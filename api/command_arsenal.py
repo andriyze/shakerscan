@@ -484,7 +484,7 @@ COMMANDS: tuple[ArsenalCommand, ...] = (
         risk_tier="read_only",
         method="GET",
         path="/arsenal/tools",
-        evidence_contract=("tool_status_rows",),
+        evidence_contract=("tool_status_rows", "release_gate"),
         timeout_seconds=15,
     ),
     ArsenalCommand(
@@ -1705,17 +1705,98 @@ def _tool_to_dict(spec: ToolAdapterSpec, *, probe_versions: bool) -> dict[str, A
     }
 
 
+def _tool_status_release_gate(tools: list[dict[str, Any]]) -> dict[str, Any]:
+    """Validate the catalog does not imply phantom installed/runnable tools.
+
+    `wired` and `gated` are allowed non-claim states: they describe ShakerScan's
+    adapter contract, not the local machine's ability to run the binary.
+    """
+    violations: list[dict[str, Any]] = []
+    runnable_claims = {"installed", "runnable"}
+    non_claim_statuses = {"wired", "gated", "disabled"}
+
+    for tool in tools:
+        name = str(tool.get("tool_name") or "")
+        status = str(tool.get("status") or "")
+        expected_status = str(tool.get("expected_status") or "")
+        binary_path = tool.get("binary_path")
+        version = tool.get("version")
+        version_command = tool.get("version_command") if isinstance(tool.get("version_command"), list) else []
+        has_external_binary_shape = bool(version_command)
+        internal_runnable = version == "internal" and not binary_path
+
+        if status not in TOOL_STATUSES:
+            violations.append({
+                "tool_name": name,
+                "code": "invalid_status",
+                "status": status,
+                "message": "tool status is not an allowed operator-visible state",
+            })
+        if expected_status not in TOOL_STATUSES:
+            violations.append({
+                "tool_name": name,
+                "code": "invalid_expected_status",
+                "expected_status": expected_status,
+                "message": "expected status is not an allowed operator-visible state",
+            })
+
+        if status in runnable_claims and has_external_binary_shape and not binary_path and not internal_runnable:
+            violations.append({
+                "tool_name": name,
+                "code": "phantom_binary_claim",
+                "status": status,
+                "message": "external adapter claims installed/runnable but no binary path resolved",
+            })
+
+        if expected_status in runnable_claims and has_external_binary_shape and not binary_path and not internal_runnable:
+            violations.append({
+                "tool_name": name,
+                "code": "phantom_expected_status",
+                "expected_status": expected_status,
+                "message": "adapter configuration claims installed/runnable but the binary is missing",
+            })
+
+        if status == "runnable" and not tool.get("evidence_parser"):
+            violations.append({
+                "tool_name": name,
+                "code": "missing_evidence_parser",
+                "status": status,
+                "message": "runnable adapters must declare an evidence parser",
+            })
+        if status == "runnable" and not tool.get("proof_contract"):
+            violations.append({
+                "tool_name": name,
+                "code": "missing_proof_contract",
+                "status": status,
+                "message": "runnable adapters must declare a proof contract",
+            })
+
+    return {
+        "name": "no_phantom_tools",
+        "status": "pass" if not violations else "fail",
+        "violations": violations,
+        "checked_count": len(tools),
+        "allowed_statuses": list(TOOL_STATUSES),
+        "claim_statuses": sorted(runnable_claims | {"waived", "catalog_only"}),
+        "non_claim_statuses": sorted(non_claim_statuses),
+        "execution_enabled": False,
+    }
+
+
 def describe_tools(*, probe_versions: bool = False) -> dict[str, Any]:
     """Return catalog/status for currently integrated tool adapters."""
     tools = [_tool_to_dict(spec, probe_versions=probe_versions) for spec in TOOL_ADAPTERS]
     counts: dict[str, int] = {}
     for tool in tools:
         counts[str(tool["status"])] = counts.get(str(tool["status"]), 0) + 1
+    release_gate = _tool_status_release_gate(tools)
     return {
         "schema_version": ARSENAL_SCHEMA_VERSION,
         "maturity": "read_only",
+        "execution_enabled": False,
         "probe_versions": bool(probe_versions),
         "status_labels": list(TOOL_STATUSES),
+        "release_gate": release_gate,
         "tools": tools,
         "summary": counts,
     }

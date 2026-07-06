@@ -350,6 +350,42 @@ def test_tool_status_catalog_is_honest_without_version_probe(monkeypatch):
     assert tools["ai_gate_probe_executor"]["status"] == "runnable"
     assert tools["model_intake_signature_verifier"]["version"] == "internal"
     assert "runnable" in payload["status_labels"]
+    assert payload["release_gate"]["name"] == "no_phantom_tools"
+    assert payload["release_gate"]["status"] == "pass"
+    assert payload["release_gate"]["execution_enabled"] is False
+
+
+def test_tool_status_release_gate_passes_current_catalog_without_probe(monkeypatch):
+    monkeypatch.setattr(arsenal.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(arsenal.os.path, "exists", lambda _path: False)
+    monkeypatch.setattr(arsenal.os, "access", lambda *_args: False)
+
+    payload = arsenal.describe_tools(probe_versions=False)
+
+    assert payload["release_gate"]["status"] == "pass"
+    assert payload["release_gate"]["violations"] == []
+    assert payload["release_gate"]["checked_count"] == len(payload["tools"])
+    assert set(payload["release_gate"]["allowed_statuses"]) == set(arsenal.TOOL_STATUSES)
+
+
+def test_tool_status_release_gate_blocks_phantom_runnable_adapter():
+    phantom = {
+        "tool_name": "phantom-sqli",
+        "status": "runnable",
+        "expected_status": "runnable",
+        "binary_path": None,
+        "version": None,
+        "version_command": ["phantom-sqli", "--version"],
+        "evidence_parser": "phantom-json-v1",
+        "proof_contract": "phantom-proof",
+    }
+
+    gate = arsenal._tool_status_release_gate([phantom])
+
+    assert gate["status"] == "fail"
+    codes = {item["code"] for item in gate["violations"]}
+    assert "phantom_binary_claim" in codes
+    assert "phantom_expected_status" in codes
 
 
 def test_tool_status_can_probe_installed_version(monkeypatch):
@@ -364,6 +400,7 @@ def test_tool_status_can_probe_installed_version(monkeypatch):
     assert tools["nuclei"]["status"] == "runnable"
     assert tools["nuclei"]["binary_path"] == "/usr/bin/nuclei"
     assert tools["nuclei"]["version"] == "nuclei v3.0.0"
+    assert payload["release_gate"]["status"] == "pass"
 
 
 def test_local_agent_catalog_is_read_only_and_does_not_read_auth(monkeypatch):

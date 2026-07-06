@@ -916,15 +916,18 @@ authz replay so expected admin/customer/tenant boundaries become proof-backed te
 principal's access is a finding.
 
 ### 9. Evidence object store phase 2, EvidenceInstance split, and tool receipts
-**Status: PARTIAL, PHASE 1 RECEIPT/INSTANCE RECORDS DONE.** `evidence_objects` table ships (hash, redaction_profile,
-retention_class, storage_uri, scan/finding links); `save_findings` + `save_ai_findings` write one
-object per finding; `GET /findings/{id}/evidence` + `GET /evidence/{id}` read them. The canonical
-finding collapse works (`templated_finding_identity`, `all_urls`, `all_payloads`,
-`duplicate_count`). `tool_receipts` and `evidence_instances` now persist record-only receipts and
-concrete proof observations through `GET/POST /arsenal/tool-receipts` and
-`GET/POST /evidence/instances`; recording either cannot run tools, create findings, or update
-canonical finding proof state. Existing external tools and internal executors are not yet wired to
-emit receipts automatically, and large artifacts are still not externalized.
+**Status: PARTIAL, PHASE 1 RECEIPT/INSTANCE RECORDS + TOOL STATUS GATE DONE.** `evidence_objects`
+table ships (hash, redaction_profile, retention_class, storage_uri, scan/finding links);
+`save_findings` + `save_ai_findings` write one object per finding; `GET /findings/{id}/evidence` +
+`GET /evidence/{id}` read them. The canonical finding collapse works
+(`templated_finding_identity`, `all_urls`, `all_payloads`, `duplicate_count`). `tool_receipts` and
+`evidence_instances` now persist record-only receipts and concrete proof observations through
+`GET/POST /arsenal/tool-receipts` and `GET/POST /evidence/instances`; recording either cannot run
+tools, create findings, or update canonical finding proof state. `GET /arsenal/tools` now returns a
+`release_gate` named `no_phantom_tools` that fails if an adapter claims installed/runnable status
+without a resolved binary or internal implementation, or if a runnable adapter lacks parser/proof
+metadata. Existing external tools and internal executors are not yet wired to emit receipts
+automatically, and large artifacts are still not externalized.
 
 **Implement:**
 1. Externalize `storage_uri` from `inline:` to S3/MinIO or local object storage for large objects.
@@ -944,15 +947,17 @@ emit receipts automatically, and large artifacts are still not externalized.
 6. DONE phase 1: parser failure, timeout, missing binary, or missing smoke/version status can be
    recorded honestly as receipt status/parser status and cannot create verified findings through the
    receipt API.
-7. Tool adapter states must be operator-visible: `catalog_only`, `wired`, `installed`, `runnable`,
+7. DONE phase 1: tool adapter states are operator-visible through `/arsenal/tools`: `catalog_only`, `wired`, `installed`, `runnable`,
    `gated`, `waived`, and `disabled`. Broad future tools stay `catalog_only` until a narrow adapter,
    parser, scope extractor, proof contract, and receipt shape exist.
 8. The near-term registry is a **Tool Receipt Registry**, not an offensive-tool expansion. Do not add
    new exploit tooling until existing DAST, ASM, AI Gate, and Model Intake tools produce receipts for
    success, failure, timeout, skip, and parser-error paths.
-9. Add a release/test gate equivalent to T3MP3ST's "no phantom tools": every claimed adapter must be
-   `installed`, `runnable`, `waived`, or `catalog_only`, and UI/report copy must not imply a missing
-   adapter ran.
+9. DONE phase 1: add a release/test gate equivalent to T3MP3ST's "no phantom tools": every claimed
+   adapter must be `installed`, `runnable`, `waived`, or `catalog_only`, and UI/report copy must not
+   imply a missing adapter ran. The `describe_tools`/`/arsenal/tools` response carries
+   `release_gate: {name: "no_phantom_tools", status, violations}` and the test suite blocks phantom
+   runnable/installed adapter claims.
 
 **Done when:** findings reference evidence objects by id/hash; one templated BOLA route is one
 finding with enumerable concrete proof instances; evidence survives worker churn; existing tools
