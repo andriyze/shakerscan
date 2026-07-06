@@ -1647,6 +1647,70 @@ def test_record_refuter_review_is_non_mutating():
     assert result["refuter_review"]["status"] == "recorded"
 
 
+def test_refuter_work_summary_triggers_weak_ai_and_model_claims():
+    weak_id = uuid.uuid4()
+    ai_id = uuid.uuid4()
+    model_id = uuid.uuid4()
+    findings = [
+        {
+            "id": weak_id,
+            "status": "active",
+            "severity": "critical",
+            "title": "Critical without deterministic proof",
+            "source": "scan",
+            "tool": "smart_sqli",
+            "last_verification_verdict": None,
+            "evidence": json.dumps({}),
+        },
+        {
+            "id": ai_id,
+            "status": "active",
+            "severity": "medium",
+            "title": "Semantic AI Gate hit",
+            "source": "ai_gate",
+            "tool": "ai_gate",
+            "ai_classification_source": "provider",
+            "last_verification_verdict": None,
+            "evidence": json.dumps({}),
+        },
+        {
+            "id": model_id,
+            "status": "active",
+            "severity": "medium",
+            "title": "Model metadata trust claim",
+            "source": "model_intake",
+            "tool": "model_intake",
+            "last_verification_verdict": None,
+            "evidence": json.dumps({"license": "unknown"}),
+        },
+        {
+            "id": uuid.uuid4(),
+            "status": "active",
+            "severity": "high",
+            "title": "Verified high",
+            "source": "scan",
+            "tool": "smart_sqli",
+            "last_verification_verdict": "exploited",
+            "evidence": json.dumps({}),
+        },
+    ]
+    reviews = [{"subject_type": "finding", "subject_id": str(weak_id)}]
+
+    summary = api_module._refuter_work_summary(findings, reviews, limit=10)
+
+    assert summary["execution_enabled"] is False
+    assert summary["findings_updated"] == 0
+    assert summary["summary"]["candidate_count"] == 3
+    assert summary["summary"]["unreviewed_count"] == 2
+    assert summary["summary"]["trigger_counts"]["critical_high_weak_or_suspected_proof"] == 1
+    assert summary["summary"]["trigger_counts"]["ai_gate_semantic_or_weak_deterministic_claim"] == 1
+    assert summary["summary"]["trigger_counts"]["model_intake_metadata_without_trust_anchor"] == 1
+    by_id = {item["subject_id"]: item for item in summary["candidates"]}
+    assert by_id[str(weak_id)]["already_reviewed"] is True
+    assert by_id[str(ai_id)]["recommended_review"]["verdict_basis"] == "signal_only"
+    assert by_id[str(model_id)]["trigger_type"] == "model_intake_trust_claim"
+
+
 def test_tool_receipt_redacts_hashes_and_is_non_executing():
     receipt_id = uuid.uuid4()
     captured: dict[str, object] = {}

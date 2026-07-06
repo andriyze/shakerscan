@@ -13573,6 +13573,127 @@ def _public_refuter_review_row(row: Any) -> dict[str, Any]:
     return payload
 
 
+def _finding_refuter_trigger(finding: dict[str, Any]) -> dict[str, Any] | None:
+    payload = row_to_dict(finding)
+    payload.update(finding_proof_fields(payload))
+    status = str(payload.get("status") or "").lower()
+    severity = str(payload.get("severity") or "").lower()
+    source = str(payload.get("source") or "").lower()
+    tool = str(payload.get("tool") or "").lower()
+    proof_state = str(payload.get("proof_state") or "").lower()
+    ai_source = str(payload.get("ai_classification_source") or "").lower()
+    evidence = _decode_json_value(payload.get("evidence")) or {}
+    if not isinstance(evidence, dict):
+        evidence = {}
+
+    reasons: list[str] = []
+    trigger_type = "finding"
+    if status == "active" and severity in {"critical", "high"} and proof_state != "verified":
+        reasons.append("critical_high_weak_or_suspected_proof")
+    if source == "ai_gate" or payload.get("ai_target_id"):
+        trigger_type = "ai_gate_semantic_or_control_claim"
+        semantic_only = (
+            ai_source in {"provider", "semantic", "ai_judge", "llm_judge"}
+            and proof_state != "verified"
+        )
+        deterministic_markers = bool(
+            evidence.get("deterministic_evidence")
+            or evidence.get("deterministic_proof")
+            or evidence.get("matched_markers")
+            or evidence.get("expected_finding")
+        )
+        if semantic_only or not deterministic_markers:
+            reasons.append("ai_gate_semantic_or_weak_deterministic_claim")
+    if source == "model_intake" or tool == "model_intake":
+        trigger_type = "model_intake_trust_claim"
+        signature_verified = bool(
+            evidence.get("signature_verified")
+            or evidence.get("signature_trusted_root")
+            or evidence.get("trusted_key_verified")
+        )
+        checksum_verified = bool(evidence.get("checksum_verified") or evidence.get("sha256_verified"))
+        if not (signature_verified or checksum_verified):
+            reasons.append("model_intake_metadata_without_trust_anchor")
+    if not reasons:
+        return None
+
+    finding_id = str(payload.get("id") or payload.get("fingerprint") or "")
+    return {
+        "subject_type": "finding",
+        "subject_id": finding_id,
+        "finding_id": finding_id if payload.get("id") else None,
+        "target_id": str(payload.get("target_id")) if payload.get("target_id") else None,
+        "title": payload.get("title"),
+        "severity": severity or None,
+        "source": source or None,
+        "tool": tool or None,
+        "proof_state": proof_state or None,
+        "trigger_type": trigger_type,
+        "trigger_reasons": reasons,
+        "recommended_review": {
+            "subject_type": "finding",
+            "subject_id": finding_id,
+            "finding_id": finding_id if payload.get("id") else None,
+            "trigger_reason": "; ".join(reasons),
+            "refuter_signal": "question",
+            "verdict_basis": "signal_only",
+        },
+        "execution_enabled": False,
+        "findings_updated": 0,
+    }
+
+
+def _refuter_work_summary(
+    findings: Sequence[Any],
+    reviews: Sequence[Any] = (),
+    *,
+    limit: int = 20,
+) -> dict[str, Any]:
+    reviewed_subjects: set[tuple[str, str]] = set()
+    for review in reviews:
+        row = row_to_dict(review)
+        subject_type = str(row.get("subject_type") or "")
+        subject_id = str(row.get("subject_id") or row.get("finding_id") or "")
+        if subject_type and subject_id:
+            reviewed_subjects.add((subject_type, subject_id))
+
+    candidates: list[dict[str, Any]] = []
+    for finding in findings:
+        candidate = _finding_refuter_trigger(row_to_dict(finding))
+        if not candidate:
+            continue
+        key = (str(candidate.get("subject_type") or ""), str(candidate.get("subject_id") or ""))
+        candidate["already_reviewed"] = key in reviewed_subjects
+        candidates.append(candidate)
+
+    severity_rank = {"critical": 5, "high": 4, "medium": 3, "low": 2, "info": 1}
+    candidates.sort(
+        key=lambda item: (
+            bool(item.get("already_reviewed")),
+            -severity_rank.get(str(item.get("severity") or ""), 0),
+            str(item.get("title") or ""),
+        )
+    )
+    bounded_limit = max(1, min(int(limit or 20), 100))
+    trigger_counts = Counter(reason for item in candidates for reason in item.get("trigger_reasons", []))
+    type_counts = Counter(str(item.get("trigger_type") or "unknown") for item in candidates)
+    unreviewed = [item for item in candidates if not item.get("already_reviewed")]
+    return {
+        "summary": {
+            "candidate_count": len(candidates),
+            "unreviewed_count": len(unreviewed),
+            "already_reviewed_count": len(candidates) - len(unreviewed),
+            "trigger_counts": dict(trigger_counts),
+            "trigger_type_counts": dict(type_counts),
+            "limit": bounded_limit,
+        },
+        "candidates": candidates[:bounded_limit],
+        "execution_enabled": False,
+        "findings_updated": 0,
+        "hypotheses_updated": 0,
+    }
+
+
 def _canonical_refuter_review(req: RefuterReviewRequest) -> dict[str, Any]:
     payload = req.model_dump(mode="json")
     verdict = str(payload.get("refuter_verdict") or "").strip() or None
@@ -14915,6 +15036,55 @@ async def arsenal_refuter_reviews(
         "count": len(rows),
         "execution_enabled": False,
     }
+
+
+@app.get("/arsenal/refuter-reviews/summary")
+async def arsenal_refuter_review_summary(
+    limit: int = Query(20, ge=1, le=100),
+    finding_window: int = Query(200, ge=1, le=1000),
+):
+    """Summarize weak/high-impact claims that should be challenged.
+
+    This is a read-only trigger worklist. It does not create refuter reviews,
+    update findings, or alter proof/deployment state.
+    """
+    async with db_pool.acquire() as conn:
+        findings = await conn.fetch(
+            """
+            SELECT *
+            FROM findings
+            WHERE status = 'active'
+              AND (
+                severity IN ('critical', 'high')
+                OR source IN ('ai_gate', 'model_intake')
+                OR ai_target_id IS NOT NULL
+                OR tool = 'model_intake'
+              )
+            ORDER BY
+              CASE severity
+                WHEN 'critical' THEN 1
+                WHEN 'high' THEN 2
+                WHEN 'medium' THEN 3
+                WHEN 'low' THEN 4
+                ELSE 5
+              END,
+              last_seen_at DESC NULLS LAST,
+              first_seen_at DESC NULLS LAST
+            LIMIT $1
+            """,
+            finding_window,
+        )
+        reviews = await conn.fetch(
+            """
+            SELECT subject_type, subject_id, finding_id
+            FROM refuter_reviews
+            WHERE subject_type = 'finding'
+            ORDER BY created_at DESC
+            LIMIT $1
+            """,
+            max(finding_window, limit),
+        )
+    return _refuter_work_summary(findings, reviews, limit=limit)
 
 
 @app.post("/arsenal/refuter-reviews")

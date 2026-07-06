@@ -794,6 +794,21 @@ COMMANDS: tuple[ArsenalCommand, ...] = (
         timeout_seconds=15,
     ),
     ArsenalCommand(
+        name="refuter_review.summary",
+        family="governance",
+        description="Read a bounded worklist of weak/high-impact findings that should be challenged.",
+        status="read_only",
+        risk_tier="read_only",
+        method="GET",
+        path="/arsenal/refuter-reviews/summary",
+        parameters_schema={
+            "limit": {"type": "integer", "minimum": 1, "maximum": 100},
+            "finding_window": {"type": "integer", "minimum": 1, "maximum": 1000},
+        },
+        evidence_contract=("trigger_counts", "refuter_candidates", "recommended_review"),
+        timeout_seconds=15,
+    ),
+    ArsenalCommand(
         name="refuter_review.record",
         family="governance",
         description="Record a refuter signal or evidence-backed verdict without directly changing findings, proof state, or gates.",

@@ -38,6 +38,7 @@ def test_command_catalog_contains_required_initial_commands():
         "campaign_action.list",
         "hypothesis.list",
         "refuter_review.list",
+        "refuter_review.summary",
         "agent_context_pack.list",
         "agent_decision_trace.list",
         "local_agent.list",
@@ -58,13 +59,17 @@ def test_refuter_review_commands_do_not_mutate_findings_directly():
     commands = {item["name"]: item for item in payload["commands"]}
 
     list_cmd = commands["refuter_review.list"]
+    summary_cmd = commands["refuter_review.summary"]
     record_cmd = commands["refuter_review.record"]
 
     assert list_cmd["status"] == "read_only"
+    assert summary_cmd["status"] == "read_only"
     assert record_cmd["status"] == "dry_run"
     assert record_cmd["risk_tier"] == "read_only"
     assert list_cmd["path"] == "/arsenal/refuter-reviews"
+    assert summary_cmd["path"] == "/arsenal/refuter-reviews/summary"
     assert record_cmd["path"] == "/arsenal/refuter-reviews"
+    assert "refuter_candidates" in summary_cmd["evidence_contract"]
     assert "verdict_basis" in record_cmd["parameters_schema"]
     assert "refuter_review_row" in record_cmd["evidence_contract"]
 

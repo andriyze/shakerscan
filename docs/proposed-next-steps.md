@@ -986,21 +986,27 @@ produce receipts for both successful and failed/skipped runs; missing binaries s
 not phantom success.
 
 ### 9a. Refuter workflow and integrity ledgers
-**Status: PARTIAL, PHASE 1 RECORDS DONE.** T3MP3ST's strongest process lesson is not a detector; it
+**Status: PARTIAL, PHASE 1 RECORDS + TRIGGER SUMMARY DONE.** T3MP3ST's strongest process lesson is not a detector; it
 is the habit of trying to disprove weak wins. ShakerScan now has durable
 `refuter_reviews` records exposed through `GET/POST /arsenal/refuter-reviews` and
-`refuter_review.list` / `refuter_review.record`. `refuter_signal` remains separate from
+`refuter_review.list` / `refuter_review.record`, plus read-only trigger summaries through
+`GET /arsenal/refuter-reviews/summary` / `refuter_review.summary`. The summary identifies
+Critical/High findings with weak or suspected proof, AI Gate semantic/weak deterministic claims, and
+Model Intake metadata trust claims that lack checksum/signature trust signals, and emits suggested
+signal-only review requests without recording them. `refuter_signal` remains separate from
 `refuter_verdict`; verdicts require deterministic replay, cryptographic, parser/protocol, or
 human-approved-review basis, and recording a review cannot directly update findings, hypotheses,
 proof state, severity, or gates. File-backed integrity ledgers exist at
 `results/benchmark-runs/INTEGRITY_LEDGER.md` and `results/planner-evals/INTEGRITY_LEDGER.md`.
-Automated triggers and UI summaries are still open.
+Automated refuter execution and UI summaries are still open.
 
 **Implement:**
-1. Trigger refuter work for Critical/High findings with suspected or weak proof, AI Gate semantic-only
+1. DONE phase 1: trigger refuter work for Critical/High findings with suspected or weak proof, AI Gate semantic-only
    hits, Model Intake metadata claims without operator trust anchors, new benchmark wins, unusually
    large finding deltas, deployment-gating findings, and parser output that would promote severity or
-   proof state.
+   proof state. Current implementation covers the first three as a read-only work summary; benchmark
+   deltas, finding deltas, deployment-gate triggers, parser-promotion triggers, and automatic work
+   recording remain open.
 2. Refuter behavior should rerun the minimal reproducer, test benign explanations, verify auth
    context/principal/tenant/object ownership, check request freshness, and attach counterevidence when
    a claim weakens.
