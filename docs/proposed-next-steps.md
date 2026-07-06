@@ -871,7 +871,8 @@ adapt it into ShakerScan's proof model: leads are coordinated work items, not fi
    by user1; `GET /api/orders/{id}` consumes it -> test user2 read/mutate." The first implementation
    is `POST /targets/{id}/graph/hypotheses`, advertised as
    `hypothesis.generate_from_graph`, which records/endorses app-graph authz leads only and does not
-   queue tests or create findings.
+   queue tests or create findings. The Application Graph page exposes the same safe generation action
+   and links operators to the read-only Hypothesis Board.
 4. DONE phase 1: add compare-and-set claim leasing so multiple workers/agents do not retest the same hypothesis.
    Expired claims become claimable; confirmed/refuted/dead hypotheses do not.
 5. Add append-only endorsements and refutations. Refuter signals can weaken/support/question a claim,

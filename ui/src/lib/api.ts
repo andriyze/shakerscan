@@ -2367,11 +2367,27 @@ export interface ApplicationGraph {
   }
 }
 
+export interface GraphHypothesisGenerationResult {
+  target_id: string
+  candidate_count: number
+  created: number
+  endorsed: number
+  hypotheses: Hypothesis[]
+  execution_enabled: boolean
+  findings_created: number
+}
+
 // First-class application graph for a target: routes, objects, and
 // producer/consumer/auth-boundary edges persisted from scans.
 export async function getApplicationGraph(targetId: string): Promise<ApplicationGraph> {
   const res = await fetch(`${API_URL}/targets/${targetId}/graph`)
   if (!res.ok) throw new Error('Failed to fetch application graph')
+  return res.json()
+}
+
+export async function generateApplicationGraphHypotheses(targetId: string): Promise<GraphHypothesisGenerationResult> {
+  const res = await fetch(`${API_URL}/targets/${targetId}/graph/hypotheses`, { method: 'POST' })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to generate graph hypotheses'))
   return res.json()
 }
 

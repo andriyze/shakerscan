@@ -4,11 +4,13 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useParams } from 'next/navigation'
 import Link from 'next/link'
 import {
+  generateApplicationGraphHypotheses,
   getApplicationGraph,
   type ApplicationGraph,
   type ApplicationGraphNode,
+  type GraphHypothesisGenerationResult,
 } from '@/lib/api'
-import { SectionCard, ErrorState } from '@/components/ui'
+import { SectionCard, ErrorState, Button } from '@/components/ui'
 
 function nodeLabel(node: ApplicationGraphNode): string {
   return node.label || node.node_key.replace(/^(route|object|principal):/, '')
@@ -34,6 +36,9 @@ function GraphContent() {
   const [nodeType, setNodeType] = useState('all')
   const [edgeType, setEdgeType] = useState('all')
   const [selectedNodeKey, setSelectedNodeKey] = useState<string | null>(null)
+  const [leadResult, setLeadResult] = useState<GraphHypothesisGenerationResult | null>(null)
+  const [leadLoading, setLeadLoading] = useState(false)
+  const [leadError, setLeadError] = useState<string | null>(null)
 
   const fetchGraph = useCallback(async () => {
     try {
@@ -50,6 +55,19 @@ function GraphContent() {
   useEffect(() => {
     fetchGraph()
   }, [fetchGraph])
+
+  const generateLeads = useCallback(async () => {
+    setLeadLoading(true)
+    setLeadError(null)
+    try {
+      const result = await generateApplicationGraphHypotheses(targetId)
+      setLeadResult(result)
+    } catch (err) {
+      setLeadError(err instanceof Error ? err.message : 'Failed to generate graph hypotheses')
+    } finally {
+      setLeadLoading(false)
+    }
+  }, [targetId])
 
   const visibleNodes = useMemo(() => {
     const q = search.trim().toLowerCase()
@@ -139,7 +157,19 @@ function GraphContent() {
         <h1 className="text-2xl font-bold text-white">Application Graph</h1>
       </div>
 
-      <SectionCard title="Summary">
+      <SectionCard
+        title="Summary"
+        actions={
+          <Button
+            type="button"
+            variant="secondary"
+            onClick={() => void generateLeads()}
+            disabled={leadLoading || (summary.by_edge_type?.auth_boundary || 0) === 0}
+          >
+            {leadLoading ? 'Generating...' : 'Generate authz leads'}
+          </Button>
+        }
+      >
         <div className="flex flex-wrap gap-2 text-xs">
           <span className="px-2 py-1 rounded bg-gray-800 text-gray-300">{summary.node_count} nodes</span>
           <span className="px-2 py-1 rounded bg-gray-800 text-gray-300">{summary.edge_count} edges</span>
@@ -159,6 +189,20 @@ function GraphContent() {
             Producer/consumer and auth-boundary edges populate from a dual-user (BOLA) scan. Run one
             with two auth contexts to enrich the graph with object ownership and cross-principal access.
           </p>
+        )}
+        {leadError && (
+          <p role="alert" className="mt-3 text-xs text-red-300">{leadError}</p>
+        )}
+        {leadResult && (
+          <div className="mt-3 rounded border border-gray-800 bg-gray-950 p-3 text-xs text-gray-400">
+            <span className="text-gray-300">{leadResult.candidate_count}</span> candidate lead(s),
+            {' '}<span className="text-green-300">{leadResult.created}</span> created,
+            {' '}<span className="text-blue-300">{leadResult.endorsed}</span> endorsed,
+            {' '}<span className="text-gray-300">{leadResult.findings_created}</span> findings created.
+            <Link href="/settings/arsenal" className="ml-2 text-blue-300 hover:text-blue-200">
+              Open board
+            </Link>
+          </div>
         )}
       </SectionCard>
 
