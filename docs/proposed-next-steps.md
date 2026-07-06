@@ -875,9 +875,10 @@ adapt it into ShakerScan's proof model: leads are coordinated work items, not fi
    and links operators to the read-only Hypothesis Board.
 4. DONE phase 1: add compare-and-set claim leasing so multiple workers/agents do not retest the same hypothesis.
    Expired claims become claimable; confirmed/refuted/dead hypotheses do not.
-5. Add append-only endorsements and refutations. Refuter signals can weaken/support/question a claim,
-   but only deterministic replay, cryptographic evidence, parser/protocol evidence, or human-approved
-   review policy can change finding status.
+5. DONE phase 1: add append-only endorsements and refutations via
+   `POST /arsenal/hypotheses/{id}/signals` / `hypothesis.signal`. Refuter signals can
+   weaken/support/question a claim, but only deterministic replay, cryptographic evidence,
+   parser/protocol evidence, or human-approved review policy can change finding status.
 6. Add bounded situation reports for agents/operators: hottest unclaimed hypotheses, claims owned by
    the requester, refuted/dead hypotheses to avoid resurfacing, live blockers, and missing
    preconditions. Do not expose the entire board by default.

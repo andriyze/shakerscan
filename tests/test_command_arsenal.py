@@ -200,6 +200,11 @@ def test_hypothesis_commands_do_not_execute_scanners_or_create_findings():
     assert record_cmd["path"] == "/arsenal/hypotheses"
     assert claim_cmd["path"] == "/arsenal/hypotheses/{hypothesis_id}/claim"
     assert "hypothesis_row" in record_cmd["evidence_contract"]
+    signal_cmd = commands["hypothesis.signal"]
+    assert signal_cmd["status"] == "dry_run"
+    assert signal_cmd["risk_tier"] == "read_only"
+    assert signal_cmd["path"] == "/arsenal/hypotheses/{hypothesis_id}/signals"
+    assert "hypothesis_row" in signal_cmd["evidence_contract"]
 
 
 def test_graph_hypothesis_generation_is_dry_run_read_only_risk():

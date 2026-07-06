@@ -3340,6 +3340,18 @@ class HypothesisClaimRequest(BaseModel):
     lease_seconds: int = Field(default=1800, ge=60, le=86400)
 
 
+class HypothesisSignalRequest(BaseModel):
+    signal_type: str = Field(pattern="^(endorsement|refutation)$")
+    source: str = Field(min_length=1, max_length=80)
+    reason: Optional[str] = None
+    evidence_object_ids: list[str] = Field(default_factory=list)
+    tool_receipt_ids: list[str] = Field(default_factory=list)
+    confidence_delta: Optional[float] = Field(default=None, ge=-1, le=1)
+    status_hint: Optional[str] = Field(default=None, pattern="^(support|question|weaken|refute)$")
+    metadata_json: dict[str, Any] = Field(default_factory=dict)
+    created_by: Optional[str] = None
+
+
 class AgentDecisionTraceStep(BaseModel):
     kind: str
     command: Optional[str] = None
@@ -12771,6 +12783,52 @@ def _canonical_hypothesis_request(req: HypothesisRequest) -> dict[str, Any]:
     }
 
 
+def _canonical_hypothesis_signal(req: HypothesisSignalRequest) -> dict[str, Any]:
+    payload = req.model_dump(mode="json")
+    signal = {
+        "signal_type": str(payload.get("signal_type") or "").strip(),
+        "source": str(payload.get("source") or "").strip(),
+        "reason": _redact_agent_text(str(payload.get("reason") or "").strip()) if payload.get("reason") else None,
+        "evidence_object_ids": _clean_string_list(payload.get("evidence_object_ids"), max_items=100),
+        "tool_receipt_ids": _clean_string_list(payload.get("tool_receipt_ids"), max_items=100),
+        "confidence_delta": payload.get("confidence_delta"),
+        "status_hint": payload.get("status_hint"),
+        "metadata_json": _redact_agent_payload(payload.get("metadata_json") or {}),
+        "created_by": str(payload.get("created_by") or "").strip() or None,
+        "recorded_at": datetime.now(timezone.utc).isoformat(),
+    }
+    return redact_sensitive(signal, redact_strings=True, scrub_text=True)
+
+
+async def _append_hypothesis_signal(conn, hypothesis_id: str, req: HypothesisSignalRequest) -> dict[str, Any]:
+    try:
+        hypothesis_uuid = uuid.UUID(str(hypothesis_id))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="hypothesis_id must be a UUID") from exc
+    signal = _canonical_hypothesis_signal(req)
+    column = "endorsements" if signal["signal_type"] == "endorsement" else "refutations"
+    row = await conn.fetchrow(
+        f"""
+        UPDATE hypotheses
+        SET {column} = {column} || jsonb_build_array($2::jsonb),
+            version = version + 1,
+            updated_at = NOW()
+        WHERE id = $1
+        RETURNING *
+        """,
+        hypothesis_uuid,
+        json.dumps(signal),
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="Hypothesis not found")
+    return {
+        "hypothesis": _public_hypothesis_row(row),
+        "signal": signal,
+        "execution_enabled": False,
+        "findings_updated": 0,
+    }
+
+
 def _graph_row_payload(row: Any) -> dict[str, Any]:
     payload = row_to_dict(row)
     payload["attributes"] = _decode_json_value(payload.get("attributes")) or {}
@@ -13696,6 +13754,17 @@ async def arsenal_claim_hypothesis(hypothesis_id: str, req: HypothesisClaimReque
             "claim_lease_expires_at": current["claim_lease_expires_at"],
         },
     )
+
+
+@app.post("/arsenal/hypotheses/{hypothesis_id}/signals")
+async def arsenal_append_hypothesis_signal(hypothesis_id: str, req: HypothesisSignalRequest):
+    """Append an endorsement/refutation signal to a hypothesis.
+
+    Signals are lead-board context only. They do not update findings, proof
+    state, severity, or deployment gates.
+    """
+    async with db_pool.acquire() as conn:
+        return await _append_hypothesis_signal(conn, hypothesis_id, req)
 
 
 # --- Cross-product mission timeline (§1) -------------------------------------

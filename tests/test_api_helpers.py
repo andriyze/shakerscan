@@ -1455,6 +1455,29 @@ def test_application_graph_hypothesis_requests_build_authz_leads_not_findings():
     assert req.endorsement["excluded_principal"] == "user2"
 
 
+def test_hypothesis_signal_redacts_and_is_non_executing():
+    req = api_module.HypothesisSignalRequest(
+        signal_type="refutation",
+        source="manual",
+        reason="Benign explanation included secret-token",
+        evidence_object_ids=[" evidence-1 ", ""],
+        tool_receipt_ids=["tool-1"],
+        confidence_delta=-0.4,
+        status_hint="weaken",
+        metadata_json={"authorization": "Bearer secret-token"},
+        created_by="pytest",
+    )
+
+    signal = api_module._canonical_hypothesis_signal(req)
+
+    assert signal["signal_type"] == "refutation"
+    assert signal["evidence_object_ids"] == ["evidence-1"]
+    assert signal["tool_receipt_ids"] == ["tool-1"]
+    assert signal["confidence_delta"] == -0.4
+    assert "secret-token" not in json.dumps(signal)
+    assert signal["metadata_json"]["authorization"] != "Bearer secret-token"
+
+
 def test_record_command_result_redacts_result_json_and_returns_public_row():
     captured: dict[str, object] = {"queries": []}
 
