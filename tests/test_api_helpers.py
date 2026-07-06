@@ -2160,6 +2160,90 @@ def test_retention_sweep_dry_run_preview_needs_no_approval(monkeypatch):
     assert conn.recorded == []  # preview records nothing and requires no receipt
 
 
+# ----- §7 mission campaigns ----------------------------------------------------
+
+class _CampaignConn:
+    def __init__(self, *, target_exists=True, plan_exists=True):
+        self.target_exists = target_exists
+        self.plan_exists = plan_exists
+        self.inserted = None
+
+    async def fetchval(self, query, *args):
+        if "FROM targets" in query:
+            return 1 if self.target_exists else None
+        if "FROM operation_plans" in query:
+            return 1 if self.plan_exists else None
+        return None
+
+    async def fetchrow(self, query, *args):
+        if "INSERT INTO campaigns" in query:
+            self.inserted = args
+            keys = [
+                "name", "objective", "campaign_type", "target_id", "target_scope",
+                "risk_tier", "policy_profile", "planner", "operation_plan_id",
+                "context_hash", "status", "deployment_impact", "metadata_json", "created_by",
+            ]
+            row = {k: args[i] for i, k in enumerate(keys)}
+            row.update({"id": "camp-1", "created_at": None, "updated_at": None})
+            return row
+        return None
+
+
+def test_persist_campaign_records_valid_mission():
+    conn = _CampaignConn()
+    req = api_module.CampaignRequest(objective="Cover the orders API", campaign_type="authenticated_dast")
+    result = asyncio.run(api_module._persist_campaign(conn, req))
+
+    assert result["objective"] == "Cover the orders API"
+    assert result["campaign_type"] == "authenticated_dast"
+    assert result["status"] == "planned"
+    assert result["execution_enabled"] is False
+
+
+def test_persist_campaign_rejects_unknown_target():
+    conn = _CampaignConn(target_exists=False)
+    req = api_module.CampaignRequest(
+        objective="x", campaign_type="api_authz", target_id="11111111-1111-4111-8111-111111111111"
+    )
+    with pytest.raises(api_module.HTTPException) as exc:
+        asyncio.run(api_module._persist_campaign(conn, req))
+    assert exc.value.status_code == 404
+
+
+def test_persist_campaign_rejects_unknown_operation_plan():
+    conn = _CampaignConn(plan_exists=False)
+    req = api_module.CampaignRequest(
+        objective="x", campaign_type="api_authz",
+        operation_plan_id="22222222-2222-4222-8222-222222222222",
+    )
+    with pytest.raises(api_module.HTTPException) as exc:
+        asyncio.run(api_module._persist_campaign(conn, req))
+    assert exc.value.status_code == 404
+
+
+def test_persist_campaign_rejects_bad_context_hash():
+    conn = _CampaignConn()
+    req = api_module.CampaignRequest(objective="x", campaign_type="benchmark", context_hash="not-hex")
+    with pytest.raises(api_module.HTTPException) as exc:
+        asyncio.run(api_module._persist_campaign(conn, req))
+    assert exc.value.status_code == 400
+
+
+def test_public_campaign_row_decodes_json_fields():
+    row = {
+        "id": "camp-1", "objective": "x", "campaign_type": "benchmark", "status": "planned",
+        "target_scope": json.dumps({"allowed_hosts": ["app.example.com"]}),
+        "planner": json.dumps({"kind": "human"}),
+        "deployment_impact": json.dumps({}),
+        "metadata_json": json.dumps({"k": "v"}),
+    }
+    public = api_module._public_campaign_row(row)
+    assert public["target_scope"]["allowed_hosts"] == ["app.example.com"]
+    assert public["planner"]["kind"] == "human"
+    assert public["metadata_json"]["k"] == "v"
+    assert public["execution_enabled"] is False
+
+
 class _ClaimConn:
     def __init__(self, *, update_row=None, current=None):
         self.update_row = update_row

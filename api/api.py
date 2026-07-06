@@ -3386,6 +3386,28 @@ class HypothesisRequest(BaseModel):
     created_by: Optional[str] = None
 
 
+class CampaignRequest(BaseModel):
+    objective: str = Field(min_length=1, max_length=500)
+    campaign_type: str = Field(pattern="^(continuous_asm|authenticated_dast|api_authz|ai_red_team|model_intake|benchmark|incident_retest|source_informed_dast|finding_retest|focused_family)$")
+    name: Optional[str] = Field(default=None, max_length=200)
+    target_id: Optional[str] = None
+    target_scope: dict[str, Any] = Field(default_factory=dict)
+    risk_tier: str = Field(default="read_only", pattern="^(read_only|passive|active|intrusive|credential|dangerous)$")
+    policy_profile: Optional[str] = None
+    planner: dict[str, Any] = Field(default_factory=dict)
+    operation_plan_id: Optional[str] = None
+    context_hash: Optional[str] = None
+    status: str = Field(default="planned", pattern="^(planned|active|paused|completed|cancelled)$")
+    deployment_impact: dict[str, Any] = Field(default_factory=dict)
+    metadata_json: dict[str, Any] = Field(default_factory=dict)
+    created_by: Optional[str] = None
+
+
+class CampaignActionLinkRequest(BaseModel):
+    command_result_id: Optional[str] = None
+    campaign_action_id: Optional[str] = None
+
+
 class HypothesisClaimRequest(BaseModel):
     owner: str = Field(min_length=1, max_length=120)
     expected_version: int = Field(ge=1)
@@ -12683,6 +12705,14 @@ def _public_campaign_action_row(row: Any) -> dict[str, Any]:
     return payload
 
 
+def _public_campaign_row(row: Any) -> dict[str, Any]:
+    payload = row_to_dict(row)
+    for key in ("target_scope", "planner", "deployment_impact", "metadata_json"):
+        payload[key] = _decode_json_value(payload.get(key)) or {}
+    payload["execution_enabled"] = False
+    return payload
+
+
 def _public_export_event_row(row: Any) -> dict[str, Any]:
     payload = row_to_dict(row)
     for key in (
@@ -15390,6 +15420,179 @@ async def arsenal_campaign_actions(
         "campaign_actions": actions,
         "execution_enabled": False,
         "count": len(actions),
+    }
+
+
+async def _persist_campaign(conn, req: CampaignRequest) -> dict[str, Any]:
+    """Validate and persist a §7 mission campaign record.
+
+    A campaign is the operating wrapper over ASM/scan/AI Gate/Model Intake/retest
+    actions. It is a planning/audit record only: creating one queues no work and
+    creates no findings.
+    """
+    target_uuid = None
+    if req.target_id:
+        try:
+            target_uuid = uuid.UUID(str(req.target_id))
+        except ValueError:
+            raise HTTPException(status_code=400, detail="target_id must be a UUID when supplied")
+        if not await conn.fetchval("SELECT 1 FROM targets WHERE id=$1", target_uuid):
+            raise HTTPException(status_code=404, detail="Target not found")
+    plan_uuid = None
+    if req.operation_plan_id:
+        try:
+            plan_uuid = uuid.UUID(str(req.operation_plan_id))
+        except ValueError:
+            raise HTTPException(status_code=400, detail="operation_plan_id must be a UUID when supplied")
+        if not await conn.fetchval("SELECT 1 FROM operation_plans WHERE id=$1", plan_uuid):
+            raise HTTPException(status_code=404, detail="Operation plan not found")
+    context_hash = str(req.context_hash or "").strip().lower() or None
+    if context_hash and not re.fullmatch(r"[a-f0-9]{64}", context_hash):
+        raise HTTPException(status_code=400, detail="context_hash must be sha256 hex when supplied")
+
+    row = await conn.fetchrow(
+        """
+        INSERT INTO campaigns (
+            name, objective, campaign_type, target_id, target_scope, risk_tier,
+            policy_profile, planner, operation_plan_id, context_hash, status,
+            deployment_impact, metadata_json, created_by
+        ) VALUES (
+            $1,$2,$3,$4,$5::jsonb,$6,
+            $7,$8::jsonb,$9,$10,$11,
+            $12::jsonb,$13::jsonb,$14
+        )
+        RETURNING *
+        """,
+        str(req.name or "").strip() or None,
+        req.objective.strip(),
+        req.campaign_type,
+        target_uuid,
+        json.dumps(_redact_agent_payload(req.target_scope or {})),
+        req.risk_tier,
+        str(req.policy_profile or "").strip() or None,
+        json.dumps(_redact_agent_payload(req.planner or {})),
+        plan_uuid,
+        context_hash,
+        req.status,
+        json.dumps(req.deployment_impact or {}),
+        json.dumps(_redact_agent_payload(req.metadata_json or {})),
+        str(req.created_by or "").strip() or None,
+    )
+    return _public_campaign_row(row)
+
+
+@app.post("/arsenal/campaigns")
+async def arsenal_create_campaign(req: CampaignRequest):
+    """Create a mission campaign record. No work is queued and no finding is created."""
+    async with db_pool.acquire() as conn:
+        campaign = await _persist_campaign(conn, req)
+    return {"campaign": campaign, "execution_enabled": False}
+
+
+@app.get("/arsenal/campaigns")
+async def arsenal_campaigns(
+    limit: int = Query(20, ge=1, le=100),
+    target_id: Optional[str] = Query(None),
+    status: Optional[str] = Query(None),
+):
+    """Read recent mission campaign records."""
+    target_uuid = None
+    if target_id:
+        try:
+            target_uuid = uuid.UUID(str(target_id))
+        except ValueError:
+            raise HTTPException(status_code=400, detail="target_id must be a UUID")
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT * FROM campaigns
+            WHERE ($2::uuid IS NULL OR target_id = $2)
+              AND ($3::text IS NULL OR status = $3)
+            ORDER BY created_at DESC
+            LIMIT $1
+            """,
+            limit,
+            target_uuid,
+            status,
+        )
+    return {
+        "campaigns": [_public_campaign_row(row) for row in rows],
+        "execution_enabled": False,
+        "count": len(rows),
+    }
+
+
+@app.get("/arsenal/campaigns/{campaign_id}")
+async def arsenal_campaign_detail(campaign_id: str, action_limit: int = Query(50, ge=1, le=200)):
+    """Read one campaign plus a rollup of its linked action ledger."""
+    try:
+        campaign_uuid = uuid.UUID(str(campaign_id))
+    except ValueError:
+        raise HTTPException(status_code=400, detail="campaign_id must be a UUID")
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT * FROM campaigns WHERE id=$1", campaign_uuid)
+        if not row:
+            raise HTTPException(status_code=404, detail="Campaign not found")
+        action_rows = await conn.fetch(
+            """
+            SELECT * FROM campaign_actions
+            WHERE mission_campaign_id = $1
+            ORDER BY created_at DESC
+            LIMIT $2
+            """,
+            campaign_uuid,
+            action_limit,
+        )
+    actions = [_public_campaign_action_row(a) for a in action_rows]
+    status_rollup: dict[str, int] = {}
+    for action in actions:
+        key = str(action.get("status") or "unknown")
+        status_rollup[key] = status_rollup.get(key, 0) + 1
+    return {
+        "campaign": _public_campaign_row(row),
+        "actions": actions,
+        "action_count": len(actions),
+        "status_rollup": status_rollup,
+        "execution_enabled": False,
+    }
+
+
+@app.post("/arsenal/campaigns/{campaign_id}/actions")
+async def arsenal_link_campaign_action(campaign_id: str, req: CampaignActionLinkRequest):
+    """Link an existing command-result/action-ledger row to a mission campaign.
+
+    This is a bookkeeping link only. It does not execute work, change proof state,
+    or create findings; it stamps mission_campaign_id onto the existing action row.
+    """
+    try:
+        campaign_uuid = uuid.UUID(str(campaign_id))
+    except ValueError:
+        raise HTTPException(status_code=400, detail="campaign_id must be a UUID")
+    command_result_uuid = _optional_uuid(req.command_result_id)
+    campaign_action_uuid = _optional_uuid(req.campaign_action_id)
+    if not command_result_uuid and not campaign_action_uuid:
+        raise HTTPException(status_code=400, detail="Provide command_result_id or campaign_action_id")
+    async with db_pool.acquire() as conn:
+        if not await conn.fetchval("SELECT 1 FROM campaigns WHERE id=$1", campaign_uuid):
+            raise HTTPException(status_code=404, detail="Campaign not found")
+        if campaign_action_uuid:
+            row = await conn.fetchrow(
+                "UPDATE campaign_actions SET mission_campaign_id=$1, updated_at=NOW() WHERE id=$2 RETURNING *",
+                campaign_uuid,
+                campaign_action_uuid,
+            )
+        else:
+            row = await conn.fetchrow(
+                "UPDATE campaign_actions SET mission_campaign_id=$1, updated_at=NOW() WHERE command_result_id=$2 RETURNING *",
+                campaign_uuid,
+                command_result_uuid,
+            )
+        if not row:
+            raise HTTPException(status_code=404, detail="No matching campaign action to link")
+    return {
+        "campaign_id": str(campaign_uuid),
+        "linked_action": _public_campaign_action_row(row),
+        "execution_enabled": False,
     }
 
 

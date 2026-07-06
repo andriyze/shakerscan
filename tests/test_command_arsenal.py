@@ -303,6 +303,25 @@ def test_mission_timeline_is_read_only_command():
     assert cmd["parameters_schema"]["include_refuters"]["type"] == "boolean"
 
 
+def test_campaign_commands_are_record_only_not_executing():
+    payload = arsenal.describe_commands()
+    commands = {item["name"]: item for item in payload["commands"]}
+
+    create = commands["campaign.create"]
+    link = commands["campaign.link_action"]
+    assert create["status"] == "dry_run"
+    assert create["risk_tier"] == "read_only"
+    assert create["path"] == "/arsenal/campaigns"
+    assert "campaign" in create["evidence_contract"]
+    assert link["status"] == "dry_run"
+    assert link["risk_tier"] == "read_only"
+    assert commands["campaign.list"]["status"] == "read_only"
+    assert commands["campaign.get"]["status"] == "read_only"
+    # A mission wrapper must not be a state-changing shortcut.
+    for name in ("campaign.create", "campaign.list", "campaign.get", "campaign.link_action"):
+        assert commands[name]["risk_tier"] == "read_only"
+
+
 def test_campaign_action_list_is_read_only_command():
     payload = arsenal.describe_commands()
     commands = {item["name"]: item for item in payload["commands"]}

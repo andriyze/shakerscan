@@ -1418,6 +1418,62 @@ async def run_schema_migrations(pool) -> None:
                 CREATE INDEX IF NOT EXISTS idx_campaign_actions_target
                 ON campaign_actions(target_id, created_at DESC) WHERE target_id IS NOT NULL
             """)
+            # §7 mission campaigns: the operating wrapper over ASM waves, scans,
+            # focused-family work, AI Gate/Model Intake runs, retests, and exports.
+            # A campaign is a planning/audit record; it does not execute work or
+            # create findings — individual actions still flow through existing
+            # product routes and receipt gates. (Distinct from scan_campaigns,
+            # which is the parallel-scan parent concept.)
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS campaigns (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    name TEXT,
+                    objective TEXT NOT NULL,
+                    campaign_type TEXT NOT NULL,
+                    target_id UUID REFERENCES targets(id) ON DELETE SET NULL,
+                    target_scope JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    risk_tier TEXT NOT NULL DEFAULT 'read_only',
+                    policy_profile TEXT,
+                    planner JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    operation_plan_id UUID REFERENCES operation_plans(id) ON DELETE SET NULL,
+                    context_hash TEXT,
+                    status TEXT NOT NULL DEFAULT 'planned',
+                    deployment_impact JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    created_by TEXT,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    CONSTRAINT campaigns_type_check CHECK (campaign_type IN (
+                        'continuous_asm','authenticated_dast','api_authz','ai_red_team',
+                        'model_intake','benchmark','incident_retest','source_informed_dast',
+                        'finding_retest','focused_family'
+                    )),
+                    CONSTRAINT campaigns_status_check CHECK (status IN (
+                        'planned','active','paused','completed','cancelled'
+                    )),
+                    CONSTRAINT campaigns_risk_check CHECK (risk_tier IN (
+                        'read_only','passive','active','intrusive','credential','dangerous'
+                    ))
+                )
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_campaigns_created_at
+                ON campaigns(created_at DESC)
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_campaigns_target
+                ON campaigns(target_id, created_at DESC) WHERE target_id IS NOT NULL
+            """)
+            # Link campaign_actions to a mission campaign (the existing campaign_id
+            # column points at scan_campaigns for parallel-scan context).
+            await conn.execute("""
+                ALTER TABLE campaign_actions
+                ADD COLUMN IF NOT EXISTS mission_campaign_id UUID REFERENCES campaigns(id) ON DELETE SET NULL
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_campaign_actions_mission_campaign
+                ON campaign_actions(mission_campaign_id, created_at DESC) WHERE mission_campaign_id IS NOT NULL
+            """)
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS hypotheses (
                     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

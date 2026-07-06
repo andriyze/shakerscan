@@ -859,7 +859,7 @@ Lab/deep workflow/write-BOLA checks after graph/principal preconditions exist.
 finding, not merely an attempted endpoint.
 
 ### 7. Campaign, hypothesis, and application-graph consumer layer
-**Status: PHASE 1 GRAPH DONE, CONSUMERS/HYPOTHESES MISSING.** `application_graph_nodes` /
+**Status: PHASE 1 GRAPH + HYPOTHESES + CAMPAIGN LAYER DONE; AUTO-LINKAGE/PROMOTION OPEN.** `application_graph_nodes` /
 `application_graph_edges` now persist route/object nodes plus producer/consumer/auth-boundary edges
 from discovery + recursive BOLA `resource_map`; `GET /targets/{id}/graph` exposes the graph.
 Object-ID and cross-user primitives also exist per scan (`access_control_checks` object-id
@@ -870,18 +870,19 @@ board between weak signals and canonical findings. This should borrow T3MP3ST's 
 adapt it into ShakerScan's proof model: leads are coordinated work items, not findings.
 
 **Implement:**
-1. Add a `campaigns` / `campaign_actions` layer over ASM waves, scans, focused family work, AI Gate
-   runs, Model Intake checks, finding retests, evidence exports, and deployment decisions. Campaign
-   rows should carry objective, target scope, risk mode, policy profile, planner, `OperationPlan`
-   reference, context hash, planned/executed/blocked actions, evidence refs, tool receipt refs,
-   findings, retests, refuter signals, deployment impact, and timeline. Use the T3MP3ST mission idea
-   only as the operating wrapper; individual actions still queue through existing ShakerScan API
-   handlers and proof contracts.
-   - Campaign types should include `continuous_asm`, `authenticated_dast`, `api_authz`,
-     `ai_red_team`, `model_intake`, `benchmark`, `incident_retest`, `source_informed_dast`,
-     `finding_retest`, and `focused_family`.
-   - Campaign actions should carry command name, risk tier, maturity label, scope receipt,
-     approval receipt, command-result id, tool receipt ids, blocked/skipped reasons, and result refs.
+1. DONE phase 1: the `campaigns` mission layer wraps `campaign_actions` over ASM/scan/focused-family/
+   AI Gate/Model Intake/retest/export work. A `campaigns` table carries objective, name, campaign
+   type, target, target scope, risk tier, policy profile, planner, `OperationPlan` reference, context
+   hash, status, and deployment impact; `campaign_actions.mission_campaign_id` links the action
+   ledger to it. `POST /arsenal/campaigns` (`campaign.create`, dry-run/record-only), `GET
+   /arsenal/campaigns` (`campaign.list`), `GET /arsenal/campaigns/{id}` (`campaign.get`, with an
+   action rollup by status), and `POST /arsenal/campaigns/{id}/actions` (`campaign.link_action`)
+   expose it. Creating or linking a campaign queues no work and creates no findings; individual
+   actions still flow through the existing product routes and receipt gates. The campaign type enum is
+   `continuous_asm`, `authenticated_dast`, `api_authz`, `ai_red_team`, `model_intake`, `benchmark`,
+   `incident_retest`, `source_informed_dast`, `finding_retest`, `focused_family`. Remaining work is
+   automatic action linkage once the execution gateway (§2 seq #3) drives command results under a
+   campaign, plus deployment-impact rollups.
 2. DONE phase 1: add a `hypotheses` table for route, endpoint, object, principal, AI target, model artifact,
    dependency, config, and secret leads. Fields should include target/campaign, vuln family, CWE,
    severity guess, confidence, source (`app_graph`, `source_ingest`, `ai_planner`, `scanner_signal`,
