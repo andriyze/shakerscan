@@ -288,6 +288,185 @@ async def _record_internal_executor_tool_receipt(
     return receipt_id
 
 
+def _truthy_module_output(value: Any) -> bool:
+    if isinstance(value, dict):
+        return any(v not in (None, "", [], {}) for v in value.values())
+    if isinstance(value, list):
+        return bool(value)
+    return value not in (None, "", [], {})
+
+
+def _external_dast_tool_specs(result: dict[str, Any], options: dict[str, Any]) -> list[dict[str, Any]]:
+    run_kind = str((options or {}).get("run_kind") or "").strip()
+    if run_kind in AI_GATE_RUN_KINDS | MODEL_INTAKE_RUN_KINDS:
+        return []
+    specs: list[dict[str, Any]] = []
+
+    discovery = result.get("discovery") if isinstance(result.get("discovery"), dict) else {}
+    exposures = discovery.get("exposures") if isinstance(discovery.get("exposures"), dict) else {}
+    nuclei = discovery.get("nuclei") if isinstance(discovery.get("nuclei"), dict) else exposures.get("nuclei")
+    if isinstance(nuclei, dict) and _truthy_module_output(nuclei):
+        completed = nuclei.get("scan_completed")
+        errors = nuclei.get("errors") if isinstance(nuclei.get("errors"), list) else []
+        specs.append({
+            "tool_name": "nuclei",
+            "parser": "nuclei-json-summary-v1",
+            "proof_contract": "template-match-evidence",
+            "status": "failed" if errors and completed is False else "success",
+            "parser_status": "parsed" if completed is not False else "failed" if errors else "partial",
+            "summary": {
+                "scan_completed": completed,
+                "templates_used": nuclei.get("templates_used"),
+                "vulnerabilities_count": len(nuclei.get("vulnerabilities") or []),
+                "errors_count": len(errors),
+            },
+        })
+
+    active = result.get("active_checks") if isinstance(result.get("active_checks"), dict) else {}
+    for tool_name, parser in (("dalfox", "dalfox-active-summary-v1"), ("sqlmap", "sqlmap-active-summary-v1")):
+        rows = active.get(tool_name) if isinstance(active.get(tool_name), list) else []
+        errors = active.get(f"{tool_name}_errors") if isinstance(active.get(f"{tool_name}_errors"), list) else []
+        if rows or errors:
+            specs.append({
+                "tool_name": tool_name,
+                "parser": parser,
+                "proof_contract": "active-replay-evidence",
+                "status": "success" if rows else "failed",
+                "parser_status": "parsed" if rows else "failed",
+                "summary": {
+                    "results_count": len(rows),
+                    "errors_count": len(errors),
+                    "endpoints_tested": active.get("tested_endpoints") or active.get(f"{tool_name}_endpoints_tested"),
+                },
+            })
+
+    tls = result.get("tls") if isinstance(result.get("tls"), dict) else {}
+    for tool_name, parser, payload_key in (
+        ("nmap", "nmap-tls-summary-v1", "nmap"),
+        ("sslyze", "sslyze-summary-v1", "sslyze"),
+        ("testssl", "testssl-summary-v1", "testssl"),
+    ):
+        payload = tls.get(payload_key) if isinstance(tls.get(payload_key), dict) else {}
+        if not _truthy_module_output(payload):
+            continue
+        completed = payload.get("scan_completed")
+        raw_present = bool(payload.get("raw") or payload.get("raw_present"))
+        has_structured = any(payload.get(key) for key in ("tls_versions", "cipher_suites", "vulnerabilities", "weak_indicators"))
+        specs.append({
+            "tool_name": tool_name,
+            "parser": parser,
+            "proof_contract": "tls-network-observation",
+            "status": "success" if completed is not False or raw_present or has_structured else "failed",
+            "parser_status": "parsed" if completed or raw_present or has_structured else "partial",
+            "summary": {
+                "scan_completed": completed,
+                "raw_present": raw_present,
+                "vulnerabilities_count": len(payload.get("vulnerabilities") or []),
+            },
+        })
+    return specs
+
+
+async def _record_external_dast_tool_receipts(
+    conn,
+    *,
+    scan_id: str,
+    job_id: str | None,
+    target: str,
+    target_id: str | None,
+    options: dict[str, Any],
+    result: dict[str, Any],
+    started_at: datetime,
+    completed_at: datetime,
+    duration_seconds: int,
+) -> list[str]:
+    specs = _external_dast_tool_specs(result, options)
+    if not specs:
+        return []
+    receipt_ids: list[str] = []
+    target_scope = _redact_receipt_value({
+        "scan_id": str(scan_id),
+        "job_id": str(job_id or ""),
+        "target_id": str(target_id or ""),
+        "target": target,
+        "scan_type": (options or {}).get("scan_type"),
+    })
+    for spec in specs:
+        redacted_argv = [spec["tool_name"], "--scan-id", str(scan_id), "--target", str(target)]
+        command_hash = _tool_receipt_hash({
+            "tool_name": spec["tool_name"],
+            "redacted_argv": _redact_receipt_value(redacted_argv),
+            "target_scope": target_scope,
+        })
+        metadata = _redact_receipt_value({
+            "executor": "scanner_dast_module",
+            "parser": spec["parser"],
+            "proof_contract": spec["proof_contract"],
+            "duration_seconds": duration_seconds,
+            "summary": spec.get("summary") or {},
+        })
+        try:
+            row = await conn.fetchrow(
+                """
+                INSERT INTO tool_receipts (
+                    tool_name, tool_version, adapter_version, command_hash, redacted_argv,
+                    worker_build, container_image, target_scope, scope_receipt_id,
+                    approval_receipt_id, policy_profile_id, status, parser_status,
+                    exit_code, timed_out, started_at, finished_at, stdout_evidence_object_id,
+                    stderr_evidence_object_id, parsed_evidence_instance_ids, redaction_summary,
+                    metadata_json, created_by
+                ) VALUES (
+                    $1,$2,$3,$4,$5::jsonb,
+                    $6,$7,$8::jsonb,$9,
+                    $10,$11,$12,$13,
+                    $14,$15,$16,$17,$18,
+                    $19,$20::jsonb,$21,
+                    $22::jsonb,$23
+                )
+                RETURNING id
+                """,
+                spec["tool_name"],
+                "scanner-output",
+                TOOL_RECEIPT_ADAPTER_VERSION,
+                command_hash,
+                json.dumps(_redact_receipt_value(redacted_argv)),
+                os.environ.get("BUILD_FINGERPRINT"),
+                os.environ.get("WORKER_IMAGE"),
+                json.dumps(target_scope),
+                None,
+                None,
+                None,
+                spec["status"],
+                spec["parser_status"],
+                0 if spec["status"] == "success" else 1,
+                False,
+                started_at,
+                completed_at,
+                None,
+                None,
+                json.dumps([]),
+                "scanner module receipt from parsed DAST result; sensitive target/options fields redacted",
+                json.dumps(metadata),
+                "worker",
+            )
+        except Exception as exc:
+            print(f"[{str(job_id or scan_id)[:8]}] external tool receipt insert error: {exc}", flush=True)
+            continue
+        receipt_id = str(row["id"]) if row and row["id"] else None
+        if receipt_id:
+            receipt_ids.append(receipt_id)
+    if receipt_ids:
+        existing = result.setdefault("tool_receipt_ids", [])
+        if isinstance(existing, list):
+            for receipt_id in receipt_ids:
+                if receipt_id not in existing:
+                    existing.append(receipt_id)
+        result.setdefault("metadata", {})
+        if isinstance(result.get("metadata"), dict):
+            result["metadata"].setdefault("tool_receipt_ids", list(existing) if isinstance(existing, list) else receipt_ids)
+    return receipt_ids
+
+
 DEFAULT_MAX_DURATION_MINUTES = int(os.environ.get('SCAN_MAX_DURATION_DEFAULT_MINUTES', '120'))
 SCAN_KILL_GRACE_SECONDS = int(os.environ.get('SCAN_KILL_GRACE_SECONDS', '10'))
 SCAN_CANCEL_POLL_SECONDS = max(0.5, float(os.environ.get('SCAN_CANCEL_POLL_SECONDS', '2')))
@@ -5213,6 +5392,19 @@ async def process_scan_job(job_data: dict):
                 duration_seconds=duration,
                 error=error,
             )
+            if target_id:
+                await _record_external_dast_tool_receipts(
+                    conn,
+                    scan_id=scan_id,
+                    job_id=job_id,
+                    target=target,
+                    target_id=target_id,
+                    options=options,
+                    result=result,
+                    started_at=now,
+                    completed_at=completed_at,
+                    duration_seconds=duration,
+                )
 
             if error:
                 # A no-output (exit-0, no JSON) failure must not be a bare 'failed'

@@ -630,6 +630,74 @@ def test_internal_model_intake_executor_receipt_records_failure():
     assert "secret-token" not in json.dumps(args, default=str)
 
 
+def test_external_dast_tool_specs_from_parsed_result():
+    specs = worker._external_dast_tool_specs(
+        {
+            "discovery": {
+                "nuclei": {
+                    "scan_completed": True,
+                    "templates_used": 12,
+                    "vulnerabilities": [{"template": "x"}],
+                }
+            },
+            "active_checks": {
+                "dalfox": [{"url": "https://app.example.com?q=x"}],
+                "sqlmap_errors": ["timeout"],
+            },
+            "tls": {
+                "nmap": {"raw": "Nmap scan report"},
+                "sslyze": {"scan_completed": True, "vulnerabilities": []},
+                "testssl": {"raw_present": True},
+            },
+        },
+        {"scan_type": "smart"},
+    )
+
+    by_tool = {item["tool_name"]: item for item in specs}
+    assert by_tool["nuclei"]["parser_status"] == "parsed"
+    assert by_tool["dalfox"]["status"] == "success"
+    assert by_tool["sqlmap"]["status"] == "failed"
+    assert by_tool["nmap"]["parser"] == "nmap-tls-summary-v1"
+    assert by_tool["sslyze"]["proof_contract"] == "tls-network-observation"
+    assert by_tool["testssl"]["parser_status"] == "parsed"
+
+
+def test_external_dast_tool_receipts_are_recorded_and_attached():
+    receipt_id = uuid.uuid4()
+    conn = _FakeReceiptConnection(receipt_id)
+    result = {
+        "discovery": {"nuclei": {"scan_completed": True, "templates_used": 1}},
+        "active_checks": {"sqlmap_errors": ["secret-token failed"]},
+        "tls": {"nmap": {"raw": "Nmap done"}},
+    }
+
+    recorded = asyncio.run(worker._record_external_dast_tool_receipts(
+        conn,
+        scan_id="11111111-1111-1111-1111-111111111111",
+        job_id="job-dast",
+        target="https://example.test/?token=secret-token",
+        target_id="33333333-3333-3333-3333-333333333333",
+        options={"scan_type": "smart"},
+        result=result,
+        started_at=datetime(2026, 7, 6, tzinfo=timezone.utc),
+        completed_at=datetime(2026, 7, 6, 0, 1, tzinfo=timezone.utc),
+        duration_seconds=60,
+    ))
+
+    assert recorded == [str(receipt_id), str(receipt_id), str(receipt_id)]
+    assert result["tool_receipt_ids"] == [str(receipt_id)]
+    assert len(conn.fetchrow_calls) == 3
+    first_query, first_args = conn.fetchrow_calls[0]
+    assert "INSERT INTO tool_receipts" in first_query
+    assert first_args[0] == "nuclei"
+    assert first_args[1] == "scanner-output"
+    assert first_args[11] == "success"
+    assert first_args[12] == "parsed"
+    assert "secret-token" not in json.dumps(first_args, default=str)
+    tools = [args[0] for _query, args in conn.fetchrow_calls]
+    assert tools == ["nuclei", "sqlmap", "nmap"]
+
+
 class _FakeCancelRedis:
     def __init__(self, cancelled: bool):
         self.cancelled = cancelled

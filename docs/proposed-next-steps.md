@@ -1021,10 +1021,10 @@ content-free export event for `GET /timeline`, and
 `release_gate` named `no_phantom_tools` that fails if an adapter
 claims installed/runnable status without a resolved binary or internal implementation, or if a
 runnable adapter lacks parser/proof metadata. Worker finalization now emits record-only `ToolReceipt`
-rows for the internal AI Gate probe executor and Model Intake signature verifier on success/failure,
-stamping returned receipt ids into scan results without changing findings or proof state. External
-DAST/ASM tools are not yet wired to emit receipts automatically, and remote S3/MinIO-style object
-storage is still open.
+rows for the internal AI Gate probe executor, Model Intake signature verifier, and parsed DAST module
+output from Nuclei, Dalfox, sqlmap, nmap, SSLyze, and testssl on success/failure, stamping returned
+receipt ids into scan results without changing findings or proof state. Per-subprocess timeout/skip
+receipts, ASM-specific executor receipts, and remote S3/MinIO-style object storage are still open.
 
 **Implement:**
 1. DONE phase 1: externalize `storage_uri` from `inline:` to local object storage for large objects.
@@ -1054,9 +1054,11 @@ storage is still open.
    `httpx`, `katana`, `nuclei`, `subfinder`, `ffuf`, `dalfox`, `sqlmap`, `nmap`, `sslyze`,
    `testssl.sh`, Playwright/browser proof, AI Gate probe execution, and Model Intake artifact
    fetch/signature verification. The registry/record schema exists, and worker finalization now emits
-   internal `ai_gate_probe_executor` and `model_intake_signature_verifier` receipts for
-   success/failure. External DAST/ASM executors still need integration to emit receipts on
-   success/failure/timeout/skip/parser-error.
+   internal `ai_gate_probe_executor` / `model_intake_signature_verifier` receipts plus parsed-result
+   DAST module receipts for Nuclei, Dalfox, sqlmap, nmap, SSLyze, and testssl. Remaining work is
+   per-subprocess receipts for timeout/skip/parser-error paths, ASM-specific executor receipts, and
+   coverage for httpx/katana/subfinder/ffuf/Playwright where the result currently lacks enough module
+   execution metadata.
 5. DONE phase 1: tool receipts include tool version, adapter version, command hash, redacted argv, worker
    build/container image, target scope, scope receipt, policy profile, approval id, timing, exit code,
    timeout, stdout/stderr artifact refs, parsed evidence refs, parser status, and redaction summary.
@@ -1068,8 +1070,9 @@ storage is still open.
    parser, scope extractor, proof contract, and receipt shape exist.
 8. The near-term registry is a **Tool Receipt Registry**, not an offensive-tool expansion. Do not add
    new exploit tooling until existing DAST, ASM, AI Gate, and Model Intake tools produce receipts for
-   success, failure, timeout, skip, and parser-error paths. Internal AI Gate and Model Intake worker
-   receipts now cover success/failure; DAST/ASM external tool receipt coverage remains open.
+   success, failure, timeout, skip, and parser-error paths. Internal AI Gate/Model Intake worker
+   receipts and parsed-result DAST module receipts now cover success/failure; DAST/ASM per-executor
+   timeout/skip/parser-error receipt coverage remains open.
 9. DONE phase 1: add a release/test gate equivalent to T3MP3ST's "no phantom tools": every claimed
    adapter must be `installed`, `runnable`, `waived`, or `catalog_only`, and UI/report copy must not
    imply a missing adapter ran. The `describe_tools`/`/arsenal/tools` response carries
