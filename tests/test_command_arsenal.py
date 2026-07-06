@@ -98,6 +98,18 @@ def test_agent_context_pack_record_is_dry_run_not_execution():
     assert "context_pack" in cmd["evidence_contract"]
 
 
+def test_agent_context_pack_generate_from_target_is_dry_run_not_execution():
+    payload = arsenal.describe_commands()
+    commands = {item["name"]: item for item in payload["commands"]}
+
+    cmd = commands["agent_context_pack.generate_from_target"]
+    assert cmd["status"] == "dry_run"
+    assert cmd["risk_tier"] == "read_only"
+    assert cmd["path"] == "/arsenal/context-packs/from-target"
+    assert cmd["scope_fields"] == ["target_id"]
+    assert "context_pack" in cmd["evidence_contract"]
+
+
 def test_agent_decision_trace_record_is_dry_run_not_execution():
     payload = arsenal.describe_commands()
     commands = {item["name"]: item for item in payload["commands"]}

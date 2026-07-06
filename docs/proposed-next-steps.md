@@ -196,6 +196,13 @@ called at real sites — verify before re-proposing any of it:
   selection, missing inputs, risk tier, scope broadening, raw shell, forbidden verified claims, and
   blocked reasons. `results/planner-evals/INTEGRITY_LEDGER.md` and
   `results/benchmark-runs/INTEGRITY_LEDGER.md` now provide durable correction ledgers.
+- **Target-fact generated AgentContextPack phase 1** — `POST /arsenal/context-packs/from-target`
+  now builds and persists bounded redacted context packs from stored target facts: target metadata,
+  ASM coverage, endpoint state counts, sampled endpoint inventory, active finding summaries with
+  server-derived proof state, known preconditions, and current Command Arsenal allow/deny state. The
+  command is exposed as `agent_context_pack.generate_from_target` with `dry_run` / `read_only`
+  maturity, and `/settings/arsenal` can generate a pack from a target ID without queueing work or
+  giving local agents execution power.
 - **ActionScopeGuard and persisted scope receipt preview phase 1** — `api.action_scope.evaluate_scope`
   now fail-closes malformed URLs, scheme-relative URLs, userinfo, trailing-dot hosts,
   Unicode/punycode confusion, loopback/private/reserved ranges outside lab policy, broad CIDRs,
@@ -320,9 +327,10 @@ raw shell execution or LLM-produced verified findings.
    schema, risk tiers, scope receipt, approval receipt, tool receipt, campaign action, hypothesis, and
    `EvidenceInstance` schemas. DONE phase 1 for persisted dry-run `OperationPlan` validation records.
    DONE phase 1 for persisted `AgentContextPack` and `AgentDecisionTrace` validation records.
-   DONE phase 1 for read-only local-agent capability records. Remaining work is deeper context-pack
-   generation from real target facts, planner evals, local-agent dry-run planning, and mandatory
-   receipt enforcement; it still must add no new execution power until receipts/gates are durable.
+   DONE phase 1 for read-only local-agent capability records. DONE phase 1 for target-fact generated
+   `AgentContextPack` records from stored target, ASM, endpoint, finding, precondition, and command
+   facts. Remaining work is local-agent dry-run planning and mandatory receipt enforcement; it still
+   must add no new execution power until receipts/gates are durable.
 2. **Unified Action Center + mission timeline:** turn the existing product cards and ASM timeline into
    a cross-product target/campaign timeline over ASM, scans, focused families, AI Gate, Model Intake,
    retests, exceptions, deployment gates, worker freshness, evidence export/replay, and blocked/skipped
@@ -462,7 +470,9 @@ bounded context packs, decision traces, and audit receipts.
    state/evidence IDs, allowed/disallowed commands, known preconditions, worker freshness, and
    `context_hash`. Prefer evidence IDs over raw evidence bodies; never send secrets or full
    transcripts by default. DONE phase 1 persistence: `/arsenal/context-packs` validates, redacts,
-   stores, and lists bounded context packs with `execution_enabled=false`.
+   stores, and lists bounded context packs with `execution_enabled=false`. DONE phase 1 generation:
+   `/arsenal/context-packs/from-target` creates the bounded pack from existing target/ASM/endpoint/
+   finding facts and stores it without queueing work.
 3. DONE phase 1: define read-only `AgentDecisionTrace` schema for durable operational trace:
    planner kind/version, context hash, command schema version, proposed/rejected actions, missing
    inputs, approvals/denials, result summaries, evidence refs, and final rationale. Do not store

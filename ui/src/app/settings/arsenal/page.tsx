@@ -11,6 +11,7 @@ import {
   getAgentDecisionTraces,
   getArsenalCommands,
   getArsenalContracts,
+  generateAgentContextPackFromTarget,
   getOperationPlans,
   getArsenalTools,
   getLocalAgents,
@@ -108,17 +109,17 @@ function CommandRow({ command }: { command: ArsenalCommand }) {
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
-            <span className="font-mono text-sm text-white">{command.name}</span>
+            <span className="break-all font-mono text-sm text-white">{command.name}</span>
             <Badge className={statusClass(command.status)}>{command.status}</Badge>
             <Badge className={riskClass(command.risk_tier)}>{command.risk_tier}</Badge>
           </div>
           <p className="mt-2 text-sm text-gray-400">{command.description}</p>
         </div>
-        <div className="shrink-0 rounded bg-gray-900 px-2 py-1 font-mono text-xs text-gray-300">
+        <div className="max-w-full break-all rounded bg-gray-900 px-2 py-1 font-mono text-xs text-gray-300 sm:shrink-0">
           {command.method} {command.path}
         </div>
       </div>
-      <div className="mt-3 flex flex-wrap gap-2 text-xs text-gray-500">
+      <div className="mt-3 flex flex-wrap gap-2 break-words text-xs text-gray-500">
         {command.scope_fields.length > 0 && <span>scope: {command.scope_fields.join(', ')}</span>}
         {command.required_confirmations.length > 0 && <span>confirm: {command.required_confirmations.join(', ')}</span>}
         {command.evidence_contract.length > 0 && <span>evidence: {command.evidence_contract.slice(0, 3).join(', ')}</span>}
@@ -135,13 +136,13 @@ function ToolRow({ tool }: { tool: ArsenalTool }) {
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
             <Icon className="h-4 w-4 text-gray-400" aria-hidden="true" />
-            <span className="font-mono text-sm text-white">{tool.tool_name}</span>
+            <span className="break-all font-mono text-sm text-white">{tool.tool_name}</span>
             <Badge className={statusClass(tool.status)}>{tool.status}</Badge>
             <Badge className={riskClass(tool.risk_tier)}>{tool.risk_tier}</Badge>
           </div>
           <p className="mt-2 text-sm text-gray-400">{tool.description}</p>
         </div>
-        <div className="shrink-0 text-right text-xs text-gray-500">
+        <div className="max-w-full text-left text-xs text-gray-500 sm:shrink-0 sm:text-right">
           <div>{tool.family}</div>
           {tool.version && (
             <div className="mt-1 max-w-44 truncate font-mono text-gray-300">
@@ -171,13 +172,13 @@ function LocalAgentRow({ agent }: { agent: LocalAgentCapability }) {
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
             <Icon className="h-4 w-4 text-gray-400" aria-hidden="true" />
-            <span className="font-mono text-sm text-white">{agent.agent}</span>
+            <span className="break-all font-mono text-sm text-white">{agent.agent}</span>
             <Badge className={statusClass(agent.status)}>{agent.status}</Badge>
             <Badge className="bg-gray-800 text-gray-300">planner disabled</Badge>
           </div>
           <p className="mt-2 text-sm text-gray-400">{agent.display_name}</p>
         </div>
-        <div className="shrink-0 text-right text-xs text-gray-500">
+        <div className="max-w-full text-left text-xs text-gray-500 sm:shrink-0 sm:text-right">
           <div>{agent.auth_detected ? agent.auth_detection_method : 'auth not detected'}</div>
           {agent.version && (
             <div className="mt-1 max-w-44 truncate font-mono text-gray-300">
@@ -223,7 +224,7 @@ function ContractRow({
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
-            <span className="font-mono text-sm text-white">{name}</span>
+            <span className="break-all font-mono text-sm text-white">{name}</span>
             <Badge className={statusClass(contract.status)}>{contract.status}</Badge>
           </div>
           <p className="mt-2 text-sm text-gray-400">{contract.description}</p>
@@ -235,17 +236,17 @@ function ContractRow({
       <div className="mt-3 grid gap-2 text-xs text-gray-500 md:grid-cols-2">
         <div className="min-w-0">
           <span className="text-gray-400">required: </span>
-          <span className="text-gray-300">{required.length ? required.slice(0, 6).join(', ') : 'none'}</span>
+          <span className="break-words text-gray-300">{required.length ? required.slice(0, 6).join(', ') : 'none'}</span>
         </div>
         <div className="min-w-0">
           <span className="text-gray-400">fields: </span>
-          <span className="text-gray-300">{fieldNames.slice(0, 6).join(', ')}</span>
+          <span className="break-words text-gray-300">{fieldNames.slice(0, 6).join(', ')}</span>
         </div>
       </div>
       {invariants.length > 0 && (
         <div className="mt-3 flex flex-wrap gap-1.5">
           {invariants.slice(0, 3).map((invariant) => (
-            <Badge key={invariant} className="bg-blue-500/15 text-blue-300">
+            <Badge key={invariant} className="max-w-full break-words bg-blue-500/15 text-blue-300">
               {invariant}
             </Badge>
           ))}
@@ -253,7 +254,7 @@ function ContractRow({
       )}
       {forbidden.length > 0 && (
         <p className="mt-2 text-xs text-red-300">
-          forbidden: {forbidden.join(', ')}
+          forbidden: <span className="break-words">{forbidden.join(', ')}</span>
         </p>
       )}
     </div>
@@ -289,6 +290,7 @@ export default function ArsenalSettingsPage() {
   const [planError, setPlanError] = useState<string | null>(null)
   const [contextResult, setContextResult] = useState<AgentContextPackResponse | null>(null)
   const [traceResult, setTraceResult] = useState<AgentDecisionTraceResponse | null>(null)
+  const [contextTargetId, setContextTargetId] = useState('')
   const [recentContextPacks, setRecentContextPacks] = useState<AgentContextPack[]>([])
   const [recentDecisionTraces, setRecentDecisionTraces] = useState<AgentDecisionTrace[]>([])
   const [contextTraceLoading, setContextTraceLoading] = useState(false)
@@ -510,6 +512,27 @@ export default function ArsenalSettingsPage() {
       setRecentDecisionTraces((traces) => [traceResponse.decision_trace, ...traces].slice(0, 5))
     } catch (err) {
       setContextTraceError(err instanceof Error ? err.message : 'Failed to record context and trace')
+    } finally {
+      setContextTraceLoading(false)
+    }
+  }
+
+  async function generateContextFromTarget() {
+    setContextTraceLoading(true)
+    setContextTraceError(null)
+    try {
+      const response = await generateAgentContextPackFromTarget({
+        target_id: contextTargetId.trim(),
+        created_by: approvalActor.trim() || 'operator',
+        include_findings: true,
+        include_endpoints: true,
+        include_gaps: true,
+      })
+      setContextResult(response)
+      setTraceResult(null)
+      setRecentContextPacks((packs) => [response.context_pack, ...packs].slice(0, 5))
+    } catch (err) {
+      setContextTraceError(err instanceof Error ? err.message : 'Failed to generate context pack')
     } finally {
       setContextTraceLoading(false)
     }
@@ -737,7 +760,7 @@ export default function ArsenalSettingsPage() {
           <div className="grid gap-2 md:grid-cols-3">
             <div>
               <span className="text-xs text-gray-500">context hash</span>
-              <div className="truncate font-mono text-xs text-gray-300">{planContextHash}</div>
+              <div className="break-all font-mono text-xs text-gray-300">{planContextHash}</div>
             </div>
             <div>
               <span className="text-xs text-gray-500">planner</span>
@@ -759,6 +782,27 @@ export default function ArsenalSettingsPage() {
             </Button>
             {contextTraceError && <span role="alert" className="text-sm text-red-300">{contextTraceError}</span>}
           </div>
+          <div className="mt-4 grid gap-3 border-t border-gray-800 pt-3 md:grid-cols-[1fr_auto]">
+            <label className="block">
+              <span className="text-xs text-gray-500">Target ID</span>
+              <input
+                value={contextTargetId}
+                onChange={(event) => setContextTargetId(event.target.value)}
+                placeholder="00000000-0000-0000-0000-000000000000"
+                className="mt-1 w-full rounded-md border border-gray-700 bg-gray-950 px-3 py-2 font-mono text-xs text-white focus:border-blue-500 focus:outline-none"
+              />
+            </label>
+            <div className="flex items-end">
+              <Button
+                type="button"
+                variant="secondary"
+                onClick={() => void generateContextFromTarget()}
+                disabled={contextTraceLoading || !contextTargetId.trim()}
+              >
+                Generate from target
+              </Button>
+            </div>
+          </div>
         </div>
         {(contextResult || traceResult) && (
           <div className="mt-4 grid gap-3 lg:grid-cols-2">
@@ -768,14 +812,14 @@ export default function ArsenalSettingsPage() {
                   <Badge className={contextResult.validated ? statusClass('read_only') : statusClass('out_of_scope')}>
                     {contextResult.context_pack.status}
                   </Badge>
-                  <span className="font-mono text-xs text-gray-400">{contextResult.context_pack.id}</span>
+                  <span className="break-all font-mono text-xs text-gray-400">{contextResult.context_pack.id}</span>
                   <span className="text-xs text-gray-500">context pack</span>
                 </div>
                 <div className="mt-2 text-xs text-gray-500">
-                  errors: <span className="text-gray-300">{contextResult.context_pack.validation_errors.length ? contextResult.context_pack.validation_errors.join(', ') : 'none'}</span>
+                  errors: <span className="break-words text-gray-300">{contextResult.context_pack.validation_errors.length ? contextResult.context_pack.validation_errors.join(', ') : 'none'}</span>
                 </div>
                 <div className="mt-1 text-xs text-gray-500">
-                  allowed commands: <span className="text-gray-300">{contextResult.context_pack.allowed_commands.slice(0, 6).join(', ') || 'none'}</span>
+                  allowed commands: <span className="break-words text-gray-300">{contextResult.context_pack.allowed_commands.slice(0, 6).join(', ') || 'none'}</span>
                 </div>
               </div>
             )}
@@ -785,11 +829,11 @@ export default function ArsenalSettingsPage() {
                   <Badge className={traceResult.validated ? statusClass('read_only') : statusClass('out_of_scope')}>
                     {traceResult.decision_trace.status}
                   </Badge>
-                  <span className="font-mono text-xs text-gray-400">{traceResult.decision_trace.id}</span>
+                  <span className="break-all font-mono text-xs text-gray-400">{traceResult.decision_trace.id}</span>
                   <span className="text-xs text-gray-500">decision trace</span>
                 </div>
                 <div className="mt-2 text-xs text-gray-500">
-                  errors: <span className="text-gray-300">{traceResult.decision_trace.validation_errors.length ? traceResult.decision_trace.validation_errors.join(', ') : 'none'}</span>
+                  errors: <span className="break-words text-gray-300">{traceResult.decision_trace.validation_errors.length ? traceResult.decision_trace.validation_errors.join(', ') : 'none'}</span>
                 </div>
                 <div className="mt-1 text-xs text-gray-500">
                   steps: <span className="text-gray-300">{traceResult.decision_trace.steps.length}</span>
@@ -805,10 +849,10 @@ export default function ArsenalSettingsPage() {
               {recentContextPacks.slice(0, 5).map((pack) => (
                 <div key={pack.id} className="rounded-md border border-gray-800 bg-gray-950 px-3 py-2">
                   <div className="flex flex-wrap items-center justify-between gap-2">
-                    <span className="font-mono text-xs text-gray-400">{pack.id}</span>
+                    <span className="break-all font-mono text-xs text-gray-400">{pack.id}</span>
                     <Badge className={pack.status === 'recorded' ? statusClass('read_only') : statusClass('out_of_scope')}>{pack.status}</Badge>
                   </div>
-                  <div className="mt-1 truncate font-mono text-xs text-gray-600">{pack.context_hash}</div>
+                  <div className="mt-1 break-all font-mono text-xs text-gray-600">{pack.context_hash}</div>
                 </div>
               ))}
             </div>
@@ -817,7 +861,7 @@ export default function ArsenalSettingsPage() {
               {recentDecisionTraces.slice(0, 5).map((trace) => (
                 <div key={trace.id} className="rounded-md border border-gray-800 bg-gray-950 px-3 py-2">
                   <div className="flex flex-wrap items-center justify-between gap-2">
-                    <span className="font-mono text-xs text-gray-400">{trace.id}</span>
+                    <span className="break-all font-mono text-xs text-gray-400">{trace.id}</span>
                     <Badge className={trace.status === 'recorded' ? statusClass('read_only') : statusClass('out_of_scope')}>{trace.status}</Badge>
                   </div>
                   <div className="mt-1 text-xs text-gray-600">{trace.steps.length} steps / {trace.command_schema_version}</div>

@@ -5,6 +5,7 @@ JSON-decode helper that have grown enough surface to be worth pinning.
 """
 
 import asyncio
+import json
 import os
 import sys
 import types
@@ -1335,6 +1336,87 @@ def test_agent_decision_trace_canonicalization_redacts_reason_and_refs():
     assert canonical["steps"][0]["refs"] == ["evidence-1"]
     assert "secret-token" not in canonical["steps"][0]["reason"]
     assert "secret-token" not in canonical["final_rationale"]
+
+
+def test_generated_agent_context_pack_from_target_uses_stored_facts(monkeypatch):
+    target_id = "11111111-1111-4111-8111-111111111111"
+
+    class FakeConn:
+        async def fetchrow(self, query, *args):
+            if "FROM targets" in query:
+                return {
+                    "id": target_id,
+                    "url": "https://app.example.com",
+                    "name": "Production app",
+                    "root_domain": "example.com",
+                    "is_active": True,
+                    "last_scanned_at": None,
+                    "last_score": 92,
+                    "last_grade": "A",
+                    "asm_enabled": True,
+                    "asm_config": {},
+                    "asm_last_test_at": None,
+                    "asm_last_recon_at": None,
+                    "metadata_json": {"owner": "security", "environment": "staging", "auth_header": "Bearer secret"},
+                }
+            return None
+
+        async def fetch(self, query, *args):
+            if "FROM target_endpoints" in query and "GROUP BY" in query:
+                return [{"auth_state": "anonymous", "test_status": "untested", "count": 2}]
+            if "FROM target_endpoints" in query:
+                return [{
+                    "method": "GET",
+                    "path": "/api/orders/{id}",
+                    "param_location": "path",
+                    "auth_state": "user1",
+                    "test_status": "untested",
+                    "last_attempt_status": None,
+                    "last_verdict": None,
+                    "priority_score": 10,
+                    "last_seen_at": None,
+                    "last_tested_at": None,
+                }]
+            if "FROM findings" in query:
+                assert " category" not in query
+                assert " proof_state" not in query
+                return [{
+                    "id": "finding-1",
+                    "title": "BOLA candidate",
+                    "severity": "high",
+                    "status": "active",
+                    "tool": "bola",
+                    "url": "https://app.example.com/api/orders/1",
+                    "last_verification_verdict": None,
+                    "last_seen": None,
+                    "first_seen": None,
+                }]
+            return []
+
+    async def fake_coverage_summary(_conn, _target_id):
+        return {"total": 3, "untested": 2, "stale": 1, "tested": 0}
+
+    class FakeRedis:
+        def hgetall(self, _key):
+            return {}
+
+    monkeypatch.setattr(api_module.asm_inventory, "coverage_summary", fake_coverage_summary)
+    monkeypatch.setattr(api_module, "get_redis", lambda: FakeRedis())
+
+    req = api_module.AgentContextPackFromTargetRequest(target_id=target_id, created_by="test")
+    generated = asyncio.run(api_module._build_agent_context_pack_from_target(FakeConn(), req))
+
+    assert generated.target_id == target_id
+    assert generated.redaction_profile == "agent-plan-generated-target"
+    assert generated.target_summary["url"] == "https://app.example.com"
+    assert generated.target_summary["owner"] == "security"
+    assert generated.current_surface["coverage"]["untested"] == 2
+    assert generated.current_surface["sample_endpoints"][0]["path"] == "/api/orders/{id}"
+    assert generated.findings_summary[0]["category"] == "bola"
+    assert generated.findings_summary[0]["proof_state"] == "suspected"
+    assert "asm.gaps" in generated.allowed_commands
+    assert "auth_header" not in json.dumps(generated.model_dump(mode="json"))
+    assert len(generated.context_hash) == 64
 
 
 def test_policy_profile_required_anchor_ids_must_be_valid_uuids():

@@ -3195,6 +3195,16 @@ class AgentContextPackRequest(BaseModel):
     created_by: Optional[str] = None
 
 
+class AgentContextPackFromTargetRequest(BaseModel):
+    target_id: str
+    created_by: Optional[str] = None
+    include_findings: bool = True
+    include_endpoints: bool = True
+    include_gaps: bool = True
+    finding_limit: int = Field(default=10, ge=0, le=25)
+    endpoint_limit: int = Field(default=12, ge=0, le=50)
+
+
 class AgentDecisionTraceStep(BaseModel):
     kind: str
     command: Optional[str] = None
@@ -11979,6 +11989,217 @@ async def _validate_agent_context_pack(conn, req: AgentContextPackRequest) -> tu
     return payload, errors, warnings, "invalid" if errors else "recorded"
 
 
+def _canonical_context_hash(payload: dict[str, Any]) -> str:
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _active_commands_for_context() -> tuple[list[str], list[dict[str, Any]]]:
+    commands = _operation_plan_allowed_commands()
+    allowed: list[str] = []
+    disallowed: list[dict[str, Any]] = []
+    for name, command in sorted(commands.items()):
+        status = str(command.get("status") or "")
+        if status in {"read_only", "dry_run"}:
+            allowed.append(name)
+        else:
+            disallowed.append({
+                "command": name,
+                "reason": f"{status}:{command.get('risk_tier') or 'unknown'}",
+            })
+    return allowed, disallowed
+
+
+def _json_safe_row(row: Any) -> dict[str, Any]:
+    payload = row_to_dict(row)
+    return _decode_json_value(payload) if isinstance(payload, dict) else payload
+
+
+async def _persist_agent_context_pack(conn, req: AgentContextPackRequest) -> dict[str, Any]:
+    payload, errors, warnings, status = await _validate_agent_context_pack(conn, req)
+    target_id = uuid.UUID(payload["target_id"]) if payload.get("target_id") else None
+    row = await conn.fetchrow(
+        """
+        INSERT INTO agent_context_packs (
+            context_version, target_id, context_hash, target_summary, current_surface,
+            current_gaps, hypotheses_summary, findings_summary, allowed_commands,
+            disallowed_commands, known_preconditions, redaction_profile, context_pack,
+            validation_errors, validation_warnings, status, created_by
+        ) VALUES (
+            $1,$2,$3,$4::jsonb,$5::jsonb,
+            $6::jsonb,$7::jsonb,$8::jsonb,$9::jsonb,
+            $10::jsonb,$11::jsonb,$12,$13::jsonb,
+            $14::jsonb,$15::jsonb,$16,$17
+        )
+        RETURNING *
+        """,
+        payload["context_version"],
+        target_id,
+        payload["context_hash"],
+        json.dumps(payload.get("target_summary") or {}),
+        json.dumps(payload.get("current_surface") or {}),
+        json.dumps(payload.get("current_gaps") or []),
+        json.dumps(payload.get("hypotheses_summary") or []),
+        json.dumps(payload.get("findings_summary") or []),
+        json.dumps(payload.get("allowed_commands") or []),
+        json.dumps(payload.get("disallowed_commands") or []),
+        json.dumps(payload.get("known_preconditions") or {}),
+        payload["redaction_profile"],
+        json.dumps(payload.get("context_pack") or {}),
+        json.dumps(errors),
+        json.dumps(warnings),
+        status,
+        str(payload.get("created_by") or "").strip() or None,
+    )
+    return {
+        "context_pack": _public_agent_context_pack_row(row),
+        "execution_enabled": False,
+        "validated": not errors,
+    }
+
+
+async def _build_agent_context_pack_from_target(conn, req: AgentContextPackFromTargetRequest) -> AgentContextPackRequest:
+    target_uuid = _uuid_or_400(req.target_id, "target id")
+    target = await conn.fetchrow(
+        """
+        SELECT id, url, name, root_domain, is_active, last_scanned_at, last_score, last_grade,
+               asm_enabled, asm_config, asm_last_test_at, asm_last_recon_at, metadata_json
+        FROM targets
+        WHERE id = $1
+        """,
+        target_uuid,
+    )
+    if not target:
+        raise HTTPException(status_code=404, detail="Target not found")
+
+    target_payload = _json_safe_row(target)
+    metadata = _decode_json_value(target_payload.get("metadata_json")) or {}
+    coverage = await asm_inventory.coverage_summary(conn, str(target_uuid))
+    endpoint_counts = await conn.fetch(
+        """
+        SELECT COALESCE(auth_state, 'unknown') AS auth_state,
+               COALESCE(test_status, 'unknown') AS test_status,
+               COUNT(*) AS count
+        FROM target_endpoints
+        WHERE target_id = $1
+        GROUP BY COALESCE(auth_state, 'unknown'), COALESCE(test_status, 'unknown')
+        ORDER BY count DESC
+        LIMIT 20
+        """,
+        target_uuid,
+    )
+    sample_endpoints = []
+    if req.include_endpoints and req.endpoint_limit > 0:
+        endpoint_rows = await conn.fetch(
+            """
+            SELECT method, path, param_location, auth_state, test_status,
+                   last_attempt_status, last_verdict, priority_score, last_seen_at, last_tested_at
+            FROM target_endpoints
+            WHERE target_id = $1
+            ORDER BY priority_score DESC, last_seen_at DESC
+            LIMIT $2
+            """,
+            target_uuid,
+            req.endpoint_limit,
+        )
+        sample_endpoints = [_json_safe_row(row) for row in endpoint_rows]
+
+    findings_summary: list[dict[str, Any]] = []
+    if req.include_findings and req.finding_limit > 0:
+        finding_rows = await conn.fetch(
+            """
+            SELECT id, title, severity, status, tool, url,
+                   last_verification_verdict,
+                   last_seen_at AS last_seen,
+                   first_seen_at AS first_seen
+            FROM findings
+            WHERE target_id = $1 AND status = 'active'
+            ORDER BY
+              CASE severity WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 WHEN 'low' THEN 3 ELSE 4 END,
+              last_seen_at DESC NULLS LAST
+            LIMIT $2
+            """,
+            target_uuid,
+            req.finding_limit,
+        )
+        for row in finding_rows:
+            finding = _json_safe_row(row)
+            finding["category"] = finding.get("tool")
+            finding.update(finding_proof_fields(finding))
+            findings_summary.append(finding)
+
+    current_gaps: list[dict[str, Any]] = []
+    if req.include_gaps:
+        current_gaps.append({
+            "kind": "asm_coverage",
+            "coverage": coverage,
+        })
+        untested = int(coverage.get("untested") or 0) if isinstance(coverage, dict) else 0
+        stale = int(coverage.get("stale") or 0) if isinstance(coverage, dict) else 0
+        if untested:
+            current_gaps.append({"kind": "untested_endpoints", "count": untested, "next_safe_command": "asm.gaps"})
+        if stale:
+            current_gaps.append({"kind": "stale_endpoints", "count": stale, "next_safe_command": "asm.gaps"})
+
+    worker_freshness = "unknown"
+    try:
+        worker_build_raw = get_redis().hgetall("shakerscan:worker_build") or {}
+        worker_freshness = "registered" if worker_build_raw else "unknown"
+    except Exception:
+        worker_freshness = "unknown"
+
+    allowed_commands, disallowed_commands = _active_commands_for_context()
+    target_summary = {
+        "target_id": str(target_uuid),
+        "url": target_payload.get("url"),
+        "name": target_payload.get("name"),
+        "root_domain": target_payload.get("root_domain"),
+        "is_active": bool(target_payload.get("is_active")),
+        "environment": metadata.get("environment") or metadata.get("env") or "unknown",
+        "owner": metadata.get("owner") or metadata.get("asset_owner") or "unknown",
+        "last_scanned_at": target_payload.get("last_scanned_at"),
+        "last_score": target_payload.get("last_score"),
+        "last_grade": target_payload.get("last_grade"),
+    }
+    current_surface = {
+        "asm_enabled": bool(target_payload.get("asm_enabled")),
+        "asm_last_test_at": target_payload.get("asm_last_test_at"),
+        "asm_last_recon_at": target_payload.get("asm_last_recon_at"),
+        "coverage": coverage,
+        "endpoint_counts": [_json_safe_row(row) for row in endpoint_counts],
+        "sample_endpoints": sample_endpoints,
+    }
+    known_preconditions = {
+        "workers": worker_freshness,
+        "primary_credentials": "configured" if metadata.get("auth") or metadata.get("credential_profile") else "unknown",
+        "second_user_credentials": "configured" if metadata.get("second_user") or metadata.get("user2") else "unknown",
+        "scope": "target-bound",
+    }
+    hash_payload = {
+        "target_summary": target_summary,
+        "current_surface": current_surface,
+        "current_gaps": current_gaps,
+        "findings_summary": findings_summary,
+        "allowed_commands": allowed_commands,
+        "disallowed_commands": disallowed_commands,
+        "known_preconditions": known_preconditions,
+    }
+    return AgentContextPackRequest(
+        target_id=str(target_uuid),
+        context_hash=_canonical_context_hash(hash_payload),
+        target_summary=target_summary,
+        current_surface=current_surface,
+        current_gaps=current_gaps,
+        findings_summary=findings_summary,
+        hypotheses_summary=[],
+        allowed_commands=allowed_commands,
+        disallowed_commands=disallowed_commands,
+        known_preconditions=known_preconditions,
+        redaction_profile="agent-plan-generated-target",
+        created_by=req.created_by,
+    )
+
+
 def _canonical_agent_decision_trace(req: AgentDecisionTraceRequest) -> dict[str, Any]:
     payload = req.model_dump(mode="json")
     payload["context_hash"] = str(payload.get("context_hash") or "").strip().lower()
@@ -12401,46 +12622,17 @@ async def arsenal_operation_plans(limit: int = Query(20, ge=1, le=100)):
 async def arsenal_create_agent_context_pack(req: AgentContextPackRequest):
     """Validate and persist a bounded AgentContextPack without exposing execution power."""
     async with db_pool.acquire() as conn:
-        payload, errors, warnings, status = await _validate_agent_context_pack(conn, req)
-        target_id = uuid.UUID(payload["target_id"]) if payload.get("target_id") else None
-        row = await conn.fetchrow(
-            """
-            INSERT INTO agent_context_packs (
-                context_version, target_id, context_hash, target_summary, current_surface,
-                current_gaps, hypotheses_summary, findings_summary, allowed_commands,
-                disallowed_commands, known_preconditions, redaction_profile, context_pack,
-                validation_errors, validation_warnings, status, created_by
-            ) VALUES (
-                $1,$2,$3,$4::jsonb,$5::jsonb,
-                $6::jsonb,$7::jsonb,$8::jsonb,$9::jsonb,
-                $10::jsonb,$11::jsonb,$12,$13::jsonb,
-                $14::jsonb,$15::jsonb,$16,$17
-            )
-            RETURNING *
-            """,
-            payload["context_version"],
-            target_id,
-            payload["context_hash"],
-            json.dumps(payload.get("target_summary") or {}),
-            json.dumps(payload.get("current_surface") or {}),
-            json.dumps(payload.get("current_gaps") or []),
-            json.dumps(payload.get("hypotheses_summary") or []),
-            json.dumps(payload.get("findings_summary") or []),
-            json.dumps(payload.get("allowed_commands") or []),
-            json.dumps(payload.get("disallowed_commands") or []),
-            json.dumps(payload.get("known_preconditions") or {}),
-            payload["redaction_profile"],
-            json.dumps(payload.get("context_pack") or {}),
-            json.dumps(errors),
-            json.dumps(warnings),
-            status,
-            str(payload.get("created_by") or "").strip() or None,
-        )
-    return {
-        "context_pack": _public_agent_context_pack_row(row),
-        "execution_enabled": False,
-        "validated": not errors,
-    }
+        return await _persist_agent_context_pack(conn, req)
+
+
+@app.post("/arsenal/context-packs/from-target")
+async def arsenal_create_agent_context_pack_from_target(req: AgentContextPackFromTargetRequest):
+    """Generate and persist a bounded AgentContextPack from stored target facts."""
+    async with db_pool.acquire() as conn:
+        generated = await _build_agent_context_pack_from_target(conn, req)
+        response = await _persist_agent_context_pack(conn, generated)
+    response["generated_from"] = {"target_id": req.target_id, "source": "target_facts"}
+    return response
 
 
 @app.get("/arsenal/context-packs")

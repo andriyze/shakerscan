@@ -279,6 +279,16 @@ export interface AgentContextPackRequest {
   created_by?: string
 }
 
+export interface AgentContextPackFromTargetRequest {
+  target_id: string
+  created_by?: string
+  include_findings?: boolean
+  include_endpoints?: boolean
+  include_gaps?: boolean
+  finding_limit?: number
+  endpoint_limit?: number
+}
+
 export interface AgentContextPack {
   id: string
   context_version: string
@@ -306,6 +316,7 @@ export interface AgentContextPackResponse {
   context_pack: AgentContextPack
   execution_enabled: boolean
   validated: boolean
+  generated_from?: Record<string, unknown>
 }
 
 export interface AgentDecisionTraceStep {
@@ -1539,6 +1550,16 @@ export async function createAgentContextPack(payload: AgentContextPackRequest): 
 export async function getAgentContextPacks(limit: number = 20): Promise<{ context_packs: AgentContextPack[]; execution_enabled: boolean; count: number }> {
   const res = await fetch(`${API_URL}/arsenal/context-packs?limit=${limit}`)
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load context packs'))
+  return res.json()
+}
+
+export async function generateAgentContextPackFromTarget(payload: AgentContextPackFromTargetRequest): Promise<AgentContextPackResponse> {
+  const res = await fetch(`${API_URL}/arsenal/context-packs/from-target`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to generate context pack'))
   return res.json()
 }
 
