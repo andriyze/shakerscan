@@ -15653,6 +15653,27 @@ async def _arsenal_dispatch_target_list(p: dict[str, Any]) -> dict[str, Any]:
     )
 
 
+async def _arsenal_dispatch_target_get(p: dict[str, Any]) -> dict[str, Any]:
+    target_id = str(p.get("target_id") or "").strip()
+    if not target_id:
+        raise HTTPException(status_code=400, detail="target.get requires a target_id parameter")
+    return await get_target(target_id)
+
+
+async def _arsenal_dispatch_target_principals(p: dict[str, Any]) -> dict[str, Any]:
+    target_id = str(p.get("target_id") or "").strip()
+    if not target_id:
+        raise HTTPException(status_code=400, detail="target.principals requires a target_id parameter")
+    return await list_target_principals(target_id, include_inactive=bool(p.get("include_inactive")))
+
+
+async def _arsenal_dispatch_target_principal_matrix(p: dict[str, Any]) -> dict[str, Any]:
+    target_id = str(p.get("target_id") or "").strip()
+    if not target_id:
+        raise HTTPException(status_code=400, detail="target.principal_matrix requires a target_id parameter")
+    return await list_target_principal_matrix(target_id, limit=_int_or_none(p.get("limit")) or 200)
+
+
 async def _arsenal_dispatch_asm_gaps(p: dict[str, Any]) -> dict[str, Any]:
     target_id = str(p.get("target_id") or "").strip()
     if not target_id:
@@ -15677,6 +15698,50 @@ async def _arsenal_dispatch_campaign_get(p: dict[str, Any]) -> dict[str, Any]:
     if not campaign_id:
         raise HTTPException(status_code=400, detail="campaign.get requires a campaign_id parameter")
     return await arsenal_campaign_detail(campaign_id, action_limit=_int_or_none(p.get("action_limit")) or 50)
+
+
+async def _arsenal_dispatch_ai_target_list(p: dict[str, Any]) -> dict[str, Any]:
+    return await list_ai_targets(
+        include_inactive=bool(p.get("include_inactive")),
+        include_demo=bool(p.get("include_demo")),
+        limit=_int_or_none(p.get("limit")) or 100,
+        offset=_int_or_none(p.get("offset")) or 0,
+    )
+
+
+async def _arsenal_dispatch_evidence_export_manifest(p: dict[str, Any]) -> dict[str, Any]:
+    return await evidence_export_manifest(
+        finding_id=p.get("finding_id"),
+        scan_id=p.get("scan_id"),
+        retention_class=p.get("retention_class"),
+        limit=_int_or_none(p.get("limit")) or 200,
+    )
+
+
+async def _arsenal_dispatch_evidence_export_bundle(p: dict[str, Any]) -> dict[str, Any]:
+    return await evidence_export_bundle(
+        finding_id=p.get("finding_id"),
+        scan_id=p.get("scan_id"),
+        retention_class=p.get("retention_class"),
+        limit=_int_or_none(p.get("limit")) or 200,
+        record_event=bool(p.get("record_event")),
+    )
+
+
+async def _arsenal_dispatch_evidence_instance_list(p: dict[str, Any]) -> dict[str, Any]:
+    return await list_evidence_instances(
+        finding_id=p.get("finding_id"),
+        tool_receipt_id=p.get("tool_receipt_id"),
+        limit=_int_or_none(p.get("limit")) or 50,
+    )
+
+
+async def _arsenal_dispatch_tool_receipt_list(p: dict[str, Any]) -> dict[str, Any]:
+    return await arsenal_tool_receipts(
+        limit=_int_or_none(p.get("limit")) or 20,
+        tool_name=p.get("tool_name"),
+        status=p.get("status"),
+    )
 
 
 async def _arsenal_dispatch_asm_improve(p: dict[str, Any], approval_receipt_id: str | None) -> dict[str, Any]:
@@ -15719,6 +15784,60 @@ async def _arsenal_dispatch_finding_retest(p: dict[str, Any], approval_receipt_i
     return await retest_finding(finding_id, body, mode=p.get("mode"))
 
 
+def _arsenal_model_fields(model_cls) -> set[str]:
+    fields = getattr(model_cls, "model_fields", None)
+    if isinstance(fields, dict):
+        return set(fields)
+    fields = getattr(model_cls, "__fields__", None)
+    if isinstance(fields, dict):
+        return set(fields)
+    return set()
+
+
+async def _arsenal_dispatch_scan_focused_family(p: dict[str, Any], approval_receipt_id: str | None) -> dict[str, Any]:
+    target = str(p.get("target") or "").strip()
+    if not target:
+        raise HTTPException(status_code=400, detail="scan.focused_family requires a target parameter")
+    check_family = str(p.get("check_family") or "").strip()
+    if not check_family:
+        raise HTTPException(status_code=400, detail="scan.focused_family requires a check_family parameter")
+    option_payload = dict(p.get("options") or {}) if isinstance(p.get("options"), dict) else {}
+    allowed = _arsenal_model_fields(ScanOptions)
+    for key, value in p.items():
+        if key in allowed and value is not None:
+            option_payload[key] = value
+    option_payload["check_family"] = check_family
+    option_payload["approval_receipt_id"] = approval_receipt_id or p.get("approval_receipt_id")
+    option_payload.setdefault("scan_type", "smart")
+    body = ScanRequest(target=target, name=p.get("name"), options=ScanOptions(**option_payload))
+    return await submit_scan(body)
+
+
+async def _arsenal_dispatch_ai_gate_replay_probe(p: dict[str, Any], approval_receipt_id: str | None) -> dict[str, Any]:
+    scan_id = str(p.get("scan_id") or "").strip()
+    if not scan_id:
+        raise HTTPException(status_code=400, detail="ai_gate.replay_probe requires a scan_id parameter")
+    fields = {
+        k: p[k]
+        for k in ("mode", "probe_family", "probe_id", "transcript_index", "requested_by", "confirm_production")
+        if p.get(k) is not None
+    }
+    body = AIScanReplayRequest(approval_receipt_id=approval_receipt_id or p.get("approval_receipt_id"), **fields)
+    return await replay_ai_scan(scan_id, body)
+
+
+async def _arsenal_dispatch_model_intake_scan(p: dict[str, Any], approval_receipt_id: str | None) -> dict[str, Any]:
+    artifact_url = str(p.get("artifact_url") or "").strip()
+    if not artifact_url:
+        raise HTTPException(status_code=400, detail="model_intake.scan requires an artifact_url parameter")
+    allowed = _arsenal_model_fields(ModelIntakeScanRequest)
+    fields = {k: v for k, v in p.items() if k in allowed and v is not None}
+    fields["artifact_url"] = artifact_url
+    fields["approval_receipt_id"] = approval_receipt_id or p.get("approval_receipt_id")
+    body = ModelIntakeScanRequest(**fields)
+    return await scan_model_intake(body)
+
+
 def _arsenal_readonly_adapters() -> dict[str, Any]:
     return {
         "campaign.list": _arsenal_dispatch_campaign_list,
@@ -15727,11 +15846,19 @@ def _arsenal_readonly_adapters() -> dict[str, Any]:
         "tool.status": _arsenal_dispatch_tool_status,
         "local_agent.list": _arsenal_dispatch_local_agent_list,
         "target.list": _arsenal_dispatch_target_list,
+        "target.get": _arsenal_dispatch_target_get,
+        "target.principals": _arsenal_dispatch_target_principals,
+        "target.principal_matrix": _arsenal_dispatch_target_principal_matrix,
         "asm.gaps": _arsenal_dispatch_asm_gaps,
         "operation_plan.list": _arsenal_dispatch_operation_plan_list,
         "agent_context_pack.list": _arsenal_dispatch_agent_context_pack_list,
         "hypothesis.list": _arsenal_dispatch_hypothesis_list,
         "campaign.get": _arsenal_dispatch_campaign_get,
+        "ai_target.list": _arsenal_dispatch_ai_target_list,
+        "evidence.export_manifest": _arsenal_dispatch_evidence_export_manifest,
+        "evidence.export_bundle": _arsenal_dispatch_evidence_export_bundle,
+        "evidence_instance.list": _arsenal_dispatch_evidence_instance_list,
+        "tool_receipt.list": _arsenal_dispatch_tool_receipt_list,
     }
 
 
@@ -15741,6 +15868,9 @@ def _arsenal_gated_adapters() -> dict[str, Any]:
         "asm.test": _arsenal_dispatch_asm_test,
         "asm.recon": _arsenal_dispatch_asm_recon,
         "finding.retest": _arsenal_dispatch_finding_retest,
+        "scan.focused_family": _arsenal_dispatch_scan_focused_family,
+        "ai_gate.replay_probe": _arsenal_dispatch_ai_gate_replay_probe,
+        "model_intake.scan": _arsenal_dispatch_model_intake_scan,
     }
 
 

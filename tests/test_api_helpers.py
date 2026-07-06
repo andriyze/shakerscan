@@ -2306,7 +2306,7 @@ def test_arsenal_execute_gated_without_adapter_is_pending(monkeypatch):
     conn = _BlockedRecordingConn()
     result = asyncio.run(api_module._arsenal_execute(
         conn, api_module.ArsenalExecuteRequest(
-            command="model_intake.scan", parameters={},
+            command="evidence.retention_sweep", parameters={"dry_run": False},
             execute=True, confirmations=["confirm_authorized"],
         )
     ))
@@ -2355,6 +2355,128 @@ def test_arsenal_execute_gated_asm_test_dispatches_when_allowed(monkeypatch):
     ))
     assert result["dispatched"] is True
     assert result["operation_id"] == "op-9"
+
+
+def test_arsenal_execute_dispatches_evidence_export_bundle(monkeypatch):
+    captured = {}
+
+    async def fake_bundle(**kwargs):
+        captured.update(kwargs)
+        return {"bundle_hash": "b" * 64, "export_event": {"id": "event-1"}}
+
+    monkeypatch.setattr(api_module, "evidence_export_bundle", fake_bundle)
+    result = asyncio.run(api_module._arsenal_execute(
+        _BlockedRecordingConn(),
+        api_module.ArsenalExecuteRequest(
+            command="evidence.export_bundle",
+            parameters={"scan_id": "44444444-4444-4444-8444-444444444444", "record_event": True},
+        ),
+    ))
+
+    assert result["dispatched"] is True
+    assert captured["scan_id"] == "44444444-4444-4444-8444-444444444444"
+    assert captured["record_event"] is True
+
+
+def test_arsenal_execute_gated_scan_focused_family_dispatches_when_allowed(monkeypatch):
+    monkeypatch.setattr(api_module, "_ai_ops_execute_enabled", lambda: True)
+    captured = {}
+
+    async def fake_validate(*args, **kwargs):
+        return {}
+
+    async def fake_submit_scan(body):
+        captured["body"] = body
+        return {"operation_id": "op-scan", "scan_id": "scan-1", "status": "queued"}
+
+    monkeypatch.setattr(api_module, "_validate_approval_receipt_for_action", fake_validate)
+    monkeypatch.setattr(api_module, "submit_scan", fake_submit_scan)
+
+    result = asyncio.run(api_module._arsenal_execute(
+        _BlockedRecordingConn(),
+        api_module.ArsenalExecuteRequest(
+            command="scan.focused_family",
+            parameters={"target": "https://app.example.com", "check_family": "sqli", "budget_profile": "fast"},
+            execute=True,
+            confirmations=["confirm_authorized"],
+            approval_receipt_id="r",
+        ),
+    ))
+
+    assert result["dispatched"] is True
+    assert result["operation_id"] == "op-scan"
+    body = captured["body"]
+    assert body.target == "https://app.example.com"
+    assert body.options.check_family == "sqli"
+    assert body.options.scan_type == "smart"
+    assert body.options.approval_receipt_id == "r"
+
+
+def test_arsenal_execute_gated_model_intake_scan_dispatches_when_allowed(monkeypatch):
+    monkeypatch.setattr(api_module, "_ai_ops_execute_enabled", lambda: True)
+    captured = {}
+
+    async def fake_validate(*args, **kwargs):
+        return {}
+
+    async def fake_model_intake(body):
+        captured["body"] = body
+        return {"operation_id": "op-model", "scan_id": "scan-model", "status": "queued"}
+
+    monkeypatch.setattr(api_module, "_validate_approval_receipt_for_action", fake_validate)
+    monkeypatch.setattr(api_module, "scan_model_intake", fake_model_intake)
+
+    result = asyncio.run(api_module._arsenal_execute(
+        _BlockedRecordingConn(),
+        api_module.ArsenalExecuteRequest(
+            command="model_intake.scan",
+            parameters={"artifact_url": "https://models.example.com/model.safetensors", "policy_profile": "production"},
+            execute=True,
+            confirmations=["confirm_authorized"],
+            approval_receipt_id="r",
+        ),
+    ))
+
+    assert result["dispatched"] is True
+    assert result["operation_id"] == "op-model"
+    body = captured["body"]
+    assert body.artifact_url == "https://models.example.com/model.safetensors"
+    assert body.policy_profile == "production"
+    assert body.approval_receipt_id == "r"
+
+
+def test_arsenal_execute_gated_ai_gate_replay_dispatches_when_allowed(monkeypatch):
+    monkeypatch.setattr(api_module, "_ai_ops_execute_enabled", lambda: True)
+    captured = {}
+
+    async def fake_validate(*args, **kwargs):
+        return {}
+
+    async def fake_replay(scan_id, body):
+        captured["scan_id"] = scan_id
+        captured["body"] = body
+        return {"operation_id": "op-ai", "scan_id": "scan-ai", "status": "queued"}
+
+    monkeypatch.setattr(api_module, "_validate_approval_receipt_for_action", fake_validate)
+    monkeypatch.setattr(api_module, "replay_ai_scan", fake_replay)
+
+    result = asyncio.run(api_module._arsenal_execute(
+        _BlockedRecordingConn(),
+        api_module.ArsenalExecuteRequest(
+            command="ai_gate.replay_probe",
+            parameters={"scan_id": "44444444-4444-4444-8444-444444444444", "mode": "family", "probe_family": "rag"},
+            execute=True,
+            confirmations=["confirm_authorized", "confirm_production_when_applicable"],
+            approval_receipt_id="r",
+        ),
+    ))
+
+    assert result["dispatched"] is True
+    assert result["operation_id"] == "op-ai"
+    assert captured["scan_id"] == "44444444-4444-4444-8444-444444444444"
+    assert captured["body"].mode == "family"
+    assert captured["body"].probe_family == "rag"
+    assert captured["body"].approval_receipt_id == "r"
 
 
 def test_arsenal_execute_detached_dispatches_without_holding_outer_db_conn(monkeypatch):
