@@ -28,7 +28,7 @@ if "fastapi" not in sys.modules:
                 return fn
             return wrapper
 
-        get = post = patch = put = delete = on_event = _decorator
+        get = post = patch = put = delete = on_event = exception_handler = _decorator
 
     class _FakeHTTPException(Exception):
         def __init__(self, status_code: int = 500, detail=None):
@@ -68,6 +68,7 @@ if "fastapi" not in sys.modules:
             self.headers = headers or {}
 
     responses_mod.Response = _FakeResponse
+    responses_mod.JSONResponse = _FakeResponse
     sys.modules["fastapi.responses"] = responses_mod
 
 import api as api_module  # noqa: E402
@@ -721,6 +722,16 @@ class _AsmActionConn:
         self.campaign_id = uuid.uuid4()
 
     async def fetchrow(self, query, *args):
+        if "SELECT id, url, root_domain, asm_config" in query:
+            return {
+                "id": args[0] if args else uuid.uuid4(),
+                "url": self.target["url"],
+                "root_domain": "example.test",
+                "asm_config": self.target.get("asm_config"),
+                "asm_last_test_at": None,
+                "asm_last_recon_at": None,
+                "metadata_json": {},
+            }
         if "SELECT url, scan_options, asm_config" in query:
             return self.target
         if "SELECT url, scan_options" in query:
@@ -1052,6 +1063,7 @@ def test_update_automation_settings_writes_scan_and_safe_asm_defaults(monkeypatc
             auto_sharding_strategy="coverage",
             default_asm_enabled=False,
             default_asm_config={"batch_size": 120, "stale_days": 14, "exploit_depth": True},
+            approval_receipts_required_for_state_changing_actions=True,
         )
     ))
 
@@ -1061,6 +1073,7 @@ def test_update_automation_settings_writes_scan_and_safe_asm_defaults(monkeypatc
     assert scan_store["auto_sharding_enabled"] == "false"
     assert scan_store["auto_sharding_strategy"] == "coverage"
     assert automation_store["default_asm_enabled"] == "false"
+    assert automation_store["approval_receipts_required_for_state_changing_actions"] == "true"
     assert stored_asm_config["batch_size"] == 120
     assert stored_asm_config["stale_days"] == 14
     assert stored_asm_config["exploit_depth"] is False
@@ -1069,6 +1082,10 @@ def test_update_automation_settings_writes_scan_and_safe_asm_defaults(monkeypatc
     assert result["settings"]["default_continuous_asm"]["enabled_for_new_web_targets"] is False
     assert result["settings"]["default_continuous_asm"]["config"]["exploit_depth"] is False
     assert result["settings"]["default_continuous_asm"]["active_depth_confirmation_required"] is True
+    assert (
+        result["settings"]["safety_boundaries"]["approval_receipts_required_for_state_changing_actions"]
+        is True
+    )
 
 
 def test_update_automation_settings_merges_partial_asm_config(monkeypatch):
@@ -1101,6 +1118,32 @@ def test_update_automation_settings_merges_partial_asm_config(monkeypatch):
     assert stored["max_requests_per_hour_per_domain"] == 333
     assert result["settings"]["default_continuous_asm"]["config"]["batch_size"] == 100
     assert result["settings"]["default_continuous_asm"]["config"]["window_days"] == [1, 3]
+
+
+def test_approval_receipt_policy_defaults_to_compatibility_mode(monkeypatch):
+    redis_client = _AutomationSettingsRedis()
+    monkeypatch.setattr(api_module, "get_redis", lambda: redis_client)
+
+    response = api_module._sanitize_automation_settings_response()
+
+    assert response["safety_boundaries"]["approval_receipts_required_for_state_changing_actions"] is False
+    api_module._require_approval_receipt_if_policy_enabled(None, action_name="scan.submit:quick")
+
+
+def test_approval_receipt_policy_blocks_missing_receipt_when_enabled(monkeypatch):
+    redis_client = _AutomationSettingsRedis()
+    redis_client.hset(
+        api_module.AUTOMATION_SETTINGS_KEY,
+        mapping={"approval_receipts_required_for_state_changing_actions": "true"},
+    )
+    monkeypatch.setattr(api_module, "get_redis", lambda: redis_client)
+
+    with pytest.raises(api_module.HTTPException) as exc:
+        api_module._require_approval_receipt_if_policy_enabled(None, action_name="asm.test")
+
+    assert exc.value.status_code == 409
+    assert exc.value.detail["error"] == "approval_receipt_required"
+    assert exc.value.detail["action"] == "asm.test"
 
 
 def test_auto_sharding_setting_disabled_keeps_smart_scan_standalone(monkeypatch):

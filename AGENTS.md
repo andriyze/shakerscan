@@ -437,10 +437,11 @@ curl http://localhost:8080/settings/automation
 curl -X PUT http://localhost:8080/settings/automation \
   -H "Content-Type: application/json" \
   -d '{"auto_sharding_enabled": true, "default_asm_enabled": true,
-       "default_asm_config": {"batch_size": 50, "stale_days": 30}}'
+       "default_asm_config": {"batch_size": 50, "stale_days": 30},
+       "approval_receipts_required_for_state_changing_actions": false}'
 ```
 
-`/settings/automation` is the preferred compact surface for UI/API/AI agents. It keeps global `exploit_depth` locked off; Lab/deep ASM still requires explicit per-target or per-action intent.
+`/settings/automation` is the preferred compact surface for UI/API/AI agents. It keeps global `exploit_depth` locked off; Lab/deep ASM still requires explicit per-target or per-action intent. Set `approval_receipts_required_for_state_changing_actions` to `true` to require a valid scope/approval receipt before queueing scans, ASM actions, AI Gate runs, Model Intake scans, or retests.
 
 ### Worker Management
 

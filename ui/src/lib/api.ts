@@ -1163,12 +1163,14 @@ export interface AutomationSettings {
     global_exploit_depth: boolean
     lab_depth_requires_explicit_action: boolean
     planned_high_risk_families_fail_closed: boolean
+    approval_receipts_required_for_state_changing_actions: boolean
   }
 }
 
 export interface AutomationSettingsUpdate extends ScanExecutionSettingsUpdate {
   default_asm_enabled?: boolean
   default_asm_config?: Partial<AsmAutomationConfig>
+  approval_receipts_required_for_state_changing_actions?: boolean
 }
 
 export interface AIProbeResponse {

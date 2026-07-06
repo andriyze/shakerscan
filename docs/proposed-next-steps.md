@@ -1,12 +1,15 @@
 # Proposed Next Steps — Proof-First Continuous Exposure Management
 
 **Status:** updated 2026-07-05 after reconciling this roadmap with
+`docs/t3mp3st-adoption-implementation-plan-updated.md`,
 `docs/archive/asm-parallel-improvement-plan.md`, `docs/parallel-scan-architecture.md`, and the
 current code. The contract-first proof layer, first app-graph/evidence slices, target de-dupe,
-policy exceptions, Model Intake trust controls, AI Gate hardening, and ASM scheduling foundations are
-implemented and wired. This document lists only the *verified-remaining* work (gaps and unfinished
-layers) plus the architectural direction. Each remaining item cites the code symbol, route, or UI
-surface that proves its status, so it stays auditable. No item below is "already done."
+policy exceptions, Model Intake trust controls, AI Gate hardening, ASM scheduling foundations,
+Command Arsenal contracts, dry-run planning records, scope receipts, approval receipts, context
+packs, decision traces, and local-agent-labeled dry-run planning are implemented and wired. This
+document lists only the *verified-remaining* work (gaps and unfinished layers) plus the architectural
+direction. Each remaining item cites the code symbol, route, or UI surface that proves its status,
+so it stays auditable. No item below is "already done."
 
 ## Report reconciliation (2026-07-05)
 
@@ -69,10 +72,13 @@ raw local-agent execution. The useful target is its harness discipline:
   them.
 
 The merged roadmap rule is: **agentic planning may propose work, but deterministic ShakerScan
-contracts decide execution, proof, evidence, findings, and gates.** This means the next increments
-should make mission contracts, context packs, decision traces, Command Arsenal status labels, scope
-receipts, approval receipts, hypotheses, tool receipts, and integrity ledgers real before any local
-agent or MCP path can execute state-changing actions.
+contracts decide execution, proof, evidence, findings, and gates.** Mission contracts, context packs,
+decision traces, Command Arsenal status labels, scope receipts, approval receipts, and file-backed
+planner/benchmark integrity ledgers now exist in phase 1 form. The next adoption increments are:
+mandatory receipt enforcement by policy, a cross-product mission timeline, campaign/hypothesis
+records, tool receipts, evidence instances, refuter records, bounded source-informed hypotheses, and
+read-only MCP only after REST Command Arsenal contracts are stable. No local-agent or MCP path may
+execute state-changing actions until those enforcement layers are durable.
 
 Every agent-facing or operator-facing capability should carry an explicit maturity label until it is
 fully implemented:
@@ -87,6 +93,21 @@ fully implemented:
 | `experimental` | Available behind feature flag; not for production claims. |
 | `catalog_only` | Known future adapter or command; not wired or runnable. |
 | `out_of_scope` | Intentionally excluded from the current roadmap. |
+
+T3MP3ST features are translated as follows in this roadmap:
+
+| T3MP3ST idea | ShakerScan implementation target | Current status |
+| --- | --- | --- |
+| Op Admiral / mission intake | `OperationPlan` plus cross-product campaign timeline | dry-run plan persistence done; unified timeline open |
+| Local-agent brain mode | bounded planner that emits `OperationPlan`, never direct tool execution | deterministic dry-run planner done; real adapters disabled |
+| Arsenal | REST Command Arsenal over ShakerScan product actions | read-only schemas/status done; gated execution open |
+| Scope/approval gates | `ActionScopeGuard`, `ScopeReceipt`, `ApprovalReceipt` | optional validation done; mandatory policy enforcement open |
+| PackBoard | `campaigns`, `campaign_actions`, `hypotheses`, situation reports | open |
+| Evidence gate | proof taxonomy, evidence objects, evidence instances, tool receipts | proof taxonomy/evidence objects done; instances/receipts open |
+| Arsenal doctor | tool status and receipt registry | status endpoint/UI phase 1 done; receipts open |
+| Refuter culture | weak-claim refuter workflow and integrity ledgers | ledgers phase 1 done; refuter records/workflow open |
+| Source-informed testing | graph facts and hypotheses from source/spec inputs | later/experimental |
+| MCP interface | thin adapter over REST Command Arsenal | later/read-only first |
 
 ## Done (do not re-list as TODO)
 
@@ -232,6 +253,12 @@ called at real sites — verify before re-proposing any of it:
   model artifact reference, or finding retest target before queueing, then stamp receipt IDs into
   queued scan/retest metadata where that route has a durable job/options record. Legacy submissions
   without a receipt still work; mandatory enforcement is still a policy rollout step.
+- **Policy-based approval receipt enforcement phase 1** — `/settings/automation` now exposes
+  `approval_receipts_required_for_state_changing_actions`. When enabled, scan submission, ASM
+  recon/test/improve, AI Gate scans/replay, Model Intake scans, single finding retest, and bulk
+  finding retest reject missing `approval_receipt_id` before queueing work; scan and Model Intake
+  routes perform an early missing-receipt guard before target-row creation. Compatibility mode remains
+  the default until an operator explicitly enables the policy.
 - **AI red-team scan-level replay phase 1** — `POST /ai/scans/{scan_id}/replay` now queues focused
   AI Gate reruns from a completed campaign using the original target, probe pack, profile, and
   environment. It can rerun skipped probe IDs, errored families, one selected family, or the full
@@ -337,23 +364,27 @@ raw shell execution or LLM-produced verified findings.
    DONE phase 1 for read-only local-agent capability records. DONE phase 1 for target-fact generated
    `AgentContextPack` records from stored target, ASM, endpoint, finding, precondition, and command
    facts. DONE phase 1 for local-agent-labeled deterministic dry-run `OperationPlan` creation from a
-   context pack without spawning local-agent CLIs. Remaining work is mandatory receipt enforcement and
-   later optional real local-agent adapter execution behind stricter gates; it still must add no new
-   execution power until receipts/gates are durable.
+   context pack without spawning local-agent CLIs. Remaining work is mandatory receipt enforcement,
+   campaign/timeline execution records, command-result audit records, and later optional real
+   local-agent adapter parsing behind stricter gates; it still must add no new execution power until
+   receipts/gates are durable.
 2. **Unified Action Center + mission timeline:** turn the existing product cards and ASM timeline into
    a cross-product target/campaign timeline over ASM, scans, focused families, AI Gate, Model Intake,
    retests, exceptions, deployment gates, worker freshness, evidence export/replay, and blocked/skipped
    reasons.
-3. **Read-only Command Arsenal and tool status:** expose schema-discoverable read-only commands for
-   inventory, ASM gaps/activity, scans, findings, AI targets, Model Intake, evidence, deployment
-   decisions, and currently integrated tool status. Tool status must distinguish `catalog_only`,
-   `wired`, `installed`, `runnable`, `gated`, `waived`, and `disabled`.
+3. **Command Arsenal execution gateway, still no raw shell:** extend the schema-discoverable
+   Command Arsenal into a gated product-action layer over existing API handlers. It is not the check
+   registry, not the external tool registry, and not a shell runner. Every command result must carry
+   operation id, status, dry-run flag, scope/approval ids, campaign id, scan/finding/evidence/tool
+   receipt refs, blocked reasons, next action, and operator message.
 4. **Scope and approval receipts for state-changing actions:** DONE phase 1 for central
    `ActionScopeGuard`, persisted `ScopeReceipt` previews, and durable `ApprovalReceipt` records.
    DONE phase 1 for optional receipt validation on `/scans` and Continuous ASM recon/test/improve.
    DONE phase 2 for optional receipt validation on AI Gate scans/replay, Model Intake scans, and
-   finding retests. Remaining work is making receipts mandatory by policy and extending enforcement
-   to future command/MCP adapters.
+   finding retests. DONE phase 1 for policy-based mandatory enforcement across those existing
+   state-changing routes via `/settings/automation`. Remaining work is command-result audit records,
+   campaign/action execution records, runtime redirect/resolution scope re-checks, and extending
+   enforcement to future command/MCP adapters.
 5. **Continuous ASM quality lane:** make `/asm/coverage`, `/asm/gaps`, scan detail, Action Center,
    and the mission timeline agree on family-aware state: attempted, proved, partial, blocked by auth,
    blocked by second user, blocked by schedule/rate cap, stale, and worker-stale.
@@ -373,10 +404,12 @@ raw shell execution or LLM-produced verified findings.
     and planner integrity ledgers for contamination, retractions, stale-fleet runs, phantom tool
     assumptions, and methodology corrections. DONE phase 1 for file-backed planner/benchmark ledger
     locations and planner fixture scoring.
-11. **Planner evals and local-agent planning, dry-run only:** add planner fixtures, integrity ledgers,
-    and dry-run local-agent planning only after command contracts, scope receipts, and read-only command
-    status are reliable. Local agents may propose plans; they must not execute shell commands, broaden
-    scope, bypass confirmations, or mark findings verified.
+11. **Planner evals and local-agent planning, dry-run only:** planner fixtures, integrity ledgers,
+    local-agent capability detection, target context packs, and deterministic local-agent-labeled
+    dry-run planning are phase 1 done. Remaining work is bounded harmless local-agent ping/testing,
+    strict parsed-output validation, and fixture-gated real-adapter experiments. Local agents may
+    propose plans; they must not execute shell commands, broaden scope, bypass confirmations, or mark
+    findings verified.
 12. **AI Gate and Model Intake polish:** add AI Gate target-history export/readiness trends and Model
     Intake exception remediation workflow depth after the cross-product operator surface can link to
     them cleanly.
@@ -387,14 +420,15 @@ Use this order when choosing between otherwise-valid work:
 
 - **P0: contracts and read-only operating layer.** `OperationPlan`, Command Arsenal, risk tiers,
   scope/approval receipt schemas, context packs, decision traces, tool status, maturity labels, and
-  integrity-ledger locations. No local-agent execution and no new tool execution power yet.
+  integrity-ledger locations are phase 1 done. The remaining P0 work is turning these into enforced
+  operation/campaign records without adding raw shell or direct local-agent execution power.
 - **P0: productize shipped foundations.** The base Action Center/CTAs, Product Status cards,
   Exceptions Queue, first-class ASM schedule kinds, and target campaign timeline phase 1 are already
   done. Remaining P0 work is the unified mission timeline, deeper safe remediation entry points, and
   cross-page agreement on blocker/blocked/running state.
 - **P1: safety receipts for state-changing actions.** Central `ActionScopeGuard`, durable scope
-  receipts, durable approval records, dry-run previews, redirect/runtime destination checks, and
-  explicit production/lab/credential/high-risk gates.
+  receipts, durable approval records, dry-run previews, optional-to-mandatory policy enforcement,
+  redirect/runtime destination checks, and explicit production/lab/credential/high-risk gates.
 - **P1: make Continuous ASM the flagship.** Family-aware coverage quality, proof-quality gaps,
   worker-aware waves, CT/new-surface inheritance, Improve Coverage explanations, and mission-timeline
   events that always say what ran, what skipped, why, and what evidence exists.
@@ -457,17 +491,39 @@ blocked, and provide safe remediation links without making users infer state fro
    readiness/control gaps, and open worker rebuild/scale controls. DONE for Model Intake trust
    blockers: `/settings/model-intake?remediate=trust` selects strict trusted-anchor mode, highlights
    the trust controls, and links exception hygiene.
+7. Add a cross-product mission timeline event model over background ASM dispatcher decisions,
+   recurring ASM waves, manual Improve Coverage actions, full coverage parent scans, focused family
+   campaigns, AI Gate campaign runs, Model Intake scans, finding retests, exception/deployment-gate
+   events, worker/fleet freshness, evidence export/replay events, and refuter requests.
+8. Timeline statuses should be explicit and API-backed: `planned`, `blocked`, `approval_required`,
+   `approved`, `queued`, `running`, `completed`, `partial`, `degraded`, `failed`, `cancelled`,
+   `evidence_bound`, `retest_scheduled`, and `refuter_requested`.
+9. Timeline events should carry at least: `event_id`, `campaign_id`, `target_id`,
+   `operation_plan_id`, `kind`, `status`, `action_name`, `risk_tier`, `blocked_by`,
+   `next_eligible_at`, `active_scan_id`, `evidence_object_ids`, `tool_receipt_ids`, and a concise
+   `operator_message`.
 
 **Done when:** a junior operator can answer, from one screen, "what is risky, what is blocked, what
 will run next, and which button fixes the next blocker" without reading scan JSON or worker logs.
 
 ### 2. Mission contract, Command Arsenal, and scope/approval receipts
-**Status: READ-ONLY SCHEMA DISCOVERY PHASE 1 DONE; DURABLE VALIDATORS/RECEIPTS STILL NEEDED.** The
+**Status: READ-ONLY / DRY-RUN PHASE 1 DONE; MANDATORY ENFORCEMENT STILL NEEDED.** The
 T3MP3ST adoption plan correctly identifies the missing operating model: ShakerScan has many
-safe/productized primitives, but no persisted mission contract yet shared by UI, REST, scheduler,
-AI Ops Router, local-agent planners, and future MCP. The near-term goal is not broad agent execution.
-It is schema-first planning, read-only command discovery, durable scope receipts, approval receipts,
-bounded context packs, decision traces, and audit receipts.
+safe/productized primitives, and now has persisted dry-run mission/context/trace/receipt records.
+The remaining goal is not broad agent execution. It is enforcing those records at state-changing
+boundaries, creating campaign/action audit records, and keeping every future planner/MCP path on the
+same API rails.
+
+Command Arsenal boundaries:
+
+- It is the safe product action layer exposed to UI, REST, AI Ops Router, local-agent planners,
+  scheduler, and future MCP clients.
+- It is not the scanner check registry.
+- It is not the external tool registry.
+- It must not expose raw shell, arbitrary Python/Node execution, or generic "run this command"
+  behavior.
+- External binaries may run only behind narrow adapters that produce tool receipts and evidence
+  parser status.
 
 **Implement:**
 1. DONE phase 1: define read-only `OperationPlan` schema with objective, planner metadata, context
@@ -504,8 +560,9 @@ bounded context packs, decision traces, and audit receipts.
    durable `ApprovalReceipt` recording: approvals require `confirm_authorized`, needs-approval scopes
    require `confirm_scope_reviewed`, and blocked scopes cannot be approved. DONE phase 1 for optional
    route validation on scan submission and Continuous ASM actions. DONE phase 2 for optional route
-   validation on AI Gate scans/replay, Model Intake scans, and finding retests. Remaining work is
-   policy-based mandatory enforcement across existing state-changing routes.
+   validation on AI Gate scans/replay, Model Intake scans, and finding retests. DONE phase 1 for
+   policy-based mandatory enforcement across those existing state-changing routes through
+   `/settings/automation`.
 7. Keep `/ai/ops/route` as the execution safety gateway. Local agents, AI Ops Router, scheduler, MCP,
    and UI should all use the same command schemas and scope/approval receipts; none may bypass the
    existing API handlers.
@@ -525,6 +582,15 @@ bounded context packs, decision traces, and audit receipts.
    scope/risk broadening, and unrunnable planned families being presented as runnable. The first
    implementation is file-backed under `results/benchmark-runs/INTEGRITY_LEDGER.md` and
    `results/planner-evals/INTEGRITY_LEDGER.md`.
+12. DONE phase 1: add policy-based mandatory approval receipt enforcement for existing
+    state-changing action routes. Legacy no-receipt mode remains the default compatibility setting
+    until an operator explicitly enables the requirement.
+13. Check scope twice for network-following actions: before execution from declared parameters, and
+    during/after redirects or resolution from actual destination. If runtime destination cannot be
+    verified, mark the action blocked or degraded rather than in-scope.
+14. Add command result audit records for gated execution: operation id, command, status, dry-run flag,
+    scope receipt id, approval id, campaign id, scan id, finding ids, hypothesis ids,
+    evidence object ids, tool receipt ids, blocked reasons, next action, and operator message.
 
 **Done when:** a mission can be planned, previewed, blocked, approved, queued, executed, and audited
 through one schema without exposing raw shell, bypassing policy gates, or allowing AI/local-agent prose
@@ -709,6 +775,12 @@ redacted argv, scope receipt, parser status, and artifact refs.
    build/container image, target scope, scope receipt, policy profile, approval id, timing, exit code,
    timeout, stdout/stderr artifact refs, parsed evidence refs, parser status, and redaction summary.
 6. Parser failure or missing tool status must degrade honestly and must not create verified findings.
+7. Tool adapter states must be operator-visible: `catalog_only`, `wired`, `installed`, `runnable`,
+   `gated`, `waived`, and `disabled`. Broad future tools stay `catalog_only` until a narrow adapter,
+   parser, scope extractor, proof contract, and receipt shape exist.
+8. The near-term registry is a **Tool Receipt Registry**, not an offensive-tool expansion. Do not add
+   new exploit tooling until existing DAST, ASM, AI Gate, and Model Intake tools produce receipts for
+   success, failure, timeout, skip, and parser-error paths.
 
 **Done when:** findings reference evidence objects by id/hash; one templated BOLA route is one
 finding with enumerable concrete proof instances; evidence survives worker churn; existing tools
@@ -757,9 +829,10 @@ then make `lfi`/`rce`/`ssrf` runnable only when their deterministic proof contra
 through `build_report`.
 
 ### 11. Planner evaluation and local-agent planning boundaries
-**Status: CONTRACT ONLY.** Local-agent planning should remain later and dry-run only until the Command
-Arsenal, scope receipts, approval receipts, context packs, and planner evals are stable. T3MP3ST's
-local-agent pattern is useful as a planner harness, not as raw execution power.
+**Status: DRY-RUN PHASE 1 DONE; REAL ADAPTERS DISABLED.** Local-agent planning should remain dry-run
+only until the Command Arsenal, mandatory receipt enforcement, context packs, parser/output
+validation, and planner evals are stable. T3MP3ST's local-agent pattern is useful as a planner
+harness, not as raw execution power.
 
 **Implement:**
 1. DONE phase 1: add fixed planner eval fixtures for: keep target covered, run BOLA, SQLi only, production AI Gate
@@ -788,6 +861,12 @@ local-agent pattern is useful as a planner harness, not as raw execution power.
 8. Reject ambiguous planner output. If a local agent lacks JSON mode, post-parse validation must fail
    closed on unknown commands, missing risk tiers, widened scope, hidden state-changing action
    requests, missing confirmations, or unbounded parameters.
+9. Add `POST /agents/local/test` only as a harmless capability ping with timeout, prompt/output caps,
+   environment stripping, no secrets, no target state mutation, and no queued scanner work.
+10. Before any real planner adapter can affect a queued action, run fixed evals for "keep target
+    covered", "run BOLA", "SQLi only", production AI Gate deep testing, Model Intake trust, stale
+    workers, out-of-scope prompt injection, missing evidence, planned/unrunnable families, production
+    RCE/lab-only gating, and missing second-user auth.
 
 **Done when:** a local or hosted planner can produce a validated dry-run `OperationPlan` from a
 bounded context pack, fail the unsafe fixtures, and route every proposed state-changing action through
@@ -817,6 +896,13 @@ and safety gates are real.
    evidence manifests, campaign timeline, plan preview, and tool status.
 6. Keep future offensive tools in a catalog-only appendix until existing tools produce receipts and
    parser/proof contracts. Tool count is not a product metric.
+7. Source-derived secrets must be redacted under the same evidence-retention policy as runtime
+   evidence. Source-derived routes may improve the application graph and hypothesis queue, but source
+   text alone must never satisfy a runtime proof contract.
+8. Read-only MCP, when added, should start with targets, ASM gaps, findings, evidence manifests,
+   campaign timeline, plan preview, and tool status. State-changing MCP remains disabled until it
+   requires scope receipt, dry-run preview, approval token or UI confirmation, and durable audit
+   records.
 
 **Done when:** source/code hints improve worklists and hypotheses without creating source-only
 verified findings, and MCP/new-tool adapters cannot bypass the same command/scope/approval/evidence

@@ -766,7 +766,9 @@ New quality gaps to track:
   active-depth confirmation boundaries. **Implemented:** `/settings/automation` exposes the combined
   API for UI/API/AI callers; the Settings page shows a compact Automation Defaults card with
   auto-sharding, default Continuous ASM for new web targets, safe ASM presets, and read-only
-  Lab/deep confirmation boundaries.
+  Lab/deep confirmation boundaries. It also exposes the approval-receipt requirement that can make
+  valid scope/approval receipts mandatory before state-changing scans, ASM actions, AI Gate runs,
+  Model Intake scans, or retests are queued.
 
 Remaining product work from the 2026-07-05 audit:
 

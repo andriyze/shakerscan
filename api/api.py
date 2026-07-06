@@ -897,6 +897,10 @@ def _load_effective_automation_settings() -> dict[str, Any]:
     settings: dict[str, Any] = {
         "default_asm_enabled": _default_asm_enabled_setting(),
         "default_asm_config": _safe_default_asm_config({}),
+        "approval_receipts_required_for_state_changing_actions": _is_truthy(
+            os.environ.get("APPROVAL_RECEIPTS_REQUIRED_FOR_STATE_CHANGING_ACTIONS", "false"),
+            default=False,
+        ),
     }
     try:
         r = get_redis()
@@ -913,7 +917,42 @@ def _load_effective_automation_settings() -> dict[str, Any]:
         settings["default_asm_config"] = _safe_default_asm_config(
             _decode_json_value(overrides.get("default_asm_config"))
         )
+    if "approval_receipts_required_for_state_changing_actions" in overrides:
+        settings["approval_receipts_required_for_state_changing_actions"] = _is_truthy(
+            overrides.get("approval_receipts_required_for_state_changing_actions"),
+            default=settings["approval_receipts_required_for_state_changing_actions"],
+        )
     return settings
+
+
+def _approval_receipts_required_for_state_changing_actions() -> bool:
+    return bool(
+        _load_effective_automation_settings().get(
+            "approval_receipts_required_for_state_changing_actions"
+        )
+    )
+
+
+def _require_approval_receipt_if_policy_enabled(
+    approval_receipt_id: str | None,
+    *,
+    action_name: str = "state_changing_action",
+) -> None:
+    if approval_receipt_id:
+        return
+    if not _approval_receipts_required_for_state_changing_actions():
+        return
+    raise HTTPException(
+        status_code=409,
+        detail={
+            "error": "approval_receipt_required",
+            "message": (
+                "Approval receipts are required for state-changing actions by automation policy. "
+                "Create a scope receipt and approval receipt, then retry with approval_receipt_id."
+            ),
+            "action": action_name,
+        },
+    )
 
 
 def _sanitize_scan_execution_settings_response(settings: dict[str, Any]) -> dict[str, Any]:
@@ -957,6 +996,9 @@ def _sanitize_automation_settings_response(
             "global_exploit_depth": False,
             "lab_depth_requires_explicit_action": True,
             "planned_high_risk_families_fail_closed": True,
+            "approval_receipts_required_for_state_changing_actions": bool(
+                automation.get("approval_receipts_required_for_state_changing_actions")
+            ),
         },
     }
 
@@ -3348,6 +3390,7 @@ class ScanExecutionSettingsUpdate(BaseModel):
 class AutomationSettingsUpdate(ScanExecutionSettingsUpdate):
     default_asm_enabled: Optional[bool] = None
     default_asm_config: Optional[dict[str, Any]] = None
+    approval_receipts_required_for_state_changing_actions: Optional[bool] = None
 
 
 class AISettingsProbeRequest(BaseModel):
@@ -3766,6 +3809,7 @@ async def _queue_ai_target_scan(target_id: str, request: AITargetScanRequest) ->
             conn,
             request.approval_receipt_id,
             target_url=target_row["endpoint_url"],
+            action_name="ai_gate.scan",
         )
 
         target = row_to_dict(target_row)
@@ -6318,6 +6362,10 @@ async def update_automation_settings(request: AutomationSettingsUpdate):
                 request.default_asm_config,
             )
         )
+    if request.approval_receipts_required_for_state_changing_actions is not None:
+        automation_updates["approval_receipts_required_for_state_changing_actions"] = (
+            "true" if request.approval_receipts_required_for_state_changing_actions else "false"
+        )
     if automation_updates:
         r.hset(AUTOMATION_SETTINGS_KEY, mapping=automation_updates)
 
@@ -7146,6 +7194,10 @@ async def scan_model_intake(request: ModelIntakeScanRequest):
     parsed = urllib.parse.urlparse(artifact_ref)
     if parsed.scheme and parsed.scheme not in {"http", "https", "hf", "oci", "s3", "gs", "gcs", "azure", "mlflow", "models"}:
         raise HTTPException(status_code=400, detail="artifact_url must use http(s), hf://, oci://, s3://, gs://, gcs://, azure://, mlflow://, or models:/")
+    _require_approval_receipt_if_policy_enabled(
+        request.approval_receipt_id,
+        action_name="model_intake.scan",
+    )
 
     r = get_redis()
     job_id = str(uuid.uuid4())
@@ -7201,6 +7253,7 @@ async def scan_model_intake(request: ModelIntakeScanRequest):
             request.approval_receipt_id,
             target_url=artifact_ref,
             target_id=target_id,
+            action_name="model_intake.scan",
         )
         if approval_context:
             options.update(approval_context)
@@ -10245,6 +10298,10 @@ async def submit_scan(request: ScanRequest):
         )
 
     options_payload = _build_scan_options_payload(request.options, scan_type)
+    _require_approval_receipt_if_policy_enabled(
+        request.options.approval_receipt_id,
+        action_name=f"scan.submit:{scan_type}",
+    )
 
     # §2 Operational freshness: record which build the fleet was on at submit, and
     # optionally refuse active scans on a stale fleet (opt-in, fail-open).
@@ -10304,6 +10361,7 @@ async def submit_scan(request: ScanRequest):
             request.options.approval_receipt_id,
             target_url=normalized_target,
             target_id=target_id,
+            action_name=f"scan.submit:{scan_type}",
         )
         if approval_context:
             options_payload.update(approval_context)
@@ -12560,8 +12618,10 @@ async def _validate_approval_receipt_for_action(
     *,
     target_url: str | None = None,
     target_id: str | uuid.UUID | None = None,
+    action_name: str = "state_changing_action",
 ) -> dict[str, Any] | None:
     if not approval_receipt_id:
+        _require_approval_receipt_if_policy_enabled(None, action_name=action_name)
         return None
     try:
         approval_uuid = uuid.UUID(str(approval_receipt_id))
@@ -13771,6 +13831,7 @@ async def asm_test(target_id: str, request: AsmTestRequest = None):
             request.approval_receipt_id,
             target_url=target["url"],
             target_id=target_id,
+            action_name="asm.test",
         )
         if approval_context:
             base_opts.update(approval_context)
@@ -13819,6 +13880,7 @@ async def asm_recon(target_id: str, request: AsmReconRequest = None):
             request.approval_receipt_id,
             target_url=target["url"],
             target_id=target_id,
+            action_name="asm.recon",
         )
         if approval_context:
             base_opts.update(approval_context)
@@ -13946,6 +14008,7 @@ async def asm_improve(target_id: str, request: AsmImproveRequest = None):
             request.approval_receipt_id,
             target_url=target["url"],
             target_id=target_id,
+            action_name="asm.improve",
         )
         if approval_context:
             base_opts.update(approval_context)
@@ -14919,6 +14982,7 @@ async def retest_finding(
             request.approval_receipt_id,
             target_url=retest_inputs.get("target_url"),
             target_id=finding_data.get("target_id"),
+            action_name="finding.retest",
         )
 
         retest_id, job_id = await enqueue_finding_retest(
@@ -15045,6 +15109,7 @@ async def retest_ai_finding(finding_id: str, request: AIFindingRetestRequest | N
             conn,
             request.approval_receipt_id,
             target_url=target_row["endpoint_url"],
+            action_name="ai_gate.finding_replay",
         )
         original_scan = None
         if finding_data.get("scan_id"):
@@ -15272,6 +15337,7 @@ async def replay_ai_scan(scan_id: str, request: AIScanReplayRequest | None = Non
             conn,
             request.approval_receipt_id,
             target_url=target_row["endpoint_url"],
+            action_name="ai_gate.campaign_replay",
         )
 
         target = row_to_dict(target_row)
@@ -15439,6 +15505,10 @@ async def bulk_retest_findings(request: FindingsBulkRetestRequest):
     """Queue retests for multiple findings by IDs or filters."""
     if request.mode and request.mode not in {"ai", "deterministic"}:
         raise HTTPException(status_code=400, detail="mode must be 'ai' or 'deterministic'")
+    _require_approval_receipt_if_policy_enabled(
+        request.approval_receipt_id,
+        action_name="finding.bulk_retest",
+    )
 
     r = get_redis()
     try:
@@ -15578,6 +15648,7 @@ async def bulk_retest_findings(request: FindingsBulkRetestRequest):
                     request.approval_receipt_id,
                     target_url=retest_inputs.get("target_url"),
                     target_id=finding_data.get("target_id"),
+                    action_name="finding.bulk_retest",
                 )
             except HTTPException as exc:
                 skipped.append({

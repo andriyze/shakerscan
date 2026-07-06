@@ -118,6 +118,7 @@ export default function ScanExecutionSettingsPanel() {
 
   const scan = settings?.scan_execution
   const asm = settings?.default_continuous_asm
+  const safety = settings?.safety_boundaries
   const asmConfig = asm?.config
   const eligibleTypes = scan?.eligible_scan_types?.join(', ') || 'smart, full, aggressive'
   const workerText = scan?.running_workers == null
@@ -194,6 +195,38 @@ export default function ScanExecutionSettingsPanel() {
               <span className="rounded border border-gray-800 px-2 py-1">{countLabel(asmConfig.max_requests_per_hour_per_domain, 'request')}/hour/domain</span>
             </div>
           )}
+        </div>
+      </div>
+
+      <div className="mt-3 rounded-lg border border-gray-800 bg-gray-950/40 p-3">
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <h3 className="text-sm font-medium text-gray-100">Require approval receipts</h3>
+            <p className="mt-1 text-xs text-gray-500">
+              Enforce scope and approval receipts before queueing scans, ASM actions, AI Gate runs, Model Intake scans, or retests.
+            </p>
+          </div>
+          <Button
+            variant={safety?.approval_receipts_required_for_state_changing_actions ? 'primary' : 'secondary'}
+            size="sm"
+            onClick={() => save(
+              {
+                approval_receipts_required_for_state_changing_actions:
+                  !safety?.approval_receipts_required_for_state_changing_actions,
+              },
+              safety?.approval_receipts_required_for_state_changing_actions
+                ? 'Approval receipt requirement disabled'
+                : 'Approval receipt requirement enabled'
+            )}
+            disabled={loading || saving || !safety}
+          >
+            {safety?.approval_receipts_required_for_state_changing_actions ? 'On' : 'Off'}
+          </Button>
+        </div>
+        <div className="mt-3 flex flex-wrap gap-2 text-[11px] text-gray-500">
+          <span className="rounded border border-gray-800 px-2 py-1">Scope preview required</span>
+          <span className="rounded border border-gray-800 px-2 py-1">Approval receipt required</span>
+          <span className="rounded border border-gray-800 px-2 py-1">Legacy mode: {safety?.approval_receipts_required_for_state_changing_actions ? 'blocked' : 'allowed'}</span>
         </div>
       </div>
 
