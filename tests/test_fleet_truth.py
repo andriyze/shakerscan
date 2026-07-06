@@ -29,7 +29,7 @@ if "fastapi" not in sys.modules:
                 return fn
             return wrapper
 
-        get = post = patch = put = delete = on_event = _decorator
+        get = post = patch = put = delete = on_event = exception_handler = _decorator
 
     fastapi_mod.FastAPI = _FakeFastAPI
     fastapi_mod.HTTPException = type("_HTTPExc", (Exception,), {})
@@ -46,6 +46,7 @@ if "fastapi" not in sys.modules:
     responses_mod.Response = type(
         "_Resp", (), {"__init__": lambda self, content=None, status_code=200, headers=None: None}
     )
+    responses_mod.JSONResponse = responses_mod.Response
     sys.modules["fastapi.responses"] = responses_mod
 
 import api as api_module  # noqa: E402

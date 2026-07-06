@@ -727,10 +727,12 @@ Command Arsenal boundaries:
     enforcement path raises (best-effort, FK-safe), so "nothing ran because policy/scope blocked it"
     is auditable with the same operation id, scope/approval refs, blocked reasons, and next action.
     Remaining: skipped/degraded rows for non-policy skip paths and runtime-check blocks.
-19. Add release/test gates for Command Arsenal and planner safety:
+19. DONE phase 1: add release/test gates for Command Arsenal and planner safety.
+    `scripts/release_gates.py` and `make release-gates` expose the named gates
     `test:no-phantom-tools`, `test:no-benchmark-fitting`, `test:no-ai-verified`,
     `test:evidence-provenance`, `test:fleet-current`, `test:planner-scope`,
-    `test:planner-risk`, and `test:planner-no-shell`.
+    `test:planner-risk`, and `test:planner-no-shell` as stable focused pytest
+    slices, with mapping tests so the gate names cannot silently drift.
 
 **Done when:** a mission can be planned, previewed, blocked, approved, queued, executed, and audited
 through one schema without exposing raw shell, bypassing policy gates, or allowing AI/local-agent prose

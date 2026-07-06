@@ -149,6 +149,27 @@ def test_state_changing_commands_are_gated_not_executable_shortcuts():
         assert "execute_shell" not in cmd["name"]
 
 
+def test_no_raw_shell_or_generic_execution_commands_are_exposed():
+    payload = arsenal.describe_commands()
+    forbidden_terms = {
+        "execute_shell",
+        "run_shell",
+        "run_command",
+        "shell",
+        "bash",
+        "curl_this_url",
+        "run_python_code",
+        "python",
+    }
+
+    for cmd in payload["commands"]:
+        name = cmd["name"].lower()
+        path = cmd["path"].lower()
+        assert name not in forbidden_terms
+        assert not any(term in name for term in forbidden_terms)
+        assert not any(term in path for term in forbidden_terms)
+
+
 def test_scope_preview_is_dry_run_not_execution():
     payload = arsenal.describe_commands()
     commands = {item["name"]: item for item in payload["commands"]}

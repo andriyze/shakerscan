@@ -1,7 +1,7 @@
 # ShakerScan developer targets.
 PY ?= python3
 
-.PHONY: e2e e2e-model-intake e2e-ai-gate e2e-dast test
+.PHONY: e2e e2e-model-intake e2e-ai-gate e2e-dast test release-gates
 
 ## Full end-to-end suite against the live stack + honey targets (hard gate).
 e2e:
@@ -31,3 +31,8 @@ test:
 		command -v pytest >/dev/null 2>&1 || pip install -q pytest >/dev/null 2>&1; \
 		rm -rf /tmp/api /tmp/scanner; cd /tmp; \
 		PYTHONPATH=/app/_src/api:/app/_src python -m pytest -q -p no:cacheprovider $(UNIT_TESTS)'
+
+## Run the named roadmap release gates. Use GATES='test:planner-no-shell ...'
+## to run a subset.
+release-gates:
+	$(PY) scripts/release_gates.py $(GATES)
