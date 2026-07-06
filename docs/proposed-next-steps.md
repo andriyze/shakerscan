@@ -468,13 +468,14 @@ raw shell execution or LLM-produced verified findings.
    representable. Read-only/dry-run inspection commands dispatch directly and record a `command_result`;
    state-changing commands stay behind the same execution gate as the AI Ops router (`execute=true` +
    required confirmations + valid approval receipt + `AI_OPS_ROUTER_EXECUTE_ENABLED`), otherwise they
-   dry-run with a recorded `approval_required`/`blocked` audit row. The phase-1 dispatch registry wires
-   a representative subset (read-only `campaign.list`, `command_result.list`, `mission.timeline`,
-   `tool.status`, `local_agent.list`; gated `asm.improve` through its existing handler, which records
-   its own command result); gate-approved commands without a wired adapter return
-   `dispatch_adapter_pending` rather than a shortcut. Remaining work is wiring the rest of the
-   inventory/ASM/scan/findings/AI Gate/Model Intake/evidence adapters, campaign linkage on dispatched
-   results, and tool/evidence receipt refs on the returned command result. External binaries may be
+   dry-run with a recorded `approval_required`/`blocked` audit row. The dispatch registry wires
+   read-only `target.list`, `campaign.list`, `campaign.get`, `command_result.list`, `mission.timeline`,
+   `tool.status`, `local_agent.list`, `asm.gaps`, `operation_plan.list`, `agent_context_pack.list`, and
+   `hypothesis.list`, plus gated `asm.improve`, `asm.test`, `asm.recon`, and `finding.retest` through
+   their existing handlers (each records its own command result); gate-approved commands without a
+   wired adapter return `dispatch_adapter_pending` rather than a shortcut. Remaining work is wiring the
+   scan/AI Gate/Model Intake/evidence adapters, campaign linkage on dispatched results, and
+   tool/evidence receipt refs on the returned command result. External binaries may be
    used only behind narrow adapters; the command schema still never exposes raw shell, arbitrary
    Python/Node execution, or generic "run this command" behavior.
 4. **Scope and approval receipts for state-changing actions:** DONE phase 1 for central

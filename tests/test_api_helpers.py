@@ -2250,6 +2250,49 @@ def test_arsenal_execute_gated_without_adapter_is_pending(monkeypatch):
     assert conn.recorded and conn.recorded[0]["status"] == "blocked"
 
 
+def test_arsenal_execute_dispatches_target_list(monkeypatch):
+    async def fake_list_targets(**kwargs):
+        return {"targets": []}
+
+    monkeypatch.setattr(api_module, "list_targets", fake_list_targets)
+    conn = _BlockedRecordingConn()
+    result = asyncio.run(api_module._arsenal_execute(
+        conn, api_module.ArsenalExecuteRequest(command="target.list", parameters={})
+    ))
+    assert result["dispatched"] is True
+    assert conn.recorded and conn.recorded[0]["status"] == "completed"
+
+
+def test_arsenal_execute_asm_gaps_requires_target_id():
+    with pytest.raises(api_module.HTTPException) as exc:
+        asyncio.run(api_module._arsenal_execute(
+            _BlockedRecordingConn(), api_module.ArsenalExecuteRequest(command="asm.gaps", parameters={})
+        ))
+    assert exc.value.status_code == 400
+
+
+def test_arsenal_execute_gated_asm_test_dispatches_when_allowed(monkeypatch):
+    monkeypatch.setattr(api_module, "_ai_ops_execute_enabled", lambda: True)
+
+    async def fake_validate(*args, **kwargs):
+        return {}
+
+    async def fake_asm_test(target_id, body):
+        return {"operation_id": "op-9", "status": "queued"}
+
+    monkeypatch.setattr(api_module, "_validate_approval_receipt_for_action", fake_validate)
+    monkeypatch.setattr(api_module, "asm_test", fake_asm_test)
+    result = asyncio.run(api_module._arsenal_execute(
+        _BlockedRecordingConn(), api_module.ArsenalExecuteRequest(
+            command="asm.test",
+            parameters={"target_id": "11111111-1111-4111-8111-111111111111"},
+            execute=True, confirmations=["confirm_authorized"], approval_receipt_id="r",
+        )
+    ))
+    assert result["dispatched"] is True
+    assert result["operation_id"] == "op-9"
+
+
 # ----- §7 mission campaigns ----------------------------------------------------
 
 class _CampaignConn:

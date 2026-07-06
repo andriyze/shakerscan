@@ -15638,6 +15638,40 @@ async def _arsenal_dispatch_local_agent_list(p: dict[str, Any]) -> dict[str, Any
     return await local_agents(probe_versions=bool(p.get("probe_versions")))
 
 
+async def _arsenal_dispatch_target_list(p: dict[str, Any]) -> dict[str, Any]:
+    return await list_targets(
+        limit=_int_or_none(p.get("limit")) or 100,
+        offset=_int_or_none(p.get("offset")) or 0,
+        include_inactive=bool(p.get("include_inactive")),
+    )
+
+
+async def _arsenal_dispatch_asm_gaps(p: dict[str, Any]) -> dict[str, Any]:
+    target_id = str(p.get("target_id") or "").strip()
+    if not target_id:
+        raise HTTPException(status_code=400, detail="asm.gaps requires a target_id parameter")
+    return await asm_gaps(target_id)
+
+
+async def _arsenal_dispatch_operation_plan_list(p: dict[str, Any]) -> dict[str, Any]:
+    return await arsenal_operation_plans(limit=_int_or_none(p.get("limit")) or 20)
+
+
+async def _arsenal_dispatch_agent_context_pack_list(p: dict[str, Any]) -> dict[str, Any]:
+    return await arsenal_agent_context_packs(limit=_int_or_none(p.get("limit")) or 20)
+
+
+async def _arsenal_dispatch_hypothesis_list(p: dict[str, Any]) -> dict[str, Any]:
+    return await arsenal_hypotheses(limit=_int_or_none(p.get("limit")) or 20, target_id=p.get("target_id"), status=p.get("status"))
+
+
+async def _arsenal_dispatch_campaign_get(p: dict[str, Any]) -> dict[str, Any]:
+    campaign_id = str(p.get("campaign_id") or "").strip()
+    if not campaign_id:
+        raise HTTPException(status_code=400, detail="campaign.get requires a campaign_id parameter")
+    return await arsenal_campaign_detail(campaign_id, action_limit=_int_or_none(p.get("action_limit")) or 50)
+
+
 async def _arsenal_dispatch_asm_improve(p: dict[str, Any], approval_receipt_id: str | None) -> dict[str, Any]:
     target_id = str(p.get("target_id") or "").strip()
     if not target_id:
@@ -15647,6 +15681,37 @@ async def _arsenal_dispatch_asm_improve(p: dict[str, Any], approval_receipt_id: 
     return await asm_improve(target_id, body)
 
 
+async def _arsenal_dispatch_asm_test(p: dict[str, Any], approval_receipt_id: str | None) -> dict[str, Any]:
+    target_id = str(p.get("target_id") or "").strip()
+    if not target_id:
+        raise HTTPException(status_code=400, detail="asm.test requires a target_id parameter")
+    fields = {k: p[k] for k in ("batch_size", "stale_days", "exploit_depth", "check_family", "endpoint_filter") if p.get(k) is not None}
+    body = AsmTestRequest(approval_receipt_id=approval_receipt_id or p.get("approval_receipt_id"), **fields)
+    return await asm_test(target_id, body)
+
+
+async def _arsenal_dispatch_asm_recon(p: dict[str, Any], approval_receipt_id: str | None) -> dict[str, Any]:
+    target_id = str(p.get("target_id") or "").strip()
+    if not target_id:
+        raise HTTPException(status_code=400, detail="asm.recon requires a target_id parameter")
+    fields = {k: p[k] for k in ("budget_profile",) if p.get(k) is not None}
+    body = AsmReconRequest(approval_receipt_id=approval_receipt_id or p.get("approval_receipt_id"), **fields)
+    return await asm_recon(target_id, body)
+
+
+async def _arsenal_dispatch_finding_retest(p: dict[str, Any], approval_receipt_id: str | None) -> dict[str, Any]:
+    finding_id = str(p.get("finding_id") or "").strip()
+    if not finding_id:
+        raise HTTPException(status_code=400, detail="finding.retest requires a finding_id parameter")
+    fields = {
+        k: p[k]
+        for k in ("finding_type", "target", "original_url", "param", "payload", "method", "request_body", "requested_by")
+        if p.get(k) is not None
+    }
+    body = FindingRetestRequest(approval_receipt_id=approval_receipt_id or p.get("approval_receipt_id"), **fields)
+    return await retest_finding(finding_id, body, mode=p.get("mode"))
+
+
 def _arsenal_readonly_adapters() -> dict[str, Any]:
     return {
         "campaign.list": _arsenal_dispatch_campaign_list,
@@ -15654,12 +15719,21 @@ def _arsenal_readonly_adapters() -> dict[str, Any]:
         "mission.timeline": _arsenal_dispatch_mission_timeline,
         "tool.status": _arsenal_dispatch_tool_status,
         "local_agent.list": _arsenal_dispatch_local_agent_list,
+        "target.list": _arsenal_dispatch_target_list,
+        "asm.gaps": _arsenal_dispatch_asm_gaps,
+        "operation_plan.list": _arsenal_dispatch_operation_plan_list,
+        "agent_context_pack.list": _arsenal_dispatch_agent_context_pack_list,
+        "hypothesis.list": _arsenal_dispatch_hypothesis_list,
+        "campaign.get": _arsenal_dispatch_campaign_get,
     }
 
 
 def _arsenal_gated_adapters() -> dict[str, Any]:
     return {
         "asm.improve": _arsenal_dispatch_asm_improve,
+        "asm.test": _arsenal_dispatch_asm_test,
+        "asm.recon": _arsenal_dispatch_asm_recon,
+        "finding.retest": _arsenal_dispatch_finding_retest,
     }
 
 
