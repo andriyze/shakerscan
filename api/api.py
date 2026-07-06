@@ -5904,6 +5904,77 @@ def _ai_campaign_context_from_scan(scan_row: Any) -> dict[str, Any]:
     }
 
 
+def _ai_campaign_evidence_manifest_summary(evidence_manifest: Any) -> dict[str, Any]:
+    """Return a content-free AI Gate evidence manifest summary for campaign exports."""
+    manifest = evidence_manifest if isinstance(evidence_manifest, dict) else {}
+    if not manifest:
+        return {"available": False}
+
+    def _dict_value(key: str) -> dict[str, Any]:
+        value = manifest.get(key)
+        return value if isinstance(value, dict) else {}
+
+    probe_catalog = _dict_value("probe_catalog")
+    detectors = _dict_value("detectors")
+    judging = _dict_value("judging")
+    evidence_hashes = _dict_value("evidence_hashes")
+    budget = _dict_value("budget")
+    sanitization = _dict_value("sanitization")
+    summary = {
+        "available": True,
+        "schema_version": manifest.get("schema_version"),
+        "target_snapshot_hash": manifest.get("target_snapshot_hash"),
+        "probe_catalog": {
+            "probe_pack": probe_catalog.get("probe_pack"),
+            "scan_profile": probe_catalog.get("scan_profile"),
+            "planned_count": probe_catalog.get("planned_count"),
+            "executed_count": probe_catalog.get("executed_count"),
+            "planned_hash": probe_catalog.get("planned_hash"),
+            "executed_hash": probe_catalog.get("executed_hash"),
+        },
+        "detectors": {
+            "version": detectors.get("version"),
+            "control_catalog_hash": detectors.get("control_catalog_hash"),
+        },
+        "judging": {
+            "semantic": {
+                "enabled": (judging.get("semantic") or {}).get("enabled") if isinstance(judging.get("semantic"), dict) else None,
+                "provider_configured": (judging.get("semantic") or {}).get("provider_configured") if isinstance(judging.get("semantic"), dict) else None,
+                "model": (judging.get("semantic") or {}).get("model") if isinstance(judging.get("semantic"), dict) else None,
+                "rubric_version": (judging.get("semantic") or {}).get("rubric_version") if isinstance(judging.get("semantic"), dict) else None,
+                "prompt_hash": (judging.get("semantic") or {}).get("prompt_hash") if isinstance(judging.get("semantic"), dict) else None,
+            },
+            "rubric": {
+                "enabled": (judging.get("rubric") or {}).get("enabled") if isinstance(judging.get("rubric"), dict) else None,
+                "provider_configured": (judging.get("rubric") or {}).get("provider_configured") if isinstance(judging.get("rubric"), dict) else None,
+                "model": (judging.get("rubric") or {}).get("model") if isinstance(judging.get("rubric"), dict) else None,
+                "rubric_version": (judging.get("rubric") or {}).get("rubric_version") if isinstance(judging.get("rubric"), dict) else None,
+                "prompt_hash": (judging.get("rubric") or {}).get("prompt_hash") if isinstance(judging.get("rubric"), dict) else None,
+            },
+        },
+        "evidence_hashes": {
+            "transcripts_hash": evidence_hashes.get("transcripts_hash"),
+            "findings_hash": evidence_hashes.get("findings_hash"),
+            "control_evidence_hash": evidence_hashes.get("control_evidence_hash"),
+            "coverage_matrix_hash": evidence_hashes.get("coverage_matrix_hash"),
+        },
+        "budget": {
+            "request_budget": budget.get("request_budget"),
+            "request_count": budget.get("request_count"),
+            "remaining_requests": budget.get("remaining_requests"),
+            "stopped_by_request_budget": budget.get("stopped_by_request_budget"),
+        },
+        "sanitization": {
+            "credentials_masked_in_manifest": sanitization.get("credentials_masked_in_manifest"),
+            "headers_and_metadata_redacted_by_key": sanitization.get("headers_and_metadata_redacted_by_key"),
+        },
+    }
+    summary["manifest_hash"] = str(manifest.get("manifest_hash") or hashlib.sha256(
+        json.dumps(summary, sort_keys=True, default=str, separators=(",", ":")).encode("utf-8")
+    ).hexdigest())
+    return summary
+
+
 def _ai_campaign_history_entry(scan_row: Any, *, current_scan_id: str | None = None) -> dict[str, Any]:
     result = _decode_json_value(_row_value(scan_row, "result")) or {}
     ai_gate = result.get("ai_gate") if isinstance(result, dict) else {}
@@ -5913,6 +5984,8 @@ def _ai_campaign_history_entry(scan_row: Any, *, current_scan_id: str | None = N
     decision = ai_gate.get("decision") if isinstance(ai_gate.get("decision"), dict) else {}
     evidence_manifest = ai_gate.get("evidence_manifest") if isinstance(ai_gate.get("evidence_manifest"), dict) else {}
     evidence = evidence_manifest.get("evidence") if isinstance(evidence_manifest.get("evidence"), dict) else {}
+    evidence_summary = _ai_campaign_evidence_manifest_summary(evidence_manifest)
+    evidence_hashes = evidence_summary.get("evidence_hashes") if isinstance(evidence_summary.get("evidence_hashes"), dict) else {}
     context = _ai_campaign_context_from_scan(scan_row)
 
     def _num(value: Any) -> int:
@@ -5949,8 +6022,9 @@ def _ai_campaign_history_entry(scan_row: Any, *, current_scan_id: str | None = N
         "with_findings": _num(summary.get("with_findings")),
         "coverage_pct": round((executed / planned) * 100) if planned else 0,
         "stopped_by_request_budget": bool(summary.get("stopped_by_request_budget") or usage.get("stopped_by_request_budget")),
-        "transcripts_hash": evidence.get("transcripts_hash"),
-        "manifest_hash": evidence_manifest.get("manifest_hash"),
+        "transcripts_hash": evidence_hashes.get("transcripts_hash") or evidence.get("transcripts_hash"),
+        "manifest_hash": evidence_summary.get("manifest_hash") if evidence_summary.get("available") else evidence_manifest.get("manifest_hash"),
+        "evidence_manifest_summary": evidence_summary,
     }
 
 
@@ -6140,11 +6214,32 @@ def _build_ai_target_campaign_history_export(
 ) -> dict[str, Any]:
     generated = (generated_at or datetime.now(timezone.utc)).astimezone(timezone.utc)
     runs = history.get("runs") if isinstance(history.get("runs"), list) else []
+    manifest_runs = [
+        {
+            "scan_id": item.get("id"),
+            **(item.get("evidence_manifest_summary") or {}),
+        }
+        for item in runs
+        if isinstance(item, dict)
+        and isinstance(item.get("evidence_manifest_summary"), dict)
+        and item.get("evidence_manifest_summary", {}).get("available")
+    ]
+    evidence_manifests = {
+        "available_count": len(manifest_runs),
+        "manifest_hashes": [item.get("manifest_hash") for item in manifest_runs if item.get("manifest_hash")],
+        "transcripts_hashes": [
+            ((item.get("evidence_hashes") or {}).get("transcripts_hash"))
+            for item in manifest_runs
+            if isinstance(item.get("evidence_hashes"), dict) and (item.get("evidence_hashes") or {}).get("transcripts_hash")
+        ],
+        "runs": manifest_runs,
+    }
     export_core = {
         "ai_target_id": history.get("ai_target_id"),
         "summary": history.get("summary") or {},
         "readiness_trends": history.get("readiness_trends") or {},
         "run_ids": [item.get("id") for item in runs if isinstance(item, dict)],
+        "evidence_manifest_hashes": evidence_manifests["manifest_hashes"],
     }
     export_hash = hashlib.sha256(
         json.dumps(export_core, sort_keys=True, default=str, separators=(",", ":")).encode("utf-8")
@@ -6158,6 +6253,7 @@ def _build_ai_target_campaign_history_export(
         "ai_target_id": history.get("ai_target_id"),
         "summary": history.get("summary") or {},
         "readiness_trends": history.get("readiness_trends") or {},
+        "evidence_manifests": evidence_manifests,
         "contexts": history.get("contexts") or [],
         "runs": runs,
         "report_links": [

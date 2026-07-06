@@ -1094,7 +1094,58 @@ def _ai_history_row(
                         "with_findings": findings_count,
                     },
                 },
-                "evidence_manifest": {"evidence": {"transcripts_hash": f"hash-{scan_id}"}},
+                "evidence_manifest": {
+                    "schema_version": "2026-05-19.ai-evidence-manifest.v1",
+                    "target_snapshot_hash": f"target-hash-{scan_id}",
+                    "target_snapshot": {"headers": {"Authorization": "Bearer secret-token"}},
+                    "probe_catalog": {
+                        "probe_pack": pack,
+                        "scan_profile": profile,
+                        "planned_count": planned,
+                        "executed_count": executed,
+                        "planned_hash": f"planned-hash-{scan_id}",
+                        "executed_hash": f"executed-hash-{scan_id}",
+                    },
+                    "detectors": {
+                        "version": "ai_gate_detectors.2026-05-19",
+                        "control_catalog_hash": f"controls-hash-{scan_id}",
+                    },
+                    "planner": {
+                        "execution_plan": {"turns": [{"prompt": "raw prompt should not export"}]},
+                    },
+                    "judging": {
+                        "semantic": {
+                            "enabled": True,
+                            "provider_configured": True,
+                            "model": "judge-model",
+                            "rubric_version": "semantic_judge.2026-05-19",
+                            "prompt_hash": f"semantic-prompt-hash-{scan_id}",
+                        },
+                        "rubric": {
+                            "enabled": False,
+                            "provider_configured": False,
+                            "model": None,
+                            "rubric_version": "rubric_judge.2026-05-19",
+                            "prompt_hash": f"rubric-prompt-hash-{scan_id}",
+                        },
+                    },
+                    "evidence_hashes": {
+                        "transcripts_hash": f"hash-{scan_id}",
+                        "findings_hash": f"findings-hash-{scan_id}",
+                        "control_evidence_hash": f"control-evidence-hash-{scan_id}",
+                        "coverage_matrix_hash": f"coverage-hash-{scan_id}",
+                    },
+                    "budget": {
+                        "request_budget": 10,
+                        "request_count": executed,
+                        "remaining_requests": max(0, 10 - executed),
+                        "stopped_by_request_budget": False,
+                    },
+                    "sanitization": {
+                        "credentials_masked_in_manifest": True,
+                        "headers_and_metadata_redacted_by_key": True,
+                    },
+                },
             },
         },
     }
@@ -1175,6 +1226,9 @@ def test_ai_target_campaign_history_groups_contexts_and_summarizes_latest_runs()
     assert history["readiness_trends"]["overall"]["coverage_delta"] == 50
     assert history["readiness_trends"]["overall"]["findings_delta"] == -2
     assert history["readiness_trends"]["contexts"][0]["trend"]["latest_run_id"] == "scan-4"
+    assert history["runs"][0]["evidence_manifest_summary"]["probe_catalog"]["executed_count"] == 4
+    assert history["runs"][0]["transcripts_hash"] == "hash-scan-4"
+    assert len(history["runs"][0]["manifest_hash"]) == 64
 
 
 def test_ai_target_campaign_history_export_is_content_free_with_report_links():
@@ -1196,6 +1250,10 @@ def test_ai_target_campaign_history_export_is_content_free_with_report_links():
     assert export["content_included"] is False
     assert export["transcripts_included"] is False
     assert export["readiness_trends"]["overall"]["state"] == "improving"
+    assert export["evidence_manifests"]["available_count"] == 2
+    assert export["evidence_manifests"]["runs"][0]["scan_id"] == "scan-4"
+    assert export["evidence_manifests"]["runs"][0]["evidence_hashes"]["transcripts_hash"] == "hash-scan-4"
+    assert export["evidence_manifests"]["runs"][0]["probe_catalog"]["planned_count"] == 4
     assert export["report_links"][0] == {
         "scan_id": "scan-4",
         "scan_url": "/scans/scan-4",
@@ -1204,6 +1262,9 @@ def test_ai_target_campaign_history_export_is_content_free_with_report_links():
     serialized = json.dumps(export).lower()
     assert '"turns"' not in serialized
     assert '"response_excerpt"' not in serialized
+    assert "authorization" not in serialized
+    assert "secret-token" not in serialized
+    assert "raw prompt" not in serialized
 
 
 def test_deployment_decision_exception_hygiene_summary():
