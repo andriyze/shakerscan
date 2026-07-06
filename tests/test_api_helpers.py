@@ -1313,13 +1313,63 @@ def test_public_command_result_row_decodes_json_fields():
     assert public["result_json"] == {"scan_id": "scan-1"}
 
 
+def test_public_campaign_action_row_decodes_json_fields():
+    row = {
+        "id": uuid.uuid4(),
+        "command": "asm.improve",
+        "status": "blocked",
+        "dry_run": False,
+        "risk_tier": "active",
+        "finding_ids": json.dumps([]),
+        "hypothesis_ids": json.dumps(["hyp-1"]),
+        "evidence_object_ids": json.dumps(["evidence-1"]),
+        "tool_receipt_ids": json.dumps([]),
+        "blocked_by": json.dumps(["missing_second_user_auth"]),
+        "result_json": json.dumps({"next": "add_credentials"}),
+    }
+
+    public = api_module._public_campaign_action_row(row)
+
+    assert public["hypothesis_ids"] == ["hyp-1"]
+    assert public["evidence_object_ids"] == ["evidence-1"]
+    assert public["blocked_by"] == ["missing_second_user_auth"]
+    assert public["result_json"] == {"next": "add_credentials"}
+
+
 def test_record_command_result_redacts_result_json_and_returns_public_row():
-    captured: dict[str, object] = {}
+    captured: dict[str, object] = {"queries": []}
 
     class _FakeConn:
         async def fetchrow(self, query, *args):
-            captured["query"] = query
-            captured["args"] = args
+            captured["queries"].append(str(query))
+            if "INSERT INTO campaign_actions" in str(query):
+                captured["campaign_action_args"] = args
+                return {
+                    "id": uuid.uuid4(),
+                    "campaign_id": args[0],
+                    "operation_plan_id": args[1],
+                    "command_result_id": args[2],
+                    "target_id": args[3],
+                    "scope_receipt_id": args[4],
+                    "approval_receipt_id": args[5],
+                    "scan_id": args[6],
+                    "command": args[7],
+                    "action_name": args[8],
+                    "status": args[9],
+                    "dry_run": args[10],
+                    "risk_tier": args[11],
+                    "finding_ids": args[12],
+                    "hypothesis_ids": args[13],
+                    "evidence_object_ids": args[14],
+                    "tool_receipt_ids": args[15],
+                    "blocked_by": args[16],
+                    "next_action": args[17],
+                    "operator_message": args[18],
+                    "result_json": args[19],
+                    "created_by": args[20],
+                    "created_at": "now",
+                }
+            captured["command_result_args"] = args
             return {
                 "id": uuid.uuid4(),
                 "command": args[0],
@@ -1361,7 +1411,8 @@ def test_record_command_result_redacts_result_json_and_returns_public_row():
         created_by="pytest",
     ))
 
-    assert "INSERT INTO command_results" in str(captured["query"])
+    assert any("INSERT INTO command_results" in query for query in captured["queries"])
+    assert any("INSERT INTO campaign_actions" in query for query in captured["queries"])
     assert result["command"] == "scan.submit"
     assert result["status"] == "queued"
     assert result["scan_id"] == str(scan_id)
@@ -1372,6 +1423,8 @@ def test_record_command_result_redacts_result_json_and_returns_public_row():
     assert result["created_by"] == "pytest"
     assert result["result_json"]["authorization"] != "Bearer secret-token"
     assert result["result_json"]["scan_id"] == str(scan_id)
+    assert captured["campaign_action_args"][7] == "scan.submit"
+    assert captured["campaign_action_args"][9] == "queued"
 
 
 def test_agent_context_pack_canonicalization_redacts_and_normalizes_commands():
@@ -2051,6 +2104,32 @@ def test_command_result_event_blocked_row_keeps_its_status():
     assert ev["status"] == "blocked"          # no scan -> keep command-result status
     assert ev["active_scan_id"] is None
     assert ev["blocked_by"] == ["approval_receipt_expired"]
+
+
+def test_campaign_action_event_uses_live_scan_status_and_refs():
+    row = {
+        "id": "action-1", "command": "asm.improve", "action_name": "asm.improve",
+        "status": "queued", "risk_tier": "active", "dry_run": False,
+        "scan_id": "44444444-4444-4444-8444-444444444444",
+        "operation_plan_id": None, "campaign_id": "77777777-7777-4777-8777-777777777777",
+        "command_result_id": "88888888-8888-4888-8888-888888888888",
+        "target_id": None, "scope_receipt_id": "scope-1", "approval_receipt_id": None,
+        "finding_ids": [], "hypothesis_ids": ["hyp-1"], "evidence_object_ids": [],
+        "tool_receipt_ids": [], "blocked_by": [], "next_action": "/scans/x",
+        "operator_message": "queued", "created_at": datetime(2026, 7, 6, tzinfo=timezone.utc),
+        "scan_status": "running", "scan_target_url": "https://app.example.com",
+        "scan_target_id": "99999999-9999-4999-8999-999999999999",
+    }
+
+    ev = api_module._campaign_action_timeline_event(row)
+
+    assert ev["kind"] == "campaign_action"
+    assert ev["status"] == "running"
+    assert ev["active_scan_id"] == "44444444-4444-4444-8444-444444444444"
+    assert ev["campaign_id"] == "77777777-7777-4777-8777-777777777777"
+    assert ev["command_result_id"] == "88888888-8888-4888-8888-888888888888"
+    assert ev["hypothesis_ids"] == ["hyp-1"]
+    assert ev["target_id"] == "99999999-9999-4999-8999-999999999999"
 
 
 class _TimelinePool:

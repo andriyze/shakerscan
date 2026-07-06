@@ -446,15 +446,17 @@ raw shell execution or LLM-produced verified findings.
    facts. DONE phase 1 for local-agent-labeled deterministic dry-run `OperationPlan` creation from a
    context pack without spawning local-agent CLIs. DONE phase 1 for policy-required approval receipt
    enforcement on current state-changing API routes. DONE phase 1 for command-result audit records on
-   successful queued product actions. DONE phase 1 for blocked/approval-required command-result rows
-   and a read-only cross-product mission timeline (`GET /timeline`). Remaining work is
-   campaign/timeline execution records, runtime destination re-checks, and later optional real
-   local-agent adapter parsing behind stricter gates; it still must add no new execution power until
-   receipts, command audit records, parser validation, and evidence gates are durable.
+   successful queued product actions. DONE phase 1 for blocked/approval-required command-result rows,
+   durable campaign-action audit records (`campaign_actions` / `GET /arsenal/campaign-actions`), and
+   a read-only cross-product mission timeline (`GET /timeline`). Remaining work is standalone
+   execution-gateway action state, runtime destination re-checks, and later optional real local-agent
+   adapter parsing behind stricter gates; it still must add no new execution power until receipts,
+   command audit records, parser validation, and evidence gates are durable.
 2. **Unified Action Center + mission timeline:** DONE phase 1 — `GET /timeline` merges command-result
    audit rows (with live scan status), recent scans, and upcoming schedules into one normalized event
-   feed with explicit statuses. Remaining work is richer campaign/action execution records and
-   evidence export/replay + refuter events on the same feed.
+   feed with explicit statuses. DONE phase 1 for campaign-action audit records mirrored from command
+   results plus read-only timeline support for standalone action rows. Remaining work is evidence
+   export/replay + refuter events on the same feed.
 3. **Command Arsenal execution gateway, still no raw shell:** extend the schema-discoverable
    Command Arsenal into a gated product-action layer over existing API handlers. It is not the check
    registry, not the external tool registry, and not a shell runner. Every command result must carry
@@ -604,13 +606,13 @@ blocked, and provide safe remediation links without making users infer state fro
 will run next, and which button fixes the next blocker" without reading scan JSON or worker logs.
 
 ### 2. Mission contract, Command Arsenal, and scope/approval receipts
-**Status: READ-ONLY / DRY-RUN / GATED PHASE 1 DONE; AUDIT AND RUNTIME RE-CHECKS OPEN.** The
+**Status: READ-ONLY / DRY-RUN / GATED PHASE 1 DONE; ACTION AUDIT PHASE 1 DONE; RUNTIME RE-CHECKS OPEN.** The
 T3MP3ST adoption plan correctly identifies the missing operating model: ShakerScan has many
 safe/productized primitives, and now has persisted dry-run mission/context/trace/receipt records plus
 policy-required approval enforcement on current state-changing routes. The remaining goal is not
-broad agent execution. It is creating campaign/action audit records, recording command results for
-every queued/blocked operation, re-checking runtime destinations, and keeping every future
-planner/MCP path on the same API rails.
+broad agent execution. It is deepening the campaign/action audit records beyond the first mirrored
+command-result ledger, re-checking runtime destinations, and keeping every future planner/MCP path on
+the same API rails.
 
 Command Arsenal boundaries:
 
@@ -704,8 +706,12 @@ Command Arsenal boundaries:
     not evidence, and a command result may never mark a finding verified without downstream proof
     objects/evidence instances.
 17. DONE phase 1: add a read-only command-result UI panel under `/settings/arsenal`. DONE phase 1:
-    the same records feed the cross-product mission timeline (`GET /timeline`). Remaining work is
-    campaign records.
+    the same records feed the cross-product mission timeline (`GET /timeline`). DONE phase 1:
+    `campaign_actions` mirrors command-result audit rows into action-shaped records,
+    `GET /arsenal/campaign-actions` exposes them read-only, `campaign_action.list` advertises the
+    surface, and the mission timeline can include standalone action rows without duplicating mirrored
+    command-result events. Remaining work is richer execution-gateway action transitions,
+    evidence/refuter events, and UI panels for campaign actions.
 18. DONE phase 1: blocked and approval-required command-result records are written before the
     enforcement path raises (best-effort, FK-safe), so "nothing ran because policy/scope blocked it"
     is auditable with the same operation id, scope/approval refs, blocked reasons, and next action.

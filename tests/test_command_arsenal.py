@@ -33,6 +33,7 @@ def test_command_catalog_contains_required_initial_commands():
         "ai_target.list",
         "model_intake.trust_preview",
         "operation_plan.list",
+        "campaign_action.list",
         "agent_context_pack.list",
         "agent_decision_trace.list",
         "local_agent.list",
@@ -168,6 +169,18 @@ def test_mission_timeline_is_read_only_command():
     assert cmd["method"] == "GET"
     assert cmd["path"] == "/timeline"
     assert "timeline_events" in cmd["evidence_contract"]
+
+
+def test_campaign_action_list_is_read_only_command():
+    payload = arsenal.describe_commands()
+    commands = {item["name"]: item for item in payload["commands"]}
+
+    cmd = commands["campaign_action.list"]
+    assert cmd["status"] == "read_only"
+    assert cmd["risk_tier"] == "read_only"
+    assert cmd["method"] == "GET"
+    assert cmd["path"] == "/arsenal/campaign-actions"
+    assert "campaign_action_rows" in cmd["evidence_contract"]
 
 
 def test_mission_contract_catalog_is_contract_only():

@@ -12011,6 +12011,20 @@ def _public_command_result_row(row: Any) -> dict[str, Any]:
     return payload
 
 
+def _public_campaign_action_row(row: Any) -> dict[str, Any]:
+    payload = row_to_dict(row)
+    for key in (
+        "finding_ids",
+        "hypothesis_ids",
+        "evidence_object_ids",
+        "tool_receipt_ids",
+        "blocked_by",
+        "result_json",
+    ):
+        payload[key] = _decode_json_value(payload.get(key)) or ([] if key != "result_json" else {})
+    return payload
+
+
 def _public_agent_context_pack_row(row: Any) -> dict[str, Any]:
     payload = row_to_dict(row)
     for key in (
@@ -12643,6 +12657,66 @@ async def _persist_operation_plan(conn, req: OperationPlanRequest) -> dict[str, 
     }
 
 
+def _optional_uuid(value: str | uuid.UUID | None) -> uuid.UUID | None:
+    if not value:
+        return None
+    return value if isinstance(value, uuid.UUID) else uuid.UUID(str(value))
+
+
+async def _record_campaign_action_from_command_result(conn, command_result: dict[str, Any]) -> dict[str, Any] | None:
+    """Best-effort campaign/action audit row paired with a CommandResult.
+
+    Command results remain the broad audit record. Campaign actions are the
+    mission-timeline execution records the roadmap calls for: action-oriented,
+    claimable later, and still unable to influence findings without downstream
+    proof/evidence contracts.
+    """
+    try:
+        command_result_id = _optional_uuid(command_result.get("id"))
+        row = await conn.fetchrow(
+            """
+            INSERT INTO campaign_actions (
+                campaign_id, operation_plan_id, command_result_id, target_id,
+                scope_receipt_id, approval_receipt_id, scan_id, command,
+                action_name, status, dry_run, risk_tier, finding_ids,
+                hypothesis_ids, evidence_object_ids, tool_receipt_ids,
+                blocked_by, next_action, operator_message, result_json, created_by
+            ) VALUES (
+                $1,$2,$3,$4,
+                $5,$6,$7,$8,
+                $9,$10,$11,$12,$13::jsonb,
+                $14::jsonb,$15::jsonb,$16::jsonb,
+                $17::jsonb,$18,$19,$20::jsonb,$21
+            )
+            RETURNING *
+            """,
+            _optional_uuid(command_result.get("campaign_id")),
+            _optional_uuid(command_result.get("operation_plan_id")),
+            command_result_id,
+            None,
+            command_result.get("scope_receipt_id") or None,
+            _optional_uuid(command_result.get("approval_receipt_id")),
+            _optional_uuid(command_result.get("scan_id")),
+            str(command_result.get("command") or "").strip(),
+            str(command_result.get("command") or "").strip(),
+            str(command_result.get("status") or "").strip(),
+            bool(command_result.get("dry_run")),
+            str(command_result.get("risk_tier") or "read_only").strip(),
+            json.dumps(command_result.get("finding_ids") or []),
+            json.dumps(command_result.get("hypothesis_ids") or []),
+            json.dumps(command_result.get("evidence_object_ids") or []),
+            json.dumps(command_result.get("tool_receipt_ids") or []),
+            json.dumps(command_result.get("blocked_by") or []),
+            command_result.get("next_action"),
+            command_result.get("operator_message"),
+            json.dumps(redact_sensitive(command_result.get("result_json") or {}, redact_strings=True, scrub_text=True)),
+            command_result.get("created_by"),
+        )
+        return _public_campaign_action_row(row)
+    except Exception:
+        return None
+
+
 async def _record_command_result(
     conn,
     *,
@@ -12665,11 +12739,6 @@ async def _record_command_result(
     result_json: dict[str, Any] | None = None,
     created_by: str | None = None,
 ) -> dict[str, Any]:
-    def _uuid_value(value: str | uuid.UUID | None) -> uuid.UUID | None:
-        if not value:
-            return None
-        return value if isinstance(value, uuid.UUID) else uuid.UUID(str(value))
-
     row = await conn.fetchrow(
         """
         INSERT INTO command_results (
@@ -12689,11 +12758,11 @@ async def _record_command_result(
         status,
         bool(dry_run),
         risk_tier,
-        _uuid_value(operation_plan_id),
+        _optional_uuid(operation_plan_id),
         str(scope_receipt_id) if scope_receipt_id else None,
-        _uuid_value(approval_receipt_id),
-        _uuid_value(campaign_id),
-        _uuid_value(scan_id),
+        _optional_uuid(approval_receipt_id),
+        _optional_uuid(campaign_id),
+        _optional_uuid(scan_id),
         json.dumps(finding_ids or []),
         json.dumps(hypothesis_ids or []),
         json.dumps(evidence_object_ids or []),
@@ -12704,7 +12773,9 @@ async def _record_command_result(
         json.dumps(redact_sensitive(result_json or {}, redact_strings=True, scrub_text=True)),
         created_by,
     )
-    return _public_command_result_row(row)
+    result = _public_command_result_row(row)
+    await _record_campaign_action_from_command_result(conn, result)
+    return result
 
 
 def _command_from_action(action_name: str) -> str:
@@ -13125,6 +13196,56 @@ async def arsenal_command_results(limit: int = Query(20, ge=1, le=100)):
     }
 
 
+@app.get("/arsenal/campaign-actions")
+async def arsenal_campaign_actions(
+    limit: int = Query(20, ge=1, le=100),
+    target_id: Optional[str] = Query(None, description="Filter actions to one target."),
+):
+    """Read recent campaign/action execution audit records.
+
+    These rows are action ledger entries only. They do not prove findings and
+    they do not execute anything; state-changing work still flows through the
+    existing product routes and receipt gates.
+    """
+    target_uuid = None
+    if target_id:
+        try:
+            target_uuid = uuid.UUID(str(target_id))
+        except ValueError:
+            raise HTTPException(status_code=400, detail="target_id must be a UUID")
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT ca.*,
+                   s.status AS scan_status,
+                   s.target_url AS scan_target_url,
+                   s.target_id AS scan_target_id
+            FROM campaign_actions ca
+            LEFT JOIN scans s ON ca.scan_id = s.id
+            WHERE ($2::uuid IS NULL OR ca.target_id = $2 OR s.target_id = $2)
+            ORDER BY ca.created_at DESC
+            LIMIT $1
+            """,
+            limit,
+            target_uuid,
+        )
+    actions = []
+    for row in rows:
+        action = _public_campaign_action_row(row)
+        if action.get("scan_status"):
+            action["live_scan_status"] = _timeline_scan_status(action.get("scan_status"))
+        if not action.get("target_id") and action.get("scan_target_id"):
+            action["target_id"] = action.get("scan_target_id")
+        if not action.get("target_url") and action.get("scan_target_url"):
+            action["target_url"] = action.get("scan_target_url")
+        actions.append(action)
+    return {
+        "campaign_actions": actions,
+        "execution_enabled": False,
+        "count": len(actions),
+    }
+
+
 # --- Cross-product mission timeline (§1) -------------------------------------
 # Explicit, API-backed statuses so operators never infer state from scan JSON.
 TIMELINE_STATUSES = (
@@ -13193,6 +13314,41 @@ def _command_result_timeline_event(row: Any) -> dict[str, Any]:
     }
 
 
+def _campaign_action_timeline_event(row: Any) -> dict[str, Any]:
+    r = row_to_dict(row)
+    action_status = str(r.get("status") or "")
+    scan_status = r.get("scan_status")
+    status = _timeline_scan_status(scan_status) if scan_status else action_status
+    scan_id = str(r["scan_id"]) if r.get("scan_id") else None
+    target_id = r.get("target_id") or r.get("scan_target_id")
+    return {
+        "event_id": str(r.get("id")),
+        "kind": "campaign_action",
+        "command": r.get("command"),
+        "action_name": r.get("action_name") or r.get("command"),
+        "status": status,
+        "risk_tier": r.get("risk_tier"),
+        "dry_run": bool(r.get("dry_run")),
+        "target_id": str(target_id) if target_id else None,
+        "target_url": r.get("scan_target_url"),
+        "scan_id": scan_id,
+        "active_scan_id": scan_id if status in ("queued", "running") else None,
+        "operation_plan_id": str(r["operation_plan_id"]) if r.get("operation_plan_id") else None,
+        "campaign_id": str(r["campaign_id"]) if r.get("campaign_id") else None,
+        "command_result_id": str(r["command_result_id"]) if r.get("command_result_id") else None,
+        "scope_receipt_id": r.get("scope_receipt_id"),
+        "approval_receipt_id": str(r["approval_receipt_id"]) if r.get("approval_receipt_id") else None,
+        "finding_ids": _decode_json_value(r.get("finding_ids")) or [],
+        "hypothesis_ids": _decode_json_value(r.get("hypothesis_ids")) or [],
+        "evidence_object_ids": _decode_json_value(r.get("evidence_object_ids")) or [],
+        "tool_receipt_ids": _decode_json_value(r.get("tool_receipt_ids")) or [],
+        "blocked_by": _decode_json_value(r.get("blocked_by")) or [],
+        "next_action": r.get("next_action"),
+        "operator_message": r.get("operator_message"),
+        "created_at": r.get("created_at"),
+    }
+
+
 def _scan_timeline_event(row: Any) -> dict[str, Any]:
     r = row_to_dict(row)
     status = _timeline_scan_status(r.get("status"))
@@ -13245,6 +13401,7 @@ def _schedule_timeline_event(row: Any) -> dict[str, Any]:
 async def mission_timeline(
     limit: int = Query(50, ge=1, le=200),
     target_id: Optional[str] = Query(None, description="Filter events to one target."),
+    include_campaign_actions: bool = Query(True, description="Include campaign/action records not already represented by a command result."),
     include_scans: bool = Query(True, description="Include recent scans not tied to a command result."),
     include_schedules: bool = Query(True, description="Include upcoming recurring schedules."),
 ):
@@ -13280,6 +13437,25 @@ async def mission_timeline(
             target_uuid,
         )
         events = [_command_result_timeline_event(row) for row in cr_rows]
+
+        if include_campaign_actions:
+            action_rows = await conn.fetch(
+                """
+                SELECT ca.*,
+                       s.status AS scan_status,
+                       s.target_url AS scan_target_url,
+                       s.target_id AS scan_target_id
+                FROM campaign_actions ca
+                LEFT JOIN scans s ON ca.scan_id = s.id
+                WHERE ca.command_result_id IS NULL
+                  AND ($2::uuid IS NULL OR ca.target_id = $2 OR s.target_id = $2)
+                ORDER BY ca.created_at DESC
+                LIMIT $1
+                """,
+                limit,
+                target_uuid,
+            )
+            events.extend(_campaign_action_timeline_event(row) for row in action_rows)
 
         if include_scans:
             scan_rows = await conn.fetch(
