@@ -1775,6 +1775,68 @@ def test_public_evidence_object_row_hydrates_local_storage(monkeypatch, tmp_path
     assert public["created_at"].startswith("2026-07-06")
 
 
+def test_evidence_export_manifest_excludes_content_and_tracks_integrity(monkeypatch, tmp_path):
+    stored = store_evidence_content({"large": "x" * 200}, results_dir=tmp_path, inline_max_bytes=8)
+    monkeypatch.setattr(api_module, "RESULTS_DIR", tmp_path)
+    row = {
+        "id": uuid.uuid4(),
+        "finding_id": uuid.uuid4(),
+        "scan_id": uuid.uuid4(),
+        "object_type": "ai_gate_evidence",
+        "content_sha256": stored["content_sha256"],
+        "size_bytes": stored["size_bytes"],
+        "storage_uri": stored["storage_uri"],
+        "retention_class": "sensitive",
+        "content": None,
+        "created_at": datetime(2026, 7, 6, tzinfo=timezone.utc),
+    }
+
+    manifest = api_module._evidence_export_manifest([row], generated_at=datetime(2026, 7, 6, tzinfo=timezone.utc))
+
+    assert manifest["schema_version"] == "2026-07-06.evidence-export-manifest.v1"
+    assert manifest["object_count"] == 1
+    assert len(manifest["manifest_hash"]) == 64
+    assert manifest["content_included"] is False
+    obj = manifest["objects"][0]
+    assert "content" not in obj
+    assert obj["content_included"] is False
+    assert obj["content_available"] is True
+    assert obj["storage_integrity"] == "verified"
+    assert manifest["retention_counts"]["sensitive"] == 1
+
+
+def test_evidence_retention_candidates_skip_legal_hold_and_use_policy_days():
+    now = datetime(2026, 7, 6, tzinfo=timezone.utc)
+    old = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    rows = [
+        {
+            "id": uuid.uuid4(),
+            "retention_class": "short",
+            "storage_uri": "inline:evidence_objects",
+            "created_at": old,
+        },
+        {
+            "id": uuid.uuid4(),
+            "retention_class": "legal_hold",
+            "storage_uri": "inline:evidence_objects",
+            "created_at": old,
+        },
+        {
+            "id": uuid.uuid4(),
+            "retention_class": "standard",
+            "storage_uri": "inline:evidence_objects",
+            "created_at": now,
+        },
+    ]
+
+    candidates = api_module._evidence_retention_candidates(rows, now=now)
+
+    assert len(candidates) == 1
+    assert candidates[0]["retention_class"] == "short"
+    assert candidates[0]["retention_days"] == api_module.EVIDENCE_RETENTION_DAYS["short"]
+    assert candidates[0]["age_days"] > candidates[0]["retention_days"]
+
+
 def test_hypothesis_situation_report_is_bounded_and_separates_work():
     now = datetime.now(timezone.utc).replace(microsecond=0)
 

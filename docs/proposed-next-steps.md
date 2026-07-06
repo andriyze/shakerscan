@@ -916,7 +916,7 @@ authz replay so expected admin/customer/tenant boundaries become proof-backed te
 principal's access is a finding.
 
 ### 9. Evidence object store phase 2, EvidenceInstance split, and tool receipts
-**Status: PARTIAL, PHASE 1 LOCAL EVIDENCE STORAGE + RECEIPT/INSTANCE RECORDS + TOOL STATUS GATE DONE.** `evidence_objects`
+**Status: PARTIAL, PHASE 1 LOCAL EVIDENCE STORAGE + RETENTION/MANIFEST + RECEIPT/INSTANCE RECORDS + TOOL STATUS GATE DONE.** `evidence_objects`
 table ships (hash, redaction_profile, retention_class, storage_uri, scan/finding links);
 `save_findings` + `save_ai_findings` write one object per finding; `GET /findings/{id}/evidence` +
 `GET /evidence/{id}` read them. The canonical finding collapse works
@@ -926,13 +926,17 @@ table ships (hash, redaction_profile, retention_class, storage_uri, scan/finding
 tools, create findings, or update canonical finding proof state. Large redacted evidence payloads now
 externalize to a content-addressed local object store under `RESULTS_DIR/evidence-objects` with
 `local:evidence_objects/...` storage URIs, and the evidence read API hydrates/verifies them on read.
-`GET /arsenal/tools` now returns a `release_gate` named `no_phantom_tools` that fails if an adapter
+`GET /evidence/export-manifest` returns a content-free hash/storage/retention manifest, and
+`POST /evidence/retention/sweep` previews or executes bounded evidence-object cleanup with
+`dry_run: true` by default and `legal_hold` excluded. `GET /arsenal/tools` now returns a
+`release_gate` named `no_phantom_tools` that fails if an adapter
 claims installed/runnable status without a resolved binary or internal implementation, or if a
 runnable adapter lacks parser/proof metadata. Worker finalization now emits record-only `ToolReceipt`
 rows for the internal AI Gate probe executor and Model Intake signature verifier on success/failure,
 stamping returned receipt ids into scan results without changing findings or proof state. External
 DAST/ASM tools are not yet wired to emit receipts automatically, remote S3/MinIO-style object storage
-is still open, and retention/export manifests are still open.
+is still open, scheduled retention automation is still open, and richer packaged exports are still
+open.
 
 **Implement:**
 1. DONE phase 1: externalize `storage_uri` from `inline:` to local object storage for large objects.
@@ -940,7 +944,12 @@ is still open, and retention/export manifests are still open.
    `RESULTS_DIR/evidence-objects`, returns `local:evidence_objects/...`, and `GET /evidence/{id}` /
    `GET /findings/{id}/evidence` hydrate and integrity-check local content. Remote S3/MinIO backends
    remain open.
-2. Add a retention sweeper and export manifest format.
+2. DONE phase 1: add a retention sweeper and export manifest format. `GET /evidence/export-manifest`
+   returns a content-free manifest with object ids, hashes, storage URIs, retention classes, storage
+   status/integrity, and a manifest hash. `POST /evidence/retention/sweep` is dry-run by default,
+   skips `legal_hold`, applies bounded retention windows (`short`, `sensitive`, `standard`, `audit`),
+   and can delete expired DB rows plus local object files only when explicitly executed. Background
+   scheduling and packaged export bundles remain open.
 3. DONE phase 1: split canonical `Finding` from `EvidenceInstance {concrete_url, object_id, payload_variant,
    request_response_refs, principal_pair, proof_observation, campaign_action_id, tool_receipt_id,
    redaction_profile, hash, retention_policy}` as durable record-only rows. Finding promotion still

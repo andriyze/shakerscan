@@ -42,6 +42,7 @@ def test_command_catalog_contains_required_initial_commands():
         "agent_decision_trace.list",
         "local_agent.list",
         "evidence.get",
+        "evidence.export_manifest",
         "evidence_instance.list",
         "tool_receipt.list",
         "deployment.decision",
@@ -87,6 +88,22 @@ def test_tool_receipt_and_evidence_instance_commands_are_record_only():
     assert instance_record["path"] == "/evidence/instances"
     assert "parser_status" in receipt_record["parameters_schema"]
     assert "proof_state" in instance_record["parameters_schema"]
+
+
+def test_evidence_manifest_and_retention_commands_are_bounded():
+    payload = arsenal.describe_commands()
+    commands = {item["name"]: item for item in payload["commands"]}
+
+    manifest = commands["evidence.export_manifest"]
+    sweep = commands["evidence.retention_sweep"]
+
+    assert manifest["status"] == "read_only"
+    assert manifest["path"] == "/evidence/export-manifest"
+    assert "manifest_hash" in manifest["evidence_contract"]
+    assert sweep["status"] == "dry_run"
+    assert sweep["risk_tier"] == "read_only"
+    assert sweep["path"] == "/evidence/retention/sweep"
+    assert sweep["parameters_schema"]["dry_run"]["default"] is True
 
 
 def test_target_principal_matrix_commands_are_non_executing_inventory():

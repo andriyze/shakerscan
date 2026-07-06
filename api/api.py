@@ -97,11 +97,11 @@ except ModuleNotFoundError as exc:
     )
 
 try:
-    from evidence_storage import hydrate_evidence_content
+    from evidence_storage import hydrate_evidence_content, local_evidence_path
 except ModuleNotFoundError as exc:
     if exc.name != "evidence_storage":
         raise
-    from api.evidence_storage import hydrate_evidence_content
+    from api.evidence_storage import hydrate_evidence_content, local_evidence_path
 
 try:
     from scan_verification_state import scan_time_verification_fields as _scan_time_verification_fields
@@ -3461,6 +3461,14 @@ class EvidenceInstanceRequest(BaseModel):
     proof_state: str = Field(default="unverified", pattern="^(verified|suspected|unverified|refuted|inconclusive)$")
     metadata_json: dict[str, Any] = Field(default_factory=dict)
     created_by: Optional[str] = None
+
+
+class EvidenceRetentionSweepRequest(BaseModel):
+    dry_run: bool = True
+    older_than_days: Optional[int] = Field(default=None, ge=0, le=3650)
+    retention_class: Optional[str] = Field(default=None, pattern="^(standard|short|audit|legal_hold|sensitive)$")
+    limit: int = Field(default=200, ge=1, le=1000)
+    delete_local_files: bool = True
 
 
 class AgentDecisionTraceStep(BaseModel):
@@ -17359,6 +17367,122 @@ def _public_evidence_object_row(row: Any) -> dict[str, Any]:
     return hydrate_evidence_content(row_to_dict(row), results_dir=RESULTS_DIR)
 
 
+EVIDENCE_RETENTION_DAYS = {
+    "short": 30,
+    "sensitive": 90,
+    "standard": 365,
+    "audit": 2555,
+    "legal_hold": None,
+}
+
+
+def _evidence_manifest_entry(row: Any) -> dict[str, Any]:
+    payload = _public_evidence_object_row(row)
+    content = payload.pop("content", None)
+    payload["content_included"] = False
+    payload["content_available"] = content is not None
+    return payload
+
+
+def _evidence_export_manifest(rows: Sequence[Any], *, generated_at: Optional[datetime] = None) -> dict[str, Any]:
+    generated = (generated_at or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    objects = [_evidence_manifest_entry(row) for row in rows]
+    retention_counts = Counter(str(item.get("retention_class") or "unknown") for item in objects)
+    storage_counts = Counter(str(item.get("storage_status") or "unknown") for item in objects)
+    integrity_counts = Counter(str(item.get("storage_integrity") or "not_checked") for item in objects)
+    manifest_hash = hashlib.sha256(
+        json.dumps(objects, sort_keys=True, default=str, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    return {
+        "schema_version": "2026-07-06.evidence-export-manifest.v1",
+        "generated_at": generated.isoformat(),
+        "object_count": len(objects),
+        "manifest_hash": manifest_hash,
+        "retention_policy_days": EVIDENCE_RETENTION_DAYS,
+        "retention_counts": dict(retention_counts),
+        "storage_counts": dict(storage_counts),
+        "integrity_counts": dict(integrity_counts),
+        "content_included": False,
+        "objects": objects,
+    }
+
+
+def _evidence_retention_candidate(
+    row: Any,
+    *,
+    now: Optional[datetime] = None,
+    older_than_days: Optional[int] = None,
+    retention_class_filter: Optional[str] = None,
+) -> dict[str, Any] | None:
+    payload = row_to_dict(row)
+    retention_class = str(payload.get("retention_class") or "standard").strip().lower() or "standard"
+    if retention_class_filter and retention_class != retention_class_filter:
+        return None
+    if retention_class == "legal_hold":
+        return None
+    created_at = _parse_hypothesis_time(payload.get("created_at"))
+    if not created_at:
+        return None
+    current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    age_days = max(0, int((current - created_at).total_seconds() // 86400))
+    threshold = older_than_days if older_than_days is not None else EVIDENCE_RETENTION_DAYS.get(retention_class)
+    if threshold is None or age_days < int(threshold):
+        return None
+    storage_uri = str(payload.get("storage_uri") or "")
+    return {
+        "id": str(payload.get("id")),
+        "scan_id": str(payload.get("scan_id")) if payload.get("scan_id") else None,
+        "finding_id": str(payload.get("finding_id")) if payload.get("finding_id") else None,
+        "object_type": payload.get("object_type"),
+        "content_sha256": payload.get("content_sha256"),
+        "size_bytes": payload.get("size_bytes") or 0,
+        "storage_uri": storage_uri,
+        "retention_class": retention_class,
+        "created_at": payload.get("created_at"),
+        "age_days": age_days,
+        "retention_days": threshold,
+        "local_file": bool(local_evidence_path(RESULTS_DIR, storage_uri)),
+    }
+
+
+def _evidence_retention_candidates(
+    rows: Sequence[Any],
+    *,
+    now: Optional[datetime] = None,
+    older_than_days: Optional[int] = None,
+    retention_class_filter: Optional[str] = None,
+) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    for row in rows:
+        candidate = _evidence_retention_candidate(
+            row,
+            now=now,
+            older_than_days=older_than_days,
+            retention_class_filter=retention_class_filter,
+        )
+        if candidate:
+            candidates.append(candidate)
+    return candidates
+
+
+def _delete_local_evidence_files(candidates: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    deleted: list[str] = []
+    missing: list[str] = []
+    errors: list[dict[str, str]] = []
+    for candidate in candidates:
+        path = local_evidence_path(RESULTS_DIR, str(candidate.get("storage_uri") or ""))
+        if not path:
+            continue
+        try:
+            path.unlink()
+            deleted.append(str(path))
+        except FileNotFoundError:
+            missing.append(str(path))
+        except OSError as exc:
+            errors.append({"path": str(path), "error": f"{type(exc).__name__}: {exc}"})
+    return {"deleted": deleted, "missing": missing, "errors": errors}
+
+
 @app.get("/findings/{finding_id}/evidence")
 async def list_finding_evidence(finding_id: str):
     """Durable evidence objects (hash, redaction profile, retention class, storage
@@ -17416,6 +17540,103 @@ async def record_evidence_instance(req: EvidenceInstanceRequest):
     """Record a concrete evidence instance without changing finding state."""
     async with db_pool.acquire() as conn:
         return await _record_evidence_instance(conn, req)
+
+
+@app.get("/evidence/export-manifest")
+async def evidence_export_manifest(
+    finding_id: Optional[str] = Query(None),
+    scan_id: Optional[str] = Query(None),
+    retention_class: Optional[str] = Query(None, regex="^(standard|short|audit|legal_hold|sensitive)$"),
+    limit: int = Query(200, ge=1, le=1000),
+):
+    """Return a content-free manifest for evidence export/audit."""
+    try:
+        finding_uuid = _optional_uuid(finding_id)
+        scan_uuid = _optional_uuid(scan_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="finding_id and scan_id must be UUIDs when provided") from exc
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT *
+            FROM evidence_objects
+            WHERE ($2::uuid IS NULL OR finding_id = $2)
+              AND ($3::uuid IS NULL OR scan_id = $3)
+              AND ($4::text IS NULL OR retention_class = $4)
+            ORDER BY created_at DESC
+            LIMIT $1
+            """,
+            limit,
+            finding_uuid,
+            scan_uuid,
+            retention_class,
+        )
+    manifest = _evidence_export_manifest(rows)
+    manifest["filters"] = {
+        "finding_id": str(finding_uuid) if finding_uuid else None,
+        "scan_id": str(scan_uuid) if scan_uuid else None,
+        "retention_class": retention_class,
+        "limit": limit,
+    }
+    return manifest
+
+
+@app.post("/evidence/retention/sweep")
+async def evidence_retention_sweep(req: EvidenceRetentionSweepRequest):
+    """Preview or execute bounded evidence-object retention cleanup.
+
+    Defaults to dry-run and never selects legal_hold evidence. Execution removes
+    matching DB rows and, when requested, their local object-store files.
+    """
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT *
+            FROM evidence_objects
+            WHERE ($2::text IS NULL OR retention_class = $2)
+              AND retention_class <> 'legal_hold'
+            ORDER BY created_at ASC
+            LIMIT $1
+            """,
+            req.limit,
+            req.retention_class,
+        )
+        candidates = _evidence_retention_candidates(
+            rows,
+            older_than_days=req.older_than_days,
+            retention_class_filter=req.retention_class,
+        )
+        file_result = {"deleted": [], "missing": [], "errors": []}
+        deleted_count = 0
+        if candidates and not req.dry_run:
+            candidate_ids = [uuid.UUID(str(item["id"])) for item in candidates if item.get("id")]
+            deleted_ids: set[str] = set()
+            if candidate_ids:
+                deleted_rows = await conn.fetch(
+                    """
+                    DELETE FROM evidence_objects
+                    WHERE id = ANY($1::uuid[])
+                      AND retention_class <> 'legal_hold'
+                    RETURNING id
+                    """,
+                    candidate_ids,
+                )
+                deleted_count = len(deleted_rows)
+                deleted_ids = {str(row["id"]) for row in deleted_rows}
+            if req.delete_local_files and deleted_ids:
+                file_result = _delete_local_evidence_files(
+                    [item for item in candidates if str(item.get("id")) in deleted_ids]
+                )
+    return {
+        "dry_run": req.dry_run,
+        "candidate_count": len(candidates),
+        "deleted_count": deleted_count,
+        "delete_local_files": req.delete_local_files,
+        "local_files": file_result,
+        "retention_policy_days": EVIDENCE_RETENTION_DAYS,
+        "candidates": candidates,
+        "execution_enabled": not req.dry_run,
+    }
 
 
 @app.get("/evidence/{evidence_id}")
