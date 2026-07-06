@@ -916,29 +916,34 @@ authz replay so expected admin/customer/tenant boundaries become proof-backed te
 principal's access is a finding.
 
 ### 9. Evidence object store phase 2, EvidenceInstance split, and tool receipts
-**Status: PHASE 1 DONE (inline).** `evidence_objects` table ships (hash, redaction_profile,
+**Status: PARTIAL, PHASE 1 RECEIPT/INSTANCE RECORDS DONE.** `evidence_objects` table ships (hash, redaction_profile,
 retention_class, storage_uri, scan/finding links); `save_findings` + `save_ai_findings` write one
 object per finding; `GET /findings/{id}/evidence` + `GET /evidence/{id}` read them. The canonical
 finding collapse works (`templated_finding_identity`, `all_urls`, `all_payloads`,
-`duplicate_count`), but individual proof instances are still folded into evidence JSON. Existing
-external tools and internal executors also do not yet produce durable receipts with version,
-redacted argv, scope receipt, parser status, and artifact refs.
+`duplicate_count`). `tool_receipts` and `evidence_instances` now persist record-only receipts and
+concrete proof observations through `GET/POST /arsenal/tool-receipts` and
+`GET/POST /evidence/instances`; recording either cannot run tools, create findings, or update
+canonical finding proof state. Existing external tools and internal executors are not yet wired to
+emit receipts automatically, and large artifacts are still not externalized.
 
 **Implement:**
 1. Externalize `storage_uri` from `inline:` to S3/MinIO or local object storage for large objects.
 2. Add a retention sweeper and export manifest format.
-3. Split canonical `Finding` from `EvidenceInstance {concrete_url, object_id, payload_variant,
+3. DONE phase 1: split canonical `Finding` from `EvidenceInstance {concrete_url, object_id, payload_variant,
    request_response_refs, principal_pair, proof_observation, campaign_action_id, tool_receipt_id,
-   redaction_profile, hash, retention_policy}`.
-4. Add `ToolReceipt` records for existing tools/executors before adding new offensive tooling:
+   redaction_profile, hash, retention_policy}` as durable record-only rows. Finding promotion still
+   goes through the existing proof taxonomy.
+4. DONE phase 1: add `ToolReceipt` records for existing tools/executors before adding new offensive tooling:
    `httpx`, `katana`, `nuclei`, `subfinder`, `ffuf`, `dalfox`, `sqlmap`, `nmap`, `sslyze`,
    `testssl.sh`, Playwright/browser proof, AI Gate probe execution, and Model Intake artifact
-   fetch/signature verification.
-5. Tool receipts should include tool version, adapter version, command hash, redacted argv, worker
+   fetch/signature verification. The registry/record schema exists; individual executors still need
+   integration to emit receipts on success/failure/skip.
+5. DONE phase 1: tool receipts include tool version, adapter version, command hash, redacted argv, worker
    build/container image, target scope, scope receipt, policy profile, approval id, timing, exit code,
    timeout, stdout/stderr artifact refs, parsed evidence refs, parser status, and redaction summary.
-6. Parser failure, timeout, missing binary, or missing smoke/version status must degrade honestly and
-   must not create verified findings.
+6. DONE phase 1: parser failure, timeout, missing binary, or missing smoke/version status can be
+   recorded honestly as receipt status/parser status and cannot create verified findings through the
+   receipt API.
 7. Tool adapter states must be operator-visible: `catalog_only`, `wired`, `installed`, `runnable`,
    `gated`, `waived`, and `disabled`. Broad future tools stay `catalog_only` until a narrow adapter,
    parser, scope extractor, proof contract, and receipt shape exist.

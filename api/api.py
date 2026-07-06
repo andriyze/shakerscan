@@ -3409,6 +3409,53 @@ class RefuterReviewRequest(BaseModel):
     created_by: Optional[str] = None
 
 
+class ToolReceiptRequest(BaseModel):
+    tool_name: str = Field(min_length=1, max_length=120)
+    tool_version: Optional[str] = None
+    adapter_version: str = "2026-07-05.v1"
+    command_hash: Optional[str] = None
+    redacted_argv: list[Any] = Field(default_factory=list)
+    worker_build: Optional[str] = None
+    container_image: Optional[str] = None
+    target_scope: dict[str, Any] = Field(default_factory=dict)
+    scope_receipt_id: Optional[str] = None
+    approval_receipt_id: Optional[str] = None
+    policy_profile_id: Optional[str] = None
+    status: str = Field(default="recorded", pattern="^(success|failed|timeout|skipped|waived|parser_error|recorded)$")
+    parser_status: str = Field(default="not_run", pattern="^(not_run|parsed|partial|failed|not_applicable)$")
+    exit_code: Optional[int] = None
+    timed_out: bool = False
+    started_at: Optional[str] = None
+    finished_at: Optional[str] = None
+    stdout_evidence_object_id: Optional[str] = None
+    stderr_evidence_object_id: Optional[str] = None
+    parsed_evidence_instance_ids: list[str] = Field(default_factory=list)
+    redaction_summary: Optional[str] = None
+    metadata_json: dict[str, Any] = Field(default_factory=dict)
+    created_by: Optional[str] = None
+
+
+class EvidenceInstanceRequest(BaseModel):
+    finding_id: Optional[str] = None
+    evidence_object_id: Optional[str] = None
+    scan_id: Optional[str] = None
+    target_id: Optional[str] = None
+    concrete_url: Optional[str] = None
+    object_id: Optional[str] = None
+    payload_variant: Optional[str] = None
+    request_response_refs: list[str] = Field(default_factory=list)
+    principal_pair: dict[str, Any] = Field(default_factory=dict)
+    proof_observation: dict[str, Any] = Field(default_factory=dict)
+    campaign_action_id: Optional[str] = None
+    tool_receipt_id: Optional[str] = None
+    redaction_profile: str = "redact_sensitive_v1"
+    hash: Optional[str] = None
+    retention_policy: str = Field(default="standard", pattern="^(standard|short|audit|legal_hold|sensitive)$")
+    proof_state: str = Field(default="unverified", pattern="^(verified|suspected|unverified|refuted|inconclusive)$")
+    metadata_json: dict[str, Any] = Field(default_factory=dict)
+    created_by: Optional[str] = None
+
+
 class AgentDecisionTraceStep(BaseModel):
     kind: str
     command: Optional[str] = None
@@ -13599,6 +13646,233 @@ async def _record_refuter_review(conn, req: RefuterReviewRequest) -> dict[str, A
     }
 
 
+def _canonical_hash_payload(payload: dict[str, Any]) -> str:
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _public_tool_receipt_row(row: Any) -> dict[str, Any]:
+    payload = row_to_dict(row)
+    for key in ("redacted_argv", "parsed_evidence_instance_ids"):
+        payload[key] = _decode_json_value(payload.get(key)) or []
+    for key in ("target_scope", "metadata_json"):
+        payload[key] = _redact_agent_payload(_decode_json_value(payload.get(key)) or {})
+    payload["execution_enabled"] = False
+    payload["findings_created"] = 0
+    payload["verified_findings_created"] = 0
+    return payload
+
+
+def _canonical_tool_receipt(req: ToolReceiptRequest) -> dict[str, Any]:
+    payload = req.model_dump(mode="json")
+    redacted_argv = _redact_agent_payload(payload.get("redacted_argv") or [])
+    target_scope = _redact_agent_payload(payload.get("target_scope") or {})
+    metadata = _redact_agent_payload(payload.get("metadata_json") or {})
+    command_hash = str(payload.get("command_hash") or "").strip()
+    if command_hash and not re.fullmatch(r"[a-fA-F0-9]{64}", command_hash):
+        raise HTTPException(status_code=400, detail="command_hash must be sha256 hex when provided")
+    if not command_hash:
+        command_hash = _canonical_hash_payload({
+            "tool_name": payload.get("tool_name"),
+            "redacted_argv": redacted_argv,
+            "target_scope": target_scope,
+            "metadata_json": metadata,
+        })
+    return {
+        "tool_name": str(payload.get("tool_name") or "").strip(),
+        "tool_version": str(payload.get("tool_version") or "").strip() or None,
+        "adapter_version": str(payload.get("adapter_version") or "2026-07-05.v1").strip() or "2026-07-05.v1",
+        "command_hash": command_hash.lower(),
+        "redacted_argv": redacted_argv,
+        "worker_build": str(payload.get("worker_build") or "").strip() or None,
+        "container_image": str(payload.get("container_image") or "").strip() or None,
+        "target_scope": target_scope,
+        "scope_receipt_id": str(payload.get("scope_receipt_id") or "").strip() or None,
+        "approval_receipt_id": str(payload.get("approval_receipt_id") or "").strip() or None,
+        "policy_profile_id": str(payload.get("policy_profile_id") or "").strip() or None,
+        "status": payload.get("status") or "recorded",
+        "parser_status": payload.get("parser_status") or "not_run",
+        "exit_code": payload.get("exit_code"),
+        "timed_out": bool(payload.get("timed_out")),
+        "started_at": _parse_hypothesis_time(payload.get("started_at")),
+        "finished_at": _parse_hypothesis_time(payload.get("finished_at")),
+        "stdout_evidence_object_id": str(payload.get("stdout_evidence_object_id") or "").strip() or None,
+        "stderr_evidence_object_id": str(payload.get("stderr_evidence_object_id") or "").strip() or None,
+        "parsed_evidence_instance_ids": _clean_string_list(payload.get("parsed_evidence_instance_ids"), max_items=500),
+        "redaction_summary": _redact_agent_text(str(payload.get("redaction_summary") or "").strip()) or None,
+        "metadata_json": metadata,
+        "created_by": str(payload.get("created_by") or "").strip() or None,
+    }
+
+
+async def _record_tool_receipt(conn, req: ToolReceiptRequest) -> dict[str, Any]:
+    payload = _canonical_tool_receipt(req)
+    try:
+        scope_uuid = _optional_uuid(payload.get("scope_receipt_id"))
+        approval_uuid = _optional_uuid(payload.get("approval_receipt_id"))
+        policy_uuid = _optional_uuid(payload.get("policy_profile_id"))
+        stdout_uuid = _optional_uuid(payload.get("stdout_evidence_object_id"))
+        stderr_uuid = _optional_uuid(payload.get("stderr_evidence_object_id"))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="receipt and evidence object ids must be UUIDs when provided") from exc
+    row = await conn.fetchrow(
+        """
+        INSERT INTO tool_receipts (
+            tool_name, tool_version, adapter_version, command_hash, redacted_argv,
+            worker_build, container_image, target_scope, scope_receipt_id,
+            approval_receipt_id, policy_profile_id, status, parser_status,
+            exit_code, timed_out, started_at, finished_at, stdout_evidence_object_id,
+            stderr_evidence_object_id, parsed_evidence_instance_ids, redaction_summary,
+            metadata_json, created_by
+        ) VALUES (
+            $1,$2,$3,$4,$5::jsonb,
+            $6,$7,$8::jsonb,$9,
+            $10,$11,$12,$13,
+            $14,$15,$16,$17,$18,
+            $19,$20::jsonb,$21,
+            $22::jsonb,$23
+        )
+        RETURNING *
+        """,
+        payload["tool_name"],
+        payload.get("tool_version"),
+        payload["adapter_version"],
+        payload["command_hash"],
+        json.dumps(payload.get("redacted_argv") or []),
+        payload.get("worker_build"),
+        payload.get("container_image"),
+        json.dumps(payload.get("target_scope") or {}),
+        scope_uuid,
+        approval_uuid,
+        policy_uuid,
+        payload["status"],
+        payload["parser_status"],
+        payload.get("exit_code"),
+        payload["timed_out"],
+        payload.get("started_at"),
+        payload.get("finished_at"),
+        stdout_uuid,
+        stderr_uuid,
+        json.dumps(payload.get("parsed_evidence_instance_ids") or []),
+        payload.get("redaction_summary"),
+        json.dumps(payload.get("metadata_json") or {}),
+        payload.get("created_by"),
+    )
+    return {
+        "tool_receipt": _public_tool_receipt_row(row),
+        "execution_enabled": False,
+        "findings_created": 0,
+        "verified_findings_created": 0,
+    }
+
+
+def _public_evidence_instance_row(row: Any) -> dict[str, Any]:
+    payload = row_to_dict(row)
+    payload["request_response_refs"] = _decode_json_value(payload.get("request_response_refs")) or []
+    for key in ("principal_pair", "proof_observation", "metadata_json"):
+        payload[key] = _redact_agent_payload(_decode_json_value(payload.get(key)) or {})
+    payload["execution_enabled"] = False
+    payload["findings_updated"] = 0
+    return payload
+
+
+def _canonical_evidence_instance(req: EvidenceInstanceRequest) -> dict[str, Any]:
+    payload = req.model_dump(mode="json")
+    request_refs = _clean_string_list(payload.get("request_response_refs"), max_items=100)
+    principal_pair = _redact_agent_payload(payload.get("principal_pair") or {})
+    proof_observation = _redact_agent_payload(payload.get("proof_observation") or {})
+    metadata = _redact_agent_payload(payload.get("metadata_json") or {})
+    instance_hash = str(payload.get("hash") or "").strip()
+    if instance_hash and not re.fullmatch(r"[a-fA-F0-9]{64}", instance_hash):
+        raise HTTPException(status_code=400, detail="hash must be sha256 hex when provided")
+    if not instance_hash:
+        instance_hash = _canonical_hash_payload({
+            "finding_id": payload.get("finding_id"),
+            "evidence_object_id": payload.get("evidence_object_id"),
+            "concrete_url": payload.get("concrete_url"),
+            "object_id": payload.get("object_id"),
+            "payload_variant": payload.get("payload_variant"),
+            "request_response_refs": request_refs,
+            "principal_pair": principal_pair,
+            "proof_observation": proof_observation,
+            "tool_receipt_id": payload.get("tool_receipt_id"),
+        })
+    return {
+        "finding_id": str(payload.get("finding_id") or "").strip() or None,
+        "evidence_object_id": str(payload.get("evidence_object_id") or "").strip() or None,
+        "scan_id": str(payload.get("scan_id") or "").strip() or None,
+        "target_id": str(payload.get("target_id") or "").strip() or None,
+        "concrete_url": _redact_agent_text(str(payload.get("concrete_url") or "").strip()) if payload.get("concrete_url") else None,
+        "object_id": str(payload.get("object_id") or "").strip() or None,
+        "payload_variant": _redact_agent_text(str(payload.get("payload_variant") or "").strip()) if payload.get("payload_variant") else None,
+        "request_response_refs": request_refs,
+        "principal_pair": principal_pair,
+        "proof_observation": proof_observation,
+        "campaign_action_id": str(payload.get("campaign_action_id") or "").strip() or None,
+        "tool_receipt_id": str(payload.get("tool_receipt_id") or "").strip() or None,
+        "redaction_profile": str(payload.get("redaction_profile") or "redact_sensitive_v1").strip() or "redact_sensitive_v1",
+        "hash": instance_hash.lower(),
+        "retention_policy": payload.get("retention_policy") or "standard",
+        "proof_state": payload.get("proof_state") or "unverified",
+        "metadata_json": metadata,
+        "created_by": str(payload.get("created_by") or "").strip() or None,
+    }
+
+
+async def _record_evidence_instance(conn, req: EvidenceInstanceRequest) -> dict[str, Any]:
+    payload = _canonical_evidence_instance(req)
+    try:
+        finding_uuid = _optional_uuid(payload.get("finding_id"))
+        evidence_uuid = _optional_uuid(payload.get("evidence_object_id"))
+        scan_uuid = _optional_uuid(payload.get("scan_id"))
+        target_uuid = _optional_uuid(payload.get("target_id"))
+        campaign_action_uuid = _optional_uuid(payload.get("campaign_action_id"))
+        tool_receipt_uuid = _optional_uuid(payload.get("tool_receipt_id"))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="evidence instance ids must be UUIDs when provided") from exc
+    row = await conn.fetchrow(
+        """
+        INSERT INTO evidence_instances (
+            finding_id, evidence_object_id, scan_id, target_id, concrete_url,
+            object_id, payload_variant, request_response_refs, principal_pair,
+            proof_observation, campaign_action_id, tool_receipt_id,
+            redaction_profile, hash, retention_policy, proof_state,
+            metadata_json, created_by
+        ) VALUES (
+            $1,$2,$3,$4,$5,
+            $6,$7,$8::jsonb,$9::jsonb,
+            $10::jsonb,$11,$12,
+            $13,$14,$15,$16,
+            $17::jsonb,$18
+        )
+        RETURNING *
+        """,
+        finding_uuid,
+        evidence_uuid,
+        scan_uuid,
+        target_uuid,
+        payload.get("concrete_url"),
+        payload.get("object_id"),
+        payload.get("payload_variant"),
+        json.dumps(payload.get("request_response_refs") or []),
+        json.dumps(payload.get("principal_pair") or {}),
+        json.dumps(payload.get("proof_observation") or {}),
+        campaign_action_uuid,
+        tool_receipt_uuid,
+        payload["redaction_profile"],
+        payload["hash"],
+        payload["retention_policy"],
+        payload["proof_state"],
+        json.dumps(payload.get("metadata_json") or {}),
+        payload.get("created_by"),
+    )
+    return {
+        "evidence_instance": _public_evidence_instance_row(row),
+        "execution_enabled": False,
+        "findings_updated": 0,
+    }
+
+
 def _graph_row_payload(row: Any) -> dict[str, Any]:
     payload = row_to_dict(row)
     payload["attributes"] = _decode_json_value(payload.get("attributes")) or {}
@@ -14638,6 +14912,43 @@ async def arsenal_record_refuter_review(req: RefuterReviewRequest):
     """
     async with db_pool.acquire() as conn:
         return await _record_refuter_review(conn, req)
+
+
+@app.get("/arsenal/tool-receipts")
+async def arsenal_tool_receipts(
+    limit: int = Query(20, ge=1, le=100),
+    tool_name: Optional[str] = Query(None),
+    status: Optional[str] = Query(None),
+):
+    """Read durable receipts for existing tools/executors."""
+    if status and status not in {"success", "failed", "timeout", "skipped", "waived", "parser_error", "recorded"}:
+        raise HTTPException(status_code=400, detail="invalid tool receipt status")
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT *
+            FROM tool_receipts
+            WHERE ($2::text IS NULL OR tool_name = $2)
+              AND ($3::text IS NULL OR status = $3)
+            ORDER BY created_at DESC
+            LIMIT $1
+            """,
+            limit,
+            tool_name,
+            status,
+        )
+    return {
+        "tool_receipts": [_public_tool_receipt_row(row) for row in rows],
+        "count": len(rows),
+        "execution_enabled": False,
+    }
+
+
+@app.post("/arsenal/tool-receipts")
+async def arsenal_record_tool_receipt(req: ToolReceiptRequest):
+    """Record a tool/executor receipt without running tools or creating findings."""
+    async with db_pool.acquire() as conn:
+        return await _record_tool_receipt(conn, req)
 
 
 # --- Cross-product mission timeline (§1) -------------------------------------
@@ -17051,6 +17362,46 @@ async def list_finding_evidence(finding_id: str):
             finding["id"],
         )
     return {"finding_id": str(finding["id"]), "evidence_objects": [row_to_dict(r) for r in rows]}
+
+
+@app.get("/evidence/instances")
+async def list_evidence_instances(
+    finding_id: Optional[str] = Query(None),
+    tool_receipt_id: Optional[str] = Query(None),
+    limit: int = Query(50, ge=1, le=200),
+):
+    """List concrete evidence instances split from canonical findings."""
+    try:
+        finding_uuid = _optional_uuid(finding_id)
+        tool_receipt_uuid = _optional_uuid(tool_receipt_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="finding_id and tool_receipt_id must be UUIDs when provided") from exc
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT *
+            FROM evidence_instances
+            WHERE ($2::uuid IS NULL OR finding_id = $2)
+              AND ($3::uuid IS NULL OR tool_receipt_id = $3)
+            ORDER BY created_at DESC
+            LIMIT $1
+            """,
+            limit,
+            finding_uuid,
+            tool_receipt_uuid,
+        )
+    return {
+        "evidence_instances": [_public_evidence_instance_row(row) for row in rows],
+        "count": len(rows),
+        "execution_enabled": False,
+    }
+
+
+@app.post("/evidence/instances")
+async def record_evidence_instance(req: EvidenceInstanceRequest):
+    """Record a concrete evidence instance without changing finding state."""
+    async with db_pool.acquire() as conn:
+        return await _record_evidence_instance(conn, req)
 
 
 @app.get("/evidence/{evidence_id}")

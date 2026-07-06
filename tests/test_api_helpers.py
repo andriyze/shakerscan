@@ -1646,6 +1646,110 @@ def test_record_refuter_review_is_non_mutating():
     assert result["refuter_review"]["status"] == "recorded"
 
 
+def test_tool_receipt_redacts_hashes_and_is_non_executing():
+    receipt_id = uuid.uuid4()
+    captured: dict[str, object] = {}
+
+    class _FakeConn:
+        async def fetchrow(self, query, *args):
+            captured["query"] = str(query)
+            captured["args"] = args
+            return {
+                "id": receipt_id,
+                "tool_name": args[0],
+                "tool_version": args[1],
+                "adapter_version": args[2],
+                "command_hash": args[3],
+                "redacted_argv": args[4],
+                "worker_build": args[5],
+                "container_image": args[6],
+                "target_scope": args[7],
+                "scope_receipt_id": args[8],
+                "approval_receipt_id": args[9],
+                "policy_profile_id": args[10],
+                "status": args[11],
+                "parser_status": args[12],
+                "exit_code": args[13],
+                "timed_out": args[14],
+                "started_at": args[15],
+                "finished_at": args[16],
+                "stdout_evidence_object_id": args[17],
+                "stderr_evidence_object_id": args[18],
+                "parsed_evidence_instance_ids": args[19],
+                "redaction_summary": args[20],
+                "metadata_json": args[21],
+                "created_by": args[22],
+            }
+
+    result = asyncio.run(api_module._record_tool_receipt(_FakeConn(), api_module.ToolReceiptRequest(
+        tool_name="nuclei",
+        redacted_argv=["nuclei", "-H", "Authorization: Bearer secret-token"],
+        target_scope={"authorization": "Bearer secret-token"},
+        status="parser_error",
+        parser_status="failed",
+        metadata_json={"cookie": "session=secret-token"},
+    )))
+
+    receipt = result["tool_receipt"]
+    assert "INSERT INTO tool_receipts" in captured["query"]
+    assert receipt["execution_enabled"] is False
+    assert receipt["findings_created"] == 0
+    assert receipt["verified_findings_created"] == 0
+    assert len(receipt["command_hash"]) == 64
+    assert "secret-token" not in json.dumps(receipt, default=str)
+
+
+def test_evidence_instance_hashes_redacts_and_does_not_update_findings():
+    instance_id = uuid.uuid4()
+    finding_id = uuid.uuid4()
+    tool_receipt_id = uuid.uuid4()
+    captured: dict[str, object] = {}
+
+    class _FakeConn:
+        async def fetchrow(self, query, *args):
+            captured["query"] = str(query)
+            captured["args"] = args
+            return {
+                "id": instance_id,
+                "finding_id": args[0],
+                "evidence_object_id": args[1],
+                "scan_id": args[2],
+                "target_id": args[3],
+                "concrete_url": args[4],
+                "object_id": args[5],
+                "payload_variant": args[6],
+                "request_response_refs": args[7],
+                "principal_pair": args[8],
+                "proof_observation": args[9],
+                "campaign_action_id": args[10],
+                "tool_receipt_id": args[11],
+                "redaction_profile": args[12],
+                "hash": args[13],
+                "retention_policy": args[14],
+                "proof_state": args[15],
+                "metadata_json": args[16],
+                "created_by": args[17],
+            }
+
+    result = asyncio.run(api_module._record_evidence_instance(_FakeConn(), api_module.EvidenceInstanceRequest(
+        finding_id=str(finding_id),
+        tool_receipt_id=str(tool_receipt_id),
+        concrete_url="https://app.example.com/api/orders/1?token=secret-token",
+        principal_pair={"actor": "user1", "other": "user2"},
+        proof_observation={"authorization": "Bearer secret-token", "status": 403},
+        proof_state="suspected",
+    )))
+
+    instance = result["evidence_instance"]
+    assert "INSERT INTO evidence_instances" in captured["query"]
+    assert instance["execution_enabled"] is False
+    assert instance["findings_updated"] == 0
+    assert instance["finding_id"] == str(finding_id)
+    assert instance["tool_receipt_id"] == str(tool_receipt_id)
+    assert len(instance["hash"]) == 64
+    assert "secret-token" not in json.dumps(instance, default=str)
+
+
 def test_hypothesis_situation_report_is_bounded_and_separates_work():
     now = datetime.now(timezone.utc).replace(microsecond=0)
 

@@ -1824,6 +1824,72 @@ async def run_schema_migrations(pool) -> None:
             """)
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_evidence_objects_finding ON evidence_objects(finding_id)")
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_evidence_objects_scan ON evidence_objects(scan_id)")
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS tool_receipts (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    tool_name TEXT NOT NULL,
+                    tool_version TEXT,
+                    adapter_version TEXT NOT NULL,
+                    command_hash TEXT NOT NULL,
+                    redacted_argv JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    worker_build TEXT,
+                    container_image TEXT,
+                    target_scope JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    scope_receipt_id UUID REFERENCES scope_receipts(id) ON DELETE SET NULL,
+                    approval_receipt_id UUID REFERENCES approval_receipts(id) ON DELETE SET NULL,
+                    policy_profile_id UUID REFERENCES policy_profiles(id) ON DELETE SET NULL,
+                    status TEXT NOT NULL DEFAULT 'recorded',
+                    parser_status TEXT NOT NULL DEFAULT 'not_run',
+                    exit_code INTEGER,
+                    timed_out BOOLEAN NOT NULL DEFAULT false,
+                    started_at TIMESTAMPTZ,
+                    finished_at TIMESTAMPTZ,
+                    stdout_evidence_object_id UUID REFERENCES evidence_objects(id) ON DELETE SET NULL,
+                    stderr_evidence_object_id UUID REFERENCES evidence_objects(id) ON DELETE SET NULL,
+                    parsed_evidence_instance_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    redaction_summary TEXT,
+                    metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    created_by TEXT,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    CONSTRAINT tool_receipts_status_check
+                        CHECK (status IN ('success','failed','timeout','skipped','waived','parser_error','recorded')),
+                    CONSTRAINT tool_receipts_parser_status_check
+                        CHECK (parser_status IN ('not_run','parsed','partial','failed','not_applicable'))
+                )
+            """)
+            await conn.execute("CREATE INDEX IF NOT EXISTS idx_tool_receipts_tool_created ON tool_receipts(tool_name, created_at DESC)")
+            await conn.execute("CREATE INDEX IF NOT EXISTS idx_tool_receipts_scope ON tool_receipts(scope_receipt_id) WHERE scope_receipt_id IS NOT NULL")
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS evidence_instances (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    finding_id UUID REFERENCES findings(id) ON DELETE CASCADE,
+                    evidence_object_id UUID REFERENCES evidence_objects(id) ON DELETE SET NULL,
+                    scan_id UUID,
+                    target_id UUID REFERENCES targets(id) ON DELETE SET NULL,
+                    concrete_url TEXT,
+                    object_id TEXT,
+                    payload_variant TEXT,
+                    request_response_refs JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    principal_pair JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    proof_observation JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    campaign_action_id UUID REFERENCES campaign_actions(id) ON DELETE SET NULL,
+                    tool_receipt_id UUID REFERENCES tool_receipts(id) ON DELETE SET NULL,
+                    redaction_profile TEXT NOT NULL DEFAULT 'redact_sensitive_v1',
+                    hash TEXT NOT NULL,
+                    retention_policy TEXT NOT NULL DEFAULT 'standard',
+                    proof_state TEXT NOT NULL DEFAULT 'unverified',
+                    metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    created_by TEXT,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    CONSTRAINT evidence_instances_proof_state_check
+                        CHECK (proof_state IN ('verified','suspected','unverified','refuted','inconclusive')),
+                    CONSTRAINT evidence_instances_retention_check
+                        CHECK (retention_policy IN ('standard','short','audit','legal_hold','sensitive'))
+                )
+            """)
+            await conn.execute("CREATE INDEX IF NOT EXISTS idx_evidence_instances_finding ON evidence_instances(finding_id, created_at DESC) WHERE finding_id IS NOT NULL")
+            await conn.execute("CREATE INDEX IF NOT EXISTS idx_evidence_instances_tool_receipt ON evidence_instances(tool_receipt_id) WHERE tool_receipt_id IS NOT NULL")
+            await conn.execute("CREATE INDEX IF NOT EXISTS idx_evidence_instances_hash ON evidence_instances(hash)")
             # First-class application graph (routes, objects, producer/consumer,
             # auth boundaries) persisted from the BOLA resource_map + discovery.
             await conn.execute("""

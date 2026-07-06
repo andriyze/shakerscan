@@ -42,6 +42,8 @@ def test_command_catalog_contains_required_initial_commands():
         "agent_decision_trace.list",
         "local_agent.list",
         "evidence.get",
+        "evidence_instance.list",
+        "tool_receipt.list",
         "deployment.decision",
         "tool.status",
     ):
@@ -64,6 +66,27 @@ def test_refuter_review_commands_do_not_mutate_findings_directly():
     assert record_cmd["path"] == "/arsenal/refuter-reviews"
     assert "verdict_basis" in record_cmd["parameters_schema"]
     assert "refuter_review_row" in record_cmd["evidence_contract"]
+
+
+def test_tool_receipt_and_evidence_instance_commands_are_record_only():
+    payload = arsenal.describe_commands()
+    commands = {item["name"]: item for item in payload["commands"]}
+
+    receipt_list = commands["tool_receipt.list"]
+    receipt_record = commands["tool_receipt.record"]
+    instance_list = commands["evidence_instance.list"]
+    instance_record = commands["evidence_instance.record"]
+
+    assert receipt_list["status"] == "read_only"
+    assert instance_list["status"] == "read_only"
+    assert receipt_record["status"] == "dry_run"
+    assert instance_record["status"] == "dry_run"
+    assert receipt_record["risk_tier"] == "read_only"
+    assert instance_record["risk_tier"] == "read_only"
+    assert receipt_record["path"] == "/arsenal/tool-receipts"
+    assert instance_record["path"] == "/evidence/instances"
+    assert "parser_status" in receipt_record["parameters_schema"]
+    assert "proof_state" in instance_record["parameters_schema"]
 
 
 def test_target_principal_matrix_commands_are_non_executing_inventory():
@@ -296,6 +319,10 @@ def test_contracts_encode_planner_and_secret_boundaries():
     assert "redirect_out_of_scope" in contracts["ScopeReceipt"]["fields"]["checks"]
     assert "queued command results cannot mark findings verified" in contracts["CommandResult"]["invariants"]
     assert "parser failure cannot create verified findings" in contracts["ToolReceipt"]["invariants"]
+    assert "recording a receipt cannot run a tool or create findings" in contracts["ToolReceipt"]["invariants"]
+    assert contracts["ToolReceipt"]["status"] == "dry_run"
+    assert contracts["EvidenceInstance"]["status"] == "dry_run"
+    assert "evidence instances enumerate observations but do not directly update canonical findings" in contracts["EvidenceInstance"]["invariants"]
     assert "hypotheses cannot directly alter finding proof_state or severity" in contracts["Hypothesis"]["invariants"]
     assert "target/family/dedupe dimensions identify a lead across signal sources" in contracts["Hypothesis"]["invariants"]
     assert "effective_status" in contracts["Hypothesis"]["fields"]
