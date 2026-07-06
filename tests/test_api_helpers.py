@@ -1386,6 +1386,75 @@ def test_canonical_hypothesis_request_redacts_and_normalizes():
     assert "secret-token" not in json.dumps(payload["endorsement"])
 
 
+def test_application_graph_hypothesis_requests_build_authz_leads_not_findings():
+    target_id = "11111111-1111-4111-8111-111111111111"
+    nodes = [
+        {
+            "id": uuid.uuid4(),
+            "node_type": "route",
+            "node_key": "route:GET /api/orders",
+            "label": "GET /api/orders",
+            "attributes": json.dumps({"role": "producer"}),
+        },
+        {
+            "id": uuid.uuid4(),
+            "node_type": "object",
+            "node_key": "object:order_id",
+            "label": "order_id",
+            "attributes": json.dumps({"sensitive_fields": ["email"]}),
+        },
+        {
+            "id": uuid.uuid4(),
+            "node_type": "route",
+            "node_key": "route:GET /api/orders/{order_id}",
+            "label": "GET /api/orders/{order_id}",
+            "attributes": json.dumps({"role": "consumer"}),
+        },
+    ]
+    edges = [
+        {
+            "id": uuid.uuid4(),
+            "src_key": "route:GET /api/orders",
+            "dst_key": "object:order_id",
+            "edge_type": "produces",
+            "attributes": json.dumps({"source_principal": "user1"}),
+        },
+        {
+            "id": uuid.uuid4(),
+            "src_key": "object:order_id",
+            "dst_key": "route:GET /api/orders/{order_id}",
+            "edge_type": "consumed_by",
+            "attributes": json.dumps({}),
+        },
+        {
+            "id": uuid.uuid4(),
+            "src_key": "route:GET /api/orders",
+            "dst_key": "route:GET /api/orders/{order_id}",
+            "edge_type": "auth_boundary",
+            "attributes": json.dumps({
+                "object_id_key": "order_id",
+                "source_principal": "user1",
+                "excluded_principal": "user2",
+                "sensitive_fields": ["email"],
+            }),
+        },
+    ]
+
+    requests = api_module._application_graph_hypothesis_requests(target_id, nodes, edges, created_by="pytest")
+
+    assert len(requests) == 1
+    req = requests[0]
+    assert req.source == "app_graph"
+    assert req.family == "bola"
+    assert req.cwe == "CWE-639"
+    assert req.severity_guess == "high"
+    assert req.next_test_action["command"] == "asm.improve"
+    assert req.next_test_action["parameters"]["check_family"] == "bola"
+    assert req.next_test_action["parameters"]["exploit_depth"] is True
+    assert req.endorsement["source_principal"] == "user1"
+    assert req.endorsement["excluded_principal"] == "user2"
+
+
 def test_record_command_result_redacts_result_json_and_returns_public_row():
     captured: dict[str, object] = {"queries": []}
 

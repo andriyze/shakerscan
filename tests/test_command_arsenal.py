@@ -202,6 +202,18 @@ def test_hypothesis_commands_do_not_execute_scanners_or_create_findings():
     assert "hypothesis_row" in record_cmd["evidence_contract"]
 
 
+def test_graph_hypothesis_generation_is_dry_run_read_only_risk():
+    payload = arsenal.describe_commands()
+    commands = {item["name"]: item for item in payload["commands"]}
+
+    cmd = commands["hypothesis.generate_from_graph"]
+    assert cmd["status"] == "dry_run"
+    assert cmd["risk_tier"] == "read_only"
+    assert cmd["method"] == "POST"
+    assert cmd["path"] == "/targets/{target_id}/graph/hypotheses"
+    assert "hypothesis_rows" in cmd["evidence_contract"]
+
+
 def test_mission_contract_catalog_is_contract_only():
     payload = arsenal.describe_contracts()
 

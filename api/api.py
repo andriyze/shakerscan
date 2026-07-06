@@ -12771,6 +12771,151 @@ def _canonical_hypothesis_request(req: HypothesisRequest) -> dict[str, Any]:
     }
 
 
+def _graph_row_payload(row: Any) -> dict[str, Any]:
+    payload = row_to_dict(row)
+    payload["attributes"] = _decode_json_value(payload.get("attributes")) or {}
+    return payload
+
+
+def _graph_route_label(node: dict[str, Any] | None, node_key: str) -> str:
+    if node and node.get("label"):
+        return str(node.get("label"))
+    if str(node_key).startswith("route:"):
+        return str(node_key)[len("route:"):]
+    return str(node_key)
+
+
+def _graph_object_label(node: dict[str, Any] | None, node_key: str) -> str:
+    if node and node.get("label"):
+        return str(node.get("label"))
+    if str(node_key).startswith("object:"):
+        return str(node_key)[len("object:"):]
+    return str(node_key)
+
+
+def _application_graph_hypothesis_requests(
+    target_id: str,
+    nodes: list[Any],
+    edges: list[Any],
+    *,
+    created_by: str | None = None,
+) -> list[HypothesisRequest]:
+    """Build app-graph authz hypotheses from persisted graph facts.
+
+    The graph is a signal source only. These requests become hypotheses/leads,
+    never findings, and their next_test_action is an operator/agent suggestion
+    through existing Command Arsenal commands.
+    """
+    node_by_key: dict[str, dict[str, Any]] = {}
+    for row in nodes:
+        payload = _graph_row_payload(row)
+        if payload.get("node_key"):
+            node_by_key[str(payload.get("node_key"))] = payload
+    edge_rows = [_graph_row_payload(row) for row in edges]
+    produced_by_route: dict[str, list[str]] = {}
+    consumed_by_route: dict[str, list[str]] = {}
+    for edge in edge_rows:
+        edge_type = str(edge.get("edge_type") or "")
+        if edge_type == "produces":
+            produced_by_route.setdefault(str(edge.get("src_key")), []).append(str(edge.get("dst_key")))
+        elif edge_type == "consumed_by":
+            consumed_by_route.setdefault(str(edge.get("dst_key")), []).append(str(edge.get("src_key")))
+
+    candidates: list[HypothesisRequest] = []
+    seen: set[str] = set()
+    for edge in edge_rows:
+        if str(edge.get("edge_type") or "") != "auth_boundary":
+            continue
+        producer_key = str(edge.get("src_key") or "")
+        consumer_key = str(edge.get("dst_key") or "")
+        if not producer_key or not consumer_key:
+            continue
+        attrs = edge.get("attributes") if isinstance(edge.get("attributes"), dict) else {}
+        object_id_key = str(attrs.get("object_id_key") or "").strip()
+        object_key = f"object:{object_id_key}" if object_id_key else ""
+        if not object_key or object_key not in node_by_key:
+            shared = [
+                key for key in produced_by_route.get(producer_key, [])
+                if key in set(consumed_by_route.get(consumer_key, []))
+            ]
+            object_key = shared[0] if shared else object_key
+        object_node = node_by_key.get(object_key)
+        producer_node = node_by_key.get(producer_key)
+        consumer_node = node_by_key.get(consumer_key)
+        producer_label = _graph_route_label(producer_node, producer_key)
+        consumer_label = _graph_route_label(consumer_node, consumer_key)
+        object_label = _graph_object_label(object_node, object_key or object_id_key or "object_id")
+        sensitive = attrs.get("sensitive_fields")
+        if not isinstance(sensitive, list):
+            sensitive = []
+        source_principal = attrs.get("source_principal")
+        excluded_principal = attrs.get("excluded_principal") or attrs.get("excluded_from_principal")
+        family = "bola" if object_key or object_id_key else "bfla"
+        principal_part = f"{source_principal or 'source'}->{excluded_principal or 'other'}"
+        dedupe_key = "|".join([
+            "app_graph_authz",
+            family,
+            producer_key,
+            object_key or object_id_key or "object",
+            consumer_key,
+            principal_part,
+        ])
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        confidence = 0.72
+        if source_principal and excluded_principal:
+            confidence += 0.08
+        if sensitive:
+            confidence += 0.08
+        confidence = min(confidence, 0.9)
+        severity = "high" if sensitive or excluded_principal else "medium"
+        candidates.append(HypothesisRequest(
+            target_id=target_id,
+            source="app_graph",
+            family=family,
+            cwe="CWE-639" if family == "bola" else "CWE-862",
+            title=f"Graph authz lead: {consumer_label} consumes {object_label}",
+            description=(
+                f"{producer_label} appears to produce {object_label}; {consumer_label} appears to consume it. "
+                "Record a two-principal authorization hypothesis before running proof-backed tests."
+            ),
+            severity_guess=severity,
+            confidence=confidence,
+            dedupe_key=dedupe_key,
+            next_test_action={
+                "command": "asm.improve",
+                "parameters": {
+                    "target_id": target_id,
+                    "check_family": "bola" if family == "bola" else "auth",
+                    "exploit_depth": family == "bola",
+                },
+                "requires": ["primary_auth", "second_user_auth"] if family == "bola" else ["primary_auth"],
+            },
+            endorsement={
+                "source": "app_graph",
+                "producer_route": producer_label,
+                "consumer_route": consumer_label,
+                "object": object_label,
+                "source_principal": source_principal,
+                "excluded_principal": excluded_principal,
+                "sensitive_fields": sensitive[:25],
+            },
+            metadata_json={
+                "producer_key": producer_key,
+                "consumer_key": consumer_key,
+                "object_key": object_key or None,
+                "edge_id": str(edge.get("id")) if edge.get("id") else None,
+                "edge_type": "auth_boundary",
+                "source_principal": source_principal,
+                "excluded_principal": excluded_principal,
+                "sensitive_fields": sensitive[:25],
+            },
+            created_by=created_by or "app_graph",
+        ))
+    return candidates
+
+
 async def _upsert_hypothesis(conn, req: HypothesisRequest) -> dict[str, Any]:
     payload = _canonical_hypothesis_request(req)
     try:
@@ -14786,6 +14931,50 @@ async def get_application_graph(target_id: str, node_type: Optional[str] = None,
         "edges": edge_rows,
         "summary": {"node_count": len(node_rows), "edge_count": len(edge_rows),
                     "by_node_type": by_node, "by_edge_type": by_edge},
+    }
+
+
+@app.post("/targets/{target_id}/graph/hypotheses")
+async def generate_application_graph_hypotheses(
+    target_id: str,
+    created_by: Optional[str] = Query("app_graph", description="Audit label for generated endorsements."),
+):
+    """Record app-graph authz leads as hypotheses.
+
+    This is a lead-board producer only: it does not queue ASM, run proof tests,
+    create findings, or mark anything verified.
+    """
+    try:
+        tgt = uuid.UUID(target_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="target_id must be a UUID")
+    async with db_pool.acquire() as conn:
+        exists = await conn.fetchrow("SELECT 1 FROM targets WHERE id = $1", tgt)
+        if not exists:
+            raise HTTPException(status_code=404, detail="Target not found")
+        nodes = await conn.fetch(
+            "SELECT * FROM application_graph_nodes WHERE target_id = $1 ORDER BY node_type, node_key",
+            tgt,
+        )
+        edges = await conn.fetch(
+            "SELECT * FROM application_graph_edges WHERE target_id = $1 ORDER BY edge_type, src_key",
+            tgt,
+        )
+        requests = _application_graph_hypothesis_requests(
+            target_id,
+            list(nodes),
+            list(edges),
+            created_by=created_by,
+        )
+        records = [await _upsert_hypothesis(conn, req) for req in requests]
+    return {
+        "target_id": target_id,
+        "candidate_count": len(requests),
+        "created": sum(1 for item in records if item.get("created")),
+        "endorsed": sum(1 for item in records if not item.get("created")),
+        "hypotheses": [item["hypothesis"] for item in records],
+        "execution_enabled": False,
+        "findings_created": 0,
     }
 
 

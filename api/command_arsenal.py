@@ -540,6 +540,22 @@ COMMANDS: tuple[ArsenalCommand, ...] = (
         timeout_seconds=15,
     ),
     ArsenalCommand(
+        name="hypothesis.generate_from_graph",
+        family="governance",
+        description="Generate app-graph authorization hypotheses from persisted producer/object/consumer facts without queueing tests.",
+        status="dry_run",
+        risk_tier="read_only",
+        method="POST",
+        path="/targets/{target_id}/graph/hypotheses",
+        scope_fields=("target_id",),
+        parameters_schema={
+            "target_id": {"type": "string", "format": "uuid"},
+            "created_by": {"type": "string"},
+        },
+        evidence_contract=("hypothesis_rows", "app_graph_edges", "dedupe_key"),
+        timeout_seconds=20,
+    ),
+    ArsenalCommand(
         name="mission.timeline",
         family="governance",
         description="Read the cross-product mission timeline: command results, campaign actions, recent scans, and upcoming schedules.",

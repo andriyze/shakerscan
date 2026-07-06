@@ -481,10 +481,10 @@ raw shell execution or LLM-produced verified findings.
    and the mission timeline agree on family-aware state: attempted, proved, partial, blocked by auth,
    blocked by second user, blocked by schedule/rate cap, stale, and worker-stale.
 6. **Campaign + hypothesis layer:** DONE phase 1 for durable deduped hypotheses/leads, endorsements,
-   read APIs, bounded context-pack summaries, and compare-and-set claim leases. Remaining work is to
-   route durable application graph facts, source/spec hints, AI planner suggestions, weak scanner
-   signals, AI Gate signals, and Model Intake metadata claims into those hypotheses. Hypotheses are
-   claimable/refutable work items, not findings.
+   read APIs, bounded context-pack summaries, compare-and-set claim leases, and app-graph authz
+   hypothesis generation. Remaining work is to route source/spec hints, AI planner suggestions, weak
+   scanner signals, AI Gate signals, and Model Intake metadata claims into those hypotheses.
+   Hypotheses are claimable/refutable work items, not findings.
 7. **Detector recall campaigns:** keep benchmark gaps as proof-backed work items: POST-body SQLi,
    NoSQL JSON/body routing, stored/reflected XSS browser proof, workflow/write-side BOLA, mass
    assignment/JWT, and graph-driven authz hypotheses.
@@ -866,9 +866,12 @@ adapt it into ShakerScan's proof model: leads are coordinated work items, not fi
    `/arsenal/hypotheses` records/endorses deduped leads, lists them read-only, exposes
    compare-and-set claim leasing, and `/settings/arsenal` renders the read-only Hypothesis Board
    without creating findings or queueing work.
-3. Make an `ApplicationGraph` consumer that emits BOLA/BFLA/BOPLA/tenant/workflow hypotheses from
+3. DONE phase 1: make an `ApplicationGraph` consumer that emits BOLA/BFLA/BOPLA/tenant/workflow hypotheses from
    persisted producer->object->consumer facts. Example: "`GET /api/orders` produces `order.id` owned
-   by user1; `GET /api/orders/{id}` consumes it -> test user2 read/mutate."
+   by user1; `GET /api/orders/{id}` consumes it -> test user2 read/mutate." The first implementation
+   is `POST /targets/{id}/graph/hypotheses`, advertised as
+   `hypothesis.generate_from_graph`, which records/endorses app-graph authz leads only and does not
+   queue tests or create findings.
 4. DONE phase 1: add compare-and-set claim leasing so multiple workers/agents do not retest the same hypothesis.
    Expired claims become claimable; confirmed/refuted/dead hypotheses do not.
 5. Add append-only endorsements and refutations. Refuter signals can weaken/support/question a claim,
