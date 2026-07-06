@@ -1419,6 +1419,91 @@ def test_generated_agent_context_pack_from_target_uses_stored_facts(monkeypatch)
     assert len(generated.context_hash) == 64
 
 
+def test_local_agent_dry_run_plan_uses_context_pack_without_spawn():
+    context_id = "22222222-2222-4222-8222-222222222222"
+
+    class FakeConn:
+        async def fetchrow(self, query, *args):
+            if "FROM agent_context_packs" in query:
+                return {
+                    "id": context_id,
+                    "context_version": "2026-07-05.v1",
+                    "target_id": None,
+                    "context_hash": "d" * 64,
+                    "target_summary": {
+                        "target_id": "target-1",
+                        "url": "https://api.example.com",
+                        "root_domain": "example.com",
+                        "environment": "production",
+                    },
+                    "current_surface": {},
+                    "current_gaps": [],
+                    "hypotheses_summary": [],
+                    "findings_summary": [],
+                    "allowed_commands": ["asm.gaps", "operation_plan.preview"],
+                    "disallowed_commands": [{"command": "scan.focused_family", "reason": "gated:active"}],
+                    "known_preconditions": {
+                        "primary_credentials": "configured",
+                        "second_user_credentials": "unknown",
+                    },
+                    "context_pack": {
+                        "target_summary": {
+                            "target_id": "target-1",
+                            "url": "https://api.example.com",
+                            "root_domain": "example.com",
+                            "environment": "production",
+                        },
+                        "allowed_commands": ["asm.gaps", "operation_plan.preview"],
+                        "known_preconditions": {
+                            "primary_credentials": "configured",
+                            "second_user_credentials": "unknown",
+                        },
+                        "context_hash": "d" * 64,
+                    },
+                    "validation_errors": [],
+                    "validation_warnings": [],
+                    "status": "recorded",
+                    "created_by": "test",
+                }
+            return None
+
+    req = api_module.LocalAgentPlanRequest(
+        agent="codex",
+        context_pack_id=context_id,
+        objective="Plan BOLA checks safely",
+        created_by="test",
+    )
+    plan, metadata = asyncio.run(api_module._build_local_agent_dry_run_plan(FakeConn(), req))
+
+    assert plan.planner["kind"] == "local_agent"
+    assert plan.planner["agent"] == "codex"
+    assert plan.planner["local_agent_spawned"] is False
+    assert plan.planner["planner_execution_enabled"] is False
+    assert plan.risk_tier == "read_only"
+    assert plan.actions[0].command == "asm.gaps"
+    assert plan.actions[0].risk_tier == "read_only"
+    assert "second_user_credentials" in plan.missing_inputs
+    assert "missing_second_user_auth" in metadata["planner_notes"]
+    assert plan.target_scope["allowed_hosts"] == ["api.example.com"]
+
+
+def test_local_agent_dry_run_plan_rejects_unknown_agent():
+    class FakeConn:
+        async def fetchrow(self, query, *args):
+            return None
+
+    req = api_module.LocalAgentPlanRequest(
+        agent="unknown-agent",
+        context_pack_id="22222222-2222-4222-8222-222222222222",
+        objective="Review coverage",
+    )
+    with pytest.raises(api_module.HTTPException) as exc:
+        asyncio.run(api_module._build_local_agent_dry_run_plan(FakeConn(), req))
+
+    assert exc.value.status_code == 400
+    assert "Unknown local agent" in exc.value.detail
+
+
 def test_policy_profile_required_anchor_ids_must_be_valid_uuids():
     req = api_module.PolicyProfileRequest(
         name="strict",

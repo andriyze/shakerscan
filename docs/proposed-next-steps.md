@@ -203,6 +203,13 @@ called at real sites — verify before re-proposing any of it:
   command is exposed as `agent_context_pack.generate_from_target` with `dry_run` / `read_only`
   maturity, and `/settings/arsenal` can generate a pack from a target ID without queueing work or
   giving local agents execution power.
+- **Local-agent dry-run planning phase 1** — `POST /agents/local/plan` now creates and persists a
+  validated `OperationPlan` from a saved bounded `AgentContextPack`, labels the planner as
+  `local_agent`, and records `local_agent_spawned=false` / `planner_execution_enabled=false`. It uses
+  deterministic read-only planning rules and server-side validation; Codex/Claude/OpenCode/Hermes
+  CLIs are still not spawned, shell access is still unavailable, and no scanner work is queued.
+  `/settings/arsenal` can generate that dry-run plan from a selected local-agent label and context
+  pack ID.
 - **ActionScopeGuard and persisted scope receipt preview phase 1** — `api.action_scope.evaluate_scope`
   now fail-closes malformed URLs, scheme-relative URLs, userinfo, trailing-dot hosts,
   Unicode/punycode confusion, loopback/private/reserved ranges outside lab policy, broad CIDRs,
@@ -329,8 +336,10 @@ raw shell execution or LLM-produced verified findings.
    DONE phase 1 for persisted `AgentContextPack` and `AgentDecisionTrace` validation records.
    DONE phase 1 for read-only local-agent capability records. DONE phase 1 for target-fact generated
    `AgentContextPack` records from stored target, ASM, endpoint, finding, precondition, and command
-   facts. Remaining work is local-agent dry-run planning and mandatory receipt enforcement; it still
-   must add no new execution power until receipts/gates are durable.
+   facts. DONE phase 1 for local-agent-labeled deterministic dry-run `OperationPlan` creation from a
+   context pack without spawning local-agent CLIs. Remaining work is mandatory receipt enforcement and
+   later optional real local-agent adapter execution behind stricter gates; it still must add no new
+   execution power until receipts/gates are durable.
 2. **Unified Action Center + mission timeline:** turn the existing product cards and ASM timeline into
    a cross-product target/campaign timeline over ASM, scans, focused families, AI Gate, Model Intake,
    retests, exceptions, deployment gates, worker freshness, evidence export/replay, and blocked/skipped
@@ -504,10 +513,14 @@ bounded context packs, decision traces, and audit receipts.
    `GET /agents/local` exposes binary presence, optional version probe, auth-detected status without
    reading auth artifact contents, headless/JSON mode support, timeout support, workdir isolation
    support, network-disable support if any, max prompt and output bytes, and adapter risk notes.
-9. Strip provider API-key environment variables when spawning local planners. Send bounded context
+9. DONE phase 1: add local-agent-labeled dry-run planning without spawning local planners:
+   `POST /agents/local/plan` consumes a saved bounded `AgentContextPack`, uses deterministic
+   read-only planning rules, persists a validated `OperationPlan`, and exposes
+   `local_agent_spawned=false` / `planner_execution_enabled=false`.
+10. Strip provider API-key environment variables when spawning local planners. Send bounded context
    packs and command schemas; do not send secrets, cookies, bearer tokens, private keys, raw
    transcripts, or raw request/response bodies by default.
-10. DONE phase 1: add benchmark/planner integrity ledgers for stale workers, benchmark fitting, hidden contamination,
+11. DONE phase 1: add benchmark/planner integrity ledgers for stale workers, benchmark fitting, hidden contamination,
    AI prose counted as evidence, phantom tool assumptions, auth context not actually used, planner
    scope/risk broadening, and unrunnable planned families being presented as runnable. The first
    implementation is file-backed under `results/benchmark-runs/INTEGRITY_LEDGER.md` and
@@ -756,18 +769,23 @@ local-agent pattern is useful as a planner harness, not as raw execution power.
    shell, no verified findings from AI rationale, clear operator explanation, deterministic dry-run
    output, and consistent blocked reasons. The current scorer accepts candidate `OperationPlan` JSON
    files by fixture id and does not execute planners.
-3. Add optional local-agent detection only after evals exist. Capability records must detect binary
-   presence/auth status without reading auth artifact contents and must record version, JSON-mode
+3. DONE phase 1: optional local-agent capability detection exists. Capability records detect binary
+   presence/auth status without reading auth artifact contents and record version, JSON-mode
    support, timeout support, sandbox/read-only support, output caps, and risk notes.
-4. Strip provider API-key environment variables when spawning local planners. Do not pass secrets,
+4. DONE phase 1: local-agent-labeled dry-run planning exists without spawning local planners.
+   It consumes saved context packs and persists server-validated `OperationPlan` rows. Real
+   local-agent CLI adapters remain disabled until stricter receipt enforcement and parser/output
+   validation land.
+5. Strip provider API-key environment variables when spawning local planners. Do not pass secrets,
    cookies, bearer tokens, private keys, raw transcripts, or raw request/response bodies by default.
-5. Local agents may propose `OperationPlan` JSON and summarize redacted evidence. They may not execute
+6. Local agents may propose `OperationPlan` JSON and summarize redacted evidence. They may not execute
    arbitrary shell commands, broaden scope, increase risk tier, bypass confirmations, or mark findings
    verified.
-6. Add dry-run APIs only after eval fixtures exist: `GET /agents/local` for capability matrix,
-   `POST /agents/local/test` for bounded harmless ping, and `POST /ai/ops/plan` for a validated
-   `OperationPlan`. `/ai/ops/route` remains the only execution gateway.
-7. Reject ambiguous planner output. If a local agent lacks JSON mode, post-parse validation must fail
+7. PARTIAL: dry-run APIs now include `GET /agents/local` for capability matrix and
+   `POST /agents/local/plan` for deterministic context-pack-to-`OperationPlan` creation. Remaining
+   optional real-adapter work is bounded harmless ping and parsed local-agent output validation.
+   `/ai/ops/route` remains the only execution gateway.
+8. Reject ambiguous planner output. If a local agent lacks JSON mode, post-parse validation must fail
    closed on unknown commands, missing risk tiers, widened scope, hidden state-changing action
    requests, missing confirmations, or unbounded parameters.
 

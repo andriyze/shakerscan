@@ -5,6 +5,7 @@ import { Boxes, CheckCircle2, RefreshCw, ShieldCheck, TerminalSquare, XCircle } 
 import {
   createAgentContextPack,
   createAgentDecisionTrace,
+  createLocalAgentDryRunPlan,
   createOperationPlan,
   createApprovalReceipt,
   getAgentContextPacks,
@@ -291,6 +292,8 @@ export default function ArsenalSettingsPage() {
   const [contextResult, setContextResult] = useState<AgentContextPackResponse | null>(null)
   const [traceResult, setTraceResult] = useState<AgentDecisionTraceResponse | null>(null)
   const [contextTargetId, setContextTargetId] = useState('')
+  const [localPlannerAgent, setLocalPlannerAgent] = useState('codex')
+  const [localPlannerContextId, setLocalPlannerContextId] = useState('')
   const [recentContextPacks, setRecentContextPacks] = useState<AgentContextPack[]>([])
   const [recentDecisionTraces, setRecentDecisionTraces] = useState<AgentDecisionTrace[]>([])
   const [contextTraceLoading, setContextTraceLoading] = useState(false)
@@ -530,11 +533,31 @@ export default function ArsenalSettingsPage() {
       })
       setContextResult(response)
       setTraceResult(null)
+      setLocalPlannerContextId(response.context_pack.id)
       setRecentContextPacks((packs) => [response.context_pack, ...packs].slice(0, 5))
     } catch (err) {
       setContextTraceError(err instanceof Error ? err.message : 'Failed to generate context pack')
     } finally {
       setContextTraceLoading(false)
+    }
+  }
+
+  async function planWithLocalAgent() {
+    setPlanLoading(true)
+    setPlanError(null)
+    try {
+      const response = await createLocalAgentDryRunPlan({
+        agent: localPlannerAgent,
+        context_pack_id: localPlannerContextId.trim(),
+        objective: planObjective,
+        created_by: approvalActor.trim() || 'operator',
+      })
+      setPlanResult(response)
+      setRecentPlans((plans) => [response.operation_plan, ...plans].slice(0, 5))
+    } catch (err) {
+      setPlanError(err instanceof Error ? err.message : 'Failed to create local-agent dry-run plan')
+    } finally {
+      setPlanLoading(false)
     }
   }
 
@@ -720,14 +743,14 @@ export default function ArsenalSettingsPage() {
               <Badge className={planResult.validated ? statusClass('read_only') : statusClass('out_of_scope')}>
                 {planResult.operation_plan.status}
               </Badge>
-              <span className="font-mono text-xs text-gray-400">{planResult.operation_plan.id}</span>
+              <span className="break-all font-mono text-xs text-gray-400">{planResult.operation_plan.id}</span>
               <span className="text-xs text-gray-500">execution disabled</span>
             </div>
             <div className="mt-3 grid gap-2 text-xs text-gray-500 md:grid-cols-2">
-              <div>errors: <span className="text-gray-300">{planResult.operation_plan.validation_errors.length ? planResult.operation_plan.validation_errors.join(', ') : 'none'}</span></div>
-              <div>warnings: <span className="text-gray-300">{planResult.operation_plan.validation_warnings.length ? planResult.operation_plan.validation_warnings.join(', ') : 'none'}</span></div>
-              <div>scope receipt: <span className="font-mono text-gray-300">{planResult.operation_plan.scope_receipt_id || 'none'}</span></div>
-              <div>approval receipt: <span className="font-mono text-gray-300">{planResult.operation_plan.approval_receipt_id || 'none'}</span></div>
+              <div>errors: <span className="break-words text-gray-300">{planResult.operation_plan.validation_errors.length ? planResult.operation_plan.validation_errors.join(', ') : 'none'}</span></div>
+              <div>warnings: <span className="break-words text-gray-300">{planResult.operation_plan.validation_warnings.length ? planResult.operation_plan.validation_warnings.join(', ') : 'none'}</span></div>
+              <div>scope receipt: <span className="break-all font-mono text-gray-300">{planResult.operation_plan.scope_receipt_id || 'none'}</span></div>
+              <div>approval receipt: <span className="break-all font-mono text-gray-300">{planResult.operation_plan.approval_receipt_id || 'none'}</span></div>
             </div>
           </div>
         )}
@@ -736,16 +759,63 @@ export default function ArsenalSettingsPage() {
             {recentPlans.slice(0, 5).map((plan) => (
               <div key={plan.id} className="rounded-md border border-gray-800 bg-gray-950 px-3 py-2">
                 <div className="flex flex-wrap items-center justify-between gap-2">
-                  <span className="min-w-0 truncate text-sm text-gray-200">{plan.objective}</span>
-                  <div className="flex shrink-0 items-center gap-2">
+                  <span className="min-w-0 break-words text-sm text-gray-200">{plan.objective}</span>
+                  <div className="flex min-w-0 flex-wrap items-center justify-end gap-2">
                     <Badge className={plan.status === 'blocked' ? statusClass('out_of_scope') : statusClass('read_only')}>{plan.status}</Badge>
-                    <span className="font-mono text-xs text-gray-500">{plan.id}</span>
+                    <span className="break-all font-mono text-xs text-gray-500">{plan.id}</span>
                   </div>
                 </div>
               </div>
             ))}
           </div>
         )}
+        <div className="mt-4 rounded-md border border-gray-800 bg-gray-950 p-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <h3 className="text-sm font-medium text-white">Local-Agent Dry-Run Planner</h3>
+              <p className="mt-1 text-xs text-gray-500">
+                Creates a validated OperationPlan from a saved context pack without spawning a local agent or executing commands.
+              </p>
+            </div>
+            <Badge className="bg-gray-800 text-gray-300">execution disabled</Badge>
+          </div>
+          <div className="mt-3 grid gap-3 md:grid-cols-[minmax(0,12rem)_minmax(0,1fr)_auto]">
+            <label className="block">
+              <span className="text-xs text-gray-500">Planner</span>
+              <select
+                value={localPlannerAgent}
+                onChange={(event) => setLocalPlannerAgent(event.target.value)}
+                className="mt-1 w-full rounded-md border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white focus:border-blue-500 focus:outline-none"
+              >
+                {visibleLocalAgents.map((agent) => (
+                  <option key={agent.agent} value={agent.agent}>
+                    {agent.display_name}
+                  </option>
+                ))}
+                {visibleLocalAgents.length === 0 && <option value="codex">Codex</option>}
+              </select>
+            </label>
+            <label className="block">
+              <span className="text-xs text-gray-500">Context pack ID</span>
+              <input
+                value={localPlannerContextId}
+                onChange={(event) => setLocalPlannerContextId(event.target.value)}
+                placeholder="00000000-0000-0000-0000-000000000000"
+                className="mt-1 w-full rounded-md border border-gray-700 bg-gray-950 px-3 py-2 font-mono text-xs text-white focus:border-blue-500 focus:outline-none"
+              />
+            </label>
+            <div className="flex items-end">
+              <Button
+                type="button"
+                variant="secondary"
+                onClick={() => void planWithLocalAgent()}
+                disabled={planLoading || !localPlannerContextId.trim() || !planObjective.trim()}
+              >
+                Plan from context
+              </Button>
+            </div>
+          </div>
+        </div>
       </Card>
 
       <Card className="p-4">

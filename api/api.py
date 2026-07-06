@@ -3205,6 +3205,13 @@ class AgentContextPackFromTargetRequest(BaseModel):
     endpoint_limit: int = Field(default=12, ge=0, le=50)
 
 
+class LocalAgentPlanRequest(BaseModel):
+    agent: str = Field(default="codex")
+    context_pack_id: str
+    objective: str
+    created_by: Optional[str] = None
+
+
 class AgentDecisionTraceStep(BaseModel):
     kind: str
     command: Optional[str] = None
@@ -12366,6 +12373,159 @@ async def _validate_operation_plan(conn, req: OperationPlanRequest) -> tuple[dic
     return payload, errors, warnings, status
 
 
+async def _persist_operation_plan(conn, req: OperationPlanRequest) -> dict[str, Any]:
+    payload, errors, warnings, status = await _validate_operation_plan(conn, req)
+    scope_id = str(payload.get("scope_receipt_id") or "").strip() or None
+    approval_id = str(payload.get("approval_receipt_id") or "").strip() or None
+    row = await conn.fetchrow(
+        """
+        INSERT INTO operation_plans (
+            objective, planner, context_hash, target_scope, risk_tier, actions,
+            confirmations, missing_inputs, stop_conditions, success_criteria,
+            status, validation_errors, validation_warnings, scope_receipt_id,
+            approval_receipt_id, plan_json, created_by
+        ) VALUES (
+            $1,$2::jsonb,$3,$4::jsonb,$5,$6::jsonb,
+            $7::jsonb,$8::jsonb,$9::jsonb,$10::jsonb,
+            $11,$12::jsonb,$13::jsonb,$14,$15,$16::jsonb,$17
+        )
+        RETURNING *
+        """,
+        payload["objective"],
+        json.dumps(payload.get("planner") or {}),
+        payload["context_hash"],
+        json.dumps(payload.get("target_scope") or {}),
+        payload["risk_tier"],
+        json.dumps(payload.get("actions") or []),
+        json.dumps(payload.get("confirmations") or []),
+        json.dumps(payload.get("missing_inputs") or []),
+        json.dumps(payload.get("stop_conditions") or []),
+        json.dumps(payload.get("success_criteria") or []),
+        status,
+        json.dumps(errors),
+        json.dumps(warnings),
+        scope_id,
+        uuid.UUID(approval_id) if approval_id else None,
+        json.dumps(payload),
+        str(payload.get("created_by") or "").strip() or None,
+    )
+    return {
+        "operation_plan": _public_operation_plan_row(row),
+        "execution_enabled": False,
+        "validated": not errors,
+    }
+
+
+def _context_pack_target_scope(context_pack: dict[str, Any]) -> dict[str, Any]:
+    target_summary = context_pack.get("target_summary") if isinstance(context_pack.get("target_summary"), dict) else {}
+    url = str(target_summary.get("url") or "").strip()
+    host = ""
+    if url:
+        parsed = urllib.parse.urlparse(url if "://" in url else f"https://{url}")
+        host = parsed.hostname or ""
+    allowed_hosts = target_summary.get("allowed_hosts") if isinstance(target_summary.get("allowed_hosts"), list) else []
+    if not allowed_hosts and host:
+        allowed_hosts = [host]
+    return {
+        "target_id": target_summary.get("target_id"),
+        "url": url,
+        "allowed_hosts": allowed_hosts,
+        "allowed_root_domains": target_summary.get("allowed_root_domains") or ([target_summary.get("root_domain")] if target_summary.get("root_domain") else []),
+        "environment": target_summary.get("environment") or "unknown",
+    }
+
+
+def _choose_local_agent_plan_action(context_pack: dict[str, Any], objective: str) -> tuple[list[dict[str, Any]], list[str], list[str]]:
+    allowed = {
+        str(item).strip()
+        for item in context_pack.get("allowed_commands", [])
+        if str(item).strip()
+    }
+    preconditions = context_pack.get("known_preconditions") if isinstance(context_pack.get("known_preconditions"), dict) else {}
+    lowered = objective.lower()
+    missing_inputs: list[str] = []
+    notes: list[str] = []
+
+    if any(term in lowered for term in ("bola", "idor", "authz", "authorization", "tenant")):
+        if str(preconditions.get("second_user_credentials") or "").lower() != "configured":
+            missing_inputs.append("second_user_credentials")
+            notes.append("missing_second_user_auth")
+        if "asm.gaps" in allowed:
+            return ([{"command": "asm.gaps", "risk_tier": "read_only", "parameters": {}, "reason": "inspect authz prerequisites before any gated BOLA work"}], missing_inputs, notes)
+
+    if any(term in lowered for term in ("sqli", "sql injection", "xss", "coverage", "covered", "asm")) and "asm.gaps" in allowed:
+        return ([{"command": "asm.gaps", "risk_tier": "read_only", "parameters": {}, "reason": "review coverage gaps before queueing any gated work"}], missing_inputs, notes)
+
+    if "target.get" in allowed:
+        return ([{"command": "target.get", "risk_tier": "read_only", "parameters": {}, "reason": "inspect target facts before planning"}], missing_inputs, notes)
+    if "operation_plan.preview" in allowed:
+        return ([{"command": "operation_plan.preview", "risk_tier": "read_only", "parameters": {}, "reason": "preview operation plan without execution"}], missing_inputs, notes)
+    if "agent_context_pack.list" in allowed:
+        return ([{"command": "agent_context_pack.list", "risk_tier": "read_only", "parameters": {}, "reason": "inspect available context packs"}], missing_inputs, notes)
+    return ([], ["allowed_read_only_command"], ["no_allowed_read_only_command"])
+
+
+async def _build_local_agent_dry_run_plan(conn, req: LocalAgentPlanRequest) -> tuple[OperationPlanRequest, dict[str, Any]]:
+    agent_name = str(req.agent or "").strip()
+    local_agents = describe_local_agents(probe_versions=False)
+    known_agents = {
+        str(agent.get("agent")): agent
+        for agent in local_agents.get("agents", [])
+        if isinstance(agent, dict) and agent.get("agent")
+    }
+    if agent_name not in known_agents:
+        raise HTTPException(status_code=400, detail="Unknown local agent")
+
+    try:
+        context_uuid = uuid.UUID(str(req.context_pack_id))
+    except ValueError:
+        raise HTTPException(status_code=400, detail="context_pack_id must be a UUID")
+    row = await conn.fetchrow("SELECT * FROM agent_context_packs WHERE id=$1", context_uuid)
+    if not row:
+        raise HTTPException(status_code=404, detail="Agent context pack not found")
+
+    context_row = _public_agent_context_pack_row(row)
+    context_pack = context_row.get("context_pack") if isinstance(context_row.get("context_pack"), dict) else {}
+    if not context_pack:
+        context_pack = {
+            "target_summary": context_row.get("target_summary") or {},
+            "current_surface": context_row.get("current_surface") or {},
+            "current_gaps": context_row.get("current_gaps") or [],
+            "allowed_commands": context_row.get("allowed_commands") or [],
+            "known_preconditions": context_row.get("known_preconditions") or {},
+        }
+    actions, missing_inputs, notes = _choose_local_agent_plan_action(context_pack, req.objective)
+    if not actions:
+        actions = [{"command": "agent_context_pack.list", "risk_tier": "read_only", "parameters": {}, "reason": "fallback read-only context inspection"}]
+
+    plan = OperationPlanRequest(
+        objective=str(req.objective or "").strip(),
+        planner={
+            "kind": "local_agent",
+            "agent": agent_name,
+            "mode": "deterministic_dry_run",
+            "local_agent_spawned": False,
+            "planner_execution_enabled": False,
+            "schema_version": local_agents.get("schema_version"),
+        },
+        context_hash=str(context_row.get("context_hash") or "").lower(),
+        target_scope=_context_pack_target_scope(context_pack),
+        risk_tier="read_only",
+        missing_inputs=missing_inputs,
+        confirmations=[],
+        actions=actions,
+        stop_conditions=["scope_blocked", "missing_required_input", "operator_cancelled"],
+        success_criteria=["operation_plan_validated", "no_execution_performed"],
+        created_by=req.created_by,
+    )
+    metadata = {
+        "agent": known_agents[agent_name],
+        "context_pack": context_row,
+        "planner_notes": notes,
+    }
+    return plan, metadata
+
+
 def _canonical_receipt_host(value: Any) -> str:
     host = str(value or "").strip().strip("[]").lower()
     if host.endswith("."):
@@ -12557,46 +12717,7 @@ async def arsenal_create_approval(req: ApprovalReceiptRequest):
 async def arsenal_create_operation_plan(req: OperationPlanRequest):
     """Validate and persist a dry-run OperationPlan without executing any action."""
     async with db_pool.acquire() as conn:
-        payload, errors, warnings, status = await _validate_operation_plan(conn, req)
-        scope_id = str(payload.get("scope_receipt_id") or "").strip() or None
-        approval_id = str(payload.get("approval_receipt_id") or "").strip() or None
-        row = await conn.fetchrow(
-            """
-            INSERT INTO operation_plans (
-                objective, planner, context_hash, target_scope, risk_tier, actions,
-                confirmations, missing_inputs, stop_conditions, success_criteria,
-                status, validation_errors, validation_warnings, scope_receipt_id,
-                approval_receipt_id, plan_json, created_by
-            ) VALUES (
-                $1,$2::jsonb,$3,$4::jsonb,$5,$6::jsonb,
-                $7::jsonb,$8::jsonb,$9::jsonb,$10::jsonb,
-                $11,$12::jsonb,$13::jsonb,$14,$15,$16::jsonb,$17
-            )
-            RETURNING *
-            """,
-            payload["objective"],
-            json.dumps(payload.get("planner") or {}),
-            payload["context_hash"],
-            json.dumps(payload.get("target_scope") or {}),
-            payload["risk_tier"],
-            json.dumps(payload.get("actions") or []),
-            json.dumps(payload.get("confirmations") or []),
-            json.dumps(payload.get("missing_inputs") or []),
-            json.dumps(payload.get("stop_conditions") or []),
-            json.dumps(payload.get("success_criteria") or []),
-            status,
-            json.dumps(errors),
-            json.dumps(warnings),
-            scope_id,
-            uuid.UUID(approval_id) if approval_id else None,
-            json.dumps(payload),
-            str(payload.get("created_by") or "").strip() or None,
-        )
-    return {
-        "operation_plan": _public_operation_plan_row(row),
-        "execution_enabled": False,
-        "validated": not errors,
-    }
+        return await _persist_operation_plan(conn, req)
 
 
 @app.get("/arsenal/plans")
@@ -12727,6 +12848,32 @@ async def local_agents(
 ):
     """Read-only local-agent capability matrix. Does not read auth artifacts or execute prompts."""
     return describe_local_agents(probe_versions=bool(probe_versions))
+
+
+@app.post("/agents/local/plan")
+async def local_agent_dry_run_plan(req: LocalAgentPlanRequest):
+    """Persist a local-agent-labeled dry-run OperationPlan from a bounded context pack.
+
+    This endpoint intentionally does not spawn Codex, Claude Code, OpenCode, Hermes, shell
+    commands, or scanners. It gives operators a validated planning artifact while the
+    local-agent execution boundary remains disabled.
+    """
+    async with db_pool.acquire() as conn:
+        plan_req, metadata = await _build_local_agent_dry_run_plan(conn, req)
+        response = await _persist_operation_plan(conn, plan_req)
+    return {
+        **response,
+        "local_agent_spawned": False,
+        "planner_execution_enabled": False,
+        "agent": {
+            "agent": metadata["agent"].get("agent"),
+            "status": metadata["agent"].get("status"),
+            "auth_detected": metadata["agent"].get("auth_detected"),
+            "binary_path": metadata["agent"].get("binary_path"),
+        },
+        "context_pack_id": metadata["context_pack"].get("id"),
+        "planner_notes": metadata.get("planner_notes") or [],
+    }
 
 
 class AsmTestRequest(BaseModel):

@@ -238,3 +238,15 @@ def test_local_agent_list_command_is_read_only():
     assert cmd["risk_tier"] == "read_only"
     assert cmd["path"] == "/agents/local"
     assert "local_agent_capability_rows" in cmd["evidence_contract"]
+
+
+def test_local_agent_plan_command_is_dry_run_not_execution():
+    payload = arsenal.describe_commands()
+    commands = {item["name"]: item for item in payload["commands"]}
+
+    cmd = commands["local_agent.plan_dry_run"]
+    assert cmd["status"] == "dry_run"
+    assert cmd["risk_tier"] == "read_only"
+    assert cmd["path"] == "/agents/local/plan"
+    assert cmd["scope_fields"] == ["context_pack_id"]
+    assert "operation_plan" in cmd["evidence_contract"]

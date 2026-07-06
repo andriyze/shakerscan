@@ -263,6 +263,26 @@ export interface OperationPlanResponse {
   validated: boolean
 }
 
+export interface LocalAgentPlanRequest {
+  agent: string
+  context_pack_id: string
+  objective: string
+  created_by?: string
+}
+
+export interface LocalAgentPlanResponse extends OperationPlanResponse {
+  local_agent_spawned: boolean
+  planner_execution_enabled: boolean
+  agent: {
+    agent: string
+    status: string
+    auth_detected: boolean
+    binary_path?: string | null
+  }
+  context_pack_id: string
+  planner_notes: string[]
+}
+
 export interface AgentContextPackRequest {
   context_version?: string
   target_id?: string
@@ -1594,6 +1614,16 @@ export async function getLocalAgents(params?: { probeVersions?: boolean }): Prom
   const query = searchParams.toString()
   const res = await fetch(`${API_URL}/agents/local${query ? `?${query}` : ''}`)
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to fetch local agents'))
+  return res.json()
+}
+
+export async function createLocalAgentDryRunPlan(payload: LocalAgentPlanRequest): Promise<LocalAgentPlanResponse> {
+  const res = await fetch(`${API_URL}/agents/local/plan`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to create local-agent dry-run plan'))
   return res.json()
 }
 
