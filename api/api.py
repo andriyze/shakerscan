@@ -97,6 +97,13 @@ except ModuleNotFoundError as exc:
     )
 
 try:
+    from evidence_storage import hydrate_evidence_content
+except ModuleNotFoundError as exc:
+    if exc.name != "evidence_storage":
+        raise
+    from api.evidence_storage import hydrate_evidence_content
+
+try:
     from scan_verification_state import scan_time_verification_fields as _scan_time_verification_fields
 except ModuleNotFoundError as exc:
     if exc.name != "scan_verification_state":
@@ -17348,6 +17355,10 @@ async def list_findings(
     }
 
 
+def _public_evidence_object_row(row: Any) -> dict[str, Any]:
+    return hydrate_evidence_content(row_to_dict(row), results_dir=RESULTS_DIR)
+
+
 @app.get("/findings/{finding_id}/evidence")
 async def list_finding_evidence(finding_id: str):
     """Durable evidence objects (hash, redaction profile, retention class, storage
@@ -17361,7 +17372,10 @@ async def list_finding_evidence(finding_id: str):
             "SELECT * FROM evidence_objects WHERE finding_id = $1 ORDER BY created_at, object_type",
             finding["id"],
         )
-    return {"finding_id": str(finding["id"]), "evidence_objects": [row_to_dict(r) for r in rows]}
+    return {
+        "finding_id": str(finding["id"]),
+        "evidence_objects": [_public_evidence_object_row(r) for r in rows],
+    }
 
 
 @app.get("/evidence/instances")
@@ -17415,7 +17429,7 @@ async def get_evidence_object(evidence_id: str):
         row = await conn.fetchrow("SELECT * FROM evidence_objects WHERE id = $1", eid)
     if not row:
         raise HTTPException(status_code=404, detail="Evidence object not found")
-    return row_to_dict(row)
+    return _public_evidence_object_row(row)
 
 
 @app.get("/findings/{finding_id:path}")

@@ -11,6 +11,7 @@ sys.modules.setdefault("asyncpg", types.SimpleNamespace())
 sys.modules.setdefault("redis", types.SimpleNamespace(from_url=lambda *a, **k: None))
 
 import worker  # noqa: E402
+from evidence_storage import hydrate_evidence_content, local_evidence_path  # noqa: E402
 
 
 class _CaptureConn:
@@ -36,6 +37,36 @@ def test_evidence_object_is_hashed_redaction_profiled_and_retention_classed():
     assert args[6] == "redact_sensitive_v1"      # redaction profile
     assert args[7] == "sensitive"                # has request/response -> sensitive
     assert "1=1" in args[8]                       # content carries the evidence
+
+
+def test_large_evidence_object_externalizes_to_local_store(monkeypatch, tmp_path):
+    monkeypatch.setattr(worker, "RESULTS_DIR", tmp_path)
+    monkeypatch.setenv("EVIDENCE_INLINE_MAX_BYTES", "16")
+    conn = _CaptureConn()
+    evidence = {"blob": "x" * 200}
+
+    asyncio.run(worker._persist_evidence_object(conn, "scan-uuid", "finding-uuid", {"tool": "ai_gate"}, evidence))
+
+    args = conn.calls[0][1]
+    assert args[3] and len(args[3]) == 64
+    assert args[4] > 16
+    assert args[5].startswith("local:evidence_objects/")
+    assert args[8] is None
+    path = local_evidence_path(tmp_path, args[5])
+    assert path is not None and path.exists()
+    assert "x" * 200 in path.read_text(encoding="utf-8")
+
+    hydrated = hydrate_evidence_content(
+        {
+            "content_sha256": args[3],
+            "storage_uri": args[5],
+            "content": None,
+        },
+        results_dir=tmp_path,
+    )
+    assert hydrated["storage_status"] == "external"
+    assert hydrated["storage_integrity"] == "verified"
+    assert "x" * 200 in hydrated["content"]
 
 
 def test_evidence_object_retention_standard_without_sensitive_fields():

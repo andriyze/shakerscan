@@ -80,6 +80,7 @@ if "fastapi" not in sys.modules:
     sys.modules["fastapi.responses"] = responses_mod
 
 import api as api_module  # noqa: E402
+from evidence_storage import store_evidence_content  # noqa: E402
 from scan_verification_state import scan_time_verification_fields  # noqa: E402
 
 sys.path.pop(0)
@@ -1748,6 +1749,30 @@ def test_evidence_instance_hashes_redacts_and_does_not_update_findings():
     assert instance["tool_receipt_id"] == str(tool_receipt_id)
     assert len(instance["hash"]) == 64
     assert "secret-token" not in json.dumps(instance, default=str)
+
+
+def test_public_evidence_object_row_hydrates_local_storage(monkeypatch, tmp_path):
+    stored = store_evidence_content({"large": "x" * 200}, results_dir=tmp_path, inline_max_bytes=8)
+    monkeypatch.setattr(api_module, "RESULTS_DIR", tmp_path)
+
+    row = {
+        "id": uuid.uuid4(),
+        "finding_id": uuid.uuid4(),
+        "content_sha256": stored["content_sha256"],
+        "size_bytes": stored["size_bytes"],
+        "storage_uri": stored["storage_uri"],
+        "content": None,
+        "created_at": datetime(2026, 7, 6, tzinfo=timezone.utc),
+    }
+
+    public = api_module._public_evidence_object_row(row)
+
+    assert public["storage_uri"].startswith("local:evidence_objects/")
+    assert public["storage_status"] == "external"
+    assert public["storage_integrity"] == "verified"
+    assert "x" * 200 in public["content"]
+    assert isinstance(public["id"], str)
+    assert public["created_at"].startswith("2026-07-06")
 
 
 def test_hypothesis_situation_report_is_bounded_and_separates_work():

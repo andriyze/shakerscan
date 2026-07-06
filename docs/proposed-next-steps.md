@@ -916,23 +916,30 @@ authz replay so expected admin/customer/tenant boundaries become proof-backed te
 principal's access is a finding.
 
 ### 9. Evidence object store phase 2, EvidenceInstance split, and tool receipts
-**Status: PARTIAL, PHASE 1 RECEIPT/INSTANCE RECORDS + TOOL STATUS GATE DONE.** `evidence_objects`
+**Status: PARTIAL, PHASE 1 LOCAL EVIDENCE STORAGE + RECEIPT/INSTANCE RECORDS + TOOL STATUS GATE DONE.** `evidence_objects`
 table ships (hash, redaction_profile, retention_class, storage_uri, scan/finding links);
 `save_findings` + `save_ai_findings` write one object per finding; `GET /findings/{id}/evidence` +
 `GET /evidence/{id}` read them. The canonical finding collapse works
 (`templated_finding_identity`, `all_urls`, `all_payloads`, `duplicate_count`). `tool_receipts` and
 `evidence_instances` now persist record-only receipts and concrete proof observations through
 `GET/POST /arsenal/tool-receipts` and `GET/POST /evidence/instances`; recording either cannot run
-tools, create findings, or update canonical finding proof state. `GET /arsenal/tools` now returns a
-`release_gate` named `no_phantom_tools` that fails if an adapter claims installed/runnable status
-without a resolved binary or internal implementation, or if a runnable adapter lacks parser/proof
-metadata. Worker finalization now emits record-only `ToolReceipt` rows for the internal AI Gate probe
-executor and Model Intake signature verifier on success/failure, stamping returned receipt ids into
-scan results without changing findings or proof state. External DAST/ASM tools are not yet wired to
-emit receipts automatically, and large artifacts are still not externalized.
+tools, create findings, or update canonical finding proof state. Large redacted evidence payloads now
+externalize to a content-addressed local object store under `RESULTS_DIR/evidence-objects` with
+`local:evidence_objects/...` storage URIs, and the evidence read API hydrates/verifies them on read.
+`GET /arsenal/tools` now returns a `release_gate` named `no_phantom_tools` that fails if an adapter
+claims installed/runnable status without a resolved binary or internal implementation, or if a
+runnable adapter lacks parser/proof metadata. Worker finalization now emits record-only `ToolReceipt`
+rows for the internal AI Gate probe executor and Model Intake signature verifier on success/failure,
+stamping returned receipt ids into scan results without changing findings or proof state. External
+DAST/ASM tools are not yet wired to emit receipts automatically, remote S3/MinIO-style object storage
+is still open, and retention/export manifests are still open.
 
 **Implement:**
-1. Externalize `storage_uri` from `inline:` to S3/MinIO or local object storage for large objects.
+1. DONE phase 1: externalize `storage_uri` from `inline:` to local object storage for large objects.
+   `api/evidence_storage.py` stores oversized redacted evidence by content hash under
+   `RESULTS_DIR/evidence-objects`, returns `local:evidence_objects/...`, and `GET /evidence/{id}` /
+   `GET /findings/{id}/evidence` hydrate and integrity-check local content. Remote S3/MinIO backends
+   remain open.
 2. Add a retention sweeper and export manifest format.
 3. DONE phase 1: split canonical `Finding` from `EvidenceInstance {concrete_url, object_id, payload_variant,
    request_response_refs, principal_pair, proof_observation, campaign_action_id, tool_receipt_id,

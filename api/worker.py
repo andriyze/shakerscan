@@ -44,6 +44,7 @@ from retest_contract import (
 )
 import parallel_scan
 import asm_inventory
+from evidence_storage import store_evidence_content
 from secret_store import decrypt_secret
 
 try:
@@ -1823,13 +1824,12 @@ async def _persist_evidence_object(conn, scan_uuid, finding_id, finding: dict, e
     """Best-effort: persist a finding's (already null-stripped + redacted) evidence as
     a first-class durable evidence_object. NEVER raises — an evidence-object write must
     not fail or roll back the scan; findings.evidence stays the back-compat source of
-    truth. Inline storage for now (storage_uri=inline:); a later phase can externalize."""
+    truth. Large payloads are content-addressed under RESULTS_DIR/evidence-objects."""
     if not finding_id:
         return
     try:
         content = evidence_redacted if evidence_redacted else None
-        raw = json.dumps(content, sort_keys=True, default=str) if content is not None else None
-        sha = hashlib.sha256(raw.encode("utf-8", "ignore")).hexdigest() if raw else None
+        stored = store_evidence_content(content, results_dir=RESULTS_DIR)
         tool = tool_override or finding.get("tool")
         object_type = (f"{tool}_evidence" if tool else "finding_evidence")[:64]
         retention = "sensitive" if (
@@ -1845,9 +1845,9 @@ async def _persist_evidence_object(conn, scan_uuid, finding_id, finding: dict, e
                 content_sha256=EXCLUDED.content_sha256, size_bytes=EXCLUDED.size_bytes,
                 storage_uri=EXCLUDED.storage_uri, content=EXCLUDED.content,
                 retention_class=EXCLUDED.retention_class, created_at=NOW()
-        """, scan_uuid, finding_id, object_type, sha,
-             len(raw.encode("utf-8", "ignore")) if raw else 0,
-             "inline:evidence_objects", "redact_sensitive_v1", retention, raw)
+        """, scan_uuid, finding_id, object_type,
+             stored["content_sha256"], stored["size_bytes"], stored["storage_uri"],
+             "redact_sensitive_v1", retention, stored["content"])
     except Exception as e:
         print(f"[evidence] persist failed for finding {finding_id}: {type(e).__name__}: {e}", flush=True)
 
