@@ -286,6 +286,34 @@ export interface CommandResult {
   created_at?: string
 }
 
+export interface CampaignAction {
+  id: string
+  command: string
+  action_name: string
+  status: string
+  dry_run: boolean
+  risk_tier: string
+  operation_plan_id?: string | null
+  command_result_id?: string | null
+  scope_receipt_id?: string | null
+  approval_receipt_id?: string | null
+  campaign_id?: string | null
+  target_id?: string | null
+  target_url?: string | null
+  scan_id?: string | null
+  live_scan_status?: string | null
+  finding_ids: string[]
+  hypothesis_ids: string[]
+  evidence_object_ids: string[]
+  tool_receipt_ids: string[]
+  blocked_by: string[]
+  next_action?: string | null
+  operator_message?: string | null
+  result_json: Record<string, unknown>
+  created_by?: string | null
+  created_at?: string
+}
+
 export interface LocalAgentPlanRequest {
   agent: string
   context_pack_id: string
@@ -1627,6 +1655,12 @@ export async function getOperationPlans(limit: number = 20): Promise<{ operation
 export async function getCommandResults(limit: number = 20): Promise<{ command_results: CommandResult[]; execution_enabled: boolean; count: number }> {
   const res = await fetch(`${API_URL}/arsenal/command-results?limit=${limit}`)
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load command result audit records'))
+  return res.json()
+}
+
+export async function getCampaignActions(limit: number = 20): Promise<{ campaign_actions: CampaignAction[]; execution_enabled: boolean; count: number }> {
+  const res = await fetch(`${API_URL}/arsenal/campaign-actions?limit=${limit}`)
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load campaign action records'))
   return res.json()
 }
 

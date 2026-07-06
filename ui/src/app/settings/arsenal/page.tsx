@@ -12,6 +12,7 @@ import {
   getAgentDecisionTraces,
   getArsenalCommands,
   getArsenalContracts,
+  getCampaignActions,
   getCommandResults,
   generateAgentContextPackFromTarget,
   getOperationPlans,
@@ -28,6 +29,7 @@ import {
   type ArsenalCommandsResponse,
   type ArsenalContractDefinition,
   type ArsenalContractsResponse,
+  type CampaignAction,
   type CommandResult,
   type OperationPlan,
   type OperationPlanResponse,
@@ -168,6 +170,56 @@ function CommandResultRow({ result }: { result: CommandResult }) {
           ))}
           {result.finding_ids.length > 4 && <Badge className="bg-gray-800 text-gray-300">+{result.finding_ids.length - 4}</Badge>}
           {result.blocked_by.map((reason) => (
+            <Badge key={reason} className={statusClass('out_of_scope')}>{reason}</Badge>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function CampaignActionRow({ action }: { action: CampaignAction }) {
+  const status = action.live_scan_status || action.status
+  return (
+    <div className="rounded-md border border-gray-800 bg-gray-950 px-3 py-2">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="break-all font-mono text-sm text-white">{action.action_name || action.command}</span>
+            <Badge className={statusClass(status)}>{status}</Badge>
+            <Badge className={riskClass(action.risk_tier)}>{action.risk_tier}</Badge>
+            {action.dry_run && <Badge className={statusClass('dry_run')}>dry run</Badge>}
+          </div>
+          <p className="mt-1 break-words text-sm text-gray-400">
+            {action.operator_message || 'Recorded campaign action'}
+          </p>
+        </div>
+        {action.next_action ? (
+          <a
+            href={action.next_action}
+            className="rounded-md border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:border-blue-400 hover:text-white"
+          >
+            Open
+          </a>
+        ) : null}
+      </div>
+      <div className="mt-2 grid gap-2 text-xs text-gray-500 md:grid-cols-2">
+        <div>action: <span className="break-all font-mono text-gray-300">{action.id}</span></div>
+        <div>command result: <span className="break-all font-mono text-gray-300">{action.command_result_id || 'standalone'}</span></div>
+        <div>campaign: <span className="break-all font-mono text-gray-300">{action.campaign_id || 'none'}</span></div>
+        <div>scan: <span className="break-all font-mono text-gray-300">{action.scan_id || 'none'}</span></div>
+        <div>scope receipt: <span className="break-all font-mono text-gray-300">{action.scope_receipt_id || 'none'}</span></div>
+        <div>approval receipt: <span className="break-all font-mono text-gray-300">{action.approval_receipt_id || 'none'}</span></div>
+      </div>
+      {(action.hypothesis_ids.length > 0 || action.evidence_object_ids.length > 0 || action.blocked_by.length > 0) && (
+        <div className="mt-2 flex flex-wrap gap-1.5">
+          {action.hypothesis_ids.slice(0, 3).map((id) => (
+            <Badge key={id} className="bg-gray-800 text-gray-300">hypothesis {id.slice(0, 8)}</Badge>
+          ))}
+          {action.evidence_object_ids.slice(0, 3).map((id) => (
+            <Badge key={id} className="bg-gray-800 text-gray-300">evidence {id.slice(0, 8)}</Badge>
+          ))}
+          {action.blocked_by.map((reason) => (
             <Badge key={reason} className={statusClass('out_of_scope')}>{reason}</Badge>
           ))}
         </div>
@@ -375,6 +427,7 @@ export default function ArsenalSettingsPage() {
   const [planResult, setPlanResult] = useState<OperationPlanResponse | null>(null)
   const [recentPlans, setRecentPlans] = useState<OperationPlan[]>([])
   const [recentCommandResults, setRecentCommandResults] = useState<CommandResult[]>([])
+  const [recentCampaignActions, setRecentCampaignActions] = useState<CampaignAction[]>([])
   const [planLoading, setPlanLoading] = useState(false)
   const [planError, setPlanError] = useState<string | null>(null)
   const [contextResult, setContextResult] = useState<AgentContextPackResponse | null>(null)
@@ -397,13 +450,24 @@ export default function ArsenalSettingsPage() {
     if (probeVersions) setProbing(true)
     else setLoading(true)
     try {
-      const [commandData, contractData, toolData, localAgentData, planData, commandResultData, contextData, traceData] = await Promise.all([
+      const [
+        commandData,
+        contractData,
+        toolData,
+        localAgentData,
+        planData,
+        commandResultData,
+        campaignActionData,
+        contextData,
+        traceData,
+      ] = await Promise.all([
         getArsenalCommands(),
         getArsenalContracts(),
         getArsenalTools({ probeVersions }),
         getLocalAgents({ probeVersions }),
         getOperationPlans(5),
         getCommandResults(5),
+        getCampaignActions(5),
         getAgentContextPacks(5),
         getAgentDecisionTraces(5),
       ])
@@ -413,6 +477,7 @@ export default function ArsenalSettingsPage() {
       setLocalAgents(localAgentData)
       setRecentPlans(planData.operation_plans)
       setRecentCommandResults(commandResultData.command_results)
+      setRecentCampaignActions(campaignActionData.campaign_actions)
       setRecentContextPacks(contextData.context_packs)
       setRecentDecisionTraces(traceData.decision_traces)
     } catch (err) {
@@ -817,6 +882,33 @@ export default function ArsenalSettingsPage() {
                 testing={testingAgent === agent.agent}
                 onTest={pingLocalAgent}
               />
+            ))}
+          </div>
+        )}
+      </Card>
+
+      <Card className="p-4">
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <TerminalSquare className="h-4 w-4 text-emerald-300" aria-hidden="true" />
+            <h2 className="font-medium text-white">Campaign Action Ledger</h2>
+          </div>
+          <Badge className="bg-gray-800 text-gray-300">read only</Badge>
+        </div>
+        <p className="mb-3 text-sm text-gray-400">
+          Action-shaped records derived from product commands, with campaign, receipt, scan, evidence, and blocked-reason refs.
+        </p>
+        {loading ? (
+          <div className="space-y-3">
+            <Skeleton className="h-24" />
+            <Skeleton className="h-24" />
+          </div>
+        ) : recentCampaignActions.length === 0 ? (
+          <EmptyState message="No campaign action records yet." />
+        ) : (
+          <div className="grid gap-2">
+            {recentCampaignActions.slice(0, 5).map((action) => (
+              <CampaignActionRow key={action.id} action={action} />
             ))}
           </div>
         )}

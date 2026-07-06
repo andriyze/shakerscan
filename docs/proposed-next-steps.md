@@ -709,9 +709,9 @@ Command Arsenal boundaries:
     the same records feed the cross-product mission timeline (`GET /timeline`). DONE phase 1:
     `campaign_actions` mirrors command-result audit rows into action-shaped records,
     `GET /arsenal/campaign-actions` exposes them read-only, `campaign_action.list` advertises the
-    surface, and the mission timeline can include standalone action rows without duplicating mirrored
-    command-result events. Remaining work is richer execution-gateway action transitions,
-    evidence/refuter events, and UI panels for campaign actions.
+    surface, `/settings/arsenal` renders the campaign action ledger, and the mission timeline can
+    include standalone action rows without duplicating mirrored command-result events. Remaining work
+    is richer execution-gateway action transitions and evidence/refuter events.
 18. DONE phase 1: blocked and approval-required command-result records are written before the
     enforcement path raises (best-effort, FK-safe), so "nothing ran because policy/scope blocked it"
     is auditable with the same operation id, scope/approval refs, blocked reasons, and next action.
