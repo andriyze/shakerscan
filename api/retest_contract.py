@@ -938,6 +938,78 @@ async def run_schema_migrations(pool) -> None:
                 ON target_endpoints(campaign_id) WHERE campaign_id IS NOT NULL
             """)
             await conn.execute("""
+                CREATE TABLE IF NOT EXISTS target_principals (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    target_id UUID NOT NULL REFERENCES targets(id) ON DELETE CASCADE,
+                    label TEXT NOT NULL,
+                    role TEXT NOT NULL DEFAULT 'user',
+                    tenant_id TEXT,
+                    auth_state TEXT NOT NULL DEFAULT 'user1',
+                    credential_profile TEXT,
+                    is_active BOOLEAN NOT NULL DEFAULT true,
+                    metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+            """)
+            await conn.execute("""
+                ALTER TABLE target_principals
+                ADD COLUMN IF NOT EXISTS auth_state TEXT NOT NULL DEFAULT 'user1',
+                ADD COLUMN IF NOT EXISTS credential_profile TEXT,
+                ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT true,
+                ADD COLUMN IF NOT EXISTS metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb
+            """)
+            await conn.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_target_principals_identity
+                ON target_principals(target_id, lower(label), COALESCE(tenant_id, ''), COALESCE(auth_state, ''))
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_target_principals_target_active
+                ON target_principals(target_id, is_active, role)
+            """)
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS target_endpoint_expectations (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    target_id UUID NOT NULL REFERENCES targets(id) ON DELETE CASCADE,
+                    endpoint_id UUID REFERENCES target_endpoints(id) ON DELETE CASCADE,
+                    method TEXT NOT NULL DEFAULT 'GET',
+                    path TEXT NOT NULL,
+                    param_shape TEXT NOT NULL DEFAULT '',
+                    param_location TEXT NOT NULL DEFAULT 'query',
+                    principal_id UUID REFERENCES target_principals(id) ON DELETE SET NULL,
+                    principal_role TEXT,
+                    tenant_id TEXT,
+                    expected_access TEXT NOT NULL DEFAULT 'unknown',
+                    expected_http_status INTEGER,
+                    expectation_source TEXT NOT NULL DEFAULT 'manual',
+                    metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    CONSTRAINT target_endpoint_expectations_access_check
+                        CHECK (expected_access IN ('allow','deny','requires_role','unknown'))
+                )
+            """)
+            await conn.execute("""
+                ALTER TABLE target_endpoint_expectations
+                ADD COLUMN IF NOT EXISTS endpoint_id UUID REFERENCES target_endpoints(id) ON DELETE CASCADE,
+                ADD COLUMN IF NOT EXISTS param_location TEXT NOT NULL DEFAULT 'query',
+                ADD COLUMN IF NOT EXISTS expected_http_status INTEGER,
+                ADD COLUMN IF NOT EXISTS expectation_source TEXT NOT NULL DEFAULT 'manual',
+                ADD COLUMN IF NOT EXISTS metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb
+            """)
+            await conn.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_target_endpoint_expectations_identity
+                ON target_endpoint_expectations(
+                    target_id, method, path, param_shape, param_location,
+                    COALESCE(principal_id, '00000000-0000-0000-0000-000000000000'::uuid),
+                    COALESCE(principal_role, ''), COALESCE(tenant_id, '')
+                )
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_target_endpoint_expectations_target
+                ON target_endpoint_expectations(target_id, path, expected_access)
+            """)
+            await conn.execute("""
                 CREATE TABLE IF NOT EXISTS asm_endpoint_attempts (
                     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                     endpoint_id UUID NOT NULL REFERENCES target_endpoints(id) ON DELETE CASCADE,

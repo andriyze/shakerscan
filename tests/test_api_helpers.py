@@ -1336,6 +1336,36 @@ def test_public_campaign_action_row_decodes_json_fields():
     assert public["result_json"] == {"next": "add_credentials"}
 
 
+def test_public_target_principal_and_expectation_rows_are_non_executing_and_redacted():
+    principal = api_module._public_target_principal_row({
+        "id": uuid.uuid4(),
+        "target_id": uuid.uuid4(),
+        "label": "Admin",
+        "role": "admin",
+        "tenant_id": "tenant-a",
+        "auth_state": "admin",
+        "credential_profile": "admin-browser-session",
+        "is_active": True,
+        "metadata_json": json.dumps({"authorization": "Bearer secret-token"}),
+    })
+    expectation = api_module._public_target_endpoint_expectation_row({
+        "id": uuid.uuid4(),
+        "target_id": uuid.uuid4(),
+        "method": "GET",
+        "path": "/admin",
+        "principal_role": "user",
+        "expected_access": "deny",
+        "metadata_json": json.dumps({"cookie": "session=secret-token"}),
+    })
+
+    assert principal["credential_configured"] is True
+    assert principal["execution_enabled"] is False
+    assert expectation["execution_enabled"] is False
+    assert expectation["finding_created"] is False
+    assert "secret-token" not in json.dumps(principal)
+    assert "secret-token" not in json.dumps(expectation)
+
+
 def test_public_hypothesis_row_decodes_json_and_never_promotes_findings():
     lease_expires_at = (datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat()
     row = {
@@ -1838,6 +1868,44 @@ def test_generated_agent_context_pack_from_target_uses_stored_facts(monkeypatch)
             return None
 
         async def fetch(self, query, *args):
+            if "FROM target_principals" in query:
+                return [{
+                    "id": uuid.uuid4(),
+                    "target_id": target_id,
+                    "label": "Admin",
+                    "role": "admin",
+                    "tenant_id": "tenant-a",
+                    "auth_state": "admin",
+                    "credential_profile": "admin-session",
+                    "is_active": True,
+                    "metadata_json": json.dumps({}),
+                }, {
+                    "id": uuid.uuid4(),
+                    "target_id": target_id,
+                    "label": "Customer",
+                    "role": "customer",
+                    "tenant_id": "tenant-a",
+                    "auth_state": "user1",
+                    "credential_profile": "customer-session",
+                    "is_active": True,
+                    "metadata_json": json.dumps({}),
+                }]
+            if "FROM target_endpoint_expectations" in query:
+                return [{
+                    "id": uuid.uuid4(),
+                    "method": "GET",
+                    "path": "/api/admin",
+                    "param_shape": "",
+                    "param_location": "query",
+                    "principal_role": "customer",
+                    "tenant_id": "tenant-a",
+                    "expected_access": "deny",
+                    "expected_http_status": 403,
+                    "expectation_source": "manual",
+                    "principal_label": "Customer",
+                    "principal_auth_state": "user1",
+                    "metadata_json": json.dumps({}),
+                }]
             if "FROM target_endpoints" in query and "GROUP BY" in query:
                 return [{"auth_state": "anonymous", "test_status": "untested", "count": 2}]
             if "FROM target_endpoints" in query:
@@ -1888,6 +1956,10 @@ def test_generated_agent_context_pack_from_target_uses_stored_facts(monkeypatch)
     assert generated.target_summary["owner"] == "security"
     assert generated.current_surface["coverage"]["untested"] == 2
     assert generated.current_surface["sample_endpoints"][0]["path"] == "/api/orders/{id}"
+    assert generated.current_surface["principal_matrix"]["role_counts"]["admin"] == 1
+    assert generated.current_surface["principal_matrix"]["expectations"][0]["expected_access"] == "deny"
+    assert generated.known_preconditions["primary_credentials"] == "configured"
+    assert generated.known_preconditions["second_user_credentials"] == "configured"
     assert generated.findings_summary[0]["category"] == "bola"
     assert generated.findings_summary[0]["proof_state"] == "suspected"
     assert "asm.gaps" in generated.allowed_commands

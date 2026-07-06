@@ -25,6 +25,8 @@ def test_command_catalog_contains_required_initial_commands():
     for name in (
         "target.list",
         "target.get",
+        "target.principals",
+        "target.principal_matrix",
         "asm.gaps",
         "asm.activity",
         "scan.result",
@@ -45,6 +47,24 @@ def test_command_catalog_contains_required_initial_commands():
         assert name in commands
         assert commands[name]["status"] == "read_only"
         assert commands[name]["risk_tier"] == "read_only"
+
+
+def test_target_principal_matrix_commands_are_non_executing_inventory():
+    payload = arsenal.describe_commands()
+    commands = {item["name"]: item for item in payload["commands"]}
+
+    principals = commands["target.principals"]
+    matrix = commands["target.principal_matrix"]
+    record = commands["target.principal_matrix.record"]
+
+    assert principals["status"] == "read_only"
+    assert matrix["status"] == "read_only"
+    assert record["status"] == "dry_run"
+    assert record["risk_tier"] == "read_only"
+    assert principals["path"] == "/targets/{target_id}/principals"
+    assert matrix["path"] == "/targets/{target_id}/principal-matrix"
+    assert record["path"] == "/targets/{target_id}/principal-matrix"
+    assert "expected_access" in record["parameters_schema"]
 
 
 def test_state_changing_commands_are_gated_not_executable_shortcuts():
@@ -263,6 +283,9 @@ def test_contracts_encode_planner_and_secret_boundaries():
     assert "target/family/dedupe dimensions identify a lead across signal sources" in contracts["Hypothesis"]["invariants"]
     assert "effective_status" in contracts["Hypothesis"]["fields"]
     assert "claimable" in contracts["Hypothesis"]["fields"]
+    assert "TargetPrincipal" in contracts
+    assert "EndpointPrincipalExpectation" in contracts
+    assert "expectations are planning facts only and cannot create findings" in contracts["EndpointPrincipalExpectation"]["invariants"]
 
 
 def test_tool_status_catalog_is_honest_without_version_probe(monkeypatch):

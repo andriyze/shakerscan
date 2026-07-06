@@ -3178,6 +3178,41 @@ class TargetUpdate(BaseModel):
     metadata_json: Optional[dict] = None
 
 
+class TargetPrincipalCreate(BaseModel):
+    label: str
+    role: str = "user"
+    tenant_id: Optional[str] = None
+    auth_state: str = "user1"
+    credential_profile: Optional[str] = None
+    metadata_json: dict[str, Any] = Field(default_factory=dict)
+    is_active: bool = True
+
+
+class TargetPrincipalUpdate(BaseModel):
+    label: Optional[str] = None
+    role: Optional[str] = None
+    tenant_id: Optional[str] = None
+    auth_state: Optional[str] = None
+    credential_profile: Optional[str] = None
+    metadata_json: Optional[dict[str, Any]] = None
+    is_active: Optional[bool] = None
+
+
+class TargetEndpointExpectationRequest(BaseModel):
+    endpoint_id: Optional[str] = None
+    method: str = "GET"
+    path: str
+    param_shape: str = ""
+    param_location: str = "query"
+    principal_id: Optional[str] = None
+    principal_role: Optional[str] = None
+    tenant_id: Optional[str] = None
+    expected_access: str = Field(default="unknown", pattern="^(allow|deny|requires_role|unknown)$")
+    expected_http_status: Optional[int] = Field(default=None, ge=100, le=599)
+    expectation_source: str = "manual"
+    metadata_json: dict[str, Any] = Field(default_factory=dict)
+
+
 class FindingUpdate(BaseModel):
     status: str  # active, resolved, false_positive, accepted_risk
     notes: Optional[str] = None
@@ -11862,6 +11897,64 @@ def _uuid_or_400(value: str, label: str = "id") -> uuid.UUID:
         raise HTTPException(status_code=400, detail=f"Invalid {label}: {value!r}")
 
 
+def _normalize_target_principal_label(value: Any) -> str:
+    label = re.sub(r"\s+", " ", str(value or "").strip())
+    if not label:
+        raise HTTPException(status_code=400, detail="principal label is required")
+    if len(label) > 120:
+        raise HTTPException(status_code=400, detail="principal label must be 120 characters or fewer")
+    return label
+
+
+def _normalize_target_principal_role(value: Any) -> str:
+    role = re.sub(r"[^a-z0-9_.-]+", "_", str(value or "user").strip().lower()).strip("_")
+    return (role or "user")[:80]
+
+
+def _normalize_target_auth_state(value: Any) -> str:
+    state = re.sub(r"[^a-zA-Z0-9_.-]+", "_", str(value or "user1").strip()).strip("_")
+    if not state:
+        state = "user1"
+    if state == "anonymous":
+        raise HTTPException(status_code=400, detail="principal auth_state must represent an authenticated identity")
+    return state[:80]
+
+
+def _normalize_target_endpoint_method(value: Any) -> str:
+    method = str(value or "GET").strip().upper()
+    if not re.fullmatch(r"[A-Z]{2,12}", method):
+        raise HTTPException(status_code=400, detail="endpoint method is invalid")
+    return method
+
+
+def _normalize_target_endpoint_path(value: Any) -> str:
+    path = str(value or "").strip()
+    if not path:
+        raise HTTPException(status_code=400, detail="endpoint path is required")
+    if "://" in path:
+        parsed = urllib.parse.urlparse(path)
+        path = parsed.path or "/"
+    if not path.startswith("/"):
+        path = "/" + path
+    return path[:1000]
+
+
+def _public_target_principal_row(row: Any) -> dict[str, Any]:
+    payload = row_to_dict(row)
+    payload["metadata_json"] = _redact_agent_payload(_decode_json_value(payload.get("metadata_json")) or {})
+    payload["credential_configured"] = bool(payload.get("credential_profile"))
+    payload["execution_enabled"] = False
+    return payload
+
+
+def _public_target_endpoint_expectation_row(row: Any) -> dict[str, Any]:
+    payload = row_to_dict(row)
+    payload["metadata_json"] = _redact_agent_payload(_decode_json_value(payload.get("metadata_json")) or {})
+    payload["execution_enabled"] = False
+    payload["finding_created"] = False
+    return payload
+
+
 @app.get("/targets/{target_id}")
 async def get_target(target_id: str):
     """Get target details."""
@@ -11931,6 +12024,263 @@ async def update_target(target_id: str, request: TargetUpdate):
             raise HTTPException(status_code=404, detail="Target not found")
 
     return {'id': target_id, 'status': 'updated'}
+
+
+@app.get("/targets/{target_id}/principals")
+async def list_target_principals(target_id: str, include_inactive: bool = False):
+    """List role/tenant principals configured for DAST/ASM authorization planning."""
+    target_uuid = _uuid_or_400(target_id, "target id")
+    async with db_pool.acquire() as conn:
+        if not await conn.fetchrow("SELECT 1 FROM targets WHERE id = $1", target_uuid):
+            raise HTTPException(status_code=404, detail="Target not found")
+        rows = await conn.fetch(
+            """
+            SELECT *
+            FROM target_principals
+            WHERE target_id = $1 AND ($2::boolean OR is_active = true)
+            ORDER BY is_active DESC, role, label
+            """,
+            target_uuid,
+            include_inactive,
+        )
+    principals = [_public_target_principal_row(row) for row in rows]
+    return {
+        "target_id": target_id,
+        "principals": principals,
+        "count": len(principals),
+        "execution_enabled": False,
+    }
+
+
+@app.post("/targets/{target_id}/principals")
+async def create_target_principal(target_id: str, request: TargetPrincipalCreate):
+    """Create or update a target principal identity without storing raw credentials."""
+    target_uuid = _uuid_or_400(target_id, "target id")
+    label = _normalize_target_principal_label(request.label)
+    role = _normalize_target_principal_role(request.role)
+    auth_state = _normalize_target_auth_state(request.auth_state)
+    metadata = _redact_agent_payload(request.metadata_json or {})
+    async with db_pool.acquire() as conn:
+        if not await conn.fetchrow("SELECT 1 FROM targets WHERE id = $1", target_uuid):
+            raise HTTPException(status_code=404, detail="Target not found")
+        row = await conn.fetchrow(
+            """
+            INSERT INTO target_principals (
+                target_id, label, role, tenant_id, auth_state, credential_profile,
+                is_active, metadata_json
+            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb)
+            ON CONFLICT (target_id, lower(label), COALESCE(tenant_id, ''), COALESCE(auth_state, ''))
+            DO UPDATE SET
+                role = EXCLUDED.role,
+                credential_profile = EXCLUDED.credential_profile,
+                is_active = EXCLUDED.is_active,
+                metadata_json = target_principals.metadata_json || EXCLUDED.metadata_json,
+                updated_at = NOW()
+            RETURNING *
+            """,
+            target_uuid,
+            label,
+            role,
+            request.tenant_id,
+            auth_state,
+            str(request.credential_profile or "").strip() or None,
+            bool(request.is_active),
+            json.dumps(metadata),
+        )
+    return {
+        "principal": _public_target_principal_row(row),
+        "execution_enabled": False,
+        "findings_created": 0,
+    }
+
+
+@app.patch("/targets/{target_id}/principals/{principal_id}")
+async def update_target_principal(target_id: str, principal_id: str, request: TargetPrincipalUpdate):
+    """Update target principal metadata without returning or accepting raw secrets."""
+    target_uuid = _uuid_or_400(target_id, "target id")
+    principal_uuid = _uuid_or_400(principal_id, "principal id")
+    updates: list[str] = []
+    values: list[Any] = []
+    if request.label is not None:
+        values.append(_normalize_target_principal_label(request.label))
+        updates.append(f"label = ${len(values)}")
+    if request.role is not None:
+        values.append(_normalize_target_principal_role(request.role))
+        updates.append(f"role = ${len(values)}")
+    if request.tenant_id is not None:
+        values.append(str(request.tenant_id).strip() or None)
+        updates.append(f"tenant_id = ${len(values)}")
+    if request.auth_state is not None:
+        values.append(_normalize_target_auth_state(request.auth_state))
+        updates.append(f"auth_state = ${len(values)}")
+    if request.credential_profile is not None:
+        values.append(str(request.credential_profile).strip() or None)
+        updates.append(f"credential_profile = ${len(values)}")
+    if request.metadata_json is not None:
+        values.append(json.dumps(_redact_agent_payload(request.metadata_json or {})))
+        updates.append(f"metadata_json = metadata_json || ${len(values)}::jsonb")
+    if request.is_active is not None:
+        values.append(bool(request.is_active))
+        updates.append(f"is_active = ${len(values)}")
+    if not updates:
+        raise HTTPException(status_code=400, detail="No updates provided")
+    values.extend([principal_uuid, target_uuid])
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            f"""
+            UPDATE target_principals
+            SET {', '.join(updates)}, updated_at = NOW()
+            WHERE id = ${len(values) - 1} AND target_id = ${len(values)}
+            RETURNING *
+            """,
+            *values,
+        )
+    if not row:
+        raise HTTPException(status_code=404, detail="Target principal not found")
+    return {"principal": _public_target_principal_row(row), "execution_enabled": False}
+
+
+@app.delete("/targets/{target_id}/principals/{principal_id}")
+async def delete_target_principal(target_id: str, principal_id: str):
+    """Deactivate a target principal used for role/tenant planning."""
+    target_uuid = _uuid_or_400(target_id, "target id")
+    principal_uuid = _uuid_or_400(principal_id, "principal id")
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            UPDATE target_principals
+            SET is_active = false, updated_at = NOW()
+            WHERE id = $1 AND target_id = $2
+            RETURNING *
+            """,
+            principal_uuid,
+            target_uuid,
+        )
+    if not row:
+        raise HTTPException(status_code=404, detail="Target principal not found")
+    return {
+        "status": "deleted",
+        "target_id": target_id,
+        "principal_id": principal_id,
+        "execution_enabled": False,
+    }
+
+
+@app.get("/targets/{target_id}/principal-matrix")
+async def list_target_principal_matrix(target_id: str, limit: int = Query(200, ge=1, le=1000)):
+    """List endpoint x principal/role expectations for authorization planning."""
+    target_uuid = _uuid_or_400(target_id, "target id")
+    async with db_pool.acquire() as conn:
+        if not await conn.fetchrow("SELECT 1 FROM targets WHERE id = $1", target_uuid):
+            raise HTTPException(status_code=404, detail="Target not found")
+        principals = await conn.fetch(
+            "SELECT * FROM target_principals WHERE target_id = $1 AND is_active = true ORDER BY role, label",
+            target_uuid,
+        )
+        rows = await conn.fetch(
+            """
+            SELECT e.*, p.label AS principal_label, p.auth_state AS principal_auth_state
+            FROM target_endpoint_expectations e
+            LEFT JOIN target_principals p ON p.id = e.principal_id
+            WHERE e.target_id = $1
+            ORDER BY e.path, e.method, COALESCE(p.role, e.principal_role, ''), COALESCE(p.label, '')
+            LIMIT $2
+            """,
+            target_uuid,
+            limit,
+        )
+    return {
+        "target_id": target_id,
+        "principals": [_public_target_principal_row(row) for row in principals],
+        "expectations": [_public_target_endpoint_expectation_row(row) for row in rows],
+        "count": len(rows),
+        "execution_enabled": False,
+        "findings_created": 0,
+    }
+
+
+@app.post("/targets/{target_id}/principal-matrix")
+async def upsert_target_principal_matrix(target_id: str, request: TargetEndpointExpectationRequest):
+    """Record an endpoint access expectation; does not queue probes or create findings."""
+    target_uuid = _uuid_or_400(target_id, "target id")
+    try:
+        endpoint_uuid = _optional_uuid(request.endpoint_id)
+        principal_uuid = _optional_uuid(request.principal_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="endpoint_id and principal_id must be UUIDs when provided") from exc
+    method = _normalize_target_endpoint_method(request.method)
+    path = _normalize_target_endpoint_path(request.path)
+    param_shape = str(request.param_shape or "").strip()[:1000]
+    param_location = str(request.param_location or "query").strip().lower()[:40] or "query"
+    principal_role = _normalize_target_principal_role(request.principal_role) if request.principal_role else None
+    metadata = _redact_agent_payload(request.metadata_json or {})
+    async with db_pool.acquire() as conn:
+        if not await conn.fetchrow("SELECT 1 FROM targets WHERE id = $1", target_uuid):
+            raise HTTPException(status_code=404, detail="Target not found")
+        if endpoint_uuid:
+            endpoint = await conn.fetchrow(
+                "SELECT method, path, param_shape, param_location FROM target_endpoints WHERE id = $1 AND target_id = $2",
+                endpoint_uuid,
+                target_uuid,
+            )
+            if not endpoint:
+                raise HTTPException(status_code=404, detail="Endpoint not found for target")
+            method = str(endpoint["method"] or method)
+            path = str(endpoint["path"] or path)
+            param_shape = str(endpoint["param_shape"] or param_shape)
+            param_location = str(endpoint["param_location"] or param_location)
+        if principal_uuid:
+            principal = await conn.fetchrow(
+                "SELECT role, tenant_id FROM target_principals WHERE id = $1 AND target_id = $2",
+                principal_uuid,
+                target_uuid,
+            )
+            if not principal:
+                raise HTTPException(status_code=404, detail="Principal not found for target")
+            principal_role = principal_role or str(principal["role"] or "user")
+            tenant_id = request.tenant_id if request.tenant_id is not None else principal["tenant_id"]
+        else:
+            tenant_id = request.tenant_id
+        row = await conn.fetchrow(
+            """
+            INSERT INTO target_endpoint_expectations (
+                target_id, endpoint_id, method, path, param_shape, param_location,
+                principal_id, principal_role, tenant_id, expected_access,
+                expected_http_status, expectation_source, metadata_json
+            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::jsonb)
+            ON CONFLICT (
+                target_id, method, path, param_shape, param_location,
+                COALESCE(principal_id, '00000000-0000-0000-0000-000000000000'::uuid),
+                COALESCE(principal_role, ''), COALESCE(tenant_id, '')
+            )
+            DO UPDATE SET
+                expected_access = EXCLUDED.expected_access,
+                expected_http_status = EXCLUDED.expected_http_status,
+                expectation_source = EXCLUDED.expectation_source,
+                endpoint_id = COALESCE(EXCLUDED.endpoint_id, target_endpoint_expectations.endpoint_id),
+                metadata_json = target_endpoint_expectations.metadata_json || EXCLUDED.metadata_json,
+                updated_at = NOW()
+            RETURNING *
+            """,
+            target_uuid,
+            endpoint_uuid,
+            method,
+            path,
+            param_shape,
+            param_location,
+            principal_uuid,
+            principal_role,
+            tenant_id,
+            request.expected_access,
+            request.expected_http_status,
+            str(request.expectation_source or "manual").strip()[:80] or "manual",
+            json.dumps(metadata),
+        )
+    return {
+        "expectation": _public_target_endpoint_expectation_row(row),
+        "execution_enabled": False,
+        "findings_created": 0,
+    }
 
 
 @app.delete("/targets/{target_id}")
@@ -12587,6 +12937,43 @@ async def _build_agent_context_pack_from_target(conn, req: AgentContextPackFromT
         )
         sample_endpoints = [_json_safe_row(row) for row in endpoint_rows]
 
+    principal_summary: dict[str, Any] = {"principals": [], "expectations": [], "role_counts": {}, "tenant_counts": {}}
+    try:
+        principal_rows = await conn.fetch(
+            """
+            SELECT id, label, role, tenant_id, auth_state, credential_profile, is_active, metadata_json
+            FROM target_principals
+            WHERE target_id = $1 AND is_active = true
+            ORDER BY role, label
+            LIMIT 20
+            """,
+            target_uuid,
+        )
+        principals = [_public_target_principal_row(row) for row in principal_rows]
+        expectation_rows = await conn.fetch(
+            """
+            SELECT e.id, e.method, e.path, e.param_shape, e.param_location,
+                   e.principal_role, e.tenant_id, e.expected_access, e.expected_http_status,
+                   e.expectation_source, p.label AS principal_label, p.auth_state AS principal_auth_state
+            FROM target_endpoint_expectations e
+            LEFT JOIN target_principals p ON p.id = e.principal_id
+            WHERE e.target_id = $1
+            ORDER BY e.updated_at DESC
+            LIMIT 25
+            """,
+            target_uuid,
+        )
+        role_counts = Counter(str(item.get("role") or "unknown") for item in principals)
+        tenant_counts = Counter(str(item.get("tenant_id") or "none") for item in principals)
+        principal_summary = {
+            "principals": principals,
+            "expectations": [_public_target_endpoint_expectation_row(row) for row in expectation_rows],
+            "role_counts": dict(role_counts),
+            "tenant_counts": dict(tenant_counts),
+        }
+    except Exception:
+        principal_summary = {"principals": [], "expectations": [], "role_counts": {}, "tenant_counts": {}}
+
     findings_summary: list[dict[str, Any]] = []
     if req.include_findings and req.finding_limit > 0:
         finding_rows = await conn.fetch(
@@ -12669,11 +13056,16 @@ async def _build_agent_context_pack_from_target(conn, req: AgentContextPackFromT
         "coverage": coverage,
         "endpoint_counts": [_json_safe_row(row) for row in endpoint_counts],
         "sample_endpoints": sample_endpoints,
+        "principal_matrix": principal_summary,
     }
+    primary_principals = [item for item in principal_summary.get("principals", []) if item.get("is_active")]
+    second_principal_configured = len(primary_principals) >= 2
     known_preconditions = {
         "workers": worker_freshness,
-        "primary_credentials": "configured" if metadata.get("auth") or metadata.get("credential_profile") else "unknown",
-        "second_user_credentials": "configured" if metadata.get("second_user") or metadata.get("user2") else "unknown",
+        "primary_credentials": "configured" if primary_principals or metadata.get("auth") or metadata.get("credential_profile") else "unknown",
+        "second_user_credentials": "configured" if second_principal_configured or metadata.get("second_user") or metadata.get("user2") else "unknown",
+        "principal_roles": sorted(principal_summary.get("role_counts", {}).keys()),
+        "principal_tenants": sorted(principal_summary.get("tenant_counts", {}).keys()),
         "scope": "target-bound",
     }
     hash_payload = {
