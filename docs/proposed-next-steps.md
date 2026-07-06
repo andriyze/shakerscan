@@ -428,8 +428,9 @@ ordering and more exact implementation boundaries:
   campaign review surface on scan detail, scan-level rerun actions for skipped/errors/family/all,
   per-transcript replay actions, same-context run comparison on scan detail, and target-level
   longitudinal campaign history on the AI Gate target surface. Target history now includes phase-1
-  readiness trends and a content-free export with run report links. Remaining AI Gate gaps are deeper
-  trend visualization and richer campaign evidence manifests.
+  readiness trends, per-context trend chips, and a content-free export with run report links.
+  Remaining AI Gate gaps are advanced longitudinal trend visualization and richer campaign evidence
+  manifests.
 
 ### Immediate implementation sequence
 
@@ -552,8 +553,8 @@ Use this order when choosing between otherwise-valid work:
 - **P2: AI red-team campaign UX.** Scan-detail campaign review, coverage matrix, skipped reasons,
   transcript/report links, finding-level replay entry points, scan-level rerun actions, selected
   transcript replay, same-context scan comparison, target-level history, phase-1 readiness trends,
-  and target-history export links are phase 1 done. Remaining work is deeper trend visualization and
-  campaign evidence manifests.
+  target-history export links, and per-context readiness trend chips are phase 1 done. Remaining
+  work is advanced longitudinal trend visualization and campaign evidence manifests.
 - **P2: Model Intake trust UX.** Guided trust modes, pre-submit trust preview, saved trust anchors,
   scan selection, strict policy-profile anchor binding, and deployment-decision anchor gaps are phase 1
   done. Remaining work is exception remediation workflow depth and campaign evidence export.
@@ -808,8 +809,8 @@ trends and per-run red-team report links.
 
 **Done when:** an AI red-team run can be reviewed, rerun, compared across runs, and defended as a
 campaign artifact instead of a loose scan report. Phase 1 now satisfies this on scan detail and on
-the AI Gate target page; deeper trend visualization and richer campaign evidence manifests remain
-later work.
+the AI Gate target page; per-context readiness trend chips are now visible. Advanced longitudinal
+trend visualization and richer campaign evidence manifests remain later work.
 
 ### 5. Model Intake trust UX
 **Status: PARTIAL, PHASE 1 UI DONE.** The API and UI now carry real signature/trust-anchor fields:

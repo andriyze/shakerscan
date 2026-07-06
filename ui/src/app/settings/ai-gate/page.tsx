@@ -303,6 +303,14 @@ function decisionPillClass(decision: string | null | undefined): string {
   return 'bg-gray-800 text-gray-300'
 }
 
+function readinessTrendClass(state: string | null | undefined): string {
+  if (state === 'improving') return 'bg-emerald-500/10 text-emerald-300'
+  if (state === 'blocked' || state === 'regressed') return 'bg-red-500/10 text-red-300'
+  if (state === 'baseline') return 'bg-blue-500/10 text-blue-200'
+  if (state === 'stable') return 'bg-gray-800 text-gray-200'
+  return 'bg-gray-800 text-gray-400'
+}
+
 export default function AIGateSettingsPage() {
   const router = useRouter()
   const toast = useToast()
@@ -1409,6 +1417,25 @@ export default function AIGateSettingsPage() {
                                         <span>findings {formatDelta(context.deltas.findings_count)}</span>
                                         <span>errors {formatDelta(context.deltas.errors)}</span>
                                       </>
+                                    )}
+                                  </div>
+                                )}
+                                {context.readiness_trend && (
+                                  <div className="mt-2 flex flex-wrap items-center gap-2 border-t border-gray-800 pt-2 text-gray-400">
+                                    <span className={`rounded px-2 py-0.5 ${readinessTrendClass(context.readiness_trend.state)}`}>
+                                      {formatCampaignLabel(context.readiness_trend.state)}
+                                    </span>
+                                    {context.readiness_trend.coverage_delta !== null && context.readiness_trend.coverage_delta !== undefined && (
+                                      <span>coverage {formatDelta(context.readiness_trend.coverage_delta)}</span>
+                                    )}
+                                    {context.readiness_trend.findings_delta !== null && context.readiness_trend.findings_delta !== undefined && (
+                                      <span>findings {formatDelta(context.readiness_trend.findings_delta)}</span>
+                                    )}
+                                    {context.readiness_trend.errors_delta !== null && context.readiness_trend.errors_delta !== undefined && (
+                                      <span>errors {formatDelta(context.readiness_trend.errors_delta)}</span>
+                                    )}
+                                    {context.readiness_trend.decision_changed && (
+                                      <span>decision changed</span>
                                     )}
                                   </div>
                                 )}
