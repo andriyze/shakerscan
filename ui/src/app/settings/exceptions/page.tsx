@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import Link from 'next/link'
-import { ExternalLink, RefreshCw, ShieldAlert, XCircle } from 'lucide-react'
+import { ExternalLink, Pencil, RefreshCw, ShieldAlert, XCircle } from 'lucide-react'
 import {
   formatDate,
   getFindingExceptions,
@@ -61,6 +61,33 @@ function exceptionToPayload(item: FindingException, status: string): FindingExce
   }
 }
 
+function exceptionToRepairForm(item: FindingException): FindingExceptionRepairForm {
+  const expiresAt = item.expires_at ? new Date(item.expires_at) : null
+  const expiryValue = expiresAt && !Number.isNaN(expiresAt.getTime())
+    ? expiresAt.toISOString().slice(0, 10)
+    : ''
+  return {
+    owner: item.owner || '',
+    approver: item.approver || '',
+    reason: item.reason || '',
+    compensatingControls: item.compensating_controls || '',
+    expiresAt: expiryValue,
+    status: item.status === 'expired' || item.status === 'revoked' ? 'active' : item.status,
+  }
+}
+
+function repairFormToPayload(item: FindingException, form: FindingExceptionRepairForm): FindingExceptionPayload {
+  const expiresAt = form.expiresAt.trim() ? new Date(`${form.expiresAt.trim()}T23:59:59.000Z`).toISOString() : null
+  return {
+    ...exceptionToPayload(item, form.status),
+    owner: form.owner.trim() || null,
+    approver: form.approver.trim() || null,
+    reason: form.reason.trim() || null,
+    compensating_controls: form.compensatingControls.trim() || null,
+    expires_at: expiresAt,
+  }
+}
+
 function exceptionWarnings(item: FindingException): string[] {
   const warnings: string[] = []
   const expiresAt = item.expires_at ? new Date(item.expires_at) : null
@@ -75,6 +102,18 @@ function exceptionWarnings(item: FindingException): string[] {
   return warnings
 }
 
+type FindingExceptionRepairForm = {
+  owner: string
+  approver: string
+  reason: string
+  compensatingControls: string
+  expiresAt: string
+  status: string
+}
+
+const inputClass = 'rounded-lg border border-gray-800 bg-gray-950 px-3 py-2 text-sm text-white focus:border-blue-500 focus:outline-none'
+const textareaClass = `${inputClass} min-h-24 resize-y`
+
 export default function ExceptionsQueuePage() {
   const toast = useToast()
   const [queueFilter, setQueueFilter] = useState<QueueFilter>('')
@@ -83,6 +122,8 @@ export default function ExceptionsQueuePage() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(false)
   const [revoking, setRevoking] = useState<FindingException | null>(null)
+  const [repairing, setRepairing] = useState<FindingException | null>(null)
+  const [repairForm, setRepairForm] = useState<FindingExceptionRepairForm | null>(null)
   const [saving, setSaving] = useState(false)
 
   useEffect(() => {
@@ -141,6 +182,31 @@ export default function ExceptionsQueuePage() {
       await load()
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Failed to revoke exception')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  function openRepair(item: FindingException) {
+    setRepairing(item)
+    setRepairForm(exceptionToRepairForm(item))
+  }
+
+  function updateRepairForm<K extends keyof FindingExceptionRepairForm>(key: K, value: FindingExceptionRepairForm[K]) {
+    setRepairForm((current) => current ? { ...current, [key]: value } : current)
+  }
+
+  async function saveRepair() {
+    if (!repairing || !repairForm) return
+    setSaving(true)
+    try {
+      await updateFindingException(repairing.id, repairFormToPayload(repairing, repairForm))
+      setRepairing(null)
+      setRepairForm(null)
+      toast.success('Exception metadata updated')
+      await load()
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to update exception')
     } finally {
       setSaving(false)
     }
@@ -300,6 +366,12 @@ export default function ExceptionsQueuePage() {
                         </Link>
                       )}
                       {item.status !== 'revoked' && (
+                        <Button size="sm" variant="secondary" onClick={() => openRepair(item)}>
+                          <Pencil className="h-3.5 w-3.5" />
+                          Repair
+                        </Button>
+                      )}
+                      {item.status !== 'revoked' && (
                         <Button size="sm" variant="danger" onClick={() => setRevoking(item)}>
                           <XCircle className="h-3.5 w-3.5" />
                           Revoke
@@ -324,6 +396,81 @@ export default function ExceptionsQueuePage() {
         onConfirm={revokeSelected}
         onCancel={() => setRevoking(null)}
       />
+      {repairing && repairForm && typeof document !== 'undefined' && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick={() => !saving && setRepairing(null)}>
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label="Repair exception metadata"
+            className="max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-lg border border-gray-800 bg-gray-900 p-5 shadow-xl"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <h2 className="text-lg font-semibold text-white">Repair exception metadata</h2>
+                <p className="mt-1 text-sm text-gray-400">
+                  Update accountability, expiry, and controls without changing the exception scope.
+                </p>
+              </div>
+              <Badge className={STATUS_STYLES[repairing.status] || 'bg-gray-800 text-gray-300'}>
+                {repairing.status.replace(/_/g, ' ')}
+              </Badge>
+            </div>
+
+            <div className="mt-4 grid gap-3 sm:grid-cols-2">
+              <label className="grid gap-1 text-sm text-gray-300">
+                Owner
+                <input value={repairForm.owner} onChange={(event) => updateRepairForm('owner', event.target.value)} className={inputClass} placeholder="team or person" />
+              </label>
+              <label className="grid gap-1 text-sm text-gray-300">
+                Approver
+                <input value={repairForm.approver} onChange={(event) => updateRepairForm('approver', event.target.value)} className={inputClass} placeholder="approval owner" />
+              </label>
+              <label className="grid gap-1 text-sm text-gray-300">
+                Expires
+                <input type="date" value={repairForm.expiresAt} onChange={(event) => updateRepairForm('expiresAt', event.target.value)} className={inputClass} />
+              </label>
+              <label className="grid gap-1 text-sm text-gray-300">
+                Status
+                <select value={repairForm.status} onChange={(event) => updateRepairForm('status', event.target.value)} className={inputClass}>
+                  <option value="active">active</option>
+                  <option value="approved">approved</option>
+                  <option value="accepted_risk">accepted risk</option>
+                  <option value="expired">expired</option>
+                  <option value="revoked">revoked</option>
+                </select>
+              </label>
+            </div>
+
+            <div className="mt-3 grid gap-3">
+              <label className="grid gap-1 text-sm text-gray-300">
+                Reason
+                <textarea value={repairForm.reason} onChange={(event) => updateRepairForm('reason', event.target.value)} className={textareaClass} placeholder="Why this exception is justified" />
+              </label>
+              <label className="grid gap-1 text-sm text-gray-300">
+                Compensating controls
+                <textarea value={repairForm.compensatingControls} onChange={(event) => updateRepairForm('compensatingControls', event.target.value)} className={textareaClass} placeholder="Controls that reduce risk while the exception is active" />
+              </label>
+            </div>
+
+            <div className="mt-4 rounded-lg border border-gray-800 bg-gray-950 p-3 text-xs text-gray-400">
+              <div className="font-medium text-gray-300">Scope stays unchanged</div>
+              <div className="mt-1 break-all">
+                {repairing.finding_id || repairing.fingerprint || repairing.policy_id || repairing.target_id || repairing.scope || 'global exception'}
+              </div>
+            </div>
+
+            <div className="mt-5 flex justify-end gap-3">
+              <Button variant="secondary" onClick={() => setRepairing(null)} disabled={saving}>
+                Cancel
+              </Button>
+              <Button onClick={saveRepair} disabled={saving}>
+                {saving ? 'Saving...' : 'Save repair'}
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

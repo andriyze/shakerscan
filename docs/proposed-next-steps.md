@@ -598,8 +598,9 @@ Use this order when choosing between otherwise-valid work:
   target-history export links, and per-context readiness trend chips are phase 1 done. Remaining
   work is advanced longitudinal trend visualization and campaign evidence manifests.
 - **P2: Model Intake trust UX.** Guided trust modes, pre-submit trust preview, saved trust anchors,
-  scan selection, strict policy-profile anchor binding, and deployment-decision anchor gaps are phase 1
-  done. Remaining work is exception remediation workflow depth and campaign evidence export.
+  scan selection, strict policy-profile anchor binding, deployment-decision anchor gaps, and the first
+  exception metadata repair flow are phase 1 done. Remaining work is campaign evidence export plus
+  broader exception lifecycle automation.
 - **P2: registry-driven execution.** Migrate scanner execution and report rollups to proof contracts,
   telemetry schemas, safety gates, and family-specific run contracts.
 - **P2/P3: planner evals and local-agent planning.** Only after read-only Command Arsenal and safety
@@ -616,12 +617,12 @@ Use this order when choosing between otherwise-valid work:
 hygiene, ASM coverage/schedule facts, Model Intake signature trust, and AI control-baseline gaps.
 The dashboard renders this as a prioritized Action Center. ASM policy/gaps/improve/activity now
 expose live `scheduler_state`, and dispatcher/scheduler decisions are persisted as
-`metadata_json.asm_last_decision`. `/settings/exceptions` now provides the first dedicated
-Exceptions Queue. Dashboard items now expose structured safe CTAs. `GET /timeline` now provides a
+`metadata_json.asm_last_decision`. `/settings/exceptions` now provides the first dedicated Exceptions
+Queue plus a bounded repair workflow for owner/approver/control/expiry hygiene without changing
+exception scope. Dashboard items now expose structured safe CTAs. `GET /timeline` now provides a
 read-only cross-product mission timeline (command results with live scan status + recent scans +
-upcoming schedules) with explicit API-backed statuses. Remaining work is product-level
-decision flow: summarize each product area, show blocker/stale/running counts, explain why work is
-blocked, and provide safe remediation links without making users infer state from scan JSON.
+upcoming schedules) with explicit API-backed statuses. Remaining work is deeper product decision flow
+and remediation automation, not the first dashboard/status/action surfaces.
 
 **Implement:**
 1. DONE: extend Action Center items with safe CTAs for workers, failed scans, target-preselected ASM
@@ -645,6 +646,8 @@ blocked, and provide safe remediation links without making users infer state fro
    highlights targets with missing control evidence; worker cards route to dashboard worker controls
    and pending scans. DONE for Model Intake trust blockers: `/settings/model-intake?remediate=trust`
    selects strict trusted-anchor mode, highlights the trust controls, and links exception hygiene.
+   DONE for exception repair phase 1: `/settings/exceptions` can update owner, approver, reason,
+   compensating controls, expiry, and status without changing scope or creating new exceptions.
 7. DONE phase 1: `GET /timeline` merges the command-result audit rows (with live scan status joined),
    recent user-facing scans, and upcoming schedules into one normalized cross-product event feed with
    an optional `target_id` filter. DONE phase 1: the feed also includes standalone campaign actions,
