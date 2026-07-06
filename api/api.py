@@ -16071,6 +16071,52 @@ def _arsenal_action_state(
     }
 
 
+async def _arsenal_adapter_pending_response(
+    conn,
+    req: ArsenalExecuteRequest,
+    command_spec: dict[str, Any],
+    *,
+    catalog_status: str,
+    risk_tier: str,
+    created_by: str | None = None,
+) -> dict[str, Any]:
+    cr = await _record_blocked_command_result(
+        conn,
+        action_name=req.command,
+        command=req.command,
+        risk_tier=risk_tier,
+        status="blocked",
+        blocked_by=["dispatch_adapter_pending"],
+        operator_message=f"{req.command} is catalogued as {catalog_status} but has no gateway dispatch adapter yet",
+        created_by=created_by if created_by is not None else req.created_by,
+    )
+    await _link_command_result_to_campaign(conn, req.campaign_id, cr["id"] if cr else None)
+    return {
+        "command": req.command,
+        "dispatched": False,
+        "dry_run": True,
+        "execution_blocked_reason": "dispatch_adapter_pending",
+        "operation_id": cr["id"] if cr else None,
+        "command_result": cr,
+        "action_state": _arsenal_action_state(
+            req,
+            command_spec,
+            catalog_status=catalog_status,
+            risk_tier=risk_tier,
+            phase="blocked",
+            dispatched=False,
+            dry_run=True,
+            execution_enabled=False,
+            operation_id=cr["id"] if cr else None,
+            command_result=cr,
+            blocked_reason="dispatch_adapter_pending",
+            missing_confirmations=[],
+            adapter_status="pending",
+        ),
+        "execution_enabled": False,
+    }
+
+
 async def _arsenal_execute(conn, req: ArsenalExecuteRequest) -> dict[str, Any]:
     command, status, risk_tier = await _validate_arsenal_execute_request(conn, req)
 
@@ -16112,6 +16158,15 @@ async def _arsenal_execute(conn, req: ArsenalExecuteRequest) -> dict[str, Any]:
             ),
             "execution_enabled": True,
         }
+
+    if status in {"read_only", "dry_run"}:
+        return await _arsenal_adapter_pending_response(
+            conn,
+            req,
+            command,
+            catalog_status=status,
+            risk_tier=risk_tier,
+        )
 
     # State-changing command: apply the same execution gate as the AI Ops router.
     required_confs = list(command.get("required_confirmations") or ())
@@ -16288,6 +16343,16 @@ async def _arsenal_execute_detached(req: ArsenalExecuteRequest) -> dict[str, Any
             ),
             "execution_enabled": True,
         }
+
+    if status in {"read_only", "dry_run"}:
+        async with db_pool.acquire() as conn:
+            return await _arsenal_adapter_pending_response(
+                conn,
+                req,
+                _command,
+                catalog_status=status,
+                risk_tier=risk_tier,
+            )
 
     required_confs = list(_command.get("required_confirmations") or ())
     missing_confs = [c for c in required_confs if c not in (req.confirmations or [])]

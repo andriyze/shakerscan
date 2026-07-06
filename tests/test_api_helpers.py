@@ -2384,6 +2384,27 @@ def test_arsenal_execute_dispatches_read_only_command(monkeypatch):
     assert result["action_state"]["command_result_id"] == result["command_result"]["id"]
 
 
+def test_arsenal_execute_unwired_read_only_command_is_adapter_pending_not_approval_required():
+    conn = _BlockedRecordingConn()
+    result = asyncio.run(api_module._arsenal_execute(
+        conn,
+        api_module.ArsenalExecuteRequest(
+            command="scan.result",
+            parameters={"scan_id": "11111111-1111-4111-8111-111111111111"},
+        ),
+    ))
+
+    assert result["dispatched"] is False
+    assert result["dry_run"] is True
+    assert result["execution_blocked_reason"] == "dispatch_adapter_pending"
+    assert conn.recorded and conn.recorded[0]["status"] == "blocked"
+    assert conn.recorded[0]["command"] == "scan.result"
+    assert result["action_state"]["phase"] == "blocked"
+    assert result["action_state"]["adapter_status"] == "pending"
+    assert result["action_state"]["blocked_reason"] == "dispatch_adapter_pending"
+    assert result["action_state"]["gate"]["missing_confirmations"] == []
+
+
 def test_arsenal_execute_gated_dry_runs_without_execute():
     conn = _BlockedRecordingConn()
     result = asyncio.run(api_module._arsenal_execute(
