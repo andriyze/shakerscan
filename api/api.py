@@ -987,6 +987,7 @@ async def _require_approval_receipt_if_policy_enabled(
     action_name: str = "state_changing_action",
     command: str | None = None,
     risk_tier: str = "active",
+    created_by: str | None = None,
 ) -> None:
     if approval_receipt_id:
         return
@@ -1002,6 +1003,7 @@ async def _require_approval_receipt_if_policy_enabled(
         operator_message=(
             f"Blocked {_command_from_action(action_name)}: approval receipt required by automation policy"
         ),
+        created_by=created_by,
     )
     raise HTTPException(
         status_code=409,
@@ -14651,6 +14653,7 @@ async def _record_blocked_command_result(
     command: str | None = None,
     scope_receipt_id: str | None = None,
     approval_receipt_id: str | uuid.UUID | None = None,
+    created_by: str | None = None,
 ) -> dict[str, Any] | None:
     """Best-effort audit row for an action rejected by policy/scope before it queued.
 
@@ -14670,6 +14673,7 @@ async def _record_blocked_command_result(
             scope_receipt_id=scope_receipt_id,
             approval_receipt_id=approval_receipt_id,
             result_json={"action": action_name, "outcome": status},
+            created_by=created_by,
         )
     except Exception:
         return None
@@ -15160,6 +15164,7 @@ async def _validate_approval_receipt_for_action(
     command: str | None = None,
     risk_tier: str = "active",
     record_blocked: bool = True,
+    created_by: str | None = None,
 ) -> dict[str, Any] | None:
     async def _deny(
         reason: str,
@@ -15183,12 +15188,13 @@ async def _validate_approval_receipt_for_action(
                 operator_message=f"Blocked {_command_from_action(action_name)}: {message}",
                 approval_receipt_id=approval_ref,
                 scope_receipt_id=scope_ref,
+                created_by=created_by,
             )
         raise HTTPException(status_code=http_status, detail=message)
 
     if not approval_receipt_id:
         await _require_approval_receipt_if_policy_enabled(
-            conn, None, action_name=action_name, command=command, risk_tier=risk_tier
+            conn, None, action_name=action_name, command=command, risk_tier=risk_tier, created_by=created_by
         )
         return None
     try:
@@ -15753,7 +15759,7 @@ async def _link_command_result_to_campaign(conn, campaign_id, command_result_id)
         return
 
 
-async def _arsenal_execute(conn, req: ArsenalExecuteRequest) -> dict[str, Any]:
+async def _validate_arsenal_execute_request(conn, req: ArsenalExecuteRequest) -> tuple[dict[str, Any], str, str]:
     if req.campaign_id:
         try:
             campaign_uuid = uuid.UUID(str(req.campaign_id))
@@ -15770,6 +15776,11 @@ async def _arsenal_execute(conn, req: ArsenalExecuteRequest) -> dict[str, Any]:
     risk_tier = str(command.get("risk_tier") or "read_only")
     if status in {"catalog_only", "out_of_scope", "contract"}:
         raise HTTPException(status_code=400, detail=f"Command '{req.command}' is not executable (status={status})")
+    return command, status, risk_tier
+
+
+async def _arsenal_execute(conn, req: ArsenalExecuteRequest) -> dict[str, Any]:
+    command, status, risk_tier = await _validate_arsenal_execute_request(conn, req)
 
     readonly = _arsenal_readonly_adapters()
     gated = _arsenal_gated_adapters()
@@ -15817,6 +15828,7 @@ async def _arsenal_execute(conn, req: ArsenalExecuteRequest) -> dict[str, Any]:
             status=result_status,
             blocked_by=[blocked_reason],
             operator_message=f"Did not execute {req.command}: {blocked_reason}",
+            created_by=req.created_by,
         )
         await _link_command_result_to_campaign(conn, req.campaign_id, cr["id"] if cr else None)
         return {
@@ -15837,6 +15849,7 @@ async def _arsenal_execute(conn, req: ArsenalExecuteRequest) -> dict[str, Any]:
         action_name=req.command,
         command=req.command,
         risk_tier=risk_tier,
+        created_by=req.created_by,
     )
 
     adapter = gated.get(req.command)
@@ -15849,6 +15862,7 @@ async def _arsenal_execute(conn, req: ArsenalExecuteRequest) -> dict[str, Any]:
             status="blocked",
             blocked_by=["dispatch_adapter_pending"],
             operator_message=f"{req.command} passed the execution gate but has no gateway dispatch adapter yet; use its dedicated route",
+            created_by=req.created_by,
         )
         await _link_command_result_to_campaign(conn, req.campaign_id, cr["id"] if cr else None)
         return {
@@ -15874,6 +15888,117 @@ async def _arsenal_execute(conn, req: ArsenalExecuteRequest) -> dict[str, Any]:
     }
 
 
+async def _arsenal_execute_detached(req: ArsenalExecuteRequest) -> dict[str, Any]:
+    async with db_pool.acquire() as conn:
+        _command, status, risk_tier = await _validate_arsenal_execute_request(conn, req)
+
+    readonly = _arsenal_readonly_adapters()
+    gated = _arsenal_gated_adapters()
+
+    if req.command in readonly and status in {"read_only", "dry_run"}:
+        result = await readonly[req.command](req.parameters)
+        async with db_pool.acquire() as conn:
+            cr = await _record_command_result(
+                conn,
+                command=req.command,
+                status="completed",
+                risk_tier=risk_tier,
+                operator_message=f"Executed {req.command} via arsenal execution gateway",
+                result_json={"dispatched": True, "via": "arsenal.execute"},
+                created_by=req.created_by,
+            )
+            await _link_command_result_to_campaign(conn, req.campaign_id, cr["id"])
+        return {
+            "command": req.command,
+            "dispatched": True,
+            "dry_run": False,
+            "result": result,
+            "operation_id": cr["id"],
+            "execution_enabled": True,
+        }
+
+    required_confs = list(_command.get("required_confirmations") or ())
+    missing_confs = [c for c in required_confs if c not in (req.confirmations or [])]
+    gate_on = _ai_ops_execute_enabled()
+    blocked_reason = None
+    if not req.execute:
+        blocked_reason = "execute_not_requested"
+    elif missing_confs:
+        blocked_reason = f"missing_confirmation:{missing_confs[0]}"
+    elif not gate_on:
+        blocked_reason = "AI_OPS_ROUTER_EXECUTE_ENABLED_disabled"
+    if blocked_reason:
+        result_status = "approval_required" if blocked_reason in {"execute_not_requested"} or blocked_reason.startswith("missing_confirmation") else "blocked"
+        async with db_pool.acquire() as conn:
+            cr = await _record_blocked_command_result(
+                conn,
+                action_name=req.command,
+                command=req.command,
+                risk_tier=risk_tier,
+                status=result_status,
+                blocked_by=[blocked_reason],
+                operator_message=f"Did not execute {req.command}: {blocked_reason}",
+                created_by=req.created_by,
+            )
+            await _link_command_result_to_campaign(conn, req.campaign_id, cr["id"] if cr else None)
+        return {
+            "command": req.command,
+            "dispatched": False,
+            "dry_run": True,
+            "execution_blocked_reason": blocked_reason,
+            "operation_id": cr["id"] if cr else None,
+            "execution_enabled": False,
+        }
+
+    async with db_pool.acquire() as conn:
+        await _validate_approval_receipt_for_action(
+            conn,
+            req.approval_receipt_id,
+            target_url=str(req.parameters.get("target") or "").strip() or None,
+            target_id=req.parameters.get("target_id"),
+            action_name=req.command,
+            command=req.command,
+            risk_tier=risk_tier,
+            created_by=req.created_by,
+        )
+
+    adapter = gated.get(req.command)
+    if not adapter:
+        async with db_pool.acquire() as conn:
+            cr = await _record_blocked_command_result(
+                conn,
+                action_name=req.command,
+                command=req.command,
+                risk_tier=risk_tier,
+                status="blocked",
+                blocked_by=["dispatch_adapter_pending"],
+                operator_message=f"{req.command} passed the execution gate but has no gateway dispatch adapter yet; use its dedicated route",
+                created_by=req.created_by,
+            )
+            await _link_command_result_to_campaign(conn, req.campaign_id, cr["id"] if cr else None)
+        return {
+            "command": req.command,
+            "dispatched": False,
+            "dry_run": False,
+            "execution_blocked_reason": "dispatch_adapter_pending",
+            "operation_id": cr["id"] if cr else None,
+            "execution_enabled": False,
+        }
+
+    result = await adapter(req.parameters, req.approval_receipt_id)
+    operation_id = result.get("operation_id") if isinstance(result, dict) else None
+    async with db_pool.acquire() as conn:
+        await _link_command_result_to_campaign(conn, req.campaign_id, operation_id)
+    return {
+        "command": req.command,
+        "dispatched": True,
+        "dry_run": False,
+        "result": result,
+        "operation_id": operation_id,
+        "execution_enabled": True,
+    }
+
+
 @app.post("/arsenal/execute")
 async def arsenal_execute(req: ArsenalExecuteRequest):
     """Execute a Command Arsenal product command by name through its existing handler.
@@ -15888,8 +16013,7 @@ async def arsenal_execute(req: ArsenalExecuteRequest):
     action to a §7 mission campaign (must already exist); this is a best-effort
     bookkeeping stamp, same as POST /arsenal/campaigns/{campaign_id}/actions.
     """
-    async with db_pool.acquire() as conn:
-        return await _arsenal_execute(conn, req)
+    return await _arsenal_execute_detached(req)
 
 
 @app.get("/arsenal/hypotheses")
@@ -16232,6 +16356,8 @@ def _command_result_timeline_event(row: Any) -> dict[str, Any]:
         "active_scan_id": scan_id if status in ("queued", "running") else None,
         "operation_plan_id": str(r["operation_plan_id"]) if r.get("operation_plan_id") else None,
         "campaign_id": str(r["campaign_id"]) if r.get("campaign_id") else None,
+        "mission_campaign_id": str(r["mission_campaign_id"]) if r.get("mission_campaign_id") else None,
+        "campaign_action_id": str(r["campaign_action_id"]) if r.get("campaign_action_id") else None,
         "scope_receipt_id": r.get("scope_receipt_id"),
         "approval_receipt_id": str(r["approval_receipt_id"]) if r.get("approval_receipt_id") else None,
         "finding_ids": _decode_json_value(r.get("finding_ids")) or [],
@@ -16471,9 +16597,18 @@ async def mission_timeline(
             SELECT cr.*,
                    s.status AS scan_status,
                    s.target_url AS scan_target_url,
-                   s.target_id AS scan_target_id
+                   s.target_id AS scan_target_id,
+                   ca.id AS campaign_action_id,
+                   ca.mission_campaign_id AS mission_campaign_id
             FROM command_results cr
             LEFT JOIN scans s ON cr.scan_id = s.id
+            LEFT JOIN LATERAL (
+                SELECT id, mission_campaign_id
+                FROM campaign_actions
+                WHERE command_result_id = cr.id
+                ORDER BY updated_at DESC NULLS LAST, created_at DESC
+                LIMIT 1
+            ) ca ON true
             WHERE ($2::uuid IS NULL OR s.target_id = $2)
             ORDER BY cr.created_at DESC
             LIMIT $1
@@ -19135,6 +19270,7 @@ async def evidence_export_bundle(
     scan_id: Optional[str] = Query(None),
     retention_class: Optional[str] = Query(None, regex="^(standard|short|audit|legal_hold|sensitive)$"),
     limit: int = Query(200, ge=1, le=1000),
+    record_event: bool = Query(False, description="Persist a content-free export event for deliberate audit logging."),
 ):
     """Return a content-free export bundle descriptor with replay/read paths."""
     try:
@@ -19167,15 +19303,16 @@ async def evidence_export_bundle(
     manifest = _evidence_export_manifest(rows)
     manifest["filters"] = filters
     bundle = _evidence_export_bundle_descriptor(manifest, filters=filters)
-    async with db_pool.acquire() as conn:
-        bundle["export_event"] = await _record_export_event(
-            conn,
-            export_kind="evidence_export_bundle",
-            command="evidence.export_bundle",
-            bundle=bundle,
-            filters=filters,
-            created_by="api",
-        )
+    if record_event:
+        async with db_pool.acquire() as conn:
+            bundle["export_event"] = await _record_export_event(
+                conn,
+                export_kind="evidence_export_bundle",
+                command="evidence.export_bundle",
+                bundle=bundle,
+                filters=filters,
+                created_by="api",
+            )
     return bundle
 
 

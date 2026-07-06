@@ -479,6 +479,7 @@ COMMANDS: tuple[ArsenalCommand, ...] = (
             "scan_id": {"type": "string", "format": "uuid"},
             "retention_class": {"type": "string", "enum": ["standard", "short", "audit", "legal_hold", "sensitive"]},
             "limit": {"type": "integer", "minimum": 1, "maximum": 1000},
+            "record_event": {"type": "boolean", "default": False},
         },
         evidence_contract=("bundle_hash", "manifest_hash", "api_read_replay", "content_sha256", "storage_integrity"),
         timeout_seconds=20,

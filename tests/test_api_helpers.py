@@ -2032,6 +2032,69 @@ def test_record_export_event_persists_only_content_free_refs():
     assert '"transcript"' not in serialized
 
 
+def test_evidence_export_bundle_get_is_read_only_unless_record_event_requested(monkeypatch):
+    class _Pool:
+        def __init__(self):
+            self.acquire_count = 0
+            self.insert_count = 0
+
+        def acquire(self):
+            pool = self
+
+            class _Conn:
+                async def fetch(self, query, *args):
+                    return []
+
+                async def fetchrow(self, query, *args):
+                    pool.insert_count += 1
+                    return {
+                        "id": uuid.uuid4(),
+                        "export_kind": args[0],
+                        "command": args[1],
+                        "status": "completed",
+                        "risk_tier": "read_only",
+                        "target_id": args[2],
+                        "scan_id": args[3],
+                        "finding_id": args[4],
+                        "bundle_hash": args[5],
+                        "manifest_hash": args[6],
+                        "object_count": args[7],
+                        "filters": args[8],
+                        "evidence_object_ids": args[9],
+                        "finding_ids": args[10],
+                        "scan_ids": args[11],
+                        "replay_plan": args[12],
+                        "operator_message": args[13],
+                        "created_by": args[14],
+                        "created_at": datetime(2026, 7, 6, tzinfo=timezone.utc),
+                    }
+
+            class _Acquire:
+                async def __aenter__(self):
+                    pool.acquire_count += 1
+                    return _Conn()
+
+                async def __aexit__(self, *exc):
+                    return False
+
+            return _Acquire()
+
+    pool = _Pool()
+    monkeypatch.setattr(api_module, "db_pool", pool)
+
+    bundle = asyncio.run(api_module.evidence_export_bundle(limit=200, record_event=False))
+
+    assert "export_event" not in bundle
+    assert pool.acquire_count == 1
+    assert pool.insert_count == 0
+
+    recorded = asyncio.run(api_module.evidence_export_bundle(limit=200, record_event=True))
+
+    assert recorded["export_event"]["export_kind"] == "evidence_export_bundle"
+    assert pool.acquire_count == 3
+    assert pool.insert_count == 1
+
+
 def test_evidence_retention_candidates_skip_legal_hold_and_use_policy_days():
     now = datetime(2026, 7, 6, tzinfo=timezone.utc)
     old = datetime(2025, 1, 1, tzinfo=timezone.utc)
@@ -2189,12 +2252,13 @@ def test_arsenal_execute_dispatches_read_only_command(monkeypatch):
 def test_arsenal_execute_gated_dry_runs_without_execute():
     conn = _BlockedRecordingConn()
     result = asyncio.run(api_module._arsenal_execute(
-        conn, api_module.ArsenalExecuteRequest(command="asm.improve", parameters={"target_id": "t"})
+        conn, api_module.ArsenalExecuteRequest(command="asm.improve", parameters={"target_id": "t"}, created_by="pytest")
     ))
     assert result["dispatched"] is False
     assert result["dry_run"] is True
     assert result["execution_blocked_reason"] == "execute_not_requested"
     assert conn.recorded and conn.recorded[0]["status"] == "approval_required"
+    assert conn.recorded[0]["created_by"] == "pytest"
 
 
 def test_arsenal_execute_gated_blocked_when_flag_disabled(monkeypatch):
@@ -2291,6 +2355,60 @@ def test_arsenal_execute_gated_asm_test_dispatches_when_allowed(monkeypatch):
     ))
     assert result["dispatched"] is True
     assert result["operation_id"] == "op-9"
+
+
+def test_arsenal_execute_detached_dispatches_without_holding_outer_db_conn(monkeypatch):
+    monkeypatch.setattr(api_module, "_ai_ops_execute_enabled", lambda: True)
+
+    class _Pool:
+        def __init__(self):
+            self.active = 0
+            self.max_active = 0
+            self.conn = _BlockedRecordingConn()
+            self.adapter_saw_no_conn = False
+
+        def acquire(self):
+            pool = self
+
+            class _Acquire:
+                async def __aenter__(self):
+                    pool.active += 1
+                    pool.max_active = max(pool.max_active, pool.active)
+                    return pool.conn
+
+                async def __aexit__(self, *exc):
+                    pool.active -= 1
+                    return False
+
+            return _Acquire()
+
+    pool = _Pool()
+
+    async def fake_validate(*args, **kwargs):
+        assert pool.active == 1
+        return {"approval_receipt_id": "r"}
+
+    async def fake_adapter(parameters, approval_receipt_id):
+        pool.adapter_saw_no_conn = pool.active == 0
+        return {"operation_id": "99999999-9999-4999-8999-999999999999", "status": "queued"}
+
+    monkeypatch.setattr(api_module, "db_pool", pool)
+    monkeypatch.setattr(api_module, "_validate_approval_receipt_for_action", fake_validate)
+    monkeypatch.setattr(api_module, "_arsenal_gated_adapters", lambda: {"asm.improve": fake_adapter})
+
+    result = asyncio.run(api_module._arsenal_execute_detached(
+        api_module.ArsenalExecuteRequest(
+            command="asm.improve",
+            parameters={"target_id": "11111111-1111-4111-8111-111111111111"},
+            execute=True,
+            confirmations=["confirm_authorized"],
+            approval_receipt_id="r",
+        )
+    ))
+
+    assert result["dispatched"] is True
+    assert pool.adapter_saw_no_conn is True
+    assert pool.max_active == 1
 
 
 # ----- §7 mission campaigns ----------------------------------------------------
@@ -3494,7 +3612,7 @@ def test_validate_approval_receipt_records_blocked_row_before_raising():
         scope_row=_make_scope_row(),
     )
     with pytest.raises(api_module.HTTPException):
-        _run_validate(conn, APPROVAL_ID, target_url="https://app.example.com/x")
+        _run_validate(conn, APPROVAL_ID, target_url="https://app.example.com/x", created_by="pytest")
 
     assert len(conn.recorded) == 1
     row = conn.recorded[0]
@@ -3503,6 +3621,7 @@ def test_validate_approval_receipt_records_blocked_row_before_raising():
     assert json.loads(row["blocked_by"]) == ["approval_receipt_expired"]
     # The (existing) approval receipt is referenced; scope not yet reached.
     assert str(row["approval_receipt_id"]) == APPROVAL_ID
+    assert row["created_by"] == "pytest"
 
 
 def test_validate_approval_receipt_blocked_row_is_fk_safe_on_not_found():
@@ -3535,7 +3654,7 @@ def test_require_approval_receipt_records_approval_required_row_when_missing():
     with pytest.raises(api_module.HTTPException) as exc:
         asyncio.run(
             api_module._require_approval_receipt_if_policy_enabled(
-                conn, None, action_name="scan.submit:quick"
+                conn, None, action_name="scan.submit:quick", created_by="pytest"
             )
         )
     assert exc.value.status_code == 409
@@ -3545,6 +3664,7 @@ def test_require_approval_receipt_records_approval_required_row_when_missing():
     assert row["status"] == "approval_required"
     assert json.loads(row["blocked_by"]) == ["approval_receipt_required"]
     assert row["approval_receipt_id"] is None
+    assert row["created_by"] == "pytest"
 
 
 # ----- gateway -> campaign auto-linkage (§7/§2) --------------------------------
@@ -3627,12 +3747,16 @@ def test_command_result_event_uses_live_scan_status_over_frozen_status():
         "tool_receipt_ids": [], "blocked_by": [], "next_action": "/scans/x",
         "operator_message": "queued", "created_at": datetime(2026, 7, 6, tzinfo=timezone.utc),
         "scan_status": "running", "scan_target_url": "https://app.example.com", "scan_target_id": None,
+        "campaign_action_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "mission_campaign_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
     }
     ev = api_module._command_result_timeline_event(row)
     assert ev["kind"] == "command_result"
     assert ev["status"] == "running"          # live scan status wins
     assert ev["active_scan_id"] == "44444444-4444-4444-8444-444444444444"
     assert ev["target_url"] == "https://app.example.com"
+    assert ev["campaign_action_id"] == "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    assert ev["mission_campaign_id"] == "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
 
 
 def test_timeline_sort_orders_newest_first_and_none_last():
@@ -3818,12 +3942,12 @@ class _TimelinePool:
                             return pool._refuters
                         if "FROM export_events ee" in query:
                             return pool._exports
+                        if "FROM command_results cr" in query and "SELECT cr.*" in query:
+                            return pool._cr
                         if "FROM campaign_actions ca" in query:
                             return pool._actions
                         if "FROM scans s" in query:
                             return pool._scans
-                        if "FROM command_results cr" in query:
-                            return pool._cr
                         return []
                 return _Conn()
 
@@ -3842,6 +3966,8 @@ def test_mission_timeline_merges_sorts_and_reports_upcoming(monkeypatch):
         "tool_receipt_ids": [], "blocked_by": [], "next_action": "/scans/x",
         "operator_message": "queued", "created_at": datetime(2026, 7, 6, 12, tzinfo=timezone.utc),
         "scan_status": "running", "scan_target_url": "https://app.example.com", "scan_target_id": None,
+        "campaign_action_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "mission_campaign_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
     }
     scan_row = {
         "id": "55555555-5555-4555-8555-555555555555", "status": "completed",
@@ -3937,6 +4063,7 @@ def test_mission_timeline_merges_sorts_and_reports_upcoming(monkeypatch):
         "55555555-5555-4555-8555-555555555555",
     ]
     assert result["events"][0]["status"] == "running"       # live scan status
+    assert result["events"][0]["mission_campaign_id"] == "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
     assert result["events"][1]["kind"] == "evidence_instance"
     assert result["events"][1]["status"] == "evidence_bound"
     assert result["events"][2]["kind"] == "refuter_review"
