@@ -15912,6 +15912,20 @@ async def _link_command_result_to_campaign(conn, campaign_id, command_result_id)
         return
 
 
+async def _command_result_response_row(conn, command_result_id) -> dict[str, Any] | None:
+    if not command_result_id:
+        return None
+    try:
+        command_result_uuid = uuid.UUID(str(command_result_id))
+    except (TypeError, ValueError):
+        return None
+    try:
+        row = await conn.fetchrow("SELECT * FROM command_results WHERE id=$1", command_result_uuid)
+    except Exception:
+        return None
+    return _public_command_result_row(row) if row else None
+
+
 async def _validate_arsenal_execute_request(conn, req: ArsenalExecuteRequest) -> tuple[dict[str, Any], str, str]:
     if req.campaign_id:
         try:
@@ -15957,6 +15971,7 @@ async def _arsenal_execute(conn, req: ArsenalExecuteRequest) -> dict[str, Any]:
             "dry_run": False,
             "result": result,
             "operation_id": cr["id"],
+            "command_result": cr,
             "execution_enabled": True,
         }
 
@@ -15990,6 +16005,7 @@ async def _arsenal_execute(conn, req: ArsenalExecuteRequest) -> dict[str, Any]:
             "dry_run": True,
             "execution_blocked_reason": blocked_reason,
             "operation_id": cr["id"] if cr else None,
+            "command_result": cr,
             "execution_enabled": False,
         }
 
@@ -16024,19 +16040,23 @@ async def _arsenal_execute(conn, req: ArsenalExecuteRequest) -> dict[str, Any]:
             "dry_run": False,
             "execution_blocked_reason": "dispatch_adapter_pending",
             "operation_id": cr["id"] if cr else None,
+            "command_result": cr,
             "execution_enabled": False,
         }
 
     # The dispatched handler records its own command_result audit row.
     result = await adapter(req.parameters, req.approval_receipt_id)
     operation_id = result.get("operation_id") if isinstance(result, dict) else None
+    command_result = None
     await _link_command_result_to_campaign(conn, req.campaign_id, operation_id)
+    command_result = await _command_result_response_row(conn, operation_id)
     return {
         "command": req.command,
         "dispatched": True,
         "dry_run": False,
         "result": result,
         "operation_id": operation_id,
+        "command_result": command_result,
         "execution_enabled": True,
     }
 
@@ -16067,6 +16087,7 @@ async def _arsenal_execute_detached(req: ArsenalExecuteRequest) -> dict[str, Any
             "dry_run": False,
             "result": result,
             "operation_id": cr["id"],
+            "command_result": cr,
             "execution_enabled": True,
         }
 
@@ -16100,6 +16121,7 @@ async def _arsenal_execute_detached(req: ArsenalExecuteRequest) -> dict[str, Any
             "dry_run": True,
             "execution_blocked_reason": blocked_reason,
             "operation_id": cr["id"] if cr else None,
+            "command_result": cr,
             "execution_enabled": False,
         }
 
@@ -16135,19 +16157,23 @@ async def _arsenal_execute_detached(req: ArsenalExecuteRequest) -> dict[str, Any
             "dry_run": False,
             "execution_blocked_reason": "dispatch_adapter_pending",
             "operation_id": cr["id"] if cr else None,
+            "command_result": cr,
             "execution_enabled": False,
         }
 
     result = await adapter(req.parameters, req.approval_receipt_id)
     operation_id = result.get("operation_id") if isinstance(result, dict) else None
+    command_result = None
     async with db_pool.acquire() as conn:
         await _link_command_result_to_campaign(conn, req.campaign_id, operation_id)
+        command_result = await _command_result_response_row(conn, operation_id)
     return {
         "command": req.command,
         "dispatched": True,
         "dry_run": False,
         "result": result,
         "operation_id": operation_id,
+        "command_result": command_result,
         "execution_enabled": True,
     }
 

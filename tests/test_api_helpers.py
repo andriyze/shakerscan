@@ -2247,6 +2247,8 @@ def test_arsenal_execute_dispatches_read_only_command(monkeypatch):
     assert result["dry_run"] is False
     assert conn.recorded and conn.recorded[0]["status"] == "completed"
     assert conn.recorded[0]["command"] == "campaign.list"
+    assert result["command_result"]["command"] == "campaign.list"
+    assert result["command_result"]["status"] == "completed"
 
 
 def test_arsenal_execute_gated_dry_runs_without_execute():
@@ -2259,6 +2261,7 @@ def test_arsenal_execute_gated_dry_runs_without_execute():
     assert result["execution_blocked_reason"] == "execute_not_requested"
     assert conn.recorded and conn.recorded[0]["status"] == "approval_required"
     assert conn.recorded[0]["created_by"] == "pytest"
+    assert result["command_result"]["created_by"] == "pytest"
 
 
 def test_arsenal_execute_gated_blocked_when_flag_disabled(monkeypatch):
@@ -2548,6 +2551,63 @@ def test_arsenal_execute_gated_evidence_retention_sweep_dispatches_when_allowed(
     assert captured["body"].dry_run is False
     assert captured["body"].older_than_days == 90
     assert captured["body"].approval_receipt_id == "r"
+
+
+def test_arsenal_execute_returns_persisted_command_result_refs(monkeypatch):
+    monkeypatch.setattr(api_module, "_ai_ops_execute_enabled", lambda: True)
+    operation_id = "99999999-9999-4999-8999-999999999999"
+
+    class _CommandResultLookupConn(_BlockedRecordingConn):
+        async def fetchrow(self, query, *args):
+            if "SELECT * FROM command_results" in query:
+                return {
+                    "id": args[0],
+                    "command": "model_intake.scan",
+                    "status": "queued",
+                    "dry_run": False,
+                    "risk_tier": "active",
+                    "operation_plan_id": None,
+                    "scope_receipt_id": "scope-1",
+                    "approval_receipt_id": None,
+                    "campaign_id": None,
+                    "scan_id": "88888888-8888-4888-8888-888888888888",
+                    "finding_ids": json.dumps([]),
+                    "hypothesis_ids": json.dumps([]),
+                    "evidence_object_ids": json.dumps(["eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"]),
+                    "tool_receipt_ids": json.dumps(["77777777-7777-4777-8777-777777777777"]),
+                    "blocked_by": json.dumps([]),
+                    "next_action": "/scans/88888888-8888-4888-8888-888888888888",
+                    "operator_message": "queued",
+                    "result_json": json.dumps({"scan_id": "88888888-8888-4888-8888-888888888888"}),
+                    "created_by": "pytest",
+                    "created_at": None,
+                }
+            return await super().fetchrow(query, *args)
+
+    async def fake_validate(*args, **kwargs):
+        return {}
+
+    async def fake_model_intake(body):
+        return {"operation_id": operation_id, "scan_id": "scan-model", "status": "queued"}
+
+    monkeypatch.setattr(api_module, "_validate_approval_receipt_for_action", fake_validate)
+    monkeypatch.setattr(api_module, "scan_model_intake", fake_model_intake)
+
+    result = asyncio.run(api_module._arsenal_execute(
+        _CommandResultLookupConn(),
+        api_module.ArsenalExecuteRequest(
+            command="model_intake.scan",
+            parameters={"artifact_url": "https://models.example.com/model.safetensors"},
+            execute=True,
+            confirmations=["confirm_authorized"],
+            approval_receipt_id="r",
+        ),
+    ))
+
+    assert result["operation_id"] == operation_id
+    assert result["command_result"]["command"] == "model_intake.scan"
+    assert result["command_result"]["tool_receipt_ids"] == ["77777777-7777-4777-8777-777777777777"]
+    assert result["command_result"]["evidence_object_ids"] == ["eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"]
 
 
 def test_arsenal_execute_detached_dispatches_without_holding_outer_db_conn(monkeypatch):
