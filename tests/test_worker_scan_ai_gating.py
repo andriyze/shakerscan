@@ -243,6 +243,138 @@ def test_failure_result_preserves_runtime_scope_metadata():
     assert failure["tool_receipt_ids"] == ["tool-1"]
 
 
+def test_ai_gate_weak_signal_becomes_replay_hypothesis():
+    hypotheses = worker._product_signal_hypotheses(
+        "11111111-1111-4111-8111-111111111111",
+        None,
+        "22222222-2222-4222-8222-222222222222",
+        "https://ai.example.com/chat",
+        {
+            "ai_gate": {"probe_pack": "shaker-rag-lite", "scan_profile": "standard"},
+            "findings": [
+                {
+                    "id": "ai_gate:rag_leak",
+                    "title": "RAG leakage",
+                    "severity": "high",
+                    "cwe": "CWE-200",
+                    "ai_verdict": "needs_review",
+                    "ai_confidence": 0.55,
+                    "ai_classification_source": "semantic_judge",
+                    "evidence": {"probe_family": "rag", "semantic_result": {"confidence": 0.55}},
+                }
+            ],
+        },
+        {"run_kind": "ai_rag", "ai_probe_pack": "shaker-rag-lite", "ai_scan_profile": "standard"},
+    )
+
+    assert len(hypotheses) == 1
+    hypothesis = hypotheses[0]
+    assert hypothesis["source"] == "ai_gate"
+    assert hypothesis["family"] == "ai_gate_rag"
+    assert hypothesis["next_test_action"]["command"] == "ai_gate.replay_probe"
+    assert hypothesis["next_test_action"]["parameters"]["source_finding_id"] == "ai_gate:rag_leak"
+    assert "ai_target_id=22222222-2222-4222-8222-222222222222" in hypothesis["dedupe_key"]
+
+
+def test_model_intake_trust_signal_becomes_trust_preview_hypothesis():
+    target_id = "33333333-3333-4333-8333-333333333333"
+    hypotheses = worker._product_signal_hypotheses(
+        "11111111-1111-4111-8111-111111111111",
+        target_id,
+        None,
+        "https://models.example.com/model.safetensors",
+        {
+            "model_intake": {
+                "summary": {
+                    "artifact_ref": "https://models.example.com/model.safetensors",
+                    "signature_verification_status": "claimed_verified",
+                    "checksum_status": "missing",
+                },
+            },
+            "findings": [
+                {
+                    "id": "model_intake:signature_not_verified",
+                    "title": "Model artifact signature is present but not cryptographically verified",
+                    "severity": "high",
+                    "tool": "model_intake",
+                }
+            ],
+        },
+        {"run_kind": "model_intake"},
+    )
+
+    assert len(hypotheses) == 1
+    hypothesis = hypotheses[0]
+    assert hypothesis["source"] == "model_intake"
+    assert hypothesis["target_id"] == target_id
+    assert hypothesis["family"] == "model_intake_trust"
+    assert hypothesis["next_test_action"]["command"] == "model_intake.trust_preview"
+    assert "finding_id=model_intake:signature_not_verified" in hypothesis["dedupe_key"]
+
+
+class _HypothesisPersistConn:
+    def __init__(self):
+        self.rows = []
+
+    async def fetchrow(self, query, *args):
+        assert "INSERT INTO hypotheses" in query
+        self.rows.append(args)
+        return {"id": "44444444-4444-4444-8444-444444444444"}
+
+
+class _HypothesisPersistAcquire:
+    def __init__(self, conn):
+        self.conn = conn
+
+    async def __aenter__(self):
+        return self.conn
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
+class _HypothesisPersistPool:
+    def __init__(self, conn):
+        self.conn = conn
+
+    def acquire(self):
+        return _HypothesisPersistAcquire(self.conn)
+
+
+def test_product_signal_hypotheses_are_persisted(monkeypatch):
+    conn = _HypothesisPersistConn()
+    monkeypatch.setattr(worker, "db_pool", _HypothesisPersistPool(conn))
+
+    count = asyncio.run(worker.persist_product_signal_hypotheses(
+        "11111111-1111-4111-8111-111111111111",
+        None,
+        "22222222-2222-4222-8222-222222222222",
+        "https://ai.example.com/chat",
+        {
+            "ai_gate": {},
+            "findings": [
+                {
+                    "id": "ai_gate:weak",
+                    "title": "Weak AI Gate signal",
+                    "severity": "medium",
+                    "ai_verdict": "needs_review",
+                    "confidence": 0.5,
+                    "evidence": {"probe_family": "agent"},
+                }
+            ],
+        },
+        {"run_kind": "ai_trace"},
+    ))
+
+    assert count == 1
+    args = conn.rows[0]
+    assert args[1] == "ai_gate"
+    assert args[2] == "ai_gate_agent"
+    assert json.loads(args[9])["command"] == "ai_gate.replay_probe"
+    assert json.loads(args[10])["source"] == "ai_gate"
+    assert args[12] == "worker"
+
+
 class _FakeProcess:
     def __init__(self, stdout_payload: bytes, stderr_payload: bytes = b""):
         self.stdout = asyncio.StreamReader()

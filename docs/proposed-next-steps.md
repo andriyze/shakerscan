@@ -155,9 +155,9 @@ Use these waves to decide sequence when a T3MP3ST idea competes with detector wo
    planning. Remaining work is harmless capability ping, strict parser validation, and release gates
    that prevent raw shell, scope broadening, risk escalation, or AI-verified claims.
 5. **Hypotheses before new detectors:** DONE phase 1 for campaign-action audit records and durable
-   hypothesis records with dedupe, endorsements, and claim leases. Remaining work is graph/source/AI
-   signal routing, bounded situation reports, and refuter workflow before treating broad agent output
-   as product truth.
+   hypothesis records with dedupe, endorsements, and claim leases. DONE phase 2 for graph plus
+   AI Gate/Model Intake product-signal routing into hypotheses. Remaining work is source/spec/weak
+   scanner signal routing and refuter workflow before treating broad agent output as product truth.
 6. **Receipts before new tools:** wrap existing tools first (`httpx`, `katana`, `nuclei`,
    `subfinder`, `ffuf`, `dalfox`, `sqlmap`, `nmap`, TLS tools, Playwright, AI Gate executor, Model
    Intake artifact/signature checks). New offensive tooling stays `catalog_only`.
@@ -527,8 +527,9 @@ raw shell execution or LLM-produced verified findings.
    blocked by second user, blocked by schedule/rate cap, stale, and worker-stale.
 6. **Campaign + hypothesis layer:** DONE phase 1 for durable deduped hypotheses/leads, endorsements,
    read APIs, bounded context-pack summaries, compare-and-set claim leases, and app-graph authz
-   hypothesis generation. Remaining work is to route source/spec hints, AI planner suggestions, weak
-   scanner signals, AI Gate signals, and Model Intake metadata claims into those hypotheses.
+   hypothesis generation. DONE phase 2 for AI Gate weak/semantic signals and Model Intake trust
+   metadata claims becoming replay/remediation hypotheses from worker finalization. Remaining work is
+   to route source/spec hints, AI planner suggestions, and weak scanner signals into those hypotheses.
    Hypotheses are claimable/refutable work items, not findings.
 7. **Detector recall campaigns:** keep benchmark gaps as proof-backed work items: POST-body SQLi,
    NoSQL JSON/body routing, stored/reflected XSS browser proof, workflow/write-side BOLA, mass
@@ -973,6 +974,11 @@ adapt it into ShakerScan's proof model: leads are coordinated work items, not fi
    confirmed/refuted/dead hypotheses unclaimable, and now exposes expired claimed/testing rows with
    `effective_status: open`, `claim_state.expired`, and `claimable: true`; `status=open` list queries
    include those expired claims.
+10. DONE phase 1 for product-signal routing: worker finalization now converts AI Gate semantic,
+    needs-review, or low-confidence findings into focused replay hypotheses, and Model Intake
+    metadata/governance/trust-control findings into `model_intake.trust_preview` remediation
+    hypotheses. These records endorse the hypothesis board only; they do not create findings, promote
+    proof state, or execute follow-up work.
 
 **Done when:** the scanner can state "`GET /api/orders` produces `order.id` owned by user1;
 `GET /api/orders/{id}` consumes it -> test user2 read/mutate" from a persisted graph and schedule

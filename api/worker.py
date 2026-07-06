@@ -2313,6 +2313,288 @@ async def save_ai_findings(scan_id: str, ai_target_id: str, findings: list) -> i
     return saved
 
 
+def _hypothesis_dedupe_part(value: Any, *, lower: bool = False) -> str | None:
+    if value is None:
+        return None
+    text = re.sub(r"\s+", " ", str(value).strip()).replace("|", "%7C")
+    if not text:
+        return None
+    return text.lower().replace(" ", "_") if lower else text
+
+
+def _product_signal_hypothesis_key(family: str, dimensions: dict[str, Any]) -> str:
+    ordered = (
+        "product",
+        "scan_id",
+        "target_id",
+        "ai_target_id",
+        "artifact",
+        "finding_id",
+        "probe_family",
+        "type",
+    )
+    parts = [f"family={family}"]
+    for key in ordered:
+        value = _hypothesis_dedupe_part(dimensions.get(key), lower=key in {"product", "probe_family", "type"})
+        if value:
+            parts.append(f"{key}={value}")
+    return "hypothesis:v1|" + "|".join(parts)
+
+
+def _severity_to_confidence(severity: Any, fallback: float = 0.62) -> float:
+    rank = {"critical": 0.82, "high": 0.74, "medium": 0.62, "low": 0.45, "info": 0.35}
+    return rank.get(str(severity or "").strip().lower(), fallback)
+
+
+def _hypothesis_severity(value: Any, default: str = "medium") -> str:
+    severity = str(value or "").strip().lower()
+    return severity if severity in {"critical", "high", "medium", "low", "info"} else default
+
+
+def _float_between_0_1(value: Any, fallback: float) -> float:
+    try:
+        return max(0.0, min(float(value), 1.0))
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _ai_gate_signal_hypotheses(
+    scan_id: str,
+    ai_target_id: str | None,
+    result: dict[str, Any],
+    options: dict[str, Any],
+) -> list[dict[str, Any]]:
+    hypotheses: list[dict[str, Any]] = []
+    ai_gate = result.get("ai_gate") if isinstance(result.get("ai_gate"), dict) else {}
+    findings = result.get("findings") if isinstance(result.get("findings"), list) else []
+    for finding in findings[:50]:
+        if not isinstance(finding, dict):
+            continue
+        evidence = finding.get("evidence") if isinstance(finding.get("evidence"), dict) else {}
+        ai_verdict = str(finding.get("ai_verdict") or "").strip().lower()
+        source = str(finding.get("ai_classification_source") or "").strip().lower()
+        confidence = _float_between_0_1(
+            finding.get("ai_confidence", finding.get("confidence")),
+            _severity_to_confidence(finding.get("severity"), 0.6),
+        )
+        weak_or_semantic = (
+            ai_verdict == "needs_review"
+            or source == "semantic_judge"
+            or isinstance(evidence.get("semantic_result"), dict)
+            or bool(evidence.get("semantic_judge_error"))
+            or confidence < 0.75
+        )
+        if not weak_or_semantic:
+            continue
+        finding_id = str(finding.get("id") or finding.get("title") or "").strip()
+        probe_family = str(evidence.get("probe_family") or evidence.get("strategy_id") or finding.get("type") or "ai_gate").strip()
+        family = f"ai_gate_{probe_family.lower().replace(' ', '_')}"[:80]
+        dims = {
+            "product": "ai_gate",
+            "scan_id": scan_id,
+            "ai_target_id": ai_target_id,
+            "finding_id": finding_id,
+            "probe_family": probe_family,
+            "type": finding.get("type") or finding.get("category"),
+        }
+        hypotheses.append({
+            "source": "ai_gate",
+            "family": family or "ai_gate",
+            "cwe": finding.get("cwe"),
+            "title": f"AI Gate follow-up lead: {finding.get('title') or probe_family}",
+            "description": (
+                "AI Gate produced a semantic, needs-review, or lower-confidence signal. "
+                "Treat it as a replayable hypothesis until focused AI Gate evidence confirms it."
+            ),
+            "severity_guess": _hypothesis_severity(finding.get("severity")),
+            "confidence": confidence,
+            "dedupe_key": _product_signal_hypothesis_key(family or "ai_gate", dims),
+            "next_test_action": {
+                "command": "ai_gate.replay_probe",
+                "parameters": {
+                    "scan_id": scan_id,
+                    "ai_target_id": ai_target_id,
+                    "source_finding_id": finding_id or None,
+                    "probe_family": probe_family,
+                },
+            },
+            "endorsement": {
+                "source": "ai_gate",
+                "scan_id": scan_id,
+                "ai_target_id": ai_target_id,
+                "finding_id": finding_id or None,
+                "ai_verdict": ai_verdict or None,
+                "ai_classification_source": source or None,
+                "confidence": confidence,
+            },
+            "metadata_json": {
+                "dedupe_dimensions": dims,
+                "product": "ai_gate",
+                "probe_pack": options.get("ai_probe_pack") or ai_gate.get("probe_pack"),
+                "scan_profile": options.get("ai_scan_profile") or ai_gate.get("scan_profile"),
+            },
+            "created_by": "worker",
+        })
+    return hypotheses
+
+
+MODEL_INTAKE_HYPOTHESIS_MARKERS = (
+    "signature",
+    "trust",
+    "metadata",
+    "governance",
+    "approval",
+    "license",
+    "sbom",
+    "malware",
+    "eval",
+    "provenance",
+    "model_card",
+)
+
+
+def _model_intake_signal_hypotheses(
+    scan_id: str,
+    target_id: str | None,
+    target: str | None,
+    result: dict[str, Any],
+) -> list[dict[str, Any]]:
+    hypotheses: list[dict[str, Any]] = []
+    findings = result.get("findings") if isinstance(result.get("findings"), list) else []
+    model_intake = result.get("model_intake") if isinstance(result.get("model_intake"), dict) else {}
+    summary = model_intake.get("summary") if isinstance(model_intake.get("summary"), dict) else {}
+    artifact_ref = summary.get("artifact_ref") or target
+    for finding in findings[:50]:
+        if not isinstance(finding, dict):
+            continue
+        finding_id = str(finding.get("id") or "").strip()
+        haystack = f"{finding_id} {finding.get('title') or ''}".lower()
+        if not any(marker in haystack for marker in MODEL_INTAKE_HYPOTHESIS_MARKERS):
+            continue
+        dims = {
+            "product": "model_intake",
+            "scan_id": scan_id,
+            "target_id": target_id,
+            "artifact": artifact_ref,
+            "finding_id": finding_id,
+            "type": finding.get("type") or finding_id,
+        }
+        hypotheses.append({
+            "target_id": target_id,
+            "source": "model_intake",
+            "family": "model_intake_trust",
+            "cwe": finding.get("cwe"),
+            "title": f"Model Intake trust lead: {finding.get('title') or finding_id}",
+            "description": (
+                "Model Intake produced a metadata, governance, or trust-control signal. "
+                "Treat it as a remediation hypothesis until checksum/signature/trust evidence confirms it."
+            ),
+            "severity_guess": _hypothesis_severity(finding.get("severity")),
+            "confidence": _severity_to_confidence(finding.get("severity"), 0.65),
+            "dedupe_key": _product_signal_hypothesis_key("model_intake_trust", dims),
+            "next_test_action": {
+                "command": "model_intake.trust_preview",
+                "parameters": {
+                    "artifact_url": artifact_ref,
+                    "scan_id": scan_id,
+                },
+            },
+            "endorsement": {
+                "source": "model_intake",
+                "scan_id": scan_id,
+                "target_id": target_id,
+                "finding_id": finding_id or None,
+                "signature_status": summary.get("signature_verification_status"),
+                "checksum_status": summary.get("checksum_status"),
+            },
+            "metadata_json": {
+                "dedupe_dimensions": dims,
+                "product": "model_intake",
+                "summary": {
+                    "signature_verification_status": summary.get("signature_verification_status"),
+                    "checksum_status": summary.get("checksum_status"),
+                    "format_posture": summary.get("format_posture"),
+                },
+            },
+            "created_by": "worker",
+        })
+    return hypotheses
+
+
+def _product_signal_hypotheses(
+    scan_id: str,
+    target_id: str | None,
+    ai_target_id: str | None,
+    target: str | None,
+    result: dict[str, Any],
+    options: dict[str, Any],
+) -> list[dict[str, Any]]:
+    run_kind = str((options or {}).get("run_kind") or "")
+    if run_kind in AI_GATE_RUN_KINDS or isinstance((result or {}).get("ai_gate"), dict):
+        return _ai_gate_signal_hypotheses(scan_id, ai_target_id, result, options)
+    if run_kind in MODEL_INTAKE_RUN_KINDS or isinstance((result or {}).get("model_intake"), dict):
+        return _model_intake_signal_hypotheses(scan_id, target_id, target, result)
+    return []
+
+
+async def persist_product_signal_hypotheses(
+    scan_id: str,
+    target_id: str | None,
+    ai_target_id: str | None,
+    target: str | None,
+    result: dict[str, Any],
+    options: dict[str, Any],
+) -> int:
+    hypotheses = _product_signal_hypotheses(scan_id, target_id, ai_target_id, target, result, options)
+    if not hypotheses:
+        return 0
+    inserted = 0
+    async with db_pool.acquire() as conn:
+        for payload in hypotheses:
+            target_uuid = uuid.UUID(payload["target_id"]) if payload.get("target_id") else None
+            endorsement = {
+                **(payload.get("endorsement") or {}),
+                "recorded_at": utc_now_iso(),
+            }
+            await conn.fetchrow(
+                """
+                INSERT INTO hypotheses (
+                    target_id, source, family, cwe, title, description,
+                    severity_guess, confidence, dedupe_key, next_test_action,
+                    endorsements, metadata_json, created_by
+                ) VALUES (
+                    $1,$2,$3,$4,$5,$6,
+                    $7,$8,$9,$10::jsonb,
+                    jsonb_build_array($11::jsonb),$12::jsonb,$13
+                )
+                ON CONFLICT (COALESCE(target_id, '00000000-0000-0000-0000-000000000000'::uuid), family, dedupe_key)
+                DO UPDATE SET
+                    confidence = GREATEST(hypotheses.confidence, EXCLUDED.confidence),
+                    next_test_action = COALESCE(EXCLUDED.next_test_action, hypotheses.next_test_action),
+                    endorsements = hypotheses.endorsements || EXCLUDED.endorsements,
+                    metadata_json = hypotheses.metadata_json || EXCLUDED.metadata_json,
+                    version = hypotheses.version + 1,
+                    updated_at = NOW()
+                RETURNING id
+                """,
+                target_uuid,
+                payload["source"],
+                payload["family"],
+                payload.get("cwe"),
+                payload.get("title"),
+                payload.get("description"),
+                payload.get("severity_guess"),
+                float(payload.get("confidence") or 0),
+                payload["dedupe_key"],
+                json.dumps(payload.get("next_test_action") or {}),
+                json.dumps(endorsement),
+                json.dumps(payload.get("metadata_json") or {}),
+                payload.get("created_by") or "worker",
+            )
+            inserted += 1
+    return inserted
+
+
 def _ai_finding_matches_retest(finding: dict[str, Any], replay_plan: dict[str, Any]) -> bool:
     evidence = parse_json_field(finding.get("evidence")) or {}
     source_finding_id = str(finding.get("source_finding_id") or evidence.get("source_finding_id") or "")
@@ -5012,6 +5294,21 @@ async def process_scan_job(job_data: dict):
                 saved_count = await save_ai_findings(scan_id, ai_target_id, findings)
             except Exception as e:
                 print(f"[{job_id[:8]}] save_ai_findings error: {e}", flush=True)
+
+        if not error and (ai_target_id or (options or {}).get("run_kind") in MODEL_INTAKE_RUN_KINDS):
+            try:
+                n = await persist_product_signal_hypotheses(
+                    scan_id,
+                    target_id,
+                    ai_target_id,
+                    target,
+                    result,
+                    options,
+                )
+                if n:
+                    print(f"[{job_id[:8]}] product hypotheses: upserted {n} signal leads", flush=True)
+            except Exception as e:
+                print(f"[{job_id[:8]}] product hypotheses error: {e}", flush=True)
 
         # Continuous ASM: persist this scan's discovered endpoint worklist into
         # the per-target inventory (docs §16). Best-effort; never fails the scan.
