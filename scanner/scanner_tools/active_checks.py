@@ -6653,7 +6653,12 @@ async def smart_sqli_test(
     get_endpoints = [
         e for e in endpoints
         if e.get("method", "GET").upper() == "GET"
-        and e.get("params")
+        # Accept query params under EITHER key. Browser/HAR discovery stores them
+        # under ``query_params`` while synthetic/inferred endpoints use ``params``;
+        # the loop below already reads ``params or query_params``, so requiring
+        # only ``params`` here silently dropped real observed injection points
+        # (e.g. /rest/products/search?q=) from SQLi while XSS still tested them.
+        and (e.get("params") or e.get("query_params"))
         and _method_allowed(e, "GET")
         and not _is_hash_route(e.get("url", ""))
         and not _is_sqli_documentation_noise_endpoint(e)

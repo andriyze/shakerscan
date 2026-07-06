@@ -83,6 +83,37 @@ def test_known_dbms_stays_focused():
     assert "comment_bypass" not in _techniques(mysql)
 
 
+def test_sqli_get_filter_admits_query_params_only_endpoints():
+    # ROOT CAUSE regression: browser/HAR discovery stores query params under
+    # ``query_params``; the SQLi GET worklist must admit those (the loop already
+    # reads params-or-query_params). Requiring only ``params`` silently dropped
+    # real observed injection points (e.g. /rest/products/search?q=) from SQLi
+    # while XSS still tested them.
+    import asyncio
+
+    async def fake_run(cmd, timeout=15):
+        url = cmd[-1]
+        injected = ("%27" in url) or ("'" in url)
+        if injected:  # any injection -> simulate a SQL error
+            return "Error: SQLITE_ERROR: incomplete input\n" + active_checks._CURL_STATUS_MARKER + "500", "", 0
+        return '{"data":[]}\n' + active_checks._CURL_STATUS_MARKER + "200", "", 0
+
+    async def fake_dbms(url, param=None):
+        return {"detected": None, "confidence": 0.0, "evidence": []}
+
+    orig_run, orig_dbms = active_checks.run, active_checks.detect_dbms
+    active_checks.run, active_checks.detect_dbms = fake_run, fake_dbms
+    try:
+        ep = [{"url": "http://t/rest/products/search?q=test", "method": "GET",
+               "query_params": ["q"], "source": "har_discovery"}]  # NO 'params' key
+        res = asyncio.run(active_checks.smart_sqli_test("http://t", ep, max_endpoints=5))
+    finally:
+        active_checks.run, active_checks.detect_dbms = orig_run, orig_dbms
+
+    assert res["get_endpoints_tested"] == 1, "query_params-only GET endpoint was not SQLi-tested"
+    assert res["vulnerabilities_found"] >= 1
+
+
 def test_check_sqli_response_catches_sqlite_error_without_fingerprint():
     # Detection is DBMS-agnostic: a SQLITE_ERROR in the response (absent from the
     # baseline) is proof even when dbms_detected is None.
