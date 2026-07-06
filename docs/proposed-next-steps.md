@@ -462,15 +462,21 @@ raw shell execution or LLM-produced verified findings.
    evidence-instance binding events and refuter review/signal events on the same feed. DONE phase 1
    for content-free evidence export bundle descriptors with API read-replay plans. DONE phase 1 for
    durable export event records on the timeline. Remaining work is richer archive/download packaging.
-3. **Command Arsenal execution gateway, still no raw shell:** extend the schema-discoverable
-   Command Arsenal into a gated product-action layer over existing API handlers. It is not the check
-   registry, not the external tool registry, and not a shell runner. Every command result must carry
-   operation id, status, dry-run flag, scope/approval ids, campaign id, scan/finding/evidence/tool
-   receipt refs, blocked reasons, next action, and operator message.
-   The first executable command families should be inventory, ASM, scans, findings, AI Gate, Model
-   Intake, evidence, governance, and tool status. External binaries may be used only behind narrow
-   adapters; the command schema should never expose raw shell, arbitrary Python/Node execution, or
-   generic "run this command" behavior.
+3. **Command Arsenal execution gateway, still no raw shell:** DONE phase 1. `POST /arsenal/execute`
+   invokes a product command by NAME through its existing route handler. Unknown / `catalog_only` /
+   `out_of_scope` / `contract` commands are refused, so raw shell and arbitrary code are not
+   representable. Read-only/dry-run inspection commands dispatch directly and record a `command_result`;
+   state-changing commands stay behind the same execution gate as the AI Ops router (`execute=true` +
+   required confirmations + valid approval receipt + `AI_OPS_ROUTER_EXECUTE_ENABLED`), otherwise they
+   dry-run with a recorded `approval_required`/`blocked` audit row. The phase-1 dispatch registry wires
+   a representative subset (read-only `campaign.list`, `command_result.list`, `mission.timeline`,
+   `tool.status`, `local_agent.list`; gated `asm.improve` through its existing handler, which records
+   its own command result); gate-approved commands without a wired adapter return
+   `dispatch_adapter_pending` rather than a shortcut. Remaining work is wiring the rest of the
+   inventory/ASM/scan/findings/AI Gate/Model Intake/evidence adapters, campaign linkage on dispatched
+   results, and tool/evidence receipt refs on the returned command result. External binaries may be
+   used only behind narrow adapters; the command schema still never exposes raw shell, arbitrary
+   Python/Node execution, or generic "run this command" behavior.
 4. **Scope and approval receipts for state-changing actions:** DONE phase 1 for central
    `ActionScopeGuard`, persisted `ScopeReceipt` previews, and durable `ApprovalReceipt` records.
    DONE phase 1 for optional receipt validation on `/scans` and Continuous ASM recon/test/improve.
@@ -623,7 +629,7 @@ blocked, and provide safe remediation links without making users infer state fro
 will run next, and which button fixes the next blocker" without reading scan JSON or worker logs.
 
 ### 2. Mission contract, Command Arsenal, and scope/approval receipts
-**Status: READ-ONLY / DRY-RUN / GATED PHASE 1 DONE; ACTION AUDIT PHASE 1 DONE; RUNTIME RE-CHECKS OPEN.** The
+**Status: READ-ONLY / DRY-RUN / GATED PHASE 1 DONE; ACTION AUDIT + EXECUTION GATEWAY PHASE 1 DONE; RUNTIME RE-CHECKS OPEN.** The
 T3MP3ST adoption plan correctly identifies the missing operating model: ShakerScan has many
 safe/productized primitives, and now has persisted dry-run mission/context/trace/receipt records plus
 policy-required approval enforcement on current state-changing routes. The remaining goal is not

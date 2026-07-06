@@ -3408,6 +3408,21 @@ class CampaignActionLinkRequest(BaseModel):
     campaign_action_id: Optional[str] = None
 
 
+class ArsenalExecuteRequest(BaseModel):
+    """Invoke a Command Arsenal product command by name through its existing
+    handler. Never a shell/arbitrary-code runner: only catalog commands with a
+    wired adapter run, and state-changing commands stay behind the same
+    confirmation + approval-receipt + execution-flag gate as the AI Ops router."""
+
+    command: str = Field(min_length=1, max_length=120)
+    parameters: dict[str, Any] = Field(default_factory=dict)
+    execute: bool = False
+    confirmations: list[str] = Field(default_factory=list)
+    approval_receipt_id: Optional[str] = None
+    scope_receipt_id: Optional[str] = None
+    created_by: Optional[str] = None
+
+
 class HypothesisClaimRequest(BaseModel):
     owner: str = Field(min_length=1, max_length=120)
     expected_version: int = Field(ge=1)
@@ -15594,6 +15609,180 @@ async def arsenal_link_campaign_action(campaign_id: str, req: CampaignActionLink
         "linked_action": _public_campaign_action_row(row),
         "execution_enabled": False,
     }
+
+
+# --- Command Arsenal execution gateway (§2 seq #3) ---------------------------
+# One schema-driven entry point that invokes a product command by NAME through
+# its existing route handler. It is not a shell/arbitrary-code runner: only
+# catalog commands with a wired adapter run, read-only inspection dispatches
+# freely, and state-changing commands stay behind the same confirmation +
+# approval-receipt + execution-flag gate as the AI Ops router.
+
+async def _arsenal_dispatch_campaign_list(p: dict[str, Any]) -> dict[str, Any]:
+    return await arsenal_campaigns(limit=_int_or_none(p.get("limit")) or 20, target_id=p.get("target_id"), status=p.get("status"))
+
+
+async def _arsenal_dispatch_command_result_list(p: dict[str, Any]) -> dict[str, Any]:
+    return await arsenal_command_results(limit=_int_or_none(p.get("limit")) or 20)
+
+
+async def _arsenal_dispatch_mission_timeline(p: dict[str, Any]) -> dict[str, Any]:
+    return await mission_timeline(limit=_int_or_none(p.get("limit")) or 50, target_id=p.get("target_id"))
+
+
+async def _arsenal_dispatch_tool_status(p: dict[str, Any]) -> dict[str, Any]:
+    return await arsenal_tools(probe_versions=bool(p.get("probe_versions")))
+
+
+async def _arsenal_dispatch_local_agent_list(p: dict[str, Any]) -> dict[str, Any]:
+    return await local_agents(probe_versions=bool(p.get("probe_versions")))
+
+
+async def _arsenal_dispatch_asm_improve(p: dict[str, Any], approval_receipt_id: str | None) -> dict[str, Any]:
+    target_id = str(p.get("target_id") or "").strip()
+    if not target_id:
+        raise HTTPException(status_code=400, detail="asm.improve requires a target_id parameter")
+    fields = {k: p[k] for k in ("batch_size", "stale_days", "exploit_depth", "check_family", "endpoint_filter") if p.get(k) is not None}
+    body = AsmImproveRequest(approval_receipt_id=approval_receipt_id or p.get("approval_receipt_id"), **fields)
+    return await asm_improve(target_id, body)
+
+
+def _arsenal_readonly_adapters() -> dict[str, Any]:
+    return {
+        "campaign.list": _arsenal_dispatch_campaign_list,
+        "command_result.list": _arsenal_dispatch_command_result_list,
+        "mission.timeline": _arsenal_dispatch_mission_timeline,
+        "tool.status": _arsenal_dispatch_tool_status,
+        "local_agent.list": _arsenal_dispatch_local_agent_list,
+    }
+
+
+def _arsenal_gated_adapters() -> dict[str, Any]:
+    return {
+        "asm.improve": _arsenal_dispatch_asm_improve,
+    }
+
+
+async def _arsenal_execute(conn, req: ArsenalExecuteRequest) -> dict[str, Any]:
+    commands = _operation_plan_allowed_commands()
+    command = commands.get(req.command)
+    if not command:
+        raise HTTPException(status_code=400, detail=f"Unknown Command Arsenal command: {req.command}")
+    status = str(command.get("status") or "")
+    risk_tier = str(command.get("risk_tier") or "read_only")
+    if status in {"catalog_only", "out_of_scope", "contract"}:
+        raise HTTPException(status_code=400, detail=f"Command '{req.command}' is not executable (status={status})")
+
+    readonly = _arsenal_readonly_adapters()
+    gated = _arsenal_gated_adapters()
+
+    # Read-only / dry-run inspection: safe, no state change -> dispatch directly.
+    if req.command in readonly and status in {"read_only", "dry_run"}:
+        result = await readonly[req.command](req.parameters)
+        cr = await _record_command_result(
+            conn,
+            command=req.command,
+            status="completed",
+            risk_tier=risk_tier,
+            operator_message=f"Executed {req.command} via arsenal execution gateway",
+            result_json={"dispatched": True, "via": "arsenal.execute"},
+            created_by=req.created_by,
+        )
+        return {
+            "command": req.command,
+            "dispatched": True,
+            "dry_run": False,
+            "result": result,
+            "operation_id": cr["id"],
+            "execution_enabled": True,
+        }
+
+    # State-changing command: apply the same execution gate as the AI Ops router.
+    required_confs = list(command.get("required_confirmations") or ())
+    missing_confs = [c for c in required_confs if c not in (req.confirmations or [])]
+    gate_on = _ai_ops_execute_enabled()
+    blocked_reason = None
+    if not req.execute:
+        blocked_reason = "execute_not_requested"
+    elif missing_confs:
+        blocked_reason = f"missing_confirmation:{missing_confs[0]}"
+    elif not gate_on:
+        blocked_reason = "AI_OPS_ROUTER_EXECUTE_ENABLED_disabled"
+    if blocked_reason:
+        result_status = "approval_required" if blocked_reason in {"execute_not_requested"} or blocked_reason.startswith("missing_confirmation") else "blocked"
+        cr = await _record_blocked_command_result(
+            conn,
+            action_name=req.command,
+            command=req.command,
+            risk_tier=risk_tier,
+            status=result_status,
+            blocked_by=[blocked_reason],
+            operator_message=f"Did not execute {req.command}: {blocked_reason}",
+        )
+        return {
+            "command": req.command,
+            "dispatched": False,
+            "dry_run": True,
+            "execution_blocked_reason": blocked_reason,
+            "operation_id": cr["id"] if cr else None,
+            "execution_enabled": False,
+        }
+
+    # Gate satisfied: validate the approval receipt (records a blocked row on failure).
+    await _validate_approval_receipt_for_action(
+        conn,
+        req.approval_receipt_id,
+        target_url=str(req.parameters.get("target") or "").strip() or None,
+        target_id=req.parameters.get("target_id"),
+        action_name=req.command,
+        command=req.command,
+        risk_tier=risk_tier,
+    )
+
+    adapter = gated.get(req.command)
+    if not adapter:
+        cr = await _record_blocked_command_result(
+            conn,
+            action_name=req.command,
+            command=req.command,
+            risk_tier=risk_tier,
+            status="blocked",
+            blocked_by=["dispatch_adapter_pending"],
+            operator_message=f"{req.command} passed the execution gate but has no gateway dispatch adapter yet; use its dedicated route",
+        )
+        return {
+            "command": req.command,
+            "dispatched": False,
+            "dry_run": False,
+            "execution_blocked_reason": "dispatch_adapter_pending",
+            "operation_id": cr["id"] if cr else None,
+            "execution_enabled": False,
+        }
+
+    # The dispatched handler records its own command_result audit row.
+    result = await adapter(req.parameters, req.approval_receipt_id)
+    return {
+        "command": req.command,
+        "dispatched": True,
+        "dry_run": False,
+        "result": result,
+        "operation_id": result.get("operation_id") if isinstance(result, dict) else None,
+        "execution_enabled": True,
+    }
+
+
+@app.post("/arsenal/execute")
+async def arsenal_execute(req: ArsenalExecuteRequest):
+    """Execute a Command Arsenal product command by name through its existing handler.
+
+    Read-only/dry-run commands dispatch directly. State-changing commands require
+    execute=true, their required confirmations, a valid approval receipt, and the
+    AI_OPS_ROUTER_EXECUTE_ENABLED flag; otherwise they dry-run with a recorded
+    blocked/approval_required audit row. Raw shell and arbitrary execution are not
+    representable — only catalog commands with a wired adapter run.
+    """
+    async with db_pool.acquire() as conn:
+        return await _arsenal_execute(conn, req)
 
 
 @app.get("/arsenal/hypotheses")

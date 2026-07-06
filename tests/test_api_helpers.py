@@ -2160,6 +2160,96 @@ def test_retention_sweep_dry_run_preview_needs_no_approval(monkeypatch):
     assert conn.recorded == []  # preview records nothing and requires no receipt
 
 
+# ----- §2 Command Arsenal execution gateway ------------------------------------
+
+def test_arsenal_execute_rejects_unknown_command():
+    # A name not in the catalog (e.g. raw shell) is refused outright.
+    with pytest.raises(api_module.HTTPException) as exc:
+        asyncio.run(api_module._arsenal_execute(
+            _BlockedRecordingConn(), api_module.ArsenalExecuteRequest(command="run_shell")
+        ))
+    assert exc.value.status_code == 400
+
+
+def test_arsenal_execute_dispatches_read_only_command(monkeypatch):
+    async def fake_campaigns(**kwargs):
+        return {"campaigns": [], "count": 0, "execution_enabled": False}
+
+    monkeypatch.setattr(api_module, "arsenal_campaigns", fake_campaigns)
+    conn = _BlockedRecordingConn()
+    result = asyncio.run(api_module._arsenal_execute(
+        conn, api_module.ArsenalExecuteRequest(command="campaign.list", parameters={"limit": 5})
+    ))
+    assert result["dispatched"] is True
+    assert result["dry_run"] is False
+    assert conn.recorded and conn.recorded[0]["status"] == "completed"
+    assert conn.recorded[0]["command"] == "campaign.list"
+
+
+def test_arsenal_execute_gated_dry_runs_without_execute():
+    conn = _BlockedRecordingConn()
+    result = asyncio.run(api_module._arsenal_execute(
+        conn, api_module.ArsenalExecuteRequest(command="asm.improve", parameters={"target_id": "t"})
+    ))
+    assert result["dispatched"] is False
+    assert result["dry_run"] is True
+    assert result["execution_blocked_reason"] == "execute_not_requested"
+    assert conn.recorded and conn.recorded[0]["status"] == "approval_required"
+
+
+def test_arsenal_execute_gated_blocked_when_flag_disabled(monkeypatch):
+    monkeypatch.setattr(api_module, "_ai_ops_execute_enabled", lambda: False)
+    conn = _BlockedRecordingConn()
+    result = asyncio.run(api_module._arsenal_execute(
+        conn, api_module.ArsenalExecuteRequest(
+            command="asm.improve", parameters={"target_id": "t"},
+            execute=True, confirmations=["confirm_authorized"],
+        )
+    ))
+    assert result["dispatched"] is False
+    assert result["execution_blocked_reason"] == "AI_OPS_ROUTER_EXECUTE_ENABLED_disabled"
+
+
+def test_arsenal_execute_gated_dispatches_when_gate_satisfied(monkeypatch):
+    monkeypatch.setattr(api_module, "_ai_ops_execute_enabled", lambda: True)
+
+    async def fake_validate(*args, **kwargs):
+        return {"approval_receipt_id": "r"}
+
+    async def fake_asm_improve(target_id, body):
+        return {"operation_id": "op-1", "status": "queued", "action": "test"}
+
+    monkeypatch.setattr(api_module, "_validate_approval_receipt_for_action", fake_validate)
+    monkeypatch.setattr(api_module, "asm_improve", fake_asm_improve)
+    result = asyncio.run(api_module._arsenal_execute(
+        _BlockedRecordingConn(), api_module.ArsenalExecuteRequest(
+            command="asm.improve",
+            parameters={"target_id": "11111111-1111-4111-8111-111111111111"},
+            execute=True, confirmations=["confirm_authorized"], approval_receipt_id="r",
+        )
+    ))
+    assert result["dispatched"] is True
+    assert result["operation_id"] == "op-1"
+
+
+def test_arsenal_execute_gated_without_adapter_is_pending(monkeypatch):
+    monkeypatch.setattr(api_module, "_ai_ops_execute_enabled", lambda: True)
+
+    async def fake_validate(*args, **kwargs):
+        return {}
+
+    monkeypatch.setattr(api_module, "_validate_approval_receipt_for_action", fake_validate)
+    conn = _BlockedRecordingConn()
+    result = asyncio.run(api_module._arsenal_execute(
+        conn, api_module.ArsenalExecuteRequest(
+            command="model_intake.scan", parameters={},
+            execute=True, confirmations=["confirm_authorized"],
+        )
+    ))
+    assert result["execution_blocked_reason"] == "dispatch_adapter_pending"
+    assert conn.recorded and conn.recorded[0]["status"] == "blocked"
+
+
 # ----- §7 mission campaigns ----------------------------------------------------
 
 class _CampaignConn:
