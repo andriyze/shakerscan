@@ -23,7 +23,7 @@ from tempfile import NamedTemporaryFile
 from typing import Any
 
 try:
-    from redaction import (
+    from scanner.redaction import (
         SENSITIVE_KEYS,
         SENSITIVE_KEY_FRAGMENTS,
         is_sensitive_key,
@@ -31,9 +31,9 @@ try:
         redact_url_credentials,
     )
 except ModuleNotFoundError as exc:
-    if exc.name != "redaction":
+    if exc.name not in {"scanner", "scanner.redaction"}:
         raise
-    from scanner.redaction import (
+    from redaction import (
         SENSITIVE_KEYS,
         SENSITIVE_KEY_FRAGMENTS,
         is_sensitive_key,
