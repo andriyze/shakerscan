@@ -3421,6 +3421,7 @@ class ArsenalExecuteRequest(BaseModel):
     approval_receipt_id: Optional[str] = None
     scope_receipt_id: Optional[str] = None
     created_by: Optional[str] = None
+    campaign_id: Optional[str] = None
 
 
 class HypothesisClaimRequest(BaseModel):
@@ -15737,7 +15738,30 @@ def _arsenal_gated_adapters() -> dict[str, Any]:
     }
 
 
+async def _link_command_result_to_campaign(conn, campaign_id, command_result_id) -> None:
+    """Best-effort: stamp mission_campaign_id onto the campaign_action created for
+    a command result. Never fails the surrounding operation."""
+    if not campaign_id or not command_result_id:
+        return
+    try:
+        await conn.execute(
+            "UPDATE campaign_actions SET mission_campaign_id=$1, updated_at=NOW() WHERE command_result_id=$2",
+            uuid.UUID(str(campaign_id)),
+            uuid.UUID(str(command_result_id)),
+        )
+    except Exception:
+        return
+
+
 async def _arsenal_execute(conn, req: ArsenalExecuteRequest) -> dict[str, Any]:
+    if req.campaign_id:
+        try:
+            campaign_uuid = uuid.UUID(str(req.campaign_id))
+        except ValueError:
+            raise HTTPException(status_code=400, detail="campaign_id must be a UUID")
+        if not await conn.fetchval("SELECT 1 FROM campaigns WHERE id=$1", campaign_uuid):
+            raise HTTPException(status_code=404, detail="Campaign not found")
+
     commands = _operation_plan_allowed_commands()
     command = commands.get(req.command)
     if not command:
@@ -15762,6 +15786,7 @@ async def _arsenal_execute(conn, req: ArsenalExecuteRequest) -> dict[str, Any]:
             result_json={"dispatched": True, "via": "arsenal.execute"},
             created_by=req.created_by,
         )
+        await _link_command_result_to_campaign(conn, req.campaign_id, cr["id"])
         return {
             "command": req.command,
             "dispatched": True,
@@ -15793,6 +15818,7 @@ async def _arsenal_execute(conn, req: ArsenalExecuteRequest) -> dict[str, Any]:
             blocked_by=[blocked_reason],
             operator_message=f"Did not execute {req.command}: {blocked_reason}",
         )
+        await _link_command_result_to_campaign(conn, req.campaign_id, cr["id"] if cr else None)
         return {
             "command": req.command,
             "dispatched": False,
@@ -15824,6 +15850,7 @@ async def _arsenal_execute(conn, req: ArsenalExecuteRequest) -> dict[str, Any]:
             blocked_by=["dispatch_adapter_pending"],
             operator_message=f"{req.command} passed the execution gate but has no gateway dispatch adapter yet; use its dedicated route",
         )
+        await _link_command_result_to_campaign(conn, req.campaign_id, cr["id"] if cr else None)
         return {
             "command": req.command,
             "dispatched": False,
@@ -15835,12 +15862,14 @@ async def _arsenal_execute(conn, req: ArsenalExecuteRequest) -> dict[str, Any]:
 
     # The dispatched handler records its own command_result audit row.
     result = await adapter(req.parameters, req.approval_receipt_id)
+    operation_id = result.get("operation_id") if isinstance(result, dict) else None
+    await _link_command_result_to_campaign(conn, req.campaign_id, operation_id)
     return {
         "command": req.command,
         "dispatched": True,
         "dry_run": False,
         "result": result,
-        "operation_id": result.get("operation_id") if isinstance(result, dict) else None,
+        "operation_id": operation_id,
         "execution_enabled": True,
     }
 
@@ -15854,6 +15883,10 @@ async def arsenal_execute(req: ArsenalExecuteRequest):
     AI_OPS_ROUTER_EXECUTE_ENABLED flag; otherwise they dry-run with a recorded
     blocked/approval_required audit row. Raw shell and arbitrary execution are not
     representable — only catalog commands with a wired adapter run.
+
+    Optionally pass campaign_id to link the resulting command_result's campaign
+    action to a §7 mission campaign (must already exist); this is a best-effort
+    bookkeeping stamp, same as POST /arsenal/campaigns/{campaign_id}/actions.
     """
     async with db_pool.acquire() as conn:
         return await _arsenal_execute(conn, req)

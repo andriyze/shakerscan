@@ -3547,6 +3547,65 @@ def test_require_approval_receipt_records_approval_required_row_when_missing():
     assert row["approval_receipt_id"] is None
 
 
+# ----- gateway -> campaign auto-linkage (§7/§2) --------------------------------
+
+class _CampaignLinkRecordingConn(_BlockedRecordingConn):
+    """Extends _BlockedRecordingConn to also answer the campaign-exists check
+    and capture the campaign_actions UPDATE issued by the gateway's best-effort
+    campaign auto-link (_link_command_result_to_campaign)."""
+
+    def __init__(self, *, campaign_exists=True, **kwargs):
+        super().__init__(**kwargs)
+        self.campaign_exists = campaign_exists
+        self.executed = []
+
+    async def fetchval(self, query, *args):
+        if "FROM campaigns" in query:
+            return 1 if self.campaign_exists else None
+        return await super().fetchval(query, *args)
+
+    async def fetchrow(self, query, *args):
+        row = await super().fetchrow(query, *args)
+        if row is not None and "INSERT INTO command_results" in query:
+            # Give the recorded command_result a real UUID id (the base fake's
+            # placeholder "cmd-blocked-1" isn't parseable as one) so the
+            # gateway's campaign-link UPDATE has a valid command_result_id.
+            row["id"] = "44444444-4444-4444-8444-444444444444"
+        return row
+
+    async def execute(self, query, *args):
+        if "UPDATE campaign_actions" in query:
+            self.executed.append(args)
+        return "UPDATE 1"
+
+
+CAMPAIGN_ID = "33333333-3333-4333-8333-333333333333"
+
+
+def test_arsenal_execute_links_dispatched_action_to_campaign(monkeypatch):
+    async def fake_campaigns(**kwargs):
+        return {"campaigns": []}
+
+    monkeypatch.setattr(api_module, "arsenal_campaigns", fake_campaigns)
+    conn = _CampaignLinkRecordingConn()
+    result = asyncio.run(api_module._arsenal_execute(
+        conn, api_module.ArsenalExecuteRequest(command="campaign.list", campaign_id=CAMPAIGN_ID)
+    ))
+    assert result["dispatched"] is True
+    assert conn.executed
+    args = conn.executed[0]
+    assert str(args[0]) == CAMPAIGN_ID
+
+
+def test_arsenal_execute_unknown_campaign_id_is_404():
+    conn = _CampaignLinkRecordingConn(campaign_exists=False)
+    with pytest.raises(api_module.HTTPException) as exc:
+        asyncio.run(api_module._arsenal_execute(
+            conn, api_module.ArsenalExecuteRequest(command="campaign.list", campaign_id=CAMPAIGN_ID)
+        ))
+    assert exc.value.status_code == 404
+
+
 # ----- cross-product mission timeline ------------------------------------------
 
 def test_timeline_scan_status_maps_to_explicit_vocabulary():
