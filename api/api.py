@@ -18074,6 +18074,80 @@ def _evidence_export_manifest(rows: Sequence[Any], *, generated_at: Optional[dat
     }
 
 
+def _evidence_export_bundle_descriptor(
+    manifest: dict[str, Any],
+    *,
+    filters: Optional[dict[str, Any]] = None,
+    generated_at: Optional[datetime] = None,
+) -> dict[str, Any]:
+    generated = (generated_at or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    objects = manifest.get("objects") if isinstance(manifest.get("objects"), list) else []
+    finding_ids = sorted({str(item.get("finding_id")) for item in objects if item.get("finding_id")})
+    scan_ids = sorted({str(item.get("scan_id")) for item in objects if item.get("scan_id")})
+    evidence_reads = []
+    for item in objects:
+        object_id = item.get("id")
+        if not object_id:
+            continue
+        evidence_reads.append({
+            "evidence_object_id": str(object_id),
+            "api_path": f"/evidence/{object_id}",
+            "content_sha256": item.get("content_sha256"),
+            "storage_uri": item.get("storage_uri"),
+            "storage_integrity": item.get("storage_integrity"),
+            "retention_class": item.get("retention_class"),
+        })
+    replay_plan = {
+        "type": "api_read_replay",
+        "content_included": False,
+        "evidence_object_reads": evidence_reads,
+        "finding_evidence_reads": [
+            {"finding_id": finding_id, "api_path": f"/findings/{finding_id}/evidence"}
+            for finding_id in finding_ids
+        ],
+    }
+    bundle_core = {
+        "manifest_hash": manifest.get("manifest_hash"),
+        "object_count": manifest.get("object_count"),
+        "filters": filters or {},
+        "replay_plan": replay_plan,
+    }
+    bundle_hash = hashlib.sha256(
+        json.dumps(bundle_core, sort_keys=True, default=str, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    return {
+        "schema_version": "2026-07-06.evidence-export-bundle.v1",
+        "generated_at": generated.isoformat(),
+        "bundle_hash": bundle_hash,
+        "manifest_hash": manifest.get("manifest_hash"),
+        "object_count": manifest.get("object_count", len(objects)),
+        "content_included": False,
+        "filters": filters or {},
+        "retention_counts": manifest.get("retention_counts") or {},
+        "storage_counts": manifest.get("storage_counts") or {},
+        "integrity_counts": manifest.get("integrity_counts") or {},
+        "finding_ids": finding_ids,
+        "scan_ids": scan_ids,
+        "files": [
+            {
+                "name": "evidence-export-manifest.json",
+                "kind": "manifest",
+                "sha256": manifest.get("manifest_hash"),
+                "content_included": False,
+            },
+            {
+                "name": "evidence-export-replay-plan.json",
+                "kind": "replay_plan",
+                "sha256": hashlib.sha256(
+                    json.dumps(replay_plan, sort_keys=True, default=str, separators=(",", ":")).encode("utf-8")
+                ).hexdigest(),
+                "content_included": False,
+            },
+        ],
+        "replay_plan": replay_plan,
+    }
+
+
 def _evidence_retention_candidate(
     row: Any,
     *,
@@ -18246,6 +18320,46 @@ async def evidence_export_manifest(
         "limit": limit,
     }
     return manifest
+
+
+@app.get("/evidence/export-bundle")
+async def evidence_export_bundle(
+    finding_id: Optional[str] = Query(None),
+    scan_id: Optional[str] = Query(None),
+    retention_class: Optional[str] = Query(None, regex="^(standard|short|audit|legal_hold|sensitive)$"),
+    limit: int = Query(200, ge=1, le=1000),
+):
+    """Return a content-free export bundle descriptor with replay/read paths."""
+    try:
+        finding_uuid = _optional_uuid(finding_id)
+        scan_uuid = _optional_uuid(scan_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="finding_id and scan_id must be UUIDs when provided") from exc
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT *
+            FROM evidence_objects
+            WHERE ($2::uuid IS NULL OR finding_id = $2)
+              AND ($3::uuid IS NULL OR scan_id = $3)
+              AND ($4::text IS NULL OR retention_class = $4)
+            ORDER BY created_at DESC
+            LIMIT $1
+            """,
+            limit,
+            finding_uuid,
+            scan_uuid,
+            retention_class,
+        )
+    filters = {
+        "finding_id": str(finding_uuid) if finding_uuid else None,
+        "scan_id": str(scan_uuid) if scan_uuid else None,
+        "retention_class": retention_class,
+        "limit": limit,
+    }
+    manifest = _evidence_export_manifest(rows)
+    manifest["filters"] = filters
+    return _evidence_export_bundle_descriptor(manifest, filters=filters)
 
 
 @app.post("/evidence/retention/sweep")

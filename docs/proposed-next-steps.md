@@ -457,8 +457,9 @@ raw shell execution or LLM-produced verified findings.
    audit rows (with live scan status), recent scans, and upcoming schedules into one normalized event
    feed with explicit statuses. DONE phase 1 for campaign-action audit records mirrored from command
    results plus read-only timeline support for standalone action rows. DONE phase 1 for durable
-   evidence-instance binding events and refuter review/signal events on the same feed. Remaining work
-   is packaged evidence export/replay events once richer export/replay bundles exist.
+   evidence-instance binding events and refuter review/signal events on the same feed. DONE phase 1
+   for content-free evidence export bundle descriptors with API read-replay plans. Remaining work is
+   durable export event records on the timeline and richer archive/download packaging.
 3. **Command Arsenal execution gateway, still no raw shell:** extend the schema-discoverable
    Command Arsenal into a gated product-action layer over existing API handlers. It is not the check
    registry, not the external tool registry, and not a shell runner. Every command result must carry
@@ -601,8 +602,9 @@ blocked, and provide safe remediation links without making users infer state fro
 7. DONE phase 1: `GET /timeline` merges the command-result audit rows (with live scan status joined),
    recent user-facing scans, and upcoming schedules into one normalized cross-product event feed with
    an optional `target_id` filter. DONE phase 1: the feed also includes standalone campaign actions,
-   durable evidence-instance binding events, and refuter review/signal events. Packaged evidence
-   export/replay events remain open until richer export/replay bundles exist.
+   durable evidence-instance binding events, and refuter review/signal events. DONE phase 1:
+   content-free evidence export bundle descriptors expose replay/read paths and bundle hashes.
+   Durable export event records on the timeline and richer archive/download packaging remain open.
 8. DONE phase 1: timeline statuses are explicit and API-backed: `planned`, `blocked`, `approval_required`,
    `approved`, `queued`, `running`, `completed`, `partial`, `degraded`, `failed`, `cancelled`,
    `evidence_bound`, `retest_scheduled`, and `refuter_requested`.
@@ -637,6 +639,7 @@ Command Arsenal boundaries:
   `exposure.graph.get`, `asm.gaps`, `asm.improve`, `asm.recon`, `asm.test`, `scan.submit`,
   `scan.focused_family`, `finding.retest`, `ai_gate.scan`, `ai_gate.replay_probe`,
   `model_intake.trust_preview`, `model_intake.scan`, `evidence.export_manifest`,
+  `evidence.export_bundle`,
   `deployment.decision`, `exception.request`, and `tool.status`.
 - Product commands should not describe low-level binaries: no `run_sqlmap`, `run_nmap`,
   `curl_this_url`, `execute_shell`, or `run_python_code` command should appear in Command Arsenal.
@@ -721,8 +724,9 @@ Command Arsenal boundaries:
     surface, `/settings/arsenal` renders the campaign action ledger, and the mission timeline can
     include standalone action rows without duplicating mirrored command-result events. DONE phase 1:
     the timeline also includes evidence-instance binding events and refuter review/signal events.
-    Remaining work is richer execution-gateway action transitions and packaged evidence export/replay
-    events.
+    DONE phase 1: `evidence.export_bundle` exposes content-free bundle descriptors with replay/read
+    paths. Remaining work is richer execution-gateway action transitions and durable export event
+    records on the timeline.
 18. DONE phase 1: blocked and approval-required command-result records are written before the
     enforcement path raises (best-effort, FK-safe), so "nothing ran because policy/scope blocked it"
     is auditable with the same operation id, scope/approval refs, blocked reasons, and next action.
@@ -936,7 +940,9 @@ table ships (hash, redaction_profile, retention_class, storage_uri, scan/finding
 tools, create findings, or update canonical finding proof state. Large redacted evidence payloads now
 externalize to a content-addressed local object store under `RESULTS_DIR/evidence-objects` with
 `local:evidence_objects/...` storage URIs, and the evidence read API hydrates/verifies them on read.
-`GET /evidence/export-manifest` returns a content-free hash/storage/retention manifest, and
+`GET /evidence/export-manifest` returns a content-free hash/storage/retention manifest,
+`GET /evidence/export-bundle` returns a content-free bundle descriptor with a manifest hash, bundle
+hash, retention/integrity summaries, and API read-replay paths, and
 `POST /evidence/retention/sweep` previews or executes bounded evidence-object cleanup with
 `dry_run: true` by default and `legal_hold` excluded. `GET /arsenal/tools` now returns a
 `release_gate` named `no_phantom_tools` that fails if an adapter
@@ -945,8 +951,8 @@ runnable adapter lacks parser/proof metadata. Worker finalization now emits reco
 rows for the internal AI Gate probe executor and Model Intake signature verifier on success/failure,
 stamping returned receipt ids into scan results without changing findings or proof state. External
 DAST/ASM tools are not yet wired to emit receipts automatically, remote S3/MinIO-style object storage
-is still open, scheduled retention automation is still open, and richer packaged exports are still
-open.
+is still open, scheduled retention automation is still open, and richer archive/download packaging is
+still open.
 
 **Implement:**
 1. DONE phase 1: externalize `storage_uri` from `inline:` to local object storage for large objects.
@@ -954,12 +960,14 @@ open.
    `RESULTS_DIR/evidence-objects`, returns `local:evidence_objects/...`, and `GET /evidence/{id}` /
    `GET /findings/{id}/evidence` hydrate and integrity-check local content. Remote S3/MinIO backends
    remain open.
-2. DONE phase 1: add a retention sweeper and export manifest format. `GET /evidence/export-manifest`
+2. DONE phase 1: add a retention sweeper, export manifest format, and content-free bundle descriptor. `GET /evidence/export-manifest`
    returns a content-free manifest with object ids, hashes, storage URIs, retention classes, storage
    status/integrity, and a manifest hash. `POST /evidence/retention/sweep` is dry-run by default,
    skips `legal_hold`, applies bounded retention windows (`short`, `sensitive`, `standard`, `audit`),
-   and can delete expired DB rows plus local object files only when explicitly executed. Background
-   scheduling and packaged export bundles remain open.
+   and can delete expired DB rows plus local object files only when explicitly executed.
+   `GET /evidence/export-bundle` / `evidence.export_bundle` returns a content-free bundle descriptor
+   with `bundle_hash`, `manifest_hash`, retention/integrity summaries, and API read-replay paths.
+   Background scheduling, durable export event records, and archive/download packaging remain open.
 3. DONE phase 1: split canonical `Finding` from `EvidenceInstance {concrete_url, object_id, payload_variant,
    request_response_refs, principal_pair, proof_observation, campaign_action_id, tool_receipt_id,
    redaction_profile, hash, retention_policy}` as durable record-only rows. Finding promotion still

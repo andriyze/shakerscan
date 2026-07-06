@@ -1890,6 +1890,47 @@ def test_evidence_export_manifest_excludes_content_and_tracks_integrity(monkeypa
     assert manifest["retention_counts"]["sensitive"] == 1
 
 
+def test_evidence_export_bundle_descriptor_is_content_free_and_replayable(monkeypatch, tmp_path):
+    stored = store_evidence_content({"large": "x" * 200}, results_dir=tmp_path, inline_max_bytes=8)
+    monkeypatch.setattr(api_module, "RESULTS_DIR", tmp_path)
+    finding_id = uuid.uuid4()
+    scan_id = uuid.uuid4()
+    object_id = uuid.uuid4()
+    row = {
+        "id": object_id,
+        "finding_id": finding_id,
+        "scan_id": scan_id,
+        "object_type": "ai_gate_evidence",
+        "content_sha256": stored["content_sha256"],
+        "size_bytes": stored["size_bytes"],
+        "storage_uri": stored["storage_uri"],
+        "retention_class": "sensitive",
+        "content": None,
+        "created_at": datetime(2026, 7, 6, tzinfo=timezone.utc),
+    }
+    manifest = api_module._evidence_export_manifest([row], generated_at=datetime(2026, 7, 6, tzinfo=timezone.utc))
+
+    bundle = api_module._evidence_export_bundle_descriptor(
+        manifest,
+        filters={"scan_id": str(scan_id), "limit": 200},
+        generated_at=datetime(2026, 7, 6, tzinfo=timezone.utc),
+    )
+
+    assert bundle["schema_version"] == "2026-07-06.evidence-export-bundle.v1"
+    assert len(bundle["bundle_hash"]) == 64
+    assert bundle["manifest_hash"] == manifest["manifest_hash"]
+    assert bundle["content_included"] is False
+    assert bundle["finding_ids"] == [str(finding_id)]
+    assert bundle["scan_ids"] == [str(scan_id)]
+    assert bundle["files"][0]["name"] == "evidence-export-manifest.json"
+    replay = bundle["replay_plan"]
+    assert replay["type"] == "api_read_replay"
+    assert replay["content_included"] is False
+    assert replay["evidence_object_reads"][0]["api_path"] == f"/evidence/{object_id}"
+    assert replay["finding_evidence_reads"][0]["api_path"] == f"/findings/{finding_id}/evidence"
+    assert "content" not in replay["evidence_object_reads"][0]
+
+
 def test_evidence_retention_candidates_skip_legal_hold_and_use_policy_days():
     now = datetime(2026, 7, 6, tzinfo=timezone.utc)
     old = datetime(2025, 1, 1, tzinfo=timezone.utc)

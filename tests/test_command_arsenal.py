@@ -44,6 +44,7 @@ def test_command_catalog_contains_required_initial_commands():
         "local_agent.list",
         "evidence.get",
         "evidence.export_manifest",
+        "evidence.export_bundle",
         "evidence_instance.list",
         "tool_receipt.list",
         "deployment.decision",
@@ -100,11 +101,16 @@ def test_evidence_manifest_and_retention_commands_are_bounded():
     commands = {item["name"]: item for item in payload["commands"]}
 
     manifest = commands["evidence.export_manifest"]
+    bundle = commands["evidence.export_bundle"]
     sweep = commands["evidence.retention_sweep"]
 
     assert manifest["status"] == "read_only"
     assert manifest["path"] == "/evidence/export-manifest"
     assert "manifest_hash" in manifest["evidence_contract"]
+    assert bundle["status"] == "read_only"
+    assert bundle["path"] == "/evidence/export-bundle"
+    assert "bundle_hash" in bundle["evidence_contract"]
+    assert "api_read_replay" in bundle["evidence_contract"]
     assert sweep["status"] == "dry_run"
     assert sweep["risk_tier"] == "read_only"
     assert sweep["path"] == "/evidence/retention/sweep"
