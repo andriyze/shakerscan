@@ -147,6 +147,16 @@ class _FakeFinalizePool:
         return False
 
 
+class _FakeReceiptConnection:
+    def __init__(self, receipt_id=None):
+        self.receipt_id = receipt_id or uuid.uuid4()
+        self.fetchrow_calls = []
+
+    async def fetchrow(self, query, *args):
+        self.fetchrow_calls.append((query, args))
+        return {"id": self.receipt_id}
+
+
 class _FakeSlotRedis:
     def __init__(self):
         self.values = {}
@@ -223,6 +233,78 @@ class _FakeJobRedis:
     def delete(self, key):
         self.deleted.append(key)
         self.values.pop(key, None)
+
+
+def test_internal_ai_gate_executor_receipt_is_recorded_and_redacted():
+    receipt_id = uuid.uuid4()
+    conn = _FakeReceiptConnection(receipt_id)
+    result = {
+        "ai_gate": {"decision": {"decision": "block"}},
+        "findings": [{"id": "ai_gate:test"}],
+    }
+
+    recorded = asyncio.run(worker._record_internal_executor_tool_receipt(
+        conn,
+        scan_id="11111111-1111-1111-1111-111111111111",
+        job_id="job-ai-gate",
+        target="https://example.test/chat?token=secret-token",
+        target_id=None,
+        ai_target_id="22222222-2222-2222-2222-222222222222",
+        options={"run_kind": "ai_api", "scan_type": "ai_gate"},
+        result=result,
+        started_at=datetime(2026, 7, 6, tzinfo=timezone.utc),
+        completed_at=datetime(2026, 7, 6, 0, 0, 5, tzinfo=timezone.utc),
+        duration_seconds=5,
+        error=None,
+    ))
+
+    assert recorded == str(receipt_id)
+    assert result["tool_receipt_ids"] == [str(receipt_id)]
+    assert result["metadata"]["tool_receipt_ids"] == [str(receipt_id)]
+    query, args = conn.fetchrow_calls[0]
+    assert "INSERT INTO tool_receipts" in query
+    assert args[0] == "ai_gate_probe_executor"
+    assert args[1] == "internal"
+    assert len(args[3]) == 64
+    assert args[11] == "success"
+    assert args[12] == "parsed"
+    assert args[13] == 0
+    assert "secret-token" not in json.dumps(args, default=str)
+    target_scope = json.loads(args[7])
+    assert target_scope["target"].endswith("***=***")
+
+
+def test_internal_model_intake_executor_receipt_records_failure():
+    receipt_id = uuid.uuid4()
+    conn = _FakeReceiptConnection(receipt_id)
+    result = {"error": "signature secret-token mismatch", "findings": []}
+
+    recorded = asyncio.run(worker._record_internal_executor_tool_receipt(
+        conn,
+        scan_id="11111111-1111-1111-1111-111111111111",
+        job_id="job-model",
+        target="https://models.example.test/model.safetensors",
+        target_id="33333333-3333-3333-3333-333333333333",
+        ai_target_id=None,
+        options={"run_kind": "model_intake", "scan_type": "model_intake"},
+        result=result,
+        started_at=datetime(2026, 7, 6, tzinfo=timezone.utc),
+        completed_at=datetime(2026, 7, 6, 0, 0, 2, tzinfo=timezone.utc),
+        duration_seconds=2,
+        error=result["error"],
+    ))
+
+    assert recorded == str(receipt_id)
+    query, args = conn.fetchrow_calls[0]
+    assert "INSERT INTO tool_receipts" in query
+    assert args[0] == "model_intake_signature_verifier"
+    assert args[11] == "failed"
+    assert args[12] == "failed"
+    assert args[13] == 1
+    metadata = json.loads(args[21])
+    assert metadata["parser"] == "model-intake-summary-v1"
+    assert metadata["error"] == "signature *** mismatch"
+    assert "secret-token" not in json.dumps(args, default=str)
 
 
 class _FakeCancelRedis:

@@ -926,8 +926,10 @@ table ships (hash, redaction_profile, retention_class, storage_uri, scan/finding
 tools, create findings, or update canonical finding proof state. `GET /arsenal/tools` now returns a
 `release_gate` named `no_phantom_tools` that fails if an adapter claims installed/runnable status
 without a resolved binary or internal implementation, or if a runnable adapter lacks parser/proof
-metadata. Existing external tools and internal executors are not yet wired to emit receipts
-automatically, and large artifacts are still not externalized.
+metadata. Worker finalization now emits record-only `ToolReceipt` rows for the internal AI Gate probe
+executor and Model Intake signature verifier on success/failure, stamping returned receipt ids into
+scan results without changing findings or proof state. External DAST/ASM tools are not yet wired to
+emit receipts automatically, and large artifacts are still not externalized.
 
 **Implement:**
 1. Externalize `storage_uri` from `inline:` to S3/MinIO or local object storage for large objects.
@@ -936,11 +938,13 @@ automatically, and large artifacts are still not externalized.
    request_response_refs, principal_pair, proof_observation, campaign_action_id, tool_receipt_id,
    redaction_profile, hash, retention_policy}` as durable record-only rows. Finding promotion still
    goes through the existing proof taxonomy.
-4. DONE phase 1: add `ToolReceipt` records for existing tools/executors before adding new offensive tooling:
+4. PARTIAL phase 1: add `ToolReceipt` records for existing tools/executors before adding new offensive tooling:
    `httpx`, `katana`, `nuclei`, `subfinder`, `ffuf`, `dalfox`, `sqlmap`, `nmap`, `sslyze`,
    `testssl.sh`, Playwright/browser proof, AI Gate probe execution, and Model Intake artifact
-   fetch/signature verification. The registry/record schema exists; individual executors still need
-   integration to emit receipts on success/failure/skip.
+   fetch/signature verification. The registry/record schema exists, and worker finalization now emits
+   internal `ai_gate_probe_executor` and `model_intake_signature_verifier` receipts for
+   success/failure. External DAST/ASM executors still need integration to emit receipts on
+   success/failure/timeout/skip/parser-error.
 5. DONE phase 1: tool receipts include tool version, adapter version, command hash, redacted argv, worker
    build/container image, target scope, scope receipt, policy profile, approval id, timing, exit code,
    timeout, stdout/stderr artifact refs, parsed evidence refs, parser status, and redaction summary.
@@ -952,7 +956,8 @@ automatically, and large artifacts are still not externalized.
    parser, scope extractor, proof contract, and receipt shape exist.
 8. The near-term registry is a **Tool Receipt Registry**, not an offensive-tool expansion. Do not add
    new exploit tooling until existing DAST, ASM, AI Gate, and Model Intake tools produce receipts for
-   success, failure, timeout, skip, and parser-error paths.
+   success, failure, timeout, skip, and parser-error paths. Internal AI Gate and Model Intake worker
+   receipts now cover success/failure; DAST/ASM external tool receipt coverage remains open.
 9. DONE phase 1: add a release/test gate equivalent to T3MP3ST's "no phantom tools": every claimed
    adapter must be `installed`, `runnable`, `waived`, or `catalog_only`, and UI/report copy must not
    imply a missing adapter ran. The `describe_tools`/`/arsenal/tools` response carries

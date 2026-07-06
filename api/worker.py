@@ -63,6 +63,7 @@ SCANNER_PATH = '/app/scanner.py'
 SCAN_LOG_TAIL = int(os.environ.get('SCAN_LOG_TAIL', '200'))
 SCAN_LOG_TTL_SECONDS = int(os.environ.get('SCAN_LOG_TTL_SECONDS', '86400'))
 HEARTBEAT_INTERVAL_SECONDS = int(os.environ.get('HEARTBEAT_INTERVAL_SECONDS', '30'))
+TOOL_RECEIPT_ADAPTER_VERSION = "2026-07-05.v1"
 
 # Maximum allowed duration per scan type (minutes) - worker-side safety net
 MAX_SCAN_DURATION = {
@@ -107,6 +108,179 @@ def utc_now() -> datetime:
 
 def utc_now_iso() -> str:
     return utc_now().isoformat()
+
+
+_RECEIPT_SENSITIVE_KEYS = {
+    "authorization",
+    "authorization_header",
+    "auth_header",
+    "bearer_token",
+    "cookie",
+    "cookies",
+    "credential",
+    "password",
+    "private_key",
+    "secret",
+    "signature",
+    "token",
+}
+
+
+def _redact_receipt_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        out: dict[str, Any] = {}
+        for key, nested in value.items():
+            normalized = str(key).strip().lower()
+            out[key] = "***" if normalized in _RECEIPT_SENSITIVE_KEYS and nested not in (None, "", [], {}) else _redact_receipt_value(nested)
+        return out
+    if isinstance(value, list):
+        return [_redact_receipt_value(item) for item in value]
+    if isinstance(value, tuple):
+        return [_redact_receipt_value(item) for item in value]
+    if isinstance(value, str):
+        redacted = re.sub(r"(?i)(bearer|token|secret|password|signature|api[_-]?key)=([^&\s]+)", r"\1=***", value)
+        redacted = re.sub(r"(?i)(authorization:\s*bearer\s+)[^\s,;]+", r"\1***", redacted)
+        redacted = re.sub(r"(?i)\b(secret|token|password|api[_-]?key)[-_a-z0-9]*\b", "***", redacted)
+        return redacted
+    return value
+
+
+def _tool_receipt_hash(payload: dict[str, Any]) -> str:
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _internal_executor_receipt_spec(options: dict[str, Any]) -> dict[str, str] | None:
+    run_kind = str((options or {}).get("run_kind") or "").strip()
+    if run_kind in AI_GATE_RUN_KINDS:
+        return {
+            "tool_name": "ai_gate_probe_executor",
+            "parser_status_key": "ai_gate",
+            "parser": "ai-gate-transcript-v1",
+            "proof_contract": "deterministic-or-judge-evidence",
+        }
+    if run_kind in MODEL_INTAKE_RUN_KINDS:
+        return {
+            "tool_name": "model_intake_signature_verifier",
+            "parser_status_key": "model_intake",
+            "parser": "model-intake-summary-v1",
+            "proof_contract": "cryptographic-signature-verification",
+        }
+    return None
+
+
+async def _record_internal_executor_tool_receipt(
+    conn,
+    *,
+    scan_id: str,
+    job_id: str | None,
+    target: str,
+    target_id: str | None,
+    ai_target_id: str | None,
+    options: dict[str, Any],
+    result: dict[str, Any],
+    started_at: datetime,
+    completed_at: datetime,
+    duration_seconds: int,
+    error: Any,
+) -> str | None:
+    """Best-effort receipt emission for built-in product executors.
+
+    This records execution metadata only. It never promotes findings, updates
+    proof state, or changes the scan terminal status.
+    """
+    spec = _internal_executor_receipt_spec(options)
+    if not spec:
+        return None
+    run_kind = str((options or {}).get("run_kind") or "")
+    product_payload = result.get(spec["parser_status_key"]) if isinstance(result, dict) else None
+    parser_status = "parsed" if isinstance(product_payload, dict) and product_payload else ("failed" if error else "partial")
+    status = "failed" if error else "success"
+    redacted_argv = [
+        spec["tool_name"],
+        "--run-kind",
+        run_kind,
+        "--scan-id",
+        str(scan_id),
+    ]
+    target_scope = _redact_receipt_value({
+        "scan_id": str(scan_id),
+        "job_id": str(job_id or ""),
+        "target_id": str(target_id or ""),
+        "ai_target_id": str(ai_target_id or ""),
+        "target": target,
+        "run_kind": run_kind,
+    })
+    command_hash = _tool_receipt_hash({
+        "tool_name": spec["tool_name"],
+        "redacted_argv": redacted_argv,
+        "target_scope": target_scope,
+    })
+    metadata = _redact_receipt_value({
+        "executor": "worker_internal",
+        "parser": spec["parser"],
+        "proof_contract": spec["proof_contract"],
+        "scan_type": (options or {}).get("scan_type"),
+        "duration_seconds": duration_seconds,
+        "finding_count": len(result.get("findings") or []) if isinstance(result.get("findings"), list) else 0,
+        "error": str(error)[:500] if error else None,
+    })
+    try:
+        row = await conn.fetchrow(
+            """
+            INSERT INTO tool_receipts (
+                tool_name, tool_version, adapter_version, command_hash, redacted_argv,
+                worker_build, container_image, target_scope, scope_receipt_id,
+                approval_receipt_id, policy_profile_id, status, parser_status,
+                exit_code, timed_out, started_at, finished_at, stdout_evidence_object_id,
+                stderr_evidence_object_id, parsed_evidence_instance_ids, redaction_summary,
+                metadata_json, created_by
+            ) VALUES (
+                $1,$2,$3,$4,$5::jsonb,
+                $6,$7,$8::jsonb,$9,
+                $10,$11,$12,$13,
+                $14,$15,$16,$17,$18,
+                $19,$20::jsonb,$21,
+                $22::jsonb,$23
+            )
+            RETURNING id
+            """,
+            spec["tool_name"],
+            "internal",
+            TOOL_RECEIPT_ADAPTER_VERSION,
+            command_hash,
+            json.dumps(redacted_argv),
+            os.environ.get("BUILD_FINGERPRINT"),
+            os.environ.get("WORKER_IMAGE"),
+            json.dumps(target_scope),
+            None,
+            None,
+            None,
+            status,
+            parser_status,
+            1 if error else 0,
+            False,
+            started_at,
+            completed_at,
+            None,
+            None,
+            json.dumps([]),
+            "worker internal executor receipt; sensitive target/options fields redacted",
+            json.dumps(metadata),
+            "worker",
+        )
+    except Exception as exc:
+        print(f"[{str(job_id or scan_id)[:8]}] tool receipt insert error: {exc}", flush=True)
+        return None
+    receipt_id = str(row["id"]) if row and row["id"] else None
+    if receipt_id:
+        receipt_ids = result.setdefault("tool_receipt_ids", [])
+        if isinstance(receipt_ids, list) and receipt_id not in receipt_ids:
+            receipt_ids.append(receipt_id)
+        result.setdefault("metadata", {})
+        if isinstance(result.get("metadata"), dict):
+            result["metadata"].setdefault("tool_receipt_ids", list(receipt_ids) if isinstance(receipt_ids, list) else [receipt_id])
+    return receipt_id
 
 
 DEFAULT_MAX_DURATION_MINUTES = int(os.environ.get('SCAN_MAX_DURATION_DEFAULT_MINUTES', '120'))
@@ -4511,7 +4685,8 @@ async def process_scan_job(job_data: dict):
         findings = result.get('findings', [])
         error = result.get('error')
 
-        # Save to file
+        # Save an early artifact before DB finalization so runtime failures still
+        # leave diagnostics. A later write refreshes it with receipt ids.
         filepath = save_result_file(result, job_id)
 
         # Calculate duration
@@ -4545,6 +4720,21 @@ async def process_scan_job(job_data: dict):
                 r.expire(job_key, 86400)
                 return
 
+            await _record_internal_executor_tool_receipt(
+                conn,
+                scan_id=scan_id,
+                job_id=job_id,
+                target=target,
+                target_id=target_id,
+                ai_target_id=ai_target_id,
+                options=options,
+                result=result,
+                started_at=now,
+                completed_at=completed_at,
+                duration_seconds=duration,
+                error=error,
+            )
+
             if error:
                 # A no-output (exit-0, no JSON) failure must not be a bare 'failed'
                 # row with nothing to debug. Surface the structured failure
@@ -4561,6 +4751,7 @@ async def process_scan_job(job_data: dict):
                 failure_result = {
                     "error": error,
                     "failure_diagnostics": diag,
+                    "tool_receipt_ids": result.get("tool_receipt_ids", []),
                     "scan_metadata": {"status": "failed", "failure_diagnostics": diag},
                 }
                 await conn.execute("""
@@ -4598,6 +4789,10 @@ async def process_scan_job(job_data: dict):
                             updated_at = NOW()
                         WHERE id = $3
                     """, uuid.UUID(scan_id), completed_at, uuid.UUID(ai_target_id))
+
+        # Save to file after best-effort receipt emission so the file mirrors
+        # the persisted scan result's receipt ids.
+        filepath = save_result_file(result, job_id)
 
         # Save findings (pure DB persistence)
         saved_count = 0
