@@ -110,7 +110,10 @@ def test_evidence_manifest_and_retention_commands_are_bounded():
     assert "manifest_hash" in manifest["evidence_contract"]
     assert bundle["status"] == "read_only"
     assert bundle["path"] == "/evidence/export-bundle"
+    assert bundle["parameters_schema"]["format"]["enum"] == ["json", "zip"]
     assert "bundle_hash" in bundle["evidence_contract"]
+    assert "archive_sha256" in bundle["evidence_contract"]
+    assert "download_api_path" in bundle["evidence_contract"]
     assert "api_read_replay" in bundle["evidence_contract"]
     # Executing the sweep deletes durable evidence, so it must be gated (not a
     # read-only/dry-run shortcut that the operation-plan approval gate ignores).

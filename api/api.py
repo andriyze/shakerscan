@@ -7,6 +7,7 @@ FastAPI server with PostgreSQL persistence and Redis queue.
 import asyncio
 import copy
 import hashlib
+import io
 import ipaddress
 import json
 import logging
@@ -18,6 +19,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+import zipfile
 from collections import Counter
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
@@ -19376,6 +19378,61 @@ def _evidence_export_bundle_descriptor(
     }
 
 
+def _evidence_export_archive_bytes(manifest: dict[str, Any], bundle: dict[str, Any]) -> bytes:
+    """Build a deterministic content-free metadata archive for evidence export."""
+    files = {
+        "evidence-export-manifest.json": manifest,
+        "evidence-export-bundle.json": bundle,
+        "evidence-export-replay-plan.json": bundle.get("replay_plan") or {},
+    }
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for name in sorted(files):
+            payload = json.dumps(files[name], sort_keys=True, indent=2, default=str).encode("utf-8")
+            info = zipfile.ZipInfo(name)
+            info.date_time = (2026, 7, 6, 0, 0, 0)
+            info.compress_type = zipfile.ZIP_DEFLATED
+            zf.writestr(info, payload)
+    return buf.getvalue()
+
+
+def _evidence_export_archive_descriptor(
+    manifest: dict[str, Any],
+    bundle: dict[str, Any],
+    *,
+    filters: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    archive_bytes = _evidence_export_archive_bytes(manifest, bundle)
+    bundle_hash = str(bundle.get("bundle_hash") or "evidence-export")
+    safe_suffix = re.sub(r"[^a-fA-F0-9]", "", bundle_hash)[:12] or "metadata"
+    query = dict(filters or bundle.get("filters") or {})
+    query["format"] = "zip"
+    query = {k: v for k, v in query.items() if v is not None}
+    files = []
+    for name, payload in (
+        ("evidence-export-manifest.json", manifest),
+        ("evidence-export-bundle.json", bundle),
+        ("evidence-export-replay-plan.json", bundle.get("replay_plan") or {}),
+    ):
+        encoded = json.dumps(payload, sort_keys=True, indent=2, default=str).encode("utf-8")
+        files.append({
+            "name": name,
+            "sha256": hashlib.sha256(encoded).hexdigest(),
+            "size_bytes": len(encoded),
+            "content_included": False,
+        })
+    return {
+        "schema_version": "2026-07-06.evidence-export-archive.v1",
+        "filename": f"shakerscan-evidence-export-{safe_suffix}.zip",
+        "media_type": "application/zip",
+        "content_included": False,
+        "archive_sha256": hashlib.sha256(archive_bytes).hexdigest(),
+        "size_bytes": len(archive_bytes),
+        "download_api_path": f"/evidence/export-bundle?{urllib.parse.urlencode(query)}",
+        "files": files,
+    }
+
+
 async def _record_export_event(
     conn,
     *,
@@ -19632,8 +19689,9 @@ async def evidence_export_bundle(
     retention_class: Optional[str] = Query(None, regex="^(standard|short|audit|legal_hold|sensitive)$"),
     limit: int = Query(200, ge=1, le=1000),
     record_event: bool = Query(False, description="Persist a content-free export event for deliberate audit logging."),
+    export_format: str = Query("json", alias="format", regex="^(json|zip)$"),
 ):
-    """Return a content-free export bundle descriptor with replay/read paths."""
+    """Return a content-free export bundle descriptor or metadata zip."""
     try:
         finding_uuid = _optional_uuid(finding_id)
         scan_uuid = _optional_uuid(scan_id)
@@ -19674,6 +19732,19 @@ async def evidence_export_bundle(
                 filters=filters,
                 created_by="api",
             )
+    archive = _evidence_export_archive_descriptor(manifest, bundle, filters=filters)
+    if export_format == "zip":
+        archive_bytes = _evidence_export_archive_bytes(manifest, bundle)
+        headers = {
+            "Content-Disposition": f"attachment; filename=\"{archive['filename']}\"",
+            "X-ShakerScan-Bundle-Hash": str(bundle.get("bundle_hash") or ""),
+            "X-ShakerScan-Archive-SHA256": archive["archive_sha256"],
+        }
+        event = bundle.get("export_event")
+        if isinstance(event, dict) and event.get("id"):
+            headers["X-ShakerScan-Export-Event-Id"] = str(event["id"])
+        return Response(content=archive_bytes, media_type=archive["media_type"], headers=headers)
+    bundle["archive"] = archive
     return bundle
 
 

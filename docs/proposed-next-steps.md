@@ -479,8 +479,8 @@ raw shell execution or LLM-produced verified findings.
    results plus read-only timeline support for standalone action rows. DONE phase 1 for durable
    evidence-instance binding events and refuter review/signal events on the same feed. DONE phase 1
    for content-free evidence export bundle descriptors with API read-replay plans. DONE phase 1 for
-   explicit `record_event=true` durable export event records on the timeline. Remaining work is richer
-   archive/download packaging.
+   explicit `record_event=true` durable export event records on the timeline. DONE phase 1 for
+   content-free zip download packaging for manifests, bundle descriptors, and replay plans.
 3. **Command Arsenal execution gateway, still no raw shell:** DONE phase 1. `POST /arsenal/execute`
    invokes a product command by NAME through its existing route handler. Unknown / `catalog_only` /
    `out_of_scope` / `contract` commands are refused, so raw shell and arbitrary code are not
@@ -996,8 +996,10 @@ externalize to a content-addressed local object store under `RESULTS_DIR/evidenc
 `local:evidence_objects/...` storage URIs, and the evidence read API hydrates/verifies them on read.
 `GET /evidence/export-manifest` returns a content-free hash/storage/retention manifest,
 `GET /evidence/export-bundle` returns a content-free bundle descriptor with a manifest hash, bundle
-hash, retention/integrity summaries, and API read-replay paths; callers that pass
-`record_event=true` also get a durable content-free export event for `GET /timeline`, and
+hash, retention/integrity summaries, API read-replay paths, and a deterministic zip archive descriptor;
+`GET /evidence/export-bundle?format=zip` downloads a content-free archive containing the manifest,
+bundle descriptor, and replay plan. Callers that pass `record_event=true` also get a durable
+content-free export event for `GET /timeline`, and
 `POST /evidence/retention/sweep` previews or executes bounded evidence-object cleanup with
 `dry_run: true` by default and `legal_hold` excluded. `GET /arsenal/tools` now returns a
 `release_gate` named `no_phantom_tools` that fails if an adapter
@@ -1006,8 +1008,7 @@ runnable adapter lacks parser/proof metadata. Worker finalization now emits reco
 rows for the internal AI Gate probe executor and Model Intake signature verifier on success/failure,
 stamping returned receipt ids into scan results without changing findings or proof state. External
 DAST/ASM tools are not yet wired to emit receipts automatically, remote S3/MinIO-style object storage
-is still open, scheduled retention automation is still open, and richer archive/download packaging is
-still open.
+is still open, and scheduled retention automation is still open.
 
 **Implement:**
 1. DONE phase 1: externalize `storage_uri` from `inline:` to local object storage for large objects.
@@ -1023,8 +1024,10 @@ still open.
    `GET /evidence/export-bundle` / `evidence.export_bundle` returns a content-free bundle descriptor
    with `bundle_hash`, `manifest_hash`, retention/integrity summaries, and API read-replay paths.
    DONE phase 1: deliberate bundle export requests with `record_event=true` write durable
-   `export_events` rows, and `GET /timeline` exposes those events without evidence content.
-   Background scheduling and archive/download packaging remain open.
+   `export_events` rows, and `GET /timeline` exposes those events without evidence content. DONE
+   phase 1: `GET /evidence/export-bundle?format=zip` returns a content-free metadata archive with
+   manifest, bundle descriptor, replay plan, archive hash, filename, and download headers. Background
+   scheduling remains open.
 3. DONE phase 1: split canonical `Finding` from `EvidenceInstance {concrete_url, object_id, payload_variant,
    request_response_refs, principal_pair, proof_observation, campaign_action_id, tool_receipt_id,
    redaction_profile, hash, retention_policy}` as durable record-only rows. Finding promotion still

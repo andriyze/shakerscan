@@ -490,7 +490,7 @@ COMMANDS: tuple[ArsenalCommand, ...] = (
     ArsenalCommand(
         name="evidence.export_bundle",
         family="evidence",
-        description="Read a content-free evidence export bundle descriptor with manifest hash, API replay paths, and retention/integrity summaries.",
+        description="Read a content-free evidence export bundle descriptor or metadata zip with manifest hash, API replay paths, and retention/integrity summaries.",
         status="read_only",
         risk_tier="read_only",
         method="GET",
@@ -502,8 +502,17 @@ COMMANDS: tuple[ArsenalCommand, ...] = (
             "retention_class": {"type": "string", "enum": ["standard", "short", "audit", "legal_hold", "sensitive"]},
             "limit": {"type": "integer", "minimum": 1, "maximum": 1000},
             "record_event": {"type": "boolean", "default": False},
+            "format": {"type": "string", "enum": ["json", "zip"], "default": "json"},
         },
-        evidence_contract=("bundle_hash", "manifest_hash", "api_read_replay", "content_sha256", "storage_integrity"),
+        evidence_contract=(
+            "bundle_hash",
+            "manifest_hash",
+            "archive_sha256",
+            "download_api_path",
+            "api_read_replay",
+            "content_sha256",
+            "storage_integrity",
+        ),
         timeout_seconds=20,
     ),
     ArsenalCommand(

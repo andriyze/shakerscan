@@ -5,11 +5,13 @@ JSON-decode helper that have grown enough surface to be worth pinning.
 """
 
 import asyncio
+import io
 import json
 import os
 import sys
 import types
 import uuid
+import zipfile
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -70,10 +72,11 @@ if "fastapi" not in sys.modules:
     responses_mod = types.ModuleType("fastapi.responses")
 
     class _FakeResponse:
-        def __init__(self, content=None, status_code=200, headers=None):
+        def __init__(self, content=None, status_code=200, headers=None, media_type=None):
             self.content = content
             self.status_code = status_code
             self.headers = headers or {}
+            self.media_type = media_type
 
     responses_mod.Response = _FakeResponse
     responses_mod.JSONResponse = _FakeResponse
@@ -1967,6 +1970,49 @@ def test_evidence_export_bundle_descriptor_is_content_free_and_replayable(monkey
     assert "content" not in replay["evidence_object_reads"][0]
 
 
+def test_evidence_export_archive_is_content_free_zip(monkeypatch, tmp_path):
+    stored = store_evidence_content({"large": "x" * 200}, results_dir=tmp_path, inline_max_bytes=8)
+    monkeypatch.setattr(api_module, "RESULTS_DIR", tmp_path)
+    finding_id = uuid.uuid4()
+    object_id = uuid.uuid4()
+    row = {
+        "id": object_id,
+        "finding_id": finding_id,
+        "scan_id": uuid.uuid4(),
+        "object_type": "dast_evidence",
+        "content_sha256": stored["content_sha256"],
+        "size_bytes": stored["size_bytes"],
+        "storage_uri": stored["storage_uri"],
+        "retention_class": "standard",
+        "content": None,
+        "created_at": datetime(2026, 7, 6, tzinfo=timezone.utc),
+    }
+    manifest = api_module._evidence_export_manifest([row], generated_at=datetime(2026, 7, 6, tzinfo=timezone.utc))
+    bundle = api_module._evidence_export_bundle_descriptor(
+        manifest,
+        filters={"finding_id": str(finding_id), "limit": 200},
+        generated_at=datetime(2026, 7, 6, tzinfo=timezone.utc),
+    )
+    archive = api_module._evidence_export_archive_descriptor(manifest, bundle, filters=bundle["filters"])
+    archive_bytes = api_module._evidence_export_archive_bytes(manifest, bundle)
+
+    assert archive["schema_version"] == "2026-07-06.evidence-export-archive.v1"
+    assert archive["content_included"] is False
+    assert archive["media_type"] == "application/zip"
+    assert archive["archive_sha256"] == api_module.hashlib.sha256(archive_bytes).hexdigest()
+    assert archive["download_api_path"].endswith("format=zip")
+    with zipfile.ZipFile(io.BytesIO(archive_bytes)) as zf:
+        assert sorted(zf.namelist()) == [
+            "evidence-export-bundle.json",
+            "evidence-export-manifest.json",
+            "evidence-export-replay-plan.json",
+        ]
+        serialized = b"".join(zf.read(name) for name in zf.namelist()).decode("utf-8").lower()
+    assert '"content_included": false' in serialized
+    assert "x" * 100 not in serialized
+    assert "secret" not in serialized
+
+
 def test_record_export_event_persists_only_content_free_refs():
     finding_id = uuid.uuid4()
     scan_id = uuid.uuid4()
@@ -2093,6 +2139,34 @@ def test_evidence_export_bundle_get_is_read_only_unless_record_event_requested(m
     assert recorded["export_event"]["export_kind"] == "evidence_export_bundle"
     assert pool.acquire_count == 3
     assert pool.insert_count == 1
+
+
+def test_evidence_export_bundle_zip_response_is_downloadable(monkeypatch):
+    class _Pool:
+        def acquire(self):
+            class _Conn:
+                async def fetch(self, query, *args):
+                    return []
+
+            class _Acquire:
+                async def __aenter__(self):
+                    return _Conn()
+
+                async def __aexit__(self, *exc):
+                    return False
+
+            return _Acquire()
+
+    monkeypatch.setattr(api_module, "db_pool", _Pool())
+
+    response = asyncio.run(api_module.evidence_export_bundle(limit=200, export_format="zip"))
+
+    assert response.media_type == "application/zip"
+    assert response.headers["Content-Disposition"].startswith("attachment; filename=")
+    assert len(response.headers["X-ShakerScan-Archive-SHA256"]) == 64
+    with zipfile.ZipFile(io.BytesIO(response.body if hasattr(response, "body") else response.content)) as zf:
+        assert "evidence-export-manifest.json" in zf.namelist()
+        assert "evidence-export-bundle.json" in zf.namelist()
 
 
 def test_evidence_retention_candidates_skip_legal_hold_and_use_policy_days():
