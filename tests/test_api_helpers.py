@@ -513,6 +513,9 @@ def test_dashboard_action_center_surfaces_ai_control_baseline_gaps():
 
 
 class _ProductStatusConn:
+    def __init__(self, *, exceptions=None):
+        self.exceptions = exceptions or {"expired": 1, "expiring": 2, "weak_records": 3}
+
     async def fetchrow(self, query, *args):
         if "COALESCE(source, 'scan')" in query:
             return {"blockers": 3, "active_findings": 5}
@@ -533,7 +536,7 @@ class _ProductStatusConn:
         if "untrusted_latest" in query:
             return {"untrusted_latest": 2}
         if "FROM finding_exceptions" in query:
-            return {"expired": 1, "expiring": 2, "weak_records": 3}
+            return self.exceptions
         if "severity = 'critical'" in query and "severity = 'high'" in query:
             return {"critical": 1, "high": 4}
         return {}
@@ -579,18 +582,36 @@ def test_dashboard_product_status_summarizes_cross_product_state():
     assert by_id["dast"]["status"] == "critical"
     assert by_id["dast"]["primary_count"] == 3
     assert by_id["dast"]["actions"][0]["href"] == "/findings?status=active&source_type=dast"
+    assert by_id["dast"]["actions"][1]["href"] == "/scans?status=failed"
     assert by_id["asm"]["href"] == "/asm?target_id=11111111-1111-4111-8111-111111111111"
     assert by_id["asm"]["secondary_count"] == 25
+    assert by_id["asm"]["actions"][0]["label"] == "Target timeline"
+    assert by_id["asm"]["actions"][1]["href"] == "/schedules?create=true&target_id=11111111-1111-4111-8111-111111111111"
     assert by_id["ai_gate"]["status"] == "warning"
     assert by_id["ai_gate"]["secondary_label"] == "control gaps"
+    assert by_id["ai_gate"]["actions"][0]["href"] == "/settings/ai-gate"
+    assert by_id["ai_gate"]["actions"][1]["href"] == "/findings?source_type=ai&status=active"
     assert by_id["model_intake"]["status"] == "critical"
     assert by_id["model_intake"]["href"] == "/settings/model-intake?remediate=trust"
     assert by_id["model_intake"]["actions"][0]["label"] == "Fix trust"
     assert by_id["model_intake"]["actions"][1]["href"] == "/findings?source_type=model_intake&status=active"
     assert by_id["exceptions"]["href"] == "/settings/exceptions?queue_filter=expired"
+    assert by_id["exceptions"]["actions"][1]["href"] == "/settings/exceptions?queue_filter=expiring"
     assert by_id["deployment"]["primary_count"] == 1
     assert by_id["workers"]["status"] == "critical"
     assert by_id["workers"]["metadata"]["total"] == 5
+
+
+def test_dashboard_product_status_links_missing_exception_controls():
+    snapshot = {"available": False}
+    items = asyncio.run(api_module._build_dashboard_product_status(
+        _ProductStatusConn(exceptions={"expired": 0, "expiring": 0, "weak_records": 3}),
+        worker_snapshot=snapshot,
+    ))
+    by_id = {item["id"]: item for item in items}
+
+    assert by_id["exceptions"]["status"] == "warning"
+    assert by_id["exceptions"]["actions"][0]["href"] == "/settings/exceptions?queue_filter=missing_controls"
 
 
 # ----- run_due_schedules --------------------------------------------------

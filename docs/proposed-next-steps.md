@@ -591,9 +591,13 @@ blocked, and provide safe remediation links without making users infer state fro
    counts only in the browser.
 6. PARTIAL/NEXT: add safe remediation routes from those cards: open failed scans, open target ASM timeline,
    open missing-auth/second-user blockers, open exception hygiene filters, open AI Gate
-   readiness/control gaps, and open worker rebuild/scale controls. DONE for Model Intake trust
-   blockers: `/settings/model-intake?remediate=trust` selects strict trusted-anchor mode, highlights
-   the trust controls, and links exception hygiene.
+   readiness/control gaps, and open worker rebuild/scale controls. DONE phase 1 for product-status
+   remediation links: DAST cards route to active findings, failed scans, running scans, or new-scan
+   entry as appropriate; ASM cards route to the selected target timeline and preselected schedule
+   creation; exception cards route directly to expired, expiring, or missing-controls queues; AI Gate
+   cards route to control gaps or AI findings; worker cards route to dashboard worker controls and
+   pending scans. DONE for Model Intake trust blockers: `/settings/model-intake?remediate=trust`
+   selects strict trusted-anchor mode, highlights the trust controls, and links exception hygiene.
 7. DONE phase 1: `GET /timeline` merges the command-result audit rows (with live scan status joined),
    recent user-facing scans, and upcoming schedules into one normalized cross-product event feed with
    an optional `target_id` filter. DONE phase 1: the feed also includes standalone campaign actions,

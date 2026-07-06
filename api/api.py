@@ -8555,6 +8555,21 @@ async def _build_dashboard_product_status(conn, *, worker_snapshot: dict[str, An
             status = "ok"
             summary = "No active DAST blockers detected."
             href = "/scans"
+        dast_actions = []
+        if blockers:
+            dast_actions.append({"label": "Review findings", "href": "/findings?status=active&source_type=dast", "variant": "primary"})
+        elif recent_failed:
+            dast_actions.append({"label": "Failed scans", "href": "/scans?status=failed", "variant": "primary"})
+        elif active_scans:
+            dast_actions.append({"label": "Running scans", "href": "/scans?status=running", "variant": "primary"})
+        else:
+            dast_actions.append({"label": "New scan", "href": "/scan/new", "variant": "primary"})
+        if recent_failed and dast_actions[0]["href"] != "/scans?status=failed":
+            dast_actions.append({"label": "Failed scans", "href": "/scans?status=failed", "variant": "secondary"})
+        elif active_scans and dast_actions[0]["href"] != "/scans?status=running":
+            dast_actions.append({"label": "Running scans", "href": "/scans?status=running", "variant": "secondary"})
+        else:
+            dast_actions.append({"label": "All scans", "href": "/scans", "variant": "secondary"})
         items.append(_dashboard_product_status_item(
             item_id="dast",
             label="DAST",
@@ -8565,10 +8580,7 @@ async def _build_dashboard_product_status(conn, *, worker_snapshot: dict[str, An
             primary_label="crit/high",
             secondary_count=active_scans,
             secondary_label="running",
-            actions=[
-                {"label": "Findings", "href": "/findings?status=active&source_type=dast", "variant": "primary"},
-                {"label": "Scans", "href": "/scans", "variant": "secondary"},
-            ],
+            actions=dast_actions,
             metadata={"active_findings": active_findings, "recent_failed_scans": recent_failed},
         ))
     except Exception:
@@ -8619,6 +8631,7 @@ async def _build_dashboard_product_status(conn, *, worker_snapshot: dict[str, An
         else:
             status = "info"
             summary = "No targets have Continuous ASM enabled."
+        schedule_href = f"/schedules?create=true&target_id={sample_target_id}" if sample_target_id else "/schedules?create=true"
         items.append(_dashboard_product_status_item(
             item_id="asm",
             label="Continuous ASM",
@@ -8630,8 +8643,8 @@ async def _build_dashboard_product_status(conn, *, worker_snapshot: dict[str, An
             secondary_count=endpoints_needing_work,
             secondary_label="endpoints",
             actions=[
-                {"label": "ASM", "href": href, "variant": "primary"},
-                {"label": "Schedules", "href": "/schedules", "variant": "secondary"},
+                {"label": "Target timeline" if sample_target_id else "ASM targets", "href": href, "variant": "primary"},
+                {"label": "Create ASM schedule", "href": schedule_href, "variant": "secondary"},
             ],
             metadata={"enabled_targets": enabled},
         ))
@@ -8683,6 +8696,18 @@ async def _build_dashboard_product_status(conn, *, worker_snapshot: dict[str, An
         else:
             status = "info"
             summary = "No AI Gate targets configured."
+        ai_actions = [
+            {
+                "label": "AI findings" if active_findings else "Control gaps",
+                "href": "/findings?source_type=ai&status=active" if active_findings else "/settings/ai-gate",
+                "variant": "primary",
+            },
+            {
+                "label": "Control gaps" if active_findings else "AI findings",
+                "href": "/settings/ai-gate" if active_findings else "/findings?source_type=ai&status=active",
+                "variant": "secondary",
+            },
+        ]
         items.append(_dashboard_product_status_item(
             item_id="ai_gate",
             label="AI Gate",
@@ -8693,10 +8718,7 @@ async def _build_dashboard_product_status(conn, *, worker_snapshot: dict[str, An
             primary_label="findings",
             secondary_count=missing_controls,
             secondary_label="control gaps",
-            actions=[
-                {"label": "AI Gate", "href": "/settings/ai-gate", "variant": "primary"},
-                {"label": "AI findings", "href": "/findings?source_type=ai_gate&status=active", "variant": "secondary"},
-            ],
+            actions=ai_actions,
             metadata={"active_targets": active_targets},
         ))
     except Exception:
@@ -8800,6 +8822,21 @@ async def _build_dashboard_product_status(conn, *, worker_snapshot: dict[str, An
             status = "ok"
             summary = "No exception hygiene blockers detected."
             href = "/settings/exceptions"
+        exception_actions = []
+        if expired:
+            exception_actions.append({"label": "Expired", "href": "/settings/exceptions?queue_filter=expired", "variant": "primary"})
+        elif weak:
+            exception_actions.append({"label": "Missing controls", "href": "/settings/exceptions?queue_filter=missing_controls", "variant": "primary"})
+        elif expiring:
+            exception_actions.append({"label": "Expiring soon", "href": "/settings/exceptions?queue_filter=expiring", "variant": "primary"})
+        else:
+            exception_actions.append({"label": "All exceptions", "href": "/settings/exceptions", "variant": "primary"})
+        if expiring and exception_actions[0]["href"] != "/settings/exceptions?queue_filter=expiring":
+            exception_actions.append({"label": "Expiring soon", "href": "/settings/exceptions?queue_filter=expiring", "variant": "secondary"})
+        elif weak and exception_actions[0]["href"] != "/settings/exceptions?queue_filter=missing_controls":
+            exception_actions.append({"label": "Missing controls", "href": "/settings/exceptions?queue_filter=missing_controls", "variant": "secondary"})
+        else:
+            exception_actions.append({"label": "All exceptions", "href": "/settings/exceptions", "variant": "secondary"})
         items.append(_dashboard_product_status_item(
             item_id="exceptions",
             label="Exceptions",
@@ -8810,10 +8847,7 @@ async def _build_dashboard_product_status(conn, *, worker_snapshot: dict[str, An
             primary_label="expired",
             secondary_count=expiring + weak,
             secondary_label="hygiene",
-            actions=[
-                {"label": "Expired", "href": "/settings/exceptions?queue_filter=expired", "variant": "primary"},
-                {"label": "All exceptions", "href": "/settings/exceptions", "variant": "secondary"},
-            ],
+            actions=exception_actions,
         ))
     except Exception:
         items.append(_dashboard_product_status_item(
