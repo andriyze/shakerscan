@@ -1942,7 +1942,7 @@ async def run_schema_migrations(pool) -> None:
                     worker_build TEXT,
                     container_image TEXT,
                     target_scope JSONB NOT NULL DEFAULT '{}'::jsonb,
-                    scope_receipt_id UUID REFERENCES scope_receipts(id) ON DELETE SET NULL,
+                    scope_receipt_id TEXT REFERENCES scope_receipts(id) ON DELETE SET NULL,
                     approval_receipt_id UUID REFERENCES approval_receipts(id) ON DELETE SET NULL,
                     policy_profile_id UUID REFERENCES policy_profiles(id) ON DELETE SET NULL,
                     status TEXT NOT NULL DEFAULT 'recorded',
