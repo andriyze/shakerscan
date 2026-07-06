@@ -12670,6 +12670,102 @@ def _public_scope_receipt_row(row: Any) -> dict[str, Any]:
     return payload
 
 
+def _runtime_scope_guard_from_scope(scope: dict[str, Any]) -> dict[str, Any]:
+    """Build the non-secret scope contract queued workers must re-check."""
+    normalized = _decode_json_value(scope.get("normalized_scope")) or {}
+    allowed_hosts = _decode_json_value(scope.get("allowed_hosts")) or []
+    allowed_roots = _decode_json_value(scope.get("allowed_root_domains")) or []
+    if not isinstance(allowed_hosts, list):
+        allowed_hosts = []
+    if not isinstance(allowed_roots, list):
+        allowed_roots = []
+    normalized_host = normalized.get("host") if isinstance(normalized, dict) else None
+    if normalized_host and not allowed_hosts:
+        allowed_hosts = [normalized_host]
+
+    guard = {
+        "scope_receipt_id": str(scope.get("id") or ""),
+        "environment": str(scope.get("environment") or "production").strip().lower() or "production",
+        "allowed_hosts": [str(item) for item in allowed_hosts if str(item or "").strip()],
+        "allowed_root_domains": [str(item) for item in allowed_roots if str(item or "").strip()],
+        "normalized_scope": normalized if isinstance(normalized, dict) else {},
+        "requires_runtime_destination_check": True,
+    }
+    if scope.get("target_id"):
+        guard["target_id"] = str(scope.get("target_id"))
+    return guard
+
+
+def evaluate_runtime_destination_scope(
+    runtime_scope_guard: dict[str, Any] | None,
+    destination_url: str | None,
+    *,
+    redirect_urls: list[str] | tuple[str, ...] | None = None,
+) -> dict[str, Any]:
+    """Re-check actual network destinations against an approval scope guard.
+
+    Network-following workers should call this with the post-resolution or
+    post-redirect destination they actually touched. Missing guard/destination
+    fails closed so unknown runtime scope cannot be treated as in-scope.
+    """
+    if not isinstance(runtime_scope_guard, dict) or not runtime_scope_guard:
+        return {
+            "verdict": "blocked",
+            "status": "blocked",
+            "blocked_by": ["runtime_scope_guard_missing"],
+            "warnings": [],
+            "checks": [],
+            "redirect_destinations": [],
+            "runtime_scope_guard_present": False,
+        }
+    raw_destination = str(destination_url or "").strip()
+    if not raw_destination:
+        return {
+            "verdict": "blocked",
+            "status": "blocked",
+            "blocked_by": ["runtime_destination_unverified"],
+            "warnings": [],
+            "checks": [],
+            "redirect_destinations": [],
+            "runtime_scope_guard_present": True,
+            "scope_receipt_id": runtime_scope_guard.get("scope_receipt_id"),
+        }
+
+    normalized = (
+        runtime_scope_guard.get("normalized_scope")
+        if isinstance(runtime_scope_guard.get("normalized_scope"), dict)
+        else {}
+    )
+    allowed_hosts = (
+        runtime_scope_guard.get("allowed_hosts")
+        if isinstance(runtime_scope_guard.get("allowed_hosts"), list)
+        else []
+    )
+    allowed_roots = (
+        runtime_scope_guard.get("allowed_root_domains")
+        if isinstance(runtime_scope_guard.get("allowed_root_domains"), list)
+        else []
+    )
+    if not allowed_hosts and normalized.get("host"):
+        allowed_hosts = [normalized["host"]]
+
+    receipt = evaluate_scope(
+        raw_destination,
+        allowed_hosts=allowed_hosts,
+        allowed_root_domains=allowed_roots,
+        environment=str(runtime_scope_guard.get("environment") or "production"),
+        redirect_urls=redirect_urls,
+        target_id=str(runtime_scope_guard.get("target_id") or "") or None,
+    )
+    payload = receipt_to_dict(receipt)
+    payload["status"] = "allowed" if payload.get("verdict") == "allowed" else "blocked"
+    if payload["status"] != "allowed" and not payload.get("blocked_by"):
+        payload["blocked_by"] = ["runtime_destination_unverified"]
+    payload["runtime_scope_guard_present"] = True
+    payload["scope_receipt_id"] = runtime_scope_guard.get("scope_receipt_id")
+    return payload
+
+
 def _public_approval_receipt_row(row: Any) -> dict[str, Any]:
     payload = row_to_dict(row)
     payload["confirmations"] = _decode_json_value(payload.get("confirmations")) or []
@@ -15249,6 +15345,7 @@ async def _validate_approval_receipt_for_action(
         "scope_receipt_id": scope["id"],
         "approved_by": approval.get("approved_by"),
         "risk_tier": approval.get("risk_tier"),
+        "runtime_scope_guard": _runtime_scope_guard_from_scope(scope),
     }
 
 

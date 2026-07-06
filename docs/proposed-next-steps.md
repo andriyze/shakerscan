@@ -146,8 +146,9 @@ Use these waves to decide sequence when a T3MP3ST idea competes with detector wo
 2. **Read-only operator visibility:** DONE phase 1 for Command Arsenal/status and dashboard/product
    cards. Remaining work is the cross-product mission timeline and command results for blocked work.
 3. **Safety receipts and audit:** DONE phase 1 for scope/approval receipts and optional plus
-   policy-required enforcement. Remaining work is runtime destination re-checks, blocked/denied audit
-   rows, and campaign action records.
+   policy-required enforcement, and DONE phase 1 for queued runtime-scope guard payloads plus a
+   deterministic actual-destination re-check helper. Remaining work is worker/adapter enforcement for
+   redirects/resolution, skipped/degraded audit rows, and campaign action records.
 4. **Planner evaluation before planner power:** DONE phase 1 for fixture scoring and dry-run local
    planning. Remaining work is harmless capability ping, strict parser validation, and release gates
    that prevent raw shell, scope broadening, risk escalation, or AI-verified claims.
@@ -300,14 +301,23 @@ called at real sites — verify before re-proposing any of it:
   `/targets/{id}/asm/recon`, and `/targets/{id}/asm/improve` now accept optional
   `approval_receipt_id`, validate that it is approved, unexpired, confirm-authorized, linked to a
   non-blocked scope, and compatible with the requested target host/id, then stamp
-  `approval_receipt_id` / `scope_receipt_id` into queued scan options. Legacy submissions without a
-  receipt still work; mandatory enforcement is the remaining rollout step.
+  `approval_receipt_id` / `scope_receipt_id` plus a non-secret `runtime_scope_guard` into queued scan
+  options. Legacy submissions without a receipt still work; mandatory enforcement is the remaining
+  rollout step.
 - **Approval receipt validation phase 2** — AI Gate scans, AI Gate finding replay, AI Gate campaign
   replay, Model Intake scans, single finding retest, and bulk finding retest now also accept optional
   `approval_receipt_id`. They validate the same approval/scope invariants against the saved AI target,
   model artifact reference, or finding retest target before queueing, then stamp receipt IDs into
   queued scan/retest metadata where that route has a durable job/options record. Legacy submissions
   without a receipt still work; mandatory enforcement is still a policy rollout step.
+- **Runtime destination scope re-check phase 1** — validated approval contexts now carry a
+  non-secret `runtime_scope_guard` with the approved scope receipt id, environment, allowed hosts/root
+  domains, normalized scope, and a `requires_runtime_destination_check` flag into queued job/options
+  metadata. `evaluate_runtime_destination_scope` gives workers/adapters a deterministic fail-closed
+  helper for actual post-resolution or post-redirect destinations: missing guards, missing actual
+  destinations, and out-of-scope redirects return blocked/degraded status rather than in-scope.
+  Remaining work is to call that helper from each network-following worker/adapter at the moment it
+  observes real destinations and record skipped/degraded command-result rows for runtime blocks.
 - **Policy-based approval receipt enforcement phase 1** — `/settings/automation` now exposes
   `approval_receipts_required_for_state_changing_actions`. When enabled, scan submission, ASM
   recon/test/improve, AI Gate scans/replay, Model Intake scans, single finding retest, and bulk
@@ -488,10 +498,11 @@ raw shell execution or LLM-produced verified findings.
    DONE phase 2 for optional receipt validation on AI Gate scans/replay, Model Intake scans, and
    finding retests. DONE phase 1 for policy-based mandatory enforcement across those existing
    state-changing routes via `/settings/automation`. DONE phase 1 for command-result audit rows on
-   successful queued operations, and for blocked/approval-required rows written before the enforcement
-   path raises (best-effort, FK-safe). Remaining work is campaign/action execution records, runtime
-   redirect/resolution scope re-checks, and extending the same enforcement model to future command/MCP
-   adapters.
+   successful queued operations, for blocked/approval-required rows written before the enforcement
+   path raises (best-effort, FK-safe), and for runtime-scope guard payloads plus a deterministic
+   actual-destination re-check helper. Remaining work is campaign/action execution records, wiring
+   runtime redirect/resolution re-checks into each network-following worker/adapter, and extending the
+   same enforcement model to future command/MCP adapters.
 5. **Continuous ASM quality lane:** make `/asm/coverage`, `/asm/gaps`, scan detail, Action Center,
    and the mission timeline agree on family-aware state: attempted, proved, partial, blocked by auth,
    blocked by second user, blocked by schedule/rate cap, stale, and worker-stale.
@@ -722,9 +733,12 @@ Command Arsenal boundaries:
 12. DONE phase 1: add policy-based mandatory approval receipt enforcement for existing
     state-changing action routes. Legacy no-receipt mode remains the default compatibility setting
     until an operator explicitly enables the requirement.
-13. Check scope twice for network-following actions: before execution from declared parameters, and
-    during/after redirects or resolution from actual destination. If runtime destination cannot be
-    verified, mark the action blocked or degraded rather than in-scope.
+13. DONE phase 1 for runtime destination scope re-checks: approval validation now stamps a
+    `runtime_scope_guard` into queued job/options metadata, and `evaluate_runtime_destination_scope`
+    fail-closes missing guards, missing actual destinations, and out-of-scope redirects. Remaining:
+    wire every network-following worker/adapter to call it during/after redirects or resolution from
+    the actual destination, and record blocked/degraded runtime-scope outcomes rather than treating
+    unverified destinations as in-scope.
 14. DONE phase 1: add command result audit records for successful queued product actions: operation id, command,
     status, dry-run flag, risk tier, operation-plan id, scope receipt id, approval id, campaign id,
     scan id, finding ids, hypothesis ids, evidence object ids, tool receipt ids, blocked reasons,

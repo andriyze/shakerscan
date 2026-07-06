@@ -3703,6 +3703,7 @@ def _make_scope_row(**overrides):
         "normalized_scope": {"host": "app.example.com"},
         "allowed_hosts": ["app.example.com"],
         "allowed_root_domains": ["example.com"],
+        "environment": "production",
         "input_scope": {},
         "blocked_by": [],
         "warnings": [],
@@ -3726,6 +3727,53 @@ def test_validate_approval_receipt_accepts_valid_receipt():
     assert ctx["approval_receipt_id"] == APPROVAL_ID
     assert ctx["scope_receipt_id"] == SCOPE_ID
     assert ctx["approved_by"] == "operator"
+    assert ctx["runtime_scope_guard"]["scope_receipt_id"] == SCOPE_ID
+    assert ctx["runtime_scope_guard"]["allowed_hosts"] == ["app.example.com"]
+    assert ctx["runtime_scope_guard"]["allowed_root_domains"] == ["example.com"]
+    assert ctx["runtime_scope_guard"]["requires_runtime_destination_check"] is True
+
+
+def test_runtime_destination_scope_allows_matching_actual_destination():
+    guard = api_module._runtime_scope_guard_from_scope(_make_scope_row())
+    result = api_module.evaluate_runtime_destination_scope(
+        guard,
+        "https://api.example.com/v1/orders",
+        redirect_urls=["https://app.example.com/login"],
+    )
+
+    assert result["status"] == "allowed"
+    assert result["verdict"] == "allowed"
+    assert result["blocked_by"] == []
+    assert result["runtime_scope_guard_present"] is True
+    assert result["scope_receipt_id"] == SCOPE_ID
+
+
+def test_runtime_destination_scope_blocks_redirect_out_of_scope():
+    guard = api_module._runtime_scope_guard_from_scope(_make_scope_row())
+    result = api_module.evaluate_runtime_destination_scope(
+        guard,
+        "https://app.example.com/start",
+        redirect_urls=["https://evil.example.net/callback"],
+    )
+
+    assert result["status"] == "blocked"
+    assert result["verdict"] == "blocked"
+    assert "redirect_out_of_scope" in result["blocked_by"]
+    assert result["redirect_destinations"][0]["host"] == "evil.example.net"
+
+
+def test_runtime_destination_scope_fails_closed_when_unverified():
+    missing_guard = api_module.evaluate_runtime_destination_scope(None, "https://app.example.com")
+    missing_destination = api_module.evaluate_runtime_destination_scope(
+        api_module._runtime_scope_guard_from_scope(_make_scope_row()),
+        "",
+    )
+
+    assert missing_guard["status"] == "blocked"
+    assert missing_guard["blocked_by"] == ["runtime_scope_guard_missing"]
+    assert missing_guard["runtime_scope_guard_present"] is False
+    assert missing_destination["status"] == "blocked"
+    assert missing_destination["blocked_by"] == ["runtime_destination_unverified"]
 
 
 def test_validate_approval_receipt_rejects_non_uuid():
