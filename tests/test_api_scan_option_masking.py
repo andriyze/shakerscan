@@ -1056,6 +1056,25 @@ class _AutomationSettingsRedis:
         return len(data)
 
 
+class _DurableSettingsConn:
+    """Fake asyncpg conn backing the durable app_settings key/value store."""
+
+    def __init__(self, durable=None):
+        self.store = dict(durable or {})
+        self.executes = []
+
+    async def fetchval(self, query, *args):
+        if "FROM app_settings" in query:
+            return self.store.get(args[0])
+        return None
+
+    async def execute(self, query, *args):
+        self.executes.append((query, args))
+        if "INSERT INTO app_settings" in query:
+            self.store[args[0]] = args[1]
+        return "OK"
+
+
 def test_automation_settings_runtime_override_controls_new_target_asm_defaults(monkeypatch):
     redis_client = _AutomationSettingsRedis()
     redis_client.hset(
@@ -1077,7 +1096,9 @@ def test_automation_settings_runtime_override_controls_new_target_asm_defaults(m
 
 def test_update_automation_settings_writes_scan_and_safe_asm_defaults(monkeypatch):
     redis_client = _AutomationSettingsRedis()
+    durable_conn = _DurableSettingsConn()
     monkeypatch.setattr(api_module, "get_redis", lambda: redis_client)
+    monkeypatch.setattr(api_module, "db_pool", _FakeAsmPool(durable_conn))
     monkeypatch.setattr(api_module, "_running_scan_worker_count_best_effort", lambda: 5)
 
     result = asyncio.run(api_module.update_automation_settings(
@@ -1109,6 +1130,8 @@ def test_update_automation_settings_writes_scan_and_safe_asm_defaults(monkeypatc
         result["settings"]["safety_boundaries"]["approval_receipts_required_for_state_changing_actions"]
         is True
     )
+    # The security flag is persisted durably to Postgres (not just Redis).
+    assert durable_conn.store[api_module.APPROVAL_POLICY_SETTING_KEY] == "true"
 
 
 def test_update_automation_settings_merges_partial_asm_config(monkeypatch):
@@ -1150,23 +1173,72 @@ def test_approval_receipt_policy_defaults_to_compatibility_mode(monkeypatch):
     response = api_module._sanitize_automation_settings_response()
 
     assert response["safety_boundaries"]["approval_receipts_required_for_state_changing_actions"] is False
-    api_module._require_approval_receipt_if_policy_enabled(None, action_name="scan.submit:quick")
+    # No durable row + no Redis flag => compatibility mode => no receipt required.
+    conn = _DurableSettingsConn()
+    asyncio.run(
+        api_module._require_approval_receipt_if_policy_enabled(
+            conn, None, action_name="scan.submit:quick"
+        )
+    )
 
 
-def test_approval_receipt_policy_blocks_missing_receipt_when_enabled(monkeypatch):
+def test_approval_receipt_policy_blocks_when_enabled_via_redis_fallback(monkeypatch):
+    # No durable Postgres row yet => enforcement falls back to the legacy
+    # Redis/env view so pre-existing configs keep working.
     redis_client = _AutomationSettingsRedis()
     redis_client.hset(
         api_module.AUTOMATION_SETTINGS_KEY,
-        mapping={"approval_receipts_required_for_state_changing_actions": "true"},
+        mapping={api_module.APPROVAL_POLICY_SETTING_KEY: "true"},
     )
     monkeypatch.setattr(api_module, "get_redis", lambda: redis_client)
 
+    conn = _DurableSettingsConn()  # durable store empty -> fall back to Redis
     with pytest.raises(api_module.HTTPException) as exc:
-        api_module._require_approval_receipt_if_policy_enabled(None, action_name="asm.test")
+        asyncio.run(
+            api_module._require_approval_receipt_if_policy_enabled(
+                conn, None, action_name="asm.test"
+            )
+        )
 
     assert exc.value.status_code == 409
     assert exc.value.detail["error"] == "approval_receipt_required"
     assert exc.value.detail["action"] == "asm.test"
+
+
+def test_approval_receipt_policy_durable_postgres_is_authoritative(monkeypatch):
+    key = api_module.APPROVAL_POLICY_SETTING_KEY
+
+    # Redis says OFF but Postgres says ON => Postgres wins => must block. This is
+    # exactly the fail-open case the durable store fixes (a flushed Redis hash
+    # can no longer silently disable the policy).
+    redis_off = _AutomationSettingsRedis()
+    monkeypatch.setattr(api_module, "get_redis", lambda: redis_off)
+    conn_on = _DurableSettingsConn(durable={key: "true"})
+    with pytest.raises(api_module.HTTPException) as exc:
+        asyncio.run(
+            api_module._require_approval_receipt_if_policy_enabled(
+                conn_on, None, action_name="scan.submit:quick"
+            )
+        )
+    assert exc.value.status_code == 409
+
+    # A provided receipt short-circuits before any policy read.
+    asyncio.run(
+        api_module._require_approval_receipt_if_policy_enabled(
+            conn_on, "receipt-id", action_name="scan.submit:quick"
+        )
+    )
+
+    # Redis says ON but Postgres says OFF => Postgres wins => must NOT block.
+    redis_on = _AutomationSettingsRedis()
+    redis_on.hset(api_module.AUTOMATION_SETTINGS_KEY, mapping={key: "true"})
+    monkeypatch.setattr(api_module, "get_redis", lambda: redis_on)
+    conn_off = _DurableSettingsConn(durable={key: "false"})
+    asyncio.run(
+        api_module._require_approval_receipt_if_policy_enabled(
+            conn_off, None, action_name="scan.submit:quick"
+        )
+    )
 
 
 def test_auto_sharding_setting_disabled_keeps_smart_scan_standalone(monkeypatch):

@@ -927,22 +927,60 @@ def _load_effective_automation_settings() -> dict[str, Any]:
     return settings
 
 
+APPROVAL_POLICY_SETTING_KEY = "approval_receipts_required_for_state_changing_actions"
+
+
 def _approval_receipts_required_for_state_changing_actions() -> bool:
+    """Redis/env-cached view of the approval policy (non-authoritative fallback)."""
     return bool(
-        _load_effective_automation_settings().get(
-            "approval_receipts_required_for_state_changing_actions"
-        )
+        _load_effective_automation_settings().get(APPROVAL_POLICY_SETTING_KEY)
     )
 
 
-def _require_approval_receipt_if_policy_enabled(
+async def _read_durable_setting(conn, key: str) -> str | None:
+    """Read one durable app_settings value, or None if unset/unavailable."""
+    try:
+        return await conn.fetchval("SELECT value FROM app_settings WHERE key = $1", key)
+    except Exception:
+        return None
+
+
+async def _write_durable_setting(conn, key: str, value: str) -> None:
+    await conn.execute(
+        """
+        INSERT INTO app_settings (key, value, updated_at)
+        VALUES ($1, $2, NOW())
+        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
+        """,
+        key,
+        value,
+    )
+
+
+async def _approval_receipts_required(conn) -> bool:
+    """Authoritative approval-policy read.
+
+    Postgres (``app_settings``) is the durable source of truth so the security
+    gate cannot silently fail open when the Redis settings hash is flushed. Only
+    when no durable row exists do we fall back to the legacy Redis/env view, so
+    upgrades and pre-existing configs keep working until the next write persists
+    the flag to Postgres.
+    """
+    durable = await _read_durable_setting(conn, APPROVAL_POLICY_SETTING_KEY)
+    if durable is not None:
+        return _is_truthy(durable, default=False)
+    return _approval_receipts_required_for_state_changing_actions()
+
+
+async def _require_approval_receipt_if_policy_enabled(
+    conn,
     approval_receipt_id: str | None,
     *,
     action_name: str = "state_changing_action",
 ) -> None:
     if approval_receipt_id:
         return
-    if not _approval_receipts_required_for_state_changing_actions():
+    if not await _approval_receipts_required(conn):
         return
     raise HTTPException(
         status_code=409,
@@ -6358,10 +6396,28 @@ async def update_scan_execution_settings(request: ScanExecutionSettingsUpdate):
     }
 
 
+async def _automation_settings_with_durable_flags() -> dict[str, Any]:
+    """Load automation settings with the durable (Postgres) approval flag applied.
+
+    Postgres is the source of truth for the security gate; Redis/env is only a
+    fallback when no durable value has been written yet.
+    """
+    automation = _load_effective_automation_settings()
+    try:
+        async with db_pool.acquire() as conn:
+            durable = await _read_durable_setting(conn, APPROVAL_POLICY_SETTING_KEY)
+    except Exception:
+        durable = None
+    if durable is not None:
+        automation[APPROVAL_POLICY_SETTING_KEY] = _is_truthy(durable, default=False)
+    return automation
+
+
 @app.get("/settings/automation")
 async def get_automation_settings():
     """Get compact safe automation defaults for Settings, API, and AI agents."""
-    return _sanitize_automation_settings_response()
+    automation = await _automation_settings_with_durable_flags()
+    return _sanitize_automation_settings_response(automation)
 
 
 @app.put("/settings/automation")
@@ -6393,15 +6449,28 @@ async def update_automation_settings(request: AutomationSettingsUpdate):
             )
         )
     if request.approval_receipts_required_for_state_changing_actions is not None:
-        automation_updates["approval_receipts_required_for_state_changing_actions"] = (
+        automation_updates[APPROVAL_POLICY_SETTING_KEY] = (
             "true" if request.approval_receipts_required_for_state_changing_actions else "false"
         )
     if automation_updates:
         r.hset(AUTOMATION_SETTINGS_KEY, mapping=automation_updates)
 
+    # The approval-receipt requirement is a security gate, so persist it durably
+    # to Postgres (Redis stays a cache). This is what enforcement reads, so the
+    # policy survives a Redis flush instead of silently failing open.
+    if request.approval_receipts_required_for_state_changing_actions is not None:
+        async with db_pool.acquire() as conn:
+            await _write_durable_setting(
+                conn,
+                APPROVAL_POLICY_SETTING_KEY,
+                "true" if request.approval_receipts_required_for_state_changing_actions else "false",
+            )
+
     return {
         "status": "updated",
-        "settings": _sanitize_automation_settings_response(),
+        "settings": _sanitize_automation_settings_response(
+            await _automation_settings_with_durable_flags()
+        ),
     }
 
 
@@ -7224,10 +7293,6 @@ async def scan_model_intake(request: ModelIntakeScanRequest):
     parsed = urllib.parse.urlparse(artifact_ref)
     if parsed.scheme and parsed.scheme not in {"http", "https", "hf", "oci", "s3", "gs", "gcs", "azure", "mlflow", "models"}:
         raise HTTPException(status_code=400, detail="artifact_url must use http(s), hf://, oci://, s3://, gs://, gcs://, azure://, mlflow://, or models:/")
-    _require_approval_receipt_if_policy_enabled(
-        request.approval_receipt_id,
-        action_name="model_intake.scan",
-    )
 
     r = get_redis()
     job_id = str(uuid.uuid4())
@@ -7267,6 +7332,12 @@ async def scan_model_intake(request: ModelIntakeScanRequest):
             options["strict_governance"] = True
 
     async with db_pool.acquire() as conn:
+        # Early missing-receipt guard before target-row creation.
+        await _require_approval_receipt_if_policy_enabled(
+            conn,
+            request.approval_receipt_id,
+            action_name="model_intake.scan",
+        )
         target = await conn.fetchrow("SELECT id FROM targets WHERE url = $1", artifact_ref)
         if target:
             target_id = target["id"]
@@ -10347,10 +10418,6 @@ async def submit_scan(request: ScanRequest):
         )
 
     options_payload = _build_scan_options_payload(request.options, scan_type)
-    _require_approval_receipt_if_policy_enabled(
-        request.options.approval_receipt_id,
-        action_name=f"scan.submit:{scan_type}",
-    )
 
     # §2 Operational freshness: record which build the fleet was on at submit, and
     # optionally refuse active scans on a stale fleet (opt-in, fail-open).
@@ -10389,6 +10456,12 @@ async def submit_scan(request: ScanRequest):
     # Create or find target
     command_result: dict[str, Any] | None = None
     async with db_pool.acquire() as conn:
+        # Early missing-receipt guard before target-row creation.
+        await _require_approval_receipt_if_policy_enabled(
+            conn,
+            request.options.approval_receipt_id,
+            action_name=f"scan.submit:{scan_type}",
+        )
         # Check if target exists
         target = await conn.fetchrow(
             "SELECT id FROM targets WHERE url = $1", normalized_target
@@ -12768,7 +12841,7 @@ async def _validate_approval_receipt_for_action(
     action_name: str = "state_changing_action",
 ) -> dict[str, Any] | None:
     if not approval_receipt_id:
-        _require_approval_receipt_if_policy_enabled(None, action_name=action_name)
+        await _require_approval_receipt_if_policy_enabled(conn, None, action_name=action_name)
         return None
     try:
         approval_uuid = uuid.UUID(str(approval_receipt_id))
@@ -15831,10 +15904,6 @@ async def bulk_retest_findings(request: FindingsBulkRetestRequest):
     """Queue retests for multiple findings by IDs or filters."""
     if request.mode and request.mode not in {"ai", "deterministic"}:
         raise HTTPException(status_code=400, detail="mode must be 'ai' or 'deterministic'")
-    _require_approval_receipt_if_policy_enabled(
-        request.approval_receipt_id,
-        action_name="finding.bulk_retest",
-    )
 
     r = get_redis()
     try:
@@ -15846,6 +15915,12 @@ async def bulk_retest_findings(request: FindingsBulkRetestRequest):
     skipped: list[dict[str, str]] = []
 
     async with db_pool.acquire() as conn:
+        # Early missing-receipt guard before any retest is queued.
+        await _require_approval_receipt_if_policy_enabled(
+            conn,
+            request.approval_receipt_id,
+            action_name="finding.bulk_retest",
+        )
         findings: list[Any] = []
 
         if request.finding_ids:

@@ -10,6 +10,7 @@ import os
 import sys
 import types
 import uuid
+from datetime import datetime, timezone
 
 import pytest
 
@@ -1735,3 +1736,164 @@ def test_asm_recommended_campaigns_suggests_family_waves_and_credentials():
 def test_asm_recommended_campaigns_recon_when_empty_and_wait_when_active():
     assert api_module._asm_recommended_campaigns(coverage={"total": 0})[0]["campaign"] == "recon"
     assert api_module._asm_recommended_campaigns(coverage={"total": 9}, active_scans=2)[0]["campaign"] == "wait"
+
+
+# ----- approval-receipt validation (security-critical gate) --------------------
+# _validate_approval_receipt_for_action decides whether a provided receipt actually
+# authorizes a state-changing action. It is the enforcement point that stops a
+# mismatched/expired/denied/blocked receipt from queueing work, so every rejection
+# branch is pinned here with a FakeConn (the host has no asyncpg).
+
+APPROVAL_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+SCOPE_ID = "scope-receipt-1"
+
+
+def _approval_receipt_conn(*, approval_row=None, scope_row=None):
+    """Return a FakeConn that routes the two SELECTs the validator issues."""
+
+    class FakeConn:
+        async def fetchrow(self, query, *args):
+            if "FROM approval_receipts" in query:
+                return approval_row
+            if "FROM scope_receipts" in query:
+                return scope_row
+            return None
+
+    return FakeConn()
+
+
+def _make_approval_row(**overrides):
+    row = {
+        "id": APPROVAL_ID,
+        "scope_receipt_id": SCOPE_ID,
+        "risk_tier": "active",
+        "confirmations": ["confirm_authorized"],
+        "approved_by": "operator",
+        "denial_reason": None,
+        "expires_at": None,
+    }
+    row.update(overrides)
+    return row
+
+
+def _make_scope_row(**overrides):
+    row = {
+        "id": SCOPE_ID,
+        "target_id": None,
+        "verdict": "allowed",
+        "normalized_scope": {"host": "app.example.com"},
+        "allowed_hosts": ["app.example.com"],
+        "allowed_root_domains": ["example.com"],
+        "input_scope": {},
+        "blocked_by": [],
+        "warnings": [],
+        "checks": [],
+        "redirect_destinations": [],
+    }
+    row.update(overrides)
+    return row
+
+
+def _run_validate(conn, receipt_id, **kwargs):
+    return asyncio.run(
+        api_module._validate_approval_receipt_for_action(conn, receipt_id, **kwargs)
+    )
+
+
+def test_validate_approval_receipt_accepts_valid_receipt():
+    conn = _approval_receipt_conn(approval_row=_make_approval_row(), scope_row=_make_scope_row())
+    ctx = _run_validate(conn, APPROVAL_ID, target_url="https://app.example.com/x", action_name="scan.submit")
+
+    assert ctx["approval_receipt_id"] == APPROVAL_ID
+    assert ctx["scope_receipt_id"] == SCOPE_ID
+    assert ctx["approved_by"] == "operator"
+
+
+def test_validate_approval_receipt_rejects_non_uuid():
+    conn = _approval_receipt_conn()
+    with pytest.raises(api_module.HTTPException) as exc:
+        _run_validate(conn, "not-a-uuid")
+    assert exc.value.status_code == 400
+    assert "UUID" in exc.value.detail
+
+
+def test_validate_approval_receipt_missing_row_is_404():
+    conn = _approval_receipt_conn(approval_row=None)
+    with pytest.raises(api_module.HTTPException) as exc:
+        _run_validate(conn, APPROVAL_ID)
+    assert exc.value.status_code == 404
+
+
+def test_validate_approval_receipt_rejects_denial_receipt():
+    conn = _approval_receipt_conn(
+        approval_row=_make_approval_row(approved_by=None, denial_reason="not authorized"),
+        scope_row=_make_scope_row(),
+    )
+    with pytest.raises(api_module.HTTPException) as exc:
+        _run_validate(conn, APPROVAL_ID)
+    assert exc.value.status_code == 400
+    assert "not an approval" in exc.value.detail
+
+
+def test_validate_approval_receipt_requires_confirm_authorized():
+    conn = _approval_receipt_conn(
+        approval_row=_make_approval_row(confirmations=[]),
+        scope_row=_make_scope_row(),
+    )
+    with pytest.raises(api_module.HTTPException) as exc:
+        _run_validate(conn, APPROVAL_ID)
+    assert exc.value.status_code == 400
+    assert "confirm_authorized" in exc.value.detail
+
+
+def test_validate_approval_receipt_rejects_expired():
+    past = datetime(2000, 1, 1, tzinfo=timezone.utc)
+    conn = _approval_receipt_conn(
+        approval_row=_make_approval_row(expires_at=past),
+        scope_row=_make_scope_row(),
+    )
+    with pytest.raises(api_module.HTTPException) as exc:
+        _run_validate(conn, APPROVAL_ID)
+    assert exc.value.status_code == 400
+    assert "expired" in exc.value.detail
+
+
+def test_validate_approval_receipt_rejects_blocked_scope():
+    conn = _approval_receipt_conn(
+        approval_row=_make_approval_row(),
+        scope_row=_make_scope_row(verdict="blocked"),
+    )
+    with pytest.raises(api_module.HTTPException) as exc:
+        _run_validate(conn, APPROVAL_ID)
+    assert exc.value.status_code == 400
+    assert "blocked" in exc.value.detail
+
+
+def test_validate_approval_receipt_needs_scope_reviewed_for_needs_approval():
+    conn = _approval_receipt_conn(
+        approval_row=_make_approval_row(confirmations=["confirm_authorized"]),
+        scope_row=_make_scope_row(verdict="needs_approval"),
+    )
+    with pytest.raises(api_module.HTTPException) as exc:
+        _run_validate(conn, APPROVAL_ID)
+    assert exc.value.status_code == 400
+    assert "confirm_scope_reviewed" in exc.value.detail
+
+
+def test_validate_approval_receipt_rejects_host_mismatch():
+    conn = _approval_receipt_conn(approval_row=_make_approval_row(), scope_row=_make_scope_row())
+    with pytest.raises(api_module.HTTPException) as exc:
+        _run_validate(conn, APPROVAL_ID, target_url="https://evil.example.net/x")
+    assert exc.value.status_code == 400
+    assert "host" in exc.value.detail
+
+
+def test_validate_approval_receipt_rejects_target_id_mismatch():
+    conn = _approval_receipt_conn(
+        approval_row=_make_approval_row(),
+        scope_row=_make_scope_row(target_id="11111111-1111-4111-8111-111111111111"),
+    )
+    with pytest.raises(api_module.HTTPException) as exc:
+        _run_validate(conn, APPROVAL_ID, target_id="22222222-2222-4222-8222-222222222222")
+    assert exc.value.status_code == 400
+    assert "target" in exc.value.detail

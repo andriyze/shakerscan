@@ -739,6 +739,19 @@ async def run_schema_migrations(pool) -> None:
                 )
             """)
 
+            # Durable key/value store for settings that must survive a Redis
+            # flush/restart. Redis remains a cache for non-security automation
+            # settings, but security-gating flags (e.g. the approval-receipt
+            # requirement) read Postgres as the source of truth so the policy
+            # cannot silently fail open when the Redis hash is lost.
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS app_settings (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL,
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+            """)
+
             # findings table verification columns
             await conn.execute("""
                 ALTER TABLE findings
