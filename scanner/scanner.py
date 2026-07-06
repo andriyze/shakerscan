@@ -45,6 +45,8 @@ from scanner_tools.active_prioritization import (
     DEFAULT_SOURCE_PRIORITY,
     DEFAULT_SOURCE_PRIORITY_VALUE,
     prioritize_active_endpoints,
+    should_generate_synthetic_active_candidates,
+    synthetic_active_candidate_cap,
 )
 from scanner_tools.focused_scope import (
     CAA_SHAPE,
@@ -8008,7 +8010,17 @@ async def build_report(target: str,
             or bool(manual_endpoints_norm)
         )
         if len(candidates) < max_active:
-            if api_hint or thorough_params:
+            if should_generate_synthetic_active_candidates(
+                api_hint=api_hint,
+                observed_candidate_count=len(candidates),
+                max_active=max_active,
+                explicit=bool(thorough_params),
+            ):
+                synthetic_candidate_cap = synthetic_active_candidate_cap(
+                    max_active,
+                    explicit=bool(thorough_params),
+                )
+                synthetic_added = 0
                 synthetic_endpoints = [
                     # High-value injection targets
                     "/rest/products/search", "/api/products/search", "/search",
@@ -8024,9 +8036,11 @@ async def build_report(target: str,
                 for endpoint in synthetic_endpoints:
                     test_url = urllib.parse.urljoin(base_url, endpoint)
                     synthetic_params = add_smart_params(test_url)
-                    candidates.extend(synthetic_params)
-                    if len(candidates) >= max_active * 2:  # Generate more, will dedupe
+                    remaining = synthetic_candidate_cap - synthetic_added
+                    if remaining <= 0:
                         break
+                    candidates.extend(synthetic_params[:remaining])
+                    synthetic_added += min(len(synthetic_params), remaining)
             else:
                 synthetic_skipped_reason = "Skipped synthetic endpoints (no API hints detected; enable --thorough-params to force)"
 

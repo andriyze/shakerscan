@@ -263,6 +263,56 @@ def _is_body_endpoint(endpoint: dict[str, Any]) -> bool:
 # are never fully crowded out by higher-source-scored GET routes.
 BODY_ENDPOINT_BUDGET_FRACTION = 0.4
 
+# Synthetic "common API" candidates are only a fallback. Keep them small enough
+# that observed HAR/browser/OpenAPI endpoints dominate the active budget and the
+# later soft-404 reachability gate never has to retire thousands of guessed URLs.
+DEFAULT_SYNTHETIC_ACTIVE_BURST_CAP = 24
+DEFAULT_SYNTHETIC_ACTIVE_BUDGET_FRACTION = 0.5
+
+
+def synthetic_active_candidate_cap(max_active: int, *, explicit: bool = False) -> int:
+    """Bound common-endpoint synthetic fan-out before reachability filtering.
+
+    ``explicit`` is for operator-requested thorough parameter probing. It allows a
+    larger, but still finite, fallback set. The cap is in candidate URLs after
+    parameter expansion, not source endpoint templates.
+    """
+    try:
+        budget = max(0, int(max_active or 0))
+    except (TypeError, ValueError):
+        budget = 0
+    if budget <= 0:
+        return 0
+    multiplier = 1.0 if explicit else DEFAULT_SYNTHETIC_ACTIVE_BUDGET_FRACTION
+    hard_cap = DEFAULT_SYNTHETIC_ACTIVE_BURST_CAP * (2 if explicit else 1)
+    return max(1, min(hard_cap, int(max(1, budget * multiplier))))
+
+
+def should_generate_synthetic_active_candidates(
+    *,
+    api_hint: bool,
+    observed_candidate_count: int,
+    max_active: int,
+    explicit: bool = False,
+) -> bool:
+    """Gate guessed endpoint generation behind signal that the target has APIs.
+
+    Without any observed API/manual/browser/HAR signal, common endpoint lists turn
+    a static site into a large phantom worklist. If real observed candidates have
+    already filled the active budget, synthetic fallback is unnecessary.
+    """
+    try:
+        budget = max(0, int(max_active or 0))
+    except (TypeError, ValueError):
+        budget = 0
+    try:
+        observed = max(0, int(observed_candidate_count or 0))
+    except (TypeError, ValueError):
+        observed = 0
+    if budget <= 0 or observed >= budget:
+        return False
+    return bool(api_hint or explicit)
+
 
 def prioritize_active_endpoints(
     endpoints: list[dict[str, Any]],

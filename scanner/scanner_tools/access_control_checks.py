@@ -1976,6 +1976,7 @@ def synthesize_resource_urls_from_collections(
     discovered_urls: list[str],
     max_collections: int = 20,
     ids_to_test: list[str] | None = None,
+    max_synthesized_urls: int | None = 60,
 ) -> list[str]:
     """
     Synthesize resource URLs from REST collection endpoints.
@@ -1988,8 +1989,14 @@ def synthesize_resource_urls_from_collections(
 
     synthesized = []
     collections_found = []
+    try:
+        max_urls = max(0, int(max_synthesized_urls)) if max_synthesized_urls is not None else None
+    except (TypeError, ValueError):
+        max_urls = 60
 
     for url in discovered_urls:
+        if max_urls is not None and len(collections_found) * len(ids_to_test) >= max_urls:
+            break
         # Skip if URL already has an ID pattern
         if any(re.search(pattern, url) for pattern, _ in ID_PATTERNS):
             continue
@@ -2012,6 +2019,8 @@ def synthesize_resource_urls_from_collections(
     for collection_url in collections_found[:max_collections]:
         base = collection_url.rstrip('/')
         for test_id in ids_to_test:
+            if max_urls is not None and len(synthesized) >= max_urls:
+                return synthesized
             synthesized.append(f"{base}/{test_id}")
 
     return synthesized

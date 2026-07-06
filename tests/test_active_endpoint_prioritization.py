@@ -10,6 +10,8 @@ from scanner_tools.active_prioritization import (  # noqa: E402
     _path_has_object_id_segment,
     active_endpoint_score,
     prioritize_active_endpoints,
+    should_generate_synthetic_active_candidates,
+    synthetic_active_candidate_cap,
 )
 
 
@@ -82,6 +84,28 @@ def test_options_routes_still_sort_when_no_better_candidates_exist():
 
     assert selected[0]["url"] == "https://example.test/api/users"
     assert active_endpoint_score(selected[0]) > active_endpoint_score(endpoints[0])
+
+
+def test_synthetic_candidate_generation_requires_signal_and_is_capped():
+    assert should_generate_synthetic_active_candidates(
+        api_hint=False,
+        observed_candidate_count=0,
+        max_active=50,
+    ) is False
+    assert should_generate_synthetic_active_candidates(
+        api_hint=True,
+        observed_candidate_count=50,
+        max_active=50,
+    ) is False
+    assert should_generate_synthetic_active_candidates(
+        api_hint=True,
+        observed_candidate_count=10,
+        max_active=50,
+    ) is True
+
+    assert synthetic_active_candidate_cap(50) == 24
+    assert synthetic_active_candidate_cap(12) == 6
+    assert synthetic_active_candidate_cap(50, explicit=True) == 48
 
 
 def test_hash_routes_survive_tight_active_budget_for_dom_xss():
