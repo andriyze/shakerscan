@@ -52,6 +52,86 @@ def test_asm_user2_prescoped_child_keeps_auth_header():
     assert scoped["auth_header"] == "Bearer user2"
 
 
+def _runtime_scope_guard():
+    return {
+        "scope_receipt_id": "scope-1",
+        "environment": "production",
+        "allowed_hosts": ["app.example.com"],
+        "allowed_root_domains": ["example.com"],
+        "normalized_scope": {"host": "app.example.com"},
+        "requires_runtime_destination_check": True,
+    }
+
+
+def test_runtime_scope_guard_allows_dast_final_url_in_scope():
+    result = {
+        "http": {"final_url": "https://api.example.com/dashboard"},
+        "findings": [{"title": "kept"}],
+        "result": {"score": 90, "grade": "A"},
+    }
+
+    checked = worker._apply_runtime_scope_guard_to_result(
+        result,
+        {"runtime_scope_guard": _runtime_scope_guard()},
+    )
+
+    assert checked.get("error") is None
+    assert checked["findings"] == [{"title": "kept"}]
+    assert checked["scan_metadata"]["runtime_scope_check"]["status"] == "allowed"
+
+
+def test_runtime_scope_guard_blocks_dast_final_url_out_of_scope():
+    result = {
+        "http": {"final_url": "https://evil.example.net/callback"},
+        "findings": [{"title": "must not persist"}],
+        "result": {"score": 80, "grade": "B"},
+    }
+
+    checked = worker._apply_runtime_scope_guard_to_result(
+        result,
+        {"runtime_scope_guard": _runtime_scope_guard()},
+    )
+
+    assert checked["findings"] == []
+    assert checked["result"]["score"] is None
+    assert checked["result"]["grade"] is None
+    assert checked["scan_metadata"]["runtime_scope_blocked"] is True
+    assert "host_out_of_allowed_scope" in checked["error"]
+
+
+def test_runtime_scope_guard_blocks_dast_when_final_url_missing():
+    result = {
+        "http": {},
+        "findings": [{"title": "must not persist"}],
+        "result": {"score": 80, "grade": "B"},
+    }
+
+    checked = worker._apply_runtime_scope_guard_to_result(
+        result,
+        {"runtime_scope_guard": _runtime_scope_guard()},
+    )
+
+    assert checked["findings"] == []
+    assert "runtime_destination_unverified" in checked["error"]
+    assert checked["scan_metadata"]["runtime_scope_check"]["status"] == "blocked"
+
+
+def test_runtime_scope_guard_skips_product_executors_until_adapters_capture_destinations():
+    result = {
+        "findings": [{"title": "ai finding"}],
+        "result": {"score": 75, "grade": "C"},
+    }
+
+    checked = worker._apply_runtime_scope_guard_to_result(
+        result,
+        {"runtime_scope_guard": _runtime_scope_guard(), "run_kind": "ai_api"},
+    )
+
+    assert checked.get("error") is None
+    assert checked["findings"] == [{"title": "ai finding"}]
+    assert "scan_metadata" not in checked
+
+
 class _FakeProcess:
     def __init__(self, stdout_payload: bytes, stderr_payload: bytes = b""):
         self.stdout = asyncio.StreamReader()

@@ -46,6 +46,10 @@ import parallel_scan
 import asm_inventory
 from evidence_storage import store_evidence_content
 from secret_store import decrypt_secret
+try:
+    from action_scope import evaluate_runtime_destination_scope
+except ImportError:
+    from api.action_scope import evaluate_runtime_destination_scope
 
 try:
     from constants import resolve_scan_budget, resolve_or_consume_budget
@@ -4544,6 +4548,42 @@ async def update_scan_progress(scan_id: str, phase: str, progress: int, job_id: 
             pass
 
 
+def _runtime_scope_guard_applies_to_dast(options: dict[str, Any]) -> bool:
+    guard = (options or {}).get("runtime_scope_guard")
+    if not isinstance(guard, dict) or not guard.get("requires_runtime_destination_check"):
+        return False
+    return str((options or {}).get("run_kind") or "").strip() not in (
+        AI_GATE_RUN_KINDS | MODEL_INTAKE_RUN_KINDS
+    )
+
+
+def _apply_runtime_scope_guard_to_result(result: dict[str, Any], options: dict[str, Any]) -> dict[str, Any]:
+    """Fail closed when a guarded DAST scan cannot prove its actual final URL is in scope."""
+    if not isinstance(result, dict) or result.get("error") or not _runtime_scope_guard_applies_to_dast(options):
+        return result
+    http = result.get("http") if isinstance(result.get("http"), dict) else {}
+    destination = http.get("final_url")
+    check = evaluate_runtime_destination_scope((options or {}).get("runtime_scope_guard"), destination)
+    metadata = result.get("scan_metadata") if isinstance(result.get("scan_metadata"), dict) else {}
+    metadata["runtime_scope_check"] = check
+    result["scan_metadata"] = metadata
+    if check.get("status") == "allowed":
+        return result
+
+    blocked_by = check.get("blocked_by") if isinstance(check.get("blocked_by"), list) else []
+    reason = ",".join(str(item) for item in blocked_by if str(item).strip()) or "runtime_scope_blocked"
+    metadata["status"] = "failed"
+    metadata["runtime_scope_blocked"] = True
+    metadata["runtime_scope_block_reason"] = reason
+    result["error"] = f"Runtime destination failed scope re-check: {reason}"
+    result["findings"] = []
+    if not isinstance(result.get("result"), dict):
+        result["result"] = {}
+    result["result"]["score"] = None
+    result["result"]["grade"] = None
+    return result
+
+
 async def process_scan_job(job_data: dict):
     """Process a scan job."""
     job_id = job_data.get('job_id', 'unknown')
@@ -4676,6 +4716,7 @@ async def process_scan_job(job_data: dict):
 
         result['job_id'] = job_id
         result['scan_id'] = scan_id
+        result = _apply_runtime_scope_guard_to_result(result, options)
 
         # Extract results (run_scan already strips NUL bytes from the whole result so
         # the scans.result write and findings rows can't crash on \x00; save_findings

@@ -129,7 +129,7 @@ records.
 | Op Admiral / mission intake | `OperationPlan` plus cross-product campaign timeline | dry-run plan persistence done; unified timeline open |
 | Local-agent brain mode | bounded planner that emits `OperationPlan`, never direct tool execution | deterministic dry-run planner done; real adapters disabled |
 | Arsenal | REST Command Arsenal over ShakerScan product actions | read-only schemas/status done; gated execution gateway/audit open |
-| Scope/approval gates | `ActionScopeGuard`, `ScopeReceipt`, `ApprovalReceipt` | optional validation and policy-required enforcement done for existing routes; runtime redirect/resolution re-checks open |
+| Scope/approval gates | `ActionScopeGuard`, `ScopeReceipt`, `ApprovalReceipt` | optional validation and policy-required enforcement done for existing routes; DAST final-URL runtime re-check done; adapter-specific redirect/resolution re-checks open |
 | PackBoard | `campaigns`, `campaign_actions`, `hypotheses`, situation reports | campaign actions + hypothesis records phase 1 done; graph routing/situation reports open |
 | Evidence gate | proof taxonomy, evidence objects, evidence instances, tool receipts | proof taxonomy/evidence objects done; instances/receipts open |
 | Arsenal doctor | tool status and receipt registry | status endpoint/UI phase 1 done; receipts open |
@@ -146,9 +146,10 @@ Use these waves to decide sequence when a T3MP3ST idea competes with detector wo
 2. **Read-only operator visibility:** DONE phase 1 for Command Arsenal/status and dashboard/product
    cards. Remaining work is the cross-product mission timeline and command results for blocked work.
 3. **Safety receipts and audit:** DONE phase 1 for scope/approval receipts and optional plus
-   policy-required enforcement, and DONE phase 1 for queued runtime-scope guard payloads plus a
-   deterministic actual-destination re-check helper. Remaining work is worker/adapter enforcement for
-   redirects/resolution, skipped/degraded audit rows, and campaign action records.
+   policy-required enforcement, queued runtime-scope guard payloads, a deterministic actual-destination
+   re-check helper, and DAST worker final-URL enforcement. Remaining work is adapter-specific
+   destination capture for AI Gate/Model Intake/tool adapters, full redirect-chain/resolution audit,
+   skipped/degraded audit rows, and campaign action records.
 4. **Planner evaluation before planner power:** DONE phase 1 for fixture scoring and dry-run local
    planning. Remaining work is harmless capability ping, strict parser validation, and release gates
    that prevent raw shell, scope broadening, risk escalation, or AI-verified claims.
@@ -316,8 +317,12 @@ called at real sites — verify before re-proposing any of it:
   metadata. `evaluate_runtime_destination_scope` gives workers/adapters a deterministic fail-closed
   helper for actual post-resolution or post-redirect destinations: missing guards, missing actual
   destinations, and out-of-scope redirects return blocked/degraded status rather than in-scope.
-  Remaining work is to call that helper from each network-following worker/adapter at the moment it
-  observes real destinations and record skipped/degraded command-result rows for runtime blocks.
+- **Runtime destination scope re-check phase 2** — the DAST worker now applies
+  `runtime_scope_guard` to the scanner report's actual `http.final_url` before findings are persisted
+  or the scan is marked completed. Out-of-scope or missing final URLs fail closed with no findings
+  saved and a `scan_metadata.runtime_scope_check` record. Remaining work is adapter-specific actual
+  destination capture for AI Gate, Model Intake, future tool/MCP adapters, and full redirect-chain or
+  DNS-resolution audit rows.
 - **Policy-based approval receipt enforcement phase 1** — `/settings/automation` now exposes
   `approval_receipts_required_for_state_changing_actions`. When enabled, scan submission, ASM
   recon/test/improve, AI Gate scans/replay, Model Intake scans, single finding retest, and bulk
@@ -499,10 +504,11 @@ raw shell execution or LLM-produced verified findings.
    finding retests. DONE phase 1 for policy-based mandatory enforcement across those existing
    state-changing routes via `/settings/automation`. DONE phase 1 for command-result audit rows on
    successful queued operations, for blocked/approval-required rows written before the enforcement
-   path raises (best-effort, FK-safe), and for runtime-scope guard payloads plus a deterministic
-   actual-destination re-check helper. Remaining work is campaign/action execution records, wiring
-   runtime redirect/resolution re-checks into each network-following worker/adapter, and extending the
-   same enforcement model to future command/MCP adapters.
+   path raises (best-effort, FK-safe), for runtime-scope guard payloads plus a deterministic
+   actual-destination re-check helper, and for DAST worker final-URL enforcement before finding
+   persistence. Remaining work is campaign/action execution records, adapter-specific runtime
+   redirect/resolution re-checks for AI Gate/Model Intake/tool adapters, and extending the same
+   enforcement model to future command/MCP adapters.
 5. **Continuous ASM quality lane:** make `/asm/coverage`, `/asm/gaps`, scan detail, Action Center,
    and the mission timeline agree on family-aware state: attempted, proved, partial, blocked by auth,
    blocked by second user, blocked by schedule/rate cap, stale, and worker-stale.
@@ -733,12 +739,13 @@ Command Arsenal boundaries:
 12. DONE phase 1: add policy-based mandatory approval receipt enforcement for existing
     state-changing action routes. Legacy no-receipt mode remains the default compatibility setting
     until an operator explicitly enables the requirement.
-13. DONE phase 1 for runtime destination scope re-checks: approval validation now stamps a
-    `runtime_scope_guard` into queued job/options metadata, and `evaluate_runtime_destination_scope`
-    fail-closes missing guards, missing actual destinations, and out-of-scope redirects. Remaining:
-    wire every network-following worker/adapter to call it during/after redirects or resolution from
-    the actual destination, and record blocked/degraded runtime-scope outcomes rather than treating
-    unverified destinations as in-scope.
+13. DONE phase 2 for runtime destination scope re-checks: approval validation now stamps a
+    `runtime_scope_guard` into queued job/options metadata, `evaluate_runtime_destination_scope`
+    fail-closes missing guards, missing actual destinations, and out-of-scope redirects, and the DAST
+    worker applies that guard to the scanner report's actual `http.final_url` before findings are
+    persisted. Remaining: wire AI Gate, Model Intake, future tool/MCP adapters, full redirect chains,
+    and DNS-resolution observations into the same blocked/degraded runtime-scope outcomes rather than
+    treating unverified destinations as in-scope.
 14. DONE phase 1: add command result audit records for successful queued product actions: operation id, command,
     status, dry-run flag, risk tier, operation-plan id, scope receipt id, approval id, campaign id,
     scan id, finding ids, hypothesis ids, evidence object ids, tool receipt ids, blocked reasons,
