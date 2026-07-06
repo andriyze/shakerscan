@@ -81,6 +81,30 @@ refuter records, bounded source-informed hypotheses, and read-only MCP only afte
 Arsenal contracts are stable. No local-agent or MCP path may execute state-changing actions until
 those audit, receipt, parser, and evidence layers are durable.
 
+The T3MP3ST plan adds useful implementation detail that this roadmap should preserve:
+
+- Treat "War Room / Op Admiral" as ShakerScan's mission intake and campaign timeline, not as a
+  separate agent console. A mission is an objective over ASM, DAST, AI Gate, Model Intake, retests,
+  exceptions, evidence, and deployment gates.
+- Treat Arsenal commands as product actions, not binaries. Good commands are `asm.gaps`,
+  `asm.improve`, `scan.focused_family`, `finding.retest`, `ai_gate.replay_probe`,
+  `model_intake.trust_preview`, and `deployment.decision`; bad commands are `run_shell`,
+  `run_sqlmap`, `curl_this_url`, or `execute_python`.
+- Treat external tools as internal adapters with receipts. Tool count is not progress until the
+  adapter has scope extraction, version/smoke status, redacted argv, parser status, evidence refs,
+  timeout/failure handling, and an operator-visible state.
+- Treat PackBoard as ShakerScan hypotheses. Leads from graph facts, source/spec hints, AI planners,
+  scanner weak signals, AI Gate, Model Intake, and humans are coordinated work items; they are not
+  findings until a proof path promotes them.
+- Treat refuters as a product workflow. High-impact weak claims, AI semantic hits, metadata trust
+  claims, benchmark wins, parser-promoted results, and deployment-gating findings should be
+  challengeable without deleting history.
+- Treat source-informed testing as graph/hypothesis input only. Source, OpenAPI, GraphQL, package,
+  frontend, backend, and IaC facts can enrich the worklist, but source text alone can never satisfy a
+  runtime proof contract.
+- Treat MCP as a later transport over REST Command Arsenal. It must start read-only and must not
+  expose any command or bypass any guard that REST does not already expose.
+
 Every agent-facing or operator-facing capability should carry an explicit maturity label until it is
 fully implemented:
 
@@ -112,6 +136,32 @@ records.
 | Refuter culture | weak-claim refuter workflow and integrity ledgers | ledgers phase 1 done; refuter records/workflow open |
 | Source-informed testing | graph facts and hypotheses from source/spec inputs | later/experimental |
 | MCP interface | thin adapter over REST Command Arsenal | later/read-only first |
+
+### T3MP3ST-derived implementation waves
+
+Use these waves to decide sequence when a T3MP3ST idea competes with detector work:
+
+1. **Contracts and labels:** DONE phase 1 for mission, context, trace, command, receipt, risk, and
+   maturity contracts. Remaining work is campaign/hypothesis schema persistence and release gates.
+2. **Read-only operator visibility:** DONE phase 1 for Command Arsenal/status and dashboard/product
+   cards. Remaining work is the cross-product mission timeline and command results for blocked work.
+3. **Safety receipts and audit:** DONE phase 1 for scope/approval receipts and optional plus
+   policy-required enforcement. Remaining work is runtime destination re-checks, blocked/denied audit
+   rows, and campaign action records.
+4. **Planner evaluation before planner power:** DONE phase 1 for fixture scoring and dry-run local
+   planning. Remaining work is harmless capability ping, strict parser validation, and release gates
+   that prevent raw shell, scope broadening, risk escalation, or AI-verified claims.
+5. **Hypotheses before new detectors:** add campaigns, campaign actions, hypotheses, claim leases,
+   endorsements, refutations, and graph/source/AI signal routing before treating broad agent output
+   as product truth.
+6. **Receipts before new tools:** wrap existing tools first (`httpx`, `katana`, `nuclei`,
+   `subfinder`, `ffuf`, `dalfox`, `sqlmap`, `nmap`, TLS tools, Playwright, AI Gate executor, Model
+   Intake artifact/signature checks). New offensive tooling stays `catalog_only`.
+7. **External evidence and replay:** split concrete proof instances from canonical findings,
+   externalize large artifacts, add retention/export manifests, and make missing evidence degrade
+   reports honestly.
+8. **Read-only MCP, then gated MCP later:** only after REST Command Arsenal, receipts, evidence,
+   planner evals, and audit records are reliable.
 
 ## Done (do not re-list as TODO)
 
@@ -271,6 +321,11 @@ called at real sites — verify before re-proposing any of it:
   `GET /arsenal/command-results`, `command_result.list`, the `CommandResult` contract, and
   `/settings/arsenal` expose the recent audit trail. Blocked/approval-required command-result rows
   and campaign timeline integration remain open.
+- **Local-agent harmless capability ping phase 1** — `POST /agents/local/test` now runs only the
+  configured version/capability command for known local-agent binaries with timeout/output caps,
+  environment credential stripping, no prompt, no planner execution, no target state mutation, and no
+  queued scanner work. `local_agent.test` is registered as a dry-run/read-only Command Arsenal
+  command, and `/settings/arsenal` exposes a per-agent Ping action plus safety facts from the result.
 - **AI red-team scan-level replay phase 1** — `POST /ai/scans/{scan_id}/replay` now queues focused
   AI Gate reruns from a completed campaign using the original target, probe pack, profile, and
   environment. It can rerun skipped probe IDs, errored families, one selected family, or the full
@@ -391,6 +446,10 @@ raw shell execution or LLM-produced verified findings.
    registry, not the external tool registry, and not a shell runner. Every command result must carry
    operation id, status, dry-run flag, scope/approval ids, campaign id, scan/finding/evidence/tool
    receipt refs, blocked reasons, next action, and operator message.
+   The first executable command families should be inventory, ASM, scans, findings, AI Gate, Model
+   Intake, evidence, governance, and tool status. External binaries may be used only behind narrow
+   adapters; the command schema should never expose raw shell, arbitrary Python/Node execution, or
+   generic "run this command" behavior.
 4. **Scope and approval receipts for state-changing actions:** DONE phase 1 for central
    `ActionScopeGuard`, persisted `ScopeReceipt` previews, and durable `ApprovalReceipt` records.
    DONE phase 1 for optional receipt validation on `/scans` and Continuous ASM recon/test/improve.
@@ -412,6 +471,9 @@ raw shell execution or LLM-produced verified findings.
 8. **Evidence store phase 2 and tool receipts:** split canonical findings from concrete
    `EvidenceInstance` rows, externalize large artifacts, add retention/export manifests, and receipt-wrap
    existing tools before adding any new offensive tooling.
+   Treat this as the T3MP3ST evidence-gate adoption point: parser failure, timeout, missing binary,
+   missing smoke status, or missing proof-critical evidence must produce a skipped/degraded/blocked
+   record, not a verified finding or phantom success.
 9. **Registry-driven execution:** migrate scanner family execution and report rollups to proof
    contracts after the evidence/proof shape is stable.
 10. **Refuter and integrity layer:** add refuter workflows for weak High/Criticals, AI Gate semantic
@@ -420,11 +482,12 @@ raw shell execution or LLM-produced verified findings.
     assumptions, and methodology corrections. DONE phase 1 for file-backed planner/benchmark ledger
     locations and planner fixture scoring.
 11. **Planner evals and local-agent planning, dry-run only:** planner fixtures, integrity ledgers,
-    local-agent capability detection, target context packs, and deterministic local-agent-labeled
-    dry-run planning are phase 1 done. Remaining work is bounded harmless local-agent ping/testing,
-    strict parsed-output validation, and fixture-gated real-adapter experiments. Local agents may
-    propose plans; they must not execute shell commands, broaden scope, bypass confirmations, or mark
-    findings verified.
+    local-agent capability detection, target context packs, deterministic local-agent-labeled
+    dry-run planning, and bounded harmless local-agent capability ping/testing are phase 1 done.
+    Remaining work is strict parsed-output validation and fixture-gated real-adapter experiments.
+    Local agents may propose plans; they must not execute shell commands, broaden scope, bypass
+    confirmations, or mark findings verified. A real prompt-based planner adapter can come only after
+    strict JSON parsing, output caps, fixture gates, and receipt/audit records are stable.
 12. **AI Gate and Model Intake polish:** add AI Gate target-history export/readiness trends and Model
     Intake exception remediation workflow depth after the cross-product operator surface can link to
     them cleanly.
@@ -542,6 +605,13 @@ Command Arsenal boundaries:
   behavior.
 - External binaries may run only behind narrow adapters that produce tool receipts and evidence
   parser status.
+- Product commands should stay human/action-oriented: `target.list`, `domain.list`,
+  `exposure.graph.get`, `asm.gaps`, `asm.improve`, `asm.recon`, `asm.test`, `scan.submit`,
+  `scan.focused_family`, `finding.retest`, `ai_gate.scan`, `ai_gate.replay_probe`,
+  `model_intake.trust_preview`, `model_intake.scan`, `evidence.export_manifest`,
+  `deployment.decision`, `exception.request`, and `tool.status`.
+- Product commands should not describe low-level binaries: no `run_sqlmap`, `run_nmap`,
+  `curl_this_url`, `execute_shell`, or `run_python_code` command should appear in Command Arsenal.
 
 **Implement:**
 1. DONE phase 1: define read-only `OperationPlan` schema with objective, planner metadata, context
@@ -619,6 +689,13 @@ Command Arsenal boundaries:
     objects/evidence instances.
 17. DONE phase 1: add a read-only command-result UI panel under `/settings/arsenal`. Remaining work is
     feeding the same records into the cross-product mission timeline once campaigns exist.
+18. Add blocked, denied, skipped, approval-required, and degraded command-result records. Successful
+    queued actions are not enough; "nothing ran because policy/scope/runtime checks blocked it" must
+    be auditable with the same operation id, scope/approval refs, blocked reasons, and next action.
+19. Add release/test gates for Command Arsenal and planner safety:
+    `test:no-phantom-tools`, `test:no-benchmark-fitting`, `test:no-ai-verified`,
+    `test:evidence-provenance`, `test:fleet-current`, `test:planner-scope`,
+    `test:planner-risk`, and `test:planner-no-shell`.
 
 **Done when:** a mission can be planned, previewed, blocked, approved, queued, executed, and audited
 through one schema without exposing raw shell, bypassing policy gates, or allowing AI/local-agent prose
@@ -900,15 +977,17 @@ harness, not as raw execution power.
 6. Local agents may propose `OperationPlan` JSON and summarize redacted evidence. They may not execute
    arbitrary shell commands, broaden scope, increase risk tier, bypass confirmations, or mark findings
    verified.
-7. PARTIAL: dry-run APIs now include `GET /agents/local` for capability matrix and
+7. DONE phase 1: dry-run APIs now include `GET /agents/local` for capability matrix,
+   `POST /agents/local/test` for harmless bounded capability/version ping, and
    `POST /agents/local/plan` for deterministic context-pack-to-`OperationPlan` creation. Remaining
-   optional real-adapter work is bounded harmless ping and parsed local-agent output validation.
-   `/ai/ops/route` remains the only execution gateway.
+   optional real-adapter work is parsed local-agent output validation and fixture-gated prompt-based
+   planner experiments. `/ai/ops/route` remains the only execution gateway.
 8. Reject ambiguous planner output. If a local agent lacks JSON mode, post-parse validation must fail
    closed on unknown commands, missing risk tiers, widened scope, hidden state-changing action
    requests, missing confirmations, or unbounded parameters.
-9. Add `POST /agents/local/test` only as a harmless capability ping with timeout, prompt/output caps,
-   environment stripping, no secrets, no target state mutation, and no queued scanner work.
+9. DONE phase 1: add `POST /agents/local/test` only as a harmless capability/version ping with
+   timeout/output caps, environment stripping, no secrets, no prompt, no planner execution, no target
+   state mutation, and no queued scanner work.
 10. Before any real planner adapter can affect a queued action, run fixed evals for "keep target
     covered", "run BOLA", "SQLi only", production AI Gate deep testing, Model Intake trust, stale
     workers, out-of-scope prompt injection, missing evidence, planned/unrunnable families, production

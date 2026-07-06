@@ -390,6 +390,23 @@ COMMANDS: tuple[ArsenalCommand, ...] = (
         timeout_seconds=15,
     ),
     ArsenalCommand(
+        name="local_agent.test",
+        family="planner",
+        description="Run a bounded harmless local-agent capability ping without sending prompts or enabling planner execution.",
+        status="dry_run",
+        risk_tier="read_only",
+        method="POST",
+        path="/agents/local/test",
+        parameters_schema={
+            "agent": {"type": "string", "enum": ["codex", "claude-code", "opencode", "hermes"]},
+            "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 10},
+            "max_output_bytes": {"type": "integer", "minimum": 128, "maximum": 8000},
+        },
+        evidence_contract=("local_agent_capability", "ping_result", "environment_redaction"),
+        redaction_contract=("environment_api_keys", "auth_artifact_contents", "prompts"),
+        timeout_seconds=10,
+    ),
+    ArsenalCommand(
         name="scope.preview",
         family="governance",
         description="Validate and persist a fail-closed scope receipt preview without executing work.",
@@ -1026,6 +1043,181 @@ def _probe_version(binary_path: str, args: tuple[str, ...], timeout_seconds: int
     if proc.returncode != 0 and not first_line:
         return None, f"version command exited {proc.returncode}"
     return first_line[:200] if first_line else None, None
+
+
+_SENSITIVE_ENV_MARKERS = (
+    "API_KEY",
+    "AUTH",
+    "BEARER",
+    "CLAUDE",
+    "CODEX",
+    "COOKIE",
+    "CREDENTIAL",
+    "DEEPSEEK",
+    "GEMINI",
+    "GOOGLE",
+    "GROQ",
+    "MISTRAL",
+    "OPENAI",
+    "OPENROUTER",
+    "PASSWORD",
+    "SECRET",
+    "TOKEN",
+    "TOGETHER",
+)
+
+
+def _safe_local_agent_env() -> tuple[dict[str, str], int]:
+    """Return an environment with provider credentials and secret-looking values removed."""
+    safe_env: dict[str, str] = {}
+    stripped_count = 0
+    for key, value in os.environ.items():
+        normalized = key.upper()
+        if any(marker in normalized for marker in _SENSITIVE_ENV_MARKERS):
+            stripped_count += 1
+            continue
+        safe_env[key] = value
+    return safe_env, stripped_count
+
+
+def _find_local_agent_spec(agent: str) -> LocalAgentSpec | None:
+    normalized = (agent or "").strip().lower()
+    for spec in LOCAL_AGENT_SPECS:
+        if spec.agent == normalized:
+            return spec
+    return None
+
+
+def _bounded_output(stdout: str | None, stderr: str | None, max_output_bytes: int) -> tuple[str, bool]:
+    output = ((stdout or "") + ("\n" if stdout and stderr else "") + (stderr or "")).strip()
+    encoded = output.encode("utf-8", errors="replace")
+    if len(encoded) <= max_output_bytes:
+        return output, False
+    trimmed = encoded[:max_output_bytes].decode("utf-8", errors="ignore")
+    return trimmed, True
+
+
+def test_local_agent_capability(
+    agent: str,
+    *,
+    timeout_seconds: int = 5,
+    max_output_bytes: int = 2000,
+) -> dict[str, Any]:
+    """Run a harmless bounded capability ping for one configured local planner agent.
+
+    This intentionally does not send prompts, run planner loops, read auth artifact contents,
+    queue scanner work, or mutate target state. The only subprocess path is the configured
+    version/capability command for a known local-agent binary.
+    """
+    spec = _find_local_agent_spec(agent)
+    if not spec:
+        raise ValueError(f"Unknown local agent: {agent}")
+
+    timeout = max(1, min(int(timeout_seconds), 10))
+    output_limit = max(128, min(int(max_output_bytes), 8000))
+    capability = _local_agent_to_dict(spec, probe_versions=False)
+    binary_path = capability.get("binary_path")
+    auth_detected, auth_detection_method, auth_artifacts = _detect_auth_artifacts(spec)
+
+    base: dict[str, Any] = {
+        "agent": spec.agent,
+        "display_name": spec.display_name,
+        "ok": False,
+        "status": "missing" if not binary_path else "failed",
+        "reason": None,
+        "binary_path": binary_path,
+        "binary_detection": capability.get("binary_detection"),
+        "auth_detected": auth_detected,
+        "auth_detection_method": auth_detection_method,
+        "auth_artifacts": auth_artifacts,
+        "auth_artifact_contents_read": False,
+        "planner_execution_enabled": False,
+        "local_agent_spawned": False,
+        "prompt_sent": False,
+        "prompt_bytes_sent": 0,
+        "target_state_mutated": False,
+        "scanner_work_queued": False,
+        "process_spawned": False,
+        "timeout_seconds": timeout,
+        "max_output_bytes": output_limit,
+        "output": "",
+        "output_truncated": False,
+        "output_bytes_captured": 0,
+        "version": None,
+        "return_code": None,
+        "timed_out": False,
+        "error": None,
+        "command_kind": "version_probe",
+        "argv_redacted": [os.path.basename(str(binary_path)) if binary_path else spec.binaries[0], *spec.version_args],
+        "environment_policy": {
+            "provider_api_keys_stripped": True,
+            "sensitive_values_returned": False,
+            "environment_variable_names_returned": False,
+            "stripped_variable_count": 0,
+        },
+    }
+
+    if not binary_path:
+        base["reason"] = "binary_not_detected"
+        return base
+
+    if not spec.version_args:
+        base.update({"ok": True, "status": "passed", "reason": "binary_detected_no_version_command"})
+        return base
+
+    safe_env, stripped_count = _safe_local_agent_env()
+    base["environment_policy"]["stripped_variable_count"] = stripped_count
+    try:
+        proc = subprocess.run(
+            [str(binary_path), *spec.version_args],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+            env=safe_env,
+        )
+    except subprocess.TimeoutExpired as exc:
+        output, truncated = _bounded_output(getattr(exc, "stdout", None), getattr(exc, "stderr", None), output_limit)
+        base.update(
+            {
+                "status": "failed",
+                "reason": "timeout",
+                "process_spawned": True,
+                "timed_out": True,
+                "error": f"TimeoutExpired: command exceeded {timeout}s",
+                "output": output,
+                "output_truncated": truncated,
+                "output_bytes_captured": len(output.encode("utf-8", errors="replace")),
+            }
+        )
+        return base
+    except Exception as exc:
+        base.update(
+            {
+                "status": "failed",
+                "reason": "probe_error",
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+        )
+        return base
+
+    output, truncated = _bounded_output(proc.stdout, proc.stderr, output_limit)
+    first_line = output.splitlines()[0].strip() if output else None
+    ok = proc.returncode == 0 or bool(first_line)
+    base.update(
+        {
+            "ok": ok,
+            "status": "passed" if proc.returncode == 0 else ("warning" if first_line else "failed"),
+            "reason": "version_probe_completed" if ok else "version_probe_failed",
+            "process_spawned": True,
+            "output": output,
+            "output_truncated": truncated,
+            "output_bytes_captured": len(output.encode("utf-8", errors="replace")),
+            "version": first_line[:200] if first_line else None,
+            "return_code": proc.returncode,
+        }
+    )
+    return base
 
 
 def _local_agent_to_dict(spec: LocalAgentSpec, *, probe_versions: bool) -> dict[str, Any]:

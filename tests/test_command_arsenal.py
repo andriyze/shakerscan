@@ -264,3 +264,80 @@ def test_local_agent_plan_command_is_dry_run_not_execution():
     assert cmd["path"] == "/agents/local/plan"
     assert cmd["scope_fields"] == ["context_pack_id"]
     assert "operation_plan" in cmd["evidence_contract"]
+
+
+def test_local_agent_test_command_is_harmless_ping():
+    payload = arsenal.describe_commands()
+    commands = {item["name"]: item for item in payload["commands"]}
+
+    cmd = commands["local_agent.test"]
+    assert cmd["status"] == "dry_run"
+    assert cmd["risk_tier"] == "read_only"
+    assert cmd["method"] == "POST"
+    assert cmd["path"] == "/agents/local/test"
+    assert "ping_result" in cmd["evidence_contract"]
+    assert "environment_api_keys" in cmd["redaction_contract"]
+    assert "prompts" in cmd["redaction_contract"]
+
+
+def test_local_agent_test_missing_binary_does_not_spawn_or_prompt(monkeypatch):
+    monkeypatch.setattr(arsenal.shutil, "which", lambda name: None)
+
+    result = arsenal.test_local_agent_capability("codex")
+
+    assert result["status"] == "missing"
+    assert result["reason"] == "binary_not_detected"
+    assert result["process_spawned"] is False
+    assert result["prompt_sent"] is False
+    assert result["planner_execution_enabled"] is False
+    assert result["scanner_work_queued"] is False
+    assert result["auth_artifact_contents_read"] is False
+
+
+def test_local_agent_test_strips_sensitive_env_and_truncates_output(monkeypatch):
+    captured = {}
+
+    def fake_run(argv, **kwargs):
+        captured["argv"] = argv
+        captured["env"] = kwargs["env"]
+
+        class Proc:
+            returncode = 0
+            stdout = "codex version 1.2.3\n" + ("x" * 5000)
+            stderr = ""
+
+        return Proc()
+
+    monkeypatch.setattr(arsenal.shutil, "which", lambda name: "/usr/local/bin/codex" if name == "codex" else None)
+    monkeypatch.setattr(arsenal.os.path, "exists", lambda path: False)
+    monkeypatch.setenv("OPENAI_API_KEY", "secret")
+    monkeypatch.setenv("SAFE_FOR_TEST", "visible")
+    monkeypatch.setattr(arsenal.subprocess, "run", fake_run)
+
+    result = arsenal.test_local_agent_capability("codex", timeout_seconds=5, max_output_bytes=256)
+
+    assert captured["argv"] == ["/usr/local/bin/codex", "--version"]
+    assert "OPENAI_API_KEY" not in captured["env"]
+    assert captured["env"]["SAFE_FOR_TEST"] == "visible"
+    assert result["status"] == "passed"
+    assert result["ok"] is True
+    assert result["process_spawned"] is True
+    assert result["prompt_sent"] is False
+    assert result["local_agent_spawned"] is False
+    assert result["planner_execution_enabled"] is False
+    assert result["scanner_work_queued"] is False
+    assert result["environment_policy"]["provider_api_keys_stripped"] is True
+    assert result["environment_policy"]["sensitive_values_returned"] is False
+    assert result["environment_policy"]["stripped_variable_count"] >= 1
+    assert result["output_truncated"] is True
+    assert result["output_bytes_captured"] <= 256
+    assert result["version"] == "codex version 1.2.3"
+
+
+def test_local_agent_test_rejects_unknown_agent():
+    try:
+        arsenal.test_local_agent_capability("unknown-agent")
+    except ValueError as exc:
+        assert "Unknown local agent" in str(exc)
+    else:
+        raise AssertionError("expected ValueError")

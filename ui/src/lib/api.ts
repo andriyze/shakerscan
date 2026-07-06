@@ -306,6 +306,48 @@ export interface LocalAgentPlanResponse extends OperationPlanResponse {
   planner_notes: string[]
 }
 
+export interface LocalAgentTestRequest {
+  agent: string
+  timeout_seconds?: number
+  max_output_bytes?: number
+}
+
+export interface LocalAgentTestResponse {
+  agent: string
+  display_name: string
+  ok: boolean
+  status: string
+  reason?: string | null
+  binary_path?: string | null
+  auth_detected: boolean
+  auth_detection_method: string
+  auth_artifact_contents_read: boolean
+  planner_execution_enabled: boolean
+  local_agent_spawned: boolean
+  prompt_sent: boolean
+  prompt_bytes_sent: number
+  target_state_mutated: boolean
+  scanner_work_queued: boolean
+  process_spawned: boolean
+  timeout_seconds: number
+  max_output_bytes: number
+  output?: string
+  output_truncated: boolean
+  output_bytes_captured: number
+  version?: string | null
+  return_code?: number | null
+  timed_out: boolean
+  error?: string | null
+  command_kind: string
+  argv_redacted: string[]
+  environment_policy: {
+    provider_api_keys_stripped: boolean
+    sensitive_values_returned: boolean
+    environment_variable_names_returned: boolean
+    stripped_variable_count: number
+  }
+}
+
 export interface AgentContextPackRequest {
   context_version?: string
   target_id?: string
@@ -1655,6 +1697,16 @@ export async function createLocalAgentDryRunPlan(payload: LocalAgentPlanRequest)
     body: JSON.stringify(payload),
   })
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to create local-agent dry-run plan'))
+  return res.json()
+}
+
+export async function testLocalAgentCapability(payload: LocalAgentTestRequest): Promise<LocalAgentTestResponse> {
+  const res = await fetch(`${API_URL}/agents/local/test`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to test local-agent capability'))
   return res.json()
 }
 

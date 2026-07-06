@@ -18,6 +18,7 @@ import {
   getArsenalTools,
   getLocalAgents,
   previewScopeReceipt,
+  testLocalAgentCapability,
   type AgentContextPack,
   type AgentContextPackResponse,
   type AgentDecisionTrace,
@@ -34,6 +35,7 @@ import {
   type ArsenalToolsResponse,
   type LocalAgentCapability,
   type LocalAgentsResponse,
+  type LocalAgentTestResponse,
   type ScopeReceiptPreview,
 } from '@/lib/api'
 import { Badge, Button, Card, EmptyState, ErrorState, Skeleton } from '@/components/ui'
@@ -210,7 +212,17 @@ function ToolRow({ tool }: { tool: ArsenalTool }) {
   )
 }
 
-function LocalAgentRow({ agent }: { agent: LocalAgentCapability }) {
+function LocalAgentRow({
+  agent,
+  testResult,
+  testing,
+  onTest,
+}: {
+  agent: LocalAgentCapability
+  testResult?: LocalAgentTestResponse
+  testing: boolean
+  onTest: (agent: string) => void
+}) {
   const Icon = agent.status === 'available' || agent.status === 'installed' ? CheckCircle2 : XCircle
   return (
     <div className="rounded-md border border-gray-800 bg-gray-950 p-3">
@@ -231,6 +243,15 @@ function LocalAgentRow({ agent }: { agent: LocalAgentCapability }) {
               version: {agent.version}
             </div>
           )}
+          <Button
+            size="sm"
+            variant="secondary"
+            className="mt-2 h-8 px-3 text-xs"
+            onClick={() => onTest(agent.agent)}
+            disabled={testing}
+          >
+            {testing ? 'Pinging...' : 'Ping'}
+          </Button>
         </div>
       </div>
       <div className="mt-3 grid gap-2 text-xs text-gray-500 md:grid-cols-2">
@@ -248,6 +269,27 @@ function LocalAgentRow({ agent }: { agent: LocalAgentCapability }) {
       )}
       {agent.version_probe_error && (
         <p role="alert" className="mt-2 text-xs text-amber-300">{agent.version_probe_error}</p>
+      )}
+      {testResult && (
+        <div className="mt-3 rounded-md border border-gray-800 bg-gray-900/60 p-2 text-xs text-gray-400">
+          <div className="flex flex-wrap items-center gap-2">
+            <span>capability ping:</span>
+            <Badge className={statusClass(testResult.status)}>{testResult.status}</Badge>
+            {testResult.reason && <span className="text-gray-500">{testResult.reason}</span>}
+          </div>
+          <div className="mt-2 grid gap-1 md:grid-cols-2">
+            <div>prompt sent: <span className="text-gray-200">{testResult.prompt_sent ? 'yes' : 'no'}</span></div>
+            <div>planner execution: <span className="text-gray-200">{testResult.planner_execution_enabled ? 'enabled' : 'disabled'}</span></div>
+            <div>scanner work queued: <span className="text-gray-200">{testResult.scanner_work_queued ? 'yes' : 'no'}</span></div>
+            <div>env keys stripped: <span className="text-gray-200">{testResult.environment_policy.stripped_variable_count}</span></div>
+          </div>
+          {testResult.version && (
+            <div className="mt-2 truncate font-mono text-gray-300">version: {testResult.version}</div>
+          )}
+          {testResult.error && (
+            <p role="alert" className="mt-2 text-amber-300">{testResult.error}</p>
+          )}
+        </div>
       )}
     </div>
   )
@@ -340,6 +382,8 @@ export default function ArsenalSettingsPage() {
   const [contextTargetId, setContextTargetId] = useState('')
   const [localPlannerAgent, setLocalPlannerAgent] = useState('codex')
   const [localPlannerContextId, setLocalPlannerContextId] = useState('')
+  const [testingAgent, setTestingAgent] = useState<string | null>(null)
+  const [localAgentTestResults, setLocalAgentTestResults] = useState<Record<string, LocalAgentTestResponse>>({})
   const [recentContextPacks, setRecentContextPacks] = useState<AgentContextPack[]>([])
   const [recentDecisionTraces, setRecentDecisionTraces] = useState<AgentDecisionTrace[]>([])
   const [contextTraceLoading, setContextTraceLoading] = useState(false)
@@ -609,6 +653,60 @@ export default function ArsenalSettingsPage() {
     }
   }
 
+  async function pingLocalAgent(agent: string) {
+    setTestingAgent(agent)
+    try {
+      const response = await testLocalAgentCapability({
+        agent,
+        timeout_seconds: 5,
+        max_output_bytes: 2000,
+      })
+      setLocalAgentTestResults((results) => ({ ...results, [agent]: response }))
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Failed to test local-agent capability'
+      setLocalAgentTestResults((results) => ({
+        ...results,
+        [agent]: {
+          agent,
+          display_name: agent,
+          ok: false,
+          status: 'failed',
+          reason: 'api_error',
+          binary_path: null,
+          auth_detected: false,
+          auth_detection_method: 'unknown',
+          auth_artifact_contents_read: false,
+          planner_execution_enabled: false,
+          local_agent_spawned: false,
+          prompt_sent: false,
+          prompt_bytes_sent: 0,
+          target_state_mutated: false,
+          scanner_work_queued: false,
+          process_spawned: false,
+          timeout_seconds: 5,
+          max_output_bytes: 2000,
+          output: '',
+          output_truncated: false,
+          output_bytes_captured: 0,
+          version: null,
+          return_code: null,
+          timed_out: false,
+          error: message,
+          command_kind: 'version_probe',
+          argv_redacted: [agent, '--version'],
+          environment_policy: {
+            provider_api_keys_stripped: true,
+            sensitive_values_returned: false,
+            environment_variable_names_returned: false,
+            stripped_variable_count: 0,
+          },
+        },
+      }))
+    } finally {
+      setTestingAgent(null)
+    }
+  }
+
   return (
     <div className="space-y-6">
       <div className="flex flex-wrap items-start justify-between gap-3">
@@ -712,7 +810,13 @@ export default function ArsenalSettingsPage() {
         ) : (
           <div className="grid gap-3 xl:grid-cols-2">
             {visibleLocalAgents.map((agent) => (
-              <LocalAgentRow key={agent.agent} agent={agent} />
+              <LocalAgentRow
+                key={agent.agent}
+                agent={agent}
+                testResult={localAgentTestResults[agent.agent]}
+                testing={testingAgent === agent.agent}
+                onTest={pingLocalAgent}
+              />
             ))}
           </div>
         )}

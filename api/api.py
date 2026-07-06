@@ -133,6 +133,7 @@ try:
     from command_arsenal import describe_commands as describe_arsenal_commands
     from command_arsenal import describe_local_agents
     from command_arsenal import describe_tools as describe_arsenal_tools
+    from command_arsenal import test_local_agent_capability
 except ModuleNotFoundError as exc:
     if exc.name not in {"command_arsenal", "action_scope"}:
         raise
@@ -141,6 +142,7 @@ except ModuleNotFoundError as exc:
     from api.command_arsenal import describe_commands as describe_arsenal_commands
     from api.command_arsenal import describe_local_agents
     from api.command_arsenal import describe_tools as describe_arsenal_tools
+    from api.command_arsenal import test_local_agent_capability
 
 AUTO_SHARD_ACTIVE_SCAN_TYPES = ACTIVE_ENFORCED_SCAN_TYPES
 AUTO_SHARD_MAX_SHARDS = parallel_scan.MAX_SHARDS
@@ -3252,6 +3254,12 @@ class LocalAgentPlanRequest(BaseModel):
     context_pack_id: str
     objective: str
     created_by: Optional[str] = None
+
+
+class LocalAgentTestRequest(BaseModel):
+    agent: str = Field(default="codex", min_length=1, max_length=64)
+    timeout_seconds: int = Field(default=5, ge=1, le=10)
+    max_output_bytes: int = Field(default=2000, ge=128, le=8000)
 
 
 class AgentDecisionTraceStep(BaseModel):
@@ -13067,6 +13075,19 @@ async def local_agents(
 ):
     """Read-only local-agent capability matrix. Does not read auth artifacts or execute prompts."""
     return describe_local_agents(probe_versions=bool(probe_versions))
+
+
+@app.post("/agents/local/test")
+async def local_agent_test(req: LocalAgentTestRequest):
+    """Run a harmless local-agent capability ping with no prompt or planner execution."""
+    try:
+        return test_local_agent_capability(
+            req.agent,
+            timeout_seconds=req.timeout_seconds,
+            max_output_bytes=req.max_output_bytes,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.post("/agents/local/plan")

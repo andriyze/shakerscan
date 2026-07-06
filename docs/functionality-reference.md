@@ -645,7 +645,8 @@ how-to with request bodies is in [`CLAUDE.md`](../CLAUDE.md) / [`AGENTS.md`](../
 `POST|GET /arsenal/plans` · `POST|GET /arsenal/context-packs` ·
 `POST /arsenal/context-packs/from-target` · `POST|GET /arsenal/decision-traces` ·
 `GET /arsenal/command-results` · `POST /arsenal/scope/preview` · `POST /arsenal/approvals` ·
-`GET /arsenal/tools` · `GET /agents/local` · `POST /agents/local/plan`
+`GET /arsenal/tools` · `GET /agents/local` · `POST /agents/local/test` ·
+`POST /agents/local/plan`
 
 **Scans (DAST)**: `POST /scans` · `POST /scans/batch` · `GET /scans` · `GET /scans/{id}` ·
 `GET /scans/{id}/result` · `GET /scans/{id}/logs` · `POST /scans/{id}/cancel` ·
