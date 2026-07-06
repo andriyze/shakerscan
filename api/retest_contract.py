@@ -1347,6 +1347,59 @@ async def run_schema_migrations(pool) -> None:
                 ON campaign_actions(target_id, created_at DESC) WHERE target_id IS NOT NULL
             """)
             await conn.execute("""
+                CREATE TABLE IF NOT EXISTS hypotheses (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    target_id UUID REFERENCES targets(id) ON DELETE SET NULL,
+                    campaign_id UUID REFERENCES scan_campaigns(id) ON DELETE SET NULL,
+                    campaign_action_id UUID REFERENCES campaign_actions(id) ON DELETE SET NULL,
+                    source TEXT NOT NULL,
+                    family TEXT NOT NULL,
+                    cwe TEXT,
+                    title TEXT,
+                    description TEXT,
+                    severity_guess TEXT,
+                    confidence DOUBLE PRECISION NOT NULL DEFAULT 0,
+                    dedupe_key TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'open',
+                    version INTEGER NOT NULL DEFAULT 1,
+                    claim_owner TEXT,
+                    claim_lease_expires_at TIMESTAMPTZ,
+                    smoke_score DOUBLE PRECISION,
+                    evidence_object_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    tool_receipt_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    next_test_action JSONB,
+                    endorsements JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    refutations JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    terminal_reason TEXT,
+                    metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    created_by TEXT,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    CONSTRAINT hypotheses_source_check
+                        CHECK (source IN ('app_graph','source_ingest','ai_planner','scanner_signal','ai_gate','model_intake','manual')),
+                    CONSTRAINT hypotheses_status_check
+                        CHECK (status IN ('open','claimed','testing','supported','refuted','promoted','dead')),
+                    CONSTRAINT hypotheses_severity_check
+                        CHECK (severity_guess IS NULL OR severity_guess IN ('critical','high','medium','low','info')),
+                    CONSTRAINT hypotheses_confidence_check
+                        CHECK (confidence >= 0 AND confidence <= 1),
+                    CONSTRAINT hypotheses_smoke_score_check
+                        CHECK (smoke_score IS NULL OR (smoke_score >= 0 AND smoke_score <= 1))
+                )
+            """)
+            await conn.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_hypotheses_dedupe
+                ON hypotheses(COALESCE(target_id, '00000000-0000-0000-0000-000000000000'::uuid), source, family, dedupe_key)
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_hypotheses_target_status
+                ON hypotheses(target_id, status, updated_at DESC) WHERE target_id IS NOT NULL
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_hypotheses_claim
+                ON hypotheses(status, claim_lease_expires_at, updated_at DESC)
+            """)
+            await conn.execute("""
                 CREATE TABLE IF NOT EXISTS agent_context_packs (
                     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                     context_version TEXT NOT NULL,

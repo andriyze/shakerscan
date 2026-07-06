@@ -34,6 +34,7 @@ def test_command_catalog_contains_required_initial_commands():
         "model_intake.trust_preview",
         "operation_plan.list",
         "campaign_action.list",
+        "hypothesis.list",
         "agent_context_pack.list",
         "agent_decision_trace.list",
         "local_agent.list",
@@ -181,6 +182,24 @@ def test_campaign_action_list_is_read_only_command():
     assert cmd["method"] == "GET"
     assert cmd["path"] == "/arsenal/campaign-actions"
     assert "campaign_action_rows" in cmd["evidence_contract"]
+
+
+def test_hypothesis_commands_do_not_execute_scanners_or_create_findings():
+    payload = arsenal.describe_commands()
+    commands = {item["name"]: item for item in payload["commands"]}
+
+    list_cmd = commands["hypothesis.list"]
+    record_cmd = commands["hypothesis.record"]
+    claim_cmd = commands["hypothesis.claim"]
+
+    assert list_cmd["status"] == "read_only"
+    assert record_cmd["status"] == "dry_run"
+    assert claim_cmd["status"] == "dry_run"
+    assert record_cmd["risk_tier"] == "read_only"
+    assert claim_cmd["risk_tier"] == "read_only"
+    assert record_cmd["path"] == "/arsenal/hypotheses"
+    assert claim_cmd["path"] == "/arsenal/hypotheses/{hypothesis_id}/claim"
+    assert "hypothesis_row" in record_cmd["evidence_contract"]
 
 
 def test_mission_contract_catalog_is_contract_only():

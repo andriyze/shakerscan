@@ -130,7 +130,7 @@ records.
 | Local-agent brain mode | bounded planner that emits `OperationPlan`, never direct tool execution | deterministic dry-run planner done; real adapters disabled |
 | Arsenal | REST Command Arsenal over ShakerScan product actions | read-only schemas/status done; gated execution gateway/audit open |
 | Scope/approval gates | `ActionScopeGuard`, `ScopeReceipt`, `ApprovalReceipt` | optional validation and policy-required enforcement done for existing routes; runtime redirect/resolution re-checks open |
-| PackBoard | `campaigns`, `campaign_actions`, `hypotheses`, situation reports | open |
+| PackBoard | `campaigns`, `campaign_actions`, `hypotheses`, situation reports | campaign actions + hypothesis records phase 1 done; graph routing/situation reports open |
 | Evidence gate | proof taxonomy, evidence objects, evidence instances, tool receipts | proof taxonomy/evidence objects done; instances/receipts open |
 | Arsenal doctor | tool status and receipt registry | status endpoint/UI phase 1 done; receipts open |
 | Refuter culture | weak-claim refuter workflow and integrity ledgers | ledgers phase 1 done; refuter records/workflow open |
@@ -151,8 +151,9 @@ Use these waves to decide sequence when a T3MP3ST idea competes with detector wo
 4. **Planner evaluation before planner power:** DONE phase 1 for fixture scoring and dry-run local
    planning. Remaining work is harmless capability ping, strict parser validation, and release gates
    that prevent raw shell, scope broadening, risk escalation, or AI-verified claims.
-5. **Hypotheses before new detectors:** add campaigns, campaign actions, hypotheses, claim leases,
-   endorsements, refutations, and graph/source/AI signal routing before treating broad agent output
+5. **Hypotheses before new detectors:** DONE phase 1 for campaign-action audit records and durable
+   hypothesis records with dedupe, endorsements, and claim leases. Remaining work is graph/source/AI
+   signal routing, bounded situation reports, and refuter workflow before treating broad agent output
    as product truth.
 6. **Receipts before new tools:** wrap existing tools first (`httpx`, `katana`, `nuclei`,
    `subfinder`, `ffuf`, `dalfox`, `sqlmap`, `nmap`, TLS tools, Playwright, AI Gate executor, Model
@@ -479,9 +480,11 @@ raw shell execution or LLM-produced verified findings.
 5. **Continuous ASM quality lane:** make `/asm/coverage`, `/asm/gaps`, scan detail, Action Center,
    and the mission timeline agree on family-aware state: attempted, proved, partial, blocked by auth,
    blocked by second user, blocked by schedule/rate cap, stale, and worker-stale.
-6. **Campaign + hypothesis layer:** use the durable application graph, source/spec hints, AI planner
-   suggestions, weak scanner signals, AI Gate signals, and Model Intake metadata claims to create
-   deduped hypotheses/leads. Hypotheses are claimable/refutable work items, not findings.
+6. **Campaign + hypothesis layer:** DONE phase 1 for durable deduped hypotheses/leads, endorsements,
+   read APIs, bounded context-pack summaries, and compare-and-set claim leases. Remaining work is to
+   route durable application graph facts, source/spec hints, AI planner suggestions, weak scanner
+   signals, AI Gate signals, and Model Intake metadata claims into those hypotheses. Hypotheses are
+   claimable/refutable work items, not findings.
 7. **Detector recall campaigns:** keep benchmark gaps as proof-backed work items: POST-body SQLi,
    NoSQL JSON/body routing, stored/reflected XSS browser proof, workflow/write-side BOLA, mass
    assignment/JWT, and graph-driven authz hypotheses.
@@ -855,15 +858,17 @@ adapt it into ShakerScan's proof model: leads are coordinated work items, not fi
      `finding_retest`, and `focused_family`.
    - Campaign actions should carry command name, risk tier, maturity label, scope receipt,
      approval receipt, command-result id, tool receipt ids, blocked/skipped reasons, and result refs.
-2. Add a `hypotheses` table for route, endpoint, object, principal, AI target, model artifact,
+2. DONE phase 1: add a `hypotheses` table for route, endpoint, object, principal, AI target, model artifact,
    dependency, config, and secret leads. Fields should include target/campaign, vuln family, CWE,
    severity guess, confidence, source (`app_graph`, `source_ingest`, `ai_planner`, `scanner_signal`,
    `ai_gate`, `model_intake`, `manual`), dedupe key, status, version, claim lease, smoke score,
    evidence refs, tool receipt refs, next test action, endorsements, refutations, and terminal reason.
+   `/arsenal/hypotheses` records/endorses deduped leads, lists them read-only, and exposes
+   compare-and-set claim leasing without creating findings or queueing work.
 3. Make an `ApplicationGraph` consumer that emits BOLA/BFLA/BOPLA/tenant/workflow hypotheses from
    persisted producer->object->consumer facts. Example: "`GET /api/orders` produces `order.id` owned
    by user1; `GET /api/orders/{id}` consumes it -> test user2 read/mutate."
-4. Add compare-and-set claim leasing so multiple workers/agents do not retest the same hypothesis.
+4. DONE phase 1: add compare-and-set claim leasing so multiple workers/agents do not retest the same hypothesis.
    Expired claims become claimable; confirmed/refuted/dead hypotheses do not.
 5. Add append-only endorsements and refutations. Refuter signals can weaken/support/question a claim,
    but only deterministic replay, cryptographic evidence, parser/protocol evidence, or human-approved

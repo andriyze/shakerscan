@@ -1336,6 +1336,56 @@ def test_public_campaign_action_row_decodes_json_fields():
     assert public["result_json"] == {"next": "add_credentials"}
 
 
+def test_public_hypothesis_row_decodes_json_and_never_promotes_findings():
+    row = {
+        "id": uuid.uuid4(),
+        "source": "app_graph",
+        "family": "bola",
+        "dedupe_key": "GET /api/orders/{id}:order.id",
+        "status": "open",
+        "version": 2,
+        "claim_owner": "agent-a",
+        "claim_lease_expires_at": "2026-07-06T12:00:00+00:00",
+        "evidence_object_ids": json.dumps(["evidence-1"]),
+        "tool_receipt_ids": json.dumps([]),
+        "next_test_action": json.dumps({"command": "asm.gaps"}),
+        "endorsements": json.dumps([{"source": "app_graph"}]),
+        "refutations": json.dumps([]),
+        "metadata_json": json.dumps({"route": "/api/orders/{id}"}),
+    }
+
+    public = api_module._public_hypothesis_row(row)
+
+    assert public["evidence_object_ids"] == ["evidence-1"]
+    assert public["next_test_action"] == {"command": "asm.gaps"}
+    assert public["endorsements"] == [{"source": "app_graph"}]
+    assert public["claim_state"]["owner"] == "agent-a"
+    assert public["can_promote_finding"] is False
+    assert public["execution_enabled"] is False
+
+
+def test_canonical_hypothesis_request_redacts_and_normalizes():
+    req = api_module.HypothesisRequest(
+        source="manual",
+        family="BOLA",
+        dedupe_key="GET /api/orders/{id}",
+        confidence=0.7,
+        description="Try bearer secret-token here",
+        next_test_action={"command": "asm.improve", "authorization": "Bearer secret-token"},
+        metadata_json={"cookie": "session=secret"},
+        endorsement={"reason": "secret-token should not remain"},
+        created_by="pytest",
+    )
+
+    payload = api_module._canonical_hypothesis_request(req)
+
+    assert payload["family"] == "bola"
+    assert payload["description"] != "Try bearer secret-token here"
+    assert payload["next_test_action"]["authorization"] != "Bearer secret-token"
+    assert payload["metadata_json"]["cookie"] != "session=secret"
+    assert "secret-token" not in json.dumps(payload["endorsement"])
+
+
 def test_record_command_result_redacts_result_json_and_returns_public_row():
     captured: dict[str, object] = {"queries": []}
 

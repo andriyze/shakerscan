@@ -3313,6 +3313,33 @@ class LocalAgentTestRequest(BaseModel):
     max_output_bytes: int = Field(default=2000, ge=128, le=8000)
 
 
+class HypothesisRequest(BaseModel):
+    source: str = Field(pattern="^(app_graph|source_ingest|ai_planner|scanner_signal|ai_gate|model_intake|manual)$")
+    family: str = Field(min_length=1, max_length=80)
+    dedupe_key: str = Field(min_length=1, max_length=500)
+    target_id: Optional[str] = None
+    campaign_id: Optional[str] = None
+    campaign_action_id: Optional[str] = None
+    cwe: Optional[str] = None
+    title: Optional[str] = None
+    description: Optional[str] = None
+    severity_guess: Optional[str] = Field(default=None, pattern="^(critical|high|medium|low|info)$")
+    confidence: float = Field(default=0.0, ge=0, le=1)
+    smoke_score: Optional[float] = Field(default=None, ge=0, le=1)
+    evidence_object_ids: list[str] = Field(default_factory=list)
+    tool_receipt_ids: list[str] = Field(default_factory=list)
+    next_test_action: Optional[dict[str, Any]] = None
+    endorsement: Optional[dict[str, Any]] = None
+    metadata_json: dict[str, Any] = Field(default_factory=dict)
+    created_by: Optional[str] = None
+
+
+class HypothesisClaimRequest(BaseModel):
+    owner: str = Field(min_length=1, max_length=120)
+    expected_version: int = Field(ge=1)
+    lease_seconds: int = Field(default=1800, ge=60, le=86400)
+
+
 class AgentDecisionTraceStep(BaseModel):
     kind: str
     command: Optional[str] = None
@@ -12025,6 +12052,26 @@ def _public_campaign_action_row(row: Any) -> dict[str, Any]:
     return payload
 
 
+def _public_hypothesis_row(row: Any) -> dict[str, Any]:
+    payload = row_to_dict(row)
+    for key in (
+        "evidence_object_ids",
+        "tool_receipt_ids",
+        "next_test_action",
+        "endorsements",
+        "refutations",
+        "metadata_json",
+    ):
+        payload[key] = _decode_json_value(payload.get(key)) or ([] if key not in {"next_test_action", "metadata_json"} else {})
+    payload["claim_state"] = {
+        "owner": payload.get("claim_owner"),
+        "lease_expires_at": payload.get("claim_lease_expires_at"),
+    }
+    payload["can_promote_finding"] = False
+    payload["execution_enabled"] = False
+    return payload
+
+
 def _public_agent_context_pack_row(row: Any) -> dict[str, Any]:
     payload = row_to_dict(row)
     for key in (
@@ -12376,6 +12423,24 @@ async def _build_agent_context_pack_from_target(conn, req: AgentContextPackFromT
             finding.update(finding_proof_fields(finding))
             findings_summary.append(finding)
 
+    hypotheses_summary: list[dict[str, Any]] = []
+    try:
+        hypothesis_rows = await conn.fetch(
+            """
+            SELECT id, source, family, cwe, title, severity_guess, confidence,
+                   dedupe_key, status, version, claim_owner, claim_lease_expires_at,
+                   smoke_score, evidence_object_ids, tool_receipt_ids, updated_at
+            FROM hypotheses
+            WHERE target_id = $1 AND status IN ('open','claimed','testing','supported')
+            ORDER BY confidence DESC, updated_at DESC
+            LIMIT 10
+            """,
+            target_uuid,
+        )
+        hypotheses_summary = [_public_hypothesis_row(row) for row in hypothesis_rows]
+    except Exception:
+        hypotheses_summary = []
+
     current_gaps: list[dict[str, Any]] = []
     if req.include_gaps:
         current_gaps.append({
@@ -12427,6 +12492,7 @@ async def _build_agent_context_pack_from_target(conn, req: AgentContextPackFromT
         "target_summary": target_summary,
         "current_surface": current_surface,
         "current_gaps": current_gaps,
+        "hypotheses_summary": hypotheses_summary,
         "findings_summary": findings_summary,
         "allowed_commands": allowed_commands,
         "disallowed_commands": disallowed_commands,
@@ -12439,7 +12505,7 @@ async def _build_agent_context_pack_from_target(conn, req: AgentContextPackFromT
         current_surface=current_surface,
         current_gaps=current_gaps,
         findings_summary=findings_summary,
-        hypotheses_summary=[],
+        hypotheses_summary=hypotheses_summary,
         allowed_commands=allowed_commands,
         disallowed_commands=disallowed_commands,
         known_preconditions=known_preconditions,
@@ -12661,6 +12727,146 @@ def _optional_uuid(value: str | uuid.UUID | None) -> uuid.UUID | None:
     if not value:
         return None
     return value if isinstance(value, uuid.UUID) else uuid.UUID(str(value))
+
+
+def _clean_string_list(values: list[Any] | None, *, max_items: int = 50) -> list[str]:
+    cleaned: list[str] = []
+    for value in values or []:
+        item = str(value or "").strip()
+        if item:
+            cleaned.append(item)
+        if len(cleaned) >= max_items:
+            break
+    return cleaned
+
+
+def _canonical_hypothesis_request(req: HypothesisRequest) -> dict[str, Any]:
+    payload = req.model_dump(mode="json")
+    family = str(payload.get("family") or "").strip().lower().replace(" ", "_")
+    source = str(payload.get("source") or "").strip()
+    dedupe_key = str(payload.get("dedupe_key") or "").strip()
+    endorsement = payload.get("endorsement") if isinstance(payload.get("endorsement"), dict) else {}
+    if not endorsement:
+        endorsement = {
+            "source": source,
+            "created_by": str(payload.get("created_by") or "").strip() or None,
+            "confidence": payload.get("confidence"),
+        }
+    else:
+        endorsement = _redact_agent_payload(endorsement)
+    return {
+        **payload,
+        "source": source,
+        "family": family,
+        "dedupe_key": dedupe_key,
+        "cwe": str(payload.get("cwe") or "").strip() or None,
+        "title": str(payload.get("title") or "").strip() or None,
+        "description": _redact_agent_text(str(payload.get("description") or "").strip()) or None,
+        "evidence_object_ids": _clean_string_list(payload.get("evidence_object_ids"), max_items=100),
+        "tool_receipt_ids": _clean_string_list(payload.get("tool_receipt_ids"), max_items=100),
+        "next_test_action": _redact_agent_payload(payload.get("next_test_action") or {}),
+        "metadata_json": _redact_agent_payload(payload.get("metadata_json") or {}),
+        "endorsement": endorsement,
+        "created_by": str(payload.get("created_by") or "").strip() or None,
+    }
+
+
+async def _upsert_hypothesis(conn, req: HypothesisRequest) -> dict[str, Any]:
+    payload = _canonical_hypothesis_request(req)
+    try:
+        target_uuid = _optional_uuid(payload.get("target_id"))
+        campaign_uuid = _optional_uuid(payload.get("campaign_id"))
+        campaign_action_uuid = _optional_uuid(payload.get("campaign_action_id"))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="target_id, campaign_id, and campaign_action_id must be UUIDs when provided") from exc
+    existing = await conn.fetchrow(
+        """
+        SELECT *
+        FROM hypotheses
+        WHERE COALESCE(target_id, '00000000-0000-0000-0000-000000000000'::uuid)
+              = COALESCE($1::uuid, '00000000-0000-0000-0000-000000000000'::uuid)
+          AND source = $2
+          AND family = $3
+          AND dedupe_key = $4
+        LIMIT 1
+        """,
+        target_uuid,
+        payload["source"],
+        payload["family"],
+        payload["dedupe_key"],
+    )
+    endorsement = {
+        **(payload.get("endorsement") or {}),
+        "recorded_at": datetime.now(timezone.utc).isoformat(),
+    }
+    if existing:
+        row = await conn.fetchrow(
+            """
+            UPDATE hypotheses
+            SET confidence = GREATEST(confidence, $2),
+                smoke_score = GREATEST(COALESCE(smoke_score, 0), COALESCE($3, 0)),
+                evidence_object_ids = COALESCE((
+                    SELECT jsonb_agg(DISTINCT value)
+                    FROM jsonb_array_elements_text(evidence_object_ids || $4::jsonb) AS value
+                ), '[]'::jsonb),
+                tool_receipt_ids = COALESCE((
+                    SELECT jsonb_agg(DISTINCT value)
+                    FROM jsonb_array_elements_text(tool_receipt_ids || $5::jsonb) AS value
+                ), '[]'::jsonb),
+                next_test_action = COALESCE($6::jsonb, next_test_action),
+                endorsements = endorsements || jsonb_build_array($7::jsonb),
+                metadata_json = metadata_json || $8::jsonb,
+                version = version + 1,
+                updated_at = NOW()
+            WHERE id = $1
+            RETURNING *
+            """,
+            existing["id"],
+            float(payload.get("confidence") or 0),
+            payload.get("smoke_score"),
+            json.dumps(payload.get("evidence_object_ids") or []),
+            json.dumps(payload.get("tool_receipt_ids") or []),
+            json.dumps(payload.get("next_test_action")) if payload.get("next_test_action") else None,
+            json.dumps(endorsement),
+            json.dumps(payload.get("metadata_json") or {}),
+        )
+        return {"hypothesis": _public_hypothesis_row(row), "created": False, "execution_enabled": False}
+
+    row = await conn.fetchrow(
+        """
+        INSERT INTO hypotheses (
+            target_id, campaign_id, campaign_action_id, source, family, cwe,
+            title, description, severity_guess, confidence, dedupe_key,
+            smoke_score, evidence_object_ids, tool_receipt_ids, next_test_action,
+            endorsements, metadata_json, created_by
+        ) VALUES (
+            $1,$2,$3,$4,$5,$6,
+            $7,$8,$9,$10,$11,
+            $12,$13::jsonb,$14::jsonb,$15::jsonb,
+            jsonb_build_array($16::jsonb),$17::jsonb,$18
+        )
+        RETURNING *
+        """,
+        target_uuid,
+        campaign_uuid,
+        campaign_action_uuid,
+        payload["source"],
+        payload["family"],
+        payload.get("cwe"),
+        payload.get("title"),
+        payload.get("description"),
+        payload.get("severity_guess"),
+        float(payload.get("confidence") or 0),
+        payload["dedupe_key"],
+        payload.get("smoke_score"),
+        json.dumps(payload.get("evidence_object_ids") or []),
+        json.dumps(payload.get("tool_receipt_ids") or []),
+        json.dumps(payload.get("next_test_action") or {}),
+        json.dumps(endorsement),
+        json.dumps(payload.get("metadata_json") or {}),
+        payload.get("created_by"),
+    )
+    return {"hypothesis": _public_hypothesis_row(row), "created": True, "execution_enabled": False}
 
 
 async def _record_campaign_action_from_command_result(conn, command_result: dict[str, Any]) -> dict[str, Any] | None:
@@ -13244,6 +13450,107 @@ async def arsenal_campaign_actions(
         "execution_enabled": False,
         "count": len(actions),
     }
+
+
+@app.get("/arsenal/hypotheses")
+async def arsenal_hypotheses(
+    limit: int = Query(20, ge=1, le=100),
+    target_id: Optional[str] = Query(None, description="Filter hypotheses to one target."),
+    status: Optional[str] = Query(None, description="Filter by hypothesis status."),
+):
+    """Read deduped hypotheses/leads. Hypotheses are not findings."""
+    target_uuid = None
+    if target_id:
+        try:
+            target_uuid = uuid.UUID(str(target_id))
+        except ValueError:
+            raise HTTPException(status_code=400, detail="target_id must be a UUID")
+    if status and status not in {"open", "claimed", "testing", "supported", "refuted", "promoted", "dead"}:
+        raise HTTPException(status_code=400, detail="invalid hypothesis status")
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT *
+            FROM hypotheses
+            WHERE ($2::uuid IS NULL OR target_id = $2)
+              AND ($3::text IS NULL OR status = $3)
+            ORDER BY
+              CASE status WHEN 'open' THEN 0 WHEN 'supported' THEN 1 WHEN 'claimed' THEN 2 ELSE 3 END,
+              updated_at DESC
+            LIMIT $1
+            """,
+            limit,
+            target_uuid,
+            status,
+        )
+    return {
+        "hypotheses": [_public_hypothesis_row(row) for row in rows],
+        "execution_enabled": False,
+        "count": len(rows),
+    }
+
+
+@app.post("/arsenal/hypotheses")
+async def arsenal_record_hypothesis(req: HypothesisRequest):
+    """Record or endorse a deduped lead without creating or promoting findings."""
+    async with db_pool.acquire() as conn:
+        return await _upsert_hypothesis(conn, req)
+
+
+@app.post("/arsenal/hypotheses/{hypothesis_id}/claim")
+async def arsenal_claim_hypothesis(hypothesis_id: str, req: HypothesisClaimRequest):
+    """Claim a hypothesis with compare-and-set leasing.
+
+    Terminal hypotheses are not claimable. Expired claims become claimable again.
+    """
+    try:
+        hypothesis_uuid = uuid.UUID(str(hypothesis_id))
+    except ValueError:
+        raise HTTPException(status_code=400, detail="hypothesis_id must be a UUID")
+    lease_expires_at = datetime.now(timezone.utc) + timedelta(seconds=req.lease_seconds)
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            UPDATE hypotheses
+            SET status = 'claimed',
+                claim_owner = $3,
+                claim_lease_expires_at = $4,
+                version = version + 1,
+                updated_at = NOW()
+            WHERE id = $1
+              AND version = $2
+              AND status NOT IN ('refuted','promoted','dead')
+              AND (
+                claim_lease_expires_at IS NULL
+                OR claim_lease_expires_at < NOW()
+                OR claim_owner = $3
+              )
+            RETURNING *
+            """,
+            hypothesis_uuid,
+            req.expected_version,
+            req.owner.strip(),
+            lease_expires_at,
+        )
+        if row:
+            return {
+                "hypothesis": _public_hypothesis_row(row),
+                "claimed": True,
+                "execution_enabled": False,
+            }
+        current = await conn.fetchrow("SELECT id, status, version, claim_owner, claim_lease_expires_at FROM hypotheses WHERE id=$1", hypothesis_uuid)
+    if not current:
+        raise HTTPException(status_code=404, detail="Hypothesis not found")
+    raise HTTPException(
+        status_code=409,
+        detail={
+            "error": "hypothesis_not_claimable",
+            "status": current["status"],
+            "version": current["version"],
+            "claim_owner": current["claim_owner"],
+            "claim_lease_expires_at": current["claim_lease_expires_at"],
+        },
+    )
 
 
 # --- Cross-product mission timeline (§1) -------------------------------------
