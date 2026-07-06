@@ -1386,6 +1386,33 @@ def test_canonical_hypothesis_request_redacts_and_normalizes():
     assert "secret-token" not in json.dumps(payload["endorsement"])
 
 
+def test_canonical_hypothesis_request_uses_structured_dedupe_dimensions():
+    req = api_module.HypothesisRequest(
+        source="manual",
+        family="BOLA",
+        dedupe_key="caller-provided-key",
+        dedupe_dimensions={
+            "method": "GET",
+            "route": "/api/orders/{id}",
+            "object_key": "order.id",
+            "principal_pair": {"actor": "user1", "other": "user2", "tenant": "tenant-a"},
+            "parameter_path": "path.id",
+            "proof_surface": "Runtime Authz Replay",
+        },
+        metadata_json={"authorization": "Bearer secret-token"},
+    )
+
+    payload = api_module._canonical_hypothesis_request(req)
+
+    assert payload["dedupe_key"] != "caller-provided-key"
+    assert payload["dedupe_key"].startswith("hypothesis:v1|family=bola|method=get|route=/api/orders/{id}")
+    assert "principal_actor=user1" in payload["dedupe_key"]
+    assert "principal_other=user2" in payload["dedupe_key"]
+    assert "proof_surface=runtime_authz_replay" in payload["dedupe_key"]
+    assert payload["metadata_json"]["dedupe_dimensions"]["object_key"] == "order.id"
+    assert payload["metadata_json"]["authorization"] != "Bearer secret-token"
+
+
 def test_application_graph_hypothesis_requests_build_authz_leads_not_findings():
     target_id = "11111111-1111-4111-8111-111111111111"
     nodes = [
@@ -1453,6 +1480,9 @@ def test_application_graph_hypothesis_requests_build_authz_leads_not_findings():
     assert req.next_test_action["parameters"]["exploit_depth"] is True
     assert req.endorsement["source_principal"] == "user1"
     assert req.endorsement["excluded_principal"] == "user2"
+    assert req.dedupe_dimensions["route"] == "/api/orders/{order_id}"
+    assert req.dedupe_dimensions["object_key"] == "object:order_id"
+    assert req.dedupe_dimensions["proof_surface"] == "runtime_authz_replay"
 
 
 def test_hypothesis_signal_redacts_and_is_non_executing():
@@ -1549,6 +1579,68 @@ def test_hypothesis_situation_report_is_bounded_and_separates_work():
     assert requirements["primary_auth"]["count"] == 1
     assert requirements["second_user_auth"]["count"] == 1
     assert all("metadata_json" not in item for item in report["hottest_unclaimed"])
+
+
+def test_upsert_hypothesis_matches_existing_across_sources_by_dedupe_key():
+    target_id = uuid.uuid4()
+    existing_id = uuid.uuid4()
+    captured: dict[str, object] = {}
+
+    class _FakeConn:
+        async def fetchrow(self, query, *args):
+            sql = str(query)
+            if "SELECT *" in sql:
+                captured["select_sql"] = sql
+                captured["select_args"] = args
+                return {"id": existing_id}
+            if "UPDATE hypotheses" in sql:
+                captured["update_args"] = args
+                return {
+                    "id": existing_id,
+                    "target_id": target_id,
+                    "source": "app_graph",
+                    "family": "bola",
+                    "dedupe_key": captured["select_args"][2],
+                    "status": "supported",
+                    "version": 2,
+                    "claim_owner": None,
+                    "claim_lease_expires_at": None,
+                    "evidence_object_ids": json.dumps([]),
+                    "tool_receipt_ids": json.dumps([]),
+                    "next_test_action": json.dumps({}),
+                    "endorsements": json.dumps([json.loads(args[6])]),
+                    "refutations": json.dumps([]),
+                    "metadata_json": args[7],
+                }
+            raise AssertionError(sql)
+
+    req = api_module.HypothesisRequest(
+        target_id=str(target_id),
+        source="ai_planner",
+        family="bola",
+        dedupe_key="placeholder",
+        dedupe_dimensions={
+            "method": "GET",
+            "route": "/api/orders/{id}",
+            "object_key": "order.id",
+            "principal_actor": "user1",
+            "principal_other": "user2",
+            "proof_surface": "runtime_authz_replay",
+        },
+        endorsement={"source": "ai_planner", "reason": "same route/object/principal"},
+    )
+
+    result = asyncio.run(api_module._upsert_hypothesis(_FakeConn(), req))
+
+    assert result["created"] is False
+    assert "AND source =" not in captured["select_sql"]
+    select_args = captured["select_args"]
+    assert select_args[0] == target_id
+    assert select_args[1] == "bola"
+    assert str(select_args[2]).startswith("hypothesis:v1|family=bola|method=get")
+    endorsement = json.loads(captured["update_args"][6])
+    assert endorsement["source"] == "ai_planner"
+    assert result["execution_enabled"] is False
 
 
 def test_record_command_result_redacts_result_json_and_returns_public_row():

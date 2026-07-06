@@ -3318,6 +3318,7 @@ class HypothesisRequest(BaseModel):
     source: str = Field(pattern="^(app_graph|source_ingest|ai_planner|scanner_signal|ai_gate|model_intake|manual)$")
     family: str = Field(min_length=1, max_length=80)
     dedupe_key: str = Field(min_length=1, max_length=500)
+    dedupe_dimensions: dict[str, Any] = Field(default_factory=dict)
     target_id: Optional[str] = None
     campaign_id: Optional[str] = None
     campaign_action_id: Optional[str] = None
@@ -12913,11 +12914,89 @@ def _clean_string_list(values: list[Any] | None, *, max_items: int = 50) -> list
     return cleaned
 
 
+def _normalize_hypothesis_dedupe_value(value: Any, *, lower: bool = False) -> Optional[str]:
+    if value is None:
+        return None
+    text = re.sub(r"\s+", " ", str(value).strip())
+    if not text:
+        return None
+    text = text.replace("|", "%7C")
+    return text.lower().replace(" ", "_") if lower else text
+
+
+def _canonical_hypothesis_dedupe_dimensions(payload: dict[str, Any], metadata: dict[str, Any]) -> dict[str, str]:
+    raw = payload.get("dedupe_dimensions") if isinstance(payload.get("dedupe_dimensions"), dict) else {}
+    metadata_dims = metadata.get("dedupe_dimensions") if isinstance(metadata.get("dedupe_dimensions"), dict) else {}
+    merged = {**metadata_dims, **raw}
+    principal_pair = merged.get("principal_pair") if isinstance(merged.get("principal_pair"), dict) else {}
+    route = (
+        merged.get("route")
+        or merged.get("endpoint")
+        or merged.get("consumer_route")
+        or metadata.get("route")
+        or metadata.get("consumer_route")
+    )
+    method = merged.get("method") or metadata.get("method")
+    object_key = merged.get("object_key") or merged.get("object") or metadata.get("object_key")
+    actor = (
+        merged.get("principal_actor")
+        or merged.get("actor")
+        or principal_pair.get("actor")
+        or metadata.get("source_principal")
+    )
+    other = (
+        merged.get("principal_other")
+        or merged.get("other")
+        or principal_pair.get("other")
+        or metadata.get("excluded_principal")
+    )
+    tenant = merged.get("tenant") or principal_pair.get("tenant") or metadata.get("tenant")
+    parameter_path = merged.get("parameter_path") or merged.get("param") or metadata.get("parameter_path")
+    body_path = merged.get("body_path") or metadata.get("body_path")
+    proof_surface = merged.get("proof_surface") or metadata.get("proof_surface")
+
+    dims = {
+        "method": _normalize_hypothesis_dedupe_value(method, lower=True),
+        "route": _normalize_hypothesis_dedupe_value(route),
+        "object_key": _normalize_hypothesis_dedupe_value(object_key),
+        "principal_actor": _normalize_hypothesis_dedupe_value(actor),
+        "principal_other": _normalize_hypothesis_dedupe_value(other),
+        "tenant": _normalize_hypothesis_dedupe_value(tenant),
+        "parameter_path": _normalize_hypothesis_dedupe_value(parameter_path),
+        "body_path": _normalize_hypothesis_dedupe_value(body_path),
+        "proof_surface": _normalize_hypothesis_dedupe_value(proof_surface, lower=True),
+    }
+    return {key: value for key, value in dims.items() if value}
+
+
+def _hypothesis_dedupe_key_from_dimensions(family: str, dimensions: dict[str, str]) -> str:
+    ordered_keys = (
+        "method",
+        "route",
+        "object_key",
+        "principal_actor",
+        "principal_other",
+        "tenant",
+        "parameter_path",
+        "body_path",
+        "proof_surface",
+    )
+    parts = [f"family={family}"]
+    parts.extend(f"{key}={dimensions[key]}" for key in ordered_keys if dimensions.get(key))
+    return "hypothesis:v1|" + "|".join(parts)
+
+
 def _canonical_hypothesis_request(req: HypothesisRequest) -> dict[str, Any]:
     payload = req.model_dump(mode="json")
     family = str(payload.get("family") or "").strip().lower().replace(" ", "_")
     source = str(payload.get("source") or "").strip()
-    dedupe_key = str(payload.get("dedupe_key") or "").strip()
+    metadata = _redact_agent_payload(payload.get("metadata_json") or {})
+    dedupe_dimensions = _canonical_hypothesis_dedupe_dimensions(payload, metadata)
+    if dedupe_dimensions:
+        metadata["dedupe_dimensions"] = dedupe_dimensions
+        dedupe_key = _hypothesis_dedupe_key_from_dimensions(family, dedupe_dimensions)
+    else:
+        dedupe_key = str(payload.get("dedupe_key") or "").strip()
     endorsement = payload.get("endorsement") if isinstance(payload.get("endorsement"), dict) else {}
     if not endorsement:
         endorsement = {
@@ -12932,13 +13011,14 @@ def _canonical_hypothesis_request(req: HypothesisRequest) -> dict[str, Any]:
         "source": source,
         "family": family,
         "dedupe_key": dedupe_key,
+        "dedupe_dimensions": dedupe_dimensions,
         "cwe": str(payload.get("cwe") or "").strip() or None,
         "title": str(payload.get("title") or "").strip() or None,
         "description": _redact_agent_text(str(payload.get("description") or "").strip()) or None,
         "evidence_object_ids": _clean_string_list(payload.get("evidence_object_ids"), max_items=100),
         "tool_receipt_ids": _clean_string_list(payload.get("tool_receipt_ids"), max_items=100),
         "next_test_action": _redact_agent_payload(payload.get("next_test_action") or {}),
-        "metadata_json": _redact_agent_payload(payload.get("metadata_json") or {}),
+        "metadata_json": metadata,
         "endorsement": endorsement,
         "created_by": str(payload.get("created_by") or "").strip() or None,
     }
@@ -13089,6 +13169,9 @@ def _application_graph_hypothesis_requests(
             confidence += 0.08
         confidence = min(confidence, 0.9)
         severity = "high" if sensitive or excluded_principal else "medium"
+        consumer_parts = consumer_label.split(" ", 1)
+        method = consumer_parts[0] if len(consumer_parts) == 2 else None
+        route = consumer_parts[1] if len(consumer_parts) == 2 else consumer_label
         candidates.append(HypothesisRequest(
             target_id=target_id,
             source="app_graph",
@@ -13102,6 +13185,14 @@ def _application_graph_hypothesis_requests(
             severity_guess=severity,
             confidence=confidence,
             dedupe_key=dedupe_key,
+            dedupe_dimensions={
+                "method": method,
+                "route": route,
+                "object_key": object_key or object_id_key or object_label,
+                "principal_actor": source_principal,
+                "principal_other": excluded_principal,
+                "proof_surface": "runtime_authz_replay",
+            },
             next_test_action={
                 "command": "asm.improve",
                 "parameters": {
@@ -13126,6 +13217,14 @@ def _application_graph_hypothesis_requests(
                 "object_key": object_key or None,
                 "edge_id": str(edge.get("id")) if edge.get("id") else None,
                 "edge_type": "auth_boundary",
+                "dedupe_dimensions": {
+                    "method": method,
+                    "route": route,
+                    "object_key": object_key or object_id_key or object_label,
+                    "principal_actor": source_principal,
+                    "principal_other": excluded_principal,
+                    "proof_surface": "runtime_authz_replay",
+                },
                 "source_principal": source_principal,
                 "excluded_principal": excluded_principal,
                 "sensitive_fields": sensitive[:25],
@@ -13149,13 +13248,11 @@ async def _upsert_hypothesis(conn, req: HypothesisRequest) -> dict[str, Any]:
         FROM hypotheses
         WHERE COALESCE(target_id, '00000000-0000-0000-0000-000000000000'::uuid)
               = COALESCE($1::uuid, '00000000-0000-0000-0000-000000000000'::uuid)
-          AND source = $2
-          AND family = $3
-          AND dedupe_key = $4
+          AND family = $2
+          AND dedupe_key = $3
         LIMIT 1
         """,
         target_uuid,
-        payload["source"],
         payload["family"],
         payload["dedupe_key"],
     )

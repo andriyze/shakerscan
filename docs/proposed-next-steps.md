@@ -886,8 +886,10 @@ adapt it into ShakerScan's proof model: leads are coordinated work items, not fi
    bounded recent board window instead of exposing the entire board by default.
 7. Promotion rule: hypotheses can become findings only through the existing proof taxonomy. AI/source
    graph/tool rationale can attach as context, but cannot promote severity or proof state by itself.
-8. Dedup rule: target, route/object/principal, vulnerability family, parameter/body path, and proof
-   surface decide whether a new signal endorses an existing hypothesis instead of creating another
+8. DONE phase 1: dedupe rule now accepts canonical `dedupe_dimensions` for route/method,
+   object key, principal pair, tenant, parameter/body path, and proof surface. These dimensions
+   produce the stored `dedupe_key`, and `_upsert_hypothesis` matches existing target/family/key rows
+   across signal sources so a new source endorses the existing hypothesis instead of creating another
    card.
 9. Claim rule: use compare-and-set on hypothesis `version`; expired claims become open again, while
    confirmed/refuted/dead hypotheses are not claimable.

@@ -204,6 +204,7 @@ def test_hypothesis_commands_do_not_execute_scanners_or_create_findings():
     assert "hottest_unclaimed" in report_cmd["evidence_contract"]
     assert "missing_preconditions" in report_cmd["evidence_contract"]
     assert record_cmd["path"] == "/arsenal/hypotheses"
+    assert "dedupe_dimensions" in record_cmd["parameters_schema"]
     assert claim_cmd["path"] == "/arsenal/hypotheses/{hypothesis_id}/claim"
     assert "hypothesis_row" in record_cmd["evidence_contract"]
     signal_cmd = commands["hypothesis.signal"]
@@ -259,6 +260,7 @@ def test_contracts_encode_planner_and_secret_boundaries():
     assert "queued command results cannot mark findings verified" in contracts["CommandResult"]["invariants"]
     assert "parser failure cannot create verified findings" in contracts["ToolReceipt"]["invariants"]
     assert "hypotheses cannot directly alter finding proof_state or severity" in contracts["Hypothesis"]["invariants"]
+    assert "target/family/dedupe dimensions identify a lead across signal sources" in contracts["Hypothesis"]["invariants"]
 
 
 def test_tool_status_catalog_is_honest_without_version_probe(monkeypatch):
