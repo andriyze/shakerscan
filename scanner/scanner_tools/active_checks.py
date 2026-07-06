@@ -5757,10 +5757,13 @@ def _load_custom_payloads(category: str, include_packs: bool = False) -> list[st
     return out
 
 
-# Techniques that EXTRACT data (heavy, column-count-specific) vs. techniques that
-# DETECT injection (quote/paren closure, boolean, comment, error). When the DBMS
-# is unknown we front-load the detection tier so an early budget cutoff still
-# tries the high-signal closure payloads.
+# Technique tiers for the unknown-DBMS wide net, ordered by reliability so an
+# early budget cutoff spends on the highest-signal payloads first:
+#   1. reliable detection — quote/paren closure, boolean, comment, error;
+#   2. time-based — LAST of the detection techniques: a slow response (target
+#      load, not injection) false-positives easily, so it must never be tried
+#      before the deterministic error/boolean payloads;
+#   3. extraction — heavy, column-count-specific UNION/schema/version dumps.
 _SQLI_EXTRACTION_TECHNIQUE_MARKERS = ("union", "schema", "version", "extract", "dump", "col")
 
 
@@ -5779,15 +5782,20 @@ def _select_sqli_payloads(dbms_key: str | None) -> list[tuple[str, str, str]]:
         # scans every error signature), so the only thing that mattered was sending
         # the right closure payload. On a hit the caller re-fingerprints from the
         # vulnerable body and self-corrects `dbms`.
-        detection: list[tuple[str, str, str]] = []
+        reliable: list[tuple[str, str, str]] = []
+        time_based: list[tuple[str, str, str]] = []
         extraction: list[tuple[str, str, str]] = []
         families = ["generic"] + [k for k in DBMS_SQLI_PAYLOADS if k != "generic"]
         for fam in families:
             for payload, technique, description in DBMS_SQLI_PAYLOADS.get(fam, []):
                 tl = technique.lower()
-                bucket = extraction if any(m in tl for m in _SQLI_EXTRACTION_TECHNIQUE_MARKERS) else detection
-                bucket.append((payload, technique, description))
-        payloads = detection + extraction
+                if any(m in tl for m in _SQLI_EXTRACTION_TECHNIQUE_MARKERS):
+                    extraction.append((payload, technique, description))
+                elif "time" in tl:
+                    time_based.append((payload, technique, description))
+                else:
+                    reliable.append((payload, technique, description))
+        payloads = reliable + time_based + extraction
 
     # De-dup (payload, technique) — same payload can recur across families.
     seen: set[tuple[str, str]] = set()

@@ -53,13 +53,24 @@ def test_unknown_dbms_includes_paren_closure_payloads():
         assert any(")) " in p or "))" in p for p, _t, _d in _select_sqli_payloads(key))
 
 
-def test_unknown_dbms_orders_detection_before_extraction():
+def test_unknown_dbms_orders_reliable_then_time_then_extraction():
     payloads = _select_sqli_payloads(None)
-    first_boolean = next((i for i, (_p, t, _d) in enumerate(payloads) if "boolean" in t.lower()), None)
-    first_union = next((i for i, (_p, t, _d) in enumerate(payloads) if "union" in t.lower()), None)
+
+    def first(pred):
+        return next((i for i, (_p, t, _d) in enumerate(payloads) if pred(t.lower())), None)
+
+    first_boolean = first(lambda t: "boolean" in t)
+    first_time = first(lambda t: "time" in t)
+    first_union = first(lambda t: "union" in t)
     assert first_boolean is not None
+    # reliable boolean/error/closure precede FP-prone time-based, which precede
+    # heavy UNION extraction.
+    if first_time is not None:
+        assert first_boolean < first_time, "reliable detection must precede time-based"
     if first_union is not None:
-        assert first_boolean < first_union, "cheap boolean payloads must precede heavy UNION extraction"
+        assert first_boolean < first_union
+    if first_time is not None and first_union is not None:
+        assert first_time < first_union
 
 
 def test_known_dbms_stays_focused():

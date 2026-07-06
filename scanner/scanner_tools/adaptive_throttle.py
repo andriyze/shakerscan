@@ -32,16 +32,25 @@ class AdaptiveThrottle:
         *,
         window: int = 20,
         slow_seconds: float = 6.0,
-        high_watermark: float = 0.30,
-        low_watermark: float = 0.10,
-        max_delay: float = 2.0,
+        high_watermark: float = 0.50,
+        low_watermark: float = 0.15,
+        max_delay: float = 0.5,
         base_step: float = 0.10,
     ) -> None:
+        # ``max_delay`` MUST stay below the time-based SQLi detection floor
+        # (min_delay = max(1.5, expected*0.75) = 1.5s in active_checks). The SQLi
+        # detector times *around* run(), which is where this delay is injected, so
+        # a per-request delay >= 1.5s would masquerade as a time-based injection
+        # and produce false positives. Keep the cap comfortably under that floor,
+        # and only engage on SUSTAINED degradation (high_watermark) so a brief
+        # blip on an otherwise-healthy target never starts pacing.
         self._window = deque(maxlen=max(4, window))
         self._slow_seconds = slow_seconds
         self._high = high_watermark
         self._low = low_watermark
-        self._max_delay = max_delay
+        # Hard safety clamp: never allow a per-request delay that could cross the
+        # time-based SQLi floor, regardless of caller-supplied config.
+        self._max_delay = min(max_delay, 1.0)
         self._base_step = base_step
         self._delay = 0.0
         self.enabled = False

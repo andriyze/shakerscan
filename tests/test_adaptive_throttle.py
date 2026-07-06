@@ -45,8 +45,20 @@ def test_backs_off_under_sustained_degradation():
     for _ in range(40):
         t.record(rc=124, elapsed=30.0)  # all timeouts
     assert t.delay > 0.0
-    assert t.delay <= 2.0  # bounded by max_delay
+    assert t.delay <= 0.5  # bounded by default max_delay
     assert t.backoff_events > 0
+
+
+def test_delay_never_reaches_time_based_sqli_floor():
+    # CRITICAL invariant: the injected per-request delay must never approach the
+    # time-based SQLi detection floor (1.5s), or it would masquerade as a
+    # time-based injection and produce false positives. Even an aggressive config
+    # is hard-clamped.
+    t = AdaptiveThrottle(window=8, max_delay=5.0)  # caller asks for 5s
+    t.enabled = True
+    for _ in range(50):
+        t.record(rc=124, elapsed=30.0)
+    assert t.delay <= 1.0, "delay must stay well under the 1.5s time-based floor"
 
 
 def test_recovers_when_responses_go_clean():
