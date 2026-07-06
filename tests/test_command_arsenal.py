@@ -37,6 +37,7 @@ def test_command_catalog_contains_required_initial_commands():
         "operation_plan.list",
         "campaign_action.list",
         "hypothesis.list",
+        "refuter_review.list",
         "agent_context_pack.list",
         "agent_decision_trace.list",
         "local_agent.list",
@@ -47,6 +48,22 @@ def test_command_catalog_contains_required_initial_commands():
         assert name in commands
         assert commands[name]["status"] == "read_only"
         assert commands[name]["risk_tier"] == "read_only"
+
+
+def test_refuter_review_commands_do_not_mutate_findings_directly():
+    payload = arsenal.describe_commands()
+    commands = {item["name"]: item for item in payload["commands"]}
+
+    list_cmd = commands["refuter_review.list"]
+    record_cmd = commands["refuter_review.record"]
+
+    assert list_cmd["status"] == "read_only"
+    assert record_cmd["status"] == "dry_run"
+    assert record_cmd["risk_tier"] == "read_only"
+    assert list_cmd["path"] == "/arsenal/refuter-reviews"
+    assert record_cmd["path"] == "/arsenal/refuter-reviews"
+    assert "verdict_basis" in record_cmd["parameters_schema"]
+    assert "refuter_review_row" in record_cmd["evidence_contract"]
 
 
 def test_target_principal_matrix_commands_are_non_executing_inventory():
@@ -286,6 +303,8 @@ def test_contracts_encode_planner_and_secret_boundaries():
     assert "TargetPrincipal" in contracts
     assert "EndpointPrincipalExpectation" in contracts
     assert "expectations are planning facts only and cannot create findings" in contracts["EndpointPrincipalExpectation"]["invariants"]
+    assert "RefuterReview" in contracts
+    assert "recording a refuter review cannot directly update proof_state, severity, findings, hypotheses, or deployment gates" in contracts["RefuterReview"]["invariants"]
 
 
 def test_tool_status_catalog_is_honest_without_version_probe(monkeypatch):

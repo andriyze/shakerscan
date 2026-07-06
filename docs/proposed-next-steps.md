@@ -955,9 +955,15 @@ produce receipts for both successful and failed/skipped runs; missing binaries s
 not phantom success.
 
 ### 9a. Refuter workflow and integrity ledgers
-**Status: CONTRACT ONLY.** T3MP3ST's strongest process lesson is not a detector; it is the habit of
-trying to disprove weak wins. ShakerScan needs a durable refuter path for claims that can affect
-operator trust, benchmark claims, or deployment gates.
+**Status: PARTIAL, PHASE 1 RECORDS DONE.** T3MP3ST's strongest process lesson is not a detector; it
+is the habit of trying to disprove weak wins. ShakerScan now has durable
+`refuter_reviews` records exposed through `GET/POST /arsenal/refuter-reviews` and
+`refuter_review.list` / `refuter_review.record`. `refuter_signal` remains separate from
+`refuter_verdict`; verdicts require deterministic replay, cryptographic, parser/protocol, or
+human-approved-review basis, and recording a review cannot directly update findings, hypotheses,
+proof state, severity, or gates. File-backed integrity ledgers exist at
+`results/benchmark-runs/INTEGRITY_LEDGER.md` and `results/planner-evals/INTEGRITY_LEDGER.md`.
+Automated triggers and UI summaries are still open.
 
 **Implement:**
 1. Trigger refuter work for Critical/High findings with suspected or weak proof, AI Gate semantic-only
@@ -967,13 +973,14 @@ operator trust, benchmark claims, or deployment gates.
 2. Refuter behavior should rerun the minimal reproducer, test benign explanations, verify auth
    context/principal/tenant/object ownership, check request freshness, and attach counterevidence when
    a claim weakens.
-3. Separate `refuter_signal` from `refuter_verdict`. Signals can weaken/support/question a claim.
-   Verdicts can change status only when backed by deterministic replay, cryptographic evidence,
-   parser/protocol evidence, or explicitly labeled human-approved review policy.
-4. Add integrity ledgers for benchmark and planner methodology: stale/non-uniform worker runs,
+3. DONE phase 1: separate `refuter_signal` from `refuter_verdict`. Signals can
+   weaken/support/question a claim. Verdicts are accepted only when backed by deterministic replay,
+   cryptographic evidence, parser/protocol evidence, or explicitly labeled human-approved review
+   policy; review records still do not directly mutate product truth.
+4. DONE phase 1: add integrity ledgers for benchmark and planner methodology: stale/non-uniform worker runs,
    benchmark fitting, hidden contamination, hardcoded target facts, phantom tool assumptions, source
    hints counted as runtime proof, AI prose counted as evidence, and planner safety failures.
-5. Store integrity records close to the artifacts they correct, for example
+5. DONE phase 1: store integrity records close to the artifacts they correct, for example
    `results/benchmark-runs/INTEGRITY_LEDGER.md` and `results/planner-evals/INTEGRITY_LEDGER.md`, then
    add API/UI summaries only after the file-backed discipline is stable.
 

@@ -1568,6 +1568,84 @@ def test_hypothesis_signal_redacts_and_is_non_executing():
     assert signal["metadata_json"]["authorization"] != "Bearer secret-token"
 
 
+def test_refuter_review_requires_evidence_basis_for_verdict_and_redacts():
+    with pytest.raises(api_module.HTTPException):
+        api_module._canonical_refuter_review(api_module.RefuterReviewRequest(
+            subject_type="finding",
+            finding_id=str(uuid.uuid4()),
+            trigger_reason="Large delta with secret-token",
+            refuter_signal="refute",
+            refuter_verdict="refuted",
+            verdict_basis="signal_only",
+        ))
+
+    payload = api_module._canonical_refuter_review(api_module.RefuterReviewRequest(
+        subject_type="finding",
+        finding_id=str(uuid.uuid4()),
+        trigger_reason="Replay contradicted the claim with secret-token",
+        refuter_signal="refute",
+        refuter_verdict="refuted",
+        verdict_basis="deterministic_replay",
+        evidence_object_ids=[" evidence-1 ", ""],
+        tool_receipt_ids=["tool-1"],
+        counterevidence={"authorization": "Bearer secret-token"},
+        notes="Secret-token must be redacted",
+    ))
+
+    assert payload["status"] == "verdict_recorded"
+    assert payload["evidence_object_ids"] == ["evidence-1"]
+    assert payload["tool_receipt_ids"] == ["tool-1"]
+    assert "secret-token" not in json.dumps(payload)
+
+
+def test_record_refuter_review_is_non_mutating():
+    review_id = uuid.uuid4()
+    finding_id = uuid.uuid4()
+    captured: dict[str, object] = {}
+
+    class _FakeConn:
+        async def fetchrow(self, query, *args):
+            captured["query"] = str(query)
+            captured["args"] = args
+            return {
+                "id": review_id,
+                "subject_type": args[0],
+                "subject_id": args[1],
+                "target_id": args[2],
+                "finding_id": args[3],
+                "hypothesis_id": args[4],
+                "campaign_id": args[5],
+                "trigger_reason": args[6],
+                "refuter_signal": args[7],
+                "refuter_verdict": args[8],
+                "verdict_basis": args[9],
+                "confidence_delta": args[10],
+                "evidence_object_ids": args[11],
+                "tool_receipt_ids": args[12],
+                "counterevidence": args[13],
+                "notes": args[14],
+                "status": args[15],
+                "metadata_json": args[16],
+                "created_by": args[17],
+            }
+
+    result = asyncio.run(api_module._record_refuter_review(_FakeConn(), api_module.RefuterReviewRequest(
+        subject_type="finding",
+        finding_id=str(finding_id),
+        trigger_reason="High finding has weak proof",
+        refuter_signal="question",
+        verdict_basis="signal_only",
+        created_by="pytest",
+    )))
+
+    assert "UPDATE findings" not in captured["query"]
+    assert result["execution_enabled"] is False
+    assert result["findings_updated"] == 0
+    assert result["hypotheses_updated"] == 0
+    assert result["refuter_review"]["finding_id"] == str(finding_id)
+    assert result["refuter_review"]["status"] == "recorded"
+
+
 def test_hypothesis_situation_report_is_bounded_and_separates_work():
     now = datetime.now(timezone.utc).replace(microsecond=0)
 

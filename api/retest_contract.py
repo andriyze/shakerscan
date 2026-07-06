@@ -1472,6 +1472,53 @@ async def run_schema_migrations(pool) -> None:
                 ON hypotheses(status, claim_lease_expires_at, updated_at DESC)
             """)
             await conn.execute("""
+                CREATE TABLE IF NOT EXISTS refuter_reviews (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    subject_type TEXT NOT NULL,
+                    subject_id TEXT,
+                    target_id UUID REFERENCES targets(id) ON DELETE SET NULL,
+                    finding_id UUID REFERENCES findings(id) ON DELETE SET NULL,
+                    hypothesis_id UUID REFERENCES hypotheses(id) ON DELETE SET NULL,
+                    campaign_id UUID REFERENCES scan_campaigns(id) ON DELETE SET NULL,
+                    trigger_reason TEXT NOT NULL,
+                    refuter_signal TEXT NOT NULL DEFAULT 'question',
+                    refuter_verdict TEXT,
+                    verdict_basis TEXT NOT NULL DEFAULT 'signal_only',
+                    confidence_delta DOUBLE PRECISION,
+                    evidence_object_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    tool_receipt_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    counterevidence JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    notes TEXT,
+                    status TEXT NOT NULL DEFAULT 'recorded',
+                    metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    created_by TEXT,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    CONSTRAINT refuter_reviews_subject_check
+                        CHECK (subject_type IN ('finding','hypothesis','ai_gate_scan','model_intake','benchmark','planner','deployment_gate','parser_output','manual')),
+                    CONSTRAINT refuter_reviews_signal_check
+                        CHECK (refuter_signal IN ('support','question','weaken','refute')),
+                    CONSTRAINT refuter_reviews_verdict_check
+                        CHECK (refuter_verdict IS NULL OR refuter_verdict IN ('supported','weakened','refuted','inconclusive')),
+                    CONSTRAINT refuter_reviews_basis_check
+                        CHECK (verdict_basis IN ('signal_only','deterministic_replay','cryptographic','parser_protocol','human_approved_review')),
+                    CONSTRAINT refuter_reviews_status_check
+                        CHECK (status IN ('recorded','verdict_recorded','rejected'))
+                )
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_refuter_reviews_subject
+                ON refuter_reviews(subject_type, subject_id, created_at DESC)
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_refuter_reviews_finding
+                ON refuter_reviews(finding_id, created_at DESC) WHERE finding_id IS NOT NULL
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_refuter_reviews_hypothesis
+                ON refuter_reviews(hypothesis_id, created_at DESC) WHERE hypothesis_id IS NOT NULL
+            """)
+            await conn.execute("""
                 CREATE TABLE IF NOT EXISTS agent_context_packs (
                     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                     context_version TEXT NOT NULL,

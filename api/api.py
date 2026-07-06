@@ -3389,6 +3389,26 @@ class HypothesisSignalRequest(BaseModel):
     created_by: Optional[str] = None
 
 
+class RefuterReviewRequest(BaseModel):
+    subject_type: str = Field(pattern="^(finding|hypothesis|ai_gate_scan|model_intake|benchmark|planner|deployment_gate|parser_output|manual)$")
+    subject_id: Optional[str] = None
+    target_id: Optional[str] = None
+    finding_id: Optional[str] = None
+    hypothesis_id: Optional[str] = None
+    campaign_id: Optional[str] = None
+    trigger_reason: str = Field(min_length=1, max_length=500)
+    refuter_signal: str = Field(default="question", pattern="^(support|question|weaken|refute)$")
+    refuter_verdict: Optional[str] = Field(default=None, pattern="^(supported|weakened|refuted|inconclusive)$")
+    verdict_basis: str = Field(default="signal_only", pattern="^(signal_only|deterministic_replay|cryptographic|parser_protocol|human_approved_review)$")
+    confidence_delta: Optional[float] = Field(default=None, ge=-1, le=1)
+    evidence_object_ids: list[str] = Field(default_factory=list)
+    tool_receipt_ids: list[str] = Field(default_factory=list)
+    counterevidence: dict[str, Any] = Field(default_factory=dict)
+    notes: Optional[str] = None
+    metadata_json: dict[str, Any] = Field(default_factory=dict)
+    created_by: Optional[str] = None
+
+
 class AgentDecisionTraceStep(BaseModel):
     kind: str
     command: Optional[str] = None
@@ -13476,6 +13496,109 @@ async def _append_hypothesis_signal(conn, hypothesis_id: str, req: HypothesisSig
     }
 
 
+REFUTER_VERDICT_BASES = {"deterministic_replay", "cryptographic", "parser_protocol", "human_approved_review"}
+
+
+def _public_refuter_review_row(row: Any) -> dict[str, Any]:
+    payload = row_to_dict(row)
+    for key in ("evidence_object_ids", "tool_receipt_ids"):
+        payload[key] = _decode_json_value(payload.get(key)) or []
+    for key in ("counterevidence", "metadata_json"):
+        payload[key] = _redact_agent_payload(_decode_json_value(payload.get(key)) or {})
+    payload["execution_enabled"] = False
+    payload["findings_updated"] = 0
+    payload["hypotheses_updated"] = 0
+    return payload
+
+
+def _canonical_refuter_review(req: RefuterReviewRequest) -> dict[str, Any]:
+    payload = req.model_dump(mode="json")
+    verdict = str(payload.get("refuter_verdict") or "").strip() or None
+    basis = str(payload.get("verdict_basis") or "signal_only").strip()
+    if verdict and basis not in REFUTER_VERDICT_BASES:
+        raise HTTPException(
+            status_code=400,
+            detail="refuter_verdict requires deterministic_replay, cryptographic, parser_protocol, or human_approved_review basis",
+        )
+    if basis != "signal_only" and not verdict:
+        raise HTTPException(status_code=400, detail="non-signal refuter basis requires refuter_verdict")
+    return {
+        "subject_type": str(payload.get("subject_type") or "").strip(),
+        "subject_id": str(payload.get("subject_id") or "").strip() or None,
+        "target_id": str(payload.get("target_id") or "").strip() or None,
+        "finding_id": str(payload.get("finding_id") or "").strip() or None,
+        "hypothesis_id": str(payload.get("hypothesis_id") or "").strip() or None,
+        "campaign_id": str(payload.get("campaign_id") or "").strip() or None,
+        "trigger_reason": _redact_agent_text(str(payload.get("trigger_reason") or "").strip()),
+        "refuter_signal": str(payload.get("refuter_signal") or "question").strip(),
+        "refuter_verdict": verdict,
+        "verdict_basis": basis,
+        "confidence_delta": payload.get("confidence_delta"),
+        "evidence_object_ids": _clean_string_list(payload.get("evidence_object_ids"), max_items=100),
+        "tool_receipt_ids": _clean_string_list(payload.get("tool_receipt_ids"), max_items=100),
+        "counterevidence": _redact_agent_payload(payload.get("counterevidence") or {}),
+        "notes": _redact_agent_text(str(payload.get("notes") or "").strip()) if payload.get("notes") else None,
+        "metadata_json": _redact_agent_payload(payload.get("metadata_json") or {}),
+        "created_by": str(payload.get("created_by") or "").strip() or None,
+        "status": "verdict_recorded" if verdict else "recorded",
+    }
+
+
+async def _record_refuter_review(conn, req: RefuterReviewRequest) -> dict[str, Any]:
+    payload = _canonical_refuter_review(req)
+    try:
+        target_uuid = _optional_uuid(payload.get("target_id"))
+        finding_uuid = _optional_uuid(payload.get("finding_id"))
+        hypothesis_uuid = _optional_uuid(payload.get("hypothesis_id"))
+        campaign_uuid = _optional_uuid(payload.get("campaign_id"))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="target_id, finding_id, hypothesis_id, and campaign_id must be UUIDs when provided") from exc
+    if payload["subject_type"] == "finding" and not (finding_uuid or payload.get("subject_id")):
+        raise HTTPException(status_code=400, detail="finding refuter review requires finding_id or subject_id")
+    if payload["subject_type"] == "hypothesis" and not (hypothesis_uuid or payload.get("subject_id")):
+        raise HTTPException(status_code=400, detail="hypothesis refuter review requires hypothesis_id or subject_id")
+    row = await conn.fetchrow(
+        """
+        INSERT INTO refuter_reviews (
+            subject_type, subject_id, target_id, finding_id, hypothesis_id, campaign_id,
+            trigger_reason, refuter_signal, refuter_verdict, verdict_basis,
+            confidence_delta, evidence_object_ids, tool_receipt_ids, counterevidence,
+            notes, status, metadata_json, created_by
+        ) VALUES (
+            $1,$2,$3,$4,$5,$6,
+            $7,$8,$9,$10,
+            $11,$12::jsonb,$13::jsonb,$14::jsonb,
+            $15,$16,$17::jsonb,$18
+        )
+        RETURNING *
+        """,
+        payload["subject_type"],
+        payload.get("subject_id"),
+        target_uuid,
+        finding_uuid,
+        hypothesis_uuid,
+        campaign_uuid,
+        payload["trigger_reason"],
+        payload["refuter_signal"],
+        payload.get("refuter_verdict"),
+        payload["verdict_basis"],
+        payload.get("confidence_delta"),
+        json.dumps(payload.get("evidence_object_ids") or []),
+        json.dumps(payload.get("tool_receipt_ids") or []),
+        json.dumps(payload.get("counterevidence") or {}),
+        payload.get("notes"),
+        payload["status"],
+        json.dumps(payload.get("metadata_json") or {}),
+        payload.get("created_by"),
+    )
+    return {
+        "refuter_review": _public_refuter_review_row(row),
+        "execution_enabled": False,
+        "findings_updated": 0,
+        "hypotheses_updated": 0,
+    }
+
+
 def _graph_row_payload(row: Any) -> dict[str, Any]:
     payload = row_to_dict(row)
     payload["attributes"] = _decode_json_value(payload.get("attributes")) or {}
@@ -14473,6 +14596,48 @@ async def arsenal_append_hypothesis_signal(hypothesis_id: str, req: HypothesisSi
     """
     async with db_pool.acquire() as conn:
         return await _append_hypothesis_signal(conn, hypothesis_id, req)
+
+
+@app.get("/arsenal/refuter-reviews")
+async def arsenal_refuter_reviews(
+    limit: int = Query(20, ge=1, le=100),
+    subject_type: Optional[str] = Query(None),
+    subject_id: Optional[str] = Query(None),
+):
+    """Read durable refuter signals/verdicts without changing findings."""
+    if subject_type and subject_type not in {"finding", "hypothesis", "ai_gate_scan", "model_intake", "benchmark", "planner", "deployment_gate", "parser_output", "manual"}:
+        raise HTTPException(status_code=400, detail="invalid subject_type")
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT *
+            FROM refuter_reviews
+            WHERE ($2::text IS NULL OR subject_type = $2)
+              AND ($3::text IS NULL OR subject_id = $3)
+            ORDER BY created_at DESC
+            LIMIT $1
+            """,
+            limit,
+            subject_type,
+            subject_id,
+        )
+    return {
+        "refuter_reviews": [_public_refuter_review_row(row) for row in rows],
+        "count": len(rows),
+        "execution_enabled": False,
+    }
+
+
+@app.post("/arsenal/refuter-reviews")
+async def arsenal_record_refuter_review(req: RefuterReviewRequest):
+    """Record a refuter signal or proof-backed verdict.
+
+    Signals are counterevidence context only. Verdicts require deterministic,
+    cryptographic, parser/protocol, or explicit human-approved-review basis and
+    still do not directly update findings, hypotheses, proof state, or gates.
+    """
+    async with db_pool.acquire() as conn:
+        return await _record_refuter_review(conn, req)
 
 
 # --- Cross-product mission timeline (§1) -------------------------------------
