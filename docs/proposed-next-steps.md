@@ -190,6 +190,12 @@ called at real sites — verify before re-proposing any of it:
   optional version probe, auth-artifact existence only, support flags, prompt/output caps, and risk
   notes. It never reads auth artifact contents, never forwards provider API keys, and keeps
   planner execution disabled. `/settings/arsenal` renders the same capability matrix.
+- **Planner eval fixtures and integrity-ledger locations phase 1** —
+  `tests/fixtures/planner_evals/planner_eval_fixtures.json` captures the required dry-run planning
+  safety fixtures, and `scripts/planner_evals.py` scores candidate `OperationPlan` JSON for command
+  selection, missing inputs, risk tier, scope broadening, raw shell, forbidden verified claims, and
+  blocked reasons. `results/planner-evals/INTEGRITY_LEDGER.md` and
+  `results/benchmark-runs/INTEGRITY_LEDGER.md` now provide durable correction ledgers.
 - **ActionScopeGuard and persisted scope receipt preview phase 1** — `api.action_scope.evaluate_scope`
   now fail-closes malformed URLs, scheme-relative URLs, userinfo, trailing-dot hosts,
   Unicode/punycode confusion, loopback/private/reserved ranges outside lab policy, broad CIDRs,
@@ -348,7 +354,8 @@ raw shell execution or LLM-produced verified findings.
 10. **Refuter and integrity layer:** add refuter workflows for weak High/Criticals, AI Gate semantic
     hits, Model Intake metadata claims, benchmark wins, and deployment-gating findings. Add benchmark
     and planner integrity ledgers for contamination, retractions, stale-fleet runs, phantom tool
-    assumptions, and methodology corrections.
+    assumptions, and methodology corrections. DONE phase 1 for file-backed planner/benchmark ledger
+    locations and planner fixture scoring.
 11. **Planner evals and local-agent planning, dry-run only:** add planner fixtures, integrity ledgers,
     and dry-run local-agent planning only after command contracts, scope receipts, and read-only command
     status are reliable. Local agents may propose plans; they must not execute shell commands, broaden
@@ -490,9 +497,11 @@ bounded context packs, decision traces, and audit receipts.
 9. Strip provider API-key environment variables when spawning local planners. Send bounded context
    packs and command schemas; do not send secrets, cookies, bearer tokens, private keys, raw
    transcripts, or raw request/response bodies by default.
-10. Add benchmark/planner integrity ledgers for stale workers, benchmark fitting, hidden contamination,
+10. DONE phase 1: add benchmark/planner integrity ledgers for stale workers, benchmark fitting, hidden contamination,
    AI prose counted as evidence, phantom tool assumptions, auth context not actually used, planner
-   scope/risk broadening, and unrunnable planned families being presented as runnable.
+   scope/risk broadening, and unrunnable planned families being presented as runnable. The first
+   implementation is file-backed under `results/benchmark-runs/INTEGRITY_LEDGER.md` and
+   `results/planner-evals/INTEGRITY_LEDGER.md`.
 
 **Done when:** a mission can be planned, previewed, blocked, approved, queued, executed, and audited
 through one schema without exposing raw shell, bypassing policy gates, or allowing AI/local-agent prose
@@ -730,12 +739,13 @@ Arsenal, scope receipts, approval receipts, context packs, and planner evals are
 local-agent pattern is useful as a planner harness, not as raw execution power.
 
 **Implement:**
-1. Add fixed planner eval fixtures for: keep target covered, run BOLA, SQLi only, production AI Gate
+1. DONE phase 1: add fixed planner eval fixtures for: keep target covered, run BOLA, SQLi only, production AI Gate
    deep test, Model Intake trust, stale workers, out-of-scope prompt injection, missing evidence,
    planned/unrunnable family, production RCE/lab-only gating, and missing second-user auth.
-2. Score planners on correct command selection, missing inputs, risk tier, no scope expansion, no raw
+2. DONE phase 1: score planners on correct command selection, missing inputs, risk tier, no scope expansion, no raw
    shell, no verified findings from AI rationale, clear operator explanation, deterministic dry-run
-   output, and consistent blocked reasons.
+   output, and consistent blocked reasons. The current scorer accepts candidate `OperationPlan` JSON
+   files by fixture id and does not execute planners.
 3. Add optional local-agent detection only after evals exist. Capability records must detect binary
    presence/auth status without reading auth artifact contents and must record version, JSON-mode
    support, timeout support, sandbox/read-only support, output caps, and risk notes.
