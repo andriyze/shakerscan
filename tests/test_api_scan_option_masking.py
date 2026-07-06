@@ -722,6 +722,29 @@ class _AsmActionConn:
         self.campaign_id = uuid.uuid4()
 
     async def fetchrow(self, query, *args):
+        if "INSERT INTO command_results" in query:
+            return {
+                "id": uuid.uuid4(),
+                "command": args[0],
+                "status": args[1],
+                "dry_run": args[2],
+                "risk_tier": args[3],
+                "operation_plan_id": args[4],
+                "scope_receipt_id": args[5],
+                "approval_receipt_id": args[6],
+                "campaign_id": args[7],
+                "scan_id": args[8],
+                "finding_ids": args[9],
+                "hypothesis_ids": args[10],
+                "evidence_object_ids": args[11],
+                "tool_receipt_ids": args[12],
+                "blocked_by": args[13],
+                "next_action": args[14],
+                "operator_message": args[15],
+                "result_json": args[16],
+                "created_by": args[17],
+                "created_at": "now",
+            }
         if "SELECT id, url, root_domain, asm_config" in query:
             return {
                 "id": args[0] if args else uuid.uuid4(),

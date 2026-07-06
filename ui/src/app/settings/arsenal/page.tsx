@@ -12,6 +12,7 @@ import {
   getAgentDecisionTraces,
   getArsenalCommands,
   getArsenalContracts,
+  getCommandResults,
   generateAgentContextPackFromTarget,
   getOperationPlans,
   getArsenalTools,
@@ -26,6 +27,7 @@ import {
   type ArsenalCommandsResponse,
   type ArsenalContractDefinition,
   type ArsenalContractsResponse,
+  type CommandResult,
   type OperationPlan,
   type OperationPlanResponse,
   type ArsenalTool,
@@ -125,6 +127,49 @@ function CommandRow({ command }: { command: ArsenalCommand }) {
         {command.required_confirmations.length > 0 && <span>confirm: {command.required_confirmations.join(', ')}</span>}
         {command.evidence_contract.length > 0 && <span>evidence: {command.evidence_contract.slice(0, 3).join(', ')}</span>}
       </div>
+    </div>
+  )
+}
+
+function CommandResultRow({ result }: { result: CommandResult }) {
+  return (
+    <div className="rounded-md border border-gray-800 bg-gray-950 px-3 py-2">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="break-all font-mono text-sm text-white">{result.command}</span>
+            <Badge className={statusClass(result.status)}>{result.status}</Badge>
+            <Badge className={riskClass(result.risk_tier)}>{result.risk_tier}</Badge>
+            {result.dry_run && <Badge className={statusClass('dry_run')}>dry run</Badge>}
+          </div>
+          <p className="mt-1 break-words text-sm text-gray-400">{result.operator_message}</p>
+        </div>
+        {result.next_action ? (
+          <a
+            href={result.next_action}
+            className="rounded-md border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:border-blue-400 hover:text-white"
+          >
+            Open
+          </a>
+        ) : null}
+      </div>
+      <div className="mt-2 grid gap-2 text-xs text-gray-500 md:grid-cols-2">
+        <div>operation: <span className="break-all font-mono text-gray-300">{result.id}</span></div>
+        <div>scan: <span className="break-all font-mono text-gray-300">{result.scan_id || 'none'}</span></div>
+        <div>scope receipt: <span className="break-all font-mono text-gray-300">{result.scope_receipt_id || 'none'}</span></div>
+        <div>approval receipt: <span className="break-all font-mono text-gray-300">{result.approval_receipt_id || 'none'}</span></div>
+      </div>
+      {(result.finding_ids.length > 0 || result.blocked_by.length > 0) && (
+        <div className="mt-2 flex flex-wrap gap-1.5">
+          {result.finding_ids.slice(0, 4).map((id) => (
+            <Badge key={id} className="bg-gray-800 text-gray-300">finding {id.slice(0, 8)}</Badge>
+          ))}
+          {result.finding_ids.length > 4 && <Badge className="bg-gray-800 text-gray-300">+{result.finding_ids.length - 4}</Badge>}
+          {result.blocked_by.map((reason) => (
+            <Badge key={reason} className={statusClass('out_of_scope')}>{reason}</Badge>
+          ))}
+        </div>
+      )}
     </div>
   )
 }
@@ -287,6 +332,7 @@ export default function ArsenalSettingsPage() {
   const [planContextHash, setPlanContextHash] = useState('0'.repeat(64))
   const [planResult, setPlanResult] = useState<OperationPlanResponse | null>(null)
   const [recentPlans, setRecentPlans] = useState<OperationPlan[]>([])
+  const [recentCommandResults, setRecentCommandResults] = useState<CommandResult[]>([])
   const [planLoading, setPlanLoading] = useState(false)
   const [planError, setPlanError] = useState<string | null>(null)
   const [contextResult, setContextResult] = useState<AgentContextPackResponse | null>(null)
@@ -307,12 +353,13 @@ export default function ArsenalSettingsPage() {
     if (probeVersions) setProbing(true)
     else setLoading(true)
     try {
-      const [commandData, contractData, toolData, localAgentData, planData, contextData, traceData] = await Promise.all([
+      const [commandData, contractData, toolData, localAgentData, planData, commandResultData, contextData, traceData] = await Promise.all([
         getArsenalCommands(),
         getArsenalContracts(),
         getArsenalTools({ probeVersions }),
         getLocalAgents({ probeVersions }),
         getOperationPlans(5),
+        getCommandResults(5),
         getAgentContextPacks(5),
         getAgentDecisionTraces(5),
       ])
@@ -321,6 +368,7 @@ export default function ArsenalSettingsPage() {
       setTools(toolData)
       setLocalAgents(localAgentData)
       setRecentPlans(planData.operation_plans)
+      setRecentCommandResults(commandResultData.command_results)
       setRecentContextPacks(contextData.context_packs)
       setRecentDecisionTraces(traceData.decision_traces)
     } catch (err) {
@@ -816,6 +864,33 @@ export default function ArsenalSettingsPage() {
             </div>
           </div>
         </div>
+      </Card>
+
+      <Card className="p-4">
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <TerminalSquare className="h-4 w-4 text-cyan-300" aria-hidden="true" />
+            <h2 className="font-medium text-white">Command Result Audit</h2>
+          </div>
+          <Badge className="bg-gray-800 text-gray-300">read only</Badge>
+        </div>
+        <p className="mb-3 text-sm text-gray-400">
+          Recent queued or partial product actions with operation IDs, receipts, target refs, and next actions.
+        </p>
+        {loading ? (
+          <div className="space-y-3">
+            <Skeleton className="h-24" />
+            <Skeleton className="h-24" />
+          </div>
+        ) : recentCommandResults.length === 0 ? (
+          <EmptyState message="No command-result audit records yet." />
+        ) : (
+          <div className="grid gap-2">
+            {recentCommandResults.slice(0, 5).map((result) => (
+              <CommandResultRow key={result.id} result={result} />
+            ))}
+          </div>
+        )}
       </Card>
 
       <Card className="p-4">

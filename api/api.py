@@ -3779,6 +3779,7 @@ async def _queue_ai_target_scan(target_id: str, request: AITargetScanRequest) ->
     job_id = str(uuid.uuid4())
     scan_id = str(uuid.uuid4())
 
+    command_result: dict[str, Any] | None = None
     async with db_pool.acquire() as conn:
         target_row = await conn.fetchrow("SELECT * FROM ai_targets WHERE id = $1", uuid.UUID(target_id))
         if not target_row:
@@ -3841,6 +3842,25 @@ async def _queue_ai_target_scan(target_id: str, request: AITargetScanRequest) ->
             run_kind,
             f"ai_target:{target_id}",
         )
+        command_result = await _record_command_result(
+            conn,
+            command="ai_gate.scan",
+            status="queued",
+            risk_tier="active",
+            scan_id=scan_id,
+            scope_receipt_id=storage_options.get("scope_receipt_id"),
+            approval_receipt_id=storage_options.get("approval_receipt_id"),
+            operator_message=f"Queued AI Gate {request.scan_profile} scan for {target.get('name') or target['endpoint_url']}",
+            result_json={
+                "target": target["endpoint_url"],
+                "ai_target_id": target_id,
+                "job_id": job_id,
+                "probe_pack": request.probe_pack,
+                "scan_profile": request.scan_profile,
+                "environment": request.environment,
+            },
+            next_action=f"/scans/{scan_id}",
+        )
 
     job_data = {
         "job_id": job_id,
@@ -3866,6 +3886,8 @@ async def _queue_ai_target_scan(target_id: str, request: AITargetScanRequest) ->
     if storage_options.get("approval_receipt_id"):
         response["approval_receipt_id"] = storage_options.get("approval_receipt_id")
         response["scope_receipt_id"] = storage_options.get("scope_receipt_id")
+    if command_result:
+        response["operation_id"] = command_result["id"]
     return response
 
 
@@ -7270,6 +7292,23 @@ async def scan_model_intake(request: ModelIntakeScanRequest):
             json.dumps(options),
             f"model_artifact:{hashlib.sha256(artifact_ref.encode()).hexdigest()[:16]}",
         )
+        command_result = await _record_command_result(
+            conn,
+            command="model_intake.scan",
+            status="queued",
+            risk_tier="active",
+            scan_id=scan_id,
+            scope_receipt_id=options.get("scope_receipt_id"),
+            approval_receipt_id=options.get("approval_receipt_id"),
+            operator_message=f"Queued Model Intake scan for {_short_url_label(artifact_ref)}",
+            result_json={
+                "target": artifact_ref,
+                "scan_type": "model_intake",
+                "job_id": job_id,
+                "policy_profile": options.get("policy_profile"),
+            },
+            next_action=f"/scans/{scan_id}",
+        )
 
     job_data = {
         "job_id": job_id,
@@ -7293,6 +7332,8 @@ async def scan_model_intake(request: ModelIntakeScanRequest):
     if options.get("approval_receipt_id"):
         response["approval_receipt_id"] = options.get("approval_receipt_id")
         response["scope_receipt_id"] = options.get("scope_receipt_id")
+    if command_result:
+        response["operation_id"] = command_result["id"]
     return response
 
 
@@ -10338,6 +10379,7 @@ async def submit_scan(request: ScanRequest):
     )
 
     # Create or find target
+    command_result: dict[str, Any] | None = None
     async with db_pool.acquire() as conn:
         # Check if target exists
         target = await conn.fetchrow(
@@ -10376,6 +10418,23 @@ async def submit_scan(request: ScanRequest):
         """, uuid.UUID(scan_id), target_id, normalized_target, job_id,
              json.dumps(_attach_target_note(options_payload, request.target, target_note, scheme_inferred)),
              scan_type, scan_role)
+        command_result = await _record_command_result(
+            conn,
+            command="scan.submit",
+            status="queued",
+            risk_tier="active" if scan_type in ACTIVE_ENFORCED_SCAN_TYPES else "passive",
+            scan_id=scan_id,
+            scope_receipt_id=options_payload.get("scope_receipt_id"),
+            approval_receipt_id=options_payload.get("approval_receipt_id"),
+            operator_message=f"Queued {scan_type} scan for {normalized_target}",
+            result_json={
+                "target": normalized_target,
+                "scan_type": scan_type,
+                "job_id": job_id,
+                "scan_role": scan_role,
+            },
+            next_action=f"/scans/{scan_id}",
+        )
 
     # Queue the job
     job_data = {
@@ -10409,6 +10468,8 @@ async def submit_scan(request: ScanRequest):
     if options_payload.get("approval_receipt_id"):
         response["approval_receipt_id"] = options_payload.get("approval_receipt_id")
         response["scope_receipt_id"] = options_payload.get("scope_receipt_id")
+    if command_result:
+        response["operation_id"] = command_result["id"]
     # Surface warning if path/query was stripped
     if target_note:
         response['warning'] = target_note
@@ -11842,6 +11903,20 @@ def _public_operation_plan_row(row: Any) -> dict[str, Any]:
     return payload
 
 
+def _public_command_result_row(row: Any) -> dict[str, Any]:
+    payload = row_to_dict(row)
+    for key in (
+        "finding_ids",
+        "hypothesis_ids",
+        "evidence_object_ids",
+        "tool_receipt_ids",
+        "blocked_by",
+        "result_json",
+    ):
+        payload[key] = _decode_json_value(payload.get(key)) or ([] if key != "result_json" else {})
+    return payload
+
+
 def _public_agent_context_pack_row(row: Any) -> dict[str, Any]:
     payload = row_to_dict(row)
     for key in (
@@ -12474,6 +12549,70 @@ async def _persist_operation_plan(conn, req: OperationPlanRequest) -> dict[str, 
     }
 
 
+async def _record_command_result(
+    conn,
+    *,
+    command: str,
+    status: str,
+    risk_tier: str,
+    operator_message: str,
+    dry_run: bool = False,
+    operation_plan_id: str | uuid.UUID | None = None,
+    scope_receipt_id: str | None = None,
+    approval_receipt_id: str | uuid.UUID | None = None,
+    campaign_id: str | uuid.UUID | None = None,
+    scan_id: str | uuid.UUID | None = None,
+    finding_ids: list[str] | None = None,
+    hypothesis_ids: list[str] | None = None,
+    evidence_object_ids: list[str] | None = None,
+    tool_receipt_ids: list[str] | None = None,
+    blocked_by: list[str] | None = None,
+    next_action: str | None = None,
+    result_json: dict[str, Any] | None = None,
+    created_by: str | None = None,
+) -> dict[str, Any]:
+    def _uuid_value(value: str | uuid.UUID | None) -> uuid.UUID | None:
+        if not value:
+            return None
+        return value if isinstance(value, uuid.UUID) else uuid.UUID(str(value))
+
+    row = await conn.fetchrow(
+        """
+        INSERT INTO command_results (
+            command, status, dry_run, risk_tier, operation_plan_id,
+            scope_receipt_id, approval_receipt_id, campaign_id, scan_id,
+            finding_ids, hypothesis_ids, evidence_object_ids, tool_receipt_ids,
+            blocked_by, next_action, operator_message, result_json, created_by
+        ) VALUES (
+            $1,$2,$3,$4,$5,
+            $6,$7,$8,$9,
+            $10::jsonb,$11::jsonb,$12::jsonb,$13::jsonb,
+            $14::jsonb,$15,$16,$17::jsonb,$18
+        )
+        RETURNING *
+        """,
+        str(command or "").strip(),
+        status,
+        bool(dry_run),
+        risk_tier,
+        _uuid_value(operation_plan_id),
+        str(scope_receipt_id) if scope_receipt_id else None,
+        _uuid_value(approval_receipt_id),
+        _uuid_value(campaign_id),
+        _uuid_value(scan_id),
+        json.dumps(finding_ids or []),
+        json.dumps(hypothesis_ids or []),
+        json.dumps(evidence_object_ids or []),
+        json.dumps(tool_receipt_ids or []),
+        json.dumps(blocked_by or []),
+        next_action,
+        operator_message,
+        json.dumps(redact_sensitive(result_json or {}, redact_strings=True, scrub_text=True)),
+        created_by,
+    )
+    return _public_command_result_row(row)
+
+
 def _context_pack_target_scope(context_pack: dict[str, Any]) -> dict[str, Any]:
     target_summary = context_pack.get("target_summary") if isinstance(context_pack.get("target_summary"), dict) else {}
     url = str(target_summary.get("url") or "").strip()
@@ -12794,6 +12933,26 @@ async def arsenal_operation_plans(limit: int = Query(20, ge=1, le=100)):
         )
     return {
         "operation_plans": [_public_operation_plan_row(row) for row in rows],
+        "execution_enabled": False,
+        "count": len(rows),
+    }
+
+
+@app.get("/arsenal/command-results")
+async def arsenal_command_results(limit: int = Query(20, ge=1, le=100)):
+    """Read recent Command Arsenal audit records for queued/blocked product actions."""
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT *
+            FROM command_results
+            ORDER BY created_at DESC
+            LIMIT $1
+            """,
+            limit,
+        )
+    return {
+        "command_results": [_public_command_result_row(row) for row in rows],
         "execution_enabled": False,
         "count": len(rows),
     }
@@ -13842,6 +14001,25 @@ async def asm_test(target_id: str, request: AsmTestRequest = None):
             endpoint_filter=request.endpoint_filter,
             triggered_by="api",
         )
+        command_result = await _record_command_result(
+            conn,
+            command="asm.test",
+            status="queued",
+            risk_tier="credential" if _normalize_asm_check_family(request.check_family) in {"auth", "bola"} else "active",
+            campaign_id=enq.get("campaign_id"),
+            scan_id=enq.get("scan_id"),
+            scope_receipt_id=base_opts.get("scope_receipt_id"),
+            approval_receipt_id=base_opts.get("approval_receipt_id"),
+            operator_message=f"Queued ASM test batch for {target['url']}",
+            result_json={
+                "target_id": target_id,
+                "batch_size": request.batch_size,
+                "stale_days": request.stale_days,
+                "check_family": _normalize_asm_check_family(request.check_family) or "all",
+                "endpoint_filter": _validate_asm_endpoint_filter_value(request.endpoint_filter),
+            },
+            next_action=f"/scans/{enq['scan_id']}",
+        )
     return {
         "scan_id": enq["scan_id"], "job_id": enq["job_id"], "campaign_id": enq["campaign_id"], "status": "queued",
         "batch_size": request.batch_size,
@@ -13850,6 +14028,7 @@ async def asm_test(target_id: str, request: AsmTestRequest = None):
         "inventory_total": coverage["total"], "untested": coverage["untested"],
         "approval_receipt_id": base_opts.get("approval_receipt_id"),
         "scope_receipt_id": base_opts.get("scope_receipt_id"),
+        "operation_id": command_result["id"],
     }
 
 
@@ -13888,6 +14067,22 @@ async def asm_recon(target_id: str, request: AsmReconRequest = None):
             base_opts["budget_profile"] = request.budget_profile
         enq = await _enqueue_asm_recon(conn, r, target_id, target["url"], base_opts, triggered_by="api")
         await conn.execute("UPDATE targets SET asm_last_recon_at = NOW() WHERE id = $1", uuid.UUID(target_id))
+        command_result = await _record_command_result(
+            conn,
+            command="asm.recon",
+            status="queued",
+            risk_tier="passive",
+            campaign_id=enq.get("campaign_id"),
+            scan_id=enq.get("scan_id"),
+            scope_receipt_id=base_opts.get("scope_receipt_id"),
+            approval_receipt_id=base_opts.get("approval_receipt_id"),
+            operator_message=f"Queued ASM recon refresh for {target['url']}",
+            result_json={
+                "target_id": target_id,
+                "budget_profile": request.budget_profile,
+            },
+            next_action=f"/scans/{enq['scan_id']}",
+        )
     return {
         "action": "recon",
         "scan_id": enq["scan_id"],
@@ -13897,6 +14092,7 @@ async def asm_recon(target_id: str, request: AsmReconRequest = None):
         "reason": "Queued discovery refresh for the persistent ASM inventory",
         "approval_receipt_id": base_opts.get("approval_receipt_id"),
         "scope_receipt_id": base_opts.get("scope_receipt_id"),
+        "operation_id": command_result["id"],
     }
 
 
@@ -14015,6 +14211,23 @@ async def asm_improve(target_id: str, request: AsmImproveRequest = None):
         if rec["next_action"] == "recon":
             enq = await _enqueue_asm_recon(conn, r, target_id, target["url"], base_opts, triggered_by="improve")
             await conn.execute("UPDATE targets SET asm_last_recon_at = NOW() WHERE id = $1", uuid.UUID(target_id))
+            command_result = await _record_command_result(
+                conn,
+                command="asm.improve",
+                status="queued",
+                risk_tier="passive",
+                campaign_id=enq.get("campaign_id"),
+                scan_id=enq.get("scan_id"),
+                scope_receipt_id=base_opts.get("scope_receipt_id"),
+                approval_receipt_id=base_opts.get("approval_receipt_id"),
+                operator_message=f"Queued ASM improve recon for {target['url']}",
+                result_json={
+                    "target_id": target_id,
+                    "selected_action": "recon",
+                    "recommendation": rec,
+                },
+                next_action=f"/scans/{enq['scan_id']}",
+            )
             return {
                 "action": "recon",
                 "scan_id": enq["scan_id"],
@@ -14026,6 +14239,7 @@ async def asm_improve(target_id: str, request: AsmImproveRequest = None):
                 "scheduler_state": scheduler_state,
                 "approval_receipt_id": base_opts.get("approval_receipt_id"),
                 "scope_receipt_id": base_opts.get("scope_receipt_id"),
+                "operation_id": command_result["id"],
             }
 
         batch_size = request.batch_size if request.batch_size is not None else cfg["batch_size"]
@@ -14040,6 +14254,27 @@ async def asm_improve(target_id: str, request: AsmImproveRequest = None):
             triggered_by="improve",
         )
         await conn.execute("UPDATE targets SET asm_last_test_at = NOW() WHERE id = $1", uuid.UUID(target_id))
+        command_result = await _record_command_result(
+            conn,
+            command="asm.improve",
+            status="queued",
+            risk_tier="credential" if _normalize_asm_check_family(request.check_family) in {"auth", "bola"} else "active",
+            campaign_id=enq.get("campaign_id"),
+            scan_id=enq.get("scan_id"),
+            scope_receipt_id=base_opts.get("scope_receipt_id"),
+            approval_receipt_id=base_opts.get("approval_receipt_id"),
+            operator_message=f"Queued ASM improve test batch for {target['url']}",
+            result_json={
+                "target_id": target_id,
+                "selected_action": "test",
+                "batch_size": batch_size,
+                "stale_days": stale_days,
+                "check_family": _normalize_asm_check_family(request.check_family) or "all",
+                "endpoint_filter": endpoint_filter,
+                "recommendation": rec,
+            },
+            next_action=f"/scans/{enq['scan_id']}",
+        )
     return {
         "action": "test",
         "scan_id": enq["scan_id"],
@@ -14054,6 +14289,7 @@ async def asm_improve(target_id: str, request: AsmImproveRequest = None):
         "scheduler_state": scheduler_state,
         "approval_receipt_id": base_opts.get("approval_receipt_id"),
         "scope_receipt_id": base_opts.get("scope_receipt_id"),
+        "operation_id": command_result["id"],
     }
 
 
@@ -15012,7 +15248,7 @@ async def retest_finding(
                 verification_id=retest_id,
                 finding_id=finding_data["id"],
                 error_message=f"Retest job payload failed contract validation: {reason}",
-            )
+        )
         raise HTTPException(
             status_code=500,
             detail={
@@ -15020,6 +15256,27 @@ async def retest_finding(
                 "message": "Retest job payload failed contract validation",
                 "reason": reason,
             },
+        )
+    async with db_pool.acquire() as conn:
+        command_result = await _record_command_result(
+            conn,
+            command="finding.retest",
+            status="retest_scheduled",
+            risk_tier="active",
+            finding_ids=[str(finding_data["id"])],
+            scope_receipt_id=approval_context.get("scope_receipt_id") if approval_context else None,
+            approval_receipt_id=approval_context.get("approval_receipt_id") if approval_context else None,
+            operator_message=f"Queued retest for finding {finding_data.get('title') or finding_data['id']}",
+            result_json={
+                "finding_id": str(finding_data["id"]),
+                "retest_id": str(retest_id),
+                "job_id": job_id,
+                "mode": mode or "tiered",
+                "finding_type": retest_inputs.get("finding_type"),
+                "target_url": retest_inputs.get("target_url"),
+            },
+            next_action=f"/findings/{finding_data['id']}",
+            created_by=request.requested_by or "api",
         )
     try:
         r.rpush(RETEST_QUEUE_NAME, json.dumps(job_data))
@@ -15058,6 +15315,7 @@ async def retest_finding(
         "replay_commands": build_replay_commands(retest_inputs),
         "approval_receipt_id": approval_context.get("approval_receipt_id") if approval_context else None,
         "scope_receipt_id": approval_context.get("scope_receipt_id") if approval_context else None,
+        "operation_id": command_result["id"],
     }
 
 
@@ -15194,6 +15452,29 @@ async def retest_ai_finding(finding_id: str, request: AIFindingRetestRequest | N
                 updated_at = NOW()
             WHERE id = $1
         """, finding_data["id"])
+        command_result = await _record_command_result(
+            conn,
+            command="ai_gate.finding_replay",
+            status="queued",
+            risk_tier="active",
+            scan_id=scan_id,
+            finding_ids=[str(finding_data["id"])],
+            scope_receipt_id=storage_options.get("scope_receipt_id"),
+            approval_receipt_id=storage_options.get("approval_receipt_id"),
+            operator_message=f"Queued AI Gate replay for finding {finding_data.get('title') or finding_data['id']}",
+            result_json={
+                "finding_id": str(finding_data["id"]),
+                "verification_id": str(verification_id),
+                "ai_target_id": str(finding_data["ai_target_id"]),
+                "scan_id": scan_id,
+                "job_id": job_id,
+                "mode": request.mode,
+                "probe_id": replay_plan.get("probe_id"),
+                "probe_family": replay_plan.get("probe_family"),
+            },
+            next_action=f"/scans/{scan_id}",
+            created_by=request.requested_by or "api",
+        )
 
     job_data = {
         "job_id": job_id,
@@ -15241,6 +15522,7 @@ async def retest_ai_finding(finding_id: str, request: AIFindingRetestRequest | N
     if storage_options.get("approval_receipt_id"):
         response["approval_receipt_id"] = storage_options.get("approval_receipt_id")
         response["scope_receipt_id"] = storage_options.get("scope_receipt_id")
+    response["operation_id"] = command_result["id"]
     return response
 
 
@@ -15408,6 +15690,28 @@ async def replay_ai_scan(scan_id: str, request: AIScanReplayRequest | None = Non
             run_kind,
             f"ai_scan_replay:{scan_id}",
         )
+        command_result = await _record_command_result(
+            conn,
+            command="ai_gate.campaign_replay",
+            status="queued",
+            risk_tier="active",
+            scan_id=new_scan_id,
+            scope_receipt_id=storage_options.get("scope_receipt_id"),
+            approval_receipt_id=storage_options.get("approval_receipt_id"),
+            operator_message=f"Queued AI Gate campaign replay for {target['endpoint_url']}",
+            result_json={
+                "source_scan_id": scan_id,
+                "queued_scan_id": new_scan_id,
+                "job_id": job_id,
+                "ai_target_id": str(original_scan["ai_target_id"]),
+                "mode": replay_plan.get("mode"),
+                "probe_ids": replay_plan.get("probe_ids") or [],
+                "probe_family": replay_plan.get("probe_family"),
+                "transcript": replay_plan.get("transcript"),
+            },
+            next_action=f"/scans/{new_scan_id}",
+            created_by=request.requested_by or "api",
+        )
 
     job_data = {
         "job_id": job_id,
@@ -15452,6 +15756,7 @@ async def replay_ai_scan(scan_id: str, request: AIScanReplayRequest | None = Non
     if storage_options.get("approval_receipt_id"):
         response["approval_receipt_id"] = storage_options.get("approval_receipt_id")
         response["scope_receipt_id"] = storage_options.get("scope_receipt_id")
+    response["operation_id"] = command_result["id"]
     return response
 
 
@@ -15738,7 +16043,55 @@ async def bulk_retest_findings(request: FindingsBulkRetestRequest):
             if not queued:
                 raise HTTPException(status_code=503, detail=f"Retest queue unavailable: {queue_error or 'unknown error'}")
 
-    return {
+        command_result = None
+        if queued:
+            first_receipt = next(
+                (
+                    item
+                    for item in queued
+                    if item.get("approval_receipt_id") or item.get("scope_receipt_id")
+                ),
+                {},
+            )
+            command_result = await _record_command_result(
+                conn,
+                command="finding.bulk_retest",
+                status="partial" if skipped else "retest_scheduled",
+                risk_tier="active",
+                finding_ids=[item["finding_id"] for item in queued],
+                scope_receipt_id=first_receipt.get("scope_receipt_id"),
+                approval_receipt_id=first_receipt.get("approval_receipt_id"),
+                blocked_by=sorted({item["reason"] for item in skipped if item.get("reason")}),
+                operator_message=f"Queued {len(queued)} finding retest(s); skipped {len(skipped)}",
+                result_json={
+                    "mode": request.mode or "tiered",
+                    "queued_count": len(queued),
+                    "skipped_count": len(skipped),
+                    "filters": {
+                        "severity": request.severity,
+                        "status": request.status,
+                        "target_id": request.target_id,
+                        "scan_id": request.scan_id,
+                        "root_domain": request.root_domain,
+                        "search": request.search,
+                        "limit": request.limit,
+                    },
+                    "queued_retests": [
+                        {
+                            "finding_id": item["finding_id"],
+                            "retest_id": item["retest_id"],
+                            "job_id": item["job_id"],
+                            "finding_type": item["finding_type"],
+                        }
+                        for item in queued
+                    ],
+                    "skipped": skipped,
+                },
+                next_action="/findings",
+                created_by=request.requested_by or "api",
+            )
+
+    response = {
         "status": "queued",
         "mode": request.mode or "tiered",
         "queued_count": len(queued),
@@ -15746,6 +16099,9 @@ async def bulk_retest_findings(request: FindingsBulkRetestRequest):
         "queued": queued,
         "skipped": skipped,
     }
+    if command_result:
+        response["operation_id"] = command_result["id"]
+    return response
 
 
 @app.patch("/findings/{finding_id:path}")

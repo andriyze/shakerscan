@@ -1289,6 +1289,90 @@ def test_operation_plan_canonicalization_redacts_parameters_and_normalizes_lists
     assert canonical["target_scope"]["authorization"] != "Bearer secret"
 
 
+def test_public_command_result_row_decodes_json_fields():
+    row = {
+        "id": uuid.uuid4(),
+        "command": "scan.submit",
+        "status": "queued",
+        "dry_run": False,
+        "risk_tier": "active",
+        "finding_ids": json.dumps(["finding-1"]),
+        "hypothesis_ids": json.dumps([]),
+        "evidence_object_ids": json.dumps(["evidence-1"]),
+        "tool_receipt_ids": json.dumps([]),
+        "blocked_by": json.dumps(["worker_stale"]),
+        "result_json": json.dumps({"scan_id": "scan-1"}),
+    }
+
+    public = api_module._public_command_result_row(row)
+
+    assert public["finding_ids"] == ["finding-1"]
+    assert public["evidence_object_ids"] == ["evidence-1"]
+    assert public["blocked_by"] == ["worker_stale"]
+    assert public["result_json"] == {"scan_id": "scan-1"}
+
+
+def test_record_command_result_redacts_result_json_and_returns_public_row():
+    captured: dict[str, object] = {}
+
+    class _FakeConn:
+        async def fetchrow(self, query, *args):
+            captured["query"] = query
+            captured["args"] = args
+            return {
+                "id": uuid.uuid4(),
+                "command": args[0],
+                "status": args[1],
+                "dry_run": args[2],
+                "risk_tier": args[3],
+                "operation_plan_id": args[4],
+                "scope_receipt_id": args[5],
+                "approval_receipt_id": args[6],
+                "campaign_id": args[7],
+                "scan_id": args[8],
+                "finding_ids": args[9],
+                "hypothesis_ids": args[10],
+                "evidence_object_ids": args[11],
+                "tool_receipt_ids": args[12],
+                "blocked_by": args[13],
+                "next_action": args[14],
+                "operator_message": args[15],
+                "result_json": args[16],
+                "created_by": args[17],
+                "created_at": "now",
+            }
+
+    scan_id = uuid.uuid4()
+    approval_id = uuid.uuid4()
+    result = asyncio.run(api_module._record_command_result(
+        _FakeConn(),
+        command="scan.submit",
+        status="queued",
+        risk_tier="active",
+        scan_id=scan_id,
+        approval_receipt_id=approval_id,
+        scope_receipt_id="scope-1",
+        finding_ids=["finding-1"],
+        blocked_by=["none"],
+        operator_message="Queued scan",
+        result_json={"authorization": "Bearer secret-token", "scan_id": str(scan_id)},
+        next_action=f"/scans/{scan_id}",
+        created_by="pytest",
+    ))
+
+    assert "INSERT INTO command_results" in str(captured["query"])
+    assert result["command"] == "scan.submit"
+    assert result["status"] == "queued"
+    assert result["scan_id"] == str(scan_id)
+    assert result["approval_receipt_id"] == str(approval_id)
+    assert result["finding_ids"] == ["finding-1"]
+    assert result["blocked_by"] == ["none"]
+    assert result["next_action"] == f"/scans/{scan_id}"
+    assert result["created_by"] == "pytest"
+    assert result["result_json"]["authorization"] != "Bearer secret-token"
+    assert result["result_json"]["scan_id"] == str(scan_id)
+
+
 def test_agent_context_pack_canonicalization_redacts_and_normalizes_commands():
     pack = api_module.AgentContextPackRequest(
         context_hash="B" * 64,

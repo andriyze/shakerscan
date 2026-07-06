@@ -146,6 +146,18 @@ def test_gated_commands_advertise_approval_receipts():
         assert "approval_receipt_id" in commands[name]["parameters_schema"]
 
 
+def test_command_result_list_is_read_only_command():
+    payload = arsenal.describe_commands()
+    commands = {item["name"]: item for item in payload["commands"]}
+
+    cmd = commands["command_result.list"]
+    assert cmd["status"] == "read_only"
+    assert cmd["risk_tier"] == "read_only"
+    assert cmd["method"] == "GET"
+    assert cmd["path"] == "/arsenal/command-results"
+    assert "command_result_rows" in cmd["evidence_contract"]
+
+
 def test_mission_contract_catalog_is_contract_only():
     payload = arsenal.describe_contracts()
 
@@ -158,6 +170,7 @@ def test_mission_contract_catalog_is_contract_only():
         "AgentDecisionTrace",
         "ScopeReceipt",
         "ApprovalReceipt",
+        "CommandResult",
         "ToolReceipt",
         "CampaignAction",
         "Hypothesis",
@@ -176,6 +189,7 @@ def test_contracts_encode_planner_and_secret_boundaries():
     assert "chain_of_thought" in contracts["AgentDecisionTrace"]["forbidden_fields"]
     assert "raw_private_key" in contracts["AgentDecisionTrace"]["forbidden_fields"]
     assert "redirect_out_of_scope" in contracts["ScopeReceipt"]["fields"]["checks"]
+    assert "queued command results cannot mark findings verified" in contracts["CommandResult"]["invariants"]
     assert "parser failure cannot create verified findings" in contracts["ToolReceipt"]["invariants"]
     assert "hypotheses cannot directly alter finding proof_state or severity" in contracts["Hypothesis"]["invariants"]
 

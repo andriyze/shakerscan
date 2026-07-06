@@ -1246,6 +1246,46 @@ async def run_schema_migrations(pool) -> None:
                 ON operation_plans(scope_receipt_id, created_at DESC) WHERE scope_receipt_id IS NOT NULL
             """)
             await conn.execute("""
+                CREATE TABLE IF NOT EXISTS command_results (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    command TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    dry_run BOOLEAN NOT NULL DEFAULT false,
+                    risk_tier TEXT NOT NULL DEFAULT 'read_only',
+                    operation_plan_id UUID REFERENCES operation_plans(id) ON DELETE SET NULL,
+                    scope_receipt_id TEXT REFERENCES scope_receipts(id) ON DELETE SET NULL,
+                    approval_receipt_id UUID REFERENCES approval_receipts(id) ON DELETE SET NULL,
+                    campaign_id UUID REFERENCES scan_campaigns(id) ON DELETE SET NULL,
+                    scan_id UUID REFERENCES scans(id) ON DELETE SET NULL,
+                    finding_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    hypothesis_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    evidence_object_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    tool_receipt_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    blocked_by JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    next_action TEXT,
+                    operator_message TEXT NOT NULL,
+                    result_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    created_by TEXT,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    CONSTRAINT command_results_status_check
+                        CHECK (status IN ('planned','blocked','approval_required','approved','queued','running','completed','partial','degraded','failed','cancelled','evidence_bound','retest_scheduled','refuter_requested')),
+                    CONSTRAINT command_results_risk_check
+                        CHECK (risk_tier IN ('read_only','passive','active','intrusive','credential','dangerous'))
+                )
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_command_results_created_at
+                ON command_results(created_at DESC)
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_command_results_scan
+                ON command_results(scan_id, created_at DESC) WHERE scan_id IS NOT NULL
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_command_results_campaign
+                ON command_results(campaign_id, created_at DESC) WHERE campaign_id IS NOT NULL
+            """)
+            await conn.execute("""
                 CREATE TABLE IF NOT EXISTS agent_context_packs (
                     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                     context_version TEXT NOT NULL,
