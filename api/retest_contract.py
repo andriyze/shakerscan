@@ -1825,6 +1825,37 @@ async def run_schema_migrations(pool) -> None:
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_evidence_objects_finding ON evidence_objects(finding_id)")
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_evidence_objects_scan ON evidence_objects(scan_id)")
             await conn.execute("""
+                CREATE TABLE IF NOT EXISTS export_events (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    export_kind TEXT NOT NULL,
+                    command TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'completed',
+                    risk_tier TEXT NOT NULL DEFAULT 'read_only',
+                    target_id UUID REFERENCES targets(id) ON DELETE SET NULL,
+                    scan_id UUID,
+                    finding_id UUID REFERENCES findings(id) ON DELETE SET NULL,
+                    bundle_hash TEXT,
+                    manifest_hash TEXT,
+                    object_count INTEGER NOT NULL DEFAULT 0,
+                    filters JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    evidence_object_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    finding_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    scan_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    replay_plan JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    operator_message TEXT,
+                    created_by TEXT,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    CONSTRAINT export_events_status_check
+                        CHECK (status IN ('completed','partial','degraded','failed')),
+                    CONSTRAINT export_events_risk_check
+                        CHECK (risk_tier IN ('read_only','passive','active','intrusive','credential','dangerous'))
+                )
+            """)
+            await conn.execute("CREATE INDEX IF NOT EXISTS idx_export_events_created_at ON export_events(created_at DESC)")
+            await conn.execute("CREATE INDEX IF NOT EXISTS idx_export_events_target ON export_events(target_id, created_at DESC) WHERE target_id IS NOT NULL")
+            await conn.execute("CREATE INDEX IF NOT EXISTS idx_export_events_scan ON export_events(scan_id, created_at DESC) WHERE scan_id IS NOT NULL")
+            await conn.execute("CREATE INDEX IF NOT EXISTS idx_export_events_finding ON export_events(finding_id, created_at DESC) WHERE finding_id IS NOT NULL")
+            await conn.execute("""
                 CREATE TABLE IF NOT EXISTS tool_receipts (
                     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                     tool_name TEXT NOT NULL,

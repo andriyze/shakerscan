@@ -884,7 +884,7 @@ COMMANDS: tuple[ArsenalCommand, ...] = (
     ArsenalCommand(
         name="mission.timeline",
         family="governance",
-        description="Read the cross-product mission timeline: command results, campaign actions, recent scans, evidence bindings, refuter reviews, and upcoming schedules.",
+        description="Read the cross-product mission timeline: command results, campaign actions, recent scans, evidence bindings, export events, refuter reviews, and upcoming schedules.",
         status="read_only",
         risk_tier="read_only",
         method="GET",
@@ -898,11 +898,13 @@ COMMANDS: tuple[ArsenalCommand, ...] = (
             "include_schedules": {"type": "boolean"},
             "include_evidence": {"type": "boolean"},
             "include_refuters": {"type": "boolean"},
+            "include_exports": {"type": "boolean"},
         },
         evidence_contract=(
             "timeline_events",
             "campaign_action_rows",
             "evidence_instance_events",
+            "export_events",
             "refuter_review_events",
             "upcoming",
             "statuses",

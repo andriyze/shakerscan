@@ -12682,6 +12682,19 @@ def _public_campaign_action_row(row: Any) -> dict[str, Any]:
     return payload
 
 
+def _public_export_event_row(row: Any) -> dict[str, Any]:
+    payload = row_to_dict(row)
+    for key in (
+        "filters",
+        "evidence_object_ids",
+        "finding_ids",
+        "scan_ids",
+        "replay_plan",
+    ):
+        payload[key] = _decode_json_value(payload.get(key)) or ([] if key.endswith("_ids") else {})
+    return payload
+
+
 def _public_hypothesis_row(row: Any) -> dict[str, Any]:
     payload = row_to_dict(row)
     for key in (
@@ -15874,6 +15887,46 @@ def _refuter_review_timeline_event(row: Any) -> dict[str, Any]:
     }
 
 
+def _export_event_timeline_event(row: Any) -> dict[str, Any]:
+    r = _public_export_event_row(row)
+    target_id = r.get("target_id") or r.get("scan_target_id") or r.get("finding_target_id")
+    scan_ids = [str(item) for item in (r.get("scan_ids") or []) if item]
+    finding_ids = [str(item) for item in (r.get("finding_ids") or []) if item]
+    evidence_ids = [str(item) for item in (r.get("evidence_object_ids") or []) if item]
+    primary_scan_id = str(r["scan_id"]) if r.get("scan_id") else (scan_ids[0] if scan_ids else None)
+    primary_finding_id = str(r["finding_id"]) if r.get("finding_id") else (finding_ids[0] if finding_ids else None)
+    if primary_finding_id and primary_finding_id not in finding_ids:
+        finding_ids = [primary_finding_id, *finding_ids]
+    replay_plan = r.get("replay_plan") or {}
+    return {
+        "event_id": f"export_event:{r.get('id')}",
+        "kind": "export_event",
+        "command": r.get("command") or "evidence.export_bundle",
+        "action_name": r.get("export_kind") or "export",
+        "status": r.get("status") or "completed",
+        "risk_tier": r.get("risk_tier") or "read_only",
+        "target_id": str(target_id) if target_id else None,
+        "target_url": r.get("scan_target_url"),
+        "scan_id": primary_scan_id,
+        "finding_ids": finding_ids,
+        "evidence_object_ids": evidence_ids,
+        "tool_receipt_ids": [],
+        "blocked_by": [],
+        "bundle_hash": r.get("bundle_hash"),
+        "manifest_hash": r.get("manifest_hash"),
+        "object_count": r.get("object_count") or 0,
+        "content_included": False,
+        "replay_paths": [
+            str(item.get("api_path"))
+            for item in (replay_plan.get("evidence_object_reads") or [])
+            if isinstance(item, dict) and item.get("api_path")
+        ],
+        "next_action": "/settings/arsenal?tab=timeline",
+        "operator_message": r.get("operator_message") or "Content-free export recorded",
+        "created_at": r.get("created_at"),
+    }
+
+
 @app.get("/timeline")
 async def mission_timeline(
     limit: int = Query(50, ge=1, le=200),
@@ -15883,6 +15936,7 @@ async def mission_timeline(
     include_schedules: bool = Query(True, description="Include upcoming recurring schedules."),
     include_evidence: bool = Query(True, description="Include evidence-instance binding events."),
     include_refuters: bool = Query(True, description="Include refuter review/signal events."),
+    include_exports: bool = Query(True, description="Include durable content-free export events."),
 ):
     """Read-only cross-product mission timeline.
 
@@ -15992,6 +16046,25 @@ async def mission_timeline(
                 target_uuid,
             )
             events.extend(_refuter_review_timeline_event(row) for row in refuter_rows)
+
+        if include_exports:
+            export_rows = await conn.fetch(
+                """
+                SELECT ee.*,
+                       s.target_id AS scan_target_id,
+                       s.target_url AS scan_target_url,
+                       f.target_id AS finding_target_id
+                FROM export_events ee
+                LEFT JOIN scans s ON ee.scan_id = s.id
+                LEFT JOIN findings f ON ee.finding_id = f.id
+                WHERE ($2::uuid IS NULL OR ee.target_id = $2 OR s.target_id = $2 OR f.target_id = $2)
+                ORDER BY ee.created_at DESC
+                LIMIT $1
+                """,
+                limit,
+                target_uuid,
+            )
+            events.extend(_export_event_timeline_event(row) for row in export_rows)
 
         upcoming: list[dict[str, Any]] = []
         if include_schedules:
@@ -18290,6 +18363,67 @@ def _evidence_export_bundle_descriptor(
     }
 
 
+async def _record_export_event(
+    conn,
+    *,
+    export_kind: str,
+    command: str,
+    bundle: dict[str, Any],
+    filters: Optional[dict[str, Any]] = None,
+    target_id: str | uuid.UUID | None = None,
+    created_by: str | None = "api",
+) -> dict[str, Any] | None:
+    """Best-effort durable audit row for content-free exports.
+
+    Export events are read-side audit artifacts. They intentionally carry only
+    hashes, IDs, filters, and replay/read paths; evidence bodies and transcripts
+    stay out of the timeline.
+    """
+    try:
+        evidence_reads = (bundle.get("replay_plan") or {}).get("evidence_object_reads") or []
+        evidence_ids = [
+            str(item.get("evidence_object_id"))
+            for item in evidence_reads
+            if isinstance(item, dict) and item.get("evidence_object_id")
+        ]
+        finding_ids = [str(item) for item in (bundle.get("finding_ids") or []) if item]
+        scan_ids = [str(item) for item in (bundle.get("scan_ids") or []) if item]
+        row = await conn.fetchrow(
+            """
+            INSERT INTO export_events (
+                export_kind, command, status, risk_tier, target_id, scan_id,
+                finding_id, bundle_hash, manifest_hash, object_count, filters,
+                evidence_object_ids, finding_ids, scan_ids, replay_plan,
+                operator_message, created_by
+            ) VALUES (
+                $1,$2,'completed','read_only',$3,$4,
+                $5,$6,$7,$8,$9::jsonb,
+                $10::jsonb,$11::jsonb,$12::jsonb,$13::jsonb,
+                $14,$15
+            )
+            RETURNING *
+            """,
+            export_kind,
+            command,
+            _optional_uuid(target_id),
+            _optional_uuid(scan_ids[0]) if scan_ids else None,
+            _optional_uuid(finding_ids[0]) if finding_ids else None,
+            bundle.get("bundle_hash") or bundle.get("export_hash"),
+            bundle.get("manifest_hash"),
+            int(bundle.get("object_count") or 0),
+            json.dumps(filters or bundle.get("filters") or {}),
+            json.dumps(evidence_ids),
+            json.dumps(finding_ids),
+            json.dumps(scan_ids),
+            json.dumps(redact_sensitive(bundle.get("replay_plan") or {}, redact_strings=True, scrub_text=True)),
+            f"Recorded content-free {export_kind} export",
+            created_by,
+        )
+        return _public_export_event_row(row)
+    except Exception:
+        return None
+
+
 def _evidence_retention_candidate(
     row: Any,
     *,
@@ -18501,7 +18635,17 @@ async def evidence_export_bundle(
     }
     manifest = _evidence_export_manifest(rows)
     manifest["filters"] = filters
-    return _evidence_export_bundle_descriptor(manifest, filters=filters)
+    bundle = _evidence_export_bundle_descriptor(manifest, filters=filters)
+    async with db_pool.acquire() as conn:
+        bundle["export_event"] = await _record_export_event(
+            conn,
+            export_kind="evidence_export_bundle",
+            command="evidence.export_bundle",
+            bundle=bundle,
+            filters=filters,
+            created_by="api",
+        )
+    return bundle
 
 
 @app.post("/evidence/retention/sweep")

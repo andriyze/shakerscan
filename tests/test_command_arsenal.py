@@ -293,8 +293,10 @@ def test_mission_timeline_is_read_only_command():
     assert cmd["path"] == "/timeline"
     assert "timeline_events" in cmd["evidence_contract"]
     assert "evidence_instance_events" in cmd["evidence_contract"]
+    assert "export_events" in cmd["evidence_contract"]
     assert "refuter_review_events" in cmd["evidence_contract"]
     assert cmd["parameters_schema"]["include_evidence"]["type"] == "boolean"
+    assert cmd["parameters_schema"]["include_exports"]["type"] == "boolean"
     assert cmd["parameters_schema"]["include_refuters"]["type"] == "boolean"
 
 

@@ -1964,6 +1964,71 @@ def test_evidence_export_bundle_descriptor_is_content_free_and_replayable(monkey
     assert "content" not in replay["evidence_object_reads"][0]
 
 
+def test_record_export_event_persists_only_content_free_refs():
+    finding_id = uuid.uuid4()
+    scan_id = uuid.uuid4()
+    evidence_id = uuid.uuid4()
+    captured = {}
+
+    class _FakeConn:
+        async def fetchrow(self, query, *args):
+            captured["query"] = query
+            captured["args"] = args
+            return {
+                "id": uuid.uuid4(),
+                "export_kind": args[0],
+                "command": args[1],
+                "status": "completed",
+                "risk_tier": "read_only",
+                "target_id": args[2],
+                "scan_id": args[3],
+                "finding_id": args[4],
+                "bundle_hash": args[5],
+                "manifest_hash": args[6],
+                "object_count": args[7],
+                "filters": args[8],
+                "evidence_object_ids": args[9],
+                "finding_ids": args[10],
+                "scan_ids": args[11],
+                "replay_plan": args[12],
+                "operator_message": args[13],
+                "created_by": args[14],
+                "created_at": datetime(2026, 7, 6, tzinfo=timezone.utc),
+            }
+
+    bundle = {
+        "bundle_hash": "b" * 64,
+        "manifest_hash": "m" * 64,
+        "object_count": 1,
+        "finding_ids": [str(finding_id)],
+        "scan_ids": [str(scan_id)],
+        "replay_plan": {
+            "content_included": False,
+            "evidence_object_reads": [
+                {"evidence_object_id": str(evidence_id), "api_path": f"/evidence/{evidence_id}"}
+            ],
+        },
+    }
+
+    event = asyncio.run(api_module._record_export_event(
+        _FakeConn(),
+        export_kind="evidence_export_bundle",
+        command="evidence.export_bundle",
+        bundle=bundle,
+        filters={"scan_id": str(scan_id)},
+    ))
+
+    assert "INSERT INTO export_events" in captured["query"]
+    assert event["export_kind"] == "evidence_export_bundle"
+    assert event["bundle_hash"] == "b" * 64
+    assert event["evidence_object_ids"] == [str(evidence_id)]
+    assert event["finding_ids"] == [str(finding_id)]
+    assert event["scan_ids"] == [str(scan_id)]
+    serialized = json.dumps(event).lower()
+    assert '"content"' not in serialized
+    assert '"transcript"' not in serialized
+
+
 def test_evidence_retention_candidates_skip_legal_hold_and_use_policy_days():
     now = datetime(2026, 7, 6, tzinfo=timezone.utc)
     old = datetime(2025, 1, 1, tzinfo=timezone.utc)
@@ -3179,14 +3244,58 @@ def test_refuter_review_timeline_event_is_refuter_requested_without_mutation():
     assert ev["next_action"] == "/findings/22222222-2222-4222-8222-222222222222"
 
 
+def test_export_event_timeline_event_is_content_free_export_record():
+    row = {
+        "id": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+        "export_kind": "evidence_export_bundle",
+        "command": "evidence.export_bundle",
+        "status": "completed",
+        "risk_tier": "read_only",
+        "target_id": None,
+        "scan_id": "44444444-4444-4444-8444-444444444444",
+        "finding_id": "22222222-2222-4222-8222-222222222222",
+        "bundle_hash": "b" * 64,
+        "manifest_hash": "m" * 64,
+        "object_count": 1,
+        "filters": json.dumps({"scan_id": "44444444-4444-4444-8444-444444444444"}),
+        "evidence_object_ids": json.dumps(["33333333-3333-4333-8333-333333333333"]),
+        "finding_ids": json.dumps(["22222222-2222-4222-8222-222222222222"]),
+        "scan_ids": json.dumps(["44444444-4444-4444-8444-444444444444"]),
+        "replay_plan": json.dumps({
+            "content_included": False,
+            "evidence_object_reads": [
+                {"evidence_object_id": "33333333-3333-4333-8333-333333333333", "api_path": "/evidence/33333333-3333-4333-8333-333333333333"}
+            ],
+        }),
+        "operator_message": "Recorded content-free evidence_export_bundle export",
+        "created_at": datetime(2026, 7, 6, 9, tzinfo=timezone.utc),
+        "scan_target_id": "99999999-9999-4999-8999-999999999999",
+        "scan_target_url": "https://app.example.com",
+        "finding_target_id": None,
+    }
+
+    ev = api_module._export_event_timeline_event(row)
+
+    assert ev["kind"] == "export_event"
+    assert ev["status"] == "completed"
+    assert ev["risk_tier"] == "read_only"
+    assert ev["target_id"] == "99999999-9999-4999-8999-999999999999"
+    assert ev["scan_id"] == "44444444-4444-4444-8444-444444444444"
+    assert ev["evidence_object_ids"] == ["33333333-3333-4333-8333-333333333333"]
+    assert ev["bundle_hash"] == "b" * 64
+    assert ev["content_included"] is False
+    assert ev["replay_paths"] == ["/evidence/33333333-3333-4333-8333-333333333333"]
+
+
 class _TimelinePool:
-    def __init__(self, cr_rows, scan_rows, schedule_rows, action_rows=None, evidence_rows=None, refuter_rows=None):
+    def __init__(self, cr_rows, scan_rows, schedule_rows, action_rows=None, evidence_rows=None, refuter_rows=None, export_rows=None):
         self._cr = cr_rows
         self._scans = scan_rows
         self._schedules = schedule_rows
         self._actions = action_rows or []
         self._evidence = evidence_rows or []
         self._refuters = refuter_rows or []
+        self._exports = export_rows or []
 
     def acquire(self):
         pool = self
@@ -3204,6 +3313,8 @@ class _TimelinePool:
                             return pool._evidence
                         if "FROM refuter_reviews rr" in query:
                             return pool._refuters
+                        if "FROM export_events ee" in query:
+                            return pool._exports
                         if "FROM campaign_actions ca" in query:
                             return pool._actions
                         if "FROM scans s" in query:
@@ -3274,10 +3385,40 @@ def test_mission_timeline_merges_sorts_and_reports_upcoming(monkeypatch):
         "tool_receipt_ids": json.dumps([]),
         "created_at": datetime(2026, 7, 6, 10, tzinfo=timezone.utc),
     }
+    export_row = {
+        "id": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+        "export_kind": "evidence_export_bundle",
+        "command": "evidence.export_bundle",
+        "status": "completed",
+        "risk_tier": "read_only",
+        "target_id": None,
+        "scan_id": "44444444-4444-4444-8444-444444444444",
+        "finding_id": "22222222-2222-4222-8222-222222222222",
+        "bundle_hash": "b" * 64,
+        "manifest_hash": "m" * 64,
+        "object_count": 1,
+        "filters": json.dumps({"scan_id": "44444444-4444-4444-8444-444444444444"}),
+        "evidence_object_ids": json.dumps(["33333333-3333-4333-8333-333333333333"]),
+        "finding_ids": json.dumps(["22222222-2222-4222-8222-222222222222"]),
+        "scan_ids": json.dumps(["44444444-4444-4444-8444-444444444444"]),
+        "replay_plan": json.dumps({"content_included": False, "evidence_object_reads": []}),
+        "operator_message": "Recorded content-free evidence_export_bundle export",
+        "created_at": datetime(2026, 7, 6, 9, tzinfo=timezone.utc),
+        "scan_target_id": "99999999-9999-4999-8999-999999999999",
+        "scan_target_url": "https://app.example.com",
+        "finding_target_id": None,
+    }
     monkeypatch.setattr(
         api_module,
         "db_pool",
-        _TimelinePool([cr_row], [scan_row], [schedule_row], evidence_rows=[evidence_row], refuter_rows=[refuter_row]),
+        _TimelinePool(
+            [cr_row],
+            [scan_row],
+            [schedule_row],
+            evidence_rows=[evidence_row],
+            refuter_rows=[refuter_row],
+            export_rows=[export_row],
+        ),
     )
 
     result = asyncio.run(api_module.mission_timeline(limit=50))
@@ -3289,6 +3430,7 @@ def test_mission_timeline_merges_sorts_and_reports_upcoming(monkeypatch):
         "cmd-1",
         "evidence_instance:11111111-1111-4111-8111-111111111111",
         "refuter_review:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "export_event:eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
         "55555555-5555-4555-8555-555555555555",
     ]
     assert result["events"][0]["status"] == "running"       # live scan status
@@ -3296,7 +3438,9 @@ def test_mission_timeline_merges_sorts_and_reports_upcoming(monkeypatch):
     assert result["events"][1]["status"] == "evidence_bound"
     assert result["events"][2]["kind"] == "refuter_review"
     assert result["events"][2]["status"] == "refuter_requested"
-    assert result["events"][3]["kind"] == "scan"
+    assert result["events"][3]["kind"] == "export_event"
+    assert result["events"][3]["content_included"] is False
+    assert result["events"][4]["kind"] == "scan"
     # Schedules are upcoming, not past events.
     assert len(result["upcoming"]) == 1
     up = result["upcoming"][0]
