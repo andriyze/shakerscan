@@ -787,10 +787,13 @@ def test_external_dast_tool_specs_record_passive_skips_and_partials_honestly():
     assert by_tool["httpx"]["status"] == "recorded"
     assert by_tool["httpx"]["parser_status"] == "partial"
     assert by_tool["katana"]["status"] == "skipped"
-    assert by_tool["katana"]["parser_status"] == "skipped"
+    assert by_tool["katana"]["parser_status"] == "not_applicable"
     assert by_tool["playwright"]["status"] == "skipped"
+    assert by_tool["playwright"]["parser_status"] == "not_applicable"
     assert by_tool["ffuf"]["status"] == "skipped"
+    assert by_tool["ffuf"]["parser_status"] == "not_applicable"
     assert by_tool["subfinder"]["status"] == "skipped"
+    assert by_tool["subfinder"]["parser_status"] == "not_applicable"
 
 
 def test_external_dast_tool_receipts_are_recorded_and_attached():

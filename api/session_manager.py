@@ -985,8 +985,28 @@ class InteractiveSession:
 
                 # Get user session for authentication
                 user_session = None
-                if as_user and as_user in self.state.users:
+                if as_user:
+                    if as_user not in self.state.users:
+                        return {
+                            "success": False,
+                            "error": f"Authenticated session user '{as_user}' is not available",
+                            "endpoint": endpoint,
+                            "method": method,
+                            "as_user": as_user,
+                            "auth_required": True,
+                            "authenticated_user": False,
+                        }
                     user_session = self.state.users[as_user]
+                    if not user_session.is_authenticated:
+                        return {
+                            "success": False,
+                            "error": f"Session user '{as_user}' is not authenticated",
+                            "endpoint": endpoint,
+                            "method": method,
+                            "as_user": as_user,
+                            "auth_required": True,
+                            "authenticated_user": False,
+                        }
 
                 user_key = as_user or "default"
                 # Use page context for the request to leverage cookies

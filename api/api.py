@@ -16828,6 +16828,39 @@ def _authz_observation_matches_expectation(observed_status: Any, expected: dict[
     return False
 
 
+def _authz_status_grants_access(observed_status: Any) -> bool:
+    try:
+        status = int(observed_status)
+    except (TypeError, ValueError):
+        return False
+    # Redirects often mean "go login"; only a concrete 2xx response is access.
+    return 200 <= status < 300
+
+
+def _authz_observation_is_violation(observation: dict[str, Any]) -> bool:
+    expected_denied = str(observation.get("expected_access") or "").lower() in {"deny", "requires_role"}
+    if not expected_denied:
+        return False
+    if not observation.get("request_success"):
+        return False
+    if not observation.get("authenticated_user"):
+        return False
+    return _authz_status_grants_access(observation.get("observed_status"))
+
+
+def _authz_redacted_request_response_ref(observation: dict[str, Any]) -> dict[str, Any]:
+    request = _redact_agent_payload(observation.get("request") or {})
+    response = _redact_agent_payload(observation.get("response") or {})
+    return {
+        "kind": "authz_replay_http_exchange",
+        "method": observation.get("method"),
+        "path": observation.get("path"),
+        "principal_auth_state": observation.get("principal_auth_state"),
+        "request": request,
+        "response": response,
+    }
+
+
 def _authz_template_replay_path(path: Any) -> str:
     raw = str(path or "").strip()
     if not raw:
@@ -16880,6 +16913,112 @@ async def _execute_authz_replay_plan(
     session = await manager.get_session(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found or expired")
+    session_users = getattr(getattr(session, "state", None), "users", {}) or {}
+    authenticated_users = {
+        str(name)
+        for name, user in session_users.items()
+        if getattr(user, "is_authenticated", False)
+    }
+    expected_principals = {
+        str(item.get("principal_auth_state") or item.get("principal_label") or "").strip()
+        for item in expected_access
+        if str(item.get("principal_auth_state") or item.get("principal_label") or "").strip()
+    }
+    missing_principals = sorted(expected_principals - authenticated_users)
+    if len(expected_principals) < 2 or missing_principals:
+        observations = [
+            {
+                "method": str(item.get("method") or replay_plan.get("method") or "GET").strip().upper(),
+                "path": str(item.get("path") or replay_plan.get("path") or "").strip(),
+                "principal_label": item.get("principal_label"),
+                "principal_auth_state": str(item.get("principal_auth_state") or item.get("principal_label") or "").strip() or None,
+                "expected_access": item.get("expected_access"),
+                "expected_http_status": item.get("expected_http_status"),
+                "observed_status": None,
+                "matched": False,
+                "request_success": False,
+                "authenticated_user": False,
+                "inconclusive_reason": "missing_authenticated_principal" if missing_principals else "requires_two_authenticated_principals",
+            }
+            for item in expected_access[:10]
+        ]
+        tool_receipt_result = await _record_tool_receipt(conn, ToolReceiptRequest(
+            tool_name="authz.replay_plan",
+            adapter_version="2026-07-07.v1",
+            redacted_argv=["authz.replay_plan", str(action_uuid), "session:<redacted>"],
+            target_scope={
+                "campaign_action_id": str(action_uuid),
+                "path": replay_plan.get("path"),
+                "method": replay_plan.get("method"),
+            },
+            approval_receipt_id=approval_receipt_id,
+            status="skipped",
+            parser_status="not_applicable",
+            metadata_json={
+                "observation_count": len(observations),
+                "mismatch_count": len(observations),
+                "violation_count": 0,
+                "missing_authenticated_principals": missing_principals,
+                "authenticated_principal_count": len(authenticated_users),
+                "required_principal_count": len(expected_principals),
+            },
+            created_by=created_by,
+        ))
+        tool_receipt = tool_receipt_result.get("tool_receipt") or {}
+        replay_result = {
+            "authz_replay": {
+                "campaign_action_id": str(action_uuid),
+                "session_id": session_id,
+                "plan": replay_plan,
+                "observations": observations,
+                "tool_receipt_id": tool_receipt.get("id"),
+                "evidence_instance_ids": [],
+                "mismatch_count": len(observations),
+                "violation_count": 0,
+                "proof_state": "inconclusive_missing_authenticated_principals",
+                "finding_created": False,
+            }
+        }
+        updated_row = await conn.fetchrow(
+            """
+            UPDATE campaign_actions
+            SET status='partial',
+                dry_run=false,
+                result_json = result_json || $1::jsonb,
+                updated_at=NOW()
+            WHERE id=$2
+            RETURNING *
+            """,
+            json.dumps(replay_result),
+            action_uuid,
+        )
+        command_result = await _record_command_result(
+            conn,
+            command="authz.replay_plan",
+            status="partial",
+            risk_tier="credential",
+            dry_run=False,
+            approval_receipt_id=approval_receipt_id,
+            tool_receipt_ids=[str(tool_receipt.get("id"))] if tool_receipt.get("id") else [],
+            result_json=replay_result,
+            operator_message="Authz replay was inconclusive because required authenticated principals were missing.",
+            next_action=f"/settings/arsenal?tab=campaign-actions",
+            created_by=created_by,
+        )
+        return {
+            "campaign_action": _public_campaign_action_row(updated_row),
+            "observations": observations,
+            "mismatches": observations,
+            "violations": [],
+            "tool_receipt_id": tool_receipt.get("id"),
+            "evidence_instance_ids": [],
+            "command_result": command_result,
+            "operation_id": command_result["id"],
+            "mismatch_count": len(observations),
+            "violation_count": 0,
+            "execution_enabled": True,
+            "findings_created": 0,
+        }
 
     observations: list[dict[str, Any]] = []
     mismatches: list[dict[str, Any]] = []
@@ -16923,17 +17062,27 @@ async def _execute_authz_replay_plan(
                 "observed_status": observed_status,
                 "matched": matched,
                 "request_success": bool(replay.get("success")) if isinstance(replay, dict) else False,
+                "authenticated_user": bool(as_user and as_user in authenticated_users),
+                "request": {
+                    "method": method,
+                    "url": endpoint,
+                    "as_user": as_user,
+                },
+                "response": {
+                    "status": observed_status,
+                    "status_text": replay.get("status_text") if isinstance(replay, dict) else None,
+                    "headers": replay.get("headers") if isinstance(replay, dict) else {},
+                    "body_sample": replay.get("body") if isinstance(replay, dict) else None,
+                },
             }
+            if isinstance(replay, dict) and replay.get("error"):
+                observation["error"] = replay.get("error")
         observations.append(observation)
         if not observation.get("matched"):
             mismatches.append(observation)
-            if str(observation.get("expected_access") or "").lower() in {"deny", "requires_role"}:
-                try:
-                    status_int = int(observation.get("observed_status"))
-                except (TypeError, ValueError):
-                    status_int = 0
-                if 200 <= status_int < 400:
-                    violations.append(observation)
+            if _authz_observation_is_violation(observation):
+                violations.append(observation)
+        observation["violation_observed"] = _authz_observation_is_violation(observation)
 
     tool_receipt_result = await _record_tool_receipt(conn, ToolReceiptRequest(
         tool_name="authz.replay_plan",
@@ -16960,19 +17109,14 @@ async def _execute_authz_replay_plan(
     target_id = action.get("target_id")
     principal_pair = replay_plan.get("principal_pair") if isinstance(replay_plan.get("principal_pair"), dict) else {}
     for observation in observations:
-        expected_denied = str(observation.get("expected_access") or "").lower() in {"deny", "requires_role"}
-        observed_status = observation.get("observed_status")
-        try:
-            observed_status_int = int(observed_status)
-        except (TypeError, ValueError):
-            observed_status_int = 0
-        violation_observed = expected_denied and 200 <= observed_status_int < 400
+        violation_observed = _authz_observation_is_violation(observation)
+        request_response_ref = _authz_redacted_request_response_ref(observation)
         instance = await _record_evidence_instance(conn, EvidenceInstanceRequest(
             target_id=str(target_id) if target_id else None,
             concrete_url=str(observation.get("path") or "").strip() or None,
             object_id=str(replay_plan.get("object_key") or "").strip() or None,
             payload_variant=str(observation.get("principal_auth_state") or observation.get("principal_label") or "").strip() or None,
-            request_response_refs=[],
+            request_response_refs=[json.dumps(request_response_ref, sort_keys=True)],
             principal_pair=principal_pair,
             proof_observation={
                 "type": "authz_replay_observation",
@@ -16981,11 +17125,13 @@ async def _execute_authz_replay_plan(
                 "observed_status": observation.get("observed_status"),
                 "matched_expectation": bool(observation.get("matched")),
                 "violation_observed": violation_observed,
+                "authenticated_user": bool(observation.get("authenticated_user")),
+                "differential_required": True,
             },
             campaign_action_id=str(action_uuid),
             tool_receipt_id=str(tool_receipt_id) if tool_receipt_id else None,
             retention_policy="audit",
-            proof_state="verified" if violation_observed else "inconclusive",
+            proof_state="suspected" if violation_observed else "inconclusive",
             metadata_json={
                 "source": "authz.replay_plan",
                 "finding_created": False,
@@ -17081,16 +17227,20 @@ async def _promote_authz_replay_finding(
         raise HTTPException(status_code=404, detail="Target not found")
     target_payload = row_to_dict(target_row)
     target_url = str(target_payload.get("url") or "")
+    await _validate_approval_receipt_for_action(
+        conn,
+        approval_receipt_id,
+        target_url=target_url,
+        target_id=target_uuid,
+        action_name="authz.promote_replay_finding",
+        command="authz.promote_replay_finding",
+        risk_tier="credential",
+        created_by=created_by,
+    )
     observations = [item for item in (replay.get("observations") or []) if isinstance(item, dict)]
     violations = []
     for item in observations:
-        if str(item.get("expected_access") or "").lower() not in {"deny", "requires_role"}:
-            continue
-        try:
-            observed_status = int(item.get("observed_status"))
-        except (TypeError, ValueError):
-            continue
-        if 200 <= observed_status < 400:
+        if item.get("violation_observed") is True or _authz_observation_is_violation(item):
             violations.append(item)
     if not violations:
         raise HTTPException(status_code=400, detail="Authz replay result has no promotable violation observation")
@@ -17103,6 +17253,9 @@ async def _promote_authz_replay_finding(
     fingerprint = hashlib.sha256(fingerprint_source.encode()).hexdigest()[:32]
     evidence_instance_ids = _clean_string_list(replay.get("evidence_instance_ids"), max_items=100)
     tool_receipt_id = str(replay.get("tool_receipt_id") or "").strip()
+    request_response_ref = _authz_redacted_request_response_ref(first)
+    request_payload = request_response_ref.get("request") if isinstance(request_response_ref.get("request"), dict) else {}
+    response_payload = request_response_ref.get("response") if isinstance(request_response_ref.get("response"), dict) else {}
     evidence_json = _redact_finding_evidence({
         "proof": "Deterministic authz replay observed a principal receiving successful access where the role matrix expected denial.",
         "authz_replay": {
@@ -17110,6 +17263,7 @@ async def _promote_authz_replay_finding(
             "violation_count": len(violations),
             "templated_path": templated_path or None,
             "violations": violations[:10],
+            "request_response_ref": request_response_ref,
             "evidence_instance_ids": evidence_instance_ids,
             "tool_receipt_id": tool_receipt_id or None,
         },
@@ -17158,8 +17312,8 @@ async def _promote_authz_replay_finding(
             8.1,
             path if path.startswith(("http://", "https://")) else target_url.rstrip("/") + "/" + path.lstrip("/"),
             json.dumps(evidence_json),
-            None,
-            None,
+            json.dumps(request_payload) if request_payload else None,
+            json.dumps(response_payload) if response_payload else None,
             "Promoted explicitly from authz.replay_plan evidence.",
         )
         status = "created"

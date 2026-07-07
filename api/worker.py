@@ -352,7 +352,7 @@ def _external_dast_tool_specs(result: dict[str, Any], options: dict[str, Any]) -
             "parser": "katana-jsonl-summary-v1",
             "proof_contract": "crawl-observation",
             "status": "skipped" if zero_rediscovery else "success" if (katana_sample or smart_url_count) else "recorded",
-            "parser_status": "skipped" if zero_rediscovery else "parsed" if (katana_sample or smart_url_count) else "partial",
+            "parser_status": "not_applicable" if zero_rediscovery else "parsed" if (katana_sample or smart_url_count) else "partial",
             "summary": {
                 "sample_count": len(katana_sample),
                 "smart_discovery_total_urls": smart_url_count,
@@ -371,7 +371,7 @@ def _external_dast_tool_specs(result: dict[str, Any], options: dict[str, Any]) -
             "parser": "playwright-proof-summary-v1",
             "proof_contract": "browser-observation",
             "status": "skipped" if browser_disabled else "success" if has_browser_output else "recorded",
-            "parser_status": "skipped" if browser_disabled else "parsed" if has_browser_output else "partial",
+            "parser_status": "not_applicable" if browser_disabled else "parsed" if has_browser_output else "partial",
             "summary": {
                 "browser_api_endpoint_count": len(browser_api_endpoints),
                 "pages_visited": pages_visited,
@@ -391,7 +391,7 @@ def _external_dast_tool_specs(result: dict[str, Any], options: dict[str, Any]) -
             "parser": "ffuf-json-summary-v1",
             "proof_contract": "content-discovery-observation",
             "status": "skipped" if ffuf_disabled else "success" if (recursive_count or deep_count) else "recorded",
-            "parser_status": "skipped" if ffuf_disabled else "parsed" if (recursive_count or deep_count) else "partial",
+            "parser_status": "not_applicable" if ffuf_disabled else "parsed" if (recursive_count or deep_count) else "partial",
             "summary": {
                 "recursive_paths": recursive_count,
                 "deep_discovery_paths": deep_count,
@@ -411,7 +411,7 @@ def _external_dast_tool_specs(result: dict[str, Any], options: dict[str, Any]) -
             "parser": "subfinder-lines-summary-v1",
             "proof_contract": "passive-discovery",
             "status": "skipped" if not subfinder_enabled else "success" if (subfinder_rows or subdomain_count) else "recorded",
-            "parser_status": "skipped" if not subfinder_enabled else "parsed" if (subfinder_rows or subdomain_count) else "partial",
+            "parser_status": "not_applicable" if not subfinder_enabled else "parsed" if (subfinder_rows or subdomain_count) else "partial",
             "summary": {
                 "subdomains_count": subdomain_count,
                 "subfinder_rows_count": len(subfinder_rows),
@@ -488,6 +488,22 @@ def _external_dast_tool_specs(result: dict[str, Any], options: dict[str, Any]) -
     return specs
 
 
+def _coerce_tool_receipt_status(status: Any) -> str:
+    value = str(status or "").strip()
+    return value if value in {"success", "failed", "timeout", "skipped", "waived", "parser_error", "recorded"} else "recorded"
+
+
+def _coerce_tool_receipt_parser_status(parser_status: Any, status: Any = None) -> str:
+    value = str(parser_status or "").strip()
+    if value == "skipped":
+        return "not_applicable"
+    if value in {"not_run", "parsed", "partial", "failed", "not_applicable"}:
+        return value
+    if str(status or "").strip() == "skipped":
+        return "not_applicable"
+    return "partial"
+
+
 async def _record_external_dast_tool_receipts(
     conn,
     *,
@@ -513,6 +529,8 @@ async def _record_external_dast_tool_receipts(
         "scan_type": (options or {}).get("scan_type"),
     })
     for spec in specs:
+        safe_status = _coerce_tool_receipt_status(spec.get("status"))
+        safe_parser_status = _coerce_tool_receipt_parser_status(spec.get("parser_status"), safe_status)
         redacted_argv = [spec["tool_name"], "--scan-id", str(scan_id), "--target", str(target)]
         command_hash = _tool_receipt_hash({
             "tool_name": spec["tool_name"],
@@ -557,9 +575,9 @@ async def _record_external_dast_tool_receipts(
                 None,
                 None,
                 None,
-                spec["status"],
-                spec["parser_status"],
-                0 if spec["status"] == "success" else 1,
+                safe_status,
+                safe_parser_status,
+                0 if safe_status == "success" else 1,
                 False,
                 started_at,
                 completed_at,
