@@ -312,6 +312,72 @@ def test_model_intake_trust_signal_becomes_trust_preview_hypothesis():
     assert "finding_id=model_intake:signature_not_verified" in hypothesis["dedupe_key"]
 
 
+def test_scanner_weak_signal_becomes_retest_hypothesis():
+    target_id = "33333333-3333-4333-8333-333333333333"
+    hypotheses = worker._product_signal_hypotheses(
+        "11111111-1111-4111-8111-111111111111",
+        target_id,
+        None,
+        "https://shop.example.com",
+        {
+            "findings": [
+                {
+                    "id": "smart_sqli:cart-search",
+                    "title": "Possible SQL injection in cart search",
+                    "severity": "high",
+                    "tool": "smart_sqli",
+                    "type": "sqli",
+                    "cwe": "CWE-89",
+                    "url": "https://shop.example.com/rest/products/search?q=test",
+                    "confidence": 0.68,
+                    "proof_state": "suspected",
+                    "needs_verification": True,
+                }
+            ],
+        },
+        {"scan_type": "smart"},
+    )
+
+    assert len(hypotheses) == 1
+    hypothesis = hypotheses[0]
+    assert hypothesis["source"] == "scanner_signal"
+    assert hypothesis["target_id"] == target_id
+    assert hypothesis["family"] == "sqli"
+    assert hypothesis["next_test_action"]["command"] == "finding.retest"
+    params = hypothesis["next_test_action"]["parameters"]
+    assert params["finding_id"] == "smart_sqli:cart-search"
+    assert params["mode"] == "deterministic"
+    assert params["check_family"] == "sqli"
+    assert "product=scanner_signal" in hypothesis["dedupe_key"]
+    assert hypothesis["metadata_json"]["runtime_proof_required"] is True
+
+
+def test_scanner_verified_signal_does_not_become_hypothesis():
+    hypotheses = worker._product_signal_hypotheses(
+        "11111111-1111-4111-8111-111111111111",
+        "33333333-3333-4333-8333-333333333333",
+        None,
+        "https://shop.example.com",
+        {
+            "findings": [
+                {
+                    "id": "proof:xss",
+                    "title": "Stored XSS executed in browser",
+                    "severity": "critical",
+                    "tool": "browser_replay",
+                    "type": "xss",
+                    "cwe": "CWE-79",
+                    "proof_state": "verified",
+                    "validation": {"poe_proven": True, "confidence": 0.95},
+                }
+            ],
+        },
+        {"scan_type": "smart"},
+    )
+
+    assert hypotheses == []
+
+
 class _HypothesisPersistConn:
     def __init__(self):
         self.rows = []

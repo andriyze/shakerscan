@@ -667,9 +667,11 @@ how-to with request bodies is in [`CLAUDE.md`](../CLAUDE.md) / [`AGENTS.md`](../
 `POST /arsenal/hypotheses/source-ingest` · `POST /arsenal/hypotheses/from-plan` ·
 `GET /agents/local` · `POST /agents/local/test` · `POST /agents/local/plan`. Source/spec hints and
 saved dry-run plan actions can be recorded as source-only hypotheses; they never create findings or
-queue scans. The `/settings/arsenal` UI includes a Source Hint Ingest panel for bounded
-source/spec/route facts. Refuter verdict derivation is gated and derives only from a linked or
-explicit verification row; failed/error/AI-driven results remain signal-only. Authz replay promotion
+queue scans. Worker finalization also routes uncertain medium-or-higher scanner findings into
+`scanner_signal` hypotheses with deterministic `finding.retest` next actions; verified findings stay
+on the finding/proof path instead of duplicating into the lead queue. The `/settings/arsenal` UI
+includes a Source Hint Ingest panel for bounded source/spec/route facts. Refuter verdict derivation is
+gated and derives only from a linked or explicit verification row; failed/error/AI-driven results remain signal-only. Authz replay promotion
 requires an authenticated cross-principal differential, treats login/forbidden soft-200 bodies and
 redirect denials as non-violations, and validates approval receipts against the campaign action's
 actual target before a manual BOLA finding can be created.

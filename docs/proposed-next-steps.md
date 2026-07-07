@@ -539,8 +539,9 @@ raw shell execution or LLM-produced verified findings.
    DONE phase 4 for saved dry-run `OperationPlan` actions becoming `ai_planner` hypotheses through
    `/arsenal/hypotheses/from-plan` / `hypothesis.generate_from_plan`; planner output remains a
    source-only signal with `runtime_proof_required=true` and creates no findings or queued work.
-   Remaining work is broader weak scanner signal routing into those hypotheses. Hypotheses are
-   claimable/refutable work items, not findings.
+   DONE phase 5 for broader weak scanner signal routing: uncertain medium+ scanner findings become
+   `scanner_signal` hypotheses with deterministic `finding.retest` next actions and
+   `runtime_proof_required=true`. Hypotheses are claimable/refutable work items, not findings.
 7. **Detector recall campaigns:** keep benchmark gaps as proof-backed work items: POST-body SQLi,
    NoSQL JSON/body routing, stored/reflected XSS browser proof, workflow/write-side BOLA, mass
    assignment/JWT, and graph-driven authz hypotheses.

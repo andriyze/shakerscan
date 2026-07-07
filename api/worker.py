@@ -2926,6 +2926,141 @@ MODEL_INTAKE_HYPOTHESIS_MARKERS = (
 )
 
 
+SCANNER_SIGNAL_FAMILY_MARKERS = (
+    ("bola", ("bola", "idor", "broken object", "object level", "cwe-639", "cwe-566")),
+    ("auth", ("auth", "authorization", "authentication", "access control", "bfla", "bopla", "jwt", "cwe-287", "cwe-862", "cwe-863")),
+    ("sqli", ("sqli", "sql injection", "nosql", "injection", "cwe-89", "cwe-943")),
+    ("xss", ("xss", "cross-site scripting", "script injection", "cwe-79")),
+    ("ssrf", ("ssrf", "server-side request", "cwe-918")),
+    ("lfi", ("lfi", "rfi", "path traversal", "file inclusion", "directory traversal", "cwe-22", "cwe-98")),
+    ("open_redirect", ("open redirect", "redirect", "cwe-601")),
+)
+
+
+def _scanner_signal_family(finding: dict[str, Any]) -> str:
+    haystack = " ".join(
+        str(finding.get(key) or "")
+        for key in ("type", "category", "title", "description", "tool", "cwe", "cwe_name", "owasp")
+    ).lower()
+    for family, markers in SCANNER_SIGNAL_FAMILY_MARKERS:
+        if any(marker in haystack for marker in markers):
+            return family
+    raw = str(finding.get("type") or finding.get("category") or finding.get("tool") or "scanner").strip().lower()
+    family = re.sub(r"[^a-z0-9]+", "_", raw).strip("_")
+    return family[:80] or "scanner"
+
+
+def _scanner_finding_is_verified(finding: dict[str, Any]) -> bool:
+    try:
+        _status, verdict, _confidence = _scan_time_verification_fields(finding)
+    except Exception:
+        verdict = None
+    explicit = str(
+        finding.get("proof_state")
+        or finding.get("verification_verdict")
+        or finding.get("last_verification_verdict")
+        or ""
+    ).strip().lower()
+    return verdict == "exploited" or explicit in {"verified", "exploited"}
+
+
+def _scanner_finding_needs_hypothesis(finding: dict[str, Any]) -> bool:
+    if not isinstance(finding, dict) or _scanner_finding_is_verified(finding):
+        return False
+    severity = _hypothesis_severity(finding.get("severity"), "info")
+    if severity not in {"critical", "high", "medium"}:
+        return False
+    evidence = finding.get("evidence") if isinstance(finding.get("evidence"), dict) else {}
+    confidence = _float_between_0_1(
+        finding.get("confidence", finding.get("ai_confidence")),
+        _severity_to_confidence(severity, 0.58),
+    )
+    proof_state = str(finding.get("proof_state") or evidence.get("proof_state") or "").strip().lower()
+    confidence_tier = str(finding.get("confidence_tier") or evidence.get("confidence_tier") or "").strip().lower()
+    return (
+        bool(finding.get("suspected") or finding.get("needs_verification") or evidence.get("needs_verification"))
+        or proof_state in {"suspected", "unverified", "inconclusive", "needs_review"}
+        or confidence_tier in {"low", "uncertain", "medium", "suspected"}
+        or confidence < 0.85
+        or _scan_time_verification_fields_dict(finding) is None
+    )
+
+
+def _scanner_signal_hypotheses(
+    scan_id: str,
+    target_id: str | None,
+    target: str | None,
+    result: dict[str, Any],
+    options: dict[str, Any],
+) -> list[dict[str, Any]]:
+    if not target_id:
+        return []
+    hypotheses: list[dict[str, Any]] = []
+    findings = result.get("findings") if isinstance(result.get("findings"), list) else []
+    for finding in findings[:100]:
+        if not isinstance(finding, dict) or not _scanner_finding_needs_hypothesis(finding):
+            continue
+        family = _scanner_signal_family(finding)
+        finding_id = str(finding.get("id") or generate_finding_fingerprint(finding) or "").strip()
+        confidence = _float_between_0_1(
+            finding.get("confidence", finding.get("ai_confidence")),
+            min(_severity_to_confidence(finding.get("severity"), 0.58), 0.82),
+        )
+        dims = {
+            "product": "scanner_signal",
+            "scan_id": scan_id,
+            "target_id": target_id,
+            "finding_id": finding_id,
+            "type": finding.get("type") or finding.get("category") or finding.get("tool"),
+        }
+        hypotheses.append({
+            "target_id": target_id,
+            "source": "scanner_signal",
+            "family": family,
+            "cwe": finding.get("cwe"),
+            "title": f"Scanner follow-up lead: {finding.get('title') or finding_id or family}",
+            "description": (
+                "A scanner finding is high enough impact to investigate but does not carry hard runtime proof. "
+                "Treat it as a hypothesis until deterministic retest or focused family evidence confirms it."
+            ),
+            "severity_guess": _hypothesis_severity(finding.get("severity")),
+            "confidence": confidence,
+            "dedupe_key": _product_signal_hypothesis_key(family, dims),
+            "next_test_action": {
+                "command": "finding.retest",
+                "parameters": {
+                    "finding_id": finding_id or None,
+                    "mode": "deterministic",
+                    "target_id": target_id,
+                    "target": target,
+                    "scan_id": scan_id,
+                    "finding_type": finding.get("type") or finding.get("category"),
+                    "check_family": family,
+                },
+            },
+            "endorsement": {
+                "source": "scanner_signal",
+                "scan_id": scan_id,
+                "target_id": target_id,
+                "finding_id": finding_id or None,
+                "tool": finding.get("tool"),
+                "severity": finding.get("severity"),
+                "confidence": confidence,
+            },
+            "metadata_json": {
+                "dedupe_dimensions": dims,
+                "product": "scanner_signal",
+                "runtime_proof_required": True,
+                "scan_type": (options or {}).get("scan_type"),
+                "url": finding.get("url"),
+                "proof_state": finding.get("proof_state"),
+                "confidence_tier": finding.get("confidence_tier"),
+            },
+            "created_by": "worker",
+        })
+    return hypotheses
+
+
 def _model_intake_signal_hypotheses(
     scan_id: str,
     target_id: str | None,
@@ -3007,7 +3142,7 @@ def _product_signal_hypotheses(
         return _ai_gate_signal_hypotheses(scan_id, ai_target_id, result, options)
     if run_kind in MODEL_INTAKE_RUN_KINDS or isinstance((result or {}).get("model_intake"), dict):
         return _model_intake_signal_hypotheses(scan_id, target_id, target, result)
-    return []
+    return _scanner_signal_hypotheses(scan_id, target_id, target, result or {}, options or {})
 
 
 async def persist_product_signal_hypotheses(
@@ -5784,7 +5919,7 @@ async def process_scan_job(job_data: dict):
             except Exception as e:
                 print(f"[{job_id[:8]}] save_ai_findings error: {e}", flush=True)
 
-        if not error and (ai_target_id or (options or {}).get("run_kind") in MODEL_INTAKE_RUN_KINDS):
+        if not error and (ai_target_id or target_id or (options or {}).get("run_kind") in MODEL_INTAKE_RUN_KINDS):
             try:
                 n = await persist_product_signal_hypotheses(
                     scan_id,
