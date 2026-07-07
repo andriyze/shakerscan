@@ -517,6 +517,18 @@ export interface RefuterQueueResult {
   hypotheses_updated: number
 }
 
+export interface RefuterActionResult {
+  command?: string
+  dispatched?: boolean
+  dry_run?: boolean
+  execution_blocked_reason?: string
+  operation_id?: string
+  result?: Record<string, unknown>
+  action_state?: Record<string, unknown>
+  refuter_review?: RefuterReview
+  status?: string
+}
+
 export interface LocalAgentPlanRequest {
   agent: string
   context_pack_id: string
@@ -1902,6 +1914,36 @@ export async function queueRefuterReviewsFromSummary(payload: {
     body: JSON.stringify(payload),
   })
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to queue refuter review work'))
+  return res.json()
+}
+
+export async function executeRefuterReviewPlan(refuterReviewId: string, payload: {
+  execute?: boolean
+  confirmations?: string[]
+  approval_receipt_id?: string
+  step_id?: string
+  requested_by?: string
+  confirm_production?: boolean
+} = {}): Promise<RefuterActionResult> {
+  const res = await fetch(`${API_URL}/arsenal/refuter-reviews/${encodeURIComponent(refuterReviewId)}/execute`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to execute refuter plan'))
+  return res.json()
+}
+
+export async function deriveRefuterReviewVerdict(refuterReviewId: string, payload: {
+  verification_id?: string
+  created_by?: string
+} = {}): Promise<RefuterActionResult> {
+  const res = await fetch(`${API_URL}/arsenal/refuter-reviews/${encodeURIComponent(refuterReviewId)}/derive-verdict`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to derive refuter verdict'))
   return res.json()
 }
 

@@ -8,6 +8,8 @@ import {
   createLocalAgentDryRunPlan,
   createOperationPlan,
   createApprovalReceipt,
+  deriveRefuterReviewVerdict,
+  executeRefuterReviewPlan,
   getAgentContextPacks,
   getAgentDecisionTraces,
   getArsenalCommands,
@@ -40,6 +42,7 @@ import {
   type HypothesisSituationReport,
   type RefuterWorkSummary,
   type RefuterQueueResult,
+  type RefuterReview,
   type OperationPlan,
   type OperationPlanResponse,
   type ArsenalTool,
@@ -447,9 +450,71 @@ function RefuterCandidateRow({ candidate }: { candidate: RefuterWorkSummary['can
 }
 
 function RefuterQueueResultPanel({ result }: { result: RefuterQueueResult }) {
+  const [busyId, setBusyId] = useState<string | null>(null)
+  const [message, setMessage] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  async function requestGate(review: RefuterReview) {
+    setBusyId(`gate:${review.id}`)
+    setError(null)
+    setMessage(null)
+    try {
+      const response = await executeRefuterReviewPlan(review.id, {
+        execute: false,
+        confirmations: [],
+        requested_by: 'arsenal_ui',
+      })
+      const blocked = response.execution_blocked_reason || String(response.action_state?.phase || response.status || 'recorded')
+      setMessage(`Execution gate: ${blocked}`)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to request execution gate')
+    } finally {
+      setBusyId(null)
+    }
+  }
+
+  async function deriveVerdict(review: RefuterReview) {
+    setBusyId(`derive:${review.id}`)
+    setError(null)
+    setMessage(null)
+    try {
+      const response = await deriveRefuterReviewVerdict(review.id, { created_by: 'arsenal_ui' })
+      const derived = response.result?.refuter_review as RefuterReview | undefined
+      setMessage(`Derived ${derived?.refuter_verdict || derived?.refuter_signal || response.status || 'review'}`)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to derive verdict')
+    } finally {
+      setBusyId(null)
+    }
+  }
+
   return (
     <div className="rounded-md border border-green-500/20 bg-green-500/5 p-3 text-sm text-green-200">
-      Recorded {result.created} signal-only review row{result.created === 1 ? '' : 's'}; findings updated: {result.findings_updated}.
+      <div>Recorded {result.created} signal-only review row{result.created === 1 ? '' : 's'}; findings updated: {result.findings_updated}.</div>
+      {result.refuter_reviews.length > 0 && (
+        <div className="mt-3 grid gap-2">
+          {result.refuter_reviews.slice(0, 5).map((review) => (
+            <div key={review.id} className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-green-500/10 bg-black/20 px-2 py-2">
+              <div className="min-w-0">
+                <div className="truncate font-mono text-xs text-green-100">{review.id}</div>
+                <div className="text-xs text-green-300/80">{review.trigger_reason}</div>
+              </div>
+              <div className="flex flex-wrap gap-1.5">
+                <Button type="button" onClick={() => void requestGate(review)} disabled={busyId !== null}>
+                  <ShieldCheck className={`h-4 w-4 ${busyId === `gate:${review.id}` ? 'animate-spin' : ''}`} aria-hidden="true" />
+                  Gate
+                </Button>
+                <Button type="button" onClick={() => void deriveVerdict(review)} disabled={busyId !== null}>
+                  <CheckCircle2 className={`h-4 w-4 ${busyId === `derive:${review.id}` ? 'animate-spin' : ''}`} aria-hidden="true" />
+                  Derive
+                </Button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+      {message && <div className="mt-2 rounded border border-green-500/20 bg-green-500/10 px-2 py-1 text-xs text-green-100">{message}</div>}
+      {error && <div className="mt-2 rounded border border-red-500/20 bg-red-500/10 px-2 py-1 text-xs text-red-200">{error}</div>}
     </div>
   )
 }
