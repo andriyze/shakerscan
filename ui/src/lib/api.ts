@@ -450,6 +450,27 @@ export interface RefuterCandidate {
   trigger_reasons: string[]
   already_reviewed: boolean
   recommended_review?: Record<string, unknown>
+  automation_plan?: {
+    status: string
+    execution_enabled: boolean
+    recommended_basis?: string | null
+    record_only_until_executed: boolean
+    minimal_reproducer?: {
+      available: boolean
+      has_url: boolean
+      has_request: boolean
+      url_sample?: string | null
+    }
+    steps: Array<{
+      id: string
+      label: string
+      mode: string
+      command: string
+      verdict_basis_after_execution?: string
+      requires?: string[]
+      counterevidence_goal?: string
+    }>
+  }
 }
 
 export interface RefuterWorkSummary {

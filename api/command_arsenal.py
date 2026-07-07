@@ -943,7 +943,7 @@ COMMANDS: tuple[ArsenalCommand, ...] = (
     ArsenalCommand(
         name="refuter_review.summary",
         family="governance",
-        description="Read a bounded worklist of weak/high-impact findings that should be challenged.",
+        description="Read a bounded worklist of weak/high-impact findings that should be challenged, with non-executing deterministic automation plans.",
         status="read_only",
         risk_tier="read_only",
         method="GET",
@@ -952,7 +952,7 @@ COMMANDS: tuple[ArsenalCommand, ...] = (
             "limit": {"type": "integer", "minimum": 1, "maximum": 100},
             "finding_window": {"type": "integer", "minimum": 1, "maximum": 1000},
         },
-        evidence_contract=("trigger_counts", "refuter_candidates", "recommended_review"),
+        evidence_contract=("trigger_counts", "refuter_candidates", "recommended_review", "automation_plan"),
         timeout_seconds=15,
     ),
     ArsenalCommand(
@@ -988,7 +988,7 @@ COMMANDS: tuple[ArsenalCommand, ...] = (
             "finding_window": {"type": "integer", "minimum": 1, "maximum": 1000},
             "created_by": {"type": "string"},
         },
-        evidence_contract=("refuter_review_rows", "trigger_counts", "signal_only_reviews"),
+        evidence_contract=("refuter_review_rows", "trigger_counts", "signal_only_reviews", "automation_plan"),
         redaction_contract=("trigger_reason", "metadata_json"),
         timeout_seconds=20,
     ),

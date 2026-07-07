@@ -1109,7 +1109,7 @@ produce receipts for both successful and failed/skipped runs; missing binaries s
 not phantom success.
 
 ### 9a. Refuter workflow and integrity ledgers
-**Status: PARTIAL, PHASE 1 RECORDS + TRIGGER SUMMARY DONE.** T3MP3ST's strongest process lesson is not a detector; it
+**Status: PARTIAL, PHASE 1 RECORDS + TRIGGER SUMMARY + AUTOMATION PLANS DONE.** T3MP3ST's strongest process lesson is not a detector; it
 is the habit of trying to disprove weak wins. ShakerScan now has durable
 `refuter_reviews` records exposed through `GET/POST /arsenal/refuter-reviews` and
 `refuter_review.list` / `refuter_review.record`, plus read-only trigger summaries through
@@ -1119,7 +1119,10 @@ Model Intake metadata trust claims that lack checksum/signature trust signals, a
 signal-only review requests. `POST /arsenal/refuter-reviews/queue-from-summary` /
 `refuter_review.queue_from_summary` can now record unreviewed suggested review work as signal-only
 refuter rows without executing scanners or mutating findings; `/settings/arsenal` renders the
-summary, candidates, and queue action. `refuter_signal` remains separate from
+summary, candidates, queue action, and the non-executing automation plan for each candidate. Those
+plans name the minimal deterministic replay, AI Gate replay, Model Intake trust-preview, and auth
+context checks needed to produce counterevidence, but they stay `planned_not_executed` until a gated
+executor exists. `refuter_signal` remains separate from
 `refuter_verdict`; verdicts require deterministic replay, cryptographic, parser/protocol, or
 human-approved-review basis, and recording a review cannot directly update findings, hypotheses,
 proof state, severity, or gates. File-backed integrity ledgers exist at
@@ -1131,12 +1134,15 @@ Automated deterministic refuter execution is still open.
    hits, Model Intake metadata claims without operator trust anchors, new benchmark wins, unusually
    large finding deltas, deployment-gating findings, and parser output that would promote severity or
    proof state. Current implementation covers the first three as a read-only work summary and can
-   queue signal-only review rows from that summary; benchmark deltas, finding deltas,
-   deployment-gate triggers, parser-promotion triggers, and deterministic automated execution remain
-   open.
-2. Refuter behavior should rerun the minimal reproducer, test benign explanations, verify auth
-   context/principal/tenant/object ownership, check request freshness, and attach counterevidence when
-   a claim weakens.
+   queue signal-only review rows from that summary. DONE phase 2: summary candidates now include
+   bounded automation plans for minimal deterministic retest, AI Gate replay, Model Intake trust
+   preview, and auth/principal/tenant/object context checks; queued review metadata preserves the
+   same plan. Benchmark deltas, finding deltas, deployment-gate triggers, parser-promotion triggers,
+   and deterministic automated execution remain open.
+2. PARTIAL phase 1: refuter behavior now plans how to rerun the minimal reproducer, test benign
+   explanations, verify auth context/principal/tenant/object ownership, check request freshness, and
+   attach counterevidence when a claim weakens. The actual executor that performs those steps and
+   records proof-backed verdicts remains open.
 3. DONE phase 1: separate `refuter_signal` from `refuter_verdict`. Signals can
    weaken/support/question a claim. Verdicts are accepted only when backed by deterministic replay,
    cryptographic evidence, parser/protocol evidence, or explicitly labeled human-approved review

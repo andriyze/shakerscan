@@ -77,7 +77,9 @@ def test_refuter_review_commands_do_not_mutate_findings_directly():
     assert record_cmd["path"] == "/arsenal/refuter-reviews"
     assert queue_cmd["path"] == "/arsenal/refuter-reviews/queue-from-summary"
     assert "refuter_candidates" in summary_cmd["evidence_contract"]
+    assert "automation_plan" in summary_cmd["evidence_contract"]
     assert "signal_only_reviews" in queue_cmd["evidence_contract"]
+    assert "automation_plan" in queue_cmd["evidence_contract"]
     assert "verdict_basis" in record_cmd["parameters_schema"]
     assert "refuter_review_row" in record_cmd["evidence_contract"]
 

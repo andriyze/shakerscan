@@ -1955,7 +1955,7 @@ def test_refuter_work_summary_triggers_weak_ai_and_model_claims():
             "source": "scan",
             "tool": "smart_sqli",
             "last_verification_verdict": None,
-            "evidence": json.dumps({}),
+            "evidence": json.dumps({"url": "https://app.example.test/login?token=secret-token"}),
         },
         {
             "id": ai_id,
@@ -2004,6 +2004,17 @@ def test_refuter_work_summary_triggers_weak_ai_and_model_claims():
     assert by_id[str(weak_id)]["already_reviewed"] is True
     assert by_id[str(ai_id)]["recommended_review"]["verdict_basis"] == "signal_only"
     assert by_id[str(model_id)]["trigger_type"] == "model_intake_trust_claim"
+    weak_plan = by_id[str(weak_id)]["automation_plan"]
+    assert weak_plan["execution_enabled"] is False
+    assert weak_plan["status"] == "planned_not_executed"
+    assert weak_plan["record_only_until_executed"] is True
+    assert {step["command"] for step in weak_plan["steps"]} >= {"refuter_review.record", "finding.retest"}
+    assert weak_plan["minimal_reproducer"]["available"] is True
+    assert "secret-token" not in json.dumps(weak_plan)
+    ai_plan = by_id[str(ai_id)]["automation_plan"]
+    assert "ai_gate.replay_probe" in {step["command"] for step in ai_plan["steps"]}
+    model_plan = by_id[str(model_id)]["automation_plan"]
+    assert "model_intake.trust_preview" in {step["command"] for step in model_plan["steps"]}
 
 
 def test_refuter_queue_from_summary_records_unreviewed_signal_only_reviews():
@@ -2093,6 +2104,9 @@ def test_refuter_queue_from_summary_records_unreviewed_signal_only_reviews():
     assert result["refuter_reviews"][0]["finding_id"] == str(ai_id)
     assert result["refuter_reviews"][0]["verdict_basis"] == "signal_only"
     assert result["refuter_reviews"][0]["created_by"] == "pytest"
+    metadata = result["refuter_reviews"][0]["metadata_json"]
+    assert metadata["automation_plan"]["execution_enabled"] is False
+    assert "ai_gate.replay_probe" in {step["command"] for step in metadata["automation_plan"]["steps"]}
     assert calls["fetchrow"][0][1][15] == "recorded"
     assert "UPDATE findings" not in calls["fetchrow"][0][0]
 

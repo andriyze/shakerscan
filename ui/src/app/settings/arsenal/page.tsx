@@ -414,6 +414,34 @@ function RefuterCandidateRow({ candidate }: { candidate: RefuterWorkSummary['can
           <Badge key={reason} className="bg-amber-500/15 text-amber-300">{reason}</Badge>
         ))}
       </div>
+      {candidate.automation_plan && (
+        <div className="mt-3 rounded-md border border-gray-800 bg-gray-900/60 p-2">
+          <div className="mb-2 flex flex-wrap items-center justify-between gap-2 text-xs">
+            <span className="font-medium text-gray-200">Automation plan</span>
+            <div className="flex flex-wrap gap-1.5">
+              <Badge className="bg-gray-800 text-gray-300">{candidate.automation_plan.status}</Badge>
+              <Badge className="bg-gray-800 text-gray-300">{candidate.automation_plan.recommended_basis || 'signal_only'}</Badge>
+              {!candidate.automation_plan.execution_enabled && <Badge className="bg-blue-500/15 text-blue-300">preview only</Badge>}
+            </div>
+          </div>
+          <div className="grid gap-1.5">
+            {candidate.automation_plan.steps.slice(0, 3).map((step) => (
+              <div key={step.id} className="flex flex-wrap items-center gap-2 text-xs text-gray-400">
+                <span className="rounded bg-gray-800 px-1.5 py-0.5 font-mono text-gray-300">{step.command}</span>
+                <span className="text-gray-300">{step.label}</span>
+                <span>{step.mode}</span>
+              </div>
+            ))}
+          </div>
+          {candidate.automation_plan.minimal_reproducer && (
+            <div className="mt-2 text-xs text-gray-500">
+              reproducer: {candidate.automation_plan.minimal_reproducer.available ? 'available' : 'missing'} ·
+              url {candidate.automation_plan.minimal_reproducer.has_url ? 'yes' : 'no'} ·
+              request {candidate.automation_plan.minimal_reproducer.has_request ? 'yes' : 'no'}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   )
 }

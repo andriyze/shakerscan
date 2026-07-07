@@ -14403,6 +14403,111 @@ def _public_refuter_review_row(row: Any) -> dict[str, Any]:
     return payload
 
 
+def _refuter_automation_plan_for_finding(
+    payload: dict[str, Any],
+    evidence: dict[str, Any],
+    *,
+    trigger_type: str,
+    reasons: Sequence[str],
+) -> dict[str, Any]:
+    finding_id = str(payload.get("id") or payload.get("fingerprint") or "")
+    target_id = str(payload.get("target_id")) if payload.get("target_id") else None
+    source = str(payload.get("source") or "").lower()
+    tool = str(payload.get("tool") or "").lower()
+    category = str(payload.get("category") or payload.get("cwe") or "").lower()
+    url_hint = (
+        payload.get("url")
+        or evidence.get("url")
+        or evidence.get("target_url")
+        or evidence.get("endpoint")
+        or evidence.get("concrete_url")
+    )
+    request_hint = payload.get("request") or evidence.get("request") or evidence.get("raw_request")
+    replayable = bool(finding_id and (url_hint or request_hint or target_id))
+
+    steps: list[dict[str, Any]] = [{
+        "id": "review_claim_basis",
+        "label": "Review stored claim basis",
+        "mode": "record_only",
+        "command": "refuter_review.record",
+        "verdict_basis_after_execution": "signal_only",
+        "requires": ["finding_record"],
+        "counterevidence_goal": "Identify the specific proof gap or benign explanation before any replay.",
+    }]
+
+    if source == "ai_gate" or payload.get("ai_target_id"):
+        steps.append({
+            "id": "replay_ai_gate_probe",
+            "label": "Replay the original AI Gate probe context",
+            "mode": "planned_not_executed",
+            "command": "ai_gate.replay_probe",
+            "verdict_basis_after_execution": "deterministic_replay",
+            "requires": ["ai_target_id", "probe_id_or_transcript_index", "production_confirmation_when_applicable"],
+            "counterevidence_goal": "Show the deterministic detector no longer fires, transcript was semantic-only, or control evidence explains the hit.",
+        })
+    elif source == "model_intake" or tool == "model_intake":
+        steps.append({
+            "id": "verify_model_trust_material",
+            "label": "Re-check checksum, signature, and trust-anchor material",
+            "mode": "planned_not_executed",
+            "command": "model_intake.trust_preview",
+            "verdict_basis_after_execution": "cryptographic",
+            "requires": ["artifact_hash_or_metadata", "signature_or_trusted_key_when_available"],
+            "counterevidence_goal": "Prove the metadata claim is unsupported, cryptographically anchored, or superseded by trusted approval evidence.",
+        })
+    else:
+        steps.append({
+            "id": "deterministic_retest",
+            "label": "Run the smallest deterministic finding retest",
+            "mode": "planned_not_executed",
+            "command": "finding.retest",
+            "verdict_basis_after_execution": "deterministic_replay",
+            "requires": ["finding_id", "scope_receipt_if_policy_requires", "approval_receipt_if_policy_requires"],
+            "counterevidence_goal": "Replay the minimal request and show fixed, blocked, non-reproducible, or non-vulnerable behavior.",
+        })
+
+    if any(token in category for token in ("639", "bola", "idor", "auth", "access", "bfla")) or any(
+        reason in {"critical_high_weak_or_suspected_proof", "ai_gate_semantic_or_weak_deterministic_claim"}
+        for reason in reasons
+    ):
+        steps.append({
+            "id": "check_auth_context",
+            "label": "Verify auth, principal, tenant, and object ownership context",
+            "mode": "planned_not_executed",
+            "command": "asm.improve",
+            "verdict_basis_after_execution": "deterministic_replay",
+            "requires": ["primary_auth", "second_user_auth_for_bola_or_idor", "object_identifier"],
+            "counterevidence_goal": "Show the original claim used the wrong principal, stale object, missing tenant boundary, or unauthenticated context.",
+        })
+
+    return {
+        "status": "planned_not_executed",
+        "execution_enabled": False,
+        "recommended_basis": steps[-1].get("verdict_basis_after_execution") if steps else "signal_only",
+        "record_only_until_executed": True,
+        "subject": {
+            "subject_type": "finding",
+            "subject_id": finding_id or None,
+            "finding_id": finding_id if payload.get("id") else None,
+            "target_id": target_id,
+            "trigger_type": trigger_type,
+        },
+        "minimal_reproducer": _redact_agent_payload({
+            "available": replayable,
+            "has_url": bool(url_hint),
+            "has_request": bool(request_hint),
+            "url_sample": str(url_hint)[:300] if url_hint else None,
+        }),
+        "steps": steps[:5],
+        "counterevidence_schema": {
+            "observed_behavior": "fixed|blocked|non_reproducible|benign_explanation|still_vulnerable|inconclusive",
+            "basis": "signal_only|deterministic_replay|cryptographic|parser_protocol|human_approved_review",
+            "artifact_refs": ["evidence_object_id", "tool_receipt_id"],
+            "notes": "redacted analyst or automation notes",
+        },
+    }
+
+
 def _finding_refuter_trigger(finding: dict[str, Any]) -> dict[str, Any] | None:
     payload = row_to_dict(finding)
     payload.update(finding_proof_fields(payload))
@@ -14448,6 +14553,12 @@ def _finding_refuter_trigger(finding: dict[str, Any]) -> dict[str, Any] | None:
         return None
 
     finding_id = str(payload.get("id") or payload.get("fingerprint") or "")
+    automation_plan = _refuter_automation_plan_for_finding(
+        payload,
+        evidence,
+        trigger_type=trigger_type,
+        reasons=reasons,
+    )
     return {
         "subject_type": "finding",
         "subject_id": finding_id,
@@ -14468,6 +14579,7 @@ def _finding_refuter_trigger(finding: dict[str, Any]) -> dict[str, Any] | None:
             "refuter_signal": "question",
             "verdict_basis": "signal_only",
         },
+        "automation_plan": automation_plan,
         "execution_enabled": False,
         "findings_updated": 0,
     }
@@ -14582,6 +14694,7 @@ def _refuter_review_requests_from_summary(
             "source": candidate.get("source"),
             "tool": candidate.get("tool"),
             "proof_state": candidate.get("proof_state"),
+            "automation_plan": candidate.get("automation_plan") if isinstance(candidate.get("automation_plan"), dict) else {},
         }
         requests.append(
             RefuterReviewRequest(
