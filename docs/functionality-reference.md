@@ -649,10 +649,11 @@ how-to with request bodies is in [`CLAUDE.md`](../CLAUDE.md) / [`AGENTS.md`](../
 `GET /arsenal/refuter-reviews/summary` · `POST /arsenal/refuter-reviews/queue-from-summary` ·
 `POST /arsenal/refuter-reviews/{id}/execute` ·
 `POST /arsenal/refuter-reviews/{id}/derive-verdict` ·
-`POST /arsenal/hypotheses/source-ingest` · `GET /agents/local` · `POST /agents/local/test` ·
-`POST /agents/local/plan`. The `/settings/arsenal` UI includes a Source Hint Ingest panel for
-recording bounded source/spec/route facts as source-only hypotheses; it never creates findings or
-queues scans.
+`POST /arsenal/hypotheses/source-ingest` · `POST /arsenal/hypotheses/from-plan` ·
+`GET /agents/local` · `POST /agents/local/test` · `POST /agents/local/plan`. Source/spec hints and
+saved dry-run plan actions can be recorded as source-only hypotheses; they never create findings or
+queue scans. The `/settings/arsenal` UI includes a Source Hint Ingest panel for bounded
+source/spec/route facts.
 
 **Scans (DAST)**: `POST /scans` · `POST /scans/batch` · `GET /scans` · `GET /scans/{id}` ·
 `GET /scans/{id}/result` · `GET /scans/{id}/logs` · `POST /scans/{id}/cancel` ·

@@ -3489,6 +3489,12 @@ class SourceIngestRequest(BaseModel):
     created_by: Optional[str] = None
 
 
+class PlannerHypothesisRequest(BaseModel):
+    operation_plan_id: str
+    created_by: Optional[str] = None
+    max_actions: int = Field(default=25, ge=1, le=50)
+
+
 class CampaignRequest(BaseModel):
     objective: str = Field(min_length=1, max_length=500)
     campaign_type: str = Field(pattern="^(continuous_asm|authenticated_dast|api_authz|ai_red_team|model_intake|benchmark|incident_retest|source_informed_dast|finding_retest|focused_family)$")
@@ -14620,6 +14626,263 @@ def _source_hint_to_hypothesis_request(
     ), None
 
 
+PLANNER_HYPOTHESIS_VERSION = "planner_action_hypothesis_v1"
+
+
+def _target_id_from_plan_action(plan: dict[str, Any], parameters: dict[str, Any]) -> str | None:
+    target_scope = plan.get("target_scope") if isinstance(plan.get("target_scope"), dict) else {}
+    for value in (
+        parameters.get("target_id"),
+        target_scope.get("target_id"),
+        target_scope.get("id"),
+    ):
+        text = str(value or "").strip()
+        if text:
+            return text
+    return None
+
+
+def _endpoint_hint_from_parameters(parameters: dict[str, Any]) -> tuple[str | None, str | None]:
+    hint = parameters.get("endpoint_hint") if isinstance(parameters.get("endpoint_hint"), dict) else {}
+    method = (
+        hint.get("method")
+        or parameters.get("method")
+        or parameters.get("http_method")
+    )
+    route = (
+        hint.get("route")
+        or hint.get("path")
+        or parameters.get("route")
+        or parameters.get("path")
+        or parameters.get("endpoint")
+    )
+    method_text = str(method or "").strip().upper() or None
+    route_text = _normalize_hypothesis_dedupe_value(route)
+    if route_text and route_text.startswith(("http://", "https://")):
+        try:
+            parsed = urlparse(route_text)
+            route_text = parsed.path or "/"
+        except Exception:
+            pass
+    if route_text and not route_text.startswith("/"):
+        route_text = "/" + route_text
+    return method_text, route_text
+
+
+def _planner_action_family_and_proof(command: str, parameters: dict[str, Any]) -> tuple[str | None, str | None, str, str, list[str]]:
+    family_raw = (
+        parameters.get("check_family")
+        or parameters.get("family")
+        or parameters.get("vulnerability_family")
+        or parameters.get("probe_family")
+    )
+    family = str(family_raw or "").strip().lower().replace("-", "_").replace(" ", "_")
+    requires: list[str] = []
+    cwe: str | None = None
+    proof_surface = "runtime_proof_required"
+    rationale = "Planner suggested follow-up work that still requires deterministic runtime proof."
+
+    if command in {"asm.improve", "asm.test"}:
+        if family in {"bola", "idor"}:
+            requires = ["primary_auth", "second_user_auth"]
+            return "bola", "CWE-639", "runtime_authz_replay", "Planner suggested BOLA/IDOR coverage that requires two-principal runtime replay.", requires
+        if family in {"auth", "authorization", "bfla", "bopla", "access_control"}:
+            requires = ["primary_auth"]
+            return "auth", "CWE-285", "runtime_authz_replay", "Planner suggested authorization coverage that requires authenticated runtime replay.", requires
+        if family in {"sqli", "sql_injection", "nosql", "nosql_injection"}:
+            return "sqli", "CWE-89", "runtime_probe", "Planner suggested injection coverage that requires runtime SQLi/NoSQL proof.", []
+        if family in {"xss", "stored_xss", "reflected_xss", "dom_xss"}:
+            return "xss", "CWE-79", "browser_runtime_probe", "Planner suggested XSS coverage that requires browser/runtime proof.", []
+        if family:
+            return family, cwe, proof_surface, rationale, requires
+        return None, None, proof_surface, "ASM action did not include a supported check_family.", []
+
+    if command == "scan.focused_family":
+        if not family:
+            return None, None, proof_surface, "Focused-family action did not include a family.", []
+        cwe_map = {
+            "ssrf": "CWE-918",
+            "lfi": "CWE-22",
+            "path_traversal": "CWE-22",
+            "dangerous_upload": "CWE-434",
+            "upload": "CWE-434",
+            "sqli": "CWE-89",
+            "xss": "CWE-79",
+        }
+        proof_map = {
+            "ssrf": "runtime_callback_or_response",
+            "lfi": "runtime_file_evidence",
+            "path_traversal": "runtime_file_evidence",
+            "dangerous_upload": "runtime_upload_handling",
+            "upload": "runtime_upload_handling",
+            "sqli": "runtime_probe",
+            "xss": "browser_runtime_probe",
+        }
+        requires = ["approval_receipt"] if family in {"ssrf", "lfi", "path_traversal", "dangerous_upload", "upload"} else []
+        return family, cwe_map.get(family), proof_map.get(family, "runtime_probe"), f"Planner suggested focused {family} proof work.", requires
+
+    if command in {"ai_gate.scan", "ai_gate.replay_probe"}:
+        pack = str(parameters.get("probe_pack") or parameters.get("probe_id") or "ai_gate").strip()
+        return "ai_gate", "CWE-284", "ai_gate_probe_transcript", f"Planner suggested AI Gate coverage ({pack}) that needs probe transcript evidence.", ["ai_target_registration"]
+
+    if command in {"model_intake.trust_preview", "model_intake.scan"}:
+        return "model_intake_trust", None, "model_intake_trust_evidence", "Planner suggested Model Intake trust work that requires checksum/signature/policy evidence.", ["artifact_reference"]
+
+    if command == "hypothesis.plan_campaign":
+        if not family:
+            family = "planned_followup"
+        return family, None, proof_surface, "Planner suggested turning a hypothesis into a campaign plan; proof still requires the planned action to execute later.", ["hypothesis_id"]
+
+    return None, None, proof_surface, f"Command {command} is not converted into a hypothesis.", []
+
+
+def _planner_action_to_hypothesis_request(
+    plan: dict[str, Any],
+    action: dict[str, Any],
+    *,
+    operation_plan_id: str,
+    action_index: int,
+    created_by: str | None,
+) -> tuple[HypothesisRequest | None, dict[str, Any] | None]:
+    command = str(action.get("command") or "").strip()
+    parameters = action.get("parameters") if isinstance(action.get("parameters"), dict) else {}
+    if not command:
+        return None, {"reason": "missing_command", "action_index": action_index}
+    if command in {"finding.retest", "deployment.decision", "target.get", "finding.get", "mission.timeline"}:
+        return None, {"reason": "command_not_hypothesis_seed", "command": command, "action_index": action_index}
+
+    family, cwe, proof_surface, rationale, requires = _planner_action_family_and_proof(command, parameters)
+    if not family:
+        return None, {"reason": "unsupported_or_incomplete_action", "command": command, "action_index": action_index, "rationale": rationale}
+
+    target_id = _target_id_from_plan_action(plan, parameters)
+    method, route = _endpoint_hint_from_parameters(parameters)
+    if not route and command in {"asm.improve", "asm.test", "scan.focused_family"}:
+        route = str(parameters.get("path_hint") or parameters.get("route_hint") or "").strip() or None
+    dedupe_dimensions = {
+        "method": method,
+        "route": route,
+        "object_key": parameters.get("object_key") or parameters.get("object_id_key"),
+        "principal_actor": parameters.get("principal_actor") or parameters.get("source_principal"),
+        "principal_other": parameters.get("principal_other") or parameters.get("excluded_principal"),
+        "tenant": parameters.get("tenant") or parameters.get("tenant_id"),
+        "parameter_path": parameters.get("parameter_path") or parameters.get("param"),
+        "body_path": parameters.get("body_path"),
+        "proof_surface": proof_surface,
+    }
+    dedupe_dimensions = {key: value for key, value in dedupe_dimensions.items() if value}
+    if dedupe_dimensions:
+        dedupe_key = "ai-planner-placeholder"
+    else:
+        params_hash = hashlib.sha256(
+            json.dumps(_redact_agent_payload(parameters), sort_keys=True, default=str).encode("utf-8")
+        ).hexdigest()[:16]
+        dedupe_key = f"ai_planner_action|command={command}|family={family}|target={target_id or 'none'}|params={params_hash}"
+
+    planner = plan.get("planner") if isinstance(plan.get("planner"), dict) else {}
+    missing_inputs = _clean_string_list(plan.get("missing_inputs"), max_items=25)
+    action_reason = str(action.get("reason") or "").strip()
+    confidence = 0.55 if action_reason else 0.45
+    if missing_inputs:
+        confidence = min(confidence, 0.4)
+    risk_tier = str(action.get("risk_tier") or plan.get("risk_tier") or "read_only")
+    severity = "high" if family in {"bola", "ssrf", "dangerous_upload", "lfi", "path_traversal"} else "medium"
+    endpoint_label = f"{method or ''} {route or ''}".strip()
+    title_suffix = f" on {endpoint_label}" if endpoint_label else ""
+    required_inputs = list(dict.fromkeys([*requires, *missing_inputs]))
+    next_action = _redact_agent_payload({
+        "command": command,
+        "parameters": parameters,
+        "requires": required_inputs,
+        "proof_surface": proof_surface,
+        "source_only": True,
+        "operation_plan_id": operation_plan_id,
+        "action_index": action_index,
+    })
+    return HypothesisRequest(
+        source="ai_planner",
+        family=family,
+        dedupe_key=dedupe_key,
+        dedupe_dimensions=dedupe_dimensions,
+        target_id=target_id,
+        cwe=cwe,
+        title=f"Planner lead: {family.replace('_', ' ')}{title_suffix}",
+        description=f"{rationale} Planner output is a work signal only and cannot create findings or satisfy proof.",
+        severity_guess=severity,
+        confidence=confidence,
+        next_test_action=next_action,
+        endorsement={
+            "source": "ai_planner",
+            "operation_plan_id": operation_plan_id,
+            "action_index": action_index,
+            "command": command,
+            "reason": action_reason or None,
+            "runtime_proof_required": True,
+        },
+        metadata_json={
+            "planner_hypothesis_version": PLANNER_HYPOTHESIS_VERSION,
+            "operation_plan_id": operation_plan_id,
+            "action_index": action_index,
+            "command": command,
+            "planner": planner,
+            "risk_tier": risk_tier,
+            "missing_inputs": missing_inputs,
+            "requires": requires,
+            "source_only": True,
+            "runtime_proof_required": True,
+            "dedupe_dimensions": dedupe_dimensions,
+        },
+        created_by=created_by or str(plan.get("created_by") or "ai_planner").strip() or "ai_planner",
+    ), None
+
+
+async def _generate_hypotheses_from_operation_plan(conn, req: PlannerHypothesisRequest) -> dict[str, Any]:
+    try:
+        plan_uuid = uuid.UUID(str(req.operation_plan_id))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="operation_plan_id must be a UUID") from exc
+    row = await conn.fetchrow("SELECT * FROM operation_plans WHERE id=$1", plan_uuid)
+    if not row:
+        raise HTTPException(status_code=404, detail="Operation plan not found")
+    plan = _public_operation_plan_row(row)
+    actions = plan.get("actions") if isinstance(plan.get("actions"), list) else []
+    created_by = str(req.created_by or plan.get("created_by") or "ai_planner").strip() or "ai_planner"
+    hypotheses: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    for index, action in enumerate(actions[: req.max_actions]):
+        if not isinstance(action, dict):
+            skipped.append({"reason": "action_not_object", "action_index": index})
+            continue
+        hypothesis_req, skip = _planner_action_to_hypothesis_request(
+            plan,
+            action,
+            operation_plan_id=str(plan_uuid),
+            action_index=index,
+            created_by=created_by,
+        )
+        if skip:
+            skipped.append(skip)
+            continue
+        if not hypothesis_req:
+            skipped.append({"reason": "no_hypothesis_generated", "action_index": index})
+            continue
+        result = await _upsert_hypothesis(conn, hypothesis_req)
+        hypotheses.append(result["hypothesis"])
+    if len(actions) > req.max_actions:
+        skipped.append({"reason": "max_actions_exceeded", "skipped_count": len(actions) - req.max_actions})
+    return {
+        "operation_plan_id": str(plan_uuid),
+        "hypotheses": hypotheses,
+        "created_or_endorsed": len(hypotheses),
+        "skipped": skipped,
+        "skipped_count": len(skipped),
+        "execution_enabled": False,
+        "findings_created": 0,
+        "queued_scans": 0,
+        "runtime_proof_required": True,
+    }
+
+
 def _canonical_hypothesis_signal(req: HypothesisSignalRequest) -> dict[str, Any]:
     payload = req.model_dump(mode="json")
     signal = {
@@ -18211,6 +18474,10 @@ async def _arsenal_dispatch_hypothesis_generate_from_source(p: dict[str, Any]) -
     return await arsenal_generate_hypotheses_from_source(SourceIngestRequest(**p))
 
 
+async def _arsenal_dispatch_hypothesis_generate_from_plan(p: dict[str, Any]) -> dict[str, Any]:
+    return await arsenal_generate_hypotheses_from_plan(PlannerHypothesisRequest(**p))
+
+
 async def _arsenal_dispatch_hypothesis_claim(p: dict[str, Any]) -> dict[str, Any]:
     hypothesis_id = str(p.get("hypothesis_id") or "").strip()
     if not hypothesis_id:
@@ -18611,6 +18878,7 @@ def _arsenal_readonly_adapters() -> dict[str, Any]:
         "hypothesis.situation_report": _arsenal_dispatch_hypothesis_situation_report,
         "hypothesis.record": _arsenal_dispatch_hypothesis_record,
         "hypothesis.generate_from_source": _arsenal_dispatch_hypothesis_generate_from_source,
+        "hypothesis.generate_from_plan": _arsenal_dispatch_hypothesis_generate_from_plan,
         "hypothesis.claim": _arsenal_dispatch_hypothesis_claim,
         "hypothesis.signal": _arsenal_dispatch_hypothesis_signal,
         "hypothesis.plan_campaign": _arsenal_dispatch_hypothesis_plan_campaign,
@@ -19327,6 +19595,18 @@ async def arsenal_generate_hypotheses_from_source(req: SourceIngestRequest):
         "queued_scans": 0,
         "runtime_proof_required": True,
     }
+
+
+@app.post("/arsenal/hypotheses/from-plan")
+async def arsenal_generate_hypotheses_from_plan(req: PlannerHypothesisRequest):
+    """Record saved planner actions as hypotheses only.
+
+    Planner output remains a signal source. This route requires a persisted
+    OperationPlan and cannot queue scanner work, create findings, or satisfy
+    runtime proof contracts.
+    """
+    async with db_pool.acquire() as conn:
+        return await _generate_hypotheses_from_operation_plan(conn, req)
 
 
 @app.post("/arsenal/hypotheses/{hypothesis_id}/claim")

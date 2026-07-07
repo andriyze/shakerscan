@@ -4662,6 +4662,140 @@ def test_upsert_hypothesis_matches_existing_across_sources_by_dedupe_key():
     assert result["execution_enabled"] is False
 
 
+def test_planner_action_to_hypothesis_is_source_only_runtime_proof_required():
+    target_id = uuid.uuid4()
+    plan_id = uuid.uuid4()
+    plan = {
+        "id": str(plan_id),
+        "planner": {"kind": "local_agent", "agent": "codex"},
+        "target_scope": {"target_id": str(target_id)},
+        "risk_tier": "credential",
+        "missing_inputs": ["second_user_auth"],
+        "created_by": "planner-test",
+    }
+    action = {
+        "command": "asm.improve",
+        "risk_tier": "credential",
+        "reason": "test BOLA worklist",
+        "parameters": {
+            "check_family": "bola",
+            "endpoint_hint": {"method": "GET", "route": "/rest/basket/{id}"},
+            "object_key": "basket.id",
+            "principal_actor": "user1",
+            "principal_other": "user2",
+        },
+    }
+
+    req, skip = api_module._planner_action_to_hypothesis_request(
+        plan,
+        action,
+        operation_plan_id=str(plan_id),
+        action_index=0,
+        created_by="codex",
+    )
+
+    assert skip is None
+    assert req is not None
+    assert req.source == "ai_planner"
+    assert req.family == "bola"
+    assert req.cwe == "CWE-639"
+    assert req.target_id == str(target_id)
+    assert req.dedupe_dimensions["route"] == "/rest/basket/{id}"
+    assert req.dedupe_dimensions["object_key"] == "basket.id"
+    assert req.next_test_action["source_only"] is True
+    assert req.next_test_action["proof_surface"] == "runtime_authz_replay"
+    assert req.next_test_action["requires"] == ["primary_auth", "second_user_auth"]
+    assert req.metadata_json["runtime_proof_required"] is True
+    assert req.metadata_json["planner"]["agent"] == "codex"
+
+
+def test_generate_hypotheses_from_operation_plan_records_no_findings_or_scans():
+    target_id = uuid.uuid4()
+    plan_id = uuid.uuid4()
+    inserted: list[dict[str, object]] = []
+
+    class _FakeConn:
+        async def fetchrow(self, query, *args):
+            sql = str(query)
+            if "FROM operation_plans" in sql:
+                assert args[0] == plan_id
+                return {
+                    "id": plan_id,
+                    "objective": "Improve BOLA coverage",
+                    "planner": json.dumps({"kind": "local_agent", "agent": "codex"}),
+                    "context_hash": "a" * 64,
+                    "target_scope": json.dumps({"target_id": str(target_id)}),
+                    "risk_tier": "credential",
+                    "actions": json.dumps([
+                        {
+                            "command": "asm.improve",
+                            "risk_tier": "credential",
+                            "parameters": {
+                                "check_family": "bola",
+                                "endpoint_hint": {"method": "GET", "route": "/api/orders/{id}"},
+                                "object_key": "order.id",
+                            },
+                        },
+                        {"command": "finding.retest", "parameters": {"finding_id": str(uuid.uuid4())}},
+                    ]),
+                    "confirmations": json.dumps([]),
+                    "missing_inputs": json.dumps(["second_user_auth"]),
+                    "stop_conditions": json.dumps([]),
+                    "success_criteria": json.dumps([]),
+                    "validation_errors": json.dumps([]),
+                    "validation_warnings": json.dumps([]),
+                    "plan_json": json.dumps({}),
+                    "created_by": "planner-test",
+                }
+            if "SELECT *" in sql and "FROM hypotheses" in sql:
+                return None
+            if "INSERT INTO hypotheses" in sql:
+                inserted.append({"args": args})
+                return {
+                    "id": uuid.uuid4(),
+                    "target_id": args[0],
+                    "campaign_id": args[1],
+                    "campaign_action_id": args[2],
+                    "source": args[3],
+                    "family": args[4],
+                    "cwe": args[5],
+                    "title": args[6],
+                    "description": args[7],
+                    "severity_guess": args[8],
+                    "confidence": args[9],
+                    "dedupe_key": args[10],
+                    "smoke_score": args[11],
+                    "evidence_object_ids": args[12],
+                    "tool_receipt_ids": args[13],
+                    "next_test_action": args[14],
+                    "endorsements": json.dumps([json.loads(args[15])]),
+                    "refutations": json.dumps([]),
+                    "metadata_json": args[16],
+                    "created_by": args[17],
+                    "status": "open",
+                    "version": 1,
+                    "claim_owner": None,
+                    "claim_lease_expires_at": None,
+                }
+            raise AssertionError(sql)
+
+    result = asyncio.run(api_module._generate_hypotheses_from_operation_plan(
+        _FakeConn(),
+        api_module.PlannerHypothesisRequest(operation_plan_id=str(plan_id), created_by="codex"),
+    ))
+
+    assert result["created_or_endorsed"] == 1
+    assert result["skipped_count"] == 1
+    assert result["skipped"][0]["reason"] == "command_not_hypothesis_seed"
+    assert result["execution_enabled"] is False
+    assert result["findings_created"] == 0
+    assert result["queued_scans"] == 0
+    assert result["runtime_proof_required"] is True
+    assert inserted[0]["args"][3] == "ai_planner"
+    assert result["hypotheses"][0]["source"] == "ai_planner"
+    assert result["hypotheses"][0]["can_promote_finding"] is False
+
+
 def test_record_command_result_redacts_result_json_and_returns_public_row():
     captured: dict[str, object] = {"queries": []}
 

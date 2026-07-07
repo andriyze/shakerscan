@@ -533,8 +533,11 @@ raw shell execution or LLM-produced verified findings.
    bounded source/spec/package hints becoming `source_ingest` hypotheses through
    `/arsenal/hypotheses/source-ingest` / `hypothesis.generate_from_source`; source facts remain
    source-only context with `runtime_proof_required=true` and create no findings or queued work.
-   Remaining work is to route AI planner suggestions and broader weak scanner signals into those
-   hypotheses. Hypotheses are claimable/refutable work items, not findings.
+   DONE phase 4 for saved dry-run `OperationPlan` actions becoming `ai_planner` hypotheses through
+   `/arsenal/hypotheses/from-plan` / `hypothesis.generate_from_plan`; planner output remains a
+   source-only signal with `runtime_proof_required=true` and creates no findings or queued work.
+   Remaining work is broader weak scanner signal routing into those hypotheses. Hypotheses are
+   claimable/refutable work items, not findings.
 7. **Detector recall campaigns:** keep benchmark gaps as proof-backed work items: POST-body SQLi,
    NoSQL JSON/body routing, stored/reflected XSS browser proof, workflow/write-side BOLA, mass
    assignment/JWT, and graph-driven authz hypotheses.
@@ -1021,6 +1024,13 @@ items, not findings.
     mass-assignment, upload, secret, and AI/tool-boundary work. The route records or endorses leads
     only, marks them `source_only` and `runtime_proof_required`, reports skipped vague hints, and
     returns `findings_created=0` / `execution_enabled=false`.
+13. DONE phase 1: `/arsenal/hypotheses/from-plan` and `hypothesis.generate_from_plan` consume a
+    persisted dry-run `OperationPlan` and convert bounded supported actions
+    (`asm.improve`, `asm.test`, `scan.focused_family`, AI Gate, Model Intake trust, and
+    hypothesis-planning actions) into deduped `ai_planner` hypotheses. The route skips commands that
+    are not hypothesis seeds, records missing inputs/preconditions as metadata, and returns
+    `findings_created=0`, `queued_scans=0`, `execution_enabled=false`, and
+    `runtime_proof_required=true`.
 
 **Done when:** the scanner can state "`GET /api/orders` produces `order.id` owned by user1;
 `GET /api/orders/{id}` consumes it -> test user2 read/mutate" from a persisted graph and schedule

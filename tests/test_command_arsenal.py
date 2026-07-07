@@ -623,6 +623,20 @@ def test_local_agent_plan_command_is_dry_run_not_execution():
     assert "operation_plan" in cmd["evidence_contract"]
 
 
+def test_hypothesis_generate_from_plan_is_dry_run_signal_only():
+    payload = arsenal.describe_commands()
+    commands = {item["name"]: item for item in payload["commands"]}
+
+    cmd = commands["hypothesis.generate_from_plan"]
+    assert cmd["status"] == "dry_run"
+    assert cmd["risk_tier"] == "read_only"
+    assert cmd["method"] == "POST"
+    assert cmd["path"] == "/arsenal/hypotheses/from-plan"
+    assert cmd["scope_fields"] == ["operation_plan_id"]
+    assert "runtime_proof_required" in cmd["evidence_contract"]
+    assert "planner" in cmd["redaction_contract"]
+
+
 def test_local_agent_parse_plan_command_is_fail_closed_dry_run():
     payload = arsenal.describe_commands()
     commands = {item["name"]: item for item in payload["commands"]}
