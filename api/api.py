@@ -16693,6 +16693,184 @@ async def _execute_authz_replay_plan(
     }
 
 
+async def _promote_authz_replay_finding(
+    conn,
+    *,
+    campaign_action_id: str,
+    approval_receipt_id: str | None = None,
+    created_by: str | None = None,
+) -> dict[str, Any]:
+    """Explicitly promote a replayed authz violation into a manual finding."""
+    action_uuid = _uuid_or_400(campaign_action_id, "campaign action id")
+    row = await conn.fetchrow("SELECT * FROM campaign_actions WHERE id=$1", action_uuid)
+    if not row:
+        raise HTTPException(status_code=404, detail="Campaign action not found")
+    action = _public_campaign_action_row(row)
+    result_json = action.get("result_json") if isinstance(action.get("result_json"), dict) else {}
+    replay = result_json.get("authz_replay") if isinstance(result_json.get("authz_replay"), dict) else {}
+    if not replay:
+        raise HTTPException(status_code=400, detail="Campaign action has no authz replay result")
+    if int(replay.get("violation_count") or 0) <= 0:
+        raise HTTPException(status_code=400, detail="Authz replay did not observe a lower-role access violation")
+    target_uuid = _optional_uuid(action.get("target_id"))
+    if not target_uuid:
+        raise HTTPException(status_code=400, detail="Campaign action is not bound to a target_id")
+    target_row = await conn.fetchrow("SELECT id, url FROM targets WHERE id=$1", target_uuid)
+    if not target_row:
+        raise HTTPException(status_code=404, detail="Target not found")
+    target_payload = row_to_dict(target_row)
+    target_url = str(target_payload.get("url") or "")
+    observations = [item for item in (replay.get("observations") or []) if isinstance(item, dict)]
+    violations = []
+    for item in observations:
+        if str(item.get("expected_access") or "").lower() not in {"deny", "requires_role"}:
+            continue
+        try:
+            observed_status = int(item.get("observed_status"))
+        except (TypeError, ValueError):
+            continue
+        if 200 <= observed_status < 400:
+            violations.append(item)
+    if not violations:
+        raise HTTPException(status_code=400, detail="Authz replay result has no promotable violation observation")
+    first = violations[0]
+    path = str(first.get("path") or "").strip() or target_url
+    actor = str(first.get("principal_auth_state") or first.get("principal_label") or "lower-role principal").strip()
+    title = f"BOLA: {actor} accessed denied resource"
+    fingerprint_source = f"{target_uuid}:authz.replay_plan:{path}:{actor}:CWE-639"
+    fingerprint = hashlib.sha256(fingerprint_source.encode()).hexdigest()[:32]
+    evidence_instance_ids = _clean_string_list(replay.get("evidence_instance_ids"), max_items=100)
+    tool_receipt_id = str(replay.get("tool_receipt_id") or "").strip()
+    evidence_json = _redact_finding_evidence({
+        "proof": "Deterministic authz replay observed a principal receiving successful access where the role matrix expected denial.",
+        "authz_replay": {
+            "campaign_action_id": str(action_uuid),
+            "violation_count": len(violations),
+            "violations": violations[:10],
+            "evidence_instance_ids": evidence_instance_ids,
+            "tool_receipt_id": tool_receipt_id or None,
+        },
+    })
+    existing = await conn.fetchrow(
+        "SELECT id, status FROM findings WHERE fingerprint=$1 AND target_id=$2",
+        fingerprint,
+        target_uuid,
+    )
+    if existing:
+        finding_id = existing["id"]
+        status = "duplicate"
+        existing_payload = row_to_dict(existing)
+        if existing_payload.get("status") == "resolved":
+            await conn.execute(
+                """
+                UPDATE findings
+                SET status='active', last_seen_at=NOW(),
+                    resurfaced_count = resurfaced_count + 1,
+                    updated_at=NOW()
+                WHERE id=$1
+                """,
+                finding_id,
+            )
+            status = "resurfaced"
+        else:
+            await conn.execute("UPDATE findings SET last_seen_at=NOW(), updated_at=NOW() WHERE id=$1", finding_id)
+    else:
+        finding_id = await conn.fetchval(
+            """
+            INSERT INTO findings (
+                target_id, fingerprint, title, description, severity,
+                cvss_score, tool, cwe, url, evidence, request, response,
+                notes, source, status
+            ) VALUES (
+                $1,$2,$3,$4,'high',
+                $5,'bola','CWE-639',$6,$7,$8,$9,
+                $10,'manual','active'
+            )
+            RETURNING id
+            """,
+            target_uuid,
+            fingerprint,
+            title,
+            "Lower-role authorization replay observed successful access where the principal matrix expected denial.",
+            8.1,
+            path if path.startswith(("http://", "https://")) else target_url.rstrip("/") + "/" + path.lstrip("/"),
+            json.dumps(evidence_json),
+            None,
+            None,
+            "Promoted explicitly from authz.replay_plan evidence.",
+        )
+        status = "created"
+    await conn.execute(
+        """
+        UPDATE evidence_instances
+        SET finding_id=$1
+        WHERE id = ANY($2::uuid[])
+        """,
+        finding_id,
+        [uuid.UUID(item) for item in evidence_instance_ids if _optional_uuid(item)],
+    )
+    await conn.execute(
+        """
+        UPDATE campaign_actions
+        SET finding_ids = (
+                SELECT COALESCE(jsonb_agg(DISTINCT value), '[]'::jsonb)
+                FROM jsonb_array_elements_text(finding_ids || $1::jsonb) AS value
+            ),
+            status='completed',
+            result_json = result_json || $2::jsonb,
+            updated_at=NOW()
+        WHERE id=$3
+        """,
+        json.dumps([str(finding_id)]),
+        json.dumps({"authz_replay_promotion": {"finding_id": str(finding_id), "status": status}}),
+        action_uuid,
+    )
+    await conn.execute(
+        """
+        UPDATE targets SET
+            active_findings_count = (
+                SELECT COUNT(*) FROM findings WHERE target_id=$1 AND status='active'
+            ),
+            updated_at=NOW()
+        WHERE id=$1
+        """,
+        target_uuid,
+    )
+    hypothesis_ids = action.get("hypothesis_ids") if isinstance(action.get("hypothesis_ids"), list) else []
+    command_result = await _record_command_result(
+        conn,
+        command="authz.promote_replay_finding",
+        status="completed",
+        risk_tier="credential",
+        dry_run=False,
+        approval_receipt_id=approval_receipt_id,
+        finding_ids=[str(finding_id)],
+        hypothesis_ids=[str(item) for item in hypothesis_ids],
+        evidence_object_ids=[],
+        tool_receipt_ids=[tool_receipt_id] if tool_receipt_id else [],
+        result_json={
+            "finding_id": str(finding_id),
+            "fingerprint": fingerprint,
+            "promotion_status": status,
+            "evidence_instance_ids": evidence_instance_ids,
+            "finding_created": status == "created",
+        },
+        operator_message="Promoted deterministic authz replay violation through explicit gated command.",
+        next_action=f"/findings/{finding_id}",
+        created_by=created_by,
+    )
+    return {
+        "finding_id": str(finding_id),
+        "fingerprint": fingerprint,
+        "status": status,
+        "command_result": command_result,
+        "evidence_instance_ids": evidence_instance_ids,
+        "tool_receipt_id": tool_receipt_id or None,
+        "execution_enabled": True,
+        "findings_created": 1 if status == "created" else 0,
+    }
+
+
 async def _plan_campaign_from_hypothesis(
     conn,
     hypothesis_id: str,
@@ -17448,6 +17626,19 @@ async def _arsenal_dispatch_authz_replay_plan(p: dict[str, Any], approval_receip
         )
 
 
+async def _arsenal_dispatch_authz_promote_replay_finding(p: dict[str, Any], approval_receipt_id: str | None) -> dict[str, Any]:
+    campaign_action_id = str(p.get("campaign_action_id") or "").strip()
+    if not campaign_action_id:
+        raise HTTPException(status_code=400, detail="authz.promote_replay_finding requires a campaign_action_id parameter")
+    async with db_pool.acquire() as conn:
+        return await _promote_authz_replay_finding(
+            conn,
+            campaign_action_id=campaign_action_id,
+            approval_receipt_id=approval_receipt_id or p.get("approval_receipt_id"),
+            created_by=p.get("created_by"),
+        )
+
+
 def _arsenal_readonly_adapters() -> dict[str, Any]:
     return {
         "campaign.list": _arsenal_dispatch_campaign_list,
@@ -17519,6 +17710,7 @@ def _arsenal_gated_adapters() -> dict[str, Any]:
         "model_intake.scan": _arsenal_dispatch_model_intake_scan,
         "evidence.retention_sweep": _arsenal_dispatch_evidence_retention_sweep,
         "authz.replay_plan": _arsenal_dispatch_authz_replay_plan,
+        "authz.promote_replay_finding": _arsenal_dispatch_authz_promote_replay_finding,
     }
 
 

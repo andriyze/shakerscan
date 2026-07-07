@@ -2386,6 +2386,125 @@ def test_execute_authz_replay_plan_records_observations_without_findings(monkeyp
     assert result["command_result"]["result_json"]["authz_replay"]["violation_count"] == 1
 
 
+def test_promote_authz_replay_finding_requires_violation_and_links_evidence():
+    action_id = uuid.uuid4()
+    target_id = uuid.uuid4()
+    hypothesis_id = uuid.uuid4()
+    finding_id = uuid.uuid4()
+    approval_id = uuid.uuid4()
+    tool_receipt_id = uuid.uuid4()
+    evidence_ids = [uuid.uuid4(), uuid.uuid4()]
+    captured: dict[str, object] = {"queries": [], "executes": []}
+    replay = {
+        "violation_count": 1,
+        "tool_receipt_id": str(tool_receipt_id),
+        "evidence_instance_ids": [str(item) for item in evidence_ids],
+        "observations": [
+            {
+                "method": "GET",
+                "path": "/api/orders/42",
+                "principal_label": "user2",
+                "principal_auth_state": "user2",
+                "expected_access": "deny",
+                "expected_http_status": 403,
+                "observed_status": 200,
+                "matched": False,
+            }
+        ],
+    }
+
+    class _FakeConn:
+        async def fetchrow(self, query, *args):
+            sql = str(query)
+            captured["queries"].append(sql)
+            if "SELECT * FROM campaign_actions" in sql:
+                return {
+                    "id": action_id,
+                    "campaign_id": None,
+                    "operation_plan_id": None,
+                    "command_result_id": None,
+                    "target_id": target_id,
+                    "scope_receipt_id": None,
+                    "approval_receipt_id": None,
+                    "scan_id": None,
+                    "command": "authz.replay_plan",
+                    "action_name": "authz.replay_plan",
+                    "status": "partial",
+                    "dry_run": False,
+                    "risk_tier": "credential",
+                    "finding_ids": json.dumps([]),
+                    "hypothesis_ids": json.dumps([str(hypothesis_id)]),
+                    "evidence_object_ids": json.dumps([]),
+                    "tool_receipt_ids": json.dumps([str(tool_receipt_id)]),
+                    "blocked_by": json.dumps([]),
+                    "next_action": None,
+                    "operator_message": "replayed",
+                    "result_json": json.dumps({"authz_replay": replay}),
+                    "created_by": "pytest",
+                    "mission_campaign_id": None,
+                    "created_at": "now",
+                    "updated_at": "now",
+                }
+            if "SELECT id, url FROM targets" in sql:
+                return {"id": target_id, "url": "https://app.example.com"}
+            if "SELECT id, status FROM findings" in sql:
+                return None
+            if "INSERT INTO command_results" in sql:
+                captured["command_result_args"] = args
+                return {
+                    "id": uuid.uuid4(),
+                    "command": args[0],
+                    "status": args[1],
+                    "dry_run": args[2],
+                    "risk_tier": args[3],
+                    "operation_plan_id": args[4],
+                    "scope_receipt_id": args[5],
+                    "approval_receipt_id": args[6],
+                    "campaign_id": args[7],
+                    "scan_id": args[8],
+                    "finding_ids": args[9],
+                    "hypothesis_ids": args[10],
+                    "evidence_object_ids": args[11],
+                    "tool_receipt_ids": args[12],
+                    "blocked_by": args[13],
+                    "next_action": args[14],
+                    "operator_message": args[15],
+                    "result_json": args[16],
+                    "created_by": args[17],
+                    "created_at": "now",
+                }
+            raise AssertionError(sql)
+
+        async def fetchval(self, query, *args):
+            captured["queries"].append(str(query))
+            assert "INSERT INTO findings" in str(query)
+            captured["finding_args"] = args
+            return finding_id
+
+        async def execute(self, query, *args):
+            captured["executes"].append((str(query), args))
+            return "OK"
+
+    result = asyncio.run(api_module._promote_authz_replay_finding(
+        _FakeConn(),
+        campaign_action_id=str(action_id),
+        approval_receipt_id=str(approval_id),
+        created_by="pytest",
+    ))
+
+    assert result["execution_enabled"] is True
+    assert result["findings_created"] == 1
+    assert result["finding_id"] == str(finding_id)
+    assert result["tool_receipt_id"] == str(tool_receipt_id)
+    assert result["evidence_instance_ids"] == [str(item) for item in evidence_ids]
+    assert result["command_result"]["command"] == "authz.promote_replay_finding"
+    assert result["command_result"]["finding_ids"] == [str(finding_id)]
+    assert result["command_result"]["tool_receipt_ids"] == [str(tool_receipt_id)]
+    assert captured["finding_args"][2].startswith("BOLA:")
+    assert any("UPDATE evidence_instances" in sql for sql, _args in captured["executes"])
+    assert any("UPDATE campaign_actions" in sql for sql, _args in captured["executes"])
+
+
 def test_hypothesis_signal_redacts_and_is_non_executing():
     req = api_module.HypothesisSignalRequest(
         signal_type="refutation",

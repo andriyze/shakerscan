@@ -433,6 +433,21 @@ def test_authz_replay_plan_is_gated_credential_command():
     assert "command_result" in cmd["evidence_contract"]
 
 
+def test_authz_promote_replay_finding_is_gated_credential_command():
+    payload = arsenal.describe_commands()
+    commands = {item["name"]: item for item in payload["commands"]}
+
+    cmd = commands["authz.promote_replay_finding"]
+    assert cmd["status"] == "gated"
+    assert cmd["risk_tier"] == "credential"
+    assert cmd["method"] == "POST"
+    assert cmd["path"] == "/arsenal/campaign-actions/{campaign_action_id}/authz-promote"
+    assert "confirm_authorized" in cmd["required_confirmations"]
+    assert "approval_receipt_id" in cmd["parameters_schema"]
+    assert "finding_id" in cmd["evidence_contract"]
+    assert "evidence_instance_ids" in cmd["evidence_contract"]
+
+
 def test_mission_contract_catalog_is_contract_only():
     payload = arsenal.describe_contracts()
 

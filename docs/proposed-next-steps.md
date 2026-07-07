@@ -1013,7 +1013,7 @@ the deterministic campaign from it, while unproven graph/source/AI signals remai
 than findings.
 
 ### 8. Auth / principal / role matrix
-**Status: PARTIAL, PHASE 4 GATED REPLAY EXECUTOR DONE.** `target_endpoints.auth_state` exists, and
+**Status: PARTIAL, PHASE 5 EXPLICIT REPLAY PROMOTION DONE.** `target_endpoints.auth_state` exists, and
 `target_principals` plus `target_endpoint_expectations` now persist role, tenant, credential-profile
 references, auth states, and endpoint x principal expected access. `GET/POST /targets/{id}/principals`
 and `GET/POST /targets/{id}/principal-matrix` expose the matrix as non-executing planning facts, and
@@ -1026,11 +1026,13 @@ rows, and missing preconditions from that matrix. `authz.replay_plan` now execut
 through an existing interactive session only via the gated Command Arsenal path (`execute=true`,
 `confirm_authorized`, approval receipt, and execution feature flag), records replay observations,
 binds them to record-only evidence instances plus an `authz.replay_plan` tool receipt, and updates
-the planned campaign action without creating findings automatically. Proof-backed lower-role finding
-promotion is still open.
+the planned campaign action without creating findings automatically. `authz.promote_replay_finding`
+now explicitly promotes replay observations with lower-role access violations into manual-source BOLA
+findings, links evidence instances/tool receipts, and records a command-result audit row; this is
+still gated and never happens automatically after replay.
 
-**Implement next:** deterministic authz replay observations should promote confirmed lower-role
-access through the normal proof taxonomy.
+**Implement next:** add richer replay proof bundles, duplicate collapse across route templates, and
+operator UI controls for the gated replay/promotion workflow.
 
 **Done when:** a campaign can assert "endpoint X requires role admin" and prove a lower-role
 principal's access is a finding.
