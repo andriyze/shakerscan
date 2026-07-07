@@ -73,7 +73,7 @@ def test_refuter_review_commands_do_not_mutate_findings_directly():
     assert record_cmd["status"] == "dry_run"
     assert queue_cmd["status"] == "dry_run"
     assert execute_cmd["status"] == "gated"
-    assert derive_cmd["status"] == "dry_run"
+    assert derive_cmd["status"] == "gated"
     assert record_cmd["risk_tier"] == "read_only"
     assert queue_cmd["risk_tier"] == "read_only"
     assert execute_cmd["risk_tier"] == "active"
@@ -92,6 +92,7 @@ def test_refuter_review_commands_do_not_mutate_findings_directly():
     assert "verdict_pending" in execute_cmd["evidence_contract"]
     assert "verification_row" in derive_cmd["evidence_contract"]
     assert "refuter_verdict" in derive_cmd["evidence_contract"]
+    assert "confirm_authorized" in derive_cmd["required_confirmations"]
     assert "verdict_basis" in record_cmd["parameters_schema"]
     assert "refuter_review_row" in record_cmd["evidence_contract"]
     assert "confirm_authorized" in execute_cmd["required_confirmations"]

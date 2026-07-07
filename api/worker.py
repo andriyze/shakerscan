@@ -347,22 +347,28 @@ def _external_dast_tool_specs(result: dict[str, Any], options: dict[str, Any]) -
         smart_discovery = discovery.get("smart_discovery") if isinstance(discovery.get("smart_discovery"), dict) else {}
         smart_url_count = int(smart_discovery.get("total_urls_discovered") or 0) if smart_discovery else 0
         zero_rediscovery = bool((options or {}).get("zero_rediscovery") or (options or {}).get("zero_rediscovery_scope"))
+        has_katana_output = bool(katana_sample)
         specs.append({
             "tool_name": "katana",
             "parser": "katana-jsonl-summary-v1",
             "proof_contract": "crawl-observation",
-            "status": "skipped" if zero_rediscovery else "success" if (katana_sample or smart_url_count) else "recorded",
-            "parser_status": "not_applicable" if zero_rediscovery else "parsed" if (katana_sample or smart_url_count) else "partial",
+            "status": "skipped" if zero_rediscovery else "success" if has_katana_output else "recorded",
+            "parser_status": "not_applicable" if zero_rediscovery else "parsed" if has_katana_output else "partial",
             "summary": {
                 "sample_count": len(katana_sample),
                 "smart_discovery_total_urls": smart_url_count,
+                "aggregate_discovery_only": bool(smart_url_count and not has_katana_output),
                 "zero_rediscovery": zero_rediscovery,
             },
         })
 
     browser_crawl = discovery.get("browser_crawl") if isinstance(discovery.get("browser_crawl"), dict) else {}
     browser_api_endpoints = discovery.get("browser_api_endpoints") if isinstance(discovery.get("browser_api_endpoints"), list) else []
-    browser_disabled = bool((options or {}).get("no_browser")) or int((options or {}).get("browser_max_pages") or 1) == 0
+    try:
+        browser_max_pages = int((options or {}).get("browser_max_pages") or 1)
+    except (TypeError, ValueError):
+        browser_max_pages = 1
+    browser_disabled = bool((options or {}).get("no_browser")) or browser_max_pages == 0
     if "browser_api_endpoints" in discovery or "browser_crawl" in discovery or browser_disabled:
         pages_visited = int(browser_crawl.get("pages_visited") or 0) if browser_crawl else 0
         has_browser_output = bool(browser_api_endpoints or pages_visited)
@@ -385,16 +391,20 @@ def _external_dast_tool_specs(result: dict[str, Any], options: dict[str, Any]) -
     ffuf_disabled = bool((options or {}).get("disable_ffuf") or discovery_summary.get("spa_catch_all"))
     recursive_count = int(smart_discovery.get("total_recursive_paths") or 0) if smart_discovery else 0
     deep_count = len(deep_discovery.get("directories") or deep_discovery.get("paths") or []) if deep_discovery else 0
+    ffuf_output = discovery.get("ffuf") if isinstance(discovery.get("ffuf"), (list, dict)) else None
+    ffuf_count = len(ffuf_output) if isinstance(ffuf_output, list) else int(ffuf_output.get("count") or len(ffuf_output.get("results") or [])) if isinstance(ffuf_output, dict) else 0
     if smart_discovery or deep_discovery or ffuf_disabled:
         specs.append({
             "tool_name": "ffuf",
             "parser": "ffuf-json-summary-v1",
             "proof_contract": "content-discovery-observation",
-            "status": "skipped" if ffuf_disabled else "success" if (recursive_count or deep_count) else "recorded",
-            "parser_status": "not_applicable" if ffuf_disabled else "parsed" if (recursive_count or deep_count) else "partial",
+            "status": "skipped" if ffuf_disabled else "success" if ffuf_count else "recorded",
+            "parser_status": "not_applicable" if ffuf_disabled else "parsed" if ffuf_count else "partial",
             "summary": {
+                "ffuf_result_count": ffuf_count,
                 "recursive_paths": recursive_count,
                 "deep_discovery_paths": deep_count,
+                "aggregate_discovery_only": bool((recursive_count or deep_count) and not ffuf_count),
                 "ffuf_disabled": ffuf_disabled,
             },
         })
@@ -410,12 +420,13 @@ def _external_dast_tool_specs(result: dict[str, Any], options: dict[str, Any]) -
             "tool_name": "subfinder",
             "parser": "subfinder-lines-summary-v1",
             "proof_contract": "passive-discovery",
-            "status": "skipped" if not subfinder_enabled else "success" if (subfinder_rows or subdomain_count) else "recorded",
-            "parser_status": "not_applicable" if not subfinder_enabled else "parsed" if (subfinder_rows or subdomain_count) else "partial",
+            "status": "skipped" if not subfinder_enabled else "success" if subfinder_rows else "recorded",
+            "parser_status": "not_applicable" if not subfinder_enabled else "parsed" if subfinder_rows else "partial",
             "summary": {
                 "subdomains_count": subdomain_count,
                 "subfinder_rows_count": len(subfinder_rows),
                 "subfinder_enabled": subfinder_enabled,
+                "aggregate_discovery_only": bool(subdomain_count and not subfinder_rows),
             },
         })
 

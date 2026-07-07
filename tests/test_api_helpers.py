@@ -2158,6 +2158,7 @@ def test_plan_campaign_from_hypothesis_records_planned_action_without_execution(
 def test_execute_authz_replay_plan_records_observations_without_findings(monkeypatch):
     action_id = uuid.uuid4()
     hypothesis_id = uuid.uuid4()
+    target_id = uuid.uuid4()
     approval_id = uuid.uuid4()
     tool_receipt_id = uuid.uuid4()
     evidence_one_id = uuid.uuid4()
@@ -2232,7 +2233,7 @@ def test_execute_authz_replay_plan_records_observations_without_findings(monkeyp
                     "campaign_id": None,
                     "operation_plan_id": None,
                     "command_result_id": None,
-                    "target_id": None,
+                    "target_id": target_id,
                     "scope_receipt_id": None,
                     "approval_receipt_id": None,
                     "scan_id": None,
@@ -2254,6 +2255,8 @@ def test_execute_authz_replay_plan_records_observations_without_findings(monkeyp
                     "created_at": "now",
                     "updated_at": "now",
                 }
+            if "SELECT id, url FROM targets" in sql:
+                return {"id": target_id, "url": "https://app.example.com"}
             if "UPDATE campaign_actions" in sql:
                 captured["update_args"] = args
                 return {
@@ -2261,7 +2264,7 @@ def test_execute_authz_replay_plan_records_observations_without_findings(monkeyp
                     "campaign_id": None,
                     "operation_plan_id": None,
                     "command_result_id": None,
-                    "target_id": None,
+                    "target_id": target_id,
                     "scope_receipt_id": None,
                     "approval_receipt_id": None,
                     "scan_id": None,
@@ -2365,6 +2368,12 @@ def test_execute_authz_replay_plan_records_observations_without_findings(monkeyp
 
     monkeypatch.setattr(api_module, "InteractiveSessionManager", _FakeInteractiveSessionManager)
 
+    async def fake_validate(conn, receipt_id, **kwargs):
+        captured["approval_validation"] = (receipt_id, kwargs)
+        return {"approval_receipt_id": receipt_id}
+
+    monkeypatch.setattr(api_module, "_validate_approval_receipt_for_action", fake_validate)
+
     result = asyncio.run(api_module._execute_authz_replay_plan(
         _FakeConn(),
         campaign_action_id=str(action_id),
@@ -2396,10 +2405,124 @@ def test_execute_authz_replay_plan_records_observations_without_findings(monkeyp
         str(evidence_two_id),
     ]
     assert result["command_result"]["result_json"]["authz_replay"]["violation_count"] == 1
+    assert captured["approval_validation"][0] == str(approval_id)
+    assert captured["approval_validation"][1]["target_id"] == target_id
     proof_bundle = result["command_result"]["result_json"]["authz_replay"]["proof_bundle"]
     assert proof_bundle["differential_observed"] is True
     assert proof_bundle["authenticated_principal_count"] == 2
     assert proof_bundle["finding_created_automatically"] is False
+
+
+def test_execute_authz_replay_plan_treats_soft_200_denial_as_non_violation(monkeypatch):
+    action_id = uuid.uuid4()
+    replay_plan = {
+        "mode": "deterministic_authz_replay",
+        "method": "GET",
+        "path": "/api/orders/{id}",
+        "expected_access": [
+            {"method": "GET", "path": "/api/orders/{id}", "principal_label": "user1", "principal_auth_state": "user1", "expected_access": "allow"},
+            {"method": "GET", "path": "/api/orders/{id}", "principal_label": "user2", "principal_auth_state": "user2", "expected_access": "deny"},
+        ],
+    }
+
+    class _FakeSession:
+        state = types.SimpleNamespace(users={
+            "user1": types.SimpleNamespace(is_authenticated=True),
+            "user2": types.SimpleNamespace(is_authenticated=True),
+        })
+
+        async def test_endpoint(self, *, endpoint, method, as_user, body, allow_out_of_scope):
+            return {
+                "success": True,
+                "status_code": 200,
+                "status_text": "OK",
+                "headers": {"content-type": "application/json"},
+                "body": '{"error":"forbidden"}' if as_user == "user2" else '{"id":42}',
+            }
+
+    class _FakeManager:
+        async def get_session(self, session_id):
+            return _FakeSession()
+
+    class _FakeInteractiveSessionManager:
+        @staticmethod
+        async def get_instance():
+            return _FakeManager()
+
+    class _FakeConn:
+        async def fetchrow(self, query, *args):
+            sql = str(query)
+            if "SELECT * FROM campaign_actions" in sql:
+                return {
+                    "id": action_id, "target_id": None, "campaign_id": None, "operation_plan_id": None,
+                    "command_result_id": None, "scope_receipt_id": None, "approval_receipt_id": None,
+                    "scan_id": None, "command": "asm.improve", "action_name": "asm.improve", "status": "planned",
+                    "dry_run": True, "risk_tier": "credential", "finding_ids": json.dumps([]),
+                    "hypothesis_ids": json.dumps([]), "evidence_object_ids": json.dumps([]),
+                    "tool_receipt_ids": json.dumps([]), "blocked_by": json.dumps([]), "next_action": None,
+                    "operator_message": "planned", "result_json": json.dumps({"authz_replay_plan": replay_plan}),
+                    "created_by": "pytest", "mission_campaign_id": None, "created_at": "now", "updated_at": "now",
+                }
+            if "UPDATE campaign_actions" in sql:
+                return {
+                    "id": action_id, "target_id": None, "campaign_id": None, "operation_plan_id": None,
+                    "command_result_id": None, "scope_receipt_id": None, "approval_receipt_id": None,
+                    "scan_id": None, "command": "asm.improve", "action_name": "asm.improve", "status": args[0],
+                    "dry_run": False, "risk_tier": "credential", "finding_ids": json.dumps([]),
+                    "hypothesis_ids": json.dumps([]), "evidence_object_ids": json.dumps([]),
+                    "tool_receipt_ids": json.dumps([]), "blocked_by": json.dumps([]), "next_action": None,
+                    "operator_message": "replayed", "result_json": args[1], "created_by": "pytest",
+                    "mission_campaign_id": None, "created_at": "now", "updated_at": "now",
+                }
+            if "INSERT INTO tool_receipts" in sql:
+                return {
+                    "id": uuid.uuid4(), "tool_name": args[0], "tool_version": args[1], "adapter_version": args[2],
+                    "command_hash": args[3], "redacted_argv": args[4], "worker_build": args[5],
+                    "container_image": args[6], "target_scope": args[7], "scope_receipt_id": args[8],
+                    "approval_receipt_id": args[9], "policy_profile_id": args[10], "status": args[11],
+                    "parser_status": args[12], "exit_code": args[13], "timed_out": args[14],
+                    "started_at": args[15], "finished_at": args[16], "stdout_evidence_object_id": args[17],
+                    "stderr_evidence_object_id": args[18], "parsed_evidence_instance_ids": args[19],
+                    "redaction_summary": args[20], "metadata_json": args[21], "created_by": args[22],
+                    "created_at": "now",
+                }
+            if "INSERT INTO evidence_instances" in sql:
+                return {
+                    "id": uuid.uuid4(), "finding_id": args[0], "evidence_object_id": args[1], "scan_id": args[2],
+                    "target_id": args[3], "concrete_url": args[4], "object_id": args[5], "payload_variant": args[6],
+                    "request_response_refs": args[7], "principal_pair": args[8], "proof_observation": args[9],
+                    "campaign_action_id": args[10], "tool_receipt_id": args[11], "redaction_profile": args[12],
+                    "hash": args[13], "retention_policy": args[14], "proof_state": args[15],
+                    "metadata_json": args[16], "created_by": args[17], "created_at": "now",
+                }
+            if "INSERT INTO command_results" in sql:
+                return {
+                    "id": uuid.uuid4(), "command": args[0], "status": args[1], "dry_run": args[2],
+                    "risk_tier": args[3], "operation_plan_id": args[4], "scope_receipt_id": args[5],
+                    "approval_receipt_id": args[6], "campaign_id": args[7], "scan_id": args[8],
+                    "finding_ids": args[9], "hypothesis_ids": args[10], "evidence_object_ids": args[11],
+                    "tool_receipt_ids": args[12], "blocked_by": args[13], "next_action": args[14],
+                    "operator_message": args[15], "result_json": args[16], "created_by": args[17],
+                    "created_at": "now",
+                }
+            raise AssertionError(sql)
+
+    monkeypatch.setattr(api_module, "InteractiveSessionManager", _FakeInteractiveSessionManager)
+
+    result = asyncio.run(api_module._execute_authz_replay_plan(
+        _FakeConn(),
+        campaign_action_id=str(action_id),
+        session_id="session-1",
+        created_by="pytest",
+    ))
+
+    assert result["violation_count"] == 0
+    assert result["observations"][1]["observed_status"] == 200
+    assert result["observations"][1]["violation_observed"] is False
+    assert result["evidence_instances"][1]["proof_state"] == "inconclusive"
+    proof_bundle = result["command_result"]["result_json"]["authz_replay"]["proof_bundle"]
+    assert proof_bundle["differential_observed"] is False
+    assert proof_bundle["soft_denial_observations"][0]["status"] == 200
 
 
 def test_execute_authz_replay_plan_treats_redirect_denial_as_non_violation(monkeypatch):
@@ -2750,6 +2873,85 @@ def test_promote_authz_replay_finding_requires_violation_and_links_evidence(monk
     assert captured["approval_validation"][1]["target_url"] == "https://app.example.com"
     assert any("UPDATE evidence_instances" in sql for sql, _args in captured["executes"])
     assert any("UPDATE campaign_actions" in sql for sql, _args in captured["executes"])
+
+
+def test_promote_authz_replay_finding_requires_differential(monkeypatch):
+    action_id = uuid.uuid4()
+    target_id = uuid.uuid4()
+    approval_id = uuid.uuid4()
+    replay = {
+        "violation_count": 1,
+        "proof_bundle": {
+            "bundle_type": "authz_replay_proof_bundle",
+            "differential_observed": False,
+            "authenticated_principal_count": 1,
+        },
+        "observations": [
+            {
+                "method": "GET",
+                "path": "/api/orders/42",
+                "principal_label": "user2",
+                "principal_auth_state": "user2",
+                "expected_access": "deny",
+                "observed_status": 200,
+                "matched": False,
+                "request_success": True,
+                "authenticated_user": True,
+                "violation_observed": True,
+            }
+        ],
+    }
+
+    class _FakeConn:
+        async def fetchrow(self, query, *args):
+            sql = str(query)
+            if "SELECT * FROM campaign_actions" in sql:
+                return {
+                    "id": action_id,
+                    "target_id": target_id,
+                    "campaign_id": None,
+                    "operation_plan_id": None,
+                    "command_result_id": None,
+                    "scope_receipt_id": None,
+                    "approval_receipt_id": None,
+                    "scan_id": None,
+                    "command": "authz.replay_plan",
+                    "action_name": "authz.replay_plan",
+                    "status": "partial",
+                    "dry_run": False,
+                    "risk_tier": "credential",
+                    "finding_ids": json.dumps([]),
+                    "hypothesis_ids": json.dumps([]),
+                    "evidence_object_ids": json.dumps([]),
+                    "tool_receipt_ids": json.dumps([]),
+                    "blocked_by": json.dumps([]),
+                    "next_action": None,
+                    "operator_message": "replayed",
+                    "result_json": json.dumps({"authz_replay": replay}),
+                    "created_by": "pytest",
+                    "mission_campaign_id": None,
+                    "created_at": "now",
+                    "updated_at": "now",
+                }
+            if "SELECT id, url FROM targets" in sql:
+                return {"id": target_id, "url": "https://app.example.com"}
+            raise AssertionError(sql)
+
+    async def fake_validate(conn, receipt_id, **kwargs):
+        return {"approval_receipt_id": receipt_id}
+
+    monkeypatch.setattr(api_module, "_validate_approval_receipt_for_action", fake_validate)
+
+    with pytest.raises(api_module.HTTPException) as exc:
+        asyncio.run(api_module._promote_authz_replay_finding(
+            _FakeConn(),
+            campaign_action_id=str(action_id),
+            approval_receipt_id=str(approval_id),
+            created_by="pytest",
+        ))
+
+    assert exc.value.status_code == 400
+    assert "differential" in str(exc.value.detail)
 
 
 def test_authz_template_replay_path_collapses_volatile_ids():
@@ -3267,6 +3469,145 @@ def test_refuter_verdict_derivation_keeps_ai_driven_results_signal_only():
     assert outcome["refuter_verdict"] is None
     assert outcome["verdict_basis"] == "signal_only"
     assert outcome["deterministic_basis"] is False
+
+
+def test_refuter_verdict_derivation_keeps_failed_retests_signal_only():
+    outcome = api_module._refuter_review_from_verification_outcome({
+        "status": "failed",
+        "result_status": "error",
+        "verdict": "error",
+        "verification_mode": "deterministic",
+    })
+
+    assert outcome["refuter_signal"] == "question"
+    assert outcome["refuter_verdict"] is None
+    assert outcome["verdict_basis"] == "signal_only"
+    assert outcome["deterministic_basis"] is False
+
+
+def test_derive_refuter_review_verdict_requires_linked_retest_when_verification_omitted():
+    review_id = uuid.uuid4()
+    finding_id = uuid.uuid4()
+
+    review_row = {
+        "id": review_id,
+        "subject_type": "finding",
+        "subject_id": str(finding_id),
+        "target_id": None,
+        "finding_id": finding_id,
+        "hypothesis_id": None,
+        "campaign_id": None,
+        "trigger_reason": "weak proof",
+        "refuter_signal": "question",
+        "refuter_verdict": None,
+        "verdict_basis": "signal_only",
+        "confidence_delta": None,
+        "evidence_object_ids": json.dumps([]),
+        "tool_receipt_ids": json.dumps([]),
+        "counterevidence": json.dumps({}),
+        "notes": None,
+        "status": "recorded",
+        "metadata_json": json.dumps({}),
+        "created_by": "pytest",
+    }
+
+    class _FakeConn:
+        async def fetchrow(self, query, *args):
+            if "SELECT * FROM refuter_reviews" in query:
+                return review_row
+            raise AssertionError(f"unexpected query: {query}")
+
+    with pytest.raises(api_module.HTTPException) as exc:
+        asyncio.run(api_module._derive_refuter_review_verdict(
+            _FakeConn(),
+            refuter_review_id=str(review_id),
+            created_by="pytest",
+        ))
+
+    assert exc.value.status_code == 409
+    assert "linked retest" in str(exc.value.detail)
+
+
+def test_derive_refuter_review_verdict_uses_latest_execution_retest_id_when_omitted():
+    review_id = uuid.uuid4()
+    finding_id = uuid.uuid4()
+    linked_verification_id = uuid.uuid4()
+    captured: dict[str, object] = {}
+
+    review_row = {
+        "id": review_id,
+        "subject_type": "finding",
+        "subject_id": str(finding_id),
+        "target_id": None,
+        "finding_id": finding_id,
+        "hypothesis_id": None,
+        "campaign_id": None,
+        "trigger_reason": "weak proof",
+        "refuter_signal": "question",
+        "refuter_verdict": None,
+        "verdict_basis": "signal_only",
+        "confidence_delta": None,
+        "evidence_object_ids": json.dumps([]),
+        "tool_receipt_ids": json.dumps([]),
+        "counterevidence": json.dumps({}),
+        "notes": None,
+        "status": "recorded",
+        "metadata_json": json.dumps({"latest_refuter_execution": {"retest_id": str(linked_verification_id)}}),
+        "created_by": "pytest",
+    }
+    verification_row = {
+        "id": linked_verification_id,
+        "finding_id": finding_id,
+        "status": "completed",
+        "result_status": "likely_fixed",
+        "verdict": "likely_fixed",
+        "verdict_reason": "Replay did not reproduce.",
+        "verification_mode": "deterministic",
+        "proof": json.dumps({}),
+        "artifacts": json.dumps({}),
+        "replay_commands": json.dumps([]),
+    }
+
+    class _FakeConn:
+        async def fetchrow(self, query, *args):
+            if "SELECT * FROM refuter_reviews" in query:
+                return review_row
+            if "FROM finding_verifications" in query:
+                captured["verification_args"] = args
+                return verification_row
+            if "INSERT INTO refuter_reviews" in query:
+                return {
+                    "id": uuid.uuid4(),
+                    "subject_type": args[0],
+                    "subject_id": args[1],
+                    "target_id": args[2],
+                    "finding_id": args[3],
+                    "hypothesis_id": args[4],
+                    "campaign_id": args[5],
+                    "trigger_reason": args[6],
+                    "refuter_signal": args[7],
+                    "refuter_verdict": args[8],
+                    "verdict_basis": args[9],
+                    "confidence_delta": args[10],
+                    "evidence_object_ids": args[11],
+                    "tool_receipt_ids": args[12],
+                    "counterevidence": args[13],
+                    "notes": args[14],
+                    "status": args[15],
+                    "metadata_json": args[16],
+                    "created_by": args[17],
+                }
+            raise AssertionError(f"unexpected query: {query}")
+
+    result = asyncio.run(api_module._derive_refuter_review_verdict(
+        _FakeConn(),
+        refuter_review_id=str(review_id),
+        created_by="pytest",
+    ))
+
+    assert captured["verification_args"][0] == linked_verification_id
+    assert result["verification_id"] == str(linked_verification_id)
+    assert result["refuter_review"]["refuter_verdict"] == "weakened"
 
 
 def test_tool_receipt_redacts_hashes_and_is_non_executing():
@@ -4660,6 +5001,38 @@ def test_upsert_hypothesis_matches_existing_across_sources_by_dedupe_key():
     endorsement = json.loads(captured["update_args"][6])
     assert endorsement["source"] == "ai_planner"
     assert result["execution_enabled"] is False
+
+
+def test_source_ingest_package_hints_dedupe_by_subject_metadata():
+    first, first_skip = api_module._source_hint_to_hypothesis_request(
+        {
+            "kind": "package_manifest",
+            "risk_hints": ["secret"],
+            "metadata_json": {"package_name": "left-pad"},
+            "confidence": 0.4,
+        },
+        target_id=None,
+        source_label="pytest",
+        created_by="pytest",
+    )
+    second, second_skip = api_module._source_hint_to_hypothesis_request(
+        {
+            "kind": "package_manifest",
+            "risk_hints": ["secret"],
+            "metadata_json": {"package_name": "right-pad"},
+            "confidence": 0.4,
+        },
+        target_id=None,
+        source_label="pytest",
+        created_by="pytest",
+    )
+
+    assert first_skip is None
+    assert second_skip is None
+    assert first is not None and second is not None
+    assert first.dedupe_dimensions["route"] == "left-pad"
+    assert second.dedupe_dimensions["route"] == "right-pad"
+    assert first.dedupe_dimensions != second.dedupe_dimensions
 
 
 def test_planner_action_to_hypothesis_is_source_only_runtime_proof_required():

@@ -533,8 +533,10 @@ export interface RefuterActionResult {
   command?: string
   dispatched?: boolean
   dry_run?: boolean
+  execution_enabled?: boolean
   execution_blocked_reason?: string
   operation_id?: string
+  command_result?: Record<string, unknown>
   result?: Record<string, unknown>
   action_state?: Record<string, unknown>
   refuter_review?: RefuterReview
@@ -1975,6 +1977,9 @@ export async function executeRefuterReviewPlan(refuterReviewId: string, payload:
 }
 
 export async function deriveRefuterReviewVerdict(refuterReviewId: string, payload: {
+  execute?: boolean
+  confirmations?: string[]
+  approval_receipt_id?: string
   verification_id?: string
   created_by?: string
 } = {}): Promise<RefuterActionResult> {

@@ -762,9 +762,40 @@ def test_external_dast_tool_specs_include_passive_discovery_receipts():
     assert by_tool["httpx"]["parser_status"] == "parsed"
     assert by_tool["katana"]["status"] == "success"
     assert by_tool["playwright"]["status"] == "success"
-    assert by_tool["ffuf"]["status"] == "success"
+    assert by_tool["ffuf"]["status"] == "recorded"
+    assert by_tool["ffuf"]["parser_status"] == "partial"
+    assert by_tool["ffuf"]["summary"]["aggregate_discovery_only"] is True
     assert by_tool["subfinder"]["status"] == "success"
     assert by_tool["subfinder"]["summary"]["subfinder_rows_count"] == 2
+
+
+def test_external_dast_tool_specs_do_not_claim_katana_success_from_aggregate_discovery():
+    specs = worker._external_dast_tool_specs(
+        {
+            "discovery": {
+                "katana_sample": [],
+                "smart_discovery": {
+                    "total_urls_discovered": 24,
+                    "total_recursive_paths": 8,
+                },
+            },
+            "subdomain_count": 3,
+            "by_source": {},
+            "input": {"sources": {"subfinder": True}},
+        },
+        {"scan_type": "smart", "subfinder": True},
+    )
+
+    by_tool = {item["tool_name"]: item for item in specs}
+    assert by_tool["katana"]["status"] == "recorded"
+    assert by_tool["katana"]["parser_status"] == "partial"
+    assert by_tool["katana"]["summary"]["aggregate_discovery_only"] is True
+    assert by_tool["ffuf"]["status"] == "recorded"
+    assert by_tool["ffuf"]["parser_status"] == "partial"
+    assert by_tool["ffuf"]["summary"]["aggregate_discovery_only"] is True
+    assert by_tool["subfinder"]["status"] == "recorded"
+    assert by_tool["subfinder"]["parser_status"] == "partial"
+    assert by_tool["subfinder"]["summary"]["aggregate_discovery_only"] is True
 
 
 def test_external_dast_tool_specs_record_passive_skips_and_partials_honestly():

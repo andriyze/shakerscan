@@ -1,6 +1,6 @@
 # Proposed Next Steps — Proof-First Continuous Exposure Management
 
-**Status:** updated 2026-07-05 after reconciling this roadmap with
+**Status:** updated 2026-07-07 after reconciling this roadmap with
 `docs/t3mp3st-adoption-implementation-plan-updated.md`,
 `docs/archive/asm-parallel-improvement-plan.md`, `docs/parallel-scan-architecture.md`, and the
 current code. The contract-first proof layer, first app-graph/evidence slices, target de-dupe,
@@ -1022,8 +1022,9 @@ items, not findings.
     bounded route/OpenAPI/GraphQL/package/frontend/backend/IaC/AI-tool hints and convert them into
     deduped `source_ingest` hypotheses for authz, SQLi/NoSQL, XSS, SSRF, LFI/path traversal,
     mass-assignment, upload, secret, and AI/tool-boundary work. The route records or endorses leads
-    only, marks them `source_only` and `runtime_proof_required`, reports skipped vague hints, and
-    returns `findings_created=0` / `execution_enabled=false`.
+    only, marks them `source_only` and `runtime_proof_required`, reports skipped vague hints, dedupes
+    package/IaC/non-route facts by their explicit subject metadata instead of collapsing all same-kind
+    hints together, and returns `findings_created=0` / `execution_enabled=false`.
 13. DONE phase 1: `/arsenal/hypotheses/from-plan` and `hypothesis.generate_from_plan` consume a
     persisted dry-run `OperationPlan` and convert bounded supported actions
     (`asm.improve`, `asm.test`, `scan.focused_family`, AI Gate, Model Intake trust, and
@@ -1049,18 +1050,21 @@ matched principal, role/tenant, expected access, and credential-precondition fac
 now derives a non-executing `authz_replay_plan` with method/path, principal pair, expected access
 rows, and missing preconditions from that matrix. `authz.replay_plan` now executes that stored plan
 through an existing interactive session only via the gated Command Arsenal path (`execute=true`,
-`confirm_authorized`, approval receipt, and execution feature flag), records replay observations,
-binds them to record-only evidence instances plus an `authz.replay_plan` tool receipt, and updates
-the planned campaign action without creating findings automatically. `authz.promote_replay_finding`
-now explicitly promotes replay observations with lower-role access violations into manual-source BOLA
-findings, links evidence instances/tool receipts, records a command-result audit row, and collapses
+`confirm_authorized`, approval receipt, and execution feature flag), refuses anonymous fallback when
+the required authenticated principals are missing, records replay observations, binds them to
+record-only evidence instances plus an `authz.replay_plan` tool receipt, and updates the planned
+campaign action without creating findings automatically. `authz.promote_replay_finding` now
+explicitly promotes only reviewed replay observations with a cross-principal differential into
+manual-source BOLA findings, validates the approval receipt against the campaign action's real
+target, links evidence instances/tool receipts, records a command-result audit row, and collapses
 volatile object ids into route-template fingerprints so `/orders/1` and `/orders/46` do not create
 separate replay findings; this is still gated and never happens automatically after replay.
 
 **Implement next:** DONE phase 1 for richer replay proof bundles. `authz.replay_plan` now stores a
-content-free `proof_bundle` that distinguishes access-granted 2xx observations, denial-like
-redirects, authenticated-principal count, and whether a cross-principal differential was observed;
-`authz.promote_replay_finding` carries that bundle into promoted evidence. Remaining work is deeper
+content-free `proof_bundle` that distinguishes access-granted 2xx observations, soft 200 denials,
+denial-like redirects, authenticated-principal count, and whether a cross-principal differential was
+observed; `authz.promote_replay_finding` requires that differential and carries the bundle into
+promoted evidence. Remaining work is deeper
 operator UI controls for choosing sessions, executing the gated replay, and promoting reviewed
 violations from the campaign-action surface.
 
@@ -1135,8 +1139,10 @@ polish remain open.
    internal `ai_gate_probe_executor` / `model_intake_signature_verifier` receipts plus parsed-result
    DAST module receipts for Nuclei, Dalfox, sqlmap, nmap, SSLyze, and testssl, passive/lifecycle
    DAST receipts for httpx, katana, subfinder, ffuf, and Playwright/browser discovery, plus ASM recon
-   and endpoint-batch executor receipts. Remaining work is deeper per-subprocess DAST receipts for
-   exact timeout/exit/stderr/parser-error paths inside the scanner process.
+   and endpoint-batch executor receipts. Passive receipts no longer claim parser success from aggregate
+   discovery counters alone; aggregate-only observations are recorded as partial/recorded telemetry.
+   Remaining work is deeper per-subprocess DAST receipts for exact timeout/exit/stderr/parser-error
+   paths inside the scanner process.
 5. DONE phase 1: tool receipts include tool version, adapter version, command hash, redacted argv, worker
    build/container image, target scope, scope receipt, policy profile, approval id, timing, exit code,
    timeout, stdout/stderr artifact refs, parsed evidence refs, parser status, and redaction summary.
@@ -1183,10 +1189,12 @@ Model Intake trust claims produce the existing trust-preview artifact. The execu
 `latest_refuter_execution` metadata plus a `refuter_review.execute_plan` command-result audit row,
 but it does not directly mutate findings, proof state, hypotheses, severity, or deployment gates.
 `POST /arsenal/refuter-reviews/{id}/derive-verdict` and `refuter_review.derive_verdict` can now read
-a completed finding verification and record a new refuter signal or deterministic proof-backed
-refuter verdict. AI-driven verification outcomes are intentionally recorded as signal-only unless a
-human-approved review records a verdict. `/settings/arsenal` now exposes queued-review controls to
-request the execution gate state and derive a verdict from completed replay evidence. `refuter_signal` remains separate from
+the review's linked completed finding verification, or an explicitly supplied verification id, and
+record a new refuter signal or deterministic proof-backed refuter verdict. The command is gated, so
+dry requests return approval state instead of mutating review history. AI-driven, failed, or errored
+verification outcomes are intentionally recorded as signal-only unless a human-approved review records
+a verdict. `/settings/arsenal` now exposes queued-review controls to request the execution gate state
+and derive a verdict from completed replay evidence. `refuter_signal` remains separate from
 `refuter_verdict`; verdicts require deterministic replay, cryptographic, parser/protocol, or
 human-approved-review basis, and recording a review cannot directly update findings, hypotheses,
 proof state, severity, or gates. File-backed integrity ledgers exist at

@@ -3,7 +3,7 @@
 **Status:** Comprehensive functional reference for the whole product. This is the "what can ShakerScan
 actually do" map across both pillars: **DAST** (Dynamic Application Security Testing) and **AI red
 teaming** (AI Gate, Model Intake, AI Security Sessions, AI-assisted analysis).
-**Date:** 2026-06-23
+**Date:** 2026-07-07
 **Audience:** users, operators, AI coding agents, and engineers who need one place that explains the
 product's functionality end to end.
 
@@ -574,6 +574,9 @@ dedicated model-intake source filter exists. Sensitive URL params and metadata k
 headless browser. You start a session, drive browser actions (`navigate`, `click`, `fill`, `register`,
 `login`, `submit`, `wait`, `extract`), maintain **separate per-user contexts** (e.g. user1/user2),
 capture screenshots, and test endpoints for cross-user access (`test-endpoint` with `as_user`).
+Endpoint tests that name a user require that user to exist and be authenticated in the session; authz
+replay automation also requires at least two authenticated principals before it can make a
+cross-principal claim.
 Validated findings are saved via `POST /session/{id}/findings` (they appear with `source: ai_session`).
 This is the engine behind the `/ai-security-session` skill; see
 [`docs/INTERACTIVE_SESSIONS_GUIDE.md`](INTERACTIVE_SESSIONS_GUIDE.md).
@@ -653,7 +656,11 @@ how-to with request bodies is in [`CLAUDE.md`](../CLAUDE.md) / [`AGENTS.md`](../
 `GET /agents/local` · `POST /agents/local/test` · `POST /agents/local/plan`. Source/spec hints and
 saved dry-run plan actions can be recorded as source-only hypotheses; they never create findings or
 queue scans. The `/settings/arsenal` UI includes a Source Hint Ingest panel for bounded
-source/spec/route facts.
+source/spec/route facts. Refuter verdict derivation is gated and derives only from a linked or
+explicit verification row; failed/error/AI-driven results remain signal-only. Authz replay promotion
+requires an authenticated cross-principal differential, treats login/forbidden soft-200 bodies and
+redirect denials as non-violations, and validates approval receipts against the campaign action's
+actual target before a manual BOLA finding can be created.
 
 **Scans (DAST)**: `POST /scans` · `POST /scans/batch` · `GET /scans` · `GET /scans/{id}` ·
 `GET /scans/{id}/result` · `GET /scans/{id}/logs` · `POST /scans/{id}/cancel` ·

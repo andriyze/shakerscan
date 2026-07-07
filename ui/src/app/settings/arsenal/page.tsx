@@ -482,7 +482,11 @@ function RefuterQueueResultPanel({ result }: { result: RefuterQueueResult }) {
     try {
       const response = await deriveRefuterReviewVerdict(review.id, { created_by: 'arsenal_ui' })
       const derived = response.result?.refuter_review as RefuterReview | undefined
-      setMessage(`Derived ${derived?.refuter_verdict || derived?.refuter_signal || response.status || 'review'}`)
+      if (response.execution_enabled === false || response.execution_blocked_reason) {
+        setMessage(`Derive gate: ${response.execution_blocked_reason || String(response.action_state?.phase || 'approval required')}`)
+      } else {
+        setMessage(`Derived ${derived?.refuter_verdict || derived?.refuter_signal || response.status || 'review'}`)
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to derive verdict')
     } finally {

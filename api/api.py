@@ -3594,6 +3594,9 @@ class RefuterReviewExecuteRequest(BaseModel):
 
 
 class RefuterReviewDeriveVerdictRequest(BaseModel):
+    execute: bool = False
+    confirmations: list[str] = Field(default_factory=list)
+    approval_receipt_id: Optional[str] = None
     verification_id: Optional[str] = None
     created_by: Optional[str] = Field(default="refuter_verdict_derive", max_length=120)
 
@@ -14558,6 +14561,18 @@ def _source_hint_to_hypothesis_request(
         return None, {"reason": "hint_mapping_failed", "error": str(exc), "hint_kind": kind}
 
     method = str(hint_payload.get("method") or "GET").strip().upper()
+    hint_metadata = hint_payload.get("metadata_json") if isinstance(hint_payload.get("metadata_json"), dict) else {}
+    subject_hint = (
+        route
+        or hint_payload.get("operation_id")
+        or hint_payload.get("title")
+        or hint_metadata.get("package")
+        or hint_metadata.get("package_name")
+        or hint_metadata.get("resource")
+        or hint_metadata.get("resource_id")
+        or hint_metadata.get("name")
+        or kind
+    )
     parameters = _clean_string_list(hint_payload.get("parameters"), max_items=50)
     body_paths = _clean_string_list(hint_payload.get("body_paths"), max_items=50)
     object_keys = _clean_string_list(hint_payload.get("object_keys"), max_items=20)
@@ -14567,7 +14582,7 @@ def _source_hint_to_hypothesis_request(
     proof_surface = str(action.get("proof_surface") or "runtime_proof_required")
     dedupe_dimensions = {
         "method": method,
-        "route": route or kind,
+        "route": subject_hint,
         "object_key": object_keys[0] if object_keys else None,
         "tenant": tenant_keys[0] if tenant_keys else None,
         "parameter_path": parameter_path,
@@ -14592,11 +14607,11 @@ def _source_hint_to_hypothesis_request(
         "rationale": rationale,
         "requires": requires,
         "dedupe_dimensions": dedupe_dimensions,
-        "hint_metadata": hint_payload.get("metadata_json") or {},
+        "hint_metadata": hint_metadata,
     })
     title = (
         str(hint_payload.get("title") or "").strip()
-        or f"Source hint: {family.replace('_', ' ')} on {method} {route or kind}"
+        or f"Source hint: {family.replace('_', ' ')} on {method} {subject_hint}"
     )
     description = (
         str(hint_payload.get("description") or "").strip()
@@ -15578,8 +15593,10 @@ async def _execute_refuter_review_plan(
 def _refuter_review_from_verification_outcome(verification: dict[str, Any]) -> dict[str, Any]:
     verdict = str(verification.get("verdict") or "").strip().lower()
     result_status = str(verification.get("result_status") or "").strip().lower()
+    status = str(verification.get("status") or "").strip().lower()
     mode = str(verification.get("verification_mode") or "deterministic").strip().lower()
-    deterministic_basis = mode != "ai_driven"
+    errored = status == "failed" or verdict == "error" or result_status == "error"
+    deterministic_basis = mode != "ai_driven" and not errored
     if verdict == "exploited":
         signal, refuter_verdict, confidence_delta = "support", "supported", 0.25
         observation = "replay_reproduced"
@@ -15643,9 +15660,14 @@ async def _derive_refuter_review_verdict(
             raise HTTPException(status_code=404, detail="Finding not found for refuter review")
         finding_uuid = uuid.UUID(str(finding_row["id"]))
 
-    if verification_id:
+    metadata = review.get("metadata_json") if isinstance(review.get("metadata_json"), dict) else {}
+    latest_execution = metadata.get("latest_refuter_execution") if isinstance(metadata.get("latest_refuter_execution"), dict) else {}
+    linked_retest_id = str(latest_execution.get("retest_id") or latest_execution.get("verification_id") or "").strip()
+    selected_verification_id = str(verification_id or linked_retest_id or "").strip()
+
+    if selected_verification_id:
         try:
-            verification_uuid = uuid.UUID(str(verification_id))
+            verification_uuid = uuid.UUID(selected_verification_id)
         except (TypeError, ValueError):
             raise HTTPException(status_code=400, detail="verification_id must be a UUID")
         verification_row = await conn.fetchrow(
@@ -15658,17 +15680,7 @@ async def _derive_refuter_review_verdict(
             finding_uuid,
         )
     else:
-        verification_row = await conn.fetchrow(
-            """
-            SELECT *
-            FROM finding_verifications
-            WHERE finding_id=$1
-              AND status IN ('completed', 'failed')
-            ORDER BY completed_at DESC NULLS LAST, updated_at DESC NULLS LAST, created_at DESC
-            LIMIT 1
-            """,
-            finding_uuid,
-        )
+        raise HTTPException(status_code=409, detail="Refuter review has no linked retest verification; execute the review plan first or provide verification_id")
     if not verification_row:
         raise HTTPException(status_code=404, detail="Completed refuter verification not found")
     verification = row_to_dict(verification_row)
@@ -15702,9 +15714,8 @@ async def _derive_refuter_review_verdict(
         confidence_delta=outcome["confidence_delta"],
         counterevidence=counterevidence,
         notes=(
-            "AI-driven verification result recorded as a refuter signal only; "
-            "proof-backed verdicts require deterministic, cryptographic, parser/protocol, "
-            "or human-approved-review basis."
+            "Verification result recorded as a refuter signal only; proof-backed verdicts require "
+            "completed deterministic replay, cryptographic, parser/protocol, or human-approved-review basis."
             if not outcome["deterministic_basis"]
             else None
         ),
@@ -17427,7 +17438,54 @@ def _authz_observation_is_violation(observation: dict[str, Any]) -> bool:
         return False
     if not observation.get("authenticated_user"):
         return False
+    if _authz_observation_is_soft_denial(observation):
+        return False
     return _authz_status_grants_access(observation.get("observed_status"))
+
+
+def _authz_observation_is_soft_denial(observation: dict[str, Any]) -> bool:
+    try:
+        status_int = int(observation.get("observed_status"))
+    except (TypeError, ValueError):
+        return False
+    if status_int < 200 or status_int >= 300:
+        return False
+    response = observation.get("response") if isinstance(observation.get("response"), dict) else {}
+    body = response.get("body_sample")
+    if body is None:
+        return False
+    if isinstance(body, (dict, list)):
+        text = json.dumps(body, sort_keys=True, default=str)
+    else:
+        text = str(body)
+    normalized = re.sub(r"\s+", " ", text).strip().lower()
+    if not normalized:
+        return False
+    denial_markers = (
+        "forbidden",
+        "unauthorized",
+        "not authorized",
+        "access denied",
+        "permission denied",
+        "requires authentication",
+        "authentication required",
+        "login required",
+        "insufficient role",
+        "insufficient privileges",
+        "not allowed",
+    )
+    if any(marker in normalized for marker in denial_markers):
+        return True
+    try:
+        parsed = json.loads(text) if isinstance(body, str) else body
+    except Exception:
+        parsed = None
+    if isinstance(parsed, dict):
+        for key in ("error", "message", "detail", "code"):
+            value = str(parsed.get(key) or "").strip().lower()
+            if value and any(marker in value for marker in denial_markers):
+                return True
+    return False
 
 
 def _authz_redacted_request_response_ref(observation: dict[str, Any]) -> dict[str, Any]:
@@ -17450,6 +17508,7 @@ def _authz_replay_proof_bundle(
     allowed_access = []
     violations = []
     denial_like_redirects = []
+    soft_denials = []
     authenticated_principals: set[str] = set()
     for observation in observations:
         principal = str(observation.get("principal_auth_state") or observation.get("principal_label") or "").strip()
@@ -17471,6 +17530,13 @@ def _authz_replay_proof_bundle(
                 "path": observation.get("path"),
                 "status": status,
                 "expected_access": observation.get("expected_access"),
+            })
+        if expected in {"deny", "requires_role"} and _authz_observation_is_soft_denial(observation):
+            soft_denials.append({
+                "principal": principal or None,
+                "method": observation.get("method"),
+                "path": observation.get("path"),
+                "status": status,
             })
         try:
             status_int = int(status)
@@ -17498,6 +17564,7 @@ def _authz_replay_proof_bundle(
         "allowed_access_observations": allowed_access[:10],
         "violation_observations": violations[:10],
         "denial_like_redirects": denial_like_redirects[:10],
+        "soft_denial_observations": soft_denials[:10],
         "differential_observed": differential_observed,
         "proof_state_hint": "differential_observed" if differential_observed else "inconclusive_or_suspected",
         "promotion_requires_explicit_operator_action": True,
@@ -17552,6 +17619,24 @@ async def _execute_authz_replay_plan(
     expected_access = [item for item in (replay_plan.get("expected_access") or []) if isinstance(item, dict)]
     if not expected_access:
         raise HTTPException(status_code=400, detail="Authz replay plan has no expected access rows")
+    target_uuid = _optional_uuid(action.get("target_id"))
+    if approval_receipt_id:
+        if not target_uuid:
+            raise HTTPException(status_code=400, detail="authz.replay_plan campaign action is not bound to a target_id")
+        target_row = await conn.fetchrow("SELECT id, url FROM targets WHERE id=$1", target_uuid)
+        if not target_row:
+            raise HTTPException(status_code=404, detail="Target not found")
+        target_payload = row_to_dict(target_row)
+        await _validate_approval_receipt_for_action(
+            conn,
+            approval_receipt_id,
+            target_url=str(target_payload.get("url") or "").strip() or None,
+            target_id=target_uuid,
+            action_name="authz.replay_plan",
+            command="authz.replay_plan",
+            risk_tier="credential",
+            created_by=created_by,
+        )
 
     manager = await InteractiveSessionManager.get_instance()
     session = await manager.get_session(session_id)
@@ -17755,13 +17840,12 @@ async def _execute_authz_replay_plan(
     tool_receipt = tool_receipt_result.get("tool_receipt") or {}
     tool_receipt_id = tool_receipt.get("id")
     evidence_instances: list[dict[str, Any]] = []
-    target_id = action.get("target_id")
     principal_pair = replay_plan.get("principal_pair") if isinstance(replay_plan.get("principal_pair"), dict) else {}
     for observation in observations:
         violation_observed = _authz_observation_is_violation(observation)
         request_response_ref = _authz_redacted_request_response_ref(observation)
         instance = await _record_evidence_instance(conn, EvidenceInstanceRequest(
-            target_id=str(target_id) if target_id else None,
+            target_id=str(target_uuid) if target_uuid else None,
             concrete_url=str(observation.get("path") or "").strip() or None,
             object_id=str(replay_plan.get("object_key") or "").strip() or None,
             payload_variant=str(observation.get("principal_auth_state") or observation.get("principal_label") or "").strip() or None,
@@ -17905,6 +17989,8 @@ async def _promote_authz_replay_finding(
     evidence_instance_ids = _clean_string_list(replay.get("evidence_instance_ids"), max_items=100)
     tool_receipt_id = str(replay.get("tool_receipt_id") or "").strip()
     proof_bundle = replay.get("proof_bundle") if isinstance(replay.get("proof_bundle"), dict) else _authz_replay_proof_bundle(replay.get("plan") if isinstance(replay.get("plan"), dict) else {}, observations)
+    if proof_bundle.get("differential_observed") is not True:
+        raise HTTPException(status_code=400, detail="Authz replay promotion requires a cross-principal differential observation")
     request_response_ref = _authz_redacted_request_response_ref(first)
     request_payload = request_response_ref.get("request") if isinstance(request_response_ref.get("request"), dict) else {}
     response_payload = request_response_ref.get("response") if isinstance(request_response_ref.get("response"), dict) else {}
@@ -18672,17 +18758,20 @@ async def _arsenal_dispatch_refuter_review_queue_from_summary(p: dict[str, Any])
     ))
 
 
-async def _arsenal_dispatch_refuter_review_derive_verdict(p: dict[str, Any]) -> dict[str, Any]:
+async def _arsenal_dispatch_refuter_review_derive_verdict(p: dict[str, Any], approval_receipt_id: str | None) -> dict[str, Any]:
     refuter_review_id = str(p.get("refuter_review_id") or "").strip()
     if not refuter_review_id:
         raise HTTPException(status_code=400, detail="refuter_review.derive_verdict requires a refuter_review_id parameter")
     async with db_pool.acquire() as conn:
-        return await _derive_refuter_review_verdict(
+        result = await _derive_refuter_review_verdict(
             conn,
             refuter_review_id=refuter_review_id,
             verification_id=p.get("verification_id"),
             created_by=p.get("created_by") or "arsenal_execute",
         )
+        if approval_receipt_id:
+            result["approval_receipt_id"] = approval_receipt_id
+        return result
 
 
 async def _arsenal_dispatch_refuter_review_execute_plan(p: dict[str, Any], approval_receipt_id: str | None) -> dict[str, Any]:
@@ -18903,7 +18992,6 @@ def _arsenal_readonly_adapters() -> dict[str, Any]:
         "refuter_review.summary": _arsenal_dispatch_refuter_review_summary,
         "refuter_review.record": _arsenal_dispatch_refuter_review_record,
         "refuter_review.queue_from_summary": _arsenal_dispatch_refuter_review_queue_from_summary,
-        "refuter_review.derive_verdict": _arsenal_dispatch_refuter_review_derive_verdict,
     }
 
 
@@ -18919,6 +19007,7 @@ def _arsenal_gated_adapters() -> dict[str, Any]:
         "model_intake.scan": _arsenal_dispatch_model_intake_scan,
         "evidence.retention_sweep": _arsenal_dispatch_evidence_retention_sweep,
         "refuter_review.execute_plan": _arsenal_dispatch_refuter_review_execute_plan,
+        "refuter_review.derive_verdict": _arsenal_dispatch_refuter_review_derive_verdict,
         "authz.replay_plan": _arsenal_dispatch_authz_replay_plan,
         "authz.promote_replay_finding": _arsenal_dispatch_authz_promote_replay_finding,
     }
@@ -19793,6 +19882,9 @@ async def arsenal_derive_refuter_review_verdict(refuter_review_id: str, req: Ref
             "verification_id": req.verification_id,
             "created_by": req.created_by,
         },
+        execute=req.execute,
+        confirmations=req.confirmations,
+        approval_receipt_id=req.approval_receipt_id,
         created_by=req.created_by,
     ))
 
