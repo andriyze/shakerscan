@@ -436,6 +436,18 @@ export interface HypothesisSituationReport {
   graph_context?: HypothesisGraphContext
 }
 
+export interface SourceIngestResult {
+  hypotheses: Hypothesis[]
+  created_or_endorsed: number
+  skipped: Array<Record<string, unknown>>
+  skipped_count: number
+  source_label: string
+  execution_enabled: boolean
+  findings_created: number
+  queued_scans: number
+  runtime_proof_required: boolean
+}
+
 export interface RefuterCandidate {
   subject_type: string
   subject_id?: string | null
@@ -1882,6 +1894,34 @@ export async function getCampaignActions(limit: number = 20): Promise<{ campaign
 export async function getHypotheses(limit: number = 20): Promise<{ hypotheses: Hypothesis[]; execution_enabled: boolean; count: number }> {
   const res = await fetch(`${API_URL}/arsenal/hypotheses?limit=${limit}`)
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load hypotheses'))
+  return res.json()
+}
+
+export async function generateSourceIngestHypotheses(payload: {
+  target_id?: string
+  source_label?: string
+  created_by?: string
+  hints: Array<{
+    kind?: string
+    method?: string
+    path?: string
+    route?: string
+    risk_hints?: string[]
+    parameters?: string[]
+    body_paths?: string[]
+    object_keys?: string[]
+    tenant_keys?: string[]
+    roles?: string[]
+    auth_required?: boolean
+    confidence?: number
+  }>
+}): Promise<SourceIngestResult> {
+  const res = await fetch(`${API_URL}/arsenal/hypotheses/source-ingest`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to generate source-informed hypotheses'))
   return res.json()
 }
 

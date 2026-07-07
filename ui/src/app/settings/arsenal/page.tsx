@@ -10,6 +10,7 @@ import {
   createApprovalReceipt,
   deriveRefuterReviewVerdict,
   executeRefuterReviewPlan,
+  generateSourceIngestHypotheses,
   getAgentContextPacks,
   getAgentDecisionTraces,
   getArsenalCommands,
@@ -51,6 +52,7 @@ import {
   type LocalAgentsResponse,
   type LocalAgentTestResponse,
   type ScopeReceiptPreview,
+  type SourceIngestResult,
 } from '@/lib/api'
 import { Badge, Button, Card, EmptyState, ErrorState, Skeleton } from '@/components/ui'
 
@@ -721,6 +723,18 @@ export default function ArsenalSettingsPage() {
   const [recentCampaignActions, setRecentCampaignActions] = useState<CampaignAction[]>([])
   const [recentHypotheses, setRecentHypotheses] = useState<Hypothesis[]>([])
   const [hypothesisSituation, setHypothesisSituation] = useState<HypothesisSituationReport | null>(null)
+  const [sourceTargetId, setSourceTargetId] = useState('')
+  const [sourceLabel, setSourceLabel] = useState('operator-source-hints')
+  const [sourceKind, setSourceKind] = useState('openapi_operation')
+  const [sourceMethod, setSourceMethod] = useState('GET')
+  const [sourcePath, setSourcePath] = useState('/rest/basket/{id}')
+  const [sourceRiskHints, setSourceRiskHints] = useState('idor')
+  const [sourceObjectKeys, setSourceObjectKeys] = useState('basket.id')
+  const [sourceBodyPaths, setSourceBodyPaths] = useState('')
+  const [sourceConfidence, setSourceConfidence] = useState('0.6')
+  const [sourceIngestResult, setSourceIngestResult] = useState<SourceIngestResult | null>(null)
+  const [sourceIngestLoading, setSourceIngestLoading] = useState(false)
+  const [sourceIngestError, setSourceIngestError] = useState<string | null>(null)
   const [refuterSummary, setRefuterSummary] = useState<RefuterWorkSummary | null>(null)
   const [refuterQueueResult, setRefuterQueueResult] = useState<RefuterQueueResult | null>(null)
   const [refuterQueueLoading, setRefuterQueueLoading] = useState(false)
@@ -823,6 +837,40 @@ export default function ArsenalSettingsPage() {
       .split(/[\n,]/)
       .map((item) => item.trim())
       .filter(Boolean)
+  }
+
+  async function submitSourceHint() {
+    setSourceIngestLoading(true)
+    setSourceIngestError(null)
+    setSourceIngestResult(null)
+    try {
+      const confidence = Number.parseFloat(sourceConfidence)
+      const result = await generateSourceIngestHypotheses({
+        target_id: sourceTargetId.trim() || undefined,
+        source_label: sourceLabel.trim() || 'operator-source-hints',
+        created_by: approvalActor.trim() || 'operator',
+        hints: [{
+          kind: sourceKind,
+          method: sourceMethod.trim().toUpperCase() || 'GET',
+          path: sourcePath.trim(),
+          risk_hints: splitLines(sourceRiskHints),
+          object_keys: splitLines(sourceObjectKeys),
+          body_paths: splitLines(sourceBodyPaths),
+          confidence: Number.isFinite(confidence) ? Math.max(0, Math.min(1, confidence)) : 0.35,
+        }],
+      })
+      setSourceIngestResult(result)
+      const [hypothesisData, situationData] = await Promise.all([
+        getHypotheses(5),
+        getHypothesisSituationReport(5, approvalActor || 'operator'),
+      ])
+      setRecentHypotheses(hypothesisData.hypotheses)
+      setHypothesisSituation(situationData)
+    } catch (err) {
+      setSourceIngestError(err instanceof Error ? err.message : 'Failed to record source-informed hypothesis')
+    } finally {
+      setSourceIngestLoading(false)
+    }
   }
 
   async function queueRefuterWork() {
@@ -1212,6 +1260,134 @@ export default function ArsenalSettingsPage() {
                 />
               ))}
             </div>
+          </div>
+        )}
+      </Card>
+
+      <Card className="p-4">
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <Boxes className="h-4 w-4 text-blue-300" aria-hidden="true" />
+            <h2 className="font-medium text-white">Source Hint Ingest</h2>
+          </div>
+          <Badge className="bg-gray-800 text-gray-300">record only</Badge>
+        </div>
+        <p className="mb-3 text-sm text-gray-400">
+          Turn bounded source, route, or API facts into source-only hypotheses. This never queues scans or creates findings.
+        </p>
+        <div className="grid gap-3 lg:grid-cols-3">
+          <label className="block lg:col-span-2">
+            <span className="text-xs text-gray-400">Target ID (optional)</span>
+            <input
+              value={sourceTargetId}
+              onChange={(event) => setSourceTargetId(event.target.value)}
+              className="mt-1 w-full rounded-md border border-gray-700 bg-gray-950 px-3 py-2 font-mono text-xs text-white focus:border-blue-500 focus:outline-none"
+            />
+          </label>
+          <label className="block">
+            <span className="text-xs text-gray-400">Source label</span>
+            <input
+              value={sourceLabel}
+              onChange={(event) => setSourceLabel(event.target.value)}
+              className="mt-1 w-full rounded-md border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white focus:border-blue-500 focus:outline-none"
+            />
+          </label>
+          <label className="block">
+            <span className="text-xs text-gray-400">Kind</span>
+            <select
+              value={sourceKind}
+              onChange={(event) => setSourceKind(event.target.value)}
+              className="mt-1 w-full rounded-md border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white focus:border-blue-500 focus:outline-none"
+            >
+              <option value="openapi_operation">openapi_operation</option>
+              <option value="backend_route">backend_route</option>
+              <option value="frontend_route">frontend_route</option>
+              <option value="graphql_field">graphql_field</option>
+              <option value="ai_tool_endpoint">ai_tool_endpoint</option>
+              <option value="route">route</option>
+            </select>
+          </label>
+          <label className="block">
+            <span className="text-xs text-gray-400">Method</span>
+            <input
+              value={sourceMethod}
+              onChange={(event) => setSourceMethod(event.target.value)}
+              className="mt-1 w-full rounded-md border border-gray-700 bg-gray-950 px-3 py-2 font-mono text-sm text-white focus:border-blue-500 focus:outline-none"
+            />
+          </label>
+          <label className="block">
+            <span className="text-xs text-gray-400">Path</span>
+            <input
+              value={sourcePath}
+              onChange={(event) => setSourcePath(event.target.value)}
+              className="mt-1 w-full rounded-md border border-gray-700 bg-gray-950 px-3 py-2 font-mono text-sm text-white focus:border-blue-500 focus:outline-none"
+            />
+          </label>
+          <label className="block">
+            <span className="text-xs text-gray-400">Risk hints</span>
+            <input
+              value={sourceRiskHints}
+              onChange={(event) => setSourceRiskHints(event.target.value)}
+              placeholder="idor, sqli, xss"
+              className="mt-1 w-full rounded-md border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white focus:border-blue-500 focus:outline-none"
+            />
+          </label>
+          <label className="block">
+            <span className="text-xs text-gray-400">Object keys</span>
+            <input
+              value={sourceObjectKeys}
+              onChange={(event) => setSourceObjectKeys(event.target.value)}
+              placeholder="order.id"
+              className="mt-1 w-full rounded-md border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white focus:border-blue-500 focus:outline-none"
+            />
+          </label>
+          <label className="block">
+            <span className="text-xs text-gray-400">Body paths</span>
+            <input
+              value={sourceBodyPaths}
+              onChange={(event) => setSourceBodyPaths(event.target.value)}
+              placeholder="$.isAdmin"
+              className="mt-1 w-full rounded-md border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white focus:border-blue-500 focus:outline-none"
+            />
+          </label>
+          <label className="block">
+            <span className="text-xs text-gray-400">Confidence</span>
+            <input
+              value={sourceConfidence}
+              onChange={(event) => setSourceConfidence(event.target.value)}
+              className="mt-1 w-full rounded-md border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white focus:border-blue-500 focus:outline-none"
+            />
+          </label>
+        </div>
+        <div className="mt-3 flex flex-wrap items-center gap-3">
+          <Button
+            type="button"
+            variant="secondary"
+            onClick={() => void submitSourceHint()}
+            disabled={sourceIngestLoading || !sourcePath.trim() || !sourceRiskHints.trim()}
+          >
+            {sourceIngestLoading ? 'Recording...' : 'Record source hint'}
+          </Button>
+          <span className="text-xs text-gray-500">source-only · runtime proof required · no scan queued</span>
+          {sourceIngestError && <span role="alert" className="text-sm text-red-300">{sourceIngestError}</span>}
+        </div>
+        {sourceIngestResult && (
+          <div className="mt-4 rounded-md border border-gray-800 bg-gray-950 p-3">
+            <div className="flex flex-wrap items-center gap-2">
+              <Badge className="bg-green-500/15 text-green-300">
+                recorded {sourceIngestResult.created_or_endorsed}
+              </Badge>
+              <Badge className="bg-gray-800 text-gray-300">skipped {sourceIngestResult.skipped_count}</Badge>
+              <Badge className="bg-gray-800 text-gray-300">findings {sourceIngestResult.findings_created}</Badge>
+              <Badge className="bg-gray-800 text-gray-300">queued scans {sourceIngestResult.queued_scans}</Badge>
+            </div>
+            {sourceIngestResult.hypotheses.length > 0 && (
+              <div className="mt-3 grid gap-2">
+                {sourceIngestResult.hypotheses.slice(0, 3).map((hypothesis) => (
+                  <HypothesisRow key={hypothesis.id} hypothesis={hypothesis} />
+                ))}
+              </div>
+            )}
           </div>
         )}
       </Card>
