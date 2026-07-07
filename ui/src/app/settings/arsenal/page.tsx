@@ -16,11 +16,13 @@ import {
   getCommandResults,
   getHypotheses,
   getHypothesisSituationReport,
+  getRefuterWorkSummary,
   generateAgentContextPackFromTarget,
   getOperationPlans,
   getArsenalTools,
   getLocalAgents,
   previewScopeReceipt,
+  queueRefuterReviewsFromSummary,
   testLocalAgentCapability,
   type AgentContextPack,
   type AgentContextPackResponse,
@@ -36,6 +38,8 @@ import {
   type Hypothesis,
   type HypothesisReportItem,
   type HypothesisSituationReport,
+  type RefuterWorkSummary,
+  type RefuterQueueResult,
   type OperationPlan,
   type OperationPlanResponse,
   type ArsenalTool,
@@ -334,6 +338,41 @@ function SituationBucket({
   )
 }
 
+function RefuterCandidateRow({ candidate }: { candidate: RefuterWorkSummary['candidates'][number] }) {
+  return (
+    <div className="rounded-md border border-gray-800 bg-gray-950 px-3 py-2">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="break-all font-mono text-sm text-white">{candidate.trigger_type}</span>
+            {candidate.severity && <Badge className={riskClass(candidate.severity)}>{candidate.severity}</Badge>}
+            {candidate.source && <Badge className="bg-gray-800 text-gray-300">{candidate.source}</Badge>}
+            {candidate.already_reviewed && <Badge className="bg-green-500/15 text-green-300">reviewed</Badge>}
+          </div>
+          <p className="mt-1 break-words text-sm text-gray-400">{candidate.title || candidate.subject_id || 'Refuter candidate'}</p>
+        </div>
+        <div className="text-right text-xs text-gray-500">
+          <div className="font-mono text-gray-300">{candidate.proof_state || 'unknown'}</div>
+          <div>proof</div>
+        </div>
+      </div>
+      <div className="mt-2 flex flex-wrap gap-1.5">
+        {candidate.trigger_reasons.slice(0, 3).map((reason) => (
+          <Badge key={reason} className="bg-amber-500/15 text-amber-300">{reason}</Badge>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function RefuterQueueResultPanel({ result }: { result: RefuterQueueResult }) {
+  return (
+    <div className="rounded-md border border-green-500/20 bg-green-500/5 p-3 text-sm text-green-200">
+      Recorded {result.created} signal-only review row{result.created === 1 ? '' : 's'}; findings updated: {result.findings_updated}.
+    </div>
+  )
+}
+
 function ToolRow({ tool }: { tool: ArsenalTool }) {
   const Icon = tool.status === 'runnable' || tool.status === 'installed' ? CheckCircle2 : tool.status === 'wired' || tool.status === 'gated' ? ShieldCheck : XCircle
   return (
@@ -536,6 +575,10 @@ export default function ArsenalSettingsPage() {
   const [recentCampaignActions, setRecentCampaignActions] = useState<CampaignAction[]>([])
   const [recentHypotheses, setRecentHypotheses] = useState<Hypothesis[]>([])
   const [hypothesisSituation, setHypothesisSituation] = useState<HypothesisSituationReport | null>(null)
+  const [refuterSummary, setRefuterSummary] = useState<RefuterWorkSummary | null>(null)
+  const [refuterQueueResult, setRefuterQueueResult] = useState<RefuterQueueResult | null>(null)
+  const [refuterQueueLoading, setRefuterQueueLoading] = useState(false)
+  const [refuterQueueError, setRefuterQueueError] = useState<string | null>(null)
   const [planLoading, setPlanLoading] = useState(false)
   const [planError, setPlanError] = useState<string | null>(null)
   const [contextResult, setContextResult] = useState<AgentContextPackResponse | null>(null)
@@ -568,6 +611,7 @@ export default function ArsenalSettingsPage() {
         campaignActionData,
         hypothesisSituationData,
         hypothesisData,
+        refuterSummaryData,
         contextData,
         traceData,
       ] = await Promise.all([
@@ -580,6 +624,7 @@ export default function ArsenalSettingsPage() {
         getCampaignActions(5),
         getHypothesisSituationReport(5, approvalActor || 'operator'),
         getHypotheses(5),
+        getRefuterWorkSummary(5, 200),
         getAgentContextPacks(5),
         getAgentDecisionTraces(5),
       ])
@@ -592,6 +637,7 @@ export default function ArsenalSettingsPage() {
       setRecentCampaignActions(campaignActionData.campaign_actions)
       setHypothesisSituation(hypothesisSituationData)
       setRecentHypotheses(hypothesisData.hypotheses)
+      setRefuterSummary(refuterSummaryData)
       setRecentContextPacks(contextData.context_packs)
       setRecentDecisionTraces(traceData.decision_traces)
     } catch (err) {
@@ -631,6 +677,25 @@ export default function ArsenalSettingsPage() {
       .split(/[\n,]/)
       .map((item) => item.trim())
       .filter(Boolean)
+  }
+
+  async function queueRefuterWork() {
+    setRefuterQueueLoading(true)
+    setRefuterQueueError(null)
+    setRefuterQueueResult(null)
+    try {
+      const result = await queueRefuterReviewsFromSummary({
+        limit: 5,
+        finding_window: 200,
+        created_by: approvalActor || 'settings-arsenal',
+      })
+      setRefuterQueueResult(result)
+      setRefuterSummary(await getRefuterWorkSummary(5, 200))
+    } catch (err) {
+      setRefuterQueueError(err instanceof Error ? err.message : 'Failed to queue refuter review work')
+    } finally {
+      setRefuterQueueLoading(false)
+    }
   }
 
   async function previewScope() {
@@ -952,6 +1017,55 @@ export default function ArsenalSettingsPage() {
             {contractEntries.map(([name, contract]) => (
               <ContractRow key={name} name={name} contract={contract} />
             ))}
+          </div>
+        )}
+      </Card>
+
+      <Card className="p-4">
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <ShieldCheck className="h-4 w-4 text-amber-300" aria-hidden="true" />
+            <h2 className="font-medium text-white">Refuter Work</h2>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <Button
+              type="button"
+              onClick={() => void queueRefuterWork()}
+              disabled={loading || refuterQueueLoading || !refuterSummary || refuterSummary.summary.unreviewed_count === 0}
+            >
+              <CheckCircle2 className={`h-4 w-4 ${refuterQueueLoading ? 'animate-spin' : ''}`} aria-hidden="true" />
+              Queue Reviews
+            </Button>
+          </div>
+        </div>
+        <p className="mb-3 text-sm text-gray-400">
+          Signal-only review work for weak high-impact findings, semantic AI Gate claims, and unanchored Model Intake trust claims.
+        </p>
+        {refuterQueueError && <div className="mb-3 rounded-md border border-red-500/20 bg-red-500/10 p-3 text-sm text-red-300">{refuterQueueError}</div>}
+        {refuterQueueResult && <div className="mb-3"><RefuterQueueResultPanel result={refuterQueueResult} /></div>}
+        {loading ? (
+          <div className="space-y-3">
+            <Skeleton className="h-24" />
+            <Skeleton className="h-24" />
+          </div>
+        ) : !refuterSummary || refuterSummary.summary.candidate_count === 0 ? (
+          <EmptyState message="No refuter review candidates in the bounded summary." />
+        ) : (
+          <div className="space-y-4">
+            <div className="grid gap-3 md:grid-cols-4">
+              <Stat label="candidates" value={refuterSummary.summary.candidate_count} />
+              <Stat label="unreviewed" value={refuterSummary.summary.unreviewed_count} tone="text-amber-300" />
+              <Stat label="reviewed" value={refuterSummary.summary.already_reviewed_count} />
+              <Stat label="queued now" value={refuterQueueResult?.created || 0} tone="text-green-300" />
+            </div>
+            <div className="grid gap-2">
+              {refuterSummary.candidates.slice(0, 5).map((candidate) => (
+                <RefuterCandidateRow
+                  key={`${candidate.subject_type}:${candidate.subject_id || candidate.finding_id || candidate.title}`}
+                  candidate={candidate}
+                />
+              ))}
+            </div>
           </div>
         )}
       </Card>

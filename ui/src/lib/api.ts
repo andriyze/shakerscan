@@ -401,6 +401,66 @@ export interface HypothesisSituationReport {
   board_truncated: boolean
 }
 
+export interface RefuterCandidate {
+  subject_type: string
+  subject_id?: string | null
+  finding_id?: string | null
+  target_id?: string | null
+  title?: string | null
+  severity?: string | null
+  source?: string | null
+  tool?: string | null
+  proof_state?: string | null
+  trigger_type: string
+  trigger_reasons: string[]
+  already_reviewed: boolean
+  recommended_review?: Record<string, unknown>
+}
+
+export interface RefuterWorkSummary {
+  summary: {
+    candidate_count: number
+    unreviewed_count: number
+    already_reviewed_count: number
+    trigger_counts: Record<string, number>
+    trigger_type_counts: Record<string, number>
+    limit: number
+  }
+  candidates: RefuterCandidate[]
+  execution_enabled: boolean
+  findings_updated: number
+  hypotheses_updated: number
+}
+
+export interface RefuterReview {
+  id: string
+  subject_type: string
+  subject_id?: string | null
+  target_id?: string | null
+  finding_id?: string | null
+  hypothesis_id?: string | null
+  campaign_id?: string | null
+  trigger_reason: string
+  refuter_signal: string
+  refuter_verdict?: string | null
+  verdict_basis: string
+  status: string
+  metadata_json: Record<string, unknown>
+  created_by?: string | null
+  created_at?: string
+}
+
+export interface RefuterQueueResult {
+  created: number
+  skipped_already_reviewed: number
+  unreviewed_count: number
+  refuter_reviews: RefuterReview[]
+  summary: RefuterWorkSummary['summary']
+  execution_enabled: boolean
+  findings_updated: number
+  hypotheses_updated: number
+}
+
 export interface LocalAgentPlanRequest {
   agent: string
   context_pack_id: string
@@ -1765,6 +1825,27 @@ export async function getHypothesisSituationReport(
   if (requester) params.set('requester', requester)
   const res = await fetch(`${API_URL}/arsenal/hypotheses/situation-report?${params.toString()}`)
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load hypothesis situation report'))
+  return res.json()
+}
+
+export async function getRefuterWorkSummary(limit: number = 5, findingWindow: number = 200): Promise<RefuterWorkSummary> {
+  const params = new URLSearchParams({ limit: String(limit), finding_window: String(findingWindow) })
+  const res = await fetch(`${API_URL}/arsenal/refuter-reviews/summary?${params.toString()}`)
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load refuter review summary'))
+  return res.json()
+}
+
+export async function queueRefuterReviewsFromSummary(payload: {
+  limit?: number
+  finding_window?: number
+  created_by?: string
+} = {}): Promise<RefuterQueueResult> {
+  const res = await fetch(`${API_URL}/arsenal/refuter-reviews/queue-from-summary`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to queue refuter review work'))
   return res.json()
 }
 

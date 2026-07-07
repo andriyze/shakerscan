@@ -1999,6 +1999,97 @@ def test_refuter_work_summary_triggers_weak_ai_and_model_claims():
     assert by_id[str(model_id)]["trigger_type"] == "model_intake_trust_claim"
 
 
+def test_refuter_queue_from_summary_records_unreviewed_signal_only_reviews():
+    weak_id = uuid.uuid4()
+    ai_id = uuid.uuid4()
+    review_id = uuid.uuid4()
+    calls = {"fetch": 0, "fetchrow": []}
+
+    class _FakeConn:
+        async def fetch(self, query, *args):
+            calls["fetch"] += 1
+            if "FROM findings" in query:
+                return [
+                    {
+                        "id": weak_id,
+                        "status": "active",
+                        "severity": "critical",
+                        "title": "Already reviewed weak proof",
+                        "source": "scan",
+                        "tool": "smart_sqli",
+                        "last_verification_verdict": None,
+                        "evidence": json.dumps({}),
+                    },
+                    {
+                        "id": ai_id,
+                        "status": "active",
+                        "severity": "medium",
+                        "title": "Unreviewed semantic AI Gate hit",
+                        "source": "ai_gate",
+                        "tool": "ai_gate",
+                        "ai_classification_source": "provider",
+                        "last_verification_verdict": None,
+                        "evidence": json.dumps({}),
+                    },
+                ]
+            if "FROM refuter_reviews" in query:
+                return [{"subject_type": "finding", "subject_id": str(weak_id), "finding_id": weak_id}]
+            return []
+
+        async def fetchrow(self, query, *args):
+            calls["fetchrow"].append((query, args))
+            return {
+                "id": review_id,
+                "subject_type": args[0],
+                "subject_id": args[1],
+                "target_id": args[2],
+                "finding_id": args[3],
+                "hypothesis_id": args[4],
+                "campaign_id": args[5],
+                "trigger_reason": args[6],
+                "refuter_signal": args[7],
+                "refuter_verdict": args[8],
+                "verdict_basis": args[9],
+                "confidence_delta": args[10],
+                "evidence_object_ids": args[11],
+                "tool_receipt_ids": args[12],
+                "counterevidence": args[13],
+                "notes": args[14],
+                "status": args[15],
+                "metadata_json": args[16],
+                "created_by": args[17],
+            }
+
+    class _FakePool:
+        def acquire(self):
+            return self
+
+        async def __aenter__(self):
+            return _FakeConn()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    original_pool = api_module.db_pool
+    api_module.db_pool = _FakePool()
+    try:
+        result = asyncio.run(api_module.arsenal_queue_refuter_reviews_from_summary(
+            api_module.RefuterReviewQueueRequest(limit=10, finding_window=20, created_by="pytest")
+        ))
+    finally:
+        api_module.db_pool = original_pool
+
+    assert result["created"] == 1
+    assert result["skipped_already_reviewed"] == 1
+    assert result["findings_updated"] == 0
+    assert result["hypotheses_updated"] == 0
+    assert result["refuter_reviews"][0]["finding_id"] == str(ai_id)
+    assert result["refuter_reviews"][0]["verdict_basis"] == "signal_only"
+    assert result["refuter_reviews"][0]["created_by"] == "pytest"
+    assert calls["fetchrow"][0][1][15] == "recorded"
+    assert "UPDATE findings" not in calls["fetchrow"][0][0]
+
+
 def test_tool_receipt_redacts_hashes_and_is_non_executing():
     receipt_id = uuid.uuid4()
     captured: dict[str, object] = {}

@@ -3537,6 +3537,12 @@ class RefuterReviewRequest(BaseModel):
     created_by: Optional[str] = None
 
 
+class RefuterReviewQueueRequest(BaseModel):
+    limit: int = Field(default=20, ge=1, le=100)
+    finding_window: int = Field(default=200, ge=1, le=1000)
+    created_by: Optional[str] = Field(default="refuter_auto_queue", max_length=120)
+
+
 class ToolReceiptRequest(BaseModel):
     tool_name: str = Field(min_length=1, max_length=120)
     tool_version: Optional[str] = None
@@ -14270,6 +14276,81 @@ def _refuter_work_summary(
     }
 
 
+async def _load_refuter_work_summary(conn, *, limit: int = 20, finding_window: int = 200) -> dict[str, Any]:
+    findings = await conn.fetch(
+        """
+        SELECT *
+        FROM findings
+        WHERE status = 'active'
+          AND (
+            severity IN ('critical', 'high')
+            OR source IN ('ai_gate', 'model_intake')
+            OR ai_target_id IS NOT NULL
+            OR tool = 'model_intake'
+          )
+        ORDER BY
+          CASE severity
+            WHEN 'critical' THEN 1
+            WHEN 'high' THEN 2
+            WHEN 'medium' THEN 3
+            WHEN 'low' THEN 4
+            ELSE 5
+          END,
+          last_seen_at DESC NULLS LAST,
+          first_seen_at DESC NULLS LAST
+        LIMIT $1
+        """,
+        finding_window,
+    )
+    reviews = await conn.fetch(
+        """
+        SELECT subject_type, subject_id, finding_id
+        FROM refuter_reviews
+        WHERE subject_type = 'finding'
+        ORDER BY created_at DESC
+        LIMIT $1
+        """,
+        max(finding_window, limit),
+    )
+    return _refuter_work_summary(findings, reviews, limit=limit)
+
+
+def _refuter_review_requests_from_summary(
+    summary: dict[str, Any],
+    *,
+    created_by: str | None = "refuter_auto_queue",
+) -> list[RefuterReviewRequest]:
+    requests: list[RefuterReviewRequest] = []
+    for candidate in summary.get("candidates") or []:
+        if not isinstance(candidate, dict) or candidate.get("already_reviewed"):
+            continue
+        recommended = candidate.get("recommended_review") if isinstance(candidate.get("recommended_review"), dict) else {}
+        if not recommended:
+            continue
+        metadata = {
+            "queued_from_summary": True,
+            "trigger_type": candidate.get("trigger_type"),
+            "trigger_reasons": candidate.get("trigger_reasons") or [],
+            "source": candidate.get("source"),
+            "tool": candidate.get("tool"),
+            "proof_state": candidate.get("proof_state"),
+        }
+        requests.append(
+            RefuterReviewRequest(
+                subject_type=str(recommended.get("subject_type") or candidate.get("subject_type") or "finding"),
+                subject_id=recommended.get("subject_id") or candidate.get("subject_id"),
+                target_id=candidate.get("target_id"),
+                finding_id=recommended.get("finding_id") or candidate.get("finding_id"),
+                trigger_reason=str(recommended.get("trigger_reason") or "; ".join(candidate.get("trigger_reasons") or [])),
+                refuter_signal=str(recommended.get("refuter_signal") or "question"),
+                verdict_basis=str(recommended.get("verdict_basis") or "signal_only"),
+                metadata_json=metadata,
+                created_by=created_by,
+            )
+        )
+    return requests
+
+
 def _canonical_refuter_review(req: RefuterReviewRequest) -> dict[str, Any]:
     payload = req.model_dump(mode="json")
     verdict = str(payload.get("refuter_verdict") or "").strip() or None
@@ -16307,6 +16388,14 @@ async def _arsenal_dispatch_refuter_review_record(p: dict[str, Any]) -> dict[str
     return await arsenal_record_refuter_review(RefuterReviewRequest(**p))
 
 
+async def _arsenal_dispatch_refuter_review_queue_from_summary(p: dict[str, Any]) -> dict[str, Any]:
+    return await arsenal_queue_refuter_reviews_from_summary(RefuterReviewQueueRequest(
+        limit=_int_or_none(p.get("limit")) or 20,
+        finding_window=_int_or_none(p.get("finding_window")) or 200,
+        created_by=p.get("created_by") or "arsenal_execute",
+    ))
+
+
 async def _arsenal_dispatch_asm_improve(p: dict[str, Any], approval_receipt_id: str | None) -> dict[str, Any]:
     target_id = str(p.get("target_id") or "").strip()
     if not target_id:
@@ -16476,6 +16565,7 @@ def _arsenal_readonly_adapters() -> dict[str, Any]:
         "refuter_review.list": _arsenal_dispatch_refuter_review_list,
         "refuter_review.summary": _arsenal_dispatch_refuter_review_summary,
         "refuter_review.record": _arsenal_dispatch_refuter_review_record,
+        "refuter_review.queue_from_summary": _arsenal_dispatch_refuter_review_queue_from_summary,
     }
 
 
@@ -17224,42 +17314,34 @@ async def arsenal_refuter_review_summary(
     update findings, or alter proof/deployment state.
     """
     async with db_pool.acquire() as conn:
-        findings = await conn.fetch(
-            """
-            SELECT *
-            FROM findings
-            WHERE status = 'active'
-              AND (
-                severity IN ('critical', 'high')
-                OR source IN ('ai_gate', 'model_intake')
-                OR ai_target_id IS NOT NULL
-                OR tool = 'model_intake'
-              )
-            ORDER BY
-              CASE severity
-                WHEN 'critical' THEN 1
-                WHEN 'high' THEN 2
-                WHEN 'medium' THEN 3
-                WHEN 'low' THEN 4
-                ELSE 5
-              END,
-              last_seen_at DESC NULLS LAST,
-              first_seen_at DESC NULLS LAST
-            LIMIT $1
-            """,
-            finding_window,
-        )
-        reviews = await conn.fetch(
-            """
-            SELECT subject_type, subject_id, finding_id
-            FROM refuter_reviews
-            WHERE subject_type = 'finding'
-            ORDER BY created_at DESC
-            LIMIT $1
-            """,
-            max(finding_window, limit),
-        )
-    return _refuter_work_summary(findings, reviews, limit=limit)
+        return await _load_refuter_work_summary(conn, limit=limit, finding_window=finding_window)
+
+
+@app.post("/arsenal/refuter-reviews/queue-from-summary")
+async def arsenal_queue_refuter_reviews_from_summary(req: RefuterReviewQueueRequest):
+    """Record signal-only refuter review work from the current weak-claim summary.
+
+    This turns suggested review requests into durable refuter review rows. It
+    still does not execute scanners, update findings, alter proof state, or
+    change deployment gates.
+    """
+    async with db_pool.acquire() as conn:
+        summary = await _load_refuter_work_summary(conn, limit=req.limit, finding_window=req.finding_window)
+        review_requests = _refuter_review_requests_from_summary(summary, created_by=req.created_by)
+        created: list[dict[str, Any]] = []
+        for review_request in review_requests:
+            result = await _record_refuter_review(conn, review_request)
+            created.append(result["refuter_review"])
+    return {
+        "created": len(created),
+        "skipped_already_reviewed": summary["summary"]["already_reviewed_count"],
+        "unreviewed_count": summary["summary"]["unreviewed_count"],
+        "refuter_reviews": created,
+        "summary": summary["summary"],
+        "execution_enabled": False,
+        "findings_updated": 0,
+        "hypotheses_updated": 0,
+    }
 
 
 @app.post("/arsenal/refuter-reviews")

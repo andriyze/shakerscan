@@ -974,6 +974,23 @@ COMMANDS: tuple[ArsenalCommand, ...] = (
         timeout_seconds=15,
     ),
     ArsenalCommand(
+        name="refuter_review.queue_from_summary",
+        family="governance",
+        description="Record signal-only refuter review work from the current weak-claim summary without mutating findings.",
+        status="dry_run",
+        risk_tier="read_only",
+        method="POST",
+        path="/arsenal/refuter-reviews/queue-from-summary",
+        parameters_schema={
+            "limit": {"type": "integer", "minimum": 1, "maximum": 100},
+            "finding_window": {"type": "integer", "minimum": 1, "maximum": 1000},
+            "created_by": {"type": "string"},
+        },
+        evidence_contract=("refuter_review_rows", "trigger_counts", "signal_only_reviews"),
+        redaction_contract=("trigger_reason", "metadata_json"),
+        timeout_seconds=20,
+    ),
+    ArsenalCommand(
         name="mission.timeline",
         family="governance",
         description="Read the cross-product mission timeline: command results, campaign actions, recent scans, evidence bindings, export events, refuter reviews, and upcoming schedules.",

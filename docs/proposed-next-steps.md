@@ -1101,20 +1101,24 @@ is the habit of trying to disprove weak wins. ShakerScan now has durable
 `GET /arsenal/refuter-reviews/summary` / `refuter_review.summary`. The summary identifies
 Critical/High findings with weak or suspected proof, AI Gate semantic/weak deterministic claims, and
 Model Intake metadata trust claims that lack checksum/signature trust signals, and emits suggested
-signal-only review requests without recording them. `refuter_signal` remains separate from
+signal-only review requests. `POST /arsenal/refuter-reviews/queue-from-summary` /
+`refuter_review.queue_from_summary` can now record unreviewed suggested review work as signal-only
+refuter rows without executing scanners or mutating findings; `/settings/arsenal` renders the
+summary, candidates, and queue action. `refuter_signal` remains separate from
 `refuter_verdict`; verdicts require deterministic replay, cryptographic, parser/protocol, or
 human-approved-review basis, and recording a review cannot directly update findings, hypotheses,
 proof state, severity, or gates. File-backed integrity ledgers exist at
 `results/benchmark-runs/INTEGRITY_LEDGER.md` and `results/planner-evals/INTEGRITY_LEDGER.md`.
-Automated refuter execution and UI summaries are still open.
+Automated deterministic refuter execution is still open.
 
 **Implement:**
 1. DONE phase 1: trigger refuter work for Critical/High findings with suspected or weak proof, AI Gate semantic-only
    hits, Model Intake metadata claims without operator trust anchors, new benchmark wins, unusually
    large finding deltas, deployment-gating findings, and parser output that would promote severity or
-   proof state. Current implementation covers the first three as a read-only work summary; benchmark
-   deltas, finding deltas, deployment-gate triggers, parser-promotion triggers, and automatic work
-   recording remain open.
+   proof state. Current implementation covers the first three as a read-only work summary and can
+   queue signal-only review rows from that summary; benchmark deltas, finding deltas,
+   deployment-gate triggers, parser-promotion triggers, and deterministic automated execution remain
+   open.
 2. Refuter behavior should rerun the minimal reproducer, test benign explanations, verify auth
    context/principal/tenant/object ownership, check request freshness, and attach counterevidence when
    a claim weakens.
