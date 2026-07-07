@@ -291,6 +291,12 @@ def test_decode_json_value_handles_none():
     assert api_module._decode_json_value(None) is None
 
 
+def test_short_url_label_drops_userinfo_credentials():
+    label = api_module._short_url_label("https://svc:sk-abc123@registry.internal/model.safetensors")
+    assert "sk-abc123" not in label and "svc:" not in label
+    assert "registry.internal" in label
+
+
 # ----- scan-time verification overrides -------------------------------------
 
 def test_scan_result_verification_overrides_promote_raw_scan_proof():
@@ -4722,3 +4728,78 @@ def test_mission_timeline_merges_sorts_and_reports_upcoming(monkeypatch):
     assert up["command"] == "asm.improve"
     # row_to_dict renders datetimes as ISO strings.
     assert up["next_eligible_at"] == schedule_row["next_run_at"].isoformat()
+
+
+# ----- finding-exceptions PATCH: owner/approver gate + edit_history audit trail -----
+
+_EXCEPTION_ID = "11111111-1111-4111-8111-111111111111"
+
+
+class _FindingExceptionEditConn:
+    """FakeConn answering the current-row SELECT and capturing the UPDATE args
+    so the edit_history append can be asserted without a real database."""
+
+    def __init__(self, current_row):
+        self.current_row = current_row
+        self.update_query = None
+        self.update_args = None
+
+    async def fetchrow(self, query, *args):
+        if "SELECT * FROM finding_exceptions" in query:
+            return dict(self.current_row) if self.current_row else None
+        if "UPDATE finding_exceptions" in query:
+            self.update_query = query
+            self.update_args = args
+            updated = dict(self.current_row)
+            updated.update({
+                "scope": args[1], "owner": args[2], "approver": args[3],
+                "reason": args[4], "compensating_controls": args[5],
+                "status": args[6], "expires_at": args[7],
+                "edit_history": args[8],
+            })
+            return updated
+        return None
+
+
+def test_update_finding_exception_requires_owner_or_approver():
+    # The 422 gate must fire before any DB access (db_pool is unset in tests).
+    with pytest.raises(api_module.HTTPException) as exc:
+        asyncio.run(
+            api_module.update_finding_exception(
+                _EXCEPTION_ID, api_module.FindingExceptionRequest(status="active")
+            )
+        )
+    assert exc.value.status_code == 422
+
+
+def test_update_finding_exception_appends_edit_history(monkeypatch):
+    current_row = {
+        "id": _EXCEPTION_ID,
+        "finding_id": "f1",
+        "fingerprint": None,
+        "policy_id": None,
+        "target_id": None,
+        "scope": "old-scope",
+        "owner": "alice",
+        "approver": "bob",
+        "reason": "old reason",
+        "compensating_controls": "old controls",
+        "status": "active",
+        "expires_at": None,
+        "edit_history": json.dumps([]),
+        "created_at": datetime(2026, 1, 1, tzinfo=timezone.utc),
+        "updated_at": datetime(2026, 1, 1, tzinfo=timezone.utc),
+    }
+    conn = _FindingExceptionEditConn(current_row)
+    monkeypatch.setattr(api_module, "db_pool", _pool_for(conn))
+
+    req = api_module.FindingExceptionRequest(owner="carol", status="revoked")
+    result = asyncio.run(api_module.update_finding_exception(_EXCEPTION_ID, req))
+
+    assert result["owner"] == "carol"
+    assert conn.update_query is not None and "edit_history" in conn.update_query
+    snapshot = json.loads(conn.update_args[8])[0]
+    assert snapshot["owner"] == "alice"
+    assert snapshot["approver"] == "bob"
+    assert snapshot["status"] == "active"
+    assert "replaced_at" in snapshot

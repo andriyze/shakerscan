@@ -4712,7 +4712,7 @@ def _short_url_label(value: str | None) -> str:
         return "unknown"
     try:
         parsed = urllib.parse.urlparse(value if "://" in value else f"https://{value}")
-        host = parsed.netloc or parsed.path
+        host = parsed.hostname or parsed.path
         path = parsed.path if parsed.netloc else ""
         label = f"{host}{path}" if path and path != "/" else host
         return label[:90] if label else value[:90]
@@ -11758,16 +11758,32 @@ async def create_finding_exception(req: FindingExceptionRequest):
 @app.patch("/finding-exceptions/{exception_id}")
 async def update_finding_exception(exception_id: str, req: FindingExceptionRequest):
     expires_at = _parse_iso_datetime(req.expires_at) if req.expires_at else None
+    if not (req.approver or req.owner):
+        raise HTTPException(status_code=422, detail="approver or owner is required for an auditable exception")
     async with db_pool.acquire() as conn:
+        current = await conn.fetchrow("SELECT * FROM finding_exceptions WHERE id=$1", uuid.UUID(exception_id))
+        if not current:
+            raise HTTPException(status_code=404, detail="Finding exception not found")
+        prior_snapshot = {
+            "owner": current["owner"],
+            "approver": current["approver"],
+            "reason": current["reason"],
+            "compensating_controls": current["compensating_controls"],
+            "status": current["status"],
+            "expires_at": current["expires_at"].isoformat() if current["expires_at"] else None,
+            "replaced_at": utc_now_iso(),
+        }
         row = await conn.fetchrow(
             """
             UPDATE finding_exceptions SET
                 scope=$2, owner=$3, approver=$4, reason=$5, compensating_controls=$6,
-                status=$7, expires_at=$8, updated_at=NOW()
+                status=$7, expires_at=$8, updated_at=NOW(),
+                edit_history = edit_history || $9::jsonb
             WHERE id=$1 RETURNING *
             """,
             uuid.UUID(exception_id), req.scope, req.owner, req.approver, req.reason,
             req.compensating_controls, req.status, expires_at,
+            json.dumps([prior_snapshot], default=str),
         )
         if not row:
             raise HTTPException(status_code=404, detail="Finding exception not found")

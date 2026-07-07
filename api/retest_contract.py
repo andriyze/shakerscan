@@ -1248,6 +1248,10 @@ async def run_schema_migrations(pool) -> None:
                 ON finding_exceptions(finding_id)
             """)
             await conn.execute("""
+                ALTER TABLE finding_exceptions
+                ADD COLUMN IF NOT EXISTS edit_history JSONB NOT NULL DEFAULT '[]'::jsonb
+            """)
+            await conn.execute("""
                 CREATE TABLE IF NOT EXISTS scope_receipts (
                     id TEXT PRIMARY KEY,
                     target_id UUID,

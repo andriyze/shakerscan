@@ -143,7 +143,8 @@ def _redact_receipt_value(value: Any) -> Any:
     if isinstance(value, tuple):
         return [_redact_receipt_value(item) for item in value]
     if isinstance(value, str):
-        redacted = re.sub(r"(?i)(bearer|token|secret|password|signature|api[_-]?key)=([^&\s]+)", r"\1=***", value)
+        redacted = re.sub(r"(://)[^/\s@]+@", r"\1***@", value)
+        redacted = re.sub(r"(?i)(bearer|token|secret|password|signature|api[_-]?key)=([^&\s]+)", r"\1=***", redacted)
         redacted = re.sub(r"(?i)(authorization:\s*bearer\s+)[^\s,;]+", r"\1***", redacted)
         redacted = re.sub(r"(?i)\b(secret|token|password|api[_-]?key)[-_a-z0-9]*\b", "***", redacted)
         return redacted
@@ -312,8 +313,11 @@ def _external_dast_tool_specs(result: dict[str, Any], options: dict[str, Any]) -
             "tool_name": "nuclei",
             "parser": "nuclei-json-summary-v1",
             "proof_contract": "template-match-evidence",
-            "status": "failed" if errors and completed is False else "success",
-            "parser_status": "parsed" if completed is not False else "failed" if errors else "partial",
+            # Honesty: only an explicit completion is 'success'. Unknown completion
+            # (scan_completed None) must never be stamped success — that would be a
+            # phantom-tool provenance the no-phantom gate exists to prevent.
+            "status": "success" if completed is True else "failed" if (completed is False or errors) else "recorded",
+            "parser_status": "parsed" if completed is True else "failed" if errors else "partial",
             "summary": {
                 "scan_completed": completed,
                 "templates_used": nuclei.get("templates_used"),
@@ -356,8 +360,11 @@ def _external_dast_tool_specs(result: dict[str, Any], options: dict[str, Any]) -
             "tool_name": tool_name,
             "parser": parser,
             "proof_contract": "tls-network-observation",
-            "status": "success" if completed is not False or raw_present or has_structured else "failed",
-            "parser_status": "parsed" if completed or raw_present or has_structured else "partial",
+            # Honesty: success requires genuine completion or real parsed structured
+            # data. raw-present alone is NOT success — `raw` also holds stderr/timeout
+            # text, and an explicit completed=False (e.g. an nmap timeout) is a failure.
+            "status": "success" if (completed is True or has_structured) else "failed" if completed is False else "recorded",
+            "parser_status": "parsed" if has_structured else "partial" if raw_present else "failed",
             "summary": {
                 "scan_completed": completed,
                 "raw_present": raw_present,

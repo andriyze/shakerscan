@@ -597,6 +597,13 @@ def test_internal_ai_gate_executor_receipt_is_recorded_and_redacted():
     assert target_scope["target"].endswith("***=***")
 
 
+def test_redact_receipt_value_strips_url_userinfo():
+    out = worker._redact_receipt_value("https://admin:hunter2@app.example.com/?token=secret-token")
+    assert "hunter2" not in out and "admin:" not in out
+    assert "secret-token" not in out
+    assert "app.example.com" in out
+
+
 def test_internal_model_intake_executor_receipt_records_failure():
     receipt_id = uuid.uuid4()
     conn = _FakeReceiptConnection(receipt_id)
@@ -655,11 +662,42 @@ def test_external_dast_tool_specs_from_parsed_result():
 
     by_tool = {item["tool_name"]: item for item in specs}
     assert by_tool["nuclei"]["parser_status"] == "parsed"
+    assert by_tool["nuclei"]["status"] == "success"          # scan_completed True
     assert by_tool["dalfox"]["status"] == "success"
     assert by_tool["sqlmap"]["status"] == "failed"
     assert by_tool["nmap"]["parser"] == "nmap-tls-summary-v1"
+    assert by_tool["sslyze"]["status"] == "success"          # scan_completed True
     assert by_tool["sslyze"]["proof_contract"] == "tls-network-observation"
-    assert by_tool["testssl"]["parser_status"] == "parsed"
+    # raw-only output (no scan_completed, no structured data) is NOT a confirmed
+    # success/parse — `raw` may hold stderr/timeout text.
+    assert by_tool["nmap"]["status"] == "recorded"
+    assert by_tool["nmap"]["parser_status"] == "partial"
+    assert by_tool["testssl"]["status"] == "recorded"
+    assert by_tool["testssl"]["parser_status"] == "partial"
+
+
+def test_external_dast_tool_specs_never_stamp_failed_or_timed_out_tools_success():
+    specs = worker._external_dast_tool_specs(
+        {
+            "discovery": {
+                # nuclei ran but reported errors and no explicit completion.
+                "nuclei": {"errors": ["template load failed"], "templates_used": 3},
+            },
+            "tls": {
+                # nmap TLS timeout: explicit failure flag + stderr echoed into raw.
+                "nmap": {"scan_completed": False, "raw": "timeout after 120s"},
+                # sslyze not installed: explicit failure.
+                "sslyze": {"scan_completed": False, "error": "SSLyze not installed"},
+            },
+        },
+        {"scan_type": "smart"},
+    )
+    by_tool = {item["tool_name"]: item for item in specs}
+    # None of these may claim success — that is exactly the phantom-tool provenance
+    # the no-phantom-tools gate is meant to prevent.
+    assert by_tool["nuclei"]["status"] != "success"
+    assert by_tool["nmap"]["status"] == "failed"      # completed=False despite raw
+    assert by_tool["sslyze"]["status"] == "failed"
 
 
 def test_external_dast_tool_receipts_are_recorded_and_attached():

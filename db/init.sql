@@ -719,6 +719,7 @@ CREATE TABLE IF NOT EXISTS finding_exceptions (
     compensating_controls TEXT,
     status TEXT NOT NULL DEFAULT 'active',
     expires_at TIMESTAMPTZ,
+    edit_history JSONB NOT NULL DEFAULT '[]'::jsonb,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     CONSTRAINT finding_exceptions_status_check
