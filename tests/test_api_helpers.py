@@ -1982,6 +1982,139 @@ def test_application_graph_hypothesis_requests_attach_principal_matrix_context()
     assert "profile-user1" not in json.dumps(req.model_dump(mode="json"))
 
 
+def test_plan_campaign_from_hypothesis_records_planned_action_without_execution():
+    hypothesis_id = uuid.uuid4()
+    target_id = uuid.uuid4()
+    campaign_id = uuid.uuid4()
+    action_id = uuid.uuid4()
+    captured: dict[str, object] = {"queries": []}
+
+    hypothesis_row = {
+        "id": hypothesis_id,
+        "target_id": target_id,
+        "campaign_id": None,
+        "campaign_action_id": None,
+        "source": "app_graph",
+        "family": "bola",
+        "cwe": "CWE-639",
+        "title": "Graph authz lead",
+        "description": "user2 should not read user1 order",
+        "severity_guess": "high",
+        "confidence": 0.8,
+        "smoke_score": None,
+        "dedupe_key": "hypothesis:v1|family=bola",
+        "status": "open",
+        "version": 1,
+        "claim_owner": None,
+        "claim_lease_expires_at": None,
+        "evidence_object_ids": json.dumps([]),
+        "tool_receipt_ids": json.dumps([]),
+        "next_test_action": json.dumps({
+            "command": "asm.improve",
+            "parameters": {"target_id": str(target_id), "check_family": "bola", "exploit_depth": True},
+            "principal_matrix": {"proof_state": "unproven_planning_context"},
+        }),
+        "endorsements": json.dumps([]),
+        "refutations": json.dumps([]),
+        "metadata_json": json.dumps({"dedupe_dimensions": {"route": "/api/orders/{id}"}}),
+        "created_by": "pytest",
+        "created_at": "now",
+        "updated_at": "now",
+    }
+
+    class _FakeConn:
+        async def fetchval(self, query, *args):
+            captured["queries"].append(str(query))
+            return 1
+
+        async def fetchrow(self, query, *args):
+            sql = str(query)
+            captured["queries"].append(sql)
+            if "SELECT * FROM hypotheses" in sql:
+                return hypothesis_row
+            if "INSERT INTO campaigns" in sql:
+                captured["campaign_args"] = args
+                return {
+                    "id": campaign_id,
+                    "name": args[0],
+                    "objective": args[1],
+                    "campaign_type": args[2],
+                    "target_id": args[3],
+                    "target_scope": args[4],
+                    "risk_tier": args[5],
+                    "policy_profile": args[6],
+                    "planner": args[7],
+                    "operation_plan_id": args[8],
+                    "context_hash": args[9],
+                    "status": args[10],
+                    "deployment_impact": args[11],
+                    "metadata_json": args[12],
+                    "created_by": args[13],
+                    "created_at": "now",
+                    "updated_at": "now",
+                }
+            if "INSERT INTO campaign_actions" in sql:
+                captured["action_args"] = args
+                return {
+                    "id": action_id,
+                    "campaign_id": args[0],
+                    "operation_plan_id": args[1],
+                    "command_result_id": args[2],
+                    "target_id": args[3],
+                    "scope_receipt_id": args[4],
+                    "approval_receipt_id": args[5],
+                    "scan_id": args[6],
+                    "command": args[7],
+                    "action_name": args[8],
+                    "status": args[9],
+                    "dry_run": args[10],
+                    "risk_tier": args[11],
+                    "finding_ids": args[12],
+                    "hypothesis_ids": args[13],
+                    "evidence_object_ids": args[14],
+                    "tool_receipt_ids": args[15],
+                    "blocked_by": args[16],
+                    "next_action": args[17],
+                    "operator_message": args[18],
+                    "result_json": args[19],
+                    "created_by": args[20],
+                    "mission_campaign_id": args[21],
+                    "created_at": "now",
+                    "updated_at": "now",
+                }
+            if "UPDATE hypotheses" in sql:
+                captured["update_args"] = args
+                updated = dict(hypothesis_row)
+                updated["campaign_action_id"] = args[0]
+                updated["metadata_json"] = json.dumps({
+                    "planned_campaign_id": str(campaign_id),
+                    "planned_campaign_action_id": str(action_id),
+                })
+                return updated
+            raise AssertionError(sql)
+
+    result = asyncio.run(api_module._plan_campaign_from_hypothesis(
+        _FakeConn(),
+        str(hypothesis_id),
+        api_module.HypothesisCampaignPlanRequest(campaign_name="Authz proof", created_by="pytest"),
+    ))
+
+    assert result["execution_enabled"] is False
+    assert result["findings_created"] == 0
+    assert result["scans_queued"] == 0
+    assert result["campaign"]["campaign_type"] == "api_authz"
+    assert result["campaign"]["risk_tier"] == "credential"
+    assert result["campaign_action"]["command"] == "asm.improve"
+    assert result["campaign_action"]["status"] == "planned"
+    assert result["campaign_action"]["dry_run"] is True
+    assert result["campaign_action"]["mission_campaign_id"] == str(campaign_id)
+    assert result["campaign_action"]["hypothesis_ids"] == [str(hypothesis_id)]
+    assert result["campaign_action"]["result_json"]["proof_state"] == "planned_not_executed"
+    assert result["hypothesis"]["campaign_action_id"] == str(action_id)
+    assert captured["action_args"][6] is None
+    assert captured["action_args"][12] == json.dumps([])
+
+
 def test_hypothesis_signal_redacts_and_is_non_executing():
     req = api_module.HypothesisSignalRequest(
         signal_type="refutation",

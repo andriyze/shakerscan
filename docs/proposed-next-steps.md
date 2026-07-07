@@ -928,15 +928,17 @@ detector recall and proof routing still require scorecard-backed scan improvemen
 finding, not merely an attempted endpoint.
 
 ### 7. Campaign, hypothesis, and application-graph consumer layer
-**Status: PHASE 1 GRAPH + HYPOTHESES + SITUATION-REPORT CONSUMER + CAMPAIGN LAYER DONE; AUTO-LINKAGE/PROMOTION OPEN.** `application_graph_nodes` /
+**Status: PHASE 2 GRAPH + HYPOTHESES + SITUATION REPORT + CAMPAIGN PLANNING DONE; EXECUTION/PROMOTION OPEN.** `application_graph_nodes` /
 `application_graph_edges` now persist route/object nodes plus producer/consumer/auth-boundary edges
 from discovery + recursive BOLA `resource_map`; `GET /targets/{id}/graph` exposes the graph.
 Object-ID and cross-user primitives also exist per scan (`access_control_checks` object-id
 extraction, `_path_has_object_id_segment`, cross-principal replay in `proof_of_exploit` /
 `verification_engine`). Bounded hypothesis situation reports now consume the durable graph as context
 by target, summarizing route/object/principal nodes, producer/consumer edges, auth-boundary edges,
-and graph-missing targets. The remaining gap is that BOLA/BFLA/BOPLA/tenant/workflow campaigns still
-do not schedule deterministic proof work from those graph-backed hypotheses. This should borrow
+and graph-missing targets. `POST /arsenal/hypotheses/{id}/plan-campaign` /
+`hypothesis.plan_campaign` now creates or links a mission campaign and planned campaign action from a
+hypothesis `next_test_action` without executing it, queueing scans, or creating findings. The
+remaining gap is deterministic proof execution and promotion from those planned actions. This should borrow
 T3MP3ST's PackBoard idea, but adapt it into ShakerScan's proof model: leads are coordinated work
 items, not findings.
 
@@ -1000,6 +1002,10 @@ items, not findings.
     metadata/governance/trust-control findings into `model_intake.trust_preview` remediation
     hypotheses. These records endorse the hypothesis board only; they do not create findings, promote
     proof state, or execute follow-up work.
+11. DONE phase 1: `hypothesis.plan_campaign` consumes a hypothesis' `next_test_action` and records a
+    mission campaign plus planned campaign action with the hypothesis id, planned action payload, and
+    `proof_state: planned_not_executed`. This is a coordination record only; it does not call
+    `asm.improve`, queue scans, claim the hypothesis, create findings, or alter proof state.
 
 **Done when:** the scanner can state "`GET /api/orders` produces `order.id` owned by user1;
 `GET /api/orders/{id}` consumes it -> test user2 read/mutate" from a persisted graph and schedule

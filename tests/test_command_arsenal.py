@@ -405,6 +405,19 @@ def test_graph_hypothesis_generation_is_dry_run_read_only_risk():
     assert "hypothesis_rows" in cmd["evidence_contract"]
 
 
+def test_hypothesis_plan_campaign_is_dry_run_and_non_executing():
+    payload = arsenal.describe_commands()
+    commands = {item["name"]: item for item in payload["commands"]}
+
+    cmd = commands["hypothesis.plan_campaign"]
+    assert cmd["status"] == "dry_run"
+    assert cmd["risk_tier"] == "read_only"
+    assert cmd["method"] == "POST"
+    assert cmd["path"] == "/arsenal/hypotheses/{hypothesis_id}/plan-campaign"
+    assert "campaign_action_row" in cmd["evidence_contract"]
+    assert "next_test_action" in cmd["evidence_contract"]
+
+
 def test_mission_contract_catalog_is_contract_only():
     payload = arsenal.describe_contracts()
 

@@ -3505,6 +3505,13 @@ class HypothesisClaimRequest(BaseModel):
     lease_seconds: int = Field(default=1800, ge=60, le=86400)
 
 
+class HypothesisCampaignPlanRequest(BaseModel):
+    campaign_id: Optional[str] = None
+    campaign_name: Optional[str] = Field(default=None, max_length=200)
+    operator_message: Optional[str] = Field(default=None, max_length=500)
+    created_by: Optional[str] = None
+
+
 class HypothesisSignalRequest(BaseModel):
     signal_type: str = Field(pattern="^(endorsement|refutation)$")
     source: str = Field(min_length=1, max_length=80)
@@ -16381,6 +16388,161 @@ async def _persist_campaign(conn, req: CampaignRequest) -> dict[str, Any]:
     return _public_campaign_row(row)
 
 
+def _campaign_type_for_hypothesis_family(family: Any) -> str:
+    normalized = str(family or "").strip().lower()
+    if normalized in {"bola", "bfla", "bopla", "idor", "auth", "authorization", "tenant"}:
+        return "api_authz"
+    if normalized in {"ai_gate", "prompt_injection", "rag", "mcp"}:
+        return "ai_red_team"
+    if normalized.startswith("model_intake") or normalized in {"model", "trust_preview"}:
+        return "model_intake"
+    return "focused_family"
+
+
+def _risk_tier_for_hypothesis_action(hypothesis: dict[str, Any], next_test_action: dict[str, Any]) -> str:
+    parameters = next_test_action.get("parameters") if isinstance(next_test_action.get("parameters"), dict) else {}
+    family = str(parameters.get("check_family") or hypothesis.get("family") or "").strip().lower()
+    if family in {"bola", "bfla", "bopla", "idor", "auth", "authorization", "tenant"}:
+        return "credential"
+    command = str(next_test_action.get("command") or "").strip()
+    if command in {"asm.improve", "asm.test", "scan.submit", "finding.retest"}:
+        return "active"
+    return "read_only"
+
+
+async def _plan_campaign_from_hypothesis(
+    conn,
+    hypothesis_id: str,
+    req: HypothesisCampaignPlanRequest,
+) -> dict[str, Any]:
+    """Create a campaign/action plan from a hypothesis without executing work."""
+    hypothesis_uuid = _uuid_or_400(hypothesis_id, "hypothesis id")
+    hypothesis_row = await conn.fetchrow("SELECT * FROM hypotheses WHERE id=$1", hypothesis_uuid)
+    if not hypothesis_row:
+        raise HTTPException(status_code=404, detail="Hypothesis not found")
+    hypothesis = _public_hypothesis_row(hypothesis_row)
+    if hypothesis.get("effective_status") in {"refuted", "promoted", "dead"}:
+        raise HTTPException(status_code=400, detail="Terminal hypotheses cannot be planned into campaigns")
+    next_test_action = hypothesis.get("next_test_action") if isinstance(hypothesis.get("next_test_action"), dict) else {}
+    command = str(next_test_action.get("command") or "").strip()
+    if not command:
+        raise HTTPException(status_code=400, detail="Hypothesis has no next_test_action command to plan")
+
+    created_by = str(req.created_by or hypothesis.get("created_by") or "hypothesis.plan_campaign").strip()
+    target_id = str(hypothesis.get("target_id") or "").strip() or None
+    target_uuid = _optional_uuid(target_id)
+    risk_tier = _risk_tier_for_hypothesis_action(hypothesis, next_test_action)
+    campaign_uuid = _optional_uuid(req.campaign_id)
+    if campaign_uuid:
+        campaign_row = await conn.fetchrow("SELECT * FROM campaigns WHERE id=$1", campaign_uuid)
+        if not campaign_row:
+            raise HTTPException(status_code=404, detail="Campaign not found")
+        campaign = _public_campaign_row(campaign_row)
+    else:
+        title = str(hypothesis.get("title") or hypothesis.get("family") or "Hypothesis").strip()
+        campaign = await _persist_campaign(conn, CampaignRequest(
+            objective=f"Plan deterministic proof work for hypothesis {hypothesis_uuid}",
+            name=req.campaign_name or f"Hypothesis: {title[:120]}",
+            campaign_type=_campaign_type_for_hypothesis_family(hypothesis.get("family")),
+            target_id=target_id,
+            target_scope={
+                "hypothesis_id": str(hypothesis_uuid),
+                "dedupe_key": hypothesis.get("dedupe_key"),
+                "dedupe_dimensions": (hypothesis.get("metadata_json") or {}).get("dedupe_dimensions")
+                    or hypothesis.get("dedupe_dimensions")
+                    or {},
+            },
+            risk_tier=risk_tier,
+            planner={
+                "source": "hypothesis.plan_campaign",
+                "next_test_action": next_test_action,
+            },
+            metadata_json={
+                "hypothesis_id": str(hypothesis_uuid),
+                "hypothesis_family": hypothesis.get("family"),
+                "hypothesis_source": hypothesis.get("source"),
+            },
+            created_by=created_by,
+        ))
+        campaign_uuid = uuid.UUID(str(campaign["id"]))
+
+    result_json = {
+        "hypothesis_id": str(hypothesis_uuid),
+        "planned_action": _redact_agent_payload(next_test_action),
+        "proof_state": "planned_not_executed",
+        "finding_created": False,
+        "scan_queued": False,
+    }
+    action_row = await conn.fetchrow(
+        """
+        INSERT INTO campaign_actions (
+            campaign_id, operation_plan_id, command_result_id, target_id,
+            scope_receipt_id, approval_receipt_id, scan_id, command,
+            action_name, status, dry_run, risk_tier, finding_ids,
+            hypothesis_ids, evidence_object_ids, tool_receipt_ids,
+            blocked_by, next_action, operator_message, result_json, created_by,
+            mission_campaign_id
+        ) VALUES (
+            $1,$2,$3,$4,
+            $5,$6,$7,$8,
+            $9,$10,$11,$12,$13::jsonb,
+            $14::jsonb,$15::jsonb,$16::jsonb,
+            $17::jsonb,$18,$19,$20::jsonb,$21,
+            $22
+        )
+        RETURNING *
+        """,
+        None,
+        None,
+        None,
+        target_uuid,
+        None,
+        None,
+        None,
+        command,
+        command,
+        "planned",
+        True,
+        risk_tier,
+        json.dumps([]),
+        json.dumps([str(hypothesis_uuid)]),
+        json.dumps([]),
+        json.dumps([]),
+        json.dumps([]),
+        command,
+        str(req.operator_message or "Planned from hypothesis next_test_action; no execution performed.").strip(),
+        json.dumps(result_json),
+        created_by,
+        campaign_uuid,
+    )
+    action = _public_campaign_action_row(action_row)
+    updated_hypothesis_row = await conn.fetchrow(
+        """
+        UPDATE hypotheses
+        SET campaign_action_id=$1,
+            metadata_json = metadata_json || $2::jsonb,
+            updated_at=NOW()
+        WHERE id=$3
+        RETURNING *
+        """,
+        _optional_uuid(action.get("id")),
+        json.dumps({
+            "planned_campaign_id": str(campaign_uuid),
+            "planned_campaign_action_id": action.get("id"),
+            "planned_from_next_test_action": True,
+        }),
+        hypothesis_uuid,
+    )
+    return {
+        "campaign": campaign,
+        "campaign_action": action,
+        "hypothesis": _public_hypothesis_row(updated_hypothesis_row) if updated_hypothesis_row else hypothesis,
+        "execution_enabled": False,
+        "findings_created": 0,
+        "scans_queued": 0,
+    }
+
+
 @app.post("/arsenal/campaigns")
 async def arsenal_create_campaign(req: CampaignRequest):
     """Create a mission campaign record. No work is queued and no finding is created."""
@@ -16690,6 +16852,14 @@ async def _arsenal_dispatch_hypothesis_signal(p: dict[str, Any]) -> dict[str, An
         raise HTTPException(status_code=400, detail="hypothesis.signal requires a hypothesis_id parameter")
     fields = {k: v for k, v in p.items() if k in _arsenal_model_fields(HypothesisSignalRequest) and v is not None}
     return await arsenal_append_hypothesis_signal(hypothesis_id, HypothesisSignalRequest(**fields))
+
+
+async def _arsenal_dispatch_hypothesis_plan_campaign(p: dict[str, Any]) -> dict[str, Any]:
+    hypothesis_id = str(p.get("hypothesis_id") or "").strip()
+    if not hypothesis_id:
+        raise HTTPException(status_code=400, detail="hypothesis.plan_campaign requires a hypothesis_id parameter")
+    fields = {k: v for k, v in p.items() if k in _arsenal_model_fields(HypothesisCampaignPlanRequest) and v is not None}
+    return await arsenal_plan_hypothesis_campaign(hypothesis_id, HypothesisCampaignPlanRequest(**fields))
 
 
 async def _arsenal_dispatch_hypothesis_generate_from_graph(p: dict[str, Any]) -> dict[str, Any]:
@@ -17011,6 +17181,7 @@ def _arsenal_readonly_adapters() -> dict[str, Any]:
         "hypothesis.record": _arsenal_dispatch_hypothesis_record,
         "hypothesis.claim": _arsenal_dispatch_hypothesis_claim,
         "hypothesis.signal": _arsenal_dispatch_hypothesis_signal,
+        "hypothesis.plan_campaign": _arsenal_dispatch_hypothesis_plan_campaign,
         "hypothesis.generate_from_graph": _arsenal_dispatch_hypothesis_generate_from_graph,
         "campaign.get": _arsenal_dispatch_campaign_get,
         "campaign_action.list": _arsenal_dispatch_campaign_action_list,
@@ -17743,6 +17914,13 @@ async def arsenal_append_hypothesis_signal(hypothesis_id: str, req: HypothesisSi
     """
     async with db_pool.acquire() as conn:
         return await _append_hypothesis_signal(conn, hypothesis_id, req)
+
+
+@app.post("/arsenal/hypotheses/{hypothesis_id}/plan-campaign")
+async def arsenal_plan_hypothesis_campaign(hypothesis_id: str, req: HypothesisCampaignPlanRequest):
+    """Plan campaign work from a hypothesis without queueing or proving anything."""
+    async with db_pool.acquire() as conn:
+        return await _plan_campaign_from_hypothesis(conn, hypothesis_id, req)
 
 
 @app.get("/arsenal/refuter-reviews")
