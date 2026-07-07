@@ -1232,6 +1232,11 @@ def test_ai_target_campaign_history_groups_contexts_and_summarizes_latest_runs()
     assert history["readiness_trends"]["overall"]["coverage_delta"] == 50
     assert history["readiness_trends"]["overall"]["findings_delta"] == -2
     assert history["readiness_trends"]["contexts"][0]["trend"]["latest_run_id"] == "scan-4"
+    assert [point["scan_id"] for point in history["trend_series"]["overall"]] == ["scan-2", "scan-3", "scan-4"]
+    assert history["trend_series"]["overall"][-1]["readiness_score"] == 100
+    assert rag_context["trend_points"][0]["scan_id"] == "scan-3"
+    assert rag_context["trend_points"][1]["scan_id"] == "scan-4"
+    assert history["trend_series"]["contexts"][0]["points"]
     assert history["runs"][0]["evidence_manifest_summary"]["probe_catalog"]["executed_count"] == 4
     assert history["runs"][0]["transcripts_hash"] == "hash-scan-4"
     assert len(history["runs"][0]["manifest_hash"]) == 64
@@ -1256,6 +1261,8 @@ def test_ai_target_campaign_history_export_is_content_free_with_report_links():
     assert export["content_included"] is False
     assert export["transcripts_included"] is False
     assert export["readiness_trends"]["overall"]["state"] == "improving"
+    assert [point["scan_id"] for point in export["trend_series"]["overall"]] == ["scan-3", "scan-4"]
+    assert export["trend_series"]["overall"][-1]["readiness_score"] == 100
     assert export["evidence_manifests"]["available_count"] == 2
     assert export["evidence_manifests"]["runs"][0]["scan_id"] == "scan-4"
     assert export["evidence_manifests"]["runs"][0]["evidence_hashes"]["transcripts_hash"] == "hash-scan-4"

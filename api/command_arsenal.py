@@ -391,7 +391,7 @@ COMMANDS: tuple[ArsenalCommand, ...] = (
     ArsenalCommand(
         name="ai_gate.target_history_export",
         family="ai_gate",
-        description="Read a content-free AI Gate target campaign-history export with readiness trends and report links.",
+        description="Read a content-free AI Gate target campaign-history export with readiness trends, trend series, and report links.",
         status="read_only",
         risk_tier="read_only",
         method="GET",
@@ -401,7 +401,7 @@ COMMANDS: tuple[ArsenalCommand, ...] = (
             "target_id": {"type": "string", "format": "uuid"},
             "limit": {"type": "integer", "minimum": 1, "maximum": 50},
         },
-        evidence_contract=("export_hash", "readiness_trends", "campaign_runs", "redteam_report_links"),
+        evidence_contract=("export_hash", "readiness_trends", "trend_series", "campaign_runs", "redteam_report_links"),
         timeout_seconds=20,
     ),
     ArsenalCommand(

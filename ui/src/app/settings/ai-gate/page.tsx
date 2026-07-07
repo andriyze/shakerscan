@@ -35,6 +35,7 @@ import {
   type AITestScenario,
   type AITestTargetTemplate,
   type AiTargetCampaignHistory,
+  type AiReadinessTrendPoint,
   type AIAuthKind,
   type AIEnvironment,
   type AIProbePack,
@@ -309,6 +310,46 @@ function readinessTrendClass(state: string | null | undefined): string {
   if (state === 'baseline') return 'bg-blue-500/10 text-blue-200'
   if (state === 'stable') return 'bg-gray-800 text-gray-200'
   return 'bg-gray-800 text-gray-400'
+}
+
+function CampaignTrendBars({
+  points,
+  title,
+  compact = false,
+}: {
+  points?: AiReadinessTrendPoint[]
+  title: string
+  compact?: boolean
+}) {
+  if (!points || points.length === 0) return null
+  return (
+    <div className={compact ? 'mt-2 border-t border-gray-800 pt-2' : 'rounded border border-gray-800 bg-gray-950 p-2'}>
+      <div className="mb-2 flex flex-wrap items-center justify-between gap-2 text-xs">
+        <span className="font-medium text-gray-200">{title}</span>
+        <span className="text-gray-500">{points.length} point{points.length === 1 ? '' : 's'}</span>
+      </div>
+      <div className={compact ? 'flex h-12 items-end gap-1' : 'flex h-20 items-end gap-1.5'}>
+        {points.map((point, index) => {
+          const score = Math.max(0, Math.min(100, Number(point.readiness_score ?? 0)))
+          const height = Math.max(6, score)
+          const tone = point.decision === 'block'
+            ? 'bg-red-400'
+            : point.errors && point.errors > 0
+              ? 'bg-yellow-300'
+              : 'bg-emerald-300'
+          const label = `${formatShortDate(point.completed_at)} score ${score}, coverage ${point.coverage_pct ?? 0}%, findings ${point.findings_count ?? 0}, errors ${point.errors ?? 0}`
+          return (
+            <div key={`${point.scan_id || 'run'}-${index}`} className="flex min-w-[14px] flex-1 flex-col items-center justify-end gap-1">
+              <div className="flex h-full w-full items-end rounded-sm bg-gray-900" title={label} aria-label={label}>
+                <div className={`w-full rounded-sm ${tone}`} style={{ height: `${height}%` }} />
+              </div>
+              {!compact && <span className="max-w-full truncate text-[10px] text-gray-500">{point.coverage_pct ?? 0}%</span>}
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
 }
 
 export default function AIGateSettingsPage() {
@@ -1408,6 +1449,7 @@ export default function AIGateSettingsPage() {
                             </div>
                           </div>
                         )}
+                        <CampaignTrendBars points={campaignHistory.trend_series?.overall} title="Readiness Over Time" />
 
                         {campaignHistory.contexts.length > 0 && (
                           <div className="grid gap-2 lg:grid-cols-2">
@@ -1454,6 +1496,7 @@ export default function AIGateSettingsPage() {
                                     )}
                                   </div>
                                 )}
+                                <CampaignTrendBars points={context.trend_points} title="Context Trend" compact />
                               </div>
                             ))}
                           </div>

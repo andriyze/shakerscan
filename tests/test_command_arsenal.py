@@ -139,6 +139,7 @@ def test_ai_gate_target_history_export_is_read_only_command():
     assert cmd["risk_tier"] == "read_only"
     assert cmd["path"] == "/ai/targets/{target_id}/campaign-history/export"
     assert "readiness_trends" in cmd["evidence_contract"]
+    assert "trend_series" in cmd["evidence_contract"]
     assert "redteam_report_links" in cmd["evidence_contract"]
 
 

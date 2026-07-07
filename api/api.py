@@ -6004,6 +6004,18 @@ def _ai_campaign_history_entry(scan_row: Any, *, current_scan_id: str | None = N
     executed = _num(summary.get("executed"))
     scan_id = str(_row_value(scan_row, "id") or "")
     usage = ai_gate.get("usage") if isinstance(ai_gate.get("usage"), dict) else {}
+    coverage_pct = round((executed / planned) * 100) if planned else 0
+    findings_count = _num(_row_value(scan_row, "findings_count"))
+    errors = _num(summary.get("errors"))
+    skipped = _num(summary.get("skipped"))
+    decision_value = decision.get("decision")
+    readiness_penalty = (
+        min(45, findings_count * 8)
+        + min(30, errors * 15)
+        + (15 if decision_value == "block" else 0)
+        + (8 if summary.get("stopped_by_request_budget") or usage.get("stopped_by_request_budget") else 0)
+    )
+    readiness_score = max(0, min(100, coverage_pct - readiness_penalty))
     return {
         "id": scan_id,
         "ui_url": f"/scans/{scan_id}" if scan_id else None,
@@ -6014,24 +6026,41 @@ def _ai_campaign_history_entry(scan_row: Any, *, current_scan_id: str | None = N
         "completed_at": _iso_or_none(_row_value(scan_row, "completed_at")),
         "score": _row_value(scan_row, "score"),
         "grade": _row_value(scan_row, "grade"),
-        "findings_count": _num(_row_value(scan_row, "findings_count")),
-        "decision": decision.get("decision"),
+        "findings_count": findings_count,
+        "decision": decision_value,
         "rationale": decision.get("rationale"),
         "probe_pack": context["probe_pack"] or None,
         "scan_profile": context["scan_profile"] or None,
         "environment": context["environment"] or None,
         "planned": planned,
         "executed": executed,
-        "skipped": _num(summary.get("skipped")),
-        "errors": _num(summary.get("errors")),
+        "skipped": skipped,
+        "errors": errors,
         "with_transcripts": _num(summary.get("with_transcripts")),
         "with_findings": _num(summary.get("with_findings")),
-        "coverage_pct": round((executed / planned) * 100) if planned else 0,
+        "coverage_pct": coverage_pct,
+        "readiness_score": readiness_score,
         "stopped_by_request_budget": bool(summary.get("stopped_by_request_budget") or usage.get("stopped_by_request_budget")),
         "transcripts_hash": evidence_hashes.get("transcripts_hash") or evidence.get("transcripts_hash"),
         "manifest_hash": evidence_summary.get("manifest_hash") if evidence_summary.get("available") else evidence_manifest.get("manifest_hash"),
         "evidence_manifest_summary": evidence_summary,
     }
+
+
+def _ai_readiness_trend_points(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    points: list[dict[str, Any]] = []
+    for entry in reversed(entries):
+        points.append({
+            "scan_id": entry.get("id"),
+            "completed_at": entry.get("completed_at") or entry.get("created_at"),
+            "coverage_pct": entry.get("coverage_pct"),
+            "readiness_score": entry.get("readiness_score"),
+            "findings_count": entry.get("findings_count"),
+            "errors": entry.get("errors"),
+            "decision": entry.get("decision"),
+            "stopped_by_request_budget": bool(entry.get("stopped_by_request_budget")),
+        })
+    return points
 
 
 def _build_ai_campaign_history(current_scan: Any, scan_rows: list[Any], *, limit: int = 6) -> dict[str, Any]:
@@ -6074,6 +6103,9 @@ def _build_ai_campaign_history(current_scan: Any, scan_rows: list[Any], *, limit
         "runs": comparable,
         "previous_run": previous_entry,
         "deltas": deltas,
+        "trend_series": {
+            "overall": _ai_readiness_trend_points(comparable),
+        },
         "total_same_target_runs": len(all_entries),
     }
 
@@ -6124,10 +6156,21 @@ def _build_ai_target_campaign_history(target_id: str, scan_rows: list[Any], *, l
             "previous_run": previous,
             "deltas": deltas,
             "readiness_trend": _ai_readiness_trend(latest, previous),
+            "trend_points": _ai_readiness_trend_points(runs),
         })
 
     latest_run = entries[0] if entries else None
     previous_run = entries[1] if len(entries) > 1 else None
+    context_trend_series = [
+        {
+            "probe_pack": item.get("probe_pack"),
+            "scan_profile": item.get("scan_profile"),
+            "environment": item.get("environment"),
+            "runs_count": item.get("runs_count"),
+            "points": item.get("trend_points") or [],
+        }
+        for item in context_summaries
+    ]
     return {
         "ai_target_id": str(target_id),
         "runs": entries,
@@ -6145,6 +6188,10 @@ def _build_ai_target_campaign_history(target_id: str, scan_rows: list[Any], *, l
                 }
                 for item in context_summaries
             ],
+        },
+        "trend_series": {
+            "overall": _ai_readiness_trend_points(entries),
+            "contexts": context_trend_series,
         },
         "summary": {
             "total_runs": len(entries),
@@ -6244,6 +6291,7 @@ def _build_ai_target_campaign_history_export(
         "ai_target_id": history.get("ai_target_id"),
         "summary": history.get("summary") or {},
         "readiness_trends": history.get("readiness_trends") or {},
+        "trend_series": history.get("trend_series") or {},
         "run_ids": [item.get("id") for item in runs if isinstance(item, dict)],
         "evidence_manifest_hashes": evidence_manifests["manifest_hashes"],
     }
@@ -6259,6 +6307,7 @@ def _build_ai_target_campaign_history_export(
         "ai_target_id": history.get("ai_target_id"),
         "summary": history.get("summary") or {},
         "readiness_trends": history.get("readiness_trends") or {},
+        "trend_series": history.get("trend_series") or {},
         "evidence_manifests": evidence_manifests,
         "contexts": history.get("contexts") or [],
         "runs": runs,

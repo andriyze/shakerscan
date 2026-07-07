@@ -450,8 +450,8 @@ ordering and more exact implementation boundaries:
   per-transcript replay actions, same-context run comparison on scan detail, and target-level
   longitudinal campaign history on the AI Gate target surface. Target history now includes phase-1
   readiness trends, per-context trend chips, and a content-free export with run report links plus
-  per-run evidence-manifest hashes/counts. Remaining AI Gate gap is advanced longitudinal trend
-  visualization.
+  per-run evidence-manifest hashes/counts. Target history now also exposes bounded trend-series
+  points and renders an advanced readiness-over-time visualization for overall and per-context runs.
 
 ### Immediate implementation sequence
 
@@ -595,8 +595,8 @@ Use this order when choosing between otherwise-valid work:
 - **P2: AI red-team campaign UX.** Scan-detail campaign review, coverage matrix, skipped reasons,
   transcript/report links, finding-level replay entry points, scan-level rerun actions, selected
   transcript replay, same-context scan comparison, target-level history, phase-1 readiness trends,
-  target-history export links, per-context readiness trend chips, and content-free campaign evidence
-  manifest summaries are phase 1 done. Remaining work is advanced longitudinal trend visualization.
+  target-history export links, per-context readiness trend chips, content-free campaign evidence
+  manifest summaries, and bounded readiness-over-time trend-series visualization are phase 1 done.
 - **P2: Model Intake trust UX.** Guided trust modes, pre-submit trust preview, saved trust anchors,
   scan selection, strict policy-profile anchor binding, deployment-decision anchor gaps, the first
   exception metadata repair flow, and content-free Model Intake evidence exports are phase 1 done.
@@ -849,7 +849,8 @@ probes, errored families, selected families, selected transcript probes, or all 
 panel, and `GET /ai/targets/{target_id}/campaign-history` plus `/settings/ai-gate` now expose
 target-level longitudinal run/context history outside a single scan detail page. `GET
 /ai/targets/{target_id}/campaign-history/export` returns a content-free JSON export with readiness
-trends, per-run red-team report links, and per-run evidence-manifest hash/count summaries.
+trends, bounded trend-series points, per-run red-team report links, and per-run evidence-manifest
+hash/count summaries.
 
 **Implement:**
 1. DONE: add an AI Red-Team Campaign view grouping target, environment, profile, probe pack, readiness,
@@ -862,14 +863,16 @@ trends, per-run red-team report links, and per-run evidence-manifest hash/count 
    transcript replay now exists through `mode=transcript` and uses the same production gate.
    Same-context campaign history/comparison now exists on scan detail. Target-level longitudinal
    run/context reporting now exists on the AI Gate target page, with phase-1 readiness trend summary,
-   a content-free campaign-history export link, and content-free evidence-manifest summaries.
+   a bounded readiness-over-time trend visualization, a content-free campaign-history export link,
+   and content-free evidence-manifest summaries.
 4. DONE for the base Action Center: missing AI control-baseline gaps already appear there; remaining
    AI Gate campaign work is richer readiness/campaign history, not the first blocker card.
 
 **Done when:** an AI red-team run can be reviewed, rerun, compared across runs, and defended as a
 campaign artifact instead of a loose scan report. Phase 1 now satisfies this on scan detail and on
 the AI Gate target page; per-context readiness trend chips and content-free evidence-manifest export
-summaries are now visible. Advanced longitudinal trend visualization remains later work.
+summaries are now visible, and bounded readiness-over-time trend bars are rendered for overall and
+per-context run history.
 
 ### 5. Model Intake trust UX
 **Status: PARTIAL, PHASE 1 UI DONE.** The API and UI now carry real signature/trust-anchor fields:

@@ -2897,9 +2897,21 @@ export interface AiScanCampaignHistoryRun {
   with_transcripts: number
   with_findings: number
   coverage_pct: number
+  readiness_score: number
   stopped_by_request_budget?: boolean
   transcripts_hash?: string | null
   manifest_hash?: string | null
+}
+
+export interface AiReadinessTrendPoint {
+  scan_id?: string | null
+  completed_at?: string | null
+  coverage_pct?: number | null
+  readiness_score?: number | null
+  findings_count?: number | null
+  errors?: number | null
+  decision?: string | null
+  stopped_by_request_budget: boolean
 }
 
 export interface AiScanCampaignHistory {
@@ -2921,6 +2933,9 @@ export interface AiScanCampaignHistory {
     coverage_pct: number
     decision_changed: boolean
   } | null
+  trend_series?: {
+    overall: AiReadinessTrendPoint[]
+  }
   total_same_target_runs: number
 }
 
@@ -2941,6 +2956,7 @@ export interface AiTargetCampaignHistoryContext {
   previous_run?: AiScanCampaignHistoryRun | null
   deltas?: AiScanCampaignHistory['deltas'] | null
   readiness_trend?: AiReadinessTrend | null
+  trend_points?: AiReadinessTrendPoint[]
 }
 
 export interface AiReadinessTrend {
@@ -2971,6 +2987,16 @@ export interface AiTargetCampaignHistory {
       environment?: string | null
       runs_count: number
       trend: AiReadinessTrend
+    }>
+  }
+  trend_series?: {
+    overall: AiReadinessTrendPoint[]
+    contexts: Array<{
+      probe_pack?: string | null
+      scan_profile?: string | null
+      environment?: string | null
+      runs_count: number
+      points: AiReadinessTrendPoint[]
     }>
   }
   summary: {
