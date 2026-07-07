@@ -1172,10 +1172,11 @@ and deployment-gate story as the original claim.
 validation and ASM scheduling and now carries `requires_auth_states` / `requires_credentials` /
 `risk_level` / `runnable` / `telemetry_schema` / `proof_contract` / `severity_rules`. Scanner
 `build_report()` now emits a registry-derived `scanner_execution_plan` in scan config, active
-telemetry, and metadata, but detector dispatch still executes many checks through hardcoded module
-calls and planned families such as `lfi`/`rce`/`ssrf` are not runnable.
+telemetry, and metadata, and SQLi/XSS active dispatch gates derive from that plan before entering
+the legacy module loops. Detector internals still execute many checks through hardcoded module calls,
+and planned families such as `lfi`/`rce`/`ssrf` are not runnable.
 
-**Implement:** migrate `build_report()` module execution to registry iteration; add
+**Implement:** continue migrating `build_report()` module execution to registry iteration; add
 `proof_contract`, `severity_rules`, telemetry schema, safety gate, and report rollup per family;
 then make `lfi`/`rce`/`ssrf` runnable only when their deterministic proof contracts exist.
 

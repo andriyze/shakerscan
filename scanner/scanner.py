@@ -2848,6 +2848,27 @@ def build_scanner_execution_plan(
     }
 
 
+def registry_family_enabled(
+    scanner_execution_plan: dict[str, Any] | None,
+    family: str,
+    *,
+    fallback: bool = False,
+) -> bool:
+    """Return whether a scanner family is enabled by the registry execution plan.
+
+    Legacy module dispatch still runs SQLi/XSS through existing loops, but the
+    run/no-run gate now comes from the same registry plan attached to reports.
+    If a plan is unavailable, keep the caller-provided legacy fallback.
+    """
+    plan = scanner_execution_plan if isinstance(scanner_execution_plan, dict) else {}
+    for item in plan.get("families") or []:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("name") or "").strip().lower() == str(family or "").strip().lower():
+            return bool(item.get("enabled"))
+    return bool(fallback)
+
+
 def _focused_family_finding_matches(finding: dict[str, Any], family: str | None) -> bool:
     rules = FOCUSED_FAMILY_RULES.get(str(family or ""))
     if not rules:
@@ -8116,8 +8137,8 @@ async def build_report(target: str,
             if len(cand) >= max_active:
                 break
 
-        run_xss = bool(active_xss)
-        run_sqli = bool(active_sqli)
+        run_xss = registry_family_enabled(scanner_execution_plan, "xss", fallback=bool(active_xss))
+        run_sqli = registry_family_enabled(scanner_execution_plan, "sqli", fallback=bool(active_sqli))
         active_block = {
             "targets": cand,
             "dalfox": [],

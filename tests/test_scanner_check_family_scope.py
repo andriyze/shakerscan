@@ -346,6 +346,20 @@ def test_scanner_execution_plan_records_zero_rediscovery_and_public_skips():
     assert families["xss"]["reason"] == "public_only"
 
 
+def test_registry_family_enabled_drives_legacy_active_dispatch_gate():
+    plan = {
+        "families": [
+            {"name": "xss", "enabled": False},
+            {"name": "sqli", "enabled": True},
+        ]
+    }
+
+    assert scanner_mod.registry_family_enabled(plan, "xss", fallback=True) is False
+    assert scanner_mod.registry_family_enabled(plan, "sqli", fallback=False) is True
+    assert scanner_mod.registry_family_enabled(plan, "headers", fallback=True) is True
+    assert scanner_mod.registry_family_enabled(None, "xss", fallback=True) is True
+
+
 def _load_reporting_module():
     import importlib.util as _ilu
     scanner_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "scanner"))
