@@ -3559,6 +3559,11 @@ class RefuterReviewExecuteRequest(BaseModel):
     confirm_production: bool = False
 
 
+class RefuterReviewDeriveVerdictRequest(BaseModel):
+    verification_id: Optional[str] = None
+    created_by: Optional[str] = Field(default="refuter_verdict_derive", max_length=120)
+
+
 class ToolReceiptRequest(BaseModel):
     tool_name: str = Field(min_length=1, max_length=120)
     tool_version: Optional[str] = None
@@ -14988,6 +14993,158 @@ async def _execute_refuter_review_plan(
     }
 
 
+def _refuter_review_from_verification_outcome(verification: dict[str, Any]) -> dict[str, Any]:
+    verdict = str(verification.get("verdict") or "").strip().lower()
+    result_status = str(verification.get("result_status") or "").strip().lower()
+    mode = str(verification.get("verification_mode") or "deterministic").strip().lower()
+    deterministic_basis = mode != "ai_driven"
+    if verdict == "exploited":
+        signal, refuter_verdict, confidence_delta = "support", "supported", 0.25
+        observation = "replay_reproduced"
+    elif verdict == "false_positive":
+        signal, refuter_verdict, confidence_delta = "refute", "refuted", -0.75
+        observation = "false_positive"
+    elif verdict == "likely_fixed":
+        signal, refuter_verdict, confidence_delta = "weaken", "weakened", -0.5
+        observation = "not_reproduced"
+    elif verdict in {"blocked_by_security", "out_of_scope_internal"}:
+        signal, refuter_verdict, confidence_delta = "weaken", "weakened", -0.35
+        observation = verdict
+    elif verdict == "likely_vulnerable":
+        signal, refuter_verdict, confidence_delta = "support", "inconclusive", 0.1
+        observation = "partial_evidence"
+    elif verdict in {"inconclusive", "error"} or result_status in {"inconclusive", "error"}:
+        signal, refuter_verdict, confidence_delta = "question", "inconclusive", 0.0
+        observation = verdict or result_status or "inconclusive"
+    else:
+        signal, refuter_verdict, confidence_delta = "question", "inconclusive", 0.0
+        observation = "unknown"
+
+    basis = "deterministic_replay" if deterministic_basis else "signal_only"
+    if not deterministic_basis:
+        refuter_verdict = None
+    return {
+        "refuter_signal": signal,
+        "refuter_verdict": refuter_verdict,
+        "verdict_basis": basis,
+        "confidence_delta": confidence_delta,
+        "observation": observation,
+        "deterministic_basis": deterministic_basis,
+    }
+
+
+async def _derive_refuter_review_verdict(
+    conn,
+    *,
+    refuter_review_id: str,
+    verification_id: str | None = None,
+    created_by: str | None = "refuter_verdict_derive",
+) -> dict[str, Any]:
+    try:
+        review_uuid = uuid.UUID(str(refuter_review_id))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="refuter_review_id must be a UUID")
+    review_row = await conn.fetchrow("SELECT * FROM refuter_reviews WHERE id=$1", review_uuid)
+    if not review_row:
+        raise HTTPException(status_code=404, detail="Refuter review not found")
+    review = _public_refuter_review_row(review_row)
+    if review.get("subject_type") != "finding":
+        raise HTTPException(status_code=400, detail="Only finding refuter reviews can derive verdicts from finding verifications")
+    finding_ref = str(review.get("finding_id") or review.get("subject_id") or "").strip()
+    if not finding_ref:
+        raise HTTPException(status_code=400, detail="Refuter review is missing finding context")
+    try:
+        finding_uuid = uuid.UUID(finding_ref)
+    except ValueError:
+        finding_row = await get_finding_record(conn, finding_ref)
+        if not finding_row:
+            raise HTTPException(status_code=404, detail="Finding not found for refuter review")
+        finding_uuid = uuid.UUID(str(finding_row["id"]))
+
+    if verification_id:
+        try:
+            verification_uuid = uuid.UUID(str(verification_id))
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="verification_id must be a UUID")
+        verification_row = await conn.fetchrow(
+            """
+            SELECT *
+            FROM finding_verifications
+            WHERE id=$1 AND finding_id=$2
+            """,
+            verification_uuid,
+            finding_uuid,
+        )
+    else:
+        verification_row = await conn.fetchrow(
+            """
+            SELECT *
+            FROM finding_verifications
+            WHERE finding_id=$1
+              AND status IN ('completed', 'failed')
+            ORDER BY completed_at DESC NULLS LAST, updated_at DESC NULLS LAST, created_at DESC
+            LIMIT 1
+            """,
+            finding_uuid,
+        )
+    if not verification_row:
+        raise HTTPException(status_code=404, detail="Completed refuter verification not found")
+    verification = row_to_dict(verification_row)
+    if str(verification.get("status") or "").lower() not in {"completed", "failed"}:
+        raise HTTPException(status_code=409, detail="Refuter verification has not completed")
+
+    outcome = _refuter_review_from_verification_outcome(verification)
+    proof = _decode_json_value(verification.get("proof")) or {}
+    artifacts = _decode_json_value(verification.get("artifacts")) or {}
+    replay_commands = _decode_json_value(verification.get("replay_commands")) or []
+    counterevidence = _redact_agent_payload({
+        "verification_id": str(verification.get("id")),
+        "verification_status": verification.get("status"),
+        "result_status": verification.get("result_status"),
+        "verdict": verification.get("verdict"),
+        "verdict_reason": verification.get("verdict_reason"),
+        "verification_mode": verification.get("verification_mode") or "deterministic",
+        "proof": proof,
+        "artifacts": artifacts,
+        "replay_commands": replay_commands,
+    })
+    result = await _record_refuter_review(conn, RefuterReviewRequest(
+        subject_type="finding",
+        subject_id=str(review.get("subject_id") or finding_uuid),
+        target_id=review.get("target_id"),
+        finding_id=str(finding_uuid),
+        trigger_reason=f"Derived from completed verification {verification.get('id')}",
+        refuter_signal=outcome["refuter_signal"],
+        refuter_verdict=outcome["refuter_verdict"],
+        verdict_basis=outcome["verdict_basis"],
+        confidence_delta=outcome["confidence_delta"],
+        counterevidence=counterevidence,
+        notes=(
+            "AI-driven verification result recorded as a refuter signal only; "
+            "proof-backed verdicts require deterministic, cryptographic, parser/protocol, "
+            "or human-approved-review basis."
+            if not outcome["deterministic_basis"]
+            else None
+        ),
+        metadata_json={
+            "derived_from_refuter_review_id": str(review_uuid),
+            "derived_from_verification_id": str(verification.get("id")),
+            "derived_observation": outcome["observation"],
+            "deterministic_basis": outcome["deterministic_basis"],
+        },
+        created_by=created_by,
+    ))
+    return {
+        **result,
+        "source_refuter_review_id": str(review_uuid),
+        "verification_id": str(verification.get("id")),
+        "derived_outcome": outcome,
+        "execution_enabled": False,
+        "findings_updated": 0,
+        "hypotheses_updated": 0,
+    }
+
+
 def _canonical_hash_payload(payload: dict[str, Any]) -> str:
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
@@ -17700,6 +17857,19 @@ async def _arsenal_dispatch_refuter_review_queue_from_summary(p: dict[str, Any])
     ))
 
 
+async def _arsenal_dispatch_refuter_review_derive_verdict(p: dict[str, Any]) -> dict[str, Any]:
+    refuter_review_id = str(p.get("refuter_review_id") or "").strip()
+    if not refuter_review_id:
+        raise HTTPException(status_code=400, detail="refuter_review.derive_verdict requires a refuter_review_id parameter")
+    async with db_pool.acquire() as conn:
+        return await _derive_refuter_review_verdict(
+            conn,
+            refuter_review_id=refuter_review_id,
+            verification_id=p.get("verification_id"),
+            created_by=p.get("created_by") or "arsenal_execute",
+        )
+
+
 async def _arsenal_dispatch_refuter_review_execute_plan(p: dict[str, Any], approval_receipt_id: str | None) -> dict[str, Any]:
     refuter_review_id = str(p.get("refuter_review_id") or "").strip()
     if not refuter_review_id:
@@ -17916,6 +18086,7 @@ def _arsenal_readonly_adapters() -> dict[str, Any]:
         "refuter_review.summary": _arsenal_dispatch_refuter_review_summary,
         "refuter_review.record": _arsenal_dispatch_refuter_review_record,
         "refuter_review.queue_from_summary": _arsenal_dispatch_refuter_review_queue_from_summary,
+        "refuter_review.derive_verdict": _arsenal_dispatch_refuter_review_derive_verdict,
     }
 
 
@@ -18731,6 +18902,25 @@ async def arsenal_execute_refuter_review_plan(refuter_review_id: str, req: Refut
         confirmations=req.confirmations,
         approval_receipt_id=req.approval_receipt_id,
         created_by=req.requested_by,
+    ))
+
+
+@app.post("/arsenal/refuter-reviews/{refuter_review_id}/derive-verdict")
+async def arsenal_derive_refuter_review_verdict(refuter_review_id: str, req: RefuterReviewDeriveVerdictRequest):
+    """Record a refuter signal/verdict from a completed verification row.
+
+    Deterministic verification rows can produce proof-backed refuter verdicts.
+    AI-driven rows are recorded as signal-only context unless a human-approved
+    review records a verdict separately.
+    """
+    return await _arsenal_execute_detached(ArsenalExecuteRequest(
+        command="refuter_review.derive_verdict",
+        parameters={
+            "refuter_review_id": refuter_review_id,
+            "verification_id": req.verification_id,
+            "created_by": req.created_by,
+        },
+        created_by=req.created_by,
     ))
 
 

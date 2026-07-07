@@ -1133,7 +1133,7 @@ produce receipts for both successful and failed/skipped runs; missing binaries s
 not phantom success.
 
 ### 9a. Refuter workflow and integrity ledgers
-**Status: PARTIAL, PHASE 1 RECORDS + TRIGGER SUMMARY + AUTOMATION PLANS + GATED EXECUTION QUEUE DONE.** T3MP3ST's strongest process lesson is not a detector; it
+**Status: PARTIAL, PHASE 1 RECORDS + TRIGGER SUMMARY + AUTOMATION PLANS + GATED EXECUTION QUEUE + VERDICT DERIVATION DONE.** T3MP3ST's strongest process lesson is not a detector; it
 is the habit of trying to disprove weak wins. ShakerScan now has durable
 `refuter_reviews` records exposed through `GET/POST /arsenal/refuter-reviews` and
 `refuter_review.list` / `refuter_review.record`, plus read-only trigger summaries through
@@ -1151,12 +1151,15 @@ findings queue deterministic `finding.retest`, AI Gate findings queue focused AI
 Model Intake trust claims produce the existing trust-preview artifact. The executor stamps
 `latest_refuter_execution` metadata plus a `refuter_review.execute_plan` command-result audit row,
 but it does not directly mutate findings, proof state, hypotheses, severity, or deployment gates.
-`refuter_signal` remains separate from
+`POST /arsenal/refuter-reviews/{id}/derive-verdict` and `refuter_review.derive_verdict` can now read
+a completed finding verification and record a new refuter signal or deterministic proof-backed
+refuter verdict. AI-driven verification outcomes are intentionally recorded as signal-only unless a
+human-approved review records a verdict. `refuter_signal` remains separate from
 `refuter_verdict`; verdicts require deterministic replay, cryptographic, parser/protocol, or
 human-approved-review basis, and recording a review cannot directly update findings, hypotheses,
 proof state, severity, or gates. File-backed integrity ledgers exist at
 `results/benchmark-runs/INTEGRITY_LEDGER.md` and `results/planner-evals/INTEGRITY_LEDGER.md`.
-Automatic proof-backed verdict derivation from completed replay evidence is still open.
+UI affordances for the execute/derive workflow and broader trigger coverage remain open.
 
 **Implement:**
 1. DONE phase 1: trigger refuter work for Critical/High findings with suspected or weak proof, AI Gate semantic-only
@@ -1172,8 +1175,10 @@ Automatic proof-backed verdict derivation from completed replay evidence is stil
    explanations, verify auth context/principal/tenant/object ownership, check request freshness, and
    attach counterevidence when a claim weakens. DONE phase 2: a gated executor now queues the
    smallest existing deterministic/AI replay primitive for the refuter review and records execution
-   metadata/audit without changing product truth. Remaining work is automatic proof-backed verdict
-   derivation from completed retest/replay receipts.
+   metadata/audit without changing product truth. DONE phase 3: completed finding verifications can
+   derive new refuter signal/verdict rows; deterministic outcomes can become proof-backed refuter
+   verdicts, while AI-driven outcomes stay signal-only unless reviewed by a human. Remaining work is
+   operator UI affordances and richer counterevidence review bundles.
 3. DONE phase 1: separate `refuter_signal` from `refuter_verdict`. Signals can
    weaken/support/question a claim. Verdicts are accepted only when backed by deterministic replay,
    cryptographic evidence, parser/protocol evidence, or explicitly labeled human-approved review

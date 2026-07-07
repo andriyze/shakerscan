@@ -2888,6 +2888,112 @@ def test_execute_refuter_review_plan_queues_deterministic_retest_without_truth_m
     assert captured["command_result"]["result_json"]["findings_updated_by_refuter"] == 0
 
 
+def test_derive_refuter_review_verdict_records_completed_deterministic_outcome():
+    review_id = uuid.uuid4()
+    finding_id = uuid.uuid4()
+    target_id = uuid.uuid4()
+    verification_id = uuid.uuid4()
+    captured: dict[str, object] = {}
+
+    review_row = {
+        "id": review_id,
+        "subject_type": "finding",
+        "subject_id": str(finding_id),
+        "target_id": target_id,
+        "finding_id": finding_id,
+        "hypothesis_id": None,
+        "campaign_id": None,
+        "trigger_reason": "critical_high_weak_or_suspected_proof",
+        "refuter_signal": "question",
+        "refuter_verdict": None,
+        "verdict_basis": "signal_only",
+        "confidence_delta": None,
+        "evidence_object_ids": json.dumps([]),
+        "tool_receipt_ids": json.dumps([]),
+        "counterevidence": json.dumps({}),
+        "notes": None,
+        "status": "recorded",
+        "metadata_json": json.dumps({}),
+        "created_by": "pytest",
+    }
+    verification_row = {
+        "id": verification_id,
+        "finding_id": finding_id,
+        "status": "completed",
+        "result_status": "likely_fixed",
+        "verdict": "likely_fixed",
+        "verdict_reason": "Replay did not reproduce the finding.",
+        "verification_mode": "deterministic",
+        "proof": json.dumps({"http_status": 404}),
+        "artifacts": json.dumps({"request_id": "req-1"}),
+        "replay_commands": json.dumps([{"description": "Replay request"}]),
+    }
+
+    class _FakeConn:
+        async def fetchrow(self, query, *args):
+            if "SELECT * FROM refuter_reviews" in query:
+                return review_row
+            if "FROM finding_verifications" in query:
+                return verification_row
+            if "INSERT INTO refuter_reviews" in query:
+                captured["insert_args"] = args
+                return {
+                    "id": uuid.uuid4(),
+                    "subject_type": args[0],
+                    "subject_id": args[1],
+                    "target_id": args[2],
+                    "finding_id": args[3],
+                    "hypothesis_id": args[4],
+                    "campaign_id": args[5],
+                    "trigger_reason": args[6],
+                    "refuter_signal": args[7],
+                    "refuter_verdict": args[8],
+                    "verdict_basis": args[9],
+                    "confidence_delta": args[10],
+                    "evidence_object_ids": args[11],
+                    "tool_receipt_ids": args[12],
+                    "counterevidence": args[13],
+                    "notes": args[14],
+                    "status": args[15],
+                    "metadata_json": args[16],
+                    "created_by": args[17],
+                }
+            raise AssertionError(f"unexpected query: {query}")
+
+    result = asyncio.run(api_module._derive_refuter_review_verdict(
+        _FakeConn(),
+        refuter_review_id=str(review_id),
+        verification_id=str(verification_id),
+        created_by="pytest",
+    ))
+
+    derived = result["refuter_review"]
+    assert derived["refuter_signal"] == "weaken"
+    assert derived["refuter_verdict"] == "weakened"
+    assert derived["verdict_basis"] == "deterministic_replay"
+    assert derived["status"] == "verdict_recorded"
+    assert derived["created_by"] == "pytest"
+    assert result["findings_updated"] == 0
+    assert result["hypotheses_updated"] == 0
+    counterevidence = derived["counterevidence"]
+    assert counterevidence["verification_id"] == str(verification_id)
+    assert counterevidence["verdict"] == "likely_fixed"
+    assert captured["insert_args"][8] == "weakened"
+    assert "UPDATE findings" not in str(captured)
+
+
+def test_refuter_verdict_derivation_keeps_ai_driven_results_signal_only():
+    outcome = api_module._refuter_review_from_verification_outcome({
+        "verdict": "exploited",
+        "verification_mode": "ai_driven",
+    })
+
+    assert outcome["refuter_signal"] == "support"
+    assert outcome["refuter_verdict"] is None
+    assert outcome["verdict_basis"] == "signal_only"
+    assert outcome["deterministic_basis"] is False
+
+
 def test_tool_receipt_redacts_hashes_and_is_non_executing():
     receipt_id = uuid.uuid4()
     captured: dict[str, object] = {}

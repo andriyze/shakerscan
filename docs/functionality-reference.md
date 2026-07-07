@@ -647,7 +647,8 @@ how-to with request bodies is in [`CLAUDE.md`](../CLAUDE.md) / [`AGENTS.md`](../
 `GET /arsenal/command-results` · `POST /arsenal/scope/preview` · `POST /arsenal/approvals` ·
 `GET /arsenal/tools` · `GET|POST /arsenal/refuter-reviews` ·
 `GET /arsenal/refuter-reviews/summary` · `POST /arsenal/refuter-reviews/queue-from-summary` ·
-`POST /arsenal/refuter-reviews/{id}/execute` · `GET /agents/local` · `POST /agents/local/test` ·
+`POST /arsenal/refuter-reviews/{id}/execute` ·
+`POST /arsenal/refuter-reviews/{id}/derive-verdict` · `GET /agents/local` · `POST /agents/local/test` ·
 `POST /agents/local/plan`
 
 **Scans (DAST)**: `POST /scans` · `POST /scans/batch` · `GET /scans` · `GET /scans/{id}` ·
