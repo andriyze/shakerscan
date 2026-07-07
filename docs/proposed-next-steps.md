@@ -1106,9 +1106,10 @@ endpoint-batch executors now emit ASM-specific receipts for success, partial/mis
 timeout, auth-missing skip, cancellation-before-start, and failure states. Oversized evidence can now
 externalize to an opt-in S3/MinIO-compatible object store via `EVIDENCE_STORAGE_BACKEND=s3`,
 `EVIDENCE_S3_BUCKET`, and optional endpoint/region/credential settings; API reads hydrate remote
-objects through signed GET and verify their recorded SHA-256 before returning content. Deeper
-per-subprocess DAST exit-code/timeout/stderr capture inside the scanner process and remote lifecycle
-polish remain open.
+objects through signed GET and verify their recorded SHA-256 before returning content. Retention
+sweeps now classify remote evidence candidates separately and report them as preserved because remote
+deletion is not yet supported. Deeper per-subprocess DAST exit-code/timeout/stderr capture inside the
+scanner process and remote deletion/lifecycle adapters remain open.
 
 **Implement:**
 1. DONE phase 1: externalize `storage_uri` from `inline:` to local object storage for large objects.
@@ -1123,7 +1124,8 @@ polish remain open.
    returns a content-free manifest with object ids, hashes, storage URIs, retention classes, storage
    status/integrity, and a manifest hash. `POST /evidence/retention/sweep` is dry-run by default,
    skips `legal_hold`, applies bounded retention windows (`short`, `sensitive`, `standard`, `audit`),
-   and can delete expired DB rows plus local object files only when explicitly executed.
+   reports remote object candidates as preserved, and can delete expired DB rows plus local object
+   files only when explicitly executed.
    `GET /evidence/export-bundle` / `evidence.export_bundle` returns a content-free bundle descriptor
    with `bundle_hash`, `manifest_hash`, retention/integrity summaries, and API read-replay paths.
    DONE phase 1: deliberate bundle export requests with `record_event=true` write durable

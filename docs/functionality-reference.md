@@ -625,6 +625,13 @@ categories — **DAST** and **AI** — but the API `source_type` filter is first
 sources filter **separately** from `dast` (R8).
 Findings support filtering, sorting, bulk update/cleanup, manual creation, and per-finding retest.
 
+**Evidence objects**: finding evidence is indexed by hash, storage URI, retention class, scan/finding
+links, and redaction profile. Large evidence can live in local content-addressed storage or an opt-in
+S3/MinIO-compatible backend; evidence reads verify SHA-256 before returning remote or local content.
+Retention sweeps are dry-run by default, skip legal hold, can delete local object files only when
+explicitly executed, and report remote-object candidates as preserved because remote deletion is not
+yet supported.
+
 **Exposure graph** (`/exposure/*`): a derived graph across domains, targets, APIs, auth roles,
 vendors, AI surfaces, MCP tools, model artifacts, scans, and findings, with asset-centric breakdowns
 (by owner/tier/classification), change deltas over time, and attack-path views. Backs the UI

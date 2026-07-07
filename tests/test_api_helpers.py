@@ -4040,6 +4040,24 @@ def test_evidence_retention_candidates_skip_legal_hold_and_use_policy_days():
     assert candidates[0]["age_days"] > candidates[0]["retention_days"]
 
 
+def test_evidence_retention_candidate_marks_remote_storage_as_preserved():
+    now = datetime(2026, 7, 6, tzinfo=timezone.utc)
+    row = {
+        "id": uuid.uuid4(),
+        "retention_class": "short",
+        "storage_uri": "s3:evidence_objects/audit-bucket/evidence-objects/ab/abcdef.json",
+        "created_at": datetime(2025, 1, 1, tzinfo=timezone.utc),
+    }
+
+    candidate = api_module._evidence_retention_candidate(row, now=now)
+
+    assert candidate is not None
+    assert candidate["storage_backend"] == "s3"
+    assert candidate["remote_object"] is True
+    assert candidate["remote_deletion_supported"] is False
+    assert candidate["local_file"] is False
+
+
 def _evidence_row(retention_class, created_at):
     return {
         "id": uuid.uuid4(),
@@ -4134,6 +4152,43 @@ def test_retention_sweep_dry_run_preview_needs_no_approval(monkeypatch):
     assert result["dry_run"] is True
     assert result["execution_enabled"] is False
     assert conn.recorded == []  # preview records nothing and requires no receipt
+
+
+def test_retention_sweep_reports_remote_objects_without_deleting_them(monkeypatch):
+    old = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    remote_id = uuid.uuid4()
+
+    class _RemoteSweepConn(_SweepConn):
+        async def fetch(self, query, *args):
+            return [
+                {
+                    "id": remote_id,
+                    "scan_id": None,
+                    "finding_id": None,
+                    "object_type": "finding_evidence",
+                    "content_sha256": "a" * 64,
+                    "size_bytes": 4096,
+                    "retention_class": "short",
+                    "storage_uri": "s3:evidence_objects/audit-bucket/evidence-objects/aa/" + ("a" * 64) + ".json",
+                    "created_at": old,
+                }
+            ]
+
+    conn = _RemoteSweepConn(policy_on=False)
+    monkeypatch.setattr(api_module, "db_pool", _pool_for(conn))
+
+    result = asyncio.run(api_module.evidence_retention_sweep(api_module.EvidenceRetentionSweepRequest(dry_run=True)))
+
+    assert result["candidate_count"] == 1
+    assert result["remote_objects"] == {
+        "candidate_count": 1,
+        "preserved_count": 1,
+        "delete_supported": False,
+    }
+    assert result["local_files"] == {"deleted": [], "missing": [], "errors": []}
+    assert result["candidates"][0]["id"] == str(remote_id)
+    assert result["candidates"][0]["storage_backend"] == "s3"
+    assert result["candidates"][0]["remote_object"] is True
 
 
 # ----- §2 Command Arsenal execution gateway ------------------------------------

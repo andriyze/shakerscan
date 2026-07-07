@@ -22610,6 +22610,19 @@ EVIDENCE_RETENTION_DAYS = {
 EVIDENCE_RETENTION_PROTECTED_CLASSES = frozenset({"audit", "sensitive"})
 
 
+def _evidence_storage_backend(storage_uri: str) -> str:
+    value = str(storage_uri or "")
+    if value.startswith("local:evidence_objects/"):
+        return "local"
+    if value.startswith("s3:evidence_objects/"):
+        return "s3"
+    if value.startswith("inline:"):
+        return "inline"
+    if not value:
+        return "none"
+    return "unknown"
+
+
 def _evidence_manifest_entry(row: Any) -> dict[str, Any]:
     payload = _public_evidence_object_row(row)
     content = payload.pop("content", None)
@@ -22867,6 +22880,7 @@ def _evidence_retention_candidate(
     if age_days < threshold:
         return None
     storage_uri = str(payload.get("storage_uri") or "")
+    storage_backend = _evidence_storage_backend(storage_uri)
     return {
         "id": str(payload.get("id")),
         "scan_id": str(payload.get("scan_id")) if payload.get("scan_id") else None,
@@ -22879,7 +22893,10 @@ def _evidence_retention_candidate(
         "created_at": payload.get("created_at"),
         "age_days": age_days,
         "retention_days": threshold,
+        "storage_backend": storage_backend,
         "local_file": bool(local_evidence_path(RESULTS_DIR, storage_uri)),
+        "remote_object": storage_backend == "s3",
+        "remote_deletion_supported": False,
     }
 
 
@@ -23156,6 +23173,7 @@ async def _evidence_retention_sweep(req: EvidenceRetentionSweepRequest, *, pool:
                     [item for item in candidates if str(item.get("id")) in deleted_ids]
                 )
         if not req.dry_run:
+            remote_candidate_count = sum(1 for item in candidates if item.get("remote_object"))
             command_result = await _record_command_result(
                 conn,
                 command="evidence.retention_sweep",
@@ -23171,6 +23189,7 @@ async def _evidence_retention_sweep(req: EvidenceRetentionSweepRequest, *, pool:
                     "older_than_days": req.older_than_days,
                     "candidate_count": len(candidates),
                     "deleted_count": deleted_count,
+                    "remote_preserved_count": remote_candidate_count,
                 },
                 next_action="/settings/arsenal?tab=timeline",
             )
@@ -23180,6 +23199,11 @@ async def _evidence_retention_sweep(req: EvidenceRetentionSweepRequest, *, pool:
         "deleted_count": deleted_count,
         "delete_local_files": req.delete_local_files,
         "local_files": file_result,
+        "remote_objects": {
+            "candidate_count": sum(1 for item in candidates if item.get("remote_object")),
+            "preserved_count": sum(1 for item in candidates if item.get("remote_object")),
+            "delete_supported": False,
+        },
         "retention_policy_days": EVIDENCE_RETENTION_DAYS,
         "candidates": candidates,
         "execution_enabled": not req.dry_run,
