@@ -82,6 +82,14 @@ try:
 except ImportError:
     analyze_attack_chains = None
 
+try:
+    import check_registry as _check_registry
+except ImportError:
+    try:
+        from api import check_registry as _check_registry
+    except ImportError:
+        _check_registry = None
+
 REPORT_SCHEMA_VERSION = "2026-01-28"
 SCANNER_VERSION = os.environ.get("SCANNER_VERSION") or os.environ.get("GIT_COMMIT") or "dev"
 
@@ -2804,6 +2812,42 @@ def build_check_family_scope(
     }
 
 
+def build_scanner_execution_plan(
+    *,
+    scan_mode: str,
+    public_only: bool,
+    quick_mode: bool,
+    active_checks: bool,
+    check_family_scope: dict[str, Any],
+    skip_global_checks: bool,
+    focused_endpoints_only: bool,
+    zero_rediscovery: bool,
+) -> dict[str, Any]:
+    """Registry-derived family execution plan attached to scan reports.
+
+    Detector dispatch still lives in the legacy waterfall. This plan is the
+    compatibility layer that lets families migrate behind the registry one at a
+    time without changing report consumers.
+    """
+    if _check_registry is not None and hasattr(_check_registry, "scanner_execution_plan"):
+        return _check_registry.scanner_execution_plan(
+            scan_mode=scan_mode,
+            public_only=public_only,
+            quick_mode=quick_mode,
+            active_checks=active_checks,
+            check_family_scope=check_family_scope,
+            skip_global_checks=skip_global_checks,
+            focused_endpoints_only=focused_endpoints_only,
+            zero_rediscovery=zero_rediscovery,
+        )
+    return {
+        "registry_version": "fallback",
+        "scan_mode": scan_mode,
+        "check_family_scope": dict(check_family_scope or {}),
+        "families": [],
+    }
+
+
 def _focused_family_finding_matches(finding: dict[str, Any], family: str | None) -> bool:
     rules = FOCUSED_FAMILY_RULES.get(str(family or ""))
     if not rules:
@@ -3062,6 +3106,7 @@ async def build_report(target: str,
         else "quick" if quick_mode
         else "standard"
     )
+    scan_mode_label = "smart" if smart_mode else ("complete" if complete_mode else ("quick" if quick_mode else "standard"))
     effective_budget_profile = budget_profile
     if thorough_params and not effective_budget_profile and not custom_budget:
         effective_budget_profile = "thorough"
@@ -3269,6 +3314,16 @@ async def build_report(target: str,
     focused_manual_active_scope = focused_scope.active
     family_focused_active_scope = bool(focused_manual_active_scope and focused_active_family_name)
     zero_rediscovery_scope = bool(zero_rediscovery and focused_manual_active_scope)
+    scanner_execution_plan = build_scanner_execution_plan(
+        scan_mode=scan_mode_label,
+        public_only=public_only,
+        quick_mode=quick_mode,
+        active_checks=active_checks,
+        check_family_scope=check_family_scope,
+        skip_global_checks=skip_global_checks,
+        focused_endpoints_only=bool(focused_endpoints_only or focused_manual_active_scope),
+        zero_rediscovery=zero_rediscovery_scope,
+    )
     discovery_budget = scan_budget
     if focused_manual_active_scope:
         scan_budget = dict(scan_budget)
@@ -3320,12 +3375,12 @@ async def build_report(target: str,
             csp_eval = analyze_csp(None)
             cookies = analyze_cookies(empty_headers)
 
-            scan_mode_label = "smart" if smart_mode else ("complete" if complete_mode else ("quick" if quick_mode else "standard"))
             report: dict[str, Any] = {
                 "schema_version": REPORT_SCHEMA_VERSION,
                 "scanner_version": SCANNER_VERSION,
                 "input": {"target": target, "normalized_host": target_host, "port": target_port, "scheme": target_scheme},
                 "scan_mode": scan_mode_label,
+                "scanner_execution_plan": scanner_execution_plan,
                 "scan_config": {
                     "active_enforced": active_enforced,
                     "active_checks": active_checks,
@@ -3336,6 +3391,7 @@ async def build_report(target: str,
                     "resolved_budget": scan_budget,
                     "focused_active_family": focused_active_family_name,
                     "check_family_scope": check_family_scope,
+                    "scanner_execution_plan": scanner_execution_plan,
                     "verified_findings_only": verified_findings_only,
                     "focus_rules": len(focus_rules),
                     "avoid_rules": len(avoid_rules),
@@ -3465,6 +3521,7 @@ async def build_report(target: str,
                     "ai_scan_classification_enabled": scan_ai_classification_enabled,
                     "ai_verify_min_severity": verify_min_severity,
                     "check_family_scope": check_family_scope,
+                    "scanner_execution_plan": scanner_execution_plan,
                 },
                 "checks_skipped": checks_skipped,
                 "scan_completion_status": report["scan_completion_status"],
@@ -5997,7 +6054,8 @@ async def build_report(target: str,
         # directly — a source-tree checksum that flags scans run on a stale image.
         "build_fingerprint": SCANNER_BUILD_FINGERPRINT,
         "input": {"target": target, "normalized_host": target_host, "port": target_port, "scheme": target_scheme},
-        "scan_mode": "smart" if smart_mode else ("complete" if complete_mode else ("quick" if quick_mode else "standard")),
+        "scan_mode": scan_mode_label,
+        "scanner_execution_plan": scanner_execution_plan,
         "scan_config": {
             "active_enforced": active_enforced,
             "active_checks": active_checks,
@@ -6008,6 +6066,7 @@ async def build_report(target: str,
             "resolved_budget": scan_budget,
             "focused_active_family": focused_active_family_name,
             "check_family_scope": check_family_scope,
+            "scanner_execution_plan": scanner_execution_plan,
             "include_partial_attack_chains": include_partial_attack_chains,
             "verified_findings_only": verified_findings_only,
             "focus_rules": len(focus_rules),
@@ -8067,6 +8126,7 @@ async def build_report(target: str,
             "custom_xss": [],
             "filters": {"xss": run_xss, "sqli": run_sqli},
             "check_family_scope": check_family_scope,
+            "scanner_execution_plan": scanner_execution_plan,
         }
         if synthetic_skipped_reason:
             active_block.setdefault("warnings", []).append(synthetic_skipped_reason)
@@ -11350,7 +11410,7 @@ async def build_report(target: str,
         "scan_id": scan_session_id,
         "target": target,
         "completed_at": now_utc_iso(),
-        "scan_mode": "smart" if smart_mode else ("complete" if complete_mode else ("quick" if quick_mode else "standard")),
+        "scan_mode": scan_mode_label,
         "coverage_status": coverage["status"],
         "schema_version": REPORT_SCHEMA_VERSION,
         "scanner_version": SCANNER_VERSION,
@@ -11366,6 +11426,7 @@ async def build_report(target: str,
             "include_partial_attack_chains": include_partial_attack_chains,
             "verified_findings_only": verified_findings_only,
             "check_family_scope": check_family_scope,
+            "scanner_execution_plan": scanner_execution_plan,
             "focus_rules": len(focus_rules),
             "avoid_rules": len(avoid_rules),
             "auth_scenario": bool(auth_scenario),

@@ -290,6 +290,62 @@ def test_family_requires_two_auth_states_is_registry_driven():
     assert scanner_mod.family_requires_two_auth_states("nope") is False
 
 
+def test_scanner_execution_plan_is_registry_driven_for_focused_family():
+    scope = scanner_mod.build_check_family_scope(
+        True,
+        active_xss=False,
+        active_sqli=True,
+        requested_family="sqli",
+    )
+
+    plan = scanner_mod.build_scanner_execution_plan(
+        scan_mode="smart",
+        public_only=False,
+        quick_mode=False,
+        active_checks=True,
+        check_family_scope=scope,
+        skip_global_checks=False,
+        focused_endpoints_only=False,
+        zero_rediscovery=False,
+    )
+    families = {item["name"]: item for item in plan["families"]}
+
+    assert plan["registry_version"] == "check_family_v1"
+    assert plan["check_family_scope"]["focused_family"] == "sqli"
+    assert families["sqli"]["enabled"] is True
+    assert families["sqli"]["telemetry_schema"] == "active_endpoint_attempt_v1"
+    assert "payload" in families["sqli"]["proof_contract"]
+    assert families["xss"]["enabled"] is False
+    assert families["headers"]["enabled"] is True
+
+
+def test_scanner_execution_plan_records_zero_rediscovery_and_public_skips():
+    scope = scanner_mod.build_check_family_scope(
+        True,
+        active_xss=True,
+        active_sqli=False,
+        requested_family="xss",
+    )
+
+    plan = scanner_mod.build_scanner_execution_plan(
+        scan_mode="quick",
+        public_only=True,
+        quick_mode=True,
+        active_checks=True,
+        check_family_scope=scope,
+        skip_global_checks=True,
+        focused_endpoints_only=True,
+        zero_rediscovery=True,
+    )
+    families = {item["name"]: item for item in plan["families"]}
+
+    assert families["recon"]["reason"] == "zero_rediscovery_scope"
+    assert families["headers"]["reason"] == "global_checks_skipped"
+    assert families["nuclei"]["reason"] == "public_only"
+    assert families["xss"]["enabled"] is False
+    assert families["xss"]["reason"] == "public_only"
+
+
 def _load_reporting_module():
     import importlib.util as _ilu
     scanner_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "scanner"))

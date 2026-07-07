@@ -33,6 +33,8 @@ def test_registry_exposes_runnable_asm_focus_families():
         "asm_check_family": "auth",
     }
     assert r.CHECK_REGISTRY_BY_NAME["auth"].requires_credentials is True
+    assert "payload" in r.CHECK_REGISTRY_BY_NAME["sqli"].proof_contract
+    assert r.CHECK_REGISTRY_BY_NAME["sqli"].severity_rules["critical_requires"] == ["exploitation_proof"]
 
 
 def test_registry_gates_high_risk_families_by_runnable_state():
@@ -76,3 +78,57 @@ def test_all_focus_preserves_normal_mix_and_clears_marker():
 
 def test_default_parallel_focus_families_exclude_high_risk_bola():
     assert tuple(spec.name for spec in r.default_parallel_focus_families()) == ("sqli", "xss")
+
+
+def test_describe_check_families_includes_proof_and_severity_contracts():
+    described = {item["name"]: item for item in r.describe_check_families()}
+
+    assert described["headers"]["proof_contract"] == [
+        "request_url",
+        "response_headers",
+        "parsed_policy_state",
+    ]
+    assert described["headers"]["severity_rules"]["csp_absent"] == "medium"
+    assert described["bola"]["severity_rules"]["critical_requires"] == ["cross_user_data_access"]
+
+
+def test_scanner_execution_plan_uses_registry_gates():
+    plan = r.scanner_execution_plan(
+        scan_mode="smart",
+        active_checks=True,
+        check_family_scope={"families": ["sqli"], "focused_family": "sqli"},
+    )
+    families = {item["name"]: item for item in plan["families"]}
+
+    assert plan["registry_version"] == "check_family_v1"
+    assert families["recon"]["enabled"] is True
+    assert families["headers"]["enabled"] is True
+    assert families["nuclei"]["enabled"] is True
+    assert families["sqli"]["enabled"] is True
+    assert families["sqli"]["reason"] == "selected_by_check_family_scope"
+    assert families["xss"]["enabled"] is False
+    assert families["ssrf"]["enabled"] is False
+    assert families["ssrf"]["reason"] == "registered_not_runnable"
+    assert "payload" in families["sqli"]["proof_contract"]
+
+
+def test_scanner_execution_plan_records_passive_skip_reasons():
+    plan = r.scanner_execution_plan(
+        scan_mode="quick",
+        public_only=True,
+        quick_mode=True,
+        active_checks=True,
+        check_family_scope={"families": ["xss"], "focused_family": "xss"},
+        skip_global_checks=True,
+        zero_rediscovery=True,
+    )
+    families = {item["name"]: item for item in plan["families"]}
+
+    assert families["recon"]["enabled"] is False
+    assert families["recon"]["reason"] == "zero_rediscovery_scope"
+    assert families["headers"]["enabled"] is False
+    assert families["headers"]["reason"] == "global_checks_skipped"
+    assert families["nuclei"]["enabled"] is False
+    assert families["nuclei"]["reason"] == "public_only"
+    assert families["xss"]["enabled"] is False
+    assert families["xss"]["reason"] == "public_only"

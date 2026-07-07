@@ -356,6 +356,8 @@ def test_asm_check_family_registry_endpoint_lists_runnable_and_planned_families(
     assert names["xss"]["runnable"] is True
     assert names["bola"]["runnable"] is True
     assert names["bola"]["requires_credentials"] is True
+    assert "resource_id" in names["bola"]["proof_contract"]
+    assert names["bola"]["severity_rules"]["critical_requires"] == ["cross_user_data_access"]
     assert names["auth"]["runnable"] is True
     assert names["auth"]["requires_credentials"] is True
     assert names["ssrf"]["risk_level"] == "high"

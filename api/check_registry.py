@@ -25,6 +25,8 @@ class CheckFamilySpec:
     risk_level: str = "low"
     allowed_presets: tuple[str, ...] = ("safe", "balanced", "lab")
     telemetry_schema: str | None = None
+    proof_contract: tuple[str, ...] = ()
+    severity_rules: dict[str, Any] = field(default_factory=dict)
     scanner_options: dict[str, Any] = field(default_factory=dict)
     runnable: bool = False
     description: str = ""
@@ -38,6 +40,8 @@ CHECK_REGISTRY: tuple[CheckFamilySpec, ...] = (
         label="Recon",
         default_profiles=("fast", "balanced", "thorough", "exhaustive"),
         telemetry_schema="discovery",
+        proof_contract=("source_url", "discovery_method", "normalized_endpoint"),
+        severity_rules={"finding_ceiling_without_concrete_evidence": "info"},
         runnable=True,
         description="Crawl, API/HAR/OpenAPI discovery, and passive surface refresh.",
     ),
@@ -48,6 +52,8 @@ CHECK_REGISTRY: tuple[CheckFamilySpec, ...] = (
         label="Nuclei",
         is_active=False,
         telemetry_schema="nuclei_template",
+        proof_contract=("template_id", "matched_at", "matcher_name", "request_url"),
+        severity_rules={"template_severity_is_input": True, "promotion_requires": ["matched_at", "template_id"]},
         description="Nuclei template checks by severity/tag. Not an ASM endpoint-test family yet.",
     ),
     CheckFamilySpec(
@@ -58,6 +64,8 @@ CHECK_REGISTRY: tuple[CheckFamilySpec, ...] = (
         is_active=True,
         risk_level="medium",
         telemetry_schema="active_endpoint_attempt_v1",
+        proof_contract=("method", "url", "parameter", "payload", "response_delta"),
+        severity_rules={"critical_requires": ["exploitation_proof"], "high_requires": ["response_delta"]},
         scanner_options={"sqli": True, "xss": False, "asm_check_family": "sqli"},
         runnable=True,
         description="SQL injection probes and proof/extraction depth.",
@@ -70,6 +78,8 @@ CHECK_REGISTRY: tuple[CheckFamilySpec, ...] = (
         is_active=True,
         risk_level="medium",
         telemetry_schema="active_endpoint_attempt_v1",
+        proof_contract=("method", "url", "parameter", "payload", "sink_or_reflection"),
+        severity_rules={"high_requires": ["confirmed_execution_or_dangerous_sink"], "medium_requires": ["reflection"]},
         scanner_options={"xss": True, "sqli": False, "asm_check_family": "xss"},
         runnable=True,
         description="Reflected, stored, and DOM XSS probes.",
@@ -85,6 +95,8 @@ CHECK_REGISTRY: tuple[CheckFamilySpec, ...] = (
         risk_level="high",
         allowed_presets=("lab",),
         telemetry_schema="active_endpoint_attempt_v1",
+        proof_contract=("resource_template", "resource_id", "primary_auth", "second_user_auth", "status_delta"),
+        severity_rules={"critical_requires": ["cross_user_data_access"], "high_requires": ["object_authorization_bypass"]},
         scanner_options={"sqli": False, "xss": False, "asm_check_family": "bola"},
         runnable=True,
         description="Multi-user object authorization comparisons. Requires Lab/deep policy and two auth contexts.",
@@ -98,6 +110,8 @@ CHECK_REGISTRY: tuple[CheckFamilySpec, ...] = (
         requires_credentials=True,
         risk_level="medium",
         telemetry_schema="active_endpoint_attempt_v1",
+        proof_contract=("method", "url", "anonymous_status", "authenticated_status", "response_delta"),
+        severity_rules={"high_requires": ["protected_resource_anonymous_access"], "medium_requires": ["auth_boundary_delta"]},
         scanner_options={"sqli": False, "xss": False, "asm_check_family": "auth"},
         runnable=True,
         description="Read-only authenticated-vs-anonymous access checks for focused ASM endpoint batches.",
@@ -109,6 +123,8 @@ CHECK_REGISTRY: tuple[CheckFamilySpec, ...] = (
         label="Headers",
         is_active=False,
         telemetry_schema="planned_passive_attempt",
+        proof_contract=("request_url", "response_headers", "parsed_policy_state"),
+        severity_rules={"missing_baseline_headers": "low_or_medium", "csp_absent": "medium"},
         description="HTTP security header posture checks.",
     ),
     CheckFamilySpec(
@@ -120,6 +136,8 @@ CHECK_REGISTRY: tuple[CheckFamilySpec, ...] = (
         risk_level="high",
         allowed_presets=("lab",),
         telemetry_schema="planned_high_risk_attempt",
+        proof_contract=("method", "url", "payload", "callback_or_response_evidence"),
+        severity_rules={"critical_requires": ["confirmed_callback"], "high_requires": ["internal_resource_fetch"]},
         description="Server-side request forgery checks. Planned and permission-gated.",
     ),
     CheckFamilySpec(
@@ -131,6 +149,8 @@ CHECK_REGISTRY: tuple[CheckFamilySpec, ...] = (
         risk_level="high",
         allowed_presets=("lab",),
         telemetry_schema="planned_high_risk_attempt",
+        proof_contract=("method", "url", "payload", "file_evidence"),
+        severity_rules={"critical_requires": ["sensitive_file_read"], "high_requires": ["path_traversal_confirmed"]},
         description="File inclusion and path traversal checks. Planned and permission-gated.",
     ),
     CheckFamilySpec(
@@ -142,6 +162,8 @@ CHECK_REGISTRY: tuple[CheckFamilySpec, ...] = (
         risk_level="high",
         allowed_presets=("lab",),
         telemetry_schema="planned_high_risk_attempt",
+        proof_contract=("method", "url", "payload", "command_output_or_callback"),
+        severity_rules={"critical_requires": ["command_execution_proof"]},
         description="Command/code execution checks. Planned and permission-gated.",
     ),
     CheckFamilySpec(
@@ -154,6 +176,8 @@ CHECK_REGISTRY: tuple[CheckFamilySpec, ...] = (
         risk_level="high",
         allowed_presets=("lab",),
         telemetry_schema="planned_workflow_attempt",
+        proof_contract=("workflow_step", "principal", "precondition", "observed_state_change"),
+        severity_rules={"severity_requires_business_impact": True, "high_requires": ["unauthorized_state_change"]},
         description="Workflow/business-logic testing. Planned for AI/manual-assisted campaigns.",
     ),
 )
@@ -238,11 +262,101 @@ def describe_check_families() -> list[dict[str, Any]]:
             "risk_level": spec.risk_level,
             "allowed_presets": list(spec.allowed_presets),
             "telemetry_schema": spec.telemetry_schema,
+            "proof_contract": list(spec.proof_contract),
+            "severity_rules": dict(spec.severity_rules),
             "runnable": spec.runnable,
             "description": spec.description,
         }
         for spec in CHECK_REGISTRY
     ]
+
+
+def scanner_execution_plan(
+    *,
+    scan_mode: str,
+    public_only: bool = False,
+    quick_mode: bool = False,
+    active_checks: bool = False,
+    check_family_scope: dict[str, Any] | None = None,
+    skip_global_checks: bool = False,
+    focused_endpoints_only: bool = False,
+    zero_rediscovery: bool = False,
+) -> dict[str, Any]:
+    """Return the registry view of scanner-family execution for a scan.
+
+    This is intentionally metadata-only: detector dispatch can migrate behind
+    this plan family by family while existing report behavior remains stable.
+    """
+    scope = check_family_scope if isinstance(check_family_scope, dict) else {}
+    requested_families = {
+        normalize_check_family(name, allow_all=True) or str(name)
+        for name in (scope.get("families") or [])
+    }
+    if "all" in requested_families:
+        requested_families.update(spec.name for spec in asm_focus_families())
+
+    families: list[dict[str, Any]] = []
+    for spec in CHECK_REGISTRY:
+        enabled = False
+        expected = False
+        reason = "not_selected"
+
+        if spec.name == "recon":
+            enabled = not zero_rediscovery
+            expected = enabled
+            reason = "zero_rediscovery_scope" if zero_rediscovery else "default_recon"
+        elif spec.name == "headers":
+            enabled = not skip_global_checks
+            expected = enabled
+            reason = "global_checks_skipped" if skip_global_checks else "default_passive"
+        elif spec.name == "nuclei":
+            enabled = not public_only and not quick_mode and not focused_endpoints_only
+            expected = enabled
+            if public_only:
+                reason = "public_only"
+            elif quick_mode:
+                reason = "quick_mode"
+            elif focused_endpoints_only:
+                reason = "focused_endpoints_only"
+            else:
+                reason = "template_scan_expected"
+        elif spec.is_active:
+            enabled = bool(active_checks and not public_only and spec.name in requested_families)
+            expected = enabled
+            if not active_checks:
+                reason = "active_checks_disabled"
+            elif public_only:
+                reason = "public_only"
+            elif spec.name in requested_families:
+                reason = "selected_by_check_family_scope"
+            elif spec.runnable:
+                reason = "not_selected"
+            else:
+                reason = "registered_not_runnable"
+
+        families.append(
+            {
+                "name": spec.name,
+                "phase": spec.phase,
+                "family": spec.family,
+                "runnable": spec.runnable,
+                "enabled": enabled,
+                "expected": expected,
+                "status": "enabled" if enabled else "skipped",
+                "reason": reason,
+                "risk_level": spec.risk_level,
+                "telemetry_schema": spec.telemetry_schema,
+                "proof_contract": list(spec.proof_contract),
+                "severity_rules": dict(spec.severity_rules),
+            }
+        )
+
+    return {
+        "registry_version": "check_family_v1",
+        "scan_mode": scan_mode,
+        "check_family_scope": dict(scope),
+        "families": families,
+    }
 
 
 def validate_asm_focus_family(value: Any) -> str | None:
