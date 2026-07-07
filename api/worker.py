@@ -64,6 +64,8 @@ QUEUE_NAME = 'scan_jobs'
 RETEST_QUEUE_NAME = os.environ.get("RETEST_QUEUE_NAME", "retest_jobs")
 AI_GATE_RUN_KINDS = {"ai_api", "ai_rag", "ai_trace", "ai_mcp", "ai_widget"}
 MODEL_INTAKE_RUN_KINDS = {"model_intake"}
+ASM_RECON_RUN_KINDS = {"asm_recon"}
+ASM_BATCH_RUN_KINDS = {"asm_batch", "asm_dynamic_batch"}
 SCANNER_PATH = '/app/scanner.py'
 SCAN_LOG_TAIL = int(os.environ.get('SCAN_LOG_TAIL', '200'))
 SCAN_LOG_TTL_SECONDS = int(os.environ.get('SCAN_LOG_TTL_SECONDS', '86400'))
@@ -171,6 +173,13 @@ def _internal_executor_receipt_spec(options: dict[str, Any]) -> dict[str, str] |
             "parser_status_key": "model_intake",
             "parser": "model-intake-summary-v1",
             "proof_contract": "cryptographic-signature-verification",
+        }
+    if run_kind in ASM_RECON_RUN_KINDS:
+        return {
+            "tool_name": "asm_recon_executor",
+            "parser_status_key": "discovery",
+            "parser": "asm-recon-summary-v1",
+            "proof_contract": "endpoint-inventory-evidence",
         }
     return None
 
@@ -286,6 +295,11 @@ async def _record_internal_executor_tool_receipt(
         result.setdefault("metadata", {})
         if isinstance(result.get("metadata"), dict):
             result["metadata"].setdefault("tool_receipt_ids", list(receipt_ids) if isinstance(receipt_ids, list) else [receipt_id])
+        scan_metadata = result.setdefault("scan_metadata", {})
+        if isinstance(scan_metadata, dict):
+            scan_receipts = scan_metadata.setdefault("tool_receipt_ids", [])
+            if isinstance(scan_receipts, list) and receipt_id not in scan_receipts:
+                scan_receipts.append(receipt_id)
     return receipt_id
 
 
@@ -472,6 +486,150 @@ async def _record_external_dast_tool_receipts(
         if isinstance(result.get("metadata"), dict):
             result["metadata"].setdefault("tool_receipt_ids", list(existing) if isinstance(existing, list) else receipt_ids)
     return receipt_ids
+
+
+async def _record_asm_executor_tool_receipt(
+    conn,
+    *,
+    scan_id: str,
+    job_id: str | None,
+    target: str,
+    target_id: str | None,
+    parent_scan_id: str | None,
+    campaign_id: str | None,
+    options: dict[str, Any],
+    result: dict[str, Any],
+    action: str,
+    status: str,
+    parser_status: str,
+    started_at: datetime,
+    completed_at: datetime,
+    duration_seconds: int,
+    endpoint_ids: list[Any] | None = None,
+    auth_state: str | None = None,
+    check_family: str | None = None,
+    endpoint_filter: str | None = None,
+    error: Any = None,
+    timed_out: bool = False,
+    summary: dict[str, Any] | None = None,
+) -> str | None:
+    """Best-effort receipt for Continuous ASM executor work.
+
+    This records executor outcome only; it does not change findings, endpoint
+    verdicts, campaigns, or scan terminal state.
+    """
+    action_name = str(action or "batch").strip().lower()
+    tool_name = "asm_recon_executor" if action_name == "recon" else "asm_endpoint_batch_executor"
+    parser = "asm-recon-summary-v1" if action_name == "recon" else "asm-endpoint-batch-summary-v1"
+    proof_contract = "endpoint-inventory-evidence" if action_name == "recon" else "endpoint-attempt-ledger"
+    safe_status = status if status in {"success", "failed", "timeout", "skipped", "waived", "parser_error", "recorded"} else "recorded"
+    safe_parser_status = parser_status if parser_status in {"not_run", "parsed", "partial", "failed", "not_applicable"} else "partial"
+    endpoint_ids = endpoint_ids or []
+    target_scope = _redact_receipt_value({
+        "scan_id": str(scan_id),
+        "job_id": str(job_id or ""),
+        "target_id": str(target_id or ""),
+        "parent_scan_id": str(parent_scan_id or ""),
+        "campaign_id": str(campaign_id or ""),
+        "target": target,
+        "action": action_name,
+        "auth_state": auth_state,
+        "check_family": check_family or "all",
+        "endpoint_filter": endpoint_filter,
+        "endpoint_count": len(endpoint_ids),
+    })
+    redacted_argv = _redact_receipt_value([
+        tool_name,
+        "--action",
+        action_name,
+        "--scan-id",
+        str(scan_id),
+        "--target",
+        str(target),
+    ])
+    command_hash = _tool_receipt_hash({
+        "tool_name": tool_name,
+        "redacted_argv": redacted_argv,
+        "target_scope": target_scope,
+    })
+    metadata = _redact_receipt_value({
+        "executor": "continuous_asm",
+        "parser": parser,
+        "proof_contract": proof_contract,
+        "duration_seconds": duration_seconds,
+        "endpoint_count": len(endpoint_ids),
+        "auth_state": auth_state,
+        "check_family": check_family or "all",
+        "endpoint_filter": endpoint_filter,
+        "scan_type": (options or {}).get("scan_type"),
+        "coverage_dynamic_worker": bool((options or {}).get("coverage_dynamic_worker")),
+        "partial": bool((result.get("scan_metadata") or {}).get("partial")) if isinstance(result, dict) else False,
+        "timed_out": bool(timed_out),
+        "error": str(error)[:500] if error else None,
+        "summary": summary or {},
+    })
+    try:
+        row = await conn.fetchrow(
+            """
+            INSERT INTO tool_receipts (
+                tool_name, tool_version, adapter_version, command_hash, redacted_argv,
+                worker_build, container_image, target_scope, scope_receipt_id,
+                approval_receipt_id, policy_profile_id, status, parser_status,
+                exit_code, timed_out, started_at, finished_at, stdout_evidence_object_id,
+                stderr_evidence_object_id, parsed_evidence_instance_ids, redaction_summary,
+                metadata_json, created_by
+            ) VALUES (
+                $1,$2,$3,$4,$5::jsonb,
+                $6,$7,$8::jsonb,$9,
+                $10,$11,$12,$13,
+                $14,$15,$16,$17,$18,
+                $19,$20::jsonb,$21,
+                $22::jsonb,$23
+            )
+            RETURNING id
+            """,
+            tool_name,
+            "internal",
+            TOOL_RECEIPT_ADAPTER_VERSION,
+            command_hash,
+            json.dumps(redacted_argv),
+            os.environ.get("BUILD_FINGERPRINT"),
+            os.environ.get("WORKER_IMAGE"),
+            json.dumps(target_scope),
+            (options or {}).get("scope_receipt_id"),
+            _optional_uuid((options or {}).get("approval_receipt_id")),
+            None,
+            safe_status,
+            safe_parser_status,
+            0 if safe_status == "success" else 124 if safe_status == "timeout" else 1,
+            bool(timed_out or safe_status == "timeout"),
+            started_at,
+            completed_at,
+            None,
+            None,
+            json.dumps([]),
+            "continuous ASM executor receipt; sensitive target/options fields redacted",
+            json.dumps(metadata),
+            "worker",
+        )
+    except Exception as exc:
+        print(f"[{str(job_id or scan_id)[:8]}] ASM tool receipt insert error: {exc}", flush=True)
+        return None
+    receipt_id = str(row["id"]) if row and row["id"] else None
+    if receipt_id and isinstance(result, dict):
+        receipt_ids = result.setdefault("tool_receipt_ids", [])
+        if isinstance(receipt_ids, list) and receipt_id not in receipt_ids:
+            receipt_ids.append(receipt_id)
+        result.setdefault("metadata", {})
+        if isinstance(result.get("metadata"), dict):
+            result["metadata"].setdefault("tool_receipt_ids", list(receipt_ids) if isinstance(receipt_ids, list) else [receipt_id])
+        scan_metadata = result.setdefault("scan_metadata", {})
+        if isinstance(scan_metadata, dict):
+            scan_receipts = scan_metadata.setdefault("tool_receipt_ids", [])
+            if isinstance(scan_receipts, list) and receipt_id not in scan_receipts:
+                scan_receipts.append(receipt_id)
+            scan_metadata.setdefault("asm_executor_receipt_id", receipt_id)
+    return receipt_id
 
 
 DEFAULT_MAX_DURATION_MINUTES = int(os.environ.get('SCAN_MAX_DURATION_DEFAULT_MINUTES', '120'))
@@ -5214,6 +5372,9 @@ async def process_scan_job(job_data: dict):
     scan_id = job_data.get('scan_id')
     target = job_data.get('target')
     options = job_data.get('options', {})
+    if job_data.get("asm_recon"):
+        options = dict(options or {})
+        options.setdefault("run_kind", "asm_recon")
     campaign_id = job_data.get('campaign_id')
 
     print(f"[{job_id[:8]}] Starting scan: {target}", flush=True)
@@ -7503,6 +7664,31 @@ async def process_exploit_batch_job(job_data: dict):
                         "per_endpoint_telemetry": False,
                     },
                 )
+                await _record_asm_executor_tool_receipt(
+                    conn,
+                    scan_id=scan_id,
+                    job_id=job_id,
+                    target=target,
+                    target_id=target_id,
+                    parent_scan_id=parent_id,
+                    campaign_id=campaign_id,
+                    options=options,
+                    result=result,
+                    action="batch",
+                    status="skipped",
+                    parser_status="not_applicable",
+                    started_at=now,
+                    completed_at=completed_at,
+                    duration_seconds=0,
+                    endpoint_ids=endpoint_ids,
+                    auth_state=auth_state,
+                    check_family=check_family,
+                    endpoint_filter=endpoint_filter,
+                    summary={
+                        "claimed_endpoints": len(endpoint_ids),
+                        "skip_reason": "auth_missing",
+                    },
+                )
                 if finish_campaign_on_complete:
                     await asm_inventory.finish_campaign(conn, campaign_id, status='completed')
                 await conn.execute(
@@ -7514,6 +7700,7 @@ async def process_exploit_batch_job(job_data: dict):
                 )
         except Exception as e:
             print(f"[asm {job_id[:8]}] auth-missing inventory stamp error: {e}", flush=True)
+        filepath = save_result_file(result, job_id)
         r.hset(f"job:{job_id}", mapping={
             'status': 'completed',
             'result_path': filepath,
@@ -7533,6 +7720,7 @@ async def process_exploit_batch_job(job_data: dict):
         return
 
     scan_opts = scoped_opts
+    scan_opts['run_kind'] = 'asm_dynamic_batch' if coverage_dynamic_worker else 'asm_batch'
     scan_opts['scan_type'] = scan_opts.get('scan_type') or 'smart'
     scan_opts['parallel'] = False
     for k in ('shard_strategy', 'shards', 'auth_state_shards'):
@@ -7605,6 +7793,16 @@ async def process_exploit_batch_job(job_data: dict):
         )
     if update_result.endswith("0"):
         print(f"[asm {job_id[:8]}] Coverage batch cancelled before start; releasing claimed endpoints", flush=True)
+        completed_at = utc_now()
+        cancelled_result = {
+            "target": target,
+            "findings": [],
+            "result": {"score": None, "grade": None},
+            "scan_metadata": {
+                "asm_cancelled_before_start": True,
+                "claimed_endpoints": len(endpoint_ids),
+            },
+        }
         try:
             async with db_pool.acquire() as conn:
                 await conn.execute(
@@ -7613,6 +7811,31 @@ async def process_exploit_batch_job(job_data: dict):
                            lease_owner=NULL, lease_expires_at=NULL, updated_at=NOW()
                        WHERE id = ANY($1::uuid[]) AND test_status='in_progress'""",
                     endpoint_ids,
+                )
+                await _record_asm_executor_tool_receipt(
+                    conn,
+                    scan_id=scan_id,
+                    job_id=job_id,
+                    target=target,
+                    target_id=target_id,
+                    parent_scan_id=parent_id,
+                    campaign_id=campaign_id,
+                    options=scan_opts,
+                    result=cancelled_result,
+                    action="batch",
+                    status="skipped",
+                    parser_status="not_run",
+                    started_at=now,
+                    completed_at=completed_at,
+                    duration_seconds=int((completed_at - now).total_seconds()),
+                    endpoint_ids=endpoint_ids,
+                    auth_state=auth_state,
+                    check_family=check_family,
+                    endpoint_filter=endpoint_filter,
+                    summary={
+                        "claimed_endpoints": len(endpoint_ids),
+                        "skip_reason": "cancelled_before_start",
+                    },
                 )
         except Exception:
             pass
@@ -7647,9 +7870,61 @@ async def process_exploit_batch_job(job_data: dict):
         partial = bool(meta.get('partial') or meta.get('timed_out'))
         score = result.get('result', {}).get('score')
         grade = result.get('result', {}).get('grade')
-        filepath = save_result_file(result, job_id)
         completed_at = utc_now()
         duration = int((completed_at - now).total_seconds())
+        telemetry_present = _active_endpoint_telemetry_present(result)
+        attempts = _active_endpoint_attempts_from_report(result) if telemetry_present else []
+        if error:
+            receipt_status = "failed"
+            receipt_parser_status = "failed"
+        elif meta.get('timed_out'):
+            receipt_status = "timeout"
+            receipt_parser_status = "partial"
+        elif partial:
+            receipt_status = "recorded"
+            receipt_parser_status = "partial"
+        elif telemetry_present:
+            receipt_status = "success"
+            receipt_parser_status = "parsed"
+        else:
+            receipt_status = "recorded"
+            receipt_parser_status = "partial"
+        try:
+            async with db_pool.acquire() as conn:
+                await _record_asm_executor_tool_receipt(
+                    conn,
+                    scan_id=scan_id,
+                    job_id=job_id,
+                    target=target,
+                    target_id=target_id,
+                    parent_scan_id=parent_id,
+                    campaign_id=campaign_id,
+                    options=scan_opts,
+                    result=result,
+                    action="batch",
+                    status=receipt_status,
+                    parser_status=receipt_parser_status,
+                    started_at=now,
+                    completed_at=completed_at,
+                    duration_seconds=duration,
+                    endpoint_ids=endpoint_ids,
+                    auth_state=auth_state,
+                    check_family=check_family,
+                    endpoint_filter=endpoint_filter,
+                    error=error,
+                    timed_out=bool(meta.get('timed_out')),
+                    summary={
+                        "claimed_endpoints": len(endpoint_ids),
+                        "assigned_endpoints": len(endpoints),
+                        "attempts_reported": len(attempts),
+                        "findings_count": len(findings),
+                        "telemetry_present": telemetry_present,
+                        "partial": partial,
+                    },
+                )
+        except Exception as e:
+            print(f"[asm {job_id[:8]}] ASM receipt record error: {e}", flush=True)
+        filepath = save_result_file(result, job_id)
         saved = 0
         if target_id and findings and not error and not parent_id:
             try:
@@ -7659,8 +7934,6 @@ async def process_exploit_batch_job(job_data: dict):
         if not error:
             try:
                 async with db_pool.acquire() as conn:
-                    telemetry_present = _active_endpoint_telemetry_present(result)
-                    attempts = _active_endpoint_attempts_from_report(result)
                     if telemetry_present:
                         recorded = {'completed_ids': [], 'partial_ids': [], 'error_ids': []}
                         if attempts:

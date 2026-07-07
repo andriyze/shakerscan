@@ -18629,6 +18629,7 @@ async def _enqueue_asm_exploit_batch(
     scan_id = str(uuid.uuid4())
     job_id = str(uuid.uuid4())
     opts = _apply_asm_check_family(base_opts or {}, check_family)
+    opts["run_kind"] = "asm_batch"
     family = _normalize_asm_check_family(check_family)
     endpoint_filter = _validate_asm_endpoint_filter_value(endpoint_filter)
     _enforce_asm_family_preconditions(family, opts, exploit_depth=exploit_depth)
@@ -18676,6 +18677,7 @@ async def _enqueue_asm_recon(
     """Create an asm_recon scan row and enqueue a lean standalone discovery scan
     that refreshes/grows the inventory (worklist persisted on completion)."""
     opts = dict(base_opts or {})
+    opts["run_kind"] = "asm_recon"
     opts["scan_type"] = "smart"
     opts.pop("parallel", None)  # recon is one lightweight standalone scan
     cb = dict(opts.get("custom_budget") or {})

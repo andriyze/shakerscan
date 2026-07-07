@@ -584,6 +584,7 @@ def test_internal_ai_gate_executor_receipt_is_recorded_and_redacted():
     assert recorded == str(receipt_id)
     assert result["tool_receipt_ids"] == [str(receipt_id)]
     assert result["metadata"]["tool_receipt_ids"] == [str(receipt_id)]
+    assert result["scan_metadata"]["tool_receipt_ids"] == [str(receipt_id)]
     query, args = conn.fetchrow_calls[0]
     assert "INSERT INTO tool_receipts" in query
     assert args[0] == "ai_gate_probe_executor"
@@ -595,6 +596,42 @@ def test_internal_ai_gate_executor_receipt_is_recorded_and_redacted():
     assert "secret-token" not in json.dumps(args, default=str)
     target_scope = json.loads(args[7])
     assert target_scope["target"].endswith("***=***")
+
+
+def test_internal_asm_recon_executor_receipt_is_recorded():
+    receipt_id = uuid.uuid4()
+    conn = _FakeReceiptConnection(receipt_id)
+    result = {
+        "discovery": {"summary": {"total_urls": 3}},
+        "findings": [],
+    }
+
+    recorded = asyncio.run(worker._record_internal_executor_tool_receipt(
+        conn,
+        scan_id="11111111-1111-1111-1111-111111111111",
+        job_id="job-asm-recon",
+        target="https://example.test/?token=secret-token",
+        target_id="33333333-3333-3333-3333-333333333333",
+        ai_target_id=None,
+        options={"run_kind": "asm_recon", "scan_type": "smart"},
+        result=result,
+        started_at=datetime(2026, 7, 6, tzinfo=timezone.utc),
+        completed_at=datetime(2026, 7, 6, 0, 0, 4, tzinfo=timezone.utc),
+        duration_seconds=4,
+        error=None,
+    ))
+
+    assert recorded == str(receipt_id)
+    assert result["scan_metadata"]["tool_receipt_ids"] == [str(receipt_id)]
+    query, args = conn.fetchrow_calls[0]
+    assert "INSERT INTO tool_receipts" in query
+    assert args[0] == "asm_recon_executor"
+    assert args[11] == "success"
+    assert args[12] == "parsed"
+    metadata = json.loads(args[21])
+    assert metadata["parser"] == "asm-recon-summary-v1"
+    assert metadata["proof_contract"] == "endpoint-inventory-evidence"
+    assert "secret-token" not in json.dumps(args, default=str)
 
 
 def test_redact_receipt_value_strips_url_userinfo():
@@ -734,6 +771,67 @@ def test_external_dast_tool_receipts_are_recorded_and_attached():
     assert "secret-token" not in json.dumps(first_args, default=str)
     tools = [args[0] for _query, args in conn.fetchrow_calls]
     assert tools == ["nuclei", "sqlmap", "nmap"]
+
+
+def test_asm_executor_receipt_records_partial_batch_and_links_metadata():
+    receipt_id = uuid.uuid4()
+    conn = _FakeReceiptConnection(receipt_id)
+    result = {
+        "target": "https://example.test",
+        "findings": [],
+        "scan_metadata": {"partial": True},
+    }
+
+    recorded = asyncio.run(worker._record_asm_executor_tool_receipt(
+        conn,
+        scan_id="11111111-1111-1111-1111-111111111111",
+        job_id="job-asm",
+        target="https://example.test/?token=secret-token",
+        target_id="33333333-3333-3333-3333-333333333333",
+        parent_scan_id="44444444-4444-4444-4444-444444444444",
+        campaign_id="55555555-5555-5555-5555-555555555555",
+        options={
+            "scan_type": "smart",
+            "run_kind": "asm_batch",
+            "scope_receipt_id": "scope-1",
+            "approval_receipt_id": "66666666-6666-4666-8666-666666666666",
+        },
+        result=result,
+        action="batch",
+        status="recorded",
+        parser_status="partial",
+        started_at=datetime(2026, 7, 6, tzinfo=timezone.utc),
+        completed_at=datetime(2026, 7, 6, 0, 0, 8, tzinfo=timezone.utc),
+        duration_seconds=8,
+        endpoint_ids=["77777777-7777-4777-8777-777777777777"],
+        auth_state="user1",
+        check_family="bola",
+        endpoint_filter="api",
+        summary={"attempts_reported": 0, "telemetry_present": False},
+    ))
+
+    assert recorded == str(receipt_id)
+    assert result["tool_receipt_ids"] == [str(receipt_id)]
+    assert result["metadata"]["tool_receipt_ids"] == [str(receipt_id)]
+    assert result["scan_metadata"]["tool_receipt_ids"] == [str(receipt_id)]
+    assert result["scan_metadata"]["asm_executor_receipt_id"] == str(receipt_id)
+    query, args = conn.fetchrow_calls[0]
+    assert "INSERT INTO tool_receipts" in query
+    assert args[0] == "asm_endpoint_batch_executor"
+    assert args[1] == "internal"
+    assert args[8] == "scope-1"
+    assert args[9] == uuid.UUID("66666666-6666-4666-8666-666666666666")
+    assert args[11] == "recorded"
+    assert args[12] == "partial"
+    assert args[14] is False
+    target_scope = json.loads(args[7])
+    assert target_scope["check_family"] == "bola"
+    assert target_scope["endpoint_count"] == 1
+    metadata = json.loads(args[21])
+    assert metadata["parser"] == "asm-endpoint-batch-summary-v1"
+    assert metadata["proof_contract"] == "endpoint-attempt-ledger"
+    assert metadata["summary"]["telemetry_present"] is False
+    assert "secret-token" not in json.dumps(args, default=str)
 
 
 class _FakeCancelRedis:
