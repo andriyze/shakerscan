@@ -1028,11 +1028,12 @@ through an existing interactive session only via the gated Command Arsenal path 
 binds them to record-only evidence instances plus an `authz.replay_plan` tool receipt, and updates
 the planned campaign action without creating findings automatically. `authz.promote_replay_finding`
 now explicitly promotes replay observations with lower-role access violations into manual-source BOLA
-findings, links evidence instances/tool receipts, and records a command-result audit row; this is
-still gated and never happens automatically after replay.
+findings, links evidence instances/tool receipts, records a command-result audit row, and collapses
+volatile object ids into route-template fingerprints so `/orders/1` and `/orders/46` do not create
+separate replay findings; this is still gated and never happens automatically after replay.
 
-**Implement next:** add richer replay proof bundles, duplicate collapse across route templates, and
-operator UI controls for the gated replay/promotion workflow.
+**Implement next:** add richer replay proof bundles and operator UI controls for the gated
+replay/promotion workflow.
 
 **Done when:** a campaign can assert "endpoint X requires role admin" and prove a lower-role
 principal's access is a finding.

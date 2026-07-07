@@ -16490,6 +16490,29 @@ def _authz_observation_matches_expectation(observed_status: Any, expected: dict[
     return False
 
 
+def _authz_template_replay_path(path: Any) -> str:
+    raw = str(path or "").strip()
+    if not raw:
+        return ""
+    parsed = urllib.parse.urlparse(raw)
+    route = parsed.path if parsed.scheme or parsed.netloc else raw.split("?", 1)[0]
+    parts: list[str] = []
+    for segment in route.split("/"):
+        if not segment:
+            continue
+        lowered = segment.lower()
+        if re.fullmatch(r"\d+", segment):
+            parts.append("{id}")
+        elif re.fullmatch(r"[0-9a-f]{24}", lowered) or re.fullmatch(r"[0-9a-f]{32,}", lowered):
+            parts.append("{hash}")
+        elif re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", lowered):
+            parts.append("{uuid}")
+        else:
+            parts.append(segment)
+    templated = "/" + "/".join(parts)
+    return templated or "/"
+
+
 async def _execute_authz_replay_plan(
     conn,
     *,
@@ -16735,9 +16758,10 @@ async def _promote_authz_replay_finding(
         raise HTTPException(status_code=400, detail="Authz replay result has no promotable violation observation")
     first = violations[0]
     path = str(first.get("path") or "").strip() or target_url
+    templated_path = _authz_template_replay_path(path)
     actor = str(first.get("principal_auth_state") or first.get("principal_label") or "lower-role principal").strip()
     title = f"BOLA: {actor} accessed denied resource"
-    fingerprint_source = f"{target_uuid}:authz.replay_plan:{path}:{actor}:CWE-639"
+    fingerprint_source = f"{target_uuid}:authz.replay_plan:{templated_path or path}:{actor}:CWE-639"
     fingerprint = hashlib.sha256(fingerprint_source.encode()).hexdigest()[:32]
     evidence_instance_ids = _clean_string_list(replay.get("evidence_instance_ids"), max_items=100)
     tool_receipt_id = str(replay.get("tool_receipt_id") or "").strip()
@@ -16746,6 +16770,7 @@ async def _promote_authz_replay_finding(
         "authz_replay": {
             "campaign_action_id": str(action_uuid),
             "violation_count": len(violations),
+            "templated_path": templated_path or None,
             "violations": violations[:10],
             "evidence_instance_ids": evidence_instance_ids,
             "tool_receipt_id": tool_receipt_id or None,

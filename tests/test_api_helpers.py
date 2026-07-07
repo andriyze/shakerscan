@@ -2501,8 +2501,17 @@ def test_promote_authz_replay_finding_requires_violation_and_links_evidence():
     assert result["command_result"]["finding_ids"] == [str(finding_id)]
     assert result["command_result"]["tool_receipt_ids"] == [str(tool_receipt_id)]
     assert captured["finding_args"][2].startswith("BOLA:")
+    finding_evidence = json.loads(captured["finding_args"][6])
+    assert finding_evidence["authz_replay"]["templated_path"] == "/api/orders/{id}"
     assert any("UPDATE evidence_instances" in sql for sql, _args in captured["executes"])
     assert any("UPDATE campaign_actions" in sql for sql, _args in captured["executes"])
+
+
+def test_authz_template_replay_path_collapses_volatile_ids():
+    assert api_module._authz_template_replay_path("/api/orders/42") == "/api/orders/{id}"
+    assert api_module._authz_template_replay_path("/users/550e8400-e29b-41d4-a716-446655440000") == "/users/{uuid}"
+    assert api_module._authz_template_replay_path("/blob/0123456789abcdef0123456789abcdef") == "/blob/{hash}"
+    assert api_module._authz_template_replay_path("/api/v2/login") == "/api/v2/login"
 
 
 def test_hypothesis_signal_redacts_and_is_non_executing():
