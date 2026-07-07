@@ -1013,18 +1013,19 @@ the deterministic campaign from it, while unproven graph/source/AI signals remai
 than findings.
 
 ### 8. Auth / principal / role matrix
-**Status: PARTIAL, PHASE 2 GRAPH PLANNING DONE.** `target_endpoints.auth_state` exists, and
+**Status: PARTIAL, PHASE 3 REPLAY CONTRACT PLANNING DONE.** `target_endpoints.auth_state` exists, and
 `target_principals` plus `target_endpoint_expectations` now persist role, tenant, credential-profile
 references, auth states, and endpoint x principal expected access. `GET/POST /targets/{id}/principals`
 and `GET/POST /targets/{id}/principal-matrix` expose the matrix as non-executing planning facts, and
 generated `AgentContextPack` records include a bounded `principal_matrix` plus credential
 precondition signals. Graph-generated authz hypotheses now consume that principal matrix, attaching
 matched principal, role/tenant, expected access, and credential-precondition facts to the next
-`asm.improve` action while keeping the record an unproven hypothesis. Proof-backed lower-role
-findings are still open.
+`asm.improve` action while keeping the record an unproven hypothesis. Hypothesis campaign planning
+now derives a non-executing `authz_replay_plan` with method/path, principal pair, expected access
+rows, and missing preconditions from that matrix. Proof-backed lower-role findings are still open.
 
-**Implement next:** deterministic authz replay should consume the planned principal matrix context
-and turn expected admin/customer/tenant boundaries into proof-backed tests.
+**Implement next:** deterministic authz replay should execute the planned `authz_replay_plan` under
+scope/approval gates and turn expected admin/customer/tenant boundaries into proof-backed tests.
 
 **Done when:** a campaign can assert "endpoint X requires role admin" and prove a lower-role
 principal's access is a finding.

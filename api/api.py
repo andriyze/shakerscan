@@ -16410,6 +16410,67 @@ def _risk_tier_for_hypothesis_action(hypothesis: dict[str, Any], next_test_actio
     return "read_only"
 
 
+def _authz_replay_plan_from_hypothesis_action(
+    hypothesis: dict[str, Any],
+    next_test_action: dict[str, Any],
+) -> dict[str, Any]:
+    """Derive a non-executing deterministic replay contract from principal facts."""
+    matrix = next_test_action.get("principal_matrix") if isinstance(next_test_action.get("principal_matrix"), dict) else {}
+    matched = matrix.get("matched_principals") if isinstance(matrix.get("matched_principals"), dict) else {}
+    primary = matched.get("primary") if isinstance(matched.get("primary"), dict) else {}
+    alternate = matched.get("alternate") if isinstance(matched.get("alternate"), dict) else {}
+    expectations = [
+        item for item in (matrix.get("matching_expectations") or [])
+        if isinstance(item, dict)
+    ][:10]
+    metadata = hypothesis.get("metadata_json") if isinstance(hypothesis.get("metadata_json"), dict) else {}
+    dims = metadata.get("dedupe_dimensions") if isinstance(metadata.get("dedupe_dimensions"), dict) else {}
+    first_expectation = expectations[0] if expectations else {}
+    preconditions = matrix.get("precondition_signals") if isinstance(matrix.get("precondition_signals"), dict) else {}
+    missing_preconditions = [
+        name for name, state in preconditions.items()
+        if str(state or "").strip().lower() != "configured"
+    ]
+    expected_access = [
+        {
+            "method": item.get("method"),
+            "path": item.get("path"),
+            "principal_label": item.get("principal_label"),
+            "principal_role": item.get("principal_role"),
+            "principal_auth_state": item.get("principal_auth_state"),
+            "tenant_id": item.get("tenant_id"),
+            "expected_access": item.get("expected_access"),
+            "expected_http_status": item.get("expected_http_status"),
+        }
+        for item in expectations
+    ]
+    return {
+        "mode": "deterministic_authz_replay",
+        "executable": False,
+        "proof_state": "planned_not_executed",
+        "method": first_expectation.get("method") or dims.get("method"),
+        "path": first_expectation.get("path") or dims.get("route"),
+        "object_key": dims.get("object_key"),
+        "principal_pair": {
+            "primary": {
+                "label": primary.get("label"),
+                "role": primary.get("role"),
+                "auth_state": primary.get("auth_state"),
+                "tenant_id": primary.get("tenant_id"),
+            } if primary else None,
+            "alternate": {
+                "label": alternate.get("label"),
+                "role": alternate.get("role"),
+                "auth_state": alternate.get("auth_state"),
+                "tenant_id": alternate.get("tenant_id"),
+            } if alternate else None,
+        },
+        "expected_access": expected_access,
+        "missing_preconditions": missing_preconditions,
+        "source": "hypothesis_principal_matrix",
+    }
+
+
 async def _plan_campaign_from_hypothesis(
     conn,
     hypothesis_id: str,
@@ -16469,6 +16530,7 @@ async def _plan_campaign_from_hypothesis(
     result_json = {
         "hypothesis_id": str(hypothesis_uuid),
         "planned_action": _redact_agent_payload(next_test_action),
+        "authz_replay_plan": _authz_replay_plan_from_hypothesis_action(hypothesis, next_test_action),
         "proof_state": "planned_not_executed",
         "finding_created": False,
         "scan_queued": False,

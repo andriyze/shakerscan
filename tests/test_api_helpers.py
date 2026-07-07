@@ -2012,7 +2012,39 @@ def test_plan_campaign_from_hypothesis_records_planned_action_without_execution(
         "next_test_action": json.dumps({
             "command": "asm.improve",
             "parameters": {"target_id": str(target_id), "check_family": "bola", "exploit_depth": True},
-            "principal_matrix": {"proof_state": "unproven_planning_context"},
+            "principal_matrix": {
+                "proof_state": "unproven_planning_context",
+                "matched_principals": {
+                    "primary": {"label": "user1", "role": "customer", "auth_state": "user1", "tenant_id": "tenant-a"},
+                    "alternate": {"label": "user2", "role": "customer", "auth_state": "user2", "tenant_id": "tenant-a"},
+                },
+                "matching_expectations": [
+                    {
+                        "method": "GET",
+                        "path": "/api/orders/{id}",
+                        "principal_label": "user1",
+                        "principal_role": "customer",
+                        "principal_auth_state": "user1",
+                        "tenant_id": "tenant-a",
+                        "expected_access": "allow",
+                        "expected_http_status": 200,
+                    },
+                    {
+                        "method": "GET",
+                        "path": "/api/orders/{id}",
+                        "principal_label": "user2",
+                        "principal_role": "customer",
+                        "principal_auth_state": "user2",
+                        "tenant_id": "tenant-a",
+                        "expected_access": "deny",
+                        "expected_http_status": 403,
+                    },
+                ],
+                "precondition_signals": {
+                    "primary_credentials": "configured",
+                    "second_user_credentials": "configured",
+                },
+            },
         }),
         "endorsements": json.dumps([]),
         "refutations": json.dumps([]),
@@ -2110,6 +2142,14 @@ def test_plan_campaign_from_hypothesis_records_planned_action_without_execution(
     assert result["campaign_action"]["mission_campaign_id"] == str(campaign_id)
     assert result["campaign_action"]["hypothesis_ids"] == [str(hypothesis_id)]
     assert result["campaign_action"]["result_json"]["proof_state"] == "planned_not_executed"
+    replay_plan = result["campaign_action"]["result_json"]["authz_replay_plan"]
+    assert replay_plan["mode"] == "deterministic_authz_replay"
+    assert replay_plan["executable"] is False
+    assert replay_plan["method"] == "GET"
+    assert replay_plan["path"] == "/api/orders/{id}"
+    assert replay_plan["principal_pair"]["alternate"]["auth_state"] == "user2"
+    assert replay_plan["expected_access"][1]["expected_access"] == "deny"
+    assert replay_plan["missing_preconditions"] == []
     assert result["hypothesis"]["campaign_action_id"] == str(action_id)
     assert captured["action_args"][6] is None
     assert captured["action_args"][12] == json.dumps([])
