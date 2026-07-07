@@ -42,6 +42,8 @@ import {
   type AsmPolicy,
   type AsmSchedulerState,
   type AsmTimelineEvent,
+  type HypothesisReportItem,
+  type HypothesisSituationReport,
   type Target,
 } from '@/lib/api'
 import { useUrlFilters } from '@/lib/useUrlFilters'
@@ -1193,6 +1195,85 @@ function ActivityCard({
   )
 }
 
+function LeadRow({ item }: { item: HypothesisReportItem }) {
+  const displayStatus = item.effective_status || item.status
+  return (
+    <div className="rounded-lg border border-gray-800 bg-gray-950/50 px-3 py-2">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="break-all font-mono text-sm text-gray-100">{item.family}</span>
+        <Badge className={STATUS_BADGE[displayStatus] || 'bg-gray-700/50 text-gray-300'}>{displayStatus}</Badge>
+        {item.severity_guess && <Badge className="bg-amber-500/15 text-amber-300">{item.severity_guess}</Badge>}
+        <Badge className="bg-gray-800 text-gray-300">{item.source}</Badge>
+      </div>
+      <div className="mt-1 break-words text-sm text-gray-400">{item.title || item.dedupe_key}</div>
+      <div className="mt-2 flex flex-wrap gap-1.5 text-xs">
+        <Badge className="bg-gray-800 text-gray-300">{Math.round((item.confidence || 0) * 100)}% confidence</Badge>
+        <Badge className="bg-gray-800 text-gray-300">endorse {item.endorsement_count}</Badge>
+        <Badge className="bg-gray-800 text-gray-300">refute {item.refutation_count}</Badge>
+      </div>
+    </div>
+  )
+}
+
+function HypothesisLeadsCard({
+  report,
+  targetId,
+}: {
+  report?: HypothesisSituationReport | null
+  targetId: string
+}) {
+  const graphSummary = report?.graph_context?.summary
+  const topLeads = report?.hottest_unclaimed || []
+  const blockers = report?.live_blockers || []
+  const missing = report?.missing_preconditions || []
+
+  return (
+    <Card className="p-4 space-y-3">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex items-center gap-2">
+          <Crosshair className="h-5 w-5 text-amber-300" />
+          <h2 className="text-sm font-medium text-gray-300">Proof leads</h2>
+        </div>
+        <Link href={`/settings/arsenal?target_id=${targetId}`} className="inline-flex items-center gap-1 text-xs text-blue-400 hover:text-blue-300">
+          Hypothesis Board <ExternalLink className="h-3.5 w-3.5" />
+        </Link>
+      </div>
+      {!report || report.summary.considered_count === 0 ? (
+        <EmptyState message="No proof leads for this target" hint="Graph, source, AI, Model Intake, and scanner signals will appear here after they create runtime-proof hypotheses." />
+      ) : (
+        <div className="space-y-3">
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+            <CoverageStat label="considered" value={report.summary.considered_count} />
+            <CoverageStat label="hot leads" value={topLeads.length} accent="text-amber-300" />
+            <CoverageStat label="blockers" value={blockers.length} accent="text-red-300" />
+            <CoverageStat label="graph nodes" value={graphSummary?.node_count ?? 0} accent="text-cyan-300" />
+          </div>
+          {topLeads.length > 0 ? (
+            <div className="grid gap-2">
+              {topLeads.slice(0, 3).map((item) => (
+                <LeadRow key={item.id} item={item} />
+              ))}
+            </div>
+          ) : (
+            <div className="rounded-lg border border-gray-800 bg-gray-950/50 p-3 text-sm text-gray-500">
+              No unclaimed leads in the bounded report.
+            </div>
+          )}
+          {missing.length > 0 && (
+            <div className="flex flex-wrap gap-1.5">
+              {missing.slice(0, 6).map((item) => (
+                <Badge key={item.requirement} className="bg-amber-500/15 text-amber-300">
+                  {item.requirement}: {item.count}
+                </Badge>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </Card>
+  )
+}
+
 // ---- Per-target view ------------------------------------------------------
 
 function TargetView({ targetId }: { targetId: string }) {
@@ -1204,6 +1285,7 @@ function TargetView({ targetId }: { targetId: string }) {
   const [activity, setActivity] = useState<AsmActivity[]>([])
   const [activitySchedulerState, setActivitySchedulerState] = useState<AsmSchedulerState | null>(null)
   const [timeline, setTimeline] = useState<AsmTimelineEvent[]>([])
+  const [hypothesisSituation, setHypothesisSituation] = useState<HypothesisSituationReport | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(false)
   const [confirmOpen, setConfirmOpen] = useState(false)
@@ -1225,6 +1307,7 @@ function TargetView({ targetId }: { targetId: string }) {
         setActivity(activityData.activity)
         setActivitySchedulerState(activityData.scheduler_state || gapData?.scheduler_state || null)
         setTimeline(activityData.timeline || [])
+        setHypothesisSituation(activityData.hypothesis_situation || null)
       })
       .catch(() => setError(true))
       .finally(() => setLoading(false))
@@ -1318,6 +1401,8 @@ function TargetView({ targetId }: { targetId: string }) {
         <GapsCard gaps={gaps} loading={loading} />
         <ActivityCard activity={activity} schedulerState={activitySchedulerState} timeline={timeline} />
       </div>
+
+      <HypothesisLeadsCard report={hypothesisSituation} targetId={targetId} />
 
       <div className="grid gap-4 xl:grid-cols-[1.2fr_0.8fr]">
         <ContinuousCard targetId={targetId} />

@@ -434,7 +434,8 @@ ordering and more exact implementation boundaries:
   target campaign timeline, so the next change is deeper schedule editing/workflow controls, not
   another schedule button or contract bridge.
 - `/targets/{id}/asm/activity` now returns scan/campaign rows, attempt counts, and the shared
-  scheduler decision object. Dashboard Action Center items now expose structured safe CTAs, and
+  scheduler decision object plus a bounded target-scoped hypothesis situation report for read-only
+  proof leads. Dashboard Action Center items now expose structured safe CTAs, and
   `/dashboard.product_status` now provides API-backed product status cards for DAST, ASM, AI Gate,
   Model Intake, exceptions, deployment gates, and worker freshness. The next dashboard gap is deeper
   remediation flow, not counts/links or the base action contract.
@@ -525,7 +526,9 @@ raw shell execution or LLM-produced verified findings.
 5. **Continuous ASM quality lane:** DONE phase 1 for `/asm/coverage`, `/asm/gaps`, scan detail,
    Action Center, and the mission timeline agreeing on family-aware state: attempted, proved,
    partial, blocked by auth, blocked by second user, blocked by schedule/rate cap, stale, and
-   worker-stale. Remaining work is deeper remediation entry points from those states.
+   worker-stale. DONE phase 2 for target ASM activity consuming the bounded hypothesis situation
+   report so graph/source/scanner/AI leads are visible next to coverage state without promotion.
+   Remaining work is deeper remediation entry points from those states.
 6. **Campaign + hypothesis layer:** DONE phase 1 for durable deduped hypotheses/leads, endorsements,
    read APIs, bounded context-pack summaries, compare-and-set claim leases, and app-graph authz
    hypothesis generation. DONE phase 2 for AI Gate weak/semantic signals and Model Intake trust
@@ -997,7 +1000,9 @@ items, not findings.
    reports now include bounded application-graph context for hypothesis targets (`graph_context`):
    route/object/principal node counts, producer/consumer and auth-boundary edge counts, target
    samples, and graph-missing targets. This is reporting context only; it cannot queue tests, create
-   findings, or promote proof state.
+   findings, or promote proof state. DONE phase 3: `GET /targets/{id}/asm/activity` now embeds the
+   same bounded target-scoped situation report, and the ASM target view renders it as proof leads next
+   to coverage and the campaign timeline.
 7. Promotion rule: hypotheses can become findings only through the existing proof taxonomy. AI/source
    graph/tool rationale can attach as context, but cannot promote severity or proof state by itself.
 8. DONE phase 1: dedupe rule now accepts canonical `dedupe_dimensions` for route/method,

@@ -1205,6 +1205,7 @@ export interface AsmActivityResponse {
   next_schedule?: Record<string, unknown> | null
   active_scans?: Array<Record<string, unknown>>
   timeline?: AsmTimelineEvent[]
+  hypothesis_situation?: HypothesisSituationReport
 }
 
 export interface AsmActionResponse {

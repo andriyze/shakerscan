@@ -19614,25 +19614,49 @@ async def arsenal_hypothesis_situation_report(
             target_uuid = uuid.UUID(str(target_id))
         except ValueError:
             raise HTTPException(status_code=400, detail="target_id must be a UUID")
-    query_limit = min(max(limit * 20, 50), 250)
     async with db_pool.acquire() as conn:
-        rows = await conn.fetch(
-            """
-            SELECT *
-            FROM hypotheses
-            WHERE ($2::uuid IS NULL OR target_id = $2)
-            ORDER BY updated_at DESC
-            LIMIT $1
-            """,
-            query_limit,
-            target_uuid,
+        return await _load_hypothesis_situation_report(
+            conn,
+            limit=limit,
+            target_uuid=target_uuid,
+            requester=requester,
+            include_graph=include_graph,
         )
-        graph_context = (
-            await _load_application_graph_context_for_hypotheses(conn, rows, limit_targets=limit)
-            if include_graph
-            else _empty_application_graph_context()
-        )
-    return _hypothesis_situation_report(rows, requester=requester, limit=limit, graph_context=graph_context)
+
+
+async def _load_hypothesis_situation_report(
+    conn,
+    *,
+    limit: int = 5,
+    target_uuid: uuid.UUID | None = None,
+    requester: str | None = None,
+    include_graph: bool = True,
+) -> dict[str, Any]:
+    """Load a bounded hypothesis situation report for one consumer surface."""
+    bounded_limit = max(1, min(int(limit or 5), 25))
+    query_limit = min(max(bounded_limit * 20, 50), 250)
+    rows = await conn.fetch(
+        """
+        SELECT *
+        FROM hypotheses
+        WHERE ($2::uuid IS NULL OR target_id = $2)
+        ORDER BY updated_at DESC
+        LIMIT $1
+        """,
+        query_limit,
+        target_uuid,
+    )
+    graph_context = (
+        await _load_application_graph_context_for_hypotheses(conn, rows, limit_targets=bounded_limit)
+        if include_graph
+        else _empty_application_graph_context()
+    )
+    return _hypothesis_situation_report(
+        rows,
+        requester=requester,
+        limit=bounded_limit,
+        graph_context=graph_context,
+    )
 
 
 @app.post("/arsenal/hypotheses")
@@ -22064,9 +22088,13 @@ async def asm_activity(
     limit: int = Query(25, ge=1, le=100),
 ):
     """Recent ASM recon/test jobs for a target, grouped away from normal scan rows."""
+    try:
+        target_uuid = uuid.UUID(target_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="target_id must be a UUID")
     r = get_redis()
     async with db_pool.acquire() as conn:
-        if not await conn.fetchrow("SELECT 1 FROM targets WHERE id = $1", uuid.UUID(target_id)):
+        if not await conn.fetchrow("SELECT 1 FROM targets WHERE id = $1", target_uuid):
             raise HTTPException(status_code=404, detail="Target not found")
         scheduler_state = await _asm_scheduler_state(conn, r, target_id)
         next_schedule = await conn.fetchrow(
@@ -22083,7 +22111,7 @@ async def asm_activity(
             ORDER BY next_run_at NULLS LAST, created_at DESC
             LIMIT 1
             """,
-            uuid.UUID(target_id),
+            target_uuid,
         )
         active_rows = await conn.fetch(
             """
@@ -22094,7 +22122,7 @@ async def asm_activity(
             ORDER BY created_at DESC
             LIMIT 5
             """,
-            uuid.UUID(target_id),
+            target_uuid,
         )
         rows = await conn.fetch(
             """
@@ -22109,7 +22137,7 @@ async def asm_activity(
             ORDER BY s.created_at DESC
             LIMIT $4
             """,
-            uuid.UUID(target_id), asm_inventory.ASM_BATCH_ROLE, asm_inventory.ASM_RECON_ROLE, limit,
+            target_uuid, asm_inventory.ASM_BATCH_ROLE, asm_inventory.ASM_RECON_ROLE, limit,
         )
         campaign_ids = [r["campaign_id"] for r in rows if r["campaign_id"]]
         attempt_counts: dict[str, dict[str, int]] = {}
@@ -22126,6 +22154,12 @@ async def asm_activity(
             for attempt in attempts:
                 cid = str(attempt["campaign_id"])
                 attempt_counts.setdefault(cid, {})[str(attempt["status"])] = int(attempt["count"] or 0)
+        hypothesis_situation = await _load_hypothesis_situation_report(
+            conn,
+            target_uuid=target_uuid,
+            limit=5,
+            include_graph=True,
+        )
     activity = []
     for row in rows:
         item = row_to_dict(row)
@@ -22145,6 +22179,7 @@ async def asm_activity(
         "next_schedule": row_to_dict(next_schedule) if next_schedule else None,
         "active_scans": [row_to_dict(row) for row in active_rows],
         "timeline": timeline,
+        "hypothesis_situation": hypothesis_situation,
     }
 
 

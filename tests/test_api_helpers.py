@@ -4941,6 +4941,75 @@ def test_hypothesis_situation_report_can_include_application_graph_context():
     assert target_summary["sample_route_keys"] == ["route:GET /api/orders"]
 
 
+def test_load_hypothesis_situation_report_filters_target_and_loads_graph_context():
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    target_id = uuid.uuid4()
+    hypothesis_id = uuid.uuid4()
+    captured: dict[str, object] = {}
+    rows = [
+        {
+            "id": hypothesis_id,
+            "target_id": target_id,
+            "source": "app_graph",
+            "family": "bola",
+            "cwe": "CWE-639",
+            "title": "BOLA graph lead",
+            "severity_guess": "high",
+            "confidence": 0.91,
+            "dedupe_key": "bola:orders",
+            "status": "open",
+            "version": 1,
+            "claim_owner": None,
+            "claim_lease_expires_at": None,
+            "smoke_score": 0.2,
+            "evidence_object_ids": json.dumps([]),
+            "tool_receipt_ids": json.dumps([]),
+            "next_test_action": json.dumps({"command": "asm.improve", "parameters": {"check_family": "bola"}}),
+            "endorsements": json.dumps([{"source": "app_graph"}]),
+            "refutations": json.dumps([]),
+            "terminal_reason": None,
+            "metadata_json": json.dumps({}),
+            "updated_at": now.isoformat(),
+        }
+    ]
+
+    class _FakeConn:
+        async def fetch(self, query, *args):
+            sql = str(query)
+            if "FROM hypotheses" in sql:
+                captured["hypothesis_args"] = args
+                return rows
+            if "FROM application_graph_nodes" in sql:
+                captured["node_args"] = args
+                return [
+                    {"target_id": target_id, "node_type": "route", "node_key": "route:GET /api/orders", "label": "GET /api/orders"},
+                    {"target_id": target_id, "node_type": "object", "node_key": "object:order_id", "label": "order_id"},
+                ]
+            if "FROM application_graph_edges" in sql:
+                captured["edge_args"] = args
+                return [
+                    {"target_id": target_id, "src_key": "route:GET /api/orders", "dst_key": "object:order_id", "edge_type": "produces"},
+                ]
+            raise AssertionError(sql)
+
+    report = asyncio.run(api_module._load_hypothesis_situation_report(
+        _FakeConn(),
+        target_uuid=target_id,
+        limit=5,
+        include_graph=True,
+    ))
+
+    assert captured["hypothesis_args"][1] == target_id
+    assert captured["node_args"][0] == [target_id]
+    assert captured["edge_args"][0] == [target_id]
+    assert report["summary"]["considered_count"] == 1
+    assert report["hottest_unclaimed"][0]["id"] == str(hypothesis_id)
+    assert report["graph_context"]["summary"]["node_count"] == 2
+    assert report["graph_context"]["summary"]["producer_consumer_edge_count"] == 1
+    assert report["execution_enabled"] is False
+    assert report["findings_created"] == 0
+
+
 def test_upsert_hypothesis_matches_existing_across_sources_by_dedupe_key():
     target_id = uuid.uuid4()
     existing_id = uuid.uuid4()

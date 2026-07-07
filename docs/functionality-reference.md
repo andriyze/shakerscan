@@ -397,6 +397,11 @@ coverage over time within safe budgets and allowed windows (`api/asm_inventory.p
   `exploit_depth: true` plus primary and second-user auth). Planned families (`auth`, `ssrf`, `lfi`,
   `rce`, `business_logic`) are registered but rejected for ASM execution until their scanner
   integrations ship.
+- `GET /targets/{id}/asm/activity` is the read-only operator summary for one target: recent hidden ASM
+  recon/test jobs, the scheduler decision, campaign timeline events, active ASM scans, and a bounded
+  target-scoped hypothesis situation report. The embedded hypothesis report surfaces proof leads and
+  missing preconditions next to coverage state, but it does not queue work, create findings, or change
+  proof state.
 
 Full design and current status: [`docs/continuous-asm-architecture.md`](continuous-asm-architecture.md).
 Multi-VPS fleet plans: [`docs/multi-node-architecture.md`](multi-node-architecture.md).
