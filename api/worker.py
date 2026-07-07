@@ -319,6 +319,106 @@ def _external_dast_tool_specs(result: dict[str, Any], options: dict[str, Any]) -
 
     discovery = result.get("discovery") if isinstance(result.get("discovery"), dict) else {}
     exposures = discovery.get("exposures") if isinstance(discovery.get("exposures"), dict) else {}
+    if "httpx" in discovery:
+        httpx_rows = discovery.get("httpx") if isinstance(discovery.get("httpx"), list) else []
+        specs.append({
+            "tool_name": "httpx",
+            "parser": "httpx-json-summary-v1",
+            "proof_contract": "http-observation",
+            "status": "success" if httpx_rows else "recorded",
+            "parser_status": "parsed" if httpx_rows else "partial",
+            "summary": {
+                "rows_count": len(httpx_rows),
+                "status_codes": sorted({
+                    str(row.get("status_code"))
+                    for row in httpx_rows
+                    if isinstance(row, dict) and row.get("status_code") is not None
+                })[:20],
+                "tech_count": sum(
+                    len(row.get("tech") or [])
+                    for row in httpx_rows
+                    if isinstance(row, dict) and isinstance(row.get("tech"), list)
+                ),
+            },
+        })
+
+    if "katana_sample" in discovery or "smart_discovery" in discovery:
+        katana_sample = discovery.get("katana_sample") if isinstance(discovery.get("katana_sample"), list) else []
+        smart_discovery = discovery.get("smart_discovery") if isinstance(discovery.get("smart_discovery"), dict) else {}
+        smart_url_count = int(smart_discovery.get("total_urls_discovered") or 0) if smart_discovery else 0
+        zero_rediscovery = bool((options or {}).get("zero_rediscovery") or (options or {}).get("zero_rediscovery_scope"))
+        specs.append({
+            "tool_name": "katana",
+            "parser": "katana-jsonl-summary-v1",
+            "proof_contract": "crawl-observation",
+            "status": "skipped" if zero_rediscovery else "success" if (katana_sample or smart_url_count) else "recorded",
+            "parser_status": "skipped" if zero_rediscovery else "parsed" if (katana_sample or smart_url_count) else "partial",
+            "summary": {
+                "sample_count": len(katana_sample),
+                "smart_discovery_total_urls": smart_url_count,
+                "zero_rediscovery": zero_rediscovery,
+            },
+        })
+
+    browser_crawl = discovery.get("browser_crawl") if isinstance(discovery.get("browser_crawl"), dict) else {}
+    browser_api_endpoints = discovery.get("browser_api_endpoints") if isinstance(discovery.get("browser_api_endpoints"), list) else []
+    browser_disabled = bool((options or {}).get("no_browser")) or int((options or {}).get("browser_max_pages") or 1) == 0
+    if "browser_api_endpoints" in discovery or "browser_crawl" in discovery or browser_disabled:
+        pages_visited = int(browser_crawl.get("pages_visited") or 0) if browser_crawl else 0
+        has_browser_output = bool(browser_api_endpoints or pages_visited)
+        specs.append({
+            "tool_name": "playwright",
+            "parser": "playwright-proof-summary-v1",
+            "proof_contract": "browser-observation",
+            "status": "skipped" if browser_disabled else "success" if has_browser_output else "recorded",
+            "parser_status": "skipped" if browser_disabled else "parsed" if has_browser_output else "partial",
+            "summary": {
+                "browser_api_endpoint_count": len(browser_api_endpoints),
+                "pages_visited": pages_visited,
+                "browser_disabled": browser_disabled,
+            },
+        })
+
+    smart_discovery = discovery.get("smart_discovery") if isinstance(discovery.get("smart_discovery"), dict) else {}
+    deep_discovery = discovery.get("deep_discovery") if isinstance(discovery.get("deep_discovery"), dict) else {}
+    discovery_summary = discovery.get("summary") if isinstance(discovery.get("summary"), dict) else {}
+    ffuf_disabled = bool((options or {}).get("disable_ffuf") or discovery_summary.get("spa_catch_all"))
+    recursive_count = int(smart_discovery.get("total_recursive_paths") or 0) if smart_discovery else 0
+    deep_count = len(deep_discovery.get("directories") or deep_discovery.get("paths") or []) if deep_discovery else 0
+    if smart_discovery or deep_discovery or ffuf_disabled:
+        specs.append({
+            "tool_name": "ffuf",
+            "parser": "ffuf-json-summary-v1",
+            "proof_contract": "content-discovery-observation",
+            "status": "skipped" if ffuf_disabled else "success" if (recursive_count or deep_count) else "recorded",
+            "parser_status": "skipped" if ffuf_disabled else "parsed" if (recursive_count or deep_count) else "partial",
+            "summary": {
+                "recursive_paths": recursive_count,
+                "deep_discovery_paths": deep_count,
+                "ffuf_disabled": ffuf_disabled,
+            },
+        })
+
+    if (options or {}).get("subfinder") or result.get("subdomain_count") is not None or result.get("by_source") is not None:
+        by_source = result.get("by_source") if isinstance(result.get("by_source"), dict) else {}
+        subfinder_rows = by_source.get("subfinder") if isinstance(by_source.get("subfinder"), list) else []
+        subdomain_count = int(result.get("subdomain_count") or len(result.get("subdomains") or []))
+        input_payload = result.get("input") if isinstance(result.get("input"), dict) else {}
+        source_payload = input_payload.get("sources") if isinstance(input_payload.get("sources"), dict) else {}
+        subfinder_enabled = bool(source_payload.get("subfinder", (options or {}).get("subfinder")))
+        specs.append({
+            "tool_name": "subfinder",
+            "parser": "subfinder-lines-summary-v1",
+            "proof_contract": "passive-discovery",
+            "status": "skipped" if not subfinder_enabled else "success" if (subfinder_rows or subdomain_count) else "recorded",
+            "parser_status": "skipped" if not subfinder_enabled else "parsed" if (subfinder_rows or subdomain_count) else "partial",
+            "summary": {
+                "subdomains_count": subdomain_count,
+                "subfinder_rows_count": len(subfinder_rows),
+                "subfinder_enabled": subfinder_enabled,
+            },
+        })
+
     nuclei = discovery.get("nuclei") if isinstance(discovery.get("nuclei"), dict) else exposures.get("nuclei")
     if isinstance(nuclei, dict) and _truthy_module_output(nuclei):
         completed = nuclei.get("scan_completed")

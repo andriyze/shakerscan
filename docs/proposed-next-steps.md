@@ -1060,15 +1060,17 @@ content-free export event for `GET /timeline`, and
 `release_gate` named `no_phantom_tools` that fails if an adapter
 claims installed/runnable status without a resolved binary or internal implementation, or if a
 runnable adapter lacks parser/proof metadata. Worker finalization now emits record-only `ToolReceipt`
-rows for the internal AI Gate probe executor, Model Intake signature verifier, and parsed DAST module
-output from Nuclei, Dalfox, sqlmap, nmap, SSLyze, and testssl on success/failure, stamping returned
+rows for the internal AI Gate probe executor, Model Intake signature verifier, parsed DAST module
+output from Nuclei, Dalfox, sqlmap, nmap, SSLyze, and testssl, and passive/lifecycle DAST outputs
+from httpx, katana, subfinder, ffuf, and Playwright/browser discovery, stamping returned
 receipt ids into scan results without changing findings or proof state. Continuous ASM recon and
 endpoint-batch executors now emit ASM-specific receipts for success, partial/missing telemetry,
 timeout, auth-missing skip, cancellation-before-start, and failure states. Oversized evidence can now
 externalize to an opt-in S3/MinIO-compatible object store via `EVIDENCE_STORAGE_BACKEND=s3`,
 `EVIDENCE_S3_BUCKET`, and optional endpoint/region/credential settings; API reads hydrate remote
-objects through signed GET and verify their recorded SHA-256 before returning content. Per-subprocess
-DAST timeout/skip/parser-error receipts and remote lifecycle polish remain open.
+objects through signed GET and verify their recorded SHA-256 before returning content. Deeper
+per-subprocess DAST exit-code/timeout/stderr capture inside the scanner process and remote lifecycle
+polish remain open.
 
 **Implement:**
 1. DONE phase 1: externalize `storage_uri` from `inline:` to local object storage for large objects.
@@ -1102,10 +1104,10 @@ DAST timeout/skip/parser-error receipts and remote lifecycle polish remain open.
    `testssl.sh`, Playwright/browser proof, AI Gate probe execution, and Model Intake artifact
    fetch/signature verification. The registry/record schema exists, and worker finalization now emits
    internal `ai_gate_probe_executor` / `model_intake_signature_verifier` receipts plus parsed-result
-   DAST module receipts for Nuclei, Dalfox, sqlmap, nmap, SSLyze, and testssl, plus ASM recon and
-   endpoint-batch executor receipts. Remaining work is per-subprocess DAST receipts for
-   timeout/skip/parser-error paths and coverage for httpx/katana/subfinder/ffuf/Playwright where the
-   result currently lacks enough module execution metadata.
+   DAST module receipts for Nuclei, Dalfox, sqlmap, nmap, SSLyze, and testssl, passive/lifecycle
+   DAST receipts for httpx, katana, subfinder, ffuf, and Playwright/browser discovery, plus ASM recon
+   and endpoint-batch executor receipts. Remaining work is deeper per-subprocess DAST receipts for
+   exact timeout/exit/stderr/parser-error paths inside the scanner process.
 5. DONE phase 1: tool receipts include tool version, adapter version, command hash, redacted argv, worker
    build/container image, target scope, scope receipt, policy profile, approval id, timing, exit code,
    timeout, stdout/stderr artifact refs, parsed evidence refs, parser status, and redaction summary.
@@ -1118,9 +1120,9 @@ DAST timeout/skip/parser-error receipts and remote lifecycle polish remain open.
 8. The near-term registry is a **Tool Receipt Registry**, not an offensive-tool expansion. Do not add
    new exploit tooling until existing DAST, ASM, AI Gate, and Model Intake tools produce receipts for
    success, failure, timeout, skip, and parser-error paths. Internal AI Gate/Model Intake worker
-   receipts, parsed-result DAST module receipts, and ASM executor receipts now cover success/failure
-   plus ASM timeout/skip/partial states; DAST per-executor timeout/skip/parser-error receipt coverage
-   remains open.
+   receipts, parsed-result/passive DAST module receipts, and ASM executor receipts now cover
+   success/failure/recorded/skipped states plus ASM timeout/skip/partial states; exact scanner
+   subprocess timeout/skip/parser-error receipt coverage remains open.
 9. DONE phase 1: add a release/test gate equivalent to T3MP3ST's "no phantom tools": every claimed
    adapter must be `installed`, `runnable`, `waived`, or `catalog_only`, and UI/report copy must not
    imply a missing adapter ran. The `describe_tools`/`/arsenal/tools` response carries

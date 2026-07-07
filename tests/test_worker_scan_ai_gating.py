@@ -737,6 +737,62 @@ def test_external_dast_tool_specs_never_stamp_failed_or_timed_out_tools_success(
     assert by_tool["sslyze"]["status"] == "failed"
 
 
+def test_external_dast_tool_specs_include_passive_discovery_receipts():
+    specs = worker._external_dast_tool_specs(
+        {
+            "discovery": {
+                "httpx": [{"url": "https://app.example.com", "status_code": 200, "tech": ["nginx"]}],
+                "katana_sample": ["https://app.example.com/api/products"],
+                "browser_api_endpoints": [{"url": "https://app.example.com/api/me"}],
+                "browser_crawl": {"pages_visited": 3, "depth_reached": 1},
+                "smart_discovery": {
+                    "total_urls_discovered": 12,
+                    "total_recursive_paths": 2,
+                },
+            },
+            "subdomain_count": 4,
+            "by_source": {"subfinder": ["a.example.com", "b.example.com"]},
+            "input": {"sources": {"subfinder": True}},
+        },
+        {"scan_type": "smart", "subfinder": True},
+    )
+
+    by_tool = {item["tool_name"]: item for item in specs}
+    assert by_tool["httpx"]["status"] == "success"
+    assert by_tool["httpx"]["parser_status"] == "parsed"
+    assert by_tool["katana"]["status"] == "success"
+    assert by_tool["playwright"]["status"] == "success"
+    assert by_tool["ffuf"]["status"] == "success"
+    assert by_tool["subfinder"]["status"] == "success"
+    assert by_tool["subfinder"]["summary"]["subfinder_rows_count"] == 2
+
+
+def test_external_dast_tool_specs_record_passive_skips_and_partials_honestly():
+    specs = worker._external_dast_tool_specs(
+        {
+            "discovery": {
+                "httpx": [],
+                "katana_sample": [],
+                "summary": {"spa_catch_all": True},
+                "smart_discovery": {"total_urls_discovered": 0, "total_recursive_paths": 0},
+            },
+            "subdomain_count": 0,
+            "by_source": {},
+            "input": {"sources": {"subfinder": False}},
+        },
+        {"scan_type": "quick", "zero_rediscovery": True, "no_browser": True},
+    )
+
+    by_tool = {item["tool_name"]: item for item in specs}
+    assert by_tool["httpx"]["status"] == "recorded"
+    assert by_tool["httpx"]["parser_status"] == "partial"
+    assert by_tool["katana"]["status"] == "skipped"
+    assert by_tool["katana"]["parser_status"] == "skipped"
+    assert by_tool["playwright"]["status"] == "skipped"
+    assert by_tool["ffuf"]["status"] == "skipped"
+    assert by_tool["subfinder"]["status"] == "skipped"
+
+
 def test_external_dast_tool_receipts_are_recorded_and_attached():
     receipt_id = uuid.uuid4()
     conn = _FakeReceiptConnection(receipt_id)

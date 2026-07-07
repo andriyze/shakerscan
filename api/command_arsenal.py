@@ -1682,7 +1682,7 @@ def describe_contracts() -> dict[str, Any]:
             "description": "Execution receipt for existing tools/executors before adding new offensive tooling.",
             "required": ["tool_name", "adapter_version", "command_hash", "scope_receipt_id", "status", "parser_status"],
             "fields": {
-                "tool_name": "nuclei|sqlmap|dalfox|playwright|ai_gate_probe_executor|model_intake_signature_verifier",
+                "tool_name": "httpx|katana|subfinder|ffuf|nuclei|sqlmap|dalfox|playwright|ai_gate_probe_executor|model_intake_signature_verifier",
                 "tool_version": "string|null",
                 "adapter_version": ARSENAL_SCHEMA_VERSION,
                 "command_hash": "sha256 of redacted argv/config",
