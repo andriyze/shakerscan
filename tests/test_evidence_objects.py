@@ -69,6 +69,77 @@ def test_large_evidence_object_externalizes_to_local_store(monkeypatch, tmp_path
     assert "x" * 200 in hydrated["content"]
 
 
+def test_large_evidence_object_externalizes_to_s3_compatible_store(monkeypatch, tmp_path):
+    monkeypatch.setenv("EVIDENCE_INLINE_MAX_BYTES", "16")
+    monkeypatch.setenv("EVIDENCE_STORAGE_BACKEND", "s3")
+    monkeypatch.setenv("EVIDENCE_S3_BUCKET", "shakerscan-evidence")
+    monkeypatch.setenv("EVIDENCE_S3_ENDPOINT_URL", "http://minio.local:9000")
+    monkeypatch.setenv("EVIDENCE_S3_ACCESS_KEY_ID", "test-key")
+    monkeypatch.setenv("EVIDENCE_S3_SECRET_ACCESS_KEY", "test-secret")
+    monkeypatch.setenv("EVIDENCE_S3_REGION", "us-test-1")
+    stored_by_url: dict[str, bytes] = {}
+
+    class _Response:
+        def __init__(self, body: bytes = b""):
+            self._body = body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return self._body
+
+    def fake_urlopen(request, timeout=0):
+        headers = {k.lower(): v for k, v in request.headers.items()}
+        assert "authorization" in headers
+        assert "x-amz-date" in headers
+        assert timeout == 15
+        if request.get_method() == "PUT":
+            stored_by_url[request.full_url] = request.data
+            return _Response()
+        if request.get_method() == "GET":
+            return _Response(stored_by_url[request.full_url])
+        raise AssertionError(f"unexpected method {request.get_method()}")
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    stored = worker.store_evidence_content({"blob": "x" * 200}, results_dir=tmp_path, inline_max_bytes=16)
+
+    assert stored["storage_uri"].startswith("s3:evidence_objects/shakerscan-evidence/evidence-objects/")
+    assert stored["content"] is None
+    assert stored["remote"] is True
+    hydrated = hydrate_evidence_content(
+        {
+            "content_sha256": stored["content_sha256"],
+            "storage_uri": stored["storage_uri"],
+            "content": None,
+        },
+        results_dir=tmp_path,
+    )
+    assert hydrated["storage_status"] == "remote"
+    assert hydrated["storage_integrity"] == "verified"
+    assert "x" * 200 in hydrated["content"]
+
+
+def test_s3_storage_falls_back_to_local_store_when_remote_fails(monkeypatch, tmp_path):
+    monkeypatch.setenv("EVIDENCE_INLINE_MAX_BYTES", "16")
+    monkeypatch.setenv("EVIDENCE_STORAGE_BACKEND", "s3")
+    monkeypatch.setenv("EVIDENCE_S3_BUCKET", "shakerscan-evidence")
+    monkeypatch.setenv("EVIDENCE_S3_ENDPOINT_URL", "http://minio.local:9000")
+
+    def fake_urlopen(*args, **kwargs):
+        raise OSError("remote down")
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    stored = worker.store_evidence_content({"blob": "x" * 200}, results_dir=tmp_path, inline_max_bytes=16)
+
+    assert stored["storage_uri"].startswith("local:evidence_objects/")
+    assert stored["remote_error"]
+    assert local_evidence_path(tmp_path, stored["storage_uri"]).exists()
+
+
 def test_evidence_object_retention_standard_without_sensitive_fields():
     conn = _CaptureConn()
     asyncio.run(worker._persist_evidence_object(conn, "s", "f", {"tool": "headers"}, {"k": "v"}))

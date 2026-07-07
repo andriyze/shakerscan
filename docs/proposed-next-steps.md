@@ -1037,15 +1037,21 @@ rows for the internal AI Gate probe executor, Model Intake signature verifier, a
 output from Nuclei, Dalfox, sqlmap, nmap, SSLyze, and testssl on success/failure, stamping returned
 receipt ids into scan results without changing findings or proof state. Continuous ASM recon and
 endpoint-batch executors now emit ASM-specific receipts for success, partial/missing telemetry,
-timeout, auth-missing skip, cancellation-before-start, and failure states. Per-subprocess DAST
-timeout/skip/parser-error receipts and remote S3/MinIO-style object storage are still open.
+timeout, auth-missing skip, cancellation-before-start, and failure states. Oversized evidence can now
+externalize to an opt-in S3/MinIO-compatible object store via `EVIDENCE_STORAGE_BACKEND=s3`,
+`EVIDENCE_S3_BUCKET`, and optional endpoint/region/credential settings; API reads hydrate remote
+objects through signed GET and verify their recorded SHA-256 before returning content. Per-subprocess
+DAST timeout/skip/parser-error receipts and remote lifecycle polish remain open.
 
 **Implement:**
 1. DONE phase 1: externalize `storage_uri` from `inline:` to local object storage for large objects.
    `api/evidence_storage.py` stores oversized redacted evidence by content hash under
    `RESULTS_DIR/evidence-objects`, returns `local:evidence_objects/...`, and `GET /evidence/{id}` /
-   `GET /findings/{id}/evidence` hydrate and integrity-check local content. Remote S3/MinIO backends
-   remain open.
+   `GET /findings/{id}/evidence` hydrate and integrity-check local content. DONE phase 2:
+   `EVIDENCE_STORAGE_BACKEND=s3` stores oversized payloads in S3/MinIO-compatible object storage
+   using content-addressed `s3:evidence_objects/...` URIs and SigV4 PUT/GET without adding a runtime
+   dependency. Remote reads return content only after the downloaded bytes match `content_sha256`;
+   failed remote writes fall back to the local store so scan finalization does not lose evidence.
 2. DONE phase 1: add a retention sweeper, export manifest format, and content-free bundle descriptor. `GET /evidence/export-manifest`
    returns a content-free manifest with object ids, hashes, storage URIs, retention classes, storage
    status/integrity, and a manifest hash. `POST /evidence/retention/sweep` is dry-run by default,
