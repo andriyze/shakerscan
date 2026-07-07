@@ -2396,6 +2396,10 @@ def test_execute_authz_replay_plan_records_observations_without_findings(monkeyp
         str(evidence_two_id),
     ]
     assert result["command_result"]["result_json"]["authz_replay"]["violation_count"] == 1
+    proof_bundle = result["command_result"]["result_json"]["authz_replay"]["proof_bundle"]
+    assert proof_bundle["differential_observed"] is True
+    assert proof_bundle["authenticated_principal_count"] == 2
+    assert proof_bundle["finding_created_automatically"] is False
 
 
 def test_execute_authz_replay_plan_treats_redirect_denial_as_non_violation(monkeypatch):
@@ -2503,6 +2507,9 @@ def test_execute_authz_replay_plan_treats_redirect_denial_as_non_violation(monke
     assert result["violation_count"] == 0
     assert result["observations"][1]["observed_status"] == 302
     assert result["observations"][1]["violation_observed"] is False
+    proof_bundle = result["command_result"]["result_json"]["authz_replay"]["proof_bundle"]
+    assert proof_bundle["differential_observed"] is False
+    assert proof_bundle["denial_like_redirects"][0]["status"] == 302
 
 
 def test_execute_authz_replay_plan_requires_authenticated_principals(monkeypatch):
@@ -2596,6 +2603,9 @@ def test_execute_authz_replay_plan_requires_authenticated_principals(monkeypatch
     assert result["violation_count"] == 0
     assert result["observations"][1]["inconclusive_reason"] == "missing_authenticated_principal"
     assert result["tool_receipt_id"]
+    proof_bundle = result["command_result"]["result_json"]["authz_replay"]["proof_bundle"]
+    assert proof_bundle["differential_observed"] is False
+    assert proof_bundle["authenticated_principal_count"] == 0
 
 
 def test_promote_authz_replay_finding_requires_violation_and_links_evidence(monkeypatch):
@@ -2611,6 +2621,12 @@ def test_promote_authz_replay_finding_requires_violation_and_links_evidence(monk
         "violation_count": 1,
         "tool_receipt_id": str(tool_receipt_id),
         "evidence_instance_ids": [str(item) for item in evidence_ids],
+        "proof_bundle": {
+            "bundle_type": "authz_replay_proof_bundle",
+            "differential_observed": True,
+            "authenticated_principal_count": 2,
+            "finding_created_automatically": False,
+        },
         "observations": [
             {
                 "method": "GET",
@@ -2728,6 +2744,7 @@ def test_promote_authz_replay_finding_requires_violation_and_links_evidence(monk
     assert json.loads(captured["finding_args"][8])["status"] == 200
     finding_evidence = json.loads(captured["finding_args"][6])
     assert finding_evidence["authz_replay"]["templated_path"] == "/api/orders/{id}"
+    assert finding_evidence["authz_replay"]["proof_bundle"]["differential_observed"] is True
     assert captured["approval_validation"][0] == str(approval_id)
     assert captured["approval_validation"][1]["target_id"] == target_id
     assert captured["approval_validation"][1]["target_url"] == "https://app.example.com"
@@ -2847,6 +2864,8 @@ def test_refuter_work_summary_triggers_weak_ai_and_model_claims():
     weak_id = uuid.uuid4()
     ai_id = uuid.uuid4()
     model_id = uuid.uuid4()
+    parser_id = uuid.uuid4()
+    deployment_id = uuid.uuid4()
     findings = [
         {
             "id": weak_id,
@@ -2880,6 +2899,26 @@ def test_refuter_work_summary_triggers_weak_ai_and_model_claims():
             "evidence": json.dumps({"license": "unknown"}),
         },
         {
+            "id": parser_id,
+            "status": "active",
+            "severity": "medium",
+            "title": "Parser-promoted weak claim",
+            "source": "scan",
+            "tool": "nuclei",
+            "last_verification_verdict": None,
+            "evidence": json.dumps({"parser_status": "partial", "parser_promoted": True}),
+        },
+        {
+            "id": deployment_id,
+            "status": "active",
+            "severity": "medium",
+            "title": "Deployment gate blocker without verified proof",
+            "source": "scan",
+            "tool": "smart_authz",
+            "last_verification_verdict": None,
+            "evidence": json.dumps({"deployment_gate_blocker": True}),
+        },
+        {
             "id": uuid.uuid4(),
             "status": "active",
             "severity": "high",
@@ -2896,26 +2935,34 @@ def test_refuter_work_summary_triggers_weak_ai_and_model_claims():
 
     assert summary["execution_enabled"] is False
     assert summary["findings_updated"] == 0
-    assert summary["summary"]["candidate_count"] == 3
-    assert summary["summary"]["unreviewed_count"] == 2
+    assert summary["summary"]["candidate_count"] == 5
+    assert summary["summary"]["unreviewed_count"] == 4
     assert summary["summary"]["trigger_counts"]["critical_high_weak_or_suspected_proof"] == 1
     assert summary["summary"]["trigger_counts"]["ai_gate_semantic_or_weak_deterministic_claim"] == 1
     assert summary["summary"]["trigger_counts"]["model_intake_metadata_without_trust_anchor"] == 1
+    assert summary["summary"]["trigger_counts"]["parser_promoted_or_degraded_output"] == 1
+    assert summary["summary"]["trigger_counts"]["deployment_gating_claim_without_verified_proof"] == 1
     by_id = {item["subject_id"]: item for item in summary["candidates"]}
     assert by_id[str(weak_id)]["already_reviewed"] is True
     assert by_id[str(ai_id)]["recommended_review"]["verdict_basis"] == "signal_only"
     assert by_id[str(model_id)]["trigger_type"] == "model_intake_trust_claim"
+    assert by_id[str(parser_id)]["trigger_type"] == "parser_output_claim"
+    assert by_id[str(deployment_id)]["trigger_type"] == "deployment_gate_claim"
     weak_plan = by_id[str(weak_id)]["automation_plan"]
     assert weak_plan["execution_enabled"] is False
     assert weak_plan["status"] == "planned_not_executed"
     assert weak_plan["record_only_until_executed"] is True
     assert {step["command"] for step in weak_plan["steps"]} >= {"refuter_review.record", "finding.retest"}
     assert weak_plan["minimal_reproducer"]["available"] is True
+    assert "counterevidence_bundle" in weak_plan
+    assert "verification_id_after_replay" in weak_plan["counterevidence_bundle"]["required_evidence_refs"]
     assert "secret-token" not in json.dumps(weak_plan)
     ai_plan = by_id[str(ai_id)]["automation_plan"]
     assert "ai_gate.replay_probe" in {step["command"] for step in ai_plan["steps"]}
     model_plan = by_id[str(model_id)]["automation_plan"]
     assert "model_intake.trust_preview" in {step["command"] for step in model_plan["steps"]}
+    parser_plan = by_id[str(parser_id)]["automation_plan"]
+    assert any("parser" in item for item in parser_plan["counterevidence_bundle"]["benign_explanations_to_test"])
 
 
 def test_refuter_queue_from_summary_records_unreviewed_signal_only_reviews():
@@ -5301,6 +5348,75 @@ def test_asm_recommended_campaigns_suggests_family_waves_and_credentials():
 def test_asm_recommended_campaigns_recon_when_empty_and_wait_when_active():
     assert api_module._asm_recommended_campaigns(coverage={"total": 0})[0]["campaign"] == "recon"
     assert api_module._asm_recommended_campaigns(coverage={"total": 9}, active_scans=2)[0]["campaign"] == "wait"
+
+
+def test_source_ingest_hint_maps_authz_fact_to_runtime_hypothesis():
+    target_id = str(uuid.uuid4())
+    req, skipped = api_module._source_hint_to_hypothesis_request(
+        api_module.SourceIngestHint(
+            kind="openapi_operation",
+            method="GET",
+            path="/api/orders/{id}",
+            risk_hints=["idor"],
+            object_keys=["order.id"],
+            roles=["user", "admin"],
+            auth_required=True,
+            confidence=0.72,
+        ),
+        target_id=target_id,
+        source_label="openapi:test",
+        created_by="pytest",
+    )
+
+    assert skipped is None
+    assert req is not None
+    assert req.source == "source_ingest"
+    assert req.family == "bola"
+    assert req.cwe == "CWE-639"
+    assert req.next_test_action["command"] == "asm.improve"
+    assert req.next_test_action["parameters"]["check_family"] == "bola"
+    assert req.next_test_action["parameters"]["exploit_depth"] is True
+    assert req.next_test_action["source_only"] is True
+    assert req.metadata_json["runtime_proof_required"] is True
+    assert req.metadata_json["source_only"] is True
+    assert req.dedupe_dimensions["route"] == "/api/orders/{id}"
+    assert req.dedupe_dimensions["proof_surface"] == "runtime_authz_replay"
+
+
+def test_source_ingest_hint_maps_body_shape_to_mass_assignment_hypothesis():
+    req, skipped = api_module._source_hint_to_hypothesis_request(
+        api_module.SourceIngestHint(
+            kind="backend_route",
+            method="POST",
+            path="/api/users",
+            body_paths=["$.isAdmin"],
+            risk_hints=["mass_assignment"],
+        ),
+        target_id=None,
+        source_label="routes:test",
+        created_by="pytest",
+    )
+
+    assert skipped is None
+    assert req is not None
+    assert req.family == "mass_assignment"
+    assert req.cwe == "CWE-915"
+    assert req.next_test_action["command"] == "hypothesis.plan_campaign"
+    assert "workflow_context" in req.next_test_action["requires"]
+    assert req.metadata_json["runtime_proof_required"] is True
+    assert req.dedupe_dimensions["body_path"] == "$.isAdmin"
+
+
+def test_source_ingest_hint_skips_unbounded_route_hint():
+    req, skipped = api_module._source_hint_to_hypothesis_request(
+        api_module.SourceIngestHint(kind="route", risk_hints=["xss"]),
+        target_id=None,
+        source_label="empty:test",
+        created_by="pytest",
+    )
+
+    assert req is None
+    assert skipped["reason"] == "missing_route_or_path"
 
 
 # ----- approval-receipt validation (security-critical gate) --------------------

@@ -3461,6 +3461,34 @@ class HypothesisRequest(BaseModel):
     created_by: Optional[str] = None
 
 
+class SourceIngestHint(BaseModel):
+    kind: str = Field(default="route", pattern="^(route|endpoint|openapi_operation|graphql_field|package_manifest|frontend_route|backend_route|iac_resource|ai_tool_endpoint)$")
+    method: Optional[str] = Field(default=None, max_length=16)
+    path: Optional[str] = Field(default=None, max_length=500)
+    route: Optional[str] = Field(default=None, max_length=500)
+    operation_id: Optional[str] = Field(default=None, max_length=200)
+    title: Optional[str] = Field(default=None, max_length=200)
+    description: Optional[str] = Field(default=None, max_length=1000)
+    risk_hints: list[str] = Field(default_factory=list, max_length=20)
+    parameters: list[str] = Field(default_factory=list, max_length=50)
+    body_paths: list[str] = Field(default_factory=list, max_length=50)
+    object_keys: list[str] = Field(default_factory=list, max_length=20)
+    tenant_keys: list[str] = Field(default_factory=list, max_length=20)
+    roles: list[str] = Field(default_factory=list, max_length=20)
+    auth_required: Optional[bool] = None
+    cwe: Optional[str] = Field(default=None, max_length=40)
+    severity_guess: Optional[str] = Field(default=None, pattern="^(critical|high|medium|low|info)$")
+    confidence: float = Field(default=0.35, ge=0, le=1)
+    metadata_json: dict[str, Any] = Field(default_factory=dict)
+
+
+class SourceIngestRequest(BaseModel):
+    target_id: Optional[str] = None
+    source_label: str = Field(default="operator_source_ingest", max_length=120)
+    hints: list[SourceIngestHint] = Field(default_factory=list, min_length=1, max_length=50)
+    created_by: Optional[str] = None
+
+
 class CampaignRequest(BaseModel):
     objective: str = Field(min_length=1, max_length=500)
     campaign_type: str = Field(pattern="^(continuous_asm|authenticated_dast|api_authz|ai_red_team|model_intake|benchmark|incident_retest|source_informed_dast|finding_retest|focused_family)$")
@@ -14363,6 +14391,235 @@ def _canonical_hypothesis_request(req: HypothesisRequest) -> dict[str, Any]:
     }
 
 
+SOURCE_INGEST_VERSION = "source_ingest_hypothesis_v1"
+
+
+def _source_hint_route(hint: dict[str, Any]) -> str | None:
+    route = _normalize_hypothesis_dedupe_value(hint.get("route") or hint.get("path"))
+    if not route:
+        return None
+    if route.startswith(("http://", "https://")):
+        try:
+            parsed = urlparse(route)
+            route = parsed.path or "/"
+        except Exception:
+            pass
+    if not route.startswith("/") and str(hint.get("kind") or "") not in {"package_manifest", "iac_resource"}:
+        route = "/" + route
+    return route
+
+
+def _source_hint_family_and_action(
+    hint: dict[str, Any],
+    *,
+    target_id: str | None,
+) -> tuple[str, str | None, str, dict[str, Any], list[str]]:
+    risks = {str(item or "").strip().lower().replace("-", "_").replace(" ", "_") for item in hint.get("risk_hints") or []}
+    kind = str(hint.get("kind") or "route").strip().lower()
+    method = str(hint.get("method") or "GET").strip().upper()
+    route = _source_hint_route(hint)
+    object_keys = _clean_string_list(hint.get("object_keys"), max_items=20)
+    tenant_keys = _clean_string_list(hint.get("tenant_keys"), max_items=20)
+    body_paths = _clean_string_list(hint.get("body_paths"), max_items=50)
+    params = _clean_string_list(hint.get("parameters"), max_items=50)
+    cwe = str(hint.get("cwe") or "").strip() or None
+    requires: list[str] = []
+
+    if risks & {"bola", "idor", "bfla", "bopla", "access_control", "object_auth", "tenant_boundary"} or object_keys or tenant_keys:
+        family = "bola" if (object_keys or risks & {"bola", "idor", "object_auth"}) else "auth"
+        cwe = cwe or ("CWE-639" if family == "bola" else "CWE-285")
+        requires.extend(["primary_auth", "second_user_auth"] if family == "bola" else ["primary_auth"])
+        action = {
+            "command": "asm.improve",
+            "parameters": {
+                "target_id": target_id,
+                "check_family": "bola" if family == "bola" else "auth",
+                "exploit_depth": family == "bola",
+                "endpoint_hint": {"method": method, "route": route},
+            },
+            "requires": requires,
+            "proof_surface": "runtime_authz_replay",
+            "source_only": True,
+        }
+        return family, cwe, "Source/spec hint suggests an authorization boundary that needs runtime replay.", action, requires
+
+    if risks & {"sqli", "sql_injection", "nosql", "nosql_injection"}:
+        action = {
+            "command": "asm.improve",
+            "parameters": {"target_id": target_id, "check_family": "sqli", "endpoint_hint": {"method": method, "route": route}},
+            "requires": [],
+            "proof_surface": "runtime_probe",
+            "source_only": True,
+        }
+        return "sqli", cwe or "CWE-89", "Source/spec hint suggests injectable request data that needs runtime SQLi/NoSQL proof.", action, []
+
+    if risks & {"xss", "stored_xss", "reflected_xss", "dom_xss"}:
+        action = {
+            "command": "asm.improve",
+            "parameters": {"target_id": target_id, "check_family": "xss", "endpoint_hint": {"method": method, "route": route}},
+            "requires": [],
+            "proof_surface": "browser_runtime_probe",
+            "source_only": True,
+        }
+        return "xss", cwe or "CWE-79", "Source/spec hint suggests reflected/stored/client-side data flow that needs browser proof.", action, []
+
+    if risks & {"ssrf", "server_side_request_forgery"}:
+        action = {
+            "command": "scan.focused_family",
+            "parameters": {"target_id": target_id, "family": "ssrf", "endpoint_hint": {"method": method, "route": route}},
+            "requires": ["lab_or_deep_intent", "approval_receipt"],
+            "proof_surface": "runtime_callback_or_response",
+            "source_only": True,
+        }
+        return "ssrf", cwe or "CWE-918", "Source/spec hint suggests outbound fetch behavior; proof requires a gated runtime callback/response check.", action, ["lab_or_deep_intent", "approval_receipt"]
+
+    if risks & {"lfi", "path_traversal", "file_read", "file_path"}:
+        action = {
+            "command": "scan.focused_family",
+            "parameters": {"target_id": target_id, "family": "lfi", "endpoint_hint": {"method": method, "route": route}},
+            "requires": ["lab_or_deep_intent", "approval_receipt"],
+            "proof_surface": "runtime_file_evidence",
+            "source_only": True,
+        }
+        return "lfi", cwe or "CWE-22", "Source/spec hint suggests file path handling that needs gated runtime proof.", action, ["lab_or_deep_intent", "approval_receipt"]
+
+    if risks & {"mass_assignment", "overposting"} or body_paths:
+        action = {
+            "command": "hypothesis.plan_campaign",
+            "parameters": {"target_id": target_id, "family": "mass_assignment", "endpoint_hint": {"method": method, "route": route}},
+            "requires": ["workflow_context", "auth_context"],
+            "proof_surface": "runtime_workflow_state_change",
+            "source_only": True,
+        }
+        return "mass_assignment", cwe or "CWE-915", "Source/spec hint suggests writable body fields that need workflow proof.", action, ["workflow_context", "auth_context"]
+
+    if risks & {"dangerous_upload", "upload", "unrestricted_file_upload"}:
+        action = {
+            "command": "hypothesis.plan_campaign",
+            "parameters": {"target_id": target_id, "family": "dangerous_upload", "endpoint_hint": {"method": method, "route": route}},
+            "requires": ["lab_or_deep_intent", "auth_context"],
+            "proof_surface": "runtime_upload_handling",
+            "source_only": True,
+        }
+        return "dangerous_upload", cwe or "CWE-434", "Source/spec hint suggests upload handling that needs gated workflow proof.", action, ["lab_or_deep_intent", "auth_context"]
+
+    if kind == "ai_tool_endpoint" or risks & {"ai_tool", "agent_tool", "rag", "mcp"}:
+        action = {
+            "command": "ai_gate.scan",
+            "parameters": {"target_id": target_id, "target_hint": {"method": method, "route": route}, "probe_pack": "shaker-agent-abuse"},
+            "requires": ["ai_target_registration", "production_confirmation_when_applicable"],
+            "proof_surface": "ai_gate_probe_transcript",
+            "source_only": True,
+        }
+        return "ai_tool_boundary", cwe or "CWE-284", "Source/spec hint suggests an AI/tool boundary that needs AI Gate replay.", action, ["ai_target_registration"]
+
+    if risks & {"secret", "credential", "token", "private_key"}:
+        action = {
+            "command": "hypothesis.plan_campaign",
+            "parameters": {"target_id": target_id, "family": "secret_exposure", "source_hint_kind": kind},
+            "requires": ["redacted_source_evidence", "runtime_or_artifact_confirmation"],
+            "proof_surface": "redacted_runtime_or_artifact_evidence",
+            "source_only": True,
+        }
+        return "secret_exposure", cwe or "CWE-798", "Source/spec hint suggests secret exposure; runtime/artifact confirmation is still required.", action, ["redacted_source_evidence"]
+
+    action = {
+        "command": "hypothesis.plan_campaign",
+        "parameters": {"target_id": target_id, "family": "source_informed_review", "endpoint_hint": {"method": method, "route": route}},
+        "requires": ["manual_triage"],
+        "proof_surface": "runtime_proof_required",
+        "source_only": True,
+    }
+    return "source_informed_review", cwe, "Source/spec hint requires bounded manual or planner triage before runtime testing.", action, ["manual_triage"]
+
+
+def _source_hint_to_hypothesis_request(
+    hint: SourceIngestHint | dict[str, Any],
+    *,
+    target_id: str | None,
+    source_label: str,
+    created_by: str | None,
+) -> tuple[HypothesisRequest | None, dict[str, Any] | None]:
+    hint_payload = hint.model_dump(mode="json") if isinstance(hint, SourceIngestHint) else dict(hint or {})
+    route = _source_hint_route(hint_payload)
+    kind = str(hint_payload.get("kind") or "route").strip().lower()
+    if kind not in {"package_manifest", "iac_resource"} and not route:
+        return None, {"reason": "missing_route_or_path", "hint_kind": kind, "operation_id": hint_payload.get("operation_id")}
+
+    try:
+        family, cwe, rationale, action, requires = _source_hint_family_and_action(hint_payload, target_id=target_id)
+    except Exception as exc:
+        return None, {"reason": "hint_mapping_failed", "error": str(exc), "hint_kind": kind}
+
+    method = str(hint_payload.get("method") or "GET").strip().upper()
+    parameters = _clean_string_list(hint_payload.get("parameters"), max_items=50)
+    body_paths = _clean_string_list(hint_payload.get("body_paths"), max_items=50)
+    object_keys = _clean_string_list(hint_payload.get("object_keys"), max_items=20)
+    tenant_keys = _clean_string_list(hint_payload.get("tenant_keys"), max_items=20)
+    parameter_path = parameters[0] if parameters else None
+    body_path = body_paths[0] if body_paths else None
+    proof_surface = str(action.get("proof_surface") or "runtime_proof_required")
+    dedupe_dimensions = {
+        "method": method,
+        "route": route or kind,
+        "object_key": object_keys[0] if object_keys else None,
+        "tenant": tenant_keys[0] if tenant_keys else None,
+        "parameter_path": parameter_path,
+        "body_path": body_path,
+        "proof_surface": proof_surface,
+    }
+    dedupe_dimensions = {key: value for key, value in dedupe_dimensions.items() if value}
+    metadata = _redact_agent_payload({
+        "source_ingest_version": SOURCE_INGEST_VERSION,
+        "source_label": source_label,
+        "source_only": True,
+        "runtime_proof_required": True,
+        "hint_kind": kind,
+        "operation_id": hint_payload.get("operation_id"),
+        "risk_hints": _clean_string_list(hint_payload.get("risk_hints"), max_items=20),
+        "parameters": parameters,
+        "body_paths": body_paths,
+        "object_keys": object_keys,
+        "tenant_keys": tenant_keys,
+        "roles": _clean_string_list(hint_payload.get("roles"), max_items=20),
+        "auth_required": hint_payload.get("auth_required"),
+        "rationale": rationale,
+        "requires": requires,
+        "dedupe_dimensions": dedupe_dimensions,
+        "hint_metadata": hint_payload.get("metadata_json") or {},
+    })
+    title = (
+        str(hint_payload.get("title") or "").strip()
+        or f"Source hint: {family.replace('_', ' ')} on {method} {route or kind}"
+    )
+    description = (
+        str(hint_payload.get("description") or "").strip()
+        or f"{rationale} Source/spec facts are planning context only and do not satisfy runtime proof."
+    )
+    return HypothesisRequest(
+        source="source_ingest",
+        family=family,
+        dedupe_key="source-ingest-placeholder",
+        dedupe_dimensions=dedupe_dimensions,
+        target_id=target_id,
+        cwe=cwe,
+        title=title,
+        description=description,
+        severity_guess=hint_payload.get("severity_guess") or ("high" if family in {"bola", "ssrf", "lfi", "dangerous_upload"} else "medium"),
+        confidence=float(hint_payload.get("confidence") if hint_payload.get("confidence") is not None else 0.35),
+        next_test_action=action,
+        endorsement={
+            "source": "source_ingest",
+            "source_label": source_label,
+            "created_by": created_by,
+            "confidence": hint_payload.get("confidence"),
+            "runtime_proof_required": True,
+        },
+        metadata_json=metadata,
+        created_by=created_by,
+    ), None
+
+
 def _canonical_hypothesis_signal(req: HypothesisSignalRequest) -> dict[str, Any]:
     payload = req.model_dump(mode="json")
     signal = {
@@ -14501,6 +14758,23 @@ def _refuter_automation_plan_for_finding(
             "counterevidence_goal": "Show the original claim used the wrong principal, stale object, missing tenant boundary, or unauthenticated context.",
         })
 
+    benign_explanations = [
+        "target behavior changed since the original observation",
+        "the original evidence was partial, parser-only, semantic-only, or missing a replayable request",
+    ]
+    if any("auth" in reason or "principal" in reason or "bola" in reason for reason in reasons):
+        benign_explanations.extend([
+            "the replay used the wrong or unauthenticated principal",
+            "the object identifier was public, shared, stale, or not owned by the asserted principal",
+        ])
+    if any("parser" in reason for reason in reasons):
+        benign_explanations.extend([
+            "the parser promoted severity from incomplete output",
+            "the tool receipt shows timeout, parser failure, or missing proof-critical stdout/stderr",
+        ])
+    if any("deployment" in reason for reason in reasons):
+        benign_explanations.append("a deployment gate counted a weak or exception-covered claim as blocking evidence")
+
     return {
         "status": "planned_not_executed",
         "execution_enabled": False,
@@ -14520,6 +14794,26 @@ def _refuter_automation_plan_for_finding(
             "url_sample": str(url_hint)[:300] if url_hint else None,
         }),
         "steps": steps[:5],
+        "counterevidence_bundle": {
+            "review_questions": [
+                "What exact proof state, request, response, principal, and object made this claim security-relevant?",
+                "Can the smallest deterministic replay reproduce the same impact now?",
+                "Is there parser/protocol, cryptographic, or human-approved-review evidence strong enough for a verdict?",
+            ],
+            "benign_explanations_to_test": benign_explanations[:8],
+            "required_evidence_refs": [
+                "finding_id",
+                "evidence_object_id_or_instance_id",
+                "tool_receipt_id_when_parser_or_external_tool_output_is_involved",
+                "verification_id_after_replay",
+            ],
+            "verdict_paths": {
+                "supported": "deterministic replay or cryptographic/parser evidence reproduces the claim",
+                "weakened": "replay is blocked, stale, partial, or no longer demonstrates the original impact",
+                "refuted": "deterministic replay shows false positive or benign behavior",
+                "inconclusive": "proof-critical evidence is missing or ambiguous",
+            },
+        },
         "counterevidence_schema": {
             "observed_behavior": "fixed|blocked|non_reproducible|benign_explanation|still_vulnerable|inconclusive",
             "basis": "signal_only|deterministic_replay|cryptographic|parser_protocol|human_approved_review",
@@ -14570,6 +14864,31 @@ def _finding_refuter_trigger(finding: dict[str, Any]) -> dict[str, Any] | None:
         checksum_verified = bool(evidence.get("checksum_verified") or evidence.get("sha256_verified"))
         if not (signature_verified or checksum_verified):
             reasons.append("model_intake_metadata_without_trust_anchor")
+    parser_status = str(
+        payload.get("parser_status")
+        or evidence.get("parser_status")
+        or evidence.get("tool_parser_status")
+        or ""
+    ).lower()
+    parser_promoted = bool(
+        evidence.get("parser_promoted")
+        or evidence.get("promoted_by_parser")
+        or payload.get("promoted_by_parser")
+    )
+    if parser_promoted or parser_status in {"partial", "failed", "parser_error"}:
+        if trigger_type == "finding":
+            trigger_type = "parser_output_claim"
+        reasons.append("parser_promoted_or_degraded_output")
+    deployment_gating = bool(
+        payload.get("blocks_deployment")
+        or evidence.get("blocks_deployment")
+        or evidence.get("deployment_gate_blocker")
+        or evidence.get("deployment_decision_blocker")
+    )
+    if deployment_gating and proof_state != "verified":
+        if trigger_type == "finding":
+            trigger_type = "deployment_gate_claim"
+        reasons.append("deployment_gating_claim_without_verified_proof")
     if not reasons:
         return None
 
@@ -16861,6 +17180,68 @@ def _authz_redacted_request_response_ref(observation: dict[str, Any]) -> dict[st
     }
 
 
+def _authz_replay_proof_bundle(
+    replay_plan: dict[str, Any],
+    observations: Sequence[dict[str, Any]],
+) -> dict[str, Any]:
+    allowed_access = []
+    violations = []
+    denial_like_redirects = []
+    authenticated_principals: set[str] = set()
+    for observation in observations:
+        principal = str(observation.get("principal_auth_state") or observation.get("principal_label") or "").strip()
+        if observation.get("authenticated_user") and principal:
+            authenticated_principals.add(principal)
+        expected = str(observation.get("expected_access") or "").lower()
+        status = observation.get("observed_status")
+        if expected == "allow" and observation.get("request_success") and observation.get("authenticated_user") and _authz_status_grants_access(status):
+            allowed_access.append({
+                "principal": principal or None,
+                "method": observation.get("method"),
+                "path": observation.get("path"),
+                "status": status,
+            })
+        if _authz_observation_is_violation(observation):
+            violations.append({
+                "principal": principal or None,
+                "method": observation.get("method"),
+                "path": observation.get("path"),
+                "status": status,
+                "expected_access": observation.get("expected_access"),
+            })
+        try:
+            status_int = int(status)
+        except (TypeError, ValueError):
+            status_int = 0
+        if expected in {"deny", "requires_role"} and 300 <= status_int < 400:
+            denial_like_redirects.append({
+                "principal": principal or None,
+                "method": observation.get("method"),
+                "path": observation.get("path"),
+                "status": status_int,
+            })
+    violation_principals = {str(item.get("principal") or "") for item in violations if item.get("principal")}
+    allow_principals = {str(item.get("principal") or "") for item in allowed_access if item.get("principal")}
+    differential_observed = bool(violations and allowed_access and (violation_principals | allow_principals) and len(authenticated_principals) >= 2)
+    return _redact_agent_payload({
+        "bundle_type": "authz_replay_proof_bundle",
+        "plan_mode": replay_plan.get("mode"),
+        "method": replay_plan.get("method"),
+        "path": replay_plan.get("path"),
+        "object_key": replay_plan.get("object_key"),
+        "observation_count": len(observations),
+        "authenticated_principal_count": len(authenticated_principals),
+        "authenticated_principals": sorted(authenticated_principals)[:10],
+        "allowed_access_observations": allowed_access[:10],
+        "violation_observations": violations[:10],
+        "denial_like_redirects": denial_like_redirects[:10],
+        "differential_observed": differential_observed,
+        "proof_state_hint": "differential_observed" if differential_observed else "inconclusive_or_suspected",
+        "promotion_requires_explicit_operator_action": True,
+        "finding_created_automatically": False,
+    })
+
+
 def _authz_template_replay_path(path: Any) -> str:
     raw = str(path or "").strip()
     if not raw:
@@ -16942,6 +17323,7 @@ async def _execute_authz_replay_plan(
             }
             for item in expected_access[:10]
         ]
+        proof_bundle = _authz_replay_proof_bundle(replay_plan, observations)
         tool_receipt_result = await _record_tool_receipt(conn, ToolReceiptRequest(
             tool_name="authz.replay_plan",
             adapter_version="2026-07-07.v1",
@@ -16961,6 +17343,7 @@ async def _execute_authz_replay_plan(
                 "missing_authenticated_principals": missing_principals,
                 "authenticated_principal_count": len(authenticated_users),
                 "required_principal_count": len(expected_principals),
+                "proof_bundle": proof_bundle,
             },
             created_by=created_by,
         ))
@@ -16971,6 +17354,7 @@ async def _execute_authz_replay_plan(
                 "session_id": session_id,
                 "plan": replay_plan,
                 "observations": observations,
+                "proof_bundle": proof_bundle,
                 "tool_receipt_id": tool_receipt.get("id"),
                 "evidence_instance_ids": [],
                 "mismatch_count": len(observations),
@@ -17084,6 +17468,7 @@ async def _execute_authz_replay_plan(
                 violations.append(observation)
         observation["violation_observed"] = _authz_observation_is_violation(observation)
 
+    proof_bundle = _authz_replay_proof_bundle(replay_plan, observations)
     tool_receipt_result = await _record_tool_receipt(conn, ToolReceiptRequest(
         tool_name="authz.replay_plan",
         adapter_version="2026-07-07.v1",
@@ -17100,6 +17485,7 @@ async def _execute_authz_replay_plan(
             "observation_count": len(observations),
             "mismatch_count": len(mismatches),
             "violation_count": len(violations),
+            "proof_bundle": proof_bundle,
         },
         created_by=created_by,
     ))
@@ -17135,6 +17521,7 @@ async def _execute_authz_replay_plan(
             metadata_json={
                 "source": "authz.replay_plan",
                 "finding_created": False,
+                "proof_bundle": proof_bundle,
             },
             created_by=created_by,
         ))
@@ -17147,6 +17534,7 @@ async def _execute_authz_replay_plan(
             "session_id": session_id,
             "plan": replay_plan,
             "observations": observations,
+            "proof_bundle": proof_bundle,
             "tool_receipt_id": tool_receipt_id,
             "evidence_instance_ids": evidence_instance_ids,
             "mismatch_count": len(mismatches),
@@ -17253,6 +17641,7 @@ async def _promote_authz_replay_finding(
     fingerprint = hashlib.sha256(fingerprint_source.encode()).hexdigest()[:32]
     evidence_instance_ids = _clean_string_list(replay.get("evidence_instance_ids"), max_items=100)
     tool_receipt_id = str(replay.get("tool_receipt_id") or "").strip()
+    proof_bundle = replay.get("proof_bundle") if isinstance(replay.get("proof_bundle"), dict) else _authz_replay_proof_bundle(replay.get("plan") if isinstance(replay.get("plan"), dict) else {}, observations)
     request_response_ref = _authz_redacted_request_response_ref(first)
     request_payload = request_response_ref.get("request") if isinstance(request_response_ref.get("request"), dict) else {}
     response_payload = request_response_ref.get("response") if isinstance(request_response_ref.get("response"), dict) else {}
@@ -17263,6 +17652,7 @@ async def _promote_authz_replay_finding(
             "violation_count": len(violations),
             "templated_path": templated_path or None,
             "violations": violations[:10],
+            "proof_bundle": proof_bundle,
             "request_response_ref": request_response_ref,
             "evidence_instance_ids": evidence_instance_ids,
             "tool_receipt_id": tool_receipt_id or None,
@@ -17817,6 +18207,10 @@ async def _arsenal_dispatch_hypothesis_record(p: dict[str, Any]) -> dict[str, An
     return await arsenal_record_hypothesis(HypothesisRequest(**p))
 
 
+async def _arsenal_dispatch_hypothesis_generate_from_source(p: dict[str, Any]) -> dict[str, Any]:
+    return await arsenal_generate_hypotheses_from_source(SourceIngestRequest(**p))
+
+
 async def _arsenal_dispatch_hypothesis_claim(p: dict[str, Any]) -> dict[str, Any]:
     hypothesis_id = str(p.get("hypothesis_id") or "").strip()
     if not hypothesis_id:
@@ -18216,6 +18610,7 @@ def _arsenal_readonly_adapters() -> dict[str, Any]:
         "hypothesis.list": _arsenal_dispatch_hypothesis_list,
         "hypothesis.situation_report": _arsenal_dispatch_hypothesis_situation_report,
         "hypothesis.record": _arsenal_dispatch_hypothesis_record,
+        "hypothesis.generate_from_source": _arsenal_dispatch_hypothesis_generate_from_source,
         "hypothesis.claim": _arsenal_dispatch_hypothesis_claim,
         "hypothesis.signal": _arsenal_dispatch_hypothesis_signal,
         "hypothesis.plan_campaign": _arsenal_dispatch_hypothesis_plan_campaign,
@@ -18888,6 +19283,50 @@ async def arsenal_record_hypothesis(req: HypothesisRequest):
     """Record or endorse a deduped lead without creating or promoting findings."""
     async with db_pool.acquire() as conn:
         return await _upsert_hypothesis(conn, req)
+
+
+@app.post("/arsenal/hypotheses/source-ingest")
+async def arsenal_generate_hypotheses_from_source(req: SourceIngestRequest):
+    """Record source/spec hints as hypotheses only.
+
+    Source facts can enrich the worklist, but they cannot queue scanner work,
+    create findings, or satisfy runtime proof contracts.
+    """
+    target_uuid = None
+    if req.target_id:
+        try:
+            target_uuid = uuid.UUID(str(req.target_id))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="target_id must be a UUID") from exc
+    created: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    async with db_pool.acquire() as conn:
+        for index, hint in enumerate(req.hints):
+            hypothesis_req, skip = _source_hint_to_hypothesis_request(
+                hint,
+                target_id=str(target_uuid) if target_uuid else None,
+                source_label=req.source_label,
+                created_by=req.created_by,
+            )
+            if skip:
+                skipped.append({"index": index, **skip})
+                continue
+            if not hypothesis_req:
+                skipped.append({"index": index, "reason": "no_hypothesis_generated"})
+                continue
+            result = await _upsert_hypothesis(conn, hypothesis_req)
+            created.append(result["hypothesis"])
+    return {
+        "hypotheses": created,
+        "created_or_endorsed": len(created),
+        "skipped": skipped,
+        "skipped_count": len(skipped),
+        "source_label": req.source_label,
+        "execution_enabled": False,
+        "findings_created": 0,
+        "queued_scans": 0,
+        "runtime_proof_required": True,
+    }
 
 
 @app.post("/arsenal/hypotheses/{hypothesis_id}/claim")

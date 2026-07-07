@@ -404,6 +404,11 @@ def test_hypothesis_commands_do_not_execute_scanners_or_create_findings():
     assert signal_cmd["risk_tier"] == "read_only"
     assert signal_cmd["path"] == "/arsenal/hypotheses/{hypothesis_id}/signals"
     assert "hypothesis_row" in signal_cmd["evidence_contract"]
+    source_cmd = commands["hypothesis.generate_from_source"]
+    assert source_cmd["status"] == "dry_run"
+    assert source_cmd["risk_tier"] == "read_only"
+    assert source_cmd["path"] == "/arsenal/hypotheses/source-ingest"
+    assert "runtime_proof_required" in source_cmd["evidence_contract"]
 
 
 def test_graph_hypothesis_generation_is_dry_run_read_only_risk():

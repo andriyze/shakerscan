@@ -522,15 +522,19 @@ raw shell execution or LLM-produced verified findings.
    runtime-scope blocked command-result rows on that worker path. Remaining work is campaign/action
    execution records, adapter-specific runtime redirect/resolution re-checks for future tool adapters,
    and extending the same enforcement model to future command/MCP adapters.
-5. **Continuous ASM quality lane:** make `/asm/coverage`, `/asm/gaps`, scan detail, Action Center,
-   and the mission timeline agree on family-aware state: attempted, proved, partial, blocked by auth,
-   blocked by second user, blocked by schedule/rate cap, stale, and worker-stale.
+5. **Continuous ASM quality lane:** DONE phase 1 for `/asm/coverage`, `/asm/gaps`, scan detail,
+   Action Center, and the mission timeline agreeing on family-aware state: attempted, proved,
+   partial, blocked by auth, blocked by second user, blocked by schedule/rate cap, stale, and
+   worker-stale. Remaining work is deeper remediation entry points from those states.
 6. **Campaign + hypothesis layer:** DONE phase 1 for durable deduped hypotheses/leads, endorsements,
    read APIs, bounded context-pack summaries, compare-and-set claim leases, and app-graph authz
    hypothesis generation. DONE phase 2 for AI Gate weak/semantic signals and Model Intake trust
-   metadata claims becoming replay/remediation hypotheses from worker finalization. Remaining work is
-   to route source/spec hints, AI planner suggestions, and weak scanner signals into those hypotheses.
-   Hypotheses are claimable/refutable work items, not findings.
+   metadata claims becoming replay/remediation hypotheses from worker finalization. DONE phase 3 for
+   bounded source/spec/package hints becoming `source_ingest` hypotheses through
+   `/arsenal/hypotheses/source-ingest` / `hypothesis.generate_from_source`; source facts remain
+   source-only context with `runtime_proof_required=true` and create no findings or queued work.
+   Remaining work is to route AI planner suggestions and broader weak scanner signals into those
+   hypotheses. Hypotheses are claimable/refutable work items, not findings.
 7. **Detector recall campaigns:** keep benchmark gaps as proof-backed work items: POST-body SQLi,
    NoSQL JSON/body routing, stored/reflected XSS browser proof, workflow/write-side BOLA, mass
    assignment/JWT, and graph-driven authz hypotheses.
@@ -540,11 +544,16 @@ raw shell execution or LLM-produced verified findings.
    Treat this as the T3MP3ST evidence-gate adoption point: parser failure, timeout, missing binary,
    missing smoke status, or missing proof-critical evidence must produce a skipped/degraded/blocked
    record, not a verified finding or phantom success.
-9. **Registry-driven execution:** migrate scanner family execution and report rollups to proof
-   contracts after the evidence/proof shape is stable.
-10. **Refuter and integrity layer:** add refuter workflows for weak High/Criticals, AI Gate semantic
-    hits, Model Intake metadata claims, benchmark wins, and deployment-gating findings. Add benchmark
-    and planner integrity ledgers for contamination, retractions, stale-fleet runs, phantom tool
+9. **Registry-driven execution:** DONE phase 2 for fail-closed registry execution metadata:
+   explicitly requested but unrunnable families now stay skipped with `registry_family_not_runnable`,
+   enabled families expose dispatch adapters, and scan plans summarize requested blocked families.
+   Remaining work is migrating more detector internals out of legacy loops and into registry
+   iteration.
+10. **Refuter and integrity layer:** DONE phase 1 for refuter workflows for weak High/Criticals,
+    AI Gate semantic hits, Model Intake metadata claims, parser-promoted/degraded output, and
+    deployment-gating claims. Refuter plans now carry structured counterevidence bundles with review
+    questions, benign explanations, required evidence refs, and verdict paths. Add benchmark and
+    planner integrity ledgers for contamination, retractions, stale-fleet runs, phantom tool
     assumptions, and methodology corrections. DONE phase 1 for file-backed planner/benchmark ledger
     locations and planner fixture scoring.
 11. **Planner evals and local-agent planning, dry-run only:** planner fixtures, integrity ledgers,
@@ -1006,6 +1015,12 @@ items, not findings.
     mission campaign plus planned campaign action with the hypothesis id, planned action payload, and
     `proof_state: planned_not_executed`. This is a coordination record only; it does not call
     `asm.improve`, queue scans, claim the hypothesis, create findings, or alter proof state.
+12. DONE phase 1: `/arsenal/hypotheses/source-ingest` and `hypothesis.generate_from_source` accept
+    bounded route/OpenAPI/GraphQL/package/frontend/backend/IaC/AI-tool hints and convert them into
+    deduped `source_ingest` hypotheses for authz, SQLi/NoSQL, XSS, SSRF, LFI/path traversal,
+    mass-assignment, upload, secret, and AI/tool-boundary work. The route records or endorses leads
+    only, marks them `source_only` and `runtime_proof_required`, reports skipped vague hints, and
+    returns `findings_created=0` / `execution_enabled=false`.
 
 **Done when:** the scanner can state "`GET /api/orders` produces `order.id` owned by user1;
 `GET /api/orders/{id}` consumes it -> test user2 read/mutate" from a persisted graph and schedule
@@ -1032,8 +1047,12 @@ findings, links evidence instances/tool receipts, records a command-result audit
 volatile object ids into route-template fingerprints so `/orders/1` and `/orders/46` do not create
 separate replay findings; this is still gated and never happens automatically after replay.
 
-**Implement next:** add richer replay proof bundles and operator UI controls for the gated
-replay/promotion workflow.
+**Implement next:** DONE phase 1 for richer replay proof bundles. `authz.replay_plan` now stores a
+content-free `proof_bundle` that distinguishes access-granted 2xx observations, denial-like
+redirects, authenticated-principal count, and whether a cross-principal differential was observed;
+`authz.promote_replay_finding` carries that bundle into promoted evidence. Remaining work is deeper
+operator UI controls for choosing sessions, executing the gated replay, and promoting reviewed
+violations from the campaign-action surface.
 
 **Done when:** a campaign can assert "endpoint X requires role admin" and prove a lower-role
 principal's access is a finding.
@@ -1168,12 +1187,16 @@ Richer counterevidence bundle review and broader trigger coverage remain open.
 1. DONE phase 1: trigger refuter work for Critical/High findings with suspected or weak proof, AI Gate semantic-only
    hits, Model Intake metadata claims without operator trust anchors, new benchmark wins, unusually
    large finding deltas, deployment-gating findings, and parser output that would promote severity or
-   proof state. Current implementation covers the first three as a read-only work summary and can
-   queue signal-only review rows from that summary. DONE phase 2: summary candidates now include
+   proof state. Current implementation covers weak findings, AI Gate semantic/weak deterministic
+   hits, Model Intake metadata trust claims, parser-promoted/degraded output, and deployment-gating
+   unverified claims as a read-only work summary and can queue signal-only review rows from that
+   summary. DONE phase 2: summary candidates now include
    bounded automation plans for minimal deterministic retest, AI Gate replay, Model Intake trust
    preview, and auth/principal/tenant/object context checks; queued review metadata preserves the
-   same plan. Benchmark deltas, finding deltas, deployment-gate triggers, parser-promotion triggers,
-   and deterministic automated execution remain open.
+   same plan. DONE phase 3: plans now include counterevidence bundles with review questions, benign
+   explanations to test, required evidence refs, and supported/weakened/refuted/inconclusive verdict
+   paths. Benchmark deltas, unusually large finding deltas, and richer counterevidence review UI
+   remain open.
 2. PARTIAL phase 1: refuter behavior now plans how to rerun the minimal reproducer, test benign
    explanations, verify auth context/principal/tenant/object ownership, check request freshness, and
    attach counterevidence when a claim weakens. DONE phase 2: a gated executor now queues the
@@ -1181,7 +1204,7 @@ Richer counterevidence bundle review and broader trigger coverage remain open.
    metadata/audit without changing product truth. DONE phase 3: completed finding verifications can
    derive new refuter signal/verdict rows; deterministic outcomes can become proof-backed refuter
    verdicts, while AI-driven outcomes stay signal-only unless reviewed by a human. Remaining work is
-   richer counterevidence review bundles.
+   richer counterevidence review UI.
 3. DONE phase 1: separate `refuter_signal` from `refuter_verdict`. Signals can
    weaken/support/question a claim. Verdicts are accepted only when backed by deterministic replay,
    cryptographic evidence, parser/protocol evidence, or explicitly labeled human-approved review
@@ -1198,15 +1221,18 @@ challenged and corrected without deleting history, and corrections are visible i
 and deployment-gate story as the original claim.
 
 ### 10. Check-registry execution migration + proof contracts per family
-**Status: PARTIAL, REGISTRY PLAN ROLLUP DONE.** `api/check_registry.py` (`CheckFamilySpec`) is the family contract for API
+**Status: PARTIAL, REGISTRY PLAN ROLLUP + FAIL-CLOSED DISPATCH METADATA DONE.** `api/check_registry.py` (`CheckFamilySpec`) is the family contract for API
 validation and ASM scheduling and now carries `requires_auth_states` / `requires_credentials` /
 `risk_level` / `runnable` / `telemetry_schema` / `proof_contract` / `severity_rules`. Scanner
 `build_report()` now emits a registry-derived `scanner_execution_plan` in scan config, active
 telemetry, and metadata. That plan now includes a registry-derived summary rollup with enabled and
 skipped family lists, skip reason counts, enabled risk/phase counts, runnable-enabled counts, and
-per-enabled-family proof contracts. SQLi/XSS active dispatch gates derive from that plan before
-entering the legacy module loops. Detector internals still execute many checks through hardcoded
-module calls, and planned families such as `lfi`/`rce`/`ssrf` are not runnable.
+per-enabled-family proof contracts. It now also records dispatch adapter counts, requested blocked
+families, per-family `requested`/`blocked_by`/`dispatch_adapter` metadata, and fail-closes explicitly
+requested registered-but-unrunnable families such as `lfi`/`rce`/`ssrf`. SQLi/XSS active dispatch
+gates derive from that plan before entering the legacy module loops. Detector internals still execute
+many checks through hardcoded module calls, and planned families such as `lfi`/`rce`/`ssrf` are not
+runnable.
 
 **Implement:** continue migrating `build_report()` module execution to registry iteration; add
 `proof_contract`, `severity_rules`, telemetry schema, safety gate, and report rollup per family;
@@ -1271,16 +1297,17 @@ bounded context pack, fail the unsafe fixtures, and route every proposed state-c
 the same Command Arsenal, `ActionScopeGuard`, approval receipts, and existing API handlers.
 
 ### 12. Source-informed DAST, MCP, and new-tool boundaries
-**Status: LATER / EXPERIMENTAL.** T3MP3ST's source-ingest and MCP ideas are useful only after the
-mission, command, scope, hypothesis, evidence, and receipt layers exist. Source facts should enrich
-the application graph and hypotheses. MCP should be a thin adapter over the REST Command Arsenal. New
-external tools should remain `catalog_only` until narrow adapters, receipts, parsers, proof contracts,
-and safety gates are real.
+**Status: SOURCE-HINT HYPOTHESIS INGEST PHASE 1 DONE; MCP / NEW TOOLS LATER.** T3MP3ST's
+source-ingest and MCP ideas are useful only after the mission, command, scope, hypothesis, evidence,
+and receipt layers exist. Bounded source/spec/package hints now enrich hypotheses through
+`/arsenal/hypotheses/source-ingest` without creating findings, queueing scans, or satisfying runtime
+proof. MCP should be a thin adapter over the REST Command Arsenal. New external tools should remain
+`catalog_only` until narrow adapters, receipts, parsers, proof contracts, and safety gates are real.
 
 **Implement later:**
-1. Add bounded source/spec/package ingest for operator-provided repositories, OpenAPI/Swagger,
-   GraphQL schemas, package manifests, lockfiles, frontend route definitions, server route definitions,
-   and optional IaC files.
+1. DONE phase 1: add bounded source/spec/package hint ingest for operator-provided route,
+   OpenAPI/Swagger, GraphQL, package, frontend route, server route, IaC, and AI-tool facts. Remaining
+   work is direct repository/file ingestion with file-count/size/path/timeout controls.
 2. Source-derived outputs are graph facts, endpoint/body-shape hints, auth/principal hints, Model
    Intake artifact hints, and hypotheses for BOLA/BFLA, mass assignment, dangerous upload, SSRF sink,
    file path parameter, template sink, and risky AI tool endpoint. They are not verified findings.

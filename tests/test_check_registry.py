@@ -110,10 +110,13 @@ def test_scanner_execution_plan_uses_registry_gates():
     assert families["nuclei"]["enabled"] is True
     assert families["sqli"]["enabled"] is True
     assert families["sqli"]["reason"] == "selected_by_check_family_scope"
+    assert families["sqli"]["dispatch_adapter"] == "legacy_active_loop"
+    assert families["sqli"]["requested"] is True
     assert families["xss"]["enabled"] is False
     assert families["ssrf"]["enabled"] is False
     assert families["ssrf"]["reason"] == "registered_not_runnable"
     assert "payload" in families["sqli"]["proof_contract"]
+    assert plan["summary"]["dispatch_adapter_counts"]["legacy_active_loop"] == 1
 
 
 def test_scanner_execution_plan_records_passive_skip_reasons():
@@ -138,3 +141,24 @@ def test_scanner_execution_plan_records_passive_skip_reasons():
     assert families["xss"]["reason"] == "public_only"
     assert plan["summary"]["skip_reason_counts"]["public_only"] >= 1
     assert "recon" in plan["summary"]["skipped_families"]
+
+
+def test_scanner_execution_plan_blocks_requested_unrunnable_family():
+    plan = r.scanner_execution_plan(
+        scan_mode="smart",
+        active_checks=True,
+        check_family_scope={"families": ["ssrf"], "focused_family": "ssrf"},
+    )
+    families = {item["name"]: item for item in plan["families"]}
+
+    assert families["ssrf"]["requested"] is True
+    assert families["ssrf"]["enabled"] is False
+    assert families["ssrf"]["reason"] == "registered_not_runnable"
+    assert families["ssrf"]["blocked_by"] == ["registry_family_not_runnable"]
+    assert plan["summary"]["requested_blocked"] == [
+        {
+            "name": "ssrf",
+            "reason": "registered_not_runnable",
+            "blocked_by": ["registry_family_not_runnable"],
+        }
+    ]

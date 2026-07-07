@@ -910,6 +910,38 @@ COMMANDS: tuple[ArsenalCommand, ...] = (
         timeout_seconds=15,
     ),
     ArsenalCommand(
+        name="hypothesis.generate_from_source",
+        family="governance",
+        description="Record bounded source/spec/package hints as hypotheses only; source text cannot create findings or satisfy runtime proof.",
+        status="dry_run",
+        risk_tier="read_only",
+        method="POST",
+        path="/arsenal/hypotheses/source-ingest",
+        scope_fields=("target_id", "source_label"),
+        parameters_schema={
+            "target_id": {"type": "string", "format": "uuid"},
+            "source_label": {"type": "string"},
+            "hints": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "kind": {"type": "string", "enum": ["route", "endpoint", "openapi_operation", "graphql_field", "package_manifest", "frontend_route", "backend_route", "iac_resource", "ai_tool_endpoint"]},
+                        "method": {"type": "string"},
+                        "path": {"type": "string"},
+                        "route": {"type": "string"},
+                        "risk_hints": {"type": "array", "items": {"type": "string"}},
+                        "parameters": {"type": "array", "items": {"type": "string"}},
+                        "body_paths": {"type": "array", "items": {"type": "string"}},
+                    },
+                },
+            },
+        },
+        evidence_contract=("hypothesis_rows", "source_hint_summary", "runtime_proof_required", "skipped_hints"),
+        redaction_contract=("description", "metadata_json", "hint_metadata"),
+        timeout_seconds=20,
+    ),
+    ArsenalCommand(
         name="hypothesis.claim",
         family="governance",
         description="Claim a hypothesis using compare-and-set leasing; does not queue scanner work.",

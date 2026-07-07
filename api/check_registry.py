@@ -301,6 +301,8 @@ def scanner_execution_plan(
         enabled = False
         expected = False
         reason = "not_selected"
+        requested = spec.name in requested_families
+        blocked_by: list[str] = []
 
         if spec.name == "recon":
             enabled = not zero_rediscovery
@@ -322,18 +324,33 @@ def scanner_execution_plan(
             else:
                 reason = "template_scan_expected"
         elif spec.is_active:
-            enabled = bool(active_checks and not public_only and spec.name in requested_families)
+            enabled = bool(active_checks and not public_only and requested and spec.runnable)
             expected = enabled
             if not active_checks:
                 reason = "active_checks_disabled"
             elif public_only:
                 reason = "public_only"
-            elif spec.name in requested_families:
+            elif requested and not spec.runnable:
+                reason = "registered_not_runnable"
+                blocked_by.append("registry_family_not_runnable")
+            elif requested:
                 reason = "selected_by_check_family_scope"
             elif spec.runnable:
                 reason = "not_selected"
             else:
                 reason = "registered_not_runnable"
+
+        dispatch_adapter = "none"
+        if enabled:
+            if spec.name in {"sqli", "xss"}:
+                dispatch_adapter = "legacy_active_loop"
+            elif spec.name in {"bola", "auth"}:
+                dispatch_adapter = "asm_endpoint_batch"
+            elif spec.name in {"recon", "headers", "nuclei"}:
+                dispatch_adapter = "legacy_passive_or_template"
+            else:
+                dispatch_adapter = "adapter_pending"
+                blocked_by.append("dispatch_adapter_pending")
 
         families.append(
             {
@@ -345,6 +362,11 @@ def scanner_execution_plan(
                 "expected": expected,
                 "status": "enabled" if enabled else "skipped",
                 "reason": reason,
+                "requested": requested,
+                "blocked_by": blocked_by,
+                "dispatch_adapter": dispatch_adapter,
+                "requires_auth_states": spec.requires_auth_states,
+                "requires_credentials": spec.requires_credentials,
                 "risk_level": spec.risk_level,
                 "telemetry_schema": spec.telemetry_schema,
                 "proof_contract": list(spec.proof_contract),
@@ -362,6 +384,16 @@ def scanner_execution_plan(
         for item in enabled_families
         if item.get("proof_contract")
     }
+    dispatch_counts = Counter(str(item.get("dispatch_adapter") or "none") for item in enabled_families)
+    requested_blocked = [
+        {
+            "name": str(item.get("name")),
+            "reason": str(item.get("reason") or "blocked"),
+            "blocked_by": list(item.get("blocked_by") or []),
+        }
+        for item in families
+        if item.get("requested") and not item.get("enabled") and item.get("blocked_by")
+    ]
 
     return {
         "registry_version": "check_family_v1",
@@ -378,6 +410,8 @@ def scanner_execution_plan(
             "enabled_by_risk": dict(enabled_by_risk),
             "proof_contracts": proof_contracts,
             "runnable_enabled_count": sum(1 for item in enabled_families if item.get("runnable")),
+            "dispatch_adapter_counts": dict(dispatch_counts),
+            "requested_blocked": requested_blocked,
         },
         "families": families,
     }
