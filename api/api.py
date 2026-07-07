@@ -13188,12 +13188,210 @@ def _hypothesis_missing_preconditions(hypothesis: dict[str, Any]) -> list[str]:
     return sorted(item for item in requirements if item)
 
 
+def _empty_application_graph_context() -> dict[str, Any]:
+    return {
+        "summary": {
+            "hypothesis_target_count": 0,
+            "target_count": 0,
+            "node_count": 0,
+            "edge_count": 0,
+            "auth_boundary_edge_count": 0,
+            "producer_consumer_edge_count": 0,
+            "missing_graph_target_count": 0,
+        },
+        "targets": [],
+        "missing_graph_target_ids": [],
+        "truncated": False,
+    }
+
+
+def _application_graph_context_for_hypotheses(
+    hypothesis_rows: Sequence[Any],
+    node_rows: Sequence[Any],
+    edge_rows: Sequence[Any],
+    *,
+    limit_targets: int = 5,
+    sample_limit: int = 5,
+) -> dict[str, Any]:
+    bounded_targets = max(1, min(int(limit_targets or 5), 25))
+    bounded_samples = max(1, min(int(sample_limit or 5), 10))
+    hypotheses = [_public_hypothesis_row(row) for row in hypothesis_rows]
+    targets_by_id: dict[str, dict[str, Any]] = {}
+    target_order: list[str] = []
+    for hypothesis in hypotheses:
+        target_id = str(hypothesis.get("target_id") or "")
+        if not target_id:
+            continue
+        if target_id not in targets_by_id:
+            targets_by_id[target_id] = {
+                "target_id": target_id,
+                "hypothesis_count": 0,
+                "sample_hypothesis_ids": [],
+                "families": Counter(),
+                "by_node_type": Counter(),
+                "by_edge_type": Counter(),
+                "sample_route_keys": [],
+                "sample_object_keys": [],
+                "sample_principal_keys": [],
+            }
+            target_order.append(target_id)
+        target_bucket = targets_by_id[target_id]
+        target_bucket["hypothesis_count"] += 1
+        family = str(hypothesis.get("family") or "unknown")
+        target_bucket["families"][family] += 1
+        if len(target_bucket["sample_hypothesis_ids"]) < bounded_samples:
+            target_bucket["sample_hypothesis_ids"].append(str(hypothesis.get("id") or ""))
+
+    if not targets_by_id:
+        return _empty_application_graph_context()
+
+    included_ids = target_order[:bounded_targets]
+    included = {target_id: targets_by_id[target_id] for target_id in included_ids}
+    node_count = 0
+    edge_count = 0
+    auth_boundary_edge_count = 0
+    producer_consumer_edge_count = 0
+    producer_consumer_types = {
+        "produces",
+        "consumed_by",
+        "consumes",
+        "producer",
+        "consumer",
+        "producer_consumer",
+    }
+
+    for row in node_rows:
+        payload = row_to_dict(row)
+        target_id = str(payload.get("target_id") or "")
+        bucket = included.get(target_id)
+        if not bucket:
+            continue
+        node_type = str(payload.get("node_type") or "unknown")
+        node_key = str(payload.get("node_key") or payload.get("label") or "")
+        bucket["by_node_type"][node_type] += 1
+        node_count += 1
+        sample_key = f"sample_{node_type}_keys"
+        if sample_key in bucket and node_key and len(bucket[sample_key]) < bounded_samples:
+            bucket[sample_key].append(node_key)
+
+    for row in edge_rows:
+        payload = row_to_dict(row)
+        target_id = str(payload.get("target_id") or "")
+        bucket = included.get(target_id)
+        if not bucket:
+            continue
+        edge_type = str(payload.get("edge_type") or "unknown")
+        bucket["by_edge_type"][edge_type] += 1
+        edge_count += 1
+        if edge_type == "auth_boundary":
+            auth_boundary_edge_count += 1
+        if edge_type in producer_consumer_types:
+            producer_consumer_edge_count += 1
+
+    target_summaries: list[dict[str, Any]] = []
+    missing_graph_target_ids: list[str] = []
+    for target_id in included_ids:
+        bucket = included[target_id]
+        by_node_type = dict(bucket["by_node_type"])
+        by_edge_type = dict(bucket["by_edge_type"])
+        target_node_count = sum(by_node_type.values())
+        target_edge_count = sum(by_edge_type.values())
+        if target_node_count == 0 and target_edge_count == 0:
+            missing_graph_target_ids.append(target_id)
+        target_summaries.append({
+            "target_id": target_id,
+            "hypothesis_count": bucket["hypothesis_count"],
+            "sample_hypothesis_ids": bucket["sample_hypothesis_ids"],
+            "families": dict(bucket["families"]),
+            "node_count": target_node_count,
+            "edge_count": target_edge_count,
+            "route_nodes": by_node_type.get("route", 0),
+            "object_nodes": by_node_type.get("object", 0),
+            "principal_nodes": by_node_type.get("principal", 0),
+            "auth_boundary_edges": by_edge_type.get("auth_boundary", 0),
+            "producer_consumer_edges": sum(by_edge_type.get(kind, 0) for kind in producer_consumer_types),
+            "by_node_type": by_node_type,
+            "by_edge_type": by_edge_type,
+            "sample_route_keys": bucket["sample_route_keys"],
+            "sample_object_keys": bucket["sample_object_keys"],
+            "sample_principal_keys": bucket["sample_principal_keys"],
+        })
+
+    return {
+        "summary": {
+            "hypothesis_target_count": len(targets_by_id),
+            "target_count": len(included_ids),
+            "node_count": node_count,
+            "edge_count": edge_count,
+            "auth_boundary_edge_count": auth_boundary_edge_count,
+            "producer_consumer_edge_count": producer_consumer_edge_count,
+            "missing_graph_target_count": len(missing_graph_target_ids),
+        },
+        "targets": target_summaries,
+        "missing_graph_target_ids": missing_graph_target_ids,
+        "truncated": len(target_order) > bounded_targets,
+    }
+
+
+async def _load_application_graph_context_for_hypotheses(
+    conn,
+    hypothesis_rows: Sequence[Any],
+    *,
+    limit_targets: int = 5,
+) -> dict[str, Any]:
+    target_ids: list[uuid.UUID] = []
+    seen: set[str] = set()
+    for row in hypothesis_rows:
+        payload = row_to_dict(row)
+        raw_target_id = payload.get("target_id")
+        if not raw_target_id:
+            continue
+        try:
+            target_uuid = uuid.UUID(str(raw_target_id))
+        except ValueError:
+            continue
+        target_key = str(target_uuid)
+        if target_key in seen:
+            continue
+        seen.add(target_key)
+        target_ids.append(target_uuid)
+        if len(target_ids) >= max(1, min(int(limit_targets or 5), 25)):
+            break
+    if not target_ids:
+        return _empty_application_graph_context()
+    nodes = await conn.fetch(
+        """
+        SELECT *
+        FROM application_graph_nodes
+        WHERE target_id = ANY($1::uuid[])
+        ORDER BY target_id, node_type, node_key
+        """,
+        target_ids,
+    )
+    edges = await conn.fetch(
+        """
+        SELECT *
+        FROM application_graph_edges
+        WHERE target_id = ANY($1::uuid[])
+        ORDER BY target_id, edge_type, src_key
+        """,
+        target_ids,
+    )
+    return _application_graph_context_for_hypotheses(
+        hypothesis_rows,
+        list(nodes),
+        list(edges),
+        limit_targets=limit_targets,
+    )
+
+
 def _hypothesis_situation_report(
     rows: Sequence[Any],
     *,
     requester: Optional[str] = None,
     limit: int = 5,
     now: Optional[datetime] = None,
+    graph_context: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     now = now or datetime.now(timezone.utc)
     bounded_limit = max(1, min(int(limit or 5), 25))
@@ -13271,6 +13469,7 @@ def _hypothesis_situation_report(
         "execution_enabled": False,
         "findings_created": 0,
         "board_truncated": len(hypotheses) > bounded_limit,
+        "graph_context": graph_context or _empty_application_graph_context(),
     }
 
 
@@ -17175,6 +17374,7 @@ async def arsenal_hypothesis_situation_report(
     limit: int = Query(5, ge=1, le=25),
     target_id: Optional[str] = Query(None, description="Filter report to one target."),
     requester: Optional[str] = Query(None, description="Claim owner/requester to summarize owned work for."),
+    include_graph: bool = Query(True, description="Include bounded application-graph context for hypothesis targets."),
 ):
     """Return bounded hypothesis context without exposing the full board by default."""
     target_uuid = None
@@ -17196,7 +17396,12 @@ async def arsenal_hypothesis_situation_report(
             query_limit,
             target_uuid,
         )
-    return _hypothesis_situation_report(rows, requester=requester, limit=limit)
+        graph_context = (
+            await _load_application_graph_context_for_hypotheses(conn, rows, limit_targets=limit)
+            if include_graph
+            else _empty_application_graph_context()
+        )
+    return _hypothesis_situation_report(rows, requester=requester, limit=limit, graph_context=graph_context)
 
 
 @app.post("/arsenal/hypotheses")

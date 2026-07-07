@@ -130,7 +130,7 @@ records.
 | Local-agent brain mode | bounded planner that emits `OperationPlan`, never direct tool execution | deterministic dry-run planner done; real adapters disabled |
 | Arsenal | REST Command Arsenal over ShakerScan product actions | read-only schemas/status done; gated execution gateway/audit open |
 | Scope/approval gates | `ActionScopeGuard`, `ScopeReceipt`, `ApprovalReceipt` | optional validation and policy-required enforcement done for existing routes; DAST, AI Gate, and Model Intake runtime destination re-checks done; future tool/MCP redirect/resolution checks open |
-| PackBoard | `campaigns`, `campaign_actions`, `hypotheses`, situation reports | campaign actions + hypothesis records phase 1 done; graph routing/situation reports open |
+| PackBoard | `campaigns`, `campaign_actions`, `hypotheses`, situation reports | campaign actions + hypothesis records phase 1 done; graph routing + situation-report graph context done; campaign execution linkage open |
 | Evidence gate | proof taxonomy, evidence objects, evidence instances, tool receipts | proof taxonomy/evidence objects done; instances/receipts open |
 | Arsenal doctor | tool status and receipt registry | status endpoint/UI phase 1 done; receipts open |
 | Refuter culture | weak-claim refuter workflow and integrity ledgers | ledgers phase 1 done; refuter records/workflow open |
@@ -919,15 +919,17 @@ Lab/deep workflow/write-BOLA checks after graph/principal preconditions exist.
 finding, not merely an attempted endpoint.
 
 ### 7. Campaign, hypothesis, and application-graph consumer layer
-**Status: PHASE 1 GRAPH + HYPOTHESES + CAMPAIGN LAYER DONE; AUTO-LINKAGE/PROMOTION OPEN.** `application_graph_nodes` /
+**Status: PHASE 1 GRAPH + HYPOTHESES + SITUATION-REPORT CONSUMER + CAMPAIGN LAYER DONE; AUTO-LINKAGE/PROMOTION OPEN.** `application_graph_nodes` /
 `application_graph_edges` now persist route/object nodes plus producer/consumer/auth-boundary edges
 from discovery + recursive BOLA `resource_map`; `GET /targets/{id}/graph` exposes the graph.
 Object-ID and cross-user primitives also exist per scan (`access_control_checks` object-id
 extraction, `_path_has_object_id_segment`, cross-principal replay in `proof_of_exploit` /
-`verification_engine`). The remaining gap is that BOLA/BFLA/BOPLA/tenant/workflow campaigns still
-do not read the durable graph as their source of hypotheses, and ShakerScan has no first-class lead
-board between weak signals and canonical findings. This should borrow T3MP3ST's PackBoard idea, but
-adapt it into ShakerScan's proof model: leads are coordinated work items, not findings.
+`verification_engine`). Bounded hypothesis situation reports now consume the durable graph as context
+by target, summarizing route/object/principal nodes, producer/consumer edges, auth-boundary edges,
+and graph-missing targets. The remaining gap is that BOLA/BFLA/BOPLA/tenant/workflow campaigns still
+do not schedule deterministic proof work from those graph-backed hypotheses. This should borrow
+T3MP3ST's PackBoard idea, but adapt it into ShakerScan's proof model: leads are coordinated work
+items, not findings.
 
 **Implement:**
 1. DONE phase 1: the `campaigns` mission layer wraps `campaign_actions` over ASM/scan/focused-family/
@@ -968,7 +970,11 @@ adapt it into ShakerScan's proof model: leads are coordinated work items, not fi
    `GET /arsenal/hypotheses/situation-report`, `hypothesis.situation_report`, and the Arsenal UI:
    hottest unclaimed hypotheses, claims owned by the requester, refuted/dead hypotheses to avoid
    resurfacing, live blockers, and missing preconditions. The report caps each bucket and reads a
-   bounded recent board window instead of exposing the entire board by default.
+   bounded recent board window instead of exposing the entire board by default. DONE phase 2:
+   reports now include bounded application-graph context for hypothesis targets (`graph_context`):
+   route/object/principal node counts, producer/consumer and auth-boundary edge counts, target
+   samples, and graph-missing targets. This is reporting context only; it cannot queue tests, create
+   findings, or promote proof state.
 7. Promotion rule: hypotheses can become findings only through the existing proof taxonomy. AI/source
    graph/tool rationale can attach as context, but cannot promote severity or proof state by itself.
 8. DONE phase 1: dedupe rule now accepts canonical `dedupe_dimensions` for route/method,

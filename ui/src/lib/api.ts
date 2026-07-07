@@ -381,6 +381,40 @@ export interface HypothesisMissingPrecondition {
   sample_hypothesis_ids: string[]
 }
 
+export interface HypothesisGraphContextTarget {
+  target_id: string
+  hypothesis_count: number
+  sample_hypothesis_ids: string[]
+  families: Record<string, number>
+  node_count: number
+  edge_count: number
+  route_nodes: number
+  object_nodes: number
+  principal_nodes: number
+  auth_boundary_edges: number
+  producer_consumer_edges: number
+  by_node_type: Record<string, number>
+  by_edge_type: Record<string, number>
+  sample_route_keys: string[]
+  sample_object_keys: string[]
+  sample_principal_keys: string[]
+}
+
+export interface HypothesisGraphContext {
+  summary: {
+    hypothesis_target_count: number
+    target_count: number
+    node_count: number
+    edge_count: number
+    auth_boundary_edge_count: number
+    producer_consumer_edge_count: number
+    missing_graph_target_count: number
+  }
+  targets: HypothesisGraphContextTarget[]
+  missing_graph_target_ids: string[]
+  truncated: boolean
+}
+
 export interface HypothesisSituationReport {
   summary: {
     generated_at: string
@@ -399,6 +433,7 @@ export interface HypothesisSituationReport {
   execution_enabled: boolean
   findings_created: number
   board_truncated: boolean
+  graph_context?: HypothesisGraphContext
 }
 
 export interface RefuterCandidate {

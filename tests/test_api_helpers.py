@@ -3347,6 +3347,80 @@ def test_hypothesis_situation_report_is_bounded_and_separates_work():
     assert all("metadata_json" not in item for item in report["hottest_unclaimed"])
 
 
+def test_hypothesis_situation_report_can_include_application_graph_context():
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    target_id = uuid.uuid4()
+    missing_graph_target_id = uuid.uuid4()
+    hypothesis_id = uuid.uuid4()
+    missing_hypothesis_id = uuid.uuid4()
+
+    def hypothesis_row(*, row_id: uuid.UUID, target: uuid.UUID, family: str) -> dict[str, object]:
+        return {
+            "id": row_id,
+            "target_id": target,
+            "source": "app_graph",
+            "family": family,
+            "cwe": "CWE-639",
+            "title": f"{family} lead",
+            "severity_guess": "high",
+            "confidence": 0.9,
+            "dedupe_key": f"{family}:{target}",
+            "status": "open",
+            "version": 1,
+            "claim_owner": None,
+            "claim_lease_expires_at": None,
+            "smoke_score": 0.2,
+            "evidence_object_ids": json.dumps([]),
+            "tool_receipt_ids": json.dumps([]),
+            "next_test_action": json.dumps({}),
+            "endorsements": json.dumps([{"source": "app_graph"}]),
+            "refutations": json.dumps([]),
+            "terminal_reason": None,
+            "metadata_json": json.dumps({}),
+            "updated_at": now.isoformat(),
+        }
+
+    rows = [
+        hypothesis_row(row_id=hypothesis_id, target=target_id, family="bola"),
+        hypothesis_row(row_id=missing_hypothesis_id, target=missing_graph_target_id, family="bfla"),
+    ]
+    nodes = [
+        {"target_id": target_id, "node_type": "route", "node_key": "route:GET /api/orders", "label": "GET /api/orders"},
+        {"target_id": target_id, "node_type": "object", "node_key": "object:order_id", "label": "order_id"},
+        {"target_id": target_id, "node_type": "principal", "node_key": "principal:user1", "label": "user1"},
+    ]
+    edges = [
+        {"target_id": target_id, "src_key": "route:GET /api/orders", "dst_key": "object:order_id", "edge_type": "produces"},
+        {"target_id": target_id, "src_key": "object:order_id", "dst_key": "route:GET /api/orders/{id}", "edge_type": "consumed_by"},
+        {"target_id": target_id, "src_key": "route:GET /api/orders", "dst_key": "route:GET /api/orders/{id}", "edge_type": "auth_boundary"},
+    ]
+
+    graph_context = api_module._application_graph_context_for_hypotheses(
+        rows,
+        nodes,
+        edges,
+        limit_targets=5,
+    )
+    report = api_module._hypothesis_situation_report(rows, limit=5, graph_context=graph_context, now=now)
+
+    assert report["graph_context"]["summary"]["hypothesis_target_count"] == 2
+    assert report["graph_context"]["summary"]["target_count"] == 2
+    assert report["graph_context"]["summary"]["node_count"] == 3
+    assert report["graph_context"]["summary"]["edge_count"] == 3
+    assert report["graph_context"]["summary"]["auth_boundary_edge_count"] == 1
+    assert report["graph_context"]["summary"]["producer_consumer_edge_count"] == 2
+    assert report["graph_context"]["missing_graph_target_ids"] == [str(missing_graph_target_id)]
+    target_summary = next(item for item in report["graph_context"]["targets"] if item["target_id"] == str(target_id))
+    assert target_summary["sample_hypothesis_ids"] == [str(hypothesis_id)]
+    assert target_summary["families"] == {"bola": 1}
+    assert target_summary["route_nodes"] == 1
+    assert target_summary["object_nodes"] == 1
+    assert target_summary["principal_nodes"] == 1
+    assert target_summary["auth_boundary_edges"] == 1
+    assert target_summary["producer_consumer_edges"] == 2
+    assert target_summary["sample_route_keys"] == ["route:GET /api/orders"]
+
+
 def test_upsert_hypothesis_matches_existing_across_sources_by_dedupe_key():
     target_id = uuid.uuid4()
     existing_id = uuid.uuid4()

@@ -815,7 +815,7 @@ COMMANDS: tuple[ArsenalCommand, ...] = (
     ArsenalCommand(
         name="hypothesis.situation_report",
         family="governance",
-        description="Read a bounded hypothesis situation report with hot unclaimed leads, owned claims, blockers, terminal leads, and missing preconditions.",
+        description="Read a bounded hypothesis situation report with hot unclaimed leads, owned claims, blockers, terminal leads, missing preconditions, and application-graph context.",
         status="read_only",
         risk_tier="read_only",
         method="GET",
@@ -825,6 +825,7 @@ COMMANDS: tuple[ArsenalCommand, ...] = (
             "limit": {"type": "integer", "minimum": 1, "maximum": 25},
             "target_id": {"type": "string", "format": "uuid"},
             "requester": {"type": "string"},
+            "include_graph": {"type": "boolean"},
         },
         evidence_contract=(
             "hottest_unclaimed",
@@ -832,6 +833,7 @@ COMMANDS: tuple[ArsenalCommand, ...] = (
             "avoid_resurfacing",
             "live_blockers",
             "missing_preconditions",
+            "graph_context",
         ),
         timeout_seconds=15,
     ),

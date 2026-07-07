@@ -338,6 +338,59 @@ function SituationBucket({
   )
 }
 
+function HypothesisGraphContextPanel({ context }: { context?: HypothesisSituationReport['graph_context'] }) {
+  if (!context || context.summary.hypothesis_target_count === 0) return null
+  return (
+    <div>
+      <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+        <h3 className="text-sm font-medium text-gray-200">Application Graph Context</h3>
+        <div className="flex flex-wrap gap-1.5">
+          {context.truncated && <Badge className="bg-amber-500/15 text-amber-300">target list truncated</Badge>}
+          {context.summary.missing_graph_target_count > 0 && (
+            <Badge className="bg-red-500/15 text-red-300">{context.summary.missing_graph_target_count} missing graph</Badge>
+          )}
+        </div>
+      </div>
+      <div className="grid gap-3 md:grid-cols-4">
+        <Stat label="graph targets" value={context.summary.target_count} />
+        <Stat label="graph nodes" value={context.summary.node_count} />
+        <Stat label="graph edges" value={context.summary.edge_count} />
+        <Stat label="auth boundaries" value={context.summary.auth_boundary_edge_count} tone="text-amber-300" />
+      </div>
+      <div className="mt-3 grid gap-2">
+        {context.targets.slice(0, 5).map((target) => (
+          <div key={target.target_id} className="rounded-md border border-gray-800 bg-gray-950 px-3 py-2">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <a href={`/targets/${target.target_id}/graph`} className="break-all font-mono text-sm text-cyan-300 hover:text-cyan-200">
+                {target.target_id}
+              </a>
+              <div className="flex flex-wrap gap-1.5">
+                <Badge className="bg-gray-800 text-gray-300">hypotheses {target.hypothesis_count}</Badge>
+                <Badge className="bg-gray-800 text-gray-300">routes {target.route_nodes}</Badge>
+                <Badge className="bg-gray-800 text-gray-300">objects {target.object_nodes}</Badge>
+                <Badge className="bg-gray-800 text-gray-300">principals {target.principal_nodes}</Badge>
+                <Badge className="bg-amber-500/15 text-amber-300">auth {target.auth_boundary_edges}</Badge>
+              </div>
+            </div>
+            <div className="mt-2 flex flex-wrap gap-1.5 text-xs">
+              {Object.entries(target.families).slice(0, 4).map(([family, count]) => (
+                <Badge key={family} className="bg-violet-500/15 text-violet-300">
+                  {family}: {count}
+                </Badge>
+              ))}
+            </div>
+            {target.sample_route_keys.length > 0 && (
+              <div className="mt-2 truncate font-mono text-xs text-gray-500">
+                {target.sample_route_keys.slice(0, 3).join(' | ')}
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
 function RefuterCandidateRow({ candidate }: { candidate: RefuterWorkSummary['candidates'][number] }) {
   return (
     <div className="rounded-md border border-gray-800 bg-gray-950 px-3 py-2">
@@ -1099,6 +1152,7 @@ export default function ArsenalSettingsPage() {
               <Stat label="live blockers" value={hypothesisSituation.live_blockers.length} tone="text-amber-300" />
               <Stat label="avoid resurfacing" value={hypothesisSituation.avoid_resurfacing.length} tone="text-red-300" />
             </div>
+            <HypothesisGraphContextPanel context={hypothesisSituation.graph_context} />
             <div className="grid gap-3 xl:grid-cols-2">
               <SituationBucket title="Hot Unclaimed" items={hypothesisSituation.hottest_unclaimed} empty="No unclaimed hypotheses in the bounded report." />
               <SituationBucket title="Your Claims" items={hypothesisSituation.requester_claims} empty="No active claims for the requester." />

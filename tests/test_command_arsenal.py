@@ -377,6 +377,8 @@ def test_hypothesis_commands_do_not_execute_scanners_or_create_findings():
     assert report_cmd["path"] == "/arsenal/hypotheses/situation-report"
     assert "hottest_unclaimed" in report_cmd["evidence_contract"]
     assert "missing_preconditions" in report_cmd["evidence_contract"]
+    assert "graph_context" in report_cmd["evidence_contract"]
+    assert report_cmd["parameters_schema"]["include_graph"]["type"] == "boolean"
     assert record_cmd["path"] == "/arsenal/hypotheses"
     assert "dedupe_dimensions" in record_cmd["parameters_schema"]
     assert claim_cmd["path"] == "/arsenal/hypotheses/{hypothesis_id}/claim"
