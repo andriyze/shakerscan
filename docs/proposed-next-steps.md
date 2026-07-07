@@ -1133,7 +1133,7 @@ produce receipts for both successful and failed/skipped runs; missing binaries s
 not phantom success.
 
 ### 9a. Refuter workflow and integrity ledgers
-**Status: PARTIAL, PHASE 1 RECORDS + TRIGGER SUMMARY + AUTOMATION PLANS DONE.** T3MP3ST's strongest process lesson is not a detector; it
+**Status: PARTIAL, PHASE 1 RECORDS + TRIGGER SUMMARY + AUTOMATION PLANS + GATED EXECUTION QUEUE DONE.** T3MP3ST's strongest process lesson is not a detector; it
 is the habit of trying to disprove weak wins. ShakerScan now has durable
 `refuter_reviews` records exposed through `GET/POST /arsenal/refuter-reviews` and
 `refuter_review.list` / `refuter_review.record`, plus read-only trigger summaries through
@@ -1145,13 +1145,18 @@ signal-only review requests. `POST /arsenal/refuter-reviews/queue-from-summary` 
 refuter rows without executing scanners or mutating findings; `/settings/arsenal` renders the
 summary, candidates, queue action, and the non-executing automation plan for each candidate. Those
 plans name the minimal deterministic replay, AI Gate replay, Model Intake trust-preview, and auth
-context checks needed to produce counterevidence, but they stay `planned_not_executed` until a gated
-executor exists. `refuter_signal` remains separate from
+context checks needed to produce counterevidence. `POST /arsenal/refuter-reviews/{id}/execute` and
+`refuter_review.execute_plan` now execute the next planned step through existing gates: normal DAST
+findings queue deterministic `finding.retest`, AI Gate findings queue focused AI finding replay, and
+Model Intake trust claims produce the existing trust-preview artifact. The executor stamps
+`latest_refuter_execution` metadata plus a `refuter_review.execute_plan` command-result audit row,
+but it does not directly mutate findings, proof state, hypotheses, severity, or deployment gates.
+`refuter_signal` remains separate from
 `refuter_verdict`; verdicts require deterministic replay, cryptographic, parser/protocol, or
 human-approved-review basis, and recording a review cannot directly update findings, hypotheses,
 proof state, severity, or gates. File-backed integrity ledgers exist at
 `results/benchmark-runs/INTEGRITY_LEDGER.md` and `results/planner-evals/INTEGRITY_LEDGER.md`.
-Automated deterministic refuter execution is still open.
+Automatic proof-backed verdict derivation from completed replay evidence is still open.
 
 **Implement:**
 1. DONE phase 1: trigger refuter work for Critical/High findings with suspected or weak proof, AI Gate semantic-only
@@ -1165,8 +1170,10 @@ Automated deterministic refuter execution is still open.
    and deterministic automated execution remain open.
 2. PARTIAL phase 1: refuter behavior now plans how to rerun the minimal reproducer, test benign
    explanations, verify auth context/principal/tenant/object ownership, check request freshness, and
-   attach counterevidence when a claim weakens. The actual executor that performs those steps and
-   records proof-backed verdicts remains open.
+   attach counterevidence when a claim weakens. DONE phase 2: a gated executor now queues the
+   smallest existing deterministic/AI replay primitive for the refuter review and records execution
+   metadata/audit without changing product truth. Remaining work is automatic proof-backed verdict
+   derivation from completed retest/replay receipts.
 3. DONE phase 1: separate `refuter_signal` from `refuter_verdict`. Signals can
    weaken/support/question a claim. Verdicts are accepted only when backed by deterministic replay,
    cryptographic evidence, parser/protocol evidence, or explicitly labeled human-approved review

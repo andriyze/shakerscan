@@ -2784,6 +2784,110 @@ def test_refuter_queue_from_summary_records_unreviewed_signal_only_reviews():
     assert "UPDATE findings" not in calls["fetchrow"][0][0]
 
 
+def test_execute_refuter_review_plan_queues_deterministic_retest_without_truth_mutation(monkeypatch):
+    review_id = uuid.uuid4()
+    finding_id = uuid.uuid4()
+    target_id = uuid.uuid4()
+    captured: dict[str, object] = {}
+
+    review_row = {
+        "id": review_id,
+        "subject_type": "finding",
+        "subject_id": str(finding_id),
+        "target_id": target_id,
+        "finding_id": finding_id,
+        "hypothesis_id": None,
+        "campaign_id": None,
+        "trigger_reason": "critical_high_weak_or_suspected_proof",
+        "refuter_signal": "question",
+        "refuter_verdict": None,
+        "verdict_basis": "signal_only",
+        "confidence_delta": None,
+        "evidence_object_ids": json.dumps([]),
+        "tool_receipt_ids": json.dumps([]),
+        "counterevidence": json.dumps({}),
+        "notes": None,
+        "status": "recorded",
+        "metadata_json": json.dumps({
+            "automation_plan": {
+                "status": "planned_not_executed",
+                "execution_enabled": False,
+                "steps": [
+                    {"id": "review_claim_basis", "command": "refuter_review.record"},
+                    {"id": "deterministic_retest", "command": "finding.retest"},
+                ],
+            }
+        }),
+        "created_by": "pytest",
+    }
+    finding_row = {
+        "id": finding_id,
+        "target_id": target_id,
+        "status": "active",
+        "severity": "critical",
+        "title": "Weak SQLi proof",
+        "source": "scan",
+        "tool": "smart_sqli",
+        "last_verification_verdict": None,
+        "evidence": json.dumps({"url": "https://app.example.test/items?id=1"}),
+    }
+
+    class _FakeConn:
+        async def fetchrow(self, query, *args):
+            if "SELECT * FROM refuter_reviews" in query:
+                return review_row
+            if "UPDATE refuter_reviews" in query:
+                captured["updated_metadata"] = json.loads(args[1])
+                return {**review_row, "metadata_json": args[1]}
+            raise AssertionError(f"unexpected query: {query}")
+
+    async def fake_get_finding_record(conn, finding_ref):
+        captured["finding_ref"] = finding_ref
+        return finding_row
+
+    async def fake_retest_finding(finding_ref, body, mode=None):
+        captured["retest"] = (finding_ref, body, mode)
+        return {
+            "operation_id": "delegated-op",
+            "retest_id": "retest-1",
+            "job_id": "job-1",
+            "status": "queued",
+            "finding_id": finding_ref,
+        }
+
+    async def fake_record_command_result(conn, **kwargs):
+        captured["command_result"] = kwargs
+        return {"id": "refuter-op", "status": kwargs["status"]}
+
+    monkeypatch.setattr(api_module, "get_finding_record", fake_get_finding_record)
+    monkeypatch.setattr(api_module, "retest_finding", fake_retest_finding)
+    monkeypatch.setattr(api_module, "_record_command_result", fake_record_command_result)
+
+    result = asyncio.run(api_module._execute_refuter_review_plan(
+        _FakeConn(),
+        refuter_review_id=str(review_id),
+        approval_receipt_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        requested_by="pytest",
+    ))
+
+    assert result["status"] == "retest_scheduled"
+    assert result["delegated_command"] == "finding.retest"
+    assert result["operation_id"] == "refuter-op"
+    assert result["findings_updated"] == 0
+    assert result["hypotheses_updated"] == 0
+    finding_ref, body, mode = captured["retest"]
+    assert finding_ref == str(finding_id)
+    assert mode == "deterministic"
+    assert body.requested_by == "pytest"
+    assert body.approval_receipt_id == "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    latest = captured["updated_metadata"]["latest_refuter_execution"]
+    assert latest["delegated_operation_id"] == "delegated-op"
+    assert latest["verdict_pending"] is True
+    assert captured["command_result"]["command"] == "refuter_review.execute_plan"
+    assert captured["command_result"]["status"] == "retest_scheduled"
+    assert captured["command_result"]["result_json"]["findings_updated_by_refuter"] == 0
+
+
 def test_tool_receipt_redacts_hashes_and_is_non_executing():
     receipt_id = uuid.uuid4()
     captured: dict[str, object] = {}

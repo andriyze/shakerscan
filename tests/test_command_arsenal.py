@@ -65,23 +65,30 @@ def test_refuter_review_commands_do_not_mutate_findings_directly():
     summary_cmd = commands["refuter_review.summary"]
     record_cmd = commands["refuter_review.record"]
     queue_cmd = commands["refuter_review.queue_from_summary"]
+    execute_cmd = commands["refuter_review.execute_plan"]
 
     assert list_cmd["status"] == "read_only"
     assert summary_cmd["status"] == "read_only"
     assert record_cmd["status"] == "dry_run"
     assert queue_cmd["status"] == "dry_run"
+    assert execute_cmd["status"] == "gated"
     assert record_cmd["risk_tier"] == "read_only"
     assert queue_cmd["risk_tier"] == "read_only"
+    assert execute_cmd["risk_tier"] == "active"
     assert list_cmd["path"] == "/arsenal/refuter-reviews"
     assert summary_cmd["path"] == "/arsenal/refuter-reviews/summary"
     assert record_cmd["path"] == "/arsenal/refuter-reviews"
     assert queue_cmd["path"] == "/arsenal/refuter-reviews/queue-from-summary"
+    assert execute_cmd["path"] == "/arsenal/refuter-reviews/{refuter_review_id}/execute"
     assert "refuter_candidates" in summary_cmd["evidence_contract"]
     assert "automation_plan" in summary_cmd["evidence_contract"]
     assert "signal_only_reviews" in queue_cmd["evidence_contract"]
     assert "automation_plan" in queue_cmd["evidence_contract"]
+    assert "delegated_result" in execute_cmd["evidence_contract"]
+    assert "verdict_pending" in execute_cmd["evidence_contract"]
     assert "verdict_basis" in record_cmd["parameters_schema"]
     assert "refuter_review_row" in record_cmd["evidence_contract"]
+    assert "confirm_authorized" in execute_cmd["required_confirmations"]
 
 
 def test_tool_receipt_and_evidence_instance_commands_are_record_only():

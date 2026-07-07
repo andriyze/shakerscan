@@ -3550,6 +3550,15 @@ class RefuterReviewQueueRequest(BaseModel):
     created_by: Optional[str] = Field(default="refuter_auto_queue", max_length=120)
 
 
+class RefuterReviewExecuteRequest(BaseModel):
+    execute: bool = False
+    confirmations: list[str] = Field(default_factory=list)
+    approval_receipt_id: Optional[str] = None
+    step_id: Optional[str] = None
+    requested_by: Optional[str] = Field(default="refuter_executor", max_length=120)
+    confirm_production: bool = False
+
+
 class ToolReceiptRequest(BaseModel):
     tool_name: str = Field(min_length=1, max_length=120)
     tool_version: Optional[str] = None
@@ -14807,6 +14816,178 @@ async def _record_refuter_review(conn, req: RefuterReviewRequest) -> dict[str, A
     }
 
 
+def _select_refuter_automation_step(
+    automation_plan: dict[str, Any],
+    *,
+    step_id: str | None = None,
+    preferred_commands: Sequence[str] = ("finding.retest", "ai_gate.replay_probe", "model_intake.trust_preview"),
+) -> dict[str, Any]:
+    steps = [step for step in (automation_plan.get("steps") or []) if isinstance(step, dict)]
+    if step_id:
+        for step in steps:
+            if str(step.get("id") or "") == step_id:
+                return step
+        raise HTTPException(status_code=400, detail="Requested refuter automation step was not found")
+    for command in preferred_commands:
+        for step in steps:
+            if str(step.get("command") or "") == command:
+                return step
+    raise HTTPException(status_code=400, detail="Refuter review has no executable automation step")
+
+
+def _refuter_finding_automation_plan(finding: dict[str, Any], review_metadata: dict[str, Any]) -> dict[str, Any]:
+    existing = review_metadata.get("automation_plan")
+    if isinstance(existing, dict) and isinstance(existing.get("steps"), list):
+        return existing
+    evidence = _decode_json_value(finding.get("evidence")) or {}
+    if not isinstance(evidence, dict):
+        evidence = {}
+    trigger = _finding_refuter_trigger(finding)
+    if trigger and isinstance(trigger.get("automation_plan"), dict):
+        return trigger["automation_plan"]
+    return _refuter_automation_plan_for_finding(
+        finding,
+        evidence,
+        trigger_type="finding",
+        reasons=[str(finding.get("trigger_reason") or "manual_refuter_execution")],
+    )
+
+
+async def _execute_refuter_review_plan(
+    conn,
+    *,
+    refuter_review_id: str,
+    approval_receipt_id: str | None = None,
+    step_id: str | None = None,
+    requested_by: str | None = "refuter_executor",
+    confirm_production: bool = False,
+) -> dict[str, Any]:
+    try:
+        review_uuid = uuid.UUID(str(refuter_review_id))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="refuter_review_id must be a UUID")
+
+    review_row = await conn.fetchrow("SELECT * FROM refuter_reviews WHERE id=$1", review_uuid)
+    if not review_row:
+        raise HTTPException(status_code=404, detail="Refuter review not found")
+    review = _public_refuter_review_row(review_row)
+    if review.get("subject_type") != "finding":
+        raise HTTPException(status_code=400, detail="Only finding refuter reviews support automated execution")
+    finding_ref = str(review.get("finding_id") or review.get("subject_id") or "").strip()
+    if not finding_ref:
+        raise HTTPException(status_code=400, detail="Refuter review is missing finding context")
+
+    finding_row = await get_finding_record(conn, finding_ref)
+    if not finding_row:
+        raise HTTPException(status_code=404, detail="Finding not found for refuter review")
+    finding = row_to_dict(finding_row)
+    metadata = review.get("metadata_json") if isinstance(review.get("metadata_json"), dict) else {}
+    automation_plan = _refuter_finding_automation_plan(finding, metadata)
+    planned_step = _select_refuter_automation_step(automation_plan, step_id=step_id)
+
+    source = str(finding.get("source") or "").lower()
+    tool = str(finding.get("tool") or "").lower()
+    delegated_command = str(planned_step.get("command") or "")
+    execution_kind = "deterministic_retest"
+    delegated_result: dict[str, Any]
+    status = "completed"
+
+    if source == "ai_gate" or finding.get("ai_target_id"):
+        delegated_command = "ai_gate.finding_replay"
+        execution_kind = "ai_gate_finding_replay"
+        delegated_result = await retest_ai_finding(
+            str(finding["id"]),
+            AIFindingRetestRequest(
+                mode="same_probe",
+                requested_by=requested_by or "refuter_executor",
+                confirm_production=confirm_production,
+                approval_receipt_id=approval_receipt_id,
+            ),
+        )
+        status = str(delegated_result.get("status") or "queued")
+    elif source == "model_intake" or tool == "model_intake":
+        delegated_command = "model_intake.trust_preview"
+        execution_kind = "model_intake_trust_preview"
+        delegated_result = await _arsenal_dispatch_model_intake_trust_preview({
+            "policy_profile": metadata.get("policy_profile") or "production",
+            "trust_mode": metadata.get("trust_mode") or "saved_anchor",
+        })
+        status = "completed"
+    else:
+        delegated_command = "finding.retest"
+        delegated_result = await retest_finding(
+            str(finding["id"]),
+            FindingRetestRequest(
+                requested_by=requested_by or "refuter_executor",
+                approval_receipt_id=approval_receipt_id,
+            ),
+            mode="deterministic",
+        )
+        status = str(delegated_result.get("status") or "queued")
+
+    execution_event = _redact_agent_payload({
+        "executed_at": utc_now_iso(),
+        "status": status,
+        "execution_kind": execution_kind,
+        "planned_step_id": planned_step.get("id"),
+        "planned_command": planned_step.get("command"),
+        "delegated_command": delegated_command,
+        "delegated_operation_id": delegated_result.get("operation_id") if isinstance(delegated_result, dict) else None,
+        "retest_id": delegated_result.get("retest_id") if isinstance(delegated_result, dict) else None,
+        "scan_id": delegated_result.get("scan_id") if isinstance(delegated_result, dict) else None,
+        "ui_url": delegated_result.get("ui_url") if isinstance(delegated_result, dict) else None,
+        "verdict_pending": True,
+        "verdict_recording_command": "refuter_review.record",
+    })
+    updated_metadata = {
+        **metadata,
+        "automation_plan": automation_plan,
+        "latest_refuter_execution": execution_event,
+    }
+    updated_row = await conn.fetchrow(
+        """
+        UPDATE refuter_reviews
+        SET metadata_json=$2::jsonb, updated_at=NOW()
+        WHERE id=$1
+        RETURNING *
+        """,
+        review_uuid,
+        json.dumps(updated_metadata),
+    )
+    command_result = await _record_command_result(
+        conn,
+        command="refuter_review.execute_plan",
+        status="retest_scheduled" if status == "queued" else status,
+        risk_tier="active",
+        finding_ids=[str(finding["id"])],
+        approval_receipt_id=approval_receipt_id,
+        operator_message=f"Executed refuter automation step {execution_event['planned_step_id']} for finding {finding.get('title') or finding['id']}",
+        result_json={
+            "refuter_review_id": str(review_uuid),
+            "finding_id": str(finding["id"]),
+            "execution": execution_event,
+            "delegated_result": delegated_result,
+            "findings_updated_by_refuter": 0,
+            "hypotheses_updated_by_refuter": 0,
+        },
+        next_action=str(delegated_result.get("ui_url") or f"/findings/{finding['id']}") if isinstance(delegated_result, dict) else f"/findings/{finding['id']}",
+        created_by=requested_by or "refuter_executor",
+    )
+    return {
+        "refuter_review": _public_refuter_review_row(updated_row),
+        "executed_step": planned_step,
+        "delegated_command": delegated_command,
+        "delegated_result": delegated_result,
+        "status": "retest_scheduled" if status == "queued" else status,
+        "operation_id": command_result["id"],
+        "command_result": command_result,
+        "execution_enabled": True,
+        "findings_updated": 0,
+        "hypotheses_updated": 0,
+        "verdict_pending": True,
+    }
+
+
 def _canonical_hash_payload(payload: dict[str, Any]) -> str:
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
@@ -17519,6 +17700,21 @@ async def _arsenal_dispatch_refuter_review_queue_from_summary(p: dict[str, Any])
     ))
 
 
+async def _arsenal_dispatch_refuter_review_execute_plan(p: dict[str, Any], approval_receipt_id: str | None) -> dict[str, Any]:
+    refuter_review_id = str(p.get("refuter_review_id") or "").strip()
+    if not refuter_review_id:
+        raise HTTPException(status_code=400, detail="refuter_review.execute_plan requires a refuter_review_id parameter")
+    async with db_pool.acquire() as conn:
+        return await _execute_refuter_review_plan(
+            conn,
+            refuter_review_id=refuter_review_id,
+            approval_receipt_id=approval_receipt_id or p.get("approval_receipt_id"),
+            step_id=p.get("step_id"),
+            requested_by=p.get("requested_by") or p.get("created_by") or "arsenal_execute",
+            confirm_production=bool(p.get("confirm_production")),
+        )
+
+
 async def _arsenal_dispatch_asm_improve(p: dict[str, Any], approval_receipt_id: str | None) -> dict[str, Any]:
     target_id = str(p.get("target_id") or "").strip()
     if not target_id:
@@ -17734,6 +17930,7 @@ def _arsenal_gated_adapters() -> dict[str, Any]:
         "ai_gate.replay_probe": _arsenal_dispatch_ai_gate_replay_probe,
         "model_intake.scan": _arsenal_dispatch_model_intake_scan,
         "evidence.retention_sweep": _arsenal_dispatch_evidence_retention_sweep,
+        "refuter_review.execute_plan": _arsenal_dispatch_refuter_review_execute_plan,
         "authz.replay_plan": _arsenal_dispatch_authz_replay_plan,
         "authz.promote_replay_finding": _arsenal_dispatch_authz_promote_replay_finding,
     }
@@ -18511,6 +18708,30 @@ async def arsenal_queue_refuter_reviews_from_summary(req: RefuterReviewQueueRequ
         "findings_updated": 0,
         "hypotheses_updated": 0,
     }
+
+
+@app.post("/arsenal/refuter-reviews/{refuter_review_id}/execute")
+async def arsenal_execute_refuter_review_plan(refuter_review_id: str, req: RefuterReviewExecuteRequest):
+    """Execute the next planned refuter automation step through existing gated primitives.
+
+    This can queue deterministic retests or AI Gate finding replays, or produce
+    a Model Intake trust preview. It records refuter execution metadata and a
+    command audit row, but it does not directly update finding proof state,
+    severity, hypotheses, or deployment gates.
+    """
+    return await _arsenal_execute_detached(ArsenalExecuteRequest(
+        command="refuter_review.execute_plan",
+        parameters={
+            "refuter_review_id": refuter_review_id,
+            "step_id": req.step_id,
+            "requested_by": req.requested_by,
+            "confirm_production": req.confirm_production,
+        },
+        execute=req.execute,
+        confirmations=req.confirmations,
+        approval_receipt_id=req.approval_receipt_id,
+        created_by=req.requested_by,
+    ))
 
 
 @app.post("/arsenal/refuter-reviews")
