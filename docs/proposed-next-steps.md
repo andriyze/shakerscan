@@ -911,12 +911,18 @@ POST-body SQLi/login coverage, stored XSS store-then-render proof, and workflow/
 Body-param SQLi/NoSQL primitives exist (`nosql_injection_test_json_body` and body-param sites in
 `active_checks`), and NoSQL JSON-body checks now emit endpoint-attempt telemetry so ASM/family
 coverage can distinguish completed, partial, and skipped JSON-body probes. The near-term gap is
-still better endpoint/body capture, auth context, and proof routing on benchmark workflows.
+still better endpoint/body capture, auth context, and proof routing on benchmark workflows. Benchmark
+summaries and scorecards now include `auth_workflow` diagnostics with required/observed auth states,
+missing second-principal blockers, and authz/BOLA attempt rollups so a missed BOLA expectation is
+classified as `missing_required_auth_context` instead of a generic detector miss when the benchmark
+did not actually exercise both principals.
 
 **Implement:** keep the benchmark as the unit of progress. Add focused campaigns for login/search/
 review/order APIs; capture real POST bodies from browser/HAR/OpenAPI; keep NoSQL operator probes
 attached to JSON-body coverage telemetry; add browser-first reflected/stored XSS proof; add safe
-Lab/deep workflow/write-BOLA checks after graph/principal preconditions exist.
+Lab/deep workflow/write-BOLA checks after graph/principal preconditions exist. DONE phase 1 for
+auth-workflow diagnostics in `scanner_tools.benchmark_summary` and `scripts/benchmark_targets.py`;
+detector recall and proof routing still require scorecard-backed scan improvements.
 
 **Done when:** recorded two-user benchmark scorecards show the targeted miss becoming a deterministic
 finding, not merely an attempted endpoint.

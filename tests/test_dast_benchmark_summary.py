@@ -61,6 +61,7 @@ def test_benchmark_summary_tracks_attempts_params_and_misses():
                 "sqli": {"min_severity": "high", "min_confirmed": 1},
             },
             "auth_states": ["user1", "user2"],
+            "requires_two_users": True,
         },
     )
 
@@ -68,6 +69,9 @@ def test_benchmark_summary_tracks_attempts_params_and_misses():
     assert summary["discovery"]["endpoints_by_source"]["har"] == 3
     assert summary["attempts"]["by_auth_state_family_status"]["user1|bola|completed"] == 1
     assert summary["attempts"]["by_auth_state_family_status"]["user2|authz|completed"] == 1
+    assert summary["auth_workflow"]["status"] == "ready"
+    assert summary["auth_workflow"]["two_principal_observed"] is True
+    assert summary["auth_workflow"]["missing_auth_states"] == []
     assert summary["parameters"]["attempted_by_location"]["query"] == 1
     assert summary["parameters"]["attempted_by_location"]["json"] == 2
     assert summary["findings"]["confirmed_by_family_severity"]["bola|high"] == 1
@@ -81,6 +85,38 @@ def test_benchmark_summary_tracks_attempts_params_and_misses():
             "likely_root_cause": "family_not_attempted",
         }
     ]
+
+
+def test_benchmark_summary_reports_auth_workflow_blocker_for_bola():
+    summary = build_benchmark_summary(
+        {
+            "smart_coverage": {"auth_states_tested": ["user1"]},
+            "active_checks": {
+                "endpoint_attempts": [
+                    {
+                        "custom_endpoint": "GET /api/orders/1",
+                        "family": "bola",
+                        "auth_state": "user1",
+                        "status": "blocked",
+                    }
+                ],
+            },
+            "findings": [],
+        },
+        expected={
+            "families": {"bola": {"min_severity": "high", "min_confirmed": 1}},
+            "auth_states": ["user1", "user2"],
+            "requires_two_users": True,
+        },
+    )
+
+    assert summary["auth_workflow"]["status"] == "blocked"
+    assert summary["auth_workflow"]["two_principal_required"] is True
+    assert summary["auth_workflow"]["two_principal_observed"] is False
+    assert summary["auth_workflow"]["missing_auth_states"] == ["user2"]
+    assert "missing_second_principal" in summary["auth_workflow"]["blockers"]
+    assert summary["misses"][0]["family"] == "bola"
+    assert summary["misses"][0]["likely_root_cause"] == "missing_required_auth_context"
 
 
 def test_benchmark_summary_records_proof_and_severity_gaps():

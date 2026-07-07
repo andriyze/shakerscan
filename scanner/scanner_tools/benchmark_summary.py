@@ -187,6 +187,57 @@ def _collect_attempts(report: dict[str, Any]) -> tuple[dict[str, Any], dict[str,
     )
 
 
+def _auth_states_from_attempts(attempts: dict[str, Any]) -> set[str]:
+    observed: set[str] = set()
+    for key in _as_dict(attempts.get("by_auth_state_family_status")):
+        auth_state = str(key).split("|", 1)[0].strip().lower()
+        if auth_state and auth_state not in {"unknown", "anonymous"}:
+            observed.add(auth_state)
+    return observed
+
+
+def _collect_auth_workflow(
+    report: dict[str, Any],
+    expected: dict[str, Any],
+    attempts: dict[str, Any],
+) -> dict[str, Any]:
+    required = {str(item).strip().lower() for item in _as_list(expected.get("auth_states")) if str(item).strip()}
+    expected_families = expected.get("families") if isinstance(expected.get("families"), dict) else {}
+    if any(str(family).lower() in {"bola", "authz", "broken_access_control"} for family in expected_families):
+        required.add("user1")
+        if str(expected.get("requires_two_users") or "").lower() in {"1", "true", "yes"} or "bola" in expected_families:
+            required.add("user2")
+
+    smart_coverage = _as_dict(report.get("smart_coverage"))
+    observed = {str(item).strip().lower() for item in _as_list(smart_coverage.get("auth_states_tested")) if str(item).strip()}
+    observed.update(_auth_states_from_attempts(attempts))
+    missing = sorted(required - observed)
+    authz_attempts = {
+        key: count
+        for key, count in _as_dict(attempts.get("by_auth_state_family_status")).items()
+        if "|bola|" in key or "|auth|" in key or "|authz|" in key
+    }
+    two_principal_required = bool({"user1", "user2"}.issubset(required))
+    two_principal_observed = bool({"user1", "user2"}.issubset(observed))
+    blockers: list[str] = []
+    if missing:
+        blockers.append("missing_required_auth_states")
+    if two_principal_required and not two_principal_observed:
+        blockers.append("missing_second_principal")
+    if report.get("auth_blocked"):
+        blockers.append("scanner_reported_auth_blocked")
+    return {
+        "required_auth_states": sorted(required),
+        "observed_auth_states": sorted(observed),
+        "missing_auth_states": missing,
+        "two_principal_required": two_principal_required,
+        "two_principal_observed": two_principal_observed,
+        "status": "blocked" if blockers else ("ready" if required else "not_required"),
+        "blockers": blockers,
+        "authz_attempts_by_state_family_status": authz_attempts,
+    }
+
+
 def _collect_findings(report: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     by_family_severity: Counter[tuple[str, str]] = Counter()
     confirmed_by_family_severity: Counter[tuple[str, str]] = Counter()
@@ -238,6 +289,7 @@ def build_benchmark_summary(
     expected = expected or {}
     discovery_sources = _collect_discovery_sources(report)
     attempts, params_by_location = _collect_attempts(report)
+    auth_workflow = _collect_auth_workflow(report, expected, attempts)
     findings, proof_or_severity_gaps = _collect_findings(report)
     misses: list[dict[str, Any]] = []
 
@@ -257,13 +309,18 @@ def build_benchmark_summary(
                 for key, count in attempts["by_auth_state_family_status"].items()
                 if f"|{family}|" in key or (family == "authz" and "|auth|" in key)
             )
+            auth_blocked_family = family in {"bola", "authz", "broken_access_control"} and auth_workflow["status"] == "blocked"
             misses.append({
                 "family": family,
                 "expected_min_confirmed": min_confirmed,
                 "expected_min_severity": min_severity,
                 "confirmed": found,
                 "attempted": attempted,
-                "likely_root_cause": "family_not_attempted" if attempted == 0 else "no_confirmed_finding_or_proof_gap",
+                "likely_root_cause": (
+                    "missing_required_auth_context"
+                    if auth_blocked_family
+                    else "family_not_attempted" if attempted == 0 else "no_confirmed_finding_or_proof_gap"
+                ),
             })
 
     required_auth_states = [str(x).lower() for x in _as_list(expected.get("auth_states"))]
@@ -281,6 +338,7 @@ def build_benchmark_summary(
         "run_mode": run_mode,
         "discovery": {"endpoints_by_source": discovery_sources},
         "attempts": attempts,
+        "auth_workflow": auth_workflow,
         "parameters": {"attempted_by_location": params_by_location},
         "findings": findings,
         "misses": misses,

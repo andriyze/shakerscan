@@ -229,6 +229,26 @@ def collect_scorecard(report, fixture):
     cov = ((report.get("smart_coverage") or {}).get("endpoints") or {})
     active = report.get("active_checks") or {}
     auth_states = ((report.get("smart_coverage") or {}).get("auth_states_tested") or [])
+    auth_cfg = fixture.get("auth") or {}
+    required_auth_states = []
+    if auth_cfg.get("user1_login"):
+        required_auth_states.append("user1")
+    if auth_cfg.get("requires_two_users") or auth_cfg.get("user2_login"):
+        required_auth_states.append("user2")
+    observed_auth_states = sorted({str(item).lower() for item in auth_states if item})
+    missing_auth_states = sorted(set(required_auth_states) - set(observed_auth_states))
+    auth_workflow = {
+        "required_auth_states": required_auth_states,
+        "observed_auth_states": observed_auth_states,
+        "missing_auth_states": missing_auth_states,
+        "two_principal_required": "user2" in required_auth_states,
+        "two_principal_observed": {"user1", "user2"}.issubset(set(observed_auth_states)),
+        "status": "blocked" if missing_auth_states else ("ready" if required_auth_states else "not_required"),
+        "blockers": (
+            ["missing_required_auth_states"]
+            + (["missing_second_principal"] if "user2" in missing_auth_states else [])
+        ) if missing_auth_states else [],
+    }
     return {
         "total_findings": len(findings),
         "verified_high_critical": len(verified_hc),
@@ -241,6 +261,7 @@ def collect_scorecard(report, fixture):
         "budget_exhausted_reason": active.get("budget_exhausted_reason"),
         "auth_blocked": bool(report.get("auth_blocked")) or "auth_missing" in str(report.get("status", "")),
         "auth_states_tested": auth_states,
+        "auth_workflow": auth_workflow,
         "timeout": "timeout" in str(report.get("error_message", "")).lower()
                    or "max duration" in str(report.get("error_message", "")).lower(),
         "error": report.get("error_message") or None,
