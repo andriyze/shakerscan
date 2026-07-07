@@ -16471,6 +16471,163 @@ def _authz_replay_plan_from_hypothesis_action(
     }
 
 
+def _authz_observation_matches_expectation(observed_status: Any, expected: dict[str, Any]) -> bool:
+    try:
+        status = int(observed_status)
+    except (TypeError, ValueError):
+        return False
+    expected_status = expected.get("expected_http_status")
+    if expected_status is not None:
+        try:
+            return status == int(expected_status)
+        except (TypeError, ValueError):
+            pass
+    expected_access = str(expected.get("expected_access") or "unknown").strip().lower()
+    if expected_access == "allow":
+        return 200 <= status < 400
+    if expected_access in {"deny", "requires_role"}:
+        return status in {401, 403, 404}
+    return False
+
+
+async def _execute_authz_replay_plan(
+    conn,
+    *,
+    campaign_action_id: str,
+    session_id: str,
+    approval_receipt_id: str | None = None,
+    created_by: str | None = None,
+) -> dict[str, Any]:
+    """Execute a planned authz replay through an existing interactive session."""
+    action_uuid = _uuid_or_400(campaign_action_id, "campaign action id")
+    session_id = str(session_id or "").strip()
+    if not session_id:
+        raise HTTPException(status_code=400, detail="authz.replay_plan requires a session_id parameter")
+    row = await conn.fetchrow("SELECT * FROM campaign_actions WHERE id=$1", action_uuid)
+    if not row:
+        raise HTTPException(status_code=404, detail="Campaign action not found")
+    action = _public_campaign_action_row(row)
+    result_json = action.get("result_json") if isinstance(action.get("result_json"), dict) else {}
+    replay_plan = result_json.get("authz_replay_plan") if isinstance(result_json.get("authz_replay_plan"), dict) else {}
+    if replay_plan.get("mode") != "deterministic_authz_replay":
+        raise HTTPException(status_code=400, detail="Campaign action does not contain an authz replay plan")
+    expected_access = [item for item in (replay_plan.get("expected_access") or []) if isinstance(item, dict)]
+    if not expected_access:
+        raise HTTPException(status_code=400, detail="Authz replay plan has no expected access rows")
+
+    manager = await InteractiveSessionManager.get_instance()
+    session = await manager.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found or expired")
+
+    observations: list[dict[str, Any]] = []
+    mismatches: list[dict[str, Any]] = []
+    violations: list[dict[str, Any]] = []
+    for expected in expected_access[:10]:
+        endpoint = str(expected.get("path") or replay_plan.get("path") or "").strip()
+        method = str(expected.get("method") or replay_plan.get("method") or "GET").strip().upper()
+        as_user = str(expected.get("principal_auth_state") or expected.get("principal_label") or "").strip() or None
+        if not endpoint:
+            observation = {
+                "method": method,
+                "path": endpoint,
+                "principal_auth_state": as_user,
+                "expected_access": expected.get("expected_access"),
+                "expected_http_status": expected.get("expected_http_status"),
+                "observed_status": None,
+                "matched": False,
+                "error": "missing_endpoint",
+            }
+        else:
+            replay = await session.test_endpoint(
+                endpoint=endpoint,
+                method=method,
+                as_user=as_user,
+                body=None,
+                allow_out_of_scope=False,
+            )
+            observed_status = (
+                replay.get("status_code")
+                if isinstance(replay, dict) and replay.get("status_code") is not None
+                else replay.get("status") if isinstance(replay, dict) else None
+            )
+            matched = _authz_observation_matches_expectation(observed_status, expected)
+            observation = {
+                "method": method,
+                "path": endpoint,
+                "principal_label": expected.get("principal_label"),
+                "principal_auth_state": as_user,
+                "expected_access": expected.get("expected_access"),
+                "expected_http_status": expected.get("expected_http_status"),
+                "observed_status": observed_status,
+                "matched": matched,
+                "request_success": bool(replay.get("success")) if isinstance(replay, dict) else False,
+            }
+        observations.append(observation)
+        if not observation.get("matched"):
+            mismatches.append(observation)
+            if str(observation.get("expected_access") or "").lower() in {"deny", "requires_role"}:
+                try:
+                    status_int = int(observation.get("observed_status"))
+                except (TypeError, ValueError):
+                    status_int = 0
+                if 200 <= status_int < 400:
+                    violations.append(observation)
+
+    replay_result = {
+        "authz_replay": {
+            "campaign_action_id": str(action_uuid),
+            "session_id": session_id,
+            "plan": replay_plan,
+            "observations": observations,
+            "mismatch_count": len(mismatches),
+            "violation_count": len(violations),
+            "proof_state": "replayed_violation_observed" if violations else "replayed_no_violation_observed",
+            "finding_created": False,
+        }
+    }
+    status = "completed" if not mismatches else "partial"
+    updated_row = await conn.fetchrow(
+        """
+        UPDATE campaign_actions
+        SET status=$1,
+            dry_run=false,
+            result_json = result_json || $2::jsonb,
+            updated_at=NOW()
+        WHERE id=$3
+        RETURNING *
+        """,
+        status,
+        json.dumps(replay_result),
+        action_uuid,
+    )
+    hypothesis_ids = action.get("hypothesis_ids") if isinstance(action.get("hypothesis_ids"), list) else []
+    command_result = await _record_command_result(
+        conn,
+        command="authz.replay_plan",
+        status=status,
+        risk_tier="credential",
+        dry_run=False,
+        approval_receipt_id=approval_receipt_id,
+        hypothesis_ids=[str(item) for item in hypothesis_ids],
+        result_json=replay_result,
+        operator_message="Executed deterministic authz replay plan; no findings were created automatically.",
+        next_action=f"/settings/arsenal?tab=campaign-actions",
+        created_by=created_by,
+    )
+    return {
+        "operation_id": command_result.get("id"),
+        "status": status,
+        "campaign_action": _public_campaign_action_row(updated_row) if updated_row else action,
+        "command_result": command_result,
+        "observations": observations,
+        "mismatch_count": len(mismatches),
+        "violation_count": len(violations),
+        "execution_enabled": True,
+        "findings_created": 0,
+    }
+
+
 async def _plan_campaign_from_hypothesis(
     conn,
     hypothesis_id: str,
@@ -17209,6 +17366,23 @@ async def _arsenal_dispatch_evidence_retention_sweep(p: dict[str, Any], approval
     return await evidence_retention_sweep(body)
 
 
+async def _arsenal_dispatch_authz_replay_plan(p: dict[str, Any], approval_receipt_id: str | None) -> dict[str, Any]:
+    campaign_action_id = str(p.get("campaign_action_id") or "").strip()
+    session_id = str(p.get("session_id") or "").strip()
+    if not campaign_action_id:
+        raise HTTPException(status_code=400, detail="authz.replay_plan requires a campaign_action_id parameter")
+    if not session_id:
+        raise HTTPException(status_code=400, detail="authz.replay_plan requires a session_id parameter")
+    async with db_pool.acquire() as conn:
+        return await _execute_authz_replay_plan(
+            conn,
+            campaign_action_id=campaign_action_id,
+            session_id=session_id,
+            approval_receipt_id=approval_receipt_id or p.get("approval_receipt_id"),
+            created_by=p.get("created_by"),
+        )
+
+
 def _arsenal_readonly_adapters() -> dict[str, Any]:
     return {
         "campaign.list": _arsenal_dispatch_campaign_list,
@@ -17279,6 +17453,7 @@ def _arsenal_gated_adapters() -> dict[str, Any]:
         "ai_gate.replay_probe": _arsenal_dispatch_ai_gate_replay_probe,
         "model_intake.scan": _arsenal_dispatch_model_intake_scan,
         "evidence.retention_sweep": _arsenal_dispatch_evidence_retention_sweep,
+        "authz.replay_plan": _arsenal_dispatch_authz_replay_plan,
     }
 
 

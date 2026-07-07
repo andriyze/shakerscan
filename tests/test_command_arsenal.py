@@ -418,6 +418,21 @@ def test_hypothesis_plan_campaign_is_dry_run_and_non_executing():
     assert "next_test_action" in cmd["evidence_contract"]
 
 
+def test_authz_replay_plan_is_gated_credential_command():
+    payload = arsenal.describe_commands()
+    commands = {item["name"]: item for item in payload["commands"]}
+
+    cmd = commands["authz.replay_plan"]
+    assert cmd["status"] == "gated"
+    assert cmd["risk_tier"] == "credential"
+    assert cmd["method"] == "POST"
+    assert cmd["path"] == "/arsenal/campaign-actions/{campaign_action_id}/authz-replay"
+    assert "confirm_authorized" in cmd["required_confirmations"]
+    assert "approval_receipt_id" in cmd["parameters_schema"]
+    assert "replay_observations" in cmd["evidence_contract"]
+    assert "command_result" in cmd["evidence_contract"]
+
+
 def test_mission_contract_catalog_is_contract_only():
     payload = arsenal.describe_contracts()
 
