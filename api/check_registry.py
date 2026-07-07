@@ -8,6 +8,7 @@ grow another set of hardcoded family lists.
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -351,10 +352,33 @@ def scanner_execution_plan(
             }
         )
 
+    enabled_families = [item for item in families if item.get("enabled")]
+    skipped_families = [item for item in families if not item.get("enabled")]
+    reason_counts = Counter(str(item.get("reason") or "unknown") for item in skipped_families)
+    enabled_by_phase = Counter(str(item.get("phase") or "unknown") for item in enabled_families)
+    enabled_by_risk = Counter(str(item.get("risk_level") or "unknown") for item in enabled_families)
+    proof_contracts = {
+        str(item.get("name")): list(item.get("proof_contract") or [])
+        for item in enabled_families
+        if item.get("proof_contract")
+    }
+
     return {
         "registry_version": "check_family_v1",
         "scan_mode": scan_mode,
         "check_family_scope": dict(scope),
+        "summary": {
+            "family_count": len(families),
+            "enabled_count": len(enabled_families),
+            "skipped_count": len(skipped_families),
+            "enabled_families": [str(item.get("name")) for item in enabled_families],
+            "skipped_families": [str(item.get("name")) for item in skipped_families],
+            "skip_reason_counts": dict(reason_counts),
+            "enabled_by_phase": dict(enabled_by_phase),
+            "enabled_by_risk": dict(enabled_by_risk),
+            "proof_contracts": proof_contracts,
+            "runnable_enabled_count": sum(1 for item in enabled_families if item.get("runnable")),
+        },
         "families": families,
     }
 

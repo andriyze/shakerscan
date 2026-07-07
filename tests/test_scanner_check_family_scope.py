@@ -312,6 +312,8 @@ def test_scanner_execution_plan_is_registry_driven_for_focused_family():
 
     assert plan["registry_version"] == "check_family_v1"
     assert plan["check_family_scope"]["focused_family"] == "sqli"
+    assert plan["summary"]["proof_contracts"]["sqli"] == families["sqli"]["proof_contract"]
+    assert "sqli" in plan["summary"]["enabled_families"]
     assert families["sqli"]["enabled"] is True
     assert families["sqli"]["telemetry_schema"] == "active_endpoint_attempt_v1"
     assert "payload" in families["sqli"]["proof_contract"]
@@ -343,6 +345,7 @@ def test_scanner_execution_plan_records_zero_rediscovery_and_public_skips():
     assert families["headers"]["reason"] == "global_checks_skipped"
     assert families["nuclei"]["reason"] == "public_only"
     assert families["xss"]["enabled"] is False
+    assert plan["summary"]["skip_reason_counts"]["public_only"] >= 1
     assert families["xss"]["reason"] == "public_only"
 
 

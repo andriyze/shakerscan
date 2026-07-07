@@ -101,6 +101,10 @@ def test_scanner_execution_plan_uses_registry_gates():
     families = {item["name"]: item for item in plan["families"]}
 
     assert plan["registry_version"] == "check_family_v1"
+    assert plan["summary"]["enabled_count"] >= 4
+    assert "sqli" in plan["summary"]["enabled_families"]
+    assert plan["summary"]["proof_contracts"]["sqli"] == families["sqli"]["proof_contract"]
+    assert plan["summary"]["enabled_by_phase"]["active"] >= 1
     assert families["recon"]["enabled"] is True
     assert families["headers"]["enabled"] is True
     assert families["nuclei"]["enabled"] is True
@@ -132,3 +136,5 @@ def test_scanner_execution_plan_records_passive_skip_reasons():
     assert families["nuclei"]["reason"] == "public_only"
     assert families["xss"]["enabled"] is False
     assert families["xss"]["reason"] == "public_only"
+    assert plan["summary"]["skip_reason_counts"]["public_only"] >= 1
+    assert "recon" in plan["summary"]["skipped_families"]

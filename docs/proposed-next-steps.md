@@ -1197,13 +1197,15 @@ challenged and corrected without deleting history, and corrections are visible i
 and deployment-gate story as the original claim.
 
 ### 10. Check-registry execution migration + proof contracts per family
-**Status: PARTIAL.** `api/check_registry.py` (`CheckFamilySpec`) is the family contract for API
+**Status: PARTIAL, REGISTRY PLAN ROLLUP DONE.** `api/check_registry.py` (`CheckFamilySpec`) is the family contract for API
 validation and ASM scheduling and now carries `requires_auth_states` / `requires_credentials` /
 `risk_level` / `runnable` / `telemetry_schema` / `proof_contract` / `severity_rules`. Scanner
 `build_report()` now emits a registry-derived `scanner_execution_plan` in scan config, active
-telemetry, and metadata, and SQLi/XSS active dispatch gates derive from that plan before entering
-the legacy module loops. Detector internals still execute many checks through hardcoded module calls,
-and planned families such as `lfi`/`rce`/`ssrf` are not runnable.
+telemetry, and metadata. That plan now includes a registry-derived summary rollup with enabled and
+skipped family lists, skip reason counts, enabled risk/phase counts, runnable-enabled counts, and
+per-enabled-family proof contracts. SQLi/XSS active dispatch gates derive from that plan before
+entering the legacy module loops. Detector internals still execute many checks through hardcoded
+module calls, and planned families such as `lfi`/`rce`/`ssrf` are not runnable.
 
 **Implement:** continue migrating `build_report()` module execution to registry iteration; add
 `proof_contract`, `severity_rules`, telemetry schema, safety gate, and report rollup per family;
