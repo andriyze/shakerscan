@@ -1841,6 +1841,147 @@ def test_application_graph_hypothesis_requests_build_authz_leads_not_findings():
     assert req.dedupe_dimensions["proof_surface"] == "runtime_authz_replay"
 
 
+def test_application_graph_hypothesis_requests_attach_principal_matrix_context():
+    target_id = "11111111-1111-4111-8111-111111111111"
+    nodes = [
+        {
+            "id": uuid.uuid4(),
+            "node_type": "route",
+            "node_key": "route:GET /api/orders",
+            "label": "GET /api/orders",
+            "attributes": json.dumps({}),
+        },
+        {
+            "id": uuid.uuid4(),
+            "node_type": "object",
+            "node_key": "object:order_id",
+            "label": "order_id",
+            "attributes": json.dumps({}),
+        },
+        {
+            "id": uuid.uuid4(),
+            "node_type": "route",
+            "node_key": "route:GET /api/orders/{order_id}",
+            "label": "GET /api/orders/{order_id}",
+            "attributes": json.dumps({}),
+        },
+    ]
+    edges = [
+        {
+            "id": uuid.uuid4(),
+            "src_key": "route:GET /api/orders",
+            "dst_key": "object:order_id",
+            "edge_type": "produces",
+            "attributes": json.dumps({}),
+        },
+        {
+            "id": uuid.uuid4(),
+            "src_key": "object:order_id",
+            "dst_key": "route:GET /api/orders/{order_id}",
+            "edge_type": "consumed_by",
+            "attributes": json.dumps({}),
+        },
+        {
+            "id": uuid.uuid4(),
+            "src_key": "route:GET /api/orders",
+            "dst_key": "route:GET /api/orders/{order_id}",
+            "edge_type": "auth_boundary",
+            "attributes": json.dumps({
+                "object_id_key": "order_id",
+                "source_principal": "user1",
+                "excluded_principal": "user2",
+            }),
+        },
+    ]
+    principals = [
+        {
+            "id": uuid.uuid4(),
+            "label": "user1",
+            "role": "customer",
+            "tenant_id": "tenant-a",
+            "auth_state": "user1",
+            "credential_profile": "profile-user1",
+            "is_active": True,
+            "metadata_json": json.dumps({"authorization": "Bearer secret-token"}),
+        },
+        {
+            "id": uuid.uuid4(),
+            "label": "user2",
+            "role": "customer",
+            "tenant_id": "tenant-a",
+            "auth_state": "user2",
+            "credential_profile": "profile-user2",
+            "is_active": True,
+            "metadata_json": json.dumps({}),
+        },
+        {
+            "id": uuid.uuid4(),
+            "label": "admin",
+            "role": "admin",
+            "tenant_id": "tenant-a",
+            "auth_state": "admin",
+            "credential_profile": None,
+            "is_active": True,
+            "metadata_json": json.dumps({}),
+        },
+    ]
+    expectations = [
+        {
+            "id": uuid.uuid4(),
+            "method": "GET",
+            "path": "/api/orders/{order_id}",
+            "param_shape": "order_id",
+            "param_location": "path",
+            "principal_role": "customer",
+            "tenant_id": "tenant-a",
+            "expected_access": "allow",
+            "expected_http_status": 200,
+            "expectation_source": "contract",
+            "principal_label": "user1",
+            "principal_auth_state": "user1",
+            "metadata_json": json.dumps({}),
+        },
+        {
+            "id": uuid.uuid4(),
+            "method": "GET",
+            "path": "/api/orders/{order_id}",
+            "param_shape": "order_id",
+            "param_location": "path",
+            "principal_role": "customer",
+            "tenant_id": "tenant-a",
+            "expected_access": "deny",
+            "expected_http_status": 403,
+            "expectation_source": "contract",
+            "principal_label": "user2",
+            "principal_auth_state": "user2",
+            "metadata_json": json.dumps({}),
+        },
+    ]
+
+    req = api_module._application_graph_hypothesis_requests(
+        target_id,
+        nodes,
+        edges,
+        principal_rows=principals,
+        expectation_rows=expectations,
+        created_by="pytest",
+    )[0]
+
+    context = req.next_test_action["principal_matrix"]
+    assert context["available"] is True
+    assert context["role_counts"]["customer"] == 2
+    assert context["tenant_counts"]["tenant-a"] == 3
+    assert context["matched_principals"]["primary"]["label"] == "user1"
+    assert context["matched_principals"]["alternate"]["label"] == "user2"
+    assert context["credential_profiles"] == {"primary": True, "alternate": True}
+    assert context["precondition_signals"]["second_user_credentials"] == "configured"
+    assert {item["expected_access"] for item in context["matching_expectations"]} == {"allow", "deny"}
+    assert req.endorsement["principal_matrix"]["proof_state"] == "unproven_planning_context"
+    assert req.metadata_json["principal_matrix"]["matching_expectations"][1]["expected_http_status"] == 403
+    assert "secret-token" not in json.dumps(req.model_dump(mode="json"))
+    assert "profile-user1" not in json.dumps(req.model_dump(mode="json"))
+
+
 def test_hypothesis_signal_redacts_and_is_non_executing():
     req = api_module.HypothesisSignalRequest(
         signal_type="refutation",

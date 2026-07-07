@@ -15049,11 +15049,105 @@ def _graph_object_label(node: dict[str, Any] | None, node_key: str) -> str:
     return str(node_key)
 
 
+def _principal_matrix_context_for_graph_hypothesis(
+    *,
+    method: str | None,
+    route: str | None,
+    source_principal: Any,
+    excluded_principal: Any,
+    principal_rows: list[Any] | None = None,
+    expectation_rows: list[Any] | None = None,
+) -> dict[str, Any]:
+    """Return bounded principal-matrix facts for graph authz planning.
+
+    This context is a scheduler/planner hint only. It never contains raw
+    credentials and does not promote graph facts into proof.
+    """
+    principals: list[dict[str, Any]] = []
+    for row in principal_rows or []:
+        payload = _public_target_principal_row(row)
+        principals.append({
+            "label": payload.get("label"),
+            "role": payload.get("role"),
+            "tenant_id": payload.get("tenant_id"),
+            "auth_state": payload.get("auth_state"),
+            "credential_configured": bool(payload.get("credential_configured")),
+            "is_active": bool(payload.get("is_active", True)),
+        })
+
+    expectations: list[dict[str, Any]] = []
+    route_value = str(route or "").strip()
+    method_value = str(method or "").strip().upper()
+    for row in expectation_rows or []:
+        payload = _public_target_endpoint_expectation_row(row)
+        expected_path = str(payload.get("path") or "").strip()
+        expected_method = str(payload.get("method") or "").strip().upper()
+        matches_route = bool(route_value and expected_path == route_value)
+        matches_method = not method_value or not expected_method or expected_method == method_value
+        expectations.append({
+            "method": payload.get("method"),
+            "path": payload.get("path"),
+            "principal_label": payload.get("principal_label"),
+            "principal_role": payload.get("principal_role"),
+            "tenant_id": payload.get("tenant_id"),
+            "expected_access": payload.get("expected_access"),
+            "expected_http_status": payload.get("expected_http_status"),
+            "expectation_source": payload.get("expectation_source"),
+            "principal_auth_state": payload.get("principal_auth_state"),
+            "matching_route": matches_route and matches_method,
+        })
+
+    role_counts = Counter(str(item.get("role") or "unknown") for item in principals)
+    tenant_counts = Counter(str(item.get("tenant_id") or "none") for item in principals)
+
+    def _principal_match(value: Any) -> dict[str, Any] | None:
+        needle = str(value or "").strip().lower()
+        if not needle:
+            return None
+        for item in principals:
+            candidates = (
+                item.get("label"),
+                item.get("auth_state"),
+                item.get("role"),
+            )
+            if any(str(candidate or "").strip().lower() == needle for candidate in candidates):
+                return item
+        return None
+
+    primary = _principal_match(source_principal)
+    alternate = _principal_match(excluded_principal)
+    matching_expectations = [item for item in expectations if item.get("matching_route")]
+    credential_profiles = {
+        "primary": bool(primary and primary.get("credential_configured")),
+        "alternate": bool(alternate and alternate.get("credential_configured")),
+    }
+    return {
+        "available": bool(principals or expectations),
+        "principals": principals[:10],
+        "expectations": expectations[:15],
+        "matching_expectations": matching_expectations[:10],
+        "role_counts": dict(role_counts),
+        "tenant_counts": dict(tenant_counts),
+        "matched_principals": {
+            "primary": primary,
+            "alternate": alternate,
+        },
+        "credential_profiles": credential_profiles,
+        "precondition_signals": {
+            "primary_credentials": "configured" if credential_profiles["primary"] else "unknown",
+            "second_user_credentials": "configured" if credential_profiles["alternate"] else "unknown",
+        },
+        "proof_state": "unproven_planning_context",
+    }
+
+
 def _application_graph_hypothesis_requests(
     target_id: str,
     nodes: list[Any],
     edges: list[Any],
     *,
+    principal_rows: list[Any] | None = None,
+    expectation_rows: list[Any] | None = None,
     created_by: str | None = None,
 ) -> list[HypothesisRequest]:
     """Build app-graph authz hypotheses from persisted graph facts.
@@ -15129,6 +15223,14 @@ def _application_graph_hypothesis_requests(
         consumer_parts = consumer_label.split(" ", 1)
         method = consumer_parts[0] if len(consumer_parts) == 2 else None
         route = consumer_parts[1] if len(consumer_parts) == 2 else consumer_label
+        principal_context = _principal_matrix_context_for_graph_hypothesis(
+            method=method,
+            route=route,
+            source_principal=source_principal,
+            excluded_principal=excluded_principal,
+            principal_rows=principal_rows,
+            expectation_rows=expectation_rows,
+        )
         candidates.append(HypothesisRequest(
             target_id=target_id,
             source="app_graph",
@@ -15158,6 +15260,7 @@ def _application_graph_hypothesis_requests(
                     "exploit_depth": family == "bola",
                 },
                 "requires": ["primary_auth", "second_user_auth"] if family == "bola" else ["primary_auth"],
+                "principal_matrix": principal_context,
             },
             endorsement={
                 "source": "app_graph",
@@ -15167,6 +15270,7 @@ def _application_graph_hypothesis_requests(
                 "source_principal": source_principal,
                 "excluded_principal": excluded_principal,
                 "sensitive_fields": sensitive[:25],
+                "principal_matrix": principal_context,
             },
             metadata_json={
                 "producer_key": producer_key,
@@ -15185,6 +15289,7 @@ def _application_graph_hypothesis_requests(
                 "source_principal": source_principal,
                 "excluded_principal": excluded_principal,
                 "sensitive_fields": sensitive[:25],
+                "principal_matrix": principal_context,
             },
             created_by=created_by or "app_graph",
         ))
@@ -19219,10 +19324,35 @@ async def generate_application_graph_hypotheses(
             "SELECT * FROM application_graph_edges WHERE target_id = $1 ORDER BY edge_type, src_key",
             tgt,
         )
+        principal_rows = await conn.fetch(
+            """
+            SELECT id, label, role, tenant_id, auth_state, credential_profile, is_active, metadata_json
+            FROM target_principals
+            WHERE target_id = $1 AND is_active = true
+            ORDER BY role, label
+            LIMIT 20
+            """,
+            tgt,
+        )
+        expectation_rows = await conn.fetch(
+            """
+            SELECT e.id, e.method, e.path, e.param_shape, e.param_location,
+                   e.principal_role, e.tenant_id, e.expected_access, e.expected_http_status,
+                   e.expectation_source, p.label AS principal_label, p.auth_state AS principal_auth_state
+            FROM target_endpoint_expectations e
+            LEFT JOIN target_principals p ON p.id = e.principal_id
+            WHERE e.target_id = $1
+            ORDER BY e.updated_at DESC
+            LIMIT 50
+            """,
+            tgt,
+        )
         requests = _application_graph_hypothesis_requests(
             target_id,
             list(nodes),
             list(edges),
+            principal_rows=list(principal_rows),
+            expectation_rows=list(expectation_rows),
             created_by=created_by,
         )
         records = [await _upsert_hypothesis(conn, req) for req in requests]
