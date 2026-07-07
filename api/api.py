@@ -16574,12 +16574,74 @@ async def _execute_authz_replay_plan(
                 if 200 <= status_int < 400:
                     violations.append(observation)
 
+    tool_receipt_result = await _record_tool_receipt(conn, ToolReceiptRequest(
+        tool_name="authz.replay_plan",
+        adapter_version="2026-07-07.v1",
+        redacted_argv=["authz.replay_plan", str(action_uuid), "session:<redacted>"],
+        target_scope={
+            "campaign_action_id": str(action_uuid),
+            "path": replay_plan.get("path"),
+            "method": replay_plan.get("method"),
+        },
+        approval_receipt_id=approval_receipt_id,
+        status="success" if not mismatches else "failed",
+        parser_status="parsed",
+        metadata_json={
+            "observation_count": len(observations),
+            "mismatch_count": len(mismatches),
+            "violation_count": len(violations),
+        },
+        created_by=created_by,
+    ))
+    tool_receipt = tool_receipt_result.get("tool_receipt") or {}
+    tool_receipt_id = tool_receipt.get("id")
+    evidence_instances: list[dict[str, Any]] = []
+    target_id = action.get("target_id")
+    principal_pair = replay_plan.get("principal_pair") if isinstance(replay_plan.get("principal_pair"), dict) else {}
+    for observation in observations:
+        expected_denied = str(observation.get("expected_access") or "").lower() in {"deny", "requires_role"}
+        observed_status = observation.get("observed_status")
+        try:
+            observed_status_int = int(observed_status)
+        except (TypeError, ValueError):
+            observed_status_int = 0
+        violation_observed = expected_denied and 200 <= observed_status_int < 400
+        instance = await _record_evidence_instance(conn, EvidenceInstanceRequest(
+            target_id=str(target_id) if target_id else None,
+            concrete_url=str(observation.get("path") or "").strip() or None,
+            object_id=str(replay_plan.get("object_key") or "").strip() or None,
+            payload_variant=str(observation.get("principal_auth_state") or observation.get("principal_label") or "").strip() or None,
+            request_response_refs=[],
+            principal_pair=principal_pair,
+            proof_observation={
+                "type": "authz_replay_observation",
+                "expected_access": observation.get("expected_access"),
+                "expected_http_status": observation.get("expected_http_status"),
+                "observed_status": observation.get("observed_status"),
+                "matched_expectation": bool(observation.get("matched")),
+                "violation_observed": violation_observed,
+            },
+            campaign_action_id=str(action_uuid),
+            tool_receipt_id=str(tool_receipt_id) if tool_receipt_id else None,
+            retention_policy="audit",
+            proof_state="verified" if violation_observed else "inconclusive",
+            metadata_json={
+                "source": "authz.replay_plan",
+                "finding_created": False,
+            },
+            created_by=created_by,
+        ))
+        evidence_instances.append(instance.get("evidence_instance") or {})
+    evidence_instance_ids = [str(item.get("id")) for item in evidence_instances if item.get("id")]
+
     replay_result = {
         "authz_replay": {
             "campaign_action_id": str(action_uuid),
             "session_id": session_id,
             "plan": replay_plan,
             "observations": observations,
+            "tool_receipt_id": tool_receipt_id,
+            "evidence_instance_ids": evidence_instance_ids,
             "mismatch_count": len(mismatches),
             "violation_count": len(violations),
             "proof_state": "replayed_violation_observed" if violations else "replayed_no_violation_observed",
@@ -16610,6 +16672,7 @@ async def _execute_authz_replay_plan(
         dry_run=False,
         approval_receipt_id=approval_receipt_id,
         hypothesis_ids=[str(item) for item in hypothesis_ids],
+        tool_receipt_ids=[str(tool_receipt_id)] if tool_receipt_id else [],
         result_json=replay_result,
         operator_message="Executed deterministic authz replay plan; no findings were created automatically.",
         next_action=f"/settings/arsenal?tab=campaign-actions",
@@ -16620,6 +16683,8 @@ async def _execute_authz_replay_plan(
         "status": status,
         "campaign_action": _public_campaign_action_row(updated_row) if updated_row else action,
         "command_result": command_result,
+        "tool_receipt": tool_receipt,
+        "evidence_instances": evidence_instances,
         "observations": observations,
         "mismatch_count": len(mismatches),
         "violation_count": len(violations),

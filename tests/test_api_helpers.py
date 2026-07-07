@@ -2159,6 +2159,9 @@ def test_execute_authz_replay_plan_records_observations_without_findings(monkeyp
     action_id = uuid.uuid4()
     hypothesis_id = uuid.uuid4()
     approval_id = uuid.uuid4()
+    tool_receipt_id = uuid.uuid4()
+    evidence_one_id = uuid.uuid4()
+    evidence_two_id = uuid.uuid4()
     captured: dict[str, object] = {"queries": []}
     replay_plan = {
         "mode": "deterministic_authz_replay",
@@ -2269,6 +2272,60 @@ def test_execute_authz_replay_plan_records_observations_without_findings(monkeyp
                     "created_at": "now",
                     "updated_at": "now",
                 }
+            if "INSERT INTO tool_receipts" in sql:
+                captured["tool_receipt_args"] = args
+                return {
+                    "id": tool_receipt_id,
+                    "tool_name": args[0],
+                    "tool_version": args[1],
+                    "adapter_version": args[2],
+                    "command_hash": args[3],
+                    "redacted_argv": args[4],
+                    "worker_build": args[5],
+                    "container_image": args[6],
+                    "target_scope": args[7],
+                    "scope_receipt_id": args[8],
+                    "approval_receipt_id": args[9],
+                    "policy_profile_id": args[10],
+                    "status": args[11],
+                    "parser_status": args[12],
+                    "exit_code": args[13],
+                    "timed_out": args[14],
+                    "started_at": args[15],
+                    "finished_at": args[16],
+                    "stdout_evidence_object_id": args[17],
+                    "stderr_evidence_object_id": args[18],
+                    "parsed_evidence_instance_ids": args[19],
+                    "redaction_summary": args[20],
+                    "metadata_json": args[21],
+                    "created_by": args[22],
+                    "created_at": "now",
+                }
+            if "INSERT INTO evidence_instances" in sql:
+                captured.setdefault("evidence_args", []).append(args)
+                evidence_id = evidence_one_id if len(captured["evidence_args"]) == 1 else evidence_two_id
+                return {
+                    "id": evidence_id,
+                    "finding_id": args[0],
+                    "evidence_object_id": args[1],
+                    "scan_id": args[2],
+                    "target_id": args[3],
+                    "concrete_url": args[4],
+                    "object_id": args[5],
+                    "payload_variant": args[6],
+                    "request_response_refs": args[7],
+                    "principal_pair": args[8],
+                    "proof_observation": args[9],
+                    "campaign_action_id": args[10],
+                    "tool_receipt_id": args[11],
+                    "redaction_profile": args[12],
+                    "hash": args[13],
+                    "retention_policy": args[14],
+                    "proof_state": args[15],
+                    "metadata_json": args[16],
+                    "created_by": args[17],
+                    "created_at": "now",
+                }
             if "INSERT INTO command_results" in sql:
                 captured["command_result_args"] = args
                 return {
@@ -2311,11 +2368,21 @@ def test_execute_authz_replay_plan_records_observations_without_findings(monkeyp
     assert result["violation_count"] == 1
     assert result["campaign_action"]["status"] == "partial"
     assert result["campaign_action"]["dry_run"] is False
+    assert result["tool_receipt"]["id"] == str(tool_receipt_id)
+    assert result["tool_receipt"]["status"] == "failed"
+    assert len(result["evidence_instances"]) == 2
+    assert result["evidence_instances"][1]["proof_state"] == "verified"
     assert result["observations"][0]["matched"] is True
     assert result["observations"][1]["matched"] is False
     assert result["command_result"]["command"] == "authz.replay_plan"
     assert result["command_result"]["approval_receipt_id"] == str(approval_id)
     assert result["command_result"]["hypothesis_ids"] == [str(hypothesis_id)]
+    assert result["command_result"]["tool_receipt_ids"] == [str(tool_receipt_id)]
+    assert result["command_result"]["result_json"]["authz_replay"]["tool_receipt_id"] == str(tool_receipt_id)
+    assert result["command_result"]["result_json"]["authz_replay"]["evidence_instance_ids"] == [
+        str(evidence_one_id),
+        str(evidence_two_id),
+    ]
     assert result["command_result"]["result_json"]["authz_replay"]["violation_count"] == 1
 
 

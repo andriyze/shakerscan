@@ -1024,12 +1024,13 @@ matched principal, role/tenant, expected access, and credential-precondition fac
 now derives a non-executing `authz_replay_plan` with method/path, principal pair, expected access
 rows, and missing preconditions from that matrix. `authz.replay_plan` now executes that stored plan
 through an existing interactive session only via the gated Command Arsenal path (`execute=true`,
-`confirm_authorized`, approval receipt, and execution feature flag), records replay observations, and
-updates the planned campaign action without creating findings automatically. Proof-backed lower-role
-finding promotion is still open.
+`confirm_authorized`, approval receipt, and execution feature flag), records replay observations,
+binds them to record-only evidence instances plus an `authz.replay_plan` tool receipt, and updates
+the planned campaign action without creating findings automatically. Proof-backed lower-role finding
+promotion is still open.
 
-**Implement next:** deterministic authz replay observations should bind evidence instances/tool
-receipts and promote confirmed lower-role access through the normal proof taxonomy.
+**Implement next:** deterministic authz replay observations should promote confirmed lower-role
+access through the normal proof taxonomy.
 
 **Done when:** a campaign can assert "endpoint X requires role admin" and prove a lower-role
 principal's access is a finding.
