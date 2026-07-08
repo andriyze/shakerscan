@@ -3923,16 +3923,29 @@ async def stored_xss_workflow(
                         finding["browser_proof"] = proof_data
                     if request_headers:
                         finding["request_headers"] = request_headers
-                    results["vulnerable"] = True
-                    results["findings"].append(finding)
+                    if payload_reflected or verified:
+                        # Raw (unescaped) reflection or a browser-confirmed execution is a
+                        # stored-XSS finding.
+                        results["vulnerable"] = True
+                        results["findings"].append(finding)
+                        results["evidence"].append({
+                            "stored_url": page_url,
+                            "snippet": snippet,
+                            "payload_reflected": payload_reflected,
+                            "verified": verified,
+                            "proof_state": finding["proof_state"],
+                        })
+                        break
+                    # Marker present but the payload was rendered SAFELY ESCAPED (the secure
+                    # behavior): stored, not executable. Record evidence only — never a
+                    # finding — and keep probing other payloads.
                     results["evidence"].append({
                         "stored_url": page_url,
                         "snippet": snippet,
-                        "payload_reflected": payload_reflected,
-                        "verified": verified,
-                        "proof_state": finding["proof_state"],
+                        "payload_reflected": False,
+                        "verified": False,
+                        "note": "stored input rendered safely escaped (marker rendered, payload not reflected) - no XSS finding",
                     })
-                    break
             if results["vulnerable"]:
                 break
         if results["vulnerable"]:
@@ -4027,11 +4040,41 @@ async def jwt_vulnerability_test(
                 new_header = base64.urlsafe_b64encode(json.dumps(header).encode()).rstrip(b'=')
                 new_payload = base64.urlsafe_b64encode(json.dumps(payload).encode()).rstrip(b'=')
                 none_token = new_header.decode() + '.' + new_payload.decode() + '.'
-                test_out, test_err, test_rc = await run(["curl", "-sS", "-L", "-k", "-H", f"Authorization: Bearer {none_token}", url], timeout=10)
-                if test_rc == 0 and test_out and "401" not in test_out[:100] and "403" not in test_out[:100]:
+
+                async def _jwt_probe_status(token: str) -> int:
+                    """Return the real HTTP status for a Bearer-token request (0 on error).
+
+                    Uses %{http_code} instead of scanning the response body for "401"/"403":
+                    a body-substring check falsely fires on any page whose text happens to
+                    contain those digits and ignores the actual status code.
+                    """
+                    probe_out, _probe_err, probe_rc = await run(
+                        ["curl", "-sS", "-L", "-k", "-o", "/dev/null", "-w", "%{http_code}",
+                         "-H", f"Authorization: Bearer {token}", url],
+                        timeout=10,
+                    )
+                    if probe_rc != 0 or not probe_out:
+                        return 0
+                    try:
+                        return int(str(probe_out).strip()[-3:])
+                    except (TypeError, ValueError):
+                        return 0
+
+                none_status = await _jwt_probe_status(none_token)
+                # Differential guard: a deliberately-tampered signature on the original token
+                # must be REJECTED (401/403). If the endpoint 2xx's that too, it is not
+                # validating JWTs at all (public/no-auth), so alg:none "acceptance" is not a
+                # finding. This prevents the broad false positive on public roots.
+                tampered_status = await _jwt_probe_status(f"{parts[0]}.{parts[1]}.invalidsignature")
+                if 200 <= none_status < 300 and tampered_status in (401, 403):
                     results["vulnerable"] = True
                     results["issues"].append("none_algorithm")
-                    results["evidence"].append({"type": "none_algorithm", "description": "JWT accepts 'none' algorithm"})
+                    results["evidence"].append({
+                        "type": "none_algorithm",
+                        "description": "JWT alg:none forgery accepted (2xx) where a tampered signature was rejected",
+                        "none_alg_status": none_status,
+                        "tampered_signature_status": tampered_status,
+                    })
                 try:
                     import jwt as pyjwt
                     weak_secrets = ['secret', 'password', '123456', 'key', 'jwt', 'token']
@@ -4205,7 +4248,7 @@ async def jwt_algorithm_confusion_test(
                 forged_token = pyjwt.encode(payload, public_key_str, algorithm='HS256')
 
                 # Test the forged token
-                auth_args = _filter_curl_headers(get_auth_curl_args(auth_session), {"authorization"})
+                auth_args = _filter_curl_headers(get_auth_curl_args(auth_session), {"authorization", "cookie"})
                 test_out, test_err, test_rc = await run(
                     ["curl", "-sS", "-L", "-k", "-H", f"Authorization: Bearer {forged_token}"] + auth_args + [url],
                     timeout=10
@@ -4269,7 +4312,7 @@ async def jwt_kid_injection_test(
             try:
                 forged_token = pyjwt.encode(payload, expected_secret, algorithm='HS256', headers={'kid': kid_payload})
 
-                auth_args = _filter_curl_headers(get_auth_curl_args(auth_session), {"authorization"})
+                auth_args = _filter_curl_headers(get_auth_curl_args(auth_session), {"authorization", "cookie"})
                 test_out, test_err, test_rc = await run(
                     ["curl", "-sS", "-L", "-k", "-H", f"Authorization: Bearer {forged_token}"] + auth_args + [url],
                     timeout=10
@@ -4331,7 +4374,7 @@ async def jwt_claim_manipulation_test(
             ({"scope": "admin read write delete"}, "scope_admin"),
         ]
 
-        auth_args = _filter_curl_headers(get_auth_curl_args(auth_session), {"authorization"})
+        auth_args = _filter_curl_headers(get_auth_curl_args(auth_session), {"authorization", "cookie"})
 
         # Get baseline response with original token
         baseline_out, _, baseline_rc = await run(
@@ -8209,6 +8252,7 @@ async def smart_xss_test(
                         param=f"path:{seg_value}",
                         payload=payload,
                         prebuilt_url=payload_url,
+                        headers=_headers_from_curl_args(auth_args) or None,
                     )
                     if proof and proof.proven:
                         verified = True
@@ -8418,7 +8462,8 @@ async def smart_xss_test(
                                 url=endpoint_url,
                                 param=param,
                                 payload=payload,
-                                screenshot_dir=None  # Could add /tmp/xss_proofs if needed
+                                screenshot_dir=None,  # Could add /tmp/xss_proofs if needed
+                                headers=_headers_from_curl_args(auth_args) or None,
                             )
                             if proof and proof.proven:
                                 verified = True

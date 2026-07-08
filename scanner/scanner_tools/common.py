@@ -131,6 +131,10 @@ def _redact_output_text(value: Any) -> str:
     )
     for pattern, replacement in replacements:
         text = re.sub(pattern, replacement, text)
+    # Strip NUL bytes: they are valid UTF-8 and survive decoding, but Postgres rejects
+    #  in jsonb, so an unstripped NUL makes the receipt/artifact INSERT raise and the
+    # record is silently dropped (binary tool output would leave no receipt at all).
+    text = text.replace("\x00", "")
     return text
 
 

@@ -4561,6 +4561,8 @@ def test_retention_sweep_executes_remote_delete_before_db_delete(monkeypatch):
             if "DELETE FROM evidence_objects" in query:
                 self.deleted_arg = args[0]
                 return [{"id": item} for item in args[0]]
+            if "SELECT DISTINCT storage_uri" in query:
+                return []  # no other evidence row shares this blob
             return rows
 
     conn = _RemoteDeleteSweepConn(policy_on=False)
@@ -4604,6 +4606,8 @@ def test_retention_sweep_preserves_row_when_remote_delete_fails(monkeypatch):
             if "DELETE FROM evidence_objects" in query:
                 self.delete_called = True
                 return [{"id": item} for item in args[0]]
+            if "SELECT DISTINCT storage_uri" in query:
+                return []  # no other evidence row shares this blob
             return rows
 
     conn = _RemoteDeleteFailureSweepConn(policy_on=False)

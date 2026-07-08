@@ -656,7 +656,11 @@ def _external_dast_tool_specs(result: dict[str, Any], options: dict[str, Any]) -
         tool_name = str(item.get("tool_name") or "").strip()
         if not tool_name:
             continue
-        normalized_tool = "sqlmap" if tool_name == "sqlmap.py" else "testssl" if tool_name == "testssl.sh" else tool_name
+        # Basename first: in the deployed image tools run by absolute path
+        # (e.g. /opt/tools/nuclei), so a bare-name membership check would drop every
+        # real per-subprocess receipt and leave only the synthetic summary receipt.
+        tool_base = os.path.basename(tool_name)
+        normalized_tool = "sqlmap" if tool_base in ("sqlmap.py", "sqlmap") else "testssl" if tool_base in ("testssl.sh", "testssl") else tool_base
         if normalized_tool not in known_subprocess_tools:
             continue
         redacted_argv = item.get("redacted_argv") if isinstance(item.get("redacted_argv"), list) else [normalized_tool]

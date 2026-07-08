@@ -1350,3 +1350,44 @@ def test_gc_endpoint_inventory_purges_and_is_bounded():
     conn2 = _GcConn()
     assert _aio.run(a.gc_endpoint_inventory(conn2, _TID, gone_retention_days=0)) == 0
     assert conn2.calls == []
+
+
+def test_probe_auth_curl_config_builds_header_and_cookie_lines():
+    cfg = a._probe_auth_curl_config({
+        "auth_header": "Bearer secret-token-xyz",
+        "auth_cookies": "session=abc123",
+        "auth_headers_json": '{"X-API-Key": "key-987"}',
+    })
+    assert 'header = "Authorization: Bearer secret-token-xyz"' in cfg
+    assert 'cookie = "session=abc123"' in cfg
+    assert 'header = "X-API-Key: key-987"' in cfg
+
+
+def test_probe_path_status_keeps_auth_off_argv(monkeypatch):
+    """The reachability probe must not expose auth secrets on the curl argv."""
+    captured = {}
+
+    class _FakeProc:
+        returncode = 0
+
+        def kill(self):
+            pass
+
+        async def communicate(self, input=None):
+            captured["stdin"] = input
+            return (b"200 12", b"")
+
+    async def fake_exec(*cmd, stdin=None, stdout=None, stderr=None):
+        captured["cmd"] = list(cmd)
+        return _FakeProc()
+
+    monkeypatch.setattr(a.asyncio, "create_subprocess_exec", fake_exec)
+
+    auth_config = a._probe_auth_curl_config({"auth_header": "Bearer secret-token-xyz"})
+    code, size = asyncio.run(a._probe_path_status("https://app.test", "/api/orders", auth_config, timeout=5))
+
+    assert code == "200"
+    # The secret is passed via `-K -` on stdin, never on argv.
+    assert "secret-token-xyz" not in " ".join(captured["cmd"])
+    assert "-K" in captured["cmd"] and "-" in captured["cmd"]
+    assert b"secret-token-xyz" in (captured["stdin"] or b"")

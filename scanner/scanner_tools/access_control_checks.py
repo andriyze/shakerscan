@@ -2801,18 +2801,19 @@ async def authz_resource_replay_test(
                         write_attempt["attacker_status"] = write_status
                         results["write_replays_completed"] += 1
                         write_returned_ids = _resource_ids_from_response(write_body)
-                        if not object_id:
-                            write_owner_object_received = True
-                        elif write_returned_ids:
-                            write_owner_object_received = object_id in write_returned_ids
-                        else:
-                            write_owner_object_received = object_id in write_body
+                        # Require the owner's object id as a STRUCTURED resource id in the write
+                        # response, not a bare substring (which also matches error text / unrelated
+                        # echoes). Unconfirmed -> not a write finding.
+                        write_owner_object_received = bool(write_returned_ids) and object_id in write_returned_ids
                         if not write_owner_object_received:
-                            write_attempt["last_verdict"] = "id_ignored_returned_own_object"
+                            write_attempt["last_verdict"] = "owner_object_not_confirmed_in_write_response"
 
                         write_resource_like = _looks_like_bola_resource_response(write_candidate["url"], write_body)
                         write_user_signals = extract_user_specific_signals(write_body)
-                        write_sensitive_fields = sorted(set(sensitive_fields + _sensitive_fields_from_body(write_body)))[:20]
+                        # Derive sensitive-field signals from the WRITE response only; inheriting
+                        # the earlier GET's sensitive_fields would let a read-derived signal satisfy
+                        # the write gate (evidence contamination).
+                        write_sensitive_fields = sorted(set(_sensitive_fields_from_body(write_body)))[:20]
                         if (
                             200 <= write_status < 300
                             and write_body
@@ -2850,18 +2851,20 @@ async def authz_resource_replay_test(
                                     "attacker_write_returned_owner_object": True,
                                 },
                                 "proof_type": "write_cross_principal_replay",
+                                "mutation_confirmed": False,
                                 "response_snippet": write_body[:300],
                             }
                             results["findings"].append({
                                 "id": f"smart_authz_write:{path_hash}",
                                 "tool": "smart_authz",
-                                "title": f"Broken object authorization: user2 can PATCH user1 object at {write_candidate['custom_endpoint']}",
+                                "title": f"Broken object authorization: user2 reached user1 object via write-method (PATCH) at {write_candidate['custom_endpoint']}",
                                 "severity": "critical",
                                 "confidence": 0.84,
                                 "severity_rationale": (
                                     "Critical: a second authenticated principal received a successful "
                                     "write-method response for an object ID produced by user1 and absent "
-                                    "from user2's own producer response."
+                                    "from user2's own producer response. Cross-principal write ACCESS is "
+                                    "confirmed; persistence of a mutation was not separately re-verified."
                                 ),
                                 "evidence": write_evidence,
                                 "description": (

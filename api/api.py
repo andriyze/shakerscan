@@ -14594,7 +14594,7 @@ def _canonical_hypothesis_request(req: HypothesisRequest) -> dict[str, Any]:
         "dedupe_key": dedupe_key,
         "dedupe_dimensions": dedupe_dimensions,
         "cwe": str(payload.get("cwe") or "").strip() or None,
-        "title": str(payload.get("title") or "").strip() or None,
+        "title": _redact_agent_text(str(payload.get("title") or "").strip()) or None,
         "description": _redact_agent_text(str(payload.get("description") or "").strip()) or None,
         "evidence_object_ids": _clean_string_list(payload.get("evidence_object_ids"), max_items=100),
         "tool_receipt_ids": _clean_string_list(payload.get("tool_receipt_ids"), max_items=100),
@@ -20131,6 +20131,15 @@ async def _link_command_result_to_campaign_action(
             }),
             action_uuid,
         )
+        if row:
+            # _record_command_result already auto-created a paired campaign_action for this
+            # command result. Now that the PLANNED action is bound to it, delete that
+            # auto-created duplicate so one execution maps to exactly one action row.
+            await conn.execute(
+                "DELETE FROM campaign_actions WHERE command_result_id=$1 AND id<>$2",
+                command_result_uuid,
+                action_uuid,
+            )
         return _public_campaign_action_row(row) if row else None
     except Exception:
         return None
@@ -24338,11 +24347,40 @@ async def _evidence_retention_sweep(req: EvidenceRetentionSweepRequest, *, pool:
         remote_result = {"deleted": [], "missing": [], "errors": [], "deleted_ids": []}
         deleted_count = 0
         if candidates and not req.dry_run:
-            remote_result = _delete_remote_evidence_objects([item for item in candidates if item.get("remote_object")])
+            # Evidence blobs are content-addressed (dedup by sha256), so one blob can back
+            # multiple evidence rows. Only delete a blob when THIS sweep drops its last
+            # reference; if a spared row (e.g. an active finding, or any row outside this
+            # candidate set) still points at the same storage_uri, keep the blob and delete
+            # only the aged DB row. Without this, sweeping a resolved finding could destroy
+            # an active finding's shared evidence.
+            candidate_ids_all = [uuid.UUID(str(item["id"])) for item in candidates if item.get("id")]
+            candidate_uris = [str(item.get("storage_uri") or "") for item in candidates if item.get("storage_uri")]
+            shared_uris: set[str] = set()
+            if candidate_uris and candidate_ids_all:
+                shared_rows = await conn.fetch(
+                    """
+                    SELECT DISTINCT storage_uri
+                    FROM evidence_objects
+                    WHERE storage_uri = ANY($1::text[])
+                      AND NOT (id = ANY($2::uuid[]))
+                    """,
+                    candidate_uris,
+                    candidate_ids_all,
+                )
+                shared_uris = {str(r["storage_uri"]) for r in shared_rows if r["storage_uri"]}
+
+            def _blob_shared(item: dict[str, Any]) -> bool:
+                return str(item.get("storage_uri") or "") in shared_uris
+
+            remote_result = _delete_remote_evidence_objects(
+                [item for item in candidates if item.get("remote_object") and not _blob_shared(item)]
+            )
             remote_deleted_ids = set(remote_result.get("deleted_ids") or [])
             db_deletable_candidates = [
                 item for item in candidates
-                if not item.get("remote_object") or str(item.get("id")) in remote_deleted_ids
+                if _blob_shared(item)                                   # shared blob: drop row, keep blob
+                or not item.get("remote_object")                        # local blob: row deletion is safe
+                or str(item.get("id")) in remote_deleted_ids            # remote blob deleted successfully
             ]
             candidate_ids = [uuid.UUID(str(item["id"])) for item in db_deletable_candidates if item.get("id")]
             deleted_ids: set[str] = set()
@@ -24364,7 +24402,8 @@ async def _evidence_retention_sweep(req: EvidenceRetentionSweepRequest, *, pool:
                 deleted_ids = {str(row["id"]) for row in deleted_rows}
             if req.delete_local_files and deleted_ids:
                 file_result = _delete_local_evidence_files(
-                    [item for item in candidates if str(item.get("id")) in deleted_ids]
+                    [item for item in candidates
+                     if str(item.get("id")) in deleted_ids and not _blob_shared(item)]
                 )
         if not req.dry_run:
             remote_candidate_count = sum(1 for item in candidates if item.get("remote_object"))

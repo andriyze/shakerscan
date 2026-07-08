@@ -138,6 +138,6 @@ def test_authz_write_replay_rejects_id_ignored_own_object(monkeypatch):
     assert not any(f["id"].startswith("smart_authz_write:") for f in result["findings"])
     assert any(
         attempt.get("proof_type") == "write_cross_principal_replay"
-        and attempt.get("last_verdict") == "id_ignored_returned_own_object"
+        and attempt.get("last_verdict") == "owner_object_not_confirmed_in_write_response"
         for attempt in result["endpoint_attempts"]
     )

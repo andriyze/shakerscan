@@ -619,31 +619,42 @@ def _soft404_matches(probe: tuple[str, int], signature: tuple[str, int]) -> bool
     return abs(probe[1] - signature[1]) <= tol
 
 
-def _probe_auth_curl_args(options: dict[str, Any] | None) -> list[str]:
-    """Build curl auth args from scan options so reachability probes use the same
-    credentials the scan itself would (otherwise auth-gated endpoints look 404)."""
-    args: list[str] = []
+def _probe_auth_curl_config(options: dict[str, Any] | None) -> str:
+    """Build a curl ``--config`` (``-K``) body carrying auth for reachability probes.
+
+    The config is fed to curl via ``-K -`` on stdin (see ``_probe_path_status``), never on
+    argv, so bearer tokens / session cookies / API keys are not exposed in ``ps`` or
+    ``/proc/<pid>/cmdline`` while the probe runs. Probes still use the same credentials the
+    scan would (otherwise auth-gated endpoints look like 404s).
+    """
     o = options or {}
+    lines: list[str] = []
+
+    def _cfg(opt: str, value: str) -> str:
+        # curl config values are double-quoted; escape backslash then quote.
+        escaped = str(value).replace("\\", "\\\\").replace('"', '\\"')
+        return f'{opt} = "{escaped}"'
+
     h = o.get("auth_header")
     if h:
         hs = str(h)
-        args += ["-H", hs if hs.lower().startswith("authorization") else f"Authorization: {hs}"]
+        lines.append(_cfg("header", hs if hs.lower().startswith("authorization") else f"Authorization: {hs}"))
     c = o.get("auth_cookies")
     if c:
-        args += ["-b", str(c)]
+        lines.append(_cfg("cookie", str(c)))
     hj = o.get("auth_headers_json")
     if hj:
         try:
             import json as _json
             d = _json.loads(hj) if isinstance(hj, str) else hj
             for k, v in (d or {}).items():
-                args += ["-H", f"{k}: {v}"]
+                lines.append(_cfg("header", f"{k}: {v}"))
         except Exception:
             pass
-    return args
+    return "\n".join(lines)
 
 
-async def _probe_path_status(base_url: str, path: str, auth_args: list[str], timeout: int) -> tuple[str, int]:
+async def _probe_path_status(base_url: str, path: str, auth_config: str, timeout: int) -> tuple[str, int]:
     """Safe GET probe returning ``(http_code, body_size)``. Uses GET only (never a
     write method) so it cannot mutate the target. Returns ``("ERR", -1)`` on any
     transient error/timeout so callers keep the endpoint when the probe is
@@ -659,13 +670,23 @@ async def _probe_path_status(base_url: str, path: str, auth_args: list[str], tim
         "curl", "-sS", "-k", "-o", "/dev/null", "-w", "%{http_code} %{size_download}",
         "--max-time", str(max(2, timeout - 1)),
         "-X", "GET", "-H", "User-Agent: Mozilla/5.0 (ShakerScan ASM reachability)",
-    ] + auth_args + [url]
+    ]
+    stdin_bytes: bytes | None = None
+    if auth_config:
+        # Auth secrets go to curl via a `-K -` config on stdin, never on argv, so they
+        # are not visible in `ps` / /proc/<pid>/cmdline for the life of the probe.
+        cmd += ["-K", "-"]
+        stdin_bytes = auth_config.encode("utf-8")
+    cmd += [url]
     proc = None
     try:
         proc = await asyncio.create_subprocess_exec(
-            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL
+            *cmd,
+            stdin=asyncio.subprocess.PIPE if stdin_bytes is not None else None,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
         )
-        out, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout + 2)
+        out, _ = await asyncio.wait_for(proc.communicate(input=stdin_bytes), timeout=timeout + 2)
         parts = (out or b"").decode("ascii", "replace").strip().split()
         if not parts:
             return ("ERR", -1)
@@ -687,15 +708,15 @@ async def _probe_path_status(base_url: str, path: str, auth_args: list[str], tim
         return ("ERR", -1)
 
 
-async def _probe_path_exists(base_url: str, path: str, auth_args: list[str], timeout: int) -> bool:
+async def _probe_path_exists(base_url: str, path: str, auth_config: str, timeout: int) -> bool:
     """True if `path` exists (any status other than a literal 404). Back-compat
     wrapper over :func:`_probe_path_status`; inconclusive probes keep the path."""
-    code, _size = await _probe_path_status(base_url, path, auth_args, timeout)
+    code, _size = await _probe_path_status(base_url, path, auth_config, timeout)
     return code != "404"
 
 
 async def _learn_not_found_signatures(
-    base_url: str, prefixes: list[str], auth_args: list[str], timeout: int, sem: "asyncio.Semaphore"
+    base_url: str, prefixes: list[str], auth_config: str, timeout: int, sem: "asyncio.Semaphore"
 ) -> dict[str, list[tuple[str, int]]]:
     """Probe implausible decoy paths under each prefix to learn its soft-404
     signature(s) — the (status, body-size) the server returns for unknown routes."""
@@ -705,7 +726,7 @@ async def _learn_not_found_signatures(
         sigs: list[tuple[str, int]] = []
         for token in _SOFT404_DECOY_TOKENS:
             async with sem:
-                sig = await _probe_path_status(base_url, prefix.rstrip("/") + "/" + token, auth_args, timeout)
+                sig = await _probe_path_status(base_url, prefix.rstrip("/") + "/" + token, auth_config, timeout)
             if sig[0] not in ("ERR", ""):
                 sigs.append(sig)
         not_found[prefix] = sigs
@@ -795,19 +816,19 @@ async def filter_reachable_worklist(
     if len(probe_paths) > max_probe:
         return entries  # too many to probe within budget; don't block, keep all
 
-    auth_args = _probe_auth_curl_args(options)
+    auth_config = _probe_auth_curl_config(options)
     sem = asyncio.Semaphore(max(1, concurrency))
     status: dict[str, tuple[str, int]] = {}
 
     async def _probe(path: str) -> None:
         async with sem:
-            status[path] = await _probe_path_status(base_url, path, auth_args, timeout)
+            status[path] = await _probe_path_status(base_url, path, auth_config, timeout)
 
     # Learn the not-found signature for each path prefix by probing decoys.
     soft404 = _soft404_enabled()
     prefixes = sorted({_path_prefix(p) for p in probe_paths})[:_SOFT404_MAX_PREFIXES] if soft404 else []
     not_found, _ = await asyncio.gather(
-        _learn_not_found_signatures(base_url, prefixes, auth_args, timeout, sem),
+        _learn_not_found_signatures(base_url, prefixes, auth_config, timeout, sem),
         asyncio.gather(*(_probe(p) for p in probe_paths)),
     )
 
@@ -887,18 +908,18 @@ async def sweep_endpoint_reachability(
     if not paths:
         return empty
 
-    auth_args = _probe_auth_curl_args(options)
+    auth_config = _probe_auth_curl_config(options)
     sem = asyncio.Semaphore(max(1, concurrency))
     status: dict[str, tuple[str, int]] = {}
 
     async def _probe(path: str) -> None:
         async with sem:
-            status[path] = await _probe_path_status(base_url, path, auth_args, timeout)
+            status[path] = await _probe_path_status(base_url, path, auth_config, timeout)
 
     soft404 = _soft404_enabled()
     prefixes = sorted({_path_prefix(p) for p in paths})[:_SOFT404_MAX_PREFIXES] if soft404 else []
     not_found, _ = await asyncio.gather(
-        _learn_not_found_signatures(base_url, prefixes, auth_args, timeout, sem),
+        _learn_not_found_signatures(base_url, prefixes, auth_config, timeout, sem),
         asyncio.gather(*(_probe(p) for p in paths)),
     )
 

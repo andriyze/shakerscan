@@ -991,6 +991,48 @@ def test_external_dast_subprocess_receipts_preserve_exact_outcome():
     assert "secret-token" not in json.dumps(args, default=str)
 
 
+def test_external_dast_subprocess_receipts_match_absolute_tool_paths():
+    # Deployed image invokes tools by absolute path (/opt/tools/nuclei); the receipt must
+    # still be recorded by basename, not dropped as an unknown tool.
+    receipt_id = uuid.uuid4()
+    conn = _FakeReceiptConnection(receipt_id)
+    result = {
+        "scan_metadata": {
+            "subprocess_receipts": [
+                {
+                    "tool_name": "/opt/tools/nuclei",
+                    "status": "success",
+                    "parser_status": "parsed",
+                    "exit_code": 0,
+                    "timed_out": False,
+                    "redacted_argv": ["/opt/tools/nuclei", "-u", "[REDACTED]"],
+                    "command_hash": "b" * 64,
+                    "stdout_length": 100,
+                    "stderr_length": 0,
+                }
+            ]
+        }
+    }
+
+    recorded = asyncio.run(worker._record_external_dast_tool_receipts(
+        conn,
+        scan_id="11111111-1111-1111-1111-111111111111",
+        job_id="job-abs-path",
+        target="https://example.test",
+        target_id="33333333-3333-3333-3333-333333333333",
+        options={"scan_type": "smart"},
+        result=result,
+        started_at=datetime(2026, 7, 6, tzinfo=timezone.utc),
+        completed_at=datetime(2026, 7, 6, 0, 0, 10, tzinfo=timezone.utc),
+        duration_seconds=10,
+    ))
+
+    assert recorded == [str(receipt_id)]
+    query, args = conn.fetchrow_calls[0]
+    assert "INSERT INTO tool_receipts" in query
+    assert args[0] == "nuclei"
+
+
 def test_external_dast_subprocess_receipts_classify_parser_errors():
     receipt_id = uuid.uuid4()
     conn = _FakeReceiptConnection(receipt_id)

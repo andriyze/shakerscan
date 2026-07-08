@@ -102,12 +102,13 @@ def test_stored_xss_marker_only_render_does_not_claim_execution(monkeypatch):
         discovered_urls=["http://h/reviews"],
     ))
 
-    assert res["vulnerable"] is True
-    finding = res["findings"][0]
-    assert finding["payload_reflected"] is False
-    assert finding["verified"] is False
-    assert finding["severity"] == "medium"
-    assert finding["proof_state"] == "likely_vulnerable"
-    assert "browser_proof" not in finding
-    assert "poe_result" not in finding
+    # Marker rendered but the payload was SAFELY ESCAPED (the secure behavior): this must
+    # NOT be a finding. It is recorded as evidence only, and browser proof is not attempted.
+    assert res["vulnerable"] is False
+    assert res["findings"] == []
     assert proof_attempted is False
+    escaped_evidence = [
+        e for e in res.get("evidence", [])
+        if isinstance(e, dict) and not e.get("payload_reflected") and not e.get("verified")
+    ]
+    assert escaped_evidence, "safely-escaped stored render should be recorded as evidence"
