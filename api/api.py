@@ -9831,6 +9831,65 @@ async def _build_dashboard_action_center(conn, *, worker_snapshot: dict[str, Any
         pass
 
     try:
+        second_user_blockers = await conn.fetch("""
+            SELECT ca.id, ca.target_id, ca.command, ca.action_name, ca.blocked_by,
+                   ca.created_at, t.url AS target_url
+            FROM campaign_actions ca
+            LEFT JOIN targets t ON t.id = ca.target_id
+            WHERE ca.status IN ('blocked', 'approval_required', 'planned', 'partial')
+              AND ca.blocked_by ?| ARRAY[
+                  'missing_second_user_auth',
+                  'second_user_auth',
+                  'second_user_credentials',
+                  'second_user_auth_context'
+              ]
+            ORDER BY ca.created_at DESC
+            LIMIT 5
+        """)
+        if second_user_blockers:
+            samples = []
+            for row in second_user_blockers[:3]:
+                action = row_to_dict(row)
+                target_id = str(action.get("target_id") or "")
+                samples.append({
+                    "label": action.get("target_url") or action.get("action_name") or action.get("command") or action.get("id"),
+                    "detail": "Second-user credentials are required before this authz/BOLA action can run.",
+                    "href": f"/asm?target_id={target_id}" if target_id else "/settings/arsenal",
+                })
+            first = row_to_dict(second_user_blockers[0])
+            first_target_id = str(first.get("target_id") or "")
+            target_href = f"/asm?target_id={first_target_id}" if first_target_id else "/settings/arsenal"
+            items.append(_action_center_item(
+                item_id="asm-second-user-blockers",
+                priority="high",
+                category="ASM",
+                title="BOLA/authz work is blocked by missing second-user context",
+                detail=(
+                    f"{len(second_user_blockers)} campaign action(s) need second-user auth before "
+                    "cross-principal replay can proceed."
+                ),
+                href=target_href,
+                action_label="Open blocker",
+                actions=[
+                    {"label": "Open blocker", "href": target_href, "variant": "primary"},
+                    {"label": "Campaign actions", "href": "/settings/arsenal", "variant": "secondary"},
+                ],
+                count=len(second_user_blockers),
+                samples=samples,
+                metadata={
+                    "blocked_action_count": len(second_user_blockers),
+                    "blocked_reasons": [
+                        "missing_second_user_auth",
+                        "second_user_auth",
+                        "second_user_credentials",
+                        "second_user_auth_context",
+                    ],
+                },
+            ))
+    except Exception:
+        pass
+
+    try:
         next_asm_schedule = await conn.fetchrow("""
             SELECT s.id, s.next_run_at, t.url AS target_url
             FROM schedules s

@@ -564,6 +564,42 @@ def test_dashboard_action_center_surfaces_asm_auth_blockers():
     assert item["samples"][0]["detail"] == "7 endpoint(s) need credentials before replay."
 
 
+def test_dashboard_action_center_surfaces_second_user_blockers():
+    target_id = "11111111-1111-4111-8111-111111111111"
+
+    class _Conn:
+        async def fetchrow(self, query, *args):
+            return {}  # no blocker/exception/asm/schedule items from fetchrow paths
+
+        async def fetch(self, query, *args):
+            if "FROM campaign_actions ca" in query and "missing_second_user_auth" in query:
+                return [{
+                    "id": "action-1",
+                    "target_id": target_id,
+                    "target_url": "https://app.example.test",
+                    "command": "asm.improve",
+                    "action_name": "asm.improve",
+                    "blocked_by": ["missing_second_user_auth"],
+                    "created_at": "2026-07-08T12:00:00",
+                }]
+            return []  # no failed scans, model rows, AI targets, refuter rows, or auth endpoint blockers
+
+    items = asyncio.run(
+        api_module._build_dashboard_action_center(_Conn(), worker_snapshot={"available": False})
+    )
+    by_id = {item["id"]: item for item in items}
+    assert "asm-second-user-blockers" in by_id
+    item = by_id["asm-second-user-blockers"]
+    assert item["priority"] == "high"
+    assert item["count"] == 1
+    assert item["href"] == f"/asm?target_id={target_id}"
+    assert item["actions"][0]["href"] == f"/asm?target_id={target_id}"
+    assert item["actions"][1]["href"] == "/settings/arsenal"
+    assert item["metadata"]["blocked_action_count"] == 1
+    assert "missing_second_user_auth" in item["metadata"]["blocked_reasons"]
+    assert item["samples"][0]["detail"] == "Second-user credentials are required before this authz/BOLA action can run."
+
+
 def test_dashboard_action_center_surfaces_ai_control_baseline_gaps():
     conn = _ActionCenterConn(ai_rows=[{
         "id": uuid.uuid4(),

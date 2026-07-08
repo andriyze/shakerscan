@@ -664,7 +664,9 @@ and remediation automation, not the first dashboard/status/action surfaces.
    selects strict trusted-anchor mode, highlights the trust controls, and links exception hygiene.
    DONE phase 2 for credential-gated ASM blockers: the dashboard action center now surfaces targets
    with `auth_missing`/`auth_failed` endpoint attempts and routes operators to the target ASM timeline
-   or preselected ASM schedule creation.
+   or preselected ASM schedule creation. DONE phase 3 for second-user authz/BOLA blockers: blocked
+   campaign actions with second-user precondition failures route to the target ASM timeline and the
+   campaign-action ledger.
    DONE for exception repair phase 1: `/settings/exceptions` can update owner, approver, reason,
    compensating controls, expiry, and status without changing scope or creating new exceptions.
 7. DONE phase 1: `GET /timeline` merges the command-result audit rows (with live scan status joined),
