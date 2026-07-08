@@ -6520,7 +6520,7 @@ _ACTIVE_REAL_SOURCES = frozenset({
 })
 
 
-def _active_endpoint_priority(ep: dict[str, Any]) -> tuple:
+def _active_endpoint_priority(ep: dict[str, Any], *, family: str | None = None) -> tuple:
     """Rank endpoints so real, high-value injection points (observed request bodies,
     login/search) lead the active-test budget instead of synthetic permutations
     (e.g. OPTIONS-derived ``/api/<Model>s/<action>``). Keyword alone is not enough —
@@ -6531,7 +6531,7 @@ def _active_endpoint_priority(ep: dict[str, Any]) -> tuple:
     keyword_hits = sum(1 for k in _ACTIVE_HIGH_VALUE_KEYWORDS if k in path)
     has_body = 1 if (method in ("POST", "PUT", "PATCH") and body) else 0
     real_source = 1 if str(ep.get("source") or "").lower() in _ACTIVE_REAL_SOURCES else 0
-    score = active_endpoint_score(ep)
+    score = active_endpoint_score(ep, family=family)
     non_low_value = 1 if score >= 8 else 0
     # Real observed source first, then request-body surface, then keyword relevance,
     # then the shared DAST score (source/path/parameter penalties). This keeps the
@@ -6540,9 +6540,9 @@ def _active_endpoint_priority(ep: dict[str, Any]) -> tuple:
     return (non_low_value, real_source, has_body, keyword_hits, score)
 
 
-def _prioritize_active_endpoints(endpoints: list) -> list:
+def _prioritize_active_endpoints(endpoints: list, *, family: str | None = None) -> list:
     """Stable value-sort of active-test endpoints, highest priority first."""
-    return sorted(endpoints, key=_active_endpoint_priority, reverse=True)
+    return sorted(endpoints, key=lambda ep: _active_endpoint_priority(ep, family=family), reverse=True)
 
 
 async def smart_sqli_test(
@@ -6674,8 +6674,8 @@ async def smart_sqli_test(
     # Value-sort so real, observed injection points lead. Otherwise a flood of GET
     # endpoints (incl. synthetic OPTIONS-derived /api/<Model>s/<action> permutations)
     # consumes the whole budget before real endpoints like POST /rest/user/login.
-    get_endpoints = _prioritize_active_endpoints(get_endpoints)
-    post_endpoints = _prioritize_active_endpoints(post_endpoints)
+    get_endpoints = _prioritize_active_endpoints(get_endpoints, family="sqli")
+    post_endpoints = _prioritize_active_endpoints(post_endpoints, family="sqli")
     # Guarantee POST-body endpoints (the high-value injection surface) get a share of
     # the budget. The COUNT reservation is the reliable guard (a single slow GET
     # iteration can overshoot a time deadline); the time deadline is a secondary cap.
@@ -7890,8 +7890,8 @@ async def smart_xss_test(
     ]
 
     # Value-sort so real, high-value endpoints lead instead of synthetic permutations.
-    get_endpoints = _prioritize_active_endpoints(get_endpoints)
-    post_endpoints = _prioritize_active_endpoints(post_endpoints)
+    get_endpoints = _prioritize_active_endpoints(get_endpoints, family="xss")
+    post_endpoints = _prioritize_active_endpoints(post_endpoints, family="xss")
 
     # Test GET endpoints
     for endpoint in get_endpoints[:max_endpoints]:

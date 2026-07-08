@@ -933,8 +933,11 @@ low-level signature field, and the UI explains why "signature present" is not th
 POST-body SQLi/login coverage, stored XSS store-then-render proof, and workflow/write-side BOLA.
 Body-param SQLi/NoSQL primitives exist (`nosql_injection_test_json_body` and body-param sites in
 `active_checks`), and NoSQL JSON-body checks now emit endpoint-attempt telemetry so ASM/family
-coverage can distinguish completed, partial, and skipped JSON-body probes. The near-term gap is
-still better endpoint/body capture, auth context, and proof routing on benchmark workflows. Benchmark
+coverage can distinguish completed, partial, and skipped JSON-body probes. Focused SQLi active
+prioritization now explicitly boosts benchmark workflow body routes such as login/search/coupon/
+review/order/product APIs, and the SQLi/XSS active loops pass their family into the shared endpoint
+scorer so tight budgets spend on the right workflow surfaces first. The near-term gap is still better
+endpoint/body capture, auth context, and proof routing on benchmark workflows. Benchmark
 summaries and scorecards now include `auth_workflow` diagnostics with required/observed auth states,
 missing second-principal blockers, and authz/BOLA attempt rollups so a missed BOLA expectation is
 classified as `missing_required_auth_context` instead of a generic detector miss when the benchmark
@@ -958,6 +961,8 @@ DONE phase 3 for connecting those rows to the hypothesis/campaign planning layer
 hypotheses;
 DONE phase 4 for an opt-in benchmark-runner bridge that seeds those hypotheses from a recorded
 scorecard;
+DONE phase 5 for focused SQLi/XSS active-loop ordering that prioritizes benchmark workflow body
+routes (`login`, `search`, `coupon`, `review`, `order`, `product`);
 detector recall and proof routing still require scorecard-backed scan improvements.
 
 **Done when:** recorded two-user benchmark scorecards show the targeted miss becoming a deterministic

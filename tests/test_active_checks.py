@@ -583,6 +583,31 @@ def test_active_endpoint_prioritization_penalizes_static_discovery_surfaces():
     assert socket_token in ordered[2:]
 
 
+def test_active_endpoint_prioritization_uses_family_specific_sqli_routes():
+    coupon = {
+        "method": "POST",
+        "url": "http://t/community/api/v2/coupon",
+        "body_params": ["code"],
+        "source": "options",
+    }
+    review = {
+        "method": "PATCH",
+        "url": "http://t/rest/products/reviews",
+        "body_params": ["message", "rating"],
+        "source": "options",
+    }
+    generic = {
+        "method": "POST",
+        "url": "http://t/api/items",
+        "body_params": ["name"],
+        "source": "options",
+    }
+
+    ordered = active_checks._prioritize_active_endpoints([generic, coupon, review], family="sqli")
+
+    assert ordered[:2] == [coupon, review]
+
+
 def test_json_mass_assignment_detects_reflected_privileged_field(monkeypatch):
     async def fake_run(cmd, timeout=15):
         body = json.loads(cmd[cmd.index("-d") + 1])

@@ -89,6 +89,9 @@ HIGH_VALUE_PATH_WEIGHTS: tuple[tuple[str, int], ...] = (
     ("profile", 5),
     ("settings", 5),
     ("order", 5),
+    ("coupon", 5),
+    ("review", 5),
+    ("product", 5),
     ("payment", 5),
     ("checkout", 5),
     ("wallet", 5),
@@ -165,7 +168,8 @@ def _path_score(path: str) -> int:
 # sinks (search/comment/review/profile) + SPA/form routes.
 _SQLI_ROUTE_TOKENS = (
     "login", "signin", "authenticate", "search", "filter", "sort", "order",
-    "track", "lookup", "report", "query",
+    "track", "lookup", "report", "query", "coupon", "promo", "voucher",
+    "review", "product", "validate", "checkout",
 )
 _XSS_ROUTE_TOKENS = (
     "search", "comment", "review", "feedback", "message", "profile", "post",
