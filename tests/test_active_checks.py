@@ -617,6 +617,62 @@ def test_active_endpoint_prioritization_uses_family_specific_sqli_routes():
     assert ordered[:2] == [coupon, review]
 
 
+def test_active_param_prioritization_leads_with_family_specific_bug_fields():
+    endpoint = {"url": "http://t/rest/products/search", "method": "GET"}
+    params = ["page", "limit", "utm_source", "metadata", "q", "email", "message"]
+
+    sqli_order = active_checks._prioritize_active_params(
+        params,
+        family="sqli",
+        endpoint=endpoint,
+        location="query",
+    )
+    xss_order = active_checks._prioritize_active_params(
+        params,
+        family="xss",
+        endpoint=endpoint,
+        location="query",
+    )
+
+    assert sqli_order[:2] == ["q", "email"]
+    assert xss_order[:2] == ["q", "message"]
+    assert sqli_order.index("utm_source") > sqli_order.index("metadata")
+    assert xss_order.index("message") < xss_order.index("metadata")
+    assert xss_order.index("page") > xss_order.index("metadata")
+
+
+def test_smart_xss_prioritizes_body_params_under_tight_budget(monkeypatch):
+    async def fake_run(command, *args, **kwargs):
+        body = json.loads(command[command.index("-d") + 1])
+        value = body.get("message")
+        if value:
+            return f"<html><body>{value}</body></html>", "", 0
+        return "<html><body>no reflection</body></html>", "", 0
+
+    monkeypatch.setattr(active_checks, "run", fake_run)
+
+    result = asyncio.run(
+        active_checks.smart_xss_test(
+            "https://example.test",
+            [
+                {
+                    "url": "https://example.test/rest/products/reviews",
+                    "method": "POST",
+                    "content_type": "application/json",
+                    "body_params": ["page", "limit", "message"],
+                    "body_template": {"page": 1, "limit": 10, "message": "ok"},
+                }
+            ],
+            max_seconds=10,
+            max_params_per_endpoint=1,
+        )
+    )
+
+    assert result["params_tested"] == 1
+    assert result["vulnerabilities_found"] == 1
+    assert result["findings"][0]["param"] == "message"
+
+
 def test_json_mass_assignment_detects_reflected_privileged_field(monkeypatch):
     async def fake_run(cmd, timeout=15):
         body = json.loads(cmd[cmd.index("-d") + 1])

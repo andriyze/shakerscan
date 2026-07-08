@@ -6744,6 +6744,46 @@ _ACTIVE_HIGH_VALUE_KEYWORDS = (
     "register", "signup", "user", "order", "coupon", "product", "payment",
 )
 
+_ACTIVE_LOW_VALUE_PARAM_KEYWORDS = (
+    "utm_", "fbclid", "gclid", "msclkid", "ga_", "cache", "cachebuster",
+    "timestamp", "nonce", "csrf", "xsrf", "page", "limit", "offset",
+    "per_page", "size", "debug", "locale", "lang",
+)
+
+_ACTIVE_SHARED_PARAM_KEYWORDS = (
+    "q", "query", "search", "term", "keyword", "filter", "where", "sort",
+    "order", "category", "email", "username", "user", "login", "password",
+    "token", "code", "coupon", "id", "uid", "account", "product", "basket",
+    "cart", "message", "comment", "review", "description", "content", "text",
+    "name", "title", "url", "redirect", "return", "callback", "next", "path",
+)
+
+_ACTIVE_SQLI_PARAM_KEYWORDS = (
+    "id", "uid", "user_id", "account", "order_id", "product_id", "basket_id",
+    "cart_id", "coupon", "code", "q", "query", "search", "filter", "where",
+    "sort", "order", "email", "username", "login", "password",
+)
+
+_ACTIVE_XSS_PARAM_KEYWORDS = (
+    "message", "comment", "review", "description", "content", "text", "body",
+    "name", "title", "q", "query", "search", "term", "keyword", "url",
+    "redirect", "return", "callback", "next", "path", "html", "template",
+)
+
+_ACTIVE_ROUTE_PARAM_HINTS = {
+    "search": ("q", "query", "search", "term", "keyword"),
+    "login": ("email", "username", "user", "login", "password"),
+    "signin": ("email", "username", "user", "login", "password"),
+    "auth": ("email", "username", "user", "login", "password", "token", "code"),
+    "review": ("message", "comment", "review", "text", "rating"),
+    "comment": ("message", "comment", "text", "body"),
+    "contact": ("message", "comment", "text", "body", "email", "name"),
+    "coupon": ("coupon", "coupon_code", "code"),
+    "basket": ("basket", "basket_id", "product", "product_id", "id"),
+    "cart": ("cart", "cart_id", "product", "product_id", "id"),
+    "product": ("product", "product_id", "id", "q", "query", "search"),
+}
+
 # Sources from actually-observed traffic/crawl (trustworthy) vs. generated guesses
 # (OPTIONS method fan-out, inferred resource×action permutations) which are mostly
 # phantom and otherwise dominate the budget.
@@ -6776,6 +6816,70 @@ def _active_endpoint_priority(ep: dict[str, Any], *, family: str | None = None) 
 def _prioritize_active_endpoints(endpoints: list, *, family: str | None = None) -> list:
     """Stable value-sort of active-test endpoints, highest priority first."""
     return sorted(endpoints, key=lambda ep: _active_endpoint_priority(ep, family=family), reverse=True)
+
+
+def _active_param_score(
+    param: str,
+    *,
+    family: str | None = None,
+    endpoint: dict[str, Any] | None = None,
+    location: str = "query",
+) -> int:
+    name = str(param or "").strip()
+    if not name:
+        return -1000
+    lowered = name.lower()
+    leaf = lowered.rsplit(".", 1)[-1].rsplit("[", 1)[0]
+    family_key = (family or "all").lower()
+    score = 0
+
+    if location == "body":
+        score += 2
+    if lowered == "q":
+        score += 12
+    if leaf in {"id", "uid"} or leaf.endswith("_id"):
+        score += 6
+    if any(keyword == lowered or keyword == leaf or keyword in lowered for keyword in _ACTIVE_SHARED_PARAM_KEYWORDS):
+        score += 4
+
+    if family_key == "sqli":
+        if any(keyword == lowered or keyword == leaf or keyword in lowered for keyword in _ACTIVE_SQLI_PARAM_KEYWORDS):
+            score += 8
+    elif family_key == "xss":
+        if any(keyword == lowered or keyword == leaf or keyword in lowered for keyword in _ACTIVE_XSS_PARAM_KEYWORDS):
+            score += 8
+
+    if endpoint:
+        path = urllib.parse.urlparse(str(endpoint.get("url") or "")).path.lower()
+        for route_hint, hinted_params in _ACTIVE_ROUTE_PARAM_HINTS.items():
+            if route_hint in path and any(hint == lowered or hint == leaf or hint in lowered for hint in hinted_params):
+                score += 5
+
+    if any(lowered == keyword or lowered.startswith(keyword) or keyword in lowered for keyword in _ACTIVE_LOW_VALUE_PARAM_KEYWORDS):
+        score -= 10
+
+    return score
+
+
+def _prioritize_active_params(
+    params: list[str],
+    *,
+    family: str | None = None,
+    endpoint: dict[str, Any] | None = None,
+    location: str = "query",
+) -> list[str]:
+    """Stable value-sort of params so tight active budgets hit likely bug surfaces."""
+    deduped = list(dict.fromkeys(str(param) for param in params if str(param or "").strip()))
+    return [
+        param
+        for _, param in sorted(
+            enumerate(deduped),
+            key=lambda item: (
+                -_active_param_score(item[1], family=family, endpoint=endpoint, location=location),
+                item[0],
+            ),
+        )
+    ]
 
 
 async def smart_sqli_test(
@@ -6927,6 +7031,7 @@ async def smart_sqli_test(
             break
         endpoint_url = endpoint.get("url", "")
         params = _coerce_param_names(endpoint.get("params") or endpoint.get("query_params"))
+        params = _prioritize_active_params(params, family="sqli", endpoint=endpoint, location="query")
         param_defaults = endpoint.get("param_defaults") or endpoint.get("query_param_defaults") or {}
 
         if not params:
@@ -7073,6 +7178,7 @@ async def smart_sqli_test(
         endpoint_url = endpoint.get("url", "")
         method = endpoint.get("method", "POST").upper()
         body_params = _coerce_param_names(endpoint.get("body_params") or endpoint.get("params"))
+        body_params = _prioritize_active_params(body_params, family="sqli", endpoint=endpoint, location="body")
         content_type = endpoint.get("content_type") or "application/json"
 
         if not body_params:
@@ -8145,6 +8251,7 @@ async def smart_xss_test(
             if "{" in endpoint_url:
                 continue
         params = _coerce_param_list(endpoint.get("params") or endpoint.get("query_params"))
+        params = _prioritize_active_params(params, family="xss", endpoint=endpoint, location="query")
         param_defaults = endpoint.get("param_defaults") or endpoint.get("query_param_defaults") or {}
 
         # An id-like path segment (e.g. /track-order/{id}) is its own injection
@@ -8350,6 +8457,7 @@ async def smart_xss_test(
 
         method = endpoint.get("method", "POST").upper()
         body_params = _coerce_param_list(endpoint.get("body_params") or endpoint.get("params"))
+        body_params = _prioritize_active_params(body_params, family="xss", endpoint=endpoint, location="body")
         content_type = endpoint.get("content_type") or "application/json"
 
         if not body_params:

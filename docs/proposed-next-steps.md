@@ -1473,6 +1473,13 @@ restart/rebuild closure, and all-worker log aggregation.
 ### 14. Verification requirements for the next cycle
 Every implementation increment above must include its own test slice:
 
+- **DONE phase 15: Active parameter prioritization for recall.** Smart SQLi and Smart XSS now
+  value-sort query/body parameters before applying per-endpoint param budgets, so tight runs spend
+  attempts on generic high-yield bug surfaces first (search/query/login/ID/coupon/product/content
+  fields) and push pagination/tracking/cache noise later. Regression coverage includes a
+  budget-constrained POST-body reflected-XSS case where the vulnerable `message` parameter appears
+  after low-value fields in discovery order.
+
 - API/unit tests for new data contracts and legacy compatibility.
 - UI tests for action-center cards, ASM schedule payloads, Model Intake trust modes, and AI red-team
   campaign review/rerun.
