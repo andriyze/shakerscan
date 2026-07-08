@@ -3407,6 +3407,60 @@ def test_finding_delta_refuter_signal_ignores_stable_and_insufficient_history():
     assert api_module._finding_delta_refuter_signal({**base, "recent_finding_counts": [8, 0, 0, 0]}) is not None
 
 
+def _benchmark_artifact(target, recall, verified, path):
+    return {
+        "artifact_type": "benchmark_scorecard_run",
+        "artifact_status": "passed_benchmark_scorecard" if recall >= 0.8 else "failed_benchmark_scorecard",
+        "artifact_path": path,
+        "targets": [{
+            "target": target,
+            "scan_id": f"scan-{path}",
+            "scorecards": {
+                "post_retest": {
+                    "target": target,
+                    "phase": "post_retest",
+                    "expected_recall": recall,
+                    "verified_high_critical": verified,
+                    "scan_id": f"scan-{path}",
+                }
+            },
+        }],
+    }
+
+
+def test_benchmark_win_delta_refuter_signal_flags_sudden_scorecard_jump():
+    signals = api_module._benchmark_win_delta_refuter_signals([
+        _benchmark_artifact("juice_shop", 0.78, 7, "latest"),
+        _benchmark_artifact("juice_shop", 0.22, 2, "baseline-2"),
+        _benchmark_artifact("juice_shop", 0.33, 3, "baseline-1"),
+    ])
+
+    assert len(signals) == 1
+    signal = signals[0]
+    assert signal["subject_type"] == "benchmark"
+    assert signal["trigger_type"] == "benchmark_scorecard_win_delta"
+    assert signal["trigger_reasons"] == [
+        "benchmark_recall_win_delta",
+        "benchmark_verified_high_critical_win_delta",
+    ]
+    assert signal["benchmark"] == "juice_shop"
+    assert signal["latest_expected_recall"] == 0.78
+    assert signal["baseline_expected_recall_median"] == 0.275
+    assert signal["execution_enabled"] is False
+
+
+def test_benchmark_win_delta_refuter_signal_ignores_flat_or_insufficient_history():
+    assert api_module._benchmark_win_delta_refuter_signals([
+        _benchmark_artifact("juice_shop", 0.44, 2, "latest"),
+        _benchmark_artifact("juice_shop", 0.33, 2, "baseline-2"),
+        _benchmark_artifact("juice_shop", 0.44, 2, "baseline-1"),
+    ]) == []
+    assert api_module._benchmark_win_delta_refuter_signals([
+        _benchmark_artifact("juice_shop", 0.78, 7, "latest"),
+        _benchmark_artifact("juice_shop", 0.22, 2, "baseline-1"),
+    ]) == []
+
+
 def test_finding_delta_target_stats_groups_recent_scans_newest_first():
     rows = [
         {"target_id": "a", "target_url": "ua", "scan_id": "a3", "findings_count": 30},

@@ -10054,13 +10054,17 @@ async def _build_dashboard_action_center(conn, *, worker_snapshot: dict[str, Any
             if unreviewed:
                 detail_parts.append(f"{unreviewed} weak or suspected-proof finding(s) awaiting a refuter review")
             if integrity:
-                detail_parts.append(f"{integrity} target(s) with an unusual finding-count spike to verify")
-            spike_samples = [
+                detail_parts.append(f"{integrity} integrity signal(s) to verify")
+            integrity_samples = [
                 {
+                    "trigger_type": sig.get("trigger_type"),
                     "target_id": sig.get("target_id"),
                     "target_url": sig.get("target_url"),
                     "latest_finding_count": sig.get("latest_finding_count"),
                     "baseline_median": sig.get("baseline_median"),
+                    "benchmark": sig.get("benchmark"),
+                    "latest_expected_recall": sig.get("latest_expected_recall"),
+                    "baseline_expected_recall_median": sig.get("baseline_expected_recall_median"),
                 }
                 for sig in (refuter.get("integrity_signals") or [])[:3]
             ]
@@ -10077,7 +10081,7 @@ async def _build_dashboard_action_center(conn, *, worker_snapshot: dict[str, Any
                 action_label="Open refuter reviews",
                 actions=[{"label": "Open refuter reviews", "href": "/settings/arsenal", "variant": "primary"}],
                 count=unreviewed + integrity,
-                samples=spike_samples,
+                samples=integrity_samples,
                 metadata={
                     "unreviewed_candidate_count": unreviewed,
                     "integrity_signal_count": integrity,
@@ -15575,6 +15579,9 @@ def _finding_refuter_trigger(finding: dict[str, Any]) -> dict[str, Any] | None:
 REFUTER_FINDING_DELTA_MIN_BASELINE = 2   # need at least this many prior scans for a baseline
 REFUTER_FINDING_DELTA_MIN_ABSOLUTE = 5   # latest must exceed baseline median by at least this
 REFUTER_FINDING_DELTA_MULTIPLIER = 2.0   # and (for non-zero baselines) be at least this many x
+REFUTER_BENCHMARK_DELTA_MIN_BASELINE = 2
+REFUTER_BENCHMARK_RECALL_DELTA = 0.25
+REFUTER_BENCHMARK_VERIFIED_DELTA = 2
 
 
 def _median(values: Sequence[float]) -> float:
@@ -15673,6 +15680,131 @@ def _finding_delta_refuter_signals(
     return signals[:bounded]
 
 
+def _benchmark_scorecard_rows(artifacts: Sequence[Any]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for artifact in artifacts or []:
+        data = artifact if isinstance(artifact, dict) else {}
+        if data.get("artifact_type") != "benchmark_scorecard_run":
+            continue
+        artifact_id = str(data.get("artifact_path") or data.get("artifact_id") or data.get("path") or "").strip() or None
+        artifact_status = str(data.get("artifact_status") or "").strip()
+        targets = data.get("targets") if isinstance(data.get("targets"), list) else []
+        for target in targets:
+            if not isinstance(target, dict):
+                continue
+            scorecard = target.get("scorecards", {}).get("post_retest") if isinstance(target.get("scorecards"), dict) else None
+            if not isinstance(scorecard, dict):
+                scorecard = target
+            benchmark = str(scorecard.get("target") or target.get("target") or data.get("target") or "").strip()
+            if not benchmark:
+                continue
+            try:
+                recall = float(scorecard.get("expected_recall"))
+            except (TypeError, ValueError):
+                continue
+            rows.append({
+                "benchmark": benchmark,
+                "artifact_id": artifact_id,
+                "artifact_status": artifact_status,
+                "scan_id": str(scorecard.get("scan_id") or target.get("scan_id") or "").strip() or None,
+                "phase": scorecard.get("phase") or target.get("phase") or "post_retest",
+                "expected_recall": recall,
+                "verified_high_critical": int(scorecard.get("verified_high_critical") or target.get("verified_high_critical") or 0),
+                "passed": bool(target.get("passed") or data.get("artifact_status") == "passed_benchmark_scorecard"),
+            })
+    return rows
+
+
+def _benchmark_win_delta_refuter_signal(benchmark_stat: dict[str, Any]) -> dict[str, Any] | None:
+    rows = [row for row in (benchmark_stat.get("rows") or []) if isinstance(row, dict)]
+    if len(rows) < REFUTER_BENCHMARK_DELTA_MIN_BASELINE + 1:
+        return None
+    latest = rows[0]
+    baseline = rows[1:]
+    baseline_recalls = [float(row.get("expected_recall") or 0.0) for row in baseline]
+    baseline_verified = [int(row.get("verified_high_critical") or 0) for row in baseline]
+    latest_recall = float(latest.get("expected_recall") or 0.0)
+    latest_verified = int(latest.get("verified_high_critical") or 0)
+    baseline_recall_median = _median(baseline_recalls)
+    baseline_verified_median = _median(baseline_verified)
+    recall_delta = latest_recall - baseline_recall_median
+    verified_delta = latest_verified - baseline_verified_median
+    reasons: list[str] = []
+    if recall_delta >= REFUTER_BENCHMARK_RECALL_DELTA:
+        reasons.append("benchmark_recall_win_delta")
+    if verified_delta >= REFUTER_BENCHMARK_VERIFIED_DELTA:
+        reasons.append("benchmark_verified_high_critical_win_delta")
+    if not reasons:
+        return None
+    benchmark = str(benchmark_stat.get("benchmark") or latest.get("benchmark") or "").strip()
+    return {
+        "subject_type": "benchmark",
+        "subject_id": benchmark,
+        "benchmark": benchmark,
+        "latest_artifact": latest.get("artifact_id"),
+        "latest_scan_id": latest.get("scan_id"),
+        "latest_expected_recall": latest_recall,
+        "latest_verified_high_critical": latest_verified,
+        "baseline_expected_recall_median": baseline_recall_median,
+        "baseline_verified_high_critical_median": baseline_verified_median,
+        "expected_recall_delta": round(recall_delta, 4),
+        "verified_high_critical_delta": verified_delta,
+        "baseline_artifacts": [row.get("artifact_id") for row in baseline if row.get("artifact_id")],
+        "trigger_type": "benchmark_scorecard_win_delta",
+        "trigger_reasons": reasons,
+        "review_hint": (
+            f"{benchmark} benchmark scorecard improved from recall median "
+            f"{baseline_recall_median:.2f} to {latest_recall:.2f}. Verify this is a "
+            "universal detector improvement, not stale fleet effects, contamination, or benchmark fitting."
+        ),
+        "execution_enabled": False,
+        "findings_updated": 0,
+    }
+
+
+def _benchmark_win_delta_refuter_signals(
+    artifacts: Sequence[Any],
+    *,
+    limit: int = 20,
+) -> list[dict[str, Any]]:
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for row in _benchmark_scorecard_rows(artifacts):
+        grouped.setdefault(str(row.get("benchmark") or ""), []).append(row)
+    signals = [
+        signal
+        for benchmark, rows in grouped.items()
+        if benchmark
+        for signal in [_benchmark_win_delta_refuter_signal({"benchmark": benchmark, "rows": rows})]
+        if signal
+    ]
+    signals.sort(key=lambda item: (-float(item.get("expected_recall_delta") or 0), str(item.get("benchmark") or "")))
+    bounded = max(1, min(int(limit or 20), 100))
+    return signals[:bounded]
+
+
+def _load_benchmark_scorecard_artifacts(*, limit: int = 20) -> list[dict[str, Any]]:
+    runs_dir = RESULTS_DIR / "benchmark-runs"
+    try:
+        paths = sorted(
+            (p for p in runs_dir.glob("benchmark-*.json") if p.is_file()),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )[:max(1, min(int(limit or 20), 100))]
+    except OSError:
+        return []
+    artifacts: list[dict[str, Any]] = []
+    for path in paths:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if isinstance(payload, dict):
+            payload = dict(payload)
+            payload["artifact_path"] = str(path)
+            artifacts.append(payload)
+    return artifacts
+
+
 def _refuter_work_summary(
     findings: Sequence[Any],
     reviews: Sequence[Any] = (),
@@ -15709,8 +15841,8 @@ def _refuter_work_summary(
     trigger_counts = Counter(reason for item in candidates for reason in item.get("trigger_reasons", []))
     type_counts = Counter(str(item.get("trigger_type") or "unknown") for item in candidates)
     unreviewed = [item for item in candidates if not item.get("already_reviewed")]
-    # Integrity signals are report-only target-level spikes; they are intentionally NOT
-    # part of `candidates`, so queue-from-summary never auto-creates a target refuter row.
+    # Integrity signals are report-only review prompts; they are intentionally NOT
+    # part of `candidates`, so queue-from-summary never auto-creates a refuter row.
     integrity = [dict(signal) for signal in (integrity_signals or []) if isinstance(signal, dict)]
     return {
         "summary": {
@@ -15788,6 +15920,11 @@ async def _load_refuter_work_summary(conn, *, limit: int = 20, finding_window: i
     integrity_signals = _finding_delta_refuter_signals(
         _finding_delta_target_stats(scan_rows), limit=limit
     )
+    benchmark_signals = _benchmark_win_delta_refuter_signals(
+        _load_benchmark_scorecard_artifacts(limit=max(limit, 10)),
+        limit=limit,
+    )
+    integrity_signals = list(integrity_signals) + list(benchmark_signals)
     return _refuter_work_summary(findings, reviews, limit=limit, integrity_signals=integrity_signals)
 
 

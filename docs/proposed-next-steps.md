@@ -1292,8 +1292,10 @@ Richer counterevidence bundle review and broader trigger coverage remain open.
    they never mutate findings or proof state. DONE phase 5: the unreviewed weak-proof candidate count
    and the finding-delta integrity spikes are now surfaced as a `refuter-review-backlog` item in the
    dashboard `action_center` (`_build_dashboard_action_center`, best-effort), closing the loop from
-   integrity signal to the productized operator decision flow (§1). Benchmark-win deltas and richer
-   counterevidence review UI remain open.
+   integrity signal to the productized operator decision flow (§1). DONE phase 6: benchmark scorecard
+   win deltas now surface as report-only integrity signals when a latest scorecard improves sharply
+   over its own recent history, so possible stale-fleet, contamination, or benchmark-fitting wins are
+   reviewed without auto-queueing or mutating findings. Richer counterevidence review UI remains open.
 2. PARTIAL phase 1: refuter behavior now plans how to rerun the minimal reproducer, test benign
    explanations, verify auth context/principal/tenant/object ownership, check request freshness, and
    attach counterevidence when a claim weakens. DONE phase 2: a gated executor now queues the
