@@ -394,6 +394,17 @@ def scanner_execution_plan(
         for item in families
         if item.get("requested") and not item.get("enabled") and item.get("blocked_by")
     ]
+    # A family can be planned (enabled) yet have no dispatch adapter wired. Surface it
+    # explicitly so `enabled_families` is never read as achieved coverage.
+    unwired_enabled = [
+        {
+            "name": str(item.get("name")),
+            "dispatch_adapter": str(item.get("dispatch_adapter") or "none"),
+            "blocked_by": list(item.get("blocked_by") or []),
+        }
+        for item in enabled_families
+        if item.get("dispatch_adapter") == "adapter_pending"
+    ]
 
     return {
         "registry_version": "check_family_v1",
@@ -412,6 +423,8 @@ def scanner_execution_plan(
             "runnable_enabled_count": sum(1 for item in enabled_families if item.get("runnable")),
             "dispatch_adapter_counts": dict(dispatch_counts),
             "requested_blocked": requested_blocked,
+            "unwired_enabled": unwired_enabled,
+            "dispatched_enabled_count": len(enabled_families) - len(unwired_enabled),
         },
         "families": families,
     }

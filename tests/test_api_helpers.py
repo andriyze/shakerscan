@@ -2875,6 +2875,114 @@ def test_promote_authz_replay_finding_requires_violation_and_links_evidence(monk
     assert any("UPDATE campaign_actions" in sql for sql, _args in captured["executes"])
 
 
+def test_promote_authz_replay_finding_creates_one_finding_per_principal(monkeypatch):
+    action_id = uuid.uuid4()
+    target_id = uuid.uuid4()
+    approval_id = uuid.uuid4()
+    tool_receipt_id = uuid.uuid4()
+    finding_ids = [uuid.uuid4(), uuid.uuid4()]
+    captured: dict[str, object] = {"finding_inserts": [], "executes": []}
+
+    def _violation(principal):
+        return {
+            "method": "GET",
+            "path": "/api/orders/42",
+            "principal_label": principal,
+            "principal_auth_state": principal,
+            "expected_access": "deny",
+            "expected_http_status": 403,
+            "observed_status": 200,
+            "matched": False,
+            "request_success": True,
+            "authenticated_user": True,
+            "violation_observed": True,
+            "request": {"method": "GET", "url": "/api/orders/42", "as_user": principal},
+            "response": {"status": 200, "body_sample": '{"id":42}'},
+        }
+
+    replay = {
+        "violation_count": 2,
+        "tool_receipt_id": str(tool_receipt_id),
+        "evidence_instance_ids": [],
+        "proof_bundle": {
+            "bundle_type": "authz_replay_proof_bundle",
+            "differential_observed": True,
+            "authenticated_principal_count": 3,
+        },
+        # Two DISTINCT offending principals on the same route template.
+        "observations": [_violation("user2"), _violation("user3")],
+    }
+
+    inserts = iter(finding_ids)
+
+    class _FakeConn:
+        async def fetchrow(self, query, *args):
+            sql = str(query)
+            if "SELECT * FROM campaign_actions" in sql:
+                return {
+                    "id": action_id, "campaign_id": None, "operation_plan_id": None,
+                    "command_result_id": None, "target_id": target_id,
+                    "scope_receipt_id": None, "approval_receipt_id": None, "scan_id": None,
+                    "command": "authz.replay_plan", "action_name": "authz.replay_plan",
+                    "status": "partial", "dry_run": False, "risk_tier": "credential",
+                    "finding_ids": json.dumps([]), "hypothesis_ids": json.dumps([]),
+                    "evidence_object_ids": json.dumps([]),
+                    "tool_receipt_ids": json.dumps([str(tool_receipt_id)]),
+                    "blocked_by": json.dumps([]), "next_action": None,
+                    "operator_message": "replayed",
+                    "result_json": json.dumps({"authz_replay": replay}),
+                    "created_by": "pytest", "mission_campaign_id": None,
+                    "created_at": "now", "updated_at": "now",
+                }
+            if "SELECT id, url FROM targets" in sql:
+                return {"id": target_id, "url": "https://app.example.com"}
+            if "SELECT id, status FROM findings" in sql:
+                return None
+            if "INSERT INTO command_results" in sql:
+                return {
+                    "id": uuid.uuid4(), "command": args[0], "status": args[1],
+                    "dry_run": args[2], "risk_tier": args[3], "operation_plan_id": args[4],
+                    "scope_receipt_id": args[5], "approval_receipt_id": args[6],
+                    "campaign_id": args[7], "scan_id": args[8], "finding_ids": args[9],
+                    "hypothesis_ids": args[10], "evidence_object_ids": args[11],
+                    "tool_receipt_ids": args[12], "blocked_by": args[13],
+                    "next_action": args[14], "operator_message": args[15],
+                    "result_json": args[16], "created_by": args[17], "created_at": "now",
+                }
+            raise AssertionError(sql)
+
+        async def fetchval(self, query, *args):
+            assert "INSERT INTO findings" in str(query)
+            captured["finding_inserts"].append(args)
+            return next(inserts)
+
+        async def execute(self, query, *args):
+            captured["executes"].append((str(query), args))
+            return "OK"
+
+    async def fake_validate(conn, receipt_id, **kwargs):
+        return {"approval_receipt_id": receipt_id, "scope_receipt_id": "scope-1"}
+
+    monkeypatch.setattr(api_module, "_validate_approval_receipt_for_action", fake_validate)
+
+    result = asyncio.run(api_module._promote_authz_replay_finding(
+        _FakeConn(),
+        campaign_action_id=str(action_id),
+        approval_receipt_id=str(approval_id),
+        created_by="pytest",
+    ))
+
+    # Both distinct principals become findings; neither is dropped.
+    assert result["findings_created"] == 2
+    assert len(captured["finding_inserts"]) == 2
+    assert result["finding_ids"] == [str(item) for item in finding_ids]
+    assert result["finding_id"] == str(finding_ids[0])
+    assert {p["principal"] for p in result["promotions"]} == {"user2", "user3"}
+    # Distinct principals => distinct fingerprints (not collapsed to one finding).
+    assert len({p["fingerprint"] for p in result["promotions"]}) == 2
+    assert result["command_result"]["finding_ids"] == [str(item) for item in finding_ids]
+
+
 def test_promote_authz_replay_finding_requires_differential(monkeypatch):
     action_id = uuid.uuid4()
     target_id = uuid.uuid4()
@@ -3437,6 +3545,12 @@ def test_derive_refuter_review_verdict_records_completed_deterministic_outcome()
                 }
             raise AssertionError(f"unexpected query: {query}")
 
+        async def execute(self, query, *args):
+            if "UPDATE refuter_reviews" in query and "verdict_pending" in query:
+                captured["reconcile_args"] = args
+                return "UPDATE 1"
+            raise AssertionError(f"unexpected execute: {query}")
+
     result = asyncio.run(api_module._derive_refuter_review_verdict(
         _FakeConn(),
         refuter_review_id=str(review_id),
@@ -3452,6 +3566,8 @@ def test_derive_refuter_review_verdict_records_completed_deterministic_outcome()
     assert derived["created_by"] == "pytest"
     assert result["findings_updated"] == 0
     assert result["hypotheses_updated"] == 0
+    assert result["verdict_pending"] is False
+    assert captured["reconcile_args"][0] == review_id
     counterevidence = derived["counterevidence"]
     assert counterevidence["verification_id"] == str(verification_id)
     assert counterevidence["verdict"] == "likely_fixed"
@@ -3599,6 +3715,12 @@ def test_derive_refuter_review_verdict_uses_latest_execution_retest_id_when_omit
                 }
             raise AssertionError(f"unexpected query: {query}")
 
+        async def execute(self, query, *args):
+            if "UPDATE refuter_reviews" in query and "verdict_pending" in query:
+                captured["reconcile_args"] = args
+                return "UPDATE 1"
+            raise AssertionError(f"unexpected execute: {query}")
+
     result = asyncio.run(api_module._derive_refuter_review_verdict(
         _FakeConn(),
         refuter_review_id=str(review_id),
@@ -3608,6 +3730,10 @@ def test_derive_refuter_review_verdict_uses_latest_execution_retest_id_when_omit
     assert captured["verification_args"][0] == linked_verification_id
     assert result["verification_id"] == str(linked_verification_id)
     assert result["refuter_review"]["refuter_verdict"] == "weakened"
+    # The execute->derive handshake is reconciled: the source review's retest is resolved.
+    assert result["verdict_pending"] is False
+    assert captured["reconcile_args"][0] == review_id
+    assert captured["reconcile_args"][1] == str(linked_verification_id)
 
 
 def test_tool_receipt_redacts_hashes_and_is_non_executing():

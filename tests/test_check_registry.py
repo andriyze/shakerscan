@@ -117,6 +117,10 @@ def test_scanner_execution_plan_uses_registry_gates():
     assert families["ssrf"]["reason"] == "registered_not_runnable"
     assert "payload" in families["sqli"]["proof_contract"]
     assert plan["summary"]["dispatch_adapter_counts"]["legacy_active_loop"] == 1
+    # Every enabled family in a normal plan is wired to a dispatch adapter, so the
+    # coverage-honesty fields report zero unwired and full dispatched coverage.
+    assert plan["summary"]["unwired_enabled"] == []
+    assert plan["summary"]["dispatched_enabled_count"] == plan["summary"]["enabled_count"]
 
 
 def test_scanner_execution_plan_records_passive_skip_reasons():

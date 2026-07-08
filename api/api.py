@@ -15727,10 +15727,31 @@ async def _derive_refuter_review_verdict(
         },
         created_by=created_by,
     ))
+    # Reconcile the execute->derive handshake: mark the source review's pending retest
+    # resolved so verdict_pending is no longer a dangling flag. create_missing=false keeps
+    # this a no-op when the review has no latest_refuter_execution (explicit verification_id).
+    await conn.execute(
+        """
+        UPDATE refuter_reviews
+        SET metadata_json = jsonb_set(
+                jsonb_set(
+                    COALESCE(metadata_json, '{}'::jsonb),
+                    '{latest_refuter_execution,verdict_pending}', 'false'::jsonb, false
+                ),
+                '{latest_refuter_execution,verdict_derived_verification_id}',
+                to_jsonb($2::text), false
+            ),
+            updated_at = NOW()
+        WHERE id = $1
+        """,
+        review_uuid,
+        str(verification.get("id")),
+    )
     return {
         **result,
         "source_refuter_review_id": str(review_uuid),
         "verification_id": str(verification.get("id")),
+        "verdict_pending": False,
         "derived_outcome": outcome,
         "execution_enabled": False,
         "findings_updated": 0,
@@ -17979,90 +18000,115 @@ async def _promote_authz_replay_finding(
             violations.append(item)
     if not violations:
         raise HTTPException(status_code=400, detail="Authz replay result has no promotable violation observation")
-    first = violations[0]
-    path = str(first.get("path") or "").strip() or target_url
-    templated_path = _authz_template_replay_path(path)
-    actor = str(first.get("principal_auth_state") or first.get("principal_label") or "lower-role principal").strip()
-    title = f"BOLA: {actor} accessed denied resource"
-    fingerprint_source = f"{target_uuid}:authz.replay_plan:{templated_path or path}:{actor}:CWE-639"
-    fingerprint = hashlib.sha256(fingerprint_source.encode()).hexdigest()[:32]
-    evidence_instance_ids = _clean_string_list(replay.get("evidence_instance_ids"), max_items=100)
-    tool_receipt_id = str(replay.get("tool_receipt_id") or "").strip()
     proof_bundle = replay.get("proof_bundle") if isinstance(replay.get("proof_bundle"), dict) else _authz_replay_proof_bundle(replay.get("plan") if isinstance(replay.get("plan"), dict) else {}, observations)
     if proof_bundle.get("differential_observed") is not True:
         raise HTTPException(status_code=400, detail="Authz replay promotion requires a cross-principal differential observation")
-    request_response_ref = _authz_redacted_request_response_ref(first)
-    request_payload = request_response_ref.get("request") if isinstance(request_response_ref.get("request"), dict) else {}
-    response_payload = request_response_ref.get("response") if isinstance(request_response_ref.get("response"), dict) else {}
-    evidence_json = _redact_finding_evidence({
-        "proof": "Deterministic authz replay observed a principal receiving successful access where the role matrix expected denial.",
-        "authz_replay": {
-            "campaign_action_id": str(action_uuid),
-            "violation_count": len(violations),
-            "templated_path": templated_path or None,
-            "violations": violations[:10],
-            "proof_bundle": proof_bundle,
-            "request_response_ref": request_response_ref,
-            "evidence_instance_ids": evidence_instance_ids,
-            "tool_receipt_id": tool_receipt_id or None,
-        },
-    })
-    existing = await conn.fetchrow(
-        "SELECT id, status FROM findings WHERE fingerprint=$1 AND target_id=$2",
-        fingerprint,
-        target_uuid,
-    )
-    if existing:
-        finding_id = existing["id"]
-        status = "duplicate"
-        existing_payload = row_to_dict(existing)
-        if existing_payload.get("status") == "resolved":
-            await conn.execute(
-                """
-                UPDATE findings
-                SET status='active', last_seen_at=NOW(),
-                    resurfaced_count = resurfaced_count + 1,
-                    updated_at=NOW()
-                WHERE id=$1
-                """,
-                finding_id,
-            )
-            status = "resurfaced"
-        else:
-            await conn.execute("UPDATE findings SET last_seen_at=NOW(), updated_at=NOW() WHERE id=$1", finding_id)
-    else:
-        finding_id = await conn.fetchval(
-            """
-            INSERT INTO findings (
-                target_id, fingerprint, title, description, severity,
-                cvss_score, tool, cwe, url, evidence, request, response,
-                notes, source, status
-            ) VALUES (
-                $1,$2,$3,$4,'high',
-                $5,'bola','CWE-639',$6,$7,$8,$9,
-                $10,'manual','active'
-            )
-            RETURNING id
-            """,
-            target_uuid,
+    evidence_instance_ids = _clean_string_list(replay.get("evidence_instance_ids"), max_items=100)
+    tool_receipt_id = str(replay.get("tool_receipt_id") or "").strip()
+
+    # A distinct offending principal is a distinct authorization violation. The route
+    # template collapse (ee7748d) already merges resource ids for one principal, so group
+    # by principal and promote one finding per principal instead of dropping every
+    # violation past the first.
+    violations_by_actor: dict[str, list[dict[str, Any]]] = {}
+    for item in violations:
+        actor_key = str(item.get("principal_auth_state") or item.get("principal_label") or "lower-role principal").strip()
+        violations_by_actor.setdefault(actor_key, []).append(item)
+
+    promotions: list[dict[str, Any]] = []
+    for actor, actor_violations in violations_by_actor.items():
+        first = actor_violations[0]
+        path = str(first.get("path") or "").strip() or target_url
+        templated_path = _authz_template_replay_path(path)
+        title = f"BOLA: {actor} accessed denied resource"
+        fingerprint_source = f"{target_uuid}:authz.replay_plan:{templated_path or path}:{actor}:CWE-639"
+        fingerprint = hashlib.sha256(fingerprint_source.encode()).hexdigest()[:32]
+        request_response_ref = _authz_redacted_request_response_ref(first)
+        request_payload = request_response_ref.get("request") if isinstance(request_response_ref.get("request"), dict) else {}
+        response_payload = request_response_ref.get("response") if isinstance(request_response_ref.get("response"), dict) else {}
+        evidence_json = _redact_finding_evidence({
+            "proof": "Deterministic authz replay observed a principal receiving successful access where the role matrix expected denial.",
+            "authz_replay": {
+                "campaign_action_id": str(action_uuid),
+                "principal": actor,
+                "violation_count": len(actor_violations),
+                "templated_path": templated_path or None,
+                "violations": actor_violations[:10],
+                "proof_bundle": proof_bundle,
+                "request_response_ref": request_response_ref,
+                "evidence_instance_ids": evidence_instance_ids,
+                "tool_receipt_id": tool_receipt_id or None,
+            },
+        })
+        existing = await conn.fetchrow(
+            "SELECT id, status FROM findings WHERE fingerprint=$1 AND target_id=$2",
             fingerprint,
-            title,
-            "Lower-role authorization replay observed successful access where the principal matrix expected denial.",
-            8.1,
-            path if path.startswith(("http://", "https://")) else target_url.rstrip("/") + "/" + path.lstrip("/"),
-            json.dumps(evidence_json),
-            json.dumps(request_payload) if request_payload else None,
-            json.dumps(response_payload) if response_payload else None,
-            "Promoted explicitly from authz.replay_plan evidence.",
+            target_uuid,
         )
-        status = "created"
+        if existing:
+            finding_id = existing["id"]
+            status = "duplicate"
+            existing_payload = row_to_dict(existing)
+            if existing_payload.get("status") == "resolved":
+                await conn.execute(
+                    """
+                    UPDATE findings
+                    SET status='active', last_seen_at=NOW(),
+                        resurfaced_count = resurfaced_count + 1,
+                        updated_at=NOW()
+                    WHERE id=$1
+                    """,
+                    finding_id,
+                )
+                status = "resurfaced"
+            else:
+                await conn.execute("UPDATE findings SET last_seen_at=NOW(), updated_at=NOW() WHERE id=$1", finding_id)
+        else:
+            finding_id = await conn.fetchval(
+                """
+                INSERT INTO findings (
+                    target_id, fingerprint, title, description, severity,
+                    cvss_score, tool, cwe, url, evidence, request, response,
+                    notes, source, status
+                ) VALUES (
+                    $1,$2,$3,$4,'high',
+                    $5,'bola','CWE-639',$6,$7,$8,$9,
+                    $10,'manual','active'
+                )
+                RETURNING id
+                """,
+                target_uuid,
+                fingerprint,
+                title,
+                "Lower-role authorization replay observed successful access where the principal matrix expected denial.",
+                8.1,
+                path if path.startswith(("http://", "https://")) else target_url.rstrip("/") + "/" + path.lstrip("/"),
+                json.dumps(evidence_json),
+                json.dumps(request_payload) if request_payload else None,
+                json.dumps(response_payload) if response_payload else None,
+                "Promoted explicitly from authz.replay_plan evidence.",
+            )
+            status = "created"
+        promotions.append({
+            "finding_id": str(finding_id),
+            "fingerprint": fingerprint,
+            "status": status,
+            "principal": actor,
+            "finding_created": status == "created",
+        })
+
+    finding_ids = [item["finding_id"] for item in promotions]
+    primary = promotions[0]
+    finding_id = primary["finding_id"]
+    fingerprint = primary["fingerprint"]
+    status = primary["status"]
     await conn.execute(
         """
         UPDATE evidence_instances
         SET finding_id=$1
         WHERE id = ANY($2::uuid[])
         """,
-        finding_id,
+        uuid.UUID(finding_id),
         [uuid.UUID(item) for item in evidence_instance_ids if _optional_uuid(item)],
     )
     await conn.execute(
@@ -18077,8 +18123,8 @@ async def _promote_authz_replay_finding(
             updated_at=NOW()
         WHERE id=$3
         """,
-        json.dumps([str(finding_id)]),
-        json.dumps({"authz_replay_promotion": {"finding_id": str(finding_id), "status": status}}),
+        json.dumps(finding_ids),
+        json.dumps({"authz_replay_promotion": {"finding_ids": finding_ids, "promotions": promotions}}),
         action_uuid,
     )
     await conn.execute(
@@ -18100,30 +18146,34 @@ async def _promote_authz_replay_finding(
         risk_tier="credential",
         dry_run=False,
         approval_receipt_id=approval_receipt_id,
-        finding_ids=[str(finding_id)],
+        finding_ids=finding_ids,
         hypothesis_ids=[str(item) for item in hypothesis_ids],
         evidence_object_ids=[],
         tool_receipt_ids=[tool_receipt_id] if tool_receipt_id else [],
         result_json={
-            "finding_id": str(finding_id),
+            "finding_id": finding_id,
+            "finding_ids": finding_ids,
+            "promotions": promotions,
             "fingerprint": fingerprint,
             "promotion_status": status,
             "evidence_instance_ids": evidence_instance_ids,
-            "finding_created": status == "created",
+            "finding_created": any(item["finding_created"] for item in promotions),
         },
-        operator_message="Promoted deterministic authz replay violation through explicit gated command.",
+        operator_message="Promoted deterministic authz replay violation(s) through explicit gated command.",
         next_action=f"/findings/{finding_id}",
         created_by=created_by,
     )
     return {
-        "finding_id": str(finding_id),
+        "finding_id": finding_id,
+        "finding_ids": finding_ids,
+        "promotions": promotions,
         "fingerprint": fingerprint,
         "status": status,
         "command_result": command_result,
         "evidence_instance_ids": evidence_instance_ids,
         "tool_receipt_id": tool_receipt_id or None,
         "execution_enabled": True,
-        "findings_created": 1 if status == "created" else 0,
+        "findings_created": sum(1 for item in promotions if item["finding_created"]),
     }
 
 
@@ -19682,6 +19732,8 @@ async def arsenal_generate_hypotheses_from_source(req: SourceIngestRequest):
     created: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
     async with db_pool.acquire() as conn:
+        if target_uuid and not await conn.fetchval("SELECT 1 FROM targets WHERE id=$1", target_uuid):
+            raise HTTPException(status_code=404, detail="Target not found")
         for index, hint in enumerate(req.hints):
             hypothesis_req, skip = _source_hint_to_hypothesis_request(
                 hint,
@@ -19793,7 +19845,10 @@ async def arsenal_append_hypothesis_signal(hypothesis_id: str, req: HypothesisSi
 async def arsenal_plan_hypothesis_campaign(hypothesis_id: str, req: HypothesisCampaignPlanRequest):
     """Plan campaign work from a hypothesis without queueing or proving anything."""
     async with db_pool.acquire() as conn:
-        return await _plan_campaign_from_hypothesis(conn, hypothesis_id, req)
+        # Atomic: campaign insert + action insert + hypothesis link must not leave an
+        # orphan campaign/action if a later write fails. HTTPExceptions roll back cleanly.
+        async with conn.transaction():
+            return await _plan_campaign_from_hypothesis(conn, hypothesis_id, req)
 
 
 @app.get("/arsenal/refuter-reviews")
