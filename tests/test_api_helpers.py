@@ -497,6 +497,40 @@ def test_dashboard_action_center_prioritizes_server_derived_items():
     assert by_id["model-intake-untrusted-signatures"]["samples"][0]["detail"] == "signature status: untrusted_root"
     assert by_id["model-intake-untrusted-signatures"]["actions"][0]["href"] == "/settings/model-intake?remediate=trust"
     assert by_id["model-intake-untrusted-signatures"]["actions"][1]["label"] == "Latest scan"
+    # No refuter data in the base fake -> the best-effort refuter block adds nothing.
+    assert "refuter-review-backlog" not in by_id
+
+
+def test_dashboard_action_center_surfaces_refuter_integrity_spike():
+    # A target whose latest scan spiked from a ~4-finding baseline to 30.
+    spike_scans = [
+        {"target_id": "t1", "target_url": "https://app.example.test", "scan_id": "s4", "findings_count": 30},
+        {"target_id": "t1", "target_url": "https://app.example.test", "scan_id": "s3", "findings_count": 4},
+        {"target_id": "t1", "target_url": "https://app.example.test", "scan_id": "s2", "findings_count": 5},
+        {"target_id": "t1", "target_url": "https://app.example.test", "scan_id": "s1", "findings_count": 3},
+    ]
+
+    class _Conn:
+        async def fetchrow(self, query, *args):
+            return {}  # no blocker/exception/asm/schedule items
+
+        async def fetch(self, query, *args):
+            if "FROM scans" in query and "ROW_NUMBER()" in query:
+                return spike_scans
+            return []  # no weak findings, reviews, failed scans, model intake, or ai targets
+
+    items = asyncio.run(
+        api_module._build_dashboard_action_center(_Conn(), worker_snapshot={"available": False})
+    )
+    by_id = {item["id"]: item for item in items}
+    assert "refuter-review-backlog" in by_id
+    item = by_id["refuter-review-backlog"]
+    assert item["category"] == "Refuter"
+    assert item["metadata"]["integrity_signal_count"] == 1
+    assert item["metadata"]["unreviewed_candidate_count"] == 0
+    assert item["count"] == 1
+    assert item["samples"][0]["target_id"] == "t1"
+    assert item["samples"][0]["latest_finding_count"] == 30
 
 
 def test_dashboard_action_center_surfaces_ai_control_baseline_gaps():

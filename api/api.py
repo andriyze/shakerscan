@@ -9905,6 +9905,48 @@ async def _build_dashboard_action_center(conn, *, worker_snapshot: dict[str, Any
     except Exception:
         pass
 
+    try:
+        refuter = await _load_refuter_work_summary(conn, limit=5, finding_window=50)
+        refuter_summary = refuter.get("summary") if isinstance(refuter.get("summary"), dict) else {}
+        unreviewed = int(refuter_summary.get("unreviewed_count") or 0)
+        integrity = int(refuter_summary.get("integrity_signal_count") or 0)
+        if unreviewed or integrity:
+            detail_parts = []
+            if unreviewed:
+                detail_parts.append(f"{unreviewed} weak or suspected-proof finding(s) awaiting a refuter review")
+            if integrity:
+                detail_parts.append(f"{integrity} target(s) with an unusual finding-count spike to verify")
+            spike_samples = [
+                {
+                    "target_id": sig.get("target_id"),
+                    "target_url": sig.get("target_url"),
+                    "latest_finding_count": sig.get("latest_finding_count"),
+                    "baseline_median": sig.get("baseline_median"),
+                }
+                for sig in (refuter.get("integrity_signals") or [])[:3]
+            ]
+            items.append(_action_center_item(
+                item_id="refuter-review-backlog",
+                priority="medium",
+                category="Refuter",
+                title="Weak or spiking claims need a refuter review",
+                detail=(
+                    "; ".join(detail_parts)
+                    + ". Refuter reviews record signal only and never change findings or proof state."
+                ),
+                href="/settings/arsenal",
+                action_label="Open refuter reviews",
+                actions=[{"label": "Open refuter reviews", "href": "/settings/arsenal", "variant": "primary"}],
+                count=unreviewed + integrity,
+                samples=spike_samples,
+                metadata={
+                    "unreviewed_candidate_count": unreviewed,
+                    "integrity_signal_count": integrity,
+                },
+            ))
+    except Exception:
+        pass
+
     items.sort(key=lambda item: (
         ACTION_CENTER_PRIORITY_ORDER.get(str(item.get("priority")), 99),
         str(item.get("category") or ""),
