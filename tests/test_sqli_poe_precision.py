@@ -486,6 +486,42 @@ def test_sqli_data_extraction_rejects_version_already_in_baseline(monkeypatch):
     assert "version" not in result["extracted_data"]
 
 
+def test_sqli_data_extraction_reuses_post_body_template(monkeypatch):
+    marker = active_checks._CURL_STATUS_MARKER
+    sent_bodies: list[dict] = []
+
+    async def fake_run(cmd, *args, **kwargs):
+        body_arg = json.loads(cmd[cmd.index("-d") + 1])
+        sent_bodies.append(body_arg)
+        # This endpoint requires the sibling category field. The old extraction
+        # replay sent only {"q": payload}, which never reached the SQL sink.
+        if body_arg.get("category") != "all":
+            return f'{{"error":"category required"}}\n{marker}400', "", 0
+        if "sqlite_version()" in str(body_arg.get("q")):
+            return f"SQLite 3.40.1\n{marker}200", "", 0
+        return f'{{"items":[]}}\n{marker}200', "", 0
+
+    monkeypatch.setattr(active_checks, "run", fake_run)
+
+    result = asyncio.run(
+        active_checks.sqli_data_extraction(
+            {
+                "url": "https://example.test/api/search",
+                "param": "q",
+                "dbms": "sqlite",
+                "method": "POST",
+                "content_type": "application/json",
+                "body": json.dumps({"q": "apple", "category": "all"}),
+            }
+        )
+    )
+
+    assert result["extraction_successful"] is True
+    assert result["extracted_data"]["version"] == "3.40.1"
+    assert sent_bodies
+    assert all(body.get("category") == "all" for body in sent_bodies)
+
+
 # ---------------------------------------------------------------------------
 # Deterministic reflection false-positive prover (retest path)
 # ---------------------------------------------------------------------------

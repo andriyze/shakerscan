@@ -966,8 +966,10 @@ routes (`login`, `search`, `coupon`, `review`, `order`, `product`);
 DONE phase 6 for stored-XSS store-then-render proof routing: stored marker evidence remains
 suspected/likely-vulnerable, while exact stored payloads are promoted to verified High only when
 the headless browser proof confirms execution and carries `browser_proof`/`poe_result` into the
-normalized finding. Remaining detector recall still requires scorecard-backed POST-body SQLi and
-workflow/write-BOLA improvements.
+normalized finding. DONE phase 7 for POST-body SQLi proof replay preserving the captured JSON/form
+body template, content type, and replay-safe request headers during extraction, so required sibling
+fields are not dropped after initial detection. Remaining detector recall still requires
+scorecard-backed POST-body SQLi measurement and workflow/write-BOLA improvements.
 
 **Done when:** recorded two-user benchmark scorecards show the targeted miss becoming a deterministic
 finding, not merely an attempted endpoint.

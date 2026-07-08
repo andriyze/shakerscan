@@ -6149,6 +6149,24 @@ def _headers_from_curl_args(args: list[str]) -> dict[str, str]:
     return headers
 
 
+def _curl_header_args_from_mapping(
+    headers: dict[str, Any] | None,
+    *,
+    drop_names: set[str] | None = None,
+) -> list[str]:
+    """Build curl header args from a stored header mapping."""
+    if not isinstance(headers, dict):
+        return []
+    drop = {name.lower() for name in (drop_names or set())}
+    args: list[str] = []
+    for name, value in headers.items():
+        header_name = str(name or "").strip()
+        if not header_name or header_name.lower() in drop or value is None:
+            continue
+        args.extend(["-H", f"{header_name}: {value}"])
+    return args
+
+
 def _build_curl_body_args(body: Any, content_type: str) -> tuple[list[str], list[str]]:
     if "multipart/form-data" in content_type:
         form_args = []
@@ -7175,6 +7193,8 @@ async def sqli_data_extraction(
     param = sqli_finding.get("param", "")
     dbms = str(sqli_finding.get("dbms") or "").lower()
     method = sqli_finding.get("method", "GET")
+    content_type = str(sqli_finding.get("content_type") or "application/json")
+    finding_headers = sqli_finding.get("request_headers") if isinstance(sqli_finding.get("request_headers"), dict) else {}
 
     if not url or not param:
         return results
@@ -7189,6 +7209,28 @@ async def sqli_data_extraction(
 
     auth_args = get_auth_curl_args(auth_session)
     extraction_payloads = SQLI_EXTRACTION_PAYLOADS[dbms]
+
+    def _body_template_from_finding() -> Any:
+        raw_body = sqli_finding.get("body")
+        if isinstance(raw_body, (dict, list)):
+            return copy.deepcopy(raw_body)
+        if not isinstance(raw_body, str) or not raw_body:
+            return {param: _fallback_value_for_param(param)}
+        if "json" in content_type.lower():
+            try:
+                parsed = json.loads(raw_body)
+                if isinstance(parsed, (dict, list)):
+                    return parsed
+            except (TypeError, ValueError, json.JSONDecodeError):
+                return {param: _fallback_value_for_param(param)}
+        parsed_form = dict(urllib.parse.parse_qsl(raw_body, keep_blank_values=True))
+        return parsed_form or {param: _fallback_value_for_param(param)}
+
+    base_replay_body = _body_template_from_finding()
+    replay_header_args = _curl_header_args_from_mapping(
+        finding_headers,
+        drop_names={"content-type", "content-length", "host", "user-agent"},
+    )
 
     print(f"[sqli-extract] Attempting data extraction from {url} param={param} dbms={dbms}", file=sys.stderr)
 
@@ -7207,15 +7249,18 @@ async def sqli_data_extraction(
                 "-H", "User-Agent: Mozilla/5.0 (compatible; SecurityScanner/1.0)",
             ] + auth_args + ["-w", f"\n{_CURL_STATUS_MARKER}%{{http_code}}", test_url]
         else:
-            # POST method
+            # Preserve the original structured request body when available. Many
+            # POST/PUT/PATCH endpoints require sibling fields, so replaying only
+            # {param: payload} turns a confirmed injection into a validation error.
             test_url = url
-            body_data = {param: payload}
+            body_data = _apply_body_param(base_replay_body, param, payload)
+            body_args, body_header_args = _build_curl_body_args(body_data, content_type)
             cmd = [
                 "curl", "-sS", "-L", "-k", "--max-time", "15", "-X", method,
                 "-H", "User-Agent: Mozilla/5.0 (compatible; SecurityScanner/1.0)",
-                "-H", "Content-Type: application/json",
-                "-d", json.dumps(body_data),
-            ] + auth_args + ["-w", f"\n{_CURL_STATUS_MARKER}%{{http_code}}", test_url]
+            ] + replay_header_args + body_header_args + auth_args + body_args + [
+                "-w", f"\n{_CURL_STATUS_MARKER}%{{http_code}}", test_url
+            ]
 
         out, _, rc = await run(cmd, timeout=20)
         if rc != 0 or not out:
