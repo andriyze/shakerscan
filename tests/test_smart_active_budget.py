@@ -440,6 +440,31 @@ def test_enabled_active_family_names_are_registry_ordered():
     assert active_checks._enabled_active_family_names(run_sqli=True, run_xss=False) == ("sqli",)
 
 
+def test_enabled_active_family_names_falls_back_without_registry(monkeypatch):
+    monkeypatch.setattr(active_checks, "_check_registry", None)
+
+    assert active_checks._registry_active_family_dispatch_order() == ("sqli", "xss")
+    assert active_checks._enabled_active_family_names(run_sqli=True, run_xss=True) == ("sqli", "xss")
+
+
+def test_enabled_active_family_names_uses_registry_parallel_order(monkeypatch):
+    class _Spec:
+        def __init__(self, name):
+            self.name = name
+            self.scanner_options = {"enabled": True}
+
+    class _Registry:
+        @staticmethod
+        def default_parallel_focus_families():
+            return (_Spec("xss"), _Spec("sqli"), _Spec("bola"))
+
+    monkeypatch.setattr(active_checks, "_check_registry", _Registry)
+
+    assert active_checks._registry_active_family_dispatch_order() == ("xss", "sqli")
+    assert active_checks._enabled_active_family_names(run_sqli=True, run_xss=True) == ("xss", "sqli")
+    assert active_checks._enabled_active_family_names(run_sqli=True, run_xss=False) == ("sqli",)
+
+
 def test_smart_sqli_stops_on_cooperative_cancel_file(monkeypatch, tmp_path):
     cancel_file = tmp_path / "scan.cancel"
     cancel_file.write_text("1", encoding="utf-8")

@@ -22,6 +22,14 @@ from .exposure_markers import (
 )
 from .active_prioritization import active_endpoint_score
 
+try:
+    import check_registry as _check_registry
+except Exception:  # pragma: no cover - package-layout fallback
+    try:
+        from api import check_registry as _check_registry
+    except Exception:  # pragma: no cover - scanner-only fallback
+        _check_registry = None
+
 PUBLIC_DISCOVERY_FILES = {"robots.txt", "sitemap.xml"}
 PUBLIC_DISCOVERY_SENSITIVE_REFERENCES = (
     ".aws/",
@@ -8942,7 +8950,22 @@ def _split_active_family_budget(active_max_seconds: float, run_sqli: bool, run_x
 USE_DEFAULT_MAX_FINDINGS_PER_FAMILY: Any = object()
 
 
-ACTIVE_FAMILY_DISPATCH_ORDER = ("sqli", "xss")
+FALLBACK_ACTIVE_FAMILY_DISPATCH_ORDER = ("sqli", "xss")
+
+
+def _registry_active_family_dispatch_order() -> tuple[str, ...]:
+    if _check_registry is None or not hasattr(_check_registry, "default_parallel_focus_families"):
+        return FALLBACK_ACTIVE_FAMILY_DISPATCH_ORDER
+    try:
+        families = tuple(
+            str(spec.name)
+            for spec in _check_registry.default_parallel_focus_families()
+            if getattr(spec, "scanner_options", None)
+            and str(getattr(spec, "name", "")) in FALLBACK_ACTIVE_FAMILY_DISPATCH_ORDER
+        )
+    except Exception:
+        return FALLBACK_ACTIVE_FAMILY_DISPATCH_ORDER
+    return families or FALLBACK_ACTIVE_FAMILY_DISPATCH_ORDER
 
 
 def _enabled_active_family_names(*, run_sqli: bool, run_xss: bool) -> tuple[str, ...]:
@@ -8950,7 +8973,7 @@ def _enabled_active_family_names(*, run_sqli: bool, run_xss: bool) -> tuple[str,
         "sqli": bool(run_sqli),
         "xss": bool(run_xss),
     }
-    return tuple(name for name in ACTIVE_FAMILY_DISPATCH_ORDER if enabled.get(name))
+    return tuple(name for name in _registry_active_family_dispatch_order() if enabled.get(name))
 
 
 # Endpoint sources that were actually observed (crawl / spec / browser / HAR /
