@@ -1202,8 +1202,12 @@ scanner process and remote deletion/lifecycle adapters remain open.
    DAST receipts for httpx, katana, subfinder, ffuf, and Playwright/browser discovery, plus ASM recon
    and endpoint-batch executor receipts. Passive receipts no longer claim parser success from aggregate
    discovery counters alone; aggregate-only observations are recorded as partial/recorded telemetry.
-   Remaining work is deeper per-subprocess DAST receipts for exact timeout/exit/stderr/parser-error
-   paths inside the scanner process.
+   DONE phase 2: `scanner_tools.common.run()` now records bounded, redacted subprocess outcomes
+   (`redacted_argv`, command hash, exit code, timeout flag, duration, stdout/stderr lengths, stderr
+   preview) into `scan_metadata.subprocess_receipts`, and worker finalization persists those exact
+   outcomes as normal `tool_receipts` with `scanner-subprocess` provenance. Remaining work is parser
+   error classification that binds subprocess stderr/stdout previews to tool-specific parser failures
+   instead of generic subprocess outcomes.
 5. DONE phase 1: tool receipts include tool version, adapter version, command hash, redacted argv, worker
    build/container image, target scope, scope receipt, policy profile, approval id, timing, exit code,
    timeout, stdout/stderr artifact refs, parsed evidence refs, parser status, and redaction summary.
@@ -1216,9 +1220,9 @@ scanner process and remote deletion/lifecycle adapters remain open.
 8. The near-term registry is a **Tool Receipt Registry**, not an offensive-tool expansion. Do not add
    new exploit tooling until existing DAST, ASM, AI Gate, and Model Intake tools produce receipts for
    success, failure, timeout, skip, and parser-error paths. Internal AI Gate/Model Intake worker
-   receipts, parsed-result/passive DAST module receipts, and ASM executor receipts now cover
-   success/failure/recorded/skipped states plus ASM timeout/skip/partial states; exact scanner
-   subprocess timeout/skip/parser-error receipt coverage remains open.
+   receipts, parsed-result/passive DAST module receipts, ASM executor receipts, and bounded scanner
+   subprocess outcome receipts now cover success/failure/recorded/skipped states plus exact subprocess
+   exit/timeout/stderr-preview evidence. Tool-specific parser-error classification remains open.
 9. DONE phase 1: add a release/test gate equivalent to T3MP3ST's "no phantom tools": every claimed
    adapter must be `installed`, `runnable`, `waived`, or `catalog_only`, and UI/report copy must not
    imply a missing adapter ran. The `describe_tools`/`/arsenal/tools` response carries

@@ -496,6 +496,44 @@ def _external_dast_tool_specs(result: dict[str, Any], options: dict[str, Any]) -
                 "vulnerabilities_count": len(payload.get("vulnerabilities") or []),
             },
         })
+    scan_metadata = result.get("scan_metadata") if isinstance(result.get("scan_metadata"), dict) else {}
+    subprocess_receipts = scan_metadata.get("subprocess_receipts") if isinstance(scan_metadata.get("subprocess_receipts"), list) else []
+    known_subprocess_tools = {
+        "curl", "dig", "host", "nslookup", "delv",
+        "httpx", "katana", "subfinder", "ffuf", "nuclei", "dalfox",
+        "sqlmap", "sqlmap.py", "nmap", "sslyze", "testssl", "testssl.sh",
+        "playwright",
+    }
+    for item in subprocess_receipts[:200]:
+        if not isinstance(item, dict):
+            continue
+        tool_name = str(item.get("tool_name") or "").strip()
+        if not tool_name:
+            continue
+        normalized_tool = "sqlmap" if tool_name == "sqlmap.py" else "testssl" if tool_name == "testssl.sh" else tool_name
+        if normalized_tool not in known_subprocess_tools:
+            continue
+        redacted_argv = item.get("redacted_argv") if isinstance(item.get("redacted_argv"), list) else [normalized_tool]
+        specs.append({
+            "tool_name": normalized_tool,
+            "tool_version": "scanner-subprocess",
+            "parser": "scanner-subprocess-outcome-v1",
+            "proof_contract": "subprocess-exit-evidence",
+            "status": item.get("status") or "recorded",
+            "parser_status": item.get("parser_status") or "not_applicable",
+            "exit_code": item.get("exit_code"),
+            "timed_out": bool(item.get("timed_out")),
+            "redacted_argv": redacted_argv,
+            "command_hash": item.get("command_hash"),
+            "summary": {
+                "exact_subprocess": True,
+                "timeout_seconds": item.get("timeout_seconds"),
+                "duration_ms": item.get("duration_ms"),
+                "stdout_length": item.get("stdout_length"),
+                "stderr_length": item.get("stderr_length"),
+                "stderr_preview": item.get("stderr_preview"),
+            },
+        })
     return specs
 
 
@@ -542,12 +580,20 @@ async def _record_external_dast_tool_receipts(
     for spec in specs:
         safe_status = _coerce_tool_receipt_status(spec.get("status"))
         safe_parser_status = _coerce_tool_receipt_parser_status(spec.get("parser_status"), safe_status)
-        redacted_argv = [spec["tool_name"], "--scan-id", str(scan_id), "--target", str(target)]
-        command_hash = _tool_receipt_hash({
+        redacted_argv = spec.get("redacted_argv") if isinstance(spec.get("redacted_argv"), list) else [
+            spec["tool_name"], "--scan-id", str(scan_id), "--target", str(target)
+        ]
+        redacted_argv = _redact_receipt_value(redacted_argv)
+        command_hash = str(spec.get("command_hash") or "").strip() or _tool_receipt_hash({
             "tool_name": spec["tool_name"],
-            "redacted_argv": _redact_receipt_value(redacted_argv),
+            "redacted_argv": redacted_argv,
             "target_scope": target_scope,
         })
+        try:
+            exit_code = int(spec.get("exit_code")) if spec.get("exit_code") is not None else 0 if safe_status == "success" else 124 if safe_status == "timeout" else 1
+        except (TypeError, ValueError):
+            exit_code = 0 if safe_status == "success" else 124 if safe_status == "timeout" else 1
+        timed_out = bool(spec.get("timed_out") or safe_status == "timeout" or exit_code == 124)
         metadata = _redact_receipt_value({
             "executor": "scanner_dast_module",
             "parser": spec["parser"],
@@ -576,10 +622,10 @@ async def _record_external_dast_tool_receipts(
                 RETURNING id
                 """,
                 spec["tool_name"],
-                "scanner-output",
+                spec.get("tool_version") or "scanner-output",
                 TOOL_RECEIPT_ADAPTER_VERSION,
                 command_hash,
-                json.dumps(_redact_receipt_value(redacted_argv)),
+                json.dumps(redacted_argv),
                 os.environ.get("BUILD_FINGERPRINT"),
                 os.environ.get("WORKER_IMAGE"),
                 json.dumps(target_scope),
@@ -588,8 +634,8 @@ async def _record_external_dast_tool_receipts(
                 None,
                 safe_status,
                 safe_parser_status,
-                0 if safe_status == "success" else 1,
-                False,
+                exit_code,
+                timed_out,
                 started_at,
                 completed_at,
                 None,

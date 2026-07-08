@@ -932,6 +932,62 @@ def test_external_dast_tool_receipts_are_recorded_and_attached():
     assert tools == ["nuclei", "sqlmap", "nmap"]
 
 
+def test_external_dast_subprocess_receipts_preserve_exact_outcome():
+    receipt_id = uuid.uuid4()
+    conn = _FakeReceiptConnection(receipt_id)
+    command_hash = "a" * 64
+    result = {
+        "scan_metadata": {
+            "subprocess_receipts": [
+                {
+                    "tool_name": "sqlmap.py",
+                    "status": "timeout",
+                    "parser_status": "not_applicable",
+                    "exit_code": 124,
+                    "timed_out": True,
+                    "timeout_seconds": 9,
+                    "duration_ms": 9010,
+                    "redacted_argv": ["sqlmap.py", "-r", "[REDACTED]"],
+                    "command_hash": command_hash,
+                    "stdout_length": 0,
+                    "stderr_length": 16,
+                    "stderr_preview": "timeout after 9s",
+                }
+            ]
+        }
+    }
+
+    recorded = asyncio.run(worker._record_external_dast_tool_receipts(
+        conn,
+        scan_id="11111111-1111-1111-1111-111111111111",
+        job_id="job-subprocess",
+        target="https://example.test/?token=secret-token",
+        target_id="33333333-3333-3333-3333-333333333333",
+        options={"scan_type": "smart"},
+        result=result,
+        started_at=datetime(2026, 7, 6, tzinfo=timezone.utc),
+        completed_at=datetime(2026, 7, 6, 0, 0, 10, tzinfo=timezone.utc),
+        duration_seconds=10,
+    ))
+
+    assert recorded == [str(receipt_id)]
+    query, args = conn.fetchrow_calls[0]
+    assert "INSERT INTO tool_receipts" in query
+    assert args[0] == "sqlmap"
+    assert args[1] == "scanner-subprocess"
+    assert args[3] == command_hash
+    assert json.loads(args[4]) == ["sqlmap.py", "-r", "[REDACTED]"]
+    assert args[11] == "timeout"
+    assert args[12] == "not_applicable"
+    assert args[13] == 124
+    assert args[14] is True
+    metadata = json.loads(args[21])
+    assert metadata["parser"] == "scanner-subprocess-outcome-v1"
+    assert metadata["summary"]["exact_subprocess"] is True
+    assert metadata["summary"]["stderr_preview"] == "timeout after 9s"
+    assert "secret-token" not in json.dumps(args, default=str)
+
+
 def test_asm_executor_receipt_records_partial_batch_and_links_metadata():
     receipt_id = uuid.uuid4()
     conn = _FakeReceiptConnection(receipt_id)

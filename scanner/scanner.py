@@ -20,7 +20,12 @@ import urllib.parse
 from datetime import UTC, datetime
 from typing import Any, NamedTuple
 
-from scanner_tools.common import is_in_scope_url, run
+from scanner_tools.common import (
+    is_in_scope_url,
+    reset_subprocess_receipts,
+    run,
+    snapshot_subprocess_receipts,
+)
 try:
     from constants import (
         resolve_active_enrichment_limits,
@@ -3121,6 +3126,8 @@ async def build_report(target: str,
                        oob_max_findings: int=SMART_SCAN_BUDGETS.oob_max_findings,
                        # Active enforcement metadata
                        active_enforced: bool=False) -> dict[str, Any]:
+
+    reset_subprocess_receipts()
 
     # Warning if conflicting flags are used (only for non-enforced scan types)
     if public_only and active_checks and not active_enforced:
@@ -11475,6 +11482,7 @@ async def build_report(target: str,
     # degradation). Replacing this dict would erase the exact markers benchmark
     # and UI gates use to avoid trusting incomplete active coverage.
     scan_metadata = report.get("scan_metadata") if isinstance(report.get("scan_metadata"), dict) else {}
+    subprocess_receipts = snapshot_subprocess_receipts()
     scan_metadata.update({
         "scan_id": scan_session_id,
         "target": target,
@@ -11503,6 +11511,8 @@ async def build_report(target: str,
         "checks_skipped": checks_skipped,
         "pre_scan_warnings": pre_scan_issues if pre_scan_issues else None,
         "browser_fetch_error": browser_fetch_error,
+        "subprocess_receipts": subprocess_receipts,
+        "subprocess_receipt_count": len(subprocess_receipts),
     })
     report["scan_metadata"] = scan_metadata
 

@@ -81,6 +81,84 @@ def normalize_hash_route_url(hash_route: str, current_url: str) -> str | None:
 _MAX_CONCURRENT_SUBPROCESSES = int(os.environ.get("SCANNER_MAX_CONCURRENT", "15"))
 _subprocess_semaphore: asyncio.Semaphore | None = None
 _semaphore_loop: asyncio.AbstractEventLoop | None = None
+_SUBPROCESS_RECEIPT_LIMIT = int(os.environ.get("SCANNER_SUBPROCESS_RECEIPT_LIMIT", "200"))
+_subprocess_receipts: list[dict[str, Any]] = []
+
+
+_SENSITIVE_ARG_MARKERS = (
+    "token", "secret", "password", "passwd", "authorization", "cookie",
+    "apikey", "api_key", "key=", "jwt",
+)
+
+
+def _redact_arg(value: Any) -> str:
+    text = str(value if value is not None else "")
+    lowered = text.lower()
+    if any(marker in lowered for marker in _SENSITIVE_ARG_MARKERS):
+        return "[REDACTED]"
+    if len(text) > 240:
+        return text[:120] + "...[truncated]..." + text[-40:]
+    return text
+
+
+def _redacted_argv(cmd: list[str]) -> list[str]:
+    redacted: list[str] = []
+    redact_next = False
+    for arg in cmd or []:
+        text = str(arg)
+        if redact_next:
+            redacted.append("[REDACTED]")
+            redact_next = False
+            continue
+        if text in {"-H", "--header", "-b", "--cookie", "--cookie-jar", "-d", "--data", "--data-raw", "--data-binary"}:
+            redacted.append(text)
+            redact_next = True
+            continue
+        redacted.append(_redact_arg(text))
+    return redacted
+
+
+def reset_subprocess_receipts() -> None:
+    _subprocess_receipts.clear()
+
+
+def snapshot_subprocess_receipts() -> list[dict[str, Any]]:
+    return [dict(item) for item in _subprocess_receipts]
+
+
+def _record_subprocess_receipt(
+    cmd: list[str],
+    *,
+    timeout_seconds: int,
+    exit_code: int,
+    timed_out: bool,
+    started_at: float,
+    stdout: str = "",
+    stderr: str = "",
+    error: str | None = None,
+) -> None:
+    if len(_subprocess_receipts) >= max(0, _SUBPROCESS_RECEIPT_LIMIT):
+        return
+    redacted = _redacted_argv(cmd or [])
+    tool_name = redacted[0] if redacted else "subprocess"
+    status = "timeout" if timed_out else "success" if exit_code == 0 else "failed"
+    parser_status = "not_applicable" if timed_out else "not_run"
+    now = time.monotonic()
+    stderr_preview = str(stderr or error or "")[:500]
+    _subprocess_receipts.append({
+        "tool_name": tool_name,
+        "status": status,
+        "parser_status": parser_status,
+        "exit_code": int(exit_code),
+        "timed_out": bool(timed_out),
+        "timeout_seconds": int(timeout_seconds),
+        "duration_ms": int(max(0, now - started_at) * 1000),
+        "redacted_argv": redacted,
+        "command_hash": hashlib.sha256("\x00".join(redacted).encode("utf-8", "ignore")).hexdigest(),
+        "stdout_length": len(stdout or ""),
+        "stderr_length": len(stderr or error or ""),
+        "stderr_preview": stderr_preview,
+    })
 
 
 def _get_semaphore() -> asyncio.Semaphore:
@@ -168,11 +246,28 @@ async def run(
                     if attempt < retry:
                         await asyncio.sleep(2 ** attempt)
                         continue
+                    _record_subprocess_receipt(
+                        cmd,
+                        timeout_seconds=timeout,
+                        exit_code=124,
+                        timed_out=True,
+                        started_at=_req_started,
+                        stderr=f"timeout after {timeout}s",
+                    )
                     return "", f"timeout after {timeout}s", 124
                 out = out_b.decode(errors="ignore")
                 err = err_b.decode(errors="ignore")
                 if _throttle is not None:
                     _throttle.record(rc=proc.returncode, elapsed=time.monotonic() - _req_started)
+                _record_subprocess_receipt(
+                    cmd,
+                    timeout_seconds=timeout,
+                    exit_code=int(proc.returncode or 0),
+                    timed_out=False,
+                    started_at=_req_started,
+                    stdout=out,
+                    stderr=err,
+                )
                 return out.strip(), err.strip(), proc.returncode
             except asyncio.CancelledError:
                 if proc is not None:
@@ -200,6 +295,14 @@ async def run(
                 if attempt < retry:
                     await asyncio.sleep(2 ** attempt)
                     continue
+                _record_subprocess_receipt(
+                    cmd,
+                    timeout_seconds=timeout,
+                    exit_code=1,
+                    timed_out=False,
+                    started_at=_req_started,
+                    error=str(e),
+                )
                 return "", str(e), 1
         return "", "Max retries exceeded", 1
 
