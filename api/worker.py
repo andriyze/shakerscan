@@ -3001,7 +3001,8 @@ def _scanner_signal_hypotheses(
         if not isinstance(finding, dict) or not _scanner_finding_needs_hypothesis(finding):
             continue
         family = _scanner_signal_family(finding)
-        finding_id = str(finding.get("id") or generate_finding_fingerprint(finding) or "").strip()
+        scanner_finding_id = str(finding.get("id") or "").strip()
+        finding_fingerprint = str(generate_finding_fingerprint(finding) or scanner_finding_id).strip()
         confidence = _float_between_0_1(
             finding.get("confidence", finding.get("ai_confidence")),
             min(_severity_to_confidence(finding.get("severity"), 0.58), 0.82),
@@ -3010,7 +3011,7 @@ def _scanner_signal_hypotheses(
             "product": "scanner_signal",
             "scan_id": scan_id,
             "target_id": target_id,
-            "finding_id": finding_id,
+            "finding_id": finding_fingerprint,
             "type": finding.get("type") or finding.get("category") or finding.get("tool"),
         }
         hypotheses.append({
@@ -3018,7 +3019,7 @@ def _scanner_signal_hypotheses(
             "source": "scanner_signal",
             "family": family,
             "cwe": finding.get("cwe"),
-            "title": f"Scanner follow-up lead: {finding.get('title') or finding_id or family}",
+            "title": f"Scanner follow-up lead: {finding.get('title') or scanner_finding_id or family}",
             "description": (
                 "A scanner finding is high enough impact to investigate but does not carry hard runtime proof. "
                 "Treat it as a hypothesis until deterministic retest or focused family evidence confirms it."
@@ -3029,7 +3030,7 @@ def _scanner_signal_hypotheses(
             "next_test_action": {
                 "command": "finding.retest",
                 "parameters": {
-                    "finding_id": finding_id or None,
+                    "finding_id": finding_fingerprint or None,
                     "mode": "deterministic",
                     "target_id": target_id,
                     "target": target,
@@ -3042,7 +3043,8 @@ def _scanner_signal_hypotheses(
                 "source": "scanner_signal",
                 "scan_id": scan_id,
                 "target_id": target_id,
-                "finding_id": finding_id or None,
+                "finding_id": finding_fingerprint or None,
+                "scanner_finding_id": scanner_finding_id or None,
                 "tool": finding.get("tool"),
                 "severity": finding.get("severity"),
                 "confidence": confidence,
@@ -3053,6 +3055,8 @@ def _scanner_signal_hypotheses(
                 "runtime_proof_required": True,
                 "scan_type": (options or {}).get("scan_type"),
                 "url": finding.get("url"),
+                "finding_fingerprint": finding_fingerprint or None,
+                "scanner_finding_id": scanner_finding_id or None,
                 "proof_state": finding.get("proof_state"),
                 "confidence_tier": finding.get("confidence_tier"),
             },

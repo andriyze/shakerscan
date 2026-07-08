@@ -329,6 +329,7 @@ def test_scanner_weak_signal_becomes_retest_hypothesis():
                     "type": "sqli",
                     "cwe": "CWE-89",
                     "url": "https://shop.example.com/rest/products/search?q=test",
+                    "evidence": {"method": "GET", "parameter": "q"},
                     "confidence": 0.68,
                     "proof_state": "suspected",
                     "needs_verification": True,
@@ -345,7 +346,9 @@ def test_scanner_weak_signal_becomes_retest_hypothesis():
     assert hypothesis["family"] == "sqli"
     assert hypothesis["next_test_action"]["command"] == "finding.retest"
     params = hypothesis["next_test_action"]["parameters"]
-    assert params["finding_id"] == "smart_sqli:cart-search"
+    assert params["finding_id"].startswith("t:")
+    assert params["finding_id"] == hypothesis["metadata_json"]["finding_fingerprint"]
+    assert hypothesis["metadata_json"]["scanner_finding_id"] == "smart_sqli:cart-search"
     assert params["mode"] == "deterministic"
     assert params["check_family"] == "sqli"
     assert "product=scanner_signal" in hypothesis["dedupe_key"]
