@@ -761,12 +761,13 @@ limited with per-tool timeouts and a global deadline.
   attempted/completed; timeouts/partials never inflate coverage.
 - **Local binding**: laptop mode binds to `127.0.0.1`; remote mode binds to a Tailscale IP. Exposing
   on `0.0.0.0` is only safe behind a firewall/VPN/reverse proxy.
-- **AI redaction**: sensitive headers/bodies and secret-bearing URL params/metadata are redacted
+- **AI redaction and credential handling**: sensitive headers/bodies and secret-bearing URL
+  params/metadata are redacted
   before any content is sent to an AI provider, via the shared `redact_sensitive()` helper (R2a).
   AI-target credential secrets can be encrypted at rest, opt-in via `AI_CREDENTIAL_ENC_KEY` (R2b), and
-  transcript responses are redacted at response time by default (R3). *Remaining:* worker-side
-  credential-reference indirection — credential secrets still reach the scanner subprocess command line
-  (fix-plan R2b remainder).
+  transcript responses are redacted at response time by default (R3). Normal DAST worker launches pass
+  auth material through a short-lived `0600` auth-config file rather than raw scanner subprocess argv,
+  and scan-time AI provider keys are supplied through the child environment instead of `--ai-api-key`.
 
 ---
 

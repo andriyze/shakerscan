@@ -12163,6 +12163,54 @@ async def ai_review_findings(
 
 # ---------- CLI & API ----------
 
+_AUTH_CONFIG_FILE_KEYS = {
+    "api_token",
+    "auth_cookies",
+    "auth_header",
+    "auth_headers_json",
+    "auth_scenario_json",
+    "login_url",
+    "login_username",
+    "login_password",
+    "login_extra_fields",
+    "auto_auth",
+    "oauth_client_id",
+    "oauth_client_secret",
+    "oauth_token_url",
+    "oauth_scope",
+    "oauth_username",
+    "oauth_password",
+    "user2_cookies",
+    "user2_header",
+    "user2_login_username",
+    "user2_login_password",
+}
+
+
+def _apply_auth_config_file_args(args: Any, path: str | None) -> None:
+    if not path:
+        return
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            parsed = json.load(f)
+    except Exception as exc:
+        raise SystemExit(f"Failed to read --auth-config-file: {exc}") from exc
+    if not isinstance(parsed, dict):
+        raise SystemExit("--auth-config-file must contain a JSON object")
+    for key in _AUTH_CONFIG_FILE_KEYS:
+        if key not in parsed:
+            continue
+        value = parsed.get(key)
+        if value is None:
+            continue
+        current = getattr(args, key, None)
+        if isinstance(current, bool):
+            if value is True:
+                setattr(args, key, True)
+        elif current in (None, ""):
+            setattr(args, key, value)
+
+
 async def cli_main():
     ap = argparse.ArgumentParser(description="Site security scanner (DNS/TLS/Headers + Browser + Discovery; optional API & active checks).")
     ap.add_argument("target", nargs="?", help="Hostname or URL (e.g., example.com or https://example.com)")
@@ -12289,6 +12337,7 @@ async def cli_main():
     ap.add_argument("--auth-header", type=str, help="Authorization header for authenticated scanning (e.g., 'Bearer token123')")
     ap.add_argument("--auth-headers-json", type=str, help="Custom auth headers as JSON (e.g., '{\"X-API-Key\": \"abc\"}')")
     ap.add_argument("--auth-scenario-json", type=str, help="Auth scenario DSL JSON (login flow, credentials, success condition)")
+    ap.add_argument("--auth-config-file", type=str, help=argparse.SUPPRESS)
 
     # New: Form-Based Login
     ap.add_argument("--login-url", type=str, help="Login page URL for form-based authentication (auto-detected if not provided)")
@@ -12430,6 +12479,7 @@ async def cli_main():
     ap.add_argument("--oob-max-payloads", type=int, default=None, dest="oob_max_payloads_deprecated", help=argparse.SUPPRESS)
 
     args = ap.parse_args()
+    _apply_auth_config_file_args(args, args.auth_config_file)
 
     # Handle deprecated --oob-max-payloads alias (only if new flag not explicitly set)
     if args.oob_max_findings is None and args.oob_max_payloads_deprecated is not None:

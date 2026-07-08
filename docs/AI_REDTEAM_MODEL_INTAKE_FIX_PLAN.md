@@ -123,9 +123,12 @@ Masking keys and nested-metadata redaction shipped. Remaining structural fixes:
   Encrypted values carry an `enc:fernet:` prefix so legacy plaintext and encrypted rows coexist during
   rollout and re-encryption never doubles up. Verified live (default plaintext; key set → `enc:fernet:`
   ciphertext that round-trips) and by `tests/test_secret_store.py` (3).
-- **Credential-reference indirection in the worker (remaining).** `api/worker.py` still passes raw
-  `--auth-*` / `--login-password` on the scanner subprocess command line; replace inline secrets with
-  credential refs resolved just-in-time. (Larger refactor across worker + scanner.)
+- ✅ **Credential-reference indirection in the worker — DONE (R2b follow-up, 2026-07-08).**
+  `api/worker.py` now writes DAST auth material to a `0600` temporary scanner auth-config file and
+  passes only `--auth-config-file` on the subprocess command line; scan-time AI provider keys are
+  supplied through the child environment instead of `--ai-api-key`. `scanner/scanner.py` keeps direct
+  CLI auth flags for manual use but can load the file-backed worker handoff. Verified by
+  `tests/test_worker_scan_ai_gating.py` and `tests/test_scanner_auth_config_file.py`.
 
 ### R3 — Transcript redaction enforcement (was §3.10) ✅ DONE (2026-06-24)
 `GET /ai/scans/{id}/transcript` now redacts at response time by default
@@ -172,8 +175,8 @@ tampered / broken-chain / wrong-key flagged; presence checks still fire); live r
   always blocks), and `plan_probe_pack(production_mode=True)` drops `non_production_only` probes (e.g.
   agent-abuse 11/14, mcp-security 7/8, rag-lite 2/10) while surfacing `production_review_probe_ids` and
   `production_safety_tiers` in the manifest. Locked by
-  `tests/test_production_safety_classification.py` (3). (Remaining: add the endpoint-URL hash to the
-  stored `confirm_production` evidence.)
+  `tests/test_production_safety_classification.py` (3). Endpoint confirmation evidence now stores a
+  content-free endpoint hash rather than the raw URL.
 - **§3.8 ✅ (2026-06-24)** Per-profile response caps wired: `rest_json.profile_response_byte_cap`
   (smoke 64 KB / trace 128 KB / standard 256 KB / deep 1 MB) is passed as the adapter's
   `default_max_response_bytes`; an explicit metadata `max_response_bytes` still wins.
@@ -182,8 +185,8 @@ tampered / broken-chain / wrong-key flagged; presence checks still fire); live r
 - **§3.15 ✅ (2026-06-24)** SPDX identifier normalization + expression parsing added to
   `model_intake._license_policy` (`MIT OR Apache-2.0` → permissive; any restricted sub-license →
   restricted; aliases like `apache 2.0` normalized; exposes a `normalized` token list).
-- **Widget target parity (remaining):** integrate the request budget (§3.7) and response cap (§3.8)
-  into `ai_gate/targets/widget_playwright.py` (Playwright adapter; currently rest_json only).
+- **Widget target parity:** request-budget enforcement and response caps now apply to
+  `ai_gate/targets/widget_playwright.py` as well as `rest_json`.
 - **§3.12 (remaining):** surface the judging quality gate in the UI ("deterministic only" /
   "needs review") — `judging_quality_gate` is computed and exposed by the API but no UI reads it.
 - **§3.14 (remaining):** ensure the `onnx` package is installed in the scanner image so ONNX inspection

@@ -14,6 +14,7 @@ import re
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.parse
@@ -83,6 +84,28 @@ MAX_SCAN_DURATION = {
 }
 VALID_DAST_SCAN_TYPES = {"quick", "standard", "deep", "full", "aggressive", "smart"}
 ACTIVE_ENFORCED_SCAN_TYPES = {"smart", "full", "aggressive"}
+SCANNER_AUTH_CONFIG_KEYS = {
+    "api_token",
+    "auth_cookies",
+    "auth_header",
+    "auth_headers_json",
+    "auth_scenario_json",
+    "login_url",
+    "login_username",
+    "login_password",
+    "login_extra_fields",
+    "auto_auth",
+    "oauth_client_id",
+    "oauth_client_secret",
+    "oauth_token_url",
+    "oauth_scope",
+    "oauth_username",
+    "oauth_password",
+    "user2_cookies",
+    "user2_header",
+    "user2_login_username",
+    "user2_login_password",
+}
 
 FOCUSED_MERGE_FAMILY_RULES = {
     "sqli": {
@@ -115,6 +138,42 @@ def utc_now() -> datetime:
 
 def utc_now_iso() -> str:
     return utc_now().isoformat()
+
+
+def _scanner_auth_config_from_options(options: dict[str, Any]) -> dict[str, Any]:
+    """Extract DAST auth material for scanner subprocess file handoff."""
+    if not isinstance(options, dict):
+        return {}
+    config: dict[str, Any] = {}
+    for key in sorted(SCANNER_AUTH_CONFIG_KEYS):
+        value = options.get(key)
+        if value is None:
+            continue
+        if isinstance(value, str) and not value:
+            continue
+        config[key] = value
+    return config
+
+
+def _write_scanner_auth_config_file(config: dict[str, Any]) -> str | None:
+    if not config:
+        return None
+    fd, path = tempfile.mkstemp(prefix="shakerscan-auth-", suffix=".json")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(config, f, sort_keys=True, separators=(",", ":"))
+        os.chmod(path, 0o600)
+        return path
+    except Exception:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+        raise
 
 
 _RECEIPT_SENSITIVE_KEYS = {
@@ -1855,39 +1914,15 @@ async def run_scan(target: str, options: dict, scan_id: str | None = None, job_i
     if scan_ai_enabled and ai_url and ai_api_key and model:
         cmd.append('--ai')
         cmd.extend(['--ai-url', ai_url])
-        cmd.extend(['--ai-api-key', ai_api_key])
         cmd.extend(['--model', model])
         if ai_fallback_model:
             cmd.extend(['--ai-fallback-model', str(ai_fallback_model)])
         cmd.extend(['--ai-mask-host', ai_mask_host])
 
     # Authentication options
-    # Session-based auth (cookies, headers)
-    if options.get('auth_cookies'):
-        cmd.extend(['--auth-cookies', options['auth_cookies']])
-    if options.get('auth_header'):
-        cmd.extend(['--auth-header', options['auth_header']])
-    if options.get('auth_headers_json'):
-        cmd.extend(['--auth-headers-json', options['auth_headers_json']])
-
-    # Form-based login
-    if options.get('login_username') and options.get('login_password'):
-        cmd.extend(['--login-username', options['login_username']])
-        cmd.extend(['--login-password', options['login_password']])
-    if options.get('login_url'):
-        cmd.extend(['--login-url', options['login_url']])
-    if options.get('login_extra_fields'):
-        cmd.extend(['--login-extra-fields', options['login_extra_fields']])
-    if options.get('auto_auth'):
-        cmd.append('--auto-auth')
-
-    # Multi-user auth (for BOLA/IDOR testing)
-    if options.get('user2_cookies'):
-        cmd.extend(['--user2-cookies', options['user2_cookies']])
-    if options.get('user2_header'):
-        cmd.extend(['--user2-header', options['user2_header']])
-    if options.get('auth_scenario_json'):
-        cmd.extend(['--auth-scenario-json', options['auth_scenario_json']])
+    scanner_auth_config_file = _write_scanner_auth_config_file(_scanner_auth_config_from_options(options))
+    if scanner_auth_config_file:
+        cmd.extend(['--auth-config-file', scanner_auth_config_file])
 
     # Manual endpoints for API-only targets
     custom_endpoints = options.get('custom_endpoints')
@@ -1918,6 +1953,8 @@ async def run_scan(target: str, options: dict, scan_id: str | None = None, job_i
     # Set up checkpoint file for partial result recovery
     checkpoint_file = None
     scan_env = os.environ.copy()
+    if scan_ai_enabled and ai_api_key:
+        scan_env["AI_API_KEY"] = ai_api_key
     # Stamp the real deployed commit (published by the API from the live checkout)
     # so scan results record the running build, not the stale baked SCANNER_VERSION.
     _real_version = _published_scanner_version()
@@ -1979,6 +2016,11 @@ async def run_scan(target: str, options: dict, scan_id: str | None = None, job_i
     _pf_err = _scanner_preflight(SCANNER_PATH)
     if _pf_err:
         print(f"[worker] SCANNER PREFLIGHT FAILED: {_pf_err}", file=sys.stderr, flush=True)
+        if scanner_auth_config_file:
+            try:
+                os.unlink(scanner_auth_config_file)
+            except OSError:
+                pass
         return {
             "target": target,
             "error": _pf_err,
@@ -1990,15 +2032,31 @@ async def run_scan(target: str, options: dict, scan_id: str | None = None, job_i
     # Memory-aware admission control: wait (bounded, heartbeating) for a fleet-wide
     # active-scan slot before launching the heavy scanner subprocess, so a large
     # worker fleet can't run too many scans at once and OOM the Docker VM.
-    _slot_r, _slot_id, _slot_held = await _await_scan_slot(job_id, scan_id)
+    try:
+        _slot_r, _slot_id, _slot_held = await _await_scan_slot(job_id, scan_id)
+    except Exception:
+        if scanner_auth_config_file:
+            try:
+                os.unlink(scanner_auth_config_file)
+            except OSError:
+                pass
+        raise
 
-    proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        env=scan_env,
-        **_scanner_process_kwargs(),
-    )
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=scan_env,
+            **_scanner_process_kwargs(),
+        )
+    except Exception:
+        if scanner_auth_config_file:
+            try:
+                os.unlink(scanner_auth_config_file)
+            except OSError:
+                pass
+        raise
 
     timeout_reason: str | None = None
     cancel_reason: str | None = None
@@ -2175,6 +2233,11 @@ async def run_scan(target: str, options: dict, scan_id: str | None = None, job_i
             pass  # CancelledError is BaseException in Python 3.8+
     await stdout_task
     await stderr_task
+    if scanner_auth_config_file:
+        try:
+            os.unlink(scanner_auth_config_file)
+        except OSError:
+            pass
 
     stdout_text = b"".join(stdout_chunks).decode(errors="replace") if stdout_chunks else ""
     stderr_text = "\n".join(stderr_lines)

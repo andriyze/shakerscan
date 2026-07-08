@@ -1540,6 +1540,62 @@ def test_run_scan_maps_explicit_standard_to_standard_flag(monkeypatch):
         assert captured["kwargs"]["start_new_session"] is True
 
 
+def test_run_scan_passes_auth_config_file_without_raw_auth_secrets(monkeypatch):
+    captured = {}
+
+    async def _fake_create_subprocess_exec(*cmd, **kwargs):
+        captured["cmd"] = list(cmd)
+        captured["env"] = dict(kwargs.get("env") or {})
+        auth_path = captured["cmd"][captured["cmd"].index("--auth-config-file") + 1]
+        captured["auth_path"] = auth_path
+        captured["auth_mode"] = os.stat(auth_path).st_mode & 0o777
+        with open(auth_path, encoding="utf-8") as f:
+            captured["auth_config"] = json.load(f)
+        return _FakeProcess(b'{"ok": true, "findings": []}')
+
+    monkeypatch.setattr(worker.asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+    monkeypatch.setattr(worker, "_load_runtime_ai_settings", lambda: {})
+
+    options = {
+        "scan_type": "smart",
+        "auth_cookies": "session=secret-cookie",
+        "auth_header": "Bearer secret-token",
+        "auth_headers_json": '{"X-API-Key":"secret-key"}',
+        "login_url": "https://example.com/login",
+        "login_username": "alice",
+        "login_password": "secret-password",
+        "login_extra_fields": '{"tenant":"acme"}',
+        "auto_auth": True,
+        "user2_header": "Bearer secret-user2",
+        "auth_scenario_json": '{"credentials":{"password":"secret-scenario"}}',
+    }
+
+    result = asyncio.run(worker.run_scan("https://example.com", options))
+    cmd = captured["cmd"]
+    cmd_text = " ".join(cmd)
+
+    assert result.get("ok") is True
+    assert "--auth-config-file" in cmd
+    assert "--auth-header" not in cmd
+    assert "--auth-cookies" not in cmd
+    assert "--login-password" not in cmd
+    assert "--auth-scenario-json" not in cmd
+    for secret in (
+        "secret-cookie",
+        "secret-token",
+        "secret-key",
+        "secret-password",
+        "secret-user2",
+        "secret-scenario",
+    ):
+        assert secret not in cmd_text
+    assert captured["auth_mode"] == 0o600
+    assert captured["auth_config"]["auth_header"] == "Bearer secret-token"
+    assert captured["auth_config"]["login_password"] == "secret-password"
+    assert captured["auth_config"]["auto_auth"] is True
+    assert not os.path.exists(captured["auth_path"])
+
+
 def test_run_scan_maps_asm_check_family_to_scanner_flag(monkeypatch):
     captured = {}
 
@@ -2923,8 +2979,10 @@ def test_run_scan_enables_scan_ai_when_classification_enabled(monkeypatch):
     assert result.get("ok") is True
     assert "--ai" in cmd
     assert "--ai-url" in cmd
-    assert "--ai-api-key" in cmd
+    assert "--ai-api-key" not in cmd
+    assert "secret" not in " ".join(cmd)
     assert "--model" in cmd
+    assert env["AI_API_KEY"] == "secret"
     assert env["AI_SCAN_CLASSIFICATION_ENABLED"] == "true"
     assert env["AI_CLASSIFY_MIN_SEVERITY"] == "low"
     assert env["AI_VERIFY_MIN_SEVERITY"] == "critical"
