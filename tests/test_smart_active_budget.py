@@ -434,6 +434,63 @@ def test_run_smart_active_tests_reserves_time_for_xss(monkeypatch):
     assert result["xss"]["endpoints_tested"] == 1
 
 
+def test_run_smart_active_tests_uses_filtered_worklist_for_xss(monkeypatch):
+    phantom = {"url": "https://example.test/api/phantom?id=1", "method": "GET", "params": ["id"], "source": "inferred"}
+    real = {"url": "https://example.test/search?q=test", "method": "GET", "params": ["q"], "source": "har_discovery"}
+    captured = {}
+
+    async def fake_filter(_base_url, endpoints, _auth_session):
+        assert endpoints == [phantom, real]
+        return [real]
+
+    async def fake_sqli(*args, **kwargs):
+        return {
+            "findings": [],
+            "dbms_detected": None,
+            "vulnerabilities_found": 0,
+            "get_endpoints_tested": 0,
+            "post_endpoints_tested": 0,
+            "endpoints_tested": 0,
+            "params_tested": 0,
+        }
+
+    async def fake_xss(_base_url, endpoints, *args, **kwargs):
+        captured["xss_endpoints"] = list(endpoints)
+        return {
+            "findings": [],
+            "reflections_found": 0,
+            "vulnerabilities_found": 0,
+            "endpoints_tested": len(endpoints),
+            "params_tested": 0,
+        }
+
+    async def fake_hash_route_dom_xss(*args, **kwargs):
+        return {
+            "findings": [],
+            "endpoints_tested": 0,
+            "params_tested": 0,
+            "vulnerabilities_found": 0,
+        }
+
+    monkeypatch.setattr(active_checks, "_filter_reachable_active_endpoints", fake_filter)
+    monkeypatch.setattr(active_checks, "smart_sqli_test", fake_sqli)
+    monkeypatch.setattr(active_checks, "smart_xss_test", fake_xss)
+    monkeypatch.setattr(active_checks, "hash_route_dom_xss_test", fake_hash_route_dom_xss)
+
+    result = asyncio.run(
+        active_checks.run_smart_active_tests(
+            "https://example.test",
+            [phantom, real],
+            run_sqli=True,
+            run_xss=True,
+            active_max_seconds=100,
+        )
+    )
+
+    assert captured["xss_endpoints"] == [real]
+    assert result["xss"]["endpoints_tested"] == 1
+
+
 def test_enabled_active_family_names_are_registry_ordered():
     assert active_checks._enabled_active_family_names(run_sqli=True, run_xss=True) == ("sqli", "xss")
     assert active_checks._enabled_active_family_names(run_sqli=False, run_xss=True) == ("xss",)

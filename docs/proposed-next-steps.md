@@ -989,6 +989,9 @@ object ID that was absent from the attacker's own listing. DONE phase 13 for nes
 request construction: DBMS detection and active JSON-body probes now mutate flattened body-path
 parameters such as `credentials.email` through the same nested JSON writer used by replay, preserving
 captured sibling fields and avoiding flat-key bodies that type-strict login/search APIs reject.
+DONE phase 14 for XSS budget quality: smart XSS now receives the same reachable/prioritized active
+worklist as SQLi, so bounded scans spend XSS budget on filtered real endpoints instead of the raw
+synthetic candidate list.
 
 **Done when:** recorded two-user benchmark scorecards show the targeted miss becoming a deterministic
 finding, not merely an attempted endpoint.

@@ -9356,7 +9356,7 @@ async def run_smart_active_tests(
             else:
                 _emit_scan_progress("active_xss", 92, "starting XSS probes")
                 xss_results = await smart_xss_test(
-                    url, endpoints, auth_session=auth_session,
+                    url, prioritized_endpoints, auth_session=auth_session,
                     max_endpoints=xss_max_endpoints,
                     max_params_per_endpoint=xss_max_params,
                     max_seconds=remaining,
