@@ -1317,9 +1317,10 @@ skipped family lists, skip reason counts, enabled risk/phase counts, runnable-en
 per-enabled-family proof contracts. It now also records dispatch adapter counts, requested blocked
 families, per-family `requested`/`blocked_by`/`dispatch_adapter` metadata, and fail-closes explicitly
 requested registered-but-unrunnable families such as `lfi`/`rce`/`ssrf`. SQLi/XSS active dispatch
-gates derive from that plan before entering the legacy module loops. Detector internals still execute
-many checks through hardcoded module calls, and planned families such as `lfi`/`rce`/`ssrf` are not
-runnable.
+gates derive from that plan before entering the legacy module loops. Focused auth/BOLA dispatch now
+also treats the registry plan as authoritative for explicit `check_family` requests while preserving
+legacy broad smart-scan behavior when no family was requested. Detector internals still execute many
+checks through hardcoded module calls, and planned families such as `lfi`/`rce`/`ssrf` are not runnable.
 
 **Implement:** continue migrating `build_report()` module execution to registry iteration; add
 `proof_contract`, `severity_rules`, telemetry schema, safety gate, and report rollup per family;

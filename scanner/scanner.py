@@ -2873,6 +2873,20 @@ def registry_family_enabled(
     return bool(fallback)
 
 
+def registry_dispatch_enabled(
+    scanner_execution_plan: dict[str, Any] | None,
+    family: str,
+    *,
+    legacy_default: bool = False,
+) -> bool:
+    """Gate focused-family dispatch through the registry without changing broad legacy scans."""
+    plan = scanner_execution_plan if isinstance(scanner_execution_plan, dict) else {}
+    scope = plan.get("check_family_scope") if isinstance(plan.get("check_family_scope"), dict) else {}
+    if scope.get("requested_family"):
+        return registry_family_enabled(plan, family, fallback=legacy_default)
+    return bool(legacy_default)
+
+
 def _focused_family_finding_matches(finding: dict[str, Any], family: str | None) -> bool:
     rules = FOCUSED_FAMILY_RULES.get(str(family or ""))
     if not rules:
@@ -10417,7 +10431,12 @@ async def build_report(target: str,
         # so default broad scans do not reinterpret public endpoints as auth
         # obligations.
         auth_focused = focused_active_family_name == "auth"
-        if auth_focused and smart_mode and smart_succeeded and not public_only:
+        auth_dispatch_enabled = registry_dispatch_enabled(
+            scanner_execution_plan,
+            "auth",
+            legacy_default=auth_focused,
+        )
+        if auth_dispatch_enabled and smart_mode and smart_succeeded and not public_only:
             try:
                 if auth_session:
                     try:
@@ -10469,12 +10488,16 @@ async def build_report(target: str,
             focused_active_family_name,
             "bola_idor",
         )
+        bola_dispatch_enabled = registry_dispatch_enabled(
+            scanner_execution_plan,
+            "bola",
+            legacy_default=bool(bola_allowed_by_focus and (bola_focused or not focused_manual_active_scope)),
+        )
         bola_eligible = (
             smart_mode
             and smart_succeeded
             and not public_only
-            and bola_allowed_by_focus
-            and (bola_focused or not focused_manual_active_scope)
+            and bola_dispatch_enabled
         )
         bola_decision = (
             bola_enrichment_decision(

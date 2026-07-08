@@ -363,6 +363,29 @@ def test_registry_family_enabled_drives_legacy_active_dispatch_gate():
     assert scanner_mod.registry_family_enabled(None, "xss", fallback=True) is True
 
 
+def test_registry_dispatch_enabled_is_authoritative_for_explicit_family():
+    plan = {
+        "check_family_scope": {"requested_family": "bola"},
+        "families": [
+            {"name": "bola", "enabled": False},
+            {"name": "auth", "enabled": True},
+        ],
+    }
+
+    assert scanner_mod.registry_dispatch_enabled(plan, "bola", legacy_default=True) is False
+    assert scanner_mod.registry_dispatch_enabled(plan, "auth", legacy_default=False) is True
+
+
+def test_registry_dispatch_enabled_preserves_broad_legacy_default():
+    plan = {
+        "check_family_scope": {"requested_family": None},
+        "families": [{"name": "bola", "enabled": False}],
+    }
+
+    assert scanner_mod.registry_dispatch_enabled(plan, "bola", legacy_default=True) is True
+    assert scanner_mod.registry_dispatch_enabled(plan, "auth", legacy_default=False) is False
+
+
 def _load_reporting_module():
     import importlib.util as _ilu
     scanner_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "scanner"))
