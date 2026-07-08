@@ -67,6 +67,18 @@ def test_unreachable_target_with_no_warnings_still_sets_error(monkeypatch):
     assert report.get("error") == "Target unreachable during pre-scan validation"
 
 
+def test_target_reachable_accepts_open_port_when_http_probe_fails():
+    """An open port must count as reachable even if the HTTP HEAD probe fails under load."""
+    # DNS + HTTP ok -> reachable.
+    assert health_check._target_is_reachable(True, True, True) is True
+    # DNS ok, HTTP probe failed, but the target port is OPEN -> still reachable (the fix).
+    assert health_check._target_is_reachable(True, False, True) is True
+    # DNS ok but nothing open and no HTTP -> fail closed.
+    assert health_check._target_is_reachable(True, False, False) is False
+    # No DNS -> always fail closed, even with an open port.
+    assert health_check._target_is_reachable(False, True, True) is False
+
+
 def test_pre_scan_validation_retries_transient_unreachable(monkeypatch):
     """A target that blips unreachable then answers must proceed (herd tolerance)."""
     calls = {"n": 0}

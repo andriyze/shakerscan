@@ -366,6 +366,17 @@ def log_health_check_results(results: dict[str, Any]) -> None:
 # Network/Connectivity Validation
 # =============================================================================
 
+def _target_is_reachable(dns_ok: bool, http_ok: bool, any_port_open: bool) -> bool:
+    """Decide whether a target is reachable enough to start a scan.
+
+    DNS must resolve, and then EITHER a valid HTTP response OR an open TCP port is enough.
+    Treating an open port as reachable prevents a slow/overloaded HTTP response (common when
+    the scanner fans out many concurrent shards at one single-host target) from fail-closing
+    an otherwise-scannable target. No DNS, or no open port at all, still fails closed.
+    """
+    return bool(dns_ok and (http_ok or any_port_open))
+
+
 async def validate_target_connectivity(target: str, timeout: int = 15) -> dict[str, Any]:
     """
     Validate network connectivity to a target before scanning.
@@ -548,9 +559,21 @@ async def validate_target_connectivity(target: str, timeout: int = 15) -> dict[s
         if not http_ok and last_url:
             issues.append(f"HTTP request to {last_url} failed or returned invalid status")
 
-    # Calculate overall reachability
-    # Target is reachable if DNS works and we can get a valid HTTP response.
-    reachable = dns_ok and http_ok
+    # Calculate overall reachability. A valid HTTP response is the strongest signal, but an
+    # open TCP port is sufficient to START a scan: under the scanner's own concurrent shard
+    # burst a single-host target can accept the TCP connection yet be too overwhelmed to
+    # complete an HTTP HEAD in time. Fail-closing that shard is wrong when its port is
+    # demonstrably open and sibling shards reach it fine (scan phases have their own
+    # timeouts). A genuinely-down target (no DNS, or no open port at all) still fails closed.
+    reachable = _target_is_reachable(dns_ok, http_ok, any_port_open)
+    if reachable and not http_ok:
+        details["reachable_via"] = "open_port_http_probe_inconclusive"
+        issues.append(
+            "HTTP probe did not complete but the target port is open; proceeding "
+            "(target may be slow or under load)."
+        )
+    elif reachable:
+        details["reachable_via"] = "http"
 
     return {
         "reachable": reachable,
