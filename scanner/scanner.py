@@ -9766,21 +9766,42 @@ async def build_report(target: str,
                             active_block["stored_xss"] = stored_res
                             if stored_res.get("vulnerable"):
                                 for finding in stored_res.get("findings", [])[:5]:
-                                    report["findings"].append(normalize_finding(
+                                    nf = normalize_finding(
                                         "stored_xss",
                                         "Stored XSS (workflow)",
                                         finding.get("severity", "high"),
                                         {
+                                            "type": "XSS",
                                             "injection_url": finding.get("injection_url"),
                                             "stored_url": finding.get("stored_url"),
+                                            "url": finding.get("stored_url"),
                                             "param": finding.get("param"),
                                             "payload": finding.get("payload"),
                                             "payload_reflected": finding.get("payload_reflected"),
                                             "snippet": finding.get("snippet"),
                                             "method": finding.get("method"),
+                                            "verified": finding.get("verified", False),
+                                            "proof_state": finding.get("proof_state"),
+                                            "confidence": finding.get("confidence"),
+                                            "cvss_score": finding.get("cvss_score"),
+                                            "evidence": finding.get("evidence"),
+                                            "request_headers": finding.get("request_headers"),
                                         },
                                         "CWE-79"
-                                    ))
+                                    )
+                                    if finding.get("browser_proof"):
+                                        nf["browser_proof"] = finding["browser_proof"]
+                                    if finding.get("poe_result"):
+                                        nf["poe_result"] = finding["poe_result"]
+                                    if finding.get("verified"):
+                                        nf["verified"] = True
+                                    if finding.get("proof_state"):
+                                        nf["proof_state"] = finding["proof_state"]
+                                    if finding.get("confidence") is not None:
+                                        nf["confidence"] = finding["confidence"]
+                                    if finding.get("cvss_score") is not None:
+                                        nf["cvss_score"] = finding["cvss_score"]
+                                    report["findings"].append(nf)
                     except Exception as e:
                         active_block["stored_xss_error"] = str(e)
                 except Exception as e:

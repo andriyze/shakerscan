@@ -963,7 +963,11 @@ DONE phase 4 for an opt-in benchmark-runner bridge that seeds those hypotheses f
 scorecard;
 DONE phase 5 for focused SQLi/XSS active-loop ordering that prioritizes benchmark workflow body
 routes (`login`, `search`, `coupon`, `review`, `order`, `product`);
-detector recall and proof routing still require scorecard-backed scan improvements.
+DONE phase 6 for stored-XSS store-then-render proof routing: stored marker evidence remains
+suspected/likely-vulnerable, while exact stored payloads are promoted to verified High only when
+the headless browser proof confirms execution and carries `browser_proof`/`poe_result` into the
+normalized finding. Remaining detector recall still requires scorecard-backed POST-body SQLi and
+workflow/write-BOLA improvements.
 
 **Done when:** recorded two-user benchmark scorecards show the targeted miss becoming a deterministic
 finding, not merely an attempted endpoint.

@@ -3688,6 +3688,7 @@ async def stored_xss_workflow(
     pages_to_check = (priority + remaining)[:max_pages]
 
     auth_args = _filter_curl_headers(get_auth_curl_args(auth_session), {"content-type"})
+    request_headers = _headers_from_curl_args(auth_args)
 
     def _coerce_param_list(raw: Any) -> list[str]:
         if isinstance(raw, dict):
@@ -3758,8 +3759,40 @@ async def stored_xss_workflow(
                     payload_reflected = payload in page_out
                     idx = page_out.find(marker)
                     snippet = page_out[max(0, idx - 80): idx + 120] if idx >= 0 else page_out[:200]
-                    results["vulnerable"] = True
-                    results["findings"].append({
+                    verified = False
+                    proof_data = None
+                    confidence = 0.55
+                    severity = "medium"
+                    evidence_notes = [
+                        "Stored marker rendered after payload submission",
+                    ]
+                    if payload_reflected:
+                        confidence = 0.65
+                        evidence_notes.append("Submitted payload rendered in the stored page response")
+
+                    if payload_reflected and HAS_XSS_PROOF and prove_xss_headless:
+                        try:
+                            proof = await prove_xss_headless(
+                                url=page_url,
+                                param=f"stored:{param}",
+                                payload=payload,
+                                prebuilt_url=page_url,
+                                headers=request_headers or None,
+                            )
+                            if proof and proof.proven:
+                                verified = True
+                                severity = "high"
+                                confidence = proof.confidence
+                                evidence_notes.append(f"Browser proof: {proof.technique}")
+                                if proof.extracted_data:
+                                    evidence_notes.append(f"Proof data: {proof.extracted_data}")
+                                proof_data = proof.to_dict()
+                            else:
+                                evidence_notes.append("Browser verification attempted but no execution confirmed")
+                        except Exception as e:
+                            evidence_notes.append(f"Browser verification skipped: {e}")
+
+                    finding = {
                         "injection_url": url,
                         "stored_url": page_url,
                         "param": param,
@@ -3767,11 +3800,27 @@ async def stored_xss_workflow(
                         "payload_reflected": payload_reflected,
                         "snippet": snippet,
                         "method": method,
-                        "severity": "high" if payload_reflected else "medium",
-                    })
+                        "severity": severity,
+                        "confidence": confidence,
+                        "verified": verified,
+                        "proof_state": "exploited" if verified else "likely_vulnerable",
+                        "evidence": evidence_notes,
+                    }
+                    if verified:
+                        finding["cvss_score"] = 7.4
+                        finding["poe_result"] = {"proven": True, "confidence": confidence}
+                    if proof_data:
+                        finding["browser_proof"] = proof_data
+                    if request_headers:
+                        finding["request_headers"] = request_headers
+                    results["vulnerable"] = True
+                    results["findings"].append(finding)
                     results["evidence"].append({
                         "stored_url": page_url,
                         "snippet": snippet,
+                        "payload_reflected": payload_reflected,
+                        "verified": verified,
+                        "proof_state": finding["proof_state"],
                     })
                     break
             if results["vulnerable"]:
