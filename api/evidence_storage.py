@@ -320,6 +320,69 @@ def _hydrate_s3_evidence(row: dict[str, Any], storage_uri: str) -> dict[str, Any
     return row
 
 
+def delete_remote_evidence_object(storage_uri: str) -> dict[str, Any]:
+    """Delete an S3-compatible evidence object by storage URI.
+
+    Retention sweeps use the DB row as the durable index. Returning a structured
+    status lets the caller keep that row when the remote delete fails, so the
+    object remains retryable instead of becoming an orphaned blob.
+    """
+    parsed = _parse_s3_storage_uri(str(storage_uri or ""))
+    if parsed is None:
+        return {
+            "storage_uri": storage_uri,
+            "storage_backend": "unknown",
+            "status": "invalid_uri",
+            "deleted": False,
+            "retryable": False,
+        }
+    bucket, key = parsed
+    try:
+        _s3_request("DELETE", bucket, key)
+        return {
+            "storage_uri": storage_uri,
+            "storage_backend": "s3",
+            "bucket": bucket,
+            "key": key,
+            "status": "deleted",
+            "deleted": True,
+            "retryable": False,
+        }
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            return {
+                "storage_uri": storage_uri,
+                "storage_backend": "s3",
+                "bucket": bucket,
+                "key": key,
+                "status": "missing",
+                "deleted": True,
+                "retryable": False,
+                "error": f"HTTPError: {exc.code}",
+            }
+        return {
+            "storage_uri": storage_uri,
+            "storage_backend": "s3",
+            "bucket": bucket,
+            "key": key,
+            "status": "remote_error",
+            "deleted": False,
+            "retryable": True,
+            "error": f"HTTPError: {exc.code}",
+        }
+    except Exception as exc:
+        return {
+            "storage_uri": storage_uri,
+            "storage_backend": "s3",
+            "bucket": bucket,
+            "key": key,
+            "status": "remote_error",
+            "deleted": False,
+            "retryable": True,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+
+
 def hydrate_evidence_content(row: dict[str, Any], *, results_dir: Path) -> dict[str, Any]:
     storage_uri = str(row.get("storage_uri") or "")
     if storage_uri.startswith(S3_STORAGE_PREFIX):

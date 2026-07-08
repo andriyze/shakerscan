@@ -4328,7 +4328,7 @@ def test_evidence_retention_candidates_skip_legal_hold_and_use_policy_days():
     assert candidates[0]["age_days"] > candidates[0]["retention_days"]
 
 
-def test_evidence_retention_candidate_marks_remote_storage_as_preserved():
+def test_evidence_retention_candidate_marks_remote_storage_as_deletable():
     now = datetime(2026, 7, 6, tzinfo=timezone.utc)
     row = {
         "id": uuid.uuid4(),
@@ -4342,7 +4342,7 @@ def test_evidence_retention_candidate_marks_remote_storage_as_preserved():
     assert candidate is not None
     assert candidate["storage_backend"] == "s3"
     assert candidate["remote_object"] is True
-    assert candidate["remote_deletion_supported"] is False
+    assert candidate["remote_deletion_supported"] is True
     assert candidate["local_file"] is False
 
 
@@ -4442,7 +4442,7 @@ def test_retention_sweep_dry_run_preview_needs_no_approval(monkeypatch):
     assert conn.recorded == []  # preview records nothing and requires no receipt
 
 
-def test_retention_sweep_reports_remote_objects_without_deleting_them(monkeypatch):
+def test_retention_sweep_dry_run_reports_remote_objects_as_preserved(monkeypatch):
     old = datetime(2025, 1, 1, tzinfo=timezone.utc)
     remote_id = uuid.uuid4()
 
@@ -4470,13 +4470,106 @@ def test_retention_sweep_reports_remote_objects_without_deleting_them(monkeypatc
     assert result["candidate_count"] == 1
     assert result["remote_objects"] == {
         "candidate_count": 1,
+        "deleted_count": 0,
+        "missing_count": 0,
+        "failed_count": 0,
         "preserved_count": 1,
-        "delete_supported": False,
+        "delete_supported": True,
+        "deleted": [],
+        "missing": [],
+        "errors": [],
     }
     assert result["local_files"] == {"deleted": [], "missing": [], "errors": []}
     assert result["candidates"][0]["id"] == str(remote_id)
     assert result["candidates"][0]["storage_backend"] == "s3"
     assert result["candidates"][0]["remote_object"] is True
+
+
+def test_retention_sweep_executes_remote_delete_before_db_delete(monkeypatch):
+    old = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    remote_id = uuid.uuid4()
+    rows = [
+        {
+            "id": remote_id,
+            "scan_id": None,
+            "finding_id": None,
+            "object_type": "finding_evidence",
+            "content_sha256": "a" * 64,
+            "size_bytes": 4096,
+            "retention_class": "short",
+            "storage_uri": "s3:evidence_objects/audit-bucket/evidence-objects/aa/" + ("a" * 64) + ".json",
+            "created_at": old,
+        }
+    ]
+
+    class _RemoteDeleteSweepConn(_SweepConn):
+        async def fetch(self, query, *args):
+            if "DELETE FROM evidence_objects" in query:
+                self.deleted_arg = args[0]
+                return [{"id": item} for item in args[0]]
+            return rows
+
+    conn = _RemoteDeleteSweepConn(policy_on=False)
+    monkeypatch.setattr(api_module, "db_pool", _pool_for(conn))
+    monkeypatch.setattr(api_module, "delete_remote_evidence_object", lambda storage_uri: {
+        "storage_uri": storage_uri,
+        "storage_backend": "s3",
+        "status": "deleted",
+        "deleted": True,
+        "retryable": False,
+    })
+
+    result = asyncio.run(api_module.evidence_retention_sweep(api_module.EvidenceRetentionSweepRequest(dry_run=False)))
+
+    assert result["deleted_count"] == 1
+    assert result["remote_objects"]["candidate_count"] == 1
+    assert result["remote_objects"]["deleted_count"] == 1
+    assert result["remote_objects"]["preserved_count"] == 0
+    assert conn.deleted_arg == [remote_id]
+
+
+def test_retention_sweep_preserves_row_when_remote_delete_fails(monkeypatch):
+    old = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    remote_id = uuid.uuid4()
+    rows = [
+        {
+            "id": remote_id,
+            "scan_id": None,
+            "finding_id": None,
+            "object_type": "finding_evidence",
+            "content_sha256": "a" * 64,
+            "size_bytes": 4096,
+            "retention_class": "short",
+            "storage_uri": "s3:evidence_objects/audit-bucket/evidence-objects/aa/" + ("a" * 64) + ".json",
+            "created_at": old,
+        }
+    ]
+
+    class _RemoteDeleteFailureSweepConn(_SweepConn):
+        async def fetch(self, query, *args):
+            if "DELETE FROM evidence_objects" in query:
+                self.delete_called = True
+                return [{"id": item} for item in args[0]]
+            return rows
+
+    conn = _RemoteDeleteFailureSweepConn(policy_on=False)
+    conn.delete_called = False
+    monkeypatch.setattr(api_module, "db_pool", _pool_for(conn))
+    monkeypatch.setattr(api_module, "delete_remote_evidence_object", lambda storage_uri: {
+        "storage_uri": storage_uri,
+        "storage_backend": "s3",
+        "status": "remote_error",
+        "deleted": False,
+        "retryable": True,
+        "error": "HTTPError: 403",
+    })
+
+    result = asyncio.run(api_module.evidence_retention_sweep(api_module.EvidenceRetentionSweepRequest(dry_run=False)))
+
+    assert result["deleted_count"] == 0
+    assert result["remote_objects"]["failed_count"] == 1
+    assert result["remote_objects"]["preserved_count"] == 1
+    assert conn.delete_called is False
 
 
 # ----- §2 Command Arsenal execution gateway ------------------------------------

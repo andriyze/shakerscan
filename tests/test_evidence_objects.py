@@ -11,7 +11,7 @@ sys.modules.setdefault("asyncpg", types.SimpleNamespace())
 sys.modules.setdefault("redis", types.SimpleNamespace(from_url=lambda *a, **k: None))
 
 import worker  # noqa: E402
-from evidence_storage import hydrate_evidence_content, local_evidence_path  # noqa: E402
+from evidence_storage import delete_remote_evidence_object, hydrate_evidence_content, local_evidence_path  # noqa: E402
 
 
 class _CaptureConn:
@@ -138,6 +138,46 @@ def test_s3_storage_falls_back_to_local_store_when_remote_fails(monkeypatch, tmp
     assert stored["storage_uri"].startswith("local:evidence_objects/")
     assert stored["remote_error"]
     assert local_evidence_path(tmp_path, stored["storage_uri"]).exists()
+
+
+def test_s3_remote_delete_uses_signed_delete(monkeypatch):
+    monkeypatch.setenv("EVIDENCE_STORAGE_BACKEND", "s3")
+    monkeypatch.setenv("EVIDENCE_S3_BUCKET", "shakerscan-evidence")
+    monkeypatch.setenv("EVIDENCE_S3_ENDPOINT_URL", "http://minio.local:9000")
+    monkeypatch.setenv("EVIDENCE_S3_ACCESS_KEY_ID", "ak")
+    monkeypatch.setenv("EVIDENCE_S3_SECRET_ACCESS_KEY", "sk")
+
+    seen = {}
+
+    class _Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self):
+            return b""
+
+    def fake_urlopen(request, timeout=0):
+        headers = {k.lower(): v for k, v in request.headers.items()}
+        seen["method"] = request.get_method()
+        seen["url"] = request.full_url
+        seen["headers"] = headers
+        assert timeout == 15
+        return _Response()
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    result = delete_remote_evidence_object(
+        "s3:evidence_objects/shakerscan-evidence/evidence-objects/aa/" + ("a" * 64) + ".json"
+    )
+
+    assert result["status"] == "deleted"
+    assert result["deleted"] is True
+    assert seen["method"] == "DELETE"
+    assert seen["url"] == "http://minio.local:9000/shakerscan-evidence/evidence-objects/aa/" + ("a" * 64) + ".json"
+    assert "authorization" in seen["headers"]
+    assert "x-amz-date" in seen["headers"]
 
 
 def test_evidence_object_retention_standard_without_sensitive_fields():

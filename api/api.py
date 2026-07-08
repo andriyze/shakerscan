@@ -99,11 +99,11 @@ except ModuleNotFoundError as exc:
     )
 
 try:
-    from evidence_storage import hydrate_evidence_content, local_evidence_path
+    from evidence_storage import delete_remote_evidence_object, hydrate_evidence_content, local_evidence_path
 except ModuleNotFoundError as exc:
     if exc.name != "evidence_storage":
         raise
-    from api.evidence_storage import hydrate_evidence_content, local_evidence_path
+    from api.evidence_storage import delete_remote_evidence_object, hydrate_evidence_content, local_evidence_path
 
 try:
     from scan_verification_state import scan_time_verification_fields as _scan_time_verification_fields
@@ -23528,7 +23528,7 @@ def _evidence_retention_candidate(
         "storage_backend": storage_backend,
         "local_file": bool(local_evidence_path(RESULTS_DIR, storage_uri)),
         "remote_object": storage_backend == "s3",
-        "remote_deletion_supported": False,
+        "remote_deletion_supported": storage_backend == "s3",
     }
 
 
@@ -23568,6 +23568,37 @@ def _delete_local_evidence_files(candidates: Sequence[dict[str, Any]]) -> dict[s
         except OSError as exc:
             errors.append({"path": str(path), "error": f"{type(exc).__name__}: {exc}"})
     return {"deleted": deleted, "missing": missing, "errors": errors}
+
+
+def _delete_remote_evidence_objects(candidates: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    deleted: list[dict[str, str]] = []
+    missing: list[dict[str, str]] = []
+    errors: list[dict[str, Any]] = []
+    deleted_ids: set[str] = set()
+    for candidate in candidates:
+        if not candidate.get("remote_object"):
+            continue
+        result = delete_remote_evidence_object(str(candidate.get("storage_uri") or ""))
+        result["evidence_object_id"] = str(candidate.get("id") or "")
+        status = str(result.get("status") or "")
+        if result.get("deleted"):
+            deleted_ids.add(str(candidate.get("id")))
+            item = {
+                "evidence_object_id": str(candidate.get("id") or ""),
+                "storage_uri": str(candidate.get("storage_uri") or ""),
+            }
+            if status == "missing":
+                missing.append(item)
+            else:
+                deleted.append(item)
+        else:
+            errors.append(result)
+    return {
+        "deleted": deleted,
+        "missing": missing,
+        "errors": errors,
+        "deleted_ids": sorted(deleted_ids),
+    }
 
 
 @app.get("/findings/{finding_id}/evidence")
@@ -23780,9 +23811,16 @@ async def _evidence_retention_sweep(req: EvidenceRetentionSweepRequest, *, pool:
             retention_class_filter=req.retention_class,
         )
         file_result = {"deleted": [], "missing": [], "errors": []}
+        remote_result = {"deleted": [], "missing": [], "errors": [], "deleted_ids": []}
         deleted_count = 0
         if candidates and not req.dry_run:
-            candidate_ids = [uuid.UUID(str(item["id"])) for item in candidates if item.get("id")]
+            remote_result = _delete_remote_evidence_objects([item for item in candidates if item.get("remote_object")])
+            remote_deleted_ids = set(remote_result.get("deleted_ids") or [])
+            db_deletable_candidates = [
+                item for item in candidates
+                if not item.get("remote_object") or str(item.get("id")) in remote_deleted_ids
+            ]
+            candidate_ids = [uuid.UUID(str(item["id"])) for item in db_deletable_candidates if item.get("id")]
             deleted_ids: set[str] = set()
             if candidate_ids:
                 deleted_rows = await conn.fetch(
@@ -23806,6 +23844,9 @@ async def _evidence_retention_sweep(req: EvidenceRetentionSweepRequest, *, pool:
                 )
         if not req.dry_run:
             remote_candidate_count = sum(1 for item in candidates if item.get("remote_object"))
+            remote_deleted_count = len(remote_result.get("deleted", []))
+            remote_missing_count = len(remote_result.get("missing", []))
+            remote_failed_count = len(remote_result.get("errors", []))
             command_result = await _record_command_result(
                 conn,
                 command="evidence.retention_sweep",
@@ -23814,14 +23855,19 @@ async def _evidence_retention_sweep(req: EvidenceRetentionSweepRequest, *, pool:
                 approval_receipt_id=req.approval_receipt_id,
                 operator_message=(
                     f"Swept {deleted_count} evidence object(s); "
-                    f"{len(file_result.get('deleted', []))} local file(s) removed"
+                    f"{len(file_result.get('deleted', []))} local file(s) removed; "
+                    f"{remote_deleted_count + remote_missing_count} remote object(s) retired"
                 ),
                 result_json={
                     "retention_class": req.retention_class,
                     "older_than_days": req.older_than_days,
                     "candidate_count": len(candidates),
                     "deleted_count": deleted_count,
-                    "remote_preserved_count": remote_candidate_count,
+                    "remote_candidate_count": remote_candidate_count,
+                    "remote_deleted_count": remote_deleted_count,
+                    "remote_missing_count": remote_missing_count,
+                    "remote_failed_count": remote_failed_count,
+                    "remote_preserved_count": remote_failed_count,
                 },
                 next_action="/settings/arsenal?tab=timeline",
             )
@@ -23833,8 +23879,18 @@ async def _evidence_retention_sweep(req: EvidenceRetentionSweepRequest, *, pool:
         "local_files": file_result,
         "remote_objects": {
             "candidate_count": sum(1 for item in candidates if item.get("remote_object")),
-            "preserved_count": sum(1 for item in candidates if item.get("remote_object")),
-            "delete_supported": False,
+            "deleted_count": len(remote_result.get("deleted", [])),
+            "missing_count": len(remote_result.get("missing", [])),
+            "failed_count": len(remote_result.get("errors", [])),
+            "preserved_count": (
+                sum(1 for item in candidates if item.get("remote_object"))
+                if req.dry_run
+                else len(remote_result.get("errors", []))
+            ),
+            "delete_supported": True,
+            "deleted": remote_result.get("deleted", []),
+            "missing": remote_result.get("missing", []),
+            "errors": remote_result.get("errors", []),
         },
         "retention_policy_days": EVIDENCE_RETENTION_DAYS,
         "candidates": candidates,

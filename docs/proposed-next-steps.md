@@ -1161,9 +1161,10 @@ timeout, auth-missing skip, cancellation-before-start, and failure states. Overs
 externalize to an opt-in S3/MinIO-compatible object store via `EVIDENCE_STORAGE_BACKEND=s3`,
 `EVIDENCE_S3_BUCKET`, and optional endpoint/region/credential settings; API reads hydrate remote
 objects through signed GET and verify their recorded SHA-256 before returning content. Retention
-sweeps now classify remote evidence candidates separately and report them as preserved because remote
-deletion is not yet supported. Deeper per-subprocess DAST exit-code/timeout/stderr capture inside the
-scanner process and remote deletion/lifecycle adapters remain open.
+sweeps now classify remote evidence candidates separately; dry-runs preserve them as previews, and
+approved executions retire S3/MinIO objects through signed DELETE before deleting their DB rows.
+Remote delete failures leave rows preserved and retryable. Deeper stdout/stderr artifact refs for long
+parser failures remain open.
 
 **Implement:**
 1. DONE phase 1: externalize `storage_uri` from `inline:` to local object storage for large objects.
@@ -1208,8 +1209,9 @@ scanner process and remote deletion/lifecycle adapters remain open.
    outcomes as normal `tool_receipts` with `scanner-subprocess` provenance. DONE phase 3: bounded
    subprocess receipts now include stdout previews and worker finalization conservatively classifies
    known JSON/parser failure markers from stderr/stdout previews as `status=parser_error` with
-   `parser_status=failed`. Remaining work is richer stdout/stderr artifact refs for long parser
-   failures and remote evidence lifecycle deletion.
+   `parser_status=failed`. DONE phase 4: retention sweeps can delete S3/MinIO remote evidence through
+   signed DELETE before deleting DB rows, with dry-run preservation and failed-delete retry semantics.
+   Remaining work is richer stdout/stderr artifact refs for long parser failures.
 5. DONE phase 1: tool receipts include tool version, adapter version, command hash, redacted argv, worker
    build/container image, target scope, scope receipt, policy profile, approval id, timing, exit code,
    timeout, stdout/stderr artifact refs, parsed evidence refs, parser status, and redaction summary.
