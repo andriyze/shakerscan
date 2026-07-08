@@ -944,7 +944,9 @@ browser-proof XSS, auth/BOLA when preconditions are present), a blocked action t
 auth/principal blockers, or a detector-gap record when no focused executor exists yet.
 `POST /arsenal/hypotheses/from-benchmark` / `hypothesis.generate_from_benchmark` now converts those
 follow-up rows into deduped `benchmark` hypotheses with `runtime_proof_required=true`, without
-queueing scans, creating findings, or satisfying proof.
+queueing scans, creating findings, or satisfying proof. `scripts/benchmark_targets.py --seed-hypotheses`
+now posts each scored card's `benchmark_followups` to that route and records the ingest response in
+the benchmark artifact; optional `--hypothesis-target-id name=uuid` binds those leads to a target.
 
 **Implement:** keep the benchmark as the unit of progress. Add focused campaigns for login/search/
 review/order APIs; capture real POST bodies from browser/HAR/OpenAPI; keep NoSQL operator probes
@@ -954,6 +956,8 @@ auth-workflow diagnostics in `scanner_tools.benchmark_summary` and `scripts/benc
 DONE phase 2 for turning missed scorecard expectations into explicit follow-up worklist rows;
 DONE phase 3 for connecting those rows to the hypothesis/campaign planning layer as benchmark
 hypotheses;
+DONE phase 4 for an opt-in benchmark-runner bridge that seeds those hypotheses from a recorded
+scorecard;
 detector recall and proof routing still require scorecard-backed scan improvements.
 
 **Done when:** recorded two-user benchmark scorecards show the targeted miss becoming a deterministic

@@ -146,6 +146,24 @@ def _post(url, body, timeout=30):
         return json.load(r)
 
 
+def parse_target_id_overrides(values):
+    """Parse --hypothesis-target-id entries as benchmark=uuid mappings."""
+    mapping = {}
+    for raw in values or []:
+        text = str(raw or "").strip()
+        if not text:
+            continue
+        if "=" not in text:
+            raise ValueError(f"target id override must be NAME=UUID, got {text!r}")
+        name, target_id = text.split("=", 1)
+        name = name.strip()
+        target_id = target_id.strip()
+        if not name or not target_id:
+            raise ValueError(f"target id override must be NAME=UUID, got {text!r}")
+        mapping[name] = target_id
+    return mapping
+
+
 def route_tokens(entry):
     toks = set()
     route = (entry.get("route") or "").lower().strip("/").split("?")[0]
@@ -164,6 +182,35 @@ def route_tokens(entry):
 
 def finding_classes(hay):
     return {c for c, kws in CLASS_KEYWORDS.items() if any(k in hay for k in kws)}
+
+
+def benchmark_hypothesis_seed_payload(card, *, target_id=None, created_by="benchmark_targets.py"):
+    followups = card.get("benchmark_followups") if isinstance(card.get("benchmark_followups"), list) else []
+    return {
+        "target_id": target_id,
+        "benchmark": card.get("target") or "benchmark",
+        "scorecard_id": f"{card.get('target') or 'benchmark'}:{card.get('phase') or 'scan_finish'}",
+        "scorecard_scan_id": card.get("scan_id"),
+        "followups": followups,
+        "created_by": created_by,
+    }
+
+
+def seed_benchmark_hypotheses(api, card, *, target_id=None, created_by="benchmark_targets.py"):
+    followups = card.get("benchmark_followups") if isinstance(card.get("benchmark_followups"), list) else []
+    if not followups:
+        return {
+            "submitted": False,
+            "reason": "no_benchmark_followups",
+            "created_or_endorsed": 0,
+            "skipped_count": 0,
+            "execution_enabled": False,
+            "findings_created": 0,
+            "queued_scans": 0,
+        }
+    body = benchmark_hypothesis_seed_payload(card, target_id=target_id, created_by=created_by)
+    result = _post(f"{api}/arsenal/hypotheses/from-benchmark", body)
+    return {"submitted": True, "request": body, "response": result}
 
 
 def _benchmark_miss_followup(miss, fixture, auth_workflow):
@@ -510,7 +557,18 @@ def main():
     ap.add_argument("--retest-wait", type=int, default=900, help="max seconds to wait for the retest wave to settle")
     ap.add_argument("--allow-stale-fleet", action="store_true",
                     help="run even if the worker fleet is not uniform (NOT recommended — §10 gate)")
+    ap.add_argument("--seed-hypotheses", action="store_true",
+                    help="post benchmark_followups to /arsenal/hypotheses/from-benchmark after scoring")
+    ap.add_argument("--hypothesis-target-id", action="append", default=[],
+                    help="optional benchmark target binding as NAME=UUID; repeat for multiple targets")
+    ap.add_argument("--hypothesis-created-by", default="benchmark_targets.py",
+                    help="created_by value for benchmark hypothesis seeding")
     args = ap.parse_args()
+    try:
+        hypothesis_target_ids = parse_target_id_overrides(args.hypothesis_target_id)
+    except ValueError as e:
+        print(f"ABORT: {e}", file=sys.stderr)
+        return 2
 
     # §3/§10 fleet gate: a stale/mixed fleet silently produces bad numbers. Abort
     # unless explicitly overridden, and record the fleet state in the output.
@@ -533,6 +591,25 @@ def main():
                               rescore_after_retest=args.rescore_after_retest, retest_wait=args.retest_wait)
         except Exception as e:
             card = {"target": name, "error": str(e), "passed": False}
+        if args.seed_hypotheses:
+            target_id = hypothesis_target_ids.get(name) or hypothesis_target_ids.get(str(card.get("target") or ""))
+            try:
+                card["benchmark_hypothesis_seed"] = seed_benchmark_hypotheses(
+                    args.api,
+                    card,
+                    target_id=target_id,
+                    created_by=args.hypothesis_created_by,
+                )
+            except Exception as e:
+                card["benchmark_hypothesis_seed"] = {
+                    "submitted": False,
+                    "error": str(e),
+                    "created_or_endorsed": 0,
+                    "skipped_count": 0,
+                    "execution_enabled": False,
+                    "findings_created": 0,
+                    "queued_scans": 0,
+                }
         cards.append(card)
         overall_ok = overall_ok and card.get("passed")
         print(f"\n=== {name} scorecard ({card.get('phase', 'scan_finish')}) ===")
@@ -551,12 +628,21 @@ def main():
             command = action.get("command") or "detector_gap"
             print(f"    FOLLOWUP {f.get('expectation_id')} [{f.get('status')}]: {command} "
                   f"{f.get('blocked_by') or ''}")
+        if card.get("benchmark_hypothesis_seed"):
+            seed = card["benchmark_hypothesis_seed"]
+            response = seed.get("response") if isinstance(seed.get("response"), dict) else {}
+            created = response.get("created_or_endorsed", seed.get("created_or_endorsed", 0))
+            skipped = response.get("skipped_count", seed.get("skipped_count", 0))
+            status = "submitted" if seed.get("submitted") else "not-submitted"
+            detail = seed.get("error") or seed.get("reason") or ""
+            print(f"    HYPOTHESES {status}: created_or_endorsed={created} skipped={skipped} {detail}")
         for g in card.get("gates", []):
             print(f"    [{'PASS' if g['pass'] else 'FAIL'}] {g['gate']}: {g['detail']}")
     run = {
         **artifact_metadata(bool(overall_ok)),
         "fleet": fleet, "fleet_uniform": uniform,
         "rescore_after_retest": args.rescore_after_retest,
+        "seed_hypotheses": args.seed_hypotheses,
         "targets": cards, "passed": overall_ok,
     }
     # Latest-pointer (stable name) plus a timestamped, git-trackable record so a

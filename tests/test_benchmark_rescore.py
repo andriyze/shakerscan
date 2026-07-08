@@ -167,6 +167,103 @@ def test_scorecard_blocks_bola_followup_until_second_principal_observed():
     assert followup["blocked_action_template"]["parameters"]["exploit_depth"] is True
 
 
+def test_benchmark_hypothesis_seed_payload_is_content_free_and_traceable():
+    card = {
+        "target": "juice_shop",
+        "phase": "post_retest",
+        "scan_id": "scan-1",
+        "benchmark_followups": [
+            {
+                "expectation_id": "sqli-login",
+                "family": "sqli",
+                "route": "/rest/user/login",
+                "next_test_action": {"command": "scan.focused_family"},
+            }
+        ],
+    }
+
+    payload = b.benchmark_hypothesis_seed_payload(
+        card,
+        target_id="target-1",
+        created_by="pytest",
+    )
+
+    assert payload["target_id"] == "target-1"
+    assert payload["benchmark"] == "juice_shop"
+    assert payload["scorecard_id"] == "juice_shop:post_retest"
+    assert payload["scorecard_scan_id"] == "scan-1"
+    assert payload["followups"] == card["benchmark_followups"]
+    assert payload["created_by"] == "pytest"
+
+
+def test_seed_benchmark_hypotheses_skips_empty_followup_list(monkeypatch):
+    called = {"post": False}
+
+    def fake_post(*_args, **_kwargs):
+        called["post"] = True
+        return {}
+
+    monkeypatch.setattr(b, "_post", fake_post)
+    result = b.seed_benchmark_hypotheses("http://api.test", {"benchmark_followups": []})
+
+    assert called["post"] is False
+    assert result["submitted"] is False
+    assert result["reason"] == "no_benchmark_followups"
+    assert result["execution_enabled"] is False
+    assert result["findings_created"] == 0
+    assert result["queued_scans"] == 0
+
+
+def test_seed_benchmark_hypotheses_posts_followups(monkeypatch):
+    captured = {}
+
+    def fake_post(url, body, timeout=30):
+        captured["url"] = url
+        captured["body"] = body
+        captured["timeout"] = timeout
+        return {
+            "created_or_endorsed": 1,
+            "skipped_count": 0,
+            "execution_enabled": False,
+            "findings_created": 0,
+            "queued_scans": 0,
+        }
+
+    monkeypatch.setattr(b, "_post", fake_post)
+    result = b.seed_benchmark_hypotheses(
+        "http://api.test",
+        {
+            "target": "crapi",
+            "phase": "scan_finish",
+            "scan_id": "scan-2",
+            "benchmark_followups": [{"expectation_id": "bola-orders", "family": "bola"}],
+        },
+        target_id="target-2",
+        created_by="pytest",
+    )
+
+    assert result["submitted"] is True
+    assert captured["url"] == "http://api.test/arsenal/hypotheses/from-benchmark"
+    assert captured["body"]["target_id"] == "target-2"
+    assert captured["body"]["benchmark"] == "crapi"
+    assert captured["body"]["scorecard_id"] == "crapi:scan_finish"
+    assert captured["body"]["followups"][0]["expectation_id"] == "bola-orders"
+    assert result["response"]["created_or_endorsed"] == 1
+
+
+def test_parse_target_id_overrides_requires_name_uuid_shape():
+    assert b.parse_target_id_overrides(["juice_shop=target-1", "crapi=target-2"]) == {
+        "juice_shop": "target-1",
+        "crapi": "target-2",
+    }
+    try:
+        b.parse_target_id_overrides(["missing-separator"])
+    except ValueError as exc:
+        assert "NAME=UUID" in str(exc)
+    else:
+        raise AssertionError("expected invalid override to raise")
+
+
 def test_retest_settle_returns_true_when_drained(monkeypatch):
     monkeypatch.setattr(b, "_get", lambda *a, **k: {
         "retest_pending": 0, "retest_queued": 0, "retest_running": 0,
