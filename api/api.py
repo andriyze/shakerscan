@@ -9777,6 +9777,60 @@ async def _build_dashboard_action_center(conn, *, worker_snapshot: dict[str, Any
         pass
 
     try:
+        auth_blocked_rows = await conn.fetch("""
+            SELECT t.id AS target_id, t.url AS target_url,
+                   COUNT(te.id) AS blocked_endpoint_count
+            FROM targets t
+            JOIN target_endpoints te ON te.target_id = t.id
+            WHERE t.is_active = true
+              AND t.asm_enabled = true
+              AND COALESCE(te.last_attempt_status, '') IN ('auth_missing', 'auth_failed')
+            GROUP BY t.id, t.url
+            ORDER BY COUNT(te.id) DESC, t.url ASC
+            LIMIT 5
+        """)
+        if auth_blocked_rows:
+            samples = []
+            total_blocked = sum(int(row_to_dict(row).get("blocked_endpoint_count") or 0) for row in auth_blocked_rows)
+            for row in auth_blocked_rows[:3]:
+                target = row_to_dict(row)
+                blocked = int(target.get("blocked_endpoint_count") or 0)
+                target_id = str(target.get("target_id") or "")
+                samples.append({
+                    "label": target.get("target_url") or target_id,
+                    "detail": f"{blocked} endpoint(s) need credentials before replay.",
+                    "href": f"/asm?target_id={target_id}" if target_id else "/asm",
+                })
+            first_target_id = str(row_to_dict(auth_blocked_rows[0]).get("target_id") or "")
+            target_href = f"/asm?target_id={first_target_id}" if first_target_id else "/asm"
+            schedule_href = f"/schedules?create=true&target_id={first_target_id}" if first_target_id else "/schedules?create=true"
+            items.append(_action_center_item(
+                item_id="asm-auth-blockers",
+                priority="high",
+                category="ASM",
+                title="ASM endpoint replay is blocked by missing credentials",
+                detail=(
+                    f"{len(auth_blocked_rows)} target(s) have endpoint attempts blocked by missing or failed auth. "
+                    "Open the target ASM timeline before adding credentials or scheduling a credentialed wave."
+                ),
+                href=target_href,
+                action_label="Open ASM timeline",
+                actions=[
+                    {"label": "Open ASM timeline", "href": target_href, "variant": "primary"},
+                    {"label": "Create ASM schedule", "href": schedule_href, "variant": "secondary"},
+                ],
+                count=total_blocked,
+                samples=samples,
+                metadata={
+                    "blocked_target_count": len(auth_blocked_rows),
+                    "blocked_endpoint_count": total_blocked,
+                    "blocked_statuses": ["auth_missing", "auth_failed"],
+                },
+            ))
+    except Exception:
+        pass
+
+    try:
         next_asm_schedule = await conn.fetchrow("""
             SELECT s.id, s.next_run_at, t.url AS target_url
             FROM schedules s

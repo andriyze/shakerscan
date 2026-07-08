@@ -533,6 +533,37 @@ def test_dashboard_action_center_surfaces_refuter_integrity_spike():
     assert item["samples"][0]["latest_finding_count"] == 30
 
 
+def test_dashboard_action_center_surfaces_asm_auth_blockers():
+    target_id = "11111111-1111-4111-8111-111111111111"
+
+    class _Conn:
+        async def fetchrow(self, query, *args):
+            return {}  # no blocker/exception/asm/schedule items from fetchrow paths
+
+        async def fetch(self, query, *args):
+            if "FROM targets t" in query and "JOIN target_endpoints te" in query:
+                return [{
+                    "target_id": target_id,
+                    "target_url": "https://app.example.test",
+                    "blocked_endpoint_count": 7,
+                }]
+            return []  # no failed scans, model rows, AI targets, or refuter rows
+
+    items = asyncio.run(
+        api_module._build_dashboard_action_center(_Conn(), worker_snapshot={"available": False})
+    )
+    by_id = {item["id"]: item for item in items}
+    assert "asm-auth-blockers" in by_id
+    item = by_id["asm-auth-blockers"]
+    assert item["priority"] == "high"
+    assert item["count"] == 7
+    assert item["href"] == f"/asm?target_id={target_id}"
+    assert item["actions"][0]["href"] == f"/asm?target_id={target_id}"
+    assert item["actions"][1]["href"] == f"/schedules?create=true&target_id={target_id}"
+    assert item["metadata"]["blocked_statuses"] == ["auth_missing", "auth_failed"]
+    assert item["samples"][0]["detail"] == "7 endpoint(s) need credentials before replay."
+
+
 def test_dashboard_action_center_surfaces_ai_control_baseline_gaps():
     conn = _ActionCenterConn(ai_rows=[{
         "id": uuid.uuid4(),
