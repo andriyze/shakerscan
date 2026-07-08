@@ -7074,10 +7074,12 @@ class _CampaignLinkRecordingConn(_BlockedRecordingConn):
     and capture the campaign_actions UPDATE issued by the gateway's best-effort
     campaign auto-link (_link_command_result_to_campaign)."""
 
-    def __init__(self, *, campaign_exists=True, **kwargs):
+    def __init__(self, *, campaign_exists=True, action_row=None, **kwargs):
         super().__init__(**kwargs)
         self.campaign_exists = campaign_exists
+        self.action_row = action_row
         self.executed = []
+        self.linked_action_updates = []
 
     async def fetchval(self, query, *args):
         if "FROM campaigns" in query:
@@ -7085,6 +7087,30 @@ class _CampaignLinkRecordingConn(_BlockedRecordingConn):
         return await super().fetchval(query, *args)
 
     async def fetchrow(self, query, *args):
+        if "SELECT * FROM campaign_actions WHERE id=$1" in query:
+            return self.action_row
+        if "UPDATE campaign_actions" in query and "RETURNING *" in query:
+            self.linked_action_updates.append(args)
+            if not self.action_row:
+                return None
+            updated = dict(self.action_row)
+            updated.update({
+                "command_result_id": args[0],
+                "status": args[1],
+                "dry_run": args[2],
+                "risk_tier": args[3],
+                "scan_id": args[4] or updated.get("scan_id"),
+                "scope_receipt_id": args[5] or updated.get("scope_receipt_id"),
+                "approval_receipt_id": args[6] or updated.get("approval_receipt_id"),
+                "finding_ids": json.loads(args[7]),
+                "hypothesis_ids": json.loads(args[8]),
+                "evidence_object_ids": json.loads(args[9]),
+                "tool_receipt_ids": json.loads(args[10]),
+                "blocked_by": json.loads(args[11]),
+                "next_action": args[12] or updated.get("next_action"),
+                "operator_message": args[13] or updated.get("operator_message"),
+            })
+            return updated
         row = await super().fetchrow(query, *args)
         if row is not None and "INSERT INTO command_results" in query:
             # Give the recorded command_result a real UUID id (the base fake's
@@ -7100,6 +7126,37 @@ class _CampaignLinkRecordingConn(_BlockedRecordingConn):
 
 
 CAMPAIGN_ID = "33333333-3333-4333-8333-333333333333"
+CAMPAIGN_ACTION_ID = "55555555-5555-4555-8555-555555555555"
+
+
+def _campaign_action_row(*, command="campaign.list", mission_campaign_id=None):
+    return {
+        "id": CAMPAIGN_ACTION_ID,
+        "campaign_id": None,
+        "operation_plan_id": None,
+        "command_result_id": None,
+        "target_id": None,
+        "scope_receipt_id": None,
+        "approval_receipt_id": None,
+        "scan_id": None,
+        "command": command,
+        "action_name": command,
+        "status": "planned",
+        "dry_run": True,
+        "risk_tier": "read_only",
+        "finding_ids": [],
+        "hypothesis_ids": [],
+        "evidence_object_ids": [],
+        "tool_receipt_ids": [],
+        "blocked_by": [],
+        "next_action": command,
+        "operator_message": "planned",
+        "result_json": {},
+        "created_by": "pytest",
+        "mission_campaign_id": mission_campaign_id,
+        "created_at": None,
+        "updated_at": None,
+    }
 
 
 def test_arsenal_execute_links_dispatched_action_to_campaign(monkeypatch):
@@ -7115,6 +7172,58 @@ def test_arsenal_execute_links_dispatched_action_to_campaign(monkeypatch):
     assert conn.executed
     args = conn.executed[0]
     assert str(args[0]) == CAMPAIGN_ID
+
+
+def test_arsenal_execute_links_result_to_planned_campaign_action(monkeypatch):
+    async def fake_campaigns(**kwargs):
+        return {"campaigns": []}
+
+    monkeypatch.setattr(api_module, "arsenal_campaigns", fake_campaigns)
+    conn = _CampaignLinkRecordingConn(action_row=_campaign_action_row())
+    result = asyncio.run(api_module._arsenal_execute(
+        conn,
+        api_module.ArsenalExecuteRequest(
+            command="campaign.list",
+            campaign_action_id=CAMPAIGN_ACTION_ID,
+        ),
+    ))
+
+    assert result["dispatched"] is True
+    assert result["campaign_action"]["id"] == CAMPAIGN_ACTION_ID
+    assert result["campaign_action"]["status"] == "completed"
+    assert result["campaign_action"]["command_result_id"] == result["command_result"]["id"]
+    assert conn.linked_action_updates
+
+
+def test_arsenal_execute_rejects_mismatched_campaign_action_command():
+    conn = _CampaignLinkRecordingConn(action_row=_campaign_action_row(command="target.list"))
+    with pytest.raises(api_module.HTTPException) as exc:
+        asyncio.run(api_module._arsenal_execute(
+            conn,
+            api_module.ArsenalExecuteRequest(
+                command="campaign.list",
+                campaign_action_id=CAMPAIGN_ACTION_ID,
+            ),
+        ))
+    assert exc.value.status_code == 409
+
+
+def test_arsenal_execute_rejects_campaign_action_from_other_campaign():
+    conn = _CampaignLinkRecordingConn(
+        action_row=_campaign_action_row(
+            mission_campaign_id="66666666-6666-4666-8666-666666666666",
+        )
+    )
+    with pytest.raises(api_module.HTTPException) as exc:
+        asyncio.run(api_module._arsenal_execute(
+            conn,
+            api_module.ArsenalExecuteRequest(
+                command="campaign.list",
+                campaign_id=CAMPAIGN_ID,
+                campaign_action_id=CAMPAIGN_ACTION_ID,
+            ),
+        ))
+    assert exc.value.status_code == 409
 
 
 def test_arsenal_execute_unknown_campaign_id_is_404():

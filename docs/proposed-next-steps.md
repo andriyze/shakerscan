@@ -994,7 +994,7 @@ captured sibling fields and avoiding flat-key bodies that type-strict login/sear
 finding, not merely an attempted endpoint.
 
 ### 7. Campaign, hypothesis, and application-graph consumer layer
-**Status: PHASE 2 GRAPH + HYPOTHESES + SITUATION REPORT + CAMPAIGN PLANNING DONE; EXECUTION/PROMOTION OPEN.** `application_graph_nodes` /
+**Status: PHASE 3 GRAPH + HYPOTHESES + SITUATION REPORT + CAMPAIGN PLANNING + EXECUTION LINKAGE DONE; PROMOTION OPEN.** `application_graph_nodes` /
 `application_graph_edges` now persist route/object nodes plus producer/consumer/auth-boundary edges
 from discovery + recursive BOLA `resource_map`; `GET /targets/{id}/graph` exposes the graph.
 Object-ID and cross-user primitives also exist per scan (`access_control_checks` object-id
@@ -1003,8 +1003,11 @@ extraction, `_path_has_object_id_segment`, cross-principal replay in `proof_of_e
 by target, summarizing route/object/principal nodes, producer/consumer edges, auth-boundary edges,
 and graph-missing targets. `POST /arsenal/hypotheses/{id}/plan-campaign` /
 `hypothesis.plan_campaign` now creates or links a mission campaign and planned campaign action from a
-hypothesis `next_test_action` without executing it, queueing scans, or creating findings. The
-remaining gap is deterministic proof execution and promotion from those planned actions. This should borrow
+hypothesis `next_test_action` without executing it, queueing scans, or creating findings. `POST
+/arsenal/execute` now accepts `campaign_action_id`, validates that the requested command matches the
+planned action, and binds the resulting `command_results` row back onto that planned action so the
+mission timeline can show the transition from planned to blocked/queued/completed. The remaining gap
+is deterministic proof promotion from those executed planned actions. This should borrow
 T3MP3ST's PackBoard idea, but adapt it into ShakerScan's proof model: leads are coordinated work
 items, not findings.
 

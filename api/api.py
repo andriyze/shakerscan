@@ -3570,6 +3570,7 @@ class ArsenalExecuteRequest(BaseModel):
     scope_receipt_id: Optional[str] = None
     created_by: Optional[str] = None
     campaign_id: Optional[str] = None
+    campaign_action_id: Optional[str] = None
 
 
 class HypothesisClaimRequest(BaseModel):
@@ -20026,6 +20027,109 @@ async def _link_command_result_to_campaign(conn, campaign_id, command_result_id)
         return
 
 
+_CAMPAIGN_ACTION_STATUS_FROM_COMMAND_RESULT = {
+    "planned": "planned",
+    "completed": "completed",
+    "queued": "queued",
+    "running": "running",
+    "blocked": "blocked",
+    "approval_required": "approval_required",
+    "approved": "approved",
+    "partial": "partial",
+    "degraded": "degraded",
+    "failed": "failed",
+    "cancelled": "cancelled",
+    "evidence_bound": "evidence_bound",
+    "retest_scheduled": "retest_scheduled",
+    "refuter_requested": "refuter_requested",
+}
+
+
+async def _validate_campaign_action_for_execution(conn, req: ArsenalExecuteRequest) -> dict[str, Any] | None:
+    if not req.campaign_action_id:
+        return None
+    try:
+        action_uuid = uuid.UUID(str(req.campaign_action_id))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="campaign_action_id must be a UUID") from exc
+    row = await conn.fetchrow("SELECT * FROM campaign_actions WHERE id=$1", action_uuid)
+    if not row:
+        raise HTTPException(status_code=404, detail="Campaign action not found")
+    planned_command = str(row.get("command") or row.get("action_name") or "").strip()
+    if planned_command and planned_command != req.command:
+        raise HTTPException(status_code=409, detail="campaign_action_id command does not match requested command")
+    if req.campaign_id and row.get("mission_campaign_id"):
+        try:
+            requested_campaign = uuid.UUID(str(req.campaign_id))
+        except ValueError:
+            raise HTTPException(status_code=400, detail="campaign_id must be a UUID")
+        if uuid.UUID(str(row.get("mission_campaign_id"))) != requested_campaign:
+            raise HTTPException(status_code=409, detail="campaign_action_id belongs to a different campaign")
+    return _public_campaign_action_row(row)
+
+
+async def _link_command_result_to_campaign_action(
+    conn,
+    campaign_action_id: str | uuid.UUID | None,
+    command_result: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Bind an executed command result back to the planned campaign action row."""
+    if not campaign_action_id or not isinstance(command_result, dict) or not command_result.get("id"):
+        return None
+    try:
+        action_uuid = uuid.UUID(str(campaign_action_id))
+        command_result_uuid = uuid.UUID(str(command_result.get("id")))
+    except (TypeError, ValueError):
+        return None
+    status = _CAMPAIGN_ACTION_STATUS_FROM_COMMAND_RESULT.get(str(command_result.get("status") or ""), "completed")
+    try:
+        row = await conn.fetchrow(
+            """
+            UPDATE campaign_actions
+            SET command_result_id=$1,
+                status=$2,
+                dry_run=$3,
+                risk_tier=$4,
+                scan_id=COALESCE($5, scan_id),
+                scope_receipt_id=COALESCE($6, scope_receipt_id),
+                approval_receipt_id=COALESCE($7, approval_receipt_id),
+                finding_ids=$8::jsonb,
+                hypothesis_ids=$9::jsonb,
+                evidence_object_ids=$10::jsonb,
+                tool_receipt_ids=$11::jsonb,
+                blocked_by=$12::jsonb,
+                next_action=COALESCE($13, next_action),
+                operator_message=COALESCE($14, operator_message),
+                result_json=COALESCE(result_json, '{}'::jsonb) || $15::jsonb,
+                updated_at=NOW()
+            WHERE id=$16
+            RETURNING *
+            """,
+            command_result_uuid,
+            status,
+            bool(command_result.get("dry_run")),
+            str(command_result.get("risk_tier") or "read_only"),
+            _optional_uuid(command_result.get("scan_id")),
+            command_result.get("scope_receipt_id") or None,
+            _optional_uuid(command_result.get("approval_receipt_id")),
+            json.dumps(command_result.get("finding_ids") or []),
+            json.dumps(command_result.get("hypothesis_ids") or []),
+            json.dumps(command_result.get("evidence_object_ids") or []),
+            json.dumps(command_result.get("tool_receipt_ids") or []),
+            json.dumps(command_result.get("blocked_by") or []),
+            command_result.get("next_action"),
+            command_result.get("operator_message"),
+            json.dumps({
+                "executed_command_result_id": str(command_result_uuid),
+                "execution_linked_at": datetime.now(timezone.utc).isoformat(),
+            }),
+            action_uuid,
+        )
+        return _public_campaign_action_row(row) if row else None
+    except Exception:
+        return None
+
+
 async def _command_result_response_row(conn, command_result_id) -> dict[str, Any] | None:
     if not command_result_id:
         return None
@@ -20131,6 +20235,7 @@ async def _arsenal_adapter_pending_response(
         created_by=created_by if created_by is not None else req.created_by,
     )
     await _link_command_result_to_campaign(conn, req.campaign_id, cr["id"] if cr else None)
+    linked_action = await _link_command_result_to_campaign_action(conn, req.campaign_action_id, cr)
     return {
         "command": req.command,
         "dispatched": False,
@@ -20153,12 +20258,14 @@ async def _arsenal_adapter_pending_response(
             missing_confirmations=[],
             adapter_status="pending",
         ),
+        "campaign_action": linked_action,
         "execution_enabled": False,
     }
 
 
 async def _arsenal_execute(conn, req: ArsenalExecuteRequest) -> dict[str, Any]:
     command, status, risk_tier = await _validate_arsenal_execute_request(conn, req)
+    await _validate_campaign_action_for_execution(conn, req)
 
     readonly = _arsenal_readonly_adapters()
     gated = _arsenal_gated_adapters()
@@ -20176,6 +20283,7 @@ async def _arsenal_execute(conn, req: ArsenalExecuteRequest) -> dict[str, Any]:
             created_by=req.created_by,
         )
         await _link_command_result_to_campaign(conn, req.campaign_id, cr["id"])
+        linked_action = await _link_command_result_to_campaign_action(conn, req.campaign_action_id, cr)
         return {
             "command": req.command,
             "dispatched": True,
@@ -20196,6 +20304,7 @@ async def _arsenal_execute(conn, req: ArsenalExecuteRequest) -> dict[str, Any]:
                 command_result=cr,
                 adapter_status="dispatched",
             ),
+            "campaign_action": linked_action,
             "execution_enabled": True,
         }
 
@@ -20232,6 +20341,7 @@ async def _arsenal_execute(conn, req: ArsenalExecuteRequest) -> dict[str, Any]:
             created_by=req.created_by,
         )
         await _link_command_result_to_campaign(conn, req.campaign_id, cr["id"] if cr else None)
+        linked_action = await _link_command_result_to_campaign_action(conn, req.campaign_action_id, cr)
         return {
             "command": req.command,
             "dispatched": False,
@@ -20255,6 +20365,7 @@ async def _arsenal_execute(conn, req: ArsenalExecuteRequest) -> dict[str, Any]:
                 missing_confirmations=missing_confs,
                 adapter_status="not_dispatched",
             ),
+            "campaign_action": linked_action,
             "execution_enabled": False,
         }
 
@@ -20283,6 +20394,7 @@ async def _arsenal_execute(conn, req: ArsenalExecuteRequest) -> dict[str, Any]:
             created_by=req.created_by,
         )
         await _link_command_result_to_campaign(conn, req.campaign_id, cr["id"] if cr else None)
+        linked_action = await _link_command_result_to_campaign_action(conn, req.campaign_action_id, cr)
         return {
             "command": req.command,
             "dispatched": False,
@@ -20306,6 +20418,7 @@ async def _arsenal_execute(conn, req: ArsenalExecuteRequest) -> dict[str, Any]:
                 missing_confirmations=[],
                 adapter_status="pending",
             ),
+            "campaign_action": linked_action,
             "execution_enabled": False,
         }
 
@@ -20315,6 +20428,7 @@ async def _arsenal_execute(conn, req: ArsenalExecuteRequest) -> dict[str, Any]:
     command_result = None
     await _link_command_result_to_campaign(conn, req.campaign_id, operation_id)
     command_result = await _command_result_response_row(conn, operation_id)
+    linked_action = await _link_command_result_to_campaign_action(conn, req.campaign_action_id, command_result)
     return {
         "command": req.command,
         "dispatched": True,
@@ -20337,6 +20451,7 @@ async def _arsenal_execute(conn, req: ArsenalExecuteRequest) -> dict[str, Any]:
             missing_confirmations=[],
             adapter_status="dispatched",
         ),
+        "campaign_action": linked_action,
         "execution_enabled": True,
     }
 
@@ -20344,6 +20459,7 @@ async def _arsenal_execute(conn, req: ArsenalExecuteRequest) -> dict[str, Any]:
 async def _arsenal_execute_detached(req: ArsenalExecuteRequest) -> dict[str, Any]:
     async with db_pool.acquire() as conn:
         _command, status, risk_tier = await _validate_arsenal_execute_request(conn, req)
+        await _validate_campaign_action_for_execution(conn, req)
 
     readonly = _arsenal_readonly_adapters()
     gated = _arsenal_gated_adapters()
@@ -20361,6 +20477,7 @@ async def _arsenal_execute_detached(req: ArsenalExecuteRequest) -> dict[str, Any
                 created_by=req.created_by,
             )
             await _link_command_result_to_campaign(conn, req.campaign_id, cr["id"])
+            linked_action = await _link_command_result_to_campaign_action(conn, req.campaign_action_id, cr)
         return {
             "command": req.command,
             "dispatched": True,
@@ -20381,6 +20498,7 @@ async def _arsenal_execute_detached(req: ArsenalExecuteRequest) -> dict[str, Any
                 command_result=cr,
                 adapter_status="dispatched",
             ),
+            "campaign_action": linked_action,
             "execution_enabled": True,
         }
 
@@ -20418,6 +20536,7 @@ async def _arsenal_execute_detached(req: ArsenalExecuteRequest) -> dict[str, Any
                 created_by=req.created_by,
             )
             await _link_command_result_to_campaign(conn, req.campaign_id, cr["id"] if cr else None)
+            linked_action = await _link_command_result_to_campaign_action(conn, req.campaign_action_id, cr)
         return {
             "command": req.command,
             "dispatched": False,
@@ -20441,6 +20560,7 @@ async def _arsenal_execute_detached(req: ArsenalExecuteRequest) -> dict[str, Any
                 missing_confirmations=missing_confs,
                 adapter_status="not_dispatched",
             ),
+            "campaign_action": linked_action,
             "execution_enabled": False,
         }
 
@@ -20470,6 +20590,7 @@ async def _arsenal_execute_detached(req: ArsenalExecuteRequest) -> dict[str, Any
                 created_by=req.created_by,
             )
             await _link_command_result_to_campaign(conn, req.campaign_id, cr["id"] if cr else None)
+            linked_action = await _link_command_result_to_campaign_action(conn, req.campaign_action_id, cr)
         return {
             "command": req.command,
             "dispatched": False,
@@ -20493,6 +20614,7 @@ async def _arsenal_execute_detached(req: ArsenalExecuteRequest) -> dict[str, Any
                 missing_confirmations=[],
                 adapter_status="pending",
             ),
+            "campaign_action": linked_action,
             "execution_enabled": False,
         }
 
@@ -20502,6 +20624,7 @@ async def _arsenal_execute_detached(req: ArsenalExecuteRequest) -> dict[str, Any
     async with db_pool.acquire() as conn:
         await _link_command_result_to_campaign(conn, req.campaign_id, operation_id)
         command_result = await _command_result_response_row(conn, operation_id)
+        linked_action = await _link_command_result_to_campaign_action(conn, req.campaign_action_id, command_result)
     return {
         "command": req.command,
         "dispatched": True,
@@ -20524,6 +20647,7 @@ async def _arsenal_execute_detached(req: ArsenalExecuteRequest) -> dict[str, Any
             missing_confirmations=[],
             adapter_status="dispatched",
         ),
+        "campaign_action": linked_action,
         "execution_enabled": True,
     }
 
