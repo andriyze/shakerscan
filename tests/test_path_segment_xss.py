@@ -55,6 +55,26 @@ def test_build_path_segment_url_replaces_only_target_segment():
     assert "%3Cscript%3E" in out  # payload url-encoded into the path
 
 
+def test_path_value_probe_candidate_only_for_lookup_routes():
+    candidate = ac._path_value_probe_candidate(
+        urllib.parse.urlparse("http://h/rest/track-order"),
+        "sample123",
+    )
+    assert candidate == "http://h/rest/track-order/sample123"
+    assert ac._path_value_probe_candidate(
+        urllib.parse.urlparse("http://h/rest/products/reviews"),
+        "sample123",
+    ) is None
+    assert ac._path_value_probe_candidate(
+        urllib.parse.urlparse("http://h/account/preferences"),
+        "sample123",
+    ) is None
+    assert ac._path_value_probe_candidate(
+        urllib.parse.urlparse("http://h/rest/track-order?x=1"),
+        "sample123",
+    ) is None
+
+
 def test_path_segment_reflected_payload_is_detected(monkeypatch):
     # Stub curl so the path-injected payload is reflected unencoded -> finding.
     async def fake_run(cmd, timeout=15):
@@ -157,3 +177,59 @@ def test_smart_xss_path_segment_browser_proof_is_high_verified(monkeypatch):
     assert f["severity"] == "high"
     assert f.get("cvss_score") == 7.4
     assert f.get("browser_proof")
+
+
+def test_smart_xss_synthesizes_lookup_path_value_for_browser_proof(monkeypatch):
+    class _Proof:
+        proven = True
+        confidence = 0.99
+        technique = "headless_xss_dialog"
+        extracted_data = "Dialog triggered: xss"
+
+        def to_dict(self):
+            return {"technique": self.technique, "proven": True}
+
+    requested_urls = []
+
+    async def fake_run(cmd, timeout=15):
+        test_url = cmd[-1]
+        requested_urls.append(test_url)
+        seg = urllib.parse.urlparse(test_url).path.rsplit("/", 1)[-1]
+        reflected = urllib.parse.unquote(seg)
+        body = f"<html><body>Order {reflected} not found</body></html>"
+        return body, "", 0
+
+    async def fake_proof(url, param, payload, prebuilt_url=None, **kwargs):
+        assert prebuilt_url and "/rest/track-order/" in prebuilt_url
+        return _Proof()
+
+    monkeypatch.setattr(ac, "run", fake_run)
+    monkeypatch.setattr(ac, "HAS_XSS_PROOF", True)
+    monkeypatch.setattr(ac, "prove_xss_headless", fake_proof)
+
+    res = asyncio.run(ac.smart_xss_test(
+        "http://h",
+        [{"url": "http://h/rest/track-order", "method": "GET"}],
+        max_endpoints=5,
+    ))
+
+    assert any("/rest/track-order/xss" in url for url in requested_urls)
+    assert res["findings"], "expected synthesized path-value route to be browser-proven"
+    f = res["findings"][0]
+    assert f["injection_point"] == "path_segment"
+    assert f["verified"] is True
+    assert f["severity"] == "high"
+
+
+def test_smart_xss_does_not_synthesize_for_plain_collection_route(monkeypatch):
+    async def fail_run(cmd, timeout=15):
+        raise AssertionError("plain collection route should not be probed")
+
+    monkeypatch.setattr(ac, "run", fail_run)
+    res = asyncio.run(ac.smart_xss_test(
+        "http://h",
+        [{"url": "http://h/rest/products/reviews", "method": "GET"}],
+        max_endpoints=5,
+    ))
+
+    assert res["findings"] == []

@@ -596,6 +596,38 @@ def _build_path_segment_url(parsed, seg_index: int, value: str) -> str:
     return urllib.parse.urlunparse(parsed._replace(path="/".join(segs)))
 
 
+_PATH_VALUE_ROUTE_TOKENS = (
+    "track", "lookup", "order", "receipt", "invoice", "status", "verify",
+    "confirm", "reset", "recover", "token", "reference", "ref", "ticket",
+)
+
+
+def _path_value_probe_candidate(parsed: urllib.parse.ParseResult, sample_value: str) -> str | None:
+    """Return a child-segment probe URL for routes that likely accept a path value.
+
+    Some applications expose value-in-path lookups as a parent route in discovery
+    (for example ``/orders/track``), while the vulnerable reflection happens at
+    ``/orders/track/{value}``. We only synthesize this for queryless GET-style
+    lookup routes with an action token, and the normal path-segment detector still
+    requires reflection or browser execution proof before a finding is emitted.
+    """
+    if parsed.query or parsed.params:
+        return None
+    path = parsed.path or ""
+    if not path or path.endswith("/"):
+        return None
+    if _injectable_path_segment(path):
+        return None
+    route_tokens = {token for token in re.split(r"[^a-z0-9]+", path.lower()) if token}
+    if not route_tokens.intersection(_PATH_VALUE_ROUTE_TOKENS):
+        return None
+    segments = [seg for seg in path.split("/") if seg]
+    if not segments:
+        return None
+    candidate_path = "/" + "/".join([*segments, urllib.parse.quote(sample_value, safe="")])
+    return urllib.parse.urlunparse(parsed._replace(path=candidate_path))
+
+
 async def custom_xss_test(url: str, auth_session: Any | None = None) -> dict:
     """
     Custom XSS detection using proven payloads and reflection analysis.
@@ -8005,6 +8037,12 @@ async def smart_xss_test(
         # params.
         parsed_ep = urllib.parse.urlparse(endpoint_url)
         path_seg = _injectable_path_segment(parsed_ep.path)
+        if not params and not path_seg:
+            probe_url = _path_value_probe_candidate(parsed_ep, "shakerxss123")
+            if probe_url:
+                endpoint_url = probe_url
+                parsed_ep = urllib.parse.urlparse(endpoint_url)
+                path_seg = _injectable_path_segment(parsed_ep.path)
 
         if not params and not path_seg:
             continue
