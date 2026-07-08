@@ -562,7 +562,9 @@ raw shell execution or LLM-produced verified findings.
     questions, benign explanations, required evidence refs, and verdict paths. Add benchmark and
     planner integrity ledgers for contamination, retractions, stale-fleet runs, phantom tool
     assumptions, and methodology corrections. DONE phase 1 for file-backed planner/benchmark ledger
-    locations and planner fixture scoring.
+    locations and planner fixture scoring; the benchmark ledger now records the flat Juice Shop
+    post-retest recall result as an explicit correction instead of treating retest plumbing as recall
+    progress.
 11. **Planner evals and local-agent planning, dry-run only:** planner fixtures, integrity ledgers,
     local-agent capability detection, target context packs, deterministic local-agent-labeled
     dry-run planning, and bounded harmless local-agent capability ping/testing are phase 1 done.
