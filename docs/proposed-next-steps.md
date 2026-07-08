@@ -976,7 +976,10 @@ reflected XSS path-value synthesis on lookup/track-style GET routes: queryless p
 receive a constrained synthetic child segment and must still pass the existing reflection/browser-proof
 gates before any finding is emitted. DONE phase 9 for stricter-but-broader NoSQL JSON-body auth-bypass
 success signals: token/session responses with account/customer/id identity markers count as proof,
-while token-only or generic 200 responses remain insufficient.
+while token-only or generic 200 responses remain insufficient. DONE phase 10 for JSON mass-assignment
+effect proof: privileged-field probes now accept normalized privilege effects such as
+`authorities=["admin:write"]` only when the baseline response lacks the same privilege signal, while
+exact field reflection remains the preferred proof.
 
 **Done when:** recorded two-user benchmark scorecards show the targeted miss becoming a deterministic
 finding, not merely an attempted endpoint.

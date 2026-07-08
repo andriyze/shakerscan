@@ -678,6 +678,77 @@ def test_json_mass_assignment_ignores_baseline_privileged_field(monkeypatch):
     assert result["findings"] == []
 
 
+def test_json_mass_assignment_detects_equivalent_privilege_effect(monkeypatch):
+    async def fake_run(cmd, timeout=15):
+        body = json.loads(cmd[cmd.index("-d") + 1])
+        if body.get("role") == "admin":
+            return (
+                json.dumps({
+                    "id": 10,
+                    "email": "user@example.test",
+                    "authorities": ["profile:read", "admin:write"],
+                })
+                + "__SHAKERSCAN_MASS_ASSIGN__200__SHAKERSCAN_MASS_ASSIGN__",
+                "",
+                0,
+            )
+        return (
+            json.dumps({
+                "id": 10,
+                "email": "user@example.test",
+                "authorities": ["profile:read"],
+            })
+            + "__SHAKERSCAN_MASS_ASSIGN__200__SHAKERSCAN_MASS_ASSIGN__",
+            "",
+            0,
+        )
+
+    monkeypatch.setattr(active_checks, "run", fake_run)
+
+    result = asyncio.run(active_checks.mass_assignment_test_json_body(
+        url="https://example.test/api/profile",
+        method="PATCH",
+        params=["email"],
+        body_template={"email": "user@example.test"},
+        content_type="application/json",
+        max_fields=1,
+    ))
+
+    assert result["vulnerable"] is True
+    assert result["findings"][0]["parameter"] == "role"
+    assert result["findings"][0]["evidence_type"] == "privileged_effect_observed"
+    assert result["findings"][0]["observed_path"] == "$.authorities"
+    assert result["findings"][0]["observed_match_type"] == "equivalent_admin_role"
+
+
+def test_json_mass_assignment_ignores_equivalent_signal_present_at_baseline(monkeypatch):
+    async def fake_run(cmd, timeout=15):
+        return (
+            json.dumps({
+                "id": 10,
+                "email": "admin@example.test",
+                "authorities": ["profile:read", "admin:write"],
+            })
+            + "__SHAKERSCAN_MASS_ASSIGN__200__SHAKERSCAN_MASS_ASSIGN__",
+            "",
+            0,
+        )
+
+    monkeypatch.setattr(active_checks, "run", fake_run)
+
+    result = asyncio.run(active_checks.mass_assignment_test_json_body(
+        url="https://example.test/api/profile",
+        method="PATCH",
+        params=["email"],
+        body_template={"email": "admin@example.test"},
+        content_type="application/json",
+        max_fields=1,
+    ))
+
+    assert result["vulnerable"] is False
+    assert result["findings"] == []
+
+
 def test_json_mass_assignment_ignores_rejected_field(monkeypatch):
     async def fake_run(cmd, timeout=15):
         body = json.loads(cmd[cmd.index("-d") + 1])

@@ -2897,25 +2897,61 @@ async def mass_assignment_test_json_body(
                 return False
         return str(observed).lower() == str(expected).lower()
 
-    def _json_field_matches(body: str, field: str, expected: Any) -> bool:
+    def _json_privilege_signal(body: str, field: str, expected: Any, category: str) -> dict[str, Any] | None:
         if not body:
-            return False
+            return None
         try:
             parsed = json.loads(body)
         except Exception:
-            return False
+            return None
         target = _norm_key(field)
+        admin_tokens = {"admin", "administrator", "superuser", "root"}
+        role_keys = {
+            "role", "roles", "userrole", "usertype", "accounttype",
+            "permission", "permissions", "authority", "authorities",
+            "scope", "scopes", "group", "groups",
+        }
+        admin_flag_keys = {
+            "admin", "isadmin", "administrator", "superuser", "root",
+        }
+        status_keys = {"verified", "isverified", "emailverified", "accountverified"}
 
-        def _walk(value: Any) -> bool:
+        def _contains_admin_token(value: Any) -> bool:
+            if isinstance(value, list):
+                return any(_contains_admin_token(item) for item in value[:20])
+            if isinstance(value, dict):
+                return any(_contains_admin_token(child) for child in value.values())
+            tokens = [
+                token for token in re.split(r"[\s,;|:/]+", str(value).lower())
+                if token
+            ]
+            return any(token in admin_tokens for token in tokens)
+
+        def _walk(value: Any, path: str = "$") -> dict[str, Any] | None:
             if isinstance(value, dict):
                 for key, child in value.items():
-                    if _norm_key(str(key)) == target and _values_equal(child, expected):
-                        return True
-                    if _walk(child):
-                        return True
+                    norm = _norm_key(str(key))
+                    child_path = f"{path}.{key}"
+                    if norm == target and _values_equal(child, expected):
+                        return {"path": child_path, "match_type": "exact_field"}
+                    if category == "role_escalation" and norm in role_keys and _contains_admin_token(child):
+                        return {"path": child_path, "match_type": "equivalent_admin_role"}
+                    if category == "admin_flags":
+                        if norm in admin_flag_keys and _values_equal(child, True):
+                            return {"path": child_path, "match_type": "equivalent_admin_flag"}
+                        if norm in role_keys and _contains_admin_token(child):
+                            return {"path": child_path, "match_type": "equivalent_admin_role"}
+                    if category == "account_status" and norm in status_keys and _values_equal(child, True):
+                        return {"path": child_path, "match_type": "equivalent_account_status"}
+                    nested = _walk(child, child_path)
+                    if nested:
+                        return nested
             elif isinstance(value, list):
-                return any(_walk(child) for child in value[:10])
-            return False
+                for idx, child in enumerate(value[:10]):
+                    nested = _walk(child, f"{path}[{idx}]")
+                    if nested:
+                        return nested
+            return None
 
         return _walk(parsed)
 
@@ -2965,9 +3001,10 @@ async def mass_assignment_test_json_body(
             continue
         if any(marker in test_lower for marker in rejection_markers):
             continue
-        if not _json_field_matches(test_out, field, value):
+        signal = _json_privilege_signal(test_out, field, value, category)
+        if not signal:
             continue
-        if _json_field_matches(baseline_out, field, value):
+        if _json_privilege_signal(baseline_out, field, value, category):
             continue
 
         results["vulnerable"] = True
@@ -2977,7 +3014,13 @@ async def mass_assignment_test_json_body(
             "category": category,
             "baseline_status": baseline_status,
             "payload_status": test_status,
-            "evidence_type": "privileged_field_reflected",
+            "evidence_type": (
+                "privileged_field_reflected"
+                if signal.get("match_type") == "exact_field"
+                else "privileged_effect_observed"
+            ),
+            "observed_path": signal.get("path"),
+            "observed_match_type": signal.get("match_type"),
             "response_snippet": test_out[:500] if test_out else "",
         })
 
