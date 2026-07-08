@@ -144,6 +144,7 @@ def _record_subprocess_receipt(
     status = "timeout" if timed_out else "success" if exit_code == 0 else "failed"
     parser_status = "not_applicable" if timed_out else "not_run"
     now = time.monotonic()
+    stdout_preview = str(stdout or "")[:500]
     stderr_preview = str(stderr or error or "")[:500]
     _subprocess_receipts.append({
         "tool_name": tool_name,
@@ -157,6 +158,7 @@ def _record_subprocess_receipt(
         "command_hash": hashlib.sha256("\x00".join(redacted).encode("utf-8", "ignore")).hexdigest(),
         "stdout_length": len(stdout or ""),
         "stderr_length": len(stderr or error or ""),
+        "stdout_preview": stdout_preview,
         "stderr_preview": stderr_preview,
     })
 

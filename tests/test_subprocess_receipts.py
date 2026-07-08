@@ -30,6 +30,7 @@ def test_common_run_records_redacted_subprocess_receipt():
     assert receipt["exit_code"] == 0
     assert receipt["timed_out"] is False
     assert receipt["stdout_length"] >= 3
+    assert receipt["stdout_preview"] == "ok\n"
     assert "secret-token" not in repr(receipt)
     assert "[REDACTED]" in receipt["redacted_argv"]
     assert len(receipt["command_hash"]) == 64

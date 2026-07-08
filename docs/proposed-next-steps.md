@@ -1205,9 +1205,11 @@ scanner process and remote deletion/lifecycle adapters remain open.
    DONE phase 2: `scanner_tools.common.run()` now records bounded, redacted subprocess outcomes
    (`redacted_argv`, command hash, exit code, timeout flag, duration, stdout/stderr lengths, stderr
    preview) into `scan_metadata.subprocess_receipts`, and worker finalization persists those exact
-   outcomes as normal `tool_receipts` with `scanner-subprocess` provenance. Remaining work is parser
-   error classification that binds subprocess stderr/stdout previews to tool-specific parser failures
-   instead of generic subprocess outcomes.
+   outcomes as normal `tool_receipts` with `scanner-subprocess` provenance. DONE phase 3: bounded
+   subprocess receipts now include stdout previews and worker finalization conservatively classifies
+   known JSON/parser failure markers from stderr/stdout previews as `status=parser_error` with
+   `parser_status=failed`. Remaining work is richer stdout/stderr artifact refs for long parser
+   failures and remote evidence lifecycle deletion.
 5. DONE phase 1: tool receipts include tool version, adapter version, command hash, redacted argv, worker
    build/container image, target scope, scope receipt, policy profile, approval id, timing, exit code,
    timeout, stdout/stderr artifact refs, parsed evidence refs, parser status, and redaction summary.
@@ -1222,7 +1224,7 @@ scanner process and remote deletion/lifecycle adapters remain open.
    success, failure, timeout, skip, and parser-error paths. Internal AI Gate/Model Intake worker
    receipts, parsed-result/passive DAST module receipts, ASM executor receipts, and bounded scanner
    subprocess outcome receipts now cover success/failure/recorded/skipped states plus exact subprocess
-   exit/timeout/stderr-preview evidence. Tool-specific parser-error classification remains open.
+   exit/timeout/stderr-preview evidence and conservative parser-error classification.
 9. DONE phase 1: add a release/test gate equivalent to T3MP3ST's "no phantom tools": every claimed
    adapter must be `installed`, `runnable`, `waived`, or `catalog_only`, and UI/report copy must not
    imply a missing adapter ran. The `describe_tools`/`/arsenal/tools` response carries

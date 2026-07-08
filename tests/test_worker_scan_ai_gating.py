@@ -988,6 +988,56 @@ def test_external_dast_subprocess_receipts_preserve_exact_outcome():
     assert "secret-token" not in json.dumps(args, default=str)
 
 
+def test_external_dast_subprocess_receipts_classify_parser_errors():
+    receipt_id = uuid.uuid4()
+    conn = _FakeReceiptConnection(receipt_id)
+    result = {
+        "scan_metadata": {
+            "subprocess_receipts": [
+                {
+                    "tool_name": "ffuf",
+                    "status": "failed",
+                    "parser_status": "not_run",
+                    "exit_code": 1,
+                    "timed_out": False,
+                    "timeout_seconds": 30,
+                    "duration_ms": 100,
+                    "redacted_argv": ["ffuf", "-of", "json"],
+                    "command_hash": "b" * 64,
+                    "stdout_length": 0,
+                    "stderr_length": 68,
+                    "stdout_preview": "",
+                    "stderr_preview": "failed to parse JSON: invalid character '<' looking for beginning of value",
+                }
+            ]
+        }
+    }
+
+    recorded = asyncio.run(worker._record_external_dast_tool_receipts(
+        conn,
+        scan_id="11111111-1111-1111-1111-111111111111",
+        job_id="job-parser",
+        target="https://example.test",
+        target_id="33333333-3333-3333-3333-333333333333",
+        options={"scan_type": "smart"},
+        result=result,
+        started_at=datetime(2026, 7, 6, tzinfo=timezone.utc),
+        completed_at=datetime(2026, 7, 6, 0, 0, 1, tzinfo=timezone.utc),
+        duration_seconds=1,
+    ))
+
+    assert recorded == [str(receipt_id)]
+    _query, args = conn.fetchrow_calls[0]
+    assert args[0] == "ffuf"
+    assert args[11] == "parser_error"
+    assert args[12] == "failed"
+    assert args[13] == 1
+    assert args[14] is False
+    metadata = json.loads(args[21])
+    assert metadata["summary"]["parser_error_reason"] == "invalid character"
+    assert metadata["summary"]["stderr_preview"].startswith("failed to parse JSON")
+
+
 def test_asm_executor_receipt_records_partial_batch_and_links_metadata():
     receipt_id = uuid.uuid4()
     conn = _FakeReceiptConnection(receipt_id)

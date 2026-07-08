@@ -311,6 +311,43 @@ def _truthy_module_output(value: Any) -> bool:
     return value not in (None, "", [], {})
 
 
+def _subprocess_parser_error_reason(tool_name: str, receipt: dict[str, Any]) -> str | None:
+    """Conservatively classify known parser/output-format failures from subprocess previews."""
+    tool = str(tool_name or "").strip().lower()
+    parser_backed_tools = {
+        "httpx", "katana", "subfinder", "ffuf", "nuclei", "dalfox",
+        "sqlmap", "nmap", "sslyze", "testssl", "playwright",
+    }
+    if tool not in parser_backed_tools:
+        return None
+    if str(receipt.get("status") or "").strip() == "timeout" or receipt.get("timed_out"):
+        return None
+    combined = " ".join(
+        str(receipt.get(key) or "")
+        for key in ("stderr_preview", "stdout_preview")
+    ).lower()
+    if not combined:
+        return None
+    parser_markers = (
+        "json: cannot unmarshal",
+        "invalid character",
+        "unexpected end of json input",
+        "failed to parse json",
+        "failed parsing json",
+        "json parse error",
+        "parse error",
+        "could not parse",
+        "cannot parse",
+        "malformed json",
+        "invalid json",
+        "unmarshal type error",
+    )
+    for marker in parser_markers:
+        if marker in combined:
+            return marker
+    return None
+
+
 def _external_dast_tool_specs(result: dict[str, Any], options: dict[str, Any]) -> list[dict[str, Any]]:
     run_kind = str((options or {}).get("run_kind") or "").strip()
     if run_kind in AI_GATE_RUN_KINDS | MODEL_INTAKE_RUN_KINDS:
@@ -514,13 +551,16 @@ def _external_dast_tool_specs(result: dict[str, Any], options: dict[str, Any]) -
         if normalized_tool not in known_subprocess_tools:
             continue
         redacted_argv = item.get("redacted_argv") if isinstance(item.get("redacted_argv"), list) else [normalized_tool]
+        parser_error_reason = _subprocess_parser_error_reason(normalized_tool, item)
+        status = "parser_error" if parser_error_reason else item.get("status") or "recorded"
+        parser_status = "failed" if parser_error_reason else item.get("parser_status") or "not_applicable"
         specs.append({
             "tool_name": normalized_tool,
             "tool_version": "scanner-subprocess",
             "parser": "scanner-subprocess-outcome-v1",
             "proof_contract": "subprocess-exit-evidence",
-            "status": item.get("status") or "recorded",
-            "parser_status": item.get("parser_status") or "not_applicable",
+            "status": status,
+            "parser_status": parser_status,
             "exit_code": item.get("exit_code"),
             "timed_out": bool(item.get("timed_out")),
             "redacted_argv": redacted_argv,
@@ -531,7 +571,9 @@ def _external_dast_tool_specs(result: dict[str, Any], options: dict[str, Any]) -
                 "duration_ms": item.get("duration_ms"),
                 "stdout_length": item.get("stdout_length"),
                 "stderr_length": item.get("stderr_length"),
+                "stdout_preview": item.get("stdout_preview"),
                 "stderr_preview": item.get("stderr_preview"),
+                "parser_error_reason": parser_error_reason,
             },
         })
     return specs
