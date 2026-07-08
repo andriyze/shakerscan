@@ -147,6 +147,33 @@ function formatAIProfile(profile: any) {
   return String(profile || 'AI Gate')
 }
 
+function getAIJudgingGateDisplay(status: any): { label: string; className: string; title: string } | null {
+  switch (String(status || '').toLowerCase()) {
+    case 'judging_completed':
+      return {
+        label: 'AI judged',
+        className: 'bg-green-900/50 text-green-200',
+        title: 'Semantic judge completed for the probes that required it.',
+      }
+    case 'judging_failed':
+    case 'judging_required':
+    case 'judging_unavailable':
+      return {
+        label: 'needs review',
+        className: 'bg-yellow-900/50 text-yellow-200',
+        title: 'Semantic judging was required but did not complete; rely on deterministic evidence and manual review.',
+      }
+    case 'not_required':
+      return {
+        label: 'deterministic only',
+        className: 'bg-gray-800 text-gray-300',
+        title: 'This run did not require semantic judging; the visible results are deterministic-only.',
+      }
+    default:
+      return null
+  }
+}
+
 function formatAIProbePack(pack: any) {
   const value = String(pack || '')
   const labels: Record<string, string> = {
@@ -499,6 +526,8 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
   const aiGateDecisionText = String(aiGateDecision?.decision || '').toLowerCase()
   const aiGateExecutionPlan = asRecord(ai_gate?.execution_plan)
   const aiGateSemanticJudge = asRecord(aiGateExecutionPlan.semantic_judge)
+  const aiGateJudgingGate = asRecord(aiGateExecutionPlan.judging_quality_gate)
+  const aiGateJudgingGateDisplay = getAIJudgingGateDisplay(aiGateJudgingGate.status)
   const semanticReviewedIds = new Set(
     [
       ...(Array.isArray(aiGateExecutionPlan.semantic_reviewed) ? aiGateExecutionPlan.semantic_reviewed : []),
@@ -1120,8 +1149,13 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
                     Each card now starts with the result. The green/red boxes below are the test rubric, not the verdict.
                   </p>
                 </div>
-                {Object.keys(aiGateSemanticJudge).length > 0 && (
+                {(Object.keys(aiGateSemanticJudge).length > 0 || aiGateJudgingGateDisplay) && (
                   <div className="flex flex-wrap gap-2 text-xs text-gray-300">
+                    {aiGateJudgingGateDisplay && (
+                      <span className={`rounded px-2 py-1 ${aiGateJudgingGateDisplay.className}`} title={aiGateJudgingGateDisplay.title}>
+                        {aiGateJudgingGateDisplay.label}
+                      </span>
+                    )}
                     <span className="rounded bg-gray-800 px-2 py-1">
                       semantic judge: {aiGateSemanticJudge.enabled ? 'on' : 'off'}
                     </span>

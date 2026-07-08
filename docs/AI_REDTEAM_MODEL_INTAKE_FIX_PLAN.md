@@ -33,7 +33,7 @@ Legend: ✅ implemented · 🟡 partial · 🔴 missing.
 | 3.1 | Model Intake checksum semantics | ✅ | — |
 | 3.2 | HTTP Range truncation handling | ✅ | — |
 | 3.3 | Signature / provenance **crypto** verification | ✅ | Real detached-sig verification (cryptography: Ed25519/RSA-PSS/ECDSA); metadata booleans are claims (R1) |
-| 3.4 | Secret redaction | 🟡 | Shared helper (R2a) + encryption-at-rest (R2b) done; worker command-line indirection remains |
+| 3.4 | Secret redaction | 🟡 | Shared helper (R2a), encryption-at-rest (R2b), and worker subprocess argv indirection done; broader DAST job-payload credential refs remain architectural work |
 | 3.5 | Local file read gate | ✅ | — |
 | 3.6 | AI Gate production safety | ✅ | Effective 3-tier probe filter (R6a); `confirm_production` evidence includes a content-free endpoint hash |
 | 3.7 | Request budget by HTTP call | ✅ | REST/SSE and widget targets consume the shared request-budget contract |
@@ -41,8 +41,8 @@ Legend: ✅ implemented · 🟡 partial · 🔴 missing.
 | 3.9 | AI Gate per-finding retest | ✅ | — |
 | 3.10 | Transcript retention & redaction policy | ✅ | Response-time redaction default + audited admin gate (R3) |
 | 3.11 | Cross-principal AI testing | ✅ | — |
-| 3.12 | Judging availability gate | ✅ | UI "deterministic only" indicator not surfaced |
-| 3.13 | MCP readiness auth-aware checks | ✅ | No `resources/list` probe; some checks lean on declared metadata |
+| 3.12 | Judging availability gate | ✅ | Scan detail/report UI show `AI judged`, `needs review`, or `deterministic only` |
+| 3.13 | MCP readiness auth-aware checks | ✅ | Safe `resources/list` probe exists; some checks still lean on declared metadata |
 | 3.14 | Parser-backed model-format checks | ✅ | ONNX degrades to string heuristics when the `onnx` lib is absent |
 | 3.15 | Governance evidence validation | ✅ | SPDX normalization + expression parsing added (R6b) |
 | 4.1 | Indirect prompt-injection harness | ✅ | — |
@@ -187,8 +187,8 @@ tampered / broken-chain / wrong-key flagged; presence checks still fire); live r
   restricted; aliases like `apache 2.0` normalized; exposes a `normalized` token list).
 - **Widget target parity:** request-budget enforcement and response caps now apply to
   `ai_gate/targets/widget_playwright.py` as well as `rest_json`.
-- **§3.12 (remaining):** surface the judging quality gate in the UI ("deterministic only" /
-  "needs review") — `judging_quality_gate` is computed and exposed by the API but no UI reads it.
+- **§3.12 ✅ (2026-07-08):** the scan detail campaign card and AI Gate report view now surface
+  the judging quality gate as `AI judged`, `needs review`, or `deterministic only`.
 - **§3.14 (remaining):** ensure the `onnx` package is installed in the scanner image so ONNX inspection
   is always parser-backed (it falls back to ASCII-string heuristics when absent — image-build change).
 
@@ -355,8 +355,8 @@ This makes AI Gate / Model Intake part of the same continuous control plane as D
   `/ai/targets/{id}/principals` CRUD, real per-turn credential switching
   (`ai_gate/targets/rest_json.py:_select_principal`), pairwise cross-tenant probe generation.
 - **§3.12 Judging gate** — `judging_gate_status` (`required`/`completed`/`unavailable`/`failed`);
-  flips decision to `needs_review` for standard/deep high-risk when judging unavailable (UI surfacing
-  per R6).
+  flips decision to `needs_review` for standard/deep high-risk when judging unavailable; scan detail
+  and report UI now surface the operator-facing gate label.
 - **§3.13 MCP readiness** — `POST /ai/targets/{id}/mcp/live-readiness` runs credentialed JSON-RPC
   `initialize` + `tools/list` (+ unauth differential); checks audience/scopes/PKCE/WWW-Authenticate/
   overbroad schema; never calls `tools/call` (`ai_assurance.py`).
@@ -430,6 +430,6 @@ only after API/unit tests pass.
 | AI Gate findings retestable individually | ✅ (3.9) |
 | RAG/agent targets can test ≥2 principals | ✅ (3.11) |
 | MCP readiness uses auth-aware, non-destructive protocol checks | ✅ (3.13) |
-| Reports show evidence quality clearly (deterministic / judged / claimed / verified / missing) | 🟡 (data present; UI surfacing — **R6** §3.12) |
+| Reports show evidence quality clearly (deterministic / judged / claimed / verified / missing) | 🟡 (AI Gate judged/deterministic gate surfaced; broader evidence-quality surfacing remains) |
 | CI/CD can consume a stable deployment-decision endpoint | ✅ (4.2) |
 | Durable, auditable policy + exception registry | 🟡 **R4** |

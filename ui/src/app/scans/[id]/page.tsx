@@ -354,6 +354,33 @@ function formatAiGateLabel(value: string | null | undefined): string {
   return String(value || 'unknown').replace(/_/g, ' ')
 }
 
+function aiGateJudgingGateDisplay(status: string | null | undefined): { label: string; className: string; title: string } | null {
+  switch (String(status || '').toLowerCase()) {
+    case 'judging_completed':
+      return {
+        label: 'AI judged',
+        className: 'bg-green-900/50 text-green-200',
+        title: 'Semantic judge completed for the probes that required it.',
+      }
+    case 'judging_failed':
+    case 'judging_required':
+    case 'judging_unavailable':
+      return {
+        label: 'needs review',
+        className: 'bg-yellow-900/50 text-yellow-200',
+        title: 'Semantic judging was required but did not complete; rely on deterministic evidence and manual review.',
+      }
+    case 'not_required':
+      return {
+        label: 'deterministic only',
+        className: 'bg-gray-800 text-gray-300',
+        title: 'This run did not require semantic judging; the visible results are deterministic-only.',
+      }
+    default:
+      return null
+  }
+}
+
 function formatDelta(value: number | undefined, suffix: string = ''): string {
   const num = Number(value || 0)
   if (num > 0) return `+${num}${suffix}`
@@ -375,6 +402,7 @@ function AiGateCampaignReviewCard({ scan }: { scan: any }) {
   const [confirmProductionReplay, setConfirmProductionReplay] = useState(false)
   const [campaignHistory, setCampaignHistory] = useState<AiScanCampaignHistory | null>(null)
   const [campaignHistoryError, setCampaignHistoryError] = useState<string | null>(null)
+  const judgingGate = aiGateJudgingGateDisplay(review.judging_gate_status)
 
   useEffect(() => {
     let cancelled = false
@@ -454,7 +482,11 @@ function AiGateCampaignReviewCard({ scan }: { scan: any }) {
             <span className={`rounded px-2 py-1 text-xs ${decisionClass}`}>{formatAiGateLabel(review.decision)}</span>
           )}
           {review.environment && <span className="rounded bg-gray-800 px-2 py-1 text-xs text-gray-300">{formatAiGateLabel(review.environment)}</span>}
-          {review.judging_gate_status && <span className="rounded bg-gray-800 px-2 py-1 text-xs text-gray-300">judge {formatAiGateLabel(review.judging_gate_status)}</span>}
+          {judgingGate && (
+            <span className={`rounded px-2 py-1 text-xs ${judgingGate.className}`} title={judgingGate.title}>
+              {judgingGate.label}
+            </span>
+          )}
         </div>
       </div>
 
