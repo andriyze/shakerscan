@@ -66,6 +66,7 @@ def test_judge_redactor_strips_credential_assignments_and_dsn():
 from ai_gate.budget import RequestBudget  # noqa: E402
 from ai_gate.planner import plan_probe_pack  # noqa: E402
 from ai_gate.targets.rest_json import RestJsonConversationTarget, extract_calibration_metadata, extract_response_text  # noqa: E402
+from ai_gate.targets.widget_playwright import WidgetPlaywrightConversationTarget, _cap_widget_response_text  # noqa: E402
 
 
 class _FakeContent:
@@ -157,6 +158,62 @@ def test_rest_target_blocks_request_when_budget_is_exhausted():
     assert exchange.status_code is None
     assert "request budget exhausted" in exchange.error
     assert len(session.requests) == 0
+
+
+def _widget_target(*, metadata: dict | None = None, max_response_bytes: int | None = None):
+    widget_metadata = {
+        "widget_manifest": {
+            "entry_url": "https://example.test/app",
+            "input_selector": "textarea",
+            "response_selector": ".assistant",
+        },
+        **(metadata or {}),
+    }
+    target = {
+        "endpoint_url": "https://example.test/app",
+        "target_type": "widget",
+        "metadata_json": widget_metadata,
+    }
+    if max_response_bytes is not None:
+        target["max_response_bytes"] = max_response_bytes
+    return WidgetPlaywrightConversationTarget(
+        "https://example.test/app",
+        target,
+        default_max_response_bytes=65_536,
+    )
+
+
+def test_widget_target_uses_response_byte_cap_with_override():
+    target = _widget_target()
+    assert target.max_response_bytes == 65_536
+
+    override = _widget_target(metadata={"max_response_bytes": 300_000})
+    assert override.max_response_bytes == 300_000
+
+    capped, truncated, observed = _cap_widget_response_text("A" * 2000, 1024)
+    assert truncated is True
+    assert observed == 2000
+    assert len(capped.encode("utf-8")) == 1024
+
+
+def test_widget_target_blocks_request_when_budget_is_exhausted():
+    target = _widget_target()
+    request_budget = RequestBudget(0)
+    target.set_request_budget(request_budget)
+
+    exchange = asyncio.run(
+        target.send_message(
+            None,
+            prompt="hello",
+            probe_id="probe",
+            session_id="session",
+        )
+    )
+
+    assert exchange.status_code is None
+    assert "request budget exhausted" in exchange.error
+    assert request_budget.attempted_requests == 0
+    assert request_budget.rejected_requests == 1
 
 
 def test_rest_target_uses_principal_specific_credential_and_replacements():

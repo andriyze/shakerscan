@@ -6104,7 +6104,11 @@ async def run_ai_target_scan(target_url: str, raw_options: dict[str, Any] | None
     )
     response_byte_cap = profile_response_byte_cap(scan_profile)
     if target_type == "widget":
-        target_adapter = WidgetPlaywrightConversationTarget(target_url, target)
+        target_adapter = WidgetPlaywrightConversationTarget(
+            target_url,
+            target,
+            default_max_response_bytes=response_byte_cap,
+        )
     elif target.get("streaming_mode") == "sse":
         target_adapter = SseConversationTarget(target_url, target, default_max_response_bytes=response_byte_cap)
     else:

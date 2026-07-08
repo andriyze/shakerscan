@@ -36,8 +36,8 @@ Legend: ✅ implemented · 🟡 partial · 🔴 missing.
 | 3.4 | Secret redaction | 🟡 | Shared helper (R2a) + encryption-at-rest (R2b) done; worker command-line indirection remains |
 | 3.5 | Local file read gate | ✅ | — |
 | 3.6 | AI Gate production safety | ✅ | Effective 3-tier probe filter (R6a); minor: endpoint-hash in `confirm_production` evidence still pending |
-| 3.7 | Request budget by HTTP call | ✅ | (widget target not integrated) |
-| 3.8 | Response body cap | ✅ | Flat 256 KB cap; per-profile defaults not wired; widget not integrated |
+| 3.7 | Request budget by HTTP call | ✅ | REST/SSE and widget targets consume the shared request-budget contract |
+| 3.8 | Response body cap | ✅ | Per-profile defaults apply to REST/SSE and widget targets; explicit `max_response_bytes` still wins |
 | 3.9 | AI Gate per-finding retest | ✅ | — |
 | 3.10 | Transcript retention & redaction policy | ✅ | Response-time redaction default + audited admin gate (R3) |
 | 3.11 | Cross-principal AI testing | ✅ | — |
