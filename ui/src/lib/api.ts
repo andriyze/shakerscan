@@ -3615,7 +3615,7 @@ export interface Schedule {
   time_of_day: string
   timezone: string
   jitter_minutes: number
-  schedule_kind?: 'normal_scan' | 'asm_improve'
+  schedule_kind?: 'normal_scan' | 'asm_improve' | 'evidence_retention_sweep'
   scan_type: string
   scan_options?: Record<string, unknown>
   is_active: boolean
@@ -3632,7 +3632,7 @@ export interface ScheduleCreate {
   day_of_week?: number
   time_of_day: string
   timezone?: string
-  schedule_kind?: 'normal_scan' | 'asm_improve'
+  schedule_kind?: 'normal_scan' | 'asm_improve' | 'evidence_retention_sweep'
   scan_type: string
   scan_options?: Record<string, unknown>
   jitter_minutes?: number

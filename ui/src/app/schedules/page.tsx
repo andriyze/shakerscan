@@ -46,14 +46,19 @@ function formatRelativeTime(dateStr: string): string {
   }
 }
 
-function getScheduleKind(schedule: Schedule): 'normal_scan' | 'asm_improve' {
+type ScheduleKind = 'normal_scan' | 'asm_improve' | 'evidence_retention_sweep'
+
+function getScheduleKind(schedule: Schedule): ScheduleKind {
   if (schedule.schedule_kind === 'asm_improve') return 'asm_improve'
+  if (schedule.schedule_kind === 'evidence_retention_sweep') return 'evidence_retention_sweep'
   if ((schedule.scan_options as { kind?: string } | undefined)?.kind === 'asm_improve') return 'asm_improve'
+  if ((schedule.scan_options as { kind?: string } | undefined)?.kind === 'evidence_retention_sweep') return 'evidence_retention_sweep'
   return 'normal_scan'
 }
 
 type AsmFamily = 'all' | 'sqli' | 'xss' | 'auth' | 'bola'
 type AsmEndpointFilter = 'all' | 'api'
+type RetentionClassFilter = 'all' | 'standard' | 'short' | 'audit' | 'sensitive'
 
 const ASM_FAMILIES: Array<{ value: AsmFamily; label: string; detail: string }> = [
   { value: 'all', label: 'All runnable checks', detail: 'Balanced SQLi/XSS/auth mix' },
@@ -92,6 +97,22 @@ function asmSummary(schedule: Schedule): string {
   return bits.join(' · ')
 }
 
+function retentionSummary(schedule: Schedule): string {
+  const options = scheduleOptions(schedule)
+  const bits = [
+    boolOption(options, 'dry_run', true) ? 'dry-run preview' : 'execute sweep',
+    `${numberOption(options, 'limit', 200)} max objects`,
+  ]
+  const retentionClass = String(options.retention_class || 'all')
+  if (retentionClass !== 'all') bits.push(retentionClass)
+  if (options.older_than_days !== undefined && options.older_than_days !== null && options.older_than_days !== '') {
+    bits.push(`${numberOption(options, 'older_than_days', 0)}d minimum age`)
+  }
+  if (boolOption(options, 'delete_local_files', true)) bits.push('delete local files')
+  if (!boolOption(options, 'dry_run', true) && options.approval_receipt_id) bits.push('receipt scoped')
+  return bits.join(' · ')
+}
+
 function SchedulesContent() {
   const searchParams = useSearchParams()
   const router = useRouter()
@@ -114,12 +135,18 @@ function SchedulesContent() {
   const [formDayOfWeek, setFormDayOfWeek] = useState(0)
   const [formTime, setFormTime] = useState('02:00')
   const [formScanType, setFormScanType] = useState<ScanType>('standard')
-  const [formKind, setFormKind] = useState<'normal_scan' | 'asm_improve'>('normal_scan')
+  const [formKind, setFormKind] = useState<ScheduleKind>('normal_scan')
   const [formAsmBatchSize, setFormAsmBatchSize] = useState(100)
   const [formAsmStaleDays, setFormAsmStaleDays] = useState(30)
   const [formAsmEndpointFilter, setFormAsmEndpointFilter] = useState<AsmEndpointFilter>('all')
   const [formAsmFamily, setFormAsmFamily] = useState<AsmFamily>('all')
   const [formAsmExploitDepth, setFormAsmExploitDepth] = useState(false)
+  const [formRetentionDryRun, setFormRetentionDryRun] = useState(true)
+  const [formRetentionOlderDays, setFormRetentionOlderDays] = useState('')
+  const [formRetentionClass, setFormRetentionClass] = useState<RetentionClassFilter>('all')
+  const [formRetentionLimit, setFormRetentionLimit] = useState(200)
+  const [formRetentionDeleteLocalFiles, setFormRetentionDeleteLocalFiles] = useState(true)
+  const [formRetentionApprovalReceipt, setFormRetentionApprovalReceipt] = useState('')
   const [creating, setCreating] = useState(false)
   const [error, setError] = useState('')
 
@@ -198,7 +225,7 @@ function SchedulesContent() {
           day_of_week: formFrequency === 'weekly' ? formDayOfWeek : undefined,
           time_of_day: formTime,
           schedule_kind: formKind,
-          scan_type: formKind === 'normal_scan' ? formScanType : 'smart',
+          scan_type: formKind === 'normal_scan' ? formScanType : 'quick',
           scan_options,
         })
         toast.success('Schedule updated')
@@ -210,7 +237,7 @@ function SchedulesContent() {
           day_of_week: formFrequency === 'weekly' ? formDayOfWeek : undefined,
           time_of_day: formTime,
           schedule_kind: formKind,
-          scan_type: formKind === 'normal_scan' ? formScanType : 'smart',
+          scan_type: formKind === 'normal_scan' ? formScanType : 'quick',
           scan_options,
         })
         toast.success('Schedule created')
@@ -226,6 +253,20 @@ function SchedulesContent() {
   }
 
   function buildScheduleOptions(): Record<string, unknown> | undefined {
+    if (formKind === 'evidence_retention_sweep') {
+      const options: Record<string, unknown> = {
+        dry_run: formRetentionDryRun,
+        limit: Math.max(1, Math.min(1000, Number(formRetentionLimit) || 200)),
+        delete_local_files: formRetentionDeleteLocalFiles,
+      }
+      const olderDays = formRetentionOlderDays.trim()
+      if (olderDays !== '') options.older_than_days = Math.max(0, Math.min(3650, Number(olderDays) || 0))
+      if (formRetentionClass !== 'all') options.retention_class = formRetentionClass
+      if (!formRetentionDryRun && formRetentionApprovalReceipt.trim()) {
+        options.approval_receipt_id = formRetentionApprovalReceipt.trim()
+      }
+      return options
+    }
     if (formKind !== 'asm_improve') return {}
     const options: Record<string, unknown> = {
       batch_size: Math.max(1, Math.min(1000, Number(formAsmBatchSize) || 100)),
@@ -253,6 +294,13 @@ function SchedulesContent() {
     const family = String(options.check_family || options.asm_check_family || 'all')
     setFormAsmFamily(ASM_FAMILIES.some(f => f.value === family) ? family as AsmFamily : 'all')
     setFormAsmExploitDepth(boolOption(options, 'exploit_depth'))
+    setFormRetentionDryRun(boolOption(options, 'dry_run', true))
+    setFormRetentionOlderDays(options.older_than_days === undefined || options.older_than_days === null ? '' : String(options.older_than_days))
+    const retentionClass = String(options.retention_class || 'all')
+    setFormRetentionClass(['standard', 'short', 'audit', 'sensitive'].includes(retentionClass) ? retentionClass as RetentionClassFilter : 'all')
+    setFormRetentionLimit(numberOption(options, 'limit', 200))
+    setFormRetentionDeleteLocalFiles(boolOption(options, 'delete_local_files', true))
+    setFormRetentionApprovalReceipt(String(options.approval_receipt_id || ''))
     setError('')
     setShowCreateModal(true)
   }
@@ -296,6 +344,12 @@ function SchedulesContent() {
     setFormAsmEndpointFilter('all')
     setFormAsmFamily('all')
     setFormAsmExploitDepth(false)
+    setFormRetentionDryRun(true)
+    setFormRetentionOlderDays('')
+    setFormRetentionClass('all')
+    setFormRetentionLimit(200)
+    setFormRetentionDeleteLocalFiles(true)
+    setFormRetentionApprovalReceipt('')
     setEditingSchedule(null)
     setError('')
   }
@@ -396,6 +450,10 @@ function SchedulesContent() {
                       <span className="px-2 py-0.5 bg-purple-500/15 text-purple-300 rounded text-xs" title="Continuous-ASM coverage wave: picks recon vs test batch from current gaps">
                         ASM coverage wave
                       </span>
+                    ) : scheduleKind === 'evidence_retention_sweep' ? (
+                      <span className="px-2 py-0.5 bg-amber-500/15 text-amber-300 rounded text-xs" title="Scheduled evidence retention sweep">
+                        Evidence retention sweep
+                      </span>
                     ) : (
                       <span className="px-2 py-0.5 bg-gray-800 rounded text-xs">
                         {getScanTypeLabel(schedule.scan_type)}
@@ -425,6 +483,11 @@ function SchedulesContent() {
                   {scheduleKind === 'asm_improve' && (
                     <div className="mt-2 text-xs text-gray-500">
                       {asmSummary(schedule)}
+                    </div>
+                  )}
+                  {scheduleKind === 'evidence_retention_sweep' && (
+                    <div className="mt-2 text-xs text-gray-500">
+                      {retentionSummary(schedule)}
                     </div>
                   )}
                 </div>
@@ -582,22 +645,28 @@ function SchedulesContent() {
                 )}
               </div>
 
-              {/* Schedule kind (§9): full scan vs ASM coverage wave */}
+              {/* Schedule kind (§9): full scan vs ASM coverage wave vs retention sweep */}
               <div>
                 <label htmlFor="schedule-kind" className="block text-sm font-medium text-gray-400 mb-1">Schedule type</label>
                 <select
                   id="schedule-kind"
                   value={formKind}
-                  onChange={(e) => setFormKind(e.target.value as 'normal_scan' | 'asm_improve')}
+                  onChange={(e) => setFormKind(e.target.value as ScheduleKind)}
                   className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-blue-500"
                 >
                   <option value="normal_scan">Full scan each run</option>
                   <option value="asm_improve">Keep this target covered (ASM coverage wave)</option>
+                  <option value="evidence_retention_sweep">Evidence retention sweep</option>
                 </select>
                 {formKind === 'asm_improve' && (
                   <p className="mt-1 text-xs text-gray-500">
                     Each run queues a bounded ASM wave: test claimable endpoints using these limits,
                     or refresh discovery when no eligible inventory exists.
+                  </p>
+                )}
+                {formKind === 'evidence_retention_sweep' && (
+                  <p className="mt-1 text-xs text-gray-500">
+                    Each run previews or executes bounded cleanup for expired evidence objects. Scheduled execution still requires an approval receipt in the schedule options.
                   </p>
                 )}
               </div>
@@ -668,6 +737,95 @@ function SchedulesContent() {
                       <span className="block text-xs text-gray-500">Required for BOLA/write-side depth and still subject to credential preconditions.</span>
                     </span>
                   </label>
+                </div>
+              )}
+
+              {formKind === 'evidence_retention_sweep' && (
+                <div className="grid gap-4 rounded-lg border border-gray-800 bg-gray-950/40 p-3 sm:grid-cols-2">
+                  <label className="sm:col-span-2 flex items-start gap-3 rounded-lg border border-gray-800 bg-gray-900/70 p-3">
+                    <input
+                      id="schedule-retention-dry-run"
+                      type="checkbox"
+                      aria-label="Preview only"
+                      checked={formRetentionDryRun}
+                      onChange={(e) => setFormRetentionDryRun(e.target.checked)}
+                      className="mt-1 h-4 w-4 rounded border-gray-600 bg-gray-800 text-blue-600 focus:ring-blue-500"
+                    />
+                    <span>
+                      <span className="block text-sm font-medium text-gray-200">Preview only</span>
+                      <span className="block text-xs text-gray-500">Dry-run is the safe default; scheduled deletes require an approval receipt.</span>
+                    </span>
+                  </label>
+                  <div>
+                    <label htmlFor="schedule-retention-class" className="block text-sm font-medium text-gray-400 mb-1">Retention class</label>
+                    <select
+                      id="schedule-retention-class"
+                      value={formRetentionClass}
+                      onChange={(e) => setFormRetentionClass(e.target.value as RetentionClassFilter)}
+                      className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-blue-500"
+                    >
+                      <option value="all">All eligible classes</option>
+                      <option value="short">Short</option>
+                      <option value="standard">Standard</option>
+                      <option value="audit">Audit</option>
+                      <option value="sensitive">Sensitive</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label htmlFor="schedule-retention-older-days" className="block text-sm font-medium text-gray-400 mb-1">Minimum age override</label>
+                    <input
+                      id="schedule-retention-older-days"
+                      type="number"
+                      min={0}
+                      max={3650}
+                      value={formRetentionOlderDays}
+                      onChange={(e) => setFormRetentionOlderDays(e.target.value)}
+                      placeholder="Use policy"
+                      className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-blue-500"
+                    />
+                  </div>
+                  <div>
+                    <label htmlFor="schedule-retention-limit" className="block text-sm font-medium text-gray-400 mb-1">Object limit</label>
+                    <input
+                      id="schedule-retention-limit"
+                      type="number"
+                      min={1}
+                      max={1000}
+                      value={formRetentionLimit}
+                      onChange={(e) => setFormRetentionLimit(Number(e.target.value))}
+                      className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-blue-500"
+                    />
+                  </div>
+                  <label className="flex items-start gap-3 rounded-lg border border-gray-800 bg-gray-900/70 p-3">
+                    <input
+                      id="schedule-retention-delete-local-files"
+                      type="checkbox"
+                      aria-label="Delete local files"
+                      checked={formRetentionDeleteLocalFiles}
+                      onChange={(e) => setFormRetentionDeleteLocalFiles(e.target.checked)}
+                      className="mt-1 h-4 w-4 rounded border-gray-600 bg-gray-800 text-blue-600 focus:ring-blue-500"
+                    />
+                    <span>
+                      <span className="block text-sm font-medium text-gray-200">Delete local files</span>
+                      <span className="block text-xs text-gray-500">Remote evidence objects are reported as preserved.</span>
+                    </span>
+                  </label>
+                  {!formRetentionDryRun && (
+                    <div className="sm:col-span-2">
+                      <label htmlFor="schedule-retention-approval-receipt" className="block text-sm font-medium text-gray-400 mb-1">Approval receipt</label>
+                      <input
+                        id="schedule-retention-approval-receipt"
+                        type="text"
+                        value={formRetentionApprovalReceipt}
+                        onChange={(e) => setFormRetentionApprovalReceipt(e.target.value)}
+                        placeholder="Receipt UUID required for scheduled deletion"
+                        className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-blue-500"
+                      />
+                      <p className="mt-1 text-xs text-amber-300">
+                        Scheduled deletion fails closed unless this receipt is valid when the job runs.
+                      </p>
+                    </div>
+                  )}
                 </div>
               )}
 

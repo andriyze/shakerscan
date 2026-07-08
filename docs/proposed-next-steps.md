@@ -839,7 +839,9 @@ activity. Remaining work is remediation actions from the timeline, not schedule 
 **Implement:**
 1. DONE: introduce typed schedule kinds (`normal_scan`, `asm_improve`,
    `evidence_retention_sweep`) in API/DB with migration/backfill and legacy `scan_options.kind`
-   decode. UI coverage for evidence-retention schedules remains a workflow-depth follow-up.
+   decode. DONE phase 2: `/schedules` now exposes evidence-retention sweep schedules with dry-run
+   default, retention-class/age/limit/local-file controls, and an approval-receipt field for
+   scheduled deletion.
 2. DONE: show one unified target timeline: background dispatcher decision, recurring schedule next run,
    current active scan/ASM batch, last activity, and last skip reason.
 3. DONE: `/schedules` creates/edits ASM waves without pretending they have a DAST `scan_type`; it
