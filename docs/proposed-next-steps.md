@@ -974,7 +974,9 @@ fields are not dropped after initial detection. Remaining detector recall still 
 scorecard-backed POST-body SQLi measurement and workflow/write-BOLA improvements. DONE phase 8 for
 reflected XSS path-value synthesis on lookup/track-style GET routes: queryless parent routes can now
 receive a constrained synthetic child segment and must still pass the existing reflection/browser-proof
-gates before any finding is emitted.
+gates before any finding is emitted. DONE phase 9 for stricter-but-broader NoSQL JSON-body auth-bypass
+success signals: token/session responses with account/customer/id identity markers count as proof,
+while token-only or generic 200 responses remain insufficient.
 
 **Done when:** recorded two-user benchmark scorecards show the targeted miss becoming a deterministic
 finding, not merely an attempted endpoint.

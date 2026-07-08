@@ -2507,18 +2507,27 @@ async def nosql_injection_test_json_body(
             )
             identity_key_fragments = (
                 "user", "username", "email", "role", "roles", "account", "profile",
+                "customer", "client", "principal", "identity", "subject", "sub",
             )
             if any(any(fragment in key for fragment in auth_key_fragments) for key in keys):
                 signals.add("auth_token_or_session")
             if any(any(fragment in key for fragment in identity_key_fragments) for key in keys):
                 signals.add("user_identity_data")
+            if "user_identity_data" not in signals:
+                id_key_markers = {"id", "_id", "uid", "user_id", "userid", "account_id", "accountid", "customer_id", "customerid"}
+                if any(key.rsplit(".", 1)[-1] in id_key_markers for key in keys):
+                    signals.add("user_identity_data")
         text_markers = (
             '"token"', '"access_token"', '"accessToken"', '"refresh_token"',
             '"jwt"', '"authentication"', '"authorization"', '"session"',
         )
         if any(marker.lower() in lowered for marker in text_markers):
             signals.add("auth_token_or_session")
-        if re.search(r'"(?:email|username|role|user(?:_id|id)?)"\s*:', body, re.I):
+        if re.search(
+            r'"(?:_?id|uid|email|username|role|roles|account(?:_?id)?|customer(?:_?id)?|user(?:_id|id)?|principal|subject|sub)"\s*:',
+            body,
+            re.I,
+        ):
             signals.add("user_identity_data")
         return sorted(signals)
 

@@ -139,3 +139,54 @@ def test_nosql_json_body_does_not_flag_generic_200_without_auth_signals(monkeypa
 
     assert result["vulnerable"] is False
     assert result["findings"] == []
+
+
+def test_nosql_json_body_accepts_token_with_account_id_identity(monkeypatch):
+    async def fake_run(cmd, *args, **kwargs):
+        body = json.loads(cmd[cmd.index("-d") + 1])
+        if isinstance(body.get("email"), dict) and isinstance(body.get("password"), dict):
+            return (
+                '{"accessToken":"jwt-token","accountId":42}'
+                "__SHAKERSCAN_NOSQL__200__SHAKERSCAN_NOSQL__",
+                "",
+                0,
+            )
+        return '{"error":"Invalid credentials"}__SHAKERSCAN_NOSQL__401__SHAKERSCAN_NOSQL__', "", 0
+
+    monkeypatch.setattr(active_checks, "run", fake_run)
+
+    result = asyncio.run(
+        active_checks.nosql_injection_test_json_body(
+            "https://example.test/rest/user/login",
+            method="POST",
+            params=["email", "password"],
+            body_template={"email": "test@example.com", "password": "wrong"},
+        )
+    )
+
+    assert result["vulnerable"] is True
+    finding = result["findings"][0]
+    assert finding["evidence_type"] == "credential_operator_bypass"
+    assert set(finding["success_signals"]) == {"auth_token_or_session", "user_identity_data"}
+
+
+def test_nosql_json_body_rejects_token_only_without_identity_signal(monkeypatch):
+    async def fake_run(cmd, *args, **kwargs):
+        body = json.loads(cmd[cmd.index("-d") + 1])
+        if isinstance(body.get("email"), dict) and isinstance(body.get("password"), dict):
+            return '{"accessToken":"jwt-token"}__SHAKERSCAN_NOSQL__200__SHAKERSCAN_NOSQL__', "", 0
+        return '{"error":"Invalid credentials"}__SHAKERSCAN_NOSQL__401__SHAKERSCAN_NOSQL__', "", 0
+
+    monkeypatch.setattr(active_checks, "run", fake_run)
+
+    result = asyncio.run(
+        active_checks.nosql_injection_test_json_body(
+            "https://example.test/rest/user/login",
+            method="POST",
+            params=["email", "password"],
+            body_template={"email": "test@example.com", "password": "wrong"},
+        )
+    )
+
+    assert result["vulnerable"] is False
+    assert result["findings"] == []
