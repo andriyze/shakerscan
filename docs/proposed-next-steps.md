@@ -938,13 +938,17 @@ still better endpoint/body capture, auth context, and proof routing on benchmark
 summaries and scorecards now include `auth_workflow` diagnostics with required/observed auth states,
 missing second-principal blockers, and authz/BOLA attempt rollups so a missed BOLA expectation is
 classified as `missing_required_auth_context` instead of a generic detector miss when the benchmark
-did not actually exercise both principals.
+did not actually exercise both principals. Scorecards now also emit `benchmark_followups`: every
+missed fixture expectation becomes either a runnable `scan.focused_family` work item (SQLi/NoSQL,
+browser-proof XSS, auth/BOLA when preconditions are present), a blocked action template with explicit
+auth/principal blockers, or a detector-gap record when no focused executor exists yet.
 
 **Implement:** keep the benchmark as the unit of progress. Add focused campaigns for login/search/
 review/order APIs; capture real POST bodies from browser/HAR/OpenAPI; keep NoSQL operator probes
 attached to JSON-body coverage telemetry; add browser-first reflected/stored XSS proof; add safe
 Lab/deep workflow/write-BOLA checks after graph/principal preconditions exist. DONE phase 1 for
 auth-workflow diagnostics in `scanner_tools.benchmark_summary` and `scripts/benchmark_targets.py`;
+DONE phase 2 for turning missed scorecard expectations into explicit follow-up worklist rows;
 detector recall and proof routing still require scorecard-backed scan improvements.
 
 **Done when:** recorded two-user benchmark scorecards show the targeted miss becoming a deterministic

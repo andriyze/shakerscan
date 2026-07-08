@@ -91,6 +91,82 @@ def test_benchmark_artifact_metadata_is_explicit_about_pass_fail():
     assert "not a success claim" in failed["artifact_note"]
 
 
+def test_scorecard_emits_benchmark_miss_followups_for_supported_families():
+    card = b.collect_scorecard(
+        {"findings": []},
+        {
+            "name": "unit",
+            "target_url": "https://bench.example.test",
+            "expected": [
+                {
+                    "id": "sqli-login",
+                    "family": "sqli",
+                    "route": "/rest/user/login",
+                    "min_severity": "critical",
+                    "proof": "verified",
+                },
+                {
+                    "id": "xss-dom",
+                    "family": "xss",
+                    "route": "#/search",
+                    "min_severity": "high",
+                    "proof": "browser",
+                },
+                {
+                    "id": "exposed-file",
+                    "family": "sensitive_exposure",
+                    "route": "/ftp",
+                    "min_severity": "high",
+                    "proof": "deterministic",
+                },
+            ],
+        },
+    )
+
+    followups = {item["expectation_id"]: item for item in card["benchmark_followups"]}
+    assert followups["sqli-login"]["status"] == "ready"
+    assert followups["sqli-login"]["next_test_action"]["command"] == "scan.focused_family"
+    assert followups["sqli-login"]["next_test_action"]["parameters"]["check_family"] == "sqli"
+    assert followups["sqli-login"]["next_test_action"]["parameters"]["target"] == "https://bench.example.test"
+    assert "post_body_params" in followups["sqli-login"]["operator_hints"]
+    assert followups["xss-dom"]["next_test_action"]["parameters"]["check_family"] == "xss"
+    assert "browser_proof_required" in followups["xss-dom"]["operator_hints"]
+    assert followups["exposed-file"]["status"] == "detector_gap"
+    assert followups["exposed-file"]["next_test_action"] is None
+
+
+def test_scorecard_blocks_bola_followup_until_second_principal_observed():
+    card = b.collect_scorecard(
+        {"findings": [], "smart_coverage": {"auth_states_tested": ["user1"]}},
+        {
+            "name": "crapi-unit",
+            "target_url": "https://crapi.example.test",
+            "auth": {
+                "user1_login": {"url": "/login"},
+                "user2_login": {"url": "/login"},
+                "requires_two_users": True,
+            },
+            "expected": [
+                {
+                    "id": "bola-orders",
+                    "family": "bola",
+                    "route": "/workshop/api/shop/orders",
+                    "min_severity": "high",
+                    "proof": "verified",
+                },
+            ],
+        },
+    )
+
+    followup = card["benchmark_followups"][0]
+    assert followup["status"] == "blocked"
+    assert followup["next_test_action"] is None
+    assert "missing_second_principal" in followup["blocked_by"]
+    assert followup["blocked_action_template"]["command"] == "scan.focused_family"
+    assert followup["blocked_action_template"]["parameters"]["check_family"] == "bola"
+    assert followup["blocked_action_template"]["parameters"]["exploit_depth"] is True
+
+
 def test_retest_settle_returns_true_when_drained(monkeypatch):
     monkeypatch.setattr(b, "_get", lambda *a, **k: {
         "retest_pending": 0, "retest_queued": 0, "retest_running": 0,

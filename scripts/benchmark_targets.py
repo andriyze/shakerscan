@@ -60,6 +60,15 @@ COMPAT = {
 STOP = {"rest", "api", "http", "https", "html", "json", "www", "v1", "v2", "v3",
         "id", "user", "users", "identity", "workshop", "community"}
 SEV_RANK = {"info": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
+FOCUSED_FAMILY_FOR_BENCHMARK_MISS = {
+    "sqli": "sqli",
+    # NoSQL probes run under the SQLi/body-injection focused lane.
+    "nosqli": "sqli",
+    "xss": "xss",
+    "bola": "bola",
+    "broken_access_control": "auth",
+}
+AUTH_REQUIRED_FAMILIES = {"bola", "broken_access_control"}
 
 
 def _get(url, timeout=30):
@@ -157,6 +166,85 @@ def finding_classes(hay):
     return {c for c, kws in CLASS_KEYWORDS.items() if any(k in hay for k in kws)}
 
 
+def _benchmark_miss_followup(miss, fixture, auth_workflow):
+    """Translate one missed expectation into an actionable, non-claiming work item.
+
+    This deliberately emits only Command Arsenal actions that exist today. Families
+    without a focused executor stay as detector-gap records so the scorecard does
+    not imply a runnable campaign where none exists.
+    """
+    family = str(miss.get("family") or "").lower()
+    proof = str(miss.get("proof") or "deterministic").lower()
+    route = miss.get("route")
+    benchmark = fixture.get("name") or "benchmark"
+    check_family = FOCUSED_FAMILY_FOR_BENCHMARK_MISS.get(family)
+    target_url = fixture.get("target_url")
+    hints = []
+    if family == "nosqli":
+        hints.append("json_body_operator_probes")
+    if family == "sqli" and route and any(token in str(route).lower() for token in ("login", "coupon", "review")):
+        hints.append("post_body_params")
+    if proof == "browser":
+        hints.append("browser_proof_required")
+    if family == "bola":
+        hints.append("cross_principal_differential_required")
+
+    blockers = []
+    if family in AUTH_REQUIRED_FAMILIES and auth_workflow.get("status") == "blocked":
+        blockers.extend(auth_workflow.get("blockers") or ["missing_required_auth_context"])
+    if family == "bola" and not auth_workflow.get("two_principal_observed"):
+        if "missing_second_principal" not in blockers:
+            blockers.append("missing_second_principal")
+
+    base = {
+        "id": f"benchmark-miss:{benchmark}:{miss.get('id')}",
+        "benchmark": benchmark,
+        "expectation_id": miss.get("id"),
+        "family": family,
+        "route": route,
+        "proof_required": proof,
+        "min_severity": miss.get("min_severity"),
+        "status": "ready",
+        "operator_hints": hints,
+        "blocked_by": blockers,
+        "reason": "missing_required_auth_context" if blockers else "missing_verified_benchmark_expectation",
+    }
+
+    if not check_family or not target_url:
+        base["status"] = "detector_gap"
+        base["next_test_action"] = None
+        base["developer_note"] = (
+            "No focused-family executor currently maps this benchmark family; improve the generic detector "
+            "or add a registered executor before this miss can be campaign-queued."
+        )
+        return base
+
+    params = {
+        "target": target_url,
+        "check_family": check_family,
+        "scan_type": "smart",
+        "budget_profile": "thorough",
+        "no_early_stop": True,
+    }
+    if family == "bola":
+        params["exploit_depth"] = True
+    if blockers:
+        base["status"] = "blocked"
+        base["next_test_action"] = None
+        base["blocked_action_template"] = {
+            "command": "scan.focused_family",
+            "risk_tier": "active",
+            "parameters": params,
+        }
+    else:
+        base["next_test_action"] = {
+            "command": "scan.focused_family",
+            "risk_tier": "active",
+            "parameters": params,
+        }
+    return base
+
+
 def mint_token(target_url, login_cfg, email, password):
     """Sign up (best-effort) + login to mint a bearer token."""
     base = target_url.rstrip("/")
@@ -202,32 +290,6 @@ def collect_scorecard(report, fixture):
     verified_hc = [e for e in high_crit if e[4]]
     suspected_hc = [e for e in high_crit if not e[4]]
 
-    expected = fixture.get("expected", [])
-    found, missed = [], []
-    for ent in expected:
-        compat = COMPAT.get(ent["family"], {ent["family"]})
-        toks = route_tokens(ent)
-        minsev = SEV_RANK.get(ent.get("min_severity", "high"), 3)
-        proof = ent.get("proof", "deterministic")
-        hit = None
-        for f, hay, classes, sev, ver in high_crit:
-            if not (classes & compat):
-                continue
-            if toks and not any(t in hay for t in toks):
-                continue
-            if SEV_RANK.get(sev, 0) < minsev:
-                continue
-            if proof in ("verified", "browser") and not ver:
-                continue  # required proof not present
-            hit = f
-            break
-        (found if hit else missed).append({
-            "id": ent["id"], "family": ent["family"], "route": ent.get("route"),
-            "proof": proof, "evidence": (hit.get("title") if hit else None),
-        })
-
-    cov = ((report.get("smart_coverage") or {}).get("endpoints") or {})
-    active = report.get("active_checks") or {}
     auth_states = ((report.get("smart_coverage") or {}).get("auth_states_tested") or [])
     auth_cfg = fixture.get("auth") or {}
     required_auth_states = []
@@ -249,6 +311,35 @@ def collect_scorecard(report, fixture):
             + (["missing_second_principal"] if "user2" in missing_auth_states else [])
         ) if missing_auth_states else [],
     }
+
+    expected = fixture.get("expected", [])
+    found, missed = [], []
+    for ent in expected:
+        compat = COMPAT.get(ent["family"], {ent["family"]})
+        toks = route_tokens(ent)
+        minsev = SEV_RANK.get(ent.get("min_severity", "high"), 3)
+        proof = ent.get("proof", "deterministic")
+        hit = None
+        for f, hay, classes, sev, ver in high_crit:
+            if not (classes & compat):
+                continue
+            if toks and not any(t in hay for t in toks):
+                continue
+            if SEV_RANK.get(sev, 0) < minsev:
+                continue
+            if proof in ("verified", "browser") and not ver:
+                continue  # required proof not present
+            hit = f
+            break
+        (found if hit else missed).append({
+            "id": ent["id"], "family": ent["family"], "route": ent.get("route"),
+            "proof": proof, "min_severity": ent.get("min_severity", "high"),
+            "evidence": (hit.get("title") if hit else None),
+        })
+    followups = [_benchmark_miss_followup(m, fixture, auth_workflow) for m in missed]
+
+    cov = ((report.get("smart_coverage") or {}).get("endpoints") or {})
+    active = report.get("active_checks") or {}
     return {
         "total_findings": len(findings),
         "verified_high_critical": len(verified_hc),
@@ -267,6 +358,7 @@ def collect_scorecard(report, fixture):
         "error": report.get("error_message") or None,
         "expected_found": found,
         "expected_missed": missed,
+        "benchmark_followups": followups,
         "expected_recall": round(len(found) / max(1, len(expected)), 2),
     }
 
@@ -454,6 +546,11 @@ def main():
             print(f"    [INVARIANT] report blocks disagree: {card['report_invariant_violations']}")
         for m in card.get("expected_missed", []):
             print(f"    MISS {m['id']} ({m['family']} {m['route']})")
+        for f in card.get("benchmark_followups", []):
+            action = f.get("next_test_action") or f.get("blocked_action_template") or {}
+            command = action.get("command") or "detector_gap"
+            print(f"    FOLLOWUP {f.get('expectation_id')} [{f.get('status')}]: {command} "
+                  f"{f.get('blocked_by') or ''}")
         for g in card.get("gates", []):
             print(f"    [{'PASS' if g['pass'] else 'FAIL'}] {g['gate']}: {g['detail']}")
     run = {
