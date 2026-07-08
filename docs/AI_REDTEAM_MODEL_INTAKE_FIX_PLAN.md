@@ -43,7 +43,7 @@ Legend: ✅ implemented · 🟡 partial · 🔴 missing.
 | 3.11 | Cross-principal AI testing | ✅ | — |
 | 3.12 | Judging availability gate | ✅ | Scan detail/report UI show `AI judged`, `needs review`, or `deterministic only` |
 | 3.13 | MCP readiness auth-aware checks | ✅ | Safe `resources/list` probe exists; some checks still lean on declared metadata |
-| 3.14 | Parser-backed model-format checks | ✅ | ONNX degrades to string heuristics when the `onnx` lib is absent |
+| 3.14 | Parser-backed model-format checks | ✅ | ONNX parser dependency is installed in the scanner image |
 | 3.15 | Governance evidence validation | ✅ | SPDX normalization + expression parsing added (R6b) |
 | 4.1 | Indirect prompt-injection harness | ✅ | — |
 | 4.2 | Deployment gate API | ✅ | — |
@@ -189,8 +189,8 @@ tampered / broken-chain / wrong-key flagged; presence checks still fire); live r
   `ai_gate/targets/widget_playwright.py` as well as `rest_json`.
 - **§3.12 ✅ (2026-07-08):** the scan detail campaign card and AI Gate report view now surface
   the judging quality gate as `AI judged`, `needs review`, or `deterministic only`.
-- **§3.14 (remaining):** ensure the `onnx` package is installed in the scanner image so ONNX inspection
-  is always parser-backed (it falls back to ASCII-string heuristics when absent — image-build change).
+- **§3.14 ✅ (2026-07-08):** `scanner/requirements.txt` now includes `onnx`, so rebuilt scanner
+  images use parser-backed ONNX inspection; malformed/local environments still degrade safely.
 
 ---
 

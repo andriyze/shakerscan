@@ -1,8 +1,11 @@
 import asyncio
 import hashlib
 import json
+import sys
+import types
 import zipfile
 from datetime import datetime, timezone
+from pathlib import Path
 
 from scanner.scanner_tools import model_intake
 from scanner.scanner_tools.model_intake import (
@@ -383,6 +386,35 @@ def test_model_intake_flags_onnx_external_data_and_custom_operator(tmp_path):
     finding_ids = {finding["id"] for finding in result["findings"]}
     assert "model_intake:onnx_external_data_reference" in finding_ids
     assert "model_intake:onnx_custom_operator" in finding_ids
+
+
+def test_model_intake_onnx_inspection_uses_parser_when_available(monkeypatch):
+    fake_onnx = types.SimpleNamespace()
+
+    def load_model_from_string(_data):
+        external_entry = types.SimpleNamespace(key="location", value="weights.bin")
+        initializer = types.SimpleNamespace(external_data=[external_entry])
+        node = types.SimpleNamespace(domain="com.example.custom")
+        graph = types.SimpleNamespace(name="parsed-graph", initializer=[initializer], node=[node])
+        return types.SimpleNamespace(graph=graph)
+
+    fake_onnx.load_model_from_string = load_model_from_string
+    monkeypatch.setitem(sys.modules, "onnx", fake_onnx)
+
+    inspection = model_intake._inspect_onnx(b"opaque protobuf bytes")
+
+    assert inspection["parsed_with"] == "onnx"
+    assert inspection["graph_name"] == "parsed-graph"
+    assert inspection["external_data_hint"] is True
+    assert "weights.bin" in inspection["external_data_locations"]
+    assert inspection["custom_operator_hint"] is True
+    assert "com.example.custom" in inspection["custom_operator_domains"]
+
+
+def test_scanner_image_installs_onnx_parser_dependency():
+    requirements = Path("scanner/requirements.txt").read_text(encoding="utf-8")
+
+    assert "onnx>=" in requirements
 
 
 def test_model_intake_flags_malformed_safetensors_header(tmp_path):
