@@ -65,3 +65,41 @@ def test_unreachable_target_with_no_warnings_still_sets_error(monkeypatch):
     monkeypatch.setattr(health_check, "pre_scan_validation", _make_fake_pre_scan([]))
     report = asyncio.run(scanner_mod.build_report("http://192.0.2.1"))
     assert report.get("error") == "Target unreachable during pre-scan validation"
+
+
+def test_pre_scan_validation_retries_transient_unreachable(monkeypatch):
+    """A target that blips unreachable then answers must proceed (herd tolerance)."""
+    calls = {"n": 0}
+
+    async def flaky(target):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            return {"reachable": False, "issues": ["transient connection refused"], "details": {}}
+        return {"reachable": True, "issues": [], "details": {}}
+
+    monkeypatch.setattr(health_check, "validate_target_connectivity", flaky)
+    result = asyncio.run(
+        health_check.pre_scan_validation("http://host.docker.internal:3001", backoff_seconds=0)
+    )
+    assert result["can_proceed"] is True
+    assert calls["n"] == 3
+    assert result["validation_attempts"] == 3
+    assert result["connectivity"]["details"]["reachable_after_retries"] == 3
+
+
+def test_pre_scan_validation_still_fails_closed_after_all_attempts(monkeypatch):
+    """A genuinely-down target must still fail closed after exhausting retries."""
+    calls = {"n": 0}
+
+    async def always_down(target):
+        calls["n"] += 1
+        return {"reachable": False, "issues": ["down"], "details": {}}
+
+    monkeypatch.setattr(health_check, "validate_target_connectivity", always_down)
+    result = asyncio.run(
+        health_check.pre_scan_validation("http://192.0.2.1", attempts=3, backoff_seconds=0)
+    )
+    assert result["can_proceed"] is False
+    assert calls["n"] == 3
+    assert result["validation_attempts"] == 3
+    assert result["warnings"] == ["down"]

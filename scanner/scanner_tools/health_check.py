@@ -579,21 +579,47 @@ def _get_connectivity_recommendation(dns_ok: bool, port_443: bool, port_80: bool
     return "Unknown connectivity issue."
 
 
-async def pre_scan_validation(target: str) -> dict[str, Any]:
+async def pre_scan_validation(
+    target: str,
+    *,
+    attempts: int = 3,
+    backoff_seconds: float = 0.75,
+) -> dict[str, Any]:
     """
     Run pre-scan validation to ensure we can reach the target.
 
     This should be called before starting a scan to detect network issues early.
 
+    A single reachability probe is retried with linear backoff before failing closed:
+    the scanner itself fans a smart scan out into many concurrent shards, and that burst
+    of simultaneous probes can momentarily saturate a single-host target's connection
+    backlog (or the Docker host-gateway), producing transient connection refusals. Without
+    a retry, an otherwise-reachable target that 20 sibling shards reached fine would fail a
+    handful of shards. A genuinely-down target still fails after all attempts, so the gate
+    stays fail-closed for real outages.
+
     Returns:
         Dict with validation results and whether scanning should proceed
     """
-    connectivity = await validate_target_connectivity(target)
+    attempts = max(1, int(attempts))
+    connectivity: dict[str, Any] = {}
+    used_attempt = 1
+    for used_attempt in range(1, attempts + 1):
+        connectivity = await validate_target_connectivity(target)
+        if connectivity.get("reachable"):
+            if used_attempt > 1:
+                connectivity.setdefault("details", {})["reachable_after_retries"] = used_attempt
+            break
+        if used_attempt < attempts:
+            # Linear backoff (0.75s, 1.5s, ...) lets the initial shard burst drain before
+            # we re-probe, staggering retries instead of hammering in lockstep.
+            await asyncio.sleep(backoff_seconds * used_attempt)
 
     return {
         "target": target,
         "connectivity": connectivity,
-        "can_proceed": connectivity["reachable"],
-        "warnings": connectivity["issues"],
-        "recommendation": connectivity.get("recommendation")
+        "can_proceed": connectivity.get("reachable", False),
+        "warnings": connectivity.get("issues", []),
+        "recommendation": connectivity.get("recommendation"),
+        "validation_attempts": used_attempt,
     }
