@@ -969,9 +969,15 @@ items, not findings.
    expose it. Creating or linking a campaign queues no work and creates no findings; individual
    actions still flow through the existing product routes and receipt gates. The campaign type enum is
    `continuous_asm`, `authenticated_dast`, `api_authz`, `ai_red_team`, `model_intake`, `benchmark`,
-   `incident_retest`, `source_informed_dast`, `finding_retest`, `focused_family`. Remaining work is
+   `incident_retest`, `source_informed_dast`, `finding_retest`, `focused_family`. DONE phase 2:
+   `GET /arsenal/campaigns/{id}` now returns a `deployment_impact` rollup
+   (`_campaign_deployment_impact`) over the findings linked to the campaign's actions —
+   `by_severity`, `by_status`, `active_finding_count`, and an `estimated_default_blockers` count of
+   active critical/high findings, plus `total_action_count` and a `partial` flag when the fetched
+   actions are bounded. The rollup is explicitly labelled an estimate, not the authoritative
+   deployment decision (policy profiles/exceptions/proof state still own that). Remaining work is
    automatic action linkage once the execution gateway (§2 seq #3) drives command results under a
-   campaign, plus deployment-impact rollups.
+   campaign.
 2. DONE phase 1: add a `hypotheses` table for route, endpoint, object, principal, AI target, model artifact,
    dependency, config, and secret leads. Fields should include target/campaign, vuln family, CWE,
    severity guess, confidence, source (`app_graph`, `source_ingest`, `ai_planner`, `scanner_signal`,

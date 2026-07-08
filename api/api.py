@@ -18485,9 +18485,46 @@ async def arsenal_campaigns(
     }
 
 
+def _campaign_deployment_impact(
+    finding_rows: Sequence[Any],
+    *,
+    partial: bool = False,
+) -> dict[str, Any]:
+    """Roll up the findings a campaign surfaced by severity/status.
+
+    This is a factual rollup, NOT the authoritative deployment decision: the real gate
+    applies policy profiles, exceptions, and proof state. `estimated_default_blockers`
+    counts active critical/high findings (the default block threshold) and is labelled as
+    an estimate so it is never mistaken for the gate verdict.
+    """
+    by_severity: dict[str, int] = {}
+    by_status: dict[str, int] = {}
+    active_count = 0
+    active_blocking = 0
+    for row in finding_rows or []:
+        data = row_to_dict(row)
+        severity = str(data.get("severity") or "unknown").lower()
+        finding_status = str(data.get("status") or "unknown").lower()
+        by_severity[severity] = by_severity.get(severity, 0) + 1
+        by_status[finding_status] = by_status.get(finding_status, 0) + 1
+        if finding_status == "active":
+            active_count += 1
+            if severity in {"critical", "high"}:
+                active_blocking += 1
+    return {
+        "linked_finding_count": sum(by_status.values()),
+        "active_finding_count": active_count,
+        "by_severity": by_severity,
+        "by_status": by_status,
+        "estimated_default_blockers": active_blocking,
+        "blocks_deployment_estimate": active_blocking > 0,
+        "partial": bool(partial),
+    }
+
+
 @app.get("/arsenal/campaigns/{campaign_id}")
 async def arsenal_campaign_detail(campaign_id: str, action_limit: int = Query(50, ge=1, le=200)):
-    """Read one campaign plus a rollup of its linked action ledger."""
+    """Read one campaign plus a rollup of its linked action ledger and finding impact."""
     try:
         campaign_uuid = uuid.UUID(str(campaign_id))
     except ValueError:
@@ -18496,6 +18533,10 @@ async def arsenal_campaign_detail(campaign_id: str, action_limit: int = Query(50
         row = await conn.fetchrow("SELECT * FROM campaigns WHERE id=$1", campaign_uuid)
         if not row:
             raise HTTPException(status_code=404, detail="Campaign not found")
+        total_action_count = int(await conn.fetchval(
+            "SELECT COUNT(*) FROM campaign_actions WHERE mission_campaign_id = $1",
+            campaign_uuid,
+        ) or 0)
         action_rows = await conn.fetch(
             """
             SELECT * FROM campaign_actions
@@ -18506,16 +18547,38 @@ async def arsenal_campaign_detail(campaign_id: str, action_limit: int = Query(50
             campaign_uuid,
             action_limit,
         )
-    actions = [_public_campaign_action_row(a) for a in action_rows]
+        actions = [_public_campaign_action_row(a) for a in action_rows]
+        finding_ids: list[str] = []
+        seen: set[str] = set()
+        for action in actions:
+            for fid in (action.get("finding_ids") or []):
+                key = str(fid).strip()
+                if key and key not in seen:
+                    seen.add(key)
+                    finding_ids.append(key)
+        finding_uuids = [uuid.UUID(fid) for fid in finding_ids if _optional_uuid(fid)]
+        finding_rows: list[Any] = []
+        if finding_uuids:
+            finding_rows = await conn.fetch(
+                "SELECT id, severity, status FROM findings WHERE id = ANY($1::uuid[])",
+                finding_uuids,
+            )
     status_rollup: dict[str, int] = {}
     for action in actions:
         key = str(action.get("status") or "unknown")
         status_rollup[key] = status_rollup.get(key, 0) + 1
+    # Impact is over the linked findings of the returned (bounded) actions; flag when the
+    # campaign has more actions than were fetched so the rollup is not read as complete.
+    deployment_impact = _campaign_deployment_impact(
+        finding_rows, partial=total_action_count > len(actions)
+    )
     return {
         "campaign": _public_campaign_row(row),
         "actions": actions,
         "action_count": len(actions),
+        "total_action_count": total_action_count,
         "status_rollup": status_rollup,
+        "deployment_impact": deployment_impact,
         "execution_enabled": False,
     }
 

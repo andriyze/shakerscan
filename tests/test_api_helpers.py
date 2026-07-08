@@ -4906,6 +4906,34 @@ def test_persist_campaign_records_valid_mission():
     assert result["execution_enabled"] is False
 
 
+def test_campaign_deployment_impact_rolls_up_findings_and_estimates_blockers():
+    rows = [
+        {"id": "f1", "severity": "critical", "status": "active"},
+        {"id": "f2", "severity": "high", "status": "active"},
+        {"id": "f3", "severity": "high", "status": "resolved"},
+        {"id": "f4", "severity": "medium", "status": "active"},
+        {"id": "f5", "severity": "low", "status": "false_positive"},
+    ]
+    impact = api_module._campaign_deployment_impact(rows, partial=True)
+    assert impact["linked_finding_count"] == 5
+    assert impact["active_finding_count"] == 3
+    assert impact["by_severity"] == {"critical": 1, "high": 2, "medium": 1, "low": 1}
+    assert impact["by_status"]["active"] == 3
+    # Only ACTIVE critical/high count toward the default-threshold blocker estimate:
+    # the resolved high (f3) and active medium (f4) are excluded.
+    assert impact["estimated_default_blockers"] == 2
+    assert impact["blocks_deployment_estimate"] is True
+    assert impact["partial"] is True
+
+
+def test_campaign_deployment_impact_empty_is_non_blocking():
+    impact = api_module._campaign_deployment_impact([])
+    assert impact["linked_finding_count"] == 0
+    assert impact["estimated_default_blockers"] == 0
+    assert impact["blocks_deployment_estimate"] is False
+    assert impact["partial"] is False
+
+
 def test_persist_campaign_rejects_unknown_target():
     conn = _CampaignConn(target_exists=False)
     req = api_module.CampaignRequest(
