@@ -979,7 +979,9 @@ success signals: token/session responses with account/customer/id identity marke
 while token-only or generic 200 responses remain insufficient. DONE phase 10 for JSON mass-assignment
 effect proof: privileged-field probes now accept normalized privilege effects such as
 `authorities=["admin:write"]` only when the baseline response lacks the same privilege signal, while
-exact field reflection remains the preferred proof.
+exact field reflection remains the preferred proof. DONE phase 11 for authenticated JWT coverage:
+basic and comprehensive JWT weakness checks now reuse configured bearer/cookie JWTs before falling
+back to guessed login endpoints, and forged-token probes suppress the original Authorization header.
 
 **Done when:** recorded two-user benchmark scorecards show the targeted miss becoming a deterministic
 finding, not merely an attempted endpoint.

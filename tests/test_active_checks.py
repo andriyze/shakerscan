@@ -12,6 +12,7 @@ import json
 import pytest
 import sys
 import os
+from types import SimpleNamespace
 
 # Add scanner directory to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'scanner'))
@@ -28,6 +29,14 @@ from scanner_tools.active_checks import (
     _select_sqli_payloads,
     _check_sqli_response,
 )
+
+
+def _jwt_fixture_token() -> str:
+    return active_checks._encode_jwt_parts(
+        {"alg": "HS256", "typ": "JWT"},
+        {"sub": "user-1", "role": "user"},
+        "signature",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -774,6 +783,52 @@ def test_json_mass_assignment_ignores_rejected_field(monkeypatch):
 
     assert result["vulnerable"] is False
     assert result["findings"] == []
+
+
+def test_jwt_token_from_auth_session_uses_bearer_header():
+    token = _jwt_fixture_token()
+    session = SimpleNamespace(
+        config=SimpleNamespace(headers={"Authorization": f"Bearer {token}"}, cookies={}),
+        state=SimpleNamespace(cookies_received={}),
+    )
+
+    assert active_checks._jwt_token_from_auth_session(session) == token
+
+
+def test_jwt_token_from_auth_session_uses_received_cookie():
+    token = _jwt_fixture_token()
+    session = SimpleNamespace(
+        config=SimpleNamespace(headers={}, cookies={}),
+        state=SimpleNamespace(cookies_received={"access_token": token}),
+    )
+
+    assert active_checks._jwt_token_from_auth_session(session) == token
+
+
+def test_jwt_comprehensive_prefers_configured_auth_token(monkeypatch):
+    token = _jwt_fixture_token()
+    session = SimpleNamespace(
+        config=SimpleNamespace(headers={"Authorization": f"Bearer {token}"}, cookies={}),
+        state=SimpleNamespace(cookies_received={}),
+    )
+    calls = []
+
+    async def fake_run(cmd, timeout=10):
+        calls.append(cmd)
+        return "", "", 0
+
+    monkeypatch.setattr(active_checks, "run", fake_run)
+
+    result = asyncio.run(active_checks.jwt_comprehensive_test(
+        "https://example.test",
+        sample_token=None,
+        auth_session=session,
+    ))
+
+    assert result["token_found"] is True
+    assert result["token_info"]["algorithm"] == "HS256"
+    assert result["tests_run"][0] == "none_algorithm"
+    assert not any("/api/login" in part for cmd in calls for part in cmd)
 
 
 if __name__ == "__main__":

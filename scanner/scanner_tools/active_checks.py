@@ -3915,23 +3915,81 @@ async def stored_xss_workflow(
     return results
 
 
-async def jwt_vulnerability_test(url: str, sample_token: str | None = None) -> dict[str, Any]:
+JWT_TOKEN_RE = re.compile(r"(eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*)")
+
+
+def _extract_jwt_from_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    match = JWT_TOKEN_RE.search(str(value))
+    return match.group(1) if match else None
+
+
+def _jwt_token_from_auth_session(auth_session: Any | None = None) -> str | None:
+    """Return a configured JWT from auth headers/cookies without guessing credentials."""
+    if auth_session is None:
+        return None
+
+    try:
+        headers = dict(getattr(getattr(auth_session, "config", None), "headers", {}) or {})
+    except Exception:
+        headers = {}
+    for name, value in headers.items():
+        token = _extract_jwt_from_text(value)
+        if token and str(name).lower() in {
+            "authorization", "x-authorization", "x-auth-token", "x-access-token",
+            "x-jwt-token", "jwt", "access-token",
+        }:
+            return token
+    for value in headers.values():
+        token = _extract_jwt_from_text(value)
+        if token:
+            return token
+
+    cookies: dict[str, Any] = {}
+    try:
+        cookies.update(dict(getattr(getattr(auth_session, "config", None), "cookies", {}) or {}))
+    except Exception:
+        pass
+    try:
+        cookies.update(dict(getattr(getattr(auth_session, "state", None), "cookies_received", {}) or {}))
+    except Exception:
+        pass
+    preferred_cookie_names = {
+        "jwt", "token", "accesstoken", "authtoken", "idtoken",
+        "session", "sessionid",
+    }
+    for name, value in cookies.items():
+        token = _extract_jwt_from_text(value)
+        if token and re.sub(r"[^a-z0-9]", "", str(name).lower()) in preferred_cookie_names:
+            return token
+    for value in cookies.values():
+        token = _extract_jwt_from_text(value)
+        if token:
+            return token
+    return None
+
+
+async def jwt_vulnerability_test(
+    url: str,
+    sample_token: str | None = None,
+    auth_session: Any | None = None,
+) -> dict[str, Any]:
     results: dict[str, Any] = {"vulnerable": False, "issues": [], "evidence": []}
+    if not sample_token:
+        sample_token = _jwt_token_from_auth_session(auth_session)
     if not sample_token:
         for endpoint in ["/api/login", "/api/auth", "/login", "/auth/login"]:
             login_url = urllib.parse.urljoin(url, endpoint)
             out, err, rc = await run(["curl", "-sS", "-X", "POST", "-L", "-k", "-H", "Content-Type: application/json", "-d", '{"username":"test","password":"test"}', login_url], timeout=10)
             if rc == 0 and out:
-                m = re.search(r'eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+', out)
-                if m:
-                    sample_token = m.group(0)
+                sample_token = _extract_jwt_from_text(out)
+                if sample_token:
                     break
     if not sample_token:
         out, err, rc = await run(["curl", "-sS", "-I", "-L", "-k", url], timeout=10)
         if rc == 0 and out:
-            m = re.search(r'eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+', out)
-            if m:
-                sample_token = m.group(0)
+            sample_token = _extract_jwt_from_text(out)
     if sample_token:
         try:
             parts = sample_token.split('.')
@@ -4121,7 +4179,7 @@ async def jwt_algorithm_confusion_test(
                 forged_token = pyjwt.encode(payload, public_key_str, algorithm='HS256')
 
                 # Test the forged token
-                auth_args = get_auth_curl_args(auth_session)  # Handles None internally
+                auth_args = _filter_curl_headers(get_auth_curl_args(auth_session), {"authorization"})
                 test_out, test_err, test_rc = await run(
                     ["curl", "-sS", "-L", "-k", "-H", f"Authorization: Bearer {forged_token}"] + auth_args + [url],
                     timeout=10
@@ -4185,7 +4243,7 @@ async def jwt_kid_injection_test(
             try:
                 forged_token = pyjwt.encode(payload, expected_secret, algorithm='HS256', headers={'kid': kid_payload})
 
-                auth_args = get_auth_curl_args(auth_session)  # Handles None internally
+                auth_args = _filter_curl_headers(get_auth_curl_args(auth_session), {"authorization"})
                 test_out, test_err, test_rc = await run(
                     ["curl", "-sS", "-L", "-k", "-H", f"Authorization: Bearer {forged_token}"] + auth_args + [url],
                     timeout=10
@@ -4247,7 +4305,7 @@ async def jwt_claim_manipulation_test(
             ({"scope": "admin read write delete"}, "scope_admin"),
         ]
 
-        auth_args = get_auth_curl_args(auth_session)  # Handles None internally
+        auth_args = _filter_curl_headers(get_auth_curl_args(auth_session), {"authorization"})
 
         # Get baseline response with original token
         baseline_out, _, baseline_rc = await run(
@@ -4341,6 +4399,9 @@ async def jwt_comprehensive_test(
 
     # Try to discover token if not provided
     if not sample_token:
+        sample_token = _jwt_token_from_auth_session(auth_session)
+
+    if not sample_token:
         for endpoint in ["/api/login", "/api/auth", "/login", "/auth/login", "/api/token"]:
             login_url = urllib.parse.urljoin(url, endpoint)
             out, err, rc = await run(
@@ -4349,17 +4410,14 @@ async def jwt_comprehensive_test(
                 timeout=10
             )
             if rc == 0 and out:
-                m = re.search(r'eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*', out)
-                if m:
-                    sample_token = m.group(0)
+                sample_token = _extract_jwt_from_text(out)
+                if sample_token:
                     break
 
         if not sample_token:
             out, err, rc = await run(["curl", "-sS", "-I", "-L", "-k", url], timeout=10)
             if rc == 0 and out:
-                m = re.search(r'eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*', out)
-                if m:
-                    sample_token = m.group(0)
+                sample_token = _extract_jwt_from_text(out)
 
     if not sample_token:
         results["error"] = "No JWT token found"
@@ -4377,7 +4435,7 @@ async def jwt_comprehensive_test(
 
     # Test 1: None algorithm + basic weak secrets
     results["tests_run"].append("none_algorithm")
-    basic_results = await jwt_vulnerability_test(url, sample_token)
+    basic_results = await jwt_vulnerability_test(url, sample_token, auth_session=auth_session)
     if basic_results.get("vulnerable"):
         results["vulnerable"] = True
         results["issues"].extend(basic_results.get("issues", []))

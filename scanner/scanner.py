@@ -1368,8 +1368,12 @@ async def ssti_test(
         max_payloads=max_payloads,
     )
 
-async def jwt_vulnerability_test(url: str, sample_token: str | None = None) -> dict[str, Any]:
-    return await _jwt_vulnerability_test_mod(url, sample_token)
+async def jwt_vulnerability_test(
+    url: str,
+    sample_token: str | None = None,
+    auth_session: Any | None = None,
+) -> dict[str, Any]:
+    return await _jwt_vulnerability_test_mod(url, sample_token, auth_session=auth_session)
 
 async def oauth_vulnerability_test(url: str) -> dict[str, Any]:
     return await _oauth_vulnerability_test_mod(url)
@@ -4406,7 +4410,7 @@ async def build_report(target: str,
         xpath_task = asyncio.create_task(xpath_injection_test(base_url))
         ssti_task = asyncio.create_task(ssti_test(base_url))
         smuggling_task = asyncio.create_task(http_smuggling_test(base_url))
-        jwt_task = asyncio.create_task(jwt_vulnerability_test(base_url))
+        jwt_task = asyncio.create_task(jwt_vulnerability_test(base_url, auth_session=auth_session))
         oauth_task = asyncio.create_task(oauth_vulnerability_test(base_url))
         session_task = asyncio.create_task(session_vulnerability_test(base_url))
         timing_task = asyncio.create_task(timing_attack_test(base_url))
