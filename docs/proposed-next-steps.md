@@ -1484,8 +1484,8 @@ Every implementation increment above must include its own test slice:
   after low-value fields in discovery order.
 - **DONE phase 15 UI visibility:** scan reports now show a capped Active Attempt Ledger from
   `active_checks.endpoint_attempts`, including endpoint, family, completed/expected params, status,
-  skip/budget reason, and SQLi technique coverage where present, so operators can see where active
-  budget was spent without opening raw JSON.
+  prioritized parameter names, skip/budget reason, and SQLi technique coverage where present, so
+  operators can see where active budget was spent without opening raw JSON.
 
 - API/unit tests for new data contracts and legacy compatibility.
 - UI tests for action-center cards, ASM schedule payloads, Model Intake trust modes, and AI red-team

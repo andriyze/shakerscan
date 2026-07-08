@@ -671,6 +671,8 @@ def test_smart_xss_prioritizes_body_params_under_tight_budget(monkeypatch):
     assert result["params_tested"] == 1
     assert result["vulnerabilities_found"] == 1
     assert result["findings"][0]["param"] == "message"
+    assert result["endpoint_attempts"][0]["param_names"] == ["message", "page", "limit"]
+    assert result["endpoint_attempts"][0]["param_location"] == "body"
 
 
 def test_smart_xss_post_body_html_response_uses_browser_proof(monkeypatch):
@@ -730,6 +732,42 @@ def test_xss_response_render_guard_rejects_json_and_accepts_html():
     ) is True
 
 
+def test_merge_endpoint_attempt_telemetry_preserves_param_names():
+    merged = active_checks._merge_endpoint_attempt_telemetry(
+        [
+            {
+                "custom_endpoint": "POST /api/reviews json:{\"message\":\"ok\"}",
+                "family": "xss",
+                "method": "POST",
+                "url": "https://example.test/api/reviews",
+                "param_names": ["message", "rating"],
+                "param_location": "body",
+                "attempted_params_count": 1,
+                "completed_params_count": 1,
+                "param_count": 2,
+                "status": "partial",
+            },
+            {
+                "custom_endpoint": "POST /api/reviews json:{\"message\":\"ok\"}",
+                "family": "sqli",
+                "method": "POST",
+                "url": "https://example.test/api/reviews",
+                "param_names": ["rating", "productId"],
+                "param_location": "body",
+                "attempted_params_count": 2,
+                "completed_params_count": 2,
+                "param_count": 2,
+                "status": "completed",
+            },
+        ]
+    )
+
+    assert merged[0]["param_names"] == ["message", "rating", "productId"]
+    assert merged[0]["param_locations"] == ["body"]
+    assert merged[0]["family_attempts"]["xss"]["param_names"] == ["message", "rating"]
+    assert merged[0]["family_attempts"]["sqli"]["param_names"] == ["rating", "productId"]
+
+
 def test_json_mass_assignment_detects_reflected_privileged_field(monkeypatch):
     async def fake_run(cmd, timeout=15):
         body = json.loads(cmd[cmd.index("-d") + 1])
@@ -769,6 +807,8 @@ def test_json_mass_assignment_detects_reflected_privileged_field(monkeypatch):
             "method": "PATCH",
             "url": "https://example.test/api/profile",
             "param_count": 1,
+            "param_names": ["role"],
+            "param_location": "body",
             "attempted_params_count": 1,
             "completed_params_count": 1,
             "status": "completed",

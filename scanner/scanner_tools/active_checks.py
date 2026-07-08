@@ -175,13 +175,17 @@ def _new_endpoint_attempt(
     if not worklist_entry:
         return None
     method = str(method_override or endpoint.get("method") or "GET").upper()
-    param_count = len(params if params is not None else (body_params if body_params is not None else []))
+    param_names = list(params if params is not None else (body_params if body_params is not None else []))
+    param_count = len(param_names)
+    param_location = "query" if params is not None else ("body" if body_params is not None else None)
     return {
         "custom_endpoint": worklist_entry,
         "family": family,
         "method": method,
         "url": url_override or endpoint.get("url") or endpoint.get("path"),
         "param_count": max(0, int(param_count)),
+        "param_names": param_names[:20],
+        "param_location": param_location,
         "attempted_params_count": 0,
         "completed_params_count": 0,
         "status": "started",
@@ -234,6 +238,8 @@ def _merge_endpoint_attempt_telemetry(*attempt_groups: Any) -> list[dict[str, An
                     "method": attempt.get("method"),
                     "url": attempt.get("url"),
                     "families": [],
+                    "param_names": [],
+                    "param_locations": [],
                     "attempted_params_count": 0,
                     "completed_params_count": 0,
                     "status": "completed",
@@ -243,6 +249,13 @@ def _merge_endpoint_attempt_telemetry(*attempt_groups: Any) -> list[dict[str, An
             family = str(attempt.get("family") or "unknown")
             if family not in item["families"]:
                 item["families"].append(family)
+            for param_name in attempt.get("param_names") or []:
+                param_text = str(param_name or "").strip()
+                if param_text and param_text not in item["param_names"]:
+                    item["param_names"].append(param_text)
+            param_location = str(attempt.get("param_location") or "").strip()
+            if param_location and param_location not in item["param_locations"]:
+                item["param_locations"].append(param_location)
             status = str(attempt.get("status") or "partial")
             item["attempted_params_count"] += int(attempt.get("attempted_params_count") or 0)
             item["completed_params_count"] += int(attempt.get("completed_params_count") or 0)
@@ -251,6 +264,8 @@ def _merge_endpoint_attempt_telemetry(*attempt_groups: Any) -> list[dict[str, An
                 "attempted_params_count": int(attempt.get("attempted_params_count") or 0),
                 "completed_params_count": int(attempt.get("completed_params_count") or 0),
                 "param_count": int(attempt.get("param_count") or 0),
+                "param_names": list(attempt.get("param_names") or [])[:20],
+                "param_location": attempt.get("param_location"),
                 "budget_exhausted": bool(attempt.get("budget_exhausted")),
                 "budget_exhausted_reason": attempt.get("budget_exhausted_reason"),
                 "skip_reason": attempt.get("skip_reason"),
@@ -2851,6 +2866,8 @@ async def mass_assignment_test_json_body(
         "method": method.upper(),
         "url": url,
         "param_count": min(max(1, int(max_fields or 1)), len(dangerous_fields)),
+        "param_names": [name for name, _, _ in dangerous_fields[: min(max(1, int(max_fields or 1)), len(dangerous_fields))]],
+        "param_location": "body",
         "attempted_params_count": 0,
         "completed_params_count": 0,
         "status": "started",

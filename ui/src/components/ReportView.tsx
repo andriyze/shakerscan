@@ -162,6 +162,19 @@ function activeAttemptParamSummary(attempt: any): string {
   return `${left} / ${right} params`
 }
 
+function activeAttemptParamPreview(attempt: any): string | null {
+  const names = Array.isArray(attempt?.param_names)
+    ? attempt.param_names.filter((name: any) => typeof name === 'string' && name.trim())
+    : []
+  if (!names.length) return null
+  const location = Array.isArray(attempt?.param_locations) && attempt.param_locations.length === 1
+    ? `${String(attempt.param_locations[0]).replace(/_/g, ' ')}: `
+    : (typeof attempt?.param_location === 'string' && attempt.param_location ? `${attempt.param_location.replace(/_/g, ' ')}: ` : '')
+  const shown = names.slice(0, 6).join(', ')
+  const suffix = names.length > 6 ? ` +${names.length - 6}` : ''
+  return `${location}${shown}${suffix}`
+}
+
 function activeAttemptReason(attempt: any): string | null {
   const reason = attempt?.skip_reason || attempt?.budget_exhausted_reason
   if (!reason) return null
@@ -2472,6 +2485,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
                     {activeEndpointAttempts.slice(0, 12).map((attempt: any, i: number) => {
                       const families = activeAttemptFamilies(attempt)
                       const reason = activeAttemptReason(attempt)
+                      const paramPreview = activeAttemptParamPreview(attempt)
                       return (
                         <tr key={`${attempt.custom_endpoint || attempt.url || i}`} className="align-top">
                           <td className="max-w-[420px] px-3 py-2">
@@ -2493,8 +2507,9 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
                               ))}
                             </div>
                           </td>
-                          <td className="whitespace-nowrap px-3 py-2 text-gray-300">
-                            {activeAttemptParamSummary(attempt)}
+                          <td className="px-3 py-2">
+                            <div className="whitespace-nowrap text-gray-300">{activeAttemptParamSummary(attempt)}</div>
+                            {paramPreview && <div className="mt-1 max-w-[260px] break-words font-mono text-[11px] text-gray-500">{paramPreview}</div>}
                           </td>
                           <td className="px-3 py-2">
                             <span className={`rounded px-1.5 py-0.5 text-[11px] font-medium ${activeAttemptStatusClass(attempt.status)}`}>
