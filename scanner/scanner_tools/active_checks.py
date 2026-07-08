@@ -6633,6 +6633,34 @@ def _apply_body_param(base_body: Any, param: str, value: Any) -> Any:
     return new_body
 
 
+def _body_param_current_value(body: Any, param: str) -> Any:
+    if isinstance(body, list):
+        if not body:
+            return None
+        first = body[0]
+        if param == "__item__" or not isinstance(first, dict):
+            return first
+        return _get_nested_value(first, param)
+    if isinstance(body, dict):
+        return _get_nested_value(body, param)
+    return None
+
+
+def _build_sqli_body_baseline(base_body: Any, param: str, canary: str) -> Any:
+    """Build a benign POST SQLi baseline using the same body-path semantics as payload replay."""
+    body = copy.deepcopy(base_body) if base_body is not None else {}
+    current = _body_param_current_value(body, param)
+    if isinstance(current, str):
+        value = f"{current}{canary}"
+    elif current is None and _param_prefers_string(param):
+        value = f"{_fallback_value_for_param(param)}{canary}"
+    elif current is None:
+        value = _fallback_value_for_param(param)
+    else:
+        value = current
+    return _apply_body_param(body, param, value)
+
+
 _CURL_STATUS_MARKER = "__CURL_STATUS__:"
 
 
@@ -6666,19 +6694,13 @@ async def _detect_dbms_post(
     if _is_sqli_documentation_endpoint(endpoint_url):
         return {"detected": None}
 
-    if isinstance(base_body, list):
-        if "json" not in content_type.lower():
-            return {"detected": None}
-        baseline_body = copy.deepcopy(base_body)
-        if not baseline_body:
-            baseline_body = [{}] if param != "__item__" else ["shakerscan_dbms_baseline"]
-        if isinstance(baseline_body[0], dict):
-            baseline_body[0][param] = "shakerscan_dbms_baseline"
-        else:
-            baseline_body[0] = "shakerscan_dbms_baseline"
-    else:
-        baseline_body = dict(base_body) if base_body else {}
-        baseline_body[param] = "shakerscan_dbms_baseline"
+    if isinstance(base_body, list) and "json" not in content_type.lower():
+        return {"detected": None}
+    baseline_body = _apply_body_param(
+        copy.deepcopy(base_body) if base_body is not None else {},
+        param,
+        "shakerscan_dbms_baseline",
+    )
 
     baseline_body_args, baseline_header_args = _build_curl_body_args(baseline_body, content_type)
     baseline_cmd = [
@@ -6690,19 +6712,13 @@ async def _detect_dbms_post(
     baseline_text = baseline_out if baseline_rc == 0 and baseline_out else ""
 
     # Build body with all params (benign values) + injected param
-    if isinstance(base_body, list):
-        if "json" not in content_type.lower():
-            return {"detected": None}
-        test_body = copy.deepcopy(base_body)
-        if not test_body:
-            test_body = [{}] if param != "__item__" else ["1'"]
-        if isinstance(test_body[0], dict):
-            test_body[0][param] = "1'"
-        else:
-            test_body[0] = "1'"
-    else:
-        test_body = dict(base_body) if base_body else {}
-        test_body[param] = "1'"
+    if isinstance(base_body, list) and "json" not in content_type.lower():
+        return {"detected": None}
+    test_body = _apply_body_param(
+        copy.deepcopy(base_body) if base_body is not None else {},
+        param,
+        "1'",
+    )
 
     body_args, header_args = _build_curl_body_args(test_body, content_type)
 
@@ -7113,26 +7129,7 @@ async def smart_sqli_test(
             # whether this body parameter is reflected into the response.
             reflection_canary = f"zqSqli{random.randint(100000, 999999)}cx"
             # Build baseline for THIS param
-            if is_array_body:
-                baseline_body = copy.deepcopy(base_body)
-                if not baseline_body:
-                    baseline_body = [{}] if param != "__item__" else [""]
-                if isinstance(baseline_body[0], dict):
-                    if param not in baseline_body[0]:
-                        baseline_body[0][param] = _fallback_value_for_param(param)
-                    if isinstance(baseline_body[0][param], str):
-                        baseline_body[0][param] = f"{baseline_body[0][param]}{reflection_canary}"
-                else:
-                    base_val = baseline_body[0] if baseline_body else _fallback_value_for_param(param)
-                    if not isinstance(base_val, str):
-                        base_val = str(base_val)
-                    baseline_body[0] = f"{base_val}{reflection_canary}"
-            else:
-                baseline_body = dict(base_body) if base_body else {}
-                if param not in baseline_body:
-                    baseline_body[param] = _fallback_value_for_param(param)
-                if isinstance(baseline_body[param], str):
-                    baseline_body[param] = f"{baseline_body[param]}{reflection_canary}"
+            baseline_body = _build_sqli_body_baseline(base_body, param, reflection_canary)
 
             baseline_body_args, baseline_header_args = _build_curl_body_args(baseline_body, content_type)
             baseline_start = time.time()

@@ -245,6 +245,105 @@ def test_smart_sqli_repairs_numeric_login_json_replay(monkeypatch):
     assert any("Authentication bypass via SQLi" in item for item in finding["evidence"])
 
 
+def test_detect_dbms_post_uses_nested_json_body_param(monkeypatch):
+    marker = active_checks._CURL_STATUS_MARKER
+    sent_bodies: list[dict] = []
+
+    async def fake_run(cmd, *args, **kwargs):
+        body = json.loads(cmd[cmd.index("-d") + 1])
+        sent_bodies.append(body)
+        assert "credentials.email" not in body
+        assert body["credentials"]["password"] == "not-real"
+        if body["credentials"]["email"] == "1'":
+            return HONEY_POSTGRES_ERROR + f"\n{marker}500", "", 0
+        return f'{{"error":"invalid login"}}\n{marker}401', "", 0
+
+    monkeypatch.setattr(active_checks, "run", fake_run)
+
+    result = asyncio.run(
+        active_checks._detect_dbms_post(
+            "https://example.test/api/login",
+            "credentials.email",
+            "application/json",
+            [],
+            method="POST",
+            base_body={
+                "credentials": {
+                    "email": "nobody@example.test",
+                    "password": "not-real",
+                }
+            },
+        )
+    )
+
+    assert result["detected"] == "postgresql"
+    assert len(sent_bodies) == 2
+    assert all("credentials.email" not in body for body in sent_bodies)
+
+
+def test_smart_sqli_nested_json_body_param_auth_bypass(monkeypatch):
+    marker = active_checks._CURL_STATUS_MARKER
+    sent_bodies: list[dict] = []
+
+    async def fake_run(cmd, *args, **kwargs):
+        if "-d" not in cmd:
+            return f"normal\n{marker}200", "", 0
+        body = json.loads(cmd[cmd.index("-d") + 1])
+        sent_bodies.append(body)
+        assert "credentials.email" not in body
+        email = body["credentials"]["email"]
+        if email == "' OR 1=1--":
+            assert body["credentials"]["password"] == "not-real"
+            return (
+                json.dumps({
+                    "authentication": {"token": "jwt-token"},
+                    "user": {"email": "admin@example.test", "role": "admin"},
+                })
+                + f"\n{marker}200",
+                "",
+                0,
+            )
+        return f"Invalid email or password.\n{marker}401", "", 0
+
+    monkeypatch.setattr(active_checks, "run", fake_run)
+
+    result = asyncio.run(
+        active_checks.smart_sqli_test(
+            "https://example.test",
+            [
+                {
+                    "url": "https://example.test/api/login",
+                    "method": "POST",
+                    "content_type": "application/json",
+                    "body_template": {
+                        "credentials": {
+                            "email": "nobody@example.test",
+                            "password": "not-real",
+                        }
+                    },
+                    "body_params": ["credentials.email", "credentials.password"],
+                }
+            ],
+            dbms="sqlite",
+            max_seconds=10,
+            max_params_per_endpoint=2,
+        )
+    )
+
+    assert result["vulnerabilities_found"] == 1
+    finding = result["findings"][0]
+    assert finding["param"] == "credentials.email"
+    assert json.loads(finding["body"]) == {
+        "credentials": {
+            "email": "nobody@example.test",
+            "password": "not-real",
+        }
+    }
+    assert any("Authentication bypass via SQLi" in item for item in finding["evidence"])
+    assert sent_bodies
+    assert all("credentials.email" not in body for body in sent_bodies)
+
+
 def test_detect_dbms_accepts_honey_postgresql_error(monkeypatch):
     async def fake_run(cmd, *args, **kwargs):
         url = cmd[-1]

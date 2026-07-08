@@ -985,7 +985,10 @@ back to guessed login endpoints, and forged-token probes suppress the original A
 DONE phase 12 for workflow/write-side BOLA replay: the graph/resource replay path now attempts a
 bounded empty-JSON `PATCH` against owner object URLs with the second principal and emits a separate
 critical `write_cross_principal_replay` finding only when the response returns the requested owner
-object ID that was absent from the attacker's own listing.
+object ID that was absent from the attacker's own listing. DONE phase 13 for nested POST-body SQLi
+request construction: DBMS detection and active JSON-body probes now mutate flattened body-path
+parameters such as `credentials.email` through the same nested JSON writer used by replay, preserving
+captured sibling fields and avoiding flat-key bodies that type-strict login/search APIs reject.
 
 **Done when:** recorded two-user benchmark scorecards show the targeted miss becoming a deterministic
 finding, not merely an attempted endpoint.
