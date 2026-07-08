@@ -942,6 +942,9 @@ did not actually exercise both principals. Scorecards now also emit `benchmark_f
 missed fixture expectation becomes either a runnable `scan.focused_family` work item (SQLi/NoSQL,
 browser-proof XSS, auth/BOLA when preconditions are present), a blocked action template with explicit
 auth/principal blockers, or a detector-gap record when no focused executor exists yet.
+`POST /arsenal/hypotheses/from-benchmark` / `hypothesis.generate_from_benchmark` now converts those
+follow-up rows into deduped `benchmark` hypotheses with `runtime_proof_required=true`, without
+queueing scans, creating findings, or satisfying proof.
 
 **Implement:** keep the benchmark as the unit of progress. Add focused campaigns for login/search/
 review/order APIs; capture real POST bodies from browser/HAR/OpenAPI; keep NoSQL operator probes
@@ -949,6 +952,8 @@ attached to JSON-body coverage telemetry; add browser-first reflected/stored XSS
 Lab/deep workflow/write-BOLA checks after graph/principal preconditions exist. DONE phase 1 for
 auth-workflow diagnostics in `scanner_tools.benchmark_summary` and `scripts/benchmark_targets.py`;
 DONE phase 2 for turning missed scorecard expectations into explicit follow-up worklist rows;
+DONE phase 3 for connecting those rows to the hypothesis/campaign planning layer as benchmark
+hypotheses;
 detector recall and proof routing still require scorecard-backed scan improvements.
 
 **Done when:** recorded two-user benchmark scorecards show the targeted miss becoming a deterministic
@@ -992,7 +997,7 @@ items, not findings.
 2. DONE phase 1: add a `hypotheses` table for route, endpoint, object, principal, AI target, model artifact,
    dependency, config, and secret leads. Fields should include target/campaign, vuln family, CWE,
    severity guess, confidence, source (`app_graph`, `source_ingest`, `ai_planner`, `scanner_signal`,
-   `ai_gate`, `model_intake`, `manual`), dedupe key, status, version, claim lease, smoke score,
+   `ai_gate`, `model_intake`, `benchmark`, `manual`), dedupe key, status, version, claim lease, smoke score,
    evidence refs, tool receipt refs, next test action, endorsements, refutations, and terminal reason.
    `/arsenal/hypotheses` records/endorses deduped leads, lists them read-only, exposes
    compare-and-set claim leasing, and `/settings/arsenal` renders the read-only Hypothesis Board

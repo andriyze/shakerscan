@@ -3440,7 +3440,7 @@ class LocalAgentTestRequest(BaseModel):
 
 
 class HypothesisRequest(BaseModel):
-    source: str = Field(pattern="^(app_graph|source_ingest|ai_planner|scanner_signal|ai_gate|model_intake|manual)$")
+    source: str = Field(pattern="^(app_graph|source_ingest|ai_planner|scanner_signal|ai_gate|model_intake|benchmark|manual)$")
     family: str = Field(min_length=1, max_length=80)
     dedupe_key: str = Field(min_length=1, max_length=500)
     dedupe_dimensions: dict[str, Any] = Field(default_factory=dict)
@@ -3493,6 +3493,32 @@ class PlannerHypothesisRequest(BaseModel):
     operation_plan_id: str
     created_by: Optional[str] = None
     max_actions: int = Field(default=25, ge=1, le=50)
+
+
+class BenchmarkFollowupHypothesisItem(BaseModel):
+    benchmark: Optional[str] = Field(default=None, max_length=120)
+    expectation_id: str = Field(min_length=1, max_length=200)
+    family: str = Field(min_length=1, max_length=80)
+    route: Optional[str] = Field(default=None, max_length=500)
+    proof_required: Optional[str] = Field(default=None, max_length=80)
+    min_severity: Optional[str] = Field(default=None, pattern="^(critical|high|medium|low|info)$")
+    status: str = Field(default="ready", max_length=80)
+    reason: Optional[str] = Field(default=None, max_length=200)
+    operator_hints: list[str] = Field(default_factory=list, max_length=25)
+    blocked_by: list[str] = Field(default_factory=list, max_length=25)
+    next_test_action: Optional[dict[str, Any]] = None
+    blocked_action_template: Optional[dict[str, Any]] = None
+    developer_note: Optional[str] = Field(default=None, max_length=1000)
+    metadata_json: dict[str, Any] = Field(default_factory=dict)
+
+
+class BenchmarkHypothesisRequest(BaseModel):
+    target_id: Optional[str] = None
+    benchmark: str = Field(default="benchmark", max_length=120)
+    scorecard_id: Optional[str] = Field(default=None, max_length=200)
+    scorecard_scan_id: Optional[str] = Field(default=None, max_length=120)
+    followups: list[BenchmarkFollowupHypothesisItem] = Field(default_factory=list, min_length=1, max_length=100)
+    created_by: Optional[str] = None
 
 
 class CampaignRequest(BaseModel):
@@ -15053,6 +15079,190 @@ async def _generate_hypotheses_from_operation_plan(conn, req: PlannerHypothesisR
     }
 
 
+BENCHMARK_HYPOTHESIS_VERSION = "benchmark_followup_hypothesis_v1"
+BENCHMARK_FAMILY_CWE = {
+    "sqli": "CWE-89",
+    "nosqli": "CWE-943",
+    "xss": "CWE-79",
+    "bola": "CWE-639",
+    "broken_access_control": "CWE-285",
+    "sensitive_exposure": "CWE-200",
+    "path_traversal": "CWE-22",
+    "jwt": "CWE-347",
+}
+BENCHMARK_PROOF_SURFACE = {
+    "browser": "browser_runtime_probe",
+    "verified": "runtime_probe",
+    "deterministic": "runtime_probe",
+}
+
+
+def _benchmark_followup_to_hypothesis_request(
+    item: BenchmarkFollowupHypothesisItem | dict[str, Any],
+    *,
+    target_id: str | None,
+    benchmark: str,
+    scorecard_id: str | None,
+    scorecard_scan_id: str | None,
+    created_by: str | None,
+) -> tuple[HypothesisRequest | None, dict[str, Any] | None]:
+    payload = item.model_dump(mode="json") if isinstance(item, BenchmarkFollowupHypothesisItem) else dict(item or {})
+    expectation_id = str(payload.get("expectation_id") or "").strip()
+    family = str(payload.get("family") or "").strip().lower().replace("-", "_").replace(" ", "_")
+    if not expectation_id:
+        return None, {"reason": "missing_expectation_id"}
+    if not family:
+        return None, {"reason": "missing_family", "expectation_id": expectation_id}
+    route = _normalize_hypothesis_dedupe_value(payload.get("route"))
+    proof_required = str(payload.get("proof_required") or "deterministic").strip().lower()
+    proof_surface = BENCHMARK_PROOF_SURFACE.get(proof_required, "runtime_proof_required")
+    min_severity = str(payload.get("min_severity") or "").strip().lower() or None
+    severity = min_severity if min_severity in {"critical", "high", "medium", "low", "info"} else (
+        "high" if family in {"bola", "sqli", "nosqli", "xss"} else "medium"
+    )
+    blocked_by = _clean_string_list(payload.get("blocked_by"), max_items=25)
+    operator_hints = _clean_string_list(payload.get("operator_hints"), max_items=25)
+    action = (
+        payload.get("next_test_action")
+        if isinstance(payload.get("next_test_action"), dict) and payload.get("next_test_action")
+        else payload.get("blocked_action_template")
+        if isinstance(payload.get("blocked_action_template"), dict) and payload.get("blocked_action_template")
+        else None
+    )
+    requires = list(dict.fromkeys([
+        *blocked_by,
+        *(operator_hints if family in {"bola", "broken_access_control"} else []),
+    ]))
+    if action:
+        next_action = _redact_agent_payload({
+            **action,
+            "requires": list(dict.fromkeys([*requires, *_clean_string_list(action.get("requires"), max_items=25)])),
+            "proof_surface": proof_surface,
+            "source_only": True,
+            "benchmark": benchmark,
+            "expectation_id": expectation_id,
+        })
+    else:
+        next_action = {
+            "command": "hypothesis.plan_campaign",
+            "parameters": {
+                "target_id": target_id,
+                "family": family,
+                "benchmark": benchmark,
+                "expectation_id": expectation_id,
+                "endpoint_hint": {"route": route} if route else {},
+            },
+            "requires": list(dict.fromkeys([*requires, "detector_or_executor_implementation"])),
+            "proof_surface": proof_surface,
+            "source_only": True,
+        }
+
+    dedupe_dimensions = {
+        "route": route or expectation_id,
+        "proof_surface": proof_surface,
+    }
+    if family == "bola":
+        dedupe_dimensions["principal_actor"] = "user2"
+        dedupe_dimensions["principal_other"] = "user1"
+    dedupe_dimensions = {key: value for key, value in dedupe_dimensions.items() if value}
+    item_benchmark = str(payload.get("benchmark") or benchmark or "benchmark").strip() or "benchmark"
+    status = str(payload.get("status") or "ready").strip().lower()
+    reason = str(payload.get("reason") or "").strip() or ("blocked" if blocked_by else "missing_verified_benchmark_expectation")
+    metadata = _redact_agent_payload({
+        "benchmark_hypothesis_version": BENCHMARK_HYPOTHESIS_VERSION,
+        "benchmark": item_benchmark,
+        "scorecard_id": scorecard_id,
+        "scorecard_scan_id": scorecard_scan_id,
+        "expectation_id": expectation_id,
+        "benchmark_followup_status": status,
+        "benchmark_followup_reason": reason,
+        "proof_required": proof_required,
+        "proof_surface": proof_surface,
+        "min_severity": min_severity,
+        "operator_hints": operator_hints,
+        "blocked_by": blocked_by,
+        "developer_note": payload.get("developer_note"),
+        "source_only": True,
+        "runtime_proof_required": True,
+        "dedupe_dimensions": dedupe_dimensions,
+        "followup_metadata": payload.get("metadata_json") if isinstance(payload.get("metadata_json"), dict) else {},
+    })
+    route_suffix = f" on {route}" if route else ""
+    title = f"Benchmark miss: {family.replace('_', ' ')} {expectation_id}{route_suffix}"
+    description = (
+        f"{item_benchmark} scorecard missed expected {family} evidence ({expectation_id}). "
+        "This is a benchmark work signal only; deterministic runtime proof is still required before any finding or gate can change."
+    )
+    confidence = 0.65 if action and not blocked_by else 0.45 if blocked_by else 0.35
+    return HypothesisRequest(
+        source="benchmark",
+        family=family,
+        dedupe_key="benchmark-followup-placeholder",
+        dedupe_dimensions=dedupe_dimensions,
+        target_id=target_id,
+        cwe=BENCHMARK_FAMILY_CWE.get(family),
+        title=title,
+        description=description,
+        severity_guess=severity,
+        confidence=confidence,
+        next_test_action=next_action,
+        endorsement={
+            "source": "benchmark",
+            "benchmark": item_benchmark,
+            "scorecard_id": scorecard_id,
+            "scorecard_scan_id": scorecard_scan_id,
+            "expectation_id": expectation_id,
+            "runtime_proof_required": True,
+        },
+        metadata_json=metadata,
+        created_by=created_by or "benchmark",
+    ), None
+
+
+async def _generate_hypotheses_from_benchmark_followups(conn, req: BenchmarkHypothesisRequest) -> dict[str, Any]:
+    target_uuid: uuid.UUID | None = None
+    if req.target_id:
+        try:
+            target_uuid = uuid.UUID(str(req.target_id))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="target_id must be a UUID") from exc
+        if not await conn.fetchval("SELECT 1 FROM targets WHERE id=$1", target_uuid):
+            raise HTTPException(status_code=404, detail="Target not found")
+    created_by = str(req.created_by or "benchmark").strip() or "benchmark"
+    hypotheses: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    for index, item in enumerate(req.followups):
+        hypothesis_req, skip = _benchmark_followup_to_hypothesis_request(
+            item,
+            target_id=str(target_uuid) if target_uuid else None,
+            benchmark=req.benchmark,
+            scorecard_id=req.scorecard_id,
+            scorecard_scan_id=req.scorecard_scan_id,
+            created_by=created_by,
+        )
+        if skip:
+            skipped.append({"index": index, **skip})
+            continue
+        if not hypothesis_req:
+            skipped.append({"index": index, "reason": "no_hypothesis_generated"})
+            continue
+        result = await _upsert_hypothesis(conn, hypothesis_req)
+        hypotheses.append(result["hypothesis"])
+    return {
+        "benchmark": req.benchmark,
+        "scorecard_id": req.scorecard_id,
+        "scorecard_scan_id": req.scorecard_scan_id,
+        "hypotheses": hypotheses,
+        "created_or_endorsed": len(hypotheses),
+        "skipped": skipped,
+        "skipped_count": len(skipped),
+        "execution_enabled": False,
+        "findings_created": 0,
+        "queued_scans": 0,
+        "runtime_proof_required": True,
+    }
+
+
 def _canonical_hypothesis_signal(req: HypothesisSignalRequest) -> dict[str, Any]:
     payload = req.model_dump(mode="json")
     signal = {
@@ -18965,6 +19175,10 @@ async def _arsenal_dispatch_hypothesis_generate_from_plan(p: dict[str, Any]) -> 
     return await arsenal_generate_hypotheses_from_plan(PlannerHypothesisRequest(**p))
 
 
+async def _arsenal_dispatch_hypothesis_generate_from_benchmark(p: dict[str, Any]) -> dict[str, Any]:
+    return await arsenal_generate_hypotheses_from_benchmark(BenchmarkHypothesisRequest(**p))
+
+
 async def _arsenal_dispatch_hypothesis_claim(p: dict[str, Any]) -> dict[str, Any]:
     hypothesis_id = str(p.get("hypothesis_id") or "").strip()
     if not hypothesis_id:
@@ -19369,6 +19583,7 @@ def _arsenal_readonly_adapters() -> dict[str, Any]:
         "hypothesis.record": _arsenal_dispatch_hypothesis_record,
         "hypothesis.generate_from_source": _arsenal_dispatch_hypothesis_generate_from_source,
         "hypothesis.generate_from_plan": _arsenal_dispatch_hypothesis_generate_from_plan,
+        "hypothesis.generate_from_benchmark": _arsenal_dispatch_hypothesis_generate_from_benchmark,
         "hypothesis.claim": _arsenal_dispatch_hypothesis_claim,
         "hypothesis.signal": _arsenal_dispatch_hypothesis_signal,
         "hypothesis.plan_campaign": _arsenal_dispatch_hypothesis_plan_campaign,
@@ -20123,6 +20338,17 @@ async def arsenal_generate_hypotheses_from_plan(req: PlannerHypothesisRequest):
     """
     async with db_pool.acquire() as conn:
         return await _generate_hypotheses_from_operation_plan(conn, req)
+
+
+@app.post("/arsenal/hypotheses/from-benchmark")
+async def arsenal_generate_hypotheses_from_benchmark(req: BenchmarkHypothesisRequest):
+    """Record benchmark scorecard follow-ups as hypotheses only.
+
+    Benchmark misses become worklist leads. This route cannot queue scanner work,
+    create findings, or satisfy runtime proof contracts.
+    """
+    async with db_pool.acquire() as conn:
+        return await _generate_hypotheses_from_benchmark_followups(conn, req)
 
 
 @app.post("/arsenal/hypotheses/{hypothesis_id}/claim")

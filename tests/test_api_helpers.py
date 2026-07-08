@@ -5609,6 +5609,161 @@ def test_generate_hypotheses_from_operation_plan_records_no_findings_or_scans():
     assert result["hypotheses"][0]["can_promote_finding"] is False
 
 
+def test_benchmark_followup_maps_to_runtime_proof_hypothesis():
+    target_id = str(uuid.uuid4())
+    req, skipped = api_module._benchmark_followup_to_hypothesis_request(
+        api_module.BenchmarkFollowupHypothesisItem(
+            benchmark="juice-shop",
+            expectation_id="sqli-login",
+            family="sqli",
+            route="/rest/user/login",
+            proof_required="verified",
+            min_severity="critical",
+            operator_hints=["post_body_params"],
+            next_test_action={
+                "command": "scan.focused_family",
+                "risk_tier": "active",
+                "parameters": {
+                    "target": "https://bench.example.test",
+                    "check_family": "sqli",
+                    "scan_type": "smart",
+                },
+            },
+        ),
+        target_id=target_id,
+        benchmark="juice-shop",
+        scorecard_id="scorecard-1",
+        scorecard_scan_id="scan-1",
+        created_by="pytest",
+    )
+
+    assert skipped is None
+    assert req is not None
+    assert req.source == "benchmark"
+    assert req.family == "sqli"
+    assert req.cwe == "CWE-89"
+    assert req.severity_guess == "critical"
+    assert req.target_id == target_id
+    assert req.next_test_action["command"] == "scan.focused_family"
+    assert req.next_test_action["parameters"]["check_family"] == "sqli"
+    assert req.next_test_action["source_only"] is True
+    assert req.metadata_json["runtime_proof_required"] is True
+    assert req.metadata_json["benchmark"] == "juice-shop"
+    assert req.dedupe_dimensions["route"] == "/rest/user/login"
+    assert req.dedupe_dimensions["proof_surface"] == "runtime_probe"
+
+
+def test_benchmark_followup_blocks_bola_until_principal_preconditions():
+    req, skipped = api_module._benchmark_followup_to_hypothesis_request(
+        api_module.BenchmarkFollowupHypothesisItem(
+            expectation_id="bola-orders",
+            family="bola",
+            route="/workshop/api/shop/orders",
+            proof_required="verified",
+            blocked_by=["missing_second_principal"],
+            blocked_action_template={
+                "command": "scan.focused_family",
+                "parameters": {"check_family": "bola", "exploit_depth": True},
+            },
+        ),
+        target_id=None,
+        benchmark="crapi",
+        scorecard_id=None,
+        scorecard_scan_id=None,
+        created_by=None,
+    )
+
+    assert skipped is None
+    assert req is not None
+    assert req.family == "bola"
+    assert req.next_test_action["command"] == "scan.focused_family"
+    assert "missing_second_principal" in req.next_test_action["requires"]
+    assert req.metadata_json["blocked_by"] == ["missing_second_principal"]
+    assert req.metadata_json["runtime_proof_required"] is True
+    assert req.dedupe_dimensions["principal_actor"] == "user2"
+    assert req.dedupe_dimensions["principal_other"] == "user1"
+
+
+def test_generate_hypotheses_from_benchmark_followups_records_no_findings_or_scans():
+    target_id = uuid.uuid4()
+    inserted: list[dict[str, object]] = []
+
+    class _FakeConn:
+        async def fetchval(self, query, *args):
+            assert "FROM targets" in str(query)
+            assert args[0] == target_id
+            return 1
+
+        async def fetchrow(self, query, *args):
+            sql = str(query)
+            if "SELECT *" in sql and "FROM hypotheses" in sql:
+                return None
+            if "INSERT INTO hypotheses" in sql:
+                inserted.append({"args": args})
+                return {
+                    "id": uuid.uuid4(),
+                    "target_id": args[0],
+                    "campaign_id": args[1],
+                    "campaign_action_id": args[2],
+                    "source": args[3],
+                    "family": args[4],
+                    "cwe": args[5],
+                    "title": args[6],
+                    "description": args[7],
+                    "severity_guess": args[8],
+                    "confidence": args[9],
+                    "dedupe_key": args[10],
+                    "smoke_score": args[11],
+                    "evidence_object_ids": args[12],
+                    "tool_receipt_ids": args[13],
+                    "next_test_action": args[14],
+                    "endorsements": json.dumps([json.loads(args[15])]),
+                    "refutations": json.dumps([]),
+                    "metadata_json": args[16],
+                    "created_by": args[17],
+                    "status": "open",
+                    "version": 1,
+                    "claim_owner": None,
+                    "claim_lease_expires_at": None,
+                }
+            raise AssertionError(sql)
+
+    result = asyncio.run(api_module._generate_hypotheses_from_benchmark_followups(
+        _FakeConn(),
+        api_module.BenchmarkHypothesisRequest(
+            target_id=str(target_id),
+            benchmark="juice-shop",
+            scorecard_id="latest",
+            scorecard_scan_id="scan-1",
+            followups=[
+                api_module.BenchmarkFollowupHypothesisItem(
+                    expectation_id="xss-dom-search",
+                    family="xss",
+                    route="#/search",
+                    proof_required="browser",
+                    min_severity="high",
+                    operator_hints=["browser_proof_required"],
+                    next_test_action={
+                        "command": "scan.focused_family",
+                        "parameters": {"target": "https://bench.example.test", "check_family": "xss"},
+                    },
+                ),
+            ],
+            created_by="pytest",
+        ),
+    ))
+
+    assert result["created_or_endorsed"] == 1
+    assert result["skipped_count"] == 0
+    assert result["execution_enabled"] is False
+    assert result["findings_created"] == 0
+    assert result["queued_scans"] == 0
+    assert result["runtime_proof_required"] is True
+    assert inserted[0]["args"][3] == "benchmark"
+    assert result["hypotheses"][0]["source"] == "benchmark"
+    assert result["hypotheses"][0]["can_promote_finding"] is False
+
+
 def test_record_command_result_redacts_result_json_and_returns_public_row():
     captured: dict[str, object] = {"queries": []}
 

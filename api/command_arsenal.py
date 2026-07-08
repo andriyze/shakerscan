@@ -886,7 +886,7 @@ COMMANDS: tuple[ArsenalCommand, ...] = (
         path="/arsenal/hypotheses",
         scope_fields=("target_id", "campaign_id", "campaign_action_id"),
         parameters_schema={
-            "source": {"type": "string", "enum": ["app_graph", "source_ingest", "ai_planner", "scanner_signal", "ai_gate", "model_intake", "manual"]},
+            "source": {"type": "string", "enum": ["app_graph", "source_ingest", "ai_planner", "scanner_signal", "ai_gate", "model_intake", "benchmark", "manual"]},
             "family": {"type": "string"},
             "dedupe_key": {"type": "string"},
             "dedupe_dimensions": {
@@ -957,6 +957,43 @@ COMMANDS: tuple[ArsenalCommand, ...] = (
         },
         evidence_contract=("hypothesis_rows", "operation_plan_id", "planner_signal_summary", "runtime_proof_required"),
         redaction_contract=("planner", "metadata_json", "next_test_action"),
+        timeout_seconds=20,
+    ),
+    ArsenalCommand(
+        name="hypothesis.generate_from_benchmark",
+        family="governance",
+        description="Record benchmark scorecard follow-up rows as hypotheses only; benchmark misses cannot create findings or satisfy proof.",
+        status="dry_run",
+        risk_tier="read_only",
+        method="POST",
+        path="/arsenal/hypotheses/from-benchmark",
+        scope_fields=("target_id", "benchmark", "scorecard_id", "scorecard_scan_id"),
+        parameters_schema={
+            "target_id": {"type": "string", "format": "uuid"},
+            "benchmark": {"type": "string"},
+            "scorecard_id": {"type": "string"},
+            "scorecard_scan_id": {"type": "string"},
+            "followups": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "expectation_id": {"type": "string"},
+                        "family": {"type": "string"},
+                        "route": {"type": "string"},
+                        "proof_required": {"type": "string"},
+                        "min_severity": {"type": "string"},
+                        "status": {"type": "string"},
+                        "blocked_by": {"type": "array", "items": {"type": "string"}},
+                        "operator_hints": {"type": "array", "items": {"type": "string"}},
+                        "next_test_action": {"type": "object"},
+                        "blocked_action_template": {"type": "object"},
+                    },
+                },
+            },
+        },
+        evidence_contract=("hypothesis_rows", "benchmark_followups", "runtime_proof_required", "skipped_followups"),
+        redaction_contract=("metadata_json", "next_test_action", "developer_note"),
         timeout_seconds=20,
     ),
     ArsenalCommand(
@@ -1782,7 +1819,7 @@ def describe_contracts() -> dict[str, Any]:
             "required": ["hypothesis_id", "source", "family", "dedupe_key", "status", "claim_state"],
             "fields": {
                 "hypothesis_id": "uuid",
-                "source": "app_graph|source_ingest|ai_planner|scanner_signal|ai_gate|model_intake|manual",
+                "source": "app_graph|source_ingest|ai_planner|scanner_signal|ai_gate|model_intake|benchmark|manual",
                 "family": "sqli|xss|bola|bfla|mass_assignment|jwt|ai_gate|model_intake",
                 "cwe": "string|null",
                 "severity_guess": "critical|high|medium|low|info|null",

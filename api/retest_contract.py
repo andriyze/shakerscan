@@ -1508,7 +1508,7 @@ async def run_schema_migrations(pool) -> None:
                     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                     CONSTRAINT hypotheses_source_check
-                        CHECK (source IN ('app_graph','source_ingest','ai_planner','scanner_signal','ai_gate','model_intake','manual')),
+                        CHECK (source IN ('app_graph','source_ingest','ai_planner','scanner_signal','ai_gate','model_intake','benchmark','manual')),
                     CONSTRAINT hypotheses_status_check
                         CHECK (status IN ('open','claimed','testing','supported','refuted','promoted','dead')),
                     CONSTRAINT hypotheses_severity_check
@@ -1518,6 +1518,12 @@ async def run_schema_migrations(pool) -> None:
                     CONSTRAINT hypotheses_smoke_score_check
                         CHECK (smoke_score IS NULL OR (smoke_score >= 0 AND smoke_score <= 1))
                 )
+            """)
+            await conn.execute("ALTER TABLE hypotheses DROP CONSTRAINT IF EXISTS hypotheses_source_check")
+            await conn.execute("""
+                ALTER TABLE hypotheses
+                ADD CONSTRAINT hypotheses_source_check
+                CHECK (source IN ('app_graph','source_ingest','ai_planner','scanner_signal','ai_gate','model_intake','benchmark','manual'))
             """)
             # Dedupe key must match the application find-or-create key, which is
             # (target, family, dedupe_key) WITHOUT source — a new source endorses
