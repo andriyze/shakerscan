@@ -15203,11 +15203,117 @@ def _finding_refuter_trigger(finding: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
+# Finding-delta integrity heuristic: a target whose latest scan reports far more findings
+# than its own recent baseline is worth a refuter look. Universal (not benchmark-specific):
+# a spike can be a real new exposure, a detector regression, or contaminated/benchmark-fit
+# output. Thresholds are deliberately conservative to avoid noise on small, noisy targets.
+REFUTER_FINDING_DELTA_MIN_BASELINE = 2   # need at least this many prior scans for a baseline
+REFUTER_FINDING_DELTA_MIN_ABSOLUTE = 5   # latest must exceed baseline median by at least this
+REFUTER_FINDING_DELTA_MULTIPLIER = 2.0   # and (for non-zero baselines) be at least this many x
+
+
+def _median(values: Sequence[float]) -> float:
+    ordered = sorted(float(v) for v in values)
+    count = len(ordered)
+    if count == 0:
+        return 0.0
+    mid = count // 2
+    if count % 2:
+        return ordered[mid]
+    return (ordered[mid - 1] + ordered[mid]) / 2.0
+
+
+def _finding_delta_refuter_signal(target_stat: dict[str, Any]) -> dict[str, Any] | None:
+    """Flag a target whose latest scan produced an unusually large finding delta.
+
+    This is an integrity *signal*, never a verdict: it is surfaced for review only and
+    cannot mutate findings, proof state, hypotheses, or gates. It exists to catch the
+    exact regression class this refuter layer is meant to catch — a sudden jump in a
+    target's finding count that may be a detector regression or contamination rather than
+    a real exposure change.
+    """
+    counts = [int(c) for c in (target_stat.get("recent_finding_counts") or []) if c is not None]
+    if len(counts) < REFUTER_FINDING_DELTA_MIN_BASELINE + 1:
+        return None
+    latest = counts[0]
+    baseline = counts[1:]
+    baseline_median = _median(baseline)
+    absolute_delta = latest - baseline_median
+    if absolute_delta < REFUTER_FINDING_DELTA_MIN_ABSOLUTE:
+        return None
+    # The absolute floor already gates the zero/near-zero baseline case; only apply the
+    # multiplier test when there is a non-trivial baseline to multiply against.
+    if baseline_median > 0 and latest < baseline_median * REFUTER_FINDING_DELTA_MULTIPLIER:
+        return None
+    target_id = str(target_stat.get("target_id") or "").strip() or None
+    return {
+        "subject_type": "target",
+        "subject_id": target_id,
+        "target_id": target_id,
+        "target_url": target_stat.get("target_url"),
+        "latest_scan_id": str(target_stat.get("latest_scan_id") or "").strip() or None,
+        "latest_finding_count": latest,
+        "baseline_median": baseline_median,
+        "baseline_finding_counts": baseline,
+        "absolute_delta": absolute_delta,
+        "trigger_type": "finding_delta_spike",
+        "trigger_reasons": ["unusually_large_finding_delta"],
+        "review_hint": (
+            f"Latest scan reported {latest} findings vs a recent baseline median of "
+            f"{baseline_median:g}. Confirm this is a real exposure change, not a detector "
+            "regression, contamination, or benchmark-fitting artifact, before trusting new claims."
+        ),
+        "execution_enabled": False,
+        "findings_updated": 0,
+    }
+
+
+def _finding_delta_target_stats(scan_rows: Sequence[Any]) -> list[dict[str, Any]]:
+    """Group completed-scan rows (ordered newest-first per target) into per-target stats."""
+    by_target: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
+    for row in scan_rows or []:
+        data = row_to_dict(row)
+        target_id = str(data.get("target_id") or "").strip()
+        if not target_id:
+            continue
+        entry = by_target.get(target_id)
+        if entry is None:
+            entry = {
+                "target_id": target_id,
+                "target_url": data.get("target_url"),
+                "latest_scan_id": str(data.get("scan_id") or data.get("id") or "").strip() or None,
+                "recent_finding_counts": [],
+            }
+            by_target[target_id] = entry
+            order.append(target_id)
+        entry["recent_finding_counts"].append(int(data.get("findings_count") or 0))
+    return [by_target[target_id] for target_id in order]
+
+
+def _finding_delta_refuter_signals(
+    target_stats: Sequence[dict[str, Any]],
+    *,
+    limit: int = 20,
+) -> list[dict[str, Any]]:
+    signals: list[dict[str, Any]] = []
+    for stat in target_stats or []:
+        if not isinstance(stat, dict):
+            continue
+        signal = _finding_delta_refuter_signal(stat)
+        if signal:
+            signals.append(signal)
+    signals.sort(key=lambda item: -float(item.get("absolute_delta") or 0))
+    bounded = max(1, min(int(limit or 20), 100))
+    return signals[:bounded]
+
+
 def _refuter_work_summary(
     findings: Sequence[Any],
     reviews: Sequence[Any] = (),
     *,
     limit: int = 20,
+    integrity_signals: Sequence[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     reviewed_subjects: set[tuple[str, str]] = set()
     for review in reviews:
@@ -15238,6 +15344,9 @@ def _refuter_work_summary(
     trigger_counts = Counter(reason for item in candidates for reason in item.get("trigger_reasons", []))
     type_counts = Counter(str(item.get("trigger_type") or "unknown") for item in candidates)
     unreviewed = [item for item in candidates if not item.get("already_reviewed")]
+    # Integrity signals are report-only target-level spikes; they are intentionally NOT
+    # part of `candidates`, so queue-from-summary never auto-creates a target refuter row.
+    integrity = [dict(signal) for signal in (integrity_signals or []) if isinstance(signal, dict)]
     return {
         "summary": {
             "candidate_count": len(candidates),
@@ -15245,9 +15354,11 @@ def _refuter_work_summary(
             "already_reviewed_count": len(candidates) - len(unreviewed),
             "trigger_counts": dict(trigger_counts),
             "trigger_type_counts": dict(type_counts),
+            "integrity_signal_count": len(integrity),
             "limit": bounded_limit,
         },
         "candidates": candidates[:bounded_limit],
+        "integrity_signals": integrity[:bounded_limit],
         "execution_enabled": False,
         "findings_updated": 0,
         "hypotheses_updated": 0,
@@ -15290,7 +15401,29 @@ async def _load_refuter_work_summary(conn, *, limit: int = 20, finding_window: i
         """,
         max(finding_window, limit),
     )
-    return _refuter_work_summary(findings, reviews, limit=limit)
+    # Recent operator-facing web-DAST scans per target (newest first, shards excluded) for
+    # the finding-delta integrity heuristic. Windowed per target so the scan set is bounded.
+    scan_rows = await conn.fetch(
+        """
+        SELECT target_id, target_url, scan_id, findings_count
+        FROM (
+            SELECT target_id, target_url, id AS scan_id, findings_count,
+                   ROW_NUMBER() OVER (PARTITION BY target_id ORDER BY created_at DESC) AS rn
+            FROM scans
+            WHERE status = 'completed'
+              AND run_kind = 'web_dast'
+              AND target_id IS NOT NULL
+              AND (scan_role IS NULL OR scan_role <> 'shard')
+        ) ranked
+        WHERE rn <= $1
+        ORDER BY target_id, rn
+        """,
+        REFUTER_FINDING_DELTA_MIN_BASELINE + 4,
+    )
+    integrity_signals = _finding_delta_refuter_signals(
+        _finding_delta_target_stats(scan_rows), limit=limit
+    )
+    return _refuter_work_summary(findings, reviews, limit=limit, integrity_signals=integrity_signals)
 
 
 def _refuter_review_requests_from_summary(

@@ -3275,6 +3275,67 @@ def test_refuter_work_summary_triggers_weak_ai_and_model_claims():
     assert any("parser" in item for item in parser_plan["counterevidence_bundle"]["benign_explanations_to_test"])
 
 
+def test_finding_delta_refuter_signal_flags_spike():
+    target_id = uuid.uuid4()
+    # Latest scan 30 findings vs a baseline that hovered around 4.
+    signal = api_module._finding_delta_refuter_signal({
+        "target_id": str(target_id),
+        "target_url": "https://app.example.com",
+        "latest_scan_id": "scan-latest",
+        "recent_finding_counts": [30, 4, 5, 3, 4],
+    })
+    assert signal is not None
+    assert signal["trigger_type"] == "finding_delta_spike"
+    assert signal["trigger_reasons"] == ["unusually_large_finding_delta"]
+    assert signal["latest_finding_count"] == 30
+    assert signal["baseline_median"] == 4
+    assert signal["absolute_delta"] == 26
+    assert signal["subject_type"] == "target"
+    assert signal["execution_enabled"] is False
+
+
+def test_finding_delta_refuter_signal_ignores_stable_and_insufficient_history():
+    base = {"target_id": "t1", "target_url": "u", "latest_scan_id": "s"}
+    # Stable: latest is in line with the baseline.
+    assert api_module._finding_delta_refuter_signal({**base, "recent_finding_counts": [6, 5, 5, 4]}) is None
+    # Small absolute delta even if proportionally larger (2 -> would-be spike) stays quiet.
+    assert api_module._finding_delta_refuter_signal({**base, "recent_finding_counts": [4, 1, 1, 2]}) is None
+    # Not enough history to form a baseline.
+    assert api_module._finding_delta_refuter_signal({**base, "recent_finding_counts": [40, 2]}) is None
+    # A big jump from a zero baseline still fires on the absolute floor alone.
+    assert api_module._finding_delta_refuter_signal({**base, "recent_finding_counts": [8, 0, 0, 0]}) is not None
+
+
+def test_finding_delta_target_stats_groups_recent_scans_newest_first():
+    rows = [
+        {"target_id": "a", "target_url": "ua", "scan_id": "a3", "findings_count": 30},
+        {"target_id": "a", "target_url": "ua", "scan_id": "a2", "findings_count": 4},
+        {"target_id": "a", "target_url": "ua", "scan_id": "a1", "findings_count": 5},
+        {"target_id": "b", "target_url": "ub", "scan_id": "b1", "findings_count": 1},
+        {"target_id": "", "target_url": "skip", "scan_id": "x", "findings_count": 9},
+    ]
+    stats = api_module._finding_delta_target_stats(rows)
+    assert [s["target_id"] for s in stats] == ["a", "b"]  # empty target dropped, order preserved
+    a = stats[0]
+    assert a["latest_scan_id"] == "a3"
+    assert a["recent_finding_counts"] == [30, 4, 5]
+
+
+def test_refuter_work_summary_includes_report_only_integrity_signals():
+    signals = api_module._finding_delta_refuter_signals([
+        {"target_id": "t1", "target_url": "u1", "latest_scan_id": "s1", "recent_finding_counts": [30, 4, 5, 3]},
+        {"target_id": "t2", "target_url": "u2", "latest_scan_id": "s2", "recent_finding_counts": [5, 4, 5, 4]},
+    ])
+    assert len(signals) == 1  # only the spiking target
+    summary = api_module._refuter_work_summary([], [], limit=10, integrity_signals=signals)
+    assert summary["summary"]["integrity_signal_count"] == 1
+    assert summary["integrity_signals"][0]["target_id"] == "t1"
+    # Report-only: integrity signals must never leak into the auto-queue candidate path.
+    assert summary["candidates"] == []
+    requests = api_module._refuter_review_requests_from_summary(summary)
+    assert requests == []
+
+
 def test_refuter_queue_from_summary_records_unreviewed_signal_only_reviews():
     weak_id = uuid.uuid4()
     ai_id = uuid.uuid4()

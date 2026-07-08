@@ -1221,8 +1221,13 @@ Richer counterevidence bundle review and broader trigger coverage remain open.
    preview, and auth/principal/tenant/object context checks; queued review metadata preserves the
    same plan. DONE phase 3: plans now include counterevidence bundles with review questions, benign
    explanations to test, required evidence refs, and supported/weakened/refuted/inconclusive verdict
-   paths. Benchmark deltas, unusually large finding deltas, and richer counterevidence review UI
-   remain open.
+   paths. DONE phase 4: the refuter summary now emits report-only target-level `integrity_signals`
+   for the `finding_delta_spike` trigger — a target whose latest web-DAST scan reports a finding
+   count far above its own recent baseline median (`_finding_delta_refuter_signal`, conservative
+   absolute+multiplier thresholds). These are surfaced for human review only; they are deliberately
+   excluded from `candidates`, so queue-from-summary never auto-creates a target refuter row, and
+   they never mutate findings or proof state. Benchmark-win deltas and richer counterevidence review
+   UI remain open.
 2. PARTIAL phase 1: refuter behavior now plans how to rerun the minimal reproducer, test benign
    explanations, verify auth context/principal/tenant/object ownership, check request freshness, and
    attach counterevidence when a claim weakens. DONE phase 2: a gated executor now queues the
