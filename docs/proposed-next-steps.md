@@ -991,7 +991,10 @@ parameters such as `credentials.email` through the same nested JSON writer used 
 captured sibling fields and avoiding flat-key bodies that type-strict login/search APIs reject.
 DONE phase 14 for XSS budget quality: smart XSS now receives the same reachable/prioritized active
 worklist as SQLi, so bounded scans spend XSS budget on filtered real endpoints instead of the raw
-synthetic candidate list.
+synthetic candidate list. DONE phase 15 for POST-body reflected-XSS browser proof: HTML-like
+POST/PUT/PATCH responses that reflect an executable payload now get a headless response-render proof
+attempt and can be promoted to verified High with `browser_proof`; JSON responses are explicitly
+excluded from that render path so raw JSON reflection is not overclaimed as browser execution.
 
 **Done when:** recorded two-user benchmark scorecards show the targeted miss becoming a deterministic
 finding, not merely an attempted endpoint.

@@ -237,7 +237,8 @@ Discovery toggles available in scan `options`: `json_link_following`, `options_m
 - **XSS** (`active_checks.py`, `dom_xss_analyzer.py`): `dalfox`-based reflected/DOM detection plus a
   custom **context-aware** tester that detects reflection context (in-script, in-attribute, event
   handler, HTML body, SVG/CSS/JSON/URL-path) and selects context-specific payloads; canary-based
-  reflection detection; hash-route testing; static DOM-XSS source-to-sink analysis over JS files.
+  reflection detection; browser proof for GET reflections and HTML-like POST/PUT/PATCH response
+  reflections; hash-route testing; static DOM-XSS source-to-sink analysis over JS files.
 - **SQLi** (`active_checks.py`): `sqlmap`-based testing that is **DBMS-aware** (SQLite, MySQL,
   PostgreSQL, MSSQL, Oracle) — it fingerprints the database, then chooses DBMS-specific payloads,
   techniques, and optional data-extraction chaining. Supports out-of-band (blind) detection via

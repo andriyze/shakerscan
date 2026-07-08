@@ -365,11 +365,12 @@ except ImportError:
 
 # Browser proof for XSS verification (optional - graceful degradation if unavailable)
 try:
-    from .proof_of_exploit import prove_xss_headless, ExploitProof
+    from .proof_of_exploit import prove_xss_headless, prove_xss_response_headless, ExploitProof
     HAS_XSS_PROOF = True
 except ImportError:
     HAS_XSS_PROOF = False
     prove_xss_headless = None
+    prove_xss_response_headless = None
     ExploitProof = None
 
 # Statistical testing for SQLi timing validation (optional)
@@ -6260,6 +6261,25 @@ def detect_reflection_context(response_body: str, marker: str) -> str:
     return "in_html"
 
 
+def _xss_response_looks_browser_renderable(response_body: str) -> bool:
+    body = str(response_body or "").lstrip()
+    if not body:
+        return False
+    if body[0] in "{[":
+        try:
+            json.loads(body)
+            return False
+        except Exception:
+            pass
+    return bool(
+        re.search(
+            r"</?(html|head|body|script|div|span|p|form|input|textarea|svg|iframe|img|a)\b",
+            body,
+            re.I,
+        )
+    )
+
+
 def _stringify_body_value(value: Any) -> str:
     if isinstance(value, (dict, list)):
         return json.dumps(value)
@@ -8559,6 +8579,38 @@ async def smart_xss_test(
                     severity = "high" if context in ["in_script", "in_angular"] else "medium"
                     confidence = 0.85
                     verified = False
+                    proof_data = None
+                    proof_attempted = False
+
+                    if (
+                        HAS_XSS_PROOF
+                        and prove_xss_response_headless
+                        and _xss_response_looks_browser_renderable(payload_out)
+                    ):
+                        proof_attempted = True
+                        try:
+                            proof = await prove_xss_response_headless(
+                                response_body=payload_out,
+                                payload=payload,
+                                request_label=f"{method} {endpoint_url}",
+                                screenshot_dir=None,
+                            )
+                            if proof and proof.proven:
+                                verified = True
+                                severity = "high"
+                                confidence = proof.confidence
+                                evidence.append(f"Browser proof: {proof.technique}")
+                                if proof.extracted_data:
+                                    evidence.append(f"Proof data: {proof.extracted_data}")
+                                proof_data = proof.to_dict()
+                            elif severity == "high":
+                                severity = "medium"
+                                confidence = 0.65
+                                evidence.append("Browser verification attempted but no execution confirmed")
+                        except Exception as e:
+                            evidence.append(f"Browser verification skipped: {e}")
+                    elif context == "in_json":
+                        evidence.append("Browser verification skipped: JSON response is not browser-renderable HTML")
 
                     finding = {
                         "type": "XSS",
@@ -8576,6 +8628,12 @@ async def smart_xss_test(
                         "content_type": content_type,
                         "body": payload_body,
                     }
+                    if verified:
+                        finding["cvss_score"] = 7.4
+                    if proof_data:
+                        finding["browser_proof"] = proof_data
+                    if proof_attempted:
+                        finding["browser_proof_attempted"] = True
                     request_headers = _headers_from_curl_args(auth_post_args + payload_headers)
                     if request_headers:
                         finding["request_headers"] = request_headers

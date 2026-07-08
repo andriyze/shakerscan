@@ -673,6 +673,63 @@ def test_smart_xss_prioritizes_body_params_under_tight_budget(monkeypatch):
     assert result["findings"][0]["param"] == "message"
 
 
+def test_smart_xss_post_body_html_response_uses_browser_proof(monkeypatch):
+    async def fake_run(command, *args, **kwargs):
+        body = json.loads(command[command.index("-d") + 1])
+        value = body.get("message")
+        return f"<html><body>{value}</body></html>", "", 0
+
+    async def fake_response_proof(**kwargs):
+        return active_checks.ExploitProof(
+            proven=True,
+            confidence=0.99,
+            evidence_type="dom_execution",
+            extracted_data="Dialog triggered: 1",
+            technique="headless_xss_response_dialog",
+            request=kwargs.get("request_label"),
+            response_snippet=kwargs.get("response_body"),
+        )
+
+    monkeypatch.setattr(active_checks, "run", fake_run)
+    monkeypatch.setattr(active_checks, "HAS_XSS_PROOF", True)
+    monkeypatch.setattr(active_checks, "prove_xss_response_headless", fake_response_proof)
+
+    result = asyncio.run(
+        active_checks.smart_xss_test(
+            "https://example.test",
+            [
+                {
+                    "url": "https://example.test/contact",
+                    "method": "POST",
+                    "content_type": "application/json",
+                    "body_params": ["message"],
+                    "body_template": {"message": "hello"},
+                }
+            ],
+            max_seconds=10,
+            max_params_per_endpoint=1,
+        )
+    )
+
+    finding = result["findings"][0]
+    assert finding["verified"] is True
+    assert finding["severity"] == "high"
+    assert finding["cvss_score"] == 7.4
+    assert finding["browser_proof"]["technique"] == "headless_xss_response_dialog"
+    assert finding["browser_proof_attempted"] is True
+
+
+def test_xss_response_render_guard_rejects_json_and_accepts_html():
+    payload = "</script><script>alert(1)</script>"
+
+    assert active_checks._xss_response_looks_browser_renderable(
+        json.dumps({"message": payload})
+    ) is False
+    assert active_checks._xss_response_looks_browser_renderable(
+        f"<html><body>{payload}</body></html>"
+    ) is True
+
+
 def test_json_mass_assignment_detects_reflected_privileged_field(monkeypatch):
     async def fake_run(cmd, timeout=15):
         body = json.loads(cmd[cmd.index("-d") + 1])
