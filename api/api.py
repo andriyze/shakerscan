@@ -5708,11 +5708,17 @@ def _build_ai_worker_options(
     production_scan = bool(target.get("production_mode")) or environment == "production"
     production_confirmation = None
     if production_scan:
+        endpoint_hash = hashlib.sha256(
+            str(target.get("endpoint_url") or "").strip().encode("utf-8")
+        ).hexdigest()
         production_confirmation = {
             "confirmed": bool(request.confirm_production),
             "confirmed_at": datetime.now(timezone.utc).isoformat(),
             "environment": environment,
             "target_production_mode": bool(target.get("production_mode")),
+            "target_id": str(target.get("id") or ""),
+            "target_type": target.get("target_type"),
+            "endpoint_hash": f"sha256:{endpoint_hash}",
             "probe_pack": probe_pack,
             "scan_profile": scan_profile,
         }

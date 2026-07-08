@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 import os
 import sys
@@ -1513,7 +1514,11 @@ def test_build_ai_worker_options_records_production_confirmation():
 
     assert storage_options["production_confirmation"]["confirmed"] is True
     assert storage_options["production_confirmation"]["environment"] == "production"
+    expected_endpoint_hash = hashlib.sha256(b"https://example.test/chat").hexdigest()
+    assert storage_options["production_confirmation"]["endpoint_hash"] == f"sha256:{expected_endpoint_hash}"
+    assert "https://example.test/chat" not in str(storage_options["production_confirmation"])
     assert worker_options["ai_target"]["metadata_json"]["production_confirmation"]["probe_pack"] == "shaker-ai-smoke"
+    assert worker_options["ai_target"]["metadata_json"]["production_confirmation"]["endpoint_hash"] == f"sha256:{expected_endpoint_hash}"
     assert worker_options["ai_target"]["credential_ref"]["configured"] is True
     assert "secret-token" not in str(worker_options)
 

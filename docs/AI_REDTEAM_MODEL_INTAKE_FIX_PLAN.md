@@ -35,7 +35,7 @@ Legend: ✅ implemented · 🟡 partial · 🔴 missing.
 | 3.3 | Signature / provenance **crypto** verification | ✅ | Real detached-sig verification (cryptography: Ed25519/RSA-PSS/ECDSA); metadata booleans are claims (R1) |
 | 3.4 | Secret redaction | 🟡 | Shared helper (R2a) + encryption-at-rest (R2b) done; worker command-line indirection remains |
 | 3.5 | Local file read gate | ✅ | — |
-| 3.6 | AI Gate production safety | ✅ | Effective 3-tier probe filter (R6a); minor: endpoint-hash in `confirm_production` evidence still pending |
+| 3.6 | AI Gate production safety | ✅ | Effective 3-tier probe filter (R6a); `confirm_production` evidence includes a content-free endpoint hash |
 | 3.7 | Request budget by HTTP call | ✅ | REST/SSE and widget targets consume the shared request-budget contract |
 | 3.8 | Response body cap | ✅ | Per-profile defaults apply to REST/SSE and widget targets; explicit `max_response_bytes` still wins |
 | 3.9 | AI Gate per-finding retest | ✅ | — |
