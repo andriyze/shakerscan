@@ -1408,8 +1408,11 @@ proof. MCP should be a thin adapter over the REST Command Arsenal. New external 
 
 **Implement later:**
 1. DONE phase 1: add bounded source/spec/package hint ingest for operator-provided route,
-   OpenAPI/Swagger, GraphQL, package, frontend route, server route, IaC, and AI-tool facts. Remaining
-   work is direct repository/file ingestion with file-count/size/path/timeout controls.
+   OpenAPI/Swagger, GraphQL, package, frontend route, server route, IaC, and AI-tool facts. DONE
+   phase 2: `/arsenal/hypotheses/source-ingest` now accepts bounded file descriptors with max file
+   count, max file size, ignored-path, and parse-timeout controls, extracts OpenAPI JSON operations
+   and common backend route declarations into source hints, and still routes everything through
+   runtime-proof-required hypotheses only.
 2. Source-derived outputs are graph facts, endpoint/body-shape hints, auth/principal hints, Model
    Intake artifact hints, and hypotheses for BOLA/BFLA, mass assignment, dangerous upload, SSRF sink,
    file path parameter, template sink, and risky AI tool endpoint. They are not verified findings.

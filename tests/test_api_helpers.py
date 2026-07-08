@@ -6668,6 +6668,94 @@ def test_source_ingest_hint_skips_unbounded_route_hint():
     assert skipped["reason"] == "missing_route_or_path"
 
 
+def test_source_file_ingest_extracts_openapi_operations_with_controls():
+    spec = {
+        "openapi": "3.1.0",
+        "paths": {
+            "/api/orders/{id}": {
+                "get": {
+                    "operationId": "getOrder",
+                    "parameters": [{"name": "id", "in": "path"}],
+                    "security": [{"bearer": []}],
+                }
+            },
+            "/api/users": {
+                "post": {
+                    "operationId": "createUser",
+                    "requestBody": {
+                        "content": {
+                            "application/json": {
+                                "schema": {"type": "object", "properties": {"email": {"type": "string"}, "isAdmin": {"type": "boolean"}}}
+                            }
+                        }
+                    },
+                }
+            },
+        },
+    }
+
+    hints, skipped, summary = api_module._source_files_to_hints(
+        [api_module.SourceIngestFile(path="openapi.json", content=json.dumps(spec))],
+        source_label="repo:test",
+        max_files=10,
+        max_file_bytes=10000,
+        ignored_paths=[],
+        parse_timeout_ms=1000,
+    )
+
+    assert skipped == []
+    assert summary["files_processed"] == 1
+    assert len(hints) == 2
+    by_path = {hint.path: hint for hint in hints}
+    assert by_path["/api/orders/{id}"].kind == "openapi_operation"
+    assert "idor" in by_path["/api/orders/{id}"].risk_hints
+    assert by_path["/api/orders/{id}"].auth_required is True
+    assert "$.isAdmin" in by_path["/api/users"].body_paths
+    assert "mass_assignment" in by_path["/api/users"].risk_hints
+
+
+def test_source_file_ingest_extracts_backend_routes_and_red_flags():
+    content = """
+    router.get('/api/products/:id', async (req, res) => db.query('select * from products where id=' + req.params.id))
+    app.patch('/api/users/:id', async (req, res) => updateUser(req.params.id, req.body.isAdmin))
+    """
+
+    hints, skipped, summary = api_module._source_files_to_hints(
+        [api_module.SourceIngestFile(path="src/routes/users.js", content=content, language="javascript")],
+        source_label="repo:test",
+        max_files=10,
+        max_file_bytes=10000,
+        ignored_paths=[],
+        parse_timeout_ms=1000,
+    )
+
+    assert skipped == []
+    assert summary["hints_generated"] == 2
+    by_path = {hint.path: hint for hint in hints}
+    assert "idor" in by_path["/api/products/:id"].risk_hints
+    assert "sqli" in by_path["/api/products/:id"].risk_hints
+    assert "$.isAdmin" in by_path["/api/users/:id"].body_paths
+    assert "mass_assignment" in by_path["/api/users/:id"].risk_hints
+
+
+def test_source_file_ingest_enforces_ignored_paths_and_size_limits():
+    hints, skipped, summary = api_module._source_files_to_hints(
+        [
+            api_module.SourceIngestFile(path="node_modules/pkg/routes.js", content="app.get('/api/hidden', h)"),
+            api_module.SourceIngestFile(path="src/large.js", content="x" * 2000),
+        ],
+        source_label="repo:test",
+        max_files=10,
+        max_file_bytes=100,
+        ignored_paths=[],
+        parse_timeout_ms=1000,
+    )
+
+    assert hints == []
+    assert summary["files_processed"] == 0
+    assert [item["reason"] for item in skipped] == ["ignored_path", "file_too_large"]
+
+
 # ----- approval-receipt validation (security-critical gate) --------------------
 # _validate_approval_receipt_for_action decides whether a provided receipt actually
 # authorizes a state-changing action. It is the enforcement point that stops a

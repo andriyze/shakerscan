@@ -6,6 +6,7 @@ FastAPI server with PostgreSQL persistence and Redis queue.
 
 import asyncio
 import copy
+import fnmatch
 import hashlib
 import io
 import ipaddress
@@ -15,6 +16,7 @@ import math
 import os
 import random
 import re
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -3482,10 +3484,21 @@ class SourceIngestHint(BaseModel):
     metadata_json: dict[str, Any] = Field(default_factory=dict)
 
 
+class SourceIngestFile(BaseModel):
+    path: str = Field(min_length=1, max_length=500)
+    content: str = Field(default="", max_length=262144)
+    language: Optional[str] = Field(default=None, max_length=80)
+
+
 class SourceIngestRequest(BaseModel):
     target_id: Optional[str] = None
     source_label: str = Field(default="operator_source_ingest", max_length=120)
-    hints: list[SourceIngestHint] = Field(default_factory=list, min_length=1, max_length=50)
+    hints: list[SourceIngestHint] = Field(default_factory=list, max_length=50)
+    files: list[SourceIngestFile] = Field(default_factory=list, max_length=100)
+    max_files: int = Field(default=25, ge=1, le=100)
+    max_file_bytes: int = Field(default=65536, ge=1024, le=262144)
+    ignored_paths: list[str] = Field(default_factory=list, max_length=50)
+    parse_timeout_ms: int = Field(default=1000, ge=100, le=5000)
     created_by: Optional[str] = None
 
 
@@ -14586,6 +14599,238 @@ def _canonical_hypothesis_request(req: HypothesisRequest) -> dict[str, Any]:
 
 
 SOURCE_INGEST_VERSION = "source_ingest_hypothesis_v1"
+SOURCE_INGEST_DEFAULT_IGNORED_PATHS = (
+    ".git/",
+    "node_modules/",
+    "vendor/",
+    "dist/",
+    "build/",
+    "coverage/",
+    "__pycache__/",
+)
+SOURCE_INGEST_HTTP_METHODS = {"get", "post", "put", "patch", "delete"}
+
+
+def _source_ingest_path_ignored(path: str, ignored_paths: Sequence[Any] | None = None) -> bool:
+    normalized = str(path or "").strip().replace("\\", "/").lstrip("./")
+    patterns = list(SOURCE_INGEST_DEFAULT_IGNORED_PATHS) + [str(item or "").strip().replace("\\", "/") for item in (ignored_paths or []) if str(item or "").strip()]
+    for pattern in patterns:
+        if pattern.endswith("/") and (normalized.startswith(pattern) or f"/{pattern}" in normalized):
+            return True
+        if fnmatch.fnmatch(normalized, pattern):
+            return True
+    return False
+
+
+def _source_ingest_risk_hints(
+    *,
+    route: str | None,
+    method: str,
+    parameters: Sequence[str] = (),
+    body_paths: Sequence[str] = (),
+    content: str = "",
+) -> tuple[list[str], list[str], list[str]]:
+    route_l = str(route or "").lower()
+    method_l = str(method or "GET").lower()
+    names = [str(item or "").strip().lower() for item in list(parameters or []) + list(body_paths or [])]
+    content_l = content[:20000].lower()
+    risks: set[str] = set()
+    object_keys: set[str] = set()
+    tenant_keys: set[str] = set()
+    if any(name in {"id", "user_id", "userid", "order_id", "account_id", "customer_id"} or name.endswith(".id") for name in names) or re.search(r"/[:{]?(?:id|user_id|order_id|account_id)[}:]?", route_l):
+        risks.add("idor")
+        object_keys.add("id")
+    if any("tenant" in name or "org" in name or "workspace" in name for name in names) or any(token in route_l for token in ("tenant", "org", "workspace")):
+        risks.add("tenant_boundary")
+        tenant_keys.add("tenant")
+    if any(name in {"q", "query", "search", "filter", "sort"} or "search" in name for name in names) or any(token in route_l for token in ("search", "query")):
+        risks.update({"sqli", "xss"})
+    if any(token in content_l for token in ("innerhtml", "dangerouslysetinnerhtml", "document.write", "v-html")):
+        risks.add("xss")
+    if any(token in content_l for token in ("select *", "where ", "findone(", "sequelize.query", "rawquery", "$where")):
+        risks.add("sqli")
+    if method_l in {"post", "put", "patch"} and any(
+        key in name for name in names for key in ("admin", "role", "permission", "is_admin", "isadmin", "authorit")
+    ):
+        risks.add("mass_assignment")
+    if "upload" in route_l or any("file" in name for name in names):
+        risks.add("dangerous_upload")
+    if any(token in content_l for token in ("requests.get(", "http.get(", "fetch(", "axios.get(", "urlopen(")) and any(name in {"url", "uri", "callback", "webhook"} or "url" in name for name in names):
+        risks.add("ssrf")
+    return sorted(risks), sorted(object_keys), sorted(tenant_keys)
+
+
+def _schema_property_paths(schema: Any, *, prefix: str = "$", max_paths: int = 30) -> list[str]:
+    if not isinstance(schema, dict) or max_paths <= 0:
+        return []
+    props = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+    paths: list[str] = []
+    for name, nested in props.items():
+        if len(paths) >= max_paths:
+            break
+        current = f"{prefix}.{name}"
+        paths.append(current)
+        paths.extend(_schema_property_paths(nested, prefix=current, max_paths=max_paths - len(paths)))
+    return paths[:max_paths]
+
+
+def _openapi_file_hints(path: str, content: str, source_label: str) -> list[SourceIngestHint]:
+    try:
+        spec = json.loads(content)
+    except Exception:
+        return []
+    if not isinstance(spec, dict) or not (spec.get("openapi") or spec.get("swagger")):
+        return []
+    hints: list[SourceIngestHint] = []
+    paths = spec.get("paths") if isinstance(spec.get("paths"), dict) else {}
+    for route, operations in paths.items():
+        if not isinstance(operations, dict):
+            continue
+        for method, operation in operations.items():
+            if str(method).lower() not in SOURCE_INGEST_HTTP_METHODS or not isinstance(operation, dict):
+                continue
+            params = [
+                str(param.get("name"))
+                for param in (operation.get("parameters") or [])
+                if isinstance(param, dict) and param.get("name")
+            ]
+            body_paths: list[str] = []
+            request_body = operation.get("requestBody") if isinstance(operation.get("requestBody"), dict) else {}
+            media = request_body.get("content") if isinstance(request_body.get("content"), dict) else {}
+            for media_obj in media.values():
+                if isinstance(media_obj, dict):
+                    body_paths.extend(_schema_property_paths(media_obj.get("schema"), max_paths=20 - len(body_paths)))
+                if len(body_paths) >= 20:
+                    break
+            risks, object_keys, tenant_keys = _source_ingest_risk_hints(
+                route=str(route),
+                method=str(method),
+                parameters=params,
+                body_paths=body_paths,
+                content=json.dumps(operation, default=str)[:20000],
+            )
+            hints.append(SourceIngestHint(
+                kind="openapi_operation",
+                method=str(method).upper(),
+                path=str(route),
+                operation_id=str(operation.get("operationId") or "")[:200] or None,
+                title=str(operation.get("summary") or operation.get("operationId") or "")[:200] or None,
+                description=str(operation.get("description") or "")[:1000] or None,
+                risk_hints=risks or ["source_informed_review"],
+                parameters=params[:50],
+                body_paths=body_paths[:50],
+                object_keys=object_keys,
+                tenant_keys=tenant_keys,
+                auth_required=bool(operation.get("security") or spec.get("security")),
+                metadata_json={"source_file": path, "source_label": source_label, "source_parser": "openapi_json_v1"},
+            ))
+    return hints
+
+
+def _route_file_hints(path: str, content: str, source_label: str, language: str | None = None) -> list[SourceIngestHint]:
+    hints: list[SourceIngestHint] = []
+    route_patterns = (
+        re.compile(r"\b(?:app|router|route|server)\s*\.\s*(get|post|put|patch|delete)\s*\(\s*['\"]([^'\"]+)['\"]", re.I),
+        re.compile(r"@(?:Get|Post|Put|Patch|Delete)\s*\(\s*['\"]([^'\"]+)['\"]", re.I),
+    )
+    for pattern in route_patterns:
+        for match in pattern.finditer(content[:100000]):
+            if len(hints) >= 50:
+                return hints
+            if len(match.groups()) == 2:
+                method, route = match.group(1), match.group(2)
+            else:
+                method, route = "GET", match.group(1)
+            params = re.findall(r"[:{]([A-Za-z_][A-Za-z0-9_]*)(?:}|(?=/|$))", route)
+            nearby = content[max(0, match.start() - 1200): min(len(content), match.end() + 2200)]
+            body_paths = [f"$.{name}" for name in sorted(set(re.findall(r"\b(?:body|req\.body|request\.body)\.([A-Za-z_][A-Za-z0-9_]*)", nearby)))[:20]]
+            risks, object_keys, tenant_keys = _source_ingest_risk_hints(
+                route=route,
+                method=method,
+                parameters=params,
+                body_paths=body_paths,
+                content=nearby,
+            )
+            hints.append(SourceIngestHint(
+                kind="backend_route",
+                method=str(method).upper(),
+                path=route,
+                risk_hints=risks or ["source_informed_review"],
+                parameters=params[:50],
+                body_paths=body_paths[:50],
+                object_keys=object_keys,
+                tenant_keys=tenant_keys,
+                metadata_json={
+                    "source_file": path,
+                    "source_label": source_label,
+                    "source_parser": "backend_route_regex_v1",
+                    "language": language,
+                },
+            ))
+    return hints
+
+
+def _source_files_to_hints(
+    files: Sequence[SourceIngestFile | dict[str, Any]],
+    *,
+    source_label: str,
+    max_files: int,
+    max_file_bytes: int,
+    ignored_paths: Sequence[str] | None,
+    parse_timeout_ms: int,
+    max_hints: int = 50,
+) -> tuple[list[SourceIngestHint], list[dict[str, Any]], dict[str, Any]]:
+    started = time.monotonic()
+    deadline = started + max(0.1, float(parse_timeout_ms) / 1000.0)
+    hints: list[SourceIngestHint] = []
+    skipped: list[dict[str, Any]] = []
+    processed = 0
+    for index, item in enumerate(files or []):
+        if index >= max_files:
+            skipped.append({"index": index, "reason": "max_files_exceeded"})
+            continue
+        if time.monotonic() > deadline:
+            skipped.append({"index": index, "reason": "parse_timeout"})
+            break
+        payload = item.model_dump(mode="json") if isinstance(item, SourceIngestFile) else dict(item or {})
+        path = str(payload.get("path") or "").strip()
+        content = str(payload.get("content") or "")
+        if not path:
+            skipped.append({"index": index, "reason": "missing_path"})
+            continue
+        if _source_ingest_path_ignored(path, ignored_paths):
+            skipped.append({"index": index, "path": path, "reason": "ignored_path"})
+            continue
+        size = len(content.encode("utf-8", "ignore"))
+        if size > max_file_bytes:
+            skipped.append({"index": index, "path": path, "size_bytes": size, "reason": "file_too_large"})
+            continue
+        processed += 1
+        generated = []
+        lower_path = path.lower()
+        if lower_path.endswith(".json"):
+            generated.extend(_openapi_file_hints(path, content, source_label))
+        generated.extend(_route_file_hints(path, content, source_label, payload.get("language")))
+        if not generated:
+            skipped.append({"index": index, "path": path, "reason": "no_source_hints_extracted"})
+            continue
+        remaining = max_hints - len(hints)
+        hints.extend(generated[:remaining])
+        if len(generated) > remaining:
+            skipped.append({"index": index, "path": path, "reason": "max_hints_exceeded", "generated": len(generated)})
+        if len(hints) >= max_hints:
+            break
+    return hints, skipped, {
+        "files_seen": len(files or []),
+        "files_processed": processed,
+        "hints_generated": len(hints),
+        "max_files": max_files,
+        "max_file_bytes": max_file_bytes,
+        "parse_timeout_ms": parse_timeout_ms,
+        "ignored_path_count": len([item for item in skipped if item.get("reason") == "ignored_path"]),
+        "execution_enabled": False,
+        "runtime_proof_required": True,
+    }
 
 
 def _source_hint_route(hint: dict[str, Any]) -> str | None:
@@ -20434,10 +20679,21 @@ async def arsenal_generate_hypotheses_from_source(req: SourceIngestRequest):
             raise HTTPException(status_code=400, detail="target_id must be a UUID") from exc
     created: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
+    generated_hints, file_skips, source_file_summary = _source_files_to_hints(
+        req.files,
+        source_label=req.source_label,
+        max_files=req.max_files,
+        max_file_bytes=req.max_file_bytes,
+        ignored_paths=req.ignored_paths,
+        parse_timeout_ms=req.parse_timeout_ms,
+        max_hints=max(0, 50 - len(req.hints)),
+    )
+    hints = list(req.hints) + generated_hints
+    skipped.extend({"source": "file_ingest", **item} for item in file_skips)
     async with db_pool.acquire() as conn:
         if target_uuid and not await conn.fetchval("SELECT 1 FROM targets WHERE id=$1", target_uuid):
             raise HTTPException(status_code=404, detail="Target not found")
-        for index, hint in enumerate(req.hints):
+        for index, hint in enumerate(hints):
             hypothesis_req, skip = _source_hint_to_hypothesis_request(
                 hint,
                 target_id=str(target_uuid) if target_uuid else None,
@@ -20458,6 +20714,7 @@ async def arsenal_generate_hypotheses_from_source(req: SourceIngestRequest):
         "skipped": skipped,
         "skipped_count": len(skipped),
         "source_label": req.source_label,
+        "source_file_summary": source_file_summary,
         "execution_enabled": False,
         "findings_created": 0,
         "queued_scans": 0,
