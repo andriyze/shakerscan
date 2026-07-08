@@ -1163,8 +1163,8 @@ externalize to an opt-in S3/MinIO-compatible object store via `EVIDENCE_STORAGE_
 objects through signed GET and verify their recorded SHA-256 before returning content. Retention
 sweeps now classify remote evidence candidates separately; dry-runs preserve them as previews, and
 approved executions retire S3/MinIO objects through signed DELETE before deleting their DB rows.
-Remote delete failures leave rows preserved and retryable. Deeper stdout/stderr artifact refs for long
-parser failures remain open.
+Remote delete failures leave rows preserved and retryable. Long subprocess stdout/stderr parser-failure
+snippets now persist as redacted evidence-object refs linked from tool receipts.
 
 **Implement:**
 1. DONE phase 1: externalize `storage_uri` from `inline:` to local object storage for large objects.
@@ -1211,7 +1211,9 @@ parser failures remain open.
    known JSON/parser failure markers from stderr/stdout previews as `status=parser_error` with
    `parser_status=failed`. DONE phase 4: retention sweeps can delete S3/MinIO remote evidence through
    signed DELETE before deleting DB rows, with dry-run preservation and failed-delete retry semantics.
-   Remaining work is richer stdout/stderr artifact refs for long parser failures.
+   DONE phase 5: subprocess receipts now carry bounded/redacted long-output artifacts, and worker
+   finalization persists those snippets as scan-scoped evidence objects linked from
+   `stdout_evidence_object_id` / `stderr_evidence_object_id`.
 5. DONE phase 1: tool receipts include tool version, adapter version, command hash, redacted argv, worker
    build/container image, target scope, scope receipt, policy profile, approval id, timing, exit code,
    timeout, stdout/stderr artifact refs, parsed evidence refs, parser status, and redaction summary.

@@ -54,3 +54,27 @@ def test_common_run_records_timeout_receipt():
     assert receipts[0]["parser_status"] == "not_applicable"
     assert receipts[0]["exit_code"] == 124
     assert receipts[0]["timed_out"] is True
+
+
+def test_common_run_records_bounded_redacted_long_output_artifact(monkeypatch):
+    common.reset_subprocess_receipts()
+    monkeypatch.setattr(common, "_SUBPROCESS_ARTIFACT_MAX_BYTES", 900)
+
+    secret = "token=secret-token-value"
+    out, err, rc = asyncio.run(common.run([
+        sys.executable,
+        "-c",
+        f"print('{secret} ' + 'x' * 1200)",
+    ], timeout=5))
+
+    receipts = common.snapshot_subprocess_receipts()
+    assert rc == 0
+    assert err == ""
+    assert secret in out
+    artifact = receipts[0]["stdout_artifact"]
+    assert artifact["stream"] == "stdout"
+    assert artifact["truncated"] is True
+    assert artifact["captured_length"] <= 900
+    assert "secret-token-value" not in artifact["content"]
+    assert "token=[REDACTED]" in artifact["content"]
+    assert len(artifact["content_sha256"]) == 64

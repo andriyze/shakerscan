@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import os
+import re
 import signal
 import ssl
 import sys
@@ -82,6 +83,8 @@ _MAX_CONCURRENT_SUBPROCESSES = int(os.environ.get("SCANNER_MAX_CONCURRENT", "15"
 _subprocess_semaphore: asyncio.Semaphore | None = None
 _semaphore_loop: asyncio.AbstractEventLoop | None = None
 _SUBPROCESS_RECEIPT_LIMIT = int(os.environ.get("SCANNER_SUBPROCESS_RECEIPT_LIMIT", "200"))
+_SUBPROCESS_PREVIEW_BYTES = 500
+_SUBPROCESS_ARTIFACT_MAX_BYTES = int(os.environ.get("SCANNER_SUBPROCESS_ARTIFACT_MAX_BYTES", "8192"))
 _subprocess_receipts: list[dict[str, Any]] = []
 
 
@@ -118,6 +121,40 @@ def _redacted_argv(cmd: list[str]) -> list[str]:
     return redacted
 
 
+def _redact_output_text(value: Any) -> str:
+    text = str(value if value is not None else "")
+    replacements = (
+        (r"(?i)(authorization:\s*bearer\s+)[^\s,;]+", r"\1[REDACTED]"),
+        (r"(?i)(bearer|token|secret|password|signature|api[_-]?key)=([^&\s]+)", r"\1=[REDACTED]"),
+        (r"(?i)(\"(?:token|secret|password|api[_-]?key|authorization)\"\s*:\s*\")[^\"]+(\")", r"\1[REDACTED]\2"),
+        (r"(?i)\b(?:sk|pk)_[a-z0-9_=-]{12,}\b", "[REDACTED]"),
+    )
+    for pattern, replacement in replacements:
+        text = re.sub(pattern, replacement, text)
+    return text
+
+
+def _output_artifact(stream_name: str, value: str) -> dict[str, Any] | None:
+    redacted = _redact_output_text(value)
+    if len(redacted) <= _SUBPROCESS_PREVIEW_BYTES:
+        return None
+    max_bytes = max(0, _SUBPROCESS_ARTIFACT_MAX_BYTES)
+    if max_bytes <= 0:
+        return None
+    encoded = redacted.encode("utf-8", "ignore")
+    captured = encoded[:max_bytes].decode("utf-8", "ignore")
+    return {
+        "stream": stream_name,
+        "content": captured,
+        "content_sha256": hashlib.sha256(captured.encode("utf-8", "ignore")).hexdigest(),
+        "original_length": len(value or ""),
+        "redacted_length": len(redacted),
+        "captured_length": len(captured),
+        "truncated": len(encoded) > max_bytes,
+        "redaction_profile": "subprocess_output_redact_v1",
+    }
+
+
 def reset_subprocess_receipts() -> None:
     _subprocess_receipts.clear()
 
@@ -144,9 +181,13 @@ def _record_subprocess_receipt(
     status = "timeout" if timed_out else "success" if exit_code == 0 else "failed"
     parser_status = "not_applicable" if timed_out else "not_run"
     now = time.monotonic()
-    stdout_preview = str(stdout or "")[:500]
-    stderr_preview = str(stderr or error or "")[:500]
-    _subprocess_receipts.append({
+    stdout_text = str(stdout or "")
+    stderr_text = str(stderr or error or "")
+    stdout_preview = _redact_output_text(stdout_text)[:_SUBPROCESS_PREVIEW_BYTES]
+    stderr_preview = _redact_output_text(stderr_text)[:_SUBPROCESS_PREVIEW_BYTES]
+    stdout_artifact = _output_artifact("stdout", stdout_text)
+    stderr_artifact = _output_artifact("stderr", stderr_text)
+    receipt = {
         "tool_name": tool_name,
         "status": status,
         "parser_status": parser_status,
@@ -156,11 +197,16 @@ def _record_subprocess_receipt(
         "duration_ms": int(max(0, now - started_at) * 1000),
         "redacted_argv": redacted,
         "command_hash": hashlib.sha256("\x00".join(redacted).encode("utf-8", "ignore")).hexdigest(),
-        "stdout_length": len(stdout or ""),
-        "stderr_length": len(stderr or error or ""),
+        "stdout_length": len(stdout_text),
+        "stderr_length": len(stderr_text),
         "stdout_preview": stdout_preview,
         "stderr_preview": stderr_preview,
-    })
+    }
+    if stdout_artifact:
+        receipt["stdout_artifact"] = stdout_artifact
+    if stderr_artifact:
+        receipt["stderr_artifact"] = stderr_artifact
+    _subprocess_receipts.append(receipt)
 
 
 def _get_semaphore() -> asyncio.Semaphore:

@@ -540,12 +540,15 @@ class _FakeFinalizePool:
 
 
 class _FakeReceiptConnection:
-    def __init__(self, receipt_id=None):
+    def __init__(self, receipt_id=None, evidence_id=None):
         self.receipt_id = receipt_id or uuid.uuid4()
+        self.evidence_id = evidence_id or uuid.uuid4()
         self.fetchrow_calls = []
 
     async def fetchrow(self, query, *args):
         self.fetchrow_calls.append((query, args))
+        if "INSERT INTO evidence_objects" in query:
+            return {"id": self.evidence_id}
         return {"id": self.receipt_id}
 
 
@@ -1036,6 +1039,69 @@ def test_external_dast_subprocess_receipts_classify_parser_errors():
     metadata = json.loads(args[21])
     assert metadata["summary"]["parser_error_reason"] == "invalid character"
     assert metadata["summary"]["stderr_preview"].startswith("failed to parse JSON")
+
+
+def test_external_dast_subprocess_receipts_link_long_output_artifacts():
+    receipt_id = uuid.uuid4()
+    evidence_id = uuid.uuid4()
+    conn = _FakeReceiptConnection(receipt_id, evidence_id=evidence_id)
+    result = {
+        "scan_metadata": {
+            "subprocess_receipts": [
+                {
+                    "tool_name": "ffuf",
+                    "status": "failed",
+                    "parser_status": "not_run",
+                    "exit_code": 1,
+                    "timed_out": False,
+                    "timeout_seconds": 30,
+                    "duration_ms": 100,
+                    "redacted_argv": ["ffuf", "-of", "json"],
+                    "command_hash": "c" * 64,
+                    "stdout_length": 0,
+                    "stderr_length": 1000,
+                    "stdout_preview": "",
+                    "stderr_preview": "failed to parse JSON: invalid character '<'",
+                    "stderr_artifact": {
+                        "stream": "stderr",
+                        "content": "failed to parse JSON: invalid character '<' " + ("x" * 900),
+                        "content_sha256": "d" * 64,
+                        "original_length": 1000,
+                        "redacted_length": 1000,
+                        "captured_length": 950,
+                        "truncated": True,
+                        "redaction_profile": "subprocess_output_redact_v1",
+                    },
+                }
+            ]
+        }
+    }
+
+    recorded = asyncio.run(worker._record_external_dast_tool_receipts(
+        conn,
+        scan_id="11111111-1111-1111-1111-111111111111",
+        job_id="job-parser-artifact",
+        target="https://example.test",
+        target_id="33333333-3333-3333-3333-333333333333",
+        options={"scan_type": "smart"},
+        result=result,
+        started_at=datetime(2026, 7, 6, tzinfo=timezone.utc),
+        completed_at=datetime(2026, 7, 6, 0, 0, 1, tzinfo=timezone.utc),
+        duration_seconds=1,
+    ))
+
+    assert recorded == [str(receipt_id)]
+    evidence_query, evidence_args = conn.fetchrow_calls[0]
+    receipt_query, receipt_args = conn.fetchrow_calls[1]
+    assert "INSERT INTO evidence_objects" in evidence_query
+    assert evidence_args[0] == uuid.UUID("11111111-1111-1111-1111-111111111111")
+    assert evidence_args[2] == "tool_stderr_artifact"
+    assert "failed to parse JSON" in json.dumps(evidence_args, default=str)
+    assert "INSERT INTO tool_receipts" in receipt_query
+    assert receipt_args[17] is None
+    assert receipt_args[18] == evidence_id
+    metadata = json.loads(receipt_args[21])
+    assert metadata["summary"]["stderr_artifact_available"] is True
 
 
 def test_asm_executor_receipt_records_partial_batch_and_links_metadata():

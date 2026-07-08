@@ -158,6 +158,56 @@ def _tool_receipt_hash(payload: dict[str, Any]) -> str:
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
+async def _persist_tool_output_artifact(
+    conn,
+    *,
+    scan_id: str,
+    tool_name: str,
+    command_hash: str,
+    stream_name: str,
+    artifact: Any,
+) -> str | None:
+    if not isinstance(artifact, dict) or not artifact.get("content"):
+        return None
+    try:
+        stored = store_evidence_content(
+            _redact_receipt_value({
+                "tool_name": tool_name,
+                "command_hash": command_hash,
+                "stream": stream_name,
+                "content": artifact.get("content"),
+                "original_length": artifact.get("original_length"),
+                "redacted_length": artifact.get("redacted_length"),
+                "captured_length": artifact.get("captured_length"),
+                "truncated": bool(artifact.get("truncated")),
+                "source_content_sha256": artifact.get("content_sha256"),
+            }),
+            results_dir=RESULTS_DIR,
+        )
+        row = await conn.fetchrow(
+            """
+            INSERT INTO evidence_objects (
+                scan_id, finding_id, object_type, content_sha256, size_bytes,
+                storage_uri, redaction_profile, retention_class, content
+            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+            RETURNING id
+            """,
+            uuid.UUID(str(scan_id)),
+            None,
+            f"tool_{stream_name}_artifact"[:64],
+            stored["content_sha256"],
+            stored["size_bytes"],
+            stored["storage_uri"],
+            "subprocess_output_redact_v1",
+            "standard",
+            stored["content"],
+        )
+        return str(row["id"]) if row and row["id"] else None
+    except Exception as exc:
+        print(f"[tool-receipt] output artifact persist failed for {tool_name}/{stream_name}: {type(exc).__name__}: {exc}", flush=True)
+        return None
+
+
 def _internal_executor_receipt_spec(options: dict[str, Any]) -> dict[str, str] | None:
     run_kind = str((options or {}).get("run_kind") or "").strip()
     if run_kind in AI_GATE_RUN_KINDS:
@@ -565,6 +615,8 @@ def _external_dast_tool_specs(result: dict[str, Any], options: dict[str, Any]) -
             "timed_out": bool(item.get("timed_out")),
             "redacted_argv": redacted_argv,
             "command_hash": item.get("command_hash"),
+            "stdout_artifact": item.get("stdout_artifact") if isinstance(item.get("stdout_artifact"), dict) else None,
+            "stderr_artifact": item.get("stderr_artifact") if isinstance(item.get("stderr_artifact"), dict) else None,
             "summary": {
                 "exact_subprocess": True,
                 "timeout_seconds": item.get("timeout_seconds"),
@@ -573,6 +625,8 @@ def _external_dast_tool_specs(result: dict[str, Any], options: dict[str, Any]) -
                 "stderr_length": item.get("stderr_length"),
                 "stdout_preview": item.get("stdout_preview"),
                 "stderr_preview": item.get("stderr_preview"),
+                "stdout_artifact_available": isinstance(item.get("stdout_artifact"), dict),
+                "stderr_artifact_available": isinstance(item.get("stderr_artifact"), dict),
                 "parser_error_reason": parser_error_reason,
             },
         })
@@ -631,6 +685,22 @@ async def _record_external_dast_tool_receipts(
             "redacted_argv": redacted_argv,
             "target_scope": target_scope,
         })
+        stdout_evidence_object_id = await _persist_tool_output_artifact(
+            conn,
+            scan_id=str(scan_id),
+            tool_name=str(spec["tool_name"]),
+            command_hash=command_hash,
+            stream_name="stdout",
+            artifact=spec.get("stdout_artifact"),
+        )
+        stderr_evidence_object_id = await _persist_tool_output_artifact(
+            conn,
+            scan_id=str(scan_id),
+            tool_name=str(spec["tool_name"]),
+            command_hash=command_hash,
+            stream_name="stderr",
+            artifact=spec.get("stderr_artifact"),
+        )
         try:
             exit_code = int(spec.get("exit_code")) if spec.get("exit_code") is not None else 0 if safe_status == "success" else 124 if safe_status == "timeout" else 1
         except (TypeError, ValueError):
@@ -680,8 +750,8 @@ async def _record_external_dast_tool_receipts(
                 timed_out,
                 started_at,
                 completed_at,
-                None,
-                None,
+                uuid.UUID(stdout_evidence_object_id) if stdout_evidence_object_id else None,
+                uuid.UUID(stderr_evidence_object_id) if stderr_evidence_object_id else None,
                 json.dumps([]),
                 "scanner module receipt from parsed DAST result; sensitive target/options fields redacted",
                 json.dumps(metadata),
