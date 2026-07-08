@@ -982,6 +982,10 @@ effect proof: privileged-field probes now accept normalized privilege effects su
 exact field reflection remains the preferred proof. DONE phase 11 for authenticated JWT coverage:
 basic and comprehensive JWT weakness checks now reuse configured bearer/cookie JWTs before falling
 back to guessed login endpoints, and forged-token probes suppress the original Authorization header.
+DONE phase 12 for workflow/write-side BOLA replay: the graph/resource replay path now attempts a
+bounded empty-JSON `PATCH` against owner object URLs with the second principal and emits a separate
+critical `write_cross_principal_replay` finding only when the response returns the requested owner
+object ID that was absent from the attacker's own listing.
 
 **Done when:** recorded two-user benchmark scorecards show the targeted miss becoming a deterministic
 finding, not merely an attempted endpoint.

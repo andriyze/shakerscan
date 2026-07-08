@@ -1831,6 +1831,55 @@ def _new_authz_endpoint_attempt(
     }
 
 
+def _authz_write_replay_candidate(candidate: dict[str, Any]) -> dict[str, Any] | None:
+    """Build a bounded low-impact write probe from a proven object URL."""
+    try:
+        parsed = urlsplit(str(candidate.get("url") or ""))
+    except Exception:
+        return None
+    if not parsed.scheme or not parsed.netloc:
+        return None
+    path = parsed.path or "/"
+    query = parsed.query
+    custom_endpoint = f"PATCH {path}?{query}" if query else f"PATCH {path}"
+    return {
+        "method": "PATCH",
+        "url": urlunsplit((parsed.scheme, parsed.netloc, path, query, "")),
+        "object_id_location": candidate.get("object_id_location") or "unknown",
+        "custom_endpoint": custom_endpoint,
+        "body": "{}",
+    }
+
+
+def _new_authz_write_attempt(
+    *,
+    producer_endpoint: str,
+    consumer_endpoint: str,
+    object_id_location: str,
+    principal_label: str,
+    attacker_label: str,
+    property_names: list[str] | None = None,
+) -> dict[str, Any]:
+    return {
+        "custom_endpoint": consumer_endpoint,
+        "family": "authz",
+        "method": "PATCH",
+        "auth_state": attacker_label,
+        "principal_label": attacker_label,
+        "source_principal": principal_label,
+        "attacker_principal": attacker_label,
+        "producer_endpoint": producer_endpoint,
+        "consumer_endpoint": consumer_endpoint,
+        "object_id_location": object_id_location,
+        "property_names_tested": list(property_names or []),
+        "proof_type": "write_cross_principal_replay",
+        "param_count": 1,
+        "attempted_params_count": 0,
+        "completed_params_count": 0,
+        "status": "started",
+    }
+
+
 def _new_authz_producer_attempt(producer_endpoint: str) -> dict[str, Any]:
     return {
         "custom_endpoint": producer_endpoint,
@@ -2457,7 +2506,10 @@ async def authz_resource_replay_test(
         "producer_ids_found": 0,
         "replays_attempted": 0,
         "replays_completed": 0,
+        "write_replays_attempted": 0,
+        "write_replays_completed": 0,
         "cross_principal_violations": 0,
+        "write_cross_principal_violations": 0,
         "budget_exceeded": False,
         "resource_map": [],
         "endpoint_attempts": [],
@@ -2469,6 +2521,7 @@ async def authz_resource_replay_test(
         results["skipped"] = True
         results["reason"] = "multi_user_credentials_required"
         return results
+    max_write_replays = max(1, min(20, int(max_replays or 1) // 4 or 1))
 
     producer_candidates: list[str] = []
     seen: set[str] = set()
@@ -2710,6 +2763,120 @@ async def authz_resource_replay_test(
                 results["endpoint_attempts"].append(attempt)
                 if results["cross_principal_violations"] >= 10:
                     return results
+
+                if results["write_replays_attempted"] < max_write_replays:
+                    write_candidate = _authz_write_replay_candidate(candidate)
+                    if write_candidate:
+                        write_attempt = _new_authz_write_attempt(
+                            producer_endpoint=producer_endpoint,
+                            consumer_endpoint=write_candidate["custom_endpoint"],
+                            object_id_location=write_candidate["object_id_location"],
+                            principal_label="user1",
+                            attacker_label="user2",
+                            property_names=ref.get("sensitive_fields") or [],
+                        )
+                        write_attempt["attempted_params_count"] = 1
+                        results["write_replays_attempted"] += 1
+                        write_headers = dict(user2_headers)
+                        write_headers["Content-Type"] = "application/json"
+                        try:
+                            write_resp = await fetch_with_capture(
+                                write_candidate["url"],
+                                method=write_candidate["method"],
+                                data=write_candidate["body"],
+                                headers=write_headers,
+                                timeout=timeout,
+                                budget_key="bola",
+                            )
+                        except Exception as exc:
+                            write_attempt["status"] = "partial"
+                            write_attempt["error_summary"] = str(exc)[:200]
+                            results["endpoint_attempts"].append(write_attempt)
+                            continue
+
+                        write_status = _auth_response_status(write_resp)
+                        write_body = str(write_resp.get("body") or "")
+                        write_attempt["completed_params_count"] = 1
+                        write_attempt["status"] = "completed"
+                        write_attempt["attacker_status"] = write_status
+                        results["write_replays_completed"] += 1
+                        write_returned_ids = _resource_ids_from_response(write_body)
+                        if not object_id:
+                            write_owner_object_received = True
+                        elif write_returned_ids:
+                            write_owner_object_received = object_id in write_returned_ids
+                        else:
+                            write_owner_object_received = object_id in write_body
+                        if not write_owner_object_received:
+                            write_attempt["last_verdict"] = "id_ignored_returned_own_object"
+
+                        write_resource_like = _looks_like_bola_resource_response(write_candidate["url"], write_body)
+                        write_user_signals = extract_user_specific_signals(write_body)
+                        write_sensitive_fields = sorted(set(sensitive_fields + _sensitive_fields_from_body(write_body)))[:20]
+                        if (
+                            200 <= write_status < 300
+                            and write_body
+                            and _is_json_like_response(write_resp)
+                            and write_resource_like
+                            and write_owner_object_received
+                            and (write_user_signals or write_sensitive_fields)
+                        ):
+                            results["vulnerable"] = True
+                            results["write_cross_principal_violations"] += 1
+                            path_hash = hashlib.sha256(
+                                f"{producer_endpoint}:{write_candidate['custom_endpoint']}:{object_id}:user2:write".encode()
+                            ).hexdigest()[:10]
+                            write_evidence = {
+                                "family": "authz",
+                                "producer_endpoint": producer_endpoint,
+                                "consumer_endpoint": write_candidate["custom_endpoint"],
+                                "url": write_candidate["url"],
+                                "method": write_candidate["method"],
+                                "request_body": write_candidate["body"],
+                                "source_principal": "user1",
+                                "attacker_principal": "user2",
+                                "object_id_key": ref.get("object_id_key"),
+                                "object_id_location": write_candidate["object_id_location"],
+                                "object_id_absent_from_attacker_listing": True,
+                                "requested_object_id": object_id,
+                                "attacker_returned_object_ids": sorted(write_returned_ids)[:8],
+                                "attacker_status": write_status,
+                                "sensitive_fields": write_sensitive_fields,
+                                "user_specific_signals": write_user_signals[:8],
+                                "authz_diff": {
+                                    "producer_ids_owner_count": len(user1_refs),
+                                    "producer_ids_attacker_count": len(user2_ids),
+                                    "replayed_owner_object_missing_from_attacker_listing": True,
+                                    "attacker_write_returned_owner_object": True,
+                                },
+                                "proof_type": "write_cross_principal_replay",
+                                "response_snippet": write_body[:300],
+                            }
+                            results["findings"].append({
+                                "id": f"smart_authz_write:{path_hash}",
+                                "tool": "smart_authz",
+                                "title": f"Broken object authorization: user2 can PATCH user1 object at {write_candidate['custom_endpoint']}",
+                                "severity": "critical",
+                                "confidence": 0.84,
+                                "severity_rationale": (
+                                    "Critical: a second authenticated principal received a successful "
+                                    "write-method response for an object ID produced by user1 and absent "
+                                    "from user2's own producer response."
+                                ),
+                                "evidence": write_evidence,
+                                "description": (
+                                    "A resource ID observed in user1's authenticated response was not "
+                                    "present in user2's own listing, but user2 could invoke a PATCH "
+                                    "request against that object and receive resource data for it."
+                                ),
+                                "remediation": (
+                                    "Authorize every object write against the requesting principal. "
+                                    "Add multi-user regression tests for update/delete workflows."
+                                ),
+                                "cwe": "CWE-639",
+                                "owasp": "API1:2023 - Broken Object Level Authorization",
+                            })
+                        results["endpoint_attempts"].append(write_attempt)
             if results.get("budget_exceeded"):
                 break
 
@@ -2768,6 +2935,7 @@ async def smart_bola_test(
         "id_patterns_found": 0,
         "access_violations": 0,
         "cross_user_violations": 0,
+        "write_cross_user_violations": 0,
         "method_variations_tested": 0,
         "synthesized_urls_tested": 0,
         "synthesized_query_urls_tested": 0,
@@ -2807,6 +2975,7 @@ async def smart_bola_test(
         results["findings"].extend(authz_results.get("findings") or [])
         results["endpoint_attempts"].extend(authz_results.get("endpoint_attempts") or [])
         results["cross_user_violations"] += int(authz_results.get("cross_principal_violations") or 0)
+        results["write_cross_user_violations"] += int(authz_results.get("write_cross_principal_violations") or 0)
         if authz_results.get("vulnerable"):
             results["vulnerable"] = True
         if authz_results.get("budget_exceeded"):
