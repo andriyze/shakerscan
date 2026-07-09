@@ -1009,7 +1009,10 @@ creates synthetic query-param variants, allowing the existing path-value XSS pro
 `/route/{value}` surfaces instead of only `/route?id=...`. DONE phase 19 for NoSQL collection
 differential proof: JSON-body NoSQL checks now compare restrictive `$eq` controls with permissive
 `$ne`/regex/exists operators and promote only material JSON collection expansion with data-shaped
-items, carrying control/payload item counts into finding evidence.
+items, carrying control/payload item counts into finding evidence. DONE phase 20 for structured API
+SQLi proof: SQLi response classification now treats material JSON collection expansion as a strong
+signal when an injected payload changes a rejected/empty control into a successful multi-record
+response, covering coupon/search/filter APIs that do not emit DB error banners.
 
 **Done when:** recorded two-user benchmark scorecards show the targeted miss becoming a deterministic
 finding, not merely an attempted endpoint.

@@ -153,6 +153,105 @@ def test_sqli_active_check_accepts_login_auth_bypass():
     assert any("Authentication bypass via SQLi" in item for item in evidence)
 
 
+def test_sqli_active_check_accepts_json_collection_expansion():
+    baseline = json.dumps({"data": []})
+    body = json.dumps({
+        "data": [
+            {"id": 1, "code": "SAVE10", "amount": 10},
+            {"id": 2, "code": "SAVE20", "amount": 20},
+            {"id": 3, "code": "SAVE30", "amount": 30},
+        ]
+    })
+
+    vulnerable, evidence = _check_sqli_response(
+        out=body,
+        baseline_len=len(baseline),
+        elapsed=0.1,
+        technique="boolean",
+        dbms_detected=None,
+        status_code=200,
+        baseline_status=422,
+        baseline_body=baseline,
+        payload="' OR 1=1--",
+    )
+
+    assert vulnerable is True
+    assert any("SQLi JSON collection expansion" in item for item in evidence)
+
+
+def test_sqli_active_check_rejects_uniform_json_collection_response():
+    body = json.dumps({
+        "data": [
+            {"id": 1, "code": "SAVE10"},
+            {"id": 2, "code": "SAVE20"},
+        ]
+    })
+
+    vulnerable, evidence = _check_sqli_response(
+        out=body,
+        baseline_len=len(body),
+        elapsed=0.1,
+        technique="boolean",
+        dbms_detected=None,
+        status_code=200,
+        baseline_status=200,
+        baseline_body=body,
+        payload="' OR 1=1--",
+    )
+
+    assert vulnerable is False
+    assert not any("SQLi JSON collection expansion" in item for item in evidence)
+
+
+def test_smart_sqli_detects_json_coupon_collection_expansion(monkeypatch):
+    marker = active_checks._CURL_STATUS_MARKER
+
+    async def fake_run(cmd, *args, **kwargs):
+        if "-d" not in cmd:
+            return f'{{"error":"invalid coupon"}}\n{marker}422', "", 0
+        body = json.loads(cmd[cmd.index("-d") + 1])
+        code = str(body.get("code") or body.get("coupon") or "")
+        if " OR " in code.upper():
+            return (
+                json.dumps({
+                    "data": [
+                        {"id": 1, "code": "SAVE10", "amount": 10},
+                        {"id": 2, "code": "SAVE20", "amount": 20},
+                        {"id": 3, "code": "SAVE30", "amount": 30},
+                    ]
+                })
+                + f"\n{marker}200",
+                "",
+                0,
+            )
+        return f'{{"data":[]}}\n{marker}422', "", 0
+
+    monkeypatch.setattr(active_checks, "run", fake_run)
+
+    result = asyncio.run(
+        active_checks.smart_sqli_test(
+            "https://example.test",
+            [
+                {
+                    "url": "https://example.test/community/api/v2/coupon",
+                    "method": "POST",
+                    "content_type": "application/json",
+                    "body_params": ["code"],
+                    "body_template": {"code": "TEST123"},
+                }
+            ],
+            max_seconds=10,
+            max_params_per_endpoint=1,
+        )
+    )
+
+    assert result["vulnerabilities_found"] == 1
+    finding = result["findings"][0]
+    assert finding["url"].endswith("/community/api/v2/coupon")
+    assert finding["param"] == "code"
+    assert any("SQLi JSON collection expansion" in item for item in finding["evidence"])
+
+
 def test_smart_sqli_detects_json_login_auth_bypass(monkeypatch):
     marker = active_checks._CURL_STATUS_MARKER
 

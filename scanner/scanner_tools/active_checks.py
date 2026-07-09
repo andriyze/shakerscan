@@ -8091,12 +8091,24 @@ def _check_sqli_response(
             # Compare array lengths
             baseline_arrays = _get_array_lengths(baseline_json)
             response_arrays = _get_array_lengths(response_json)
-            for key in baseline_arrays:
-                if key in response_arrays:
-                    bl = baseline_arrays[key]
-                    rl = response_arrays[key]
-                    if bl != rl:
-                        evidence.append(f"Array '{key}' length: {bl} -> {rl}")
+            for key in sorted(set(baseline_arrays) | set(response_arrays)):
+                bl = baseline_arrays.get(key, 0)
+                rl = response_arrays.get(key, 0)
+                if bl != rl:
+                    evidence.append(f"Array '{key}' length: {bl} -> {rl}")
+                if (
+                    not reflected
+                    and status_code is not None
+                    and 200 <= status_code < 300
+                    and rl >= max(2, bl + 2)
+                    and response_len >= baseline_len + 120
+                    and (
+                        baseline_status in (400, 401, 403, 404, 422)
+                        or (baseline_status is not None and 200 <= baseline_status < 300 and bl <= 1)
+                    )
+                ):
+                    strong_signal = True
+                    evidence.append(f"SQLi JSON collection expansion: array '{key}' {bl} -> {rl}")
 
     # 3b. Authentication-bypass proof for login endpoints. A failed-login
     # baseline becoming an authenticated JSON session is strong evidence for
