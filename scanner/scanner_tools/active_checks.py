@@ -2578,6 +2578,7 @@ async def nosql_injection_test_json_body(
         "url": url,
         "method": method,
         "endpoint_attempts": [],
+        "validation_fields_added": [],
     }
 
     params = _coerce_param_names(params)
@@ -2845,6 +2846,38 @@ async def nosql_injection_test_json_body(
         if not _has_nested_key(base_body, name):
             _set_nested_value(base_body, name, _fallback_value_for_param(name), overwrite=False)
 
+    async def _retry_after_validation(
+        request_body: dict[str, Any],
+        response_body: str,
+        response_code: int | None,
+    ) -> tuple[str, int | None]:
+        if response_code not in (400, 422):
+            return response_body, response_code
+        missing_fields = _extract_missing_validation_fields(response_body)
+        added_fields = _add_validation_fields_to_body(base_body, missing_fields, "application/json")
+        if not added_fields:
+            return response_body, response_code
+        _add_validation_fields_to_body(request_body, added_fields, "application/json")
+        results["validation_fields_added"].append({
+            "url": url,
+            "method": method,
+            "fields": added_fields,
+        })
+        if attempt is not None:
+            attempt["validation_fields_added"] = list(dict.fromkeys(
+                [*(attempt.get("validation_fields_added") or []), *added_fields]
+            ))
+        retry_cmd = [
+            "curl", "-sS", "-X", method, "-L", "-k", "--max-time", "10",
+            "-H", "Content-Type: application/json",
+            "-d", json.dumps(request_body),
+            "-w", "__SHAKERSCAN_NOSQL__%{http_code}__SHAKERSCAN_NOSQL__",
+        ] + auth_args + [url]
+        retry_raw, _, retry_rc = await run(retry_cmd, timeout=15)
+        if retry_rc != 0:
+            return response_body, response_code
+        return _parse_meta(retry_raw or "")
+
     if debug_nosql:
         print(f"[DEBUG NoSQL Test] url={url} method={method} params={params}", file=sys.stderr)
         print(f"[DEBUG NoSQL Test] base_body={base_body}", file=sys.stderr)
@@ -2867,6 +2900,12 @@ async def nosql_injection_test_json_body(
         ] + auth_args + [url]
         baseline_raw, _, baseline_rc = await run(baseline_cmd, timeout=15)
         baseline_out, baseline_code = _parse_meta(baseline_raw or "")
+        if baseline_rc == 0:
+            baseline_out, baseline_code = await _retry_after_validation(
+                baseline_payload,
+                baseline_out,
+                baseline_code,
+            )
         if baseline_rc == 0:
             _mark_completed([identity_param, secret_param])
         if baseline_rc == 0 and baseline_code in (405, 415, 501):
@@ -2935,6 +2974,12 @@ async def nosql_injection_test_json_body(
         ] + auth_args + [url]
         baseline_raw, _, baseline_rc = await run(baseline_cmd, timeout=15)
         baseline_out, baseline_code = _parse_meta(baseline_raw or "")
+        if baseline_rc == 0:
+            baseline_out, baseline_code = await _retry_after_validation(
+                baseline_payload,
+                baseline_out,
+                baseline_code,
+            )
         baseline_len = len(baseline_out) if baseline_out else 0
         if debug_nosql:
             print(f"[DEBUG NoSQL Test] param={param} baseline_body={baseline_body}", file=sys.stderr)

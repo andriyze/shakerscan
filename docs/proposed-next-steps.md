@@ -1048,6 +1048,9 @@ an explicit `400/422` missing-field validation structure, Smart SQLi can add at 
 fields and retry once before payload testing. Privilege, ownership, tenant, payment, approval, and
 workflow-state fields are denied; non-JSON text never drives completion, and completion telemetry is
 recorded separately from vulnerability proof.
+DONE phase 31 for the same bounded completion contract in JSON-body NoSQL testing: validation-derived
+safe siblings are added to the persistent baseline and one retry is made before operator differentials,
+with the added fields carried in endpoint-attempt telemetry and excluded from proof classification.
 
 **Done when:** recorded two-user benchmark scorecards show the targeted miss becoming a deterministic
 finding, not merely an attempted endpoint.
