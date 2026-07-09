@@ -85,3 +85,32 @@ def test_active_worklist_reconstructs_array_body_from_params():
     assert isinstance(payload["items"], list)
     assert payload["items"][0]["id"] == 1
     assert "qty" in payload["items"][0]
+
+
+def test_lookup_routes_are_preserved_for_path_value_active_testing():
+    endpoints = scanner_module._path_value_lookup_active_endpoints(
+        "http://shop.test",
+        [
+            "http://shop.test/rest/track-order",
+            "http://shop.test/rest/track-order?id=1",
+            "http://shop.test/rest/products/reviews",
+            "http://shop.test/assets/app.js",
+            "http://evil.test/rest/track-order",
+            "/api/orders/status",
+        ],
+    )
+
+    assert endpoints == [
+        {
+            "url": "http://shop.test/rest/track-order",
+            "method": "GET",
+            "params": [],
+            "source": "discovered_lookup",
+        },
+        {
+            "url": "http://shop.test/api/orders/status",
+            "method": "GET",
+            "params": [],
+            "source": "discovered_lookup",
+        },
+    ]

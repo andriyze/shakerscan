@@ -2619,6 +2619,68 @@ def _serialize_active_worklist(endpoints: list, limit: int = ACTIVE_WORKLIST_EMI
     return out
 
 
+_PATH_VALUE_LOOKUP_ROUTE_TOKENS = (
+    "track", "lookup", "order", "receipt", "invoice", "status", "verify",
+    "confirm", "reset", "recover", "token", "reference", "ref", "ticket",
+)
+
+_STATIC_ACTIVE_ROUTE_EXTENSIONS = (
+    ".css", ".js", ".mjs", ".map", ".png", ".jpg", ".jpeg", ".gif", ".svg",
+    ".ico", ".webp", ".woff", ".woff2", ".ttf", ".eot", ".pdf", ".zip",
+)
+
+
+def _path_value_lookup_active_endpoints(
+    base_url: str,
+    discovered_urls: list[str],
+    *,
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    """Preserve queryless lookup/action routes as active XSS path-value inputs.
+
+    The normal active candidate generator often adds synthetic query params to
+    high-value routes such as ``/rest/track-order``. That is useful for query
+    SQLi/XSS, but it can hide the original parent route from the path-value XSS
+    synthesis that probes ``/rest/track-order/{value}``. Keep the original,
+    in-scope route in the endpoint graph; proof still happens later.
+    """
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for raw_url in discovered_urls or []:
+        if not isinstance(raw_url, str) or not raw_url.strip():
+            continue
+        full_url = urllib.parse.urljoin(base_url, raw_url.strip())
+        try:
+            parsed = urllib.parse.urlparse(full_url)
+        except Exception:
+            continue
+        if parsed.query or parsed.params:
+            continue
+        path = parsed.path or ""
+        if not path or path == "/" or path.endswith("/"):
+            continue
+        if path.lower().endswith(_STATIC_ACTIVE_ROUTE_EXTENSIONS):
+            continue
+        if not is_in_scope_url(full_url, base_url):
+            continue
+        route_tokens = {token for token in re.split(r"[^a-z0-9]+", path.lower()) if token}
+        if not route_tokens.intersection(_PATH_VALUE_LOOKUP_ROUTE_TOKENS):
+            continue
+        canonical = urllib.parse.urlunparse((parsed.scheme, parsed.netloc, path, "", "", ""))
+        if canonical in seen:
+            continue
+        seen.add(canonical)
+        out.append({
+            "url": canonical,
+            "method": "GET",
+            "params": [],
+            "source": "discovered_lookup",
+        })
+        if len(out) >= limit:
+            break
+    return out
+
+
 class ActiveCheckFamily(NamedTuple):
     """One runnable active check family — the scanner's SINGLE SOURCE OF TRUTH.
 
@@ -8406,6 +8468,21 @@ async def build_report(target: str,
                         # Real discovered endpoints get har_discovery priority; synthetic fallbacks get inferred
                         source = "inferred" if u in cand_synthetic else "har_discovery"
                         _merge_endpoint({"url": u, "method": "GET", "params": params, "source": source})
+
+                    lookup_added = 0
+                    lookup_sources: list[str] = []
+                    lookup_sources.extend(functional_urls or [])
+                    lookup_sources.extend(browser_urls or [])
+                    lookup_sources.extend(manual_urls or [])
+                    for ep in _path_value_lookup_active_endpoints(base_url, lookup_sources):
+                        if _merge_endpoint(ep):
+                            lookup_added += 1
+                    if lookup_added:
+                        active_block["active_path_value_lookup_routes"] = lookup_added
+                        print(
+                            f"[scanner] Added {lookup_added} queryless lookup routes for path-value active testing",
+                            file=sys.stderr,
+                        )
 
                 # Add inferred parameter endpoints from smart discovery (even if no query string)
                 if smart_discovery_data and not focused_manual_active_scope:

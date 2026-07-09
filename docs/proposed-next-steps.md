@@ -1003,6 +1003,10 @@ harvested from authenticated producer responses to discovered consumer/sub-resou
 return the requested owner object ID. DONE phase 17 for smart-mode debug exposure recall: default
 smart scans now run a narrow `debug_dev` forced-browsing lane, so validated Prometheus/actuator-style
 endpoints such as `/metrics` can surface without enabling the full broad forced-browsing wordlist.
+DONE phase 18 for reflected-XSS route preservation: Smart now keeps discovered queryless
+lookup/action routes such as `/rest/track-order` in the active endpoint graph even when it also
+creates synthetic query-param variants, allowing the existing path-value XSS proof to test
+`/route/{value}` surfaces instead of only `/route?id=...`.
 
 **Done when:** recorded two-user benchmark scorecards show the targeted miss becoming a deterministic
 finding, not merely an attempted endpoint.
