@@ -35,6 +35,7 @@ def _path_has_object_id_segment(path: str) -> bool:
 
 DEFAULT_SOURCE_PRIORITY: dict[str, int] = {
     "har_discovery": 1,
+    "js_bundle_analysis": 2,
     "manual": 2,
     "discovered_lookup": 2,
     "hash_route": 2,
@@ -49,6 +50,7 @@ DEFAULT_SOURCE_PRIORITY_VALUE = 6
 
 SOURCE_BONUS: dict[str, int] = {
     "har_discovery": 14,
+    "js_bundle_analysis": 14,
     "manual": 14,
     "discovered_lookup": 12,
     "hash_route": 18,

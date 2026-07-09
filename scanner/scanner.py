@@ -2619,6 +2619,47 @@ def _serialize_active_worklist(endpoints: list, limit: int = ACTIVE_WORKLIST_EMI
     return out
 
 
+def _frontend_http_active_endpoints(base_url: str, analysis: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """Normalize statically observed frontend HTTP calls for active testing."""
+    if not isinstance(analysis, dict):
+        return []
+    base = urllib.parse.urlparse(base_url)
+    endpoints: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for request in analysis.get("request_endpoints", []) or []:
+        if not isinstance(request, dict):
+            continue
+        raw_url = str(request.get("url") or "").strip()
+        method = str(request.get("method") or "GET").upper()
+        if not raw_url or method not in {"GET", "POST", "PUT", "PATCH", "DELETE"}:
+            continue
+        full_url = urllib.parse.urljoin(base_url.rstrip("/") + "/", raw_url)
+        parsed = urllib.parse.urlparse(full_url)
+        if parsed.scheme not in {"http", "https"} or parsed.netloc != base.netloc:
+            continue
+        key = (method, full_url)
+        if key in seen:
+            continue
+        seen.add(key)
+        endpoint: dict[str, Any] = {
+            "url": full_url,
+            "method": method,
+            "source": "js_bundle_analysis",
+        }
+        params = list(dict.fromkeys(request.get("params") or []))
+        body_params = list(dict.fromkeys(request.get("body_params") or []))
+        if params:
+            endpoint["params"] = params
+        if body_params and method in {"POST", "PUT", "PATCH"}:
+            endpoint["body_params"] = body_params
+            endpoint["body_required_params"] = list(
+                dict.fromkeys(request.get("body_required_params") or body_params)
+            )
+            endpoint["content_type"] = request.get("content_type") or "application/json"
+        endpoints.append(endpoint)
+    return endpoints
+
+
 _PATH_VALUE_LOOKUP_ROUTE_TOKENS = (
     "track", "lookup", "order", "receipt", "invoice", "status", "verify",
     "confirm", "reset", "recover", "token", "reference", "ref", "ticket",
@@ -8529,6 +8570,17 @@ async def build_report(target: str,
                     print(
                         f"[scanner] Added {manual_get_count} GET and {manual_post_count} POST manual endpoints to smart testing",
                         file=sys.stderr
+                    )
+
+                js_request_count = 0
+                for js_endpoint in _frontend_http_active_endpoints(base_url, js_bundle_analysis):
+                    if _merge_endpoint(js_endpoint):
+                        js_request_count += 1
+                if js_request_count:
+                    active_block["frontend_http_requests"] = js_request_count
+                    print(
+                        f"[scanner] Added {js_request_count} method-aware frontend HTTP requests to smart testing",
+                        file=sys.stderr,
                     )
 
                 if not focused_manual_active_scope:

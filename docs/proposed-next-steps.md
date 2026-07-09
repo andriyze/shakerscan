@@ -1024,10 +1024,14 @@ producer quality: cross-principal replay now ranks compound resource route names
 repeated synthetic query variants cannot starve service-prefixed collection endpoints. DONE phase 24
 for non-`id` object identifiers: BOLA replay now treats VIN/license-style keys as replayable resource
 identifiers and can apply them to discovered placeholders or query parameters such as
-`<vehicleVIN>`/`?VIN=`, preserving the existing cross-principal proof requirement. DONE phase 25 for
-coupon API discovery: frontend route extraction/expansion now keeps coupon/apply/validate fragments
-and maps versioned coupon APIs into community-service API candidates, improving SQLi worklist coverage
-for service-split SPA backends.
+`<vehicleVIN>`/`?VIN=`, preserving the existing cross-principal proof requirement. DONE phase 25,
+corrected after integrity review, for coupon route discovery: frontend extraction keeps
+coupon/apply/validate fragments, but service-prefix composition is allowed only from API bases observed
+in the target's analyzed frontend assets. The earlier product-specific community/workshop mount mapping was removed as
+benchmark fitting. DONE phase 26 for method-aware frontend request capture: static `fetch` and
+axios-style calls now preserve literal same-origin URLs, HTTP methods, and query/body parameter names in
+the active endpoint graph. These observed request facts remain usable on SPA catch-all sites, while loose
+route strings do not gain fabricated POST methods or bodies.
 
 **Done when:** recorded two-user benchmark scorecards show the targeted miss becoming a deterministic
 finding, not merely an attempted endpoint.

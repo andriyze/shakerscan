@@ -114,3 +114,39 @@ def test_lookup_routes_are_preserved_for_path_value_active_testing():
             "source": "discovered_lookup",
         },
     ]
+
+
+def test_frontend_http_requests_become_same_origin_active_endpoints():
+    endpoints = scanner_module._frontend_http_active_endpoints(
+        "https://app.example.test",
+        {
+            "request_endpoints": [
+                {
+                    "url": "/api/search",
+                    "method": "POST",
+                    "body_params": ["query", "filters"],
+                    "body_required_params": ["query"],
+                    "content_type": "application/json",
+                },
+                {"url": "/api/products?q=seed", "method": "GET", "params": ["q"]},
+                {"url": "https://other.example.test/api/admin", "method": "GET"},
+            ]
+        },
+    )
+
+    assert endpoints == [
+        {
+            "url": "https://app.example.test/api/search",
+            "method": "POST",
+            "source": "js_bundle_analysis",
+            "body_params": ["query", "filters"],
+            "body_required_params": ["query"],
+            "content_type": "application/json",
+        },
+        {
+            "url": "https://app.example.test/api/products?q=seed",
+            "method": "GET",
+            "source": "js_bundle_analysis",
+            "params": ["q"],
+        },
+    ]

@@ -5,7 +5,11 @@ _SCANNER_DIR = Path(__file__).resolve().parents[1] / "scanner"
 if str(_SCANNER_DIR) not in sys.path:
     sys.path.insert(0, str(_SCANNER_DIR))
 
-from scanner_tools.discovery import expand_frontend_route_api_candidates, extract_frontend_route_fragments
+from scanner_tools.discovery import (
+    expand_frontend_route_api_candidates,
+    extract_frontend_http_requests,
+    extract_frontend_route_fragments,
+)
 
 
 # crAPI-specific service mounts that must NOT be fabricated from a route noun. Prepending
@@ -81,3 +85,33 @@ def test_extracts_route_fragments_but_does_not_fabricate_service_mounts():
     # The extracted fragments themselves remain probeable candidates.
     for fragment in fragments:
         assert fragment in expanded
+
+
+def test_extracts_method_and_body_shape_from_static_frontend_http_calls():
+    bundle = """
+      axios.post('/api/search', {query: term, filters: {category: selected}});
+      api.patch(`/v1/orders/${orderId}`, {status: nextStatus, note});
+      axios.get('/api/products', {params: {q: search, category: selected}});
+      fetch('/api/profile', {
+        method: 'PUT',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({displayName: name, preferences: prefs})
+      });
+    """
+
+    requests = extract_frontend_http_requests(bundle)
+    by_request = {(item["method"], item["url"]): item for item in requests}
+
+    assert by_request[("POST", "/api/search")]["body_params"] == ["query", "filters"]
+    assert by_request[("PATCH", "/v1/orders/{orderId}")]["body_params"] == ["status", "note"]
+    assert by_request[("GET", "/api/products")]["params"] == ["q", "category"]
+    assert by_request[("PUT", "/api/profile")]["body_params"] == ["displayName", "preferences"]
+
+
+def test_route_literals_do_not_gain_fabricated_http_methods():
+    bundle = """
+      const couponRoute = '/api/v2/coupon';
+      const routes = ['/orders', '/search', '/reviews'];
+    """
+
+    assert extract_frontend_http_requests(bundle) == []
