@@ -185,6 +185,9 @@ def test_request_contract_merges_by_method_path_with_source_precedence():
     assert static["body_params"] == ["query", "filters", "limit"]
     assert static["body_required_params"] == ["query"]
     assert static["body_param_defaults"] == {"limit": 10, "query": "real search"}
+    assert static["params"] == ["preview", "locale"]
+    assert static["param_defaults"] == {"preview": "1", "locale": "en"}
+    assert static["url"] == "https://app.example.test/api/search?locale=en"
     assert static["content_type"] == "application/x-www-form-urlencoded"
     assert static["request_contract_sources"] == [
         "js_bundle_analysis",
@@ -193,3 +196,23 @@ def test_request_contract_merges_by_method_path_with_source_precedence():
     ]
     assert static["request_contract_strength"] == "runtime_observed"
     assert static["source"] == "har_discovery"
+
+
+def test_request_contract_keeps_strong_query_when_later_rows_are_queryless():
+    runtime = scanner_module._initialize_active_endpoint_contract({
+        "url": "https://app.example.test/api/search?locale=en",
+        "method": "GET",
+        "source": "har_discovery",
+    })
+    schema = {
+        "url": "https://app.example.test/api/search",
+        "method": "GET",
+        "source": "openapi",
+        "params": ["q"],
+    }
+
+    scanner_module._merge_active_endpoint_contract(runtime, schema)
+
+    assert runtime["url"] == "https://app.example.test/api/search?locale=en"
+    assert runtime["params"] == ["locale", "q"]
+    assert runtime["param_defaults"] == {"locale": "en"}

@@ -2702,7 +2702,25 @@ def _request_contract_source_strength(source: str) -> int:
     return _REQUEST_CONTRACT_STRENGTH.get(str(source or ""), 1)
 
 
+def _merge_endpoint_url_query_contract(endpoint: dict[str, Any]) -> None:
+    """Preserve query names and observed defaults inside a canonical path contract."""
+    parsed = urllib.parse.urlparse(str(endpoint.get("url") or ""))
+    pairs = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+    if not pairs:
+        return
+    names = [str(name) for name, _value in pairs if name]
+    if names:
+        endpoint["params"] = list(dict.fromkeys([*(endpoint.get("params") or []), *names]))
+    defaults = dict(endpoint.get("param_defaults") or {})
+    for name, value in pairs:
+        if name:
+            defaults.setdefault(str(name), value)
+    if defaults:
+        endpoint["param_defaults"] = defaults
+
+
 def _initialize_active_endpoint_contract(endpoint: dict[str, Any]) -> dict[str, Any]:
+    _merge_endpoint_url_query_contract(endpoint)
     source = str(endpoint.get("source") or "inferred")
     endpoint["request_contract_sources"] = list(dict.fromkeys(
         [*(endpoint.get("request_contract_sources") or []), source]
@@ -2717,6 +2735,8 @@ def _initialize_active_endpoint_contract(endpoint: dict[str, Any]) -> dict[str, 
 
 def _merge_active_endpoint_contract(existing: dict[str, Any], incoming: dict[str, Any]) -> None:
     """Merge one canonical method/path request contract with provenance precedence."""
+    _merge_endpoint_url_query_contract(existing)
+    _merge_endpoint_url_query_contract(incoming)
     existing_source = str(existing.get("source") or "inferred")
     incoming_source = str(incoming.get("source") or "inferred")
     existing_sources = list(existing.get("request_contract_sources") or [existing_source])
@@ -2724,6 +2744,13 @@ def _merge_active_endpoint_contract(existing: dict[str, Any], incoming: dict[str
     sources = list(dict.fromkeys([*existing_sources, *incoming_sources]))
     existing_strength = max((_request_contract_source_strength(item) for item in existing_sources), default=1)
     incoming_strength = max((_request_contract_source_strength(item) for item in incoming_sources), default=1)
+
+    existing_url = str(existing.get("url") or "")
+    incoming_url = str(incoming.get("url") or "")
+    existing_has_query = bool(urllib.parse.urlparse(existing_url).query)
+    incoming_has_query = bool(urllib.parse.urlparse(incoming_url).query)
+    if incoming_has_query and (not existing_has_query or incoming_strength >= existing_strength):
+        existing["url"] = incoming_url
 
     for list_key in ("params", "body_params", "body_required_params", "allowed_methods"):
         values = [*(existing.get(list_key) or []), *(incoming.get(list_key) or [])]

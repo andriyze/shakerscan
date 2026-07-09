@@ -1071,6 +1071,9 @@ by `axios.create`. Non-HTTP objects such as queues and caches cannot fabricate m
 DONE phase 35 for production-wired body-completion telemetry: merged active attempts preserve
 per-family validation fields and proof labels, benchmark consumers expand the canonical family map,
 and response-guided completion ratios are distinct from ordinary probe-parameter execution ratios.
+DONE phase 36 for query-preserving canonical contracts: method/path still deduplicates endpoint rows,
+while query names/defaults are merged into the contract and the strongest query-bearing observed URL
+survives later queryless or weaker-source rows.
 
 **Done when:** recorded two-user benchmark scorecards show the targeted miss becoming a deterministic
 finding, not merely an attempted endpoint.
