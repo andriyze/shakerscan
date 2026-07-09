@@ -2681,6 +2681,76 @@ def _path_value_lookup_active_endpoints(
     return out
 
 
+def _collect_collection_authz_candidate_urls(
+    base_url: str,
+    *,
+    smart_discovery_data: dict[str, Any] | None = None,
+    crawl_urls: list[str] | None = None,
+    endpoints: list[dict[str, Any]] | None = None,
+    browser_api_endpoints: list[Any] | None = None,
+    js_bundle_analysis: dict[str, Any] | None = None,
+    har_discovery_result: Any | None = None,
+    limit: int = 500,
+) -> list[str]:
+    """Collect discovered URL candidates for collection-level authz/BFLA checks.
+
+    `check_collection_authz` owns the collection/sensitivity filter; this helper
+    only makes sure the candidate pool is independent from the BOLA/id route pool.
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+
+    def _normalize(raw_url: Any) -> str | None:
+        if not raw_url:
+            return None
+        if isinstance(raw_url, dict):
+            raw_url = raw_url.get("url") or raw_url.get("path")
+        if not isinstance(raw_url, str):
+            return None
+        u = raw_url.strip()
+        if not u:
+            return None
+        if u.startswith("//"):
+            u = "https:" + u
+        if u.startswith("/"):
+            u = urllib.parse.urljoin(base_url, u)
+        elif not u.startswith(("http://", "https://")):
+            u = urllib.parse.urljoin(base_url.rstrip("/") + "/", u)
+        try:
+            parsed = urllib.parse.urlparse(u)
+        except Exception:
+            return None
+        if not parsed.scheme or not parsed.netloc:
+            return None
+        return urllib.parse.urlunparse((parsed.scheme, parsed.netloc, parsed.path or "/", "", parsed.query, ""))
+
+    def _add_many(items: Any) -> None:
+        if not items:
+            return
+        for item in items:
+            normalized = _normalize(item)
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            out.append(normalized)
+            if len(out) >= limit:
+                return
+
+    if smart_discovery_data:
+        _add_many(smart_discovery_data.get("all_urls", []))
+        _add_many(smart_discovery_data.get("api_endpoints", []))
+        _add_many(smart_discovery_data.get("parameterized_urls", []))
+        _add_many(smart_discovery_data.get("recursive_paths", []))
+    _add_many(crawl_urls or [])
+    _add_many(endpoints or [])
+    _add_many(browser_api_endpoints or [])
+    if js_bundle_analysis and isinstance(js_bundle_analysis, dict):
+        _add_many(js_bundle_analysis.get("api_endpoints", []))
+    if har_discovery_result and getattr(har_discovery_result, "endpoints", None):
+        _add_many([getattr(ep, "url", None) for ep in har_discovery_result.endpoints])
+    return out[:limit]
+
+
 class ActiveCheckFamily(NamedTuple):
     """One runnable active check family — the scanner's SINGLE SOURCE OF TRUTH.
 
@@ -10616,6 +10686,65 @@ async def build_report(target: str,
                 active_block["smart_auth_error"] = str(e)
                 print(f"[scanner] Focused auth error: {e}", file=sys.stderr)
 
+        # Broken function-level authorization (BFLA) on sensitive collection
+        # endpoints needs only primary auth plus an anonymous-vs-authenticated
+        # differential. Keep it independent from the heavier BOLA lane, which can
+        # be skipped by budget or second-user policy.
+        collection_authz_result: dict[str, Any] | None = None
+        collection_authz_allowed_by_focus = focused_family_allows_active_module(
+            focused_active_family_name,
+            "bola_idor",
+        )
+        if (
+            smart_mode
+            and smart_succeeded
+            and not public_only
+            and not focused_manual_active_scope
+            and auth_session
+            and collection_authz_allowed_by_focus
+        ):
+            try:
+                from scanner_tools.access_control_checks import check_collection_authz
+
+                collection_candidates = _collect_collection_authz_candidate_urls(
+                    base_url,
+                    smart_discovery_data=smart_discovery_data if isinstance(smart_discovery_data, dict) else None,
+                    crawl_urls=crawl_urls,
+                    endpoints=endpoints,
+                    browser_api_endpoints=browser_api_endpoints,
+                    js_bundle_analysis=js_bundle_analysis if isinstance(js_bundle_analysis, dict) else None,
+                    har_discovery_result=har_discovery_result,
+                )
+                collection_authz_result = await check_collection_authz(
+                    base_url,
+                    discovered_urls=collection_candidates,
+                    auth_session=auth_session,
+                    timeout=10,
+                    max_endpoints=smart_bola_max_endpoints,
+                )
+                active_block["collection_authz"] = {
+                    "endpoints_tested": collection_authz_result.get("endpoints_tested", 0),
+                    "vulnerable": collection_authz_result.get("vulnerable", False),
+                    "skipped_reason": collection_authz_result.get("skipped_reason"),
+                    "candidate_count": len(collection_candidates),
+                }
+                for f in collection_authz_result.get("findings", []):
+                    nf = normalize_finding(
+                        str(f.get("tool") or "bfla"),
+                        str(f.get("title")),
+                        str(f.get("severity") or "high"),
+                        f.get("evidence") or {},
+                        f.get("cwe") or "CWE-285",
+                    )
+                    nf["verified"] = True
+                    nf["cvss_score"] = 7.5
+                    report["findings"].append(nf)
+                if collection_authz_result.get("findings"):
+                    print(f"[scanner] BFLA: found {len(collection_authz_result['findings'])} broken-authorization collection(s)", file=sys.stderr)
+            except Exception as e:
+                active_block["collection_authz_error"] = str(e)
+                print(f"[scanner] BFLA collection-authz error: {e}", file=sys.stderr)
+
         # Smart BOLA Testing - run in smart mode to detect authorization issues.
         # Focused BOLA batches are allowed through the otherwise broad
         # focused-scope skip gate; other focused families keep BOLA disabled.
@@ -10858,7 +10987,7 @@ async def build_report(target: str,
                 # (e.g. /api/Users -> the full user list incl. admin). Needs a
                 # primary auth context; no-op anonymously. The anon-vs-authed
                 # differential is deterministic proof, so findings arrive verified.
-                if auth_session:
+                if auth_session and collection_authz_result is None:
                     try:
                         from scanner_tools.access_control_checks import check_collection_authz
                         collection_authz = await check_collection_authz(

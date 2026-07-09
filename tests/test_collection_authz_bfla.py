@@ -7,6 +7,7 @@ precision guards (own-record-only and HTML-shell responses must NOT fire).
 """
 
 import asyncio
+import importlib.util
 import os
 import sys
 
@@ -14,6 +15,12 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scanner"))
 
 from scanner_tools import access_control_checks as acc  # noqa: E402
 from scanner_tools import proof_of_exploit as poe  # noqa: E402
+
+_SCANNER_FILE = os.path.join(os.path.dirname(__file__), "..", "scanner", "scanner.py")
+_SPEC = importlib.util.spec_from_file_location("scanner_entrypoint_for_bfla_tests", _SCANNER_FILE)
+scanner_module = importlib.util.module_from_spec(_SPEC)
+assert _SPEC and _SPEC.loader
+_SPEC.loader.exec_module(scanner_module)
 
 
 class _Cfg:
@@ -118,3 +125,33 @@ def test_non_collection_urls_are_ignored(monkeypatch):
     res = _run(monkeypatch, _router("Unauthorized", auth_status=401),
                urls=("/metrics", "/assets/app.js", "/main.css"))
     assert res["vulnerable"] is False
+
+
+def test_collection_authz_candidate_collector_is_independent_from_bola_ids():
+    class _HarEndpoint:
+        url = "/api/Accounts"
+
+    class _Har:
+        endpoints = [_HarEndpoint()]
+
+    urls = scanner_module._collect_collection_authz_candidate_urls(
+        "https://shop.test",
+        smart_discovery_data={
+            "api_endpoints": ["/api/Users"],
+            "parameterized_urls": ["/api/orders/1?id=1"],
+        },
+        crawl_urls=["/rest/products/reviews"],
+        endpoints=[{"url": "https://shop.test/api/Customers", "method": "GET"}],
+        browser_api_endpoints=[{"url": "/api/Users"}],
+        js_bundle_analysis={"api_endpoints": ["/api/Feedbacks"]},
+        har_discovery_result=_Har(),
+    )
+
+    assert urls == [
+        "https://shop.test/api/Users",
+        "https://shop.test/api/orders/1?id=1",
+        "https://shop.test/rest/products/reviews",
+        "https://shop.test/api/Customers",
+        "https://shop.test/api/Feedbacks",
+        "https://shop.test/api/Accounts",
+    ]

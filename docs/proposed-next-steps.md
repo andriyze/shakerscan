@@ -1015,7 +1015,10 @@ signal when an injected payload changes a rejected/empty control into a successf
 response, covering coupon/search/filter APIs that do not emit DB error banners. DONE phase 21 for
 query-parameter NoSQL proof: Smart's NoSQL lane now tests discovered GET endpoints with query
 parameters using `$eq`/`$ne` operator differentials and only promotes material JSON collection
-expansion, covering review/search collection routes that are not JSON-body sinks.
+expansion, covering review/search collection routes that are not JSON-body sinks. DONE phase 22 for
+BFLA collection-authz scheduling: authenticated Smart scans now run the safe anon-vs-auth collection
+differential independently from the heavier BOLA lane, using discovered collection routes from crawl,
+browser, endpoint graph, JS, HAR, and the existing model-collection wordlist.
 
 **Done when:** recorded two-user benchmark scorecards show the targeted miss becoming a deterministic
 finding, not merely an attempted endpoint.
