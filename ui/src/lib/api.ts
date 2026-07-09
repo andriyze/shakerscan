@@ -3860,6 +3860,7 @@ export interface TargetPrincipal {
   role: string
   tenant_id?: string | null
   auth_state: string
+  credential_profile?: string | null
   credential_configured: boolean
   is_active: boolean
   metadata_json: Record<string, unknown>
@@ -3888,6 +3889,16 @@ export interface TargetPrincipalMatrixResponse {
   count: number
   execution_enabled: boolean
   findings_created: number
+}
+
+export interface TargetPrincipalPayload {
+  label: string
+  role: string
+  tenant_id?: string
+  auth_state: string
+  credential_profile?: string
+  is_active?: boolean
+  metadata_json?: Record<string, unknown>
 }
 
 export interface InteractiveActionRequest {
@@ -3975,6 +3986,32 @@ export async function listInteractiveSessions(): Promise<InteractiveSessionsList
 export async function getTargetPrincipalMatrix(targetId: string, limit: number = 200): Promise<TargetPrincipalMatrixResponse> {
   const res = await fetch(`${API_URL}/targets/${encodeURIComponent(targetId)}/principal-matrix?limit=${limit}`)
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load target principal matrix'))
+  return res.json()
+}
+
+export async function createTargetPrincipal(targetId: string, payload: TargetPrincipalPayload): Promise<{ principal: TargetPrincipal; execution_enabled: boolean; findings_created: number }> {
+  const res = await fetch(`${API_URL}/targets/${encodeURIComponent(targetId)}/principals`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to create target principal'))
+  return res.json()
+}
+
+export async function updateTargetPrincipal(targetId: string, principalId: string, payload: Partial<TargetPrincipalPayload>): Promise<{ principal: TargetPrincipal; execution_enabled: boolean }> {
+  const res = await fetch(`${API_URL}/targets/${encodeURIComponent(targetId)}/principals/${encodeURIComponent(principalId)}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to update target principal'))
+  return res.json()
+}
+
+export async function deactivateTargetPrincipal(targetId: string, principalId: string): Promise<{ status: string; target_id: string; principal_id: string; execution_enabled: boolean }> {
+  const res = await fetch(`${API_URL}/targets/${encodeURIComponent(targetId)}/principals/${encodeURIComponent(principalId)}`, { method: 'DELETE' })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to deactivate target principal'))
   return res.json()
 }
 

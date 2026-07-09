@@ -4,7 +4,9 @@ import Link from 'next/link'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   captureInteractiveScreenshot,
+  createTargetPrincipal,
   createInteractiveSessionFinding,
+  deactivateTargetPrincipal,
   endInteractiveSession,
   getInteractiveSession,
   getTargetPrincipalMatrix,
@@ -12,6 +14,7 @@ import {
   runInteractiveAction,
   startInteractiveSession,
   testInteractiveEndpoint,
+  updateTargetPrincipal,
   type InteractiveEndpointTestResult,
   type InteractiveSessionState,
   type InteractiveSessionSummary,
@@ -19,6 +22,11 @@ import {
 } from '@/lib/api'
 import { SEVERITY_LEVELS } from '@/lib/constants'
 import { Badge, Button, Card, ErrorState, useToast } from '@/components/ui'
+import {
+  buildPrincipalProfilePayload,
+  emptyPrincipalProfileDraft,
+  type PrincipalProfileDraft,
+} from '@/lib/principalProfile'
 
 type UserKey = 'user1' | 'user2'
 
@@ -82,6 +90,23 @@ export default function InteractiveSessionPage() {
   const [targetId, setTargetId] = useState('')
   const [principalMatrix, setPrincipalMatrix] = useState<TargetPrincipalMatrixResponse | null>(null)
   const [principalMatrixError, setPrincipalMatrixError] = useState<string | null>(null)
+  const [principalDrafts, setPrincipalDrafts] = useState<Record<UserKey, PrincipalProfileDraft>>({
+    user1: emptyPrincipalProfileDraft(),
+    user2: emptyPrincipalProfileDraft(),
+  })
+  const [principalBusy, setPrincipalBusy] = useState<UserKey | null>(null)
+
+  const loadPrincipalMatrix = useCallback(async (id: string) => {
+    if (!id) return
+    try {
+      const matrix = await getTargetPrincipalMatrix(id, 100)
+      setPrincipalMatrix(matrix)
+      setPrincipalMatrixError(null)
+    } catch (err) {
+      setPrincipalMatrix(null)
+      setPrincipalMatrixError(err instanceof Error ? err.message : 'Failed to load principal matrix')
+    }
+  }, [])
 
   useEffect(() => {
     const requestedTarget = new URLSearchParams(window.location.search).get('target')
@@ -92,16 +117,9 @@ export default function InteractiveSessionPage() {
 
   useEffect(() => {
     if (!targetId) return
-    getTargetPrincipalMatrix(targetId, 100)
-      .then((matrix) => {
-        setPrincipalMatrix(matrix)
-        setPrincipalMatrixError(null)
-      })
-      .catch((err) => {
-        setPrincipalMatrix(null)
-        setPrincipalMatrixError(err instanceof Error ? err.message : 'Failed to load principal matrix')
-      })
-  }, [targetId])
+    setPrincipalDrafts({ user1: emptyPrincipalProfileDraft(), user2: emptyPrincipalProfileDraft() })
+    void loadPrincipalMatrix(targetId)
+  }, [loadPrincipalMatrix, targetId])
 
   const [endpoint, setEndpoint] = useState('')
   const [method, setMethod] = useState('GET')
@@ -197,6 +215,67 @@ export default function InteractiveSessionPage() {
     }
     return mapped
   }, [principalMatrix])
+
+  useEffect(() => {
+    if (!principalMatrix) return
+    setPrincipalDrafts((current) => {
+      const next = { ...current }
+      for (const slot of ['user1', 'user2'] as UserKey[]) {
+        const principal = principalMatrix.principals.find((item) => item.auth_state === slot)
+        if (!principal) continue
+        next[slot] = {
+          label: principal.label,
+          role: principal.role,
+          tenantId: principal.tenant_id || '',
+          credentialProfile: principal.credential_profile || '',
+        }
+      }
+      return next
+    })
+  }, [principalMatrix])
+
+  async function handleSavePrincipal(slot: UserKey) {
+    if (!targetId) return
+    const principal = principalsByAuthState[slot]
+    const payload = buildPrincipalProfilePayload(slot, principalDrafts[slot], Boolean(principal))
+    if (!payload.label) {
+      toast.error(`${slot} label is required`)
+      return
+    }
+
+    setPrincipalBusy(slot)
+    try {
+      if (principal) {
+        await updateTargetPrincipal(targetId, principal.id, payload)
+      } else {
+        await createTargetPrincipal(targetId, payload)
+      }
+      await loadPrincipalMatrix(targetId)
+      toast.success(`${slot} principal ${principal ? 'updated' : 'created'}`)
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : `Failed to save ${slot} principal`)
+    } finally {
+      setPrincipalBusy(null)
+    }
+  }
+
+  async function handleDeactivatePrincipal(slot: UserKey) {
+    if (!targetId) return
+    const principal = principalsByAuthState[slot]
+    if (!principal || !window.confirm(`Deactivate principal ${principal.label}?`)) return
+
+    setPrincipalBusy(slot)
+    try {
+      await deactivateTargetPrincipal(targetId, principal.id)
+      setPrincipalDrafts((current) => ({ ...current, [slot]: emptyPrincipalProfileDraft() }))
+      await loadPrincipalMatrix(targetId)
+      toast.success(`${slot} principal deactivated`)
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : `Failed to deactivate ${slot} principal`)
+    } finally {
+      setPrincipalBusy(null)
+    }
+  }
 
   async function handleStartSession() {
     if (!target.trim()) {
@@ -552,17 +631,65 @@ export default function InteractiveSessionPage() {
                   const allowCount = expectations.filter((item) => item.expected_access === 'allow').length
                   const denyCount = expectations.filter((item) => item.expected_access === 'deny').length
                   return (
-                    <div key={authState} className="rounded-md border border-gray-800 bg-gray-950 p-3">
+                    <div key={authState} className="space-y-3 rounded-md border border-gray-800 bg-gray-950 p-3">
                       <div className="flex flex-wrap items-center gap-2">
                         <Badge className="bg-blue-500/15 text-blue-300">{authState}</Badge>
                         <span className="text-sm font-medium text-white">{principal?.label || 'Unassigned principal'}</span>
                         {principal?.role && <Badge className="bg-gray-800 text-gray-300">{principal.role}</Badge>}
                         {principal?.credential_configured && <Badge className="bg-green-500/15 text-green-300">credential profile</Badge>}
                       </div>
-                      <div className="mt-2 flex flex-wrap gap-2 text-xs text-gray-500">
+                      <div className="flex flex-wrap gap-2 text-xs text-gray-500">
                         <span>tenant: <span className="text-gray-300">{principal?.tenant_id || 'none'}</span></span>
                         <span>allow: <span className="text-green-300">{allowCount}</span></span>
                         <span>deny: <span className="text-amber-300">{denyCount}</span></span>
+                      </div>
+                      <div className="grid gap-2 sm:grid-cols-2">
+                        <label className="space-y-1 text-xs text-gray-500">
+                          <span>Label</span>
+                          <input
+                            value={principalDrafts[authState].label}
+                            onChange={(event) => setPrincipalDrafts((current) => ({ ...current, [authState]: { ...current[authState], label: event.target.value } }))}
+                            placeholder="Customer account"
+                            className="w-full rounded-md border border-gray-800 bg-gray-900 px-2.5 py-2 text-sm text-white placeholder-gray-600 focus:border-blue-500 focus:outline-none"
+                          />
+                        </label>
+                        <label className="space-y-1 text-xs text-gray-500">
+                          <span>Role</span>
+                          <input
+                            value={principalDrafts[authState].role}
+                            onChange={(event) => setPrincipalDrafts((current) => ({ ...current, [authState]: { ...current[authState], role: event.target.value } }))}
+                            placeholder="user"
+                            className="w-full rounded-md border border-gray-800 bg-gray-900 px-2.5 py-2 text-sm text-white placeholder-gray-600 focus:border-blue-500 focus:outline-none"
+                          />
+                        </label>
+                        <label className="space-y-1 text-xs text-gray-500">
+                          <span>Tenant ID</span>
+                          <input
+                            value={principalDrafts[authState].tenantId}
+                            onChange={(event) => setPrincipalDrafts((current) => ({ ...current, [authState]: { ...current[authState], tenantId: event.target.value } }))}
+                            placeholder="tenant-a"
+                            className="w-full rounded-md border border-gray-800 bg-gray-900 px-2.5 py-2 text-sm text-white placeholder-gray-600 focus:border-blue-500 focus:outline-none"
+                          />
+                        </label>
+                        <label className="space-y-1 text-xs text-gray-500">
+                          <span>Credential profile reference</span>
+                          <input
+                            value={principalDrafts[authState].credentialProfile}
+                            onChange={(event) => setPrincipalDrafts((current) => ({ ...current, [authState]: { ...current[authState], credentialProfile: event.target.value } }))}
+                            placeholder="vault/customer-a"
+                            className="w-full rounded-md border border-gray-800 bg-gray-900 px-2.5 py-2 text-sm text-white placeholder-gray-600 focus:border-blue-500 focus:outline-none"
+                          />
+                        </label>
+                      </div>
+                      <div className="flex flex-wrap items-center justify-end gap-2">
+                        {principal && (
+                          <Button size="sm" variant="ghost" disabled={principalBusy === authState} onClick={() => void handleDeactivatePrincipal(authState)}>
+                            Deactivate
+                          </Button>
+                        )}
+                        <Button size="sm" disabled={principalBusy === authState} onClick={() => void handleSavePrincipal(authState)}>
+                          {principalBusy === authState ? 'Saving...' : principal ? 'Update principal' : 'Create principal'}
+                        </Button>
                       </div>
                     </div>
                   )

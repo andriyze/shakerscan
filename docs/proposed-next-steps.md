@@ -1176,7 +1176,7 @@ the deterministic campaign from it, while unproven graph/source/AI signals remai
 than findings.
 
 ### 8. Auth / principal / role matrix
-**Status: PARTIAL, PHASE 7 PRINCIPAL-AWARE SESSIONS DONE.** `target_endpoints.auth_state` exists, and
+**Status: PARTIAL, PHASE 8 PRINCIPAL PROFILE LIFECYCLE DONE.** `target_endpoints.auth_state` exists, and
 `target_principals` plus `target_endpoint_expectations` now persist role, tenant, credential-profile
 references, auth states, and endpoint x principal expected access. `GET/POST /targets/{id}/principals`
 and `GET/POST /targets/{id}/principal-matrix` expose the matrix as non-executing planning facts, and
@@ -1210,6 +1210,11 @@ phase 7: ASM auth-remediation links now carry target identity into the interacti
 loads the content-free persisted principal matrix, labels user contexts with role/tenant expectations,
 shows credential-profile presence without credential contents, summarizes allow/deny expectations,
 and can load a selected expectation into the endpoint replay form without executing it.
+DONE phase 8: the same workflow can create, update, and deactivate the content-free `user1` and
+`user2` principal records, including labels, roles, tenant ids, and credential-profile references.
+The UI never accepts or returns raw credential contents; session auth remains an explicit separate
+step. Remaining work is integration with a managed credential-profile secret store and
+expiry/refresh lifecycle.
 
 **Done when:** a campaign can assert "endpoint X requires role admin" and prove a lower-role
 principal's access is a finding.
