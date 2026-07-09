@@ -1355,7 +1355,7 @@ produce receipts for both successful and failed/skipped runs; missing binaries s
 not phantom success.
 
 ### 9a. Refuter workflow and integrity ledgers
-**Status: PARTIAL, PHASE 9 VERDICT-BASIS UI TRUTHFULNESS DONE.** T3MP3ST's strongest process lesson is not a detector; it
+**Status: PARTIAL, PHASE 10 DETECTOR INTEGRITY RELEASE GATE DONE.** T3MP3ST's strongest process lesson is not a detector; it
 is the habit of trying to disprove weak wins. ShakerScan now has durable
 `refuter_reviews` records exposed through `GET/POST /arsenal/refuter-reviews` and
 `refuter_review.list` / `refuter_review.record`, plus read-only trigger summaries through
@@ -1434,7 +1434,10 @@ remains open.
    policy; review records still do not directly mutate product truth.
 4. DONE phase 1: add integrity ledgers for benchmark and planner methodology: stale/non-uniform worker runs,
    benchmark fitting, hidden contamination, hardcoded target facts, phantom tool assumptions, source
-   hints counted as runtime proof, AI prose counted as evidence, and planner safety failures.
+   hints counted as runtime proof, AI prose counted as evidence, and planner safety failures. DONE
+   phase 10: a release test inspects executable discovery/prioritization constants and rejects known
+   benchmark hostnames or service-mount answer strings while allowing docs, fixtures, and benchmark
+   tooling to name their targets explicitly.
 5. DONE phase 1: store integrity records close to the artifacts they correct, for example
    `results/benchmark-runs/INTEGRITY_LEDGER.md` and `results/planner-evals/INTEGRITY_LEDGER.md`, then
    add API/UI summaries only after the file-backed discipline is stable.

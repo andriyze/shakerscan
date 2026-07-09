@@ -74,3 +74,5 @@ claim instead of deleting it.
   versioned-route extraction, and retained method/body/source-based prioritization.
 - Follow-up: Enforce the universal-engine rule in regression tests and treat observed
   HTTP calls, schemas, browser/HAR traffic, and discovered client bases as route facts.
+  `tests/test_detector_integrity_gate.py` now blocks known benchmark hostnames and
+  service-mount answer strings from executable discovery/prioritization constants.
