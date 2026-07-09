@@ -3153,6 +3153,12 @@ def expand_frontend_route_api_candidates(endpoints: list[str], discovered_api_ba
             expanded.add("/identity/api" + endpoint)
         if lowered.startswith(("/v1/community/", "/v2/community/", "/v3/community/", "/v4/community/")):
             expanded.add("/community/api" + endpoint)
+        if re.match(r"^/api/v[0-9]+/coupons?(?:/|$)", lowered):
+            expanded.add("/community" + endpoint)
+        if re.match(r"^/v[0-9]+/coupons?(?:/|$)", lowered):
+            expanded.add("/community/api" + endpoint)
+        if lowered.startswith(("/coupon", "/coupons", "/apply-coupon", "/apply_coupon", "/validate-coupon", "/validate_coupon")):
+            expanded.add("/community/api/v2" + endpoint)
         if lowered.startswith(("/shop/", "/mechanic", "/merchant/")) or lowered in {"/shop", "/orders", "/past-orders"}:
             expanded.add("/workshop/api" + endpoint)
         if lowered.startswith(("/api/shop/", "/api/mechanic/", "/api/merchant/")):
@@ -3165,6 +3171,8 @@ def extract_frontend_route_fragments(content: str) -> list[str]:
     """Extract app route fragments from SPA bundles that are later base-prefixed."""
     route_fragment_patterns = [
         r'''/(?:v[0-9]+/(?:user|vehicle|community)/[A-Za-z0-9_./<>{}$?-]+)''',
+        r'''/(?:api/)?v[0-9]+/coupons?(?:/[A-Za-z0-9_./<>{}$?-]+)?''',
+        r'''/(?:coupons?|apply[-_]coupon|validate[-_]coupon)(?:/[A-Za-z0-9_./<>{}$?-]+)?''',
         r'''/(?:shop|mechanic|merchant)/(?:[A-Za-z0-9_./<>{}$?-]+)''',
         r'''/(?:orders|past-orders)(?:[A-Za-z0-9_./<>{}$?-]*)''',
         r'''(?:^|['"`])((?:api/(?:shop|mechanic|merchant)/[A-Za-z0-9_./<>{}$?-]+))''',

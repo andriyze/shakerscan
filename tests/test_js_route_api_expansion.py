@@ -18,6 +18,8 @@ def test_expands_crapi_style_frontend_routes_to_service_api_candidates():
                 "/shop/orders",
                 "/api/shop/orders/all",
                 "/api/shop/orders/<orderId>",
+                "/api/v2/coupon/validate-coupon",
+                "/coupon",
                 "/mechanic/service_requests",
                 "/orders",
                 "/past-orders",
@@ -31,6 +33,8 @@ def test_expands_crapi_style_frontend_routes_to_service_api_candidates():
     assert "/workshop/api/shop/orders" in expanded
     assert "/workshop/api/shop/orders/all" in expanded
     assert "/workshop/api/shop/orders/<orderId>" in expanded
+    assert "/community/api/v2/coupon/validate-coupon" in expanded
+    assert "/community/api/v2/coupon" in expanded
     assert "/workshop/api/mechanic/service_requests" in expanded
     assert "/workshop/api/orders" in expanded
     assert "/workshop/api/past-orders" in expanded
@@ -57,6 +61,8 @@ def test_extracts_minified_crapi_style_route_fragments():
       GET_ORDERS:"/shop/orders",
       GET_ORDERS_REAL:"api/shop/orders/all",
       GET_ORDER_BY_ID:"api/shop/orders/<orderId>",
+      VALIDATE_COUPON:"/api/v2/coupon/validate-coupon",
+      COUPON:"/coupon",
       GET_SERVICE:"/mechanic/service_requests",
       GET_PAST:"/past-orders"
     };
@@ -78,5 +84,7 @@ def test_extracts_minified_crapi_style_route_fragments():
     assert "/workshop/api/shop/orders" in expanded
     assert "/workshop/api/shop/orders/all" in expanded
     assert "/workshop/api/shop/orders/<orderId>" in expanded
+    assert "/community/api/v2/coupon/validate-coupon" in expanded
+    assert "/community/api/v2/coupon" in expanded
     assert "/workshop/api/mechanic/service_requests" in expanded
     assert "/workshop/api/past-orders" in expanded
