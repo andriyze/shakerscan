@@ -555,6 +555,12 @@ export interface RefuterActionResult {
   status?: string
 }
 
+export interface RefuterReviewsResponse {
+  refuter_reviews: RefuterReview[]
+  count: number
+  execution_enabled: boolean
+}
+
 export interface LocalAgentPlanRequest {
   agent: string
   context_pack_id: string
@@ -1992,6 +1998,12 @@ export async function getRefuterWorkSummary(limit: number = 5, findingWindow: nu
   const params = new URLSearchParams({ limit: String(limit), finding_window: String(findingWindow) })
   const res = await fetch(`${API_URL}/arsenal/refuter-reviews/summary?${params.toString()}`)
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load refuter review summary'))
+  return res.json()
+}
+
+export async function getRefuterReviews(limit: number = 20): Promise<RefuterReviewsResponse> {
+  const res = await fetch(`${API_URL}/arsenal/refuter-reviews?limit=${limit}`)
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load refuter reviews'))
   return res.json()
 }
 

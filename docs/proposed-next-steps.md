@@ -1315,7 +1315,7 @@ produce receipts for both successful and failed/skipped runs; missing binaries s
 not phantom success.
 
 ### 9a. Refuter workflow and integrity ledgers
-**Status: PARTIAL, PHASE 1 RECORDS + TRIGGER SUMMARY + AUTOMATION PLANS + GATED EXECUTION QUEUE + VERDICT DERIVATION DONE.** T3MP3ST's strongest process lesson is not a detector; it
+**Status: PARTIAL, PHASE 7 COUNTEREVIDENCE REVIEW UI DONE.** T3MP3ST's strongest process lesson is not a detector; it
 is the habit of trying to disprove weak wins. ShakerScan now has durable
 `refuter_reviews` records exposed through `GET/POST /arsenal/refuter-reviews` and
 `refuter_review.list` / `refuter_review.record`, plus read-only trigger summaries through
@@ -1344,7 +1344,8 @@ and derive a verdict from completed replay evidence. `refuter_signal` remains se
 human-approved-review basis, and recording a review cannot directly update findings, hypotheses,
 proof state, severity, or gates. File-backed integrity ledgers exist at
 `results/benchmark-runs/INTEGRITY_LEDGER.md` and `results/planner-evals/INTEGRITY_LEDGER.md`.
-Richer counterevidence bundle review and broader trigger coverage remain open.
+Durable review rows and their counterevidence bundles are now operator-visible after refresh, with
+receipt-gated selected-step execution and verdict derivation. Broader trigger coverage remains open.
 
 **Implement:**
 1. DONE phase 1: trigger refuter work for Critical/High findings with suspected or weak proof, AI Gate semantic-only
@@ -1369,7 +1370,9 @@ Richer counterevidence bundle review and broader trigger coverage remain open.
    integrity signal to the productized operator decision flow (§1). DONE phase 6: benchmark scorecard
    win deltas now surface as report-only integrity signals when a latest scorecard improves sharply
    over its own recent history, so possible stale-fleet, contamination, or benchmark-fitting wins are
-   reviewed without auto-queueing or mutating findings. Richer counterevidence review UI remains open.
+   reviewed without auto-queueing or mutating findings. DONE phase 7: the Command Arsenal UI renders
+   durable review questions, benign explanations, required evidence refs, verdict paths, and selected
+   automation steps, then routes execution and verdict derivation through the approval-receipt gate.
 2. PARTIAL phase 1: refuter behavior now plans how to rerun the minimal reproducer, test benign
    explanations, verify auth context/principal/tenant/object ownership, check request freshness, and
    attach counterevidence when a claim weakens. DONE phase 2: a gated executor now queues the
@@ -1377,7 +1380,7 @@ Richer counterevidence bundle review and broader trigger coverage remain open.
    metadata/audit without changing product truth. DONE phase 3: completed finding verifications can
    derive new refuter signal/verdict rows; deterministic outcomes can become proof-backed refuter
    verdicts, while AI-driven outcomes stay signal-only unless reviewed by a human. Remaining work is
-   richer counterevidence review UI.
+   broader trigger coverage and richer evidence attachment/annotation.
 3. DONE phase 1: separate `refuter_signal` from `refuter_verdict`. Signals can
    weaken/support/question a claim. Verdicts are accepted only when backed by deterministic replay,
    cryptographic evidence, parser/protocol evidence, or explicitly labeled human-approved review

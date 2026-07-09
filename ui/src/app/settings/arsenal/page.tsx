@@ -21,6 +21,7 @@ import {
   getHypotheses,
   getHypothesisSituationReport,
   getRefuterWorkSummary,
+  getRefuterReviews,
   generateAgentContextPackFromTarget,
   getOperationPlans,
   getArsenalTools,
@@ -59,6 +60,7 @@ import {
   type SourceIngestResult,
 } from '@/lib/api'
 import { buildAuthzReplayReview, sessionMatchesTarget } from '@/lib/authzReplay'
+import { buildRefuterReviewPlanView } from '@/lib/refuterReview'
 import { Badge, Button, Card, EmptyState, ErrorState, Skeleton } from '@/components/ui'
 
 function statusClass(status: string): string {
@@ -675,6 +677,98 @@ function RefuterQueueResultPanel({ result }: { result: RefuterQueueResult }) {
   )
 }
 
+function RefuterReviewRow({ review, approvalReceiptId, operator, onRefresh }: {
+  review: RefuterReview
+  approvalReceiptId?: string
+  operator: string
+  onRefresh: () => Promise<void>
+}) {
+  const plan = useMemo(() => buildRefuterReviewPlanView(review.metadata_json), [review.metadata_json])
+  const [stepId, setStepId] = useState(plan.steps[0]?.id || '')
+  const [busy, setBusy] = useState<'execute' | 'derive' | null>(null)
+  const [message, setMessage] = useState<string | null>(null)
+
+  async function executeStep() {
+    if (!approvalReceiptId) return
+    setBusy('execute')
+    setMessage(null)
+    try {
+      const response = await executeRefuterReviewPlan(review.id, {
+        execute: true, confirmations: ['confirm_authorized'], approval_receipt_id: approvalReceiptId,
+        step_id: stepId || undefined, requested_by: operator,
+      })
+      setMessage(response.execution_blocked_reason || 'Review step dispatched')
+      await onRefresh()
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : 'Review step failed')
+    } finally { setBusy(null) }
+  }
+
+  async function deriveVerdict() {
+    if (!approvalReceiptId) return
+    setBusy('derive')
+    setMessage(null)
+    try {
+      const response = await deriveRefuterReviewVerdict(review.id, {
+        execute: true, confirmations: ['confirm_authorized'], approval_receipt_id: approvalReceiptId, created_by: operator,
+      })
+      setMessage(response.execution_blocked_reason || 'Verdict derivation completed')
+      await onRefresh()
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : 'Verdict derivation failed')
+    } finally { setBusy(null) }
+  }
+
+  return (
+    <div className="rounded-md border border-gray-800 bg-gray-950 p-3">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <Badge className="bg-amber-500/15 text-amber-300">{review.refuter_signal}</Badge>
+            <Badge className="bg-gray-800 text-gray-300">{review.verdict_basis}</Badge>
+            {review.refuter_verdict && <Badge className={statusClass('proof_backed')}>{review.refuter_verdict}</Badge>}
+          </div>
+          <p className="mt-2 break-words text-sm text-gray-300">{review.trigger_reason}</p>
+          <p className="mt-1 break-all font-mono text-xs text-gray-500">{review.id}</p>
+        </div>
+        {review.finding_id && <a href={`/findings/${review.finding_id}`} className="text-xs text-blue-300 hover:text-blue-200">Finding</a>}
+      </div>
+      {plan.available && (
+        <div className="mt-3 grid gap-3 lg:grid-cols-2">
+          <div><div className="text-xs font-medium text-gray-300">Review questions</div><div className="mt-1 grid gap-1">
+            {plan.reviewQuestions.map((item) => <p key={item} className="text-xs text-gray-500">{item}</p>)}
+          </div></div>
+          <div><div className="text-xs font-medium text-gray-300">Benign explanations</div><div className="mt-1 flex flex-wrap gap-1.5">
+            {plan.benignExplanations.map((item) => <Badge key={item} className="max-w-full break-words bg-gray-800 text-gray-300">{item}</Badge>)}
+          </div></div>
+          <div><div className="text-xs font-medium text-gray-300">Required evidence</div><div className="mt-1 flex flex-wrap gap-1.5">
+            {plan.requiredEvidenceRefs.map((item) => <Badge key={item} className="bg-blue-500/15 text-blue-300">{item}</Badge>)}
+          </div></div>
+          <div><div className="text-xs font-medium text-gray-300">Verdict paths</div><div className="mt-1 grid gap-1">
+            {plan.verdictPaths.map((item) => <p key={item.verdict} className="text-xs text-gray-500"><span className="text-gray-300">{item.verdict}:</span> {item.description}</p>)}
+          </div></div>
+        </div>
+      )}
+      <div className="mt-3 flex flex-wrap items-end gap-2 border-t border-gray-800 pt-3">
+        {plan.steps.length > 0 && <label className="min-w-64 flex-1"><span className="text-xs text-gray-400">Review step</span>
+          <select value={stepId} onChange={(event) => setStepId(event.target.value)} className="mt-1 w-full rounded-md border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white">
+            {plan.steps.map((step) => <option key={step.id} value={step.id}>{step.label} · {step.command}</option>)}
+          </select></label>}
+        <Button size="sm" variant="secondary" disabled={!approvalReceiptId || busy !== null || plan.steps.length === 0} onClick={() => void executeStep()}>
+          <RefreshCw className={`h-3.5 w-3.5 ${busy === 'execute' ? 'animate-spin' : ''}`} aria-hidden="true" /> Execute step
+        </Button>
+        <Button size="sm" disabled={!approvalReceiptId || busy !== null} onClick={() => void deriveVerdict()}>
+          <CheckCircle2 className={`h-3.5 w-3.5 ${busy === 'derive' ? 'animate-spin' : ''}`} aria-hidden="true" /> Derive verdict
+        </Button>
+      </div>
+      <div className="mt-2 flex flex-wrap gap-2">
+        {!approvalReceiptId && <Badge className={statusClass('out_of_scope')}>approval receipt required</Badge>}
+        {message && <span className="text-xs text-gray-300">{message}</span>}
+      </div>
+    </div>
+  )
+}
+
 function ToolRow({ tool }: { tool: ArsenalTool }) {
   const Icon = tool.status === 'runnable' || tool.status === 'installed' ? CheckCircle2 : tool.status === 'wired' || tool.status === 'gated' ? ShieldCheck : XCircle
   return (
@@ -892,6 +986,7 @@ export default function ArsenalSettingsPage() {
   const [sourceIngestError, setSourceIngestError] = useState<string | null>(null)
   const [refuterSummary, setRefuterSummary] = useState<RefuterWorkSummary | null>(null)
   const [refuterQueueResult, setRefuterQueueResult] = useState<RefuterQueueResult | null>(null)
+  const [recentRefuterReviews, setRecentRefuterReviews] = useState<RefuterReview[]>([])
   const [refuterQueueLoading, setRefuterQueueLoading] = useState(false)
   const [refuterQueueError, setRefuterQueueError] = useState<string | null>(null)
   const [planLoading, setPlanLoading] = useState(false)
@@ -930,6 +1025,7 @@ export default function ArsenalSettingsPage() {
         contextData,
         traceData,
         sessionData,
+        refuterReviewData,
       ] = await Promise.all([
         getArsenalCommands(),
         getArsenalContracts(),
@@ -944,6 +1040,7 @@ export default function ArsenalSettingsPage() {
         getAgentContextPacks(5),
         getAgentDecisionTraces(5),
         listInteractiveSessions(),
+        getRefuterReviews(10),
       ])
       setCommands(commandData)
       setContracts(contractData)
@@ -958,6 +1055,7 @@ export default function ArsenalSettingsPage() {
       setRecentContextPacks(contextData.context_packs)
       setRecentDecisionTraces(traceData.decision_traces)
       setInteractiveSessions(sessionData.sessions || [])
+      setRecentRefuterReviews(refuterReviewData.refuter_reviews || [])
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load Command Arsenal status')
     } finally {
@@ -977,6 +1075,11 @@ export default function ArsenalSettingsPage() {
     ])
     setRecentCampaignActions(actionData.campaign_actions)
     setInteractiveSessions(sessionData.sessions || [])
+  }
+
+  async function refreshRefuterReviews() {
+    const data = await getRefuterReviews(10)
+    setRecentRefuterReviews(data.refuter_reviews || [])
   }
 
   const commandCounts = useMemo(() => countBy(commands?.commands || []), [commands])
@@ -1052,6 +1155,7 @@ export default function ArsenalSettingsPage() {
       })
       setRefuterQueueResult(result)
       setRefuterSummary(await getRefuterWorkSummary(5, 200))
+      await refreshRefuterReviews()
     } catch (err) {
       setRefuterQueueError(err instanceof Error ? err.message : 'Failed to queue refuter review work')
     } finally {
@@ -1378,6 +1482,25 @@ export default function ArsenalSettingsPage() {
             {contractEntries.map(([name, contract]) => (
               <ContractRow key={name} name={name} contract={contract} />
             ))}
+          </div>
+        )}
+        {!loading && recentRefuterReviews.length > 0 && (
+          <div className="mt-4 border-t border-gray-800 pt-4">
+            <div className="mb-3 flex items-center justify-between gap-2">
+              <h3 className="text-sm font-medium text-white">Durable Reviews</h3>
+              <Badge className="bg-gray-800 text-gray-300">{recentRefuterReviews.length}</Badge>
+            </div>
+            <div className="grid gap-3">
+              {recentRefuterReviews.map((review) => (
+                <RefuterReviewRow
+                  key={review.id}
+                  review={review}
+                  approvalReceiptId={approvalReceipt?.approved_by ? approvalReceipt.id : undefined}
+                  operator={approvalActor.trim() || 'operator'}
+                  onRefresh={refreshRefuterReviews}
+                />
+              ))}
+            </div>
           </div>
         )}
       </Card>
