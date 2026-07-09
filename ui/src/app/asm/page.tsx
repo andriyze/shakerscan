@@ -1070,20 +1070,41 @@ const TIMELINE_BADGE: Record<string, string> = {
 }
 
 function ActivityCard({
+  targetId,
   activity,
   schedulerState,
   timeline,
+  onRefresh,
 }: {
+  targetId: string
   activity: AsmActivity[]
   schedulerState?: AsmSchedulerState | null
   timeline?: AsmTimelineEvent[]
+  onRefresh: () => void
 }) {
+  const toast = useToast()
+  const [improving, setImproving] = useState(false)
   const decision = schedulerState?.decision
   const lastDecision = schedulerState?.last_decision
   const activeScanId = decision?.active_scan_id || schedulerState?.active_scan_ids?.[0] || lastDecision?.active_scan_id
   const decisionLabel = decision?.action
     ? `${decision.action}${decision.blocked_by ? ` · blocked by ${decision.blocked_by.replace(/_/g, ' ')}` : ''}`
     : 'No live decision'
+
+  async function improveFromTimeline() {
+    setImproving(true)
+    try {
+      const result = await improveAsmTarget(targetId)
+      toast.success(result.action === 'wait' ? (result.reason || 'ASM work is already active') : 'Queued ASM coverage work', {
+        link: result.scan_id ? { href: `/scans/${result.scan_id}`, label: 'View activity' } : undefined,
+      })
+      setTimeout(onRefresh, 700)
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to improve ASM coverage')
+    } finally {
+      setImproving(false)
+    }
+  }
 
   return (
     <Card className="p-4 space-y-3">
@@ -1132,6 +1153,7 @@ function ActivityCard({
       {timeline && timeline.length > 0 ? (
         <div className="space-y-2">
           {timeline.map((event) => {
+            const action = event.remediation
             const content = (
               <div className="flex items-start justify-between gap-3 rounded-lg border border-gray-800 bg-gray-950/50 px-3 py-2 hover:border-gray-700">
                 <div className="min-w-0">
@@ -1148,18 +1170,24 @@ function ActivityCard({
                     <div className="mt-1 truncate font-mono text-[11px] text-gray-600">campaign {event.campaign_id}</div>
                   )}
                 </div>
-                <div className="shrink-0 text-right text-xs text-gray-500">
-                  {event.timestamp ? formatDate(event.timestamp) : '—'}
+                <div className="flex shrink-0 flex-col items-end gap-2 text-right text-xs text-gray-500">
+                  <span>{event.timestamp ? formatDate(event.timestamp) : '—'}</span>
+                  {action?.kind === 'improve' ? (
+                    <Button size="sm" variant="secondary" disabled={improving} onClick={() => void improveFromTimeline()}>
+                      <Sparkles className={`h-3.5 w-3.5 ${improving ? 'animate-pulse' : ''}`} />
+                      {action.label}
+                    </Button>
+                  ) : action?.href ? (
+                    <Link href={action.href} className="inline-flex items-center gap-1 text-blue-400 hover:text-blue-300">
+                      {action.label} <ExternalLink className="h-3 w-3" />
+                    </Link>
+                  ) : event.href ? (
+                    <Link href={event.href} className="text-blue-400 hover:text-blue-300">Open</Link>
+                  ) : null}
                 </div>
               </div>
             )
-            return event.href ? (
-              <Link key={event.id} href={event.href}>
-                {content}
-              </Link>
-            ) : (
-              <div key={event.id}>{content}</div>
-            )
+            return <div key={event.id}>{content}</div>
           })}
         </div>
       ) : activity.length === 0 ? (
@@ -1399,7 +1427,13 @@ function TargetView({ targetId }: { targetId: string }) {
 
       <div className="grid gap-4 xl:grid-cols-[1.2fr_0.8fr]">
         <GapsCard gaps={gaps} loading={loading} />
-        <ActivityCard activity={activity} schedulerState={activitySchedulerState} timeline={timeline} />
+        <ActivityCard
+          targetId={targetId}
+          activity={activity}
+          schedulerState={activitySchedulerState}
+          timeline={timeline}
+          onRefresh={load}
+        />
       </div>
 
       <HypothesisLeadsCard report={hypothesisSituation} targetId={targetId} />

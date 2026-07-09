@@ -1118,7 +1118,7 @@ def test_asm_campaign_timeline_merges_scheduler_schedule_active_and_activity():
         scheduler_state={
             "decision": {
                 "action": "none",
-                "blocked_by": "daily_cap",
+                "blocked_by": "daily_endpoint_cap",
                 "reason": "daily cap reached",
                 "next_eligible_at": "2026-07-05T12:00:00",
             },
@@ -1152,6 +1152,8 @@ def test_asm_campaign_timeline_merges_scheduler_schedule_active_and_activity():
             "completed_at": "2026-07-04T02:05:00",
             "attempt_status_counts": {"completed": 3},
         }],
+        target_id="target-1",
+        target_url="https://app.example.test/api",
     )
 
     kinds = [event["kind"] for event in timeline]
@@ -1159,8 +1161,35 @@ def test_asm_campaign_timeline_merges_scheduler_schedule_active_and_activity():
     assert "last_scheduler_decision" in kinds
     assert "activity" in kinds
     assert timeline[0]["href"] == "/scans/scan-active"
+    assert timeline[0]["remediation"]["href"] == "/scans/scan-active"
+    assert timeline[1]["remediation"] == {
+        "kind": "schedule",
+        "label": "Adjust schedule",
+        "href": "/schedules?create=true&target_id=target-1",
+    }
     assert timeline[3]["href"] == "/schedules"
     assert any(event["detail"] == "daily cap reached" for event in timeline)
+
+
+def test_asm_campaign_timeline_routes_auth_blockers_to_prefilled_session():
+    timeline = api_module._build_asm_campaign_timeline(
+        scheduler_state={
+            "decision": {
+                "action": "none",
+                "blocked_by": "second_user_auth_missing",
+                "reason": "BOLA requires two authenticated principals",
+            },
+        },
+        activity=[],
+        target_id="target-1",
+        target_url="https://app.example.test/api?tenant=one",
+    )
+
+    assert timeline[0]["remediation"] == {
+        "kind": "configure_auth",
+        "label": "Configure auth session",
+        "href": "/interactive?target=https%3A%2F%2Fapp.example.test%2Fapi%3Ftenant%3Done",
+    }
 
 
 def test_ai_scan_replay_plan_selects_skipped_probe_ids():

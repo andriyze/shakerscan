@@ -78,6 +78,11 @@ export default function InteractiveSessionPage() {
   const [activeSessions, setActiveSessions] = useState<InteractiveSessionSummary[]>([])
   const [sessionsError, setSessionsError] = useState<string | null>(null)
 
+  useEffect(() => {
+    const requestedTarget = new URLSearchParams(window.location.search).get('target')
+    if (requestedTarget) setTarget(requestedTarget)
+  }, [])
+
   const [endpoint, setEndpoint] = useState('')
   const [method, setMethod] = useState('GET')
   const [asUser, setAsUser] = useState<UserKey>('user1')

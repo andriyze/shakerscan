@@ -1215,6 +1215,11 @@ export interface AsmTimelineEvent {
   campaign_id?: string | null
   schedule_id?: string | null
   href?: string | null
+  remediation?: {
+    kind: 'open_scan' | 'configure_auth' | 'workers' | 'schedule' | 'review_coverage' | 'improve' | string
+    label: string
+    href?: string | null
+  } | null
 }
 
 export interface AsmActivityResponse {

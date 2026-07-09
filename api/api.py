@@ -22600,6 +22600,8 @@ def _build_asm_campaign_timeline(
     activity: list[dict[str, Any]],
     next_schedule: dict[str, Any] | None = None,
     active_scans: list[dict[str, Any]] | None = None,
+    target_id: str | None = None,
+    target_url: str | None = None,
     limit: int = 12,
 ) -> list[dict[str, Any]]:
     """Derived operator timeline for one target's Continuous ASM state.
@@ -22611,6 +22613,38 @@ def _build_asm_campaign_timeline(
     """
     events: list[dict[str, Any]] = []
     seen: set[tuple[str, str]] = set()
+
+    def remediation(
+        *,
+        status: Any = None,
+        scan_id: str | None = None,
+        blocked_by: Any = None,
+    ) -> dict[str, Any] | None:
+        normalized_status = str(status or "").strip().lower()
+        blocker = str(blocked_by or "").strip().lower()
+        if scan_id:
+            return {
+                "kind": "open_scan",
+                "label": "Review failed scan" if normalized_status == "failed" else "View scan",
+                "href": f"/scans/{scan_id}",
+            }
+        if any(token in blocker for token in ("auth_missing", "auth_failed", "second_user", "principal")):
+            suffix = f"?target={urllib.parse.quote(str(target_url), safe='')}" if target_url else ""
+            return {"kind": "configure_auth", "label": "Configure auth session", "href": f"/interactive{suffix}"}
+        if "worker_stale" in blocker or "stale_worker" in blocker:
+            return {"kind": "workers", "label": "Review workers", "href": "/#workers"}
+        policy_or_rate_blocker = (
+            ("daily" in blocker and "cap" in blocker)
+            or ("rate" in blocker and "cap" in blocker)
+            or "schedule" in blocker
+            or "policy_window" in blocker
+        )
+        if policy_or_rate_blocker:
+            suffix = f"?create=true&target_id={target_id}" if target_id else ""
+            return {"kind": "schedule", "label": "Adjust schedule", "href": f"/schedules{suffix}"}
+        if blocker:
+            return {"kind": "review_coverage", "label": "Review coverage", "href": f"/asm?target_id={target_id}" if target_id else "/asm"}
+        return {"kind": "improve", "label": "Improve coverage"}
 
     def add(event: dict[str, Any]) -> None:
         key = (str(event.get("kind") or ""), str(event.get("id") or event.get("scan_id") or event.get("timestamp") or event.get("title") or ""))
@@ -22634,6 +22668,7 @@ def _build_asm_campaign_timeline(
             "scan_id": scan_id,
             "campaign_id": str(row.get("campaign_id")) if row.get("campaign_id") else None,
             "href": f"/scans/{scan_id}",
+            "remediation": remediation(status=row.get("status"), scan_id=scan_id),
         })
 
     decision = (scheduler_state or {}).get("decision") if isinstance(scheduler_state, dict) else None
@@ -22647,6 +22682,10 @@ def _build_asm_campaign_timeline(
             "status": str(blocked_by or action),
             "detail": decision.get("reason") or "No scheduler reason was returned.",
             "timestamp": _event_time(decision.get("recorded_at")),
+            "remediation": remediation(
+                blocked_by=blocked_by,
+                scan_id=str(decision.get("active_scan_id")) if decision.get("active_scan_id") else None,
+            ),
         })
         if decision.get("next_eligible_at"):
             add({
@@ -22671,6 +22710,7 @@ def _build_asm_campaign_timeline(
             "timestamp": _event_time(next_schedule.get("next_run_at")),
             "schedule_id": schedule_id or None,
             "href": "/schedules",
+            "remediation": {"kind": "schedule", "label": "Manage schedule", "href": "/schedules"},
         })
 
     last_decision = (scheduler_state or {}).get("last_decision") if isinstance(scheduler_state, dict) else None
@@ -22684,6 +22724,10 @@ def _build_asm_campaign_timeline(
             "timestamp": _event_time(last_decision.get("recorded_at")),
             "scan_id": str(last_decision.get("active_scan_id")) if last_decision.get("active_scan_id") else None,
             "href": f"/scans/{last_decision.get('active_scan_id')}" if last_decision.get("active_scan_id") else None,
+            "remediation": remediation(
+                blocked_by=last_decision.get("blocked_by"),
+                scan_id=str(last_decision.get("active_scan_id")) if last_decision.get("active_scan_id") else None,
+            ),
         })
 
     for row in activity:
@@ -22708,6 +22752,7 @@ def _build_asm_campaign_timeline(
             "scan_id": scan_id,
             "campaign_id": str(row.get("campaign_id")) if row.get("campaign_id") else None,
             "href": f"/scans/{scan_id}" if scan_id else None,
+            "remediation": remediation(status=row.get("status"), scan_id=scan_id or None),
         })
 
     return events[: max(1, int(limit or 12))]
@@ -23540,7 +23585,8 @@ async def asm_activity(
         raise HTTPException(status_code=400, detail="target_id must be a UUID")
     r = get_redis()
     async with db_pool.acquire() as conn:
-        if not await conn.fetchrow("SELECT 1 FROM targets WHERE id = $1", target_uuid):
+        target_row = await conn.fetchrow("SELECT id, url FROM targets WHERE id = $1", target_uuid)
+        if not target_row:
             raise HTTPException(status_code=404, detail="Target not found")
         scheduler_state = await _asm_scheduler_state(conn, r, target_id)
         next_schedule = await conn.fetchrow(
@@ -23617,6 +23663,8 @@ async def asm_activity(
         activity=activity,
         next_schedule=row_to_dict(next_schedule) if next_schedule else None,
         active_scans=[row_to_dict(row) for row in active_rows],
+        target_id=str(target_uuid),
+        target_url=str(target_row.get("url") or ""),
         limit=limit,
     )
     return {

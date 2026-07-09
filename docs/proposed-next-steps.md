@@ -843,7 +843,9 @@ enqueueing batches. Retention schedules run bounded evidence sweeps from `scan_o
 dry-run, and require an approval receipt before scheduled execution can delete evidence. `/targets/{id}/asm/activity`
 now exposes and the ASM UI renders a derived campaign timeline that combines scheduler decisions,
 next eligible time, next recurring ASM wave, active scans, last scheduler decision, and recent
-activity. Remaining work is remediation actions from the timeline, not schedule payload depth.
+activity. Timeline events now carry server-backed remediation contracts for failed/active scans,
+schedule and rate-cap blockers, stale workers, auth/second-user blockers, and immediately claimable
+coverage work; the ASM UI renders those links/actions without inferring state from display text.
 
 **Implement:**
 1. DONE: introduce typed schedule kinds (`normal_scan`, `asm_improve`,
@@ -860,6 +862,10 @@ activity. Remaining work is remediation actions from the timeline, not schedule 
    execution, and target active-scan skip have backend tests. UI payload shape is covered by
    TypeScript/production build and browser QA; add component-level tests when the UI test harness
    expands beyond helper scripts.
+5. DONE phase 1: add safe remediation actions to the target campaign timeline. Failed and active
+   jobs open their scan, policy/rate blockers open preselected schedule controls, stale-worker
+   blockers open worker controls, auth/second-user blockers open a target-prefilled interactive
+   session, and claimable work calls the existing `/asm/improve` route.
 
 **Done when:** "Keep this target covered" is a first-class scheduled/campaign action, not an
 encoded scan option, and users can see why a target did or did not receive ASM work.
