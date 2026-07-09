@@ -1416,12 +1416,17 @@ gates derive from that plan before entering the legacy module loops. Focused aut
 also treats the registry plan as authoritative for explicit `check_family` requests while preserving
 legacy broad smart-scan behavior when no family was requested. The smart active SQLi/XSS loop now
 derives its family dispatch order from registry runnable parallel families with a scanner-local
-fallback. Detector internals still execute many checks through hardcoded module calls, and planned
+fallback. The phase-4 mass-assignment executor is now registry-backed with its effect-based proof and
+severity contract, explicit legacy flag activation, and `legacy_phase4_mass_assignment` dispatch
+adapter; the registry plan is authoritative for whether that task is created. Detector internals
+still execute many checks through hardcoded module calls, and planned
 families such as `lfi`/`rce`/`ssrf` are not runnable.
 
 **Implement:** continue migrating `build_report()` module execution to registry iteration; add
 `proof_contract`, `severity_rules`, telemetry schema, safety gate, and report rollup per family;
 then make `lfi`/`rce`/`ssrf` runnable only when their deterministic proof contracts exist.
+DONE phase 3 for mass-assignment registration and dispatch gating without expanding ASM focus or
+changing explicit `--mass-assignment-testing` behavior.
 
 **Done when:** adding a check family is a registry entry plus module integration, not edits scattered
 through `build_report`.

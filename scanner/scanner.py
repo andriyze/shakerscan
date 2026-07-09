@@ -3053,12 +3053,15 @@ def build_check_family_scope(
     active_xss: bool,
     active_sqli: bool,
     requested_family: str | None = None,
+    mass_assignment: bool = False,
 ) -> dict[str, Any]:
     families: list[str] = []
     if active_checks and active_xss:
         families.append("xss")
     if active_checks and active_sqli:
         families.append("sqli")
+    if mass_assignment:
+        families.append("mass_assignment")
     normalized_requested = normalize_scanner_check_family(requested_family)
     if (
         active_checks
@@ -3068,8 +3071,9 @@ def build_check_family_scope(
     ):
         families.append(normalized_requested)
 
-    focused_family = families[0] if active_checks and len(families) == 1 else None
-    if not active_checks:
+    effective_active = bool(active_checks or mass_assignment)
+    focused_family = families[0] if effective_active and len(families) == 1 else None
+    if not effective_active:
         mode = "inactive"
     elif focused_family:
         mode = "focused"
@@ -3440,6 +3444,7 @@ async def build_report(target: str,
         active_xss,
         active_sqli,
         requested_family=active_check_family,
+        mass_assignment=mass_assignment_testing,
     )
     if smart_mode and focused_active_family:
         print(f"[smart] Focused active mode enabled for {focused_active_family_name}; disabling unrelated active modules", file=sys.stderr)
@@ -3635,7 +3640,7 @@ async def build_report(target: str,
         scan_mode=scan_mode_label,
         public_only=public_only,
         quick_mode=quick_mode,
-        active_checks=active_checks,
+        active_checks=bool(active_checks or mass_assignment_testing),
         check_family_scope=check_family_scope,
         skip_global_checks=skip_global_checks,
         focused_endpoints_only=bool(focused_endpoints_only or focused_manual_active_scope),
@@ -5772,7 +5777,12 @@ async def build_report(target: str,
         forced_browsing_task = asyncio.create_task(dummy_forced_browsing())
 
     # Mass Assignment Check (requires auth for best results)
-    if mass_assignment_testing and not public_only:
+    mass_assignment_dispatch_enabled = registry_family_enabled(
+        scanner_execution_plan,
+        "mass_assignment",
+        fallback=bool(mass_assignment_testing),
+    )
+    if mass_assignment_testing and mass_assignment_dispatch_enabled and not public_only:
         from scanner_tools.access_control_checks import check_mass_assignment
         mass_assignment_task = asyncio.create_task(check_mass_assignment(base_url, auth_session=auth_session))
     else:

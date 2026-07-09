@@ -33,6 +33,10 @@ def test_registry_exposes_runnable_asm_focus_families():
         "asm_check_family": "auth",
     }
     assert r.CHECK_REGISTRY_BY_NAME["auth"].requires_credentials is True
+    mass_assignment = r.CHECK_REGISTRY_BY_NAME["mass_assignment"]
+    assert mass_assignment.runnable is True
+    assert mass_assignment.telemetry_schema == "active_endpoint_attempt_v1"
+    assert "observed_privilege_effect" in mass_assignment.proof_contract
     assert "payload" in r.CHECK_REGISTRY_BY_NAME["sqli"].proof_contract
     assert r.CHECK_REGISTRY_BY_NAME["sqli"].severity_rules["critical_requires"] == ["exploitation_proof"]
 
@@ -113,6 +117,7 @@ def test_scanner_execution_plan_uses_registry_gates():
     assert families["sqli"]["dispatch_adapter"] == "legacy_active_loop"
     assert families["sqli"]["requested"] is True
     assert families["xss"]["enabled"] is False
+    assert families["mass_assignment"]["enabled"] is False
     assert families["ssrf"]["enabled"] is False
     assert families["ssrf"]["reason"] == "registered_not_runnable"
     assert "payload" in families["sqli"]["proof_contract"]
@@ -121,6 +126,22 @@ def test_scanner_execution_plan_uses_registry_gates():
     # coverage-honesty fields report zero unwired and full dispatched coverage.
     assert plan["summary"]["unwired_enabled"] == []
     assert plan["summary"]["dispatched_enabled_count"] == plan["summary"]["enabled_count"]
+
+
+def test_scanner_execution_plan_dispatches_registered_mass_assignment():
+    plan = r.scanner_execution_plan(
+        scan_mode="complete",
+        active_checks=True,
+        check_family_scope={"families": ["mass_assignment"]},
+    )
+    families = {item["name"]: item for item in plan["families"]}
+
+    assert families["mass_assignment"]["enabled"] is True
+    assert families["mass_assignment"]["dispatch_adapter"] == "legacy_phase4_mass_assignment"
+    assert families["sqli"]["enabled"] is False
+    assert plan["summary"]["proof_contracts"]["mass_assignment"] == list(
+        r.CHECK_REGISTRY_BY_NAME["mass_assignment"].proof_contract
+    )
 
 
 def test_scanner_execution_plan_records_passive_skip_reasons():

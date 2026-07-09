@@ -118,6 +118,22 @@ CHECK_REGISTRY: tuple[CheckFamilySpec, ...] = (
         description="Read-only authenticated-vs-anonymous access checks for focused ASM endpoint batches.",
     ),
     CheckFamilySpec(
+        name="mass_assignment",
+        phase="active",
+        family="access_control",
+        label="Mass Assignment",
+        is_active=True,
+        risk_level="medium",
+        telemetry_schema="active_endpoint_attempt_v1",
+        proof_contract=("method", "url", "field", "baseline_value", "observed_privilege_effect"),
+        severity_rules={
+            "high_requires": ["persisted_or_response_privilege_effect"],
+            "reflection_only_ceiling": "medium",
+        },
+        runnable=True,
+        description="Bounded privileged-field mutation with baseline-vs-response effect proof.",
+    ),
+    CheckFamilySpec(
         name="headers",
         phase="passive",
         family="headers",
@@ -346,6 +362,8 @@ def scanner_execution_plan(
                 dispatch_adapter = "legacy_active_loop"
             elif spec.name in {"bola", "auth"}:
                 dispatch_adapter = "asm_endpoint_batch"
+            elif spec.name == "mass_assignment":
+                dispatch_adapter = "legacy_phase4_mass_assignment"
             elif spec.name in {"recon", "headers", "nuclei"}:
                 dispatch_adapter = "legacy_passive_or_template"
             else:

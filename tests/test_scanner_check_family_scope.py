@@ -110,6 +110,31 @@ def test_check_family_scope_marks_normal_active_mix():
     assert scope["families"] == ["xss", "sqli"]
 
 
+def test_check_family_scope_includes_legacy_mass_assignment_executor():
+    scope = scanner_mod.build_check_family_scope(
+        True,
+        active_xss=True,
+        active_sqli=True,
+        mass_assignment=True,
+    )
+
+    assert scope["mode"] == "active_mix"
+    assert scope["families"] == ["xss", "sqli", "mass_assignment"]
+
+
+def test_check_family_scope_keeps_explicit_mass_assignment_without_global_active_flag():
+    scope = scanner_mod.build_check_family_scope(
+        False,
+        active_xss=True,
+        active_sqli=True,
+        mass_assignment=True,
+    )
+
+    assert scope["families"] == ["mass_assignment"]
+    assert scope["mode"] == "focused"
+    assert scope["focused_family"] == "mass_assignment"
+
+
 def test_check_family_scope_marks_inactive_scan():
     scope = scanner_mod.build_check_family_scope(False, active_xss=True, active_sqli=True)
 
