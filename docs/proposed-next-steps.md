@@ -1189,7 +1189,7 @@ the deterministic campaign from it, while unproven graph/source/AI signals remai
 than findings.
 
 ### 8. Auth / principal / role matrix
-**Status: PARTIAL, PHASE 11 EXECUTION FEEDBACK TRUTHFULNESS DONE.** `target_endpoints.auth_state` exists, and
+**Status: PARTIAL, PHASE 12 MANAGED CREDENTIAL LIFECYCLE DONE.** `target_endpoints.auth_state` exists, and
 `target_principals` plus `target_endpoint_expectations` now persist role, tenant, credential-profile
 references, auth states, and endpoint x principal expected access. `GET/POST /targets/{id}/principals`
 and `GET/POST /targets/{id}/principal-matrix` expose the matrix as non-executing planning facts, and
@@ -1240,6 +1240,11 @@ execution plans prematurely.
 DONE phase 11: Command Arsenal replay and promotion controls inspect fail-closed HTTP 200 responses
 and show the dispatcher block reason or action-state phase; successful dispatches show explicit
 completion feedback. Operators no longer have to infer execution from a silent refresh.
+DONE phase 12: target-scoped credential profiles now store write-only Authorization-header or cookie
+material behind masked REST responses, use the shared optional Fernet encryption-at-rest layer,
+track expiry and near-expiry refresh state, support explicit rotation, and retain deactivated rows for
+audit history. Principal-to-profile resolution into scan/session execution remains the next phase;
+creating a profile alone does not queue work or prove an authorization finding.
 
 **Done when:** a campaign can assert "endpoint X requires role admin" and prove a lower-role
 principal's access is a finding.

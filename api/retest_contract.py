@@ -938,6 +938,32 @@ async def run_schema_migrations(pool) -> None:
                 ON target_endpoints(campaign_id) WHERE campaign_id IS NOT NULL
             """)
             await conn.execute("""
+                CREATE TABLE IF NOT EXISTS target_credential_profiles (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    target_id UUID NOT NULL REFERENCES targets(id) ON DELETE CASCADE,
+                    name TEXT NOT NULL,
+                    auth_kind TEXT NOT NULL,
+                    secret_value TEXT NOT NULL,
+                    secret_preview TEXT,
+                    expires_at TIMESTAMPTZ,
+                    is_active BOOLEAN NOT NULL DEFAULT true,
+                    metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    rotated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    CONSTRAINT target_credential_profiles_auth_kind_check
+                        CHECK (auth_kind IN ('authorization_header', 'cookie'))
+                )
+            """)
+            await conn.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_target_credential_profiles_name
+                ON target_credential_profiles(target_id, lower(name))
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_target_credential_profiles_active
+                ON target_credential_profiles(target_id, is_active, expires_at)
+            """)
+            await conn.execute("""
                 CREATE TABLE IF NOT EXISTS target_principals (
                     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                     target_id UUID NOT NULL REFERENCES targets(id) ON DELETE CASCADE,

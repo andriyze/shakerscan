@@ -716,6 +716,14 @@ actual target before a manual BOLA finding can be created.
 · `GET /session/{id}/screenshot.png` · `POST /session/{id}/action` · `POST /session/{id}/test-endpoint`
 · `POST /session/{id}/findings` · `DELETE /session/{id}` · `GET /sessions`
 
+**Target credentials and principals**: `GET|POST /targets/{id}/credential-profiles` ·
+`PATCH|DELETE /targets/{id}/credential-profiles/{profile_id}` ·
+`POST /targets/{id}/credential-profiles/{profile_id}/rotate` · `GET|POST /targets/{id}/principals` ·
+`PATCH|DELETE /targets/{id}/principals/{principal_id}` · `GET|POST /targets/{id}/principal-matrix`.
+Credential profile responses expose only a masked preview, storage/expiry state, and metadata; secret
+material is write-only. Profiles support exact Authorization-header values and cookie strings,
+expiry warnings, explicit rotation, and soft deactivation.
+
 **Discovery & exposure**: `POST|GET /discovery` · `GET /discovery/{id}` · `GET /dashboard` ·
 `GET /exposure/graph` · `GET /exposure/nodes` · `GET /exposure/assets` · `GET /exposure/changes` ·
 `GET /exposure/attack-paths`
@@ -738,8 +746,9 @@ actual target before a manual BOLA finding can be created.
 - AI Ops Router execution gate: `AI_OPS_ROUTER_EXECUTE_ENABLED`.
 - AI Gate transcripts: `AI_GATE_TRANSCRIPT_RETENTION_DAYS` (retention label, default 30);
   `AI_TRANSCRIPT_ALLOW_SENSITIVE` (default off — when on, `GET /ai/scans/{id}/transcript?include_sensitive=true` returns raw, audit-logged bodies; otherwise responses are redacted at response time).
-- AI credential encryption-at-rest: `AI_CREDENTIAL_ENC_KEY` (a Fernet key; when set, AI-target credential
-  secrets are encrypted at rest with an `enc:fernet:` prefix; unset = plaintext, backward compatible).
+- Credential encryption-at-rest: `AI_CREDENTIAL_ENC_KEY` (a Fernet key; when set, AI-target and DAST
+  target-profile credential secrets are encrypted at rest with an `enc:fernet:` prefix; unset =
+  plaintext, backward compatible). Profile responses report whether their stored value is encrypted.
 - Allocation fallback: `COVERAGE_ALLOCATION_DEFAULT`. Shard ceilings: `SHAKERSCAN_MAX_SHARDS`,
   `SHAKERSCAN_COVERAGE_MAX_SHARDS`, `PARALLEL_SHARD_MAX_PER_PARENT`, etc.
 - Custom dictionaries: `SHAKERSCAN_CUSTOM_WORDLIST`, `SHAKERSCAN_CUSTOM_<CAT>_PAYLOADS`.
@@ -767,7 +776,8 @@ limited with per-tool timeouts and a global deadline.
 - **AI redaction and credential handling**: sensitive headers/bodies and secret-bearing URL
   params/metadata are redacted
   before any content is sent to an AI provider, via the shared `redact_sensitive()` helper (R2a).
-  AI-target credential secrets can be encrypted at rest, opt-in via `AI_CREDENTIAL_ENC_KEY` (R2b), and
+  AI-target and target-profile credential secrets can be encrypted at rest, opt-in via
+  `AI_CREDENTIAL_ENC_KEY` (R2b), and
   transcript responses are redacted at response time by default (R3). Normal DAST worker launches pass
   auth material through a short-lived `0600` auth-config file rather than raw scanner subprocess argv,
   and scan-time AI provider keys are supplied through the child environment instead of `--ai-api-key`.

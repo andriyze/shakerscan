@@ -65,9 +65,9 @@ except ModuleNotFoundError as exc:
     )
 
 try:
-    from secret_store import decrypt_secret, encrypt_secret
+    from secret_store import decrypt_secret, encrypt_secret, encryption_enabled
 except ModuleNotFoundError:
-    from api.secret_store import decrypt_secret, encrypt_secret
+    from api.secret_store import decrypt_secret, encrypt_secret, encryption_enabled
 
 try:
     from ai_control_requirements import AI_CONTROL_REQUIREMENTS
@@ -3260,6 +3260,30 @@ class TargetUpdate(BaseModel):
     # Merged into the existing metadata (JSONB ||), so partial ownership
     # updates don't clobber unrelated keys. Set a key to "" to clear it.
     metadata_json: Optional[dict] = None
+
+
+class TargetCredentialProfileCreate(BaseModel):
+    name: str
+    auth_kind: str = Field(pattern="^(authorization_header|cookie)$")
+    secret: str
+    expires_at: Optional[datetime] = None
+    metadata_json: dict[str, Any] = Field(default_factory=dict)
+
+
+class TargetCredentialProfileUpdate(BaseModel):
+    name: Optional[str] = None
+    auth_kind: Optional[str] = Field(default=None, pattern="^(authorization_header|cookie)$")
+    secret: Optional[str] = None
+    expires_at: Optional[datetime] = None
+    clear_expiry: bool = False
+    is_active: Optional[bool] = None
+    metadata_json: Optional[dict[str, Any]] = None
+
+
+class TargetCredentialProfileRotate(BaseModel):
+    secret: str
+    expires_at: Optional[datetime] = None
+    clear_expiry: bool = False
 
 
 class TargetPrincipalCreate(BaseModel):
@@ -13093,6 +13117,81 @@ def _normalize_target_principal_label(value: Any) -> str:
     return label
 
 
+def _normalize_target_credential_profile_name(value: Any) -> str:
+    name = re.sub(r"\s+", " ", str(value or "").strip())
+    if not name:
+        raise HTTPException(status_code=400, detail="credential profile name is required")
+    if len(name) > 120:
+        raise HTTPException(status_code=400, detail="credential profile name must be 120 characters or fewer")
+    return name
+
+
+def _normalize_target_credential_secret(value: Any) -> str:
+    secret = str(value or "").strip()
+    if not secret:
+        raise HTTPException(status_code=400, detail="credential profile secret is required")
+    if "\r" in secret or "\n" in secret:
+        raise HTTPException(status_code=400, detail="credential profile secret must not contain CR or LF")
+    if len(secret) > 16384:
+        raise HTTPException(status_code=400, detail="credential profile secret is too large")
+    return secret
+
+
+def _target_credential_profile_status(row: dict[str, Any]) -> tuple[str, bool]:
+    if not bool(row.get("is_active", True)):
+        return "inactive", False
+    expires_at = row.get("expires_at")
+    if isinstance(expires_at, str):
+        try:
+            expires_at = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+        except ValueError:
+            expires_at = None
+    if isinstance(expires_at, datetime):
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        now = datetime.now(timezone.utc)
+        if expires_at <= now:
+            return "expired", True
+        return "active", expires_at <= now + timedelta(days=7)
+    return "active", False
+
+
+def _public_target_credential_profile_row(row: Any) -> dict[str, Any]:
+    payload = row_to_dict(row)
+    status, refresh_required = _target_credential_profile_status(payload)
+    stored_secret = str(payload.pop("secret_value", "") or "")
+    payload["metadata_json"] = _redact_agent_payload(_decode_json_value(payload.get("metadata_json")) or {})
+    payload["secret_configured"] = bool(stored_secret)
+    payload["storage_encrypted"] = stored_secret.startswith("enc:fernet:")
+    payload["encryption_available"] = encryption_enabled()
+    payload["status"] = status
+    payload["refresh_required"] = refresh_required
+    payload["execution_compatible"] = status == "active" and bool(stored_secret)
+    return payload
+
+
+def _target_credential_profile_values(
+    *,
+    name: Any,
+    auth_kind: Any,
+    secret: Any,
+    expires_at: datetime | None,
+    metadata_json: Any,
+) -> dict[str, Any]:
+    normalized_secret = _normalize_target_credential_secret(secret)
+    kind = str(auth_kind or "").strip().lower()
+    if kind not in {"authorization_header", "cookie"}:
+        raise HTTPException(status_code=400, detail="auth_kind must be authorization_header or cookie")
+    return {
+        "name": _normalize_target_credential_profile_name(name),
+        "auth_kind": kind,
+        "secret_value": encrypt_secret(normalized_secret),
+        "secret_preview": _mask_ai_target_secret(normalized_secret),
+        "expires_at": expires_at,
+        "metadata_json": _redact_agent_payload(metadata_json if isinstance(metadata_json, dict) else {}),
+    }
+
+
 def _normalize_target_principal_role(value: Any) -> str:
     role = re.sub(r"[^a-z0-9_.-]+", "_", str(value or "user").strip().lower()).strip("_")
     return (role or "user")[:80]
@@ -13230,6 +13329,170 @@ async def update_target(target_id: str, request: TargetUpdate):
             raise HTTPException(status_code=404, detail="Target not found")
 
     return {'id': target_id, 'status': 'updated'}
+
+
+@app.get("/targets/{target_id}/credential-profiles")
+async def list_target_credential_profiles(target_id: str, include_inactive: bool = False):
+    """List target-scoped credential profiles without returning secret material."""
+    target_uuid = _uuid_or_400(target_id, "target id")
+    async with db_pool.acquire() as conn:
+        if not await conn.fetchrow("SELECT 1 FROM targets WHERE id = $1", target_uuid):
+            raise HTTPException(status_code=404, detail="Target not found")
+        rows = await conn.fetch(
+            """
+            SELECT * FROM target_credential_profiles
+            WHERE target_id = $1 AND ($2::boolean OR is_active = true)
+            ORDER BY is_active DESC, lower(name)
+            """,
+            target_uuid,
+            include_inactive,
+        )
+    profiles = [_public_target_credential_profile_row(row) for row in rows]
+    return {"target_id": target_id, "profiles": profiles, "count": len(profiles)}
+
+
+@app.post("/targets/{target_id}/credential-profiles")
+async def create_target_credential_profile(target_id: str, request: TargetCredentialProfileCreate):
+    """Create or rotate a named target credential profile."""
+    target_uuid = _uuid_or_400(target_id, "target id")
+    values = _target_credential_profile_values(
+        name=request.name,
+        auth_kind=request.auth_kind,
+        secret=request.secret,
+        expires_at=request.expires_at,
+        metadata_json=request.metadata_json,
+    )
+    async with db_pool.acquire() as conn:
+        if not await conn.fetchrow("SELECT 1 FROM targets WHERE id = $1", target_uuid):
+            raise HTTPException(status_code=404, detail="Target not found")
+        row = await conn.fetchrow(
+            """
+            INSERT INTO target_credential_profiles (
+                target_id, name, auth_kind, secret_value, secret_preview,
+                expires_at, metadata_json, rotated_at
+            ) VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,NOW())
+            ON CONFLICT (target_id, lower(name))
+            DO UPDATE SET
+                auth_kind = EXCLUDED.auth_kind,
+                secret_value = EXCLUDED.secret_value,
+                secret_preview = EXCLUDED.secret_preview,
+                expires_at = EXCLUDED.expires_at,
+                is_active = true,
+                metadata_json = target_credential_profiles.metadata_json || EXCLUDED.metadata_json,
+                rotated_at = NOW(),
+                updated_at = NOW()
+            RETURNING *
+            """,
+            target_uuid,
+            values["name"],
+            values["auth_kind"],
+            values["secret_value"],
+            values["secret_preview"],
+            values["expires_at"],
+            json.dumps(values["metadata_json"]),
+        )
+    return {"profile": _public_target_credential_profile_row(row)}
+
+
+@app.patch("/targets/{target_id}/credential-profiles/{profile_id}")
+async def update_target_credential_profile(
+    target_id: str,
+    profile_id: str,
+    request: TargetCredentialProfileUpdate,
+):
+    """Update profile metadata and optionally rotate its credential."""
+    target_uuid = _uuid_or_400(target_id, "target id")
+    profile_uuid = _uuid_or_400(profile_id, "credential profile id")
+    async with db_pool.acquire() as conn:
+        existing_row = await conn.fetchrow(
+            "SELECT * FROM target_credential_profiles WHERE id = $1 AND target_id = $2",
+            profile_uuid,
+            target_uuid,
+        )
+        if not existing_row:
+            raise HTTPException(status_code=404, detail="Credential profile not found")
+        existing = row_to_dict(existing_row)
+        next_kind = request.auth_kind or existing.get("auth_kind")
+        if request.auth_kind and request.auth_kind != existing.get("auth_kind") and request.secret is None:
+            raise HTTPException(status_code=400, detail="secret is required when auth_kind changes")
+        secret = request.secret
+        rotated = secret is not None
+        secret_value = existing.get("secret_value")
+        secret_preview = existing.get("secret_preview")
+        if rotated:
+            normalized_secret = _normalize_target_credential_secret(secret)
+            secret_value = encrypt_secret(normalized_secret)
+            secret_preview = _mask_ai_target_secret(normalized_secret)
+        expires_at = existing.get("expires_at")
+        if request.clear_expiry:
+            expires_at = None
+        elif "expires_at" in request.model_fields_set:
+            expires_at = request.expires_at
+        metadata = _decode_json_value(existing.get("metadata_json")) or {}
+        if request.metadata_json is not None:
+            metadata.update(_redact_agent_payload(request.metadata_json))
+        row = await conn.fetchrow(
+            """
+            UPDATE target_credential_profiles SET
+                name = $1, auth_kind = $2, secret_value = $3, secret_preview = $4,
+                expires_at = $5, is_active = $6, metadata_json = $7::jsonb,
+                rotated_at = CASE WHEN $8::boolean THEN NOW() ELSE rotated_at END,
+                updated_at = NOW()
+            WHERE id = $9 AND target_id = $10
+            RETURNING *
+            """,
+            _normalize_target_credential_profile_name(request.name or existing.get("name")),
+            next_kind,
+            secret_value,
+            secret_preview,
+            expires_at,
+            bool(request.is_active) if request.is_active is not None else bool(existing.get("is_active", True)),
+            json.dumps(metadata),
+            rotated,
+            profile_uuid,
+            target_uuid,
+        )
+    return {"profile": _public_target_credential_profile_row(row)}
+
+
+@app.post("/targets/{target_id}/credential-profiles/{profile_id}/rotate")
+async def rotate_target_credential_profile(
+    target_id: str,
+    profile_id: str,
+    request: TargetCredentialProfileRotate,
+):
+    """Rotate secret material while preserving the profile identity."""
+    return await update_target_credential_profile(
+        target_id,
+        profile_id,
+        TargetCredentialProfileUpdate(
+            secret=request.secret,
+            expires_at=request.expires_at,
+            clear_expiry=request.clear_expiry,
+            is_active=True,
+        ),
+    )
+
+
+@app.delete("/targets/{target_id}/credential-profiles/{profile_id}")
+async def delete_target_credential_profile(target_id: str, profile_id: str):
+    """Deactivate a credential profile without deleting its audit history."""
+    target_uuid = _uuid_or_400(target_id, "target id")
+    profile_uuid = _uuid_or_400(profile_id, "credential profile id")
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            UPDATE target_credential_profiles
+            SET is_active = false, updated_at = NOW()
+            WHERE id = $1 AND target_id = $2
+            RETURNING *
+            """,
+            profile_uuid,
+            target_uuid,
+        )
+    if not row:
+        raise HTTPException(status_code=404, detail="Credential profile not found")
+    return {"status": "deactivated", "profile": _public_target_credential_profile_row(row)}
 
 
 @app.get("/targets/{target_id}/principals")

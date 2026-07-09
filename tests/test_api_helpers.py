@@ -135,6 +135,70 @@ def test_worker_build_current_is_unknown_until_worker_registers():
     ) is None
 
 
+def test_target_credential_profile_public_shape_never_returns_secret(monkeypatch):
+    monkeypatch.setattr(api_module, "encryption_enabled", lambda: True)
+    row = {
+        "id": uuid.uuid4(),
+        "target_id": uuid.uuid4(),
+        "name": "customer-a",
+        "auth_kind": "authorization_header",
+        "secret_value": "enc:fernet:ciphertext",
+        "secret_preview": "Bear...en",
+        "expires_at": datetime.now(timezone.utc) + timedelta(days=2),
+        "is_active": True,
+        "metadata_json": json.dumps({"owner": "security"}),
+    }
+
+    public = api_module._public_target_credential_profile_row(row)
+
+    assert "secret_value" not in public
+    assert public["secret_configured"] is True
+    assert public["storage_encrypted"] is True
+    assert public["encryption_available"] is True
+    assert public["status"] == "active"
+    assert public["refresh_required"] is True
+    assert "ciphertext" not in json.dumps(public)
+
+
+def test_target_credential_profile_expiry_and_inactive_states():
+    expired, refresh = api_module._target_credential_profile_status({
+        "is_active": True,
+        "expires_at": datetime.now(timezone.utc) - timedelta(seconds=1),
+    })
+    inactive, inactive_refresh = api_module._target_credential_profile_status({
+        "is_active": False,
+        "expires_at": datetime.now(timezone.utc) - timedelta(days=1),
+    })
+
+    assert (expired, refresh) == ("expired", True)
+    assert (inactive, inactive_refresh) == ("inactive", False)
+
+
+def test_target_credential_profile_values_encrypt_and_reject_header_injection(monkeypatch):
+    monkeypatch.setattr(api_module, "encrypt_secret", lambda value: f"encrypted:{value}")
+    values = api_module._target_credential_profile_values(
+        name=" Customer A ",
+        auth_kind="authorization_header",
+        secret="Bearer token",
+        expires_at=None,
+        metadata_json={"owner": "security"},
+    )
+
+    assert values["name"] == "Customer A"
+    assert values["secret_value"] == "encrypted:Bearer token"
+    assert values["secret_preview"] != "Bearer token"
+
+    with pytest.raises(api_module.HTTPException) as exc:
+        api_module._target_credential_profile_values(
+            name="customer-a",
+            auth_kind="authorization_header",
+            secret="Bearer token\r\nX-Admin: true",
+            expires_at=None,
+            metadata_json={},
+        )
+    assert exc.value.status_code == 400
+
+
 # ----- manual / session finding evidence redaction ------------------------
 
 def test_create_manual_finding_redacts_live_auth_material(monkeypatch):
