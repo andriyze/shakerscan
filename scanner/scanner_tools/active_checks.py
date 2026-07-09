@@ -2850,13 +2850,13 @@ async def nosql_injection_test_json_body(
         request_body: dict[str, Any],
         response_body: str,
         response_code: int | None,
-    ) -> tuple[str, int | None]:
+    ) -> tuple[str, int | None, bool]:
         if response_code not in (400, 422):
-            return response_body, response_code
+            return response_body, response_code, True
         missing_fields = _extract_missing_validation_fields(response_body)
         added_fields = _add_validation_fields_to_body(base_body, missing_fields, "application/json")
         if not added_fields:
-            return response_body, response_code
+            return response_body, response_code, False
         _add_validation_fields_to_body(request_body, added_fields, "application/json")
         results["validation_fields_added"].append({
             "url": url,
@@ -2875,8 +2875,9 @@ async def nosql_injection_test_json_body(
         ] + auth_args + [url]
         retry_raw, _, retry_rc = await run(retry_cmd, timeout=15)
         if retry_rc != 0:
-            return response_body, response_code
-        return _parse_meta(retry_raw or "")
+            return response_body, response_code, False
+        retry_body, retry_code = _parse_meta(retry_raw or "")
+        return retry_body, retry_code, retry_code not in (400, 422)
 
     if debug_nosql:
         print(f"[DEBUG NoSQL Test] url={url} method={method} params={params}", file=sys.stderr)
@@ -2900,22 +2901,23 @@ async def nosql_injection_test_json_body(
         ] + auth_args + [url]
         baseline_raw, _, baseline_rc = await run(baseline_cmd, timeout=15)
         baseline_out, baseline_code = _parse_meta(baseline_raw or "")
-        if baseline_rc == 0:
-            baseline_out, baseline_code = await _retry_after_validation(
+        baseline_valid = baseline_rc == 0
+        if baseline_valid:
+            baseline_out, baseline_code, baseline_valid = await _retry_after_validation(
                 baseline_payload,
                 baseline_out,
                 baseline_code,
             )
-        if baseline_rc == 0:
+        if baseline_valid:
             _mark_completed([identity_param, secret_param])
-        if baseline_rc == 0 and baseline_code in (405, 415, 501):
+        if baseline_valid and baseline_code in (405, 415, 501):
             results["skipped"] = True
             results["reason"] = "method_or_content_type_not_supported"
             results["baseline_status"] = baseline_code
             _finalize_attempt(skipped_reason="method_or_content_type_not_supported")
             return results
 
-        if baseline_rc == 0 and _is_auth_failure(baseline_code, baseline_out):
+        if baseline_valid and _is_auth_failure(baseline_code, baseline_out):
             combo_payloads = [
                 {"$ne": None},
                 {"$ne": ""},
@@ -2974,8 +2976,9 @@ async def nosql_injection_test_json_body(
         ] + auth_args + [url]
         baseline_raw, _, baseline_rc = await run(baseline_cmd, timeout=15)
         baseline_out, baseline_code = _parse_meta(baseline_raw or "")
-        if baseline_rc == 0:
-            baseline_out, baseline_code = await _retry_after_validation(
+        baseline_valid = baseline_rc == 0
+        if baseline_valid:
+            baseline_out, baseline_code, baseline_valid = await _retry_after_validation(
                 baseline_payload,
                 baseline_out,
                 baseline_code,
@@ -2986,7 +2989,7 @@ async def nosql_injection_test_json_body(
             print(f"[DEBUG NoSQL Test] baseline_out={baseline_out[:200] if baseline_out else 'None'}...", file=sys.stderr)
             print(f"[DEBUG NoSQL Test] baseline_len={baseline_len}", file=sys.stderr)
 
-        if baseline_rc != 0:
+        if not baseline_valid:
             continue
         _mark_completed([param])
         if baseline_code in (405, 415, 501):
@@ -7633,9 +7636,6 @@ async def smart_sqli_test(
 
             baseline_out, _, baseline_rc = await run(baseline_cmd, timeout=12)
             baseline_elapsed = time.time() - baseline_start
-            if attempt is not None:
-                attempt["completed_params_count"] += 1
-
             if baseline_rc != 0:
                 continue
 
@@ -7823,8 +7823,13 @@ async def smart_sqli_test(
                     retry_start = time.time()
                     retry_out, _, retry_rc = await run(retry_cmd, timeout=12)
                     baseline_elapsed = time.time() - retry_start
-                    if retry_rc == 0:
-                        baseline_body_out, baseline_status = _parse_curl_body_status(retry_out)
+                    if retry_rc != 0:
+                        continue
+                    baseline_body_out, baseline_status = _parse_curl_body_status(retry_out)
+            if baseline_status in (400, 422):
+                continue
+            if attempt is not None:
+                attempt["completed_params_count"] += 1
             baseline_len = len(baseline_body_out) if baseline_body_out else 0
             param_reflected = bool(baseline_body_out and reflection_canary in baseline_body_out)
 

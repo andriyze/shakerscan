@@ -203,7 +203,7 @@ def test_sqli_active_check_rejects_uniform_json_collection_response():
     assert not any("SQLi JSON collection expansion" in item for item in evidence)
 
 
-def test_smart_sqli_detects_json_coupon_collection_expansion(monkeypatch):
+def test_smart_sqli_rejects_collection_expansion_against_validation_error_baseline(monkeypatch):
     marker = active_checks._CURL_STATUS_MARKER
 
     async def fake_run(cmd, *args, **kwargs):
@@ -245,11 +245,8 @@ def test_smart_sqli_detects_json_coupon_collection_expansion(monkeypatch):
         )
     )
 
-    assert result["vulnerabilities_found"] == 1
-    finding = result["findings"][0]
-    assert finding["url"].endswith("/community/api/v2/coupon")
-    assert finding["param"] == "code"
-    assert any("SQLi JSON collection expansion" in item for item in finding["evidence"])
+    assert result["vulnerabilities_found"] == 0
+    assert result["findings"] == []
 
 
 def test_extracts_bounded_safe_fields_from_json_validation_errors():
@@ -317,6 +314,45 @@ def test_smart_sqli_completes_missing_validation_siblings_before_payloads(monkey
     }]
     assert any(body.get("customerId") == 1 for body in sent_bodies)
     assert result["endpoint_attempts"][0]["validation_fields_added"] == ["customerId"]
+
+
+def test_smart_sqli_skips_payloads_when_completed_baseline_retry_fails(monkeypatch):
+    marker = active_checks._CURL_STATUS_MARKER
+    sent_bodies: list[dict] = []
+
+    async def fake_run(cmd, *args, **kwargs):
+        body = json.loads(cmd[cmd.index("-d") + 1])
+        sent_bodies.append(body)
+        if "customerId" not in body:
+            return (
+                json.dumps({"detail": [{"loc": ["body", "customerId"], "msg": "Field required"}]})
+                + f"\n{marker}422",
+                "",
+                0,
+            )
+        if " OR " in str(body.get("query") or "").upper():
+            return "SQLite error: near OR: syntax error" + f"\n{marker}500", "", 0
+        return "", "operation timed out", 28
+
+    monkeypatch.setattr(active_checks, "run", fake_run)
+
+    result = asyncio.run(active_checks.smart_sqli_test(
+        "https://example.test",
+        [{
+            "url": "https://example.test/api/search",
+            "method": "POST",
+            "content_type": "application/json",
+            "body_params": ["query"],
+        }],
+        dbms="sqlite",
+        max_seconds=10,
+        max_params_per_endpoint=1,
+    ))
+
+    assert result["vulnerabilities_found"] == 0
+    assert result["findings"] == []
+    assert len(sent_bodies) == 2
+    assert not any(" OR " in str(body.get("query") or "").upper() for body in sent_bodies)
 
 
 def test_smart_sqli_detects_json_login_auth_bypass(monkeypatch):

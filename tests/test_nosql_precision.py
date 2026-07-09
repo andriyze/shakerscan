@@ -293,6 +293,38 @@ def test_nosql_json_body_completes_validation_siblings_before_differential(monke
     assert any(json.loads(cmd[cmd.index("-d") + 1]).get("contextId") == 1 for cmd in calls)
 
 
+def test_nosql_json_body_skips_payloads_when_completed_baseline_retry_fails(monkeypatch):
+    calls = []
+
+    async def fake_run(cmd, *args, **kwargs):
+        calls.append(cmd)
+        body = json.loads(cmd[cmd.index("-d") + 1])
+        if "contextId" not in body:
+            return (
+                json.dumps({"detail": [{"loc": ["body", "contextId"], "msg": "Field required"}]})
+                + "__SHAKERSCAN_NOSQL__422__SHAKERSCAN_NOSQL__",
+                "",
+                0,
+            )
+        if isinstance(body.get("id"), dict):
+            return '{"data":[{"id":1},{"id":2},{"id":3}]}__SHAKERSCAN_NOSQL__200__SHAKERSCAN_NOSQL__', "", 0
+        return "", "operation timed out", 28
+
+    monkeypatch.setattr(active_checks, "run", fake_run)
+
+    result = asyncio.run(active_checks.nosql_injection_test_json_body(
+        "https://example.test/api/reviews/search",
+        method="POST",
+        params=["id"],
+        body_template={"id": 1},
+    ))
+
+    assert result["vulnerable"] is False
+    assert result["findings"] == []
+    assert len(calls) == 2
+    assert not any(isinstance(json.loads(cmd[cmd.index("-d") + 1]).get("id"), dict) for cmd in calls)
+
+
 def test_nosql_json_body_rejects_uniform_collection_response(monkeypatch):
     async def fake_run(cmd, *args, **kwargs):
         return (

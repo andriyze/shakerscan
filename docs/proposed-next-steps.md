@@ -1061,6 +1061,9 @@ DONE phase 32 for scorecard-backed POST-body injection measurement: shared bench
 saved target scorecards now report SQLi/NoSQL body attempts, attempted/completed parameter counts,
 completion ratios, response-guided completion counts, redacted validation-field samples, statuses,
 and proof-type counts without retaining request bodies.
+DONE phase 33 for fail-closed response-guided baselines: SQLi and JSON-body NoSQL parameter probes
+now stop before sending attack payloads when the completed benign retry fails or remains a `400/422`
+validation error. A completed attack body is never compared against the earlier incomplete baseline.
 
 **Done when:** recorded two-user benchmark scorecards show the targeted miss becoming a deterministic
 finding, not merely an attempted endpoint.
