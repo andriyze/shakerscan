@@ -122,6 +122,7 @@ function SchedulesContent() {
   const [loading, setLoading] = useState(true)
   const [fetchError, setFetchError] = useState(false)
   const [statusFilter, setStatusFilter] = useState<string>('all')
+  const [healthFilter, setHealthFilter] = useState(false)
   const [showCreateModal, setShowCreateModal] = useState(false)
   const [targets, setTargets] = useState<Target[]>([])
   const [deleting, setDeleting] = useState<string | null>(null)
@@ -175,6 +176,9 @@ function SchedulesContent() {
 
   // Handle ?create=true&target_id=... from targets page
   useEffect(() => {
+    if (searchParams.get('health') === 'attention') {
+      setHealthFilter(true)
+    }
     if (searchParams.get('create') === 'true') {
       const targetId = searchParams.get('target_id')
       if (targetId) setFormTargetId(targetId)
@@ -361,6 +365,10 @@ function SchedulesContent() {
 
   const formLocalTime = utcTimeToLocalLabel(formTime)
   const asmNeedsLabDepth = formKind === 'asm_improve' && formAsmFamily === 'bola' && !formAsmExploitDepth
+  const visibleSchedules = healthFilter
+    ? schedules.filter(schedule => ['attention', 'warning'].includes(schedule.schedule_health?.status || ''))
+    : schedules
+  const unhealthyCount = schedules.filter(schedule => ['attention', 'warning'].includes(schedule.schedule_health?.status || '')).length
 
   return (
     <div className="space-y-6">
@@ -378,7 +386,7 @@ function SchedulesContent() {
       </div>
 
       {/* Status Filter */}
-      <div className="flex items-center gap-3">
+      <div className="flex flex-wrap items-center gap-3">
         <label className="text-sm text-gray-400">Status:</label>
         <select
           value={statusFilter}
@@ -389,6 +397,17 @@ function SchedulesContent() {
           <option value="active">Active</option>
           <option value="disabled">Disabled</option>
         </select>
+        <button
+          type="button"
+          onClick={() => setHealthFilter(value => !value)}
+          className={`rounded-lg border px-3 py-2 text-sm transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${
+            healthFilter
+              ? 'border-amber-500/50 bg-amber-500/15 text-amber-200'
+              : 'border-gray-800 bg-gray-900 text-gray-300 hover:border-gray-700'
+          }`}
+        >
+          Needs attention{unhealthyCount ? ` (${unhealthyCount})` : ''}
+        </button>
       </div>
 
       {/* Schedule Cards */}
@@ -401,17 +420,27 @@ function SchedulesContent() {
           message="No schedules yet. Create one to automate your scans."
           action={{ label: 'Create schedule', onClick: () => setShowCreateModal(true) }}
         />
+      ) : visibleSchedules.length === 0 ? (
+        <EmptyState
+          message="No schedules match the current filter."
+          action={healthFilter ? { label: 'Show all schedules', onClick: () => setHealthFilter(false) } : undefined}
+        />
       ) : (
         <div className="space-y-3">
-          {schedules.map((schedule) => {
+          {visibleSchedules.map((schedule) => {
             const localTime = (schedule.timezone || 'UTC') === 'UTC'
               ? utcTimeToLocalLabel(schedule.time_of_day.slice(0, 5))
               : null
             const scheduleKind = getScheduleKind(schedule)
+            const health = schedule.schedule_health
             return (
             <div
               key={schedule.id}
-              className={`bg-gray-900 rounded-lg border ${schedule.is_active ? 'border-gray-800' : 'border-gray-800/50 opacity-60'} p-4`}
+              className={`bg-gray-900 rounded-lg border ${
+                health?.status === 'attention'
+                  ? 'border-amber-600/70'
+                  : schedule.is_active ? 'border-gray-800' : 'border-gray-800/50 opacity-60'
+              } p-4`}
             >
               <div className="flex items-start gap-4">
                 {/* Toggle */}
@@ -488,6 +517,42 @@ function SchedulesContent() {
                   {scheduleKind === 'evidence_retention_sweep' && (
                     <div className="mt-2 text-xs text-gray-500">
                       {retentionSummary(schedule)}
+                    </div>
+                  )}
+                  {health && ['attention', 'warning'].includes(health.status) && (
+                    <div className="mt-3 rounded-md border border-amber-700/50 bg-amber-500/10 p-3">
+                      <div className="flex flex-wrap items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <div className="text-sm font-medium text-amber-200">Schedule needs attention</div>
+                          <div className="mt-1 text-sm text-amber-100/80">
+                            {health.recent_failed_count || 1} recent failure{health.recent_failed_count === 1 ? '' : 's'}
+                            {health.lookback_days ? ` in ${health.lookback_days} days` : ''}.
+                            {health.latest_error ? ` ${health.latest_error}` : ''}
+                          </div>
+                          {health.recommendation && (
+                            <div className="mt-1 text-xs text-amber-100/70">{health.recommendation}</div>
+                          )}
+                        </div>
+                        <div className="flex flex-wrap gap-2">
+                          {health.latest_failed_scan_id && (
+                            <a
+                              href={`/scans/${health.latest_failed_scan_id}`}
+                              className="inline-flex items-center rounded border border-amber-500/40 bg-amber-500/15 px-2.5 py-1.5 text-xs font-medium text-amber-100 hover:bg-amber-500/25 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+                            >
+                              Failed scan
+                            </a>
+                          )}
+                          {health.suggested_scan_type && (
+                            <button
+                              type="button"
+                              onClick={() => openEdit(schedule)}
+                              className="inline-flex items-center rounded border border-gray-700 bg-gray-950 px-2.5 py-1.5 text-xs font-medium text-gray-200 hover:border-gray-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+                            >
+                              Edit budget
+                            </button>
+                          )}
+                        </div>
+                      </div>
                     </div>
                   )}
                 </div>

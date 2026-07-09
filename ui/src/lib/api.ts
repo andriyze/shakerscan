@@ -3621,6 +3621,19 @@ export interface Schedule {
   is_active: boolean
   last_run_at?: string
   next_run_at?: string
+  schedule_health?: {
+    status: 'attention' | 'warning' | 'ok' | string
+    reason?: string | null
+    failure_kind?: string | null
+    recent_failed_count?: number | null
+    timeout_failed_count?: number | null
+    lookback_days?: number | null
+    latest_failed_scan_id?: string | null
+    latest_failed_at?: string | null
+    latest_error?: string | null
+    recommendation?: string | null
+    suggested_scan_type?: string | null
+  }
   created_at: string
   updated_at: string
 }

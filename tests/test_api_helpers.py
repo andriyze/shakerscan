@@ -501,6 +501,98 @@ def test_dashboard_action_center_prioritizes_server_derived_items():
     assert "refuter-review-backlog" not in by_id
 
 
+def test_schedule_health_marks_repeated_quick_timeout():
+    schedule = {
+        "id": "22222222-2222-4222-8222-222222222222",
+        "target_id": "11111111-1111-4111-8111-111111111111",
+        "schedule_kind": "normal_scan",
+        "scan_type": "quick",
+        "is_active": True,
+    }
+    failures = [
+        {
+            "id": "33333333-3333-4333-8333-333333333333",
+            "error_message": "Scan terminated: Exceeded max duration (32 min > 15 min for quick scan)",
+            "created_at": "2026-07-09T00:44:55+00:00",
+        },
+        {
+            "id": "44444444-4444-4444-8444-444444444444",
+            "error_message": "Scan terminated: No heartbeat for 16.9 minutes",
+            "created_at": "2026-07-08T01:08:38+00:00",
+        },
+    ]
+
+    health = api_module._schedule_health_from_failures(schedule, failures)
+
+    assert health["status"] == "attention"
+    assert health["reason"] == "repeated_timeout"
+    assert health["recent_failed_count"] == 2
+    assert health["timeout_failed_count"] == 2
+    assert health["latest_failed_scan_id"] == "33333333-3333-4333-8333-333333333333"
+    assert health["suggested_scan_type"] == "standard"
+    assert "Pause this schedule" in health["recommendation"]
+
+
+def test_dashboard_action_center_surfaces_recurring_schedule_failures():
+    target_id = uuid.UUID("11111111-1111-4111-8111-111111111111")
+    schedule_id = uuid.UUID("22222222-2222-4222-8222-222222222222")
+    latest_scan_id = uuid.UUID("33333333-3333-4333-8333-333333333333")
+
+    class _Conn:
+        async def fetchrow(self, query, *args):
+            return {}
+
+        async def fetch(self, query, *args):
+            if "FROM schedules s" in query and "JOIN targets t" in query:
+                return [{
+                    "id": schedule_id,
+                    "target_id": target_id,
+                    "target_url": "https://shakerscan.com",
+                    "target_name": None,
+                    "schedule_kind": "normal_scan",
+                    "scan_type": "quick",
+                    "scan_options": {},
+                    "is_active": True,
+                    "updated_at": "2026-07-09T01:16:41+00:00",
+                }]
+            if "FROM scans" in query and "target_id = ANY" in query:
+                return [
+                    {
+                        "id": latest_scan_id,
+                        "target_id": target_id,
+                        "target_url": "https://shakerscan.com",
+                        "scan_type": "quick",
+                        "error_message": "Scan terminated: Exceeded max duration (32 min > 15 min for quick scan)",
+                        "created_at": "2026-07-09T00:44:55+00:00",
+                        "completed_at": "2026-07-09T01:16:44+00:00",
+                    },
+                    {
+                        "id": uuid.UUID("44444444-4444-4444-8444-444444444444"),
+                        "target_id": target_id,
+                        "target_url": "https://shakerscan.com",
+                        "scan_type": "quick",
+                        "error_message": "Scan terminated: No heartbeat for 16.9 minutes",
+                        "created_at": "2026-07-08T01:08:38+00:00",
+                        "completed_at": "2026-07-08T01:26:01+00:00",
+                    },
+                ]
+            return []
+
+    items = asyncio.run(
+        api_module._build_dashboard_action_center(_Conn(), worker_snapshot={"available": False})
+    )
+    by_id = {item["id"]: item for item in items}
+
+    assert "schedule-health-attention" in by_id
+    item = by_id["schedule-health-attention"]
+    assert item["priority"] == "high"
+    assert item["href"] == "/schedules?health=attention"
+    assert item["actions"][1]["href"] == f"/scans/{latest_scan_id}"
+    assert item["metadata"]["schedule_ids"] == [str(schedule_id)]
+    assert item["samples"][0]["label"] == "https://shakerscan.com"
+    assert "Exceeded max duration" in item["samples"][0]["detail"]
+
+
 def test_dashboard_action_center_surfaces_refuter_integrity_spike():
     # A target whose latest scan spiked from a ~4-finding baseline to 30.
     spike_scans = [

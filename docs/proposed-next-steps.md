@@ -202,12 +202,13 @@ called at real sites — verify before re-proposing any of it:
   dispatcher, and recurring ASM-wave schedules exist.
 - **Dashboard Action Center phase 1** — `/dashboard` returns `action_center` items for worker
   freshness, deployment blockers, failed scans, policy-exception hygiene, ASM gaps/schedules,
-  Model Intake trust gaps, and AI control-baseline gaps; the dashboard renders them as a
-  prioritized operator feed.
+  recurring schedule-health failures, Model Intake trust gaps, and AI control-baseline gaps; the
+  dashboard renders them as a prioritized operator feed.
 - **Dashboard Action Center CTAs** — `action_center` items now include structured `actions[]`
   alongside legacy `href/action_label`, and the dashboard renders safe direct links for worker
   controls, deployment blockers, failed scans, exception queues, target-preselected ASM coverage,
-  ASM schedules, Model Intake trust gaps, and AI Gate control gaps.
+  ASM schedules, recurring schedule timeout remediation, Model Intake trust gaps, and AI Gate
+  control gaps.
 - **Dashboard Product Status phase 1** — `/dashboard` now returns `product_status` cards for DAST,
   Continuous ASM, AI Gate, Model Intake, policy exceptions, deployment gates, and worker freshness.
   The dashboard renders blocker/running/stale counts and safe quick links from API facts rather than
@@ -643,8 +644,9 @@ upcoming schedules) with explicit API-backed statuses. Remaining work is deeper 
 and remediation automation, not the first dashboard/status/action surfaces.
 
 **Implement:**
-1. DONE: extend Action Center items with safe CTAs for workers, failed scans, target-preselected ASM
-   coverage, exception queues, Model Intake trust gaps, and AI control gaps.
+1. DONE: extend Action Center items with safe CTAs for workers, failed scans, recurring
+   schedule-health failures, target-preselected ASM coverage, exception queues, Model Intake trust
+   gaps, and AI control gaps.
 2. DONE: extend first-class "next action" and "why skipped" facts from ASM policy/gaps/improve/activity
    into Dashboard Action Center CTAs where target/action links are safe.
 3. DONE: add an Exceptions Queue page/filter for `finding_exceptions`: expiring soon, expired,

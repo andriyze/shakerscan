@@ -9119,6 +9119,138 @@ def _record_map(row: Any) -> dict[str, Any]:
         return row if isinstance(row, dict) else {}
 
 
+SCHEDULE_HEALTH_LOOKBACK_DAYS = 14
+
+
+def _schedule_failure_kind(error_message: Any) -> str:
+    text = str(error_message or "").lower()
+    if "exceeded max duration" in text:
+        return "duration_timeout"
+    if "no heartbeat" in text:
+        return "heartbeat_timeout"
+    if "target unreachable" in text or "dns resolution failed" in text or "cannot resolve hostname" in text:
+        return "target_unreachable"
+    if "queue enqueue" in text or "redis" in text:
+        return "queue_failure"
+    return "failed"
+
+
+def _first_error_line(error_message: Any) -> str:
+    text = str(error_message or "Scan failed before producing a clean result.").strip()
+    return text.split("\n", 1)[0][:300]
+
+
+def _schedule_health_from_failures(
+    schedule: dict[str, Any],
+    failures: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    if not failures:
+        return None
+
+    latest = failures[0]
+    latest_kind = _schedule_failure_kind(latest.get("error_message"))
+    timeout_count = sum(
+        1
+        for failure in failures
+        if _schedule_failure_kind(failure.get("error_message")) in {"duration_timeout", "heartbeat_timeout"}
+    )
+    recent_failed_count = len(failures)
+    scan_type = str(schedule.get("scan_type") or "quick")
+    schedule_kind = _schedule_kind_from_row(schedule)
+
+    status = "attention" if recent_failed_count >= 2 or latest_kind in {"duration_timeout", "heartbeat_timeout"} else "warning"
+    if latest_kind in {"duration_timeout", "heartbeat_timeout"}:
+        reason = "repeated_timeout" if timeout_count >= 2 else latest_kind
+    elif recent_failed_count >= 2:
+        reason = "repeated_failure"
+    else:
+        reason = latest_kind
+
+    suggested_scan_type = None
+    recommendation = "Review the latest failed scan before the next scheduled run."
+    if schedule_kind == "normal_scan" and scan_type == "quick" and reason in {"repeated_timeout", "duration_timeout", "heartbeat_timeout"}:
+        suggested_scan_type = "standard"
+        recommendation = "Pause this schedule or switch it to standard after confirming the production scan budget."
+    elif reason in {"repeated_timeout", "duration_timeout", "heartbeat_timeout"}:
+        recommendation = "Pause this schedule or increase the schedule budget after confirming authorization."
+    elif reason == "target_unreachable":
+        recommendation = "Pause this schedule until the target resolves and passes pre-scan validation."
+
+    latest_failed_scan_id = latest.get("id")
+    return {
+        "status": status,
+        "reason": reason,
+        "failure_kind": latest_kind,
+        "recent_failed_count": recent_failed_count,
+        "timeout_failed_count": timeout_count,
+        "lookback_days": SCHEDULE_HEALTH_LOOKBACK_DAYS,
+        "latest_failed_scan_id": str(latest_failed_scan_id) if latest_failed_scan_id else None,
+        "latest_failed_at": latest.get("created_at") or latest.get("completed_at"),
+        "latest_error": _first_error_line(latest.get("error_message")),
+        "recommendation": recommendation,
+        "suggested_scan_type": suggested_scan_type,
+    }
+
+
+async def _schedule_health_map_for_schedules(
+    conn,
+    schedules: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    candidates = [
+        schedule
+        for schedule in schedules
+        if schedule.get("is_active", True)
+        and _schedule_kind_from_row(schedule) == "normal_scan"
+        and schedule.get("target_id")
+    ]
+    if not candidates:
+        return {}
+
+    target_ids: list[uuid.UUID] = []
+    seen_target_ids: set[str] = set()
+    for schedule in candidates:
+        target_id = str(schedule.get("target_id"))
+        if target_id in seen_target_ids:
+            continue
+        try:
+            target_ids.append(uuid.UUID(target_id))
+            seen_target_ids.add(target_id)
+        except (TypeError, ValueError):
+            continue
+    if not target_ids:
+        return {}
+
+    recent_failures = await conn.fetch(
+        """
+        SELECT id, target_id, target_url, scan_type, error_message, created_at, completed_at
+        FROM scans
+        WHERE status = 'failed'
+          AND target_id = ANY($1::uuid[])
+          AND created_at >= NOW() - ($2::int * INTERVAL '1 day')
+          AND (scan_role IS NULL OR scan_role <> 'shard')
+        ORDER BY created_at DESC
+        LIMIT 500
+        """,
+        target_ids,
+        SCHEDULE_HEALTH_LOOKBACK_DAYS,
+    )
+
+    failures_by_key: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for row in recent_failures:
+        failure = row_to_dict(row)
+        key = (str(failure.get("target_id")), str(failure.get("scan_type") or "quick"))
+        failures_by_key.setdefault(key, []).append(failure)
+
+    health_by_schedule_id: dict[str, dict[str, Any]] = {}
+    for schedule in candidates:
+        key = (str(schedule.get("target_id")), str(schedule.get("scan_type") or "quick"))
+        failures = failures_by_key.get(key, [])
+        health = _schedule_health_from_failures(schedule, failures)
+        if health and health.get("status") in {"attention", "warning"}:
+            health_by_schedule_id[str(schedule.get("id"))] = health
+    return health_by_schedule_id
+
+
 def _metadata_has_any(metadata: dict[str, Any], keys: tuple[str, ...] | list[str]) -> bool:
     for key in keys:
         value = metadata.get(key)
@@ -9721,6 +9853,65 @@ async def _build_dashboard_action_center(conn, *, worker_snapshot: dict[str, Any
                 ],
                 count=len(failed_scans),
                 samples=samples,
+            ))
+    except Exception:
+        pass
+
+    try:
+        schedule_rows = await conn.fetch("""
+            SELECT s.*, t.url AS target_url, t.name AS target_name
+            FROM schedules s
+            JOIN targets t ON s.target_id = t.id
+            WHERE s.is_active = true
+              AND COALESCE(s.schedule_kind, 'normal_scan') = 'normal_scan'
+            ORDER BY s.updated_at DESC
+            LIMIT 200
+        """)
+        schedules = [row_to_dict(row) for row in schedule_rows]
+        health_map = await _schedule_health_map_for_schedules(conn, schedules)
+        unhealthy = []
+        for schedule in schedules:
+            health = health_map.get(str(schedule.get("id")))
+            if health:
+                unhealthy.append({**schedule, "schedule_health": health})
+        if unhealthy:
+            unhealthy.sort(key=lambda item: str(item.get("schedule_health", {}).get("latest_failed_at") or ""), reverse=True)
+            samples = []
+            for schedule in unhealthy[:3]:
+                health = schedule.get("schedule_health") or {}
+                scan_id = health.get("latest_failed_scan_id")
+                scan_type = schedule.get("scan_type") or "scan"
+                detail = (
+                    f"{scan_type}: {health.get('recent_failed_count')} recent failure(s); "
+                    f"{health.get('latest_error')}"
+                )
+                samples.append({
+                    "label": schedule.get("target_url") or schedule.get("id"),
+                    "detail": detail,
+                    "href": f"/scans/{scan_id}" if scan_id else "/schedules?health=attention",
+                })
+            latest_scan_id = (unhealthy[0].get("schedule_health") or {}).get("latest_failed_scan_id")
+            items.append(_action_center_item(
+                item_id="schedule-health-attention",
+                priority="high",
+                category="Schedules",
+                title="Recurring schedules are failing",
+                detail=(
+                    f"{len(unhealthy)} active schedule(s) have recent repeated failures or timeout signals. "
+                    "Pause them or edit the schedule budget before the next run."
+                ),
+                href="/schedules?health=attention",
+                action_label="Review schedules",
+                actions=[
+                    {"label": "Review schedules", "href": "/schedules?health=attention", "variant": "primary"},
+                    {"label": "Latest failed scan", "href": f"/scans/{latest_scan_id}" if latest_scan_id else "/scans?status=failed", "variant": "secondary"},
+                ],
+                count=len(unhealthy),
+                samples=samples,
+                metadata={
+                    "lookback_days": SCHEDULE_HEALTH_LOOKBACK_DAYS,
+                    "schedule_ids": [str(schedule.get("id")) for schedule in unhealthy[:10]],
+                },
             ))
     except Exception:
         pass
@@ -27638,9 +27829,18 @@ async def list_schedules(
         params.extend([limit, offset])
 
         rows = await conn.fetch(query, *params)
+        schedules = [row_to_dict(r) for r in rows]
+        try:
+            health_map = await _schedule_health_map_for_schedules(conn, schedules)
+            for schedule in schedules:
+                health = health_map.get(str(schedule.get("id")))
+                if health:
+                    schedule["schedule_health"] = health
+        except Exception:
+            pass
 
     return {
-        'schedules': [row_to_dict(r) for r in rows],
+        'schedules': schedules,
         'total': len(rows)
     }
 

@@ -422,7 +422,9 @@ and `/gungnir/*` endpoints.
 
 **Schedules** (`schedule_runner`, `/schedules`): recurring daily/weekly scans per target with
 `time_of_day` (UTC), optional `day_of_week`, scan type, and `scan_options`, so important targets stay
-continuously monitored.
+continuously monitored. Schedule listings include derived `schedule_health` when recent scan results
+show repeated failures or timeout/heartbeat failures for the same active target/type pair, and the
+Dashboard Action Center links operators to the affected schedule plus the latest failed scan.
 
 ---
 
