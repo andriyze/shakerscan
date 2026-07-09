@@ -1012,7 +1012,10 @@ differential proof: JSON-body NoSQL checks now compare restrictive `$eq` control
 items, carrying control/payload item counts into finding evidence. DONE phase 20 for structured API
 SQLi proof: SQLi response classification now treats material JSON collection expansion as a strong
 signal when an injected payload changes a rejected/empty control into a successful multi-record
-response, covering coupon/search/filter APIs that do not emit DB error banners.
+response, covering coupon/search/filter APIs that do not emit DB error banners. DONE phase 21 for
+query-parameter NoSQL proof: Smart's NoSQL lane now tests discovered GET endpoints with query
+parameters using `$eq`/`$ne` operator differentials and only promotes material JSON collection
+expansion, covering review/search collection routes that are not JSON-body sinks.
 
 **Done when:** recorded two-user benchmark scorecards show the targeted miss becoming a deterministic
 finding, not merely an attempted endpoint.

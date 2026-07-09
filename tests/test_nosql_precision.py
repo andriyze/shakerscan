@@ -1,5 +1,6 @@
 import asyncio
 import json
+import urllib.parse
 
 from scanner.scanner_tools import active_checks
 
@@ -256,6 +257,51 @@ def test_nosql_json_body_rejects_uniform_collection_response(monkeypatch):
             params=["id"],
             body_template={"id": 1},
         )
+    )
+
+    assert result["vulnerable"] is False
+    assert result["findings"] == []
+
+
+def test_nosql_query_detects_collection_operator_differential(monkeypatch):
+    async def fake_run(cmd, *args, **kwargs):
+        parsed = urllib.parse.urlparse(cmd[-1])
+        pairs = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+        names = {name for name, _value in pairs}
+        if "id[$ne]" in names:
+            body = json.dumps({
+                "data": [
+                    {"id": 1, "message": "great", "rating": 5},
+                    {"id": 2, "message": "ok", "rating": 3},
+                    {"id": 3, "message": "bad", "rating": 1},
+                ]
+            })
+            return f"{body}__SHAKERSCAN_NOSQL_QUERY__200__SHAKERSCAN_NOSQL_QUERY__", "", 0
+        return '{"data":[]}__SHAKERSCAN_NOSQL_QUERY__200__SHAKERSCAN_NOSQL_QUERY__', "", 0
+
+    monkeypatch.setattr(active_checks, "run", fake_run)
+
+    result = asyncio.run(
+        active_checks.nosql_injection_test("https://example.test/rest/products/reviews?id=1")
+    )
+
+    assert result["vulnerable"] is True
+    finding = result["findings"][0]
+    assert finding["parameter"] == "id"
+    assert finding["evidence_type"] == "operator_query_collection_differential"
+    assert finding["control_items"] == 0
+    assert finding["payload_items"] == 3
+
+
+def test_nosql_query_rejects_uniform_collection_response(monkeypatch):
+    async def fake_run(cmd, *args, **kwargs):
+        body = json.dumps({"data": [{"id": 1, "message": "same"}, {"id": 2, "message": "same"}]})
+        return f"{body}__SHAKERSCAN_NOSQL_QUERY__200__SHAKERSCAN_NOSQL_QUERY__", "", 0
+
+    monkeypatch.setattr(active_checks, "run", fake_run)
+
+    result = asyncio.run(
+        active_checks.nosql_injection_test("https://example.test/rest/products/reviews?id=1")
     )
 
     assert result["vulnerable"] is False

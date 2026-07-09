@@ -10343,19 +10343,64 @@ async def build_report(target: str,
                             # Test if content_type is JSON or not specified (assume JSON for API endpoints)
                             and (not ep.get("content_type") or "json" in ep.get("content_type", "").lower())
                         ]
+                        nosql_query_candidates = [
+                            ep for ep in endpoints
+                            if (ep.get("method") or "GET").upper() == "GET"
+                            and (ep.get("params") or ep.get("query_params"))
+                            and (
+                                not ep.get("allowed_methods")
+                                or "GET" in [m.upper() for m in ep.get("allowed_methods", [])]
+                            )
+                            and not str(ep.get("url") or "").lower().endswith((".js", ".css", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico"))
+                        ]
                         if debug_nosql:
                             print(f"[DEBUG NoSQL] NoSQL candidates after filter: {len(nosql_candidates)}", file=sys.stderr)
                             for i, ep in enumerate(nosql_candidates[:5]):
                                 print(f"[DEBUG NoSQL]   candidate {i}: {ep.get('url')} params={ep.get('body_params')}", file=sys.stderr)
+                            print(f"[DEBUG NoSQL] NoSQL query candidates after filter: {len(nosql_query_candidates)}", file=sys.stderr)
+                            for i, ep in enumerate(nosql_query_candidates[:5]):
+                                print(f"[DEBUG NoSQL]   query candidate {i}: {ep.get('url')} params={ep.get('params') or ep.get('query_params')}", file=sys.stderr)
 
-                        if nosql_candidates:
+                        if nosql_candidates or nosql_query_candidates:
                             active_block["nosql_injection"] = []
                             nosql_limit = int(active_enrichment_limits.get("nosql_json_endpoints") or (3 if quick_mode else 8))
                             emit_progress(
                                 "active_nosql",
                                 94,
-                                f"starting NoSQL JSON body checks on {min(len(nosql_candidates), nosql_limit)} candidates",
+                                (
+                                    "starting NoSQL checks on "
+                                    f"{min(len(nosql_candidates), nosql_limit)} JSON and "
+                                    f"{min(len(nosql_query_candidates), nosql_limit)} query candidates"
+                                ),
                             )
+                            for ep in nosql_query_candidates[:nosql_limit]:
+                                nosql_result = await nosql_injection_test(ep["url"])
+                                if nosql_result.get("vulnerable"):
+                                    nosql_result["url"] = ep.get("url")
+                                    nosql_result["method"] = "GET"
+                                    active_block["nosql_injection"].append(nosql_result)
+                                    for finding in nosql_result.get("findings") or nosql_result.get("evidence", []):
+                                        report["findings"].append(normalize_finding(
+                                            "nosql_injection",
+                                            f"NoSQL Injection in {finding.get('parameter', 'query')}",
+                                            "high",
+                                            {
+                                                "type": "nosql_injection",
+                                                "url": ep.get("url"),
+                                                "method": "GET",
+                                                "parameter": finding.get("parameter"),
+                                                "payload": finding.get("payload"),
+                                                "evidence_type": finding.get("evidence_type"),
+                                                "control_status": finding.get("control_status"),
+                                                "payload_status": finding.get("payload_status"),
+                                                "control_items": finding.get("control_items"),
+                                                "payload_items": finding.get("payload_items"),
+                                                "control_length": finding.get("control_length"),
+                                                "payload_length": finding.get("payload_length"),
+                                                "response_snippet": finding.get("response_snippet", "")[:200],
+                                            },
+                                            "CWE-943"
+                                        ))
                             for ep in nosql_candidates[:nosql_limit]:
                                 nosql_result = await nosql_injection_test_json_body(
                                     url=ep["url"],
