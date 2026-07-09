@@ -29,6 +29,7 @@ import {
   listInteractiveSessions,
   previewScopeReceipt,
   promoteAuthzReplay,
+  recordRefuterReview,
   queueRefuterReviewsFromSummary,
   testLocalAgentCapability,
   type AgentContextPack,
@@ -60,7 +61,7 @@ import {
   type SourceIngestResult,
 } from '@/lib/api'
 import { buildAuthzReplayReview, sessionMatchesTarget } from '@/lib/authzReplay'
-import { buildRefuterReviewPlanView } from '@/lib/refuterReview'
+import { buildRefuterAnnotationPayload, buildRefuterReviewPlanView } from '@/lib/refuterReview'
 import { Badge, Button, Card, EmptyState, ErrorState, Skeleton } from '@/components/ui'
 
 function statusClass(status: string): string {
@@ -112,6 +113,10 @@ function countBy<T extends { status: string }>(items: T[]): Record<string, numbe
     acc[item.status] = (acc[item.status] || 0) + 1
     return acc
   }, {})
+}
+
+function splitReferenceIds(value: string): string[] {
+  return [...new Set(value.split(/[\s,]+/).map((item) => item.trim()).filter(Boolean))].slice(0, 100)
 }
 
 function Stat({
@@ -685,8 +690,16 @@ function RefuterReviewRow({ review, approvalReceiptId, operator, onRefresh }: {
 }) {
   const plan = useMemo(() => buildRefuterReviewPlanView(review.metadata_json), [review.metadata_json])
   const [stepId, setStepId] = useState(plan.steps[0]?.id || '')
-  const [busy, setBusy] = useState<'execute' | 'derive' | null>(null)
+  const [busy, setBusy] = useState<'execute' | 'derive' | 'record' | null>(null)
   const [message, setMessage] = useState<string | null>(null)
+  const [annotationOpen, setAnnotationOpen] = useState(false)
+  const [annotationMode, setAnnotationMode] = useState<'signal' | 'human_verdict'>('signal')
+  const [annotationSignal, setAnnotationSignal] = useState<'support' | 'question' | 'weaken' | 'refute'>('question')
+  const [annotationVerdict, setAnnotationVerdict] = useState<'supported' | 'weakened' | 'refuted' | 'inconclusive'>('inconclusive')
+  const [observedBehavior, setObservedBehavior] = useState('inconclusive')
+  const [annotationNotes, setAnnotationNotes] = useState('')
+  const [evidenceRefs, setEvidenceRefs] = useState('')
+  const [toolReceiptRefs, setToolReceiptRefs] = useState('')
 
   async function executeStep() {
     if (!approvalReceiptId) return
@@ -716,6 +729,32 @@ function RefuterReviewRow({ review, approvalReceiptId, operator, onRefresh }: {
       await onRefresh()
     } catch (err) {
       setMessage(err instanceof Error ? err.message : 'Verdict derivation failed')
+    } finally { setBusy(null) }
+  }
+
+  async function recordCounterevidence() {
+    setBusy('record')
+    setMessage(null)
+    try {
+      const payload = buildRefuterAnnotationPayload(review, {
+        mode: annotationMode,
+        signal: annotationSignal,
+        verdict: annotationVerdict,
+        observedBehavior,
+        notes: annotationNotes,
+        evidenceObjectIds: splitReferenceIds(evidenceRefs),
+        toolReceiptIds: splitReferenceIds(toolReceiptRefs),
+        createdBy: operator,
+      })
+      await recordRefuterReview(payload)
+      setMessage(annotationMode === 'human_verdict' ? `Recorded human verdict: ${annotationVerdict}` : 'Recorded signal-only counterevidence')
+      setAnnotationOpen(false)
+      setAnnotationNotes('')
+      setEvidenceRefs('')
+      setToolReceiptRefs('')
+      await onRefresh()
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : 'Counterevidence recording failed')
     } finally { setBusy(null) }
   }
 
@@ -760,7 +799,38 @@ function RefuterReviewRow({ review, approvalReceiptId, operator, onRefresh }: {
         <Button size="sm" disabled={!approvalReceiptId || busy !== null} onClick={() => void deriveVerdict()}>
           <CheckCircle2 className={`h-3.5 w-3.5 ${busy === 'derive' ? 'animate-spin' : ''}`} aria-hidden="true" /> Derive verdict
         </Button>
+        <Button size="sm" variant="ghost" disabled={busy !== null} onClick={() => setAnnotationOpen((open) => !open)}>
+          <Boxes className="h-3.5 w-3.5" /> {annotationOpen ? 'Close evidence' : 'Add evidence'}
+        </Button>
       </div>
+      {annotationOpen && (
+        <div className="mt-3 space-y-3 rounded-md border border-gray-800 bg-gray-900/60 p-3">
+          <div className="inline-flex rounded-md border border-gray-700 bg-gray-950 p-0.5" role="group" aria-label="Annotation mode">
+            <button type="button" onClick={() => setAnnotationMode('signal')} className={`rounded px-3 py-1.5 text-xs ${annotationMode === 'signal' ? 'bg-blue-600 text-white' : 'text-gray-400 hover:text-white'}`}>Signal note</button>
+            <button type="button" onClick={() => setAnnotationMode('human_verdict')} className={`rounded px-3 py-1.5 text-xs ${annotationMode === 'human_verdict' ? 'bg-amber-600 text-white' : 'text-gray-400 hover:text-white'}`}>Human verdict</button>
+          </div>
+          <div className="grid gap-3 md:grid-cols-2">
+            {annotationMode === 'signal' ? (
+              <label className="block"><span className="text-xs text-gray-400">Signal</span><select value={annotationSignal} onChange={(event) => setAnnotationSignal(event.target.value as typeof annotationSignal)} className="mt-1 w-full rounded-md border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white">
+                <option value="support">support</option><option value="question">question</option><option value="weaken">weaken</option><option value="refute">refute</option>
+              </select></label>
+            ) : (
+              <label className="block"><span className="text-xs text-gray-400">Verdict</span><select value={annotationVerdict} onChange={(event) => setAnnotationVerdict(event.target.value as typeof annotationVerdict)} className="mt-1 w-full rounded-md border border-amber-700 bg-gray-950 px-3 py-2 text-sm text-white">
+                <option value="supported">supported</option><option value="weakened">weakened</option><option value="refuted">refuted</option><option value="inconclusive">inconclusive</option>
+              </select></label>
+            )}
+            <label className="block"><span className="text-xs text-gray-400">Observed behavior</span><select value={observedBehavior} onChange={(event) => setObservedBehavior(event.target.value)} className="mt-1 w-full rounded-md border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white">
+              <option value="fixed">fixed</option><option value="blocked">blocked</option><option value="non_reproducible">non-reproducible</option><option value="benign_explanation">benign explanation</option><option value="still_vulnerable">still vulnerable</option><option value="inconclusive">inconclusive</option>
+            </select></label>
+            <label className="block"><span className="text-xs text-gray-400">Evidence object IDs</span><input value={evidenceRefs} onChange={(event) => setEvidenceRefs(event.target.value)} placeholder="UUIDs separated by spaces" className="mt-1 w-full rounded-md border border-gray-700 bg-gray-950 px-3 py-2 font-mono text-xs text-white" /></label>
+            <label className="block"><span className="text-xs text-gray-400">Tool receipt IDs</span><input value={toolReceiptRefs} onChange={(event) => setToolReceiptRefs(event.target.value)} placeholder="UUIDs separated by spaces" className="mt-1 w-full rounded-md border border-gray-700 bg-gray-950 px-3 py-2 font-mono text-xs text-white" /></label>
+          </div>
+          <label className="block"><span className="text-xs text-gray-400">Analyst notes</span><textarea value={annotationNotes} onChange={(event) => setAnnotationNotes(event.target.value)} rows={3} className="mt-1 w-full resize-y rounded-md border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white" /></label>
+          <div className="flex justify-end"><Button size="sm" variant={annotationMode === 'human_verdict' ? 'danger' : 'secondary'} disabled={busy !== null || !annotationNotes.trim()} onClick={() => void recordCounterevidence()}>
+            <ShieldCheck className={`h-3.5 w-3.5 ${busy === 'record' ? 'animate-pulse' : ''}`} /> Record {annotationMode === 'human_verdict' ? 'human verdict' : 'counterevidence'}
+          </Button></div>
+        </div>
+      )}
       <div className="mt-2 flex flex-wrap gap-2">
         {!approvalReceiptId && <Badge className={statusClass('out_of_scope')}>approval receipt required</Badge>}
         {message && <span className="text-xs text-gray-300">{message}</span>}

@@ -525,6 +525,10 @@ export interface RefuterReview {
   refuter_verdict?: string | null
   verdict_basis: string
   status: string
+  evidence_object_ids?: string[]
+  tool_receipt_ids?: string[]
+  counterevidence?: Record<string, unknown>
+  notes?: string | null
   metadata_json: Record<string, unknown>
   created_by?: string | null
   created_at?: string
@@ -2009,6 +2013,33 @@ export async function getRefuterWorkSummary(limit: number = 5, findingWindow: nu
 export async function getRefuterReviews(limit: number = 20): Promise<RefuterReviewsResponse> {
   const res = await fetch(`${API_URL}/arsenal/refuter-reviews?limit=${limit}`)
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load refuter reviews'))
+  return res.json()
+}
+
+export async function recordRefuterReview(payload: {
+  subject_type: string
+  subject_id?: string
+  target_id?: string
+  finding_id?: string
+  hypothesis_id?: string
+  campaign_id?: string
+  trigger_reason: string
+  refuter_signal?: 'support' | 'question' | 'weaken' | 'refute'
+  refuter_verdict?: 'supported' | 'weakened' | 'refuted' | 'inconclusive'
+  verdict_basis?: 'signal_only' | 'deterministic_replay' | 'cryptographic' | 'parser_protocol' | 'human_approved_review'
+  evidence_object_ids?: string[]
+  tool_receipt_ids?: string[]
+  counterevidence?: Record<string, unknown>
+  notes?: string
+  metadata_json?: Record<string, unknown>
+  created_by?: string
+}): Promise<{ refuter_review: RefuterReview; execution_enabled: boolean; findings_updated: number; hypotheses_updated: number }> {
+  const res = await fetch(`${API_URL}/arsenal/refuter-reviews`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to record refuter counterevidence'))
   return res.json()
 }
 
