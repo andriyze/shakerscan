@@ -1043,6 +1043,11 @@ method/path rather than raw query-bearing URL, retain all contributing sources, 
 traffic override schema/static/inferred content types, body templates, and conflicting defaults.
 Only OpenAPI, explicit manual input, or form metadata marks fields required; observed and inferred
 body fields remain replay siblings without being mislabeled as schema requirements.
+DONE phase 30 for bounded response-guided SQLi request completion: when a JSON POST baseline returns
+an explicit `400/422` missing-field validation structure, Smart SQLi can add at most five safe sibling
+fields and retry once before payload testing. Privilege, ownership, tenant, payment, approval, and
+workflow-state fields are denied; non-JSON text never drives completion, and completion telemetry is
+recorded separately from vulnerability proof.
 
 **Done when:** recorded two-user benchmark scorecards show the targeted miss becoming a deterministic
 finding, not merely an attempted endpoint.

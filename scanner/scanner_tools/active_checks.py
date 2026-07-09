@@ -6982,6 +6982,119 @@ def _build_body_template(endpoint: dict[str, Any], param: str | None = None) -> 
     return body
 
 
+_VALIDATION_FIELD_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]{0,63}$")
+_VALIDATION_FIELD_DENY_TOKENS = frozenset({
+    "admin", "role", "roles", "permission", "permissions", "privilege", "privileges",
+    "owner", "ownership", "tenant", "price", "amount", "balance", "credit", "payment",
+    "approved", "approval", "verified", "verification", "status", "state",
+})
+
+
+def _safe_validation_field_name(raw: Any) -> str | None:
+    if isinstance(raw, list):
+        parts = [str(part) for part in raw if str(part).lower() not in {"body", "request", "payload"}]
+        raw = ".".join(parts)
+    value = str(raw or "").strip().strip("'\"")
+    value = re.sub(r"^\$\.?", "", value)
+    value = value.replace("[", ".").replace("]", "").strip(".")
+    if not value or not _VALIDATION_FIELD_RE.fullmatch(value):
+        return None
+    token_source = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", value).lower()
+    tokens = {token for token in re.split(r"[^a-z0-9]+", token_source) if token}
+    if tokens.intersection(_VALIDATION_FIELD_DENY_TOKENS):
+        return None
+    return value
+
+
+def _extract_missing_validation_fields(body: str, *, max_fields: int = 5) -> list[str]:
+    """Extract explicit missing-field names from a bounded JSON validation error."""
+    if not body or len(body) > 100_000:
+        return []
+    try:
+        parsed = json.loads(body)
+    except Exception:
+        return []
+
+    found: list[str] = []
+
+    def add(raw: Any) -> None:
+        field = _safe_validation_field_name(raw)
+        if field and field not in found and len(found) < max_fields:
+            found.append(field)
+
+    def missing_signal(value: Any) -> bool:
+        text = str(value or "").lower()
+        return any(marker in text for marker in (
+            "required", "missing", "must not be blank", "must not be null", "may not be empty",
+        ))
+
+    def walk(value: Any, depth: int = 0) -> None:
+        if depth > 8 or len(found) >= max_fields:
+            return
+        if isinstance(value, list):
+            for item in value[:25]:
+                walk(item, depth + 1)
+            return
+        if not isinstance(value, dict):
+            return
+
+        message = value.get("msg") or value.get("message") or value.get("defaultMessage") or value.get("error")
+        error_type = value.get("type") or value.get("code")
+        is_missing = missing_signal(message) or missing_signal(error_type)
+        if is_missing:
+            location = value.get("loc") or value.get("location")
+            explicit = value.get("field") or value.get("name") or value.get("param") or value.get("path")
+            if location:
+                add(location)
+            if explicit:
+                add(explicit)
+            for text in (message, value.get("detail")):
+                if not isinstance(text, str):
+                    continue
+                for pattern in (
+                    r"['\"]([A-Za-z_][A-Za-z0-9_.-]{0,63})['\"]\s+(?:is\s+)?required",
+                    r"(?:missing|required)\s+(?:field|parameter|property)?\s*[:=-]?\s*['\"]?([A-Za-z_][A-Za-z0-9_.-]{0,63})",
+                ):
+                    for match in re.finditer(pattern, text, re.IGNORECASE):
+                        add(match.group(1))
+
+        errors = value.get("errors")
+        if isinstance(errors, dict):
+            for field, error in list(errors.items())[:25]:
+                if missing_signal(error):
+                    add(field)
+        for child in value.values():
+            if isinstance(child, (dict, list)):
+                walk(child, depth + 1)
+
+    walk(parsed)
+    return found
+
+
+def _add_validation_fields_to_body(body: Any, fields: list[str], content_type: str) -> list[str]:
+    if isinstance(body, list):
+        if not body or not isinstance(body[0], dict):
+            return []
+        target = body[0]
+    elif isinstance(body, dict):
+        target = body
+    else:
+        return []
+    nested = "json" in str(content_type or "").lower()
+    added: list[str] = []
+    for field in fields[:5]:
+        if nested:
+            if _has_nested_key(target, field):
+                continue
+            _set_nested_value(target, field, _fallback_value_for_param(field), overwrite=False)
+        else:
+            if field in target:
+                continue
+            target[field] = _fallback_value_for_param(field)
+        added.append(field)
+    return added
+
+
 def _apply_body_param(base_body: Any, param: str, value: Any) -> Any:
     """Apply a parameter value to a body template, handling nested keys.
 
@@ -7310,6 +7423,7 @@ async def smart_sqli_test(
         "budget_exhausted": False,
         "budget_exhausted_reason": None,
         "endpoint_attempts": [],
+        "validation_fields_added": [],
     }
     deadline = time.monotonic() + max_seconds if max_seconds and max_seconds > 0 else None
     budget_logged = False
@@ -7640,6 +7754,32 @@ async def smart_sqli_test(
                 continue
 
             baseline_body_out, baseline_status = _parse_curl_body_status(baseline_out)
+            if baseline_status in (400, 422) and "json" in content_type.lower():
+                missing_fields = _extract_missing_validation_fields(baseline_body_out)
+                added_fields = _add_validation_fields_to_body(base_body, missing_fields, content_type)
+                if added_fields:
+                    _add_validation_fields_to_body(baseline_body, added_fields, content_type)
+                    results["validation_fields_added"].append({
+                        "url": endpoint_url,
+                        "method": method,
+                        "fields": added_fields,
+                    })
+                    if attempt is not None:
+                        attempt["validation_fields_added"] = list(dict.fromkeys(
+                            [*(attempt.get("validation_fields_added") or []), *added_fields]
+                        ))
+                    baseline_body_args, baseline_header_args = _build_curl_body_args(baseline_body, content_type)
+                    retry_cmd = [
+                        "curl", "-sS", "-X", method, "-L", "-k", "--max-time", "10",
+                        "-H", "User-Agent: Mozilla/5.0 (compatible; SecurityScanner/1.0)",
+                    ] + baseline_header_args + auth_post_args + baseline_body_args + [
+                        "-w", f"\n{_CURL_STATUS_MARKER}%{{http_code}}", endpoint_url,
+                    ]
+                    retry_start = time.time()
+                    retry_out, _, retry_rc = await run(retry_cmd, timeout=12)
+                    baseline_elapsed = time.time() - retry_start
+                    if retry_rc == 0:
+                        baseline_body_out, baseline_status = _parse_curl_body_status(retry_out)
             baseline_len = len(baseline_body_out) if baseline_body_out else 0
             param_reflected = bool(baseline_body_out and reflection_canary in baseline_body_out)
 
