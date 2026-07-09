@@ -134,6 +134,23 @@ CHECK_REGISTRY: tuple[CheckFamilySpec, ...] = (
         description="Bounded privileged-field mutation with baseline-vs-response effect proof.",
     ),
     CheckFamilySpec(
+        name="jwt",
+        phase="active",
+        family="authentication",
+        label="JWT Security",
+        is_active=True,
+        risk_level="medium",
+        telemetry_schema="jwt_probe_result_v1",
+        proof_contract=("token_source", "mutation", "baseline_status", "forged_status", "acceptance_delta"),
+        severity_rules={
+            "critical_requires": ["forged_token_accepted_with_privileged_effect"],
+            "high_requires": ["forged_token_accepted"],
+            "metadata_only_ceiling": "medium",
+        },
+        runnable=True,
+        description="JWT algorithm, signature, key, and claim mutation checks with acceptance proof.",
+    ),
+    CheckFamilySpec(
         name="headers",
         phase="passive",
         family="headers",
@@ -364,6 +381,8 @@ def scanner_execution_plan(
                 dispatch_adapter = "asm_endpoint_batch"
             elif spec.name == "mass_assignment":
                 dispatch_adapter = "legacy_phase4_mass_assignment"
+            elif spec.name == "jwt":
+                dispatch_adapter = "legacy_advanced_jwt"
             elif spec.name in {"recon", "headers", "nuclei"}:
                 dispatch_adapter = "legacy_passive_or_template"
             else:

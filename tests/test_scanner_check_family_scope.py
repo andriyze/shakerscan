@@ -135,6 +135,17 @@ def test_check_family_scope_keeps_explicit_mass_assignment_without_global_active
     assert scope["focused_family"] == "mass_assignment"
 
 
+def test_check_family_scope_includes_automatic_advanced_jwt_executor():
+    scope = scanner_mod.build_check_family_scope(
+        True,
+        active_xss=True,
+        active_sqli=True,
+        jwt=True,
+    )
+
+    assert scope["families"] == ["xss", "sqli", "jwt"]
+
+
 def test_check_family_scope_marks_inactive_scan():
     scope = scanner_mod.build_check_family_scope(False, active_xss=True, active_sqli=True)
 

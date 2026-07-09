@@ -3054,6 +3054,7 @@ def build_check_family_scope(
     active_sqli: bool,
     requested_family: str | None = None,
     mass_assignment: bool = False,
+    jwt: bool = False,
 ) -> dict[str, Any]:
     families: list[str] = []
     if active_checks and active_xss:
@@ -3062,6 +3063,8 @@ def build_check_family_scope(
         families.append("sqli")
     if mass_assignment:
         families.append("mass_assignment")
+    if jwt:
+        families.append("jwt")
     normalized_requested = normalize_scanner_check_family(requested_family)
     if (
         active_checks
@@ -3071,7 +3074,7 @@ def build_check_family_scope(
     ):
         families.append(normalized_requested)
 
-    effective_active = bool(active_checks or mass_assignment)
+    effective_active = bool(active_checks or mass_assignment or jwt)
     focused_family = families[0] if effective_active and len(families) == 1 else None
     if not effective_active:
         mode = "inactive"
@@ -3439,12 +3442,17 @@ async def build_report(target: str,
     elif active_checks and (bool(active_xss) != bool(active_sqli)):
         focused_active_family_name = "xss" if active_xss else "sqli"
     focused_active_family = bool(focused_active_family_name)
+    registry_jwt_testing = bool(
+        (smart_mode or (complete_mode and complete_tier in ("full", "aggressive")))
+        and not focused_active_family
+    )
     check_family_scope = build_check_family_scope(
         active_checks,
         active_xss,
         active_sqli,
         requested_family=active_check_family,
         mass_assignment=mass_assignment_testing,
+        jwt=registry_jwt_testing,
     )
     if smart_mode and focused_active_family:
         print(f"[smart] Focused active mode enabled for {focused_active_family_name}; disabling unrelated active modules", file=sys.stderr)
@@ -3640,7 +3648,7 @@ async def build_report(target: str,
         scan_mode=scan_mode_label,
         public_only=public_only,
         quick_mode=quick_mode,
-        active_checks=bool(active_checks or mass_assignment_testing),
+        active_checks=bool(active_checks or mass_assignment_testing or registry_jwt_testing),
         check_family_scope=check_family_scope,
         skip_global_checks=skip_global_checks,
         focused_endpoints_only=bool(focused_endpoints_only or focused_manual_active_scope),
@@ -4701,20 +4709,31 @@ async def build_report(target: str,
 
     # New advanced vulnerability checks (smart/full/aggressive only)
     advanced_scan = (smart_mode or (complete_mode and complete_tier in ("full", "aggressive"))) and not focused_active_family
+    jwt_dispatch_enabled = registry_family_enabled(
+        scanner_execution_plan,
+        "jwt",
+        fallback=bool(advanced_scan),
+    )
     if advanced_scan and not public_only:
         nosql_task = asyncio.create_task(nosql_injection_test(base_url))
         ldap_task = asyncio.create_task(ldap_injection_test(base_url))
         xpath_task = asyncio.create_task(xpath_injection_test(base_url))
         ssti_task = asyncio.create_task(ssti_test(base_url))
         smuggling_task = asyncio.create_task(http_smuggling_test(base_url))
-        jwt_task = asyncio.create_task(jwt_vulnerability_test(base_url, auth_session=auth_session))
+        if jwt_dispatch_enabled:
+            jwt_task = asyncio.create_task(jwt_vulnerability_test(base_url, auth_session=auth_session))
+            jwt_comprehensive_task = asyncio.create_task(jwt_comprehensive_test(base_url, None, auth_session))
+        else:
+            async def dummy_registry_jwt(): return {"vulnerable": False, "issues": [], "evidence": [], "skipped": True, "reason": "registry_dispatch_disabled"}
+            async def dummy_registry_jwt_comprehensive(): return {"vulnerable": False, "algorithm_confusion": {}, "kid_injection": {}, "claim_manipulation": {}, "findings": [], "skipped": True, "reason": "registry_dispatch_disabled"}
+            jwt_task = asyncio.create_task(dummy_registry_jwt())
+            jwt_comprehensive_task = asyncio.create_task(dummy_registry_jwt_comprehensive())
         oauth_task = asyncio.create_task(oauth_vulnerability_test(base_url))
         session_task = asyncio.create_task(session_vulnerability_test(base_url))
         timing_task = asyncio.create_task(timing_attack_test(base_url))
         graphql_task = asyncio.create_task(graphql_vulnerability_test(base_url))
         cache_poison_task = asyncio.create_task(cache_poisoning_test(base_url))
         # Enhanced security tests (new)
-        jwt_comprehensive_task = asyncio.create_task(jwt_comprehensive_test(base_url, None, auth_session))
         graphql_comprehensive_task = asyncio.create_task(graphql_comprehensive_test(base_url, None, auth_session))
         verb_tampering_task = asyncio.create_task(test_verb_tampering(base_url))
         rate_limit_task = asyncio.create_task(detect_rate_limits(base_url))

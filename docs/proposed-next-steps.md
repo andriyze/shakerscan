@@ -1418,7 +1418,10 @@ legacy broad smart-scan behavior when no family was requested. The smart active 
 derives its family dispatch order from registry runnable parallel families with a scanner-local
 fallback. The phase-4 mass-assignment executor is now registry-backed with its effect-based proof and
 severity contract, explicit legacy flag activation, and `legacy_phase4_mass_assignment` dispatch
-adapter; the registry plan is authoritative for whether that task is created. Detector internals
+adapter; the registry plan is authoritative for whether that task is created. Basic and comprehensive
+JWT checks are likewise registered with token-source/mutation/acceptance-delta proof requirements and
+the `legacy_advanced_jwt` adapter; broad Smart/full/aggressive scans add JWT to their registry scope,
+while focused family scans continue to omit it. Detector internals
 still execute many checks through hardcoded module calls, and planned
 families such as `lfi`/`rce`/`ssrf` are not runnable.
 
@@ -1427,6 +1430,7 @@ families such as `lfi`/`rce`/`ssrf` are not runnable.
 then make `lfi`/`rce`/`ssrf` runnable only when their deterministic proof contracts exist.
 DONE phase 3 for mass-assignment registration and dispatch gating without expanding ASM focus or
 changing explicit `--mass-assignment-testing` behavior.
+DONE phase 4 for JWT basic/comprehensive task gating without exposing JWT as an ASM focus family.
 
 **Done when:** adding a check family is a registry entry plus module integration, not edits scattered
 through `build_report`.

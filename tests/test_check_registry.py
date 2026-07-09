@@ -37,6 +37,10 @@ def test_registry_exposes_runnable_asm_focus_families():
     assert mass_assignment.runnable is True
     assert mass_assignment.telemetry_schema == "active_endpoint_attempt_v1"
     assert "observed_privilege_effect" in mass_assignment.proof_contract
+    jwt = r.CHECK_REGISTRY_BY_NAME["jwt"]
+    assert jwt.runnable is True
+    assert jwt.telemetry_schema == "jwt_probe_result_v1"
+    assert "forged_status" in jwt.proof_contract
     assert "payload" in r.CHECK_REGISTRY_BY_NAME["sqli"].proof_contract
     assert r.CHECK_REGISTRY_BY_NAME["sqli"].severity_rules["critical_requires"] == ["exploitation_proof"]
 
@@ -142,6 +146,19 @@ def test_scanner_execution_plan_dispatches_registered_mass_assignment():
     assert plan["summary"]["proof_contracts"]["mass_assignment"] == list(
         r.CHECK_REGISTRY_BY_NAME["mass_assignment"].proof_contract
     )
+
+
+def test_scanner_execution_plan_dispatches_registered_jwt():
+    plan = r.scanner_execution_plan(
+        scan_mode="smart",
+        active_checks=True,
+        check_family_scope={"families": ["jwt"]},
+    )
+    families = {item["name"]: item for item in plan["families"]}
+
+    assert families["jwt"]["enabled"] is True
+    assert families["jwt"]["dispatch_adapter"] == "legacy_advanced_jwt"
+    assert families["sqli"]["enabled"] is False
 
 
 def test_scanner_execution_plan_records_passive_skip_reasons():
