@@ -125,7 +125,6 @@ def test_frontend_http_requests_become_same_origin_active_endpoints():
                     "url": "/api/search",
                     "method": "POST",
                     "body_params": ["query", "filters"],
-                    "body_required_params": ["query"],
                     "content_type": "application/json",
                 },
                 {"url": "/api/products?q=seed", "method": "GET", "params": ["q"]},
@@ -140,7 +139,6 @@ def test_frontend_http_requests_become_same_origin_active_endpoints():
             "method": "POST",
             "source": "js_bundle_analysis",
             "body_params": ["query", "filters"],
-            "body_required_params": ["query"],
             "content_type": "application/json",
         },
         {
@@ -150,3 +148,48 @@ def test_frontend_http_requests_become_same_origin_active_endpoints():
             "params": ["q"],
         },
     ]
+
+
+def test_request_contract_merges_by_method_path_with_source_precedence():
+    static = scanner_module._initialize_active_endpoint_contract({
+        "url": "https://app.example.test/api/search",
+        "method": "POST",
+        "source": "js_bundle_analysis",
+        "body_params": ["query", "filters"],
+        "content_type": "application/json",
+    })
+    schema = {
+        "url": "https://app.example.test/api/search?preview=1",
+        "method": "POST",
+        "source": "openapi",
+        "body_params": ["query", "filters", "limit"],
+        "body_required_params": ["query"],
+        "body_param_defaults": {"limit": 25},
+        "content_type": "application/json",
+    }
+    runtime = {
+        "url": "https://app.example.test/api/search?locale=en",
+        "method": "POST",
+        "source": "har_discovery",
+        "body_params": ["query", "filters", "limit"],
+        "body_param_defaults": {"query": "real search", "limit": 10},
+        "content_type": "application/x-www-form-urlencoded",
+    }
+
+    assert scanner_module._active_endpoint_contract_key(static["url"], "POST") == (
+        scanner_module._active_endpoint_contract_key(schema["url"], "POST")
+    )
+    scanner_module._merge_active_endpoint_contract(static, schema)
+    scanner_module._merge_active_endpoint_contract(static, runtime)
+
+    assert static["body_params"] == ["query", "filters", "limit"]
+    assert static["body_required_params"] == ["query"]
+    assert static["body_param_defaults"] == {"limit": 10, "query": "real search"}
+    assert static["content_type"] == "application/x-www-form-urlencoded"
+    assert static["request_contract_sources"] == [
+        "js_bundle_analysis",
+        "openapi",
+        "har_discovery",
+    ]
+    assert static["request_contract_strength"] == "runtime_observed"
+    assert static["source"] == "har_discovery"

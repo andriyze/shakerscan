@@ -3386,7 +3386,6 @@ def extract_frontend_http_requests(content: str, *, max_requests: int = 500) -> 
         item: dict[str, Any] = {"url": normalized_url, "method": method, "source": "js_bundle_analysis"}
         if body and method in {"POST", "PUT", "PATCH"}:
             item["body_params"] = body
-            item["body_required_params"] = body
             item["content_type"] = content_type or "application/json"
         if query:
             item["params"] = query

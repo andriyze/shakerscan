@@ -2652,12 +2652,110 @@ def _frontend_http_active_endpoints(base_url: str, analysis: dict[str, Any] | No
             endpoint["params"] = params
         if body_params and method in {"POST", "PUT", "PATCH"}:
             endpoint["body_params"] = body_params
-            endpoint["body_required_params"] = list(
-                dict.fromkeys(request.get("body_required_params") or body_params)
-            )
+            required = list(dict.fromkeys(request.get("body_required_params") or []))
+            if required:
+                endpoint["body_required_params"] = required
             endpoint["content_type"] = request.get("content_type") or "application/json"
         endpoints.append(endpoint)
     return endpoints
+
+
+_REQUEST_CONTRACT_STRENGTH = {
+    "inferred": 1,
+    "common": 1,
+    "options": 1,
+    "crawl": 2,
+    "url_crawl": 2,
+    "discovered_lookup": 2,
+    "hash_route": 2,
+    "js_bundle_analysis": 3,
+    "openapi": 4,
+    "form": 4,
+    "manual": 4,
+    "browser_api_capture": 5,
+    "har_discovery": 5,
+}
+
+_REQUEST_CONTRACT_STRENGTH_LABELS = {
+    1: "inferred",
+    2: "discovered",
+    3: "static_observed",
+    4: "schema_or_explicit",
+    5: "runtime_observed",
+}
+
+
+def _active_endpoint_contract_key(url: str, method: str) -> tuple[str, str]:
+    parsed = urllib.parse.urlparse(str(url or ""))
+    canonical_url = urllib.parse.urlunparse((
+        parsed.scheme.lower(),
+        parsed.netloc.lower(),
+        parsed.path or "/",
+        "",
+        "",
+        "",
+    ))
+    return canonical_url, str(method or "GET").upper()
+
+
+def _request_contract_source_strength(source: str) -> int:
+    return _REQUEST_CONTRACT_STRENGTH.get(str(source or ""), 1)
+
+
+def _initialize_active_endpoint_contract(endpoint: dict[str, Any]) -> dict[str, Any]:
+    source = str(endpoint.get("source") or "inferred")
+    endpoint["request_contract_sources"] = list(dict.fromkeys(
+        [*(endpoint.get("request_contract_sources") or []), source]
+    ))
+    strength = max(
+        (_request_contract_source_strength(item) for item in endpoint["request_contract_sources"]),
+        default=1,
+    )
+    endpoint["request_contract_strength"] = _REQUEST_CONTRACT_STRENGTH_LABELS[strength]
+    return endpoint
+
+
+def _merge_active_endpoint_contract(existing: dict[str, Any], incoming: dict[str, Any]) -> None:
+    """Merge one canonical method/path request contract with provenance precedence."""
+    existing_source = str(existing.get("source") or "inferred")
+    incoming_source = str(incoming.get("source") or "inferred")
+    existing_sources = list(existing.get("request_contract_sources") or [existing_source])
+    incoming_sources = list(incoming.get("request_contract_sources") or [incoming_source])
+    sources = list(dict.fromkeys([*existing_sources, *incoming_sources]))
+    existing_strength = max((_request_contract_source_strength(item) for item in existing_sources), default=1)
+    incoming_strength = max((_request_contract_source_strength(item) for item in incoming_sources), default=1)
+
+    for list_key in ("params", "body_params", "body_required_params", "allowed_methods"):
+        values = [*(existing.get(list_key) or []), *(incoming.get(list_key) or [])]
+        if values:
+            existing[list_key] = list(dict.fromkeys(values))
+
+    for dict_key in ("param_defaults", "body_param_defaults"):
+        old_values = dict(existing.get(dict_key) or {})
+        new_values = dict(incoming.get(dict_key) or {})
+        if incoming_strength >= existing_strength:
+            old_values.update(new_values)
+        else:
+            for key, value in new_values.items():
+                old_values.setdefault(key, value)
+        if old_values:
+            existing[dict_key] = old_values
+
+    for scalar_key in ("content_type", "body_template"):
+        incoming_value = incoming.get(scalar_key)
+        if incoming_value is not None and (
+            existing.get(scalar_key) is None or incoming_strength >= existing_strength
+        ):
+            existing[scalar_key] = incoming_value
+
+    existing["request_contract_sources"] = sources
+    strongest = max(existing_strength, incoming_strength)
+    existing["request_contract_strength"] = _REQUEST_CONTRACT_STRENGTH_LABELS[strongest]
+
+    existing_priority = DEFAULT_SOURCE_PRIORITY.get(existing_source, DEFAULT_SOURCE_PRIORITY_VALUE)
+    incoming_priority = DEFAULT_SOURCE_PRIORITY.get(incoming_source, DEFAULT_SOURCE_PRIORITY_VALUE)
+    if incoming_priority < existing_priority:
+        existing["source"] = incoming_source
 
 
 _PATH_VALUE_LOOKUP_ROUTE_TOKENS = (
@@ -8494,40 +8592,14 @@ async def build_report(target: str,
                         )
                         if allowed:
                             new_ep["allowed_methods"] = allowed
-                    key = (url, method)
+                    key = _active_endpoint_contract_key(url, method)
                     existing = endpoint_index.get(key)
                     if not existing:
+                        _initialize_active_endpoint_contract(new_ep)
                         endpoints.append(new_ep)
                         endpoint_index[key] = new_ep
                         return True
-                    for list_key in ("params", "body_params", "body_required_params"):
-                        if new_ep.get(list_key):
-                            existing[list_key] = _dedupe_list(
-                                (existing.get(list_key) or []) + list(new_ep.get(list_key))
-                            )
-                    if new_ep.get("body_param_defaults"):
-                        defaults = dict(existing.get("body_param_defaults") or {})
-                        defaults.update(new_ep.get("body_param_defaults") or {})
-                        existing["body_param_defaults"] = defaults
-                    if new_ep.get("param_defaults"):
-                        defaults = dict(existing.get("param_defaults") or {})
-                        defaults.update(new_ep.get("param_defaults") or {})
-                        existing["param_defaults"] = defaults
-                    if new_ep.get("body_template") and not existing.get("body_template"):
-                        existing["body_template"] = new_ep.get("body_template")
-                    if new_ep.get("content_type") and not existing.get("content_type"):
-                        existing["content_type"] = new_ep["content_type"]
-                    if new_ep.get("allowed_methods"):
-                        existing["allowed_methods"] = _dedupe_list(
-                            (existing.get("allowed_methods") or []) + list(new_ep.get("allowed_methods"))
-                        )
-                    # Keep the highest-priority source (lower number = higher priority)
-                    new_source = new_ep.get("source", "")
-                    existing_source = existing.get("source", "")
-                    new_priority = _SOURCE_PRIORITY.get(new_source, _DEFAULT_SOURCE_PRIORITY)
-                    existing_priority = _SOURCE_PRIORITY.get(existing_source, _DEFAULT_SOURCE_PRIORITY)
-                    if new_priority < existing_priority:
-                        existing["source"] = new_source
+                    _merge_active_endpoint_contract(existing, new_ep)
                     return False
 
                 manual_get_count = 0
@@ -8957,7 +9029,6 @@ async def build_report(target: str,
                                 "url": base_post_url,
                                 "method": "POST",
                                 "body_params": unique_params[:8],
-                                "body_required_params": unique_params[:3],
                                 "body_param_defaults": {},
                                 "content_type": "application/json",
                                 "source": "inferred",
@@ -8998,7 +9069,6 @@ async def build_report(target: str,
                             "url": full_url,
                             "method": "POST",
                             "body_params": params,
-                            "body_required_params": params,
                             "body_param_defaults": {},
                             "content_type": "application/json",
                             "source": "common",
@@ -9057,7 +9127,6 @@ async def build_report(target: str,
                                     "url": opt_url,
                                     "method": method_u,
                                     "body_params": params,
-                                    "body_required_params": params[:3],
                                     "body_param_defaults": {},
                                     "content_type": "application/json",
                                     "source": "options",
@@ -9101,7 +9170,6 @@ async def build_report(target: str,
                                 "url": har_url,
                                 "method": har_method,
                                 "body_params": body_params,
-                                "body_required_params": body_params[:5] if len(body_params) > 5 else body_params,
                                 "body_param_defaults": body_defaults,
                                 "content_type": har_content_type,
                                 "body_template": har_body_template,

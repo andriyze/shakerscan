@@ -1038,6 +1038,11 @@ base/path cross-products with a program-derived request URL and preserves the sa
 DONE phase 28 for config-style frontend requests: axios callable/request configurations with literal
 `method`, `url`, `data`, and `params` now produce the same bounded request contract as verb-style calls;
 objects without an explicit method are ignored.
+DONE phase 29 for provenance-aware request contracts: active endpoints now merge by canonical
+method/path rather than raw query-bearing URL, retain all contributing sources, and let runtime
+traffic override schema/static/inferred content types, body templates, and conflicting defaults.
+Only OpenAPI, explicit manual input, or form metadata marks fields required; observed and inferred
+body fields remain replay siblings without being mislabeled as schema requirements.
 
 **Done when:** recorded two-user benchmark scorecards show the targeted miss becoming a deterministic
 finding, not merely an attempted endpoint.
