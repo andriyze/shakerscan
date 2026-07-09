@@ -1000,7 +1000,9 @@ excluded from that render path so raw JSON reflection is not overclaimed as brow
 phase 16 for crAPI-style BOLA consumer synthesis: cross-principal replay now applies owner object IDs
 harvested from authenticated producer responses to discovered consumer/sub-resource templates such as
 `/vehicle/{id}/location`, while keeping the existing proof gate that requires the attacker response to
-return the requested owner object ID.
+return the requested owner object ID. DONE phase 17 for smart-mode debug exposure recall: default
+smart scans now run a narrow `debug_dev` forced-browsing lane, so validated Prometheus/actuator-style
+endpoints such as `/metrics` can surface without enabling the full broad forced-browsing wordlist.
 
 **Done when:** recorded two-user benchmark scorecards show the targeted miss becoming a deterministic
 finding, not merely an attempted endpoint.

@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scanner"))
 
+import scanner_tools.access_control_checks as access_control_checks  # noqa: E402
 from scanner_tools.access_control_checks import determine_severity  # noqa: E402
 
 
@@ -24,6 +25,40 @@ def test_forced_browsing_debug_dev_metrics_is_high_not_critical():
 def test_forced_browsing_sensitive_files_and_admin_stay_critical():
     assert determine_severity(200, "sensitive_files", "/.env") == "critical"
     assert determine_severity(200, "admin_panels", "/admin") == "critical"
+
+
+def test_forced_browsing_accepts_prometheus_metrics_body(monkeypatch):
+    async def fake_spa(*args, **kwargs):
+        return {"is_spa_catch_all": False}
+
+    async def fake_homepage_hash(*args, **kwargs):
+        return None
+
+    async def fake_run(cmd, **kwargs):
+        url = cmd[-1]
+        if "-I" in cmd:
+            return ("200" if url.endswith("/metrics") else "404", "", 0)
+        if url.endswith("/metrics"):
+            body = "# HELP process_cpu_seconds_total Total user and system CPU time\n# TYPE process_cpu_seconds_total counter\nprocess_cpu_seconds_total 1\n"
+            return (body + "\n---CURL_METADATA---\n200|text/plain|120", "", 0)
+        return ("\n---CURL_METADATA---\n404|text/plain|0", "", 0)
+
+    monkeypatch.setattr(access_control_checks, "detect_spa_catch_all", fake_spa)
+    monkeypatch.setattr(access_control_checks, "fetch_homepage_hash", fake_homepage_hash)
+    monkeypatch.setattr(access_control_checks, "run", fake_run)
+
+    result = asyncio.run(access_control_checks.check_forced_browsing(
+        "https://app.test",
+        categories=["debug_dev"],
+        timeout_per_request=1,
+    ))
+
+    assert result["vulnerable"] is True
+    metrics = next(item for item in result["findings"] if item["path"] == "/metrics")
+    assert metrics["severity"] == "high"
+    assert metrics["accessible"] is True
+    assert metrics["content_type"] == "text/plain"
+    assert not metrics.get("content_validation_failed")
 
 
 

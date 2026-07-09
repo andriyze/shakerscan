@@ -5483,10 +5483,13 @@ async def build_report(target: str,
         api_security_p4_task = asyncio.create_task(dummy_api_security_p4())
 
     # Access Control Checks - Forced Browsing (can run in parallel with Phase 4)
-    if forced_browsing_testing and not public_only and not skip_global_checks:
+    smart_debug_exposure_testing = smart_mode and not focused_active_family and not forced_browsing_testing
+    if (forced_browsing_testing or smart_debug_exposure_testing) and not public_only and not skip_global_checks:
+        forced_browsing_categories = None if forced_browsing_testing else ["debug_dev"]
         forced_browsing_task = asyncio.create_task(check_forced_browsing(
             base_url,
             max_concurrent=10,
+            categories=forced_browsing_categories,
             max_total_time=forced_browsing_max_seconds,
         ))
     else:
