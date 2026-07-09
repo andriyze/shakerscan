@@ -1176,7 +1176,7 @@ the deterministic campaign from it, while unproven graph/source/AI signals remai
 than findings.
 
 ### 8. Auth / principal / role matrix
-**Status: PARTIAL, PHASE 9 ENDPOINT EXPECTATION LIFECYCLE DONE.** `target_endpoints.auth_state` exists, and
+**Status: PARTIAL, PHASE 10 CREDENTIAL PRECONDITION TRUTHFULNESS DONE.** `target_endpoints.auth_state` exists, and
 `target_principals` plus `target_endpoint_expectations` now persist role, tenant, credential-profile
 references, auth states, and endpoint x principal expected access. `GET/POST /targets/{id}/principals`
 and `GET/POST /targets/{id}/principal-matrix` expose the matrix as non-executing planning facts, and
@@ -1219,6 +1219,11 @@ DONE phase 9: operators can create or update allow/deny/requires-role endpoint e
 interactive principal plan, load persisted rows back into the editor, and explicitly delete obsolete
 expectations through a target-scoped UUID route. These remain planning records only: expectation
 maintenance cannot execute a replay or create a finding.
+DONE phase 10: generated target context packs no longer treat content-free principal identities as
+configured credentials. Primary readiness requires an active credential-profile reference (or the
+legacy target auth signal), and second-user readiness requires two distinct profile references (or
+the legacy alternate-user signal), preventing record-only principal setup from unblocking auth/BOLA
+execution plans prematurely.
 
 **Done when:** a campaign can assert "endpoint X requires role admin" and prove a lower-role
 principal's access is a finding.

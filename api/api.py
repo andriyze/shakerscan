@@ -13142,6 +13142,25 @@ def _public_target_endpoint_expectation_row(row: Any) -> dict[str, Any]:
     return payload
 
 
+def _target_credential_precondition_signals(
+    principals: list[dict[str, Any]],
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, str]:
+    """Derive credential readiness from secret-profile references, not identities."""
+    metadata = metadata or {}
+    active_profile_refs = {
+        str(item.get("credential_profile") or "").strip()
+        for item in principals
+        if item.get("is_active", True) and str(item.get("credential_profile") or "").strip()
+    }
+    primary_legacy = bool(metadata.get("auth") or metadata.get("credential_profile"))
+    alternate_legacy = bool(metadata.get("second_user") or metadata.get("user2"))
+    return {
+        "primary_credentials": "configured" if active_profile_refs or primary_legacy else "unknown",
+        "second_user_credentials": "configured" if len(active_profile_refs) >= 2 or alternate_legacy else "unknown",
+    }
+
+
 @app.get("/targets/{target_id}")
 async def get_target(target_id: str):
     """Get target details."""
@@ -14487,12 +14506,13 @@ async def _build_agent_context_pack_from_target(conn, req: AgentContextPackFromT
         "sample_endpoints": sample_endpoints,
         "principal_matrix": principal_summary,
     }
-    primary_principals = [item for item in principal_summary.get("principals", []) if item.get("is_active")]
-    second_principal_configured = len(primary_principals) >= 2
+    credential_preconditions = _target_credential_precondition_signals(
+        principal_summary.get("principals", []),
+        metadata,
+    )
     known_preconditions = {
         "workers": worker_freshness,
-        "primary_credentials": "configured" if primary_principals or metadata.get("auth") or metadata.get("credential_profile") else "unknown",
-        "second_user_credentials": "configured" if second_principal_configured or metadata.get("second_user") or metadata.get("user2") else "unknown",
+        **credential_preconditions,
         "principal_roles": sorted(principal_summary.get("role_counts", {}).keys()),
         "principal_tenants": sorted(principal_summary.get("tenant_counts", {}).keys()),
         "scope": "target-bound",

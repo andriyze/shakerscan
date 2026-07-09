@@ -6450,6 +6450,48 @@ def test_generated_agent_context_pack_from_target_uses_stored_facts(monkeypatch)
     assert len(generated.context_hash) == 64
 
 
+def test_target_credential_preconditions_require_profile_references():
+    identities_only = [
+        {"id": "principal-1", "is_active": True, "credential_profile": None},
+        {"id": "principal-2", "is_active": True, "credential_profile": ""},
+    ]
+    assert api_module._target_credential_precondition_signals(identities_only) == {
+        "primary_credentials": "unknown",
+        "second_user_credentials": "unknown",
+    }
+
+    one_profile = [
+        {"id": "principal-1", "is_active": True, "credential_profile": "vault/customer"},
+        {"id": "principal-2", "is_active": True, "credential_profile": None},
+    ]
+    assert api_module._target_credential_precondition_signals(one_profile) == {
+        "primary_credentials": "configured",
+        "second_user_credentials": "unknown",
+    }
+
+
+def test_target_credential_preconditions_require_distinct_second_profile():
+    shared_profile = [
+        {"id": "principal-1", "is_active": True, "credential_profile": "vault/shared"},
+        {"id": "principal-2", "is_active": True, "credential_profile": "vault/shared"},
+    ]
+    assert api_module._target_credential_precondition_signals(shared_profile)["second_user_credentials"] == "unknown"
+
+    distinct_profiles = [
+        {"id": "principal-1", "is_active": True, "credential_profile": "vault/customer-a"},
+        {"id": "principal-2", "is_active": True, "credential_profile": "vault/customer-b"},
+    ]
+    assert api_module._target_credential_precondition_signals(distinct_profiles) == {
+        "primary_credentials": "configured",
+        "second_user_credentials": "configured",
+    }
+
+
+def test_target_credential_preconditions_preserve_legacy_metadata_signals():
+    assert api_module._target_credential_precondition_signals([], {"auth": {"kind": "bearer"}})["primary_credentials"] == "configured"
+    assert api_module._target_credential_precondition_signals([], {"user2": {"kind": "cookie"}})["second_user_credentials"] == "configured"
+
+
 def test_local_agent_dry_run_plan_uses_context_pack_without_spawn():
     context_id = "22222222-2222-4222-8222-222222222222"
 
