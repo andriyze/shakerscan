@@ -15,6 +15,7 @@ import asyncio
 import hashlib
 import json
 import time
+import urllib.parse
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 
@@ -1675,7 +1676,135 @@ def _collection_item_base_path(base_path: str) -> str | None:
     return None
 
 
-def _resource_replay_candidates(producer_url: str, ref: dict[str, Any]) -> list[dict[str, Any]]:
+def _normalize_authz_url(base_url: str, raw_url: str) -> str | None:
+    if not isinstance(raw_url, str):
+        return None
+    url = raw_url.strip()
+    if not url:
+        return None
+    if url.startswith("//"):
+        url = "https:" + url
+    if url.startswith("/"):
+        return urljoin(base_url.rstrip("/") + "/", url.lstrip("/"))
+    if not url.startswith("http"):
+        return urljoin(base_url.rstrip("/") + "/", url)
+    return url
+
+
+def _is_resource_placeholder_segment(segment: str) -> bool:
+    text = urllib.parse.unquote(str(segment or "")).strip()
+    if not text:
+        return False
+    lowered = text.lower()
+    if lowered in {"{id}", ":id", "<id>", "$id"}:
+        return True
+    if (text.startswith("{") and text.endswith("}")) or (text.startswith("<") and text.endswith(">")):
+        inner = text[1:-1].strip().lower()
+        return bool(inner) and ("id" in inner or inner in {"uuid", "uid"})
+    if text.startswith(":"):
+        return "id" in text[1:].lower()
+    return False
+
+
+def _replace_discovered_consumer_id(url: str, object_id: str) -> dict[str, Any] | None:
+    """Return a concrete replay candidate by applying ``object_id`` to a discovered route."""
+    if not object_id:
+        return None
+    try:
+        parsed = urlsplit(url)
+    except Exception:
+        return None
+    if parsed.fragment:
+        return None
+    path = parsed.path or "/"
+    segments = path.split("/")
+    changed = False
+    object_id_location = "path"
+    new_segments: list[str] = []
+    for segment in segments:
+        if not segment:
+            new_segments.append(segment)
+            continue
+        decoded = urllib.parse.unquote(segment)
+        if not changed and (_is_resource_placeholder_segment(segment) or _safe_scalar_id(decoded)):
+            new_segments.append(urllib.parse.quote(str(object_id), safe=""))
+            changed = True
+        else:
+            new_segments.append(segment)
+
+    query_pairs = parse_qsl(parsed.query, keep_blank_values=True)
+    new_pairs: list[tuple[str, str]] = []
+    query_changed = False
+    for key, value in query_pairs:
+        value_is_placeholder = _is_resource_placeholder_segment(value)
+        value_is_id = bool(_safe_scalar_id(value))
+        if not changed and not query_changed and _is_probable_id_param(key) and (value == "" or value_is_placeholder or value_is_id):
+            new_pairs.append((key, str(object_id)))
+            query_changed = True
+            object_id_location = "query"
+        else:
+            new_pairs.append((key, value))
+
+    if not changed and not query_changed:
+        return None
+
+    new_path = "/".join(new_segments) or "/"
+    query = urlencode(new_pairs, doseq=True)
+    concrete_url = urlunsplit((parsed.scheme, parsed.netloc, new_path, query, ""))
+    custom_endpoint = f"GET {new_path}?{query}" if query else f"GET {new_path}"
+    return {
+        "method": "GET",
+        "url": concrete_url,
+        "object_id_location": object_id_location,
+        "custom_endpoint": custom_endpoint,
+        "source": "discovered_consumer_template",
+    }
+
+
+def _authz_consumer_templates(base_url: str, discovered_urls: list[str]) -> list[str]:
+    """Select discovered routes that can consume owner object IDs during replay."""
+    templates: list[str] = []
+    seen: set[str] = set()
+    for raw_url in discovered_urls or []:
+        url = _normalize_authz_url(base_url, raw_url)
+        if not url or url in seen:
+            continue
+        if any(excl in url.lower() for excl in COLLECTION_EXCLUSIONS):
+            continue
+        if _has_excluded_synth_path_segment(url):
+            continue
+        try:
+            parsed = urlsplit(url)
+        except Exception:
+            continue
+        if parsed.fragment:
+            continue
+        path_segments = _bola_path_segments(url)
+        if not (path_segments & BOLA_RESOURCE_PATH_SEGMENTS):
+            continue
+        has_path_id = any(
+            _is_resource_placeholder_segment(segment) or bool(_safe_scalar_id(urllib.parse.unquote(segment)))
+            for segment in (parsed.path or "").split("/")
+            if segment
+        )
+        has_query_id = any(
+            _is_probable_id_param(key) and (value == "" or _is_resource_placeholder_segment(value) or bool(_safe_scalar_id(value)))
+            for key, value in parse_qsl(parsed.query, keep_blank_values=True)
+        )
+        if not has_path_id and not has_query_id:
+            continue
+        seen.add(url)
+        templates.append(url)
+    templates.sort(key=lambda item: (_rank_authz_producer_url(item), len(urlsplit(item).path or "")), reverse=True)
+    return templates[:80]
+
+
+def _resource_replay_candidates(
+    producer_url: str,
+    ref: dict[str, Any],
+    *,
+    consumer_templates: list[str] | None = None,
+) -> list[dict[str, Any]]:
     """Build read-safe candidate consumer URLs from a producer response reference."""
     object_id = str(ref.get("object_id") or "").strip()
     object_key = str(ref.get("object_id_key") or "id")
@@ -1690,14 +1819,27 @@ def _resource_replay_candidates(producer_url: str, ref: dict[str, Any]) -> list[
     candidates: list[dict[str, Any]] = []
     seen_urls: set[str] = set()
 
+    for template_url in consumer_templates or []:
+        candidate = _replace_discovered_consumer_id(template_url, object_id)
+        if not candidate:
+            continue
+        candidate_url = str(candidate.get("url") or "")
+        if not candidate_url or candidate_url in seen_urls:
+            continue
+        candidates.append(candidate)
+        seen_urls.add(candidate_url)
+        if len(candidates) >= 5:
+            break
+
     path_url = host + _path_with_resource_id(base_path, object_id)
-    candidates.append({
-        "method": "GET",
-        "url": path_url,
-        "object_id_location": "path",
-        "custom_endpoint": f"GET {_path_with_resource_id(base_path, object_id)}",
-    })
-    seen_urls.add(path_url)
+    if path_url not in seen_urls:
+        candidates.append({
+            "method": "GET",
+            "url": path_url,
+            "object_id_location": "path",
+            "custom_endpoint": f"GET {_path_with_resource_id(base_path, object_id)}",
+        })
+        seen_urls.add(path_url)
 
     item_base_path = _collection_item_base_path(base_path)
     if item_base_path:
@@ -1724,7 +1866,7 @@ def _resource_replay_candidates(producer_url: str, ref: dict[str, Any]) -> list[
             "object_id_location": "query",
             "custom_endpoint": f"GET {base_path}?{query}",
         })
-    return candidates[:3]
+    return candidates[:6]
 
 
 def _rank_authz_producer_url(url: str) -> int:
@@ -2526,17 +2668,9 @@ async def authz_resource_replay_test(
     producer_candidates: list[str] = []
     seen: set[str] = set()
     for raw_url in discovered_urls or []:
-        if not isinstance(raw_url, str):
-            continue
-        url = raw_url.strip()
+        url = _normalize_authz_url(base_url, raw_url)
         if not url:
             continue
-        if url.startswith("//"):
-            url = "https:" + url
-        if url.startswith("/"):
-            url = urljoin(base_url.rstrip("/") + "/", url.lstrip("/"))
-        if not url.startswith("http"):
-            url = urljoin(base_url.rstrip("/") + "/", url)
         if any(excl in url.lower() for excl in COLLECTION_EXCLUSIONS):
             continue
         if _has_excluded_synth_path_segment(url):
@@ -2556,6 +2690,12 @@ async def authz_resource_replay_test(
             continue
         seen.add(custom)
         producer_candidates.append(url)
+
+    consumer_templates = _authz_consumer_templates(base_url, discovered_urls or [])
+    results["consumer_template_count"] = len(consumer_templates)
+    results["consumer_templates_sample"] = [
+        _bola_custom_endpoint(url, "GET") or url for url in consumer_templates[:20]
+    ]
 
     producer_limit = max(1, int(max_producers or 1))
     ranked_pairs = sorted(
@@ -2629,7 +2769,11 @@ async def authz_resource_replay_test(
             object_id = str(ref.get("object_id") or "")
             if not object_id or object_id in user2_ids:
                 continue
-            candidates = _resource_replay_candidates(producer_url, ref)
+            candidates = _resource_replay_candidates(
+                producer_url,
+                ref,
+                consumer_templates=consumer_templates,
+            )
             if not candidates:
                 continue
             results["resource_map"].append({

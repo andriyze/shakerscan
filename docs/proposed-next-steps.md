@@ -996,7 +996,11 @@ worklist as SQLi, so bounded scans spend XSS budget on filtered real endpoints i
 synthetic candidate list. DONE phase 15 for POST-body reflected-XSS browser proof: HTML-like
 POST/PUT/PATCH responses that reflect an executable payload now get a headless response-render proof
 attempt and can be promoted to verified High with `browser_proof`; JSON responses are explicitly
-excluded from that render path so raw JSON reflection is not overclaimed as browser execution.
+excluded from that render path so raw JSON reflection is not overclaimed as browser execution. DONE
+phase 16 for crAPI-style BOLA consumer synthesis: cross-principal replay now applies owner object IDs
+harvested from authenticated producer responses to discovered consumer/sub-resource templates such as
+`/vehicle/{id}/location`, while keeping the existing proof gate that requires the attacker response to
+return the requested owner object ID.
 
 **Done when:** recorded two-user benchmark scorecards show the targeted miss becoming a deterministic
 finding, not merely an attempted endpoint.
