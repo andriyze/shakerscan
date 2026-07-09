@@ -1964,6 +1964,7 @@ def test_public_target_principal_and_expectation_rows_are_non_executing_and_reda
         "tenant_id": "tenant-a",
         "auth_state": "admin",
         "credential_profile": "admin-browser-session",
+        "credential_configured": True,
         "is_active": True,
         "metadata_json": json.dumps({"authorization": "Bearer secret-token"}),
     })
@@ -2224,6 +2225,7 @@ def test_application_graph_hypothesis_requests_attach_principal_matrix_context()
             "tenant_id": "tenant-a",
             "auth_state": "user1",
             "credential_profile": "profile-user1",
+            "credential_configured": True,
             "is_active": True,
             "metadata_json": json.dumps({"authorization": "Bearer secret-token"}),
         },
@@ -2234,6 +2236,7 @@ def test_application_graph_hypothesis_requests_attach_principal_matrix_context()
             "tenant_id": "tenant-a",
             "auth_state": "user2",
             "credential_profile": "profile-user2",
+            "credential_configured": True,
             "is_active": True,
             "metadata_json": json.dumps({}),
         },
@@ -6424,6 +6427,7 @@ def test_generated_agent_context_pack_from_target_uses_stored_facts(monkeypatch)
                     "tenant_id": "tenant-a",
                     "auth_state": "admin",
                     "credential_profile": "admin-session",
+                    "credential_configured": True,
                     "is_active": True,
                     "metadata_json": json.dumps({}),
                 }, {
@@ -6434,6 +6438,7 @@ def test_generated_agent_context_pack_from_target_uses_stored_facts(monkeypatch)
                     "tenant_id": "tenant-a",
                     "auth_state": "user1",
                     "credential_profile": "customer-session",
+                    "credential_configured": True,
                     "is_active": True,
                     "metadata_json": json.dumps({}),
                 }]
@@ -6506,7 +6511,7 @@ def test_generated_agent_context_pack_from_target_uses_stored_facts(monkeypatch)
     assert generated.current_surface["principal_matrix"]["role_counts"]["admin"] == 1
     assert generated.current_surface["principal_matrix"]["expectations"][0]["expected_access"] == "deny"
     assert generated.known_preconditions["primary_credentials"] == "configured"
-    assert generated.known_preconditions["second_user_credentials"] == "configured"
+    assert generated.known_preconditions["second_user_credentials"] == "unknown"
     assert generated.findings_summary[0]["category"] == "bola"
     assert generated.findings_summary[0]["proof_state"] == "suspected"
     assert "asm.gaps" in generated.allowed_commands
@@ -6525,7 +6530,7 @@ def test_target_credential_preconditions_require_profile_references():
     }
 
     one_profile = [
-        {"id": "principal-1", "is_active": True, "credential_profile": "vault/customer"},
+        {"id": "principal-1", "auth_state": "user1", "is_active": True, "credential_profile": "vault/customer", "credential_configured": True},
         {"id": "principal-2", "is_active": True, "credential_profile": None},
     ]
     assert api_module._target_credential_precondition_signals(one_profile) == {
@@ -6533,17 +6538,38 @@ def test_target_credential_preconditions_require_profile_references():
         "second_user_credentials": "unknown",
     }
 
+    unresolved_profile = [{
+        "id": "principal-1",
+        "auth_state": "user1",
+        "is_active": True,
+        "credential_profile": "missing-profile",
+        "credential_configured": False,
+    }]
+    assert api_module._target_credential_precondition_signals(unresolved_profile) == {
+        "primary_credentials": "unknown",
+        "second_user_credentials": "unknown",
+    }
+
+    admin_only = [{
+        "id": "principal-admin",
+        "auth_state": "admin",
+        "is_active": True,
+        "credential_profile": "admin-profile",
+        "credential_configured": True,
+    }]
+    assert api_module._target_credential_precondition_signals(admin_only)["primary_credentials"] == "unknown"
+
 
 def test_target_credential_preconditions_require_distinct_second_profile():
     shared_profile = [
-        {"id": "principal-1", "is_active": True, "credential_profile": "vault/shared"},
-        {"id": "principal-2", "is_active": True, "credential_profile": "vault/shared"},
+        {"id": "principal-1", "auth_state": "user1", "is_active": True, "credential_profile": "vault/shared", "credential_configured": True},
+        {"id": "principal-2", "auth_state": "user2", "is_active": True, "credential_profile": "vault/shared", "credential_configured": True},
     ]
     assert api_module._target_credential_precondition_signals(shared_profile)["second_user_credentials"] == "unknown"
 
     distinct_profiles = [
-        {"id": "principal-1", "is_active": True, "credential_profile": "vault/customer-a"},
-        {"id": "principal-2", "is_active": True, "credential_profile": "vault/customer-b"},
+        {"id": "principal-1", "auth_state": "user1", "is_active": True, "credential_profile": "vault/customer-a", "credential_configured": True},
+        {"id": "principal-2", "auth_state": "user2", "is_active": True, "credential_profile": "vault/customer-b", "credential_configured": True},
     ]
     assert api_module._target_credential_precondition_signals(distinct_profiles) == {
         "primary_credentials": "configured",
@@ -6554,6 +6580,70 @@ def test_target_credential_preconditions_require_distinct_second_profile():
 def test_target_credential_preconditions_preserve_legacy_metadata_signals():
     assert api_module._target_credential_precondition_signals([], {"auth": {"kind": "bearer"}})["primary_credentials"] == "configured"
     assert api_module._target_credential_precondition_signals([], {"user2": {"kind": "cookie"}})["second_user_credentials"] == "configured"
+
+
+def test_target_credential_profile_resolution_maps_primary_and_second_user(monkeypatch):
+    class FakeConn:
+        async def fetch(self, query, *_args):
+            assert "cp.expires_at > NOW()" in query
+            return [
+                {
+                    "auth_state": "user1",
+                    "profile_id": uuid.uuid4(),
+                    "auth_kind": "authorization_header",
+                    "secret_value": "enc-primary",
+                },
+                {
+                    "auth_state": "user2",
+                    "profile_id": uuid.uuid4(),
+                    "auth_kind": "cookie",
+                    "secret_value": "enc-second",
+                },
+            ]
+
+    monkeypatch.setattr(api_module, "decrypt_secret", lambda value: {
+        "enc-primary": "Bearer primary-token",
+        "enc-second": "session=second-user",
+    }[value])
+    options = asyncio.run(api_module._resolve_target_credential_profiles(
+        FakeConn(),
+        uuid.uuid4(),
+        {"scan_type": "smart"},
+    ))
+
+    assert options["auth_header"] == "Bearer primary-token"
+    assert options["user2_cookies"] == "session=second-user"
+    assert [item["auth_state"] for item in options["resolved_credential_profiles"]] == ["user1", "user2"]
+
+
+def test_target_credential_profile_resolution_preserves_explicit_auth_and_skips_undecryptable(monkeypatch):
+    class FakeConn:
+        async def fetch(self, *_args):
+            return [
+                {
+                    "auth_state": "user1",
+                    "profile_id": uuid.uuid4(),
+                    "auth_kind": "authorization_header",
+                    "secret_value": "stored-primary",
+                },
+                {
+                    "auth_state": "user2",
+                    "profile_id": uuid.uuid4(),
+                    "auth_kind": "authorization_header",
+                    "secret_value": "enc:fernet:unavailable",
+                },
+            ]
+
+    monkeypatch.setattr(api_module, "decrypt_secret", lambda value: value)
+    options = asyncio.run(api_module._resolve_target_credential_profiles(
+        FakeConn(),
+        uuid.uuid4(),
+        {"auth_header": "Bearer explicit"},
+    ))
+
+    assert options["auth_header"] == "Bearer explicit"
+    assert "user2_header" not in options
+    assert "resolved_credential_profiles" not in options
 
 
 def test_local_agent_dry_run_plan_uses_context_pack_without_spawn():

@@ -1189,7 +1189,7 @@ the deterministic campaign from it, while unproven graph/source/AI signals remai
 than findings.
 
 ### 8. Auth / principal / role matrix
-**Status: PARTIAL, PHASE 12 MANAGED CREDENTIAL LIFECYCLE DONE.** `target_endpoints.auth_state` exists, and
+**Status: PARTIAL, PHASE 13 MANAGED CREDENTIAL EXECUTION DONE.** `target_endpoints.auth_state` exists, and
 `target_principals` plus `target_endpoint_expectations` now persist role, tenant, credential-profile
 references, auth states, and endpoint x principal expected access. `GET/POST /targets/{id}/principals`
 and `GET/POST /targets/{id}/principal-matrix` expose the matrix as non-executing planning facts, and
@@ -1243,8 +1243,16 @@ completion feedback. Operators no longer have to infer execution from a silent r
 DONE phase 12: target-scoped credential profiles now store write-only Authorization-header or cookie
 material behind masked REST responses, use the shared optional Fernet encryption-at-rest layer,
 track expiry and near-expiry refresh state, support explicit rotation, and retain deactivated rows for
-audit history. Principal-to-profile resolution into scan/session execution remains the next phase;
-creating a profile alone does not queue work or prove an authorization finding.
+audit history. This storage phase did not itself queue work or prove an authorization finding.
+DONE phase 13: normal target scans, manual ASM recon/test/improve actions, and the background ASM
+dispatcher now resolve only active, unexpired profiles referenced by active `user1`/`user2`
+principals into the scanner's existing primary/second-user Authorization or cookie fields. Explicit
+per-scan auth wins; an undecryptable Fernet value is never sent as a credential. Principal lists,
+context packs, and graph hypotheses count a credential as configured only when the named managed
+profile currently resolves. The interactive workflow manages masked profiles, expiry, rotation, and
+deactivation and selects real profile names instead of accepting only free text. Loading a managed
+profile into an already-running browser session remains an explicit session-auth step; no secret is
+returned to the browser, and profile resolution does not create findings.
 
 **Done when:** a campaign can assert "endpoint X requires role admin" and prove a lower-role
 principal's access is a finding.

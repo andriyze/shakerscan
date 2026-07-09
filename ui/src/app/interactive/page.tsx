@@ -2,17 +2,22 @@
 
 import Link from 'next/link'
 import { useCallback, useEffect, useMemo, useState } from 'react'
+import { KeyRound, RefreshCw, ShieldCheck, XCircle } from 'lucide-react'
 import {
   captureInteractiveScreenshot,
+  createTargetCredentialProfile,
   createTargetPrincipal,
   createInteractiveSessionFinding,
+  deactivateTargetCredentialProfile,
   deactivateTargetPrincipal,
   deleteTargetPrincipalExpectation,
   endInteractiveSession,
   getInteractiveSession,
+  getTargetCredentialProfiles,
   getTargetPrincipalMatrix,
   listInteractiveSessions,
   runInteractiveAction,
+  rotateTargetCredentialProfile,
   startInteractiveSession,
   testInteractiveEndpoint,
   updateTargetPrincipal,
@@ -21,6 +26,7 @@ import {
   type InteractiveSessionState,
   type InteractiveSessionSummary,
   type TargetPrincipalMatrixResponse,
+  type TargetCredentialProfile,
 } from '@/lib/api'
 import { SEVERITY_LEVELS } from '@/lib/constants'
 import { Badge, Button, Card, ErrorState, useToast } from '@/components/ui'
@@ -55,6 +61,14 @@ type FindingFormState = {
   response: string
   remediation: string
   notes: string
+}
+
+type CredentialProfileDraft = {
+  name: string
+  authKind: TargetCredentialProfile['auth_kind']
+  secret: string
+  expiresAt: string
+  rotateProfileId: string
 }
 
 const REQUEST_METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE']
@@ -102,6 +116,16 @@ export default function InteractiveSessionPage() {
     user2: emptyPrincipalProfileDraft(),
   })
   const [principalBusy, setPrincipalBusy] = useState<UserKey | null>(null)
+  const [credentialProfiles, setCredentialProfiles] = useState<TargetCredentialProfile[]>([])
+  const [credentialProfilesError, setCredentialProfilesError] = useState<string | null>(null)
+  const [credentialBusy, setCredentialBusy] = useState<string | null>(null)
+  const [credentialDraft, setCredentialDraft] = useState<CredentialProfileDraft>({
+    name: '',
+    authKind: 'authorization_header',
+    secret: '',
+    expiresAt: '',
+    rotateProfileId: '',
+  })
   const [expectationDraft, setExpectationDraft] = useState<PrincipalExpectationDraft>(emptyPrincipalExpectationDraft)
   const [expectationBusy, setExpectationBusy] = useState<string | null>(null)
 
@@ -117,6 +141,18 @@ export default function InteractiveSessionPage() {
     }
   }, [])
 
+  const loadCredentialProfiles = useCallback(async (id: string) => {
+    if (!id) return
+    try {
+      const result = await getTargetCredentialProfiles(id)
+      setCredentialProfiles(result.profiles || [])
+      setCredentialProfilesError(null)
+    } catch (err) {
+      setCredentialProfiles([])
+      setCredentialProfilesError(err instanceof Error ? err.message : 'Failed to load credential profiles')
+    }
+  }, [])
+
   useEffect(() => {
     const requestedTarget = new URLSearchParams(window.location.search).get('target')
     const requestedTargetId = new URLSearchParams(window.location.search).get('target_id')
@@ -128,7 +164,8 @@ export default function InteractiveSessionPage() {
     if (!targetId) return
     setPrincipalDrafts({ user1: emptyPrincipalProfileDraft(), user2: emptyPrincipalProfileDraft() })
     void loadPrincipalMatrix(targetId)
-  }, [loadPrincipalMatrix, targetId])
+    void loadCredentialProfiles(targetId)
+  }, [loadCredentialProfiles, loadPrincipalMatrix, targetId])
 
   const [endpoint, setEndpoint] = useState('')
   const [method, setMethod] = useState('GET')
@@ -265,6 +302,65 @@ export default function InteractiveSessionPage() {
       toast.error(err instanceof Error ? err.message : `Failed to save ${slot} principal`)
     } finally {
       setPrincipalBusy(null)
+    }
+  }
+
+  async function handleSaveCredentialProfile() {
+    if (!targetId) return
+    if (!credentialDraft.name.trim() || !credentialDraft.secret.trim()) {
+      toast.error('Profile name and secret are required')
+      return
+    }
+    const expiresAt = credentialDraft.expiresAt
+      ? new Date(credentialDraft.expiresAt).toISOString()
+      : undefined
+    setCredentialBusy(credentialDraft.rotateProfileId || 'create')
+    try {
+      if (credentialDraft.rotateProfileId) {
+        await rotateTargetCredentialProfile(targetId, credentialDraft.rotateProfileId, {
+          secret: credentialDraft.secret,
+          expires_at: expiresAt,
+          clear_expiry: !expiresAt,
+        })
+      } else {
+        await createTargetCredentialProfile(targetId, {
+          name: credentialDraft.name.trim(),
+          auth_kind: credentialDraft.authKind,
+          secret: credentialDraft.secret,
+          expires_at: expiresAt,
+        })
+      }
+      setCredentialDraft({ name: '', authKind: 'authorization_header', secret: '', expiresAt: '', rotateProfileId: '' })
+      await Promise.all([loadCredentialProfiles(targetId), loadPrincipalMatrix(targetId)])
+      toast.success(credentialDraft.rotateProfileId ? 'Credential profile rotated' : 'Credential profile created')
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to save credential profile')
+    } finally {
+      setCredentialBusy(null)
+    }
+  }
+
+  function handlePrepareCredentialRotation(profile: TargetCredentialProfile) {
+    setCredentialDraft({
+      name: profile.name,
+      authKind: profile.auth_kind,
+      secret: '',
+      expiresAt: profile.expires_at ? profile.expires_at.slice(0, 16) : '',
+      rotateProfileId: profile.id,
+    })
+  }
+
+  async function handleDeactivateCredentialProfile(profile: TargetCredentialProfile) {
+    if (!targetId || !window.confirm(`Deactivate credential profile ${profile.name}?`)) return
+    setCredentialBusy(profile.id)
+    try {
+      await deactivateTargetCredentialProfile(targetId, profile.id)
+      await Promise.all([loadCredentialProfiles(targetId), loadPrincipalMatrix(targetId)])
+      toast.success('Credential profile deactivated')
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to deactivate credential profile')
+    } finally {
+      setCredentialBusy(null)
     }
   }
 
@@ -678,6 +774,115 @@ export default function InteractiveSessionPage() {
             <ErrorState message={principalMatrixError} />
           ) : principalMatrix && (
             <>
+              <div className="space-y-3 border-b border-gray-800 pb-4">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <KeyRound className="h-4 w-4 text-blue-300" aria-hidden="true" />
+                    <h3 className="text-sm font-medium text-white">Managed credential profiles</h3>
+                  </div>
+                  <span className="text-xs text-gray-500">Secrets are write-only</span>
+                </div>
+                {credentialProfilesError && <ErrorState message={credentialProfilesError} />}
+                {credentialProfiles.length > 0 && (
+                  <div className="divide-y divide-gray-800 border-y border-gray-800">
+                    {credentialProfiles.map((profile) => (
+                      <div key={profile.id} className="flex flex-wrap items-center gap-2 py-2 text-xs">
+                        <span className="w-full font-medium text-gray-200 sm:w-auto sm:min-w-0 sm:flex-1 sm:truncate">{profile.name}</span>
+                        <Badge className={profile.status === 'active' ? 'bg-green-500/15 text-green-300' : 'bg-amber-500/15 text-amber-300'}>
+                          {profile.status}
+                        </Badge>
+                        <span className="text-gray-500">{profile.auth_kind === 'authorization_header' ? 'Authorization' : 'Cookie'}</span>
+                        <span className="font-mono text-gray-500">{profile.secret_preview || 'configured'}</span>
+                        {profile.storage_encrypted ? (
+                          <span className="inline-flex items-center gap-1 text-green-300"><ShieldCheck className="h-3.5 w-3.5" aria-hidden="true" /> encrypted</span>
+                        ) : (
+                          <span className="text-amber-300">plaintext storage</span>
+                        )}
+                        {profile.refresh_required && <span className="text-amber-300">refresh due</span>}
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          title={`Rotate ${profile.name}`}
+                          disabled={credentialBusy === profile.id}
+                          onClick={() => handlePrepareCredentialRotation(profile)}
+                        >
+                          <RefreshCw className="h-3.5 w-3.5" aria-hidden="true" />
+                          <span>Rotate</span>
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          title={`Deactivate ${profile.name}`}
+                          disabled={credentialBusy === profile.id}
+                          onClick={() => void handleDeactivateCredentialProfile(profile)}
+                        >
+                          <XCircle className="h-3.5 w-3.5" aria-hidden="true" />
+                          <span>Deactivate</span>
+                        </Button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                <div className="grid gap-2 md:grid-cols-[minmax(10rem,1.2fr)_minmax(10rem,1fr)_minmax(13rem,2fr)_minmax(12rem,1fr)_auto]">
+                  <label className="space-y-1 text-xs text-gray-500">
+                    <span>Profile name</span>
+                    <input
+                      value={credentialDraft.name}
+                      disabled={Boolean(credentialDraft.rotateProfileId)}
+                      onChange={(event) => setCredentialDraft((current) => ({ ...current, name: event.target.value }))}
+                      placeholder="customer-a"
+                      className="w-full rounded-md border border-gray-800 bg-gray-900 px-2.5 py-2 text-sm text-white placeholder-gray-600 focus:border-blue-500 focus:outline-none disabled:opacity-60"
+                    />
+                  </label>
+                  <label className="space-y-1 text-xs text-gray-500">
+                    <span>Credential type</span>
+                    <select
+                      value={credentialDraft.authKind}
+                      disabled={Boolean(credentialDraft.rotateProfileId)}
+                      onChange={(event) => setCredentialDraft((current) => ({ ...current, authKind: event.target.value as TargetCredentialProfile['auth_kind'] }))}
+                      className="w-full rounded-md border border-gray-800 bg-gray-900 px-2.5 py-2 text-sm text-white focus:border-blue-500 focus:outline-none disabled:opacity-60"
+                    >
+                      <option value="authorization_header">Authorization header</option>
+                      <option value="cookie">Cookie string</option>
+                    </select>
+                  </label>
+                  <label className="space-y-1 text-xs text-gray-500">
+                    <span>{credentialDraft.rotateProfileId ? 'New secret' : 'Secret'}</span>
+                    <input
+                      type="password"
+                      autoComplete="new-password"
+                      value={credentialDraft.secret}
+                      onChange={(event) => setCredentialDraft((current) => ({ ...current, secret: event.target.value }))}
+                      placeholder={credentialDraft.authKind === 'authorization_header' ? 'Bearer token' : 'session=value'}
+                      className="w-full rounded-md border border-gray-800 bg-gray-900 px-2.5 py-2 text-sm text-white placeholder-gray-600 focus:border-blue-500 focus:outline-none"
+                    />
+                  </label>
+                  <label className="space-y-1 text-xs text-gray-500">
+                    <span>Expires at</span>
+                    <input
+                      type="datetime-local"
+                      value={credentialDraft.expiresAt}
+                      onChange={(event) => setCredentialDraft((current) => ({ ...current, expiresAt: event.target.value }))}
+                      className="w-full rounded-md border border-gray-800 bg-gray-900 px-2.5 py-2 text-sm text-white focus:border-blue-500 focus:outline-none"
+                    />
+                  </label>
+                  <div className="flex items-end gap-1">
+                    {credentialDraft.rotateProfileId && (
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => setCredentialDraft({ name: '', authKind: 'authorization_header', secret: '', expiresAt: '', rotateProfileId: '' })}
+                      >
+                        Cancel
+                      </Button>
+                    )}
+                    <Button size="sm" disabled={Boolean(credentialBusy)} onClick={() => void handleSaveCredentialProfile()}>
+                      <KeyRound className="h-3.5 w-3.5" aria-hidden="true" />
+                      <span>{credentialDraft.rotateProfileId ? 'Rotate' : 'Add profile'}</span>
+                    </Button>
+                  </div>
+                </div>
+              </div>
               <div className="grid gap-3 md:grid-cols-2">
                 {(['user1', 'user2'] as UserKey[]).map((authState) => {
                   const principal = principalsByAuthState[authState]
@@ -726,13 +931,20 @@ export default function InteractiveSessionPage() {
                           />
                         </label>
                         <label className="space-y-1 text-xs text-gray-500">
-                          <span>Credential profile reference</span>
-                          <input
+                          <span>Credential profile</span>
+                          <select
                             value={principalDrafts[authState].credentialProfile}
                             onChange={(event) => setPrincipalDrafts((current) => ({ ...current, [authState]: { ...current[authState], credentialProfile: event.target.value } }))}
-                            placeholder="vault/customer-a"
                             className="w-full rounded-md border border-gray-800 bg-gray-900 px-2.5 py-2 text-sm text-white placeholder-gray-600 focus:border-blue-500 focus:outline-none"
-                          />
+                          >
+                            <option value="">No managed profile</option>
+                            {principalDrafts[authState].credentialProfile && !credentialProfiles.some((profile) => profile.name === principalDrafts[authState].credentialProfile) && (
+                              <option value={principalDrafts[authState].credentialProfile}>{principalDrafts[authState].credentialProfile} (unresolved)</option>
+                            )}
+                            {credentialProfiles.map((profile) => (
+                              <option key={profile.id} value={profile.name}>{profile.name} · {profile.auth_kind === 'authorization_header' ? 'Authorization' : 'Cookie'}</option>
+                            ))}
+                          </select>
                         </label>
                       </div>
                       <div className="flex flex-wrap items-center justify-end gap-2">

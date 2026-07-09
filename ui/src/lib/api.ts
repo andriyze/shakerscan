@@ -3867,6 +3867,32 @@ export interface TargetPrincipal {
   metadata_json: Record<string, unknown>
 }
 
+export interface TargetCredentialProfile {
+  id: string
+  target_id: string
+  name: string
+  auth_kind: 'authorization_header' | 'cookie'
+  secret_preview?: string | null
+  secret_configured: boolean
+  storage_encrypted: boolean
+  encryption_available: boolean
+  expires_at?: string | null
+  status: 'active' | 'expired' | 'inactive'
+  refresh_required: boolean
+  execution_compatible: boolean
+  is_active: boolean
+  rotated_at?: string | null
+  metadata_json: Record<string, unknown>
+}
+
+export interface TargetCredentialProfilePayload {
+  name: string
+  auth_kind: TargetCredentialProfile['auth_kind']
+  secret: string
+  expires_at?: string
+  metadata_json?: Record<string, unknown>
+}
+
 export interface TargetPrincipalExpectation {
   id: string
   method: string
@@ -4002,6 +4028,38 @@ export async function listInteractiveSessions(): Promise<InteractiveSessionsList
 export async function getTargetPrincipalMatrix(targetId: string, limit: number = 200): Promise<TargetPrincipalMatrixResponse> {
   const res = await fetch(`${API_URL}/targets/${encodeURIComponent(targetId)}/principal-matrix?limit=${limit}`)
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load target principal matrix'))
+  return res.json()
+}
+
+export async function getTargetCredentialProfiles(targetId: string): Promise<{ target_id: string; profiles: TargetCredentialProfile[]; count: number }> {
+  const res = await fetch(`${API_URL}/targets/${encodeURIComponent(targetId)}/credential-profiles`)
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load credential profiles'))
+  return res.json()
+}
+
+export async function createTargetCredentialProfile(targetId: string, payload: TargetCredentialProfilePayload): Promise<{ profile: TargetCredentialProfile }> {
+  const res = await fetch(`${API_URL}/targets/${encodeURIComponent(targetId)}/credential-profiles`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to create credential profile'))
+  return res.json()
+}
+
+export async function rotateTargetCredentialProfile(targetId: string, profileId: string, payload: { secret: string; expires_at?: string; clear_expiry?: boolean }): Promise<{ profile: TargetCredentialProfile }> {
+  const res = await fetch(`${API_URL}/targets/${encodeURIComponent(targetId)}/credential-profiles/${encodeURIComponent(profileId)}/rotate`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to rotate credential profile'))
+  return res.json()
+}
+
+export async function deactivateTargetCredentialProfile(targetId: string, profileId: string): Promise<{ status: string; profile: TargetCredentialProfile }> {
+  const res = await fetch(`${API_URL}/targets/${encodeURIComponent(targetId)}/credential-profiles/${encodeURIComponent(profileId)}`, { method: 'DELETE' })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to deactivate credential profile'))
   return res.json()
 }
 

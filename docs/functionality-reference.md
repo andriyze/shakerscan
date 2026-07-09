@@ -722,7 +722,9 @@ actual target before a manual BOLA finding can be created.
 `PATCH|DELETE /targets/{id}/principals/{principal_id}` · `GET|POST /targets/{id}/principal-matrix`.
 Credential profile responses expose only a masked preview, storage/expiry state, and metadata; secret
 material is write-only. Profiles support exact Authorization-header values and cookie strings,
-expiry warnings, explicit rotation, and soft deactivation.
+expiry warnings, explicit rotation, and soft deactivation. Active, unexpired profiles referenced by
+active `user1`/`user2` principals resolve server-side into normal and Continuous ASM scan jobs;
+explicit per-scan auth fields retain precedence, and undecryptable/expired profiles fail closed.
 
 **Discovery & exposure**: `POST|GET /discovery` · `GET /discovery/{id}` · `GET /dashboard` ·
 `GET /exposure/graph` · `GET /exposure/nodes` · `GET /exposure/assets` · `GET /exposure/changes` ·

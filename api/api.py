@@ -2669,6 +2669,7 @@ async def run_asm_dispatch(pool: asyncpg.Pool):
                 base_opts = _decode_json_value(t['scan_options']) or {}
                 if not isinstance(base_opts, dict):
                     base_opts = {}
+                base_opts = await _resolve_target_credential_profiles(conn, t['id'], base_opts)
 
                 if action == 'recon':
                     enq = await _enqueue_asm_recon(conn, r, target_id, target_url, base_opts)
@@ -11731,11 +11732,8 @@ async def submit_scan(request: ScanRequest):
                 },
             )
 
-    parallel_enabled, parallel_worker_count = _apply_auto_sharding_policy(
-        request.options,
-        options_payload,
-        scan_type,
-    )
+    parallel_enabled = False
+    parallel_worker_count: int | None = None
 
     # Create or find target
     command_result: dict[str, Any] | None = None
@@ -11772,6 +11770,13 @@ async def submit_scan(request: ScanRequest):
         )
         if approval_context:
             options_payload.update(approval_context)
+
+        options_payload = await _resolve_target_credential_profiles(conn, target_id, options_payload)
+        parallel_enabled, parallel_worker_count = _apply_auto_sharding_policy(
+            request.options,
+            options_payload,
+            scan_type,
+        )
 
         # Parallel scans become a parent row; the scan_plan job fans out shards.
         scan_role = 'parent' if parallel_enabled else 'standalone'
@@ -13228,7 +13233,7 @@ def _normalize_target_endpoint_path(value: Any) -> str:
 def _public_target_principal_row(row: Any) -> dict[str, Any]:
     payload = row_to_dict(row)
     payload["metadata_json"] = _redact_agent_payload(_decode_json_value(payload.get("metadata_json")) or {})
-    payload["credential_configured"] = bool(payload.get("credential_profile"))
+    payload["credential_configured"] = bool(payload.get("credential_configured"))
     payload["execution_enabled"] = False
     return payload
 
@@ -13247,17 +13252,86 @@ def _target_credential_precondition_signals(
 ) -> dict[str, str]:
     """Derive credential readiness from secret-profile references, not identities."""
     metadata = metadata or {}
-    active_profile_refs = {
-        str(item.get("credential_profile") or "").strip()
+    profile_by_auth_state = {
+        str(item.get("auth_state") or "").strip(): str(item.get("credential_profile") or "").strip()
         for item in principals
-        if item.get("is_active", True) and str(item.get("credential_profile") or "").strip()
+        if item.get("is_active", True)
+        and item.get("credential_configured") is True
+        and str(item.get("auth_state") or "").strip() in {"user1", "user2"}
+        and str(item.get("credential_profile") or "").strip()
     }
+    primary_profile = profile_by_auth_state.get("user1")
+    alternate_profile = profile_by_auth_state.get("user2")
     primary_legacy = bool(metadata.get("auth") or metadata.get("credential_profile"))
     alternate_legacy = bool(metadata.get("second_user") or metadata.get("user2"))
     return {
-        "primary_credentials": "configured" if active_profile_refs or primary_legacy else "unknown",
-        "second_user_credentials": "configured" if len(active_profile_refs) >= 2 or alternate_legacy else "unknown",
+        "primary_credentials": "configured" if primary_profile or primary_legacy else "unknown",
+        "second_user_credentials": (
+            "configured"
+            if (primary_profile and alternate_profile and primary_profile.lower() != alternate_profile.lower()) or alternate_legacy
+            else "unknown"
+        ),
     }
+
+
+async def _resolve_target_credential_profiles(
+    conn: Any,
+    target_id: uuid.UUID,
+    options_payload: dict[str, Any],
+) -> dict[str, Any]:
+    """Resolve active principal profiles into existing scanner auth fields.
+
+    Explicit scan options always win. Undecryptable, inactive, and expired
+    profiles are omitted so an auth-required campaign remains fail-closed.
+    """
+    rows = await conn.fetch(
+        """
+        SELECT p.auth_state, cp.id AS profile_id, cp.auth_kind, cp.secret_value
+        FROM target_principals p
+        JOIN target_credential_profiles cp
+          ON cp.target_id = p.target_id
+         AND lower(cp.name) = lower(p.credential_profile)
+        WHERE p.target_id = $1
+          AND p.is_active = true
+          AND cp.is_active = true
+          AND (cp.expires_at IS NULL OR cp.expires_at > NOW())
+          AND p.auth_state IN ('user1', 'user2')
+        ORDER BY CASE p.auth_state WHEN 'user1' THEN 0 ELSE 1 END, p.updated_at DESC
+        """,
+        target_id,
+    )
+    resolved_states: set[str] = set()
+    resolved_profiles: list[dict[str, str]] = []
+    for row in rows:
+        payload = row_to_dict(row)
+        auth_state = str(payload.get("auth_state") or "").strip()
+        if auth_state in resolved_states:
+            continue
+        stored_secret = str(payload.get("secret_value") or "")
+        secret = str(decrypt_secret(stored_secret) or "")
+        if not secret or secret.startswith("enc:fernet:") or "\r" in secret or "\n" in secret:
+            continue
+        auth_kind = str(payload.get("auth_kind") or "")
+        option_key = None
+        if auth_state == "user1":
+            option_key = "auth_header" if auth_kind == "authorization_header" else "auth_cookies"
+        elif auth_state == "user2":
+            option_key = "user2_header" if auth_kind == "authorization_header" else "user2_cookies"
+        if not option_key:
+            continue
+        if options_payload.get(option_key):
+            resolved_states.add(auth_state)
+            continue
+        options_payload[option_key] = secret
+        resolved_states.add(auth_state)
+        resolved_profiles.append({
+            "auth_state": auth_state,
+            "profile_id": str(payload.get("profile_id")),
+            "option_key": option_key,
+        })
+    if resolved_profiles:
+        options_payload["resolved_credential_profiles"] = resolved_profiles
+    return options_payload
 
 
 @app.get("/targets/{target_id}")
@@ -13504,8 +13578,15 @@ async def list_target_principals(target_id: str, include_inactive: bool = False)
             raise HTTPException(status_code=404, detail="Target not found")
         rows = await conn.fetch(
             """
-            SELECT *
-            FROM target_principals
+            SELECT p.*,
+                   EXISTS (
+                     SELECT 1 FROM target_credential_profiles cp
+                     WHERE cp.target_id = p.target_id
+                       AND lower(cp.name) = lower(p.credential_profile)
+                       AND cp.is_active = true
+                       AND (cp.expires_at IS NULL OR cp.expires_at > NOW())
+                   ) AS credential_configured
+            FROM target_principals p
             WHERE target_id = $1 AND ($2::boolean OR is_active = true)
             ORDER BY is_active DESC, role, label
             """,
@@ -13556,6 +13637,19 @@ async def create_target_principal(target_id: str, request: TargetPrincipalCreate
             bool(request.is_active),
             json.dumps(metadata),
         )
+        row = await conn.fetchrow(
+            """
+            SELECT p.*, EXISTS (
+              SELECT 1 FROM target_credential_profiles cp
+              WHERE cp.target_id = p.target_id
+                AND lower(cp.name) = lower(p.credential_profile)
+                AND cp.is_active = true
+                AND (cp.expires_at IS NULL OR cp.expires_at > NOW())
+            ) AS credential_configured
+            FROM target_principals p WHERE p.id = $1
+            """,
+            row["id"],
+        )
     return {
         "principal": _public_target_principal_row(row),
         "execution_enabled": False,
@@ -13604,8 +13698,22 @@ async def update_target_principal(target_id: str, principal_id: str, request: Ta
             """,
             *values,
         )
-    if not row:
-        raise HTTPException(status_code=404, detail="Target principal not found")
+        if not row:
+            raise HTTPException(status_code=404, detail="Target principal not found")
+        row = await conn.fetchrow(
+            """
+            SELECT p.*, EXISTS (
+              SELECT 1 FROM target_credential_profiles cp
+              WHERE cp.target_id = p.target_id
+                AND lower(cp.name) = lower(p.credential_profile)
+                AND cp.is_active = true
+                AND (cp.expires_at IS NULL OR cp.expires_at > NOW())
+            ) AS credential_configured
+            FROM target_principals p WHERE p.id = $1 AND p.target_id = $2
+            """,
+            principal_uuid,
+            target_uuid,
+        )
     return {"principal": _public_target_principal_row(row), "execution_enabled": False}
 
 
@@ -13643,7 +13751,18 @@ async def list_target_principal_matrix(target_id: str, limit: int = Query(200, g
         if not await conn.fetchrow("SELECT 1 FROM targets WHERE id = $1", target_uuid):
             raise HTTPException(status_code=404, detail="Target not found")
         principals = await conn.fetch(
-            "SELECT * FROM target_principals WHERE target_id = $1 AND is_active = true ORDER BY role, label",
+            """
+            SELECT p.*, EXISTS (
+              SELECT 1 FROM target_credential_profiles cp
+              WHERE cp.target_id = p.target_id
+                AND lower(cp.name) = lower(p.credential_profile)
+                AND cp.is_active = true
+                AND (cp.expires_at IS NULL OR cp.expires_at > NOW())
+            ) AS credential_configured
+            FROM target_principals p
+            WHERE p.target_id = $1 AND p.is_active = true
+            ORDER BY p.role, p.label
+            """,
             target_uuid,
         )
         rows = await conn.fetch(
@@ -14652,10 +14771,18 @@ async def _build_agent_context_pack_from_target(conn, req: AgentContextPackFromT
     try:
         principal_rows = await conn.fetch(
             """
-            SELECT id, label, role, tenant_id, auth_state, credential_profile, is_active, metadata_json
-            FROM target_principals
-            WHERE target_id = $1 AND is_active = true
-            ORDER BY role, label
+            SELECT p.id, p.label, p.role, p.tenant_id, p.auth_state,
+                   p.credential_profile, p.is_active, p.metadata_json,
+                   EXISTS (
+                     SELECT 1 FROM target_credential_profiles cp
+                     WHERE cp.target_id = p.target_id
+                       AND lower(cp.name) = lower(p.credential_profile)
+                       AND cp.is_active = true
+                       AND (cp.expires_at IS NULL OR cp.expires_at > NOW())
+                   ) AS credential_configured
+            FROM target_principals p
+            WHERE p.target_id = $1 AND p.is_active = true
+            ORDER BY p.role, p.label
             LIMIT 20
             """,
             target_uuid,
@@ -23224,10 +23351,18 @@ async def generate_application_graph_hypotheses(
         )
         principal_rows = await conn.fetch(
             """
-            SELECT id, label, role, tenant_id, auth_state, credential_profile, is_active, metadata_json
-            FROM target_principals
-            WHERE target_id = $1 AND is_active = true
-            ORDER BY role, label
+            SELECT p.id, p.label, p.role, p.tenant_id, p.auth_state,
+                   p.credential_profile, p.is_active, p.metadata_json,
+                   EXISTS (
+                     SELECT 1 FROM target_credential_profiles cp
+                     WHERE cp.target_id = p.target_id
+                       AND lower(cp.name) = lower(p.credential_profile)
+                       AND cp.is_active = true
+                       AND (cp.expires_at IS NULL OR cp.expires_at > NOW())
+                   ) AS credential_configured
+            FROM target_principals p
+            WHERE p.target_id = $1 AND p.is_active = true
+            ORDER BY p.role, p.label
             LIMIT 20
             """,
             tgt,
@@ -23337,6 +23472,7 @@ async def asm_test(target_id: str, request: AsmTestRequest = None):
         )
         if approval_context:
             base_opts.update(approval_context)
+        base_opts = await _resolve_target_credential_profiles(conn, uuid.UUID(target_id), base_opts)
         enq = await _enqueue_asm_exploit_batch(
             conn, r, target_id, target["url"], base_opts,
             batch_size=request.batch_size, stale_days=request.stale_days,
@@ -23406,6 +23542,7 @@ async def asm_recon(target_id: str, request: AsmReconRequest = None):
         )
         if approval_context:
             base_opts.update(approval_context)
+        base_opts = await _resolve_target_credential_profiles(conn, uuid.UUID(target_id), base_opts)
         if request.budget_profile:
             base_opts["budget_profile"] = request.budget_profile
         enq = await _enqueue_asm_recon(conn, r, target_id, target["url"], base_opts, triggered_by="api")
@@ -23551,6 +23688,7 @@ async def asm_improve(target_id: str, request: AsmImproveRequest = None):
         )
         if approval_context:
             base_opts.update(approval_context)
+        base_opts = await _resolve_target_credential_profiles(conn, uuid.UUID(target_id), base_opts)
         if rec["next_action"] == "recon":
             enq = await _enqueue_asm_recon(conn, r, target_id, target["url"], base_opts, triggered_by="improve")
             await conn.execute("UPDATE targets SET asm_last_recon_at = NOW() WHERE id = $1", uuid.UUID(target_id))

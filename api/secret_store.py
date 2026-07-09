@@ -1,4 +1,4 @@
-"""Encryption-at-rest for AI target credential secrets (R2b).
+"""Encryption-at-rest for AI and DAST target credential secrets (R2b).
 
 Opt-in and backward compatible:
 
