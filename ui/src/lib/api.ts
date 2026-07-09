@@ -324,6 +324,7 @@ export interface ArsenalExecutionResponse {
   command_result?: CommandResult | null
   campaign_action?: CampaignAction | null
   result?: Record<string, unknown> | null
+  action_state?: Record<string, unknown> | null
 }
 
 export interface Hypothesis {

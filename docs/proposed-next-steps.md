@@ -1186,7 +1186,7 @@ the deterministic campaign from it, while unproven graph/source/AI signals remai
 than findings.
 
 ### 8. Auth / principal / role matrix
-**Status: PARTIAL, PHASE 10 CREDENTIAL PRECONDITION TRUTHFULNESS DONE.** `target_endpoints.auth_state` exists, and
+**Status: PARTIAL, PHASE 11 EXECUTION FEEDBACK TRUTHFULNESS DONE.** `target_endpoints.auth_state` exists, and
 `target_principals` plus `target_endpoint_expectations` now persist role, tenant, credential-profile
 references, auth states, and endpoint x principal expected access. `GET/POST /targets/{id}/principals`
 and `GET/POST /targets/{id}/principal-matrix` expose the matrix as non-executing planning facts, and
@@ -1234,6 +1234,9 @@ configured credentials. Primary readiness requires an active credential-profile 
 legacy target auth signal), and second-user readiness requires two distinct profile references (or
 the legacy alternate-user signal), preventing record-only principal setup from unblocking auth/BOLA
 execution plans prematurely.
+DONE phase 11: Command Arsenal replay and promotion controls inspect fail-closed HTTP 200 responses
+and show the dispatcher block reason or action-state phase; successful dispatches show explicit
+completion feedback. Operators no longer have to infer execution from a silent refresh.
 
 **Done when:** a campaign can assert "endpoint X requires role admin" and prove a lower-role
 principal's access is a finding.
@@ -1349,7 +1352,7 @@ produce receipts for both successful and failed/skipped runs; missing binaries s
 not phantom success.
 
 ### 9a. Refuter workflow and integrity ledgers
-**Status: PARTIAL, PHASE 8 EVIDENCE ANNOTATION DONE.** T3MP3ST's strongest process lesson is not a detector; it
+**Status: PARTIAL, PHASE 9 VERDICT-BASIS UI TRUTHFULNESS DONE.** T3MP3ST's strongest process lesson is not a detector; it
 is the habit of trying to disprove weak wins. ShakerScan now has durable
 `refuter_reviews` records exposed through `GET/POST /arsenal/refuter-reviews` and
 `refuter_review.list` / `refuter_review.record`, plus read-only trigger summaries through
@@ -1410,6 +1413,8 @@ remains open.
    reviewed without auto-queueing or mutating findings. DONE phase 7: the Command Arsenal UI renders
    durable review questions, benign explanations, required evidence refs, verdict paths, and selected
    automation steps, then routes execution and verdict derivation through the approval-receipt gate.
+   DONE phase 9: verdict badges are styled by both verdict and `verdict_basis`; signal-only records
+   remain neutral and cannot visually inherit proof-backed green treatment.
 2. PARTIAL phase 1: refuter behavior now plans how to rerun the minimal reproducer, test benign
    explanations, verify auth context/principal/tenant/object ownership, check request freshness, and
    attach counterevidence when a claim weakens. DONE phase 2: a gated executor now queues the

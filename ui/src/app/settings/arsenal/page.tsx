@@ -60,8 +60,8 @@ import {
   type ScopeReceiptPreview,
   type SourceIngestResult,
 } from '@/lib/api'
-import { buildAuthzReplayReview, sessionMatchesTarget } from '@/lib/authzReplay'
-import { buildRefuterAnnotationPayload, buildRefuterReviewPlanView } from '@/lib/refuterReview'
+import { authzExecutionFeedback, buildAuthzReplayReview, sessionMatchesTarget } from '@/lib/authzReplay'
+import { buildRefuterAnnotationPayload, buildRefuterReviewPlanView, refuterVerdictClass } from '@/lib/refuterReview'
 import { Badge, Button, Card, EmptyState, ErrorState, Skeleton } from '@/components/ui'
 
 function statusClass(status: string): string {
@@ -229,6 +229,7 @@ function CampaignActionRow({
   const [sessionId, setSessionId] = useState('')
   const [executing, setExecuting] = useState<'replay' | 'promote' | null>(null)
   const [actionError, setActionError] = useState<string | null>(null)
+  const [actionMessage, setActionMessage] = useState<string | null>(null)
 
   useEffect(() => {
     if (!sessionId && availableSessions.length > 0) {
@@ -240,14 +241,18 @@ function CampaignActionRow({
     if (!sessionId || !approvalReceiptId) return
     setExecuting('replay')
     setActionError(null)
+    setActionMessage(null)
     try {
-      await executeAuthzReplay(action.id, {
+      const response = await executeAuthzReplay(action.id, {
         session_id: sessionId,
         execute: true,
         confirmations: ['confirm_authorized'],
         approval_receipt_id: approvalReceiptId,
         created_by: operator || 'operator',
       })
+      const feedback = authzExecutionFeedback(response, 'Authorization replay completed')
+      if (feedback.blocked) setActionError(feedback.message)
+      else setActionMessage(feedback.message)
       await onRefresh()
     } catch (err) {
       setActionError(err instanceof Error ? err.message : 'Authorization replay failed')
@@ -260,13 +265,17 @@ function CampaignActionRow({
     if (!approvalReceiptId) return
     setExecuting('promote')
     setActionError(null)
+    setActionMessage(null)
     try {
-      await promoteAuthzReplay(action.id, {
+      const response = await promoteAuthzReplay(action.id, {
         execute: true,
         confirmations: ['confirm_authorized'],
         approval_receipt_id: approvalReceiptId,
         created_by: operator || 'operator',
       })
+      const feedback = authzExecutionFeedback(response, 'Authorization replay promoted')
+      if (feedback.blocked) setActionError(feedback.message)
+      else setActionMessage(feedback.message)
       await onRefresh()
     } catch (err) {
       setActionError(err instanceof Error ? err.message : 'Authorization replay promotion failed')
@@ -393,6 +402,7 @@ function CampaignActionRow({
             ))}
           </div>
           {actionError && <p role="alert" className="mt-2 text-sm text-red-300">{actionError}</p>}
+          {actionMessage && <p role="status" className="mt-2 text-sm text-green-300">{actionMessage}</p>}
         </div>
       )}
     </div>
@@ -765,7 +775,7 @@ function RefuterReviewRow({ review, approvalReceiptId, operator, onRefresh }: {
           <div className="flex flex-wrap items-center gap-2">
             <Badge className="bg-amber-500/15 text-amber-300">{review.refuter_signal}</Badge>
             <Badge className="bg-gray-800 text-gray-300">{review.verdict_basis}</Badge>
-            {review.refuter_verdict && <Badge className={statusClass('proof_backed')}>{review.refuter_verdict}</Badge>}
+            {review.refuter_verdict && <Badge className={refuterVerdictClass(review.refuter_verdict, review.verdict_basis)}>{review.refuter_verdict}</Badge>}
           </div>
           <p className="mt-2 break-words text-sm text-gray-300">{review.trigger_reason}</p>
           <p className="mt-1 break-all font-mono text-xs text-gray-500">{review.id}</p>

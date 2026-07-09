@@ -11,7 +11,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const out = mkdtempSync(path.join(tmpdir(), 'refuter-review-'))
 execFileSync('npx', ['tsc', 'src/lib/refuterReview.ts', '--module', 'commonjs', '--target', 'es2022', '--outDir', out, '--skipLibCheck'], { cwd: root })
 const require = createRequire(import.meta.url)
-const { buildRefuterReviewPlanView, buildRefuterAnnotationPayload } = require(path.join(out, 'refuterReview.js'))
+const { buildRefuterReviewPlanView, buildRefuterAnnotationPayload, refuterVerdictClass } = require(path.join(out, 'refuterReview.js'))
 test.after(() => rmSync(out, { recursive: true, force: true }))
 
 test('normalizes counterevidence questions, steps, refs, and verdict paths', () => {
@@ -48,4 +48,11 @@ test('keeps analyst notes signal-only unless human verdict mode is explicit', ()
   assert.equal(verdict.verdict_basis, 'human_approved_review')
   assert.equal(verdict.refuter_verdict, 'refuted')
   assert.equal(verdict.refuter_signal, 'refute')
+})
+
+test('does not style signal-only verdicts as proof-backed', () => {
+  assert.equal(refuterVerdictClass('supported', 'signal_only'), 'bg-gray-800 text-gray-300')
+  assert.equal(refuterVerdictClass('supported', 'human_approved_review'), 'bg-green-500/15 text-green-300')
+  assert.equal(refuterVerdictClass('weakened', 'human_approved_review'), 'bg-amber-500/15 text-amber-300')
+  assert.equal(refuterVerdictClass('refuted', 'human_approved_review'), 'bg-blue-500/15 text-blue-300')
 })

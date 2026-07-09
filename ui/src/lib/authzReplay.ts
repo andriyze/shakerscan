@@ -14,6 +14,14 @@ export interface AuthzReplayReview {
   promotedFindingIds: string[]
 }
 
+export interface AuthzExecutionFeedbackInput {
+  dispatched?: boolean
+  dry_run?: boolean
+  execution_enabled?: boolean
+  execution_blocked_reason?: string | null
+  action_state?: Record<string, unknown> | null
+}
+
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' && !Array.isArray(value)
     ? value as Record<string, unknown>
@@ -69,4 +77,23 @@ export function sessionMatchesTarget(sessionTarget: string, actionTarget?: strin
   } catch {
     return sessionTarget.replace(/\/$/, '') === actionTarget.replace(/\/$/, '')
   }
+}
+
+export function authzExecutionFeedback(
+  response: AuthzExecutionFeedbackInput,
+  successMessage: string
+): { blocked: boolean; message: string } {
+  const state = asRecord(response.action_state)
+  const reason = stringValue(response.execution_blocked_reason)
+    || stringValue(state.blocked_reason)
+    || stringValue(state.phase)
+  const blocked = Boolean(
+    reason
+    || response.execution_enabled === false
+    || response.dispatched === false
+    || response.dry_run === true
+  )
+  return blocked
+    ? { blocked: true, message: `Execution blocked: ${reason || 'request was not dispatched'}` }
+    : { blocked: false, message: successMessage }
 }

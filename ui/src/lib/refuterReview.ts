@@ -88,3 +88,11 @@ export function buildRefuterAnnotationPayload(review: RefuterReviewIdentity, inp
     created_by: input.createdBy || 'operator',
   }
 }
+
+export function refuterVerdictClass(verdict: string | null | undefined, verdictBasis: string): string {
+  if (!verdict || verdictBasis === 'signal_only') return 'bg-gray-800 text-gray-300'
+  if (verdict === 'supported') return 'bg-green-500/15 text-green-300'
+  if (verdict === 'weakened') return 'bg-amber-500/15 text-amber-300'
+  if (verdict === 'refuted') return 'bg-blue-500/15 text-blue-300'
+  return 'bg-gray-800 text-gray-300'
+}

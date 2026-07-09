@@ -28,7 +28,7 @@ execFileSync(
 )
 
 const require = createRequire(import.meta.url)
-const { buildAuthzReplayReview, sessionMatchesTarget } = require(path.join(outDir, 'authzReplay.js'))
+const { authzExecutionFeedback, buildAuthzReplayReview, sessionMatchesTarget } = require(path.join(outDir, 'authzReplay.js'))
 
 test.after(() => {
   rmSync(outDir, { recursive: true, force: true })
@@ -66,4 +66,20 @@ test('summarizes replay proof and promotion state', () => {
 test('matches interactive sessions by origin', () => {
   assert.equal(sessionMatchesTarget('https://app.example.test/login', 'https://app.example.test'), true)
   assert.equal(sessionMatchesTarget('https://other.example.test', 'https://app.example.test'), false)
+})
+
+test('surfaces fail-closed HTTP 200 responses as blocked execution', () => {
+  assert.deepEqual(authzExecutionFeedback({
+    dispatched: false,
+    dry_run: true,
+    execution_enabled: false,
+    execution_blocked_reason: 'AI_OPS_ROUTER_EXECUTE_ENABLED_disabled',
+  }, 'Replay completed'), {
+    blocked: true,
+    message: 'Execution blocked: AI_OPS_ROUTER_EXECUTE_ENABLED_disabled',
+  })
+  assert.deepEqual(authzExecutionFeedback({ dispatched: true, execution_enabled: true }, 'Replay completed'), {
+    blocked: false,
+    message: 'Replay completed',
+  })
 })
