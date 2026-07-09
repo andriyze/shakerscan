@@ -38,3 +38,25 @@ claim instead of deleting it.
   single Smart Juice Shop scorecard plus an authenticated/two-user run before
   claiming recall progress. Benchmark-followup hypotheses are worklist entries,
   not proof that recall has moved.
+
+### 2026-07-09 — Product-specific frontend route expansion was removed
+
+- Date: 2026-07-09
+- Artifact: Commits `3ee716b` and `17d2612`; tracked scorecards under
+  `results/benchmark-runs/benchmark-{juice_shop,crapi}.json`.
+- Issue: `3ee716b` mapped generic coupon/shop/mechanic route nouns onto crAPI's
+  community/workshop service mounts. Describing those as generic route-shape
+  rules did not make them universal; they fabricated target-specific candidates.
+- Impact: Builds between `3ee716b` and `17d2612` could spend discovery and active
+  budgets on benchmark-fitted routes. Inspection of the API results referenced by
+  the currently tracked scorecards reported scanner version `a6956df`, which
+  predates `3ee716b`, so those recorded scores were not produced by the fitted
+  expansion and must not be retroactively marked contaminated.
+- Correction: `17d2612` removed the product-specific mappings. Commits `39259f8`,
+  `08af65c`, and `0faab3c` recover frontend request methods, body/query fields,
+  and client-bound base URLs only from static call/config facts in the target's
+  own frontend assets.
+- Follow-up: Route composition must remain tied to observed traffic, schemas, or
+  statically linked client configuration. Benchmark hostnames, product nouns,
+  and answer-key routes are prohibited detector inputs; score movement still
+  requires a fresh build-current benchmark run.
