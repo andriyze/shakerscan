@@ -1176,7 +1176,7 @@ the deterministic campaign from it, while unproven graph/source/AI signals remai
 than findings.
 
 ### 8. Auth / principal / role matrix
-**Status: PARTIAL, PHASE 6 OPERATOR REPLAY UI DONE.** `target_endpoints.auth_state` exists, and
+**Status: PARTIAL, PHASE 7 PRINCIPAL-AWARE SESSIONS DONE.** `target_endpoints.auth_state` exists, and
 `target_principals` plus `target_endpoint_expectations` now persist role, tenant, credential-profile
 references, auth states, and endpoint x principal expected access. `GET/POST /targets/{id}/principals`
 and `GET/POST /targets/{id}/principal-matrix` expose the matrix as non-executing planning facts, and
@@ -1205,7 +1205,11 @@ promoted evidence. DONE phase 6 for campaign-action operator controls: the adver
 and promotion routes now dispatch through the approval-receipt gate, completed replay actions are
 eligible for explicit promotion, and the Command Arsenal UI supports origin-aware interactive-session
 selection, proof-bundle review, gated replay, and differential-only finding promotion. Remaining work
-is richer principal/session lifecycle management beyond the existing interactive-session surface.
+is credential-profile lifecycle management beyond the existing interactive-session surface. DONE
+phase 7: ASM auth-remediation links now carry target identity into the interactive workflow; that page
+loads the content-free persisted principal matrix, labels user contexts with role/tenant expectations,
+shows credential-profile presence without credential contents, summarizes allow/deny expectations,
+and can load a selected expectation into the endpoint replay form without executing it.
 
 **Done when:** a campaign can assert "endpoint X requires role admin" and prove a lower-role
 principal's access is a finding.

@@ -3853,6 +3853,43 @@ export interface InteractiveSessionsListResponse {
   count: number
 }
 
+export interface TargetPrincipal {
+  id: string
+  target_id: string
+  label: string
+  role: string
+  tenant_id?: string | null
+  auth_state: string
+  credential_configured: boolean
+  is_active: boolean
+  metadata_json: Record<string, unknown>
+}
+
+export interface TargetPrincipalExpectation {
+  id: string
+  method: string
+  path: string
+  param_shape?: string | null
+  param_location?: string | null
+  principal_id?: string | null
+  principal_label?: string | null
+  principal_auth_state?: string | null
+  principal_role?: string | null
+  tenant_id?: string | null
+  expected_access: 'allow' | 'deny' | 'requires_role' | 'unknown'
+  expected_http_status?: number | null
+  expectation_source?: string | null
+}
+
+export interface TargetPrincipalMatrixResponse {
+  target_id: string
+  principals: TargetPrincipal[]
+  expectations: TargetPrincipalExpectation[]
+  count: number
+  execution_enabled: boolean
+  findings_created: number
+}
+
 export interface InteractiveActionRequest {
   action: string
   user?: string
@@ -3932,6 +3969,12 @@ export async function listInteractiveSessions(): Promise<InteractiveSessionsList
   if (!res.ok) {
     throw new Error(await getApiErrorMessage(res, 'Failed to list interactive sessions'))
   }
+  return res.json()
+}
+
+export async function getTargetPrincipalMatrix(targetId: string, limit: number = 200): Promise<TargetPrincipalMatrixResponse> {
+  const res = await fetch(`${API_URL}/targets/${encodeURIComponent(targetId)}/principal-matrix?limit=${limit}`)
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load target principal matrix'))
   return res.json()
 }
 

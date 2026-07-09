@@ -22629,7 +22629,12 @@ def _build_asm_campaign_timeline(
                 "href": f"/scans/{scan_id}",
             }
         if any(token in blocker for token in ("auth_missing", "auth_failed", "second_user", "principal")):
-            suffix = f"?target={urllib.parse.quote(str(target_url), safe='')}" if target_url else ""
+            params = []
+            if target_url:
+                params.append(f"target={urllib.parse.quote(str(target_url), safe='')}")
+            if target_id:
+                params.append(f"target_id={urllib.parse.quote(str(target_id), safe='')}")
+            suffix = f"?{'&'.join(params)}" if params else ""
             return {"kind": "configure_auth", "label": "Configure auth session", "href": f"/interactive{suffix}"}
         if "worker_stale" in blocker or "stale_worker" in blocker:
             return {"kind": "workers", "label": "Review workers", "href": "/#workers"}

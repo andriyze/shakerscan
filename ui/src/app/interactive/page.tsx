@@ -7,6 +7,7 @@ import {
   createInteractiveSessionFinding,
   endInteractiveSession,
   getInteractiveSession,
+  getTargetPrincipalMatrix,
   listInteractiveSessions,
   runInteractiveAction,
   startInteractiveSession,
@@ -14,6 +15,7 @@ import {
   type InteractiveEndpointTestResult,
   type InteractiveSessionState,
   type InteractiveSessionSummary,
+  type TargetPrincipalMatrixResponse,
 } from '@/lib/api'
 import { SEVERITY_LEVELS } from '@/lib/constants'
 import { Badge, Button, Card, ErrorState, useToast } from '@/components/ui'
@@ -77,11 +79,29 @@ export default function InteractiveSessionPage() {
   const [session, setSession] = useState<InteractiveSessionState | null>(null)
   const [activeSessions, setActiveSessions] = useState<InteractiveSessionSummary[]>([])
   const [sessionsError, setSessionsError] = useState<string | null>(null)
+  const [targetId, setTargetId] = useState('')
+  const [principalMatrix, setPrincipalMatrix] = useState<TargetPrincipalMatrixResponse | null>(null)
+  const [principalMatrixError, setPrincipalMatrixError] = useState<string | null>(null)
 
   useEffect(() => {
     const requestedTarget = new URLSearchParams(window.location.search).get('target')
+    const requestedTargetId = new URLSearchParams(window.location.search).get('target_id')
     if (requestedTarget) setTarget(requestedTarget)
+    if (requestedTargetId) setTargetId(requestedTargetId)
   }, [])
+
+  useEffect(() => {
+    if (!targetId) return
+    getTargetPrincipalMatrix(targetId, 100)
+      .then((matrix) => {
+        setPrincipalMatrix(matrix)
+        setPrincipalMatrixError(null)
+      })
+      .catch((err) => {
+        setPrincipalMatrix(null)
+        setPrincipalMatrixError(err instanceof Error ? err.message : 'Failed to load principal matrix')
+      })
+  }, [targetId])
 
   const [endpoint, setEndpoint] = useState('')
   const [method, setMethod] = useState('GET')
@@ -167,6 +187,16 @@ export default function InteractiveSessionPage() {
     const keys = Object.keys(session.users)
     return Array.from(new Set(['default', ...keys]))
   }, [session?.users])
+
+  const principalsByAuthState = useMemo(() => {
+    const mapped: Partial<Record<UserKey, TargetPrincipalMatrixResponse['principals'][number]>> = {}
+    for (const principal of principalMatrix?.principals || []) {
+      if ((principal.auth_state === 'user1' || principal.auth_state === 'user2') && !mapped[principal.auth_state]) {
+        mapped[principal.auth_state] = principal
+      }
+    }
+    return mapped
+  }, [principalMatrix])
 
   async function handleStartSession() {
     if (!target.trim()) {
@@ -505,15 +535,78 @@ export default function InteractiveSessionPage() {
         )}
       </Card>
 
+      {(principalMatrix || principalMatrixError) && (
+        <Card className="p-5 space-y-4">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <h2 className="text-lg font-semibold text-white">Principal Replay Plan</h2>
+            {principalMatrix && <Badge className="bg-gray-800 text-gray-300">{principalMatrix.expectations.length} expectations</Badge>}
+          </div>
+          {principalMatrixError ? (
+            <ErrorState message={principalMatrixError} />
+          ) : principalMatrix && (
+            <>
+              <div className="grid gap-3 md:grid-cols-2">
+                {(['user1', 'user2'] as UserKey[]).map((authState) => {
+                  const principal = principalsByAuthState[authState]
+                  const expectations = principalMatrix.expectations.filter((item) => item.principal_auth_state === authState || item.principal_id === principal?.id)
+                  const allowCount = expectations.filter((item) => item.expected_access === 'allow').length
+                  const denyCount = expectations.filter((item) => item.expected_access === 'deny').length
+                  return (
+                    <div key={authState} className="rounded-md border border-gray-800 bg-gray-950 p-3">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <Badge className="bg-blue-500/15 text-blue-300">{authState}</Badge>
+                        <span className="text-sm font-medium text-white">{principal?.label || 'Unassigned principal'}</span>
+                        {principal?.role && <Badge className="bg-gray-800 text-gray-300">{principal.role}</Badge>}
+                        {principal?.credential_configured && <Badge className="bg-green-500/15 text-green-300">credential profile</Badge>}
+                      </div>
+                      <div className="mt-2 flex flex-wrap gap-2 text-xs text-gray-500">
+                        <span>tenant: <span className="text-gray-300">{principal?.tenant_id || 'none'}</span></span>
+                        <span>allow: <span className="text-green-300">{allowCount}</span></span>
+                        <span>deny: <span className="text-amber-300">{denyCount}</span></span>
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+              {principalMatrix.expectations.length > 0 && (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead><tr className="border-b border-gray-800 text-left text-xs text-gray-500"><th className="px-2 py-2">Endpoint</th><th className="px-2 py-2">Principal</th><th className="px-2 py-2">Expected</th><th className="px-2 py-2" /></tr></thead>
+                    <tbody>
+                      {principalMatrix.expectations.slice(0, 8).map((item) => (
+                        <tr key={item.id} className="border-b border-gray-800/70">
+                          <td className="px-2 py-2 font-mono text-xs text-gray-300">{item.method} {item.path}</td>
+                          <td className="px-2 py-2 text-gray-400">{item.principal_label || item.principal_auth_state || item.principal_role || 'unspecified'}</td>
+                          <td className="px-2 py-2"><Badge className={item.expected_access === 'deny' ? 'bg-amber-500/15 text-amber-300' : item.expected_access === 'allow' ? 'bg-green-500/15 text-green-300' : 'bg-gray-800 text-gray-300'}>{item.expected_access}{item.expected_http_status ? ` · ${item.expected_http_status}` : ''}</Badge></td>
+                          <td className="px-2 py-2 text-right"><Button size="sm" variant="ghost" onClick={() => {
+                            setEndpoint(item.path)
+                            setMethod(item.method)
+                            if (item.principal_auth_state === 'user1' || item.principal_auth_state === 'user2') setAsUser(item.principal_auth_state)
+                          }}>Load test</Button></td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </>
+          )}
+        </Card>
+      )}
+
       <Card className="p-5 space-y-4">
         <h2 className="text-lg font-semibold text-white">Step 2. Configure Two User Contexts</h2>
         <div className="grid gap-4 lg:grid-cols-2">
           {(['user1', 'user2'] as UserKey[]).map((user) => {
             const userState = session?.users?.[user]
+            const plannedPrincipal = principalsByAuthState[user]
             return (
               <div key={user} className="rounded-lg border border-gray-800 bg-gray-950 p-4 space-y-3">
                 <div className="flex items-center justify-between">
-                  <h3 className="text-sm font-semibold text-white uppercase tracking-wide">{user}</h3>
+                  <div>
+                    <h3 className="text-sm font-semibold text-white uppercase tracking-wide">{user}</h3>
+                    {plannedPrincipal && <p className="mt-0.5 text-xs text-gray-500">{plannedPrincipal.label} · {plannedPrincipal.role}{plannedPrincipal.tenant_id ? ` · tenant ${plannedPrincipal.tenant_id}` : ''}</p>}
+                  </div>
                   <Badge className={userState?.is_authenticated ? 'bg-green-500/20 text-green-300' : 'bg-gray-700 text-gray-400'}>
                     {userState?.is_authenticated ? `${userState.auth_method || 'auth'} ready` : 'not authenticated'}
                   </Badge>
