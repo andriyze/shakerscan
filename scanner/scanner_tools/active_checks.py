@@ -2555,6 +2555,83 @@ async def nosql_injection_test_json_body(
             signals.add("user_identity_data")
         return sorted(signals)
 
+    def _json_collection_stats(body: str) -> dict[str, Any]:
+        """Extract conservative collection-shape stats from a JSON response."""
+        stats: dict[str, Any] = {
+            "valid_json": False,
+            "max_array_items": 0,
+            "object_key_count": 0,
+            "data_keys": set(),
+        }
+        if not body:
+            return stats
+        try:
+            parsed = json.loads(body)
+        except Exception:
+            return stats
+        stats["valid_json"] = True
+
+        def _walk(value: Any, depth: int = 0) -> None:
+            if depth > 5:
+                return
+            if isinstance(value, dict):
+                stats["object_key_count"] += len(value)
+                for key, child in value.items():
+                    key_text = str(key).lower()
+                    stats["data_keys"].add(key_text)
+                    _walk(child, depth + 1)
+            elif isinstance(value, list):
+                stats["max_array_items"] = max(int(stats["max_array_items"]), len(value))
+                for child in value[:10]:
+                    _walk(child, depth + 1)
+
+        _walk(parsed)
+        return stats
+
+    def _collection_diff_evidence(
+        control_body: str,
+        permissive_body: str,
+        *,
+        control_status: int | None,
+        permissive_status: int | None,
+    ) -> dict[str, Any] | None:
+        if permissive_status is None or not (200 <= permissive_status < 300):
+            return None
+        permissive_stats = _json_collection_stats(permissive_body)
+        if not permissive_stats["valid_json"]:
+            return None
+        control_stats = _json_collection_stats(control_body)
+        p_items = int(permissive_stats["max_array_items"])
+        c_items = int(control_stats["max_array_items"])
+        p_keys = permissive_stats["data_keys"]
+        data_key_markers = {
+            "id", "_id", "uid", "product", "productid", "product_id", "review",
+            "reviews", "comment", "comments", "message", "rating", "email",
+            "user", "username", "author", "createdat", "updatedat", "name",
+            "title", "description",
+        }
+        has_data_shape = (
+            p_items >= 2
+            and int(permissive_stats["object_key_count"]) >= 2
+            and bool(p_keys.intersection(data_key_markers) or len(p_keys) >= 3)
+        )
+        if not has_data_shape:
+            return None
+
+        control_rejected = control_status in (400, 401, 403, 404, 422)
+        expanded_items = p_items >= max(2, c_items + 2)
+        expanded_bytes = len(permissive_body or "") >= len(control_body or "") + 120
+        if control_rejected or (expanded_items and expanded_bytes):
+            return {
+                "control_status": control_status,
+                "payload_status": permissive_status,
+                "control_items": c_items,
+                "payload_items": p_items,
+                "control_length": len(control_body or ""),
+                "payload_length": len(permissive_body or ""),
+            }
+        return None
+
     # NoSQLi payloads for JSON body injection
     nosql_payloads = [
         {"$ne": ""},                   # Not equal to empty - bypasses auth
@@ -2689,6 +2766,20 @@ async def nosql_injection_test_json_body(
             _finalize_attempt(skipped_reason="method_or_content_type_not_supported")
             return results
 
+        restrictive_out = baseline_out
+        restrictive_code = baseline_code
+        restrictive_payload = copy.deepcopy(base_body)
+        _set_nested_value(restrictive_payload, param, {"$eq": "shakerscan_nx_8f3a2e"}, overwrite=True)
+        restrictive_cmd = [
+            "curl", "-sS", "-X", method, "-L", "-k", "--max-time", "10",
+            "-H", "Content-Type: application/json",
+            "-d", json.dumps(restrictive_payload),
+            "-w", "__SHAKERSCAN_NOSQL__%{http_code}__SHAKERSCAN_NOSQL__",
+        ] + auth_args + [url]
+        restrictive_raw, _, restrictive_rc = await run(restrictive_cmd, timeout=15)
+        if restrictive_rc == 0:
+            restrictive_out, restrictive_code = _parse_meta(restrictive_raw or "")
+
         # Test each NoSQLi payload
         for payload in nosql_payloads:
             test_payload = copy.deepcopy(base_body)
@@ -2753,6 +2844,7 @@ async def nosql_injection_test_json_body(
             # Check for behavioral differences
             is_vulnerable = False
             evidence_type = ""
+            collection_evidence = None
 
             # Pre-compute success/error indicators
             error_markers = [
@@ -2764,9 +2856,27 @@ async def nosql_injection_test_json_body(
             baseline_is_error = (baseline_code is not None and baseline_code >= 400) or any(m in baseline_lower for m in error_markers)
             test_is_success = (test_code is not None and test_code < 400) and not any(m in test_lower for m in error_markers)
 
+            if isinstance(payload, dict) and ("$ne" in payload or "$regex" in payload or "$exists" in payload):
+                collection_evidence = _collection_diff_evidence(
+                    restrictive_out or baseline_out or "",
+                    test_out or "",
+                    control_status=restrictive_code,
+                    permissive_status=test_code,
+                )
+                if collection_evidence:
+                    is_vulnerable = True
+                    evidence_type = "operator_collection_differential"
+                    if debug_nosql:
+                        print(
+                            "[DEBUG NoSQL Test] COLLECTION DIFFERENTIAL DETECTED: "
+                            f"control_items={collection_evidence['control_items']} "
+                            f"payload_items={collection_evidence['payload_items']}",
+                            file=sys.stderr,
+                        )
+
             # Significant length difference (use lower threshold for small baselines)
             min_diff = min(100, max(20, baseline_len * 2))
-            if baseline_is_error and test_is_success and test_len > baseline_len * 1.5 and test_len > baseline_len + min_diff:
+            if not is_vulnerable and baseline_is_error and test_is_success and test_len > baseline_len * 1.5 and test_len > baseline_len + min_diff:
                 is_vulnerable = True
                 evidence_type = "length_difference"
                 if debug_nosql:
@@ -2774,7 +2884,7 @@ async def nosql_injection_test_json_body(
 
             # Empty/minimal baseline with substantial response (catches {} -> data)
             baseline_minimal = baseline_len <= 10 or baseline_out in ('{}', '[]', 'null', '')
-            if baseline_minimal and test_len > 30 and test_is_success:
+            if not is_vulnerable and baseline_minimal and test_len > 30 and test_is_success:
                 is_vulnerable = True
                 evidence_type = "empty_baseline_bypass"
                 if debug_nosql:
@@ -2788,7 +2898,7 @@ async def nosql_injection_test_json_body(
                 if debug_nosql and payload == nosql_payloads[0]:
                     print(f"[DEBUG NoSQL Test] baseline_looks_error={baseline_looks_error} test_looks_success={test_is_success}", file=sys.stderr)
 
-                if baseline_looks_error and test_is_success and test_len > 50:
+                if not is_vulnerable and baseline_looks_error and test_is_success and test_len > 50:
                     is_vulnerable = True
                     evidence_type = "bypass_error"
                     if debug_nosql:
@@ -2798,22 +2908,25 @@ async def nosql_injection_test_json_body(
             data_indicators = ['"id"', '"_id"', '"email"', '"user', '"token"', '"coupon"', '"code"', '"amount"']
             test_has_data = any(x in test_out.lower() for x in data_indicators) if test_out else False
             baseline_has_data = any(x in (baseline_out or "").lower() for x in data_indicators)
-            if test_has_data and not baseline_has_data and test_is_success:
+            if not is_vulnerable and test_has_data and not baseline_has_data and test_is_success:
                 is_vulnerable = True
                 evidence_type = "data_leak"
                 if debug_nosql:
                     print(f"[DEBUG NoSQL Test] DATA LEAK DETECTED!", file=sys.stderr)
 
             if is_vulnerable:
-                results["vulnerable"] = True
-                results["findings"].append({
+                finding = {
                     "parameter": param,
                     "payload": json.dumps(payload),
                     "evidence_type": evidence_type,
                     "baseline_length": baseline_len,
                     "payload_length": test_len,
                     "response_snippet": test_out[:500] if test_out else "",
-                })
+                }
+                if collection_evidence:
+                    finding.update(collection_evidence)
+                results["vulnerable"] = True
+                results["findings"].append(finding)
                 break  # Found vuln for this param, move to next
 
     _finalize_attempt()

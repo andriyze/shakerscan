@@ -1006,7 +1006,10 @@ endpoints such as `/metrics` can surface without enabling the full broad forced-
 DONE phase 18 for reflected-XSS route preservation: Smart now keeps discovered queryless
 lookup/action routes such as `/rest/track-order` in the active endpoint graph even when it also
 creates synthetic query-param variants, allowing the existing path-value XSS proof to test
-`/route/{value}` surfaces instead of only `/route?id=...`.
+`/route/{value}` surfaces instead of only `/route?id=...`. DONE phase 19 for NoSQL collection
+differential proof: JSON-body NoSQL checks now compare restrictive `$eq` controls with permissive
+`$ne`/regex/exists operators and promote only material JSON collection expansion with data-shaped
+items, carrying control/payload item counts into finding evidence.
 
 **Done when:** recorded two-user benchmark scorecards show the targeted miss becoming a deterministic
 finding, not merely an attempted endpoint.

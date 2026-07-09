@@ -63,10 +63,11 @@ if "fastapi" not in sys.modules:
     responses_mod = types.ModuleType("fastapi.responses")
 
     class _FakeResponse:
-        def __init__(self, content=None, status_code=200, headers=None):
+        def __init__(self, content=None, status_code=200, headers=None, media_type=None):
             self.content = content
             self.status_code = status_code
             self.headers = headers or {}
+            self.media_type = media_type
 
     responses_mod.Response = _FakeResponse
     responses_mod.JSONResponse = _FakeResponse

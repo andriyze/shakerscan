@@ -194,3 +194,69 @@ def test_nosql_json_body_rejects_token_only_without_identity_signal(monkeypatch)
 
     assert result["vulnerable"] is False
     assert result["findings"] == []
+
+
+def test_nosql_json_body_detects_collection_operator_differential(monkeypatch):
+    calls = []
+
+    async def fake_run(cmd, *args, **kwargs):
+        calls.append(cmd)
+        body = json.loads(cmd[cmd.index("-d") + 1])
+        product_id = body.get("id")
+        if isinstance(product_id, dict) and "$ne" in product_id:
+            return (
+                json.dumps({
+                    "data": [
+                        {"id": 1, "message": "great", "rating": 5},
+                        {"id": 2, "message": "ok", "rating": 3},
+                        {"id": 3, "message": "bad", "rating": 1},
+                    ]
+                })
+                + "__SHAKERSCAN_NOSQL__200__SHAKERSCAN_NOSQL__",
+                "",
+                0,
+            )
+        return '{"data":[]}__SHAKERSCAN_NOSQL__200__SHAKERSCAN_NOSQL__', "", 0
+
+    monkeypatch.setattr(active_checks, "run", fake_run)
+
+    result = asyncio.run(
+        active_checks.nosql_injection_test_json_body(
+            "https://example.test/rest/products/reviews",
+            method="POST",
+            params=["id"],
+            body_template={"id": 1},
+        )
+    )
+
+    assert result["vulnerable"] is True
+    finding = result["findings"][0]
+    assert finding["evidence_type"] == "operator_collection_differential"
+    assert finding["control_items"] == 0
+    assert finding["payload_items"] == 3
+    assert finding["payload_status"] == 200
+    assert len(calls) == 3  # scalar baseline, restrictive $eq, permissive $ne
+
+
+def test_nosql_json_body_rejects_uniform_collection_response(monkeypatch):
+    async def fake_run(cmd, *args, **kwargs):
+        return (
+            json.dumps({"data": [{"id": 1, "message": "same"}, {"id": 2, "message": "same"}]})
+            + "__SHAKERSCAN_NOSQL__200__SHAKERSCAN_NOSQL__",
+            "",
+            0,
+        )
+
+    monkeypatch.setattr(active_checks, "run", fake_run)
+
+    result = asyncio.run(
+        active_checks.nosql_injection_test_json_body(
+            "https://example.test/rest/products/reviews",
+            method="POST",
+            params=["id"],
+            body_template={"id": 1},
+        )
+    )
+
+    assert result["vulnerable"] is False
+    assert result["findings"] == []
