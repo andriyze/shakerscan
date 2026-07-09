@@ -7,6 +7,7 @@ import {
   createTargetPrincipal,
   createInteractiveSessionFinding,
   deactivateTargetPrincipal,
+  deleteTargetPrincipalExpectation,
   endInteractiveSession,
   getInteractiveSession,
   getTargetPrincipalMatrix,
@@ -15,6 +16,7 @@ import {
   startInteractiveSession,
   testInteractiveEndpoint,
   updateTargetPrincipal,
+  upsertTargetPrincipalExpectation,
   type InteractiveEndpointTestResult,
   type InteractiveSessionState,
   type InteractiveSessionSummary,
@@ -27,6 +29,11 @@ import {
   emptyPrincipalProfileDraft,
   type PrincipalProfileDraft,
 } from '@/lib/principalProfile'
+import {
+  buildPrincipalExpectationPayload,
+  emptyPrincipalExpectationDraft,
+  type PrincipalExpectationDraft,
+} from '@/lib/principalExpectation'
 
 type UserKey = 'user1' | 'user2'
 
@@ -95,6 +102,8 @@ export default function InteractiveSessionPage() {
     user2: emptyPrincipalProfileDraft(),
   })
   const [principalBusy, setPrincipalBusy] = useState<UserKey | null>(null)
+  const [expectationDraft, setExpectationDraft] = useState<PrincipalExpectationDraft>(emptyPrincipalExpectationDraft)
+  const [expectationBusy, setExpectationBusy] = useState<string | null>(null)
 
   const loadPrincipalMatrix = useCallback(async (id: string) => {
     if (!id) return
@@ -274,6 +283,51 @@ export default function InteractiveSessionPage() {
       toast.error(err instanceof Error ? err.message : `Failed to deactivate ${slot} principal`)
     } finally {
       setPrincipalBusy(null)
+    }
+  }
+
+  async function handleSaveExpectation() {
+    if (!targetId) return
+    let payload
+    try {
+      payload = buildPrincipalExpectationPayload(expectationDraft)
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Invalid expectation')
+      return
+    }
+    if (!payload.path) {
+      toast.error('Endpoint path is required')
+      return
+    }
+    if (!payload.principal_id && !payload.principal_role) {
+      toast.error('Select a principal or provide a role')
+      return
+    }
+
+    setExpectationBusy('save')
+    try {
+      await upsertTargetPrincipalExpectation(targetId, payload)
+      await loadPrincipalMatrix(targetId)
+      setExpectationDraft(emptyPrincipalExpectationDraft())
+      toast.success('Principal expectation saved')
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to save principal expectation')
+    } finally {
+      setExpectationBusy(null)
+    }
+  }
+
+  async function handleDeleteExpectation(expectationId: string) {
+    if (!targetId || !window.confirm('Delete this principal expectation?')) return
+    setExpectationBusy(expectationId)
+    try {
+      await deleteTargetPrincipalExpectation(targetId, expectationId)
+      await loadPrincipalMatrix(targetId)
+      toast.success('Principal expectation deleted')
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to delete principal expectation')
+    } finally {
+      setExpectationBusy(null)
     }
   }
 
@@ -695,6 +749,87 @@ export default function InteractiveSessionPage() {
                   )
                 })}
               </div>
+              <div className="border-t border-gray-800 pt-4">
+                <div className="grid gap-3 lg:grid-cols-[auto_minmax(12rem,2fr)_minmax(11rem,1fr)_minmax(9rem,1fr)_7rem_auto]">
+                  <label className="space-y-1 text-xs text-gray-500">
+                    <span>Method</span>
+                    <select
+                      value={expectationDraft.method}
+                      onChange={(event) => setExpectationDraft((current) => ({ ...current, method: event.target.value }))}
+                      className="w-full rounded-md border border-gray-800 bg-gray-950 px-2.5 py-2 text-sm text-white focus:border-blue-500 focus:outline-none"
+                    >
+                      {REQUEST_METHODS.map((option) => <option key={option} value={option}>{option}</option>)}
+                    </select>
+                  </label>
+                  <label className="space-y-1 text-xs text-gray-500">
+                    <span>Endpoint path</span>
+                    <input
+                      value={expectationDraft.path}
+                      onChange={(event) => setExpectationDraft((current) => ({ ...current, path: event.target.value }))}
+                      placeholder="/api/orders/{id}"
+                      className="w-full rounded-md border border-gray-800 bg-gray-950 px-2.5 py-2 text-sm font-mono text-white placeholder-gray-600 focus:border-blue-500 focus:outline-none"
+                    />
+                  </label>
+                  <label className="space-y-1 text-xs text-gray-500">
+                    <span>Principal</span>
+                    <select
+                      value={expectationDraft.principalId}
+                      onChange={(event) => {
+                        const selected = principalMatrix.principals.find((item) => item.id === event.target.value)
+                        setExpectationDraft((current) => ({
+                          ...current,
+                          principalId: event.target.value,
+                          principalRole: selected?.role || current.principalRole,
+                          tenantId: selected?.tenant_id || current.tenantId,
+                        }))
+                      }}
+                      className="w-full rounded-md border border-gray-800 bg-gray-950 px-2.5 py-2 text-sm text-white focus:border-blue-500 focus:outline-none"
+                    >
+                      <option value="">Role only</option>
+                      {principalMatrix.principals.map((item) => <option key={item.id} value={item.id}>{item.auth_state}: {item.label}</option>)}
+                    </select>
+                  </label>
+                  <label className="space-y-1 text-xs text-gray-500">
+                    <span>Expected access</span>
+                    <select
+                      value={expectationDraft.expectedAccess}
+                      onChange={(event) => setExpectationDraft((current) => ({ ...current, expectedAccess: event.target.value as PrincipalExpectationDraft['expectedAccess'] }))}
+                      className="w-full rounded-md border border-gray-800 bg-gray-950 px-2.5 py-2 text-sm text-white focus:border-blue-500 focus:outline-none"
+                    >
+                      <option value="allow">Allow</option>
+                      <option value="deny">Deny</option>
+                      <option value="requires_role">Requires role</option>
+                      <option value="unknown">Unknown</option>
+                    </select>
+                  </label>
+                  <label className="space-y-1 text-xs text-gray-500">
+                    <span>HTTP status</span>
+                    <input
+                      value={expectationDraft.expectedHttpStatus}
+                      onChange={(event) => setExpectationDraft((current) => ({ ...current, expectedHttpStatus: event.target.value }))}
+                      inputMode="numeric"
+                      placeholder="403"
+                      className="w-full rounded-md border border-gray-800 bg-gray-950 px-2.5 py-2 text-sm text-white placeholder-gray-600 focus:border-blue-500 focus:outline-none"
+                    />
+                  </label>
+                  <div className="flex items-end">
+                    <Button className="w-full" disabled={expectationBusy === 'save'} onClick={() => void handleSaveExpectation()}>
+                      {expectationBusy === 'save' ? 'Saving...' : 'Save expectation'}
+                    </Button>
+                  </div>
+                </div>
+                {!expectationDraft.principalId && (
+                  <label className="mt-3 block max-w-xs space-y-1 text-xs text-gray-500">
+                    <span>Required role</span>
+                    <input
+                      value={expectationDraft.principalRole}
+                      onChange={(event) => setExpectationDraft((current) => ({ ...current, principalRole: event.target.value }))}
+                      placeholder="admin"
+                      className="w-full rounded-md border border-gray-800 bg-gray-950 px-2.5 py-2 text-sm text-white placeholder-gray-600 focus:border-blue-500 focus:outline-none"
+                    />
+                  </label>
+                )}
+              </div>
               {principalMatrix.expectations.length > 0 && (
                 <div className="overflow-x-auto">
                   <table className="w-full text-sm">
@@ -705,11 +840,25 @@ export default function InteractiveSessionPage() {
                           <td className="px-2 py-2 font-mono text-xs text-gray-300">{item.method} {item.path}</td>
                           <td className="px-2 py-2 text-gray-400">{item.principal_label || item.principal_auth_state || item.principal_role || 'unspecified'}</td>
                           <td className="px-2 py-2"><Badge className={item.expected_access === 'deny' ? 'bg-amber-500/15 text-amber-300' : item.expected_access === 'allow' ? 'bg-green-500/15 text-green-300' : 'bg-gray-800 text-gray-300'}>{item.expected_access}{item.expected_http_status ? ` · ${item.expected_http_status}` : ''}</Badge></td>
-                          <td className="px-2 py-2 text-right"><Button size="sm" variant="ghost" onClick={() => {
-                            setEndpoint(item.path)
-                            setMethod(item.method)
-                            if (item.principal_auth_state === 'user1' || item.principal_auth_state === 'user2') setAsUser(item.principal_auth_state)
-                          }}>Load test</Button></td>
+                          <td className="px-2 py-2 text-right">
+                            <div className="flex justify-end gap-1">
+                              <Button size="sm" variant="ghost" onClick={() => setExpectationDraft({
+                                method: item.method,
+                                path: item.path,
+                                principalId: item.principal_id || '',
+                                principalRole: item.principal_role || '',
+                                tenantId: item.tenant_id || '',
+                                expectedAccess: item.expected_access,
+                                expectedHttpStatus: item.expected_http_status ? String(item.expected_http_status) : '',
+                              })}>Edit</Button>
+                              <Button size="sm" variant="ghost" onClick={() => {
+                                setEndpoint(item.path)
+                                setMethod(item.method)
+                                if (item.principal_auth_state === 'user1' || item.principal_auth_state === 'user2') setAsUser(item.principal_auth_state)
+                              }}>Load test</Button>
+                              <Button size="sm" variant="ghost" disabled={expectationBusy === item.id} onClick={() => void handleDeleteExpectation(item.id)}>Delete</Button>
+                            </div>
+                          </td>
                         </tr>
                       ))}
                     </tbody>

@@ -3882,6 +3882,21 @@ export interface TargetPrincipalExpectation {
   expectation_source?: string | null
 }
 
+export interface TargetPrincipalExpectationPayload {
+  endpoint_id?: string
+  method: string
+  path: string
+  param_shape?: string
+  param_location?: string
+  principal_id?: string
+  principal_role?: string
+  tenant_id?: string
+  expected_access: TargetPrincipalExpectation['expected_access']
+  expected_http_status?: number
+  expectation_source?: string
+  metadata_json?: Record<string, unknown>
+}
+
 export interface TargetPrincipalMatrixResponse {
   target_id: string
   principals: TargetPrincipal[]
@@ -4012,6 +4027,22 @@ export async function updateTargetPrincipal(targetId: string, principalId: strin
 export async function deactivateTargetPrincipal(targetId: string, principalId: string): Promise<{ status: string; target_id: string; principal_id: string; execution_enabled: boolean }> {
   const res = await fetch(`${API_URL}/targets/${encodeURIComponent(targetId)}/principals/${encodeURIComponent(principalId)}`, { method: 'DELETE' })
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to deactivate target principal'))
+  return res.json()
+}
+
+export async function upsertTargetPrincipalExpectation(targetId: string, payload: TargetPrincipalExpectationPayload): Promise<{ expectation: TargetPrincipalExpectation; execution_enabled: boolean; findings_created: number }> {
+  const res = await fetch(`${API_URL}/targets/${encodeURIComponent(targetId)}/principal-matrix`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to save principal expectation'))
+  return res.json()
+}
+
+export async function deleteTargetPrincipalExpectation(targetId: string, expectationId: string): Promise<{ status: string; target_id: string; expectation_id: string; execution_enabled: boolean; findings_created: number }> {
+  const res = await fetch(`${API_URL}/targets/${encodeURIComponent(targetId)}/principal-matrix/${encodeURIComponent(expectationId)}`, { method: 'DELETE' })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to delete principal expectation'))
   return res.json()
 }
 

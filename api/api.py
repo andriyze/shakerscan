@@ -13470,6 +13470,28 @@ async def upsert_target_principal_matrix(target_id: str, request: TargetEndpoint
     }
 
 
+@app.delete("/targets/{target_id}/principal-matrix/{expectation_id}")
+async def delete_target_principal_expectation(target_id: str, expectation_id: str):
+    """Delete one record-only endpoint access expectation for a target."""
+    target_uuid = _uuid_or_400(target_id, "target id")
+    expectation_uuid = _uuid_or_400(expectation_id, "expectation id")
+    async with db_pool.acquire() as conn:
+        deleted = await conn.fetchval(
+            "DELETE FROM target_endpoint_expectations WHERE id = $1 AND target_id = $2 RETURNING id",
+            expectation_uuid,
+            target_uuid,
+        )
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Target principal expectation not found")
+    return {
+        "status": "deleted",
+        "target_id": target_id,
+        "expectation_id": expectation_id,
+        "execution_enabled": False,
+        "findings_created": 0,
+    }
+
+
 @app.delete("/targets/{target_id}")
 async def delete_target(target_id: str):
     """Delete a target (soft delete - sets inactive)."""

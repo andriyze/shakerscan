@@ -1176,7 +1176,7 @@ the deterministic campaign from it, while unproven graph/source/AI signals remai
 than findings.
 
 ### 8. Auth / principal / role matrix
-**Status: PARTIAL, PHASE 8 PRINCIPAL PROFILE LIFECYCLE DONE.** `target_endpoints.auth_state` exists, and
+**Status: PARTIAL, PHASE 9 ENDPOINT EXPECTATION LIFECYCLE DONE.** `target_endpoints.auth_state` exists, and
 `target_principals` plus `target_endpoint_expectations` now persist role, tenant, credential-profile
 references, auth states, and endpoint x principal expected access. `GET/POST /targets/{id}/principals`
 and `GET/POST /targets/{id}/principal-matrix` expose the matrix as non-executing planning facts, and
@@ -1215,6 +1215,10 @@ DONE phase 8: the same workflow can create, update, and deactivate the content-f
 The UI never accepts or returns raw credential contents; session auth remains an explicit separate
 step. Remaining work is integration with a managed credential-profile secret store and
 expiry/refresh lifecycle.
+DONE phase 9: operators can create or update allow/deny/requires-role endpoint expectations from the
+interactive principal plan, load persisted rows back into the editor, and explicitly delete obsolete
+expectations through a target-scoped UUID route. These remain planning records only: expectation
+maintenance cannot execute a replay or create a finding.
 
 **Done when:** a campaign can assert "endpoint X requires role admin" and prove a lower-role
 principal's access is a finding.
