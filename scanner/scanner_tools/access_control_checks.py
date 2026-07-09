@@ -1528,6 +1528,8 @@ BOLA_RESOURCE_ID_KEYS = {
     "invoice_id", "invoiceid", "document_id", "documentid", "payment_id",
     "paymentid", "vehicle_id", "vehicleid", "address_id", "addressid",
     "basket_id", "basketid", "cart_id", "cartid", "product_id", "productid",
+    "vin", "vehicle_vin", "vehiclevin", "vin_number", "vinnumber",
+    "license_plate", "licenseplate",
 }
 
 BOLA_SENSITIVE_FIELD_KEYS = {
@@ -1601,6 +1603,37 @@ def _safe_scalar_id(value: Any) -> str | None:
     return None
 
 
+def _resource_identifier_name(name: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", str(name or "").lower())
+
+
+def _is_resource_identifier_name(name: str) -> bool:
+    normalized = _resource_identifier_name(name)
+    if not normalized:
+        return False
+    normalized_keys = {_resource_identifier_name(key) for key in BOLA_RESOURCE_ID_KEYS}
+    return normalized in normalized_keys or normalized.endswith("id")
+
+
+def _safe_resource_identifier_value(value: Any, key_name: str) -> str | None:
+    scalar = _safe_scalar_id(value)
+    if scalar:
+        return scalar
+    normalized_key = _resource_identifier_name(key_name)
+    if normalized_key not in {"vin", "vehiclevin", "vinnumber", "licenseplate"}:
+        return None
+    if not isinstance(value, str):
+        return None
+    candidate = value.strip()
+    if not (5 <= len(candidate) <= 32):
+        return None
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", candidate):
+        return None
+    if not any(ch.isdigit() for ch in candidate) or not any(ch.isalpha() for ch in candidate):
+        return None
+    return candidate
+
+
 def _extract_resource_refs_from_json(body: str) -> list[dict[str, Any]]:
     """Extract generic object IDs and sensitive field names from JSON responses."""
     parsed = _parse_json_body(body)
@@ -1617,9 +1650,9 @@ def _extract_resource_refs_from_json(body: str) -> list[dict[str, Any]]:
         )
         keys_lower = {str(k).strip().lower(): str(k) for k in obj.keys() if isinstance(k, str)}
         for lowered, original_key in keys_lower.items():
-            if lowered not in BOLA_RESOURCE_ID_KEYS and not lowered.endswith("id"):
+            if not _is_resource_identifier_name(lowered):
                 continue
-            object_id = _safe_scalar_id(obj.get(original_key))
+            object_id = _safe_resource_identifier_value(obj.get(original_key), original_key)
             if not object_id:
                 continue
             key = (lowered, object_id)
@@ -1701,9 +1734,9 @@ def _is_resource_placeholder_segment(segment: str) -> bool:
         return True
     if (text.startswith("{") and text.endswith("}")) or (text.startswith("<") and text.endswith(">")):
         inner = text[1:-1].strip().lower()
-        return bool(inner) and ("id" in inner or inner in {"uuid", "uid"})
+        return bool(inner) and _is_resource_identifier_name(inner)
     if text.startswith(":"):
-        return "id" in text[1:].lower()
+        return _is_resource_identifier_name(text[1:])
     return False
 
 
@@ -2100,7 +2133,13 @@ def _bola_path_segments(url_or_template: str) -> set[str]:
         path = urlsplit(url_or_template).path.lower()
     except Exception:
         path = str(url_or_template).lower()
-    return {segment for segment in path.split("/") if segment}
+    segments: set[str] = set()
+    for segment in path.split("/"):
+        if not segment:
+            continue
+        segments.add(segment)
+        segments.update(token for token in re.split(r"[-_]+", segment) if token)
+    return segments
 
 
 def _is_operational_only_bola_endpoint(url_or_template: str) -> bool:
@@ -2199,9 +2238,7 @@ def _is_probable_id_param(param_name: str) -> bool:
     lowered = name.lower()
     if any(excl in lowered for excl in QUERY_ID_PARAM_EXCLUSIONS):
         return False
-    if lowered in {"id", "uid", "uuid"}:
-        return True
-    return lowered.endswith("id")
+    return _is_resource_identifier_name(lowered)
 
 
 def _has_excluded_synth_path_segment(url: str) -> bool:

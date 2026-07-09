@@ -1021,7 +1021,10 @@ differential independently from the heavier BOLA lane, using discovered collecti
 browser, endpoint graph, JS, HAR, and the existing model-collection wordlist. DONE phase 23 for BOLA
 producer quality: cross-principal replay now ranks compound resource route names such as
 `mechanic_report`, boosts concrete collection/list producers, and diversifies producer selection so
-repeated synthetic query variants cannot starve service-prefixed collection endpoints.
+repeated synthetic query variants cannot starve service-prefixed collection endpoints. DONE phase 24
+for non-`id` object identifiers: BOLA replay now treats VIN/license-style keys as replayable resource
+identifiers and can apply them to discovered placeholders or query parameters such as
+`<vehicleVIN>`/`?VIN=`, preserving the existing cross-principal proof requirement.
 
 **Done when:** recorded two-user benchmark scorecards show the targeted miss becoming a deterministic
 finding, not merely an attempted endpoint.

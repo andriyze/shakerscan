@@ -106,6 +106,26 @@ def test_authz_producer_selection_diversifies_repeated_query_paths():
     assert len({access_control_checks._authz_producer_path_key(url) for url in selected}) == 3
 
 
+def test_authz_resource_refs_extract_vin_identifiers():
+    body = json.dumps({"vin": "VINOWNER001", "model": "Corsa", "year": 2020})
+
+    assert "VINOWNER001" in access_control_checks._resource_ids_from_response(body)
+
+
+def test_authz_consumer_template_replaces_vehicle_vin_placeholder_and_query():
+    path_candidate = access_control_checks._replace_discovered_consumer_id(
+        "https://app.test/workshop/api/merchant/service_requests/<vehicleVIN>",
+        "VINOWNER001",
+    )
+    query_candidate = access_control_checks._replace_discovered_consumer_id(
+        "https://app.test/workshop/api/mechanic/service_report?VIN=",
+        "VINOWNER001",
+    )
+
+    assert path_candidate["custom_endpoint"] == "GET /workshop/api/merchant/service_requests/VINOWNER001"
+    assert query_candidate["custom_endpoint"] == "GET /workshop/api/mechanic/service_report?VIN=VINOWNER001"
+
+
 def test_authz_resource_replay_detects_write_side_bola(monkeypatch):
     from scanner_tools.access_control_checks import authz_resource_replay_test
     import scanner_tools.proof_of_exploit as poe
@@ -204,7 +224,7 @@ def test_authz_resource_replay_uses_discovered_consumer_templates(monkeypatch):
     finding = next(f for f in result["findings"] if f["id"].startswith("smart_authz:"))
     assert finding["evidence"]["consumer_endpoint"] == f"GET /identity/api/v2/vehicle/{owner_vehicle_id}/location"
     assert finding["evidence"]["requested_object_id"] == owner_vehicle_id
-    assert finding["evidence"]["attacker_returned_object_ids"] == [owner_vehicle_id]
+    assert owner_vehicle_id in finding["evidence"]["attacker_returned_object_ids"]
     assert any(
         attempt["consumer_endpoint"] == f"GET /identity/api/v2/vehicle/{owner_vehicle_id}/location"
         and attempt["status"] == "completed"

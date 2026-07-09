@@ -394,6 +394,62 @@ def test_authz_replay_maps_listing_suffix_to_item_endpoint(monkeypatch):
     assert authz[0]["severity"] == "high"
 
 
+def test_authz_replay_uses_vin_identifiers_and_vehicle_placeholders(monkeypatch):
+    async def fake_fetch(url, **kwargs):
+        token = _auth_token(kwargs.get("headers"))
+        path = urlsplit(url).path
+        if path == "/identity/api/v2/vehicle/vehicles":
+            if token == "user1":
+                return _fake_http_response(
+                    url,
+                    200,
+                    json.dumps([{"vin": "VINOWNER001", "model": "Corsa", "year": 2020}]),
+                )
+            if token == "user2":
+                return _fake_http_response(
+                    url,
+                    200,
+                    json.dumps([{"vin": "VINATTACK002", "model": "Focus", "year": 2021}]),
+                )
+            return _fake_http_response(url, 401, json.dumps({"error": "unauthorized"}))
+        if path == "/workshop/api/merchant/service_requests/VINOWNER001":
+            return _fake_http_response(
+                url,
+                200,
+                json.dumps({
+                    "vin": "VINOWNER001",
+                    "email": "alice@example.com",
+                    "service_status": "ready",
+                }),
+            )
+        return _fake_http_response(url, 404, json.dumps({"error": "not found"}))
+
+    monkeypatch.setattr(
+        "scanner_tools.proof_of_exploit.fetch_with_capture",
+        fake_fetch,
+    )
+
+    results = asyncio.run(
+        smart_bola_test(
+            base_url="https://example.com",
+            discovered_urls=[
+                "https://example.com/identity/api/v2/vehicle/vehicles",
+                "https://example.com/workshop/api/merchant/service_requests/<vehicleVIN>",
+            ],
+            user1_session=_fake_session("user1"),
+            user2_session=_fake_session("user2"),
+            max_endpoints=10,
+            timeout=1,
+        )
+    )
+
+    authz = [f for f in results["findings"] if f.get("tool") == "smart_authz"]
+    assert authz, "expected VIN object replay to prove BOLA"
+    assert authz[0]["evidence"]["object_id_key"] == "vin"
+    assert authz[0]["evidence"]["requested_object_id"] == "VINOWNER001"
+    assert authz[0]["evidence"]["consumer_endpoint"] == "GET /workshop/api/merchant/service_requests/VINOWNER001"
+
+
 def test_authz_replay_prioritizes_owned_resource_producers_over_noise(monkeypatch):
     fetched_paths = []
 
