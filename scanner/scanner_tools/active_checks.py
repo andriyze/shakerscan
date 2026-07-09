@@ -7653,6 +7653,8 @@ async def smart_sqli_test(
 
             if baseline_status in (405, 415):
                 continue
+            if attempt is not None:
+                attempt["completed_params_count"] += 1
 
             for payload, technique, description in payloads:
                 if _budget_exhausted():
