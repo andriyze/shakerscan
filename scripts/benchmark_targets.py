@@ -30,6 +30,11 @@ except ImportError:
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 FIXTURE_DIR = os.path.join(REPO, "tests", "fixtures", "benchmarks")
 OUT_DIR = os.path.join(REPO, "results", "benchmark-runs")
+SCANNER_DIR = os.path.join(REPO, "scanner")
+if SCANNER_DIR not in sys.path:
+    sys.path.insert(0, SCANNER_DIR)
+
+from scanner_tools.benchmark_summary import collect_body_completion_diagnostics  # noqa: E402
 
 # Coarse finding-class detection (mirrors measure.py, kept route-anchored).
 CLASS_KEYWORDS = {
@@ -406,6 +411,7 @@ def collect_scorecard(report, fixture):
         "expected_found": found,
         "expected_missed": missed,
         "benchmark_followups": followups,
+        "body_completion_diagnostics": collect_body_completion_diagnostics(report),
         "expected_recall": round(len(found) / max(1, len(expected)), 2),
     }
 

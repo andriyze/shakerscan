@@ -167,6 +167,33 @@ def test_scorecard_blocks_bola_followup_until_second_principal_observed():
     assert followup["blocked_action_template"]["parameters"]["exploit_depth"] is True
 
 
+def test_scorecard_includes_body_completion_diagnostics():
+    card = b.collect_scorecard(
+        {
+            "findings": [],
+            "active_checks": {
+                "endpoint_attempts": [
+                    {
+                        "family": "nosql",
+                        "method": "POST",
+                        "param_location": "body",
+                        "attempted_params_count": 2,
+                        "completed_params_count": 2,
+                        "status": "completed",
+                        "validation_fields_added": ["email"],
+                    }
+                ],
+            },
+        },
+        {"name": "unit", "expected": []},
+    )
+
+    diagnostics = card["body_completion_diagnostics"]
+    assert diagnostics["body_attempts"] == 1
+    assert diagnostics["parameter_completion_ratio"] == 1.0
+    assert diagnostics["families"]["nosqli"]["response_guided_completion_attempts"] == 1
+
+
 def test_benchmark_hypothesis_seed_payload_is_content_free_and_traceable():
     card = {
         "target": "juice_shop",

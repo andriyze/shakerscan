@@ -973,7 +973,7 @@ the headless browser proof confirms execution and carries `browser_proof`/`poe_r
 normalized finding. DONE phase 7 for POST-body SQLi proof replay preserving the captured JSON/form
 body template, content type, and replay-safe request headers during extraction, so required sibling
 fields are not dropped after initial detection. Remaining detector recall still requires
-scorecard-backed POST-body SQLi measurement and workflow/write-BOLA improvements. DONE phase 8 for
+workflow/write-BOLA improvements. DONE phase 8 for
 reflected XSS path-value synthesis on lookup/track-style GET routes: queryless parent routes can now
 receive a constrained synthetic child segment and must still pass the existing reflection/browser-proof
 gates before any finding is emitted. DONE phase 9 for stricter-but-broader NoSQL JSON-body auth-bypass
@@ -1051,6 +1051,10 @@ recorded separately from vulnerability proof.
 DONE phase 31 for the same bounded completion contract in JSON-body NoSQL testing: validation-derived
 safe siblings are added to the persistent baseline and one retry is made before operator differentials,
 with the added fields carried in endpoint-attempt telemetry and excluded from proof classification.
+DONE phase 32 for scorecard-backed POST-body injection measurement: shared benchmark summaries and
+saved target scorecards now report SQLi/NoSQL body attempts, attempted/completed parameter counts,
+completion ratios, response-guided completion counts, redacted validation-field samples, statuses,
+and proof-type counts without retaining request bodies.
 
 **Done when:** recorded two-user benchmark scorecards show the targeted miss becoming a deterministic
 finding, not merely an attempted endpoint.

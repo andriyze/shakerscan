@@ -37,6 +37,8 @@ FAMILY_BY_TOOL = {
     "csp_evaluator": "headers",
     "http_headers": "headers",
 }
+BODY_PARAM_LOCATIONS = {"body", "form", "json", "multipart"}
+BODY_INJECTION_FAMILIES = {"sqli", "nosqli"}
 
 
 def _as_dict(value: Any) -> dict[str, Any]:
@@ -187,6 +189,80 @@ def _collect_attempts(report: dict[str, Any]) -> tuple[dict[str, Any], dict[str,
     )
 
 
+def collect_body_completion_diagnostics(report: dict[str, Any]) -> dict[str, Any]:
+    """Summarize SQL/NoSQL body-probe completion without exposing request bodies."""
+    active = _as_dict(report.get("active_checks"))
+    families: dict[str, dict[str, Any]] = {}
+
+    for attempt in _as_list(active.get("endpoint_attempts")):
+        if not isinstance(attempt, dict):
+            continue
+        family = str(attempt.get("family") or "").strip().lower()
+        if family == "nosql":
+            family = "nosqli"
+        if family not in BODY_INJECTION_FAMILIES:
+            continue
+        location = str(
+            attempt.get("param_location")
+            or _param_location_from_custom_endpoint(attempt.get("custom_endpoint"))
+        ).strip().lower()
+        if location not in BODY_PARAM_LOCATIONS:
+            continue
+
+        item = families.setdefault(family, {
+            "body_attempts": 0,
+            "attempted_params": 0,
+            "completed_params": 0,
+            "response_guided_completion_attempts": 0,
+            "validation_fields_added": 0,
+            "validation_field_samples": [],
+            "status_counts": {},
+            "proof_counts": {},
+        })
+        item["body_attempts"] += 1
+        try:
+            item["attempted_params"] += max(0, int(attempt.get("attempted_params_count") or 0))
+        except Exception:
+            pass
+        try:
+            item["completed_params"] += max(0, int(attempt.get("completed_params_count") or 0))
+        except Exception:
+            pass
+
+        status = str(attempt.get("status") or "unknown").strip().lower()
+        item["status_counts"][status] = int(item["status_counts"].get(status) or 0) + 1
+        proof_type = str(attempt.get("proof_type") or "").strip()
+        if proof_type:
+            item["proof_counts"][proof_type] = int(item["proof_counts"].get(proof_type) or 0) + 1
+
+        fields = [str(field) for field in _as_list(attempt.get("validation_fields_added")) if str(field)]
+        if fields:
+            item["response_guided_completion_attempts"] += 1
+            item["validation_fields_added"] += len(fields)
+            for field in fields:
+                redacted = _redact(field)
+                if redacted not in item["validation_field_samples"]:
+                    item["validation_field_samples"].append(redacted)
+                if len(item["validation_field_samples"]) >= 20:
+                    break
+
+    total_attempted = sum(int(item["attempted_params"]) for item in families.values())
+    total_completed = sum(int(item["completed_params"]) for item in families.values())
+    for item in families.values():
+        attempted = int(item["attempted_params"])
+        item["parameter_completion_ratio"] = round(int(item["completed_params"]) / max(1, attempted), 4)
+        item["status_counts"] = dict(sorted(item["status_counts"].items()))
+        item["proof_counts"] = dict(sorted(item["proof_counts"].items()))
+
+    return {
+        "body_attempts": sum(int(item["body_attempts"]) for item in families.values()),
+        "attempted_params": total_attempted,
+        "completed_params": total_completed,
+        "parameter_completion_ratio": round(total_completed / max(1, total_attempted), 4),
+        "families": {family: families[family] for family in sorted(families)},
+    }
+
+
 def _auth_states_from_attempts(attempts: dict[str, Any]) -> set[str]:
     observed: set[str] = set()
     for key in _as_dict(attempts.get("by_auth_state_family_status")):
@@ -289,6 +365,7 @@ def build_benchmark_summary(
     expected = expected or {}
     discovery_sources = _collect_discovery_sources(report)
     attempts, params_by_location = _collect_attempts(report)
+    body_completion = collect_body_completion_diagnostics(report)
     auth_workflow = _collect_auth_workflow(report, expected, attempts)
     findings, proof_or_severity_gaps = _collect_findings(report)
     misses: list[dict[str, Any]] = []
@@ -339,7 +416,10 @@ def build_benchmark_summary(
         "discovery": {"endpoints_by_source": discovery_sources},
         "attempts": attempts,
         "auth_workflow": auth_workflow,
-        "parameters": {"attempted_by_location": params_by_location},
+        "parameters": {
+            "attempted_by_location": params_by_location,
+            "body_completion": body_completion,
+        },
         "findings": findings,
         "misses": misses,
         "proof_or_severity_gaps": proof_or_severity_gaps,
