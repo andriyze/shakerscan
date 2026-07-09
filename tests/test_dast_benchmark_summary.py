@@ -11,6 +11,7 @@ from scanner_tools.benchmark_summary import (  # noqa: E402
     build_benchmark_summary,
     compare_benchmark_summaries,
 )
+from scanner_tools import active_checks  # noqa: E402
 
 
 def test_benchmark_summary_tracks_attempts_params_and_misses():
@@ -158,13 +159,58 @@ def test_benchmark_summary_measures_response_guided_body_completion():
     assert body["body_attempts"] == 2
     assert body["attempted_params"] == 4
     assert body["completed_params"] == 3
-    assert body["parameter_completion_ratio"] == 0.75
+    assert body["parameter_completion_ratio"] == 1.0
+    assert body["response_guided_completion_ratio"] == 1.0
+    assert body["probe_parameter_completion_ratio"] == 0.75
     assert body["families"]["sqli"]["response_guided_completion_attempts"] == 1
     assert body["families"]["sqli"]["validation_fields_added"] == 2
     assert body["families"]["sqli"]["validation_field_samples"] == ["customerId", "[redacted]"]
     assert body["families"]["sqli"]["proof_counts"] == {"json_collection_expansion": 1}
-    assert body["families"]["nosqli"]["parameter_completion_ratio"] == 0.5
+    assert body["families"]["nosqli"]["parameter_completion_ratio"] == 1.0
+    assert body["families"]["nosqli"]["probe_parameter_completion_ratio"] == 0.5
     assert body["families"]["nosqli"]["status_counts"] == {"partial": 1}
+
+
+def test_benchmark_summary_reads_body_completion_from_production_merge_shape():
+    merged = active_checks._merge_endpoint_attempt_telemetry([{
+        "custom_endpoint": 'POST /api/search json:{"query":"test"}',
+        "family": "sqli",
+        "method": "POST",
+        "url": "https://example.test/api/search",
+        "param_names": ["query"],
+        "param_location": "body",
+        "attempted_params_count": 1,
+        "completed_params_count": 1,
+        "param_count": 1,
+        "status": "completed",
+        "validation_fields_added": ["customerId"],
+        "proof_type": "json_collection_expansion",
+        "proof_types": ["json_collection_expansion"],
+    }])
+
+    summary = build_benchmark_summary({"active_checks": {"endpoint_attempts": merged}})
+    body = summary["parameters"]["body_completion"]
+
+    assert body["body_attempts"] == 1
+    assert body["families"]["sqli"]["validation_fields_added"] == 1
+    assert body["families"]["sqli"]["proof_counts"] == {"json_collection_expansion": 1}
+    assert summary["attempts"]["by_auth_state_family_status"] == {"anonymous|sqli|completed": 1}
+
+
+def test_response_guided_completion_ratio_is_zero_without_added_fields():
+    body = build_benchmark_summary({
+        "active_checks": {"endpoint_attempts": [{
+            "family": "sqli",
+            "method": "POST",
+            "param_location": "body",
+            "attempted_params_count": 1,
+            "completed_params_count": 1,
+            "status": "completed",
+        }]},
+    })["parameters"]["body_completion"]
+
+    assert body["parameter_completion_ratio"] == 0.0
+    assert body["probe_parameter_completion_ratio"] == 1.0
 
 
 def test_benchmark_summary_records_proof_and_severity_gaps():

@@ -1068,6 +1068,9 @@ validation error. A completed attack body is never compared against the earlier 
 DONE phase 34 for bounded frontend request parsing: static object inspection uses one depth pass,
 caps each object at 64KB and 30 keys, and verb-style calls require `axios` or a client variable proven
 by `axios.create`. Non-HTTP objects such as queues and caches cannot fabricate mutating requests.
+DONE phase 35 for production-wired body-completion telemetry: merged active attempts preserve
+per-family validation fields and proof labels, benchmark consumers expand the canonical family map,
+and response-guided completion ratios are distinct from ordinary probe-parameter execution ratios.
 
 **Done when:** recorded two-user benchmark scorecards show the targeted miss becoming a deterministic
 finding, not merely an attempted endpoint.

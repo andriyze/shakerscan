@@ -57,6 +57,28 @@ def _as_list(value: Any) -> list[Any]:
     return value if isinstance(value, list) else []
 
 
+def _endpoint_attempts(report: dict[str, Any]):
+    """Yield flat family attempts from raw and merged active telemetry."""
+    active = _as_dict(report.get("active_checks"))
+    for attempt in _as_list(active.get("endpoint_attempts")):
+        if not isinstance(attempt, dict):
+            continue
+        family_attempts = _as_dict(attempt.get("family_attempts"))
+        if not family_attempts:
+            yield attempt
+            continue
+        for family, family_attempt in family_attempts.items():
+            if not isinstance(family_attempt, dict):
+                continue
+            yield {
+                "custom_endpoint": attempt.get("custom_endpoint"),
+                "method": attempt.get("method"),
+                "url": attempt.get("url"),
+                "family": family,
+                **family_attempt,
+            }
+
+
 def _family_for_finding(finding: dict[str, Any]) -> str:
     evidence = _as_dict(finding.get("evidence"))
     explicit = evidence.get("family") or evidence.get("probe_family") or finding.get("family")
@@ -145,8 +167,7 @@ def _collect_discovery_sources(report: dict[str, Any]) -> dict[str, int]:
 
 
 def _collect_attempts(report: dict[str, Any]) -> tuple[dict[str, Any], dict[str, int]]:
-    active = _as_dict(report.get("active_checks"))
-    attempts = _as_list(active.get("endpoint_attempts"))
+    attempts = list(_endpoint_attempts(report))
     by_auth_family: Counter[tuple[str, str, str]] = Counter()
     params_by_location: Counter[str] = Counter()
     proof_by_family: Counter[tuple[str, str]] = Counter()
@@ -191,10 +212,9 @@ def _collect_attempts(report: dict[str, Any]) -> tuple[dict[str, Any], dict[str,
 
 def collect_body_completion_diagnostics(report: dict[str, Any]) -> dict[str, Any]:
     """Summarize SQL/NoSQL body-probe completion without exposing request bodies."""
-    active = _as_dict(report.get("active_checks"))
     families: dict[str, dict[str, Any]] = {}
 
-    for attempt in _as_list(active.get("endpoint_attempts")):
+    for attempt in _endpoint_attempts(report):
         if not isinstance(attempt, dict):
             continue
         family = str(attempt.get("family") or "").strip().lower()
@@ -248,9 +268,16 @@ def collect_body_completion_diagnostics(report: dict[str, Any]) -> dict[str, Any
 
     total_attempted = sum(int(item["attempted_params"]) for item in families.values())
     total_completed = sum(int(item["completed_params"]) for item in families.values())
+    total_body_attempts = sum(int(item["body_attempts"]) for item in families.values())
+    total_guided_attempts = sum(int(item["response_guided_completion_attempts"]) for item in families.values())
     for item in families.values():
         attempted = int(item["attempted_params"])
-        item["parameter_completion_ratio"] = round(int(item["completed_params"]) / max(1, attempted), 4)
+        body_attempts = int(item["body_attempts"])
+        probe_ratio = round(int(item["completed_params"]) / max(1, attempted), 4)
+        guided_ratio = round(int(item["response_guided_completion_attempts"]) / max(1, body_attempts), 4)
+        item["parameter_completion_ratio"] = guided_ratio
+        item["response_guided_completion_ratio"] = guided_ratio
+        item["probe_parameter_completion_ratio"] = probe_ratio
         item["status_counts"] = dict(sorted(item["status_counts"].items()))
         item["proof_counts"] = dict(sorted(item["proof_counts"].items()))
 
@@ -258,7 +285,9 @@ def collect_body_completion_diagnostics(report: dict[str, Any]) -> dict[str, Any
         "body_attempts": sum(int(item["body_attempts"]) for item in families.values()),
         "attempted_params": total_attempted,
         "completed_params": total_completed,
-        "parameter_completion_ratio": round(total_completed / max(1, total_attempted), 4),
+        "parameter_completion_ratio": round(total_guided_attempts / max(1, total_body_attempts), 4),
+        "response_guided_completion_ratio": round(total_guided_attempts / max(1, total_body_attempts), 4),
+        "probe_parameter_completion_ratio": round(total_completed / max(1, total_attempted), 4),
         "families": {family: families[family] for family in sorted(families)},
     }
 

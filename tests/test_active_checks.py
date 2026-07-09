@@ -752,6 +752,9 @@ def test_merge_endpoint_attempt_telemetry_preserves_param_names():
                 "completed_params_count": 2,
                 "param_count": 2,
                 "status": "completed",
+                "validation_fields_added": ["customerId"],
+                "proof_type": "json_collection_expansion",
+                "proof_types": ["json_collection_expansion"],
             },
         ]
     )
@@ -760,6 +763,8 @@ def test_merge_endpoint_attempt_telemetry_preserves_param_names():
     assert merged[0]["param_locations"] == ["body"]
     assert merged[0]["family_attempts"]["xss"]["param_names"] == ["message", "rating"]
     assert merged[0]["family_attempts"]["sqli"]["param_names"] == ["rating", "productId"]
+    assert merged[0]["family_attempts"]["sqli"]["validation_fields_added"] == ["customerId"]
+    assert merged[0]["family_attempts"]["sqli"]["proof_types"] == ["json_collection_expansion"]
 
 
 def test_json_mass_assignment_detects_reflected_privileged_field(monkeypatch):

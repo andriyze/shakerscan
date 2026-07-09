@@ -269,6 +269,12 @@ def _merge_endpoint_attempt_telemetry(*attempt_groups: Any) -> list[dict[str, An
                 "budget_exhausted": bool(attempt.get("budget_exhausted")),
                 "budget_exhausted_reason": attempt.get("budget_exhausted_reason"),
                 "skip_reason": attempt.get("skip_reason"),
+                "auth_state": attempt.get("auth_state"),
+                "principal_label": attempt.get("principal_label"),
+                "techniques_attempted": list(attempt.get("techniques_attempted") or [])[:30],
+                "validation_fields_added": list(attempt.get("validation_fields_added") or [])[:20],
+                "proof_type": attempt.get("proof_type"),
+                "proof_types": list(attempt.get("proof_types") or [])[:20],
             }
             if status != "completed" and item["status"] == "completed":
                 item["status"] = status
@@ -7685,6 +7691,13 @@ async def smart_sqli_test(
                 )
 
                 if is_vulnerable:
+                    if attempt is not None:
+                        proof_types = attempt.setdefault("proof_types", [])
+                        for proof_type in _sqli_proof_types(evidence):
+                            if proof_type not in proof_types:
+                                proof_types.append(proof_type)
+                        if proof_types:
+                            attempt["proof_type"] = proof_types[0]
                     if not results["dbms_detected"]:
                         fingerprint = _match_dbms_fingerprint(body_out, baseline_body)
                         if fingerprint:
@@ -7890,6 +7903,13 @@ async def smart_sqli_test(
                 )
 
                 if is_vulnerable:
+                    if attempt is not None:
+                        proof_types = attempt.setdefault("proof_types", [])
+                        for proof_type in _sqli_proof_types(evidence):
+                            if proof_type not in proof_types:
+                                proof_types.append(proof_type)
+                        if proof_types:
+                            attempt["proof_type"] = proof_types[0]
                     if not results["dbms_detected"]:
                         fingerprint = _match_dbms_fingerprint(body_out, baseline_body_out)
                         if fingerprint:
@@ -8571,6 +8591,23 @@ def _check_sqli_response(
                 break
 
     return strong_signal, evidence
+
+
+def _sqli_proof_types(evidence: list[str]) -> list[str]:
+    """Map proof evidence to stable, content-free telemetry labels."""
+    labels: list[str] = []
+    checks = (
+        ("SQLi JSON collection expansion", "json_collection_expansion"),
+        ("Authentication bypass via SQLi", "authentication_bypass"),
+        ("SQL error detected", "db_error_fingerprint"),
+        ("Time-based delay", "time_delay"),
+        ("Boolean difference", "boolean_differential"),
+        ("Data extraction indicator", "data_extraction"),
+    )
+    for marker, label in checks:
+        if any(marker in item for item in evidence):
+            labels.append(label)
+    return labels or ["differential_response"]
 
 
 def _select_xss_payloads(context: str) -> list[tuple[str, str, str]]:

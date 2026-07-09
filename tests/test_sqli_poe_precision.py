@@ -314,6 +314,7 @@ def test_smart_sqli_completes_missing_validation_siblings_before_payloads(monkey
     }]
     assert any(body.get("customerId") == 1 for body in sent_bodies)
     assert result["endpoint_attempts"][0]["validation_fields_added"] == ["customerId"]
+    assert result["endpoint_attempts"][0]["proof_type"] == "differential_response"
 
 
 def test_smart_sqli_skips_payloads_when_completed_baseline_retry_fails(monkeypatch):
