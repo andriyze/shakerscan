@@ -3105,6 +3105,120 @@ def test_promote_authz_replay_finding_requires_violation_and_links_evidence(monk
     assert any("UPDATE campaign_actions" in sql for sql, _args in captured["executes"])
 
 
+def test_campaign_action_execution_allows_explicit_authz_replay_promotion():
+    action_id = uuid.uuid4()
+
+    class _FakeConn:
+        async def fetchrow(self, query, *args):
+            assert "SELECT * FROM campaign_actions" in str(query)
+            assert args == (action_id,)
+            return {
+                "id": action_id,
+                "command": "authz.replay_plan",
+                "action_name": "authz.replay_plan",
+                "result_json": json.dumps({"authz_replay": {"violation_count": 1}}),
+                "finding_ids": json.dumps([]),
+                "hypothesis_ids": json.dumps([]),
+                "evidence_object_ids": json.dumps([]),
+                "tool_receipt_ids": json.dumps([]),
+                "blocked_by": json.dumps([]),
+                "mission_campaign_id": None,
+            }
+
+    req = api_module.ArsenalExecuteRequest(
+        command="authz.promote_replay_finding",
+        parameters={"campaign_action_id": str(action_id)},
+        campaign_action_id=str(action_id),
+    )
+    action = asyncio.run(api_module._validate_campaign_action_for_execution(_FakeConn(), req))
+
+    assert action["id"] == str(action_id)
+    assert action["result_json"]["authz_replay"]["violation_count"] == 1
+
+
+def test_campaign_action_execution_rejects_promotion_before_authz_replay():
+    action_id = uuid.uuid4()
+
+    class _FakeConn:
+        async def fetchrow(self, query, *args):
+            return {
+                "id": action_id,
+                "command": "authz.replay_plan",
+                "action_name": "authz.replay_plan",
+                "result_json": json.dumps({"authz_replay_plan": {"mode": "deterministic_authz_replay"}}),
+                "finding_ids": json.dumps([]),
+                "hypothesis_ids": json.dumps([]),
+                "evidence_object_ids": json.dumps([]),
+                "tool_receipt_ids": json.dumps([]),
+                "blocked_by": json.dumps([]),
+                "mission_campaign_id": None,
+            }
+
+    req = api_module.ArsenalExecuteRequest(
+        command="authz.promote_replay_finding",
+        parameters={"campaign_action_id": str(action_id)},
+        campaign_action_id=str(action_id),
+    )
+    with pytest.raises(api_module.HTTPException) as exc:
+        asyncio.run(api_module._validate_campaign_action_for_execution(_FakeConn(), req))
+
+    assert exc.value.status_code == 409
+
+
+def test_authz_replay_route_forwards_gated_campaign_action(monkeypatch):
+    action_id = uuid.uuid4()
+    approval_id = uuid.uuid4()
+    captured = {}
+
+    async def fake_execute(req):
+        captured["request"] = req
+        return {"dispatched": True}
+
+    monkeypatch.setattr(api_module, "_arsenal_execute_detached", fake_execute)
+    result = asyncio.run(api_module.arsenal_execute_authz_replay(
+        str(action_id),
+        api_module.AuthzReplayExecuteRequest(
+            session_id="session-1",
+            execute=True,
+            confirmations=["confirm_authorized"],
+            approval_receipt_id=str(approval_id),
+            created_by="pytest",
+        ),
+    ))
+
+    req = captured["request"]
+    assert result == {"dispatched": True}
+    assert req.command == "authz.replay_plan"
+    assert req.campaign_action_id == str(action_id)
+    assert req.parameters["session_id"] == "session-1"
+    assert req.approval_receipt_id == str(approval_id)
+
+
+def test_authz_promote_route_forwards_gated_campaign_action(monkeypatch):
+    action_id = uuid.uuid4()
+    captured = {}
+
+    async def fake_execute(req):
+        captured["request"] = req
+        return {"dispatched": True}
+
+    monkeypatch.setattr(api_module, "_arsenal_execute_detached", fake_execute)
+    result = asyncio.run(api_module.arsenal_promote_authz_replay(
+        str(action_id),
+        api_module.AuthzReplayPromoteRequest(
+            execute=True,
+            confirmations=["confirm_authorized"],
+            created_by="pytest",
+        ),
+    ))
+
+    req = captured["request"]
+    assert result == {"dispatched": True}
+    assert req.command == "authz.promote_replay_finding"
+    assert req.campaign_action_id == str(action_id)
+    assert req.parameters["campaign_action_id"] == str(action_id)
+
+
 def test_promote_authz_replay_finding_creates_one_finding_per_principal(monkeypatch):
     action_id = uuid.uuid4()
     target_id = uuid.uuid4()

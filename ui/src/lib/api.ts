@@ -314,6 +314,18 @@ export interface CampaignAction {
   created_at?: string
 }
 
+export interface ArsenalExecutionResponse {
+  command: string
+  dispatched: boolean
+  dry_run: boolean
+  execution_enabled: boolean
+  operation_id?: string | null
+  execution_blocked_reason?: string | null
+  command_result?: CommandResult | null
+  campaign_action?: CampaignAction | null
+  result?: Record<string, unknown> | null
+}
+
 export interface Hypothesis {
   id: string
   target_id?: string | null
@@ -1891,6 +1903,43 @@ export async function getCommandResults(limit: number = 20): Promise<{ command_r
 export async function getCampaignActions(limit: number = 20): Promise<{ campaign_actions: CampaignAction[]; execution_enabled: boolean; count: number }> {
   const res = await fetch(`${API_URL}/arsenal/campaign-actions?limit=${limit}`)
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load campaign action records'))
+  return res.json()
+}
+
+export async function executeAuthzReplay(
+  campaignActionId: string,
+  payload: {
+    session_id: string
+    execute: boolean
+    confirmations?: string[]
+    approval_receipt_id?: string
+    created_by?: string
+  }
+): Promise<ArsenalExecutionResponse> {
+  const res = await fetch(`${API_URL}/arsenal/campaign-actions/${encodeURIComponent(campaignActionId)}/authz-replay`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to execute authorization replay'))
+  return res.json()
+}
+
+export async function promoteAuthzReplay(
+  campaignActionId: string,
+  payload: {
+    execute: boolean
+    confirmations?: string[]
+    approval_receipt_id?: string
+    created_by?: string
+  }
+): Promise<ArsenalExecutionResponse> {
+  const res = await fetch(`${API_URL}/arsenal/campaign-actions/${encodeURIComponent(campaignActionId)}/authz-promote`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to promote authorization replay'))
   return res.json()
 }
 

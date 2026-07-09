@@ -3573,6 +3573,21 @@ class ArsenalExecuteRequest(BaseModel):
     campaign_action_id: Optional[str] = None
 
 
+class AuthzReplayExecuteRequest(BaseModel):
+    session_id: str = Field(min_length=1, max_length=200)
+    execute: bool = False
+    confirmations: list[str] = Field(default_factory=list)
+    approval_receipt_id: Optional[str] = None
+    created_by: Optional[str] = Field(default="authz_replay_operator", max_length=120)
+
+
+class AuthzReplayPromoteRequest(BaseModel):
+    execute: bool = False
+    confirmations: list[str] = Field(default_factory=list)
+    approval_receipt_id: Optional[str] = None
+    created_by: Optional[str] = Field(default="authz_replay_operator", max_length=120)
+
+
 class HypothesisClaimRequest(BaseModel):
     owner: str = Field(min_length=1, max_length=120)
     expected_version: int = Field(ge=1)
@@ -18386,6 +18401,47 @@ async def arsenal_campaign_actions(
     }
 
 
+@app.post("/arsenal/campaign-actions/{campaign_action_id}/authz-replay")
+async def arsenal_execute_authz_replay(
+    campaign_action_id: str,
+    req: AuthzReplayExecuteRequest,
+):
+    """Execute a planned authz replay through the gated Arsenal dispatcher."""
+    return await _arsenal_execute_detached(ArsenalExecuteRequest(
+        command="authz.replay_plan",
+        parameters={
+            "campaign_action_id": campaign_action_id,
+            "session_id": req.session_id,
+            "created_by": req.created_by,
+        },
+        execute=req.execute,
+        confirmations=req.confirmations,
+        approval_receipt_id=req.approval_receipt_id,
+        created_by=req.created_by,
+        campaign_action_id=campaign_action_id,
+    ))
+
+
+@app.post("/arsenal/campaign-actions/{campaign_action_id}/authz-promote")
+async def arsenal_promote_authz_replay(
+    campaign_action_id: str,
+    req: AuthzReplayPromoteRequest,
+):
+    """Explicitly promote a reviewed authz replay through the same receipt gate."""
+    return await _arsenal_execute_detached(ArsenalExecuteRequest(
+        command="authz.promote_replay_finding",
+        parameters={
+            "campaign_action_id": campaign_action_id,
+            "created_by": req.created_by,
+        },
+        execute=req.execute,
+        confirmations=req.confirmations,
+        approval_receipt_id=req.approval_receipt_id,
+        created_by=req.created_by,
+        campaign_action_id=campaign_action_id,
+    ))
+
+
 async def _persist_campaign(conn, req: CampaignRequest) -> dict[str, Any]:
     """Validate and persist a §7 mission campaign record.
 
@@ -20278,8 +20334,16 @@ async def _validate_campaign_action_for_execution(conn, req: ArsenalExecuteReque
     row = await conn.fetchrow("SELECT * FROM campaign_actions WHERE id=$1", action_uuid)
     if not row:
         raise HTTPException(status_code=404, detail="Campaign action not found")
-    planned_command = str(row.get("command") or row.get("action_name") or "").strip()
-    if planned_command and planned_command != req.command:
+    action = _public_campaign_action_row(row)
+    planned_command = str(action.get("command") or action.get("action_name") or "").strip()
+    result_json = action.get("result_json") if isinstance(action.get("result_json"), dict) else {}
+    replay = result_json.get("authz_replay") if isinstance(result_json.get("authz_replay"), dict) else {}
+    promotes_completed_replay = (
+        req.command == "authz.promote_replay_finding"
+        and planned_command == "authz.replay_plan"
+        and bool(replay)
+    )
+    if planned_command and planned_command != req.command and not promotes_completed_replay:
         raise HTTPException(status_code=409, detail="campaign_action_id command does not match requested command")
     if req.campaign_id and row.get("mission_campaign_id"):
         try:
@@ -20288,7 +20352,7 @@ async def _validate_campaign_action_for_execution(conn, req: ArsenalExecuteReque
             raise HTTPException(status_code=400, detail="campaign_id must be a UUID")
         if uuid.UUID(str(row.get("mission_campaign_id"))) != requested_campaign:
             raise HTTPException(status_code=409, detail="campaign_action_id belongs to a different campaign")
-    return _public_campaign_action_row(row)
+    return action
 
 
 async def _link_command_result_to_campaign_action(

@@ -1170,7 +1170,7 @@ the deterministic campaign from it, while unproven graph/source/AI signals remai
 than findings.
 
 ### 8. Auth / principal / role matrix
-**Status: PARTIAL, PHASE 5 EXPLICIT REPLAY PROMOTION DONE.** `target_endpoints.auth_state` exists, and
+**Status: PARTIAL, PHASE 6 OPERATOR REPLAY UI DONE.** `target_endpoints.auth_state` exists, and
 `target_principals` plus `target_endpoint_expectations` now persist role, tenant, credential-profile
 references, auth states, and endpoint x principal expected access. `GET/POST /targets/{id}/principals`
 and `GET/POST /targets/{id}/principal-matrix` expose the matrix as non-executing planning facts, and
@@ -1195,9 +1195,11 @@ separate replay findings; this is still gated and never happens automatically af
 content-free `proof_bundle` that distinguishes access-granted 2xx observations, soft 200 denials,
 denial-like redirects, authenticated-principal count, and whether a cross-principal differential was
 observed; `authz.promote_replay_finding` requires that differential and carries the bundle into
-promoted evidence. Remaining work is deeper
-operator UI controls for choosing sessions, executing the gated replay, and promoting reviewed
-violations from the campaign-action surface.
+promoted evidence. DONE phase 6 for campaign-action operator controls: the advertised authz replay
+and promotion routes now dispatch through the approval-receipt gate, completed replay actions are
+eligible for explicit promotion, and the Command Arsenal UI supports origin-aware interactive-session
+selection, proof-bundle review, gated replay, and differential-only finding promotion. Remaining work
+is richer principal/session lifecycle management beyond the existing interactive-session surface.
 
 **Done when:** a campaign can assert "endpoint X requires role admin" and prove a lower-role
 principal's access is a finding.

@@ -9,6 +9,7 @@ import {
   createOperationPlan,
   createApprovalReceipt,
   deriveRefuterReviewVerdict,
+  executeAuthzReplay,
   executeRefuterReviewPlan,
   generateSourceIngestHypotheses,
   getAgentContextPacks,
@@ -24,7 +25,9 @@ import {
   getOperationPlans,
   getArsenalTools,
   getLocalAgents,
+  listInteractiveSessions,
   previewScopeReceipt,
+  promoteAuthzReplay,
   queueRefuterReviewsFromSummary,
   testLocalAgentCapability,
   type AgentContextPack,
@@ -41,6 +44,7 @@ import {
   type Hypothesis,
   type HypothesisReportItem,
   type HypothesisSituationReport,
+  type InteractiveSessionSummary,
   type RefuterWorkSummary,
   type RefuterQueueResult,
   type RefuterReview,
@@ -54,6 +58,7 @@ import {
   type ScopeReceiptPreview,
   type SourceIngestResult,
 } from '@/lib/api'
+import { buildAuthzReplayReview, sessionMatchesTarget } from '@/lib/authzReplay'
 import { Badge, Button, Card, EmptyState, ErrorState, Skeleton } from '@/components/ui'
 
 function statusClass(status: string): string {
@@ -192,8 +197,77 @@ function CommandResultRow({ result }: { result: CommandResult }) {
   )
 }
 
-function CampaignActionRow({ action }: { action: CampaignAction }) {
+function CampaignActionRow({
+  action,
+  sessions,
+  approvalReceiptId,
+  operator,
+  onRefresh,
+}: {
+  action: CampaignAction
+  sessions: InteractiveSessionSummary[]
+  approvalReceiptId?: string
+  operator: string
+  onRefresh: () => Promise<void>
+}) {
   const status = action.live_scan_status || action.status
+  const review = useMemo(() => buildAuthzReplayReview(action.result_json), [action.result_json])
+  const matchingSessions = useMemo(
+    () => sessions.filter((session) => !session.is_expired && sessionMatchesTarget(session.target_url, action.target_url)),
+    [sessions, action.target_url]
+  )
+  const availableSessions = matchingSessions.length > 0
+    ? [...matchingSessions, ...sessions.filter((session) => !session.is_expired && !matchingSessions.includes(session))]
+    : sessions.filter((session) => !session.is_expired)
+  const [sessionId, setSessionId] = useState('')
+  const [executing, setExecuting] = useState<'replay' | 'promote' | null>(null)
+  const [actionError, setActionError] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (!sessionId && availableSessions.length > 0) {
+      setSessionId(availableSessions[0].session_id)
+    }
+  }, [availableSessions, sessionId])
+
+  async function runReplay() {
+    if (!sessionId || !approvalReceiptId) return
+    setExecuting('replay')
+    setActionError(null)
+    try {
+      await executeAuthzReplay(action.id, {
+        session_id: sessionId,
+        execute: true,
+        confirmations: ['confirm_authorized'],
+        approval_receipt_id: approvalReceiptId,
+        created_by: operator || 'operator',
+      })
+      await onRefresh()
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : 'Authorization replay failed')
+    } finally {
+      setExecuting(null)
+    }
+  }
+
+  async function promoteReplay() {
+    if (!approvalReceiptId) return
+    setExecuting('promote')
+    setActionError(null)
+    try {
+      await promoteAuthzReplay(action.id, {
+        execute: true,
+        confirmations: ['confirm_authorized'],
+        approval_receipt_id: approvalReceiptId,
+        created_by: operator || 'operator',
+      })
+      await onRefresh()
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : 'Authorization replay promotion failed')
+    } finally {
+      setExecuting(null)
+    }
+  }
+
   return (
     <div className="rounded-md border border-gray-800 bg-gray-950 px-3 py-2">
       <div className="flex flex-wrap items-start justify-between gap-3">
@@ -236,6 +310,82 @@ function CampaignActionRow({ action }: { action: CampaignAction }) {
           {action.blocked_by.map((reason) => (
             <Badge key={reason} className={statusClass('out_of_scope')}>{reason}</Badge>
           ))}
+        </div>
+      )}
+      {review.available && (
+        <div className="mt-3 border-t border-gray-800 pt-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex min-w-0 flex-wrap items-center gap-2">
+              <Badge className="bg-cyan-500/15 text-cyan-300">authz replay</Badge>
+              <span className="break-all font-mono text-xs text-gray-300">
+                {review.method || 'GET'} {review.path || 'planned endpoint'}
+              </span>
+            </div>
+            {review.proofState && <Badge className={review.violationCount > 0 ? statusClass('wired') : statusClass('read_only')}>{review.proofState}</Badge>}
+          </div>
+          {review.observationCount > 0 && (
+            <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-4">
+              <Stat label="observations" value={review.observationCount} />
+              <Stat label="principals" value={review.authenticatedPrincipalCount} />
+              <Stat label="mismatches" value={review.mismatchCount} tone={review.mismatchCount > 0 ? 'text-amber-300' : 'text-white'} />
+              <Stat label="violations" value={review.violationCount} tone={review.violationCount > 0 ? 'text-red-300' : 'text-white'} />
+            </div>
+          )}
+          <div className="mt-3 flex flex-wrap items-end gap-2">
+            <label className="min-w-64 flex-1">
+              <span className="text-xs text-gray-400">Interactive session</span>
+              <select
+                value={sessionId}
+                onChange={(event) => setSessionId(event.target.value)}
+                className="mt-1 w-full rounded-md border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white focus:border-blue-500 focus:outline-none"
+              >
+                {availableSessions.length === 0 && <option value="">No active sessions</option>}
+                {availableSessions.map((session) => (
+                  <option key={session.session_id} value={session.session_id}>
+                    {session.target_url}{matchingSessions.includes(session) ? '' : ' (different origin)'}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <a
+              href="/interactive"
+              className="rounded-md border border-gray-700 px-3 py-2 text-xs font-medium text-gray-300 hover:border-blue-400 hover:text-white"
+            >
+              Sessions
+            </a>
+            <Button
+              size="sm"
+              variant="secondary"
+              onClick={() => void runReplay()}
+              disabled={!sessionId || !approvalReceiptId || executing !== null}
+            >
+              <RefreshCw className={`h-3.5 w-3.5 ${executing === 'replay' ? 'animate-spin' : ''}`} aria-hidden="true" />
+              Run replay
+            </Button>
+            {review.violationCount > 0 && review.differentialObserved && review.promotedFindingIds.length === 0 && (
+              <Button
+                size="sm"
+                variant="danger"
+                onClick={() => void promoteReplay()}
+                disabled={!approvalReceiptId || executing !== null}
+              >
+                <ShieldCheck className="h-3.5 w-3.5" aria-hidden="true" />
+                Promote finding
+              </Button>
+            )}
+          </div>
+          <div className="mt-2 flex flex-wrap gap-1.5">
+            {!approvalReceiptId && <Badge className={statusClass('out_of_scope')}>approval receipt required</Badge>}
+            {review.accessGrantedCount > 0 && <Badge className={statusClass('wired')}>access granted {review.accessGrantedCount}</Badge>}
+            {review.softDenialCount > 0 && <Badge className="bg-gray-800 text-gray-300">soft denials {review.softDenialCount}</Badge>}
+            {review.redirectDenialCount > 0 && <Badge className="bg-gray-800 text-gray-300">redirect denials {review.redirectDenialCount}</Badge>}
+            {review.promotedFindingIds.map((id) => (
+              <a key={id} href={`/findings/${id}`}>
+                <Badge className={statusClass('proof_backed')}>finding {id.slice(0, 8)}</Badge>
+              </a>
+            ))}
+          </div>
+          {actionError && <p role="alert" className="mt-2 text-sm text-red-300">{actionError}</p>}
         </div>
       )}
     </div>
@@ -725,6 +875,7 @@ export default function ArsenalSettingsPage() {
   const [recentPlans, setRecentPlans] = useState<OperationPlan[]>([])
   const [recentCommandResults, setRecentCommandResults] = useState<CommandResult[]>([])
   const [recentCampaignActions, setRecentCampaignActions] = useState<CampaignAction[]>([])
+  const [interactiveSessions, setInteractiveSessions] = useState<InteractiveSessionSummary[]>([])
   const [recentHypotheses, setRecentHypotheses] = useState<Hypothesis[]>([])
   const [hypothesisSituation, setHypothesisSituation] = useState<HypothesisSituationReport | null>(null)
   const [sourceTargetId, setSourceTargetId] = useState('')
@@ -778,6 +929,7 @@ export default function ArsenalSettingsPage() {
         refuterSummaryData,
         contextData,
         traceData,
+        sessionData,
       ] = await Promise.all([
         getArsenalCommands(),
         getArsenalContracts(),
@@ -785,12 +937,13 @@ export default function ArsenalSettingsPage() {
         getLocalAgents({ probeVersions }),
         getOperationPlans(5),
         getCommandResults(5),
-        getCampaignActions(5),
+        getCampaignActions(20),
         getHypothesisSituationReport(5, approvalActor || 'operator'),
         getHypotheses(5),
         getRefuterWorkSummary(5, 200),
         getAgentContextPacks(5),
         getAgentDecisionTraces(5),
+        listInteractiveSessions(),
       ])
       setCommands(commandData)
       setContracts(contractData)
@@ -804,6 +957,7 @@ export default function ArsenalSettingsPage() {
       setRefuterSummary(refuterSummaryData)
       setRecentContextPacks(contextData.context_packs)
       setRecentDecisionTraces(traceData.decision_traces)
+      setInteractiveSessions(sessionData.sessions || [])
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load Command Arsenal status')
     } finally {
@@ -815,6 +969,15 @@ export default function ArsenalSettingsPage() {
   useEffect(() => {
     void load(false)
   }, [])
+
+  async function refreshCampaignActions() {
+    const [actionData, sessionData] = await Promise.all([
+      getCampaignActions(20),
+      listInteractiveSessions(),
+    ])
+    setRecentCampaignActions(actionData.campaign_actions)
+    setInteractiveSessions(sessionData.sessions || [])
+  }
 
   const commandCounts = useMemo(() => countBy(commands?.commands || []), [commands])
   const gatedCommands = useMemo(
@@ -1511,7 +1674,7 @@ export default function ArsenalSettingsPage() {
             <TerminalSquare className="h-4 w-4 text-emerald-300" aria-hidden="true" />
             <h2 className="font-medium text-white">Campaign Action Ledger</h2>
           </div>
-          <Badge className="bg-gray-800 text-gray-300">read only</Badge>
+          <Badge className="bg-amber-500/15 text-amber-300">gated replay</Badge>
         </div>
         <p className="mb-3 text-sm text-gray-400">
           Action-shaped records derived from product commands, with campaign, receipt, scan, evidence, and blocked-reason refs.
@@ -1525,8 +1688,15 @@ export default function ArsenalSettingsPage() {
           <EmptyState message="No campaign action records yet." />
         ) : (
           <div className="grid gap-2">
-            {recentCampaignActions.slice(0, 5).map((action) => (
-              <CampaignActionRow key={action.id} action={action} />
+            {recentCampaignActions.slice(0, 20).map((action) => (
+              <CampaignActionRow
+                key={action.id}
+                action={action}
+                sessions={interactiveSessions}
+                approvalReceiptId={approvalReceipt?.approved_by ? approvalReceipt.id : undefined}
+                operator={approvalActor.trim() || 'operator'}
+                onRefresh={refreshCampaignActions}
+              />
             ))}
           </div>
         )}
