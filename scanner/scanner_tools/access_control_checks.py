@@ -123,6 +123,18 @@ CATEGORY_CONTENT_VALIDATORS = {
             # Kubernetes health (JSON)
             '"healthy":', '"ready":', '"live":',
         ],
+        # Unambiguous debug/actuator/prometheus/dev-server signatures: any ONE confirms a
+        # real debug endpoint. The generic JSON tokens in required_patterns above (e.g.
+        # "status":, _count, _total) also match ordinary API / JSON-catch-all bodies, so
+        # they no longer validate on a single match (min_matches is 2) and only a strong
+        # signature short-circuits — preventing a false HIGH exposure on {"status":"ok"}.
+        "strong_signature_patterns": [
+            "# help", "# type", "_bucket",
+            '"beans":', '"mappings":', '"configprops":', '"components":',
+            "hot module", "__webpack_hmr", "webpackhotupdate",
+            "__nextjs_original-stack-frame", "next-router-state-tree",
+            "v8.serialize",
+        ],
         # Highly specific patterns valid in HTML (1 match sufficient)
         "html_safe_patterns_unique": [
             # phpinfo specific (outputs HTML by design) - very unique markers
@@ -150,7 +162,7 @@ CATEGORY_CONTENT_VALIDATORS = {
             # Node.js (need multiple)
             "    at ", "node_modules/", "internal/modules",
         ],
-        "min_matches": 1,
+        "min_matches": 2,
         "reject_if_html_generic": True,
         # These paths should NEVER return generic HTML app content
         "always_validate": True,
@@ -335,6 +347,13 @@ def _has_category_content(body: str, content_type: str, category: str) -> tuple[
     # (patterns like "stack trace" in HTML error pages are not valid debug endpoints)
     if validator.get("reject_html_content_type", False) and is_html:
         return False, "html_content_type_rejected"
+
+    # Unambiguous signatures validate on a single match; the generic tokens in
+    # required_patterns need min_matches (so a JSON catch-all body like {"status":"ok"}
+    # with one loose token does not become a false HIGH exposure).
+    strong_signatures = validator.get("strong_signature_patterns", [])
+    if strong_signatures and any(p in body_lower for p in strong_signatures):
+        return True, "strong_signature_match"
 
     # Check for required patterns
     pattern_matches = 0

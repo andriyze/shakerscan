@@ -9241,10 +9241,36 @@ async def _schedule_health_map_for_schedules(
         key = (str(failure.get("target_id")), str(failure.get("scan_type") or "quick"))
         failures_by_key.setdefault(key, []).append(failure)
 
+    # Recovery detection: a schedule that has produced a non-failed terminal run more
+    # recently than its failures has RECOVERED and must not be flagged. Without this, a
+    # single outage keeps a green-since schedule marked "needs attention" for the whole
+    # 14-day window.
+    last_success_rows = await conn.fetch(
+        """
+        SELECT target_id, COALESCE(scan_type, 'quick') AS scan_type, MAX(created_at) AS last_success
+        FROM scans
+        WHERE status IN ('completed', 'partial', 'degraded')
+          AND target_id = ANY($1::uuid[])
+          AND (scan_role IS NULL OR scan_role <> 'shard')
+        GROUP BY target_id, COALESCE(scan_type, 'quick')
+        """,
+        target_ids,
+    )
+    last_success_by_key: dict[tuple[str, str], Any] = {}
+    for row in last_success_rows:
+        record = row_to_dict(row)
+        last_success_by_key[(str(record.get("target_id")), str(record.get("scan_type") or "quick"))] = record.get("last_success")
+
     health_by_schedule_id: dict[str, dict[str, Any]] = {}
     for schedule in candidates:
         key = (str(schedule.get("target_id")), str(schedule.get("scan_type") or "quick"))
         failures = failures_by_key.get(key, [])
+        last_success = last_success_by_key.get(key)
+        if last_success is not None:
+            failures = [
+                failure for failure in failures
+                if failure.get("created_at") is not None and failure["created_at"] > last_success
+            ]
         health = _schedule_health_from_failures(schedule, failures)
         if health and health.get("status") in {"attention", "warning"}:
             health_by_schedule_id[str(schedule.get("id"))] = health

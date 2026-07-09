@@ -272,3 +272,23 @@ def test_authz_write_replay_rejects_id_ignored_own_object(monkeypatch):
         and attempt.get("last_verdict") == "owner_object_not_confirmed_in_write_response"
         for attempt in result["endpoint_attempts"]
     )
+
+
+def test_debug_dev_json_catch_all_is_not_flagged_but_real_signatures_are():
+    """A JSON catch-all body with one loose token must not validate as a debug endpoint,
+    while a real actuator/prometheus signature still does."""
+    hcc = access_control_checks._has_category_content
+    # Single generic token in a plain JSON body -> not a debug endpoint (was a false HIGH).
+    ok, _ = hcc('{"status":"ok"}', "application/json", "debug_dev")
+    assert ok is False
+    ok, _ = hcc('{"total_count":0}', "application/json", "debug_dev")
+    assert ok is False
+    # Real Spring actuator health (strong "components":) -> valid.
+    ok, reason = hcc('{"status":"UP","components":{"db":{"status":"UP"}}}', "application/json", "debug_dev")
+    assert ok is True
+    # Prometheus metrics (strong "# HELP"/"# TYPE") -> valid.
+    ok, _ = hcc("# HELP x total\n# TYPE x counter\nx 1\n", "text/plain", "debug_dev")
+    assert ok is True
+    # Two generic tokens together still validate (genuine actuator-ish body).
+    ok, _ = hcc('{"status":"UP","health":"OK"}', "application/json", "debug_dev")
+    assert ok is True

@@ -593,6 +593,43 @@ def test_dashboard_action_center_surfaces_recurring_schedule_failures():
     assert "Exceeded max duration" in item["samples"][0]["detail"]
 
 
+def test_dashboard_action_center_does_not_flag_recovered_schedule():
+    """A schedule that failed during an outage but has succeeded SINCE must not be flagged."""
+    import datetime as _dt
+    target_id = uuid.UUID("11111111-1111-4111-8111-111111111111")
+    schedule_id = uuid.UUID("22222222-2222-4222-8222-222222222222")
+    failure_time = _dt.datetime(2026, 7, 1, 0, 44, 55, tzinfo=_dt.timezone.utc)
+    recovery_time = _dt.datetime(2026, 7, 8, 2, 0, 0, tzinfo=_dt.timezone.utc)  # newer than the failure
+
+    class _Conn:
+        async def fetchrow(self, query, *args):
+            return {}
+
+        async def fetch(self, query, *args):
+            if "FROM schedules s" in query and "JOIN targets t" in query:
+                return [{
+                    "id": schedule_id, "target_id": target_id, "target_url": "https://shakerscan.com",
+                    "target_name": None, "schedule_kind": "normal_scan", "scan_type": "quick",
+                    "scan_options": {}, "is_active": True, "updated_at": "2026-07-09T01:16:41+00:00",
+                }]
+            if "last_success" in query:
+                return [{"target_id": target_id, "scan_type": "quick", "last_success": recovery_time}]
+            if "FROM scans" in query and "target_id = ANY" in query:
+                return [{
+                    "id": uuid.UUID("33333333-3333-4333-8333-333333333333"), "target_id": target_id,
+                    "target_url": "https://shakerscan.com", "scan_type": "quick",
+                    "error_message": "Scan terminated: Exceeded max duration",
+                    "created_at": failure_time, "completed_at": failure_time,
+                }]
+            return []
+
+    items = asyncio.run(
+        api_module._build_dashboard_action_center(_Conn(), worker_snapshot={"available": False})
+    )
+    by_id = {item["id"]: item for item in items}
+    assert "schedule-health-attention" not in by_id
+
+
 def test_dashboard_action_center_surfaces_refuter_integrity_spike():
     # A target whose latest scan spiked from a ~4-finding baseline to 30.
     spike_scans = [

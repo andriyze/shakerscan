@@ -3144,25 +3144,12 @@ def expand_frontend_route_api_candidates(endpoints: list[str], discovered_api_ba
                 if endpoint.startswith(("/api/", "/v1/", "/v2/", "/v3/", "/v4/")):
                     expanded.add(base + endpoint)
 
-        # crAPI-style microservice route fragments. This is intentionally based
-        # on route shape, not host or product name, so similar service-split
-        # SPAs benefit without hard-coding a target URL.
-        if lowered.startswith(("/v1/user/", "/v2/user/", "/v3/user/", "/v4/user/")):
-            expanded.add("/identity/api" + endpoint)
-        if lowered.startswith(("/v1/vehicle/", "/v2/vehicle/", "/v3/vehicle/", "/v4/vehicle/")):
-            expanded.add("/identity/api" + endpoint)
-        if lowered.startswith(("/v1/community/", "/v2/community/", "/v3/community/", "/v4/community/")):
-            expanded.add("/community/api" + endpoint)
-        if re.match(r"^/api/v[0-9]+/coupons?(?:/|$)", lowered):
-            expanded.add("/community" + endpoint)
-        if re.match(r"^/v[0-9]+/coupons?(?:/|$)", lowered):
-            expanded.add("/community/api" + endpoint)
-        if lowered.startswith(("/coupon", "/coupons", "/apply-coupon", "/apply_coupon", "/validate-coupon", "/validate_coupon")):
-            expanded.add("/community/api/v2" + endpoint)
-        if lowered.startswith(("/shop/", "/mechanic", "/merchant/")) or lowered in {"/shop", "/orders", "/past-orders"}:
-            expanded.add("/workshop/api" + endpoint)
-        if lowered.startswith(("/api/shop/", "/api/mechanic/", "/api/merchant/")):
-            expanded.add("/workshop" + endpoint)
+        # NOTE: service-prefix expansion is done ONLY via discovered_api_bases above.
+        # Hardcoding specific service mounts (e.g. mapping "/coupon" -> "/community/api/v2"
+        # or "/shop" -> "/workshop/api") fabricates routes that exist only on one target
+        # app (crAPI) and inflate a benchmark without generalizing. Service routing must be
+        # discovered (from bases in the same bundle / OpenAPI / observed traffic), never
+        # hardcoded per product. See universal-engine rule: ship techniques, not app facts.
 
     return sorted(expanded)
 

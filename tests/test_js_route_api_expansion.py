@@ -8,39 +8,42 @@ if str(_SCANNER_DIR) not in sys.path:
 from scanner_tools.discovery import expand_frontend_route_api_candidates, extract_frontend_route_fragments
 
 
-def test_expands_crapi_style_frontend_routes_to_service_api_candidates():
-    expanded = set(
-        expand_frontend_route_api_candidates(
-            [
-                "/v2/user/dashboard",
-                "/v2/vehicle/vehicles",
-                "/v2/community/posts",
-                "/shop/orders",
-                "/api/shop/orders/all",
-                "/api/shop/orders/<orderId>",
-                "/api/v2/coupon/validate-coupon",
-                "/coupon",
-                "/mechanic/service_requests",
-                "/orders",
-                "/past-orders",
-            ]
-        )
-    )
+# crAPI-specific service mounts that must NOT be fabricated from a route noun. Prepending
+# these product-specific prefixes only produces valid routes on crAPI and inflates its
+# benchmark without generalizing (universal-engine rule: ship techniques, not app facts).
+_FABRICATED_SERVICE_MOUNTS = {
+    "/identity/api/v2/user/dashboard",
+    "/identity/api/v2/vehicle/vehicles",
+    "/community/api/v2/community/posts",
+    "/workshop/api/shop/orders",
+    "/community/api/v2/coupon/validate-coupon",
+    "/community/api/v2/coupon",
+    "/workshop/api/mechanic/service_requests",
+    "/workshop/api/past-orders",
+}
 
-    assert "/identity/api/v2/user/dashboard" in expanded
-    assert "/identity/api/v2/vehicle/vehicles" in expanded
-    assert "/community/api/v2/community/posts" in expanded
-    assert "/workshop/api/shop/orders" in expanded
-    assert "/workshop/api/shop/orders/all" in expanded
-    assert "/workshop/api/shop/orders/<orderId>" in expanded
-    assert "/community/api/v2/coupon/validate-coupon" in expanded
-    assert "/community/api/v2/coupon" in expanded
-    assert "/workshop/api/mechanic/service_requests" in expanded
-    assert "/workshop/api/orders" in expanded
-    assert "/workshop/api/past-orders" in expanded
+
+def test_preserves_frontend_routes_without_fabricating_service_mounts():
+    routes = [
+        "/v2/user/dashboard",
+        "/v2/vehicle/vehicles",
+        "/shop/orders",
+        "/api/v2/coupon/validate-coupon",
+        "/coupon",
+        "/mechanic/service_requests",
+        "/past-orders",
+    ]
+    expanded = set(expand_frontend_route_api_candidates(routes))
+
+    # Originals are preserved as candidates (probe what the bundle actually references).
+    for route in routes:
+        assert route in expanded, route
+    # No hardcoded per-product service prefix is invented.
+    assert expanded & _FABRICATED_SERVICE_MOUNTS == set()
 
 
 def test_expands_discovered_api_bases_without_dropping_originals():
+    # The ONLY service-prefix composition is via bases discovered in the same bundle.
     expanded = expand_frontend_route_api_candidates(
         ["/v2/users", "api/orders"],
         discovered_api_bases=["/tenant-a"],
@@ -52,15 +55,12 @@ def test_expands_discovered_api_bases_without_dropping_originals():
     assert "/tenant-a/api/orders" in expanded
 
 
-def test_extracts_minified_crapi_style_route_fragments():
+def test_extracts_route_fragments_but_does_not_fabricate_service_mounts():
     bundle = """
     const sg={
       GET_USER:"/v2/user/dashboard",
       GET_VEHICLES:"/v2/vehicle/vehicles",
-      GET_POSTS:"/v2/community/posts/<postId>",
       GET_ORDERS:"/shop/orders",
-      GET_ORDERS_REAL:"api/shop/orders/all",
-      GET_ORDER_BY_ID:"api/shop/orders/<orderId>",
       VALIDATE_COUPON:"/api/v2/coupon/validate-coupon",
       COUPON:"/coupon",
       GET_SERVICE:"/mechanic/service_requests",
@@ -72,19 +72,12 @@ def test_extracts_minified_crapi_style_route_fragments():
     fragments = set(extract_frontend_route_fragments(bundle))
     expanded = set(expand_frontend_route_api_candidates(list(fragments)))
 
+    # Extraction still recovers the real route fragments present in the bundle.
     assert "/v2/user/dashboard" in fragments
-    assert "/v2/vehicle/vehicles" in fragments
-    assert "/v2/community/posts/<postId>" in fragments
     assert "/shop/orders" in fragments
-    assert "/mechanic/service_requests" in fragments
-    assert "/past-orders" in fragments
-    assert "/identity/api/v2/user/dashboard" in expanded
-    assert "/identity/api/v2/vehicle/vehicles" in expanded
-    assert "/community/api/v2/community/posts/<postId>" in expanded
-    assert "/workshop/api/shop/orders" in expanded
-    assert "/workshop/api/shop/orders/all" in expanded
-    assert "/workshop/api/shop/orders/<orderId>" in expanded
-    assert "/community/api/v2/coupon/validate-coupon" in expanded
-    assert "/community/api/v2/coupon" in expanded
-    assert "/workshop/api/mechanic/service_requests" in expanded
-    assert "/workshop/api/past-orders" in expanded
+    assert "/coupon" in fragments
+    # But expansion never invents the crAPI service-mounted variants.
+    assert expanded & _FABRICATED_SERVICE_MOUNTS == set()
+    # The extracted fragments themselves remain probeable candidates.
+    for fragment in fragments:
+        assert fragment in expanded

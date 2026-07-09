@@ -236,7 +236,7 @@ def test_nosql_json_body_detects_collection_operator_differential(monkeypatch):
     assert finding["control_items"] == 0
     assert finding["payload_items"] == 3
     assert finding["payload_status"] == 200
-    assert len(calls) == 3  # scalar baseline, restrictive $eq, permissive $ne
+    assert len(calls) == 4  # scalar baseline, restrictive $eq x2 (reproducibility guard), permissive $ne
 
 
 def test_nosql_json_body_rejects_uniform_collection_response(monkeypatch):
@@ -306,3 +306,40 @@ def test_nosql_query_rejects_uniform_collection_response(monkeypatch):
 
     assert result["vulnerable"] is False
     assert result["findings"] == []
+
+
+def test_nosql_json_body_suppresses_volatile_collection_differential(monkeypatch):
+    """A volatile collection (control differs between two samples) must NOT be scored as
+    operator injection just because the $ne response is larger than one control sample."""
+    call = {"restrictive": 0}
+
+    async def fake_run(cmd, *args, **kwargs):
+        body = json.loads(cmd[cmd.index("-d") + 1])
+        product_id = body.get("id")
+        if isinstance(product_id, dict) and "$ne" in product_id:
+            # permissive: 5 items
+            items = [{"id": i, "message": "m", "rating": 3} for i in range(5)]
+            return json.dumps({"data": items}) + "__SHAKERSCAN_NOSQL__200__SHAKERSCAN_NOSQL__", "", 0
+        if isinstance(product_id, dict) and "$eq" in product_id:
+            # restrictive control is VOLATILE: first sample 0 items, second sample 4 items
+            call["restrictive"] += 1
+            n = 0 if call["restrictive"] == 1 else 4
+            items = [{"id": i, "message": "m", "rating": 3} for i in range(n)]
+            return json.dumps({"data": items}) + "__SHAKERSCAN_NOSQL__200__SHAKERSCAN_NOSQL__", "", 0
+        return '{"data":[]}__SHAKERSCAN_NOSQL__200__SHAKERSCAN_NOSQL__', "", 0
+
+    monkeypatch.setattr(active_checks, "run", fake_run)
+
+    result = asyncio.run(
+        active_checks.nosql_injection_test_json_body(
+            "https://example.test/rest/products/reviews",
+            method="POST",
+            params=["id"],
+            body_template={"id": 1},
+        )
+    )
+
+    # The two control samples disagree (0 vs 4 items) -> volatile -> no operator finding.
+    assert not any(
+        f.get("evidence_type") == "operator_collection_differential" for f in result["findings"]
+    )

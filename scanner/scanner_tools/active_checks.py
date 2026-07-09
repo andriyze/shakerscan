@@ -2357,6 +2357,8 @@ async def nosql_injection_test(url: str) -> dict[str, Any]:
         *,
         control_status: int | None,
         permissive_status: int | None,
+        control2_body: str | None = None,
+        control2_status: int | None = None,
     ) -> dict[str, Any] | None:
         if permissive_status is None or not (200 <= permissive_status < 300):
             return None
@@ -2385,6 +2387,25 @@ async def nosql_injection_test(url: str) -> dict[str, Any]:
         control_rejected = control_status in (400, 401, 403, 404, 422)
         expanded_items = p_items >= max(2, c_items + 2)
         expanded_bytes = len(permissive_body or "") >= len(control_body or "") + 120
+        if not control_rejected and expanded_items and expanded_bytes:
+            # Reproducibility guard: an expansion delta only means injection if the CONTROL
+            # is stable. A volatile collection (feed/randomized/rate-limited list) can differ
+            # by the threshold request-to-request with no injection, faking the differential.
+            # Require a second control sample that matches the first AND that the permissive
+            # response still clears it. (control_rejected is a status asymmetry, jitter-proof.)
+            if control2_body is None:
+                return None
+            control2_stats = _json_collection_stats(control2_body)
+            c2_items = int(control2_stats["max_array_items"])
+            controls_stable = (
+                control2_status == control_status
+                and c2_items <= c_items + 1
+                and abs(len(control2_body or "") - len(control_body or "")) < 120
+                and p_items >= max(2, c2_items + 2)
+                and len(permissive_body or "") >= len(control2_body or "") + 120
+            )
+            if not controls_stable:
+                return None
         if control_rejected or (expanded_items and expanded_bytes):
             return {
                 "control_status": control_status,
@@ -2430,11 +2451,20 @@ async def nosql_injection_test(url: str) -> dict[str, Any]:
 
             control_body, control_status = _split_status(control_raw)
             permissive_body, permissive_status = _split_status(permissive_raw)
+            # Second control sample to detect a volatile collection (reproducibility guard).
+            control2_raw, _, control2_rc = await run([
+                "curl", "-sS", "-L", "-k", "--max-time", "10",
+                "-w", f"{status_marker}%{{http_code}}{status_marker}",
+                control_url,
+            ], timeout=15)
+            control2_body, control2_status = _split_status(control2_raw) if control2_rc == 0 else (None, None)
             evidence = _query_collection_diff_evidence(
                 control_body,
                 permissive_body,
                 control_status=control_status,
                 permissive_status=permissive_status,
+                control2_body=control2_body,
+                control2_status=control2_status,
             )
             if evidence:
                 finding = {
@@ -2730,6 +2760,8 @@ async def nosql_injection_test_json_body(
         *,
         control_status: int | None,
         permissive_status: int | None,
+        control2_body: str | None = None,
+        control2_status: int | None = None,
     ) -> dict[str, Any] | None:
         if permissive_status is None or not (200 <= permissive_status < 300):
             return None
@@ -2757,6 +2789,23 @@ async def nosql_injection_test_json_body(
         control_rejected = control_status in (400, 401, 403, 404, 422)
         expanded_items = p_items >= max(2, c_items + 2)
         expanded_bytes = len(permissive_body or "") >= len(control_body or "") + 120
+        if not control_rejected and expanded_items and expanded_bytes:
+            # Reproducibility guard (see _query_collection_diff_evidence): an expansion delta
+            # is only injection if the control is stable across two samples; a volatile
+            # collection can fake it. Require a matching second control and clearance of it.
+            if control2_body is None:
+                return None
+            control2_stats = _json_collection_stats(control2_body)
+            c2_items = int(control2_stats["max_array_items"])
+            controls_stable = (
+                control2_status == control_status
+                and c2_items <= c_items + 1
+                and abs(len(control2_body or "") - len(control_body or "")) < 120
+                and p_items >= max(2, c2_items + 2)
+                and len(permissive_body or "") >= len(control2_body or "") + 120
+            )
+            if not controls_stable:
+                return None
         if control_rejected or (expanded_items and expanded_bytes):
             return {
                 "control_status": control_status,
@@ -2915,6 +2964,13 @@ async def nosql_injection_test_json_body(
         restrictive_raw, _, restrictive_rc = await run(restrictive_cmd, timeout=15)
         if restrictive_rc == 0:
             restrictive_out, restrictive_code = _parse_meta(restrictive_raw or "")
+        # Second restrictive (control) sample for the reproducibility guard: detects a
+        # volatile collection so a jitter delta is not scored as operator injection.
+        restrictive2_out = None
+        restrictive2_code = None
+        restrictive2_raw, _, restrictive2_rc = await run(restrictive_cmd, timeout=15)
+        if restrictive2_rc == 0:
+            restrictive2_out, restrictive2_code = _parse_meta(restrictive2_raw or "")
 
         # Test each NoSQLi payload
         for payload in nosql_payloads:
@@ -2998,6 +3054,8 @@ async def nosql_injection_test_json_body(
                     test_out or "",
                     control_status=restrictive_code,
                     permissive_status=test_code,
+                    control2_body=restrictive2_out,
+                    control2_status=restrictive2_code,
                 )
                 if collection_evidence:
                     is_vulnerable = True
