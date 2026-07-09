@@ -302,24 +302,6 @@ def test_family_route_boost_raises_family_relevant_routes():
     assert active_endpoint_score(review, family=None) == active_endpoint_score(review, family="all")
 
 
-def test_sqli_family_boosts_benchmark_workflow_body_routes():
-    coupon = {
-        "url": "https://t/community/api/v2/coupon",
-        "method": "POST",
-        "body_params": ["coupon_code", "code"],
-        "source": "options",
-    }
-    review = {
-        "url": "https://t/rest/products/reviews",
-        "method": "PATCH",
-        "body_params": ["message", "rating"],
-        "source": "options",
-    }
-
-    assert active_endpoint_score(coupon, family="sqli") > active_endpoint_score(coupon)
-    assert active_endpoint_score(review, family="sqli") > active_endpoint_score(review)
-
-
 def test_family_ordering_prefers_family_routes_under_budget():
     search = {"url": "https://t/api/items/filter", "method": "GET", "params": ["sort"], "source": "options"}
     comment = {"url": "https://t/api/items/comment", "method": "POST", "body_params": ["text"], "source": "options"}

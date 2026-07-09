@@ -943,10 +943,10 @@ low-level signature field, and the UI explains why "signature present" is not th
 POST-body SQLi/login coverage, stored XSS store-then-render proof, and workflow/write-side BOLA.
 Body-param SQLi/NoSQL primitives exist (`nosql_injection_test_json_body` and body-param sites in
 `active_checks`), and NoSQL JSON-body checks now emit endpoint-attempt telemetry so ASM/family
-coverage can distinguish completed, partial, and skipped JSON-body probes. Focused SQLi active
-prioritization now explicitly boosts benchmark workflow body routes such as login/search/coupon/
-review/order/product APIs, and the SQLi/XSS active loops pass their family into the shared endpoint
-scorer so tight budgets spend on the right workflow surfaces first. The near-term gap is still better
+coverage can distinguish completed, partial, and skipped JSON-body probes. Focused SQLi/XSS active
+loops pass their family into the shared endpoint scorer, while endpoint ordering relies on generic
+source, method, body/parameter shape, and injection-surface signals rather than benchmark product
+nouns. The near-term gap is still better
 endpoint/body capture, auth context, and proof routing on benchmark workflows. Benchmark
 summaries and scorecards now include `auth_workflow` diagnostics with required/observed auth states,
 missing second-principal blockers, and authz/BOLA attempt rollups so a missed BOLA expectation is
@@ -971,8 +971,9 @@ DONE phase 3 for connecting those rows to the hypothesis/campaign planning layer
 hypotheses;
 DONE phase 4 for an opt-in benchmark-runner bridge that seeds those hypotheses from a recorded
 scorecard;
-DONE phase 5 for focused SQLi/XSS active-loop ordering that prioritizes benchmark workflow body
-routes (`login`, `search`, `coupon`, `review`, `order`, `product`);
+CORRECTED phase 5: focused SQLi/XSS active-loop ordering remains, but benchmark workflow noun boosts
+were removed; source provenance, request method, body/parameter shape, and generic sink signals drive
+the bounded worklist instead.
 DONE phase 6 for stored-XSS store-then-render proof routing: stored marker evidence remains
 suspected/likely-vulnerable, while exact stored payloads are promoted to verified High only when
 the headless browser proof confirms execution and carries `browser_proof`/`poe_result` into the
@@ -1030,11 +1031,11 @@ producer quality: cross-principal replay now ranks compound resource route names
 repeated synthetic query variants cannot starve service-prefixed collection endpoints. DONE phase 24
 for non-`id` object identifiers: BOLA replay now treats VIN/license-style keys as replayable resource
 identifiers and can apply them to discovered placeholders or query parameters such as
-`<vehicleVIN>`/`?VIN=`, preserving the existing cross-principal proof requirement. DONE phase 25,
-corrected after integrity review, for coupon route discovery: frontend extraction keeps
-coupon/apply/validate fragments, but service-prefix composition is allowed only from API bases observed
-in the target's analyzed frontend assets. The earlier product-specific community/workshop mount mapping was removed as
-benchmark fitting. DONE phase 26 for method-aware frontend request capture: static `fetch` and
+`<vehicleVIN>`/`?VIN=`, preserving the existing cross-principal proof requirement. CORRECTED phase 25:
+product-specific coupon/shop/mechanic fragment filters and direct community/identity/workshop API-doc
+probes were removed along with the earlier service-mount rewrite. Frontend request recovery now
+depends on generic versioned literals or statically observed HTTP calls and client bases. DONE phase
+26 for method-aware frontend request capture: static `fetch` and
 axios-style calls now preserve literal same-origin URLs, HTTP methods, and query/body parameter names in
 the active endpoint graph. These observed request facts remain usable on SPA catch-all sites, while loose
 route strings do not gain fabricated POST methods or bodies.

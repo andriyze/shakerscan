@@ -1843,10 +1843,6 @@ OPENAPI_DISCOVERY_PATHS = [
     "/service/api-docs",
     # GraphQL schema
     "/graphql/schema",
-    # Common API base prefixes (for apps like crAPI)
-    "/community/api-docs", "/community/openapi.json",
-    "/identity/api-docs", "/identity/openapi.json",
-    "/workshop/api-docs", "/workshop/openapi.json",
 ]
 
 
@@ -2848,7 +2844,6 @@ def _is_interesting_path(path: str) -> bool:
 
 # Path-to-parameter inference mapping
 PATH_TO_PARAMS = {
-    "mechanic": ["mechanic_code", "mechanic_id", "id", "code"],
     "user": ["user_id", "id", "uid", "username"],
     "users": ["user_id", "id", "uid", "username"],
     "order": ["order_id", "id", "oid"],
@@ -2866,8 +2861,6 @@ PATH_TO_PARAMS = {
     "posts": ["post_id", "id"],
     "comment": ["comment_id", "id"],
     "comments": ["comment_id", "id"],
-    "coupon": ["coupon_code", "code", "id"],
-    "coupons": ["coupon_code", "code", "id"],
     "search": ["q", "query", "search", "keyword"],
     "login": ["username", "email", "password"],
     "auth": ["token", "code", "redirect_uri"],
@@ -2888,7 +2881,6 @@ def infer_params_from_path(path: str) -> list[str]:
     Infer likely parameter names from a URL path.
 
     For example:
-    - /mechanic → ["mechanic_code", "mechanic_id", "id", "code"]
     - /user/profile → ["user_id", "id", "uid", "username"]
     """
     params: list[str] = []
@@ -2931,15 +2923,14 @@ async def probe_api_base(
     """
     Probe common API resources at a discovered API base path.
 
-    When we find an API base like /workshop/api/, probe for common resources:
-    - /workshop/api/mechanic
-    - /workshop/api/users
-    - /workshop/api/vehicles
+    When we find an API base like /tenant/api/, probe for common resources:
+    - /tenant/api/users
+    - /tenant/api/orders
     etc.
 
     Args:
         base_url: Target base URL
-        api_path: API base path (e.g., "/workshop/api/")
+        api_path: API base path (e.g., "/tenant/api/")
         auth_session: Optional auth session for authenticated probing
         limit: Max resources to probe
         concurrency: Max concurrent requests
@@ -2956,7 +2947,7 @@ async def probe_api_base(
 
     # Add high-priority resources at the top
     priority_resources = [
-        "mechanic", "users", "vehicles", "orders", "products",
+        "users", "vehicles", "orders", "products",
         "posts", "comments", "contact", "location", "service",
         "otp", "validate", "verify", "check", "report"
     ]
@@ -3145,9 +3136,8 @@ def expand_frontend_route_api_candidates(endpoints: list[str], discovered_api_ba
                     expanded.add(base + endpoint)
 
         # NOTE: service-prefix expansion is done ONLY via discovered_api_bases above.
-        # Hardcoding specific service mounts (e.g. mapping "/coupon" -> "/community/api/v2"
-        # or "/shop" -> "/workshop/api") fabricates routes that exist only on one target
-        # app (crAPI) and inflate a benchmark without generalizing. Service routing must be
+        # Hardcoding product-specific service mounts fabricates routes that exist only on one
+        # target and inflates a benchmark without generalizing. Service routing must be
         # discovered (from bases in the same bundle / OpenAPI / observed traffic), never
         # hardcoded per product. See universal-engine rule: ship techniques, not app facts.
 
@@ -3157,12 +3147,7 @@ def expand_frontend_route_api_candidates(endpoints: list[str], discovered_api_ba
 def extract_frontend_route_fragments(content: str) -> list[str]:
     """Extract app route fragments from SPA bundles that are later base-prefixed."""
     route_fragment_patterns = [
-        r'''/(?:v[0-9]+/(?:user|vehicle|community)/[A-Za-z0-9_./<>{}$?-]+)''',
-        r'''/(?:api/)?v[0-9]+/coupons?(?:/[A-Za-z0-9_./<>{}$?-]+)?''',
-        r'''/(?:coupons?|apply[-_]coupon|validate[-_]coupon)(?:/[A-Za-z0-9_./<>{}$?-]+)?''',
-        r'''/(?:shop|mechanic|merchant)/(?:[A-Za-z0-9_./<>{}$?-]+)''',
-        r'''/(?:orders|past-orders)(?:[A-Za-z0-9_./<>{}$?-]*)''',
-        r'''(?:^|['"`])((?:api/(?:shop|mechanic|merchant)/[A-Za-z0-9_./<>{}$?-]+))''',
+        r'''/(?:api/)?v[0-9]+/[A-Za-z0-9_./<>{}$?-]+''',
     ]
     fragments: set[str] = set()
     for pattern in route_fragment_patterns:
@@ -3761,28 +3746,25 @@ async def analyze_js_bundles(base_url: str, js_urls: list[str], max_bundles: int
             deduped_requests.append(request)
     findings["request_endpoints"] = deduped_requests
 
-    api_like_routes = [
+    versioned_api_routes = [
         route for route in findings["routes"]
         if isinstance(route, str)
-        and (
-            route.startswith(("/v1/", "/v2/", "/v3/", "/v4/", "/shop", "/mechanic", "/merchant/"))
-            or route in {"/orders", "/past-orders"}
-        )
+        and route.startswith(("/v1/", "/v2/", "/v3/", "/v4/"))
     ]
     findings["api_endpoints"] = expand_frontend_route_api_candidates(
-        findings["api_endpoints"] + api_like_routes,
+        findings["api_endpoints"] + versioned_api_routes,
         findings["discovered_api_bases"],
     )
 
     # Prepend discovered API bases to relative endpoints to create combined paths
-    # This helps find endpoints like /community/api/v2/... when JS only has /api/v2/...
+    # Compose only API bases and paths observed in the same bundle.
     if findings["discovered_api_bases"]:
         combined_endpoints = set(findings["api_endpoints"])
         for base in findings["discovered_api_bases"]:
             base = base.rstrip("/")
             for endpoint in findings["api_endpoints"]:
                 if endpoint.startswith("/") and not endpoint.startswith(base):
-                    # Combine base + endpoint (e.g., /community + /api/v2/users)
+                    # Combine base + endpoint (e.g., /tenant + /api/v2/users)
                     combined = base + endpoint
                     combined_endpoints.add(combined)
                     # Also try with common API path segments

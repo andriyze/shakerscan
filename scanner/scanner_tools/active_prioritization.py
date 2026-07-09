@@ -8,8 +8,8 @@ from typing import Any
 
 
 # A path *segment* that looks like a concrete or templated object identifier.
-# These are the IDOR / BOLA / SQLi-on-path-param goldmines (e.g. crAPI's
-# /identity/api/v2/vehicle/{vehicleId}/location or /api/orders/42): the
+# These are IDOR / BOLA / SQLi-on-path-param candidates (for example,
+# /api/resources/{resourceId}/location or /api/orders/42): the
 # vulnerable code path only runs when a real resource id reaches it, yet such
 # routes often carry no high-value path *keyword* and would otherwise score low.
 _OBJECT_ID_SEGMENT_RE = re.compile(
@@ -93,9 +93,6 @@ HIGH_VALUE_PATH_WEIGHTS: tuple[tuple[str, int], ...] = (
     ("profile", 5),
     ("settings", 5),
     ("order", 5),
-    ("coupon", 5),
-    ("review", 5),
-    ("product", 5),
     ("payment", 5),
     ("checkout", 5),
     ("wallet", 5),
@@ -172,8 +169,7 @@ def _path_score(path: str) -> int:
 # sinks (search/comment/review/profile) + SPA/form routes.
 _SQLI_ROUTE_TOKENS = (
     "login", "signin", "authenticate", "search", "filter", "sort", "order",
-    "track", "lookup", "report", "query", "coupon", "promo", "voucher",
-    "review", "product", "validate", "checkout",
+    "track", "lookup", "report", "query",
 )
 _XSS_ROUTE_TOKENS = (
     "search", "comment", "review", "feedback", "message", "profile", "post",

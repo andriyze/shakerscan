@@ -60,3 +60,17 @@ claim instead of deleting it.
   statically linked client configuration. Benchmark hostnames, product nouns,
   and answer-key routes are prohibited detector inputs; score movement still
   requires a fresh build-current benchmark run.
+
+### 2026-07-09 — Residual product-specific discovery inputs removed
+
+- Date: 2026-07-09
+- Artifact: `scanner/scanner_tools/discovery.py` and
+  `scanner/scanner_tools/active_prioritization.py` after the `17d2612` correction.
+- Issue: The mount rewrite was gone, but direct community/identity/workshop API-doc
+  probes, coupon/mechanic route filters, and benchmark-workflow score boosts remained.
+- Impact: Those rules could still spend discovery or active budgets based on product
+  vocabulary rather than target-observed request facts.
+- Correction: Removed the direct service probes and product filters, restored generic
+  versioned-route extraction, and retained method/body/source-based prioritization.
+- Follow-up: Enforce the universal-engine rule in regression tests and treat observed
+  HTTP calls, schemas, browser/HAR traffic, and discovered client bases as route facts.

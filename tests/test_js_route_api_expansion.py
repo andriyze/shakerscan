@@ -62,7 +62,7 @@ def test_expands_discovered_api_bases_without_dropping_originals():
     assert "/tenant-a/api/orders" in expanded
 
 
-def test_extracts_route_fragments_but_does_not_fabricate_service_mounts():
+def test_extracts_only_generic_versioned_route_fragments():
     bundle = """
     const sg={
       GET_USER:"/v2/user/dashboard",
@@ -79,13 +79,14 @@ def test_extracts_route_fragments_but_does_not_fabricate_service_mounts():
     fragments = set(extract_frontend_route_fragments(bundle))
     expanded = set(expand_frontend_route_api_candidates(list(fragments)))
 
-    # Extraction still recovers the real route fragments present in the bundle.
+    # Generic versioned literals remain visible without product-noun filters.
     assert "/v2/user/dashboard" in fragments
-    assert "/shop/orders" in fragments
-    assert "/coupon" in fragments
+    assert "/api/v2/coupon/validate-coupon" in fragments
+    assert "/shop/orders" not in fragments
+    assert "/coupon" not in fragments
     # But expansion never invents the crAPI service-mounted variants.
     assert expanded & _FABRICATED_SERVICE_MOUNTS == set()
-    # The extracted fragments themselves remain probeable candidates.
+    # Extracted versioned fragments remain probeable candidates.
     for fragment in fragments:
         assert fragment in expanded
 

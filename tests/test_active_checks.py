@@ -592,17 +592,11 @@ def test_active_endpoint_prioritization_penalizes_static_discovery_surfaces():
     assert socket_token in ordered[2:]
 
 
-def test_active_endpoint_prioritization_uses_family_specific_sqli_routes():
-    coupon = {
+def test_active_endpoint_prioritization_uses_generic_sqli_route_signals():
+    search = {
         "method": "POST",
-        "url": "http://t/community/api/v2/coupon",
-        "body_params": ["code"],
-        "source": "options",
-    }
-    review = {
-        "method": "PATCH",
-        "url": "http://t/rest/products/reviews",
-        "body_params": ["message", "rating"],
+        "url": "http://t/api/search",
+        "body_params": ["query"],
         "source": "options",
     }
     generic = {
@@ -612,9 +606,9 @@ def test_active_endpoint_prioritization_uses_family_specific_sqli_routes():
         "source": "options",
     }
 
-    ordered = active_checks._prioritize_active_endpoints([generic, coupon, review], family="sqli")
+    ordered = active_checks._prioritize_active_endpoints([generic, search], family="sqli")
 
-    assert ordered[:2] == [coupon, review]
+    assert ordered[0] == search
 
 
 def test_active_param_prioritization_leads_with_family_specific_bug_fields():
