@@ -3417,6 +3417,31 @@ def extract_frontend_http_requests(content: str, *, max_requests: int = 500) -> 
         content_type = "application/x-www-form-urlencoded" if body_value and "URLSearchParams" in body_value else None
         add_request(match.group(2), method, body_params=body_params, content_type=content_type)
 
+    config_call_re = re.compile(
+        r"\b(axios|[A-Za-z_$][\w$]*)\s*(\.\s*request\s*)?\(\s*(\{)",
+        re.IGNORECASE,
+    )
+    for match in config_call_re.finditer(content or ""):
+        client = match.group(1)
+        if client.lower() != "axios" and not match.group(2) and client not in client_bases:
+            continue
+        config = _extract_balanced_js_segment(content, match.start(3), "{", "}")
+        url_value = _js_object_property_value(config or "", "url")
+        method_value = _js_object_property_value(config or "", "method")
+        request_url = str(url_value or "").strip("'\"` ")
+        method = str(method_value or "").strip("'\"` ").upper()
+        if not request_url or method not in _FRONTEND_HTTP_METHODS:
+            continue
+        request_url = _compose_frontend_client_url(client_bases.get(client), request_url)
+        data_value = _js_object_property_value(config or "", "data")
+        params_value = _js_object_property_value(config or "", "params")
+        add_request(
+            request_url,
+            method,
+            body_params=_js_object_keys(data_value),
+            query_params=_js_object_keys(params_value),
+        )
+
     return requests
 
 

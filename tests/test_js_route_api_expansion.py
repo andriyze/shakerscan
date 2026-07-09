@@ -140,3 +140,26 @@ def test_binds_relative_calls_to_their_configured_http_client_base():
         "quantity",
     ]
     assert by_request[("POST", "/api/session")]["body_params"] == ["token"]
+
+
+def test_extracts_config_style_frontend_requests():
+    bundle = """
+      const reportsApi = axios.create({baseURL: '/api/v3'});
+      reportsApi.request({
+        method: 'POST',
+        url: '/reports/search',
+        data: {query: text, filters: selectedFilters},
+        params: {locale: currentLocale}
+      });
+      axios({method: 'PATCH', url: '/api/profile', data: {displayName: name}});
+      unrelated({url: '/route-only', data: {value: x}});
+    """
+
+    requests = extract_frontend_http_requests(bundle)
+    by_request = {(item["method"], item["url"]): item for item in requests}
+
+    report_request = by_request[("POST", "/api/v3/reports/search")]
+    assert report_request["body_params"] == ["query", "filters"]
+    assert report_request["params"] == ["locale"]
+    assert by_request[("PATCH", "/api/profile")]["body_params"] == ["displayName"]
+    assert not any(item["url"] == "/route-only" for item in requests)

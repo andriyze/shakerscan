@@ -1035,6 +1035,9 @@ route strings do not gain fabricated POST methods or bodies.
 DONE phase 27 for client-bound API base recovery: statically configured axios client instances bind
 their literal `baseURL` only to calls made through that same client variable. This replaces broad
 base/path cross-products with a program-derived request URL and preserves the same-origin active gate.
+DONE phase 28 for config-style frontend requests: axios callable/request configurations with literal
+`method`, `url`, `data`, and `params` now produce the same bounded request contract as verb-style calls;
+objects without an explicit method are ignored.
 
 **Done when:** recorded two-user benchmark scorecards show the targeted miss becoming a deterministic
 finding, not merely an attempted endpoint.
