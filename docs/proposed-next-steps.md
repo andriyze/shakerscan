@@ -1064,6 +1064,9 @@ and proof-type counts without retaining request bodies.
 DONE phase 33 for fail-closed response-guided baselines: SQLi and JSON-body NoSQL parameter probes
 now stop before sending attack payloads when the completed benign retry fails or remains a `400/422`
 validation error. A completed attack body is never compared against the earlier incomplete baseline.
+DONE phase 34 for bounded frontend request parsing: static object inspection uses one depth pass,
+caps each object at 64KB and 30 keys, and verb-style calls require `axios` or a client variable proven
+by `axios.create`. Non-HTTP objects such as queues and caches cannot fabricate mutating requests.
 
 **Done when:** recorded two-user benchmark scorecards show the targeted miss becoming a deterministic
 finding, not merely an attempted endpoint.

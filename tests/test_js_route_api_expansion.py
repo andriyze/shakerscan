@@ -1,4 +1,5 @@
 import sys
+import time
 from pathlib import Path
 
 _SCANNER_DIR = Path(__file__).resolve().parents[1] / "scanner"
@@ -10,6 +11,7 @@ from scanner_tools.discovery import (
     extract_frontend_http_client_bases,
     extract_frontend_http_requests,
     extract_frontend_route_fragments,
+    _js_object_keys,
 )
 
 
@@ -90,6 +92,7 @@ def test_extracts_route_fragments_but_does_not_fabricate_service_mounts():
 
 def test_extracts_method_and_body_shape_from_static_frontend_http_calls():
     bundle = """
+      const api = axios.create({baseURL: '/'});
       axios.post('/api/search', {query: term, filters: {category: selected}});
       api.patch(`/v1/orders/${orderId}`, {status: nextStatus, note});
       axios.get('/api/products', {params: {q: search, category: selected}});
@@ -107,6 +110,36 @@ def test_extracts_method_and_body_shape_from_static_frontend_http_calls():
     assert by_request[("PATCH", "/v1/orders/{orderId}")]["body_params"] == ["status", "note"]
     assert by_request[("GET", "/api/products")]["params"] == ["q", "category"]
     assert by_request[("PUT", "/api/profile")]["body_params"] == ["displayName", "preferences"]
+
+
+def test_ignores_verb_calls_on_objects_not_proven_to_be_http_clients():
+    bundle = """
+      queue.post('/topic/orders', {payload: value});
+      cache.get('/internal/key');
+      const api = axios.create({baseURL: '/api'});
+      api.post('/orders', {productId: id});
+    """
+
+    requests = extract_frontend_http_requests(bundle)
+
+    assert requests == [{
+        "url": "/api/orders",
+        "method": "POST",
+        "source": "js_bundle_analysis",
+        "body_params": ["productId"],
+        "content_type": "application/json",
+    }]
+
+
+def test_js_object_key_extraction_is_bounded_and_linear():
+    object_text = "{" + ",".join(f"key{index}:1" for index in range(8_000)) + "}"
+
+    started = time.perf_counter()
+    keys = _js_object_keys(object_text)
+    elapsed = time.perf_counter() - started
+
+    assert keys == [f"key{index}" for index in range(30)]
+    assert elapsed < 1.0
 
 
 def test_route_literals_do_not_gain_fabricated_http_methods():

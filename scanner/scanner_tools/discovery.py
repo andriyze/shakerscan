@@ -3208,11 +3208,17 @@ def _extract_balanced_js_segment(content: str, start: int, opener: str, closer: 
     return None
 
 
-def _js_object_depth_at(content: str, end: int) -> int:
+_JS_OBJECT_SCAN_MAX_CHARS = 64_000
+_JS_OBJECT_KEY_LIMIT = 30
+
+
+def _js_object_depth_profile(content: str) -> list[int]:
+    """Return quote-aware object depth at each position in one bounded pass."""
+    depths = [0] * (len(content) + 1)
     depth = 0
     quote = ""
     escaped = False
-    for char in content[:end]:
+    for index, char in enumerate(content):
         if quote:
             if escaped:
                 escaped = False
@@ -3220,26 +3226,28 @@ def _js_object_depth_at(content: str, end: int) -> int:
                 escaped = True
             elif char == quote:
                 quote = ""
-            continue
-        if char in ("'", '"', "`"):
+        elif char in ("'", '"', "`"):
             quote = char
         elif char == "{":
             depth += 1
         elif char == "}":
             depth -= 1
-    return depth
+        depths[index + 1] = depth
+    return depths
 
 
 def _js_object_property_value(object_text: str, property_name: str) -> str | None:
     """Return a static top-level object-property value from a JS object literal."""
     if not object_text.startswith("{"):
         return None
+    object_text = object_text[:_JS_OBJECT_SCAN_MAX_CHARS]
+    depth_at = _js_object_depth_profile(object_text)
     property_re = re.compile(
         rf"(?:^|[,{{])\s*(?:['\"]{re.escape(property_name)}['\"]|{re.escape(property_name)})\s*:\s*",
         re.IGNORECASE,
     )
     for match in property_re.finditer(object_text):
-        if _js_object_depth_at(object_text, match.end()) != 1:
+        if depth_at[match.end()] != 1:
             continue
         cursor = match.end()
         if cursor >= len(object_text):
@@ -3285,24 +3293,32 @@ def _js_object_keys(object_text: str | None) -> list[str]:
     first_brace = object_text.find("{")
     if first_brace < 0:
         return []
-    object_text = _extract_balanced_js_segment(object_text, first_brace, "{", "}") or ""
+    object_text = object_text[first_brace:first_brace + _JS_OBJECT_SCAN_MAX_CHARS]
     if not object_text:
         return []
+    depth_at = _js_object_depth_profile(object_text)
     keys: list[str] = []
+    seen: set[str] = set()
     key_re = re.compile(r"(?:^|[,{}])\s*(?:['\"]([^'\"]+)['\"]|([A-Za-z_$][\w$-]*))\s*:")
     for match in key_re.finditer(object_text):
-        if _js_object_depth_at(object_text, match.end()) != 1:
+        if depth_at[match.end()] != 1:
             continue
         key = match.group(1) or match.group(2)
-        if key and key not in keys:
+        if key and key not in seen:
+            seen.add(key)
             keys.append(key)
+            if len(keys) >= _JS_OBJECT_KEY_LIMIT:
+                return keys
     shorthand_re = re.compile(r"(?:^|,)\s*([A-Za-z_$][\w$]*)\s*(?=,|})")
     for match in shorthand_re.finditer(object_text):
-        if _js_object_depth_at(object_text, match.end()) != 1:
+        if depth_at[match.end()] != 1:
             continue
         key = match.group(1)
-        if key and key not in keys:
+        if key and key not in seen:
+            seen.add(key)
             keys.append(key)
+            if len(keys) >= _JS_OBJECT_KEY_LIMIT:
+                break
     return keys
 
 
@@ -3397,6 +3413,8 @@ def extract_frontend_http_requests(content: str, *, max_requests: int = 500) -> 
     )
     for match in method_call_re.finditer(content or ""):
         client = match.group(1)
+        if client.lower() != "axios" and client not in client_bases:
+            continue
         method = match.group(2).upper()
         request_url = _compose_frontend_client_url(client_bases.get(client), match.group(4))
         config = _static_js_call_config(content, match.end())
