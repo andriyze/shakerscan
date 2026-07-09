@@ -55,6 +55,7 @@ CHECK_REGISTRY: tuple[CheckFamilySpec, ...] = (
         telemetry_schema="nuclei_template",
         proof_contract=("template_id", "matched_at", "matcher_name", "request_url"),
         severity_rules={"template_severity_is_input": True, "promotion_requires": ["matched_at", "template_id"]},
+        runnable=True,
         description="Nuclei template checks by severity/tag. Not an ASM endpoint-test family yet.",
     ),
     CheckFamilySpec(
@@ -383,8 +384,10 @@ def scanner_execution_plan(
                 dispatch_adapter = "legacy_phase4_mass_assignment"
             elif spec.name == "jwt":
                 dispatch_adapter = "legacy_advanced_jwt"
-            elif spec.name in {"recon", "headers", "nuclei"}:
+            elif spec.name in {"recon", "headers"}:
                 dispatch_adapter = "legacy_passive_or_template"
+            elif spec.name == "nuclei":
+                dispatch_adapter = "legacy_nuclei_template"
             else:
                 dispatch_adapter = "adapter_pending"
                 blocked_by.append("dispatch_adapter_pending")

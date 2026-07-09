@@ -1460,7 +1460,7 @@ challenged and corrected without deleting history, and corrections are visible i
 and deployment-gate story as the original claim.
 
 ### 10. Check-registry execution migration + proof contracts per family
-**Status: PARTIAL, REGISTRY PLAN ROLLUP + FAIL-CLOSED DISPATCH METADATA DONE.** `api/check_registry.py` (`CheckFamilySpec`) is the family contract for API
+**Status: PARTIAL, NUCLEI REGISTRY DISPATCH DONE.** `api/check_registry.py` (`CheckFamilySpec`) is the family contract for API
 validation and ASM scheduling and now carries `requires_auth_states` / `requires_credentials` /
 `risk_level` / `runnable` / `telemetry_schema` / `proof_contract` / `severity_rules`. Scanner
 `build_report()` now emits a registry-derived `scanner_execution_plan` in scan config, active
@@ -1478,7 +1478,10 @@ severity contract, explicit legacy flag activation, and `legacy_phase4_mass_assi
 adapter; the registry plan is authoritative for whether that task is created. Basic and comprehensive
 JWT checks are likewise registered with token-source/mutation/acceptance-delta proof requirements and
 the `legacy_advanced_jwt` adapter; broad Smart/full/aggressive scans add JWT to their registry scope,
-while focused family scans continue to omit it. Detector internals
+while focused family scans continue to omit it. Nuclei is now a runnable template family with the
+`legacy_nuclei_template` adapter; task creation reads the registry plan, so standard/deep/full/smart
+profiles dispatch templates while quick, public-only, focused-endpoint, and zero-rediscovery scopes
+retain explicit skip metadata instead of starting the legacy executor. Detector internals
 still execute many checks through hardcoded module calls, and planned
 families such as `lfi`/`rce`/`ssrf` are not runnable.
 
@@ -1488,6 +1491,7 @@ then make `lfi`/`rce`/`ssrf` runnable only when their deterministic proof contra
 DONE phase 3 for mass-assignment registration and dispatch gating without expanding ASM focus or
 changing explicit `--mass-assignment-testing` behavior.
 DONE phase 4 for JWT basic/comprehensive task gating without exposing JWT as an ASM focus family.
+DONE phase 5 for Nuclei task gating without exposing templates as an ASM endpoint-test family.
 
 **Done when:** adding a check family is a registry entry plus module integration, not edits scattered
 through `build_report`.

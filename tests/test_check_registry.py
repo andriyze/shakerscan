@@ -41,6 +41,10 @@ def test_registry_exposes_runnable_asm_focus_families():
     assert jwt.runnable is True
     assert jwt.telemetry_schema == "jwt_probe_result_v1"
     assert "forged_status" in jwt.proof_contract
+    nuclei = r.CHECK_REGISTRY_BY_NAME["nuclei"]
+    assert nuclei.runnable is True
+    assert nuclei.telemetry_schema == "nuclei_template"
+    assert nuclei.proof_contract == ("template_id", "matched_at", "matcher_name", "request_url")
     assert "payload" in r.CHECK_REGISTRY_BY_NAME["sqli"].proof_contract
     assert r.CHECK_REGISTRY_BY_NAME["sqli"].severity_rules["critical_requires"] == ["exploitation_proof"]
 
@@ -159,6 +163,25 @@ def test_scanner_execution_plan_dispatches_registered_jwt():
     assert families["jwt"]["enabled"] is True
     assert families["jwt"]["dispatch_adapter"] == "legacy_advanced_jwt"
     assert families["sqli"]["enabled"] is False
+
+
+def test_scanner_execution_plan_dispatches_registered_nuclei_only_when_profile_allows_it():
+    standard = r.scanner_execution_plan(
+        scan_mode="standard",
+        active_checks=False,
+    )
+    quick = r.scanner_execution_plan(
+        scan_mode="quick",
+        quick_mode=True,
+        active_checks=False,
+    )
+    standard_families = {item["name"]: item for item in standard["families"]}
+    quick_families = {item["name"]: item for item in quick["families"]}
+
+    assert standard_families["nuclei"]["enabled"] is True
+    assert standard_families["nuclei"]["dispatch_adapter"] == "legacy_nuclei_template"
+    assert quick_families["nuclei"]["enabled"] is False
+    assert quick_families["nuclei"]["reason"] == "quick_mode"
 
 
 def test_scanner_execution_plan_records_passive_skip_reasons():

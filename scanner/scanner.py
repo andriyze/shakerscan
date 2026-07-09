@@ -5327,6 +5327,21 @@ async def build_report(target: str,
             "reason": "zero_rediscovery_child",
         }
         nuclei_task = asyncio.create_task(dummy_nuclei_zero())
+    nuclei_registry_enabled = registry_family_enabled(
+        scanner_execution_plan,
+        "nuclei",
+        fallback=bool(not public_only and not quick_mode and not focused_endpoints_only),
+    )
+    if nuclei_task is None and not nuclei_registry_enabled:
+        async def dummy_nuclei_registry(): return {
+            "vulnerabilities": [],
+            "info": [],
+            "scan_completed": False,
+            "templates_used": 0,
+            "skipped": True,
+            "reason": "registry_dispatch_disabled",
+        }
+        nuclei_task = asyncio.create_task(dummy_nuclei_registry())
     if nuclei_task is None and not public_only:
         nuclei_target_limits = {
             "quick": 120,

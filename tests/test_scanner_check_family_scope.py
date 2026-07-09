@@ -154,6 +154,32 @@ def test_check_family_scope_marks_inactive_scan():
     assert scope["families"] == []
 
 
+def test_nuclei_dispatch_uses_registry_profile_gate():
+    standard_plan = scanner_mod.build_scanner_execution_plan(
+        scan_mode="standard",
+        public_only=False,
+        quick_mode=False,
+        active_checks=False,
+        check_family_scope={"families": []},
+        skip_global_checks=False,
+        focused_endpoints_only=False,
+        zero_rediscovery=False,
+    )
+    quick_plan = scanner_mod.build_scanner_execution_plan(
+        scan_mode="quick",
+        public_only=False,
+        quick_mode=True,
+        active_checks=False,
+        check_family_scope={"families": []},
+        skip_global_checks=False,
+        focused_endpoints_only=False,
+        zero_rediscovery=False,
+    )
+
+    assert scanner_mod.registry_family_enabled(standard_plan, "nuclei", fallback=False) is True
+    assert scanner_mod.registry_family_enabled(quick_plan, "nuclei", fallback=True) is False
+
+
 def test_resolve_active_check_flags_uses_registry_family_aliases():
     active_xss, active_sqli, family = scanner_mod.resolve_active_check_flags(check_family="sql")
 
