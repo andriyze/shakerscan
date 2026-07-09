@@ -14,6 +14,7 @@ All functions follow async patterns and return structured dictionaries.
 import asyncio
 import hashlib
 import json
+import re
 import time
 import urllib.parse
 from typing import Any
@@ -1876,7 +1877,14 @@ def _rank_authz_producer_url(url: str) -> int:
     except Exception:
         parsed = urlsplit(str(url or "/"))
     path = parsed.path or "/"
-    segments = {segment.lower() for segment in path.split("/") if segment}
+    raw_segments = [segment.lower() for segment in path.split("/") if segment]
+    # Treat endpoint names such as ``mechanic_report`` and ``return-order`` as
+    # semantic resource tokens. Microservice APIs frequently encode the resource
+    # noun in a compound leaf segment, and BOLA producer ranking should not miss
+    # those just because the route is not slash-delimited.
+    segments = set(raw_segments)
+    for segment in raw_segments:
+        segments.update(token for token in re.split(r"[-_]+", segment) if token)
     score = 0
 
     if segments & AUTHZ_PRODUCER_STRONG_SEGMENTS:
@@ -1884,11 +1892,16 @@ def _rank_authz_producer_url(url: str) -> int:
     if any(segment in {"api", "rest"} or segment.startswith("v") and segment[1:].isdigit() for segment in segments):
         score += 15
     if parsed.query:
-        score += 5
+        # Query IDs are useful, but discovered apps often produce many synthetic
+        # ?id=1/?username=test variants. Keep them competitive without letting
+        # them crowd out concrete service-prefixed collection routes.
+        score += 2
     if any(segment.endswith(("s", "es", "ies")) for segment in segments):
         score += 8
     if segments & BOLA_RESOURCE_PATH_SEGMENTS:
         score += 10
+    if raw_segments and raw_segments[-1] in {"all", "list", "mine", "owned"} and (segments & BOLA_RESOURCE_PATH_SEGMENTS):
+        score += 18
 
     low_value_hits = segments & AUTHZ_PRODUCER_LOW_VALUE_SEGMENTS
     score -= 15 * len(low_value_hits)
@@ -1910,6 +1923,45 @@ def _rank_authz_producer_url(url: str) -> int:
         score -= 10
 
     return score
+
+
+def _authz_producer_path_key(url: str) -> str:
+    try:
+        parsed = urlsplit(url)
+    except Exception:
+        parsed = urlsplit(str(url or ""))
+    return parsed.path or str(url or "")
+
+
+def _select_authz_producers(ranked_producers: list[str], limit: int) -> list[str]:
+    """Return a diversified producer list from ranked candidates.
+
+    Discovery commonly creates several query variants for one path. Testing all
+    of those before moving on wastes the bounded BOLA budget on repeated 404s and
+    can starve real collection producers discovered later in the worklist.
+    """
+    limit = max(1, int(limit or 1))
+    selected: list[str] = []
+    selected_set: set[str] = set()
+    seen_paths: set[str] = set()
+
+    for url in ranked_producers:
+        path_key = _authz_producer_path_key(url)
+        if path_key in seen_paths:
+            continue
+        selected.append(url)
+        selected_set.add(url)
+        seen_paths.add(path_key)
+        if len(selected) >= limit:
+            return selected
+
+    for url in ranked_producers:
+        if url in selected_set:
+            continue
+        selected.append(url)
+        if len(selected) >= limit:
+            break
+    return selected
 
 
 def _is_low_value_authz_producer_url(url: str) -> bool:
@@ -2704,10 +2756,10 @@ async def authz_resource_replay_test(
         reverse=True,
     )
     ranked_producers = [url for _idx, url in ranked_pairs]
-    producers = ranked_producers[:producer_limit]
+    producers = _select_authz_producers(ranked_producers, producer_limit)
     selected_producers = set(producers)
     results["producer_candidate_count"] = len(producer_candidates)
-    results["producer_selection_strategy"] = "owned_resource_path_rank_v1"
+    results["producer_selection_strategy"] = "owned_resource_path_rank_diverse_v2"
     results["producer_candidates_sample"] = [
         {
             "url": url,

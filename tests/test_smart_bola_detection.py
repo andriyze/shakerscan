@@ -444,7 +444,7 @@ def test_authz_replay_prioritizes_owned_resource_producers_over_noise(monkeypatc
         )
     )
 
-    assert results["producer_selection_strategy"] == "owned_resource_path_rank_v1"
+    assert results["producer_selection_strategy"] == "owned_resource_path_rank_diverse_v2"
     assert results["producer_candidate_count"] == 1
     assert fetched_paths[:2] == ["/api/orders", "/api/orders"]
     assert [f for f in results["findings"] if f.get("tool") == "smart_authz"]

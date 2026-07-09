@@ -1018,7 +1018,10 @@ parameters using `$eq`/`$ne` operator differentials and only promotes material J
 expansion, covering review/search collection routes that are not JSON-body sinks. DONE phase 22 for
 BFLA collection-authz scheduling: authenticated Smart scans now run the safe anon-vs-auth collection
 differential independently from the heavier BOLA lane, using discovered collection routes from crawl,
-browser, endpoint graph, JS, HAR, and the existing model-collection wordlist.
+browser, endpoint graph, JS, HAR, and the existing model-collection wordlist. DONE phase 23 for BOLA
+producer quality: cross-principal replay now ranks compound resource route names such as
+`mechanic_report`, boosts concrete collection/list producers, and diversifies producer selection so
+repeated synthetic query variants cannot starve service-prefixed collection endpoints.
 
 **Done when:** recorded two-user benchmark scorecards show the targeted miss becoming a deterministic
 finding, not merely an attempted endpoint.

@@ -78,6 +78,34 @@ def test_authz_guard_rejects_id_ignored_endpoint_returning_own_object():
     assert "685" in _resource_ids_from_response(owner_body)
 
 
+def test_authz_producer_rank_prefers_service_collection_over_query_variants():
+    rank = access_control_checks._rank_authz_producer_url
+
+    collection = "https://app.test/workshop/api/shop/orders/all"
+    query_variant = "https://app.test/api/v2/user/pictures?id=1"
+    compound_resource = "https://app.test/workshop/api/mechanic/mechanic_report"
+
+    assert rank(collection) > rank(query_variant)
+    assert rank(compound_resource) >= 60
+
+
+def test_authz_producer_selection_diversifies_repeated_query_paths():
+    urls = [
+        "https://app.test/api/v2/user/pictures?id=1",
+        "https://app.test/api/v2/user/pictures?username=test",
+        "https://app.test/api/v2/user/pictures?email=test@test.com",
+        "https://app.test/workshop/api/shop/orders/all",
+        "https://app.test/workshop/api/mechanic/mechanic_report",
+    ]
+    ranked = sorted(urls, key=access_control_checks._rank_authz_producer_url, reverse=True)
+
+    selected = access_control_checks._select_authz_producers(ranked, 3)
+
+    assert "https://app.test/workshop/api/shop/orders/all" in selected
+    assert sum("/api/v2/user/pictures" in url for url in selected) == 1
+    assert len({access_control_checks._authz_producer_path_key(url) for url in selected}) == 3
+
+
 def test_authz_resource_replay_detects_write_side_bola(monkeypatch):
     from scanner_tools.access_control_checks import authz_resource_replay_test
     import scanner_tools.proof_of_exploit as poe
