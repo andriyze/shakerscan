@@ -7,6 +7,7 @@ if str(_SCANNER_DIR) not in sys.path:
 
 from scanner_tools.discovery import (
     expand_frontend_route_api_candidates,
+    extract_frontend_http_client_bases,
     extract_frontend_http_requests,
     extract_frontend_route_fragments,
 )
@@ -115,3 +116,27 @@ def test_route_literals_do_not_gain_fabricated_http_methods():
     """
 
     assert extract_frontend_http_requests(bundle) == []
+
+
+def test_binds_relative_calls_to_their_configured_http_client_base():
+    bundle = """
+      const identityApi = axios.create({baseURL: '/identity/api/v2'});
+      let ordersApi = axios.create({timeout: 5000, baseURL: '/workshop/api'});
+      identityApi.get('/vehicle/vehicles', {params: {page: currentPage}});
+      ordersApi.post('/shop/orders', {productId: product.id, quantity: count});
+      axios.post('/api/session', {token: sessionToken});
+    """
+
+    assert extract_frontend_http_client_bases(bundle) == {
+        "identityApi": "/identity/api/v2",
+        "ordersApi": "/workshop/api",
+    }
+    requests = extract_frontend_http_requests(bundle)
+    by_request = {(item["method"], item["url"]): item for item in requests}
+
+    assert by_request[("GET", "/identity/api/v2/vehicle/vehicles")]["params"] == ["page"]
+    assert by_request[("POST", "/workshop/api/shop/orders")]["body_params"] == [
+        "productId",
+        "quantity",
+    ]
+    assert by_request[("POST", "/api/session")]["body_params"] == ["token"]

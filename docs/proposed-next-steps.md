@@ -1032,6 +1032,9 @@ benchmark fitting. DONE phase 26 for method-aware frontend request capture: stat
 axios-style calls now preserve literal same-origin URLs, HTTP methods, and query/body parameter names in
 the active endpoint graph. These observed request facts remain usable on SPA catch-all sites, while loose
 route strings do not gain fabricated POST methods or bodies.
+DONE phase 27 for client-bound API base recovery: statically configured axios client instances bind
+their literal `baseURL` only to calls made through that same client variable. This replaces broad
+base/path cross-products with a program-derived request URL and preserves the same-origin active gate.
 
 **Done when:** recorded two-user benchmark scorecards show the targeted miss becoming a deterministic
 finding, not merely an attempted endpoint.

@@ -3331,6 +3331,36 @@ def _normalize_frontend_request_url(raw_url: str) -> str | None:
     return url
 
 
+def extract_frontend_http_client_bases(content: str) -> dict[str, str]:
+    """Map statically configured axios client variables to their literal base URLs."""
+    clients: dict[str, str] = {}
+    create_re = re.compile(
+        r"(?:\b(?:const|let|var)\s+)?([A-Za-z_$][\w$]*)\s*=\s*axios\s*\.\s*create\s*\(\s*",
+        re.IGNORECASE,
+    )
+    for match in create_re.finditer(content or ""):
+        cursor = match.end()
+        if cursor >= len(content) or content[cursor] != "{":
+            continue
+        config = _extract_balanced_js_segment(content, cursor, "{", "}")
+        base_value = _js_object_property_value(config or "", "baseURL")
+        base = str(base_value or "").strip("'\"` ")
+        normalized = _normalize_frontend_request_url(base)
+        if normalized:
+            clients[match.group(1)] = normalized.rstrip("/")
+    return clients
+
+
+def _compose_frontend_client_url(client_base: str | None, request_url: str) -> str:
+    if not client_base or request_url.startswith(("http://", "https://")):
+        return request_url
+    if client_base.startswith(("http://", "https://")):
+        return client_base.rstrip("/") + "/" + request_url.lstrip("/")
+    return "/" + "/".join(
+        part.strip("/") for part in (client_base, request_url) if part.strip("/")
+    )
+
+
 def extract_frontend_http_requests(content: str, *, max_requests: int = 500) -> list[dict[str, Any]]:
     """Recover static HTTP call facts from frontend bundles without executing JS.
 
@@ -3339,6 +3369,7 @@ def extract_frontend_http_requests(content: str, *, max_requests: int = 500) -> 
     """
     requests: list[dict[str, Any]] = []
     seen: set[tuple[str, str, tuple[str, ...], tuple[str, ...]]] = set()
+    client_bases = extract_frontend_http_client_bases(content)
 
     def add_request(url: str, method: str, *, body_params=None, query_params=None, content_type=None):
         normalized_url = _normalize_frontend_request_url(url)
@@ -3362,17 +3393,19 @@ def extract_frontend_http_requests(content: str, *, max_requests: int = 500) -> 
         requests.append(item)
 
     method_call_re = re.compile(
-        r"\b(?:axios|[A-Za-z_$][\w$]*)\s*\.\s*(get|post|put|patch|delete)\s*\(\s*(['\"`])([^'\"`\s]+)\2",
+        r"\b(axios|[A-Za-z_$][\w$]*)\s*\.\s*(get|post|put|patch|delete)\s*\(\s*(['\"`])([^'\"`\s]+)\3",
         re.IGNORECASE,
     )
     for match in method_call_re.finditer(content or ""):
-        method = match.group(1).upper()
+        client = match.group(1)
+        method = match.group(2).upper()
+        request_url = _compose_frontend_client_url(client_bases.get(client), match.group(4))
         config = _static_js_call_config(content, match.end())
         if method == "GET":
             params_value = _js_object_property_value(config or "", "params")
-            add_request(match.group(3), method, query_params=_js_object_keys(params_value))
+            add_request(request_url, method, query_params=_js_object_keys(params_value))
         else:
-            add_request(match.group(3), method, body_params=_js_object_keys(config))
+            add_request(request_url, method, body_params=_js_object_keys(config))
 
     fetch_re = re.compile(r"\bfetch\s*\(\s*(['\"`])([^'\"`\s]+)\1", re.IGNORECASE)
     for match in fetch_re.finditer(content or ""):
