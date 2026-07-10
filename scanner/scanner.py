@@ -3070,6 +3070,7 @@ def build_check_family_scope(
     requested_family: str | None = None,
     mass_assignment: bool = False,
     jwt: bool = False,
+    bola: bool = False,
 ) -> dict[str, Any]:
     families: list[str] = []
     if active_checks and active_xss:
@@ -3080,6 +3081,8 @@ def build_check_family_scope(
         families.append("mass_assignment")
     if jwt:
         families.append("jwt")
+    if bola:
+        families.append("bola")
     normalized_requested = normalize_scanner_check_family(requested_family)
     if (
         active_checks
@@ -3089,7 +3092,7 @@ def build_check_family_scope(
     ):
         families.append(normalized_requested)
 
-    effective_active = bool(active_checks or mass_assignment or jwt)
+    effective_active = bool(active_checks or mass_assignment or jwt or bola)
     focused_family = families[0] if effective_active and len(families) == 1 else None
     if not effective_active:
         mode = "inactive"
@@ -3165,14 +3168,12 @@ def registry_dispatch_enabled(
     scanner_execution_plan: dict[str, Any] | None,
     family: str,
     *,
-    legacy_default: bool = False,
     expected_adapter: str | None = None,
 ) -> bool:
     """Gate dispatch through a registry decision and optional adapter contract."""
     return bool(registry_dispatch_decision(
         scanner_execution_plan,
         family,
-        legacy_default=legacy_default,
         expected_adapter=expected_adapter,
     )["dispatch_enabled"])
 
@@ -3181,12 +3182,10 @@ def registry_dispatch_decision(
     scanner_execution_plan: dict[str, Any] | None,
     family: str,
     *,
-    legacy_default: bool = False,
     expected_adapter: str | None = None,
 ) -> dict[str, Any]:
     """Return a fail-closed, reportable family-to-adapter dispatch decision."""
     plan = scanner_execution_plan if isinstance(scanner_execution_plan, dict) else {}
-    scope = plan.get("check_family_scope") if isinstance(plan.get("check_family_scope"), dict) else {}
     normalized_family = str(family or "").strip().lower()
     adapter_contract_missing = expected_adapter is None and normalized_family not in SCANNER_REGISTRY_ADAPTER_CONTRACTS
     if expected_adapter is None:
@@ -3212,6 +3211,9 @@ def registry_dispatch_decision(
     if not family_row.get("runnable"):
         decision["reason"] = "registry_family_not_runnable"
         return decision
+    if family_row.get("scanner_enabled") is False:
+        decision["reason"] = "registry_policy_disabled"
+        return decision
     blocked_by = [str(item) for item in (family_row.get("blocked_by") or []) if str(item)]
     if blocked_by:
         decision["reason"] = blocked_by[0]
@@ -3221,12 +3223,8 @@ def registry_dispatch_decision(
     if expected_adapter and adapter != expected_adapter:
         decision["reason"] = "registry_dispatch_adapter_mismatch"
         return decision
-    requested_scope = bool(scope.get("requested_family"))
     if family_row.get("enabled"):
         decision.update({"dispatch_enabled": True, "decision": "dispatch", "reason": "registry_enabled"})
-        return decision
-    if not requested_scope and legacy_default:
-        decision.update({"dispatch_enabled": True, "decision": "dispatch", "reason": "registry_validated_legacy_broad"})
         return decision
     decision["decision"] = "skipped"
     decision["reason"] = str(family_row.get("reason") or "registry_family_disabled")
@@ -3550,6 +3548,7 @@ async def build_report(target: str,
         requested_family=active_check_family,
         mass_assignment=mass_assignment_testing,
         jwt=registry_jwt_testing,
+        bola=bool(smart_mode and not focused_active_family),
     )
     if smart_mode and focused_active_family:
         print(f"[smart] Focused active mode enabled for {focused_active_family_name}; disabling unrelated active modules", file=sys.stderr)
@@ -5402,7 +5401,6 @@ async def build_report(target: str,
     nuclei_dispatch_decision = registry_dispatch_decision(
         scanner_execution_plan,
         "nuclei",
-        legacy_default=bool(not public_only and not quick_mode and not focused_endpoints_only),
     )
     scanner_dispatch_decisions.append(nuclei_dispatch_decision)
     nuclei_registry_enabled = bool(nuclei_dispatch_decision["dispatch_enabled"])
@@ -8588,12 +8586,10 @@ async def build_report(target: str,
         xss_dispatch_decision = registry_dispatch_decision(
             scanner_execution_plan,
             "xss",
-            legacy_default=bool(active_xss),
         )
         sqli_dispatch_decision = registry_dispatch_decision(
             scanner_execution_plan,
             "sqli",
-            legacy_default=bool(active_sqli),
         )
         scanner_dispatch_decisions.extend([xss_dispatch_decision, sqli_dispatch_decision])
         run_xss = bool(xss_dispatch_decision["dispatch_enabled"])
@@ -10947,7 +10943,6 @@ async def build_report(target: str,
         auth_dispatch_decision = registry_dispatch_decision(
             scanner_execution_plan,
             "auth",
-            legacy_default=auth_focused,
         )
         scanner_dispatch_decisions.append(auth_dispatch_decision)
         auth_dispatch_enabled = bool(auth_dispatch_decision["dispatch_enabled"])
@@ -11065,7 +11060,6 @@ async def build_report(target: str,
         bola_dispatch_decision = registry_dispatch_decision(
             scanner_execution_plan,
             "bola",
-            legacy_default=bool(bola_allowed_by_focus and (bola_focused or not focused_manual_active_scope)),
         )
         scanner_dispatch_decisions.append(bola_dispatch_decision)
         bola_dispatch_enabled = bool(bola_dispatch_decision["dispatch_enabled"])

@@ -39,6 +39,7 @@ class CheckFamilySpec:
     emits_endpoint_telemetry: bool = False
     scanner_focus_order: int = 1000
     runnable: bool = False
+    scanner_enabled: bool = True
     description: str = ""
 
 
@@ -401,6 +402,7 @@ def describe_check_families() -> list[dict[str, Any]]:
             "severity_rules": dict(spec.severity_rules),
             "dispatch_adapter": spec.dispatch_adapter,
             "runnable": spec.runnable,
+            "scanner_enabled": spec.scanner_enabled,
             "description": spec.description,
         }
         for spec in CHECK_REGISTRY
@@ -479,6 +481,11 @@ def scanner_execution_plan(
         if enabled and not spec.dispatch_adapter:
             dispatch_adapter = "adapter_pending"
             blocked_by.append("dispatch_adapter_pending")
+        if enabled and not spec.scanner_enabled:
+            enabled = False
+            expected = False
+            reason = "registry_policy_disabled"
+            blocked_by.append("registry_policy_disabled")
 
         families.append(
             {
@@ -486,6 +493,7 @@ def scanner_execution_plan(
                 "phase": spec.phase,
                 "family": spec.family,
                 "runnable": spec.runnable,
+                "scanner_enabled": spec.scanner_enabled,
                 "enabled": enabled,
                 "expected": expected,
                 "status": "enabled" if enabled else "skipped",

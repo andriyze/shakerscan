@@ -1,3 +1,5 @@
+from dataclasses import replace
+
 import pytest
 
 import sys
@@ -186,6 +188,31 @@ def test_scanner_execution_plan_dispatches_registered_jwt():
     assert families["jwt"]["enabled"] is True
     assert families["jwt"]["dispatch_adapter"] == "legacy_advanced_jwt"
     assert families["sqli"]["enabled"] is False
+
+
+def test_scanner_execution_plan_honors_registry_policy_independently(monkeypatch):
+    monkeypatch.setattr(
+        r,
+        "CHECK_REGISTRY",
+        tuple(
+            replace(spec, scanner_enabled=False) if spec.name == "jwt" else spec
+            for spec in r.CHECK_REGISTRY
+        ),
+    )
+
+    plan = r.scanner_execution_plan(
+        scan_mode="smart",
+        active_checks=True,
+        check_family_scope={"families": ["jwt"]},
+    )
+    jwt = next(item for item in plan["families"] if item["name"] == "jwt")
+
+    assert jwt["requested"] is True
+    assert jwt["runnable"] is True
+    assert jwt["scanner_enabled"] is False
+    assert jwt["enabled"] is False
+    assert jwt["reason"] == "registry_policy_disabled"
+    assert jwt["blocked_by"] == ["registry_policy_disabled"]
 
 
 def test_scanner_execution_plan_dispatches_registered_nuclei_only_when_profile_allows_it():

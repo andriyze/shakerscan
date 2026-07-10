@@ -146,6 +146,31 @@ def test_check_family_scope_includes_automatic_advanced_jwt_executor():
     assert scope["families"] == ["xss", "sqli", "jwt"]
 
 
+def test_check_family_scope_plans_broad_smart_bola_without_legacy_override():
+    scope = scanner_mod.build_check_family_scope(
+        True,
+        active_xss=True,
+        active_sqli=True,
+        jwt=True,
+        bola=True,
+    )
+    plan = scanner_mod.build_scanner_execution_plan(
+        scan_mode="smart",
+        public_only=False,
+        quick_mode=False,
+        active_checks=True,
+        check_family_scope=scope,
+        skip_global_checks=False,
+        focused_endpoints_only=False,
+        zero_rediscovery=False,
+    )
+    families = {item["name"]: item for item in plan["families"]}
+
+    assert scope["families"] == ["xss", "sqli", "jwt", "bola"]
+    assert families["bola"]["enabled"] is True
+    assert scanner_mod.registry_dispatch_enabled(plan, "bola") is True
+
+
 def test_check_family_scope_marks_inactive_scan():
     scope = scanner_mod.build_check_family_scope(False, active_xss=True, active_sqli=True)
 
@@ -420,18 +445,18 @@ def test_registry_dispatch_enabled_is_authoritative_for_explicit_family():
         ],
     }
 
-    assert scanner_mod.registry_dispatch_enabled(plan, "bola", legacy_default=True) is False
-    assert scanner_mod.registry_dispatch_enabled(plan, "auth", legacy_default=False) is True
+    assert scanner_mod.registry_dispatch_enabled(plan, "bola") is False
+    assert scanner_mod.registry_dispatch_enabled(plan, "auth") is True
 
 
-def test_registry_dispatch_enabled_preserves_broad_legacy_default():
+def test_registry_dispatch_enabled_does_not_override_disabled_broad_plan():
     plan = {
         "check_family_scope": {"requested_family": None},
         "families": [{"name": "bola", "enabled": False, "runnable": True, "dispatch_adapter": "asm_endpoint_batch"}],
     }
 
-    assert scanner_mod.registry_dispatch_enabled(plan, "bola", legacy_default=True) is True
-    assert scanner_mod.registry_dispatch_enabled(plan, "auth", legacy_default=False) is False
+    assert scanner_mod.registry_dispatch_enabled(plan, "bola") is False
+    assert scanner_mod.registry_dispatch_enabled(plan, "auth") is False
 
 
 def test_registry_dispatch_decision_fails_closed_on_adapter_contract_drift():
@@ -487,7 +512,7 @@ def test_registry_dispatch_decision_rejects_unmapped_scanner_adapter():
     assert decision["reason"] == "scanner_adapter_contract_missing"
 
 
-def test_registry_dispatch_decision_validates_broad_legacy_adapter_before_dispatch():
+def test_registry_dispatch_decision_keeps_disabled_broad_family_skipped():
     plan = {
         "check_family_scope": {"requested_family": None},
         "families": [{
@@ -504,12 +529,12 @@ def test_registry_dispatch_decision_validates_broad_legacy_adapter_before_dispat
     decision = scanner_mod.registry_dispatch_decision(
         plan,
         "bola",
-        legacy_default=True,
         expected_adapter="asm_endpoint_batch",
     )
 
-    assert decision["dispatch_enabled"] is True
-    assert decision["reason"] == "registry_validated_legacy_broad"
+    assert decision["dispatch_enabled"] is False
+    assert decision["decision"] == "skipped"
+    assert decision["reason"] == "not_selected"
 
 
 def test_registry_report_phase_dispatches_only_enabled_declared_adapters():
