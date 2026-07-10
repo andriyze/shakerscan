@@ -12180,6 +12180,13 @@ class FindingExceptionRequest(BaseModel):
     expires_at: Optional[str] = None
 
 
+class FindingExceptionLifecycleSweepRequest(BaseModel):
+    dry_run: bool = True
+    target_id: Optional[str] = None
+    limit: int = Field(default=200, ge=1, le=500)
+    approval_receipt_id: Optional[str] = None
+
+
 async def _validate_policy_profile_required_anchor_ids(conn, req: PolicyProfileRequest) -> list[str]:
     try:
         required_anchor_ids = [str(uuid.UUID(item)) for item in _str_list(req.required_trust_anchor_ids)]
@@ -12316,6 +12323,102 @@ async def list_finding_exceptions(
             *params,
         )
     return {"finding_exceptions": [row_to_dict(r) for r in rows]}
+
+
+@app.post("/finding-exceptions/lifecycle/sweep")
+async def finding_exception_lifecycle_sweep(req: FindingExceptionLifecycleSweepRequest):
+    return await _finding_exception_lifecycle_sweep(req, pool=db_pool)
+
+
+async def _finding_exception_lifecycle_sweep(
+    req: FindingExceptionLifecycleSweepRequest,
+    *,
+    pool: asyncpg.Pool,
+) -> dict[str, Any]:
+    """Preview or expire elapsed exceptions without renewing or deleting them."""
+    try:
+        target_uuid = uuid.UUID(req.target_id) if req.target_id else None
+    except ValueError:
+        raise HTTPException(status_code=422, detail="target_id must be a UUID")
+
+    async with pool.acquire() as conn:
+        if not req.dry_run:
+            await _validate_approval_receipt_for_action(
+                conn,
+                req.approval_receipt_id,
+                target_id=target_uuid,
+                action_name="finding_exception.lifecycle_sweep",
+                command="finding_exception.lifecycle_sweep",
+                risk_tier="active",
+                always_require_receipt=True,
+            )
+        candidates = await conn.fetch(
+            """
+            SELECT *
+            FROM finding_exceptions
+            WHERE status IN ('active', 'approved', 'accepted_risk')
+              AND expires_at IS NOT NULL
+              AND expires_at < NOW()
+              AND ($1::uuid IS NULL OR target_id = $1)
+            ORDER BY expires_at ASC, created_at ASC
+            LIMIT $2
+            """,
+            target_uuid,
+            req.limit,
+        )
+        candidate_ids = [str(row["id"]) for row in candidates]
+        expired_rows: list[Any] = []
+        command_result: dict[str, Any] | None = None
+        if candidate_ids and not req.dry_run:
+            expired_rows = await conn.fetch(
+                """
+                UPDATE finding_exceptions
+                SET status = 'expired',
+                    updated_at = NOW(),
+                    edit_history = edit_history || jsonb_build_array(
+                        jsonb_build_object(
+                            'status', status,
+                            'expires_at', expires_at,
+                            'replaced_at', NOW(),
+                            'transition', 'lifecycle_sweep'
+                        )
+                    )
+                WHERE id = ANY($1::uuid[])
+                  AND status IN ('active', 'approved', 'accepted_risk')
+                  AND expires_at IS NOT NULL
+                  AND expires_at < NOW()
+                RETURNING id
+                """,
+                [uuid.UUID(item) for item in candidate_ids],
+            )
+        if not req.dry_run:
+            expired_ids = [str(row["id"]) for row in expired_rows]
+            command_result = await _record_command_result(
+                conn,
+                command="finding_exception.lifecycle_sweep",
+                status="completed",
+                risk_tier="active",
+                approval_receipt_id=req.approval_receipt_id,
+                operator_message=f"Expired {len(expired_ids)} elapsed finding exception(s)",
+                next_action="/settings/exceptions?queue_filter=expired",
+                result_json={
+                    "target_id": str(target_uuid) if target_uuid else None,
+                    "candidate_count": len(candidate_ids),
+                    "expired_count": len(expired_ids),
+                    "expired_exception_ids": expired_ids,
+                },
+            )
+    response = {
+        "dry_run": req.dry_run,
+        "target_id": str(target_uuid) if target_uuid else None,
+        "candidate_count": len(candidate_ids),
+        "expired_count": len(expired_rows),
+        "candidate_exception_ids": candidate_ids,
+        "execution_enabled": not req.dry_run,
+    }
+    if command_result:
+        response["operation_id"] = command_result["id"]
+    return response
 
 
 @app.post("/finding-exceptions")
@@ -21195,6 +21298,16 @@ async def _arsenal_dispatch_evidence_retention_sweep(p: dict[str, Any], approval
     return await evidence_retention_sweep(body)
 
 
+async def _arsenal_dispatch_finding_exception_lifecycle_sweep(
+    p: dict[str, Any], approval_receipt_id: str | None
+) -> dict[str, Any]:
+    allowed = _arsenal_model_fields(FindingExceptionLifecycleSweepRequest)
+    fields = {k: v for k, v in p.items() if k in allowed and v is not None}
+    fields["approval_receipt_id"] = approval_receipt_id or p.get("approval_receipt_id")
+    body = FindingExceptionLifecycleSweepRequest(**fields)
+    return await finding_exception_lifecycle_sweep(body)
+
+
 async def _arsenal_dispatch_authz_replay_plan(p: dict[str, Any], approval_receipt_id: str | None) -> dict[str, Any]:
     campaign_action_id = str(p.get("campaign_action_id") or "").strip()
     session_id = str(p.get("session_id") or "").strip()
@@ -21296,6 +21409,7 @@ def _arsenal_gated_adapters() -> dict[str, Any]:
         "ai_gate.scan": _arsenal_dispatch_ai_gate_scan,
         "ai_gate.replay_probe": _arsenal_dispatch_ai_gate_replay_probe,
         "model_intake.scan": _arsenal_dispatch_model_intake_scan,
+        "finding_exception.lifecycle_sweep": _arsenal_dispatch_finding_exception_lifecycle_sweep,
         "evidence.retention_sweep": _arsenal_dispatch_evidence_retention_sweep,
         "refuter_review.execute_plan": _arsenal_dispatch_refuter_review_execute_plan,
         "refuter_review.derive_verdict": _arsenal_dispatch_refuter_review_derive_verdict,

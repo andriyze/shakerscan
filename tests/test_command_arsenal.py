@@ -146,6 +146,19 @@ def test_evidence_manifest_and_retention_commands_are_bounded():
     assert sweep["parameters_schema"]["dry_run"]["default"] is True
 
 
+def test_finding_exception_lifecycle_sweep_is_one_way_and_gated():
+    commands = {item["name"]: item for item in arsenal.describe_commands()["commands"]}
+    sweep = commands["finding_exception.lifecycle_sweep"]
+
+    assert sweep["status"] == "gated"
+    assert sweep["risk_tier"] == "active"
+    assert sweep["path"] == "/finding-exceptions/lifecycle/sweep"
+    assert sweep["parameters_schema"]["dry_run"]["default"] is True
+    assert sweep["parameters_schema"]["limit"]["maximum"] == 500
+    assert "confirm_authorized" in sweep["required_confirmations"]
+    assert "expired_count" in sweep["evidence_contract"]
+
+
 def test_ai_gate_target_history_export_is_read_only_command():
     payload = arsenal.describe_commands()
     commands = {item["name"]: item for item in payload["commands"]}

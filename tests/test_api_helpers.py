@@ -5689,6 +5689,38 @@ def test_arsenal_execute_gated_evidence_retention_sweep_dispatches_when_allowed(
     assert captured["body"].approval_receipt_id == "r"
 
 
+def test_arsenal_execute_gated_exception_lifecycle_sweep_dispatches_when_allowed(monkeypatch):
+    monkeypatch.setattr(api_module, "_ai_ops_execute_enabled", lambda: True)
+    captured = {}
+
+    async def fake_validate(*args, **kwargs):
+        return {}
+
+    async def fake_sweep(body):
+        captured["body"] = body
+        return {"operation_id": "op-exception-sweep", "dry_run": False, "expired_count": 2}
+
+    monkeypatch.setattr(api_module, "_validate_approval_receipt_for_action", fake_validate)
+    monkeypatch.setattr(api_module, "finding_exception_lifecycle_sweep", fake_sweep)
+
+    result = asyncio.run(api_module._arsenal_execute(
+        _BlockedRecordingConn(),
+        api_module.ArsenalExecuteRequest(
+            command="finding_exception.lifecycle_sweep",
+            parameters={"dry_run": False, "limit": 50},
+            execute=True,
+            confirmations=["confirm_authorized"],
+            approval_receipt_id="r",
+        ),
+    ))
+
+    assert result["dispatched"] is True
+    assert result["operation_id"] == "op-exception-sweep"
+    assert captured["body"].dry_run is False
+    assert captured["body"].limit == 50
+    assert captured["body"].approval_receipt_id == "r"
+
+
 def test_arsenal_execute_returns_persisted_command_result_refs(monkeypatch):
     monkeypatch.setattr(api_module, "_ai_ops_execute_enabled", lambda: True)
     operation_id = "99999999-9999-4999-8999-999999999999"
@@ -8625,3 +8657,79 @@ def test_update_finding_exception_appends_edit_history(monkeypatch):
     assert snapshot["approver"] == "bob"
     assert snapshot["status"] == "active"
     assert "replaced_at" in snapshot
+
+
+class _FindingExceptionSweepConn:
+    def __init__(self, candidates):
+        self.candidates = candidates
+        self.fetch_calls = []
+
+    async def fetch(self, query, *args):
+        self.fetch_calls.append((query, args))
+        if "SELECT *" in query and "FROM finding_exceptions" in query:
+            return self.candidates
+        if "UPDATE finding_exceptions" in query:
+            return [{"id": row["id"]} for row in self.candidates]
+        return []
+
+
+def test_finding_exception_lifecycle_sweep_dry_run_is_bounded(monkeypatch):
+    candidates = [
+        {"id": uuid.UUID("11111111-1111-4111-8111-111111111111")},
+        {"id": uuid.UUID("22222222-2222-4222-8222-222222222222")},
+    ]
+    conn = _FindingExceptionSweepConn(candidates)
+    monkeypatch.setattr(api_module, "db_pool", _pool_for(conn))
+
+    result = asyncio.run(
+        api_module.finding_exception_lifecycle_sweep(
+            api_module.FindingExceptionLifecycleSweepRequest(dry_run=True, limit=2)
+        )
+    )
+
+    assert result["dry_run"] is True
+    assert result["candidate_count"] == 2
+    assert result["expired_count"] == 0
+    assert len(conn.fetch_calls) == 1
+    query, args = conn.fetch_calls[0]
+    assert "status IN ('active', 'approved', 'accepted_risk')" in query
+    assert "expires_at < NOW()" in query
+    assert args[1] == 2
+
+
+def test_finding_exception_lifecycle_sweep_execution_requires_receipt_and_audits(monkeypatch):
+    candidate_id = uuid.UUID("11111111-1111-4111-8111-111111111111")
+    conn = _FindingExceptionSweepConn([{"id": candidate_id}])
+    monkeypatch.setattr(api_module, "db_pool", _pool_for(conn))
+    approval_calls = []
+    command_calls = []
+
+    async def fake_validate(_conn, receipt_id, **kwargs):
+        approval_calls.append((receipt_id, kwargs))
+        return {"id": receipt_id}
+
+    async def fake_record(_conn, **kwargs):
+        command_calls.append(kwargs)
+        return {"id": "33333333-3333-4333-8333-333333333333"}
+
+    monkeypatch.setattr(api_module, "_validate_approval_receipt_for_action", fake_validate)
+    monkeypatch.setattr(api_module, "_record_command_result", fake_record)
+
+    result = asyncio.run(
+        api_module.finding_exception_lifecycle_sweep(
+            api_module.FindingExceptionLifecycleSweepRequest(
+                dry_run=False,
+                approval_receipt_id="44444444-4444-4444-8444-444444444444",
+            )
+        )
+    )
+
+    assert result["expired_count"] == 1
+    assert result["operation_id"] == "33333333-3333-4333-8333-333333333333"
+    assert approval_calls[0][1]["always_require_receipt"] is True
+    assert approval_calls[0][1]["command"] == "finding_exception.lifecycle_sweep"
+    assert command_calls[0]["status"] == "completed"
+    assert command_calls[0]["result_json"]["expired_exception_ids"] == [str(candidate_id)]
+    update_query = conn.fetch_calls[1][0]
+    assert "transition', 'lifecycle_sweep'" in update_query
+    assert "status = 'expired'" in update_query

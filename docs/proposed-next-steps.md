@@ -388,6 +388,10 @@ called at real sites — verify before re-proposing any of it:
   expiring, missing owner, missing approver, missing compensating controls, policy-scoped, and
   target-scoped records. `/settings/exceptions` renders those queues, summaries, finding links, and
   non-destructive revoke actions that preserve the audit row.
+- **Exception lifecycle phase 2** — `POST /finding-exceptions/lifecycle/sweep` and
+  `finding_exception.lifecycle_sweep` provide bounded dry-run previews and approval-gated execution.
+  Execution only marks elapsed effective exceptions `expired`, preserves prior state in
+  `edit_history`, and emits a command-result receipt; it never renews or deletes exceptions.
 - **Benchmark** — two-user run + post-retest re-score + fleet gate + invariant/active gates;
   scorecards committed to `results/benchmark-runs/`.
 
@@ -619,7 +623,9 @@ Use this order when choosing between otherwise-valid work:
 - **P2: Model Intake trust UX.** Guided trust modes, pre-submit trust preview, saved trust anchors,
   scan selection, strict policy-profile anchor binding, deployment-decision anchor gaps, the first
   exception metadata repair flow, and content-free Model Intake evidence exports are phase 1 done.
-  Remaining work is broader exception lifecycle automation.
+  DONE phase 2: bounded exception lifecycle previews and approval-gated expiry execution are
+  available from the Exceptions Queue and Command Arsenal. Renewal remains a deliberate operator
+  edit because extending an exception must not be automated.
 - **P2: registry-driven execution.** Migrate scanner execution and report rollups to proof contracts,
   telemetry schemas, safety gates, and family-specific run contracts.
 - **P2/P3: planner evals and local-agent planning.** Only after read-only Command Arsenal and safety

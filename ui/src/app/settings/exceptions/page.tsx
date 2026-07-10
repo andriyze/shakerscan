@@ -2,10 +2,11 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import Link from 'next/link'
-import { ExternalLink, Pencil, RefreshCw, ShieldAlert, XCircle } from 'lucide-react'
+import { ExternalLink, Pencil, RefreshCw, ShieldAlert, TimerReset, XCircle } from 'lucide-react'
 import {
   formatDate,
   getFindingExceptions,
+  sweepFindingExceptionLifecycle,
   updateFindingException,
   type FindingException,
   type FindingExceptionPayload,
@@ -125,6 +126,9 @@ export default function ExceptionsQueuePage() {
   const [repairing, setRepairing] = useState<FindingException | null>(null)
   const [repairForm, setRepairForm] = useState<FindingExceptionRepairForm | null>(null)
   const [saving, setSaving] = useState(false)
+  const [sweeping, setSweeping] = useState(false)
+  const [sweepCandidates, setSweepCandidates] = useState<number | null>(null)
+  const [approvalReceiptId, setApprovalReceiptId] = useState('')
 
   useEffect(() => {
     setQueueFilter(parseQueueFilter(new URLSearchParams(window.location.search).get('queue_filter')))
@@ -212,6 +216,39 @@ export default function ExceptionsQueuePage() {
     }
   }
 
+  async function previewLifecycleSweep() {
+    setSweeping(true)
+    try {
+      const result = await sweepFindingExceptionLifecycle({ dry_run: true, limit: 500 })
+      setSweepCandidates(result.candidate_count)
+      toast.success(`Lifecycle preview found ${result.candidate_count} elapsed exception${result.candidate_count === 1 ? '' : 's'}`)
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to preview exception lifecycle')
+    } finally {
+      setSweeping(false)
+    }
+  }
+
+  async function executeLifecycleSweep() {
+    if (!approvalReceiptId.trim()) return
+    setSweeping(true)
+    try {
+      const result = await sweepFindingExceptionLifecycle({
+        dry_run: false,
+        limit: 500,
+        approval_receipt_id: approvalReceiptId.trim(),
+      })
+      setSweepCandidates(null)
+      setApprovalReceiptId('')
+      toast.success(`Expired ${result.expired_count} elapsed exception${result.expired_count === 1 ? '' : 's'}`)
+      await load()
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to expire elapsed exceptions')
+    } finally {
+      setSweeping(false)
+    }
+  }
+
   return (
     <div className="space-y-6">
       <div className="flex flex-wrap items-start justify-between gap-3">
@@ -256,6 +293,42 @@ export default function ExceptionsQueuePage() {
           <div className="text-xs uppercase text-gray-500">No controls</div>
           <div className="mt-1 text-2xl font-semibold text-red-300">{summary.missingControls}</div>
         </Card>
+      </div>
+
+      <div className="flex flex-wrap items-center justify-between gap-3 border-y border-gray-800 py-3">
+        <div className="flex min-w-0 items-start gap-3">
+          <TimerReset className="mt-0.5 h-5 w-5 shrink-0 text-amber-300" />
+          <div>
+            <div className="text-sm font-medium text-gray-200">Lifecycle sweep</div>
+            <div className="text-xs text-gray-500">
+              Marks elapsed effective exceptions expired. It never renews, revokes, or deletes records.
+            </div>
+          </div>
+        </div>
+        <div className="flex max-w-full flex-wrap items-center justify-end gap-2">
+          <Button variant="secondary" onClick={previewLifecycleSweep} disabled={sweeping}>
+            <RefreshCw className={`h-4 w-4 ${sweeping ? 'animate-spin' : ''}`} />
+            Preview expiry
+          </Button>
+          {sweepCandidates !== null && sweepCandidates > 0 && (
+            <>
+              <input
+                value={approvalReceiptId}
+                onChange={(event) => setApprovalReceiptId(event.target.value)}
+                className={`${inputClass} w-64 max-w-full font-mono text-xs`}
+                placeholder="Approval receipt UUID"
+                aria-label="Approval receipt UUID"
+              />
+              <Button onClick={executeLifecycleSweep} disabled={sweeping || !approvalReceiptId.trim()}>
+                Expire {sweepCandidates}
+              </Button>
+              <Link href="/settings/arsenal" className="text-xs text-blue-400 hover:text-blue-300">
+                Approval receipts
+              </Link>
+            </>
+          )}
+          {sweepCandidates === 0 && <span className="text-xs text-emerald-300">No elapsed exceptions</span>}
+        </div>
       </div>
 
       <Card className="p-4 space-y-4">

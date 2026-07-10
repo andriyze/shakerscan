@@ -3002,6 +3002,31 @@ export async function deleteFindingException(id: string): Promise<{ deleted: boo
   return res.json()
 }
 
+export interface FindingExceptionLifecycleSweepResult {
+  dry_run: boolean
+  target_id?: string | null
+  candidate_count: number
+  expired_count: number
+  candidate_exception_ids: string[]
+  execution_enabled: boolean
+  operation_id?: string
+}
+
+export async function sweepFindingExceptionLifecycle(data: {
+  dry_run?: boolean
+  target_id?: string
+  limit?: number
+  approval_receipt_id?: string
+}): Promise<FindingExceptionLifecycleSweepResult> {
+  const res = await fetch(`${API_URL}/finding-exceptions/lifecycle/sweep`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to sweep exception lifecycle'))
+  return res.json()
+}
+
 export async function retestFinding(
   id: string,
   params: {
