@@ -598,6 +598,14 @@ def _sanitize_scan_options(value: Any) -> Any:
     return redact_sensitive(options)
 
 
+def _public_target_row(row: Any) -> dict[str, Any]:
+    """Serialize a target without exposing credentials stored in scan options."""
+    target = row_to_dict(row)
+    if "scan_options" in target:
+        target["scan_options"] = _sanitize_scan_options(target.get("scan_options"))
+    return target
+
+
 def _source_type_filter_sql(source_type: Optional[str]) -> str:
     """SQL fragment for the findings `source_type` filter (first-class taxonomy).
 
@@ -12895,7 +12903,7 @@ async def list_targets(
         )
 
     return {
-        'targets': [dict(r) for r in rows],
+        'targets': [_public_target_row(r) for r in rows],
         'total': total
     }
 
@@ -13491,7 +13499,7 @@ async def get_target(target_id: str):
             ORDER BY created_at DESC LIMIT 10
         """, target_uuid)
 
-    result = dict(target)
+    result = _public_target_row(target)
     result['recent_scans'] = [dict(s) for s in scans]
     return result
 

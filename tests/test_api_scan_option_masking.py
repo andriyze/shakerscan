@@ -995,6 +995,27 @@ def test_sanitize_scan_options_decodes_json_string():
     assert sanitized["auth_header"] == "***"
 
 
+def test_public_target_row_masks_stored_scan_credentials():
+    target = api_module._public_target_row({
+        "id": uuid.uuid4(),
+        "url": "https://app.example.test",
+        "scan_options": json.dumps({
+            "scan_type": "smart",
+            "auth_header": "Bearer target-secret",
+            "login_password": "password123",
+            "managed_credential_profiles": [{
+                "profile_id": "profile-1",
+                "option_key": "auth_header",
+            }],
+        }),
+    })
+
+    assert target["scan_options"]["scan_type"] == "smart"
+    assert target["scan_options"]["auth_header"] == "***"
+    assert target["scan_options"]["login_password"] == "***"
+    assert target["scan_options"]["managed_credential_profiles"] == "***"
+
+
 def _auto_shard_settings(enabled=True, **overrides):
     settings = {
         "auto_sharding_enabled": enabled,
