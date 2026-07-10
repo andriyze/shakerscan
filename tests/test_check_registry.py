@@ -102,6 +102,16 @@ def test_describe_check_families_includes_proof_and_severity_contracts():
     ]
     assert described["headers"]["severity_rules"]["csp_absent"] == "medium"
     assert described["bola"]["severity_rules"]["critical_requires"] == ["cross_user_data_access"]
+    assert described["headers"]["dispatch_adapter"] == "legacy_config_findings"
+
+
+def test_scanner_focus_contracts_come_from_registry_in_legacy_order():
+    contracts = r.scanner_active_family_contracts()
+
+    assert [item["name"] for item in contracts] == ["all", "sqli", "xss", "auth", "bola"]
+    assert contracts[1]["tools"] == ["smart_sqli", "custom_sqli", "sqlmap", "nosql_injection"]
+    assert contracts[-1]["requires_two_auth_states"] is True
+    assert r.normalize_check_family("access-control") == "auth"
 
 
 def test_scanner_execution_plan_uses_registry_gates():

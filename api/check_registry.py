@@ -29,6 +29,15 @@ class CheckFamilySpec:
     proof_contract: tuple[str, ...] = ()
     severity_rules: dict[str, Any] = field(default_factory=dict)
     scanner_options: dict[str, Any] = field(default_factory=dict)
+    dispatch_adapter: str | None = None
+    aliases: tuple[str, ...] = ()
+    finding_tools: tuple[str, ...] = ()
+    finding_cwes: tuple[str, ...] = ()
+    finding_title_markers: tuple[str, ...] = ()
+    finding_type_markers: tuple[str, ...] = ()
+    remediation: tuple[str, ...] = ()
+    emits_endpoint_telemetry: bool = False
+    scanner_focus_order: int = 1000
     runnable: bool = False
     description: str = ""
 
@@ -43,6 +52,7 @@ CHECK_REGISTRY: tuple[CheckFamilySpec, ...] = (
         telemetry_schema="discovery",
         proof_contract=("source_url", "discovery_method", "normalized_endpoint"),
         severity_rules={"finding_ceiling_without_concrete_evidence": "info"},
+        dispatch_adapter="legacy_discovery",
         runnable=True,
         description="Crawl, API/HAR/OpenAPI discovery, and passive surface refresh.",
     ),
@@ -55,6 +65,7 @@ CHECK_REGISTRY: tuple[CheckFamilySpec, ...] = (
         telemetry_schema="nuclei_template",
         proof_contract=("template_id", "matched_at", "matcher_name", "request_url"),
         severity_rules={"template_severity_is_input": True, "promotion_requires": ["matched_at", "template_id"]},
+        dispatch_adapter="legacy_nuclei_template",
         runnable=True,
         description="Nuclei template checks by severity/tag. Not an ASM endpoint-test family yet.",
     ),
@@ -69,6 +80,19 @@ CHECK_REGISTRY: tuple[CheckFamilySpec, ...] = (
         proof_contract=("method", "url", "parameter", "payload", "response_delta"),
         severity_rules={"critical_requires": ["exploitation_proof"], "high_requires": ["response_delta"]},
         scanner_options={"sqli": True, "xss": False, "asm_check_family": "sqli"},
+        dispatch_adapter="legacy_active_loop",
+        aliases=("sql", "sql-injection", "sql_injection"),
+        finding_tools=("smart_sqli", "custom_sqli", "sqlmap", "nosql_injection"),
+        finding_cwes=("CWE-89", "CWE-943"),
+        finding_title_markers=("sql injection",),
+        finding_type_markers=("sqli", "sql injection", "nosql"),
+        remediation=(
+            "Use parameterized queries/prepared statements for database access.",
+            "Validate and type-check request parameters before using them in queries.",
+            "Run database accounts with least privilege and monitor anomalous query behavior.",
+        ),
+        emits_endpoint_telemetry=True,
+        scanner_focus_order=10,
         runnable=True,
         description="SQL injection probes and proof/extraction depth.",
     ),
@@ -83,6 +107,19 @@ CHECK_REGISTRY: tuple[CheckFamilySpec, ...] = (
         proof_contract=("method", "url", "parameter", "payload", "sink_or_reflection"),
         severity_rules={"high_requires": ["confirmed_execution_or_dangerous_sink"], "medium_requires": ["reflection"]},
         scanner_options={"xss": True, "sqli": False, "asm_check_family": "xss"},
+        dispatch_adapter="legacy_active_loop",
+        aliases=("cross-site-scripting", "cross_site_scripting"),
+        finding_tools=("smart_xss", "custom_xss", "dalfox", "dom_xss", "hash_route_dom_xss", "stored_xss"),
+        finding_cwes=("CWE-79",),
+        finding_title_markers=("xss", "cross-site scripting"),
+        finding_type_markers=("xss", "cross-site scripting"),
+        remediation=(
+            "Contextually encode untrusted data before rendering it in HTML, JavaScript, URLs, or attributes.",
+            "Use framework-safe templating APIs and avoid unsafe DOM sinks.",
+            "Add regression tests for the confirmed XSS payload and affected parameter.",
+        ),
+        emits_endpoint_telemetry=True,
+        scanner_focus_order=20,
         runnable=True,
         description="Reflected, stored, and DOM XSS probes.",
     ),
@@ -100,6 +137,19 @@ CHECK_REGISTRY: tuple[CheckFamilySpec, ...] = (
         proof_contract=("resource_template", "resource_id", "primary_auth", "second_user_auth", "status_delta"),
         severity_rules={"critical_requires": ["cross_user_data_access"], "high_requires": ["object_authorization_bypass"]},
         scanner_options={"sqli": False, "xss": False, "asm_check_family": "bola"},
+        dispatch_adapter="asm_endpoint_batch",
+        aliases=("idor", "object_authorization", "object-authorization"),
+        finding_tools=("smart_bola", "bola_idor", "bola_check", "bola_multi_user", "bola_enumeration"),
+        finding_cwes=("CWE-639",),
+        finding_title_markers=("bola", "idor", "object level authorization", "object-level authorization"),
+        finding_type_markers=("bola", "idor", "access control"),
+        remediation=(
+            "Enforce object-level authorization on every resource read and write.",
+            "Compare the requesting principal against the resource owner or an explicit sharing policy.",
+            "Add multi-user regression tests for the affected resource IDs and methods.",
+        ),
+        emits_endpoint_telemetry=True,
+        scanner_focus_order=40,
         runnable=True,
         description="Multi-user object authorization comparisons. Requires Lab/deep policy and two auth contexts.",
     ),
@@ -115,6 +165,19 @@ CHECK_REGISTRY: tuple[CheckFamilySpec, ...] = (
         proof_contract=("method", "url", "anonymous_status", "authenticated_status", "response_delta"),
         severity_rules={"high_requires": ["protected_resource_anonymous_access"], "medium_requires": ["auth_boundary_delta"]},
         scanner_options={"sqli": False, "xss": False, "asm_check_family": "auth"},
+        dispatch_adapter="asm_endpoint_batch",
+        aliases=("authentication", "access-control", "access_control"),
+        finding_tools=("smart_auth", "session_management", "auth_bypass", "forced_browsing"),
+        finding_cwes=("CWE-306", "CWE-862", "CWE-287", "CWE-425"),
+        finding_title_markers=("authentication", "auth bypass", "anonymous access", "forced browsing"),
+        finding_type_markers=("authentication", "access control", "auth"),
+        remediation=(
+            "Require authentication before returning user-specific resources.",
+            "Centralize authorization middleware so anonymous requests cannot reach protected handlers.",
+            "Add regression tests that replay the affected endpoint without credentials.",
+        ),
+        emits_endpoint_telemetry=True,
+        scanner_focus_order=30,
         runnable=True,
         description="Read-only authenticated-vs-anonymous access checks for focused ASM endpoint batches.",
     ),
@@ -131,6 +194,7 @@ CHECK_REGISTRY: tuple[CheckFamilySpec, ...] = (
             "high_requires": ["persisted_or_response_privilege_effect"],
             "reflection_only_ceiling": "medium",
         },
+        dispatch_adapter="legacy_phase4_mass_assignment",
         runnable=True,
         description="Bounded privileged-field mutation with baseline-vs-response effect proof.",
     ),
@@ -148,6 +212,7 @@ CHECK_REGISTRY: tuple[CheckFamilySpec, ...] = (
             "high_requires": ["forged_token_accepted"],
             "metadata_only_ceiling": "medium",
         },
+        dispatch_adapter="legacy_advanced_jwt",
         runnable=True,
         description="JWT algorithm, signature, key, and claim mutation checks with acceptance proof.",
     ),
@@ -160,6 +225,8 @@ CHECK_REGISTRY: tuple[CheckFamilySpec, ...] = (
         telemetry_schema="planned_passive_attempt",
         proof_contract=("request_url", "response_headers", "parsed_policy_state"),
         severity_rules={"missing_baseline_headers": "low_or_medium", "csp_absent": "medium"},
+        dispatch_adapter="legacy_config_findings",
+        runnable=True,
         description="HTTP security header posture checks.",
     ),
     CheckFamilySpec(
@@ -221,18 +288,41 @@ CHECK_REGISTRY: tuple[CheckFamilySpec, ...] = (
 CHECK_REGISTRY_BY_NAME = {spec.name: spec for spec in CHECK_REGISTRY}
 CHECK_FAMILY_ALIASES = {
     "all": "all",
-    "sql": "sqli",
-    "sql-injection": "sqli",
-    "sql_injection": "sqli",
-    "cross-site-scripting": "xss",
-    "cross_site_scripting": "xss",
-    "idor": "bola",
+    **{alias: spec.name for spec in CHECK_REGISTRY for alias in spec.aliases},
     "path_traversal": "lfi",
     "path-traversal": "lfi",
     "cmdi": "rce",
     "command_injection": "rce",
     "command-injection": "rce",
 }
+
+
+def scanner_active_family_contracts() -> list[dict[str, Any]]:
+    """Return scanner focus/attribution contracts from the canonical registry."""
+    contracts: list[dict[str, Any]] = [{
+        "name": "all", "active_xss": True, "active_sqli": True, "aliases": [],
+        "tools": [], "cwes": [], "title_markers": [], "type_markers": [],
+        "remediation": [], "requires_two_auth_states": False,
+        "emits_endpoint_telemetry": False,
+    }]
+    focus_specs = sorted(CHECK_REGISTRY, key=lambda item: item.scanner_focus_order)
+    for spec in focus_specs:
+        if not (spec.runnable and spec.is_active and spec.scanner_options):
+            continue
+        contracts.append({
+            "name": spec.name,
+            "active_xss": bool(spec.scanner_options.get("xss")),
+            "active_sqli": bool(spec.scanner_options.get("sqli")),
+            "aliases": list(spec.aliases),
+            "tools": list(spec.finding_tools),
+            "cwes": list(spec.finding_cwes),
+            "title_markers": list(spec.finding_title_markers),
+            "type_markers": list(spec.finding_type_markers),
+            "remediation": list(spec.remediation),
+            "requires_two_auth_states": spec.requires_auth_states,
+            "emits_endpoint_telemetry": spec.emits_endpoint_telemetry,
+        })
+    return contracts
 
 
 def normalize_check_family(value: Any, *, allow_all: bool = True) -> str | None:
@@ -299,6 +389,7 @@ def describe_check_families() -> list[dict[str, Any]]:
             "telemetry_schema": spec.telemetry_schema,
             "proof_contract": list(spec.proof_contract),
             "severity_rules": dict(spec.severity_rules),
+            "dispatch_adapter": spec.dispatch_adapter,
             "runnable": spec.runnable,
             "description": spec.description,
         }
@@ -374,23 +465,10 @@ def scanner_execution_plan(
             else:
                 reason = "registered_not_runnable"
 
-        dispatch_adapter = "none"
-        if enabled:
-            if spec.name in {"sqli", "xss"}:
-                dispatch_adapter = "legacy_active_loop"
-            elif spec.name in {"bola", "auth"}:
-                dispatch_adapter = "asm_endpoint_batch"
-            elif spec.name == "mass_assignment":
-                dispatch_adapter = "legacy_phase4_mass_assignment"
-            elif spec.name == "jwt":
-                dispatch_adapter = "legacy_advanced_jwt"
-            elif spec.name in {"recon", "headers"}:
-                dispatch_adapter = "legacy_passive_or_template"
-            elif spec.name == "nuclei":
-                dispatch_adapter = "legacy_nuclei_template"
-            else:
-                dispatch_adapter = "adapter_pending"
-                blocked_by.append("dispatch_adapter_pending")
+        dispatch_adapter = spec.dispatch_adapter or "none"
+        if enabled and not spec.dispatch_adapter:
+            dispatch_adapter = "adapter_pending"
+            blocked_by.append("dispatch_adapter_pending")
 
         families.append(
             {

@@ -448,6 +448,35 @@ def test_registry_dispatch_enabled_preserves_broad_legacy_default():
     assert scanner_mod.registry_dispatch_enabled(plan, "auth", legacy_default=False) is False
 
 
+def test_registry_report_phase_dispatches_only_enabled_declared_adapters():
+    called = []
+    plan = {"families": [
+        {"name": "headers", "phase": "passive", "enabled": True, "dispatch_adapter": "headers_adapter"},
+        {"name": "recon", "phase": "recon", "enabled": True, "dispatch_adapter": "recon_adapter"},
+        {"name": "other", "phase": "passive", "enabled": False, "dispatch_adapter": "other_adapter"},
+    ]}
+
+    receipts = scanner_mod.dispatch_registry_report_phase(
+        plan, "passive", {"headers_adapter": lambda: called.append("headers")}
+    )
+
+    assert called == ["headers"]
+    assert receipts == [{
+        "family": "headers", "phase": "passive", "dispatch_adapter": "headers_adapter", "status": "completed",
+    }]
+
+
+def test_registry_report_phase_records_missing_adapter_without_running():
+    plan = {"families": [{
+        "name": "headers", "phase": "passive", "enabled": True, "dispatch_adapter": "missing",
+    }]}
+
+    receipts = scanner_mod.dispatch_registry_report_phase(plan, "passive", {})
+
+    assert receipts[0]["status"] == "blocked"
+    assert receipts[0]["reason"] == "dispatch_adapter_not_registered"
+
+
 def _load_reporting_module():
     import importlib.util as _ilu
     scanner_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "scanner"))

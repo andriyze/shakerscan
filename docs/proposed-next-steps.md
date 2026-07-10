@@ -1465,7 +1465,7 @@ challenged and corrected without deleting history, and corrections are visible i
 and deployment-gate story as the original claim.
 
 ### 10. Check-registry execution migration + proof contracts per family
-**Status: PARTIAL, NUCLEI REGISTRY DISPATCH DONE.** `api/check_registry.py` (`CheckFamilySpec`) is the family contract for API
+**Status: REGISTRY CONTRACT CONSOLIDATION + PASSIVE DISPATCH DONE; HIGH-RISK FAMILIES FAIL-CLOSED.** `api/check_registry.py` (`CheckFamilySpec`) is the family contract for API
 validation and ASM scheduling and now carries `requires_auth_states` / `requires_credentials` /
 `risk_level` / `runnable` / `telemetry_schema` / `proof_contract` / `severity_rules`. Scanner
 `build_report()` now emits a registry-derived `scanner_execution_plan` in scan config, active
@@ -1480,15 +1480,22 @@ legacy broad smart-scan behavior when no family was requested. The smart active 
 derives its family dispatch order from registry runnable parallel families with a scanner-local
 fallback. The phase-4 mass-assignment executor is now registry-backed with its effect-based proof and
 severity contract, explicit legacy flag activation, and `legacy_phase4_mass_assignment` dispatch
-adapter; the registry plan is authoritative for whether that task is created. Basic and comprehensive
+adapter; task creation now reads only the registry decision and fails closed when the plan/family is
+missing instead of rechecking the legacy input that produced the plan. Basic and comprehensive
 JWT checks are likewise registered with token-source/mutation/acceptance-delta proof requirements and
-the `legacy_advanced_jwt` adapter; broad Smart/full/aggressive scans add JWT to their registry scope,
+the `legacy_advanced_jwt` adapter; their dispatch also has no permissive legacy fallback. Broad
+Smart/full/aggressive scans add JWT to their registry scope,
 while focused family scans continue to omit it. Nuclei is now a runnable template family with the
 `legacy_nuclei_template` adapter; task creation reads the registry plan, so standard/deep/full/smart
 profiles dispatch templates while quick, public-only, focused-endpoint, and zero-rediscovery scopes
-retain explicit skip metadata instead of starting the legacy executor. Detector internals
-still execute many checks through hardcoded module calls, and planned
-families such as `lfi`/`rce`/`ssrf` are not runnable.
+retain explicit skip metadata instead of starting the legacy executor. Focused scanner aliases,
+finding attribution, remediation, auth-state requirements, telemetry flags, and dispatch-adapter
+names now derive from that same registry instead of a second scanner-local registry. Passive
+header/config finding emission runs through a generic phase dispatcher and records completed,
+failed, or missing-adapter state in `scanner_execution_receipts`. Detector internals for some legacy
+modules still retain specialized loops. Planned `lfi`/`rce`/`ssrf` families remain explicitly
+unrunnable: response validators alone are not bounded discovery executors and cannot justify claiming
+those families were dispatched.
 
 **Implement:** continue migrating `build_report()` module execution to registry iteration; add
 `proof_contract`, `severity_rules`, telemetry schema, safety gate, and report rollup per family;
@@ -1497,6 +1504,7 @@ DONE phase 3 for mass-assignment registration and dispatch gating without expand
 changing explicit `--mass-assignment-testing` behavior.
 DONE phase 4 for JWT basic/comprehensive task gating without exposing JWT as an ASM focus family.
 DONE phase 5 for Nuclei task gating without exposing templates as an ASM endpoint-test family.
+DONE phase 6 for canonical focused-family metadata and registry-driven passive report dispatch.
 
 **Done when:** adding a check family is a registry entry plus module integration, not edits scattered
 through `build_report`.

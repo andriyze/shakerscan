@@ -2940,66 +2940,29 @@ class ActiveCheckFamily(NamedTuple):
     emits_endpoint_telemetry: bool = False
 
 
-ACTIVE_CHECK_FAMILIES: dict[str, ActiveCheckFamily] = {
-    "all": ActiveCheckFamily(name="all", active_xss=True, active_sqli=True),
-    "sqli": ActiveCheckFamily(
-        name="sqli", active_xss=False, active_sqli=True,
-        aliases=("sql", "sql-injection", "sql_injection"),
-        tools=frozenset({"smart_sqli", "custom_sqli", "sqlmap", "nosql_injection"}),
-        cwes=frozenset({"CWE-89", "CWE-943"}),
-        title_markers=("sql injection",),
-        type_markers=("sqli", "sql injection", "nosql"),
-        remediation=(
-            "Use parameterized queries/prepared statements for database access.",
-            "Validate and type-check request parameters before using them in queries.",
-            "Run database accounts with least privilege and monitor anomalous query behavior.",
-        ),
-        emits_endpoint_telemetry=True,
-    ),
-    "xss": ActiveCheckFamily(
-        name="xss", active_xss=True, active_sqli=False,
-        aliases=("cross-site-scripting", "cross_site_scripting"),
-        tools=frozenset({"smart_xss", "custom_xss", "dalfox", "dom_xss", "hash_route_dom_xss", "stored_xss"}),
-        cwes=frozenset({"CWE-79"}),
-        title_markers=("xss", "cross-site scripting"),
-        type_markers=("xss", "cross-site scripting"),
-        remediation=(
-            "Contextually encode untrusted data before rendering it in HTML, JavaScript, URLs, or attributes.",
-            "Use framework-safe templating APIs and avoid unsafe DOM sinks.",
-            "Add regression tests for the confirmed XSS payload and affected parameter.",
-        ),
-        emits_endpoint_telemetry=True,
-    ),
-    "auth": ActiveCheckFamily(
-        name="auth", active_xss=False, active_sqli=False,
-        aliases=("authentication", "access-control", "access_control"),
-        tools=frozenset({"smart_auth", "session_management", "auth_bypass", "forced_browsing"}),
-        cwes=frozenset({"CWE-306", "CWE-862", "CWE-287", "CWE-425"}),
-        title_markers=("authentication", "auth bypass", "anonymous access", "forced browsing"),
-        type_markers=("authentication", "access control", "auth"),
-        remediation=(
-            "Require authentication before returning user-specific resources.",
-            "Centralize authorization middleware so anonymous requests cannot reach protected handlers.",
-            "Add regression tests that replay the affected endpoint without credentials.",
-        ),
-        emits_endpoint_telemetry=True,
-    ),
-    "bola": ActiveCheckFamily(
-        name="bola", active_xss=False, active_sqli=False,
-        aliases=("idor", "object_authorization", "object-authorization"),
-        tools=frozenset({"smart_bola", "bola_idor", "bola_check", "bola_multi_user", "bola_enumeration"}),
-        cwes=frozenset({"CWE-639"}),
-        title_markers=("bola", "idor", "object level authorization", "object-level authorization"),
-        type_markers=("bola", "idor", "access control"),
-        remediation=(
-            "Enforce object-level authorization on every resource read and write.",
-            "Compare the requesting principal against the resource owner or an explicit sharing policy.",
-            "Add multi-user regression tests for the affected resource IDs and methods.",
-        ),
-        requires_two_auth_states=True,
-        emits_endpoint_telemetry=True,
-    ),
-}
+def _active_check_families_from_registry() -> dict[str, ActiveCheckFamily]:
+    if _check_registry is None or not hasattr(_check_registry, "scanner_active_family_contracts"):
+        raise RuntimeError("canonical check registry is required for scanner family dispatch")
+    families: dict[str, ActiveCheckFamily] = {}
+    for item in _check_registry.scanner_active_family_contracts():
+        family = ActiveCheckFamily(
+            name=str(item["name"]),
+            active_xss=bool(item.get("active_xss")),
+            active_sqli=bool(item.get("active_sqli")),
+            aliases=tuple(item.get("aliases") or []),
+            tools=frozenset(item.get("tools") or []),
+            cwes=frozenset(item.get("cwes") or []),
+            title_markers=tuple(item.get("title_markers") or []),
+            type_markers=tuple(item.get("type_markers") or []),
+            remediation=tuple(item.get("remediation") or []),
+            requires_two_auth_states=bool(item.get("requires_two_auth_states")),
+            emits_endpoint_telemetry=bool(item.get("emits_endpoint_telemetry")),
+        )
+        families[family.name] = family
+    return families
+
+
+ACTIVE_CHECK_FAMILIES: dict[str, ActiveCheckFamily] = _active_check_families_from_registry()
 
 
 # --- Derived legacy views (kept byte-identical so existing call sites are unchanged) ---
@@ -3195,6 +3158,40 @@ def registry_dispatch_enabled(
     if scope.get("requested_family"):
         return registry_family_enabled(plan, family, fallback=legacy_default)
     return bool(legacy_default)
+
+
+def dispatch_registry_report_phase(
+    scanner_execution_plan: dict[str, Any] | None,
+    phase: str,
+    adapters: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Run enabled synchronous report adapters declared by the canonical registry."""
+    receipts: list[dict[str, Any]] = []
+    plan = scanner_execution_plan if isinstance(scanner_execution_plan, dict) else {}
+    for family in plan.get("families") or []:
+        if not isinstance(family, dict) or not family.get("enabled") or family.get("phase") != phase:
+            continue
+        adapter_name = str(family.get("dispatch_adapter") or "")
+        adapter = adapters.get(adapter_name)
+        receipt = {
+            "family": str(family.get("name") or ""),
+            "phase": phase,
+            "dispatch_adapter": adapter_name or "none",
+            "status": "blocked",
+        }
+        if not callable(adapter):
+            receipt["reason"] = "dispatch_adapter_not_registered"
+            receipts.append(receipt)
+            continue
+        try:
+            adapter()
+        except Exception as exc:
+            receipt["status"] = "failed"
+            receipt["reason"] = f"{type(exc).__name__}: {str(exc)[:200]}"
+        else:
+            receipt["status"] = "completed"
+        receipts.append(receipt)
+    return receipts
 
 
 def _focused_family_finding_matches(finding: dict[str, Any], family: str | None) -> bool:
@@ -4739,7 +4736,7 @@ async def build_report(target: str,
     jwt_dispatch_enabled = registry_family_enabled(
         scanner_execution_plan,
         "jwt",
-        fallback=bool(advanced_scan),
+        fallback=False,
     )
     if advanced_scan and not public_only:
         nosql_task = asyncio.create_task(nosql_injection_test(base_url))
@@ -5841,9 +5838,9 @@ async def build_report(target: str,
     mass_assignment_dispatch_enabled = registry_family_enabled(
         scanner_execution_plan,
         "mass_assignment",
-        fallback=bool(mass_assignment_testing),
+        fallback=False,
     )
-    if mass_assignment_testing and mass_assignment_dispatch_enabled and not public_only:
+    if mass_assignment_dispatch_enabled and not public_only:
         from scanner_tools.access_control_checks import check_mass_assignment
         mass_assignment_task = asyncio.create_task(check_mass_assignment(base_url, auth_session=auth_session))
     else:
@@ -11370,12 +11367,13 @@ async def build_report(target: str,
             "[scanner] Parallel child shard: skipping duplicate posture/config findings",
             file=sys.stderr,
         )
-    else:
-        try:
-            emit_config_findings(report)
-        except Exception:
-            # Do not fail the whole scan if emitter has a bug
-            pass
+    passive_dispatch_receipts = dispatch_registry_report_phase(
+        scanner_execution_plan,
+        "passive",
+        {"legacy_config_findings": lambda: emit_config_findings(report)},
+    )
+    if passive_dispatch_receipts:
+        report.setdefault("scanner_execution_receipts", []).extend(passive_dispatch_receipts)
 
     # Endpoint-scoped active checks over the discovered API surface:
     # unauthenticated sensitive-data exposure + CORS, webhook signature bypass,
