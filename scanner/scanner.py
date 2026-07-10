@@ -2589,9 +2589,14 @@ def _serialize_active_worklist(endpoints: list, limit: int = ACTIVE_WORKLIST_EMI
         except Exception:
             continue
         path = pu.path or "/"
+        is_hash_route = pu.fragment.startswith(("/", "!/"))
+        if is_hash_route:
+            path = f"{path}#{pu.fragment}"
         params = [p for p in (e.get("params") or []) if p]
         body = [b for b in (e.get("body_params") or []) if b]
-        if pu.query:
+        if is_hash_route:
+            entry = f"{method} {path}"
+        elif pu.query:
             entry = f"{method} {path}?{pu.query}"
         elif params:
             entry = f"{method} {path}?" + "&".join(f"{p}=1" for p in params)
@@ -2687,13 +2692,14 @@ _REQUEST_CONTRACT_STRENGTH_LABELS = {
 
 def _active_endpoint_contract_key(url: str, method: str) -> tuple[str, str]:
     parsed = urllib.parse.urlparse(str(url or ""))
+    fragment = parsed.fragment if parsed.fragment.startswith(("/", "!/")) else ""
     canonical_url = urllib.parse.urlunparse((
         parsed.scheme.lower(),
         parsed.netloc.lower(),
         parsed.path or "/",
         "",
         "",
-        "",
+        fragment,
     ))
     return canonical_url, str(method or "GET").upper()
 

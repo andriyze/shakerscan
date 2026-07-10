@@ -116,6 +116,33 @@ def test_lookup_routes_are_preserved_for_path_value_active_testing():
     ]
 
 
+def test_hash_routes_remain_distinct_request_contracts():
+    search = scanner_module._active_endpoint_contract_key(
+        "https://app.example.test/#/search?q=test",
+        "GET",
+    )
+    contact = scanner_module._active_endpoint_contract_key(
+        "https://app.example.test/#/contact?message=test",
+        "GET",
+    )
+
+    assert search != contact
+    assert search == ("https://app.example.test/#/search?q=test", "GET")
+
+
+def test_active_worklist_preserves_hash_route_and_fragment_query():
+    worklist = scanner_module._serialize_active_worklist([
+        {
+            "method": "GET",
+            "url": "https://app.example.test/#/search?q=test",
+            "params": ["q"],
+            "source": "hash_route",
+        }
+    ])
+
+    assert worklist == ["GET /#/search?q=test"]
+
+
 def test_frontend_http_requests_become_same_origin_active_endpoints():
     endpoints = scanner_module._frontend_http_active_endpoints(
         "https://app.example.test",
