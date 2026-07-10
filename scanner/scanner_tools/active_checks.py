@@ -7343,7 +7343,7 @@ _ACTIVE_ROUTE_PARAM_HINTS = {
 # phantom and otherwise dominate the budget.
 _ACTIVE_REAL_SOURCES = frozenset({
     "har_discovery", "har_network_capture", "har", "browser_api_capture", "browser",
-    "url_crawl", "crawl", "js_bundle_analysis", "js", "manual", "openapi", "swagger",
+    "url_crawl", "crawl", "discovered_lookup", "js_bundle_analysis", "js", "manual", "openapi", "swagger",
 })
 
 

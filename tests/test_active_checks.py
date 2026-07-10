@@ -592,6 +592,31 @@ def test_active_endpoint_prioritization_penalizes_static_discovery_surfaces():
     assert socket_token in ordered[2:]
 
 
+def test_xss_prioritization_keeps_discovered_lookup_ahead_of_options_fanout():
+    discovered_lookup = {
+        "method": "GET",
+        "url": "http://t/rest/orders/track",
+        "params": [],
+        "source": "discovered_lookup",
+    }
+    options_phantoms = [
+        {
+            "method": "GET",
+            "url": f"http://t/api/Resource{i}s/search",
+            "params": ["q", "query", "id"],
+            "source": "options",
+        }
+        for i in range(250)
+    ]
+
+    ordered = active_checks._prioritize_active_endpoints(
+        [*options_phantoms, discovered_lookup],
+        family="xss",
+    )
+
+    assert ordered[0] == discovered_lookup
+
+
 def test_active_endpoint_prioritization_uses_generic_sqli_route_signals():
     search = {
         "method": "POST",

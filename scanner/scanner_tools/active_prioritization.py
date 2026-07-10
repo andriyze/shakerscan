@@ -174,6 +174,7 @@ _SQLI_ROUTE_TOKENS = (
 _XSS_ROUTE_TOKENS = (
     "search", "comment", "review", "feedback", "message", "profile", "post",
     "note", "reply", "chat", "greeting", "subject", "title", "description",
+    "track", "lookup", "receipt", "invoice", "status", "verify", "confirm",
 )
 _XSS_REFLECTED_PARAM_TOKENS = (
     "q", "query", "search", "keyword", "term", "name", "title", "comment",
