@@ -722,6 +722,41 @@ async def _backfill_target_endpoint_fingerprints(conn) -> None:
     )
 
 
+async def _migrate_target_principal_slots(conn) -> None:
+    """Make the two executable principal slots unambiguous."""
+    await conn.execute("""
+        UPDATE target_principals
+        SET is_active = false,
+            metadata_json = metadata_json || '{"deactivated_by":"principal_slot_v1"}'::jsonb,
+            updated_at = NOW()
+        WHERE is_active = true
+          AND auth_state NOT IN ('user1', 'user2')
+    """)
+    await conn.execute("""
+        WITH ranked AS (
+            SELECT id,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY target_id, auth_state
+                       ORDER BY updated_at DESC, id DESC
+                   ) AS slot_rank
+            FROM target_principals
+            WHERE is_active = true
+              AND auth_state IN ('user1', 'user2')
+        )
+        UPDATE target_principals p
+        SET is_active = false,
+            metadata_json = metadata_json || '{"deactivated_by":"principal_slot_v1_duplicate"}'::jsonb,
+            updated_at = NOW()
+        FROM ranked r
+        WHERE p.id = r.id AND r.slot_rank > 1
+    """)
+    await conn.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_target_principals_active_auth_slot
+        ON target_principals(target_id, auth_state)
+        WHERE is_active = true AND auth_state IN ('user1', 'user2')
+    """)
+
+
 async def run_schema_migrations(pool) -> None:
     """Run all retest-related schema migrations with advisory lock to avoid races.
 
@@ -993,6 +1028,10 @@ async def run_schema_migrations(pool) -> None:
                 CREATE INDEX IF NOT EXISTS idx_target_principals_target_active
                 ON target_principals(target_id, is_active, role)
             """)
+            # Scanner execution has exactly two authenticated identity slots.
+            # Retain legacy rows for audit, but deactivate unsupported slots and
+            # duplicate active assignments before enforcing one principal per slot.
+            await _migrate_target_principal_slots(conn)
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS target_endpoint_expectations (
                     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

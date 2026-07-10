@@ -13205,12 +13205,24 @@ def _normalize_target_principal_role(value: Any) -> str:
 
 
 def _normalize_target_auth_state(value: Any) -> str:
-    state = re.sub(r"[^a-zA-Z0-9_.-]+", "_", str(value or "user1").strip()).strip("_")
-    if not state:
-        state = "user1"
-    if state == "anonymous":
-        raise HTTPException(status_code=400, detail="principal auth_state must represent an authenticated identity")
-    return state[:80]
+    state = str(value or "user1").strip().lower()
+    if state not in {"user1", "user2"}:
+        raise HTTPException(
+            status_code=400,
+            detail="principal auth_state must be user1 or user2; use role for application roles",
+        )
+    return state
+
+
+def _principal_slot_conflict() -> HTTPException:
+    return HTTPException(
+        status_code=409,
+        detail={
+            "error": "principal_auth_state_conflict",
+            "message": "This target already has an active principal assigned to that auth_state",
+            "blocked_by": ["principal_auth_state_already_assigned"],
+        },
+    )
 
 
 def _normalize_target_endpoint_method(value: Any) -> str:
@@ -13624,30 +13636,33 @@ async def create_target_principal(target_id: str, request: TargetPrincipalCreate
     async with db_pool.acquire() as conn:
         if not await conn.fetchrow("SELECT 1 FROM targets WHERE id = $1", target_uuid):
             raise HTTPException(status_code=404, detail="Target not found")
-        row = await conn.fetchrow(
-            """
-            INSERT INTO target_principals (
-                target_id, label, role, tenant_id, auth_state, credential_profile,
-                is_active, metadata_json
-            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb)
-            ON CONFLICT (target_id, lower(label), COALESCE(tenant_id, ''), COALESCE(auth_state, ''))
-            DO UPDATE SET
-                role = EXCLUDED.role,
-                credential_profile = EXCLUDED.credential_profile,
-                is_active = EXCLUDED.is_active,
-                metadata_json = target_principals.metadata_json || EXCLUDED.metadata_json,
-                updated_at = NOW()
-            RETURNING *
-            """,
-            target_uuid,
-            label,
-            role,
-            request.tenant_id,
-            auth_state,
-            str(request.credential_profile or "").strip() or None,
-            bool(request.is_active),
-            json.dumps(metadata),
-        )
+        try:
+            row = await conn.fetchrow(
+                """
+                INSERT INTO target_principals (
+                    target_id, label, role, tenant_id, auth_state, credential_profile,
+                    is_active, metadata_json
+                ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb)
+                ON CONFLICT (target_id, lower(label), COALESCE(tenant_id, ''), COALESCE(auth_state, ''))
+                DO UPDATE SET
+                    role = EXCLUDED.role,
+                    credential_profile = EXCLUDED.credential_profile,
+                    is_active = EXCLUDED.is_active,
+                    metadata_json = target_principals.metadata_json || EXCLUDED.metadata_json,
+                    updated_at = NOW()
+                RETURNING *
+                """,
+                target_uuid,
+                label,
+                role,
+                request.tenant_id,
+                auth_state,
+                str(request.credential_profile or "").strip() or None,
+                bool(request.is_active),
+                json.dumps(metadata),
+            )
+        except asyncpg.UniqueViolationError as exc:
+            raise _principal_slot_conflict() from exc
         row = await conn.fetchrow(
             """
             SELECT p.*, EXISTS (
@@ -13700,15 +13715,18 @@ async def update_target_principal(target_id: str, principal_id: str, request: Ta
         raise HTTPException(status_code=400, detail="No updates provided")
     values.extend([principal_uuid, target_uuid])
     async with db_pool.acquire() as conn:
-        row = await conn.fetchrow(
-            f"""
-            UPDATE target_principals
-            SET {', '.join(updates)}, updated_at = NOW()
-            WHERE id = ${len(values) - 1} AND target_id = ${len(values)}
-            RETURNING *
-            """,
-            *values,
-        )
+        try:
+            row = await conn.fetchrow(
+                f"""
+                UPDATE target_principals
+                SET {', '.join(updates)}, updated_at = NOW()
+                WHERE id = ${len(values) - 1} AND target_id = ${len(values)}
+                RETURNING *
+                """,
+                *values,
+            )
+        except asyncpg.UniqueViolationError as exc:
+            raise _principal_slot_conflict() from exc
         if not row:
             raise HTTPException(status_code=404, detail="Target principal not found")
         row = await conn.fetchrow(
@@ -17658,7 +17676,13 @@ def _principal_matrix_context_for_graph_hypothesis(
         payload = _public_target_endpoint_expectation_row(row)
         expected_path = str(payload.get("path") or "").strip()
         expected_method = str(payload.get("method") or "").strip().upper()
-        matches_route = bool(route_value and expected_path == route_value)
+        matches_route = bool(
+            route_value
+            and (
+                expected_path == route_value
+                or _authz_template_replay_path(expected_path) == _authz_template_replay_path(route_value)
+            )
+        )
         matches_method = not method_value or not expected_method or expected_method == method_value
         expectations.append({
             "method": payload.get("method"),
@@ -19039,6 +19063,8 @@ def _authz_replay_plan_from_hypothesis_action(
     metadata = hypothesis.get("metadata_json") if isinstance(hypothesis.get("metadata_json"), dict) else {}
     dims = metadata.get("dedupe_dimensions") if isinstance(metadata.get("dedupe_dimensions"), dict) else {}
     first_expectation = expectations[0] if expectations else {}
+    route_candidate = str(dims.get("route") or "").strip()
+    concrete_path = route_candidate if route_candidate and not _authz_replay_path_is_template(route_candidate) else None
     preconditions = matrix.get("precondition_signals") if isinstance(matrix.get("precondition_signals"), dict) else {}
     missing_preconditions = [
         name for name, state in preconditions.items()
@@ -19054,6 +19080,7 @@ def _authz_replay_plan_from_hypothesis_action(
             "tenant_id": item.get("tenant_id"),
             "expected_access": item.get("expected_access"),
             "expected_http_status": item.get("expected_http_status"),
+            "concrete_path": concrete_path,
         }
         for item in expectations
     ]
@@ -19063,6 +19090,7 @@ def _authz_replay_plan_from_hypothesis_action(
         "proof_state": "planned_not_executed",
         "method": first_expectation.get("method") or dims.get("method"),
         "path": first_expectation.get("path") or dims.get("route"),
+        "concrete_path": concrete_path,
         "object_key": dims.get("object_key"),
         "principal_pair": {
             "primary": {
@@ -19277,6 +19305,33 @@ def _authz_template_replay_path(path: Any) -> str:
     return templated or "/"
 
 
+def _authz_replay_path_is_template(path: Any) -> bool:
+    raw = urllib.parse.unquote(str(path or "").strip())
+    if not raw:
+        return False
+    return bool(
+        re.search(r"\{[^{}\/]+\}", raw)
+        or re.search(r"(?:^|/):[A-Za-z_][A-Za-z0-9_]*(?:/|$)", raw)
+        or re.search(r"(?:^|/)\*(?:/|$)", raw)
+    )
+
+
+def _authz_concrete_replay_path(expected: dict[str, Any], replay_plan: dict[str, Any]) -> str:
+    """Resolve a concrete replay destination without inventing object identifiers."""
+    for candidate in (
+        expected.get("concrete_path"),
+        expected.get("concrete_url"),
+        replay_plan.get("concrete_path"),
+        replay_plan.get("concrete_url"),
+        expected.get("path"),
+        replay_plan.get("path"),
+    ):
+        value = str(candidate or "").strip()
+        if value and not _authz_replay_path_is_template(value):
+            return value
+    return ""
+
+
 async def _execute_authz_replay_plan(
     conn,
     *,
@@ -19298,9 +19353,16 @@ async def _execute_authz_replay_plan(
     replay_plan = result_json.get("authz_replay_plan") if isinstance(result_json.get("authz_replay_plan"), dict) else {}
     if replay_plan.get("mode") != "deterministic_authz_replay":
         raise HTTPException(status_code=400, detail="Campaign action does not contain an authz replay plan")
-    expected_access = [item for item in (replay_plan.get("expected_access") or []) if isinstance(item, dict)]
+    expected_access = [dict(item) for item in (replay_plan.get("expected_access") or []) if isinstance(item, dict)]
     if not expected_access:
         raise HTTPException(status_code=400, detail="Authz replay plan has no expected access rows")
+    for item in expected_access:
+        item["_execution_path"] = _authz_concrete_replay_path(item, replay_plan)
+    unresolved_templates = [
+        str(item.get("path") or replay_plan.get("path") or "").strip()
+        for item in expected_access
+        if not item.get("_execution_path")
+    ]
     target_uuid = _optional_uuid(action.get("target_id"))
     if approval_receipt_id:
         if not target_uuid:
@@ -19336,11 +19398,11 @@ async def _execute_authz_replay_plan(
         if str(item.get("principal_auth_state") or item.get("principal_label") or "").strip()
     }
     missing_principals = sorted(expected_principals - authenticated_users)
-    if len(expected_principals) < 2 or missing_principals:
+    if len(expected_principals) < 2 or missing_principals or unresolved_templates:
         observations = [
             {
                 "method": str(item.get("method") or replay_plan.get("method") or "GET").strip().upper(),
-                "path": str(item.get("path") or replay_plan.get("path") or "").strip(),
+                "path": str(item.get("_execution_path") or item.get("path") or replay_plan.get("path") or "").strip(),
                 "principal_label": item.get("principal_label"),
                 "principal_auth_state": str(item.get("principal_auth_state") or item.get("principal_label") or "").strip() or None,
                 "expected_access": item.get("expected_access"),
@@ -19349,14 +19411,20 @@ async def _execute_authz_replay_plan(
                 "matched": False,
                 "request_success": False,
                 "authenticated_user": False,
-                "inconclusive_reason": "missing_authenticated_principal" if missing_principals else "requires_two_authenticated_principals",
+                "inconclusive_reason": (
+                    "unresolved_route_template"
+                    if unresolved_templates
+                    else "missing_authenticated_principal"
+                    if missing_principals
+                    else "requires_two_authenticated_principals"
+                ),
             }
             for item in expected_access[:10]
         ]
         proof_bundle = _authz_replay_proof_bundle(replay_plan, observations)
         tool_receipt_result = await _record_tool_receipt(conn, ToolReceiptRequest(
             tool_name="authz.replay_plan",
-            adapter_version="2026-07-07.v1",
+            adapter_version="2026-07-09.v2",
             redacted_argv=["authz.replay_plan", str(action_uuid), "session:<redacted>"],
             target_scope={
                 "campaign_action_id": str(action_uuid),
@@ -19371,6 +19439,7 @@ async def _execute_authz_replay_plan(
                 "mismatch_count": len(observations),
                 "violation_count": 0,
                 "missing_authenticated_principals": missing_principals,
+                "unresolved_route_templates": sorted(set(unresolved_templates)),
                 "authenticated_principal_count": len(authenticated_users),
                 "required_principal_count": len(expected_principals),
                 "proof_bundle": proof_bundle,
@@ -19389,7 +19458,11 @@ async def _execute_authz_replay_plan(
                 "evidence_instance_ids": [],
                 "mismatch_count": len(observations),
                 "violation_count": 0,
-                "proof_state": "inconclusive_missing_authenticated_principals",
+                "proof_state": (
+                    "inconclusive_unresolved_route_template"
+                    if unresolved_templates
+                    else "inconclusive_missing_authenticated_principals"
+                ),
                 "finding_created": False,
             }
         }
@@ -19413,9 +19486,14 @@ async def _execute_authz_replay_plan(
             risk_tier="credential",
             dry_run=False,
             approval_receipt_id=approval_receipt_id,
+            blocked_by=["unresolved_route_template"] if unresolved_templates else [],
             tool_receipt_ids=[str(tool_receipt.get("id"))] if tool_receipt.get("id") else [],
             result_json=replay_result,
-            operator_message="Authz replay was inconclusive because required authenticated principals were missing.",
+            operator_message=(
+                "Authz replay was not executed because the route template has no concrete object path."
+                if unresolved_templates
+                else "Authz replay was inconclusive because required authenticated principals were missing."
+            ),
             next_action=f"/settings/arsenal?tab=campaign-actions",
             created_by=created_by,
         )
@@ -19430,6 +19508,7 @@ async def _execute_authz_replay_plan(
             "operation_id": command_result["id"],
             "mismatch_count": len(observations),
             "violation_count": 0,
+            "status": "partial",
             "execution_enabled": True,
             "findings_created": 0,
         }
@@ -19438,7 +19517,7 @@ async def _execute_authz_replay_plan(
     mismatches: list[dict[str, Any]] = []
     violations: list[dict[str, Any]] = []
     for expected in expected_access[:10]:
-        endpoint = str(expected.get("path") or replay_plan.get("path") or "").strip()
+        endpoint = str(expected.get("_execution_path") or "").strip()
         method = str(expected.get("method") or replay_plan.get("method") or "GET").strip().upper()
         as_user = str(expected.get("principal_auth_state") or expected.get("principal_label") or "").strip() or None
         if not endpoint:
@@ -19501,7 +19580,7 @@ async def _execute_authz_replay_plan(
     proof_bundle = _authz_replay_proof_bundle(replay_plan, observations)
     tool_receipt_result = await _record_tool_receipt(conn, ToolReceiptRequest(
         tool_name="authz.replay_plan",
-        adapter_version="2026-07-07.v1",
+        adapter_version="2026-07-09.v2",
         redacted_argv=["authz.replay_plan", str(action_uuid), "session:<redacted>"],
         target_scope={
             "campaign_action_id": str(action_uuid),

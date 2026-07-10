@@ -2496,6 +2496,7 @@ def test_execute_authz_replay_plan_records_observations_without_findings(monkeyp
         "proof_state": "planned_not_executed",
         "method": "GET",
         "path": "/api/orders/{id}",
+        "concrete_path": "/api/orders/42",
         "principal_pair": {
             "primary": {"label": "user1", "auth_state": "user1"},
             "alternate": {"label": "user2", "auth_state": "user2"},
@@ -2527,7 +2528,7 @@ def test_execute_authz_replay_plan_records_observations_without_findings(monkeyp
         })
 
         async def test_endpoint(self, *, endpoint, method, as_user, body, allow_out_of_scope):
-            assert endpoint == "/api/orders/{id}"
+            assert endpoint == "/api/orders/42"
             assert method == "GET"
             assert body is None
             assert allow_out_of_scope is False
@@ -2739,12 +2740,103 @@ def test_execute_authz_replay_plan_records_observations_without_findings(monkeyp
     assert proof_bundle["finding_created_automatically"] is False
 
 
+def test_execute_authz_replay_plan_skips_unresolved_route_templates(monkeypatch):
+    action_id = uuid.uuid4()
+    replay_plan = {
+        "mode": "deterministic_authz_replay",
+        "method": "GET",
+        "path": "/api/orders/{id}",
+        "expected_access": [
+            {"path": "/api/orders/{id}", "principal_auth_state": "user1", "expected_access": "allow"},
+            {"path": "/api/orders/{id}", "principal_auth_state": "user2", "expected_access": "deny"},
+        ],
+    }
+    calls = {"test_endpoint": 0}
+
+    class FakeSession:
+        state = types.SimpleNamespace(users={
+            "user1": types.SimpleNamespace(is_authenticated=True),
+            "user2": types.SimpleNamespace(is_authenticated=True),
+        })
+
+        async def test_endpoint(self, **kwargs):
+            calls["test_endpoint"] += 1
+            raise AssertionError("template path must not reach the HTTP client")
+
+    class FakeManager:
+        async def get_session(self, session_id):
+            return FakeSession()
+
+    class FakeInteractiveSessionManager:
+        @staticmethod
+        async def get_instance():
+            return FakeManager()
+
+    action_row = {
+        "id": action_id,
+        "target_id": None,
+        "campaign_id": None,
+        "operation_plan_id": None,
+        "command_result_id": None,
+        "scope_receipt_id": None,
+        "approval_receipt_id": None,
+        "scan_id": None,
+        "command": "authz.replay_plan",
+        "action_name": "authz.replay_plan",
+        "status": "planned",
+        "dry_run": True,
+        "risk_tier": "credential",
+        "finding_ids": [],
+        "hypothesis_ids": [],
+        "evidence_object_ids": [],
+        "tool_receipt_ids": [],
+        "blocked_by": [],
+        "result_json": {"authz_replay_plan": replay_plan},
+    }
+
+    class FakeConn:
+        async def fetchrow(self, query, *args):
+            if "SELECT * FROM campaign_actions" in str(query):
+                return action_row
+            if "UPDATE campaign_actions" in str(query):
+                return {**action_row, "status": "partial", "dry_run": False, "result_json": args[0]}
+            raise AssertionError(str(query))
+
+    async def fake_record_tool_receipt(conn, request):
+        calls["tool_receipt"] = request
+        return {"tool_receipt": {"id": str(uuid.uuid4()), "status": request.status}}
+
+    async def fake_record_command_result(conn, **kwargs):
+        calls["command_result"] = kwargs
+        return {"id": str(uuid.uuid4()), **kwargs}
+
+    monkeypatch.setattr(api_module, "InteractiveSessionManager", FakeInteractiveSessionManager)
+    monkeypatch.setattr(api_module, "_record_tool_receipt", fake_record_tool_receipt)
+    monkeypatch.setattr(api_module, "_record_command_result", fake_record_command_result)
+
+    result = asyncio.run(api_module._execute_authz_replay_plan(
+        FakeConn(),
+        campaign_action_id=str(action_id),
+        session_id="session-1",
+        created_by="pytest",
+    ))
+
+    assert calls["test_endpoint"] == 0
+    assert calls["tool_receipt"].status == "skipped"
+    assert calls["command_result"]["status"] == "partial"
+    assert calls["command_result"]["blocked_by"] == ["unresolved_route_template"]
+    assert result["status"] == "partial"
+    assert result["observations"][0]["inconclusive_reason"] == "unresolved_route_template"
+    assert result["violation_count"] == 0
+
+
 def test_execute_authz_replay_plan_treats_soft_200_denial_as_non_violation(monkeypatch):
     action_id = uuid.uuid4()
     replay_plan = {
         "mode": "deterministic_authz_replay",
         "method": "GET",
         "path": "/api/orders/{id}",
+        "concrete_path": "/api/orders/42",
         "expected_access": [
             {"method": "GET", "path": "/api/orders/{id}", "principal_label": "user1", "principal_auth_state": "user1", "expected_access": "allow"},
             {"method": "GET", "path": "/api/orders/{id}", "principal_label": "user2", "principal_auth_state": "user2", "expected_access": "deny"},
@@ -2857,6 +2949,7 @@ def test_execute_authz_replay_plan_treats_redirect_denial_as_non_violation(monke
         "mode": "deterministic_authz_replay",
         "method": "GET",
         "path": "/api/orders/{id}",
+        "concrete_path": "/api/orders/42",
         "principal_pair": {
             "primary": {"label": "user1", "auth_state": "user1"},
             "alternate": {"label": "user2", "auth_state": "user2"},
@@ -2967,6 +3060,7 @@ def test_execute_authz_replay_plan_requires_authenticated_principals(monkeypatch
         "mode": "deterministic_authz_replay",
         "method": "GET",
         "path": "/api/orders/{id}",
+        "concrete_path": "/api/orders/42",
         "expected_access": [
             {"path": "/api/orders/{id}", "principal_label": "user1", "principal_auth_state": "user1", "expected_access": "allow"},
             {"path": "/api/orders/{id}", "principal_label": "user2", "principal_auth_state": "user2", "expected_access": "deny"},
@@ -3507,6 +3601,17 @@ def test_authz_template_replay_path_collapses_volatile_ids():
     assert api_module._authz_template_replay_path("/users/550e8400-e29b-41d4-a716-446655440000") == "/users/{uuid}"
     assert api_module._authz_template_replay_path("/blob/0123456789abcdef0123456789abcdef") == "/blob/{hash}"
     assert api_module._authz_template_replay_path("/api/v2/login") == "/api/v2/login"
+
+
+def test_authz_concrete_replay_path_never_invents_template_values():
+    plan = {"path": "/api/orders/{id}"}
+    assert api_module._authz_concrete_replay_path({"path": "/api/orders/{id}"}, plan) == ""
+    assert api_module._authz_concrete_replay_path(
+        {"path": "/api/orders/{id}", "concrete_path": "/api/orders/42"},
+        plan,
+    ) == "/api/orders/42"
+    assert api_module._authz_replay_path_is_template("/api/orders/:orderId") is True
+    assert api_module._authz_replay_path_is_template("/api/orders/42") is False
 
 
 def test_hypothesis_signal_redacts_and_is_non_executing():
@@ -7240,6 +7345,51 @@ def test_source_file_ingest_enforces_ignored_paths_and_size_limits():
     assert hints == []
     assert summary["files_processed"] == 0
     assert [item["reason"] for item in skipped] == ["ignored_path", "file_too_large"]
+
+
+def test_target_principal_auth_state_is_limited_to_executable_identity_slots():
+    assert api_module._normalize_target_auth_state(" USER1 ") == "user1"
+    assert api_module._normalize_target_auth_state("user2") == "user2"
+
+    with pytest.raises(api_module.HTTPException) as exc:
+        api_module._normalize_target_auth_state("admin")
+
+    assert exc.value.status_code == 400
+    assert "use role" in str(exc.value.detail)
+
+
+def test_update_target_principal_returns_409_for_active_slot_collision(monkeypatch):
+    class UniqueViolationError(Exception):
+        pass
+
+    class FakeConn:
+        async def fetchrow(self, query, *args):
+            if "UPDATE target_principals" in str(query):
+                raise UniqueViolationError("idx_target_principals_active_auth_slot")
+            raise AssertionError(str(query))
+
+    class FakePool:
+        def acquire(self):
+            return self
+
+        async def __aenter__(self):
+            return FakeConn()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr(api_module.asyncpg, "UniqueViolationError", UniqueViolationError, raising=False)
+    monkeypatch.setattr(api_module, "db_pool", FakePool())
+
+    with pytest.raises(api_module.HTTPException) as exc:
+        asyncio.run(api_module.update_target_principal(
+            str(uuid.uuid4()),
+            str(uuid.uuid4()),
+            api_module.TargetPrincipalUpdate(auth_state="user2", is_active=True),
+        ))
+
+    assert exc.value.status_code == 409
+    assert exc.value.detail["error"] == "principal_auth_state_conflict"
 
 
 # ----- approval-receipt validation (security-critical gate) --------------------

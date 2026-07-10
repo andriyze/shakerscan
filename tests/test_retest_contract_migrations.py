@@ -127,3 +127,17 @@ def test_backfill_target_endpoint_fingerprints_dedupes_collisions():
         and args == (retest_contract.ASM_ENDPOINT_FINGERPRINT_MIGRATION,)
         for query, args in conn.executed
     )
+
+
+def test_target_principal_slot_migration_deactivates_ambiguous_rows_before_unique_index():
+    conn = _FakeMigrationConn([])
+
+    asyncio.run(retest_contract._migrate_target_principal_slots(conn))
+
+    statements = [query for query, _args in conn.executed]
+    assert len(statements) == 3
+    assert "auth_state NOT IN ('user1', 'user2')" in statements[0]
+    assert "ROW_NUMBER() OVER" in statements[1]
+    assert "ORDER BY updated_at DESC, id DESC" in statements[1]
+    assert "idx_target_principals_active_auth_slot" in statements[2]
+    assert "WHERE is_active = true AND auth_state IN ('user1', 'user2')" in statements[2]
