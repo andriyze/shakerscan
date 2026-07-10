@@ -61,6 +61,11 @@ GATES: dict[str, tuple[str, ...]] = {
         "tests/test_planner_evals.py::test_planner_eval_rejects_scope_broadening_and_shell",
         "tests/test_planner_evals.py::test_shipping_planner_never_violates_safety_invariants_on_any_fixture",
     ),
+    "test:mcp-read-only": (
+        "tests/test_read_only_mcp.py",
+        "tests/test_command_arsenal.py::test_no_raw_shell_or_generic_execution_commands_are_exposed",
+        "tests/test_command_arsenal.py::test_state_changing_commands_are_gated_not_executable_shortcuts",
+    ),
 }
 
 

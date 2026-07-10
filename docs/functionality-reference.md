@@ -679,6 +679,12 @@ requires an authenticated cross-principal differential, treats login/forbidden s
 redirect denials as non-violations, and validates approval receipts against the campaign action's
 actual target before a manual BOLA finding can be created.
 
+**Read-only MCP**: `./scanner.sh mcp` starts a stdio MCP adapter over `POST /arsenal/execute`.
+It exposes targets, ASM gaps, findings, content-free evidence manifests, the mission timeline,
+saved dry-run plans, and tool status. The adapter revalidates the live Arsenal catalog on every
+listing/call and fails closed if a mapped command is no longer `read_only` / `GET` / read-only risk.
+State-changing commands are not exposed. See [`docs/read-only-mcp.md`](read-only-mcp.md).
+
 **Scans (DAST)**: `POST /scans` · `POST /scans/batch` · `GET /scans` · `GET /scans/{id}` ·
 `GET /scans/{id}/result` · `GET /scans/{id}/logs` · `POST /scans/{id}/cancel` ·
 `GET /scans/{id}/deployment-decision` · `GET /scans/{id}/ai-redteam-report`

@@ -158,6 +158,7 @@ From a clone, you can still use prebuilt Docker Hub images:
 ./scanner.sh scan-full https://example.com --confirm-active   # Full assessment with active testing
 ./scanner.sh scan-smart https://example.com --confirm-active  # Adaptive smart scan
 ./scanner.sh status                          # Check status
+./scanner.sh mcp                             # Read-only Command Arsenal MCP over stdio
 ./scanner.sh logs worker -f                  # Follow worker logs
 ./scanner.sh stop                            # Stop all services
 ```

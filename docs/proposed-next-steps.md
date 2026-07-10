@@ -1587,11 +1587,11 @@ bounded context pack, fail the unsafe fixtures, and route every proposed state-c
 the same Command Arsenal, `ActionScopeGuard`, approval receipts, and existing API handlers.
 
 ### 12. Source-informed DAST, MCP, and new-tool boundaries
-**Status: SOURCE-HINT HYPOTHESIS INGEST PHASE 1 DONE; MCP / NEW TOOLS LATER.** T3MP3ST's
+**Status: SOURCE-HINT INGEST + READ-ONLY MCP PHASE 1 DONE; NEW TOOLS LATER.** T3MP3ST's
 source-ingest and MCP ideas are useful only after the mission, command, scope, hypothesis, evidence,
 and receipt layers exist. Bounded source/spec/package hints now enrich hypotheses through
 `/arsenal/hypotheses/source-ingest` without creating findings, queueing scans, or satisfying runtime
-proof. MCP should be a thin adapter over the REST Command Arsenal. New external tools should remain
+proof. `scripts/shakerscan_mcp.py` is now a thin stdio adapter over the REST Command Arsenal. New external tools should remain
 `catalog_only` until narrow adapters, receipts, parsers, proof contracts, and safety gates are real.
 
 **Implement later:**
@@ -1606,21 +1606,24 @@ proof. MCP should be a thin adapter over the REST Command Arsenal. New external 
    file path parameter, template sink, and risky AI tool endpoint. They are not verified findings.
 3. Add limits for repository file count, file size, ignored paths, timeout, secret redaction, and
    retention before any source-informed planner can run.
-4. Add MCP only after REST Command Arsenal is stable. MCP must expose no command REST does not expose
-   and must not bypass `ActionScopeGuard`, policy profiles, approval receipts, feature flags, or
-   deployment gates.
-5. State-changing MCP commands remain disabled until planner evals, scope receipts, approvals, and
-   command audit trails are reliable. Read-only MCP can start with targets, ASM gaps, findings,
-   evidence manifests, campaign timeline, plan preview, and tool status.
+4. DONE phase 1: read-only MCP was added only after REST Command Arsenal stabilized. The adapter
+   exposes a fixed mapping to existing REST commands, revalidates the live catalog before listings
+   and calls, and dispatches through `/arsenal/execute`; it cannot bypass `ActionScopeGuard`, policy
+   profiles, approval receipts, feature flags, or deployment gates.
+5. DONE phase 1: state-changing MCP commands remain unrepresentable. Read-only MCP exposes targets,
+   ASM gaps, findings, content-free evidence manifests, campaign timeline, saved dry-run plans, and
+   tool status. Calls preserve Command Arsenal audit rows without exposing scan/retest/replay/policy
+   mutation commands.
 6. Keep future offensive tools in a catalog-only appendix until existing tools produce receipts and
    parser/proof contracts. Tool count is not a product metric.
 7. Source-derived secrets must be redacted under the same evidence-retention policy as runtime
    evidence. Source-derived routes may improve the application graph and hypothesis queue, but source
    text alone must never satisfy a runtime proof contract.
-8. Read-only MCP, when added, should start with targets, ASM gaps, findings, evidence manifests,
-   campaign timeline, plan preview, and tool status. State-changing MCP remains disabled until it
-   requires scope receipt, dry-run preview, approval token or UI confirmation, and durable audit
-   records.
+8. DONE phase 1: `./scanner.sh mcp` starts a bounded stdio server with request/response caps,
+   no-redirect REST calls, loopback-only API origins by default, exact input schemas, and live
+   status/risk/method drift checks. State-changing MCP remains disabled by design; any future phase
+   must require scope receipt, dry-run preview, approval token or UI confirmation, and durable audit
+   records through the same Arsenal route.
 9. Source-derived secrets, credentials, private keys, and tokens must be redacted under the same
    evidence-retention policy used for runtime artifacts, and source-derived route facts must never
    satisfy runtime proof contracts.

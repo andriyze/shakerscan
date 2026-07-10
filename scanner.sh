@@ -1310,6 +1310,7 @@ print_help() {
     echo "  doctor             Check local prerequisites and common startup issues"
     echo "  env                Show PATH, launcher, and runtime guidance"
     echo "  agent [name]       Start Codex, Claude, or OpenCode in this runtime dir"
+    echo "  mcp                Start the read-only Command Arsenal MCP stdio adapter"
     echo "  gungnir <cmd>      CT monitor: start, stop, status, logs"
     echo "  build              Build Docker images"
     echo "  rebuild [opts]     Rebuild Docker images (cached by default)"
@@ -2120,7 +2121,7 @@ configure_runtime_mode "$COMMAND"
 
 # Dependency preflight for command execution
 case $COMMAND in
-    help|--help|-h|install-deps|doctor|env|agent|ai)
+    help|--help|-h|install-deps|doctor|env|agent|ai|mcp)
         ;;
     *)
         if ! ensure_command_dependencies "$COMMAND" "${ARGS[0]}"; then
@@ -2172,6 +2173,9 @@ case $COMMAND in
         ;;
     agent|ai)
         start_agent "${ARGS[0]}"
+        ;;
+    mcp)
+        exec python3 "$SCRIPT_DIR/scripts/shakerscan_mcp.py"
         ;;
     gungnir)
         gungnir_cmd "${ARGS[0]}"
