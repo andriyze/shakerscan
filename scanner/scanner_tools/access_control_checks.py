@@ -420,8 +420,8 @@ _PROMETHEUS_RUNTIME_METRIC_PREFIXES = (
 )
 
 
-def _prometheus_sensitive_metric_proof(body: str, content_type: str) -> dict[str, Any] | None:
-    """Prove unauthenticated exposure of multiple sensitive metric classes."""
+def _prometheus_sensitive_metric_signal(body: str, content_type: str) -> dict[str, Any] | None:
+    """Identify business-sensitive metric names without claiming value disclosure."""
     sample = str(body or "")[:262144]
     ct_lower = str(content_type or "").lower()
     if not sample or (
@@ -454,8 +454,8 @@ def _prometheus_sensitive_metric_proof(body: str, content_type: str) -> dict[str
     if len(matched_by_category) < 2 or len(matched_names) < 3:
         return None
     return {
-        "proof_type": "sensitive_content_exposure",
-        "proof_state": "verified",
+        "signal_type": "sensitive_metric_names_exposed",
+        "proof_state": "observed",
         "sensitive_metric_categories": sorted(matched_by_category),
         "sensitive_metric_names": matched_names[:20],
         "sensitive_metric_count": len(matched_names),
@@ -812,7 +812,7 @@ async def test_single_path(
                         finding["content_validation_failed"] = True
                         finding["validation_reason"] = validation_reason
                     elif category == "debug_dev":
-                        sensitive_metrics = _prometheus_sensitive_metric_proof(body, content_type)
+                        sensitive_metrics = _prometheus_sensitive_metric_signal(body, content_type)
                         if sensitive_metrics:
                             finding.update(sensitive_metrics)
 
@@ -1042,6 +1042,7 @@ def format_findings_for_scanner(
                 ),
                 "proof_type": fb_finding.get("proof_type"),
                 "proof_state": fb_finding.get("proof_state"),
+                "signal_type": fb_finding.get("signal_type"),
                 "sensitive_metric_categories": fb_finding.get("sensitive_metric_categories"),
                 "sensitive_metric_names": fb_finding.get("sensitive_metric_names"),
                 "sensitive_metric_count": fb_finding.get("sensitive_metric_count"),

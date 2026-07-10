@@ -1068,10 +1068,12 @@ while query names/defaults are merged into the contract and the strongest query-
 survives later queryless or weaker-source rows.
 DONE phase 37 for proof-preserving post-retest scorecards: structured browser/PoE contracts survive
 finding persistence, and live retest verdicts overlay the original scan finding instead of replacing
-immutable scan-time evidence. DONE phase 38 for deterministic sensitive-metrics exposure proof:
+immutable scan-time evidence. CORRECTED phase 38 for bounded sensitive-metrics exposure signals:
 unauthenticated Prometheus responses qualify only when bounded parsing finds at least three
 application-defined sensitive metric names spanning two independent identity, commerce, or security
 classes; standard runtime/exporter prefixes are excluded and generic metrics remain unverified.
+Metric names alone are an observed lead, not deterministic value-disclosure or exploited proof, and
+therefore retain the human-verification gate.
 DONE phase 39 for non-polling benchmark submission: `scripts/benchmark_targets.py --submit-only`
 queues exactly one fingerprint-current benchmark and exits with a content-free receipt, while
 requested two-user runs fail before submission unless both principals are minted successfully and

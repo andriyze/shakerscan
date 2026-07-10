@@ -26,7 +26,6 @@ _DETERMINISTIC_PROOF_TYPES = {
     "data_extraction",
     "oob_callback",
     "differential_response",
-    "sensitive_content_exposure",
 }
 
 _BROWSER_EXECUTION_MARKERS = (

@@ -407,7 +407,7 @@ def test_precision_policy_does_not_auto_verify_forced_browsing_response_shape():
     assert adjusted[0].get("validation", {}).get("evidence_level") != "confirmed_exploit"
 
 
-def test_precision_policy_accepts_typed_sensitive_metrics_exposure_proof():
+def test_precision_policy_does_not_treat_metric_names_as_exploitation_proof():
     findings = [
         {
             "tool": "forced_browsing",
@@ -417,7 +417,8 @@ def test_precision_policy_accepts_typed_sensitive_metrics_exposure_proof():
             "evidence": {
                 "url": "https://example.test/observability",
                 "status_code": 200,
-                "proof_type": "sensitive_content_exposure",
+                "signal_type": "sensitive_metric_names_exposed",
+                "proof_state": "observed",
                 "sensitive_metric_categories": ["commerce", "identity"],
                 "sensitive_metric_names": [
                     "service_users_registered",
@@ -430,9 +431,10 @@ def test_precision_policy_accepts_typed_sensitive_metrics_exposure_proof():
 
     adjusted = apply_dast_precision_policy(findings)
 
-    assert adjusted[0]["verified"] is True
-    assert adjusted[0]["severity"] == "high"
-    assert adjusted[0]["needs_verification"] is False
+    assert adjusted[0]["verified"] is False
+    assert adjusted[0]["severity"] == "medium"
+    assert adjusted[0]["needs_verification"] is True
+    assert adjusted[0]["proof_state"] != "exploited"
 
 
 def test_precision_policy_does_not_cap_verified_vendor_dom_xss():

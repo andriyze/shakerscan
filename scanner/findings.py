@@ -537,6 +537,19 @@ def apply_dast_precision_policy(
                 finding["verification_reason"] = "postMessage static handler lead lacks exploitability proof"
                 _cap_confidence_for_precision(finding, 0.49, "missing_postmessage_exploitability_proof")
 
+        elif tool == "forced_browsing" and evidence.get("signal_type") == "sensitive_metric_names_exposed":
+            finding["suspected"] = True
+            finding["needs_verification"] = True
+            finding["proof_state"] = "observed"
+            finding["verification_reason"] = (
+                "Business-sensitive metric names are exposed, but no sensitive value disclosure was proven"
+            )
+            _cap_confidence_for_precision(
+                finding,
+                0.64,
+                "metric_names_without_sensitive_value_proof",
+            )
+
         elif tool == "cache_poisoning":
             cacheable = bool(_evidence_value(finding, "cacheable"))
             details = _evidence_value(finding, "details") or []

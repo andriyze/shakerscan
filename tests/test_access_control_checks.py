@@ -70,7 +70,7 @@ process_cpu_user_seconds_total 1
 http_auth_requests_total 2
 http_requests_total{status=\"200\"} 10
 """
-    assert access_control_checks._prometheus_sensitive_metric_proof(generic, "text/plain") is None
+    assert access_control_checks._prometheus_sensitive_metric_signal(generic, "text/plain") is None
 
     sensitive = """# HELP service_users_registered Registered users
 # TYPE service_users_registered gauge
@@ -79,13 +79,13 @@ service_orders_placed_total 8
 service_wallet_balance_total 500
 service_auth_challenges_total 3
 """
-    proof = access_control_checks._prometheus_sensitive_metric_proof(sensitive, "text/plain; version=0.0.4")
+    signal = access_control_checks._prometheus_sensitive_metric_signal(sensitive, "text/plain; version=0.0.4")
 
-    assert proof is not None
-    assert proof["proof_type"] == "sensitive_content_exposure"
-    assert proof["proof_state"] == "verified"
-    assert proof["sensitive_metric_categories"] == ["commerce", "identity", "security"]
-    assert "service_wallet_balance_total" in proof["sensitive_metric_names"]
+    assert signal is not None
+    assert signal["signal_type"] == "sensitive_metric_names_exposed"
+    assert signal["proof_state"] == "observed"
+    assert signal["sensitive_metric_categories"] == ["commerce", "identity", "security"]
+    assert "service_wallet_balance_total" in signal["sensitive_metric_names"]
 
     formatted = access_control_checks.format_findings_for_scanner({
         "findings": [{
@@ -95,11 +95,12 @@ service_auth_challenges_total 3
             "category": "debug_dev",
             "severity": "high",
             "accessible": True,
-            **proof,
+            **signal,
         }],
     }, "https://app.test")
-    assert formatted[0]["evidence"]["proof_type"] == "sensitive_content_exposure"
-    assert formatted[0]["evidence"]["sensitive_metric_count"] == proof["sensitive_metric_count"]
+    assert formatted[0]["evidence"]["proof_type"] is None
+    assert formatted[0]["evidence"]["signal_type"] == "sensitive_metric_names_exposed"
+    assert formatted[0]["evidence"]["sensitive_metric_count"] == signal["sensitive_metric_count"]
 
 
 
