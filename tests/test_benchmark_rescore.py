@@ -146,6 +146,52 @@ def test_fleet_gate_allows_uniform_fleet(monkeypatch):
     assert summary["stale"] == 0
 
 
+def test_submit_target_requires_current_workers_and_returns_content_free_receipt(monkeypatch):
+    tokens = iter(["user1-secret", "user2-secret"])
+    captured = {}
+
+    monkeypatch.setattr(b, "mint_token", lambda *args, **kwargs: next(tokens))
+
+    def fake_post(url, body, timeout=30):
+        captured["url"] = url
+        captured["body"] = body
+        return {"scan_id": "scan-1", "job_id": "job-1", "status": "queued"}
+
+    monkeypatch.setattr(b, "_post", fake_post)
+
+    receipt = b.submit_target("crapi", "http://scanner.test", True)
+
+    options = captured["body"]["options"]
+    assert captured["url"] == "http://scanner.test/scans"
+    assert options["require_current_workers"] is True
+    assert options["auth_header"] == "Bearer user1-secret"
+    assert options["user2_header"] == "Bearer user2-secret"
+    assert receipt == {
+        "target": "crapi",
+        "scan_id": "scan-1",
+        "job_id": "job-1",
+        "status": "queued",
+        "two_user": True,
+        "require_current_workers": True,
+    }
+    assert "secret" not in str(receipt)
+
+
+def test_submit_target_aborts_before_queueing_when_second_principal_is_missing(monkeypatch):
+    tokens = iter(["user1-secret", None])
+    monkeypatch.setattr(b, "mint_token", lambda *args, **kwargs: next(tokens))
+    monkeypatch.setattr(b, "_post", lambda *args, **kwargs: (_ for _ in ()).throw(
+        AssertionError("scan must not be queued without both required principals")
+    ))
+
+    try:
+        b.submit_target("crapi", "http://scanner.test", True)
+    except RuntimeError as exc:
+        assert "user2" in str(exc)
+    else:
+        raise AssertionError("missing user2 credentials must fail closed")
+
+
 def test_apply_gates_fails_report_trust_signals():
     card = {
         "verified_high_critical": 10,

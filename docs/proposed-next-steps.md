@@ -1066,6 +1066,15 @@ and response-guided completion ratios are distinct from ordinary probe-parameter
 DONE phase 36 for query-preserving canonical contracts: method/path still deduplicates endpoint rows,
 while query names/defaults are merged into the contract and the strongest query-bearing observed URL
 survives later queryless or weaker-source rows.
+DONE phase 37 for proof-preserving post-retest scorecards: structured browser/PoE contracts survive
+finding persistence, and live retest verdicts overlay the original scan finding instead of replacing
+immutable scan-time evidence. DONE phase 38 for deterministic sensitive-metrics exposure proof:
+unauthenticated Prometheus responses qualify only when bounded parsing finds at least three
+application-defined sensitive metric names spanning two independent identity, commerce, or security
+classes; standard runtime/exporter prefixes are excluded and generic metrics remain unverified.
+DONE phase 39 for non-polling benchmark submission: `scripts/benchmark_targets.py --submit-only`
+queues exactly one fingerprint-current benchmark and exits with a content-free receipt, while
+requested two-user runs fail before submission unless both principals are minted successfully.
 
 **Done when:** recorded two-user benchmark scorecards show the targeted miss becoming a deterministic
 finding, not merely an attempted endpoint.

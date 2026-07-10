@@ -549,26 +549,58 @@ def artifact_metadata(passed: bool) -> dict:
     }
 
 
+def submit_target(name, api, do_auth):
+    """Submit one benchmark scan and return a content-free queue receipt."""
+    fx = yaml.safe_load(open(os.path.join(FIXTURE_DIR, f"{name}.yaml")))
+    opts = dict(fx.get("scan_options") or {})
+    opts["require_current_workers"] = True
+    two_user = False
+    auth_cfg = fx.get("auth") if isinstance(fx.get("auth"), dict) else {}
+    if do_auth and auth_cfg:
+        t1 = mint_token(
+            fx["target_url"],
+            auth_cfg.get("user1_login", {}),
+            "bench.u1@shaker.test",
+            "Bench!Pass1",
+        )
+        if not t1:
+            raise RuntimeError("failed to mint required benchmark user1 credentials")
+        opts["auth_header"] = f"Bearer {t1}"
+        requires_two_users = bool(auth_cfg.get("requires_two_users") or auth_cfg.get("user2_login"))
+        if requires_two_users:
+            t2 = mint_token(
+                fx["target_url"],
+                auth_cfg.get("user2_login", auth_cfg.get("user1_login", {})),
+                "bench.u2@shaker.test",
+                "Bench!Pass2",
+            )
+            if not t2:
+                raise RuntimeError("failed to mint required benchmark user2 credentials")
+            opts["user2_header"] = f"Bearer {t2}"
+            two_user = True
+    resp = _post(f"{api}/scans", {"target": fx["target_url"], "options": opts})
+    scan_id = resp.get("id") or resp.get("scan_id")
+    if not scan_id:
+        raise RuntimeError("benchmark scan submission returned no scan id")
+    return {
+        "target": name,
+        "scan_id": scan_id,
+        "job_id": resp.get("job_id"),
+        "status": resp.get("status"),
+        "two_user": two_user,
+        "require_current_workers": True,
+    }
+
+
 def run_target(name, api, timeout, do_auth, preset_scan_id=None, rescore_after_retest=False, retest_wait=600):
     fx = yaml.safe_load(open(os.path.join(FIXTURE_DIR, f"{name}.yaml")))
     report = None
     scan_id = preset_scan_id
     two_user = False
     if not scan_id:
-        opts = dict(fx.get("scan_options") or {})
-        if do_auth and fx.get("auth"):
-            t1 = mint_token(fx["target_url"], fx["auth"].get("user1_login", {}),
-                            "bench.u1@shaker.test", "Bench!Pass1")
-            if t1:
-                opts["auth_header"] = f"Bearer {t1}"
-            if fx["auth"].get("requires_two_users") or fx["auth"].get("user2_login"):
-                t2 = mint_token(fx["target_url"], fx["auth"].get("user2_login", fx["auth"].get("user1_login", {})),
-                                "bench.u2@shaker.test", "Bench!Pass2")
-                if t2:
-                    opts["user2_header"] = f"Bearer {t2}"
-                    two_user = True
-        resp = _post(f"{api}/scans", {"target": fx["target_url"], "options": opts})
-        scan_id = resp.get("id") or resp.get("scan_id")
+        receipt = submit_target(name, api, do_auth)
+        scan_id = receipt["scan_id"]
+        two_user = receipt["two_user"]
         print(f"[{name}] submitted scan {scan_id} (two_user={two_user})", flush=True)
         deadline = time.time() + timeout
         while time.time() < deadline:
@@ -641,6 +673,8 @@ def main():
     ap.add_argument("--timeout", type=int, default=2400)
     ap.add_argument("--auth", action="store_true", help="mint bearer tokens from fixture auth config")
     ap.add_argument("--scan-id", default=None, help="score an existing scan id instead of submitting")
+    ap.add_argument("--submit-only", action="store_true",
+                    help="submit exactly one benchmark and exit without polling or scoring")
     ap.add_argument("--rescore-after-retest", action="store_true",
                     help="after the scan, wait for the auto-retest wave then re-score from live verdicts (§6)")
     ap.add_argument("--retest-wait", type=int, default=900, help="max seconds to wait for the retest wave to settle")
@@ -670,6 +704,21 @@ def main():
         return 2
     if not uniform:
         print(f"WARN: proceeding on a non-uniform fleet (--allow-stale-fleet): {fleet}", file=sys.stderr)
+
+    if args.submit_only:
+        if args.scan_id or args.rescore_after_retest or args.seed_hypotheses:
+            print("ABORT: --submit-only cannot be combined with scoring or hypothesis options", file=sys.stderr)
+            return 2
+        if len(args.targets) != 1:
+            print("ABORT: --submit-only requires exactly one benchmark target", file=sys.stderr)
+            return 2
+        try:
+            receipt = submit_target(args.targets[0], args.api, args.auth)
+        except Exception as e:
+            print(f"ABORT: {e}", file=sys.stderr)
+            return 2
+        print(json.dumps(receipt, sort_keys=True))
+        return 0
 
     os.makedirs(OUT_DIR, exist_ok=True)
     overall_ok = True
