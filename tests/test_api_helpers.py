@@ -5,6 +5,7 @@ JSON-decode helper that have grown enough surface to be worth pinning.
 """
 
 import asyncio
+import base64
 import io
 import json
 import os
@@ -15,6 +16,11 @@ import zipfile
 from datetime import datetime, timedelta, timezone
 
 import pytest
+
+
+def _test_jwt(**claims):
+    encode = lambda value: base64.urlsafe_b64encode(json.dumps(value).encode()).decode().rstrip("=")
+    return f"{encode({'alg': 'none'})}.{encode(claims)}.signature"
 
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "api"))
@@ -2527,11 +2533,13 @@ def test_execute_authz_replay_plan_records_observations_without_findings(monkeyp
                 is_authenticated=True,
                 credential_profile_id="profile-user1",
                 principal_auth_state="user1",
+                token=_test_jwt(email="user1@example.test"),
             ),
             "user2": types.SimpleNamespace(
                 is_authenticated=True,
                 credential_profile_id="profile-user2",
                 principal_auth_state="user2",
+                token=_test_jwt(email="user2@example.test"),
             ),
         })
 
@@ -2752,6 +2760,7 @@ def test_execute_authz_replay_plan_records_observations_without_findings(monkeyp
     assert proof_bundle["differential_observed"] is True
     assert proof_bundle["authenticated_principal_count"] == 2
     assert proof_bundle["principal_profile_bindings_verified"] is True
+    assert proof_bundle["principal_identity_bindings_verified"] is True
     assert proof_bundle["finding_created_automatically"] is False
 
 
@@ -2781,8 +2790,12 @@ def test_authz_replay_requires_distinct_slotted_session_profiles():
     assert reason == "target_principal_profiles_not_distinct"
 
     distinct_profile_users = {
-        "user1": types.SimpleNamespace(credential_profile_id="profile-a", principal_auth_state="user1"),
-        "user2": types.SimpleNamespace(credential_profile_id="profile-b", principal_auth_state="user2"),
+        "user1": types.SimpleNamespace(
+            credential_profile_id="profile-a", principal_auth_state="user1", token=_test_jwt(email="one@example.test")
+        ),
+        "user2": types.SimpleNamespace(
+            credential_profile_id="profile-b", principal_auth_state="user2", token=_test_jwt(email="two@example.test")
+        ),
     }
     reason, details = api_module._authz_session_profile_binding_status(
         expected,
@@ -2791,6 +2804,72 @@ def test_authz_replay_requires_distinct_slotted_session_profiles():
     )
     assert reason is None
     assert details["mismatched_slots"] == []
+    assert details["identity_verified_slots"] == ["user1", "user2"]
+
+    same_account_users = {
+        "user1": types.SimpleNamespace(
+            credential_profile_id="profile-a", principal_auth_state="user1", token=_test_jwt(email="same@example.test")
+        ),
+        "user2": types.SimpleNamespace(
+            credential_profile_id="profile-b", principal_auth_state="user2", token=_test_jwt(email="same@example.test")
+        ),
+    }
+    reason, details = api_module._authz_session_profile_binding_status(
+        expected,
+        same_account_users,
+        {"user1": "profile-a", "user2": "profile-b"},
+    )
+    assert reason == "session_principals_not_distinct"
+    assert details["identity_collision"] is True
+
+    opaque_users = {
+        "user1": types.SimpleNamespace(
+            credential_profile_id="profile-a", principal_auth_state="user1", token="opaque-one"
+        ),
+        "user2": types.SimpleNamespace(
+            credential_profile_id="profile-b", principal_auth_state="user2", token="opaque-two"
+        ),
+    }
+    reason, details = api_module._authz_session_profile_binding_status(
+        expected,
+        opaque_users,
+        {"user1": "profile-a", "user2": "profile-b"},
+    )
+    assert reason == "session_principal_identity_unverified"
+    assert details["missing_session_identity_slots"] == ["user1", "user2"]
+
+
+def test_authz_replay_proof_bundle_requires_verified_identity_bindings():
+    observations = [
+        {
+            "principal_auth_state": "user1",
+            "expected_access": "allow",
+            "observed_status": 200,
+            "request_success": True,
+            "authenticated_user": True,
+            "principal_profile_verified": True,
+            "principal_identity_verified": False,
+        },
+        {
+            "principal_auth_state": "user2",
+            "expected_access": "deny",
+            "observed_status": 200,
+            "request_success": True,
+            "authenticated_user": True,
+            "principal_profile_verified": True,
+            "principal_identity_verified": False,
+            "violation_observed": True,
+        },
+    ]
+
+    bundle = api_module._authz_replay_proof_bundle(
+        {"mode": "deterministic_authz_replay", "method": "GET", "path": "/api/orders/42"},
+        observations,
+    )
+
+    assert bundle["principal_profile_bindings_verified"] is True
+    assert bundle["principal_identity_bindings_verified"] is False
+    assert bundle["differential_observed"] is False
 
 
 def test_session_managed_profile_binding_is_server_asserted(monkeypatch):
@@ -2990,8 +3069,14 @@ def test_execute_authz_replay_plan_treats_soft_200_denial_as_non_violation(monke
 
     class _FakeSession:
         state = types.SimpleNamespace(users={
-            "user1": types.SimpleNamespace(is_authenticated=True, credential_profile_id="profile-user1", principal_auth_state="user1"),
-            "user2": types.SimpleNamespace(is_authenticated=True, credential_profile_id="profile-user2", principal_auth_state="user2"),
+            "user1": types.SimpleNamespace(
+                is_authenticated=True, credential_profile_id="profile-user1", principal_auth_state="user1",
+                token=_test_jwt(email="user1@example.test"),
+            ),
+            "user2": types.SimpleNamespace(
+                is_authenticated=True, credential_profile_id="profile-user2", principal_auth_state="user2",
+                token=_test_jwt(email="user2@example.test"),
+            ),
         })
 
         async def test_endpoint(self, *, endpoint, method, as_user, body, allow_out_of_scope):
@@ -3114,8 +3199,14 @@ def test_execute_authz_replay_plan_treats_redirect_denial_as_non_violation(monke
 
     class _FakeSession:
         state = types.SimpleNamespace(users={
-            "user1": types.SimpleNamespace(is_authenticated=True, credential_profile_id="profile-user1", principal_auth_state="user1"),
-            "user2": types.SimpleNamespace(is_authenticated=True, credential_profile_id="profile-user2", principal_auth_state="user2"),
+            "user1": types.SimpleNamespace(
+                is_authenticated=True, credential_profile_id="profile-user1", principal_auth_state="user1",
+                token=_test_jwt(email="user1@example.test"),
+            ),
+            "user2": types.SimpleNamespace(
+                is_authenticated=True, credential_profile_id="profile-user2", principal_auth_state="user2",
+                token=_test_jwt(email="user2@example.test"),
+            ),
         })
 
         async def test_endpoint(self, *, endpoint, method, as_user, body, allow_out_of_scope):
@@ -3327,6 +3418,7 @@ def test_promote_authz_replay_finding_requires_violation_and_links_evidence(monk
             "differential_observed": True,
             "authenticated_principal_count": 2,
             "principal_profile_bindings_verified": True,
+            "principal_identity_bindings_verified": True,
             "finding_created_automatically": False,
         },
         "observations": [
@@ -3602,6 +3694,7 @@ def test_promote_authz_replay_finding_creates_one_finding_per_principal(monkeypa
             "differential_observed": True,
             "authenticated_principal_count": 3,
             "principal_profile_bindings_verified": True,
+            "principal_identity_bindings_verified": True,
         },
         # Two DISTINCT offending principals on the same route template.
         "observations": [_violation("user2"), _violation("user3")],
@@ -3688,6 +3781,7 @@ def test_promote_authz_replay_finding_requires_differential(monkeypatch):
             "differential_observed": False,
             "authenticated_principal_count": 1,
             "principal_profile_bindings_verified": True,
+            "principal_identity_bindings_verified": True,
         },
         "observations": [
             {

@@ -5,6 +5,7 @@ FastAPI server with PostgreSQL persistence and Redis queue.
 """
 
 import asyncio
+import base64
 import copy
 import fnmatch
 import hashlib
@@ -19428,8 +19429,13 @@ def _authz_replay_proof_bundle(
         observation.get("principal_profile_verified") is True
         for observation in observations
     )
+    principal_identity_bindings_verified = bool(observations) and all(
+        observation.get("principal_identity_verified") is True
+        for observation in observations
+    )
     differential_observed = bool(
         principal_profile_bindings_verified
+        and principal_identity_bindings_verified
         and violations
         and allowed_access
         and (violation_principals | allow_principals)
@@ -19445,6 +19451,7 @@ def _authz_replay_proof_bundle(
         "authenticated_principal_count": len(authenticated_principals),
         "authenticated_principals": sorted(authenticated_principals)[:10],
         "principal_profile_bindings_verified": principal_profile_bindings_verified,
+        "principal_identity_bindings_verified": principal_identity_bindings_verified,
         "allowed_access_observations": allowed_access[:10],
         "violation_observations": violations[:10],
         "denial_like_redirects": denial_like_redirects[:10],
@@ -19537,6 +19544,41 @@ async def _authz_target_principal_profile_bindings(
     return bindings
 
 
+def _authz_session_principal_identity(user: Any) -> str | None:
+    """Hash a stable server-issued JWT claim without retaining principal data."""
+    candidates: list[str] = []
+    token = str(getattr(user, "token", None) or "").strip()
+    if token:
+        candidates.append(token)
+    headers = getattr(user, "headers", None)
+    if isinstance(headers, dict):
+        for key, value in headers.items():
+            if str(key).strip().lower() == "authorization":
+                candidates.append(str(value or "").strip())
+    cookies = getattr(user, "cookies", None)
+    if isinstance(cookies, dict):
+        candidates.extend(str(value or "").strip() for value in cookies.values())
+
+    for candidate in candidates:
+        raw = re.sub(r"^bearer\s+", "", candidate, flags=re.IGNORECASE).strip()
+        parts = raw.split(".")
+        if len(parts) != 3:
+            continue
+        try:
+            encoded = parts[1] + "=" * (-len(parts[1]) % 4)
+            claims = json.loads(base64.urlsafe_b64decode(encoded.encode("ascii")).decode("utf-8"))
+        except (ValueError, TypeError, UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        if not isinstance(claims, dict):
+            continue
+        for claim in ("email", "user_id", "userId", "username", "sub", "id"):
+            value = claims.get(claim)
+            if isinstance(value, (str, int)) and str(value).strip():
+                normalized = str(value).strip().lower() if claim in {"email", "username"} else str(value).strip()
+                return hashlib.sha256(f"{claim}:{normalized}".encode("utf-8")).hexdigest()
+    return None
+
+
 def _authz_session_profile_binding_status(
     expected_principals: set[str],
     session_users: dict[str, Any],
@@ -19550,6 +19592,8 @@ def _authz_session_profile_binding_status(
         "bound_slots": sorted(target_bindings),
         "mismatched_slots": [],
         "missing_session_profile_slots": [],
+        "missing_session_identity_slots": [],
+        "identity_verified_slots": [],
     }
     if expected_principals != required_slots:
         return "authz_replay_requires_slotted_principals", details
@@ -19572,6 +19616,21 @@ def _authz_session_profile_binding_status(
         return "session_principal_profiles_unbound", details
     if details["mismatched_slots"]:
         return "session_principal_profile_mismatch", details
+
+    identities: dict[str, str] = {}
+    for slot in sorted(required_slots):
+        identity = _authz_session_principal_identity(session_users.get(slot))
+        if not identity:
+            details["missing_session_identity_slots"].append(slot)
+            continue
+        identities[slot] = identity
+        details["identity_verified_slots"].append(slot)
+    if details["missing_session_identity_slots"]:
+        return "session_principal_identity_unverified", details
+    if len(set(identities.values())) != len(required_slots):
+        details["identity_collision"] = True
+        return "session_principals_not_distinct", details
+    details["identity_collision"] = False
     return None, details
 
 
@@ -19680,6 +19739,7 @@ async def _execute_authz_replay_plan(
                     in authenticated_users
                 ),
                 "principal_profile_verified": False,
+                "principal_identity_verified": False,
                 "inconclusive_reason": precondition_reason,
             }
             for item in expected_access[:10]
@@ -19821,6 +19881,7 @@ async def _execute_authz_replay_plan(
                 "authenticated_user": bool(as_user and as_user in authenticated_users),
                 "credential_profile_id": target_profile_bindings.get(as_user or ""),
                 "principal_profile_verified": True,
+                "principal_identity_verified": True,
                 "request": {
                     "method": method,
                     "url": endpoint,
@@ -20010,6 +20071,11 @@ async def _promote_authz_replay_finding(
         raise HTTPException(
             status_code=400,
             detail="Authz replay promotion requires verified target principal profile bindings",
+        )
+    if proof_bundle.get("principal_identity_bindings_verified") is not True:
+        raise HTTPException(
+            status_code=400,
+            detail="Authz replay promotion requires distinct verified session principal identities",
         )
     if proof_bundle.get("differential_observed") is not True:
         raise HTTPException(status_code=400, detail="Authz replay promotion requires a cross-principal differential observation")

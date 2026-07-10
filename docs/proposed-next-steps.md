@@ -1290,6 +1290,10 @@ inventory. `target.principal_matrix.record` is now an active, gated Command Arse
 receipt and write command-result audit rows. The interactive workflow obtains that scoped receipt
 only after an explicit operator confirmation. An unaudited AI/read-only command can no longer alter
 `expected_access` and suppress a future authorization proof.
+DONE phase 15: gated authz replay requires both distinct managed profile bindings and distinct stable
+server-issued JWT identities in the active session. Identity claims are hashed for equality checks and
+never retained; same-account profiles and opaque credentials without a provable identity make replay
+inconclusive instead of allowing a cross-principal proof claim.
 
 **Done when:** a campaign can assert "endpoint X requires role admin" and prove a lower-role
 principal's access is a finding.
