@@ -405,6 +405,19 @@ _PROMETHEUS_SENSITIVE_METRIC_TOKENS = {
         "challenge", "challenges",
     },
 }
+_PROMETHEUS_RUNTIME_METRIC_PREFIXES = (
+    "process_",
+    "nodejs_",
+    "go_",
+    "python_",
+    "jvm_",
+    "dotnet_",
+    "runtime_",
+    "system_",
+    "http_",
+    "promhttp_",
+    "scrape_",
+)
 
 
 def _prometheus_sensitive_metric_proof(body: str, content_type: str) -> dict[str, Any] | None:
@@ -431,6 +444,7 @@ def _prometheus_sensitive_metric_proof(body: str, content_type: str) -> dict[str
         matches = sorted({
             name
             for name in metric_names
+            if not name.startswith(_PROMETHEUS_RUNTIME_METRIC_PREFIXES)
             if set(filter(None, re.split(r"[^a-z0-9]+", name))) & tokens
         })
         if matches:

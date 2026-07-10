@@ -66,6 +66,8 @@ def test_prometheus_sensitive_exposure_requires_multiple_metric_classes():
     generic = """# HELP process_cpu_seconds_total CPU time
 # TYPE process_cpu_seconds_total counter
 process_cpu_seconds_total 1
+process_cpu_user_seconds_total 1
+http_auth_requests_total 2
 http_requests_total{status=\"200\"} 10
 """
     assert access_control_checks._prometheus_sensitive_metric_proof(generic, "text/plain") is None
