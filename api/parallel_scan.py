@@ -169,6 +169,17 @@ _PRIMARY_AUTH_KEYS = (
     "auto_auth", "auth_scenario_json",
 )
 _SECONDARY_AUTH_KEYS = ("user2_header", "user2_cookies")
+_MANAGED_AUTH_REFS_KEY = "managed_credential_profiles"
+
+
+def _managed_auth_refs(options: dict[str, Any], state: str | None = None) -> list[dict[str, Any]]:
+    refs = options.get(_MANAGED_AUTH_REFS_KEY)
+    if not isinstance(refs, list):
+        return []
+    clean = [dict(item) for item in refs if isinstance(item, dict)]
+    if state is not None:
+        clean = [item for item in clean if str(item.get("auth_state")) == state]
+    return clean
 
 # Shard caps. All overridable via env so operators can right-size for their
 # fleet/DB without a code change (e.g. SHAKERSCAN_COVERAGE_MAX_TOTAL_SHARDS=64).
@@ -553,9 +564,9 @@ def available_auth_states(options: dict[str, Any]) -> list[str]:
     """Auth identities the parent options can exercise: always anonymous, plus
     user1 (primary creds) and user2 (secondary creds) when present."""
     states = ["anonymous"]
-    if any(options.get(k) for k in _PRIMARY_AUTH_KEYS):
+    if any(options.get(k) for k in _PRIMARY_AUTH_KEYS) or _managed_auth_refs(options, "user1"):
         states.append("user1")
-    if any(options.get(k) for k in _SECONDARY_AUTH_KEYS):
+    if any(options.get(k) for k in _SECONDARY_AUTH_KEYS) or _managed_auth_refs(options, "user2"):
         states.append("user2")
     return states
 
@@ -563,12 +574,19 @@ def available_auth_states(options: dict[str, Any]) -> list[str]:
 def _apply_auth_state(options: dict[str, Any], state: str) -> dict[str, Any]:
     """Return a copy of options scoped to a single auth identity."""
     o = dict(options)
+    managed_refs = _managed_auth_refs(options)
     if state == "anonymous":
         for k in (*_PRIMARY_AUTH_KEYS, *_SECONDARY_AUTH_KEYS):
             o.pop(k, None)
+        o.pop(_MANAGED_AUTH_REFS_KEY, None)
     elif state == "user1":
         for k in _SECONDARY_AUTH_KEYS:
             o.pop(k, None)
+        user1_refs = [item for item in managed_refs if item.get("auth_state") == "user1"]
+        if user1_refs:
+            o[_MANAGED_AUTH_REFS_KEY] = user1_refs
+        else:
+            o.pop(_MANAGED_AUTH_REFS_KEY, None)
     elif state == "user2":
         # Use ONLY the secondary identity. Never fall back to primary creds, or a
         # user2 shard given just user2_cookies would inherit user1's auth_header
@@ -581,6 +599,18 @@ def _apply_auth_state(options: dict[str, Any], state: str) -> dict[str, Any]:
             o["auth_cookies"] = options["user2_cookies"]
         for k in _SECONDARY_AUTH_KEYS:
             o.pop(k, None)
+        remapped_refs = []
+        for item in managed_refs:
+            if item.get("auth_state") != "user2":
+                continue
+            remapped = dict(item)
+            remapped["auth_state"] = "user1"
+            remapped["option_key"] = "auth_header" if item.get("option_key") == "user2_header" else "auth_cookies"
+            remapped_refs.append(remapped)
+        if remapped_refs:
+            o[_MANAGED_AUTH_REFS_KEY] = remapped_refs
+        else:
+            o.pop(_MANAGED_AUTH_REFS_KEY, None)
     o["auth_state"] = state
     return o
 
@@ -1220,6 +1250,9 @@ def plan_dynamic_coverage_family_shards(
                 for key in _SECONDARY_AUTH_KEYS:
                     if parent_options.get(key):
                         opts[key] = parent_options[key]
+                bola_refs = _managed_auth_refs(parent_options, "user2")
+                if bola_refs:
+                    opts[_MANAGED_AUTH_REFS_KEY] = _managed_auth_refs(opts) + bola_refs
             opts["coverage_allocation"] = "dynamic"
             opts["coverage_dynamic_worker"] = True
             opts["coverage_dynamic_batch_size"] = batch_size

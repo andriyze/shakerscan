@@ -92,6 +92,17 @@ def test_default_parallel_focus_families_exclude_high_risk_bola():
     assert tuple(spec.name for spec in r.default_parallel_focus_families()) == ("sqli", "xss")
 
 
+def test_managed_profile_refs_satisfy_auth_context_without_secret_values():
+    options = {"managed_credential_profiles": [
+        {"auth_state": "user1", "profile_id": "p1", "option_key": "auth_header"},
+        {"auth_state": "user2", "profile_id": "p2", "option_key": "user2_header"},
+    ]}
+
+    assert r.has_primary_auth_context(options) is True
+    assert r.has_second_user_auth_context(options) is True
+    assert r.family_precondition_error("bola", options, exploit_depth=True) is None
+
+
 def test_describe_check_families_includes_proof_and_severity_contracts():
     described = {item["name"]: item for item in r.describe_check_families()}
 

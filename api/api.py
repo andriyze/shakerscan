@@ -2520,6 +2520,7 @@ async def run_due_schedules(pool: asyncpg.Pool):
                 """, next_run, schedule_id)
                 continue
             scan_options = _build_scan_options_payload(scan_options_model, scan_type)
+            scan_options = await _resolve_target_credential_profiles(conn, target_id, scan_options)
             parallel_enabled, parallel_worker_count = _apply_auto_sharding_policy(
                 scan_options_model,
                 scan_options,
@@ -13279,14 +13280,15 @@ async def _resolve_target_credential_profiles(
     target_id: uuid.UUID,
     options_payload: dict[str, Any],
 ) -> dict[str, Any]:
-    """Resolve active principal profiles into existing scanner auth fields.
+    """Attach content-free managed-profile refs for worker-time resolution.
 
-    Explicit scan options always win. Undecryptable, inactive, and expired
-    profiles are omitted so an auth-required campaign remains fail-closed.
+    Managed secret values must never be copied into scan rows or Redis jobs.
+    Workers resolve these target-bound profile ids in memory immediately before
+    execution. Explicit per-scan auth still wins for its auth state.
     """
     rows = await conn.fetch(
         """
-        SELECT p.auth_state, cp.id AS profile_id, cp.auth_kind, cp.secret_value
+        SELECT p.auth_state, cp.id AS profile_id, cp.auth_kind
         FROM target_principals p
         JOIN target_credential_profiles cp
           ON cp.target_id = p.target_id
@@ -13300,37 +13302,45 @@ async def _resolve_target_credential_profiles(
         """,
         target_id,
     )
-    resolved_states: set[str] = set()
-    resolved_profiles: list[dict[str, str]] = []
+    selected: dict[str, dict[str, Any]] = {}
     for row in rows:
         payload = row_to_dict(row)
         auth_state = str(payload.get("auth_state") or "").strip()
-        if auth_state in resolved_states:
+        if auth_state in selected:
             continue
-        stored_secret = str(payload.get("secret_value") or "")
-        secret = str(decrypt_secret(stored_secret) or "")
-        if not secret or secret.startswith("enc:fernet:") or "\r" in secret or "\n" in secret:
+        selected[auth_state] = payload
+
+    primary = selected.get("user1")
+    secondary = selected.get("user2")
+    if primary and secondary and str(primary.get("profile_id")) == str(secondary.get("profile_id")):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "shared_principal_credential_profile",
+                "message": "user1 and user2 must reference distinct managed credential profiles",
+                "blocked_by": ["principal_credentials_not_distinct"],
+            },
+        )
+
+    profile_refs: list[dict[str, str]] = []
+    for auth_state in ("user1", "user2"):
+        payload = selected.get(auth_state)
+        if not payload:
             continue
         auth_kind = str(payload.get("auth_kind") or "")
-        option_key = None
         if auth_state == "user1":
             option_key = "auth_header" if auth_kind == "authorization_header" else "auth_cookies"
-        elif auth_state == "user2":
+        else:
             option_key = "user2_header" if auth_kind == "authorization_header" else "user2_cookies"
-        if not option_key:
-            continue
         if options_payload.get(option_key):
-            resolved_states.add(auth_state)
             continue
-        options_payload[option_key] = secret
-        resolved_states.add(auth_state)
-        resolved_profiles.append({
+        profile_refs.append({
             "auth_state": auth_state,
             "profile_id": str(payload.get("profile_id")),
             "option_key": option_key,
         })
-    if resolved_profiles:
-        options_payload["resolved_credential_profiles"] = resolved_profiles
+    if profile_refs:
+        options_payload["managed_credential_profiles"] = profile_refs
     return options_payload
 
 

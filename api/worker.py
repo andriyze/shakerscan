@@ -1387,6 +1387,68 @@ def _runtime_ai_target_credential_from_row(row: dict[str, Any] | None) -> dict[s
     }
 
 
+_MANAGED_SCAN_AUTH_OPTION_KEYS = {
+    "user1": {"authorization_header": "auth_header", "cookie": "auth_cookies"},
+    "user2": {"authorization_header": "user2_header", "cookie": "user2_cookies"},
+}
+
+
+async def _hydrate_managed_scan_credentials(options: dict[str, Any], scan_id: str) -> dict[str, Any]:
+    """Resolve target-bound managed credentials in worker memory only."""
+    hydrated = dict(options or {})
+    raw_refs = hydrated.pop("managed_credential_profiles", None)
+    if not isinstance(raw_refs, list) or not raw_refs:
+        return hydrated
+
+    refs = [dict(item) for item in raw_refs if isinstance(item, dict)][:2]
+    states = [str(item.get("auth_state") or "") for item in refs]
+    profile_ids = [str(item.get("profile_id") or "") for item in refs]
+    if len(states) != len(set(states)) or not all(state in _MANAGED_SCAN_AUTH_OPTION_KEYS for state in states):
+        raise ValueError("invalid managed credential profile references")
+    if len(profile_ids) != len(set(profile_ids)):
+        raise ValueError("user1 and user2 managed credential profiles must be distinct")
+    try:
+        profile_uuids = [uuid.UUID(value) for value in profile_ids]
+        scan_uuid = uuid.UUID(str(scan_id))
+    except ValueError as exc:
+        raise ValueError("invalid managed credential profile id") from exc
+
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT cp.id, cp.auth_kind, cp.secret_value
+            FROM scans s
+            JOIN target_credential_profiles cp ON cp.target_id = s.target_id
+            WHERE s.id = $1
+              AND cp.id = ANY($2::uuid[])
+              AND cp.is_active = true
+              AND (cp.expires_at IS NULL OR cp.expires_at > NOW())
+            """,
+            scan_uuid,
+            profile_uuids,
+        )
+    profiles = {str(row["id"]): dict(row) for row in rows}
+    resolved: list[dict[str, str]] = []
+    for ref in refs:
+        auth_state = str(ref.get("auth_state"))
+        profile_id = str(ref.get("profile_id"))
+        row = profiles.get(profile_id)
+        if row is None:
+            raise ValueError(f"managed credential profile unavailable for {auth_state}")
+        auth_kind = str(row.get("auth_kind") or "")
+        expected_key = _MANAGED_SCAN_AUTH_OPTION_KEYS[auth_state].get(auth_kind)
+        if not expected_key or str(ref.get("option_key") or "") != expected_key:
+            raise ValueError(f"managed credential profile kind mismatch for {auth_state}")
+        secret = str(decrypt_secret(row.get("secret_value")) or "")
+        if not secret or secret.startswith("enc:fernet:") or "\r" in secret or "\n" in secret:
+            raise ValueError(f"managed credential profile could not be decrypted for {auth_state}")
+        if not hydrated.get(expected_key):
+            hydrated[expected_key] = secret
+        resolved.append({"auth_state": auth_state, "profile_id": profile_id, "option_key": expected_key})
+    hydrated["resolved_credential_profiles"] = resolved
+    return hydrated
+
+
 async def _hydrate_ai_gate_options(options: dict[str, Any]) -> dict[str, Any]:
     hydrated = dict(options)
     ai_target = dict(hydrated.get("ai_target") or {})
@@ -6053,6 +6115,7 @@ async def process_scan_job(job_data: dict):
 
     try:
         try:
+            options = await _hydrate_managed_scan_credentials(options, scan_id)
             result = await run_scan(target, options, scan_id=scan_id, job_id=job_id)
         except ValueError as e:
             # Validation errors (e.g., incompatible options like public+smart)
@@ -6455,7 +6518,10 @@ def _asm_scan_options_for_auth_state(
     if asm_inventory.normalize_auth_state(base.get("auth_state")) == state:
         if state == "anonymous":
             return parallel_scan._apply_auth_state(base, state)
-        if any(base.get(k) for k in parallel_scan._PRIMARY_AUTH_KEYS):
+        if (
+            any(base.get(k) for k in parallel_scan._PRIMARY_AUTH_KEYS)
+            or parallel_scan._managed_auth_refs(base, "user1")
+        ):
             return base
     if state not in parallel_scan.available_auth_states(base):
         return None
@@ -6889,7 +6955,8 @@ async def process_scan_plan_job(job_data: dict):
             # Use the DB-normalized target_url (scheme-full), not the raw queued
             # target which can be scheme-less when the user submitted without a
             # scheme — a scheme-less target makes the scanner exit with no JSON.
-            recon_result = await run_scan(target_url, recon_opts, scan_id=parent_id, job_id=parent_job_id)
+            runtime_recon_opts = await _hydrate_managed_scan_credentials(recon_opts, parent_id)
+            recon_result = await run_scan(target_url, runtime_recon_opts, scan_id=parent_id, job_id=parent_job_id)
         except Exception as e:
             recon_result = {}
             print(f"[{parent_id[:8]}] coverage recon error: {e}", flush=True)
@@ -7340,6 +7407,7 @@ async def process_scan_shard_job(job_data: dict):
     heartbeat_thread.start()
     try:
         try:
+            options = await _hydrate_managed_scan_credentials(options, scan_id)
             result = await run_scan(target, options, scan_id=scan_id, job_id=job_id)
         except Exception as e:
             result = {'target': target, 'error': str(e),
@@ -8440,6 +8508,7 @@ async def process_exploit_batch_job(job_data: dict):
     error = None
     try:
         try:
+            scan_opts = await _hydrate_managed_scan_credentials(scan_opts, scan_id)
             result = await run_scan(target, scan_opts, scan_id=scan_id, job_id=job_id)
         except Exception as e:
             result = {'target': target, 'error': str(e), 'result': {'score': None, 'grade': None}, 'findings': []}

@@ -749,6 +749,47 @@ def test_dynamic_coverage_family_auth_state_workers_are_scoped():
     assert "user2_header" not in user2
 
 
+def test_managed_profile_refs_drive_auth_shards_without_secret_values():
+    refs = [
+        {"auth_state": "user1", "profile_id": "p1", "option_key": "auth_header"},
+        {"auth_state": "user2", "profile_id": "p2", "option_key": "user2_header"},
+    ]
+    options = {"auth_state_shards": True, "managed_credential_profiles": refs}
+
+    assert p.available_auth_states(options) == ["anonymous", "user1", "user2"]
+    anon = p._apply_auth_state(options, "anonymous")
+    user1 = p._apply_auth_state(options, "user1")
+    user2 = p._apply_auth_state(options, "user2")
+
+    assert "managed_credential_profiles" not in anon
+    assert user1["managed_credential_profiles"] == [refs[0]]
+    assert user2["managed_credential_profiles"] == [{
+        "auth_state": "user1", "profile_id": "p2", "option_key": "auth_header",
+    }]
+
+
+def test_managed_bola_lane_retains_distinct_profile_refs():
+    refs = [
+        {"auth_state": "user1", "profile_id": "p1", "option_key": "auth_header"},
+        {"auth_state": "user2", "profile_id": "p2", "option_key": "user2_header"},
+    ]
+    plan = p.plan_dynamic_coverage_family_shards(
+        {
+            "scan_type": "smart", "auth_state_shards": True,
+            "managed_credential_profiles": refs, "exploit_depth": True,
+        },
+        endpoint_count=5,
+        auth_states=["anonymous", "user1", "user2"],
+    )
+
+    bola = next(
+        shard.options for shard in plan.shards
+        if shard.options["auth_state"] == "user1" and shard.options["coverage_attempt_family"] == "bola"
+    )
+    assert {item["profile_id"] for item in bola["managed_credential_profiles"]} == {"p1", "p2"}
+    assert "auth_header" not in bola and "user2_header" not in bola
+
+
 def test_dynamic_coverage_family_respects_explicit_focus():
     plan = p.plan_dynamic_coverage_family_shards(
         {

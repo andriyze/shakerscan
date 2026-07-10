@@ -578,18 +578,25 @@ def apply_asm_focus(options: dict[str, Any], value: Any) -> tuple[dict[str, Any]
 
 def has_primary_auth_context(options: dict[str, Any]) -> bool:
     opts = options or {}
+    managed_refs = opts.get("managed_credential_profiles") if isinstance(opts.get("managed_credential_profiles"), list) else []
     return bool(
         opts.get("auth_header")
         or opts.get("auth_cookies")
         or opts.get("auth_headers_json")
         or opts.get("auth_scenario_json")
         or (opts.get("login_username") and opts.get("login_password"))
+        or any(isinstance(item, dict) and item.get("auth_state") == "user1" for item in managed_refs)
     )
 
 
 def has_second_user_auth_context(options: dict[str, Any]) -> bool:
     opts = options or {}
-    return bool(opts.get("user2_header") or opts.get("user2_cookies"))
+    managed_refs = opts.get("managed_credential_profiles") if isinstance(opts.get("managed_credential_profiles"), list) else []
+    return bool(
+        opts.get("user2_header")
+        or opts.get("user2_cookies")
+        or any(isinstance(item, dict) and item.get("auth_state") == "user2" for item in managed_refs)
+    )
 
 
 def family_precondition_error(

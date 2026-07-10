@@ -6586,37 +6586,35 @@ def test_target_credential_profile_resolution_maps_primary_and_second_user(monke
     class FakeConn:
         async def fetch(self, query, *_args):
             assert "cp.expires_at > NOW()" in query
+            assert "cp.secret_value" not in query
             return [
                 {
                     "auth_state": "user1",
                     "profile_id": uuid.uuid4(),
                     "auth_kind": "authorization_header",
-                    "secret_value": "enc-primary",
                 },
                 {
                     "auth_state": "user2",
                     "profile_id": uuid.uuid4(),
                     "auth_kind": "cookie",
-                    "secret_value": "enc-second",
                 },
             ]
 
-    monkeypatch.setattr(api_module, "decrypt_secret", lambda value: {
-        "enc-primary": "Bearer primary-token",
-        "enc-second": "session=second-user",
-    }[value])
     options = asyncio.run(api_module._resolve_target_credential_profiles(
         FakeConn(),
         uuid.uuid4(),
         {"scan_type": "smart"},
     ))
 
-    assert options["auth_header"] == "Bearer primary-token"
-    assert options["user2_cookies"] == "session=second-user"
-    assert [item["auth_state"] for item in options["resolved_credential_profiles"]] == ["user1", "user2"]
+    assert "auth_header" not in options
+    assert "user2_cookies" not in options
+    refs = options["managed_credential_profiles"]
+    assert [item["auth_state"] for item in refs] == ["user1", "user2"]
+    assert [item["option_key"] for item in refs] == ["auth_header", "user2_cookies"]
+    assert "primary-token" not in json.dumps(options)
 
 
-def test_target_credential_profile_resolution_preserves_explicit_auth_and_skips_undecryptable(monkeypatch):
+def test_target_credential_profile_resolution_preserves_explicit_auth():
     class FakeConn:
         async def fetch(self, *_args):
             return [
@@ -6624,17 +6622,14 @@ def test_target_credential_profile_resolution_preserves_explicit_auth_and_skips_
                     "auth_state": "user1",
                     "profile_id": uuid.uuid4(),
                     "auth_kind": "authorization_header",
-                    "secret_value": "stored-primary",
                 },
                 {
                     "auth_state": "user2",
                     "profile_id": uuid.uuid4(),
                     "auth_kind": "authorization_header",
-                    "secret_value": "enc:fernet:unavailable",
                 },
             ]
 
-    monkeypatch.setattr(api_module, "decrypt_secret", lambda value: value)
     options = asyncio.run(api_module._resolve_target_credential_profiles(
         FakeConn(),
         uuid.uuid4(),
@@ -6643,7 +6638,26 @@ def test_target_credential_profile_resolution_preserves_explicit_auth_and_skips_
 
     assert options["auth_header"] == "Bearer explicit"
     assert "user2_header" not in options
-    assert "resolved_credential_profiles" not in options
+    assert options["managed_credential_profiles"][0]["auth_state"] == "user2"
+
+
+def test_target_credential_profile_resolution_blocks_shared_profile():
+    profile_id = uuid.uuid4()
+
+    class FakeConn:
+        async def fetch(self, *_args):
+            return [
+                {"auth_state": "user1", "profile_id": profile_id, "auth_kind": "authorization_header"},
+                {"auth_state": "user2", "profile_id": profile_id, "auth_kind": "authorization_header"},
+            ]
+
+    try:
+        asyncio.run(api_module._resolve_target_credential_profiles(FakeConn(), uuid.uuid4(), {}))
+    except api_module.HTTPException as exc:
+        assert exc.status_code == 409
+        assert exc.detail["error"] == "shared_principal_credential_profile"
+    else:
+        raise AssertionError("shared user1/user2 credential profile should fail closed")
 
 
 def test_local_agent_dry_run_plan_uses_context_pack_without_spawn():

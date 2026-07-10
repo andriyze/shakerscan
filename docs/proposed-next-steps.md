@@ -1250,9 +1250,14 @@ material behind masked REST responses, use the shared optional Fernet encryption
 track expiry and near-expiry refresh state, support explicit rotation, and retain deactivated rows for
 audit history. This storage phase did not itself queue work or prove an authorization finding.
 DONE phase 13: normal target scans, manual ASM recon/test/improve actions, and the background ASM
-dispatcher now resolve only active, unexpired profiles referenced by active `user1`/`user2`
-principals into the scanner's existing primary/second-user Authorization or cookie fields. Explicit
-per-scan auth wins; an undecryptable Fernet value is never sent as a credential. Principal lists,
+dispatcher now attach only content-free, target-bound profile ids for active, unexpired profiles
+referenced by active `user1`/`user2` principals. Workers resolve and decrypt those ids in memory
+immediately before execution into the scanner's existing primary/second-user Authorization or cookie
+fields; managed values are never copied into `scans.options`, parent/shard rows, or Redis jobs.
+Explicit per-scan auth wins; an unavailable or undecryptable Fernet value fails closed. Parallel and
+dynamic ASM auth-state planners preserve/remap profile references without materializing secrets.
+The API and worker both reject a shared profile id across user1/user2, so BOLA cannot compare one
+identity to itself. Principal lists,
 context packs, and graph hypotheses count a credential as configured only when the named managed
 profile currently resolves. The interactive workflow manages masked profiles, expiry, rotation, and
 deactivation and selects real profile names instead of accepting only free text. Loading a managed

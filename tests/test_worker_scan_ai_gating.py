@@ -19,6 +19,98 @@ sys.modules.setdefault("redis", types.SimpleNamespace(from_url=lambda *args, **k
 import worker  # noqa: E402
 
 
+class _ManagedCredentialConn:
+    def __init__(self, rows):
+        self.rows = rows
+        self.calls = []
+
+    async def fetch(self, query, *args):
+        self.calls.append((query, args))
+        assert "JOIN target_credential_profiles cp ON cp.target_id = s.target_id" in query
+        return self.rows
+
+
+class _ManagedCredentialPool:
+    def __init__(self, rows):
+        self.conn = _ManagedCredentialConn(rows)
+
+    def acquire(self):
+        return self
+
+    async def __aenter__(self):
+        return self.conn
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
+def test_managed_credentials_are_hydrated_only_in_worker_memory(monkeypatch):
+    p1 = uuid.uuid4()
+    p2 = uuid.uuid4()
+    monkeypatch.setattr(worker, "db_pool", _ManagedCredentialPool([
+        {"id": p1, "auth_kind": "authorization_header", "secret_value": "enc-u1"},
+        {"id": p2, "auth_kind": "cookie", "secret_value": "enc-u2"},
+    ]))
+    monkeypatch.setattr(worker, "decrypt_secret", lambda value: {"enc-u1": "Bearer user-one", "enc-u2": "session=user-two"}[value])
+    queued = {
+        "scan_type": "smart",
+        "managed_credential_profiles": [
+            {"auth_state": "user1", "profile_id": str(p1), "option_key": "auth_header"},
+            {"auth_state": "user2", "profile_id": str(p2), "option_key": "user2_cookies"},
+        ],
+    }
+
+    hydrated = asyncio.run(worker._hydrate_managed_scan_credentials(queued, str(uuid.uuid4())))
+
+    assert "managed_credential_profiles" not in hydrated
+    assert hydrated["auth_header"] == "Bearer user-one"
+    assert hydrated["user2_cookies"] == "session=user-two"
+    assert queued.get("auth_header") is None
+    assert "user-one" not in json.dumps(queued)
+    assert [item["profile_id"] for item in hydrated["resolved_credential_profiles"]] == [str(p1), str(p2)]
+
+
+def test_worker_rejects_duplicate_managed_profile_refs(monkeypatch):
+    profile_id = str(uuid.uuid4())
+    monkeypatch.setattr(worker, "db_pool", _ManagedCredentialPool([]))
+    queued = {"managed_credential_profiles": [
+        {"auth_state": "user1", "profile_id": profile_id, "option_key": "auth_header"},
+        {"auth_state": "user2", "profile_id": profile_id, "option_key": "user2_header"},
+    ]}
+
+    try:
+        asyncio.run(worker._hydrate_managed_scan_credentials(queued, str(uuid.uuid4())))
+    except ValueError as exc:
+        assert "must be distinct" in str(exc)
+    else:
+        raise AssertionError("duplicate managed profile refs should fail closed")
+
+
+def test_worker_rejects_unavailable_or_undecryptable_managed_profile(monkeypatch):
+    profile_id = uuid.uuid4()
+    queued = {"managed_credential_profiles": [{
+        "auth_state": "user1", "profile_id": str(profile_id), "option_key": "auth_header",
+    }]}
+    monkeypatch.setattr(worker, "db_pool", _ManagedCredentialPool([]))
+    try:
+        asyncio.run(worker._hydrate_managed_scan_credentials(queued, str(uuid.uuid4())))
+    except ValueError as exc:
+        assert "unavailable" in str(exc)
+    else:
+        raise AssertionError("missing profile should fail closed")
+
+    monkeypatch.setattr(worker, "db_pool", _ManagedCredentialPool([
+        {"id": profile_id, "auth_kind": "authorization_header", "secret_value": "enc:fernet:unavailable"},
+    ]))
+    monkeypatch.setattr(worker, "decrypt_secret", lambda value: value)
+    try:
+        asyncio.run(worker._hydrate_managed_scan_credentials(queued, str(uuid.uuid4())))
+    except ValueError as exc:
+        assert "could not be decrypted" in str(exc)
+    else:
+        raise AssertionError("undecryptable profile should fail closed")
+
+
 def test_asm_bola_user1_scope_preserves_second_user_comparator():
     opts = {
         "auth_header": "Bearer user1",
@@ -50,6 +142,23 @@ def test_asm_user2_prescoped_child_keeps_auth_header():
     assert scoped is not None
     assert scoped["auth_state"] == "user2"
     assert scoped["auth_header"] == "Bearer user2"
+
+
+def test_asm_prescoped_child_keeps_managed_runtime_profile_ref():
+    opts = {
+        "auth_state": "user2",
+        "managed_credential_profiles": [{
+            "auth_state": "user1",
+            "profile_id": "00000000-0000-4000-8000-000000000002",
+            "option_key": "auth_header",
+        }],
+        "coverage_dynamic_worker": True,
+    }
+
+    scoped = worker._asm_scan_options_for_auth_state(opts, "user2", check_family="sqli")
+
+    assert scoped is not None
+    assert scoped["managed_credential_profiles"] == opts["managed_credential_profiles"]
 
 
 def _runtime_scope_guard():
