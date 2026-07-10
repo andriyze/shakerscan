@@ -3657,6 +3657,46 @@ def _is_internal_target(url: str) -> bool:
     return False
 
 
+def _url_origin(url: str) -> tuple[str, str, int] | None:
+    """Return a normalized HTTP origin for strict source-scan inheritance."""
+    try:
+        parsed = urllib.parse.urlparse(str(url or "").strip())
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            return None
+        scheme = parsed.scheme.lower()
+        port = parsed.port or (443 if scheme == "https" else 80)
+        return scheme, parsed.hostname.lower().rstrip("."), port
+    except (TypeError, ValueError):
+        return None
+
+
+def _internal_retest_scope_authorized(verification: dict, target_url: str) -> bool:
+    """Inherit bounded private-target authorization from the source scan.
+
+    A finding cannot authorize its own destination. The source scan must target
+    the exact origin and carry either a lab-scoped runtime guard or explicit
+    deep intent on an active scan type.
+    """
+    source_target = str(verification.get("source_scan_target_url") or "").strip()
+    if not source_target or _url_origin(source_target) != _url_origin(target_url):
+        return False
+
+    options = parse_json_field(verification.get("source_scan_options"))
+    guard = options.get("runtime_scope_guard")
+    if isinstance(guard, dict):
+        environment = str(guard.get("environment") or "production").strip().lower()
+        if environment in {"development", "dev", "preview", "staging", "lab", "test"}:
+            scope = evaluate_runtime_destination_scope(guard, target_url)
+            if scope.get("status") in {"allowed", "degraded"}:
+                return True
+        return False
+
+    scan_type = str(
+        verification.get("source_scan_type") or options.get("scan_type") or ""
+    ).strip().lower()
+    return scan_type in {"smart", "full", "aggressive"} and options.get("exploit_depth") is True
+
+
 def _detect_security_block_text(*parts: str | None) -> bool:
     """Best-effort detection for WAF/edge blocks from response text."""
     merged = " ".join([p for p in parts if p]).lower()
@@ -3688,6 +3728,7 @@ def classify_retest_outcome(
     confidence: float | None,
     inputs: dict,
     error_message: str | None = None,
+    internal_target_authorized: bool = False,
 ) -> tuple[str, str, str]:
     """
     Return (result_status, verdict, verdict_reason).
@@ -3714,7 +3755,7 @@ def classify_retest_outcome(
     extracted_data = str((proof or {}).get("extracted_data") or "")
     target_url = str(inputs.get("original_url") or inputs.get("target_url") or "")
 
-    if _is_internal_target(target_url):
+    if _is_internal_target(target_url) and not internal_target_authorized:
         return (
             "inconclusive",
             "out_of_scope_internal",
@@ -4455,6 +4496,7 @@ async def run_finding_retest(verification: dict) -> dict:
             "retry_class": "validation",
             "retryable": False,
         }
+    internal_target_authorized = _internal_retest_scope_authorized(verification, test_url)
 
     # AI-only types (2fa_bypass, generic_http) rely on AI reasoning (Tier 2)
     # rather than a deterministic prover. Return a deterministic "inconclusive"
@@ -4632,6 +4674,7 @@ async def run_finding_retest(verification: dict) -> dict:
     except Exception as e:
         result_status, verdict, verdict_reason = classify_retest_outcome(
             proof=None, proven=False, confidence=None, inputs=inputs, error_message=str(e),
+            internal_target_authorized=internal_target_authorized,
         )
         retry_class, retryable = classify_retry(str(e))
         return {
@@ -4669,10 +4712,12 @@ async def run_finding_retest(verification: dict) -> dict:
     if not still_vulnerable and last_error and not proof:
         result_status, verdict, verdict_reason = classify_retest_outcome(
             proof=None, proven=False, confidence=None, inputs=inputs, error_message=last_error,
+            internal_target_authorized=internal_target_authorized,
         )
     else:
         result_status, verdict, verdict_reason = classify_retest_outcome(
             proof=proof_data, proven=still_vulnerable, confidence=confidence, inputs=inputs,
+            internal_target_authorized=internal_target_authorized,
         )
 
     # Deterministic ladder is exhausted only when all non-AI steps have been tried
@@ -4841,9 +4886,13 @@ async def process_finding_retest_job(job_data: dict):
 
         async with db_pool.acquire() as conn:
             verification = await conn.fetchrow("""
-                SELECT fv.*, f.title, f.tool, f.evidence, f.url as finding_url
+                SELECT fv.*, f.title, f.tool, f.evidence, f.url as finding_url,
+                       s.target_url as source_scan_target_url,
+                       s.options as source_scan_options,
+                       s.scan_type as source_scan_type
                 FROM finding_verifications fv
                 JOIN findings f ON fv.finding_id = f.id
+                LEFT JOIN scans s ON fv.scan_id = s.id
                 WHERE fv.id = $1
             """, uuid.UUID(verification_id))
 

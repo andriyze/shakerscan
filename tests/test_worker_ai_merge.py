@@ -15,6 +15,7 @@ sys.modules.setdefault("redis", types.SimpleNamespace(from_url=lambda *args, **k
 from worker import (  # noqa: E402
     _enforce_verdict_invariants,
     _has_partial_deterministic_evidence,
+    _internal_retest_scope_authorized,
     _merge_ai_result_into_retest_result,
     _is_ai_circuit_open,
     _is_retryable_ai_error,
@@ -207,6 +208,72 @@ def test_classify_catch_all_is_inconclusive():
         inputs={"target_url": "https://example.com/x"},
     )
     assert verdict == "inconclusive"
+
+
+def test_private_retest_without_inherited_scope_stays_out_of_scope():
+    _status, verdict, _reason = classify_retest_outcome(
+        proof={"evidence_type": "not_found"},
+        proven=False,
+        confidence=0.8,
+        inputs={"target_url": "http://127.0.0.1:3001/ftp/file"},
+    )
+    assert verdict == "out_of_scope_internal"
+
+
+def test_private_retest_with_authorized_source_scan_can_be_classified():
+    verification = {
+        "source_scan_target_url": "http://127.0.0.1:3001",
+        "source_scan_type": "smart",
+        "source_scan_options": {"scan_type": "smart", "exploit_depth": True},
+    }
+    target_url = "http://127.0.0.1:3001/ftp/file"
+
+    authorized = _internal_retest_scope_authorized(verification, target_url)
+    _status, verdict, _reason = classify_retest_outcome(
+        proof={"evidence_type": "not_found"},
+        proven=False,
+        confidence=0.8,
+        inputs={"target_url": target_url},
+        internal_target_authorized=authorized,
+    )
+
+    assert authorized is True
+    assert verdict != "out_of_scope_internal"
+
+
+def test_private_retest_does_not_inherit_scope_across_origins():
+    verification = {
+        "source_scan_target_url": "http://127.0.0.1:3001",
+        "source_scan_type": "smart",
+        "source_scan_options": {"scan_type": "smart", "exploit_depth": True},
+    }
+
+    assert _internal_retest_scope_authorized(
+        verification,
+        "http://127.0.0.1:8888/identity/api/users",
+    ) is False
+
+
+def test_private_retest_inherits_matching_lab_scope_receipt():
+    verification = {
+        "source_scan_target_url": "http://host.docker.internal:3001",
+        "source_scan_options": {
+            "runtime_scope_guard": {
+                "scope_receipt_id": "scope-unit",
+                "environment": "lab",
+                "allowed_hosts": ["host.docker.internal"],
+                "allowed_root_domains": [],
+                "normalized_scope": {"host": "host.docker.internal"},
+                "requires_runtime_destination_check": True,
+                "requires_runtime_dns_check": False,
+            }
+        },
+    }
+
+    assert _internal_retest_scope_authorized(
+        verification,
+        "http://host.docker.internal:3001/rest/products/search",
+    ) is True
 
 
 def test_ai_timeout_over_low_conf_no_proof_stays_inconclusive():
