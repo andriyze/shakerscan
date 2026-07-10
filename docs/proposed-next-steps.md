@@ -1502,7 +1502,7 @@ DONE phase 5 for Nuclei task gating without exposing templates as an ASM endpoin
 through `build_report`.
 
 ### 11. Planner evaluation and local-agent planning boundaries
-**Status: DRY-RUN PHASE 1 + STRICT PARSER VALIDATION DONE; REAL ADAPTERS DISABLED.** Local-agent
+**Status: DRY-RUN PHASE 1 + STRICT PARSER VALIDATION + FIXTURE-GATED CODEX ADAPTER DONE.** Local-agent
 planning should remain dry-run only until the Command Arsenal, mandatory receipt enforcement,
 context packs, parser/output validation, and planner evals are stable. T3MP3ST's local-agent pattern
 is useful as a planner harness, not as raw execution power.
@@ -1522,7 +1522,7 @@ is useful as a planner harness, not as raw execution power.
    It consumes saved context packs and persists server-validated `OperationPlan` rows. Real
    local-agent CLI adapters remain disabled until stricter receipt enforcement and fixture-gated
    prompt-based planner experiments land.
-5. Strip provider API-key environment variables when spawning local planners. Do not pass secrets,
+5. DONE phase 2: strip provider API-key environment variables when spawning local planners. Do not pass secrets,
    cookies, bearer tokens, private keys, raw transcripts, or raw request/response bodies by default.
 6. Local agents may propose `OperationPlan` JSON and summarize redacted evidence. They may not execute
    arbitrary shell commands, broaden scope, increase risk tier, bypass confirmations, or mark findings
@@ -1542,15 +1542,26 @@ is useful as a planner harness, not as raw execution power.
 9. DONE phase 1: add `POST /agents/local/test` only as a harmless capability/version ping with
    timeout/output caps, environment stripping, no secrets, no prompt, no planner execution, no target
    state mutation, and no queued scanner work.
-10. Before any real planner adapter can affect a queued action, run fixed evals for "keep target
+10. DONE phase 2: before any real planner adapter can persist a dry-run plan, run fixed evals for "keep target
     covered", "run BOLA", "SQLi only", production AI Gate deep testing, Model Intake trust, stale
     workers, out-of-scope prompt injection, missing evidence, planned/unrunnable families, production
     RCE/lab-only gating, and missing second-user auth.
-11. Store planner version/fingerprint and context-pack hash with every generated plan. Detect auth
+11. DONE phase 2: store planner version/fingerprint and context-pack hash with every generated plan. Detect auth
     state by binary/status/artifact existence only; never read auth artifact contents.
-12. Strip provider API-key environment variables when spawning local planners. Bound working
+12. DONE phase 2: strip provider API-key environment variables when spawning local planners. Bound working
     directory, timeout, prompt bytes, output bytes, retry count, and network behavior to the safest
     mode the specific adapter can prove.
+
+Phase 2 adds the host-side `scripts/local_planner_adapter.py` Codex adapter. `evaluate` must produce
+a passing scorecard for every fixed fixture, and the scorecard is bound to the fixture hash, adapter
+version, and detected Codex version/path fingerprint. `plan` fails closed on a missing, failing, or
+stale scorecard; runs Codex once in an empty temporary workdir with a read-only sandbox, ephemeral
+session, bounded prompt/output/timeout, zero retries, stripped provider/secret environment variables,
+and shell, unified-exec, browser, app, plugin, computer, image, and multi-agent features disabled;
+then submits exact JSON to `/agents/local/plan/parse`. Only an accepted candidate is sent to the
+existing dry-run `/arsenal/plans` persistence route. The adapter never calls an execution route,
+does not read auth artifact contents, and records its controls, planner fingerprint, context hash,
+and eval scorecard hash in `planner` metadata.
 
 **Done when:** a local or hosted planner can produce a validated dry-run `OperationPlan` from a
 bounded context pack, fail the unsafe fixtures, and route every proposed state-changing action through
