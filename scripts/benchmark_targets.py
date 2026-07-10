@@ -96,12 +96,62 @@ def _norm_live_finding(f):
         "type": f.get("type"),
         "cwe": f.get("cwe"),
         "description": f.get("description"),
+        "tool": f.get("tool"),
         "severity": f.get("severity"),
         "verified": bool(f.get("verified")) or verdict == "exploited",
         "confidence_tier": f.get("confidence_tier"),
         "evidence": f.get("evidence"),
         "browser_proof": f.get("browser_proof"),
+        "poe_result": f.get("poe_result"),
     }
+
+
+def _post_retest_findings(scan_findings, live_findings):
+    """Overlay live verdicts without discarding immutable scan-time proof."""
+    by_exact = {}
+    by_title_url = {}
+    for finding in scan_findings or []:
+        if not isinstance(finding, dict):
+            continue
+        title = str(finding.get("title") or "").strip().lower()
+        url = str(finding.get("url") or "").strip()
+        tool = str(finding.get("tool") or "").strip().lower()
+        by_exact.setdefault((title, url, tool), finding)
+        by_title_url.setdefault((title, url), finding)
+
+    merged_findings = []
+    for live in live_findings or []:
+        if not isinstance(live, dict):
+            continue
+        title = str(live.get("title") or "").strip().lower()
+        url = str(live.get("url") or "").strip()
+        tool = str(live.get("tool") or "").strip().lower()
+        original = by_exact.get((title, url, tool)) or by_title_url.get((title, url)) or {}
+        merged = dict(original)
+        merged.update(live)
+
+        original_evidence = original.get("evidence")
+        live_evidence = live.get("evidence")
+        for name, value in (("original", original_evidence), ("live", live_evidence)):
+            if isinstance(value, str):
+                try:
+                    value = json.loads(value)
+                except (TypeError, ValueError):
+                    value = None
+            if name == "original":
+                original_evidence = value
+            else:
+                live_evidence = value
+        if isinstance(original_evidence, dict) and isinstance(live_evidence, dict):
+            merged["evidence"] = {**original_evidence, **live_evidence}
+        elif isinstance(original_evidence, dict) and not live_evidence:
+            merged["evidence"] = original_evidence
+
+        for proof_field in ("browser_proof", "poe_result"):
+            if not merged.get(proof_field) and original.get(proof_field):
+                merged[proof_field] = original[proof_field]
+        merged_findings.append(merged)
+    return merged_findings
 
 
 def _has_browser_proof(finding):
@@ -555,7 +605,7 @@ def run_target(name, api, timeout, do_auth, preset_scan_id=None, rescore_after_r
         live = fetch_live_findings(api, scan_id)
         if live is not None:
             retest_report = dict(report)
-            retest_report["findings"] = live
+            retest_report["findings"] = _post_retest_findings(report.get("findings"), live)
             post_card = collect_scorecard(retest_report, fx)
             post_card["phase"] = "post_retest"
             post_card["retest_settled"] = settled

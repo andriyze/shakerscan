@@ -92,3 +92,26 @@ claim instead of deleting it.
   so accidental scope shrinkage also fails.
 - Follow-up: Keep benchmark fixtures/tooling outside detector inputs; any future
   exclusion must identify a non-executable or non-detector boundary explicitly.
+
+### 2026-07-10 — Post-retest scoring discarded browser proof
+
+- Date: 2026-07-10
+- Artifact: `results/benchmark-runs/benchmark-juice_shop-20260710T142656Z.json`
+  and `results/benchmark-runs/benchmark-juice_shop-20260710T142926Z.json` for scan
+  `6b869eae-66a8-4098-85ef-9a17cbde35c7`.
+- Issue: The scan report contained an explicit successful headless-browser proof
+  for a verified hash-route DOM XSS finding. Finding persistence omitted the
+  top-level `browser_proof`, and post-retest scoring replaced the scan finding
+  with the lossy database row. The first scorecard therefore reported 4/9 recall
+  and failed the browser-XSS gate despite the recorded execution proof.
+- Impact: The false miss affected benchmark interpretation only. It did not
+  change finding severity, verified High/Critical count, scanner detector inputs,
+  or production proof promotion.
+- Correction: Structured browser/PoE proof contracts are now persisted inside
+  redacted evidence, and post-retest scoring overlays live verdicts onto the
+  original scan finding instead of discarding immutable scan-time proof. The
+  corrected scorecard reports 5/9 recall and passes the browser-XSS gate while
+  retaining the honest overall failure at 5 verified High/Critical against 6.
+- Follow-up: Keep post-processing additive to original proof artifacts. A retest
+  verdict may update verification state, but must not erase the evidence that
+  established the original deterministic or browser proof.

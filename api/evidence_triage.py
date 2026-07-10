@@ -16,6 +16,11 @@ TRIAGE_FIELDS_FROM_FINDING = (
     "confidence",
     "confidence_tier",
 )
+PROOF_FIELDS_FROM_FINDING = (
+    "browser_proof",
+    "poe_result",
+    "proof_state",
+)
 
 _REDACT_SENSITIVE_KEY_RE = re.compile(
     r"^(authorization|cookie|set[-_]?cookie|proxy-authorization|"
@@ -66,6 +71,12 @@ def build_evidence_with_triage(finding: dict[str, Any]) -> dict[str, Any] | None
         base = {}
     else:
         base = {"raw": evidence}
+
+    for key in PROOF_FIELDS_FROM_FINDING:
+        value = finding.get(key)
+        if value is None or key in base:
+            continue
+        base[key] = value
 
     triage: dict[str, Any] = {}
     for key in TRIAGE_FIELDS_FROM_FINDING:

@@ -29,3 +29,24 @@ def test_redact_finding_evidence_removes_nested_auth_material():
     assert "eyJabc123" not in as_text
     assert "live-secret-token" not in as_text
     assert redacted["triage"]["verified"] is True
+
+
+def test_build_evidence_preserves_structured_proof_contracts():
+    evidence = build_evidence_with_triage({
+        "evidence": {"url": "https://example.test/search"},
+        "browser_proof": {
+            "proven": True,
+            "technique": "headless_xss_dialog",
+            "request_headers": {"Authorization": "Bearer live-secret-token-12345"},
+        },
+        "poe_result": {"proven": True, "confidence": 0.99},
+        "proof_state": "verified",
+    })
+
+    redacted = redact_finding_evidence(evidence)
+
+    assert redacted["browser_proof"]["proven"] is True
+    assert redacted["browser_proof"]["technique"] == "headless_xss_dialog"
+    assert redacted["browser_proof"]["request_headers"]["Authorization"] == "[REDACTED]"
+    assert redacted["poe_result"]["proven"] is True
+    assert redacted["proof_state"] == "verified"

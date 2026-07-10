@@ -23,9 +23,7 @@
         "sqli",
         "xss"
       ],
-      "browser_proven_high_critical_families": [
-        "xss"
-      ],
+      "browser_proven_high_critical_families": [],
       "suspected_high_critical": 0,
       "false_positive_risk": 0.0,
       "coverage_percent": 0.424,
@@ -74,14 +72,6 @@
           "evidence": "POST SQL Injection (sqlite - auth_bypass_boolean)"
         },
         {
-          "id": "xss-dom-search",
-          "family": "xss",
-          "route": "#/search",
-          "proof": "browser",
-          "min_severity": "high",
-          "evidence": "DOM XSS in Hash Route (iframe_js_uri) (2 occurrences)"
-        },
-        {
           "id": "exposed-ftp-listing",
           "family": "sensitive_exposure",
           "route": "/ftp",
@@ -99,6 +89,14 @@
         }
       ],
       "expected_missed": [
+        {
+          "id": "xss-dom-search",
+          "family": "xss",
+          "route": "#/search",
+          "proof": "browser",
+          "min_severity": "high",
+          "evidence": null
+        },
         {
           "id": "xss-reflected",
           "family": "xss",
@@ -133,6 +131,32 @@
         }
       ],
       "benchmark_followups": [
+        {
+          "id": "benchmark-miss:juice-shop:xss-dom-search",
+          "benchmark": "juice-shop",
+          "expectation_id": "xss-dom-search",
+          "family": "xss",
+          "route": "#/search",
+          "proof_required": "browser",
+          "min_severity": "high",
+          "status": "ready",
+          "operator_hints": [
+            "browser_proof_required"
+          ],
+          "blocked_by": [],
+          "reason": "missing_verified_benchmark_expectation",
+          "next_test_action": {
+            "command": "scan.focused_family",
+            "risk_tier": "active",
+            "parameters": {
+              "target": "http://host.docker.internal:3001",
+              "check_family": "xss",
+              "scan_type": "smart",
+              "budget_profile": "thorough",
+              "no_early_stop": true
+            }
+          }
+        },
         {
           "id": "benchmark-miss:juice-shop:xss-reflected",
           "benchmark": "juice-shop",
@@ -270,7 +294,7 @@
           }
         }
       },
-      "expected_recall": 0.56,
+      "expected_recall": 0.44,
       "phase": "post_retest",
       "retest_settled": true,
       "two_user": false,
@@ -325,8 +349,8 @@
         },
         {
           "gate": "require_browser_proven_xss",
-          "pass": true,
-          "detail": "browser XSS present"
+          "pass": false,
+          "detail": "no browser-proven XSS"
         }
       ],
       "passed": false,
@@ -604,9 +628,7 @@
             "sqli",
             "xss"
           ],
-          "browser_proven_high_critical_families": [
-            "xss"
-          ],
+          "browser_proven_high_critical_families": [],
           "suspected_high_critical": 0,
           "false_positive_risk": 0.0,
           "coverage_percent": 0.424,
@@ -655,14 +677,6 @@
               "evidence": "POST SQL Injection (sqlite - auth_bypass_boolean)"
             },
             {
-              "id": "xss-dom-search",
-              "family": "xss",
-              "route": "#/search",
-              "proof": "browser",
-              "min_severity": "high",
-              "evidence": "DOM XSS in Hash Route (iframe_js_uri) (2 occurrences)"
-            },
-            {
               "id": "exposed-ftp-listing",
               "family": "sensitive_exposure",
               "route": "/ftp",
@@ -680,6 +694,14 @@
             }
           ],
           "expected_missed": [
+            {
+              "id": "xss-dom-search",
+              "family": "xss",
+              "route": "#/search",
+              "proof": "browser",
+              "min_severity": "high",
+              "evidence": null
+            },
             {
               "id": "xss-reflected",
               "family": "xss",
@@ -714,6 +736,32 @@
             }
           ],
           "benchmark_followups": [
+            {
+              "id": "benchmark-miss:juice-shop:xss-dom-search",
+              "benchmark": "juice-shop",
+              "expectation_id": "xss-dom-search",
+              "family": "xss",
+              "route": "#/search",
+              "proof_required": "browser",
+              "min_severity": "high",
+              "status": "ready",
+              "operator_hints": [
+                "browser_proof_required"
+              ],
+              "blocked_by": [],
+              "reason": "missing_verified_benchmark_expectation",
+              "next_test_action": {
+                "command": "scan.focused_family",
+                "risk_tier": "active",
+                "parameters": {
+                  "target": "http://host.docker.internal:3001",
+                  "check_family": "xss",
+                  "scan_type": "smart",
+                  "budget_profile": "thorough",
+                  "no_early_stop": true
+                }
+              }
+            },
             {
               "id": "benchmark-miss:juice-shop:xss-reflected",
               "benchmark": "juice-shop",
@@ -851,7 +899,7 @@
               }
             }
           },
-          "expected_recall": 0.56,
+          "expected_recall": 0.44,
           "phase": "post_retest",
           "retest_settled": true,
           "two_user": false,

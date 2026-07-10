@@ -50,6 +50,36 @@ def test_live_finding_preserves_browser_proof_evidence():
     assert b._has_browser_proof(finding) is True
 
 
+def test_post_retest_merge_preserves_scan_time_browser_proof():
+    proof = {"proven": True, "technique": "headless_xss_dialog"}
+    scan_finding = {
+        "title": "DOM XSS in Hash Route",
+        "tool": "hash_route_dom_xss",
+        "url": "https://example.test/#/search?q=payload",
+        "severity": "high",
+        "verified": True,
+        "browser_proof": proof,
+        "evidence": {"payload": "redacted-marker"},
+    }
+    live_finding = b._norm_live_finding({
+        "title": scan_finding["title"],
+        "tool": scan_finding["tool"],
+        "url": scan_finding["url"],
+        "severity": "high",
+        "last_verification_verdict": "exploited",
+        "evidence": {"triage": {"verified": True}},
+    })
+
+    merged = b._post_retest_findings([scan_finding], [live_finding])
+
+    assert len(merged) == 1
+    assert merged[0]["verified"] is True
+    assert merged[0]["browser_proof"] == proof
+    assert merged[0]["evidence"]["payload"] == "redacted-marker"
+    assert merged[0]["evidence"]["triage"]["verified"] is True
+    assert b._has_browser_proof(merged[0]) is True
+
+
 def test_verified_family_gate_is_independent_of_expectation_severity():
     fixture = {
         "name": "unit",
