@@ -99,7 +99,25 @@ def _norm_live_finding(f):
         "severity": f.get("severity"),
         "verified": bool(f.get("verified")) or verdict == "exploited",
         "confidence_tier": f.get("confidence_tier"),
+        "evidence": f.get("evidence"),
+        "browser_proof": f.get("browser_proof"),
     }
+
+
+def _has_browser_proof(finding):
+    """Require an explicit successful browser proof, not a generic verified flag."""
+    evidence = finding.get("evidence")
+    if isinstance(evidence, str):
+        try:
+            evidence = json.loads(evidence)
+        except (TypeError, ValueError):
+            evidence = {}
+    if not isinstance(evidence, dict):
+        evidence = {}
+    for proof in (finding.get("browser_proof"), evidence.get("browser_proof")):
+        if isinstance(proof, dict) and proof.get("proven") is True:
+            return True
+    return False
 
 
 def fetch_live_findings(api, scan_id, timeout=30):
@@ -336,11 +354,22 @@ def collect_scorecard(report, fixture):
         hay = " ".join(str(f.get(k, "")) for k in
                        ("title", "url", "category", "type", "cwe", "description", "name")).lower()
         sev = (f.get("severity") or "").lower()
-        enriched.append((f, hay, finding_classes(hay), sev, bool(f.get("verified"))))
+        enriched.append((
+            f,
+            hay,
+            finding_classes(hay),
+            sev,
+            bool(f.get("verified")),
+            _has_browser_proof(f),
+        ))
 
     high_crit = [e for e in enriched if e[3] in ("high", "critical")]
     verified_hc = [e for e in high_crit if e[4]]
     suspected_hc = [e for e in high_crit if not e[4]]
+    verified_hc_families = sorted({family for entry in verified_hc for family in entry[2]})
+    browser_proven_hc_families = sorted({
+        family for entry in high_crit if entry[5] for family in entry[2]
+    })
 
     auth_states = ((report.get("smart_coverage") or {}).get("auth_states_tested") or [])
     auth_cfg = fixture.get("auth") or {}
@@ -372,7 +401,7 @@ def collect_scorecard(report, fixture):
         minsev = SEV_RANK.get(ent.get("min_severity", "high"), 3)
         proof = ent.get("proof", "deterministic")
         hit = None
-        for f, hay, classes, sev, ver in high_crit:
+        for f, hay, classes, sev, ver, browser_proven in high_crit:
             if not (classes & compat):
                 continue
             if toks and not any(t in hay for t in toks):
@@ -381,6 +410,8 @@ def collect_scorecard(report, fixture):
                 continue
             if proof in ("verified", "browser") and not ver:
                 continue  # required proof not present
+            if proof == "browser" and not browser_proven:
+                continue
             hit = f
             break
         (found if hit else missed).append({
@@ -395,6 +426,8 @@ def collect_scorecard(report, fixture):
     return {
         "total_findings": len(findings),
         "verified_high_critical": len(verified_hc),
+        "verified_high_critical_families": verified_hc_families,
+        "browser_proven_high_critical_families": browser_proven_hc_families,
         "suspected_high_critical": len(suspected_hc),
         "false_positive_risk": round(len(suspected_hc) / max(1, len(high_crit)), 2),
         "coverage_percent": cov.get("coverage"),
@@ -442,13 +475,13 @@ def apply_gates(card, fixture):
         chk("max_unverified_high_ratio", card["false_positive_risk"] <= m,
             f"{card['false_positive_risk']} <= {m}")
     if gates.get("require_verified_sqli"):
-        ok = any(e["family"] == "sqli" for e in card["expected_found"])
+        ok = "sqli" in (card.get("verified_high_critical_families") or [])
         chk("require_verified_sqli", ok, "verified SQLi present" if ok else "no verified SQLi")
     if gates.get("require_browser_proven_xss"):
-        ok = any(e["family"] == "xss" and e["proof"] == "browser" for e in card["expected_found"])
+        ok = "xss" in (card.get("browser_proven_high_critical_families") or [])
         chk("require_browser_proven_xss", ok, "browser XSS present" if ok else "no browser-proven XSS")
     if gates.get("require_verified_bola"):
-        ok = any(e["family"] == "bola" for e in card["expected_found"])
+        ok = "bola" in (card.get("verified_high_critical_families") or [])
         chk("require_verified_bola", ok, "verified BOLA present" if ok else "no verified BOLA")
     return results
 

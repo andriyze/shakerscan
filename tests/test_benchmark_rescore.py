@@ -39,6 +39,63 @@ def test_inconclusive_retest_is_not_verified():
         assert f["verified"] is False, verdict
 
 
+def test_live_finding_preserves_browser_proof_evidence():
+    proof = {"proven": True, "technique": "headless_xss_dialog"}
+    finding = b._norm_live_finding({
+        "title": "Reflected XSS",
+        "severity": "high",
+        "evidence": {"browser_proof": proof},
+    })
+
+    assert b._has_browser_proof(finding) is True
+
+
+def test_verified_family_gate_is_independent_of_expectation_severity():
+    fixture = {
+        "name": "unit",
+        "expected": [{
+            "id": "critical-sqli",
+            "family": "sqli",
+            "route": "/api/search",
+            "min_severity": "critical",
+            "proof": "verified",
+        }],
+        "gates": {"require_verified_sqli": True},
+    }
+    card = b.collect_scorecard({
+        "findings": [{
+            "title": "SQL Injection",
+            "url": "https://example.test/api/search",
+            "severity": "high",
+            "verified": True,
+        }],
+    }, fixture)
+
+    assert card["expected_found"] == []
+    gate = next(g for g in b.apply_gates(card, fixture) if g["gate"] == "require_verified_sqli")
+    assert gate["pass"] is True
+
+
+def test_browser_gate_requires_explicit_successful_browser_proof():
+    fixture = {"name": "unit", "expected": [], "gates": {"require_browser_proven_xss": True}}
+    base = {
+        "title": "Reflected XSS",
+        "url": "https://example.test/search",
+        "severity": "high",
+        "verified": True,
+    }
+
+    unproven = b.collect_scorecard({"findings": [base]}, fixture)
+    failed = next(g for g in b.apply_gates(unproven, fixture) if g["gate"] == "require_browser_proven_xss")
+    assert failed["pass"] is False
+
+    proven = b.collect_scorecard({
+        "findings": [{**base, "browser_proof": {"proven": True}}],
+    }, fixture)
+    passed = next(g for g in b.apply_gates(proven, fixture) if g["gate"] == "require_browser_proven_xss")
+    assert passed["pass"] is True
+
+
 def test_fleet_gate_blocks_mixed_fleet(monkeypatch):
     monkeypatch.setattr(b, "_get", lambda *a, **k: {
         "fleet_uniform": False, "count": 16, "current_count": 5,
