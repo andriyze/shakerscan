@@ -15,6 +15,7 @@ Fixtures: tests/fixtures/benchmarks/<name>.yaml
 """
 import argparse
 import base64
+import hashlib
 import json
 import os
 import re
@@ -373,11 +374,13 @@ def mint_token(target_url, login_cfg, email, password):
     login = login_cfg.get("url", "/rest/user/login")
     ef = login_cfg.get("email_field", "email")
     pf = login_cfg.get("password_field", "password")
+    phone_suffix = int.from_bytes(hashlib.sha256(email.encode("utf-8")).digest()[:8], "big") % 1_000_000_000
+    phone_number = str(9_000_000_000 + phone_suffix)
     # best-effort signup (ignore failures — account may exist)
     for signup in ("/api/Users/", "/identity/api/auth/signup"):
         try:
             _post(base + signup, {ef: email, pf: password, "passwordRepeat": password,
-                                  "name": email.split("@")[0], "number": "9999999999",
+                                  "name": email.split("@")[0], "number": phone_number,
                                   "securityQuestion": {"id": 1}, "securityAnswer": "x"})
         except Exception:
             pass

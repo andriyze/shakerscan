@@ -211,6 +211,30 @@ def test_submit_target_uses_fresh_role_distinct_principal_accounts(monkeypatch):
     assert "run123" not in str(receipt)
 
 
+def test_mint_token_uses_distinct_stable_ten_digit_signup_numbers(monkeypatch):
+    signup_bodies = []
+
+    def fake_post(url, body, timeout=30):
+        if url.endswith("/auth/login"):
+            return {"token": "server-token"}
+        signup_bodies.append(body)
+        return {"status": 200}
+
+    monkeypatch.setattr(b, "_post", fake_post)
+    login = {"url": "/identity/api/auth/login"}
+
+    assert b.mint_token("http://target.test", login, "user1@shaker.test", "pass") == "server-token"
+    first_numbers = {body["number"] for body in signup_bodies}
+    signup_bodies.clear()
+    assert b.mint_token("http://target.test", login, "user2@shaker.test", "pass") == "server-token"
+    second_numbers = {body["number"] for body in signup_bodies}
+
+    assert len(first_numbers) == 1
+    assert len(second_numbers) == 1
+    assert first_numbers != second_numbers
+    assert all(len(number) == 10 and number.isdigit() for number in first_numbers | second_numbers)
+
+
 def test_submit_target_aborts_before_queueing_when_second_principal_is_missing(monkeypatch):
     tokens = iter(["user1-secret", None])
     monkeypatch.setattr(b, "mint_token", lambda *args, **kwargs: next(tokens))

@@ -1084,7 +1084,9 @@ the authoritative execution controls.
 DONE phase 41 for repeatable authenticated benchmark bootstrap: each submission mints fresh,
 role-distinct test-account emails under one per-run nonce before comparing stable server-issued JWT
 identity claims. Prior benchmark accounts with stale passwords can no longer block a later authorized
-run, and account identifiers remain absent from the content-free queue receipt.
+run, signup-only phone identifiers are deterministically unique per fresh account for APIs that
+enforce global phone uniqueness, and account identifiers remain absent from the content-free queue
+receipt.
 
 **Done when:** recorded two-user benchmark scorecards show the targeted miss becoming a deterministic
 finding, not merely an attempted endpoint.
