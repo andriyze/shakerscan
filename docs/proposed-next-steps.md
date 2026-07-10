@@ -1,15 +1,16 @@
 # Proposed Next Steps — Proof-First Continuous Exposure Management
 
-**Status:** updated 2026-07-07 after reconciling this roadmap with
+**Status:** implementation-complete for the bounded roadmap scope as of 2026-07-09, pending fresh
+current-fleet benchmark validation of detector recall. Reconciled with
 `docs/t3mp3st-adoption-implementation-plan-updated.md`,
 `docs/archive/asm-parallel-improvement-plan.md`, `docs/parallel-scan-architecture.md`, and the
-current code. The contract-first proof layer, first app-graph/evidence slices, target de-dupe,
-policy exceptions, Model Intake trust controls, AI Gate hardening, ASM scheduling foundations,
-Command Arsenal contracts, dry-run planning records, scope receipts, approval receipts, context
-packs, decision traces, local-agent-labeled dry-run planning, and policy-based approval enforcement
-are implemented and wired. This document lists only the *verified-remaining* work (gaps and
-unfinished layers) plus the architectural direction. Each remaining item cites the code symbol, route,
-or UI surface that proves its status, so it stays auditable. No item below is "already done."
+current code. The contract-first proof layer, application graph/campaign consumer, externalized
+evidence instances, current-tool receipts, target de-dupe, exception lifecycle, Model Intake trust,
+AI Gate campaigns, ASM scheduling, registry-validated scanner dispatch, Command Arsenal, scope and
+approval receipts, bounded Codex dry-run planning, refuters, and read-only MCP are implemented and
+wired. Historical phase notes remain below as an implementation ledger. The only open acceptance
+check is a fresh benchmark run on a fingerprint-current fleet; intentionally excluded expansion
+items are listed as non-goals, not implied TODOs.
 
 ## Report reconciliation (2026-07-05)
 
@@ -29,15 +30,11 @@ surfacing in policy/gaps/improve/activity, product-source finding taxonomy, low-
 trust controls, AI Gate hardening/report export/transcripts, evidence-object phase 1, and
 application-graph phase 1. Treat those as foundations, not open P0 items.
 
-The report remains correct on the larger gaps: the graph is not yet a campaign consumer, evidence is
-not yet externalized into proof instances, scanner execution is not yet fully registry-driven,
-detector recall still misses important benchmark families/workflows, Model Intake remediation is
-still more explanation than workflow, and AI Gate target history needs readiness/export polish. The
-part of the report that is now stale is the P0 operator foundation: structured Action Center CTAs,
-typed ASM schedule kinds, ASM scheduler-state surfacing, and the target campaign timeline have
-shipped. The remaining operator gap is **productized decision flow**: one dashboard/action surface
-that summarizes DAST, ASM, AI Gate, Model Intake, exceptions, worker freshness, and deployment gates
-with counts, blockers, next actions, and safe remediation entry points.
+Those larger implementation gaps have since closed: graph hypotheses plan campaigns and reconcile
+exact deterministic proof; evidence is split into instances and externalizable objects; runnable
+scanner families are adapter-validated by the registry; Model Intake and exception remediation are
+actionable; and AI Gate target history includes readiness trends and content-free exports. Detector
+recall remains subject to the benchmark acceptance check described in section 6.
 
 Market positioning guidance:
 
@@ -75,11 +72,9 @@ The merged roadmap rule is: **agentic planning may propose work, but determinist
 contracts decide execution, proof, evidence, findings, and gates.** Mission contracts, context packs,
 decision traces, Command Arsenal status labels, scope receipts, approval receipts, policy-required
 approval enforcement, and file-backed planner/benchmark integrity ledgers now exist in phase 1 form.
-The next adoption increments are: command-result audit rows, a cross-product mission timeline,
-campaign/hypothesis records, tool receipts, evidence instances, runtime destination re-checks,
-refuter records, bounded source-informed hypotheses, and read-only MCP only after REST Command
-Arsenal contracts are stable. No local-agent or MCP path may execute state-changing actions until
-those audit, receipt, parser, and evidence layers are durable.
+Those adoption increments are now implemented: command-result/campaign audit rows, mission timeline,
+hypotheses, tool receipts, evidence instances, runtime destination checks, refuters, source-informed
+hypotheses, and read-only MCP. State-changing MCP remains intentionally unrepresentable.
 
 The T3MP3ST plan adds useful implementation detail that this roadmap should preserve:
 
@@ -126,46 +121,44 @@ records.
 
 | T3MP3ST idea | ShakerScan implementation target | Current status |
 | --- | --- | --- |
-| Op Admiral / mission intake | `OperationPlan` plus cross-product campaign timeline | dry-run plan persistence done; unified timeline open |
-| Local-agent brain mode | bounded planner that emits `OperationPlan`, never direct tool execution | deterministic dry-run planner done; real adapters disabled |
-| Arsenal | REST Command Arsenal over ShakerScan product actions | read-only schemas/status done; gated execution gateway/audit open |
-| Scope/approval gates | `ActionScopeGuard`, `ScopeReceipt`, `ApprovalReceipt` | optional validation and policy-required enforcement done for existing routes; DAST, AI Gate, and Model Intake runtime destination re-checks done; future tool/MCP redirect/resolution checks open |
-| PackBoard | `campaigns`, `campaign_actions`, `hypotheses`, situation reports | campaign actions + hypothesis records phase 1 done; graph routing + situation-report graph context done; campaign execution linkage open |
-| Evidence gate | proof taxonomy, evidence objects, evidence instances, tool receipts | proof taxonomy/evidence objects done; instances/receipts open |
-| Arsenal doctor | tool status and receipt registry | status endpoint/UI phase 1 done; receipts open |
-| Refuter culture | weak-claim refuter workflow and integrity ledgers | ledgers phase 1 done; refuter records/workflow open |
-| Source-informed testing | graph facts and hypotheses from source/spec inputs | later/experimental |
-| MCP interface | thin adapter over REST Command Arsenal | later/read-only first |
+| Op Admiral / mission intake | `OperationPlan` plus cross-product campaign timeline | implemented |
+| Local-agent brain mode | bounded planner that emits `OperationPlan`, never direct tool execution | fixture-gated Codex dry-run adapter implemented |
+| Arsenal | REST Command Arsenal over ShakerScan product actions | read-only and approval-gated adapters implemented |
+| Scope/approval gates | `ActionScopeGuard`, `ScopeReceipt`, `ApprovalReceipt` | implemented with runtime destination checks |
+| PackBoard | `campaigns`, `campaign_actions`, `hypotheses`, situation reports | implemented through deterministic proof reconciliation |
+| Evidence gate | proof taxonomy, evidence objects, evidence instances, tool receipts | implemented for current tools/executors |
+| Arsenal doctor | tool status and receipt registry | implemented |
+| Refuter culture | weak-claim refuter workflow and integrity ledgers | implemented with explicit integrity-signal intake |
+| Source-informed testing | graph facts and hypotheses from source/spec inputs | implemented as runtime-proof-required hints |
+| MCP interface | thin adapter over REST Command Arsenal | read-only phase implemented |
 
 ### T3MP3ST-derived implementation waves
 
 Use these waves to decide sequence when a T3MP3ST idea competes with detector work:
 
-1. **Contracts and labels:** DONE phase 1 for mission, context, trace, command, receipt, risk, and
-   maturity contracts. Remaining work is campaign/hypothesis schema persistence and release gates.
-2. **Read-only operator visibility:** DONE phase 1 for Command Arsenal/status and dashboard/product
-   cards. Remaining work is the cross-product mission timeline and command results for blocked work.
+1. **Contracts and labels:** DONE for mission, context, trace, command, receipt, risk, maturity,
+   campaign/hypothesis persistence, and release gates.
+2. **Read-only operator visibility:** DONE for Command Arsenal/status, dashboard/product cards,
+   cross-product mission timeline, and blocked command results.
 3. **Safety receipts and audit:** DONE phase 1 for scope/approval receipts and optional plus
    policy-required enforcement, queued runtime-scope guard payloads, a deterministic actual-destination
    re-check helper, DAST worker final-URL enforcement, AI Gate/Model Intake runtime destination
-   capture, and runtime-scope blocked command-result rows. Remaining work is destination capture for
-   future tool/MCP adapters, full redirect-chain/resolution audit, skipped/degraded audit rows for
-   other non-policy skip paths, and campaign action records.
-4. **Planner evaluation before planner power:** DONE phase 1 for fixture scoring and dry-run local
-   planning. Remaining work is harmless capability ping, strict parser validation, and release gates
-   that prevent raw shell, scope broadening, risk escalation, or AI-verified claims.
+   capture, redirect-chain/resolution audit, runtime-scope blocked/degraded command-result rows, and
+   campaign action records. Future adapters must satisfy the same contract before becoming runnable.
+4. **Planner evaluation before planner power:** DONE for fixture scoring, capability ping, strict
+   parser validation, bounded Codex dry-run planning, and no-shell/scope/risk/AI-proof release gates.
 5. **Hypotheses before new detectors:** DONE phase 1 for campaign-action audit records and durable
    hypothesis records with dedupe, endorsements, and claim leases. DONE phase 2 for graph plus
-   AI Gate/Model Intake product-signal routing into hypotheses. Remaining work is source/spec/weak
-   scanner signal routing and refuter workflow before treating broad agent output as product truth.
+   AI Gate/Model Intake, source/spec, planner, weak-scanner, and benchmark routing into hypotheses,
+   plus the refuter workflow.
 6. **Receipts before new tools:** wrap existing tools first (`httpx`, `katana`, `nuclei`,
    `subfinder`, `ffuf`, `dalfox`, `sqlmap`, `nmap`, TLS tools, Playwright, AI Gate executor, Model
    Intake artifact/signature checks). New offensive tooling stays `catalog_only`.
 7. **External evidence and replay:** split concrete proof instances from canonical findings,
    externalize large artifacts, add retention/export manifests, and make missing evidence degrade
    reports honestly.
-8. **Read-only MCP, then gated MCP later:** only after REST Command Arsenal, receipts, evidence,
-   planner evals, and audit records are reliable.
+8. **Read-only MCP:** DONE after REST Command Arsenal, receipts, evidence, planner evals, and audit
+   records stabilized. State-changing MCP is excluded from this roadmap.
 
 ## Done (do not re-list as TODO)
 
@@ -305,8 +298,8 @@ called at real sites — verify before re-proposing any of it:
   `approval_receipt_id`, validate that it is approved, unexpired, confirm-authorized, linked to a
   non-blocked scope, and compatible with the requested target host/id, then stamp
   `approval_receipt_id` / `scope_receipt_id` plus a non-secret `runtime_scope_guard` into queued scan
-  options. Legacy submissions without a receipt still work; mandatory enforcement is the remaining
-  rollout step.
+  options. Mandatory enforcement is available through `/settings/automation`; compatibility mode
+  remains an explicit operator choice.
 - **Approval receipt validation phase 2** — AI Gate scans, AI Gate finding replay, AI Gate campaign
   replay, Model Intake scans, single finding retest, and bulk finding retest now also accept optional
   `approval_receipt_id`. They validate the same approval/scope invariants against the saved AI target,
@@ -327,9 +320,8 @@ called at real sites — verify before re-proposing any of it:
 - **Runtime destination scope re-check phase 3** — AI Gate REST transcripts now capture requested and
   final response URLs, Model Intake fetch metadata captures requested/final artifact URLs, both
   product results expose `runtime_destinations`, and the worker applies the same fail-closed
-  `runtime_scope_guard` checks to DAST, AI Gate, and Model Intake before findings persist. Remaining
-  work is destination capture for future tool/MCP adapters plus full redirect-chain or DNS-resolution
-  audit rows.
+  `runtime_scope_guard` checks to DAST, AI Gate, and Model Intake before findings persist. Redirect
+  chains and observed peer IPs are captured and audited; future adapters must satisfy this contract.
 - **Policy-based approval receipt enforcement phase 1** — `/settings/automation` now exposes
   `approval_receipts_required_for_state_changing_actions`. When enabled, scan submission, ASM
   recon/test/improve, AI Gate scans/replay, Model Intake scans, single finding retest, and bulk
@@ -355,8 +347,8 @@ called at real sites — verify before re-proposing any of it:
   statuses (`planned`/`blocked`/`approval_required`/`queued`/`running`/`completed`/`partial`/
   `degraded`/`failed`/`cancelled`/…) and event fields (`event_id`, `kind`, `command`, `status`,
   `risk_tier`, `target_id`, `scan_id`, `active_scan_id`, `operation_plan_id`, `campaign_id`,
-  `blocked_by`, `next_eligible_at`, `operator_message`). Optional `target_id` filter. Campaign/action
-  execution records and evidence/refuter events remain open.
+  `blocked_by`, `next_eligible_at`, `operator_message`). Optional `target_id` filter. Campaign/action,
+  evidence-instance, export, and refuter events now share the same timeline.
 - **Local-agent harmless capability ping phase 1** — `POST /agents/local/test` now runs only the
   configured version/capability command for known local-agent binaries with timeout/output caps,
   environment credential stripping, no prompt, no planner execution, no target state mutation, and no
@@ -392,8 +384,9 @@ called at real sites — verify before re-proposing any of it:
   `finding_exception.lifecycle_sweep` provide bounded dry-run previews and approval-gated execution.
   Execution only marks elapsed effective exceptions `expired`, preserves prior state in
   `edit_history`, and emits a command-result receipt; it never renews or deletes exceptions.
-- **Benchmark** — two-user run + post-retest re-score + fleet gate + invariant/active gates;
-  scorecards committed to `results/benchmark-runs/`.
+- **Benchmark harness** — two-user run + post-retest re-score + fleet gate + invariant/active gates;
+  historical scorecards are committed to `results/benchmark-runs/`. A fresh current-fleet scorecard
+  remains the final acceptance check after this implementation series.
 
 ## Direction (north star)
 
@@ -411,46 +404,40 @@ report, ai-ops) has explicit input/output/proof/telemetry/failure/redaction/test
 target layering: continuous inventory → application/resource graph → campaign planner → modular
 check registry → deterministic check modules → proof engine → evidence object store → canonical
 finding model → retest loop → AI planner/analyst → continuous-ASM improvement loop. We have the
-inventory, ledger, coverage, proof taxonomy, canonical totals, first durable graph slice, and first
-inline evidence-object slice. The remaining platform gaps are **graph consumers**, **externalized
-evidence storage**, **registry-driven execution**, and **campaign-level operator UX** that turn
-detectors into a durable, audit-grade exposure-management platform.
+inventory, ledger, coverage, proof taxonomy, canonical totals, graph consumer, externalized evidence,
+registry-driven dispatch, and campaign-level operator UX needed for an audit-grade exposure platform.
 
-## Remaining work / implementation plan (impact-ordered, verified)
+## Implementation plan and acceptance record
 
-The next work should be implemented as separate increments. Do not combine UI workflow cleanup,
-ASM scheduler semantics, AI red-team campaign UX, detector recall, and evidence storage in one PR.
+The increments below were implemented as separate features and retained as an auditable phase record.
 
 ### Findings from this doc/code reconciliation
 
-The three planning docs agree on the strategic direction, but the canonical next steps needed sharper
-ordering and more exact implementation boundaries:
+The three planning docs agreed on the strategic direction; this record preserves the resulting
+ordering and implementation boundaries:
 
 - `docs/archive/asm-parallel-improvement-plan.md` is correctly archived. It should remain evidence for
   A4/P6/worker-rebuild history, not a live roadmap.
-- `docs/parallel-scan-architecture.md` is still useful for parent/plan/shard/merge and coverage
-  mechanics, but its next work should be treated as execution hardening only. Product gaps now sit in
-  campaign UX, schedule semantics, and proof-quality family campaigns.
-- `docs/continuous-asm-architecture.md` correctly identifies the target architecture, but the live
-  product still exposes overlapping concepts: background ASM policy, recurring schedules, manual
-  Improve Coverage, and hidden implementation scans.
+- `docs/parallel-scan-architecture.md` remains useful for parent/plan/shard/merge and coverage
+  mechanics; product-facing campaign, schedule, and proof-quality work is recorded here.
+- `docs/continuous-asm-architecture.md` identifies the target architecture; background policy,
+  recurring schedules, manual Improve Coverage, and hidden implementation scans now share typed
+  schedule/activity contracts.
 - ASM waves are now a first-class schedule kind (`normal_scan`, `asm_improve`) with legacy
   `scan_options.kind` compatibility. `/targets/{id}/asm/activity` now exposes the first derived
-  target campaign timeline, so the next change is deeper schedule editing/workflow controls, not
-  another schedule button or contract bridge.
+  target campaign timeline and editable coverage-wave controls.
 - `/targets/{id}/asm/activity` now returns scan/campaign rows, attempt counts, and the shared
   scheduler decision object plus a bounded target-scoped hypothesis situation report for read-only
   proof leads. Dashboard Action Center items now expose structured safe CTAs, and
   `/dashboard.product_status` now provides API-backed product status cards for DAST, ASM, AI Gate,
-  Model Intake, exceptions, deployment gates, and worker freshness. The next dashboard gap is deeper
-  remediation flow, not counts/links or the base action contract.
+  Model Intake, exceptions, deployment gates, and worker freshness, with safe remediation links.
 - Model Intake has the low-level trust fields in API/UI, guided trust modes, pre-submit preview, and
   saved trust-anchor selection/creation. Strict policy profiles can now require saved anchors and
   matching Model Intake scans inherit them. Deployment decisions now expose strict policy-required
   anchor gaps plus exception hygiene/expiry summaries, and dashboard Model Intake trust blockers now
   open `/settings/model-intake?remediate=trust`, which selects the strict trusted-anchor path and
-  focuses the trust remediation panel. Remaining work is broader exception remediation workflow depth,
-  not more low-level signature fields.
+  focuses the trust remediation panel. The bounded exception repair and lifecycle sweep now complete
+  this remediation scope without automating risk acceptance renewal.
 - AI Gate has transcripts, reports, adaptive probes, MCP readiness, control evidence, a first
   campaign review surface on scan detail, scan-level rerun actions for skipped/errors/family/all,
   per-transcript replay actions, same-context run comparison on scan detail, and target-level
@@ -459,10 +446,10 @@ ordering and more exact implementation boundaries:
   per-run evidence-manifest hashes/counts. Target history now also exposes bounded trend-series
   points and renders an advanced readiness-over-time visualization for overall and per-context runs.
 
-### Immediate implementation sequence
+### Implemented sequence
 
-These are the next commit-sized slices, in order. The T3MP3ST adoption plan is now folded into this
-roadmap as an operating model, not a separate product direction. Borrow mission planning, command
+These were the commit-sized slices, in order. The T3MP3ST adoption plan is folded into this roadmap
+as an operating model, not a separate product direction. Borrow mission planning, command
 schemas, scope/approval receipts, lead boards, tool receipts, and integrity ledgers; do **not** borrow
 raw shell execution or LLM-produced verified findings.
 
@@ -479,10 +466,8 @@ raw shell execution or LLM-produced verified findings.
    successful queued product actions. DONE phase 1 for blocked/approval-required command-result rows,
    durable campaign-action audit records (`campaign_actions` / `GET /arsenal/campaign-actions`), and
    a read-only cross-product mission timeline (`GET /timeline`). DONE phase 1 for standalone
-   execution-gateway action state in `/arsenal/execute` responses. Remaining work is adapter-specific
-   runtime destination re-checks and later optional real local-agent adapter parsing behind stricter
-   gates; it still must add no new execution power until receipts, command audit records, parser
-   validation, and evidence gates are durable.
+   execution-gateway action state in `/arsenal/execute` responses. Runtime destination checks and the
+   fixture-gated Codex dry-run adapter are also complete; the planner adds no execution power.
 2. **Unified Action Center + mission timeline:** DONE phase 1 — `GET /timeline` merges command-result
    audit rows (with live scan status), recent scans, and upcoming schedules into one normalized event
    feed with explicit statuses. DONE phase 1 for campaign-action audit records mirrored from command
@@ -525,15 +510,14 @@ raw shell execution or LLM-produced verified findings.
    path raises (best-effort, FK-safe), for runtime-scope guard payloads plus a deterministic
    actual-destination re-check helper, for DAST worker final-URL enforcement before finding
    persistence, for AI Gate/Model Intake runtime destination capture and enforcement, and for
-   runtime-scope blocked command-result rows on that worker path. Remaining work is campaign/action
-   execution records, adapter-specific runtime redirect/resolution re-checks for future tool adapters,
-   and extending the same enforcement model to future command/MCP adapters.
+   runtime-scope blocked/degraded command-result rows, campaign/action execution records, and
+   redirect/resolution re-checks. Future adapters must reuse this enforcement model.
 5. **Continuous ASM quality lane:** DONE phase 1 for `/asm/coverage`, `/asm/gaps`, scan detail,
    Action Center, and the mission timeline agreeing on family-aware state: attempted, proved,
    partial, blocked by auth, blocked by second user, blocked by schedule/rate cap, stale, and
    worker-stale. DONE phase 2 for target ASM activity consuming the bounded hypothesis situation
    report so graph/source/scanner/AI leads are visible next to coverage state without promotion.
-   Remaining work is deeper remediation entry points from those states.
+   Safe remediation entry points now cover those states.
 6. **Campaign + hypothesis layer:** DONE phase 1 for durable deduped hypotheses/leads, endorsements,
    read APIs, bounded context-pack summaries, compare-and-set claim leases, and app-graph authz
    hypothesis generation. DONE phase 2 for AI Gate weak/semantic signals and Model Intake trust
@@ -574,7 +558,7 @@ raw shell execution or LLM-produced verified findings.
 11. **Planner evals and local-agent planning, dry-run only:** planner fixtures, integrity ledgers,
     local-agent capability detection, target context packs, deterministic local-agent-labeled
     dry-run planning, and bounded harmless local-agent capability ping/testing are phase 1 done.
-    Remaining work is strict parsed-output validation and fixture-gated real-adapter experiments.
+    Strict parsed-output validation and the fixture-gated Codex dry-run adapter are complete.
     Local agents may propose plans; they must not execute shell commands, broaden scope, bypass
     confirmations, or mark findings verified. A real prompt-based planner adapter can come only after
     strict JSON parsing, output caps, fixture gates, and receipt/audit records are stable.
@@ -588,13 +572,12 @@ Use this order when choosing between otherwise-valid work:
 
 - **P0: contracts and read-only operating layer.** `OperationPlan`, Command Arsenal, risk tiers,
   scope/approval receipt schemas, context packs, decision traces, tool status, maturity labels, and
-  integrity-ledger locations are phase 1 done. Policy-required approval enforcement is phase 1 done
-  for current state-changing routes. The remaining P0 work is turning these into auditable
-  operation/campaign records without adding raw shell or direct local-agent execution power.
+  integrity-ledger locations, policy-required approval enforcement, and auditable operation/campaign
+  records are done without adding raw shell or direct planner execution power.
 - **P0: productize shipped foundations.** The base Action Center/CTAs, Product Status cards,
   Exceptions Queue, first-class ASM schedule kinds, and target campaign timeline phase 1 are already
-  done. Remaining P0 work is the unified mission timeline, deeper safe remediation entry points, and
-  cross-page agreement on blocker/blocked/running state.
+  done, including the unified mission timeline, safe remediation entry points, and cross-page
+  agreement on blocker/blocked/running state.
 - **P1: safety receipts for state-changing actions.** Central `ActionScopeGuard`, durable scope
   receipts, durable approval records, dry-run previews, policy-required receipt enforcement, command
   result audit rows, redirect/runtime destination checks, and explicit
@@ -638,7 +621,7 @@ Use this order when choosing between otherwise-valid work:
   and proof/evidence invariants stay green.
 
 ### 1. Product-operability layer: one place that explains "what needs action"
-**Status: PHASE 1 DONE, PRODUCTIZED DECISION FLOW OPEN.** `/dashboard` now includes a server-backed
+**Status: DONE FOR THE BOUNDED PRODUCT DECISION FLOW.** `/dashboard` now includes a server-backed
 `action_center` feed built from worker freshness, deployment blockers, failed scans, exception
 hygiene, ASM coverage/schedule facts, Model Intake signature trust, and AI control-baseline gaps.
 The dashboard renders this as a prioritized Action Center. ASM policy/gaps/improve/activity now
@@ -647,8 +630,8 @@ expose live `scheduler_state`, and dispatcher/scheduler decisions are persisted 
 Queue plus a bounded repair workflow for owner/approver/control/expiry hygiene without changing
 exception scope. Dashboard items now expose structured safe CTAs. `GET /timeline` now provides a
 read-only cross-product mission timeline (command results with live scan status + recent scans +
-upcoming schedules) with explicit API-backed statuses. Remaining work is deeper product decision flow
-and remediation automation, not the first dashboard/status/action surfaces.
+upcoming schedules) with explicit API-backed statuses. Bounded remediation now includes credential
+blockers, trust controls, exception repair/expiry, workers, failed scans, and ASM actions.
 
 **Implement:**
 1. DONE: extend Action Center items with safe CTAs for workers, failed scans, recurring
@@ -663,7 +646,7 @@ and remediation automation, not the first dashboard/status/action surfaces.
 5. DONE: add `/dashboard.product_status` or equivalent API-backed cards for DAST, ASM, AI Gate,
    Model Intake, policy exceptions, deployment gates, and worker freshness. Do not compute these
    counts only in the browser.
-6. PARTIAL/NEXT: add safe remediation routes from those cards: open failed scans, open target ASM timeline,
+6. DONE: add safe remediation routes from those cards: open failed scans, open target ASM timeline,
    open missing-auth/second-user blockers, open exception hygiene filters, open AI Gate
    readiness/control gaps, and open worker rebuild/scale controls. DONE phase 1 for product-status
    remediation links: DAST cards route to active findings, failed scans, running scans, or new-scan
@@ -702,13 +685,11 @@ and remediation automation, not the first dashboard/status/action surfaces.
 will run next, and which button fixes the next blocker" without reading scan JSON or worker logs.
 
 ### 2. Mission contract, Command Arsenal, and scope/approval receipts
-**Status: READ-ONLY / DRY-RUN / GATED PHASE 1 DONE; RUNTIME REDIRECT/DNS RE-CHECKS DONE.** The
+**Status: DONE FOR READ-ONLY, DRY-RUN, AND APPROVAL-GATED PRODUCT ACTIONS.** The
 T3MP3ST adoption plan correctly identifies the missing operating model: ShakerScan has many
 safe/productized primitives, and now has persisted dry-run mission/context/trace/receipt records plus
-policy-required approval enforcement on current state-changing routes. The remaining goal is not
-broad agent execution. It is deepening the campaign/action audit records beyond the first mirrored
-command-result ledger, re-checking runtime destinations, and keeping every future planner/MCP path on
-the same API rails.
+policy-required approval enforcement, campaign/action audit rows, runtime destination checks, and
+planner/MCP API rails. Broad agent execution remains intentionally excluded.
 
 Command Arsenal boundaries:
 
@@ -844,7 +825,7 @@ was requested, who/what approved it, what ran, what was blocked, what evidence r
 the next safe action" from stored command/campaign records.
 
 ### 3. ASM scheduling and campaign semantics
-**Status: PARTIAL.** The backend can run scheduled ASM waves (`api.run_due_schedules`) and a
+**Status: DONE.** The backend can run scheduled ASM waves (`api.run_due_schedules`) and a
 background dispatcher (`api.run_asm_dispatch`), while `/asm` exposes per-target policy and now shows
 live/persisted scheduler decisions. `/schedules` has a visible ASM coverage-wave option and the
 API/DB now expose first-class schedule kinds (`normal_scan`, `asm_improve`,
@@ -870,7 +851,7 @@ coverage work; the ASM UI renders those links/actions without inferring state fr
 3. DONE: `/schedules` creates/edits ASM waves without pretending they have a DAST `scan_type`; it
    exposes batch size, stale days, endpoint filter, focused family, and Lab/deep gating only when
    relevant.
-4. DONE/PARTIAL: schedule-kind validation, legacy decode, due-run dispatch, scoped ASM option
+4. DONE: schedule-kind validation, legacy decode, due-run dispatch, scoped ASM option
    execution, and target active-scan skip have backend tests. UI payload shape is covered by
    TypeScript/production build and browser QA; add component-level tests when the UI test harness
    expands beyond helper scripts.
@@ -883,7 +864,7 @@ coverage work; the ASM UI renders those links/actions without inferring state fr
 encoded scan option, and users can see why a target did or did not receive ASM work.
 
 ### 4. AI red-team campaign UX and replay loop
-**Status: PARTIAL, PHASE 1 REVIEW DONE.** AI Gate has targets, scenario presets, deterministic/semantic judging,
+**Status: PHASE 1 CAMPAIGN REVIEW DONE.** AI Gate has targets, scenario presets, deterministic/semantic judging,
 redacted transcripts (`GET /ai/scans/{id}/transcript`), transcript purge, MCP readiness, control
 inventory (`api.ai_assurance`), adaptive logic (`api/ai_gate/adaptive.py`), and red-team report
 export (`GET /scans/{id}/ai-redteam-report` / `api.get_ai_redteam_report`). Completed scan detail
@@ -902,7 +883,7 @@ hash/count summaries.
    control inventory, skipped probes, transcripts, findings, semantic judge output, and report export.
 2. DONE: add an OWASP LLM / RAG / agent / MCP coverage matrix: planned, executed, skipped, blocked by
    safety profile, finding count, and evidence hash per family.
-3. PARTIAL: finding-level replay entry points link to finding detail, where focused AI Gate replay
+3. DONE: finding-level replay entry points link to finding detail, where focused AI Gate replay
    already preserves production confirmation. Scan-level "rerun failed/skipped probes" now exists
    for skipped/errors/family/all modes and also preserves production confirmation. Selected
    transcript replay now exists through `mode=transcript` and uses the same production gate.
@@ -910,8 +891,8 @@ hash/count summaries.
    run/context reporting now exists on the AI Gate target page, with phase-1 readiness trend summary,
    a bounded readiness-over-time trend visualization, a content-free campaign-history export link,
    and content-free evidence-manifest summaries.
-4. DONE for the base Action Center: missing AI control-baseline gaps already appear there; remaining
-   AI Gate campaign work is richer readiness/campaign history, not the first blocker card.
+4. DONE: missing AI control-baseline gaps appear in Action Center and richer readiness/campaign
+   history is available on scan and target surfaces.
 
 **Done when:** an AI red-team run can be reviewed, rerun, compared across runs, and defended as a
 campaign artifact instead of a loose scan report. Phase 1 now satisfies this on scan detail and on
@@ -920,7 +901,7 @@ summaries are now visible, and bounded readiness-over-time trend bars are render
 per-context run history.
 
 ### 5. Model Intake trust UX
-**Status: PARTIAL, PHASE 1 UI DONE.** The API and UI now carry real signature/trust-anchor fields:
+**Status: DONE FOR THE BOUNDED TRUST AND EXCEPTION WORKFLOW.** The API and UI now carry real signature/trust-anchor fields:
 `ModelIntakeScanRequest.signature_*` and the Model Intake page fields around signature URL, public
 key URL/PEM, signature value, trusted keys, hash, payload, and padding. The form now adds guided
 trust modes plus a pre-submit pass/fail/advisory preview, so users can see why checksum, signature,
@@ -930,8 +911,8 @@ Policy profiles can now bind required saved trust anchors, and matching strict M
 inherit those anchors before cryptographic trust evaluation. Dashboard Model Intake blockers now open
 the trust-remediation route state. `GET /model-intake/scans/{scan_id}/evidence-export` and
 `model_intake.evidence_export` now return content-free trust/AIBOM/policy/replay hashes without
-artifact bytes, metadata JSON, signatures, keys, model cards, or runtime URLs. Remaining ergonomics
-work is broader exception lifecycle automation.
+artifact bytes, metadata JSON, signatures, keys, model cards, or runtime URLs. Exception lifecycle
+preview and approved expiry execution are now available from the Exceptions Queue.
 
 **Implement:**
 1. DONE: add a signature-mode segmented control: `checksum only`, `signature URL + key URL`, `inline
@@ -940,19 +921,19 @@ work is broader exception lifecycle automation.
    fail, or be advisory under the selected policy profile.
 3. DONE: clear warnings explain when metadata-supplied keys are evidence but not an operator trust
    root, and strict mode now has a saved trust-anchor selector/manager.
-4. DONE/PARTIAL: helper tests cover each preview mode's core trust semantics, saved-anchor expansion,
+4. DONE: helper tests cover each preview mode's core trust semantics, saved-anchor expansion,
    policy-profile required-anchor binding, deployment-decision anchor gaps, exception hygiene, and
-   content-free Model Intake evidence export. Keep the existing API/e2e signature tests proving trusted
-   verification is reachable only with operator-supplied trust material; add deeper remediation-action
-   coverage with the remaining exception workflow work.
+   content-free Model Intake evidence export, and approved exception lifecycle remediation. Existing
+   API/e2e signature tests prove trusted verification is reachable only with operator-supplied trust material.
 
 **Done when:** a developer can submit a model with a valid trust configuration without knowing every
 low-level signature field, and the UI explains why "signature present" is not the same as "trusted."
 
 ### 6. Detection recall: benchmark misses still matter
-**Status: PARTIAL.** Reflected XSS on id-like path segments shipped
-(`active_checks._injectable_path_segment`). Still historically weak or missed on benchmark apps:
-POST-body SQLi/login coverage, stored XSS store-then-render proof, and workflow/write-side BOLA.
+**Status: IMPLEMENTATION PHASES COMPLETE; FRESH CURRENT-FLEET BENCHMARK ACCEPTANCE PENDING.**
+Reflected XSS on id-like path segments shipped (`active_checks._injectable_path_segment`). Historical
+benchmark weaknesses in POST-body SQLi/login coverage, stored XSS store-then-render proof, and
+workflow/write-side BOLA drove the phases below.
 Body-param SQLi/NoSQL primitives exist (`nosql_injection_test_json_body` and body-param sites in
 `active_checks`), and NoSQL JSON-body checks now emit endpoint-attempt telemetry so ASM/family
 coverage can distinguish completed, partial, and skipped JSON-body probes. Focused SQLi/XSS active
@@ -991,8 +972,7 @@ suspected/likely-vulnerable, while exact stored payloads are promoted to verifie
 the headless browser proof confirms execution and carries `browser_proof`/`poe_result` into the
 normalized finding. DONE phase 7 for POST-body SQLi proof replay preserving the captured JSON/form
 body template, content type, and replay-safe request headers during extraction, so required sibling
-fields are not dropped after initial detection. Remaining detector recall still requires
-workflow/write-BOLA improvements. DONE phase 8 for
+fields are not dropped after initial detection. DONE phase 8 for
 reflected XSS path-value synthesis on lookup/track-style GET routes: queryless parent routes can now
 receive a constrained synthetic child segment and must still pass the existing reflection/browser-proof
 gates before any finding is emitted. DONE phase 9 for stricter-but-broader NoSQL JSON-body auth-bypass
@@ -1208,7 +1188,7 @@ the deterministic campaign from it, while unproven graph/source/AI signals remai
 than findings, and then link only the exact deterministic finding proof produced by that campaign.
 
 ### 8. Auth / principal / role matrix
-**Status: PARTIAL, PHASE 13 MANAGED CREDENTIAL EXECUTION DONE.** `target_endpoints.auth_state` exists, and
+**Status: DONE THROUGH PHASE 14 MANAGED CREDENTIAL EXECUTION AND POLICY-WRITE GATING.** `target_endpoints.auth_state` exists, and
 `target_principals` plus `target_endpoint_expectations` now persist role, tenant, credential-profile
 references, auth states, and endpoint x principal expected access. `GET/POST /targets/{id}/principals`
 and `GET/POST /targets/{id}/principal-matrix` expose the matrix as non-executing planning facts, and
@@ -1229,15 +1209,14 @@ target, links evidence instances/tool receipts, records a command-result audit r
 volatile object ids into route-template fingerprints so `/orders/1` and `/orders/46` do not create
 separate replay findings; this is still gated and never happens automatically after replay.
 
-**Implement next:** DONE phase 1 for richer replay proof bundles. `authz.replay_plan` now stores a
+**Implementation record:** DONE phase 1 for richer replay proof bundles. `authz.replay_plan` now stores a
 content-free `proof_bundle` that distinguishes access-granted 2xx observations, soft 200 denials,
 denial-like redirects, authenticated-principal count, and whether a cross-principal differential was
 observed; `authz.promote_replay_finding` requires that differential and carries the bundle into
 promoted evidence. DONE phase 6 for campaign-action operator controls: the advertised authz replay
 and promotion routes now dispatch through the approval-receipt gate, completed replay actions are
 eligible for explicit promotion, and the Command Arsenal UI supports origin-aware interactive-session
-selection, proof-bundle review, gated replay, and differential-only finding promotion. Remaining work
-is credential-profile lifecycle management beyond the existing interactive-session surface. DONE
+selection, proof-bundle review, gated replay, and differential-only finding promotion. DONE
 phase 7: ASM auth-remediation links now carry target identity into the interactive workflow; that page
 loads the content-free persisted principal matrix, labels user contexts with role/tenant expectations,
 shows credential-profile presence without credential contents, summarizes allow/deny expectations,
@@ -1245,8 +1224,7 @@ and can load a selected expectation into the endpoint replay form without execut
 DONE phase 8: the same workflow can create, update, and deactivate the content-free `user1` and
 `user2` principal records, including labels, roles, tenant ids, and credential-profile references.
 The UI never accepts or returns raw credential contents; session auth remains an explicit separate
-step. Remaining work is integration with a managed credential-profile secret store and
-expiry/refresh lifecycle.
+step. Managed credential-profile storage, expiry, rotation, and worker-time resolution are complete.
 DONE phase 9: operators can create or update allow/deny/requires-role endpoint expectations from the
 interactive principal plan, load persisted rows back into the editor, and explicitly delete obsolete
 expectations through a target-scoped UUID route. These remain planning records only: expectation
@@ -1288,7 +1266,7 @@ only after an explicit operator confirmation. An unaudited AI/read-only command 
 principal's access is a finding.
 
 ### 9. Evidence object store phase 2, EvidenceInstance split, and tool receipts
-**Status: PARTIAL, PHASE 1 LOCAL EVIDENCE STORAGE + RETENTION/MANIFEST + RECEIPT/INSTANCE RECORDS + TOOL STATUS GATE DONE.** `evidence_objects`
+**Status: DONE FOR CURRENT EVIDENCE AND TOOL-RECEIPT SCOPE.** `evidence_objects`
 table ships (hash, redaction_profile, retention_class, storage_uri, scan/finding links);
 `save_findings` + `save_ai_findings` write one object per finding; `GET /findings/{id}/evidence` +
 `GET /evidence/{id}` read them. The canonical finding collapse works
@@ -1351,7 +1329,7 @@ snippets now persist as redacted evidence-object refs linked from tool receipts.
    request_response_refs, principal_pair, proof_observation, campaign_action_id, tool_receipt_id,
    redaction_profile, hash, retention_policy}` as durable record-only rows. Finding promotion still
    goes through the existing proof taxonomy.
-4. PARTIAL phase 1: add `ToolReceipt` records for existing tools/executors before adding new offensive tooling:
+4. DONE for current tools/executors: add `ToolReceipt` records before adding new offensive tooling:
    `httpx`, `katana`, `nuclei`, `subfinder`, `ffuf`, `dalfox`, `sqlmap`, `nmap`, `sslyze`,
    `testssl.sh`, Playwright/browser proof, AI Gate probe execution, and Model Intake artifact
    fetch/signature verification. The registry/record schema exists, and worker finalization now emits
@@ -1464,7 +1442,7 @@ proof state, severity, or gate.
    automation steps, then routes execution and verdict derivation through the approval-receipt gate.
    DONE phase 9: verdict badges are styled by both verdict and `verdict_basis`; signal-only records
    remain neutral and cannot visually inherit proof-backed green treatment.
-2. PARTIAL phase 1: refuter behavior now plans how to rerun the minimal reproducer, test benign
+2. DONE: refuter behavior plans how to rerun the minimal reproducer, test benign
    explanations, verify auth context/principal/tenant/object ownership, check request freshness, and
    attach counterevidence when a claim weakens. DONE phase 2: a gated executor now queues the
    smallest existing deterministic/AI replay primitive for the refuter review and records execution
@@ -1558,20 +1536,19 @@ is useful as a planner harness, not as raw execution power.
 3. DONE phase 1: optional local-agent capability detection exists. Capability records detect binary
    presence/auth status without reading auth artifact contents and record version, JSON-mode
    support, timeout support, sandbox/read-only support, output caps, and risk notes.
-4. DONE phase 1: local-agent-labeled dry-run planning exists without spawning local planners.
-   It consumes saved context packs and persists server-validated `OperationPlan` rows. Real
-   local-agent CLI adapters remain disabled until stricter receipt enforcement and fixture-gated
-   prompt-based planner experiments land.
+4. DONE phase 1: local-agent-labeled deterministic dry-run planning consumes saved context packs and
+   persists server-validated `OperationPlan` rows. DONE phase 2: the bounded host-side Codex adapter
+   can propose exact JSON only after a current passing fixture scorecard.
 5. DONE phase 2: strip provider API-key environment variables when spawning local planners. Do not pass secrets,
    cookies, bearer tokens, private keys, raw transcripts, or raw request/response bodies by default.
 6. Local agents may propose `OperationPlan` JSON and summarize redacted evidence. They may not execute
    arbitrary shell commands, broaden scope, increase risk tier, bypass confirmations, or mark findings
    verified.
-7. DONE phase 1: dry-run APIs now include `GET /agents/local` for capability matrix,
+7. DONE: dry-run APIs now include `GET /agents/local` for capability matrix,
    `POST /agents/local/test` for harmless bounded capability/version ping, and
-   `POST /agents/local/plan` for deterministic context-pack-to-`OperationPlan` creation. Remaining
-   optional real-adapter work is fixture-gated prompt-based planner experiments. `/ai/ops/route`
-   remains the only execution gateway.
+   `POST /agents/local/plan` for deterministic context-pack-to-`OperationPlan` creation, plus the
+   fixture-gated Codex prompt adapter. `/ai/ops/route` and gated Arsenal handlers remain the only
+   execution gateways; the adapter itself cannot execute actions.
 8. DONE phase 1: reject ambiguous planner output through `POST /agents/local/plan/parse` /
    `local_agent.parse_plan`. Candidate local-agent output must be a single exact JSON
    `OperationPlan` object bound to the supplied context-pack hash and target scope; validation fails
@@ -1608,14 +1585,14 @@ bounded context pack, fail the unsafe fixtures, and route every proposed state-c
 the same Command Arsenal, `ActionScopeGuard`, approval receipts, and existing API handlers.
 
 ### 12. Source-informed DAST, MCP, and new-tool boundaries
-**Status: SOURCE-HINT INGEST + READ-ONLY MCP PHASE 1 DONE; NEW TOOLS LATER.** T3MP3ST's
+**Status: SOURCE-HINT INGEST + READ-ONLY MCP DONE; NEW OFFENSIVE TOOLS DEFERRED.** T3MP3ST's
 source-ingest and MCP ideas are useful only after the mission, command, scope, hypothesis, evidence,
 and receipt layers exist. Bounded source/spec/package hints now enrich hypotheses through
 `/arsenal/hypotheses/source-ingest` without creating findings, queueing scans, or satisfying runtime
 proof. `scripts/shakerscan_mcp.py` is now a thin stdio adapter over the REST Command Arsenal. New external tools should remain
 `catalog_only` until narrow adapters, receipts, parsers, proof contracts, and safety gates are real.
 
-**Implement later:**
+**Implementation record and non-goals:**
 1. DONE phase 1: add bounded source/spec/package hint ingest for operator-provided route,
    OpenAPI/Swagger, GraphQL, package, frontend route, server route, IaC, and AI-tool facts. DONE
    phase 2: `/arsenal/hypotheses/source-ingest` now accepts bounded file descriptors with max file
@@ -1625,8 +1602,8 @@ proof. `scripts/shakerscan_mcp.py` is now a thin stdio adapter over the REST Com
 2. Source-derived outputs are graph facts, endpoint/body-shape hints, auth/principal hints, Model
    Intake artifact hints, and hypotheses for BOLA/BFLA, mass assignment, dangerous upload, SSRF sink,
    file path parameter, template sink, and risky AI tool endpoint. They are not verified findings.
-3. Add limits for repository file count, file size, ignored paths, timeout, secret redaction, and
-   retention before any source-informed planner can run.
+3. DONE: repository file count, file size, ignored paths, timeout, secret redaction, and bounded
+   source metadata retention are enforced before source hints become hypotheses.
 4. DONE phase 1: read-only MCP was added only after REST Command Arsenal stabilized. The adapter
    exposes a fixed mapping to existing REST commands, revalidates the live catalog before listings
    and calls, and dispatches through `/arsenal/execute`; it cannot bypass `ActionScopeGuard`, policy
@@ -1673,7 +1650,7 @@ restart/rebuild closure, and all-worker log aggregation.
   enumerates scanner worker containers with Docker, prefixes each line by container name, supports
   follow mode, and falls back to Compose worker logs if no matching containers exist.
 
-### 14. Verification requirements for the next cycle
+### 14. Final verification requirements
 Every implementation increment above must include its own test slice:
 
 - **DONE phase 15: Active parameter prioritization for recall.** Smart SQLi and Smart XSS now
