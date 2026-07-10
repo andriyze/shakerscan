@@ -243,3 +243,17 @@ def test_request_contract_keeps_strong_query_when_later_rows_are_queryless():
     assert runtime["url"] == "https://app.example.test/api/search?locale=en"
     assert runtime["params"] == ["locale", "q"]
     assert runtime["param_defaults"] == {"locale": "en"}
+
+
+def test_options_method_expansion_requires_observed_request_contract():
+    assert scanner_module._supports_options_method_expansion({
+        "source": "crawl",
+        "request_contract_sources": ["crawl", "inferred"],
+    }) is False
+    assert scanner_module._supports_options_method_expansion({
+        "source": "crawl",
+        "request_contract_sources": ["crawl", "js_bundle_analysis"],
+    }) is True
+    assert scanner_module._supports_options_method_expansion({
+        "source": "har_discovery",
+    }) is True

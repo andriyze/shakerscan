@@ -2689,6 +2689,15 @@ _REQUEST_CONTRACT_STRENGTH_LABELS = {
     5: "runtime_observed",
 }
 
+_OPTIONS_EXPANSION_OBSERVED_SOURCES = frozenset({
+    "har_discovery",
+    "browser_api_capture",
+    "js_bundle_analysis",
+    "openapi",
+    "form",
+    "manual",
+})
+
 
 def _active_endpoint_contract_key(url: str, method: str) -> tuple[str, str]:
     parsed = urllib.parse.urlparse(str(url or ""))
@@ -2706,6 +2715,16 @@ def _active_endpoint_contract_key(url: str, method: str) -> tuple[str, str]:
 
 def _request_contract_source_strength(source: str) -> int:
     return _REQUEST_CONTRACT_STRENGTH.get(str(source or ""), 1)
+
+
+def _supports_options_method_expansion(endpoint: dict[str, Any]) -> bool:
+    """Only trust OPTIONS fan-out on a route backed by a request contract."""
+    sources = {
+        str(source or "").strip().lower()
+        for source in [endpoint.get("source"), *(endpoint.get("request_contract_sources") or [])]
+        if str(source or "").strip()
+    }
+    return bool(sources.intersection(_OPTIONS_EXPANSION_OBSERVED_SOURCES))
 
 
 def _merge_endpoint_url_query_contract(endpoint: dict[str, Any]) -> None:
@@ -8797,11 +8816,28 @@ async def build_report(target: str,
                     )
 
                 if not focused_manual_active_scope:
+                    har_candidate_paths = {
+                        _normalize_endpoint_url(str(candidate.get("url") or ""))
+                        for candidate in (har_test_targets or [])
+                        if candidate.get("url")
+                    }
+                    browser_candidate_paths = {
+                        _normalize_endpoint_url(str(candidate.get("url") or ""))
+                        for candidate in (browser_api_endpoints or [])
+                        if isinstance(candidate, dict) and candidate.get("url")
+                    }
                     for u in cand:
                         parsed = urllib.parse.urlparse(u)
                         params = list(urllib.parse.parse_qs(parsed.query, keep_blank_values=True).keys())
-                        # Real discovered endpoints get har_discovery priority; synthetic fallbacks get inferred
-                        source = "inferred" if u in cand_synthetic else "har_discovery"
+                        normalized_candidate = _normalize_endpoint_url(u)
+                        if u in cand_synthetic:
+                            source = "inferred"
+                        elif normalized_candidate in har_candidate_paths:
+                            source = "har_discovery"
+                        elif normalized_candidate in browser_candidate_paths:
+                            source = "browser_api_capture"
+                        else:
+                            source = "crawl"
                         _merge_endpoint({"url": u, "method": "GET", "params": params, "source": source})
 
                     lookup_added = 0
@@ -8827,10 +8863,10 @@ async def build_report(target: str,
                         ep_url = endpoint.get("url")
                         params = endpoint.get("params") or []
                         if ep_url and params:
-                            _merge_endpoint({"url": ep_url, "method": "GET", "params": params, "source": "har_discovery"})
+                            _merge_endpoint({"url": ep_url, "method": "GET", "params": params, "source": "crawl"})
                     for ep_url, params in (smart_discovery_data.get("discovered_params") or {}).items():
                         if ep_url and params:
-                            _merge_endpoint({"url": ep_url, "method": "GET", "params": params, "source": "har_discovery"})
+                            _merge_endpoint({"url": ep_url, "method": "GET", "params": params, "source": "crawl"})
 
                 # Add form-discovered endpoints (POST/GET) from discovery
                 def _is_token_param(name: str) -> bool:
@@ -9251,6 +9287,14 @@ async def build_report(target: str,
                     options_added = 0
                     for opt_url, methods in (options_method_results.get("methods_by_url") or {}).items():
                         if not opt_url or not methods:
+                            continue
+                        target_norm = _normalize_endpoint_url(opt_url)
+                        matching_contracts = [
+                            endpoint
+                            for endpoint in endpoints
+                            if _normalize_endpoint_url(str(endpoint.get("url") or "")) == target_norm
+                        ]
+                        if not any(_supports_options_method_expansion(endpoint) for endpoint in matching_contracts):
                             continue
                         parsed = urllib.parse.urlparse(opt_url)
                         for method in methods:
