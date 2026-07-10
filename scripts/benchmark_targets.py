@@ -18,6 +18,7 @@ import base64
 import json
 import os
 import re
+import secrets
 import sys
 import time
 import urllib.request
@@ -578,10 +579,11 @@ def submit_target(name, api, do_auth):
     two_user = False
     auth_cfg = fx.get("auth") if isinstance(fx.get("auth"), dict) else {}
     if do_auth and auth_cfg:
+        principal_nonce = secrets.token_hex(6)
         t1 = mint_token(
             fx["target_url"],
             auth_cfg.get("user1_login", {}),
-            "bench.u1@shaker.test",
+            f"bench.u1.{principal_nonce}@shaker.test",
             "Bench!Pass1",
         )
         if not t1:
@@ -592,7 +594,7 @@ def submit_target(name, api, do_auth):
             t2 = mint_token(
                 fx["target_url"],
                 auth_cfg.get("user2_login", auth_cfg.get("user1_login", {})),
-                "bench.u2@shaker.test",
+                f"bench.u2.{principal_nonce}@shaker.test",
                 "Bench!Pass2",
             )
             if not t2:

@@ -1081,6 +1081,10 @@ the discovered candidate inventory from the configured endpoint execution ceilin
 scheduled upper bound. A large pre-cap URL pool is no longer presented as if every candidate were
 scheduled for active replay, while the existing `smart_bola_test` endpoint and deadline limits remain
 the authoritative execution controls.
+DONE phase 41 for repeatable authenticated benchmark bootstrap: each submission mints fresh,
+role-distinct test-account emails under one per-run nonce before comparing stable server-issued JWT
+identity claims. Prior benchmark accounts with stale passwords can no longer block a later authorized
+run, and account identifiers remain absent from the content-free queue receipt.
 
 **Done when:** recorded two-user benchmark scorecards show the targeted miss becoming a deterministic
 finding, not merely an attempted endpoint.

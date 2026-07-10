@@ -188,6 +188,29 @@ def test_submit_target_requires_current_workers_and_returns_content_free_receipt
     assert "secret" not in str(receipt)
 
 
+def test_submit_target_uses_fresh_role_distinct_principal_accounts(monkeypatch):
+    minted = []
+    monkeypatch.setattr(b.secrets, "token_hex", lambda _size: "run123")
+
+    def fake_mint(_target, _login, email, _password):
+        minted.append(email)
+        return _jwt(email=email)
+
+    monkeypatch.setattr(b, "mint_token", fake_mint)
+    monkeypatch.setattr(b, "_post", lambda *_args, **_kwargs: {
+        "scan_id": "scan-unique", "job_id": "job-unique", "status": "queued",
+    })
+
+    receipt = b.submit_target("crapi", "http://scanner.test", True)
+
+    assert minted == [
+        "bench.u1.run123@shaker.test",
+        "bench.u2.run123@shaker.test",
+    ]
+    assert receipt["two_user"] is True
+    assert "run123" not in str(receipt)
+
+
 def test_submit_target_aborts_before_queueing_when_second_principal_is_missing(monkeypatch):
     tokens = iter(["user1-secret", None])
     monkeypatch.setattr(b, "mint_token", lambda *args, **kwargs: next(tokens))
