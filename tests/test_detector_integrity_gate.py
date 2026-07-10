@@ -1,4 +1,4 @@
-"""Release gate for benchmark-independent discovery and prioritization."""
+"""Release gate for benchmark-independent executable scanner logic."""
 
 import ast
 from pathlib import Path
@@ -6,8 +6,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 DETECTOR_MODULES = (
-    ROOT / "scanner" / "scanner_tools" / "discovery.py",
-    ROOT / "scanner" / "scanner_tools" / "active_prioritization.py",
+    ROOT / "scanner" / "scanner.py",
+    *sorted((ROOT / "scanner" / "scanner_tools").rglob("*.py")),
 )
 PROHIBITED_EXECUTABLE_LITERALS = (
     "juice-shop",
@@ -45,6 +45,7 @@ def _executable_string_constants(path: Path) -> list[tuple[int, str]]:
 
 
 def test_detector_modules_do_not_embed_benchmark_answers():
+    assert len(DETECTOR_MODULES) >= 80, "detector gate unexpectedly lost scanner module coverage"
     violations: list[str] = []
     for path in DETECTOR_MODULES:
         for line, value in _executable_string_constants(path):

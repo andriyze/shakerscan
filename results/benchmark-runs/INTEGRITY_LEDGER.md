@@ -74,5 +74,21 @@ claim instead of deleting it.
   versioned-route extraction, and retained method/body/source-based prioritization.
 - Follow-up: Enforce the universal-engine rule in regression tests and treat observed
   HTTP calls, schemas, browser/HAR traffic, and discovered client bases as route facts.
-  `tests/test_detector_integrity_gate.py` now blocks known benchmark hostnames and
-  service-mount answer strings from executable discovery/prioritization constants.
+  `tests/test_detector_integrity_gate.py` originally blocked known benchmark hostnames
+  and service-mount answer strings in only `discovery.py` and
+  `active_prioritization.py`; that narrow scope was an incomplete release guard.
+
+### 2026-07-09 — Detector integrity release gate scope corrected
+
+- Date: 2026-07-09
+- Artifact: `tests/test_detector_integrity_gate.py`
+- Issue: The initial release gate inspected two modules while executable detector,
+  orchestration, and proof logic spans `scanner.py` and roughly 80 modules under
+  `scanner/scanner_tools`. The ledger wording could be read as broader protection.
+- Impact: A benchmark hostname, product noun, or answer-key service mount added to an
+  uninspected scanner module would not have failed the release gate.
+- Correction: The gate now AST-parses `scanner.py` and every Python file under
+  `scanner/scanner_tools`, excludes only docstrings, and asserts a minimum module count
+  so accidental scope shrinkage also fails.
+- Follow-up: Keep benchmark fixtures/tooling outside detector inputs; any future
+  exclusion must identify a non-executable or non-detector boundary explicitly.
