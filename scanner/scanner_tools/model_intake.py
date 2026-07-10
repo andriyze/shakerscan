@@ -555,6 +555,15 @@ def _download_http(
             final_url = str(response.geturl() or "")
         except Exception:
             final_url = ""
+        remote_ip = None
+        try:
+            raw = getattr(getattr(response, "fp", None), "raw", None)
+            sock = getattr(raw, "_sock", None)
+            peer = sock.getpeername() if sock else None
+            if isinstance(peer, (list, tuple)) and peer:
+                remote_ip = str(peer[0])
+        except Exception:
+            remote_ip = None
         content_range = _parse_content_range(headers.get("Content-Range"))
         content_length = headers.get("Content-Length")
         try:
@@ -579,6 +588,8 @@ def _download_http(
             "requested_url": url,
             "final_url": final_url or url,
             "redirected": bool(final_url and final_url != url),
+            "redirect_chain": [final_url] if final_url and final_url != url else [],
+            "remote_ip": remote_ip,
             "status": status,
             "content_type": headers.get("Content-Type"),
             "content_length": content_length,
@@ -666,6 +677,11 @@ def _runtime_destination(
         record["source"] = meta.get("source")
     if meta.get("redirected") is not None:
         record["redirected"] = bool(meta.get("redirected"))
+    if isinstance(meta.get("redirect_chain"), list):
+        record["redirect_chain"] = meta.get("redirect_chain")
+    if meta.get("remote_ip"):
+        record["remote_ip"] = meta.get("remote_ip")
+        record["resolved_host"] = urllib.parse.urlparse(final_url or requested_url).hostname
     return redact_model_intake_value(record)
 
 

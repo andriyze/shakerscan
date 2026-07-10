@@ -304,10 +304,65 @@ def runtime_scope_guard_from_scope(scope: dict[str, Any]) -> dict[str, Any]:
         "allowed_root_domains": [str(item) for item in allowed_roots if str(item or "").strip()],
         "normalized_scope": normalized if isinstance(normalized, dict) else {},
         "requires_runtime_destination_check": True,
+        "requires_runtime_dns_check": True,
     }
     if scope.get("target_id"):
         guard["target_id"] = str(scope.get("target_id"))
     return guard
+
+
+def _evaluate_runtime_dns_observations(
+    urls: tuple[str, ...],
+    observations: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None,
+    *,
+    environment: str,
+) -> tuple[list[dict[str, Any]], list[str], list[str]]:
+    expected_hosts: list[str] = []
+    for url in urls:
+        parsed = _parse_absolute_http_url(str(url or "").strip())
+        host = _canonical_host(parsed.hostname or "") if parsed else ""
+        if host and host not in expected_hosts:
+            expected_hosts.append(host)
+
+    observations_by_host: dict[str, list[str]] = {}
+    for observation in observations or ():
+        if not isinstance(observation, dict):
+            continue
+        host = _canonical_host(observation.get("host"))
+        raw_ips = observation.get("ips")
+        if not isinstance(raw_ips, (list, tuple)):
+            raw_ips = [observation.get("ip")] if observation.get("ip") else []
+        ips = [str(item).strip() for item in raw_ips if str(item or "").strip()]
+        if host and ips:
+            observations_by_host.setdefault(host, []).extend(ips)
+
+    results: list[dict[str, Any]] = []
+    blocked: list[str] = []
+    warnings: list[str] = []
+    for host in expected_hosts:
+        try:
+            ipaddress.ip_address(host)
+            continue
+        except ValueError:
+            pass
+        ips = list(dict.fromkeys(observations_by_host.get(host, [])))
+        if not ips:
+            warnings.append("runtime_dns_unverified")
+            results.append({"host": host, "ips": [], "verdict": "degraded", "reason": "runtime_dns_unverified"})
+            continue
+        result: dict[str, Any] = {"host": host, "ips": ips, "verdict": "allowed"}
+        for ip in ips:
+            try:
+                ipaddress.ip_address(ip)
+            except ValueError:
+                blocked.append("runtime_dns_invalid")
+                result.update({"verdict": "blocked", "reason": "runtime_dns_invalid"})
+                continue
+            if _ip_scope_block_reason(ip, environment):
+                blocked.append("runtime_dns_private_range")
+                result.update({"verdict": "blocked", "reason": "runtime_dns_private_range"})
+        results.append(result)
+    return results, list(dict.fromkeys(blocked)), list(dict.fromkeys(warnings))
 
 
 def evaluate_runtime_destination_scope(
@@ -315,6 +370,7 @@ def evaluate_runtime_destination_scope(
     destination_url: str | None,
     *,
     redirect_urls: list[str] | tuple[str, ...] | None = None,
+    resolution_observations: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None = None,
 ) -> dict[str, Any]:
     """Re-check actual network destinations against an approval scope guard.
 
@@ -372,8 +428,46 @@ def evaluate_runtime_destination_scope(
         target_id=str(runtime_scope_guard.get("target_id") or "") or None,
     )
     payload = receipt_to_dict(receipt)
-    payload["status"] = "allowed" if payload.get("verdict") == "allowed" else "blocked"
-    if payload["status"] != "allowed" and not payload.get("blocked_by"):
+    dns_results: list[dict[str, Any]] = []
+    dns_blocked: list[str] = []
+    dns_warnings: list[str] = []
+    if runtime_scope_guard.get("requires_runtime_dns_check"):
+        dns_results, dns_blocked, dns_warnings = _evaluate_runtime_dns_observations(
+            (raw_destination, *(str(item or "") for item in (redirect_urls or ()))),
+            resolution_observations,
+            environment=str(runtime_scope_guard.get("environment") or "production"),
+        )
+        if dns_blocked:
+            payload.setdefault("checks", []).append({
+                "name": "runtime_dns_resolution",
+                "status": "blocked",
+                "message": "A runtime hostname resolved to a private, loopback, reserved, or invalid address.",
+            })
+        elif dns_warnings:
+            payload.setdefault("checks", []).append({
+                "name": "runtime_dns_resolution",
+                "status": "degraded",
+                "message": "One or more runtime hostname resolutions were not observed.",
+            })
+        else:
+            payload.setdefault("checks", []).append({
+                "name": "runtime_dns_resolution",
+                "status": "passed",
+                "message": "Observed runtime hostname resolutions remained in policy.",
+            })
+    payload["resolution_observations"] = dns_results
+    payload["blocked_by"] = list(dict.fromkeys([*(payload.get("blocked_by") or []), *dns_blocked]))
+    payload["warnings"] = list(dict.fromkeys([*(payload.get("warnings") or []), *dns_warnings]))
+    if payload["blocked_by"]:
+        payload["verdict"] = "blocked"
+        payload["status"] = "blocked"
+    elif payload["warnings"]:
+        payload["verdict"] = "degraded"
+        payload["status"] = "degraded"
+    else:
+        payload["verdict"] = "allowed"
+        payload["status"] = "allowed"
+    if payload["status"] == "blocked" and not payload.get("blocked_by"):
         payload["blocked_by"] = ["runtime_destination_unverified"]
     payload["runtime_scope_guard_present"] = True
     payload["scope_receipt_id"] = runtime_scope_guard.get("scope_receipt_id")

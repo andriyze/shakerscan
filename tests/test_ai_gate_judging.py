@@ -20,11 +20,31 @@ from ai_gate_scan import (  # noqa: E402
     _control_gap_findings,
     _apply_ai_gate_analysis_fields,
     _agent_execution_receipt_findings,
+    _ai_gate_runtime_destinations,
     _classify_response,
     _cross_principal_probe_extensions,
     _redact_secrets_for_judge,
     _semantic_review_priority,
 )
+
+
+def test_ai_gate_runtime_destinations_preserve_redirect_and_peer_ip_evidence():
+    destinations = _ai_gate_runtime_destinations(
+        {"endpoint_url": "https://app.example.com/api/chat"},
+        [{
+            "response_metadata": {
+                "request_url": "https://app.example.com/api/chat",
+                "final_url": "https://api.example.com/chat",
+                "redirect_chain": ["https://api.example.com/chat"],
+                "remote_ip": "8.8.8.8",
+            },
+        }],
+    )
+
+    request = next(item for item in destinations if item["label"] == "ai_gate_request")
+    assert request["redirect_chain"] == ["https://api.example.com/chat"]
+    assert request["remote_ip"] == "8.8.8.8"
+    assert request["resolved_host"] == "api.example.com"
 
 
 def test_judge_does_not_downgrade_finding_with_deterministic_proof():

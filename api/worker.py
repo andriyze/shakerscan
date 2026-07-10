@@ -5677,7 +5677,16 @@ def _runtime_destination_records(result: dict[str, Any], options: dict[str, Any]
     records: list[dict[str, Any]] = []
     seen: set[tuple[str, str, str]] = set()
 
-    def add(label: str, url: Any, final_url: Any = None, *, source: str | None = None) -> None:
+    def add(
+        label: str,
+        url: Any,
+        final_url: Any = None,
+        *,
+        source: str | None = None,
+        redirect_urls: Any = None,
+        resolved_ips: Any = None,
+        resolved_host: Any = None,
+    ) -> None:
         raw_url = str(url or "").strip()
         raw_final = str(final_url or raw_url).strip()
         if not raw_url and not raw_final:
@@ -5691,24 +5700,58 @@ def _runtime_destination_records(result: dict[str, Any], options: dict[str, Any]
             record["final_url"] = raw_final
         if source:
             record["source"] = source
+        if isinstance(redirect_urls, (list, tuple)):
+            record["redirect_urls"] = [str(item) for item in redirect_urls if str(item or "").strip()]
+        if isinstance(resolved_ips, (list, tuple)):
+            record["resolved_ips"] = [str(item) for item in resolved_ips if str(item or "").strip()]
+        elif str(resolved_ips or "").strip():
+            record["resolved_ips"] = [str(resolved_ips).strip()]
+        if str(resolved_host or "").strip():
+            record["resolved_host"] = str(resolved_host).strip()
         records.append(record)
 
     if run_kind in AI_GATE_RUN_KINDS:
         ai_gate = result.get("ai_gate") if isinstance(result.get("ai_gate"), dict) else {}
         for item in ai_gate.get("runtime_destinations") or ():
             if isinstance(item, dict):
-                add(str(item.get("label") or "ai_gate"), item.get("url"), item.get("final_url"), source=item.get("source"))
+                add(
+                    str(item.get("label") or "ai_gate"),
+                    item.get("url"),
+                    item.get("final_url"),
+                    source=item.get("source"),
+                    redirect_urls=item.get("redirect_urls") or item.get("redirect_chain"),
+                    resolved_ips=item.get("resolved_ips") or item.get("remote_ip"),
+                    resolved_host=item.get("resolved_host"),
+                )
         return records
 
     if run_kind in MODEL_INTAKE_RUN_KINDS:
         model_intake = result.get("model_intake") if isinstance(result.get("model_intake"), dict) else {}
         for item in model_intake.get("runtime_destinations") or ():
             if isinstance(item, dict):
-                add(str(item.get("label") or "model_intake"), item.get("url"), item.get("final_url"), source=item.get("source"))
+                add(
+                    str(item.get("label") or "model_intake"),
+                    item.get("url"),
+                    item.get("final_url"),
+                    source=item.get("source"),
+                    redirect_urls=item.get("redirect_urls") or item.get("redirect_chain"),
+                    resolved_ips=item.get("resolved_ips") or item.get("remote_ip"),
+                    resolved_host=item.get("resolved_host"),
+                )
         return records
 
     http = result.get("http") if isinstance(result.get("http"), dict) else {}
-    add("dast_final_url", http.get("final_url"), source="http_final_url")
+    final_url = str(http.get("final_url") or "").strip()
+    final_host = urllib.parse.urlparse(final_url).hostname if final_url else None
+    add(
+        "dast_http",
+        http.get("request_url") or final_url,
+        final_url,
+        source="http_observation",
+        redirect_urls=http.get("redirect_chain"),
+        resolved_ips=http.get("remote_ip"),
+        resolved_host=final_host,
+    )
     return records
 
 
@@ -5722,21 +5765,32 @@ def _evaluate_runtime_destination_records(
     checks: list[dict[str, Any]] = []
     blocked_by: list[str] = []
     warnings: list[str] = []
+    all_resolution_observations: list[dict[str, Any]] = []
+    for record in records:
+        resolved_ips = record.get("resolved_ips") if isinstance(record.get("resolved_ips"), list) else []
+        resolved_host = str(record.get("resolved_host") or "").strip()
+        if resolved_host and resolved_ips:
+            observation = {"host": resolved_host, "ips": resolved_ips}
+            if observation not in all_resolution_observations:
+                all_resolution_observations.append(observation)
     for record in records:
         url = str(record.get("url") or "").strip()
         final_url = str(record.get("final_url") or url).strip()
-        redirects = [final_url] if url and final_url and final_url != url else None
+        redirects = record.get("redirect_urls") if isinstance(record.get("redirect_urls"), list) else []
+        if url and final_url and final_url != url and final_url not in redirects:
+            redirects = [*redirects, final_url]
         check = evaluate_runtime_destination_scope(
             (options or {}).get("runtime_scope_guard"),
             url or final_url,
-            redirect_urls=redirects,
+            redirect_urls=redirects or None,
+            resolution_observations=all_resolution_observations,
         )
         check["label"] = record.get("label")
         check["source"] = record.get("source")
         check["url"] = url or final_url
         check["final_url"] = final_url or url
         checks.append(check)
-        if check.get("status") != "allowed":
+        if check.get("status") == "blocked":
             for reason in check.get("blocked_by") or ():
                 if reason not in blocked_by:
                     blocked_by.append(reason)
@@ -5746,8 +5800,8 @@ def _evaluate_runtime_destination_records(
 
     first = checks[0] if checks else {}
     return {
-        "verdict": "blocked" if blocked_by else "allowed",
-        "status": "blocked" if blocked_by else "allowed",
+        "verdict": "blocked" if blocked_by else ("degraded" if warnings else "allowed"),
+        "status": "blocked" if blocked_by else ("degraded" if warnings else "allowed"),
         "blocked_by": blocked_by,
         "warnings": warnings,
         "checks": checks,
@@ -5766,6 +5820,12 @@ def _apply_runtime_scope_guard_to_result(result: dict[str, Any], options: dict[s
     metadata["runtime_scope_check"] = check
     result["scan_metadata"] = metadata
     if check.get("status") == "allowed":
+        return result
+    if check.get("status") == "degraded":
+        metadata["runtime_scope_degraded"] = True
+        metadata["runtime_scope_degraded_reason"] = ",".join(
+            str(item) for item in check.get("warnings") or [] if str(item).strip()
+        ) or "runtime_scope_degraded"
         return result
 
     blocked_by = check.get("blocked_by") if isinstance(check.get("blocked_by"), list) else []
@@ -5791,7 +5851,7 @@ def _optional_uuid(value: Any) -> uuid.UUID | None:
         return None
 
 
-async def _record_runtime_scope_block_command_result(
+async def _record_runtime_scope_command_result(
     conn,
     *,
     scan_id: str | None,
@@ -5800,8 +5860,11 @@ async def _record_runtime_scope_block_command_result(
     options: dict[str, Any],
     runtime_scope_check: dict[str, Any],
 ) -> str | None:
-    blocked_by = runtime_scope_check.get("blocked_by") if isinstance(runtime_scope_check.get("blocked_by"), list) else []
-    reason = ",".join(str(item) for item in blocked_by if str(item).strip()) or "runtime_scope_blocked"
+    status = "degraded" if runtime_scope_check.get("status") == "degraded" else "blocked"
+    reasons = runtime_scope_check.get("warnings") if status == "degraded" else runtime_scope_check.get("blocked_by")
+    reasons = reasons if isinstance(reasons, list) else []
+    default_reason = "runtime_scope_degraded" if status == "degraded" else "runtime_scope_blocked"
+    reason = ",".join(str(item) for item in reasons if str(item).strip()) or default_reason
     try:
         row = await conn.fetchrow(
             """
@@ -5819,7 +5882,7 @@ async def _record_runtime_scope_block_command_result(
             RETURNING id
             """,
             "scan.runtime_scope_check",
-            "blocked",
+            status,
             False,
             str((options or {}).get("risk_tier") or "active"),
             _optional_uuid((options or {}).get("operation_plan_id")),
@@ -5831,9 +5894,13 @@ async def _record_runtime_scope_block_command_result(
             json.dumps([]),
             json.dumps([]),
             json.dumps([]),
-            json.dumps(blocked_by or ["runtime_scope_blocked"]),
+            json.dumps(reasons or [default_reason]),
             f"/scans/{scan_id}" if scan_id else None,
-            f"Blocked scan at runtime: actual destination failed scope re-check ({reason})",
+            (
+                f"Degraded scan at runtime: destination DNS evidence was incomplete ({reason})"
+                if status == "degraded"
+                else f"Blocked scan at runtime: actual destination failed scope re-check ({reason})"
+            ),
             json.dumps({
                 "target": target,
                 "runtime_scope_check": runtime_scope_check,
@@ -5844,6 +5911,11 @@ async def _record_runtime_scope_block_command_result(
     except Exception as exc:
         print(f"[worker] runtime scope command_result insert failed: {exc}", flush=True)
         return None
+
+
+async def _record_runtime_scope_block_command_result(conn, **kwargs) -> str | None:
+    """Backward-compatible wrapper for callers/tests using the phase-1 name."""
+    return await _record_runtime_scope_command_result(conn, **kwargs)
 
 
 def _failure_result_for_scan_error(result: dict[str, Any], error: Any, diag: Any) -> dict[str, Any]:
@@ -6108,6 +6180,20 @@ async def process_scan_job(job_data: dict):
                 """, error_detail[:2000], json.dumps(failure_result), completed_at, duration, uuid.UUID(scan_id))
                 await asm_inventory.finish_campaign(conn, campaign_id, status='failed')
             else:
+                metadata = result.get("scan_metadata") if isinstance(result.get("scan_metadata"), dict) else {}
+                runtime_check = metadata.get("runtime_scope_check") if isinstance(metadata, dict) else None
+                if metadata.get("runtime_scope_degraded") and isinstance(runtime_check, dict):
+                    command_result_id = await _record_runtime_scope_command_result(
+                        conn,
+                        scan_id=scan_id,
+                        campaign_id=campaign_id,
+                        target=target,
+                        options=options,
+                        runtime_scope_check=runtime_check,
+                    )
+                    if command_result_id:
+                        metadata["runtime_scope_command_result_id"] = command_result_id
+                        result["scan_metadata"] = metadata
                 await conn.execute("""
                     UPDATE scans SET
                         status = 'completed',

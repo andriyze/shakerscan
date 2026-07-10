@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import re
+import urllib.parse
 from typing import Any
 
 from ai_gate.budget import CHARS_PER_TOKEN_ESTIMATE, RequestBudget, TokenBudget
@@ -3990,14 +3991,22 @@ def _ai_gate_runtime_destinations(
     destinations: list[dict[str, Any]] = []
     seen: set[tuple[str, str, str]] = set()
 
-    def add(label: str, url: Any, final_url: Any = None, *, source: str | None = None) -> None:
+    def add(label: str, url: Any, final_url: Any = None, *, source: str | None = None) -> dict[str, Any] | None:
         raw_url = str(url or "").strip()
         raw_final = str(final_url or raw_url).strip()
         if not raw_url and not raw_final:
-            return
+            return None
         key = (label, raw_url, raw_final)
         if key in seen:
-            return
+            return next(
+                (
+                    item for item in destinations
+                    if item.get("label") == label
+                    and item.get("url") == (raw_url or raw_final)
+                    and item.get("final_url") == raw_final
+                ),
+                None,
+            )
         seen.add(key)
         record: dict[str, Any] = {"label": label, "url": raw_url or raw_final}
         if raw_final:
@@ -4005,6 +4014,7 @@ def _ai_gate_runtime_destinations(
         if source:
             record["source"] = source
         destinations.append(record)
+        return record
 
     add("ai_target", target.get("endpoint_url"), source="configured_target")
     for transcript in transcripts:
@@ -4016,7 +4026,18 @@ def _ai_gate_runtime_destinations(
             records.extend(item for item in turns if isinstance(item, dict))
         for record in records:
             metadata = record.get("response_metadata") if isinstance(record.get("response_metadata"), dict) else {}
-            add("ai_gate_request", metadata.get("request_url"), metadata.get("final_url"), source="transcript")
+            destination = add("ai_gate_request", metadata.get("request_url"), metadata.get("final_url"), source="transcript")
+            if destination is not None:
+                if isinstance(metadata.get("redirect_chain"), list):
+                    destination["redirect_chain"] = metadata.get("redirect_chain")
+                if metadata.get("remote_ip"):
+                    destination["remote_ip"] = metadata.get("remote_ip")
+                    try:
+                        destination["resolved_host"] = urllib.parse.urlparse(
+                            str(metadata.get("final_url") or metadata.get("request_url") or "")
+                        ).hostname
+                    except Exception:
+                        pass
             widget_evidence = record.get("widget_evidence") if isinstance(record.get("widget_evidence"), dict) else {}
             add("ai_widget_page", widget_evidence.get("page_url"), source="widget_evidence")
     if isinstance(widget_summary, dict):

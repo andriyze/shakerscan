@@ -1154,6 +1154,24 @@ class RestJsonConversationTarget:
                     "max_response_bytes": self.max_response_bytes,
                     "raw_response_bytes_observed": raw_bytes_observed,
                 }
+                redirect_chain = [
+                    str(getattr(item, "url", "") or "")
+                    for item in (getattr(response, "history", None) or [])
+                    if str(getattr(item, "url", "") or "").strip()
+                ]
+                final_response_url = str(getattr(response, "url", "") or request_url)
+                if final_response_url != request_url and final_response_url not in redirect_chain:
+                    redirect_chain.append(final_response_url)
+                if redirect_chain:
+                    response_metadata["redirect_chain"] = redirect_chain
+                try:
+                    connection = getattr(response, "connection", None)
+                    transport = getattr(connection, "transport", None)
+                    peer = transport.get_extra_info("peername") if transport else None
+                    if isinstance(peer, (list, tuple)) and peer:
+                        response_metadata["remote_ip"] = str(peer[0])
+                except Exception:
+                    pass
                 if self.request_budget is not None:
                     response_metadata["request_budget"] = self.request_budget.to_dict()
                 selected_principal = self._select_principal(principal)

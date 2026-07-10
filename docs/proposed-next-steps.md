@@ -695,7 +695,7 @@ and remediation automation, not the first dashboard/status/action surfaces.
 will run next, and which button fixes the next blocker" without reading scan JSON or worker logs.
 
 ### 2. Mission contract, Command Arsenal, and scope/approval receipts
-**Status: READ-ONLY / DRY-RUN / GATED PHASE 1 DONE; ACTION AUDIT + EXECUTION GATEWAY PHASE 1 DONE; RUNTIME RE-CHECKS OPEN.** The
+**Status: READ-ONLY / DRY-RUN / GATED PHASE 1 DONE; RUNTIME REDIRECT/DNS RE-CHECKS DONE.** The
 T3MP3ST adoption plan correctly identifies the missing operating model: ShakerScan has many
 safe/productized primitives, and now has persisted dry-run mission/context/trace/receipt records plus
 policy-required approval enforcement on current state-changing routes. The remaining goal is not
@@ -788,9 +788,12 @@ Command Arsenal boundaries:
     worker applies that guard to the scanner report's actual `http.final_url`, and AI Gate/Model
     Intake adapters now emit runtime destinations that are enforced before findings persist. Runtime
     blocks preserve the check in scan metadata and write a blocked `scan.runtime_scope_check`
-    command-result row for the timeline. Remaining: wire future tool/MCP adapters, full redirect
-    chains, and DNS-resolution observations into the same blocked/degraded runtime-scope outcomes
-    rather than treating unverified destinations as in-scope.
+    command-result row for the timeline. DONE phase 4: DAST header capture now preserves every
+    observed redirect hop and the final peer IP; AI Gate transcripts preserve aiohttp redirect
+    history and peer IP when available; Model Intake fetch metadata preserves its observed final hop
+    and peer IP. The worker evaluates every supplied hop, blocks production resolutions into
+    private/loopback/reserved space, and marks missing DNS observations `degraded` rather than
+    silently in-scope. Future tool/MCP adapters must supply the same destination contract.
 14. DONE phase 1: add command result audit records for successful queued product actions: operation id, command,
     status, dry-run flag, risk tier, operation-plan id, scope receipt id, approval id, campaign id,
     scan id, finding ids, hypothesis ids, evidence object ids, tool receipt ids, blocked reasons,
@@ -815,8 +818,10 @@ Command Arsenal boundaries:
 18. DONE phase 1: blocked and approval-required command-result records are written before the
     enforcement path raises (best-effort, FK-safe), so "nothing ran because policy/scope blocked it"
     is auditable with the same operation id, scope/approval refs, blocked reasons, and next action.
-    DONE phase 2 for DAST, AI Gate, and Model Intake runtime-check blocks. Remaining:
-    skipped/degraded rows for other non-policy skip paths and future adapter runtime-check blocks.
+    DONE phase 2 for DAST, AI Gate, and Model Intake runtime-check blocks. DONE phase 3 for runtime
+    scope degradation audit: incomplete DNS observations preserve findings but stamp scan metadata
+    and write a `degraded` command-result row with the same scope receipt and destination evidence.
+    Other non-policy skip paths remain governed by their family/tool telemetry and receipt records.
 19. DONE phase 1: add release/test gates for Command Arsenal and planner safety.
     `scripts/release_gates.py` and `make release-gates` expose the named gates
     `test:no-phantom-tools`, `test:no-benchmark-fitting`, `test:no-ai-verified`,

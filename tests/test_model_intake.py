@@ -253,6 +253,24 @@ def test_download_http_200_full_small_file_is_not_truncated(monkeypatch):
     assert meta["truncated"] is False
 
 
+def test_model_intake_runtime_destination_preserves_network_observations():
+    destination = model_intake._runtime_destination(
+        "artifact",
+        "https://models.example.com/start",
+        {
+            "requested_url": "https://models.example.com/start",
+            "final_url": "https://cdn.example.com/model.bin",
+            "redirect_chain": ["https://cdn.example.com/model.bin"],
+            "remote_ip": "8.8.8.8",
+            "source": "http",
+        },
+    )
+
+    assert destination["redirect_chain"] == ["https://cdn.example.com/model.bin"]
+    assert destination["remote_ip"] == "8.8.8.8"
+    assert destination["resolved_host"] == "cdn.example.com"
+
+
 def test_intake_decision_blocks_on_critical_or_high():
     # The single most important decision line: any critical/high finding blocks.
     assert _intake_decision([{"severity": "critical"}])["decision"] == "block"

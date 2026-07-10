@@ -7310,12 +7310,17 @@ def test_runtime_destination_scope_allows_matching_actual_destination():
         guard,
         "https://api.example.com/v1/orders",
         redirect_urls=["https://app.example.com/login"],
+        resolution_observations=[
+            {"host": "api.example.com", "ips": ["8.8.8.8"]},
+            {"host": "app.example.com", "ips": ["1.1.1.1"]},
+        ],
     )
 
     assert result["status"] == "allowed"
     assert result["verdict"] == "allowed"
     assert result["blocked_by"] == []
     assert result["runtime_scope_guard_present"] is True
+    assert result["resolution_observations"][0]["verdict"] == "allowed"
     assert result["scope_receipt_id"] == SCOPE_ID
 
 

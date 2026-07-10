@@ -63,6 +63,10 @@ def _runtime_scope_guard():
     }
 
 
+def _runtime_scope_guard_with_dns():
+    return {**_runtime_scope_guard(), "requires_runtime_dns_check": True}
+
+
 def test_runtime_scope_guard_allows_dast_final_url_in_scope():
     result = {
         "http": {"final_url": "https://api.example.com/dashboard"},
@@ -183,6 +187,75 @@ def test_runtime_scope_guard_blocks_product_executor_without_runtime_destination
     assert "runtime_destination_unverified" in checked["error"]
 
 
+def test_runtime_scope_guard_checks_every_dast_redirect_hop():
+    result = {
+        "http": {
+            "request_url": "https://app.example.com/start",
+            "final_url": "https://app.example.com/final",
+            "redirect_chain": [
+                "https://evil.example.net/bounce",
+                "https://app.example.com/final",
+            ],
+            "remote_ip": "203.0.113.10",
+        },
+        "findings": [{"title": "must not persist"}],
+        "result": {"score": 80, "grade": "B"},
+    }
+
+    checked = worker._apply_runtime_scope_guard_to_result(
+        result,
+        {"runtime_scope_guard": _runtime_scope_guard_with_dns()},
+    )
+
+    assert checked["findings"] == []
+    assert "redirect_out_of_scope" in checked["error"]
+    destinations = checked["scan_metadata"]["runtime_scope_check"]["destinations"]
+    assert destinations[0]["redirect_urls"][0] == "https://evil.example.net/bounce"
+
+
+def test_runtime_scope_guard_degrades_when_runtime_dns_is_unobserved():
+    result = {
+        "http": {
+            "request_url": "https://app.example.com/start",
+            "final_url": "https://app.example.com/final",
+            "redirect_chain": ["https://app.example.com/final"],
+        },
+        "findings": [{"title": "kept with degraded scope evidence"}],
+        "result": {"score": 80, "grade": "B"},
+    }
+
+    checked = worker._apply_runtime_scope_guard_to_result(
+        result,
+        {"runtime_scope_guard": _runtime_scope_guard_with_dns()},
+    )
+
+    assert checked.get("error") is None
+    assert checked["findings"] == [{"title": "kept with degraded scope evidence"}]
+    assert checked["scan_metadata"]["runtime_scope_degraded"] is True
+    assert checked["scan_metadata"]["runtime_scope_check"]["status"] == "degraded"
+
+
+def test_runtime_scope_guard_blocks_private_runtime_dns_resolution():
+    result = {
+        "http": {
+            "request_url": "https://app.example.com/start",
+            "final_url": "https://app.example.com/final",
+            "redirect_chain": ["https://app.example.com/final"],
+            "remote_ip": "127.0.0.1",
+        },
+        "findings": [{"title": "must not persist"}],
+        "result": {"score": 80, "grade": "B"},
+    }
+
+    checked = worker._apply_runtime_scope_guard_to_result(
+        result,
+        {"runtime_scope_guard": _runtime_scope_guard_with_dns()},
+    )
+
+    assert checked["findings"] == []
+    assert "runtime_dns_private_range" in checked["error"]
+
+
 class _RuntimeScopeCommandResultConn:
     def __init__(self):
         self.args = None
@@ -222,6 +295,27 @@ def test_runtime_scope_block_records_command_result_row():
     assert json.loads(conn.args[13]) == ["host_out_of_allowed_scope"]
     assert json.loads(conn.args[16])["runtime_scope_check"]["status"] == "blocked"
     assert conn.args[17] == "worker"
+
+
+def test_runtime_scope_degraded_records_command_result_row():
+    conn = _RuntimeScopeCommandResultConn()
+    command_result_id = asyncio.run(worker._record_runtime_scope_command_result(
+        conn,
+        scan_id="11111111-1111-4111-8111-111111111111",
+        campaign_id=None,
+        target="https://app.example.com",
+        options={"scope_receipt_id": "scope-1"},
+        runtime_scope_check={
+            "status": "degraded",
+            "warnings": ["runtime_dns_unverified"],
+            "destinations": [{"url": "https://app.example.com"}],
+        },
+    ))
+
+    assert command_result_id == "44444444-4444-4444-8444-444444444444"
+    assert conn.args[1] == "degraded"
+    assert json.loads(conn.args[13]) == ["runtime_dns_unverified"]
+    assert "Degraded scan at runtime" in conn.args[15]
 
 
 def test_failure_result_preserves_runtime_scope_metadata():
