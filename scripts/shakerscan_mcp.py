@@ -15,6 +15,7 @@ import sys
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from dataclasses import dataclass
 from typing import Any, BinaryIO
 
@@ -219,6 +220,36 @@ class ArsenalClient:
             raise MCPError(-32006, f"Arguments are not present in the live Arsenal contract: {', '.join(uncatalogued)}")
         if missing:
             raise MCPError(-32602, f"Missing required tool arguments: {', '.join(missing)}")
+        for name, value in arguments.items():
+            self._validate_argument(name, value, tool.properties[name])
+
+    @staticmethod
+    def _validate_argument(name: str, value: Any, schema: dict[str, Any]) -> None:
+        expected = schema.get("type")
+        if expected == "integer" and (not isinstance(value, int) or isinstance(value, bool)):
+            raise MCPError(-32602, f"Tool argument {name} must be an integer")
+        if expected == "string" and not isinstance(value, str):
+            raise MCPError(-32602, f"Tool argument {name} must be a string")
+        if expected == "boolean" and not isinstance(value, bool):
+            raise MCPError(-32602, f"Tool argument {name} must be a boolean")
+
+        allowed = schema.get("enum")
+        if isinstance(allowed, list) and value not in allowed:
+            raise MCPError(-32602, f"Tool argument {name} must be one of: {', '.join(map(str, allowed))}")
+        if expected == "integer":
+            minimum = schema.get("minimum")
+            maximum = schema.get("maximum")
+            if minimum is not None and value < minimum:
+                raise MCPError(-32602, f"Tool argument {name} must be at least {minimum}")
+            if maximum is not None and value > maximum:
+                raise MCPError(-32602, f"Tool argument {name} must be at most {maximum}")
+        if schema.get("format") == "uuid" and isinstance(value, str):
+            try:
+                parsed = uuid.UUID(value)
+            except (ValueError, AttributeError):
+                raise MCPError(-32602, f"Tool argument {name} must be a UUID") from None
+            if str(parsed) != value.lower():
+                raise MCPError(-32602, f"Tool argument {name} must use canonical UUID form")
 
     def list_tools(self) -> list[dict[str, Any]]:
         catalog = self.catalog()

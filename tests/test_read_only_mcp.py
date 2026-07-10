@@ -110,6 +110,25 @@ def test_mcp_rejects_unknown_and_missing_arguments_before_dispatch():
     assert not any(path == "/arsenal/execute" for _method, path, _payload in client.calls)
 
 
+@pytest.mark.parametrize(
+    ("tool", "arguments"),
+    [
+        ("shakerscan_timeline", {"limit": 10_000_000}),
+        ("shakerscan_plans", {"limit": True}),
+        ("shakerscan_findings", {"severity": "urgent"}),
+        ("shakerscan_asm_gaps", {"target_id": "not-a-uuid"}),
+    ],
+)
+def test_mcp_enforces_tool_schema_values_before_dispatch(tool, arguments):
+    client = FakeClient()
+
+    with pytest.raises(mcp.MCPError) as exc:
+        client.call_tool(tool, arguments)
+
+    assert exc.value.code == -32602
+    assert not any(path == "/arsenal/execute" for _method, path, _payload in client.calls)
+
+
 def test_mcp_server_protocol_and_notifications():
     server = mcp.MCPServer(FakeClient())
 
