@@ -1676,6 +1676,13 @@ async def run_schema_migrations(pool) -> None:
                 ON refuter_reviews(finding_id, created_at DESC) WHERE finding_id IS NOT NULL
             """)
             await conn.execute("""
+                ALTER TABLE refuter_reviews DROP CONSTRAINT IF EXISTS refuter_reviews_subject_check
+            """)
+            await conn.execute("""
+                ALTER TABLE refuter_reviews ADD CONSTRAINT refuter_reviews_subject_check
+                    CHECK (subject_type IN ('finding','hypothesis','target','ai_gate_scan','model_intake','benchmark','planner','deployment_gate','parser_output','manual'))
+            """)
+            await conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_refuter_reviews_hypothesis
                 ON refuter_reviews(hypothesis_id, created_at DESC) WHERE hypothesis_id IS NOT NULL
             """)

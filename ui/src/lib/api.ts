@@ -507,9 +507,19 @@ export interface RefuterWorkSummary {
     already_reviewed_count: number
     trigger_counts: Record<string, number>
     trigger_type_counts: Record<string, number>
+    integrity_signal_count: number
     limit: number
   }
   candidates: RefuterCandidate[]
+  integrity_signals: Array<{
+    subject_type: 'target' | 'benchmark' | string
+    subject_id?: string | null
+    target_id?: string | null
+    trigger_type: string
+    trigger_reasons: string[]
+    review_hint?: string
+    already_reviewed?: boolean
+  }>
   execution_enabled: boolean
   findings_updated: number
   hypotheses_updated: number
@@ -539,6 +549,8 @@ export interface RefuterReview {
 
 export interface RefuterQueueResult {
   created: number
+  created_integrity_signals: number
+  created_finding_reviews: number
   skipped_already_reviewed: number
   unreviewed_count: number
   refuter_reviews: RefuterReview[]
@@ -2076,6 +2088,7 @@ export async function recordRefuterReview(payload: {
 export async function queueRefuterReviewsFromSummary(payload: {
   limit?: number
   finding_window?: number
+  include_integrity_signals?: boolean
   created_by?: string
 } = {}): Promise<RefuterQueueResult> {
   const res = await fetch(`${API_URL}/arsenal/refuter-reviews/queue-from-summary`, {

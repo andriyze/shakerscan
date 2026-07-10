@@ -722,7 +722,10 @@ function RefuterQueueResultPanel({ result }: { result: RefuterQueueResult }) {
 
   return (
     <div className="rounded-md border border-green-500/20 bg-green-500/5 p-3 text-sm text-green-200">
-      <div>Recorded {result.created} signal-only review row{result.created === 1 ? '' : 's'}; findings updated: {result.findings_updated}.</div>
+      <div>
+        Recorded {result.created} signal-only review row{result.created === 1 ? '' : 's'}
+        {' '}({result.created_finding_reviews} claim, {result.created_integrity_signals} integrity); findings updated: {result.findings_updated}.
+      </div>
       {result.refuter_reviews.length > 0 && (
         <div className="mt-3 grid gap-2">
           {result.refuter_reviews.slice(0, 5).map((review) => (
@@ -1291,7 +1294,7 @@ export default function ArsenalSettingsPage() {
     }
   }
 
-  async function queueRefuterWork() {
+  async function queueRefuterWork(includeIntegritySignals = false) {
     setRefuterQueueLoading(true)
     setRefuterQueueError(null)
     setRefuterQueueResult(null)
@@ -1299,6 +1302,7 @@ export default function ArsenalSettingsPage() {
       const result = await queueRefuterReviewsFromSummary({
         limit: 5,
         finding_window: 200,
+        include_integrity_signals: includeIntegritySignals,
         created_by: approvalActor || 'settings-arsenal',
       })
       setRefuterQueueResult(result)
@@ -1662,11 +1666,25 @@ export default function ArsenalSettingsPage() {
           <div className="flex flex-wrap gap-2">
             <Button
               type="button"
-              onClick={() => void queueRefuterWork()}
+              onClick={() => void queueRefuterWork(false)}
               disabled={loading || refuterQueueLoading || !refuterSummary || refuterSummary.summary.unreviewed_count === 0}
             >
               <CheckCircle2 className={`h-4 w-4 ${refuterQueueLoading ? 'animate-spin' : ''}`} aria-hidden="true" />
-              Queue Reviews
+              Queue weak claims
+            </Button>
+            <Button
+              type="button"
+              variant="secondary"
+              onClick={() => void queueRefuterWork(true)}
+              disabled={
+                loading
+                || refuterQueueLoading
+                || !refuterSummary
+                || refuterSummary.integrity_signals.every((signal) => signal.already_reviewed)
+              }
+            >
+              <ShieldCheck className="h-4 w-4" aria-hidden="true" />
+              Queue integrity signals
             </Button>
           </div>
         </div>
@@ -1680,14 +1698,15 @@ export default function ArsenalSettingsPage() {
             <Skeleton className="h-24" />
             <Skeleton className="h-24" />
           </div>
-        ) : !refuterSummary || refuterSummary.summary.candidate_count === 0 ? (
+        ) : !refuterSummary || (refuterSummary.summary.candidate_count === 0 && refuterSummary.integrity_signals.length === 0) ? (
           <EmptyState message="No refuter review candidates in the bounded summary." />
         ) : (
           <div className="space-y-4">
-            <div className="grid gap-3 md:grid-cols-4">
+            <div className="grid gap-3 md:grid-cols-5">
               <Stat label="candidates" value={refuterSummary.summary.candidate_count} />
               <Stat label="unreviewed" value={refuterSummary.summary.unreviewed_count} tone="text-amber-300" />
               <Stat label="reviewed" value={refuterSummary.summary.already_reviewed_count} />
+              <Stat label="integrity signals" value={refuterSummary.summary.integrity_signal_count} tone="text-cyan-300" />
               <Stat label="queued now" value={refuterQueueResult?.created || 0} tone="text-green-300" />
             </div>
             <div className="grid gap-2">
@@ -1698,6 +1717,23 @@ export default function ArsenalSettingsPage() {
                 />
               ))}
             </div>
+            {refuterSummary.integrity_signals.length > 0 && (
+              <div className="border-t border-gray-800 pt-3">
+                <div className="mb-2 text-xs font-medium uppercase text-gray-500">Report-only integrity signals</div>
+                <div className="grid gap-2">
+                  {refuterSummary.integrity_signals.slice(0, 5).map((signal) => (
+                    <div key={`${signal.subject_type}:${signal.subject_id}:${signal.trigger_type}`} className="rounded-md border border-gray-800 bg-gray-950 p-3 text-xs">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <Badge className="bg-cyan-500/15 text-cyan-300">{signal.trigger_type.replace(/_/g, ' ')}</Badge>
+                        <span className="font-mono text-gray-400">{signal.subject_id || 'unscoped'}</span>
+                        {signal.already_reviewed && <Badge className="bg-gray-800 text-gray-400">review recorded</Badge>}
+                      </div>
+                      {signal.review_hint && <p className="mt-2 text-gray-400">{signal.review_hint}</p>}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
         )}
       </Card>

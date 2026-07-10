@@ -4173,6 +4173,43 @@ def test_refuter_work_summary_includes_report_only_integrity_signals():
     assert requests == []
 
 
+def test_refuter_integrity_signals_require_opt_in_and_dedupe_reviewed_subjects():
+    target_id = str(uuid.uuid4())
+    signals = [{
+        "subject_type": "target",
+        "subject_id": target_id,
+        "target_id": target_id,
+        "trigger_type": "finding_delta_spike",
+        "trigger_reasons": ["unusually_large_finding_delta"],
+        "review_hint": "Confirm the scan delta is real.",
+    }, {
+        "subject_type": "benchmark",
+        "subject_id": "benchmark-a",
+        "trigger_type": "benchmark_scorecard_win_delta",
+        "trigger_reasons": ["benchmark_recall_win_delta"],
+        "review_hint": "Confirm benchmark independence.",
+    }]
+    reviews = [{"subject_type": "benchmark", "subject_id": "benchmark-a", "finding_id": None}]
+    summary = api_module._refuter_work_summary([], reviews, limit=10, integrity_signals=signals)
+
+    assert summary["integrity_signals"][0]["already_reviewed"] is False
+    assert summary["integrity_signals"][1]["already_reviewed"] is True
+    assert api_module._refuter_review_requests_from_summary(summary) == []
+
+    requests = api_module._refuter_review_requests_from_summary(
+        summary,
+        include_integrity_signals=True,
+        created_by="pytest",
+    )
+    assert len(requests) == 1
+    request = requests[0]
+    assert request.subject_type == "target"
+    assert request.subject_id == target_id
+    assert request.verdict_basis == "signal_only"
+    assert request.metadata_json["queued_integrity_signal"] is True
+    assert request.metadata_json["execution_enabled"] is False
+
+
 def test_refuter_queue_from_summary_records_unreviewed_signal_only_reviews():
     weak_id = uuid.uuid4()
     ai_id = uuid.uuid4()
@@ -4254,6 +4291,8 @@ def test_refuter_queue_from_summary_records_unreviewed_signal_only_reviews():
         api_module.db_pool = original_pool
 
     assert result["created"] == 1
+    assert result["created_finding_reviews"] == 1
+    assert result["created_integrity_signals"] == 0
     assert result["skipped_already_reviewed"] == 1
     assert result["findings_updated"] == 0
     assert result["hypotheses_updated"] == 0

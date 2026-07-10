@@ -3648,7 +3648,7 @@ class HypothesisSignalRequest(BaseModel):
 
 
 class RefuterReviewRequest(BaseModel):
-    subject_type: str = Field(pattern="^(finding|hypothesis|ai_gate_scan|model_intake|benchmark|planner|deployment_gate|parser_output|manual)$")
+    subject_type: str = Field(pattern="^(finding|hypothesis|target|ai_gate_scan|model_intake|benchmark|planner|deployment_gate|parser_output|manual)$")
     subject_id: Optional[str] = None
     target_id: Optional[str] = None
     finding_id: Optional[str] = None
@@ -3670,6 +3670,7 @@ class RefuterReviewRequest(BaseModel):
 class RefuterReviewQueueRequest(BaseModel):
     limit: int = Field(default=20, ge=1, le=100)
     finding_window: int = Field(default=200, ge=1, le=1000)
+    include_integrity_signals: bool = False
     created_by: Optional[str] = Field(default="refuter_auto_queue", max_length=120)
 
 
@@ -16956,9 +16957,12 @@ def _refuter_work_summary(
     trigger_counts = Counter(reason for item in candidates for reason in item.get("trigger_reasons", []))
     type_counts = Counter(str(item.get("trigger_type") or "unknown") for item in candidates)
     unreviewed = [item for item in candidates if not item.get("already_reviewed")]
-    # Integrity signals are report-only review prompts; they are intentionally NOT
-    # part of `candidates`, so queue-from-summary never auto-creates a refuter row.
+    # Integrity signals stay separate from finding candidates. They become durable
+    # review work only when queue-from-summary explicitly opts in.
     integrity = [dict(signal) for signal in (integrity_signals or []) if isinstance(signal, dict)]
+    for signal in integrity:
+        key = (str(signal.get("subject_type") or ""), str(signal.get("subject_id") or ""))
+        signal["already_reviewed"] = key in reviewed_subjects
     return {
         "summary": {
             "candidate_count": len(candidates),
@@ -17007,7 +17011,6 @@ async def _load_refuter_work_summary(conn, *, limit: int = 20, finding_window: i
         """
         SELECT subject_type, subject_id, finding_id
         FROM refuter_reviews
-        WHERE subject_type = 'finding'
         ORDER BY created_at DESC
         LIMIT $1
         """,
@@ -17046,6 +17049,7 @@ async def _load_refuter_work_summary(conn, *, limit: int = 20, finding_window: i
 def _refuter_review_requests_from_summary(
     summary: dict[str, Any],
     *,
+    include_integrity_signals: bool = False,
     created_by: str | None = "refuter_auto_queue",
 ) -> list[RefuterReviewRequest]:
     requests: list[RefuterReviewRequest] = []
@@ -17077,6 +17081,40 @@ def _refuter_review_requests_from_summary(
                 created_by=created_by,
             )
         )
+    if include_integrity_signals:
+        for signal in summary.get("integrity_signals") or []:
+            if not isinstance(signal, dict) or signal.get("already_reviewed"):
+                continue
+            subject_type = str(signal.get("subject_type") or "manual")
+            if subject_type not in {"target", "benchmark"}:
+                subject_type = "manual"
+            subject_id = str(signal.get("subject_id") or "").strip() or None
+            if not subject_id:
+                continue
+            requests.append(
+                RefuterReviewRequest(
+                    subject_type=subject_type,
+                    subject_id=subject_id,
+                    target_id=signal.get("target_id"),
+                    trigger_reason=str(
+                        signal.get("review_hint")
+                        or "; ".join(signal.get("trigger_reasons") or [])
+                        or signal.get("trigger_type")
+                        or "integrity signal requires review"
+                    ),
+                    refuter_signal="question",
+                    verdict_basis="signal_only",
+                    metadata_json={
+                        "queued_from_summary": True,
+                        "queued_integrity_signal": True,
+                        "trigger_type": signal.get("trigger_type"),
+                        "trigger_reasons": signal.get("trigger_reasons") or [],
+                        "integrity_signal": signal,
+                        "execution_enabled": False,
+                    },
+                    created_by=created_by,
+                )
+            )
     return requests
 
 
@@ -21148,6 +21186,7 @@ async def _arsenal_dispatch_refuter_review_queue_from_summary(p: dict[str, Any])
     return await arsenal_queue_refuter_reviews_from_summary(RefuterReviewQueueRequest(
         limit=_int_or_none(p.get("limit")) or 20,
         finding_window=_int_or_none(p.get("finding_window")) or 200,
+        include_integrity_signals=bool(p.get("include_integrity_signals", False)),
         created_by=p.get("created_by") or "arsenal_execute",
     ))
 
@@ -22386,7 +22425,7 @@ async def arsenal_refuter_reviews(
     subject_id: Optional[str] = Query(None),
 ):
     """Read durable refuter signals/verdicts without changing findings."""
-    if subject_type and subject_type not in {"finding", "hypothesis", "ai_gate_scan", "model_intake", "benchmark", "planner", "deployment_gate", "parser_output", "manual"}:
+    if subject_type and subject_type not in {"finding", "hypothesis", "target", "ai_gate_scan", "model_intake", "benchmark", "planner", "deployment_gate", "parser_output", "manual"}:
         raise HTTPException(status_code=400, detail="invalid subject_type")
     async with db_pool.acquire() as conn:
         rows = await conn.fetch(
@@ -22433,13 +22472,22 @@ async def arsenal_queue_refuter_reviews_from_summary(req: RefuterReviewQueueRequ
     """
     async with db_pool.acquire() as conn:
         summary = await _load_refuter_work_summary(conn, limit=req.limit, finding_window=req.finding_window)
-        review_requests = _refuter_review_requests_from_summary(summary, created_by=req.created_by)
+        review_requests = _refuter_review_requests_from_summary(
+            summary,
+            include_integrity_signals=req.include_integrity_signals,
+            created_by=req.created_by,
+        )
         created: list[dict[str, Any]] = []
+        created_integrity = 0
         for review_request in review_requests:
             result = await _record_refuter_review(conn, review_request)
             created.append(result["refuter_review"])
+            if review_request.metadata_json.get("queued_integrity_signal") is True:
+                created_integrity += 1
     return {
         "created": len(created),
+        "created_integrity_signals": created_integrity,
+        "created_finding_reviews": len(created) - created_integrity,
         "skipped_already_reviewed": summary["summary"]["already_reviewed_count"],
         "unreviewed_count": summary["summary"]["unreviewed_count"],
         "refuter_reviews": created,

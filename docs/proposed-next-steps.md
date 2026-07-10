@@ -1397,7 +1397,7 @@ produce receipts for both successful and failed/skipped runs; missing binaries s
 not phantom success.
 
 ### 9a. Refuter workflow and integrity ledgers
-**Status: PARTIAL, PHASE 10 DETECTOR INTEGRITY RELEASE GATE DONE.** T3MP3ST's strongest process lesson is not a detector; it
+**Status: PHASE 11 DONE.** T3MP3ST's strongest process lesson is not a detector; it
 is the habit of trying to disprove weak wins. ShakerScan now has durable
 `refuter_reviews` records exposed through `GET/POST /arsenal/refuter-reviews` and
 `refuter_review.list` / `refuter_review.record`, plus read-only trigger summaries through
@@ -1429,8 +1429,11 @@ proof state, severity, or gates. File-backed integrity ledgers exist at
 Durable review rows and their counterevidence bundles are now operator-visible after refresh, with
 receipt-gated selected-step execution and verdict derivation. Operators can now append durable
 signal-only counterevidence or an explicitly labeled human-approved verdict, including bounded
-evidence-object/tool-receipt refs, observed behavior, and redacted notes. Broader trigger coverage
-remains open.
+evidence-object/tool-receipt refs, observed behavior, and redacted notes. DONE phase 11 for explicit
+integrity-signal intake: finding-delta and benchmark-win signals remain separate/report-only by
+default, but an operator can opt in to durable signal-only `target`/`benchmark` review rows. Prior
+subject reviews are deduplicated, and this path still executes no scanner and changes no finding,
+proof state, severity, or gate.
 
 **Implement:**
 1. DONE phase 1: trigger refuter work for Critical/High findings with suspected or weak proof, AI Gate semantic-only
@@ -1447,9 +1450,9 @@ remains open.
    paths. DONE phase 4: the refuter summary now emits report-only target-level `integrity_signals`
    for the `finding_delta_spike` trigger — a target whose latest web-DAST scan reports a finding
    count far above its own recent baseline median (`_finding_delta_refuter_signal`, conservative
-   absolute+multiplier thresholds). These are surfaced for human review only; they are deliberately
-   excluded from `candidates`, so queue-from-summary never auto-creates a target refuter row, and
-   they never mutate findings or proof state. DONE phase 5: the unreviewed weak-proof candidate count
+   absolute+multiplier thresholds). These remain separate from `candidates` and are never queued by
+   default; an explicit `include_integrity_signals=true` request can preserve them as signal-only
+   target reviews, and they never mutate findings or proof state. DONE phase 5: the unreviewed weak-proof candidate count
    and the finding-delta integrity spikes are now surfaced as a `refuter-review-backlog` item in the
    dashboard `action_center` (`_build_dashboard_action_center`, best-effort), closing the loop from
    integrity signal to the productized operator decision flow (§1). DONE phase 6: benchmark scorecard
@@ -1466,8 +1469,8 @@ remains open.
    smallest existing deterministic/AI replay primitive for the refuter review and records execution
    metadata/audit without changing product truth. DONE phase 3: completed finding verifications can
    derive new refuter signal/verdict rows; deterministic outcomes can become proof-backed refuter
-   verdicts, while AI-driven outcomes stay signal-only unless reviewed by a human. Remaining work is
-   broader trigger coverage. DONE phase 4: durable analyst counterevidence attachment/annotation uses
+   verdicts, while AI-driven outcomes stay signal-only unless reviewed by a human. DONE phase 4:
+   durable analyst counterevidence attachment/annotation uses
    the existing record-only refuter route; signal notes stay `signal_only`, while human verdict mode
    is explicitly stamped `human_approved_review` and never mutates findings or deployment gates.
 3. DONE phase 1: separate `refuter_signal` from `refuter_verdict`. Signals can

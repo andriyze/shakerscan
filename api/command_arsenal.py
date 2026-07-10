@@ -1129,7 +1129,7 @@ COMMANDS: tuple[ArsenalCommand, ...] = (
         scope_fields=("subject_type", "subject_id"),
         parameters_schema={
             "limit": {"type": "integer", "minimum": 1, "maximum": 100},
-            "subject_type": {"type": "string", "enum": ["finding", "hypothesis", "ai_gate_scan", "model_intake", "benchmark", "planner", "deployment_gate", "parser_output", "manual"]},
+            "subject_type": {"type": "string", "enum": ["finding", "hypothesis", "target", "ai_gate_scan", "model_intake", "benchmark", "planner", "deployment_gate", "parser_output", "manual"]},
             "subject_id": {"type": "string"},
         },
         evidence_contract=("refuter_review_rows", "refuter_signal", "refuter_verdict", "verdict_basis"),
@@ -1160,7 +1160,7 @@ COMMANDS: tuple[ArsenalCommand, ...] = (
         path="/arsenal/refuter-reviews",
         scope_fields=("target_id", "finding_id", "hypothesis_id", "campaign_id"),
         parameters_schema={
-            "subject_type": {"type": "string", "enum": ["finding", "hypothesis", "ai_gate_scan", "model_intake", "benchmark", "planner", "deployment_gate", "parser_output", "manual"]},
+            "subject_type": {"type": "string", "enum": ["finding", "hypothesis", "target", "ai_gate_scan", "model_intake", "benchmark", "planner", "deployment_gate", "parser_output", "manual"]},
             "subject_id": {"type": "string"},
             "refuter_signal": {"type": "string", "enum": ["support", "question", "weaken", "refute"]},
             "refuter_verdict": {"type": "string", "enum": ["supported", "weakened", "refuted", "inconclusive"]},
@@ -1181,6 +1181,7 @@ COMMANDS: tuple[ArsenalCommand, ...] = (
         parameters_schema={
             "limit": {"type": "integer", "minimum": 1, "maximum": 100},
             "finding_window": {"type": "integer", "minimum": 1, "maximum": 1000},
+            "include_integrity_signals": {"type": "boolean", "default": False},
             "created_by": {"type": "string"},
         },
         evidence_contract=("refuter_review_rows", "trigger_counts", "signal_only_reviews", "automation_plan"),

@@ -82,6 +82,8 @@ def test_refuter_review_commands_do_not_mutate_findings_directly():
     assert summary_cmd["path"] == "/arsenal/refuter-reviews/summary"
     assert record_cmd["path"] == "/arsenal/refuter-reviews"
     assert queue_cmd["path"] == "/arsenal/refuter-reviews/queue-from-summary"
+    assert queue_cmd["parameters_schema"]["include_integrity_signals"]["default"] is False
+    assert "target" in record_cmd["parameters_schema"]["subject_type"]["enum"]
     assert execute_cmd["path"] == "/arsenal/refuter-reviews/{refuter_review_id}/execute"
     assert derive_cmd["path"] == "/arsenal/refuter-reviews/{refuter_review_id}/derive-verdict"
     assert "refuter_candidates" in summary_cmd["evidence_contract"]
