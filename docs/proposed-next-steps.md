@@ -1074,7 +1074,8 @@ application-defined sensitive metric names spanning two independent identity, co
 classes; standard runtime/exporter prefixes are excluded and generic metrics remain unverified.
 DONE phase 39 for non-polling benchmark submission: `scripts/benchmark_targets.py --submit-only`
 queues exactly one fingerprint-current benchmark and exits with a content-free receipt, while
-requested two-user runs fail before submission unless both principals are minted successfully.
+requested two-user runs fail before submission unless both principals are minted successfully and
+their server-issued JWT identity claims prove they are distinct accounts.
 
 **Done when:** recorded two-user benchmark scorecards show the targeted miss becoming a deterministic
 finding, not merely an attempted endpoint.

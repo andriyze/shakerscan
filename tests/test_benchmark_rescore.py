@@ -6,12 +6,21 @@ re-score's verdict->verified mapping, the retest-settle wait, and the §10 fleet
 gate that the runner now enforces.
 """
 
+import base64
+import json
 import os
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 
 import benchmark_targets as b  # noqa: E402
+
+
+def _jwt(**claims):
+    def encode(value):
+        raw = json.dumps(value, separators=(",", ":")).encode()
+        return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+    return f"{encode({'alg': 'none'})}.{encode(claims)}.signature"
 
 
 def test_retest_proof_counts_as_verified():
@@ -147,7 +156,9 @@ def test_fleet_gate_allows_uniform_fleet(monkeypatch):
 
 
 def test_submit_target_requires_current_workers_and_returns_content_free_receipt(monkeypatch):
-    tokens = iter(["user1-secret", "user2-secret"])
+    user1_token = _jwt(email="user1@example.test")
+    user2_token = _jwt(email="user2@example.test")
+    tokens = iter([user1_token, user2_token])
     captured = {}
 
     monkeypatch.setattr(b, "mint_token", lambda *args, **kwargs: next(tokens))
@@ -164,8 +175,8 @@ def test_submit_target_requires_current_workers_and_returns_content_free_receipt
     options = captured["body"]["options"]
     assert captured["url"] == "http://scanner.test/scans"
     assert options["require_current_workers"] is True
-    assert options["auth_header"] == "Bearer user1-secret"
-    assert options["user2_header"] == "Bearer user2-secret"
+    assert options["auth_header"] == f"Bearer {user1_token}"
+    assert options["user2_header"] == f"Bearer {user2_token}"
     assert receipt == {
         "target": "crapi",
         "scan_id": "scan-1",
@@ -190,6 +201,28 @@ def test_submit_target_aborts_before_queueing_when_second_principal_is_missing(m
         assert "user2" in str(exc)
     else:
         raise AssertionError("missing user2 credentials must fail closed")
+
+
+def test_submit_target_rejects_same_principal_tokens(monkeypatch):
+    tokens = iter([_jwt(email="same@example.test"), _jwt(email="same@example.test")])
+    monkeypatch.setattr(b, "mint_token", lambda *args, **kwargs: next(tokens))
+    monkeypatch.setattr(b, "_post", lambda *args, **kwargs: (_ for _ in ()).throw(
+        AssertionError("scan must not be queued for the same principal")
+    ))
+
+    try:
+        b.submit_target("crapi", "http://scanner.test", True)
+    except RuntimeError as exc:
+        assert "same principal" in str(exc)
+    else:
+        raise AssertionError("same-principal tokens must fail closed")
+
+
+def test_jwt_principal_identity_requires_stable_account_claim():
+    assert b._jwt_principal_identity(_jwt(email="User@Example.Test", sub="generic")) == "email:user@example.test"
+    assert b._jwt_principal_identity(_jwt(sub="account-42")) == "sub:account-42"
+    assert b._jwt_principal_identity(_jwt(role="user")) is None
+    assert b._jwt_principal_identity("opaque-token") is None
 
 
 def test_apply_gates_fails_report_trust_signals():

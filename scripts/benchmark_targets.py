@@ -14,6 +14,7 @@ Usage:
 Fixtures: tests/fixtures/benchmarks/<name>.yaml
 """
 import argparse
+import base64
 import json
 import os
 import re
@@ -387,6 +388,26 @@ def mint_token(target_url, login_cfg, email, password):
         return None
 
 
+def _jwt_principal_identity(token):
+    """Extract a stable principal claim from a server-issued JWT for comparison."""
+    parts = str(token or "").split(".")
+    if len(parts) != 3:
+        return None
+    try:
+        payload = parts[1] + "=" * (-len(parts[1]) % 4)
+        claims = json.loads(base64.urlsafe_b64decode(payload.encode()).decode("utf-8"))
+    except (ValueError, TypeError, json.JSONDecodeError):
+        return None
+    if not isinstance(claims, dict):
+        return None
+    for key in ("email", "user_id", "userId", "username", "sub", "id"):
+        value = claims.get(key)
+        if isinstance(value, (str, int)) and str(value).strip():
+            normalized = str(value).strip().lower() if key in {"email", "username"} else str(value).strip()
+            return f"{key}:{normalized}"
+    return None
+
+
 def _report_invariants(report):
     """Run the shared report-invariant checker (§2/§10) — empty list == consistent."""
     try:
@@ -576,6 +597,12 @@ def submit_target(name, api, do_auth):
             )
             if not t2:
                 raise RuntimeError("failed to mint required benchmark user2 credentials")
+            identity1 = _jwt_principal_identity(t1)
+            identity2 = _jwt_principal_identity(t2)
+            if not identity1 or not identity2:
+                raise RuntimeError("cannot prove distinct benchmark principals from token identity claims")
+            if identity1 == identity2:
+                raise RuntimeError("benchmark user1 and user2 resolved to the same principal identity")
             opts["user2_header"] = f"Bearer {t2}"
             two_user = True
     resp = _post(f"{api}/scans", {"target": fx["target_url"], "options": opts})
