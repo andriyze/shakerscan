@@ -757,6 +757,14 @@ async def _migrate_target_principal_slots(conn) -> None:
     """)
 
 
+async def _migrate_hypothesis_proof_links(conn) -> None:
+    """Add durable finding links used by proof reconciliation."""
+    await conn.execute("""
+        ALTER TABLE hypotheses
+        ADD COLUMN IF NOT EXISTS promoted_finding_ids JSONB NOT NULL DEFAULT '[]'::jsonb
+    """)
+
+
 async def run_schema_migrations(pool) -> None:
     """Run all retest-related schema migrations with advisory lock to avoid races.
 
@@ -1564,6 +1572,7 @@ async def run_schema_migrations(pool) -> None:
                     smoke_score DOUBLE PRECISION,
                     evidence_object_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
                     tool_receipt_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    promoted_finding_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
                     next_test_action JSONB,
                     endorsements JSONB NOT NULL DEFAULT '[]'::jsonb,
                     refutations JSONB NOT NULL DEFAULT '[]'::jsonb,
@@ -1585,6 +1594,7 @@ async def run_schema_migrations(pool) -> None:
                 )
             """)
             await conn.execute("ALTER TABLE hypotheses DROP CONSTRAINT IF EXISTS hypotheses_source_check")
+            await _migrate_hypothesis_proof_links(conn)
             await conn.execute("""
                 ALTER TABLE hypotheses
                 ADD CONSTRAINT hypotheses_source_check

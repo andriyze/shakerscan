@@ -668,6 +668,7 @@ how-to with request bodies is in [`CLAUDE.md`](../CLAUDE.md) / [`AGENTS.md`](../
 `POST /arsenal/refuter-reviews/{id}/execute` ·
 `POST /arsenal/refuter-reviews/{id}/derive-verdict` ·
 `POST /arsenal/hypotheses/source-ingest` · `POST /arsenal/hypotheses/from-plan` ·
+`POST /arsenal/hypotheses/{id}/reconcile-proof` ·
 `GET /agents/local` · `POST /agents/local/test` · `POST /agents/local/plan`. Source/spec hints and
 saved dry-run plan actions can be recorded as source-only hypotheses; they never create findings or
 queue scans. Worker finalization also routes uncertain medium-or-higher scanner findings into
@@ -678,6 +679,9 @@ gated and derives only from a linked or explicit verification row; failed/error/
 requires an authenticated cross-principal differential, treats login/forbidden soft-200 bodies and
 redirect denials as non-violations, and validates approval receipts against the campaign action's
 actual target before a manual BOLA finding can be created.
+Hypothesis proof reconciliation is separately approval-gated and can only link an existing
+`exploited` canonical finding with exact campaign-action, target, family, and route dimensions; it
+never creates or verifies a finding from lead context.
 
 **Read-only MCP**: `./scanner.sh mcp` starts a stdio MCP adapter over `POST /arsenal/execute`.
 It exposes targets, ASM gaps, findings, content-free evidence manifests, the mission timeline,

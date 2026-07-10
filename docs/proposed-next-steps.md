@@ -1084,7 +1084,7 @@ survives later queryless or weaker-source rows.
 finding, not merely an attempted endpoint.
 
 ### 7. Campaign, hypothesis, and application-graph consumer layer
-**Status: PHASE 3 GRAPH + HYPOTHESES + SITUATION REPORT + CAMPAIGN PLANNING + EXECUTION LINKAGE DONE; PROMOTION OPEN.** `application_graph_nodes` /
+**Status: GRAPH + HYPOTHESES + CAMPAIGN EXECUTION + PROOF RECONCILIATION DONE.** `application_graph_nodes` /
 `application_graph_edges` now persist route/object nodes plus producer/consumer/auth-boundary edges
 from discovery + recursive BOLA `resource_map`; `GET /targets/{id}/graph` exposes the graph.
 Object-ID and cross-user primitives also exist per scan (`access_control_checks` object-id
@@ -1096,8 +1096,9 @@ and graph-missing targets. `POST /arsenal/hypotheses/{id}/plan-campaign` /
 hypothesis `next_test_action` without executing it, queueing scans, or creating findings. `POST
 /arsenal/execute` now accepts `campaign_action_id`, validates that the requested command matches the
 planned action, and binds the resulting `command_results` row back onto that planned action so the
-mission timeline can show the transition from planned to blocked/queued/completed. The remaining gap
-is deterministic proof promotion from those executed planned actions. This should borrow
+mission timeline can show the transition from planned to blocked/queued/completed.
+`POST /arsenal/hypotheses/{id}/reconcile-proof` / `hypothesis.reconcile_proof` now reconciles an
+executed action back to its lead through the existing deterministic proof taxonomy. This borrows
 T3MP3ST's PackBoard idea, but adapt it into ShakerScan's proof model: leads are coordinated work
 items, not findings.
 
@@ -1118,9 +1119,8 @@ items, not findings.
    `by_severity`, `by_status`, `active_finding_count`, and an `estimated_default_blockers` count of
    active critical/high findings, plus `total_action_count` and a `partial` flag when the fetched
    actions are bounded. The rollup is explicitly labelled an estimate, not the authoritative
-   deployment decision (policy profiles/exceptions/proof state still own that). Remaining work is
-   automatic action linkage once the execution gateway (§2 seq #3) drives command results under a
-   campaign.
+   deployment decision (policy profiles/exceptions/proof state still own that). Execution-gateway
+   command results now link automatically to their planned campaign action.
 2. DONE phase 1: add a `hypotheses` table for route, endpoint, object, principal, AI target, model artifact,
    dependency, config, and secret leads. Fields should include target/campaign, vuln family, CWE,
    severity guess, confidence, source (`app_graph`, `source_ingest`, `ai_planner`, `scanner_signal`,
@@ -1153,8 +1153,15 @@ items, not findings.
    findings, or promote proof state. DONE phase 3: `GET /targets/{id}/asm/activity` now embeds the
    same bounded target-scoped situation report, and the ASM target view renders it as proof leads next
    to coverage and the campaign timeline.
-7. Promotion rule: hypotheses can become findings only through the existing proof taxonomy. AI/source
-   graph/tool rationale can attach as context, but cannot promote severity or proof state by itself.
+7. DONE phase 1: hypotheses become `promoted` only by linking an already-created canonical finding
+   from the exact campaign action. Reconciliation requires a target-scoped approval receipt,
+   compare-and-set hypothesis version, target/family/route/method/parameter agreement, exact scan,
+   deterministic-retest, or gated-authz action provenance, and persisted `exploited` proof. It never
+   creates a finding. AI/source/graph/tool rationale, scan completion, weak/likely proof, unrelated
+   findings, and mismatched routes remain ineligible and are recorded as bounded rejection counts.
+   The Hypothesis Board exposes this gated reconciliation and links promoted finding IDs without
+   changing finding severity or proof state. `test:hypothesis-proof-promotion` is the focused release
+   gate for these invariants.
 8. DONE phase 1: dedupe rule now accepts canonical `dedupe_dimensions` for route/method,
    object key, principal pair, tenant, parameter/body path, and proof surface. These dimensions
    produce the stored `dedupe_key`, and `_upsert_hypothesis` matches existing target/family/key rows
@@ -1191,7 +1198,7 @@ items, not findings.
 **Done when:** the scanner can state "`GET /api/orders` produces `order.id` owned by user1;
 `GET /api/orders/{id}` consumes it -> test user2 read/mutate" from a persisted graph and schedule
 the deterministic campaign from it, while unproven graph/source/AI signals remain hypotheses rather
-than findings.
+than findings, and then link only the exact deterministic finding proof produced by that campaign.
 
 ### 8. Auth / principal / role matrix
 **Status: PARTIAL, PHASE 13 MANAGED CREDENTIAL EXECUTION DONE.** `target_endpoints.auth_state` exists, and

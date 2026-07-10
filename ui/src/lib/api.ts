@@ -350,12 +350,14 @@ export interface Hypothesis {
   smoke_score?: number | null
   evidence_object_ids: string[]
   tool_receipt_ids: string[]
+  promoted_finding_ids: string[]
   next_test_action?: Record<string, unknown> | null
   endorsements: Array<Record<string, unknown>>
   refutations: Array<Record<string, unknown>>
   terminal_reason?: string | null
   metadata_json: Record<string, unknown>
   can_promote_finding: boolean
+  can_reconcile_proof?: boolean
   execution_enabled: boolean
   created_by?: string | null
   created_at?: string
@@ -1962,6 +1964,33 @@ export async function promoteAuthzReplay(
 export async function getHypotheses(limit: number = 20): Promise<{ hypotheses: Hypothesis[]; execution_enabled: boolean; count: number }> {
   const res = await fetch(`${API_URL}/arsenal/hypotheses?limit=${limit}`)
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load hypotheses'))
+  return res.json()
+}
+
+export async function reconcileHypothesisProof(
+  hypothesisId: string,
+  payload: {
+    expected_version: number
+    campaign_action_id?: string
+    approval_receipt_id: string
+    created_by?: string
+  }
+): Promise<{
+  status: string
+  promoted: boolean
+  hypothesis: Hypothesis
+  proof_reconciliation: Record<string, unknown>
+  command_result: CommandResult
+  operation_id: string
+  findings_created: number
+  execution_enabled: boolean
+}> {
+  const res = await fetch(`${API_URL}/arsenal/hypotheses/${encodeURIComponent(hypothesisId)}/reconcile-proof`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to reconcile hypothesis proof'))
   return res.json()
 }
 

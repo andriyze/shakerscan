@@ -191,6 +191,17 @@ def test_target_principal_matrix_write_is_approval_gated_policy_state():
     assert "expected_access" in record["parameters_schema"]
 
 
+def test_hypothesis_proof_reconciliation_is_gated_and_proof_constrained():
+    command = {item["name"]: item for item in arsenal.describe_commands()["commands"]}["hypothesis.reconcile_proof"]
+
+    assert command["status"] == "gated"
+    assert command["risk_tier"] == "active"
+    assert command["required_confirmations"] == ["confirm_authorized"]
+    assert command["method"] == "POST"
+    assert "existing_verified_finding" in command["evidence_contract"]
+    assert "exact_campaign_action_provenance" in command["evidence_contract"]
+
+
 def test_state_changing_commands_are_gated_not_executable_shortcuts():
     payload = arsenal.describe_commands()
     commands = {item["name"]: item for item in payload["commands"]}
@@ -202,6 +213,7 @@ def test_state_changing_commands_are_gated_not_executable_shortcuts():
         "ai_gate.scan",
         "ai_gate.replay_probe",
         "model_intake.scan",
+        "hypothesis.reconcile_proof",
         "approval.record",
     ):
         cmd = commands[name]

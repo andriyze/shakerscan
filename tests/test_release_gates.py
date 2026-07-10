@@ -12,6 +12,7 @@ EXPECTED_GATES = {
     "test:no-benchmark-fitting",
     "test:no-ai-verified",
     "test:mcp-read-only",
+    "test:hypothesis-proof-promotion",
     "test:evidence-provenance",
     "test:fleet-current",
     "test:planner-scope",

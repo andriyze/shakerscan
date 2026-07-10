@@ -3490,6 +3490,13 @@ class HypothesisRequest(BaseModel):
     created_by: Optional[str] = None
 
 
+class HypothesisProofReconcileRequest(BaseModel):
+    expected_version: int = Field(ge=1)
+    campaign_action_id: Optional[str] = None
+    approval_receipt_id: str
+    created_by: Optional[str] = Field(default="hypothesis_proof_reconciler", max_length=120)
+
+
 class SourceIngestHint(BaseModel):
     kind: str = Field(default="route", pattern="^(route|endpoint|openapi_operation|graphql_field|package_manifest|frontend_route|backend_route|iac_resource|ai_tool_endpoint)$")
     method: Optional[str] = Field(default=None, max_length=16)
@@ -14089,6 +14096,7 @@ def _public_command_result_row(row: Any) -> dict[str, Any]:
         "hypothesis_ids",
         "evidence_object_ids",
         "tool_receipt_ids",
+        "promoted_finding_ids",
         "blocked_by",
         "result_json",
     ):
@@ -14159,6 +14167,10 @@ def _public_hypothesis_row(row: Any) -> dict[str, Any]:
     payload["effective_status"] = effective_status
     payload["claimable"] = effective_status not in {"refuted", "promoted", "dead"} and not claim_active
     payload["can_promote_finding"] = False
+    payload["can_reconcile_proof"] = bool(
+        payload.get("campaign_action_id")
+        and effective_status not in {"refuted", "promoted", "dead"}
+    )
     payload["execution_enabled"] = False
     return payload
 
@@ -19795,6 +19807,10 @@ async def _promote_authz_replay_finding(
                     UPDATE findings
                     SET status='active', last_seen_at=NOW(),
                         resurfaced_count = resurfaced_count + 1,
+                        last_verification_status='still_vulnerable',
+                        last_verification_verdict='exploited',
+                        last_verification_confidence=1.0,
+                        last_verified_at=NOW(),
                         updated_at=NOW()
                     WHERE id=$1
                     """,
@@ -19802,18 +19818,32 @@ async def _promote_authz_replay_finding(
                 )
                 status = "resurfaced"
             else:
-                await conn.execute("UPDATE findings SET last_seen_at=NOW(), updated_at=NOW() WHERE id=$1", finding_id)
+                await conn.execute(
+                    """
+                    UPDATE findings
+                    SET last_seen_at=NOW(),
+                        last_verification_status='still_vulnerable',
+                        last_verification_verdict='exploited',
+                        last_verification_confidence=1.0,
+                        last_verified_at=NOW(),
+                        updated_at=NOW()
+                    WHERE id=$1
+                    """,
+                    finding_id,
+                )
         else:
             finding_id = await conn.fetchval(
                 """
                 INSERT INTO findings (
                     target_id, fingerprint, title, description, severity,
                     cvss_score, tool, cwe, url, evidence, request, response,
-                    notes, source, status
+                    notes, source, status, last_verification_status,
+                    last_verification_verdict, last_verification_confidence, last_verified_at
                 ) VALUES (
                     $1,$2,$3,$4,'high',
                     $5,'bola','CWE-639',$6,$7,$8,$9,
-                    $10,'manual','active'
+                    $10,'manual','active','still_vulnerable',
+                    'exploited',1.0,NOW()
                 )
                 RETURNING id
                 """,
@@ -19914,6 +19944,394 @@ async def _promote_authz_replay_finding(
         "tool_receipt_id": tool_receipt_id or None,
         "execution_enabled": True,
         "findings_created": sum(1 for item in promotions if item["finding_created"]),
+    }
+
+
+def _hypothesis_structured_values(value: Any, keys: set[str], *, depth: int = 5) -> set[str]:
+    values: set[str] = set()
+    if depth < 0:
+        return values
+    if isinstance(value, dict):
+        for key, nested in list(value.items())[:100]:
+            if str(key).strip().lower() in keys:
+                if isinstance(nested, (str, int, float)):
+                    values.add(str(nested).strip())
+                elif isinstance(nested, list):
+                    values.update(str(item).strip() for item in nested[:50] if isinstance(item, (str, int, float)))
+            values.update(_hypothesis_structured_values(nested, keys, depth=depth - 1))
+    elif isinstance(value, list):
+        for nested in value[:100]:
+            values.update(_hypothesis_structured_values(nested, keys, depth=depth - 1))
+    return {item for item in values if item}
+
+
+def _hypothesis_family_matches_finding(hypothesis: dict[str, Any], finding: dict[str, Any]) -> bool:
+    raw_family = str(hypothesis.get("family") or "").strip().lower().replace("-", "_")
+    evidence = _decode_json_value(finding.get("evidence")) or {}
+    inferred = str(infer_type_from_title_tool(finding.get("title"), finding.get("tool")) or "").lower()
+    if raw_family in {"nosql", "nosqli", "nosql_injection"}:
+        return inferred == "nosqli"
+    if raw_family in {"sqli", "sql", "sql_injection"}:
+        return inferred == "sqli"
+
+    family_aliases = {
+        "idor": "bola",
+        "bfla": "bola",
+        "bopla": "bola",
+        "object_authorization": "bola",
+        "authentication": "auth",
+        "access_control": "auth",
+        "cross_site_scripting": "xss",
+        "massassignment": "mass_assignment",
+    }
+    normalized = family_aliases.get(raw_family, check_registry.normalize_check_family(raw_family, allow_all=False) or raw_family)
+    if normalized == "bola" and inferred in {"bola", "idor"}:
+        return True
+    if normalized == "xss" and inferred == "xss":
+        return True
+    if normalized == "jwt" and inferred == "jwt":
+        return True
+
+    spec = check_registry.get_check_family(normalized)
+    title = str(finding.get("title") or "").strip().lower()
+    tool = str(finding.get("tool") or "").strip().lower()
+    cwe = str(finding.get("cwe") or "").strip().upper()
+    if spec and (
+        tool in {item.lower() for item in spec.finding_tools}
+        or cwe in {item.upper() for item in spec.finding_cwes}
+        or any(marker.lower() in title for marker in spec.finding_title_markers)
+    ):
+        return True
+
+    tokens = _hypothesis_structured_values(
+        evidence,
+        {"family", "category", "finding_type", "probe_family", "check_family", "type"},
+    )
+    tokens.update({tool, inferred})
+    normalized_tokens = {
+        family_aliases.get(token.lower().replace("-", "_"), token.lower().replace("-", "_"))
+        for token in tokens
+    }
+    return normalized in normalized_tokens
+
+
+def _hypothesis_route_matches_finding(route: Any, finding: dict[str, Any]) -> bool:
+    expected = str(route or "").strip()
+    if not expected:
+        return True
+    expected = re.sub(r"^[A-Z]{2,12}\s+", "", expected)
+    parsed_expected = urllib.parse.urlparse(expected)
+    expected_path = parsed_expected.path if parsed_expected.scheme or parsed_expected.netloc else expected.split("?", 1)[0]
+    actual_url = str(finding.get("url") or "").strip()
+    parsed_actual = urllib.parse.urlparse(actual_url)
+    actual_path = parsed_actual.path if parsed_actual.scheme or parsed_actual.netloc else actual_url.split("?", 1)[0]
+    if not expected_path or not actual_path:
+        return False
+    expected_segments = [item for item in expected_path.strip("/").split("/") if item]
+    actual_segments = [item for item in actual_path.strip("/").split("/") if item]
+    if len(expected_segments) != len(actual_segments):
+        return False
+    placeholder = re.compile(r"^(?:\{[^{}]+\}|:[A-Za-z_][A-Za-z0-9_]*|<[^<>]+>|\*)$")
+    return all(
+        placeholder.fullmatch(expected_segment) is not None
+        or urllib.parse.unquote(expected_segment).lower() == urllib.parse.unquote(actual_segment).lower()
+        for expected_segment, actual_segment in zip(expected_segments, actual_segments)
+    )
+
+
+def _hypothesis_dimensions_match_finding(hypothesis: dict[str, Any], finding: dict[str, Any]) -> bool:
+    metadata = hypothesis.get("metadata_json") if isinstance(hypothesis.get("metadata_json"), dict) else {}
+    dimensions = metadata.get("dedupe_dimensions") if isinstance(metadata.get("dedupe_dimensions"), dict) else {}
+    if not _hypothesis_route_matches_finding(dimensions.get("route"), finding):
+        return False
+    evidence = _decode_json_value(finding.get("evidence")) or {}
+    request = _decode_json_value(finding.get("request")) or {}
+    expected_method = str(dimensions.get("method") or "").strip().upper()
+    if expected_method:
+        observed_methods = {
+            value.upper()
+            for value in _hypothesis_structured_values([evidence, request], {"method", "http_method"})
+        }
+        if not observed_methods or expected_method not in observed_methods:
+            return False
+    for dimension_name, observed_keys in (
+        ("parameter_path", {"parameter", "param", "parameter_path"}),
+        ("body_path", {"body_path", "parameter_path", "parameter", "param"}),
+    ):
+        expected_value = str(dimensions.get(dimension_name) or "").strip().lower()
+        if not expected_value:
+            continue
+        observed_values = {
+            value.strip().lower()
+            for value in _hypothesis_structured_values([evidence, request], observed_keys)
+        }
+        if expected_value not in observed_values:
+            return False
+    return True
+
+
+def _hypothesis_verification_ids(value: Any, *, depth: int = 4) -> set[uuid.UUID]:
+    ids: set[uuid.UUID] = set()
+    if depth < 0:
+        return ids
+    if isinstance(value, dict):
+        for key, nested in list(value.items())[:100]:
+            if str(key).strip().lower() in {"verification_id", "retest_id"}:
+                try:
+                    ids.add(uuid.UUID(str(nested)))
+                except (TypeError, ValueError):
+                    pass
+            ids.update(_hypothesis_verification_ids(nested, depth=depth - 1))
+    elif isinstance(value, list):
+        for nested in value[:100]:
+            ids.update(_hypothesis_verification_ids(nested, depth=depth - 1))
+    return ids
+
+
+async def _reconcile_hypothesis_proof(
+    conn: Any,
+    hypothesis_id: str,
+    req: HypothesisProofReconcileRequest,
+) -> dict[str, Any]:
+    """Promote a hypothesis only by linking proof-backed findings from its action."""
+    hypothesis_uuid = _uuid_or_400(hypothesis_id, "hypothesis id")
+    hypothesis_row = await conn.fetchrow("SELECT * FROM hypotheses WHERE id=$1", hypothesis_uuid)
+    if not hypothesis_row:
+        raise HTTPException(status_code=404, detail="Hypothesis not found")
+    hypothesis = _public_hypothesis_row(hypothesis_row)
+    if int(hypothesis.get("version") or 0) != req.expected_version:
+        raise HTTPException(status_code=409, detail={"error": "hypothesis_version_conflict", "version": hypothesis.get("version")})
+    if hypothesis.get("effective_status") in {"refuted", "dead"}:
+        raise HTTPException(status_code=409, detail="Refuted or dead hypotheses cannot be promoted")
+
+    target_uuid = _optional_uuid(hypothesis.get("target_id"))
+    if not target_uuid:
+        raise HTTPException(status_code=400, detail="Proof reconciliation requires a target-bound hypothesis")
+    target_row = await conn.fetchrow("SELECT id, url FROM targets WHERE id=$1", target_uuid)
+    if not target_row:
+        raise HTTPException(status_code=404, detail="Target not found")
+    await _validate_approval_receipt_for_action(
+        conn,
+        req.approval_receipt_id,
+        target_url=str(row_to_dict(target_row).get("url") or "").strip() or None,
+        target_id=target_uuid,
+        action_name="hypothesis.reconcile_proof",
+        command="hypothesis.reconcile_proof",
+        risk_tier="active",
+        created_by=req.created_by,
+        always_require_receipt=True,
+    )
+
+    action_uuid = _optional_uuid(req.campaign_action_id or hypothesis.get("campaign_action_id"))
+    if not action_uuid:
+        raise HTTPException(status_code=400, detail="Hypothesis has no campaign action to reconcile")
+    action_row = await conn.fetchrow(
+        """
+        SELECT ca.*, cr.command AS executed_command,
+               cr.status AS executed_status,
+               cr.finding_ids AS executed_finding_ids,
+               cr.result_json AS executed_result_json
+        FROM campaign_actions ca
+        LEFT JOIN command_results cr ON cr.id = ca.command_result_id
+        WHERE ca.id=$1
+        """,
+        action_uuid,
+    )
+    if not action_row:
+        raise HTTPException(status_code=404, detail="Campaign action not found")
+    action = _public_campaign_action_row(action_row)
+    linked_hypotheses = {str(item) for item in action.get("hypothesis_ids") or []}
+    if str(hypothesis_uuid) not in linked_hypotheses and str(hypothesis.get("campaign_action_id") or "") != str(action_uuid):
+        raise HTTPException(status_code=409, detail="Campaign action is not linked to this hypothesis")
+    if _optional_uuid(action.get("target_id")) != target_uuid:
+        raise HTTPException(status_code=409, detail="Campaign action target does not match hypothesis target")
+
+    executed_finding_ids = _clean_string_list(_decode_json_value(action_row.get("executed_finding_ids")) or [], max_items=200)
+    candidate_ids = _clean_string_list((action.get("finding_ids") or []) + executed_finding_ids, max_items=200)
+    candidate_uuids = [_optional_uuid(item) for item in candidate_ids]
+    candidate_uuids = [item for item in candidate_uuids if item]
+    scan_uuid = _optional_uuid(action.get("scan_id"))
+    scan_status = None
+    if scan_uuid:
+        scan_status = await conn.fetchval("SELECT status FROM scans WHERE id=$1", scan_uuid)
+    if scan_uuid:
+        finding_rows = await conn.fetch(
+            """
+            SELECT id, target_id, scan_id, fingerprint, title, tool, cwe, severity,
+                   status, url, evidence, request, response,
+                   last_verification_status, last_verification_verdict,
+                   last_verification_confidence, updated_at
+            FROM findings
+            WHERE scan_id=$1 OR id=ANY($2::uuid[])
+            ORDER BY updated_at DESC
+            LIMIT 200
+            """,
+            scan_uuid,
+            candidate_uuids,
+        )
+    elif candidate_uuids:
+        finding_rows = await conn.fetch(
+            """
+            SELECT id, target_id, scan_id, fingerprint, title, tool, cwe, severity,
+                   status, url, evidence, request, response,
+                   last_verification_status, last_verification_verdict,
+                   last_verification_confidence, updated_at
+            FROM findings
+            WHERE id=ANY($1::uuid[])
+            ORDER BY updated_at DESC
+            LIMIT 200
+            """,
+            candidate_uuids,
+        )
+    else:
+        finding_rows = []
+
+    executed_result = _decode_json_value(action_row.get("executed_result_json")) or {}
+    verification_ids = _hypothesis_verification_ids(executed_result)
+    verification_rows = []
+    if verification_ids:
+        verification_rows = await conn.fetch(
+            """
+            SELECT id, finding_id, status, verdict, verification_mode, proof, artifacts
+            FROM finding_verifications
+            WHERE id=ANY($1::uuid[])
+            """,
+            list(verification_ids),
+        )
+    verified_by_retest = {
+        str(row["finding_id"])
+        for row in verification_rows
+        if str(row.get("status") or "").lower() == "completed"
+        and str(row.get("verdict") or "").lower() == "exploited"
+        and str(row.get("verification_mode") or "deterministic").lower() == "deterministic"
+    }
+    executed_command = str(action_row.get("executed_command") or "").strip()
+    direct_proof_command = executed_command in {"authz.promote_replay_finding"}
+
+    promoted: list[dict[str, Any]] = []
+    rejected_counts: Counter[str] = Counter()
+    for row in finding_rows:
+        finding = row_to_dict(row)
+        finding_id = str(finding.get("id") or "")
+        if _optional_uuid(finding.get("target_id")) != target_uuid:
+            rejected_counts["target_mismatch"] += 1
+            continue
+        if finding_proof_fields(finding).get("proof_state") != "verified":
+            rejected_counts["deterministic_proof_missing"] += 1
+            continue
+        scan_provenance = bool(
+            scan_uuid
+            and _optional_uuid(finding.get("scan_id")) == scan_uuid
+            and str(scan_status or "").lower() == "completed"
+        )
+        retest_provenance = finding_id in verified_by_retest
+        direct_provenance = bool(direct_proof_command and finding_id in set(candidate_ids))
+        if not (scan_provenance or retest_provenance or direct_provenance):
+            rejected_counts["action_provenance_missing"] += 1
+            continue
+        if not _hypothesis_family_matches_finding(hypothesis, finding):
+            rejected_counts["family_mismatch"] += 1
+            continue
+        if not _hypothesis_dimensions_match_finding(hypothesis, finding):
+            rejected_counts["dedupe_dimensions_mismatch"] += 1
+            continue
+        promoted.append({
+            "finding_id": finding_id,
+            "fingerprint": finding.get("fingerprint"),
+            "proof_state": "verified",
+            "proof_provenance": (
+                "campaign_scan" if scan_provenance else "deterministic_retest" if retest_provenance else "gated_authz_promotion"
+            ),
+        })
+
+    promoted_ids = [item["finding_id"] for item in promoted]
+    evidence_rows = []
+    if promoted_ids:
+        evidence_rows = await conn.fetch(
+            "SELECT id FROM evidence_objects WHERE finding_id=ANY($1::uuid[]) ORDER BY created_at DESC LIMIT 200",
+            [uuid.UUID(item) for item in promoted_ids],
+        )
+    evidence_ids = [str(row["id"]) for row in evidence_rows]
+    reconciliation = {
+        "reconciled_at": datetime.now(timezone.utc).isoformat(),
+        "campaign_action_id": str(action_uuid),
+        "command_result_id": str(action.get("command_result_id") or "") or None,
+        "scan_id": str(scan_uuid) if scan_uuid else None,
+        "scan_status": scan_status,
+        "candidate_count": len(finding_rows),
+        "promoted_finding_ids": promoted_ids,
+        "promotions": promoted,
+        "rejected_counts": dict(rejected_counts),
+        "proof_required": "existing deterministic verified finding with exact action provenance",
+        "finding_created": False,
+    }
+    update_status = "promoted" if promoted_ids else str(hypothesis.get("status") or "open")
+    terminal_reason = "deterministic_action_proof_reconciled" if promoted_ids else hypothesis.get("terminal_reason")
+    updated_row = await conn.fetchrow(
+        """
+        UPDATE hypotheses
+        SET status=$1,
+            promoted_finding_ids=(
+                SELECT COALESCE(jsonb_agg(DISTINCT value), '[]'::jsonb)
+                FROM jsonb_array_elements_text(promoted_finding_ids || $2::jsonb) AS value
+            ),
+            evidence_object_ids=(
+                SELECT COALESCE(jsonb_agg(DISTINCT value), '[]'::jsonb)
+                FROM jsonb_array_elements_text(evidence_object_ids || $3::jsonb) AS value
+            ),
+            tool_receipt_ids=(
+                SELECT COALESCE(jsonb_agg(DISTINCT value), '[]'::jsonb)
+                FROM jsonb_array_elements_text(tool_receipt_ids || $4::jsonb) AS value
+            ),
+            metadata_json=metadata_json || $5::jsonb,
+            terminal_reason=$6,
+            claim_owner=CASE WHEN $1='promoted' THEN NULL ELSE claim_owner END,
+            claim_lease_expires_at=CASE WHEN $1='promoted' THEN NULL ELSE claim_lease_expires_at END,
+            version=version+1,
+            updated_at=NOW()
+        WHERE id=$7 AND version=$8 AND status NOT IN ('refuted','dead')
+        RETURNING *
+        """,
+        update_status,
+        json.dumps(promoted_ids),
+        json.dumps(evidence_ids),
+        json.dumps(action.get("tool_receipt_ids") or []),
+        json.dumps({"latest_proof_reconciliation": reconciliation}),
+        terminal_reason,
+        hypothesis_uuid,
+        req.expected_version,
+    )
+    if not updated_row:
+        raise HTTPException(status_code=409, detail="Hypothesis changed while proof was being reconciled")
+    result_status = "completed" if promoted_ids else "partial"
+    command_result = await _record_command_result(
+        conn,
+        command="hypothesis.reconcile_proof",
+        status=result_status,
+        risk_tier="active",
+        approval_receipt_id=req.approval_receipt_id,
+        finding_ids=promoted_ids,
+        hypothesis_ids=[str(hypothesis_uuid)],
+        evidence_object_ids=evidence_ids,
+        tool_receipt_ids=_clean_string_list(action.get("tool_receipt_ids"), max_items=200),
+        result_json={"proof_reconciliation": reconciliation},
+        operator_message=(
+            f"Promoted hypothesis from {len(promoted_ids)} deterministic proof-backed finding(s)."
+            if promoted_ids
+            else "No exact deterministic proof-backed finding was eligible; hypothesis remains open."
+        ),
+        next_action=f"/findings/{promoted_ids[0]}" if promoted_ids else "/settings/arsenal?tab=hypotheses",
+        created_by=req.created_by,
+    )
+    return {
+        "status": result_status,
+        "promoted": bool(promoted_ids),
+        "hypothesis": _public_hypothesis_row(updated_row),
+        "proof_reconciliation": reconciliation,
+        "command_result": command_result,
+        "operation_id": command_result.get("id"),
+        "findings_created": 0,
+        "execution_enabled": True,
     }
 
 
@@ -20448,6 +20866,19 @@ async def _arsenal_dispatch_hypothesis_plan_campaign(p: dict[str, Any]) -> dict[
     return await arsenal_plan_hypothesis_campaign(hypothesis_id, HypothesisCampaignPlanRequest(**fields))
 
 
+async def _arsenal_dispatch_hypothesis_reconcile_proof(
+    p: dict[str, Any], approval_receipt_id: str | None,
+) -> dict[str, Any]:
+    hypothesis_id = str(p.get("hypothesis_id") or "").strip()
+    if not hypothesis_id:
+        raise HTTPException(status_code=400, detail="hypothesis.reconcile_proof requires a hypothesis_id parameter")
+    fields = {k: v for k, v in p.items() if k in _arsenal_model_fields(HypothesisProofReconcileRequest) and v is not None}
+    fields["approval_receipt_id"] = approval_receipt_id or p.get("approval_receipt_id")
+    async with db_pool.acquire() as conn:
+        async with conn.transaction():
+            return await _reconcile_hypothesis_proof(conn, hypothesis_id, HypothesisProofReconcileRequest(**fields))
+
+
 async def _arsenal_dispatch_hypothesis_generate_from_graph(p: dict[str, Any]) -> dict[str, Any]:
     target_id = str(p.get("target_id") or "").strip()
     if not target_id:
@@ -20871,6 +21302,7 @@ def _arsenal_gated_adapters() -> dict[str, Any]:
         "authz.replay_plan": _arsenal_dispatch_authz_replay_plan,
         "authz.promote_replay_finding": _arsenal_dispatch_authz_promote_replay_finding,
         "target.principal_matrix.record": _arsenal_dispatch_target_principal_matrix_record,
+        "hypothesis.reconcile_proof": _arsenal_dispatch_hypothesis_reconcile_proof,
     }
 
 
@@ -21823,6 +22255,14 @@ async def arsenal_plan_hypothesis_campaign(hypothesis_id: str, req: HypothesisCa
         # orphan campaign/action if a later write fails. HTTPExceptions roll back cleanly.
         async with conn.transaction():
             return await _plan_campaign_from_hypothesis(conn, hypothesis_id, req)
+
+
+@app.post("/arsenal/hypotheses/{hypothesis_id}/reconcile-proof")
+async def arsenal_reconcile_hypothesis_proof(hypothesis_id: str, req: HypothesisProofReconcileRequest):
+    """Reconcile existing deterministic action proof without creating a finding."""
+    async with db_pool.acquire() as conn:
+        async with conn.transaction():
+            return await _reconcile_hypothesis_proof(conn, hypothesis_id, req)
 
 
 @app.get("/arsenal/refuter-reviews")

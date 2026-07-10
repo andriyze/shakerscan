@@ -29,6 +29,7 @@ import {
   listInteractiveSessions,
   previewScopeReceipt,
   promoteAuthzReplay,
+  reconcileHypothesisProof,
   recordRefuterReview,
   queueRefuterReviewsFromSummary,
   testLocalAgentCapability,
@@ -409,9 +410,45 @@ function CampaignActionRow({
   )
 }
 
-function HypothesisRow({ hypothesis }: { hypothesis: Hypothesis }) {
+function HypothesisRow({ hypothesis, approvalReceiptId, operator, onRefresh }: {
+  hypothesis: Hypothesis
+  approvalReceiptId?: string
+  operator?: string
+  onRefresh?: () => Promise<void> | void
+}) {
   const claimOwner = hypothesis.claim_state?.owner || hypothesis.claim_owner
   const displayStatus = hypothesis.effective_status || hypothesis.status
+  const promotedFindingIds = hypothesis.promoted_finding_ids || []
+  const [reconciling, setReconciling] = useState(false)
+  const [reconcileError, setReconcileError] = useState<string | null>(null)
+  const [reconcileMessage, setReconcileMessage] = useState<string | null>(null)
+
+  async function reconcileProof() {
+    if (!approvalReceiptId || !hypothesis.campaign_action_id) return
+    if (!window.confirm('Reconcile this hypothesis against deterministic proof from its linked campaign action?')) return
+    setReconciling(true)
+    setReconcileError(null)
+    setReconcileMessage(null)
+    try {
+      const result = await reconcileHypothesisProof(hypothesis.id, {
+        expected_version: hypothesis.version,
+        campaign_action_id: hypothesis.campaign_action_id,
+        approval_receipt_id: approvalReceiptId,
+        created_by: operator || 'settings-arsenal',
+      })
+      setReconcileMessage(
+        result.promoted
+          ? `Promoted from ${(result.hypothesis.promoted_finding_ids || []).length} deterministic finding(s).`
+          : 'No exact deterministic proof was eligible; the hypothesis remains open.'
+      )
+      await onRefresh?.()
+    } catch (err) {
+      setReconcileError(err instanceof Error ? err.message : 'Failed to reconcile hypothesis proof')
+    } finally {
+      setReconciling(false)
+    }
+  }
+
   return (
     <div className="rounded-md border border-gray-800 bg-gray-950 px-3 py-2">
       <div className="flex flex-wrap items-start justify-between gap-3">
@@ -445,8 +482,30 @@ function HypothesisRow({ hypothesis }: { hypothesis: Hypothesis }) {
         {hypothesis.tool_receipt_ids.slice(0, 3).map((id) => (
           <Badge key={id} className="bg-gray-800 text-gray-300">tool {id.slice(0, 8)}</Badge>
         ))}
-        <Badge className="bg-gray-800 text-gray-300">not a finding</Badge>
+        {promotedFindingIds.map((id) => (
+          <a key={id} href={`/findings/${id}`}>
+            <Badge className={statusClass('proof_backed')}>finding {id.slice(0, 8)}</Badge>
+          </a>
+        ))}
+        {promotedFindingIds.length === 0 && <Badge className="bg-gray-800 text-gray-300">lead only</Badge>}
       </div>
+      {hypothesis.can_reconcile_proof && hypothesis.campaign_action_id && (
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          <Button
+            size="sm"
+            variant="secondary"
+            disabled={!approvalReceiptId || reconciling}
+            onClick={() => void reconcileProof()}
+            title={!approvalReceiptId ? 'A target-scoped approval receipt is required' : 'Reconcile deterministic campaign proof'}
+          >
+            <ShieldCheck className="mr-1.5 h-3.5 w-3.5" aria-hidden="true" />
+            {reconciling ? 'Reconciling...' : 'Reconcile proof'}
+          </Button>
+          {!approvalReceiptId && <Badge className={statusClass('out_of_scope')}>target approval required</Badge>}
+        </div>
+      )}
+      {reconcileError && <p role="alert" className="mt-2 text-xs text-red-300">{reconcileError}</p>}
+      {reconcileMessage && <p role="status" className="mt-2 text-xs text-gray-300">{reconcileMessage}</p>}
     </div>
   )
 }
@@ -1162,6 +1221,15 @@ export default function ArsenalSettingsPage() {
     setRecentRefuterReviews(data.refuter_reviews || [])
   }
 
+  async function refreshHypotheses() {
+    const [hypothesisData, situationData] = await Promise.all([
+      getHypotheses(5),
+      getHypothesisSituationReport(5, approvalActor || 'operator'),
+    ])
+    setRecentHypotheses(hypothesisData.hypotheses)
+    setHypothesisSituation(situationData)
+  }
+
   const commandCounts = useMemo(() => countBy(commands?.commands || []), [commands])
   const gatedCommands = useMemo(
     () => (commands?.commands || []).filter((command) => command.status === 'gated'),
@@ -1817,7 +1885,13 @@ export default function ArsenalSettingsPage() {
                 <h3 className="mb-2 text-sm font-medium text-gray-200">Recent Board Entries</h3>
                 <div className="grid gap-2">
                   {recentHypotheses.slice(0, 5).map((hypothesis) => (
-                    <HypothesisRow key={hypothesis.id} hypothesis={hypothesis} />
+                    <HypothesisRow
+                      key={hypothesis.id}
+                      hypothesis={hypothesis}
+                      approvalReceiptId={approvalReceipt?.approved_by ? approvalReceipt.id : undefined}
+                      operator={approvalActor.trim() || 'operator'}
+                      onRefresh={refreshHypotheses}
+                    />
                   ))}
                 </div>
               </div>

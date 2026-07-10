@@ -141,3 +141,15 @@ def test_target_principal_slot_migration_deactivates_ambiguous_rows_before_uniqu
     assert "ORDER BY updated_at DESC, id DESC" in statements[1]
     assert "idx_target_principals_active_auth_slot" in statements[2]
     assert "WHERE is_active = true AND auth_state IN ('user1', 'user2')" in statements[2]
+
+
+def test_hypothesis_proof_link_migration_adds_durable_promoted_finding_ids():
+    conn = _FakeMigrationConn([])
+
+    asyncio.run(retest_contract._migrate_hypothesis_proof_links(conn))
+
+    assert len(conn.executed) == 1
+    statement, args = conn.executed[0]
+    assert args == ()
+    assert "ALTER TABLE hypotheses" in statement
+    assert "promoted_finding_ids JSONB NOT NULL DEFAULT '[]'::jsonb" in statement

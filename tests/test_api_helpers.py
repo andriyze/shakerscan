@@ -3614,6 +3614,244 @@ def test_authz_concrete_replay_path_never_invents_template_values():
     assert api_module._authz_replay_path_is_template("/api/orders/42") is False
 
 
+def test_hypothesis_finding_match_requires_family_route_method_and_parameter():
+    hypothesis = {
+        "family": "xss",
+        "metadata_json": {
+            "dedupe_dimensions": {
+                "route": "/api/search/{id}",
+                "method": "get",
+                "parameter_path": "q",
+            }
+        },
+    }
+    finding = {
+        "title": "Reflected XSS",
+        "tool": "smart_xss",
+        "cwe": "CWE-79",
+        "url": "https://app.example.com/api/search/42?q=x",
+        "evidence": {"method": "GET", "parameter": "q"},
+        "request": {},
+    }
+
+    assert api_module._hypothesis_family_matches_finding(hypothesis, finding) is True
+    assert api_module._hypothesis_dimensions_match_finding(hypothesis, finding) is True
+    assert api_module._hypothesis_dimensions_match_finding(
+        hypothesis,
+        {**finding, "evidence": {"method": "POST", "parameter": "q"}},
+    ) is False
+    assert api_module._hypothesis_route_matches_finding("/api/search/{id}", {"url": "https://app.example.com/api/search"}) is False
+
+
+def test_reconcile_hypothesis_promotes_only_existing_action_proof(monkeypatch):
+    hypothesis_id = uuid.uuid4()
+    action_id = uuid.uuid4()
+    target_id = uuid.uuid4()
+    scan_id = uuid.uuid4()
+    finding_id = uuid.uuid4()
+    evidence_id = uuid.uuid4()
+    approval_id = str(uuid.uuid4())
+    captured = {}
+
+    hypothesis_row = {
+        "id": hypothesis_id,
+        "target_id": target_id,
+        "campaign_id": None,
+        "campaign_action_id": action_id,
+        "source": "scanner_signal",
+        "family": "xss",
+        "dedupe_key": "xss-search",
+        "status": "testing",
+        "version": 3,
+        "claim_owner": "worker-1",
+        "claim_lease_expires_at": datetime.now(timezone.utc) + timedelta(hours=1),
+        "evidence_object_ids": [],
+        "tool_receipt_ids": [],
+        "promoted_finding_ids": [],
+        "next_test_action": {},
+        "endorsements": [],
+        "refutations": [],
+        "metadata_json": {"dedupe_dimensions": {"route": "/api/search", "method": "get", "parameter_path": "q"}},
+    }
+    action_row = {
+        "id": action_id,
+        "target_id": target_id,
+        "command_result_id": uuid.uuid4(),
+        "scan_id": scan_id,
+        "command": "scan.focused_family",
+        "action_name": "scan.focused_family",
+        "status": "queued",
+        "dry_run": False,
+        "risk_tier": "active",
+        "finding_ids": [],
+        "hypothesis_ids": [str(hypothesis_id)],
+        "evidence_object_ids": [],
+        "tool_receipt_ids": [str(uuid.uuid4())],
+        "blocked_by": [],
+        "result_json": {},
+        "executed_command": "scan.focused_family",
+        "executed_status": "queued",
+        "executed_finding_ids": [],
+        "executed_result_json": {},
+    }
+    finding_row = {
+        "id": finding_id,
+        "target_id": target_id,
+        "scan_id": scan_id,
+        "fingerprint": "fp-xss",
+        "title": "Reflected XSS",
+        "tool": "smart_xss",
+        "cwe": "CWE-79",
+        "severity": "high",
+        "status": "active",
+        "url": "https://app.example.com/api/search?q=x",
+        "evidence": {"method": "GET", "parameter": "q"},
+        "request": {},
+        "response": {},
+        "last_verification_status": "still_vulnerable",
+        "last_verification_verdict": "exploited",
+        "last_verification_confidence": 1.0,
+        "updated_at": datetime.now(timezone.utc),
+    }
+
+    class FakeConn:
+        async def fetchrow(self, query, *args):
+            sql = str(query)
+            if "SELECT * FROM hypotheses" in sql:
+                return hypothesis_row
+            if "SELECT id, url FROM targets" in sql:
+                return {"id": target_id, "url": "https://app.example.com"}
+            if "SELECT ca.*" in sql:
+                return action_row
+            if "UPDATE hypotheses" in sql:
+                captured["update_args"] = args
+                return {
+                    **hypothesis_row,
+                    "status": "promoted",
+                    "version": 4,
+                    "claim_owner": None,
+                    "claim_lease_expires_at": None,
+                    "promoted_finding_ids": [str(finding_id)],
+                    "evidence_object_ids": [str(evidence_id)],
+                }
+            raise AssertionError(sql)
+
+        async def fetchval(self, query, *args):
+            if "SELECT status FROM scans" in str(query):
+                return "completed"
+            raise AssertionError(str(query))
+
+        async def fetch(self, query, *args):
+            sql = str(query)
+            if "FROM findings" in sql:
+                return [finding_row]
+            if "FROM evidence_objects" in sql:
+                return [{"id": evidence_id}]
+            raise AssertionError(sql)
+
+    async def fake_validate(conn, receipt_id, **kwargs):
+        captured["approval"] = (receipt_id, kwargs)
+        return {"approval_receipt_id": receipt_id}
+
+    async def fake_record(conn, **kwargs):
+        captured["command_result"] = kwargs
+        return {"id": str(uuid.uuid4()), **kwargs}
+
+    monkeypatch.setattr(api_module, "_validate_approval_receipt_for_action", fake_validate)
+    monkeypatch.setattr(api_module, "_record_command_result", fake_record)
+
+    result = asyncio.run(api_module._reconcile_hypothesis_proof(
+        FakeConn(),
+        str(hypothesis_id),
+        api_module.HypothesisProofReconcileRequest(
+            expected_version=3,
+            campaign_action_id=str(action_id),
+            approval_receipt_id=approval_id,
+        ),
+    ))
+
+    assert result["promoted"] is True
+    assert result["findings_created"] == 0
+    assert result["hypothesis"]["status"] == "promoted"
+    assert result["hypothesis"]["promoted_finding_ids"] == [str(finding_id)]
+    assert result["proof_reconciliation"]["promotions"][0]["proof_provenance"] == "campaign_scan"
+    assert captured["approval"][0] == approval_id
+    assert captured["approval"][1]["always_require_receipt"] is True
+    assert captured["command_result"]["finding_ids"] == [str(finding_id)]
+
+
+def test_reconcile_hypothesis_keeps_ai_only_or_weak_finding_open(monkeypatch):
+    hypothesis_id = uuid.uuid4()
+    action_id = uuid.uuid4()
+    target_id = uuid.uuid4()
+    scan_id = uuid.uuid4()
+    finding_id = uuid.uuid4()
+    hypothesis_row = {
+        "id": hypothesis_id, "target_id": target_id, "campaign_action_id": action_id,
+        "source": "ai_gate", "family": "xss", "dedupe_key": "weak", "status": "open", "version": 1,
+        "evidence_object_ids": [], "tool_receipt_ids": [], "promoted_finding_ids": [],
+        "next_test_action": {}, "endorsements": [], "refutations": [], "metadata_json": {},
+    }
+    action_row = {
+        "id": action_id, "target_id": target_id, "command_result_id": uuid.uuid4(), "scan_id": scan_id,
+        "command": "ai_gate.scan", "status": "completed", "dry_run": False, "risk_tier": "active",
+        "finding_ids": [str(finding_id)], "hypothesis_ids": [str(hypothesis_id)],
+        "evidence_object_ids": [], "tool_receipt_ids": [], "blocked_by": [], "result_json": {},
+        "executed_command": "ai_gate.scan", "executed_status": "completed",
+        "executed_finding_ids": [str(finding_id)], "executed_result_json": {},
+    }
+
+    class FakeConn:
+        async def fetchrow(self, query, *args):
+            sql = str(query)
+            if "SELECT * FROM hypotheses" in sql:
+                return hypothesis_row
+            if "SELECT id, url FROM targets" in sql:
+                return {"id": target_id, "url": "https://app.example.com"}
+            if "SELECT ca.*" in sql:
+                return action_row
+            if "UPDATE hypotheses" in sql:
+                return {**hypothesis_row, "version": 2, "metadata_json": {"latest_proof_reconciliation": {}}}
+            raise AssertionError(sql)
+
+        async def fetchval(self, query, *args):
+            return "completed"
+
+        async def fetch(self, query, *args):
+            if "FROM findings" in str(query):
+                return [{
+                    "id": finding_id, "target_id": target_id, "scan_id": scan_id,
+                    "fingerprint": "weak", "title": "Semantic XSS concern", "tool": "ai_judge",
+                    "cwe": "CWE-79", "severity": "high", "status": "active",
+                    "url": "https://app.example.com/chat", "evidence": {}, "request": {}, "response": {},
+                    "last_verification_status": "completed", "last_verification_verdict": "likely_vulnerable",
+                    "last_verification_confidence": 0.9, "updated_at": datetime.now(timezone.utc),
+                }]
+            if "FROM evidence_objects" in str(query):
+                return []
+            raise AssertionError(str(query))
+
+    async def fake_validate(*args, **kwargs):
+        return {}
+
+    async def fake_record(conn, **kwargs):
+        return {"id": str(uuid.uuid4()), **kwargs}
+
+    monkeypatch.setattr(api_module, "_validate_approval_receipt_for_action", fake_validate)
+    monkeypatch.setattr(api_module, "_record_command_result", fake_record)
+    result = asyncio.run(api_module._reconcile_hypothesis_proof(
+        FakeConn(), str(hypothesis_id),
+        api_module.HypothesisProofReconcileRequest(
+            expected_version=1, campaign_action_id=str(action_id), approval_receipt_id=str(uuid.uuid4()),
+        ),
+    ))
+
+    assert result["promoted"] is False
+    assert result["status"] == "partial"
+    assert result["hypothesis"]["status"] == "open"
+    assert result["proof_reconciliation"]["rejected_counts"] == {"deterministic_proof_missing": 1}
+
+
 def test_hypothesis_signal_redacts_and_is_non_executing():
     req = api_module.HypothesisSignalRequest(
         signal_type="refutation",
@@ -7486,6 +7724,11 @@ def test_validate_approval_receipt_can_require_receipt_even_when_global_policy_i
 def test_principal_matrix_record_is_only_in_gated_gateway_adapters():
     assert "target.principal_matrix.record" not in api_module._arsenal_readonly_adapters()
     assert api_module._arsenal_gated_adapters()["target.principal_matrix.record"] is api_module._arsenal_dispatch_target_principal_matrix_record
+
+
+def test_hypothesis_proof_reconciliation_is_only_in_gated_gateway_adapters():
+    assert "hypothesis.reconcile_proof" not in api_module._arsenal_readonly_adapters()
+    assert api_module._arsenal_gated_adapters()["hypothesis.reconcile_proof"] is api_module._arsenal_dispatch_hypothesis_reconcile_proof
 
 
 def test_principal_matrix_write_validates_target_scoped_receipt_and_audits(monkeypatch):

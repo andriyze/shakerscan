@@ -66,6 +66,12 @@ GATES: dict[str, tuple[str, ...]] = {
         "tests/test_command_arsenal.py::test_no_raw_shell_or_generic_execution_commands_are_exposed",
         "tests/test_command_arsenal.py::test_state_changing_commands_are_gated_not_executable_shortcuts",
     ),
+    "test:hypothesis-proof-promotion": (
+        "tests/test_api_helpers.py::test_hypothesis_finding_match_requires_family_route_method_and_parameter",
+        "tests/test_api_helpers.py::test_reconcile_hypothesis_promotes_only_existing_action_proof",
+        "tests/test_api_helpers.py::test_reconcile_hypothesis_keeps_ai_only_or_weak_finding_open",
+        "tests/test_command_arsenal.py::test_hypothesis_proof_reconciliation_is_gated_and_proof_constrained",
+    ),
 }
 
 
