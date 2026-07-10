@@ -1,6 +1,7 @@
 import importlib.util
 import os
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -434,6 +435,46 @@ def test_scanner_execution_plan_records_zero_rediscovery_and_public_skips():
     assert families["xss"]["enabled"] is False
     assert plan["summary"]["skip_reason_counts"]["public_only"] >= 1
     assert families["xss"]["reason"] == "public_only"
+
+
+def test_scanner_execution_plan_fails_loudly_when_registry_is_unavailable(monkeypatch):
+    monkeypatch.setattr(scanner_mod, "_check_registry", None)
+
+    with pytest.raises(RuntimeError, match="scanner_check_registry_unavailable"):
+        scanner_mod.build_scanner_execution_plan(
+            scan_mode="smart",
+            public_only=False,
+            quick_mode=False,
+            active_checks=True,
+            check_family_scope={"families": ["sqli"]},
+            skip_global_checks=False,
+            focused_endpoints_only=False,
+            zero_rediscovery=False,
+        )
+
+
+def test_scanner_execution_plan_fails_loudly_on_partial_registry(monkeypatch):
+    monkeypatch.setattr(
+        scanner_mod,
+        "_check_registry",
+        SimpleNamespace(scanner_execution_plan=lambda **_kwargs: {
+            "registry_version": "check_family_v1",
+            "families": [{"name": "sqli"}],
+            "summary": {},
+        }),
+    )
+
+    with pytest.raises(RuntimeError, match="required_families_missing"):
+        scanner_mod.build_scanner_execution_plan(
+            scan_mode="smart",
+            public_only=False,
+            quick_mode=False,
+            active_checks=True,
+            check_family_scope={"families": ["sqli"]},
+            skip_global_checks=False,
+            focused_endpoints_only=False,
+            zero_rediscovery=False,
+        )
 
 
 def test_registry_dispatch_enabled_is_authoritative_for_explicit_family():

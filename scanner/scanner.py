@@ -3128,29 +3128,20 @@ def build_scanner_execution_plan(
     focused_endpoints_only: bool,
     zero_rediscovery: bool,
 ) -> dict[str, Any]:
-    """Registry-derived family execution plan attached to scan reports.
-
-    Detector dispatch still lives in the legacy waterfall. This plan is the
-    compatibility layer that lets families migrate behind the registry one at a
-    time without changing report consumers.
-    """
-    if _check_registry is not None and hasattr(_check_registry, "scanner_execution_plan"):
-        return _check_registry.scanner_execution_plan(
-            scan_mode=scan_mode,
-            public_only=public_only,
-            quick_mode=quick_mode,
-            active_checks=active_checks,
-            check_family_scope=check_family_scope,
-            skip_global_checks=skip_global_checks,
-            focused_endpoints_only=focused_endpoints_only,
-            zero_rediscovery=zero_rediscovery,
-        )
-    return {
-        "registry_version": "fallback",
-        "scan_mode": scan_mode,
-        "check_family_scope": dict(check_family_scope or {}),
-        "families": [],
-    }
+    """Build and validate the authoritative scanner-family execution plan."""
+    if _check_registry is None or not callable(getattr(_check_registry, "scanner_execution_plan", None)):
+        raise RuntimeError("scanner_check_registry_unavailable")
+    plan = _check_registry.scanner_execution_plan(
+        scan_mode=scan_mode,
+        public_only=public_only,
+        quick_mode=quick_mode,
+        active_checks=active_checks,
+        check_family_scope=check_family_scope,
+        skip_global_checks=skip_global_checks,
+        focused_endpoints_only=focused_endpoints_only,
+        zero_rediscovery=zero_rediscovery,
+    )
+    return validate_scanner_execution_plan(plan)
 
 
 SCANNER_REGISTRY_ADAPTER_CONTRACTS = {
@@ -3162,6 +3153,40 @@ SCANNER_REGISTRY_ADAPTER_CONTRACTS = {
     "mass_assignment": "legacy_phase4_mass_assignment",
     "jwt": "legacy_advanced_jwt",
 }
+
+_SCANNER_REQUIRED_REGISTRY_FAMILIES = frozenset({
+    "recon",
+    "headers",
+    *SCANNER_REGISTRY_ADAPTER_CONTRACTS,
+})
+
+
+def validate_scanner_execution_plan(plan: Any) -> dict[str, Any]:
+    """Reject missing or partial registry plans before any detector dispatch."""
+    if not isinstance(plan, dict):
+        raise RuntimeError("scanner_check_registry_plan_invalid:not_an_object")
+    if plan.get("registry_version") != "check_family_v1":
+        raise RuntimeError("scanner_check_registry_plan_invalid:unsupported_version")
+    families = plan.get("families")
+    if not isinstance(families, list) or not families:
+        raise RuntimeError("scanner_check_registry_plan_invalid:families_missing")
+    names = [
+        str(item.get("name") or "").strip().lower()
+        for item in families
+        if isinstance(item, dict)
+    ]
+    if len(names) != len(families) or any(not name for name in names):
+        raise RuntimeError("scanner_check_registry_plan_invalid:family_row_invalid")
+    if len(set(names)) != len(names):
+        raise RuntimeError("scanner_check_registry_plan_invalid:duplicate_family")
+    missing = sorted(_SCANNER_REQUIRED_REGISTRY_FAMILIES - set(names))
+    if missing:
+        raise RuntimeError(
+            "scanner_check_registry_plan_invalid:required_families_missing:" + ",".join(missing)
+        )
+    if not isinstance(plan.get("summary"), dict):
+        raise RuntimeError("scanner_check_registry_plan_invalid:summary_missing")
+    return plan
 
 
 def registry_dispatch_enabled(
