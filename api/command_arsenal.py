@@ -12,6 +12,7 @@ import os
 import shutil
 import subprocess
 from typing import Any
+import uuid
 
 
 ARSENAL_SCHEMA_VERSION = "2026-07-05.v1"
@@ -1581,6 +1582,64 @@ def describe_commands() -> dict[str, Any]:
             "operator_message": "string",
         },
     }
+
+
+def validate_command_parameters(command: dict[str, Any], parameters: Any) -> list[str]:
+    """Validate declared command constraints at the server dispatch boundary."""
+    if not isinstance(parameters, dict):
+        return ["parameters:must_be_object"]
+    schema = command.get("parameters_schema") if isinstance(command, dict) else None
+    if not isinstance(schema, dict):
+        return []
+
+    errors: list[str] = []
+    for name, constraints in schema.items():
+        if name not in parameters or not isinstance(constraints, dict):
+            continue
+        value = parameters[name]
+        expected = constraints.get("type")
+        valid_type = True
+        if expected == "integer":
+            valid_type = isinstance(value, int) and not isinstance(value, bool)
+        elif expected == "number":
+            valid_type = isinstance(value, (int, float)) and not isinstance(value, bool)
+        elif expected == "boolean":
+            valid_type = isinstance(value, bool)
+        elif expected == "string":
+            valid_type = isinstance(value, str)
+        elif expected == "array":
+            valid_type = isinstance(value, list)
+        elif expected == "object":
+            valid_type = isinstance(value, dict)
+        if not valid_type:
+            errors.append(f"{name}:type:{expected}")
+            continue
+
+        if "enum" in constraints and value not in constraints.get("enum", []):
+            errors.append(f"{name}:enum")
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            if constraints.get("minimum") is not None and value < constraints["minimum"]:
+                errors.append(f"{name}:minimum:{constraints['minimum']}")
+            if constraints.get("maximum") is not None and value > constraints["maximum"]:
+                errors.append(f"{name}:maximum:{constraints['maximum']}")
+        if isinstance(value, str):
+            if constraints.get("minLength") is not None and len(value) < constraints["minLength"]:
+                errors.append(f"{name}:minLength:{constraints['minLength']}")
+            if constraints.get("maxLength") is not None and len(value) > constraints["maxLength"]:
+                errors.append(f"{name}:maxLength:{constraints['maxLength']}")
+            if constraints.get("format") == "uuid":
+                try:
+                    uuid.UUID(value)
+                except (ValueError, TypeError, AttributeError):
+                    errors.append(f"{name}:format:uuid")
+        if isinstance(value, list):
+            if constraints.get("maxItems") is not None and len(value) > constraints["maxItems"]:
+                errors.append(f"{name}:maxItems:{constraints['maxItems']}")
+            item_schema = constraints.get("items")
+            if isinstance(item_schema, dict) and item_schema.get("type") == "string":
+                if any(not isinstance(item, str) for item in value):
+                    errors.append(f"{name}:items:type:string")
+    return errors
 
 
 def describe_contracts() -> dict[str, Any]:

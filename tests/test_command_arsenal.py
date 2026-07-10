@@ -57,6 +57,20 @@ def test_command_catalog_contains_required_initial_commands():
         assert commands[name]["risk_tier"] == "read_only"
 
 
+def test_server_parameter_validator_enforces_bounds_and_uuid_formats():
+    commands = {item["name"]: item for item in arsenal.describe_commands()["commands"]}
+
+    assert arsenal.validate_command_parameters(
+        commands["evidence_instance.list"], {"limit": 201}
+    ) == ["limit:maximum:200"]
+    assert arsenal.validate_command_parameters(
+        commands["asm.gaps"], {"target_id": "not-a-uuid"}
+    ) == ["target_id:format:uuid"]
+    assert arsenal.validate_command_parameters(
+        commands["evidence_instance.list"], {"limit": 200}
+    ) == []
+
+
 def test_refuter_review_commands_do_not_mutate_findings_directly():
     payload = arsenal.describe_commands()
     commands = {item["name"]: item for item in payload["commands"]}

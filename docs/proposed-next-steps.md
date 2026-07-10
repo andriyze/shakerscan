@@ -162,6 +162,10 @@ Use these waves to decide sequence when a T3MP3ST idea competes with detector wo
 8. **Read-only MCP:** DONE after REST Command Arsenal, receipts, evidence, planner evals, and audit
    records stabilized. State-changing MCP is excluded from this roadmap.
 
+Server-side Arsenal dispatch revalidates catalog parameter types, bounds, enums, UUID formats, string
+lengths, and array constraints before invoking any adapter. MCP schemas are client guidance, not a
+security boundary; direct REST/planner callers cannot bypass the same declared limits.
+
 ## Done (do not re-list as TODO)
 
 The product-invariant / contract-first layer that the last cycle targeted is implemented and

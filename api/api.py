@@ -151,6 +151,7 @@ try:
     from command_arsenal import describe_local_agents
     from command_arsenal import describe_tools as describe_arsenal_tools
     from command_arsenal import test_local_agent_capability
+    from command_arsenal import validate_command_parameters as _validate_command_parameters
 except ModuleNotFoundError as exc:
     if exc.name not in {"command_arsenal", "action_scope"}:
         raise
@@ -165,6 +166,7 @@ except ModuleNotFoundError as exc:
     from api.command_arsenal import describe_local_agents
     from api.command_arsenal import describe_tools as describe_arsenal_tools
     from api.command_arsenal import test_local_agent_capability
+    from api.command_arsenal import validate_command_parameters as _validate_command_parameters
 
 AUTO_SHARD_ACTIVE_SCAN_TYPES = ACTIVE_ENFORCED_SCAN_TYPES
 AUTO_SHARD_MAX_SHARDS = parallel_scan.MAX_SHARDS
@@ -21740,6 +21742,12 @@ async def _validate_arsenal_execute_request(conn, req: ArsenalExecuteRequest) ->
     risk_tier = str(command.get("risk_tier") or "read_only")
     if status in {"catalog_only", "out_of_scope", "contract"}:
         raise HTTPException(status_code=400, detail=f"Command '{req.command}' is not executable (status={status})")
+    parameter_errors = _validate_command_parameters(command, req.parameters)
+    if parameter_errors:
+        raise HTTPException(
+            status_code=422,
+            detail={"error": "invalid_arsenal_parameters", "violations": parameter_errors},
+        )
     return command, status, risk_tier
 
 

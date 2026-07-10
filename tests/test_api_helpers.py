@@ -5581,7 +5581,11 @@ def test_arsenal_read_only_and_dry_run_catalog_commands_have_gateway_adapters():
 def test_arsenal_execute_gated_dry_runs_without_execute():
     conn = _BlockedRecordingConn()
     result = asyncio.run(api_module._arsenal_execute(
-        conn, api_module.ArsenalExecuteRequest(command="asm.improve", parameters={"target_id": "t"}, created_by="pytest")
+        conn, api_module.ArsenalExecuteRequest(
+            command="asm.improve",
+            parameters={"target_id": "11111111-1111-4111-8111-111111111111"},
+            created_by="pytest",
+        )
     ))
     assert result["dispatched"] is False
     assert result["dry_run"] is True
@@ -5599,7 +5603,8 @@ def test_arsenal_execute_gated_blocked_when_flag_disabled(monkeypatch):
     conn = _BlockedRecordingConn()
     result = asyncio.run(api_module._arsenal_execute(
         conn, api_module.ArsenalExecuteRequest(
-            command="asm.improve", parameters={"target_id": "t"},
+            command="asm.improve",
+            parameters={"target_id": "11111111-1111-4111-8111-111111111111"},
             execute=True, confirmations=["confirm_authorized"],
         )
     ))
@@ -8088,6 +8093,28 @@ def test_runtime_destination_scope_degrades_missing_required_dns_observation():
         "verdict": "degraded",
         "reason": "runtime_dns_unverified",
     }]
+
+
+def test_arsenal_dispatch_rejects_catalog_bound_and_uuid_violations_before_adapter_call():
+    for request, expected_violation in (
+        (
+            api_module.ArsenalExecuteRequest(
+                command="evidence_instance.list", parameters={"limit": 201}
+            ),
+            "limit:maximum:200",
+        ),
+        (
+            api_module.ArsenalExecuteRequest(
+                command="asm.gaps", parameters={"target_id": "not-a-uuid"}
+            ),
+            "target_id:format:uuid",
+        ),
+    ):
+        with pytest.raises(api_module.HTTPException) as exc:
+            asyncio.run(api_module._validate_arsenal_execute_request(None, request))
+        assert exc.value.status_code == 422
+        assert exc.value.detail["error"] == "invalid_arsenal_parameters"
+        assert expected_violation in exc.value.detail["violations"]
 
 
 def test_validate_approval_receipt_rejects_non_uuid():
