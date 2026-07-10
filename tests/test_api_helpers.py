@@ -2523,8 +2523,16 @@ def test_execute_authz_replay_plan_records_observations_without_findings(monkeyp
 
     class _FakeSession:
         state = types.SimpleNamespace(users={
-            "user1": types.SimpleNamespace(is_authenticated=True),
-            "user2": types.SimpleNamespace(is_authenticated=True),
+            "user1": types.SimpleNamespace(
+                is_authenticated=True,
+                credential_profile_id="profile-user1",
+                principal_auth_state="user1",
+            ),
+            "user2": types.SimpleNamespace(
+                is_authenticated=True,
+                credential_profile_id="profile-user2",
+                principal_auth_state="user2",
+            ),
         })
 
         async def test_endpoint(self, *, endpoint, method, as_user, body, allow_out_of_scope):
@@ -2695,6 +2703,12 @@ def test_execute_authz_replay_plan_records_observations_without_findings(monkeyp
 
     monkeypatch.setattr(api_module, "InteractiveSessionManager", _FakeInteractiveSessionManager)
 
+    async def fake_profile_bindings(conn, bound_target_id):
+        assert bound_target_id == target_id
+        return {"user1": "profile-user1", "user2": "profile-user2"}
+
+    monkeypatch.setattr(api_module, "_authz_target_principal_profile_bindings", fake_profile_bindings)
+
     async def fake_validate(conn, receipt_id, **kwargs):
         captured["approval_validation"] = (receipt_id, kwargs)
         return {"approval_receipt_id": receipt_id}
@@ -2737,7 +2751,137 @@ def test_execute_authz_replay_plan_records_observations_without_findings(monkeyp
     proof_bundle = result["command_result"]["result_json"]["authz_replay"]["proof_bundle"]
     assert proof_bundle["differential_observed"] is True
     assert proof_bundle["authenticated_principal_count"] == 2
+    assert proof_bundle["principal_profile_bindings_verified"] is True
     assert proof_bundle["finding_created_automatically"] is False
+
+
+def test_authz_replay_requires_distinct_slotted_session_profiles():
+    expected = {"user1", "user2"}
+    raw_session_users = {
+        "user1": types.SimpleNamespace(is_authenticated=True),
+        "user2": types.SimpleNamespace(is_authenticated=True),
+    }
+    reason, details = api_module._authz_session_profile_binding_status(
+        expected,
+        raw_session_users,
+        {"user1": "profile-a", "user2": "profile-b"},
+    )
+    assert reason == "session_principal_profiles_unbound"
+    assert details["missing_session_profile_slots"] == ["user1", "user2"]
+
+    same_profile_users = {
+        "user1": types.SimpleNamespace(credential_profile_id="profile-a", principal_auth_state="user1"),
+        "user2": types.SimpleNamespace(credential_profile_id="profile-a", principal_auth_state="user2"),
+    }
+    reason, _ = api_module._authz_session_profile_binding_status(
+        expected,
+        same_profile_users,
+        {"user1": "profile-a", "user2": "profile-a"},
+    )
+    assert reason == "target_principal_profiles_not_distinct"
+
+    distinct_profile_users = {
+        "user1": types.SimpleNamespace(credential_profile_id="profile-a", principal_auth_state="user1"),
+        "user2": types.SimpleNamespace(credential_profile_id="profile-b", principal_auth_state="user2"),
+    }
+    reason, details = api_module._authz_session_profile_binding_status(
+        expected,
+        distinct_profile_users,
+        {"user1": "profile-a", "user2": "profile-b"},
+    )
+    assert reason is None
+    assert details["mismatched_slots"] == []
+
+
+def test_session_managed_profile_binding_is_server_asserted(monkeypatch):
+    profile_id = uuid.uuid4()
+    captured: dict[str, object] = {}
+
+    class _Session:
+        def _is_in_scope(self, url):
+            captured["scope_url"] = url
+            return True
+
+        async def action(self, payload):
+            captured.setdefault("actions", []).append(payload)
+            return {"success": True, "auth_method": "jwt"}
+
+    session = _Session()
+
+    class _Manager:
+        async def get_session(self, session_id):
+            assert session_id == "session-1"
+            return session
+
+    class _InteractiveSessionManager:
+        @staticmethod
+        async def get_instance():
+            return _Manager()
+
+    class _Conn:
+        async def fetchrow(self, query, *args):
+            assert args == (profile_id, "user1")
+            return {
+                "id": profile_id,
+                "auth_kind": "authorization_header",
+                "secret_value": "encrypted-value",
+                "auth_state": "user1",
+                "target_url": "https://app.example.com",
+            }
+
+    class _Acquire:
+        async def __aenter__(self):
+            return _Conn()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class _Pool:
+        def acquire(self):
+            return _Acquire()
+
+    monkeypatch.setattr(api_module, "InteractiveSessionManager", _InteractiveSessionManager)
+    monkeypatch.setattr(api_module, "db_pool", _Pool())
+    monkeypatch.setattr(api_module, "decrypt_secret", lambda value: "Bearer managed-token")
+
+    result = asyncio.run(api_module.session_action(
+        "session-1",
+        api_module.SessionActionRequest(
+            action="use_credential_profile",
+            user="user1",
+            data={
+                "credential_profile_id": str(profile_id),
+                "_credential_profile_id": "caller-spoof",
+                "_principal_auth_state": "user2",
+            },
+        ),
+    ))
+
+    managed_action = captured["actions"][0]
+    assert result["managed_profile_applied"] is True
+    assert managed_action["action"] == "set_auth"
+    assert managed_action["data"] == {
+        "auth_header": "Bearer managed-token",
+        "_credential_profile_id": str(profile_id),
+        "_principal_auth_state": "user1",
+        "_replace_auth_state": True,
+    }
+
+    asyncio.run(api_module.session_action(
+        "session-1",
+        api_module.SessionActionRequest(
+            action="set_auth",
+            user="user1",
+            data={
+                "auth_header": "Bearer raw-token",
+                "_credential_profile_id": str(profile_id),
+                "_principal_auth_state": "user1",
+                "_replace_auth_state": True,
+            },
+        ),
+    ))
+    raw_action = captured["actions"][1]
+    assert raw_action["data"] == {"auth_header": "Bearer raw-token"}
 
 
 def test_execute_authz_replay_plan_skips_unresolved_route_templates(monkeypatch):
@@ -2832,6 +2976,7 @@ def test_execute_authz_replay_plan_skips_unresolved_route_templates(monkeypatch)
 
 def test_execute_authz_replay_plan_treats_soft_200_denial_as_non_violation(monkeypatch):
     action_id = uuid.uuid4()
+    target_id = uuid.uuid4()
     replay_plan = {
         "mode": "deterministic_authz_replay",
         "method": "GET",
@@ -2845,8 +2990,8 @@ def test_execute_authz_replay_plan_treats_soft_200_denial_as_non_violation(monke
 
     class _FakeSession:
         state = types.SimpleNamespace(users={
-            "user1": types.SimpleNamespace(is_authenticated=True),
-            "user2": types.SimpleNamespace(is_authenticated=True),
+            "user1": types.SimpleNamespace(is_authenticated=True, credential_profile_id="profile-user1", principal_auth_state="user1"),
+            "user2": types.SimpleNamespace(is_authenticated=True, credential_profile_id="profile-user2", principal_auth_state="user2"),
         })
 
         async def test_endpoint(self, *, endpoint, method, as_user, body, allow_out_of_scope):
@@ -2872,7 +3017,7 @@ def test_execute_authz_replay_plan_treats_soft_200_denial_as_non_violation(monke
             sql = str(query)
             if "SELECT * FROM campaign_actions" in sql:
                 return {
-                    "id": action_id, "target_id": None, "campaign_id": None, "operation_plan_id": None,
+                    "id": action_id, "target_id": target_id, "campaign_id": None, "operation_plan_id": None,
                     "command_result_id": None, "scope_receipt_id": None, "approval_receipt_id": None,
                     "scan_id": None, "command": "asm.improve", "action_name": "asm.improve", "status": "planned",
                     "dry_run": True, "risk_tier": "credential", "finding_ids": json.dumps([]),
@@ -2883,7 +3028,7 @@ def test_execute_authz_replay_plan_treats_soft_200_denial_as_non_violation(monke
                 }
             if "UPDATE campaign_actions" in sql:
                 return {
-                    "id": action_id, "target_id": None, "campaign_id": None, "operation_plan_id": None,
+                    "id": action_id, "target_id": target_id, "campaign_id": None, "operation_plan_id": None,
                     "command_result_id": None, "scope_receipt_id": None, "approval_receipt_id": None,
                     "scan_id": None, "command": "asm.improve", "action_name": "asm.improve", "status": args[0],
                     "dry_run": False, "risk_tier": "credential", "finding_ids": json.dumps([]),
@@ -2926,6 +3071,12 @@ def test_execute_authz_replay_plan_treats_soft_200_denial_as_non_violation(monke
             raise AssertionError(sql)
 
     monkeypatch.setattr(api_module, "InteractiveSessionManager", _FakeInteractiveSessionManager)
+
+    async def fake_profile_bindings(conn, bound_target_id):
+        assert bound_target_id == target_id
+        return {"user1": "profile-user1", "user2": "profile-user2"}
+
+    monkeypatch.setattr(api_module, "_authz_target_principal_profile_bindings", fake_profile_bindings)
 
     result = asyncio.run(api_module._execute_authz_replay_plan(
         _FakeConn(),
@@ -2945,6 +3096,7 @@ def test_execute_authz_replay_plan_treats_soft_200_denial_as_non_violation(monke
 
 def test_execute_authz_replay_plan_treats_redirect_denial_as_non_violation(monkeypatch):
     action_id = uuid.uuid4()
+    target_id = uuid.uuid4()
     replay_plan = {
         "mode": "deterministic_authz_replay",
         "method": "GET",
@@ -2962,8 +3114,8 @@ def test_execute_authz_replay_plan_treats_redirect_denial_as_non_violation(monke
 
     class _FakeSession:
         state = types.SimpleNamespace(users={
-            "user1": types.SimpleNamespace(is_authenticated=True),
-            "user2": types.SimpleNamespace(is_authenticated=True),
+            "user1": types.SimpleNamespace(is_authenticated=True, credential_profile_id="profile-user1", principal_auth_state="user1"),
+            "user2": types.SimpleNamespace(is_authenticated=True, credential_profile_id="profile-user2", principal_auth_state="user2"),
         })
 
         async def test_endpoint(self, *, endpoint, method, as_user, body, allow_out_of_scope):
@@ -2983,7 +3135,7 @@ def test_execute_authz_replay_plan_treats_redirect_denial_as_non_violation(monke
             sql = str(query)
             if "SELECT * FROM campaign_actions" in sql:
                 return {
-                    "id": action_id, "target_id": None, "campaign_id": None, "operation_plan_id": None,
+                    "id": action_id, "target_id": target_id, "campaign_id": None, "operation_plan_id": None,
                     "command_result_id": None, "scope_receipt_id": None, "approval_receipt_id": None,
                     "scan_id": None, "command": "asm.improve", "action_name": "asm.improve", "status": "planned",
                     "dry_run": True, "risk_tier": "credential", "finding_ids": json.dumps([]),
@@ -2994,7 +3146,7 @@ def test_execute_authz_replay_plan_treats_redirect_denial_as_non_violation(monke
                 }
             if "UPDATE campaign_actions" in sql:
                 return {
-                    "id": action_id, "target_id": None, "campaign_id": None, "operation_plan_id": None,
+                    "id": action_id, "target_id": target_id, "campaign_id": None, "operation_plan_id": None,
                     "command_result_id": None, "scope_receipt_id": None, "approval_receipt_id": None,
                     "scan_id": None, "command": "asm.improve", "action_name": "asm.improve", "status": args[0],
                     "dry_run": False, "risk_tier": "credential", "finding_ids": json.dumps([]),
@@ -3037,6 +3189,12 @@ def test_execute_authz_replay_plan_treats_redirect_denial_as_non_violation(monke
             raise AssertionError(sql)
 
     monkeypatch.setattr(api_module, "InteractiveSessionManager", _FakeInteractiveSessionManager)
+
+    async def fake_profile_bindings(conn, bound_target_id):
+        assert bound_target_id == target_id
+        return {"user1": "profile-user1", "user2": "profile-user2"}
+
+    monkeypatch.setattr(api_module, "_authz_target_principal_profile_bindings", fake_profile_bindings)
 
     result = asyncio.run(api_module._execute_authz_replay_plan(
         _FakeConn(),
@@ -3148,7 +3306,7 @@ def test_execute_authz_replay_plan_requires_authenticated_principals(monkeypatch
     assert result["tool_receipt_id"]
     proof_bundle = result["command_result"]["result_json"]["authz_replay"]["proof_bundle"]
     assert proof_bundle["differential_observed"] is False
-    assert proof_bundle["authenticated_principal_count"] == 0
+    assert proof_bundle["authenticated_principal_count"] == 1
 
 
 def test_promote_authz_replay_finding_requires_violation_and_links_evidence(monkeypatch):
@@ -3168,6 +3326,7 @@ def test_promote_authz_replay_finding_requires_violation_and_links_evidence(monk
             "bundle_type": "authz_replay_proof_bundle",
             "differential_observed": True,
             "authenticated_principal_count": 2,
+            "principal_profile_bindings_verified": True,
             "finding_created_automatically": False,
         },
         "observations": [
@@ -3442,6 +3601,7 @@ def test_promote_authz_replay_finding_creates_one_finding_per_principal(monkeypa
             "bundle_type": "authz_replay_proof_bundle",
             "differential_observed": True,
             "authenticated_principal_count": 3,
+            "principal_profile_bindings_verified": True,
         },
         # Two DISTINCT offending principals on the same route template.
         "observations": [_violation("user2"), _violation("user3")],
@@ -3527,6 +3687,7 @@ def test_promote_authz_replay_finding_requires_differential(monkeypatch):
             "bundle_type": "authz_replay_proof_bundle",
             "differential_observed": False,
             "authenticated_principal_count": 1,
+            "principal_profile_bindings_verified": True,
         },
         "observations": [
             {

@@ -511,6 +511,27 @@ export default function InteractiveSessionPage() {
     }
   }
 
+  async function handleApplyManagedProfile(user: UserKey, credentialProfileId: string) {
+    if (!currentSessionId) {
+      toast.error('Start or attach a session first')
+      return
+    }
+    setBusyAction(`auth-${user}`)
+    try {
+      const res = await runInteractiveAction(currentSessionId, {
+        action: 'use_credential_profile',
+        user,
+        data: { credential_profile_id: credentialProfileId },
+      })
+      toast.success(`${user} managed profile applied (${res.auth_method || 'unknown method'})`)
+      await loadSessionState(currentSessionId, true)
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : `Failed to apply managed profile for ${user}`)
+    } finally {
+      setBusyAction(null)
+    }
+  }
+
   async function handleCaptureScreenshot() {
     if (!currentSessionId) {
       toast.error('Start or attach a session first')
@@ -1092,6 +1113,12 @@ export default function InteractiveSessionPage() {
           {(['user1', 'user2'] as UserKey[]).map((user) => {
             const userState = session?.users?.[user]
             const plannedPrincipal = principalsByAuthState[user]
+            const managedProfile = credentialProfiles.find((profile) => profile.name === plannedPrincipal?.credential_profile)
+            const managedProfileBound = Boolean(
+              managedProfile?.id
+              && userState?.credential_profile_id === managedProfile.id
+              && userState?.principal_auth_state === user,
+            )
             return (
               <div key={user} className="rounded-lg border border-gray-800 bg-gray-950 p-4 space-y-3">
                 <div className="flex items-center justify-between">
@@ -1100,9 +1127,19 @@ export default function InteractiveSessionPage() {
                     {plannedPrincipal && <p className="mt-0.5 text-xs text-gray-500">{plannedPrincipal.label} · {plannedPrincipal.role}{plannedPrincipal.tenant_id ? ` · tenant ${plannedPrincipal.tenant_id}` : ''}</p>}
                   </div>
                   <Badge className={userState?.is_authenticated ? 'bg-green-500/20 text-green-300' : 'bg-gray-700 text-gray-400'}>
-                    {userState?.is_authenticated ? `${userState.auth_method || 'auth'} ready` : 'not authenticated'}
+                    {managedProfileBound ? 'profile bound' : userState?.is_authenticated ? `${userState.auth_method || 'auth'} ready` : 'not authenticated'}
                   </Badge>
                 </div>
+
+                {managedProfile && (
+                  <Button
+                    onClick={() => void handleApplyManagedProfile(user, managedProfile.id)}
+                    disabled={!currentSessionId || busyAction === `auth-${user}` || !managedProfile.execution_compatible}
+                    className="w-full"
+                  >
+                    {busyAction === `auth-${user}` ? `Applying ${user}...` : `Apply ${managedProfile.name}`}
+                  </Button>
+                )}
 
                 <div className="space-y-2">
                   <input
@@ -1130,8 +1167,9 @@ export default function InteractiveSessionPage() {
                   onClick={() => void handleApplyAuth(user)}
                   disabled={!currentSessionId || busyAction === `auth-${user}`}
                   className="w-full"
+                  variant={managedProfile ? 'secondary' : 'primary'}
                 >
-                  {busyAction === `auth-${user}` ? `Applying ${user}...` : `Apply ${user} Auth`}
+                  {busyAction === `auth-${user}` ? `Applying ${user}...` : `Apply manual auth`}
                 </Button>
               </div>
             )

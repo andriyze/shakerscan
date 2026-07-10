@@ -19422,7 +19422,17 @@ def _authz_replay_proof_bundle(
             })
     violation_principals = {str(item.get("principal") or "") for item in violations if item.get("principal")}
     allow_principals = {str(item.get("principal") or "") for item in allowed_access if item.get("principal")}
-    differential_observed = bool(violations and allowed_access and (violation_principals | allow_principals) and len(authenticated_principals) >= 2)
+    principal_profile_bindings_verified = bool(observations) and all(
+        observation.get("principal_profile_verified") is True
+        for observation in observations
+    )
+    differential_observed = bool(
+        principal_profile_bindings_verified
+        and violations
+        and allowed_access
+        and (violation_principals | allow_principals)
+        and len(authenticated_principals) >= 2
+    )
     return _redact_agent_payload({
         "bundle_type": "authz_replay_proof_bundle",
         "plan_mode": replay_plan.get("mode"),
@@ -19432,6 +19442,7 @@ def _authz_replay_proof_bundle(
         "observation_count": len(observations),
         "authenticated_principal_count": len(authenticated_principals),
         "authenticated_principals": sorted(authenticated_principals)[:10],
+        "principal_profile_bindings_verified": principal_profile_bindings_verified,
         "allowed_access_observations": allowed_access[:10],
         "violation_observations": violations[:10],
         "denial_like_redirects": denial_like_redirects[:10],
@@ -19491,6 +19502,75 @@ def _authz_concrete_replay_path(expected: dict[str, Any], replay_plan: dict[str,
         if value and not _authz_replay_path_is_template(value):
             return value
     return ""
+
+
+async def _authz_target_principal_profile_bindings(
+    conn: Any,
+    target_id: uuid.UUID,
+) -> dict[str, str]:
+    """Return the active managed credential profile id for each authz slot."""
+    rows = await conn.fetch(
+        """
+        SELECT p.auth_state, cp.id AS credential_profile_id
+        FROM target_principals p
+        JOIN target_credential_profiles cp
+          ON cp.target_id = p.target_id
+         AND lower(cp.name) = lower(p.credential_profile)
+        WHERE p.target_id = $1
+          AND p.is_active = true
+          AND cp.is_active = true
+          AND (cp.expires_at IS NULL OR cp.expires_at > NOW())
+          AND p.auth_state IN ('user1', 'user2')
+        ORDER BY CASE p.auth_state WHEN 'user1' THEN 0 ELSE 1 END
+        """,
+        target_id,
+    )
+    bindings: dict[str, str] = {}
+    for row in rows:
+        payload = row_to_dict(row)
+        auth_state = str(payload.get("auth_state") or "").strip()
+        profile_id = str(payload.get("credential_profile_id") or "").strip()
+        if auth_state in {"user1", "user2"} and profile_id and auth_state not in bindings:
+            bindings[auth_state] = profile_id
+    return bindings
+
+
+def _authz_session_profile_binding_status(
+    expected_principals: set[str],
+    session_users: dict[str, Any],
+    target_bindings: dict[str, str],
+) -> tuple[str | None, dict[str, Any]]:
+    """Validate that replay actors are the target's two distinct slotted profiles."""
+    required_slots = {"user1", "user2"}
+    details: dict[str, Any] = {
+        "required_slots": sorted(required_slots),
+        "expected_principals": sorted(expected_principals),
+        "bound_slots": sorted(target_bindings),
+        "mismatched_slots": [],
+        "missing_session_profile_slots": [],
+    }
+    if expected_principals != required_slots:
+        return "authz_replay_requires_slotted_principals", details
+    if set(target_bindings) != required_slots:
+        return "target_principal_profiles_missing", details
+    profile_ids = [target_bindings[slot] for slot in sorted(required_slots)]
+    if len(set(profile_ids)) != len(profile_ids):
+        return "target_principal_profiles_not_distinct", details
+
+    for slot in sorted(required_slots):
+        user = session_users.get(slot)
+        actual_profile_id = str(getattr(user, "credential_profile_id", None) or "").strip()
+        actual_auth_state = str(getattr(user, "principal_auth_state", None) or "").strip()
+        if not actual_profile_id or not actual_auth_state:
+            details["missing_session_profile_slots"].append(slot)
+            continue
+        if actual_auth_state != slot or actual_profile_id != target_bindings[slot]:
+            details["mismatched_slots"].append(slot)
+    if details["missing_session_profile_slots"]:
+        return "session_principal_profiles_unbound", details
+    if details["mismatched_slots"]:
+        return "session_principal_profile_mismatch", details
+    return None, details
 
 
 async def _execute_authz_replay_plan(
@@ -19559,7 +19639,29 @@ async def _execute_authz_replay_plan(
         if str(item.get("principal_auth_state") or item.get("principal_label") or "").strip()
     }
     missing_principals = sorted(expected_principals - authenticated_users)
-    if len(expected_principals) < 2 or missing_principals or unresolved_templates:
+    profile_binding_reason: str | None = None
+    profile_binding_details: dict[str, Any] = {}
+    target_profile_bindings: dict[str, str] = {}
+    if not unresolved_templates and not missing_principals and len(expected_principals) >= 2:
+        if not target_uuid:
+            profile_binding_reason = "authz_replay_target_not_bound"
+        else:
+            target_profile_bindings = await _authz_target_principal_profile_bindings(conn, target_uuid)
+            profile_binding_reason, profile_binding_details = _authz_session_profile_binding_status(
+                expected_principals,
+                session_users,
+                target_profile_bindings,
+            )
+    precondition_reason = (
+        "unresolved_route_template"
+        if unresolved_templates
+        else "missing_authenticated_principal"
+        if missing_principals
+        else "requires_two_authenticated_principals"
+        if len(expected_principals) < 2
+        else profile_binding_reason
+    )
+    if precondition_reason:
         observations = [
             {
                 "method": str(item.get("method") or replay_plan.get("method") or "GET").strip().upper(),
@@ -19571,21 +19673,19 @@ async def _execute_authz_replay_plan(
                 "observed_status": None,
                 "matched": False,
                 "request_success": False,
-                "authenticated_user": False,
-                "inconclusive_reason": (
-                    "unresolved_route_template"
-                    if unresolved_templates
-                    else "missing_authenticated_principal"
-                    if missing_principals
-                    else "requires_two_authenticated_principals"
+                "authenticated_user": bool(
+                    str(item.get("principal_auth_state") or item.get("principal_label") or "").strip()
+                    in authenticated_users
                 ),
+                "principal_profile_verified": False,
+                "inconclusive_reason": precondition_reason,
             }
             for item in expected_access[:10]
         ]
         proof_bundle = _authz_replay_proof_bundle(replay_plan, observations)
         tool_receipt_result = await _record_tool_receipt(conn, ToolReceiptRequest(
             tool_name="authz.replay_plan",
-            adapter_version="2026-07-09.v2",
+            adapter_version="2026-07-10.v3",
             redacted_argv=["authz.replay_plan", str(action_uuid), "session:<redacted>"],
             target_scope={
                 "campaign_action_id": str(action_uuid),
@@ -19603,6 +19703,8 @@ async def _execute_authz_replay_plan(
                 "unresolved_route_templates": sorted(set(unresolved_templates)),
                 "authenticated_principal_count": len(authenticated_users),
                 "required_principal_count": len(expected_principals),
+                "principal_profile_binding_reason": profile_binding_reason,
+                "principal_profile_binding_details": profile_binding_details,
                 "proof_bundle": proof_bundle,
             },
             created_by=created_by,
@@ -19619,11 +19721,7 @@ async def _execute_authz_replay_plan(
                 "evidence_instance_ids": [],
                 "mismatch_count": len(observations),
                 "violation_count": 0,
-                "proof_state": (
-                    "inconclusive_unresolved_route_template"
-                    if unresolved_templates
-                    else "inconclusive_missing_authenticated_principals"
-                ),
+                "proof_state": f"inconclusive_{precondition_reason}",
                 "finding_created": False,
             }
         }
@@ -19647,12 +19745,14 @@ async def _execute_authz_replay_plan(
             risk_tier="credential",
             dry_run=False,
             approval_receipt_id=approval_receipt_id,
-            blocked_by=["unresolved_route_template"] if unresolved_templates else [],
+            blocked_by=[precondition_reason],
             tool_receipt_ids=[str(tool_receipt.get("id"))] if tool_receipt.get("id") else [],
             result_json=replay_result,
             operator_message=(
                 "Authz replay was not executed because the route template has no concrete object path."
                 if unresolved_templates
+                else "Authz replay was inconclusive because required principal profile bindings were not verified."
+                if profile_binding_reason
                 else "Authz replay was inconclusive because required authenticated principals were missing."
             ),
             next_action=f"/settings/arsenal?tab=campaign-actions",
@@ -19717,6 +19817,8 @@ async def _execute_authz_replay_plan(
                 "matched": matched,
                 "request_success": bool(replay.get("success")) if isinstance(replay, dict) else False,
                 "authenticated_user": bool(as_user and as_user in authenticated_users),
+                "credential_profile_id": target_profile_bindings.get(as_user or ""),
+                "principal_profile_verified": True,
                 "request": {
                     "method": method,
                     "url": endpoint,
@@ -19741,7 +19843,7 @@ async def _execute_authz_replay_plan(
     proof_bundle = _authz_replay_proof_bundle(replay_plan, observations)
     tool_receipt_result = await _record_tool_receipt(conn, ToolReceiptRequest(
         tool_name="authz.replay_plan",
-        adapter_version="2026-07-09.v2",
+        adapter_version="2026-07-10.v3",
         redacted_argv=["authz.replay_plan", str(action_uuid), "session:<redacted>"],
         target_scope={
             "campaign_action_id": str(action_uuid),
@@ -19902,6 +20004,11 @@ async def _promote_authz_replay_finding(
     if not violations:
         raise HTTPException(status_code=400, detail="Authz replay result has no promotable violation observation")
     proof_bundle = replay.get("proof_bundle") if isinstance(replay.get("proof_bundle"), dict) else _authz_replay_proof_bundle(replay.get("plan") if isinstance(replay.get("plan"), dict) else {}, observations)
+    if proof_bundle.get("principal_profile_bindings_verified") is not True:
+        raise HTTPException(
+            status_code=400,
+            detail="Authz replay promotion requires verified target principal profile bindings",
+        )
     if proof_bundle.get("differential_observed") is not True:
         raise HTTPException(status_code=400, detail="Authz replay promotion requires a cross-principal differential observation")
     evidence_instance_ids = _clean_string_list(replay.get("evidence_instance_ids"), max_items=100)
@@ -28538,7 +28645,7 @@ class SessionStartRequest(BaseModel):
 
 
 class SessionActionRequest(BaseModel):
-    action: str  # navigate, click, fill, set_auth, register, login, submit, wait, extract
+    action: str  # navigate, click, fill, set_auth, use_credential_profile, register, login, submit, wait, extract
     user: Optional[str] = "default"
     data: Optional[dict] = None
 
@@ -28704,6 +28811,7 @@ async def session_action(session_id: str, request: SessionActionRequest):
     - click: Click element (data: {"selector": "button#submit"})
     - fill: Fill input (data: {"selector": "input#email", "value": "test@example.com"})
     - set_auth: Set auth context (data: {"token":"..."} or {"auth_header":"Bearer ..."} or {"cookies":{"session":"..."}})
+    - use_credential_profile: Apply the target principal slot's managed profile (data: {"credential_profile_id":"..."})
     - register: Register user (data: {"email": "...", "password": "..."})
     - login: Login user (data: {"email": "...", "password": "..."})
     - submit: Submit form (data: {"selector": "form"})
@@ -28718,15 +28826,72 @@ async def session_action(session_id: str, request: SessionActionRequest):
     if not session:
         raise HTTPException(status_code=404, detail="Session not found or expired")
 
+    action_name = str(request.action or "").strip()
+    user_name = str(request.user or "default").strip() or "default"
+    action_data = dict(request.data or {})
+    # These bindings are server assertions. A caller cannot add them to raw
+    # set_auth/login actions and thereby qualify for an authz replay.
+    action_data.pop("_credential_profile_id", None)
+    action_data.pop("_principal_auth_state", None)
+    action_data.pop("_replace_auth_state", None)
+    managed_profile_applied = False
+    if action_name == "use_credential_profile":
+        if user_name not in {"user1", "user2"}:
+            raise HTTPException(status_code=400, detail="managed credential profiles require user1 or user2")
+        profile_uuid = _uuid_or_400(action_data.get("credential_profile_id"), "credential profile id")
+        async with db_pool.acquire() as conn:
+            profile_row = await conn.fetchrow(
+                """
+                SELECT cp.id, cp.auth_kind, cp.secret_value, p.auth_state, t.url AS target_url
+                FROM target_credential_profiles cp
+                JOIN targets t ON t.id = cp.target_id
+                JOIN target_principals p
+                  ON p.target_id = cp.target_id
+                 AND lower(p.credential_profile) = lower(cp.name)
+                 AND p.is_active = true
+                WHERE cp.id = $1
+                  AND cp.is_active = true
+                  AND (cp.expires_at IS NULL OR cp.expires_at > NOW())
+                  AND p.auth_state = $2
+                """,
+                profile_uuid,
+                user_name,
+            )
+        if not profile_row:
+            raise HTTPException(
+                status_code=404,
+                detail="Active credential profile is not bound to this target principal slot",
+            )
+        profile = row_to_dict(profile_row)
+        if not session._is_in_scope(str(profile.get("target_url") or "")):
+            raise HTTPException(status_code=409, detail="Credential profile target does not match the session origin")
+        secret_value = str(decrypt_secret(profile.get("secret_value")) or "").strip()
+        if not secret_value:
+            raise HTTPException(status_code=409, detail="Credential profile has no usable secret")
+        auth_kind = str(profile.get("auth_kind") or "").strip()
+        if auth_kind == "authorization_header":
+            action_data = {"auth_header": secret_value}
+        elif auth_kind == "cookie":
+            action_data = {"cookie_string": secret_value}
+        else:
+            raise HTTPException(status_code=409, detail="Credential profile auth kind is not executable")
+        action_data["_credential_profile_id"] = str(profile_uuid)
+        action_data["_principal_auth_state"] = user_name
+        action_data["_replace_auth_state"] = True
+        action_name = "set_auth"
+        managed_profile_applied = True
+
     result = await session.action({
-        "action": request.action,
-        "user": request.user,
-        "data": request.data or {}
+        "action": action_name,
+        "user": user_name,
+        "data": action_data,
     })
 
     if not result.get("success"):
         raise HTTPException(status_code=400, detail=result.get("error", "Action failed"))
 
+    if managed_profile_applied:
+        result["managed_profile_applied"] = True
     return result
 
 

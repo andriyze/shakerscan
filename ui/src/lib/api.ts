@@ -3879,6 +3879,8 @@ export interface InteractiveSessionUserState {
   is_authenticated: boolean
   auth_method: string | null
   cookies_count: number
+  credential_profile_id?: string | null
+  principal_auth_state?: string | null
 }
 
 export interface InteractiveDiscoveredEndpoint {

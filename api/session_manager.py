@@ -95,6 +95,8 @@ class UserSession:
     is_authenticated: bool = False
     auth_method: str | None = None  # "cookie", "jwt", "basic"
     token: str | None = None
+    credential_profile_id: str | None = None
+    principal_auth_state: str | None = None
 
 
 @dataclass
@@ -571,6 +573,7 @@ class InteractiveSession:
 
     async def _handle_set_auth(self, page: Page, user: str, data: dict) -> dict[str, Any]:
         """Set user auth context directly using token/header/cookies."""
+        replace_auth_state = data.get("_replace_auth_state") is True
         auth_header = (data.get("auth_header") or "").strip()
         token = (data.get("token") or "").strip()
         cookies_input = data.get("cookies")
@@ -600,6 +603,14 @@ class InteractiveSession:
                 "action": "set_auth"
             }
 
+        if replace_auth_state:
+            try:
+                context = self._contexts.get(user)
+                if context:
+                    await context.clear_cookies()
+            except Exception:
+                pass
+
         if cookie_dict:
             parsed = urlparse(page.url or self.target_url)
             domain = parsed.hostname or urlparse(self.target_url).hostname
@@ -622,7 +633,7 @@ class InteractiveSession:
                     # Keep state even if browser cookie injection fails
                     pass
 
-        existing = self.state.users.get(user, UserSession(name=user))
+        existing = UserSession(name=user) if replace_auth_state else self.state.users.get(user, UserSession(name=user))
         merged_headers = dict(existing.headers or {})
         merged_headers.update(headers)
         merged_cookies = dict(existing.cookies or {})
@@ -641,7 +652,9 @@ class InteractiveSession:
             headers=merged_headers,
             is_authenticated=is_authenticated,
             auth_method=auth_method,
-            token=token or existing.token
+            token=token or existing.token,
+            credential_profile_id=str(data.get("_credential_profile_id") or "").strip() or None,
+            principal_auth_state=str(data.get("_principal_auth_state") or "").strip() or None,
         )
 
         return {
@@ -651,7 +664,9 @@ class InteractiveSession:
             "is_authenticated": is_authenticated,
             "auth_method": auth_method,
             "cookies_count": len(merged_cookies),
-            "has_authorization_header": "Authorization" in merged_headers
+            "has_authorization_header": "Authorization" in merged_headers,
+            "credential_profile_id": self.state.users[user].credential_profile_id,
+            "principal_auth_state": self.state.users[user].principal_auth_state,
         }
 
     async def _handle_register(self, page: Page, user: str, data: dict) -> dict[str, Any]:
@@ -917,7 +932,7 @@ class InteractiveSession:
                 headers={"Authorization": f"Bearer {token}"} if token else {},
                 is_authenticated=is_authenticated,
                 auth_method=auth_method,
-                token=token
+                token=token,
             )
 
             if not is_authenticated:
@@ -1110,7 +1125,9 @@ class InteractiveSession:
                 name: {
                     "is_authenticated": user.is_authenticated,
                     "auth_method": user.auth_method,
-                    "cookies_count": len(user.cookies)
+                    "cookies_count": len(user.cookies),
+                    "credential_profile_id": user.credential_profile_id,
+                    "principal_auth_state": user.principal_auth_state,
                 }
                 for name, user in self.state.users.items()
             },
