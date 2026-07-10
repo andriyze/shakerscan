@@ -7318,6 +7318,85 @@ def test_validate_approval_receipt_accepts_valid_receipt():
     assert ctx["runtime_scope_guard"]["requires_runtime_destination_check"] is True
 
 
+def test_validate_approval_receipt_can_require_receipt_even_when_global_policy_is_off():
+    conn = _approval_receipt_conn()
+    with pytest.raises(api_module.HTTPException) as exc:
+        asyncio.run(api_module._validate_approval_receipt_for_action(
+            conn,
+            None,
+            action_name="target.principal_matrix.record",
+            always_require_receipt=True,
+            record_blocked=False,
+        ))
+
+    assert exc.value.status_code == 400
+    assert "required" in str(exc.value.detail).lower()
+
+
+def test_principal_matrix_record_is_only_in_gated_gateway_adapters():
+    assert "target.principal_matrix.record" not in api_module._arsenal_readonly_adapters()
+    assert api_module._arsenal_gated_adapters()["target.principal_matrix.record"] is api_module._arsenal_dispatch_target_principal_matrix_record
+
+
+def test_principal_matrix_write_validates_target_scoped_receipt_and_audits(monkeypatch):
+    target_id = str(uuid.uuid4())
+    approval_id = str(uuid.uuid4())
+    expectation_id = uuid.uuid4()
+    calls = {}
+
+    class FakeConn:
+        async def fetchrow(self, query, *args):
+            if "SELECT url FROM targets" in query:
+                return {"url": "https://app.example.com"}
+            if "INSERT INTO target_endpoint_expectations" in query:
+                return {
+                    "id": expectation_id,
+                    "target_id": uuid.UUID(target_id),
+                    "method": "GET",
+                    "path": "/admin",
+                    "metadata_json": {},
+                    "expected_access": "deny",
+                }
+            return None
+
+    class FakePool:
+        def acquire(self):
+            return self
+
+        async def __aenter__(self):
+            return FakeConn()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    async def fake_validate(_conn, receipt_id, **kwargs):
+        calls["validation"] = (receipt_id, kwargs)
+        return {"approval_receipt_id": receipt_id, "scope_receipt_id": "scope-1"}
+
+    async def fake_record(_conn, **kwargs):
+        calls["audit"] = kwargs
+        return {"id": "operation-1"}
+
+    monkeypatch.setattr(api_module, "db_pool", FakePool())
+    monkeypatch.setattr(api_module, "_validate_approval_receipt_for_action", fake_validate)
+    monkeypatch.setattr(api_module, "_record_command_result", fake_record)
+
+    result = asyncio.run(api_module.upsert_target_principal_matrix(
+        target_id,
+        api_module.TargetEndpointExpectationRequest(
+            path="/admin", principal_role="user", expected_access="deny",
+            approval_receipt_id=approval_id,
+        ),
+    ))
+
+    receipt_id, validation = calls["validation"]
+    assert receipt_id == approval_id
+    assert validation["target_id"] == uuid.UUID(target_id)
+    assert validation["always_require_receipt"] is True
+    assert calls["audit"]["command"] == "target.principal_matrix.record"
+    assert result["operation_id"] == "operation-1"
+
+
 def test_runtime_destination_scope_allows_matching_actual_destination():
     guard = api_module._runtime_scope_guard_from_scope(_make_scope_row())
     result = api_module.evaluate_runtime_destination_scope(

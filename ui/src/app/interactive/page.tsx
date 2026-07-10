@@ -8,6 +8,7 @@ import {
   createTargetCredentialProfile,
   createTargetPrincipal,
   createInteractiveSessionFinding,
+  createTargetPolicyApproval,
   deactivateTargetCredentialProfile,
   deactivateTargetPrincipal,
   deleteTargetPrincipalExpectation,
@@ -399,10 +400,12 @@ export default function InteractiveSessionPage() {
       toast.error('Select a principal or provide a role')
       return
     }
+    if (!target || !window.confirm('Approve this authorization expectation for future replay and BOLA decisions?')) return
 
     setExpectationBusy('save')
     try {
-      await upsertTargetPrincipalExpectation(targetId, payload)
+      const approvalReceiptId = await createTargetPolicyApproval(targetId, target)
+      await upsertTargetPrincipalExpectation(targetId, { ...payload, approval_receipt_id: approvalReceiptId })
       await loadPrincipalMatrix(targetId)
       setExpectationDraft(emptyPrincipalExpectationDraft())
       toast.success('Principal expectation saved')
@@ -414,10 +417,11 @@ export default function InteractiveSessionPage() {
   }
 
   async function handleDeleteExpectation(expectationId: string) {
-    if (!targetId || !window.confirm('Delete this principal expectation?')) return
+    if (!targetId || !target || !window.confirm('Approve deletion of this authorization expectation?')) return
     setExpectationBusy(expectationId)
     try {
-      await deleteTargetPrincipalExpectation(targetId, expectationId)
+      const approvalReceiptId = await createTargetPolicyApproval(targetId, target)
+      await deleteTargetPrincipalExpectation(targetId, expectationId, approvalReceiptId)
       await loadPrincipalMatrix(targetId)
       toast.success('Principal expectation deleted')
     } catch (err) {

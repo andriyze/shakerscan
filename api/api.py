@@ -3321,6 +3321,7 @@ class TargetEndpointExpectationRequest(BaseModel):
     expected_http_status: Optional[int] = Field(default=None, ge=100, le=599)
     expectation_source: str = "manual"
     metadata_json: dict[str, Any] = Field(default_factory=dict)
+    approval_receipt_id: Optional[str] = None
 
 
 class FindingUpdate(BaseModel):
@@ -13813,8 +13814,19 @@ async def upsert_target_principal_matrix(target_id: str, request: TargetEndpoint
     principal_role = _normalize_target_principal_role(request.principal_role) if request.principal_role else None
     metadata = _redact_agent_payload(request.metadata_json or {})
     async with db_pool.acquire() as conn:
-        if not await conn.fetchrow("SELECT 1 FROM targets WHERE id = $1", target_uuid):
+        target_row = await conn.fetchrow("SELECT url FROM targets WHERE id = $1", target_uuid)
+        if not target_row:
             raise HTTPException(status_code=404, detail="Target not found")
+        approval_context = await _validate_approval_receipt_for_action(
+            conn,
+            request.approval_receipt_id,
+            target_url=str(target_row["url"] or ""),
+            target_id=target_uuid,
+            action_name="target.principal_matrix.record",
+            command="target.principal_matrix.record",
+            risk_tier="active",
+            always_require_receipt=True,
+        )
         if endpoint_uuid:
             endpoint = await conn.fetchrow(
                 "SELECT method, path, param_shape, param_location FROM target_endpoints WHERE id = $1 AND target_id = $2",
@@ -13874,19 +13886,49 @@ async def upsert_target_principal_matrix(target_id: str, request: TargetEndpoint
             str(request.expectation_source or "manual").strip()[:80] or "manual",
             json.dumps(metadata),
         )
+        command_result = await _record_command_result(
+            conn,
+            command="target.principal_matrix.record",
+            status="completed",
+            risk_tier="active",
+            scope_receipt_id=(approval_context or {}).get("scope_receipt_id"),
+            approval_receipt_id=(approval_context or {}).get("approval_receipt_id"),
+            operator_message=f"Recorded {method} {path} principal expectation",
+            result_json={"target_id": target_id, "expectation_id": str(row["id"]), "expected_access": request.expected_access},
+            created_by="principal_matrix_api",
+        )
     return {
         "expectation": _public_target_endpoint_expectation_row(row),
         "execution_enabled": False,
         "findings_created": 0,
+        "operation_id": command_result["id"],
+        "approval_receipt_id": (approval_context or {}).get("approval_receipt_id"),
     }
 
 
 @app.delete("/targets/{target_id}/principal-matrix/{expectation_id}")
-async def delete_target_principal_expectation(target_id: str, expectation_id: str):
+async def delete_target_principal_expectation(
+    target_id: str,
+    expectation_id: str,
+    approval_receipt_id: str = Query(...),
+):
     """Delete one record-only endpoint access expectation for a target."""
     target_uuid = _uuid_or_400(target_id, "target id")
     expectation_uuid = _uuid_or_400(expectation_id, "expectation id")
     async with db_pool.acquire() as conn:
+        target_row = await conn.fetchrow("SELECT url FROM targets WHERE id = $1", target_uuid)
+        if not target_row:
+            raise HTTPException(status_code=404, detail="Target not found")
+        approval_context = await _validate_approval_receipt_for_action(
+            conn,
+            approval_receipt_id,
+            target_url=str(target_row["url"] or ""),
+            target_id=target_uuid,
+            action_name="target.principal_matrix.delete",
+            command="target.principal_matrix.record",
+            risk_tier="active",
+            always_require_receipt=True,
+        )
         deleted = await conn.fetchval(
             "DELETE FROM target_endpoint_expectations WHERE id = $1 AND target_id = $2 RETURNING id",
             expectation_uuid,
@@ -13894,12 +13936,26 @@ async def delete_target_principal_expectation(target_id: str, expectation_id: st
         )
     if not deleted:
         raise HTTPException(status_code=404, detail="Target principal expectation not found")
+    async with db_pool.acquire() as conn:
+        command_result = await _record_command_result(
+            conn,
+            command="target.principal_matrix.delete",
+            status="completed",
+            risk_tier="active",
+            scope_receipt_id=(approval_context or {}).get("scope_receipt_id"),
+            approval_receipt_id=(approval_context or {}).get("approval_receipt_id"),
+            operator_message="Deleted principal expectation",
+            result_json={"target_id": target_id, "expectation_id": expectation_id},
+            created_by="principal_matrix_api",
+        )
     return {
         "status": "deleted",
         "target_id": target_id,
         "expectation_id": expectation_id,
         "execution_enabled": False,
         "findings_created": 0,
+        "operation_id": command_result["id"],
+        "approval_receipt_id": (approval_context or {}).get("approval_receipt_id"),
     }
 
 
@@ -18562,6 +18618,7 @@ async def _validate_approval_receipt_for_action(
     risk_tier: str = "active",
     record_blocked: bool = True,
     created_by: str | None = None,
+    always_require_receipt: bool = False,
 ) -> dict[str, Any] | None:
     async def _deny(
         reason: str,
@@ -18590,6 +18647,8 @@ async def _validate_approval_receipt_for_action(
         raise HTTPException(status_code=http_status, detail=message)
 
     if not approval_receipt_id:
+        if always_require_receipt:
+            await _deny("approval_receipt_required", "Approval receipt is required")
         await _require_approval_receipt_if_policy_enabled(
             conn, None, action_name=action_name, command=command, risk_tier=risk_tier, created_by=created_by
         )
@@ -20147,11 +20206,14 @@ async def _arsenal_dispatch_target_principal_matrix(p: dict[str, Any]) -> dict[s
     return await list_target_principal_matrix(target_id, limit=_int_or_none(p.get("limit")) or 200)
 
 
-async def _arsenal_dispatch_target_principal_matrix_record(p: dict[str, Any]) -> dict[str, Any]:
+async def _arsenal_dispatch_target_principal_matrix_record(
+    p: dict[str, Any], approval_receipt_id: str | None,
+) -> dict[str, Any]:
     target_id = str(p.get("target_id") or "").strip()
     if not target_id:
         raise HTTPException(status_code=400, detail="target.principal_matrix.record requires a target_id parameter")
     fields = {k: v for k, v in p.items() if k in _arsenal_model_fields(TargetEndpointExpectationRequest) and v is not None}
+    fields["approval_receipt_id"] = approval_receipt_id or p.get("approval_receipt_id")
     return await upsert_target_principal_matrix(target_id, TargetEndpointExpectationRequest(**fields))
 
 
@@ -20668,7 +20730,6 @@ def _arsenal_readonly_adapters() -> dict[str, Any]:
         "target.get": _arsenal_dispatch_target_get,
         "target.principals": _arsenal_dispatch_target_principals,
         "target.principal_matrix": _arsenal_dispatch_target_principal_matrix,
-        "target.principal_matrix.record": _arsenal_dispatch_target_principal_matrix_record,
         "exposure.graph.get": _arsenal_dispatch_exposure_graph_get,
         "asm.gaps": _arsenal_dispatch_asm_gaps,
         "asm.activity": _arsenal_dispatch_asm_activity,
@@ -20730,6 +20791,7 @@ def _arsenal_gated_adapters() -> dict[str, Any]:
         "refuter_review.derive_verdict": _arsenal_dispatch_refuter_review_derive_verdict,
         "authz.replay_plan": _arsenal_dispatch_authz_replay_plan,
         "authz.promote_replay_finding": _arsenal_dispatch_authz_promote_replay_finding,
+        "target.principal_matrix.record": _arsenal_dispatch_target_principal_matrix_record,
     }
 
 

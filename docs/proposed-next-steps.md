@@ -1263,6 +1263,12 @@ profile currently resolves. The interactive workflow manages masked profiles, ex
 deactivation and selects real profile names instead of accepting only free text. Loading a managed
 profile into an already-running browser session remains an explicit session-auth step; no secret is
 returned to the browser, and profile resolution does not create findings.
+DONE phase 14: endpoint/principal expectation writes are authorization-policy changes, not read-only
+inventory. `target.principal_matrix.record` is now an active, gated Command Arsenal command with
+`confirm_authorized`; direct create/update and delete routes always require a target-scoped approval
+receipt and write command-result audit rows. The interactive workflow obtains that scoped receipt
+only after an explicit operator confirmation. An unaudited AI/read-only command can no longer alter
+`expected_access` and suppress a future authorization proof.
 
 **Done when:** a campaign can assert "endpoint X requires role admin" and prove a lower-role
 principal's access is a finding.

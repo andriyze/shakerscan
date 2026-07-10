@@ -172,7 +172,7 @@ def test_model_intake_evidence_export_is_read_only_command():
     assert "signature_public_key" in cmd["redaction_contract"]
 
 
-def test_target_principal_matrix_commands_are_non_executing_inventory():
+def test_target_principal_matrix_write_is_approval_gated_policy_state():
     payload = arsenal.describe_commands()
     commands = {item["name"]: item for item in payload["commands"]}
 
@@ -182,8 +182,9 @@ def test_target_principal_matrix_commands_are_non_executing_inventory():
 
     assert principals["status"] == "read_only"
     assert matrix["status"] == "read_only"
-    assert record["status"] == "dry_run"
-    assert record["risk_tier"] == "read_only"
+    assert record["status"] == "gated"
+    assert record["risk_tier"] == "active"
+    assert record["required_confirmations"] == ["confirm_authorized"]
     assert principals["path"] == "/targets/{target_id}/principals"
     assert matrix["path"] == "/targets/{target_id}/principal-matrix"
     assert record["path"] == "/targets/{target_id}/principal-matrix"

@@ -3922,6 +3922,7 @@ export interface TargetPrincipalExpectationPayload {
   expected_http_status?: number
   expectation_source?: string
   metadata_json?: Record<string, unknown>
+  approval_receipt_id?: string
 }
 
 export interface TargetPrincipalMatrixResponse {
@@ -4089,7 +4090,29 @@ export async function deactivateTargetPrincipal(targetId: string, principalId: s
   return res.json()
 }
 
-export async function upsertTargetPrincipalExpectation(targetId: string, payload: TargetPrincipalExpectationPayload): Promise<{ expectation: TargetPrincipalExpectation; execution_enabled: boolean; findings_created: number }> {
+export async function createTargetPolicyApproval(targetId: string, targetUrl: string): Promise<string> {
+  const parsed = new URL(targetUrl)
+  const scope = await previewScopeReceipt({
+    url: targetUrl,
+    target_id: targetId,
+    allowed_hosts: [parsed.hostname],
+    environment: 'production',
+  })
+  if (scope.scope_receipt.verdict === 'blocked') {
+    throw new Error(`Target policy scope is blocked: ${scope.scope_receipt.blocked_by.join(', ')}`)
+  }
+  const confirmations = ['confirm_authorized']
+  if (scope.scope_receipt.verdict === 'needs_approval') confirmations.push('confirm_scope_reviewed')
+  const approval = await createApprovalReceipt({
+    scope_receipt_id: scope.scope_receipt.receipt_id,
+    risk_tier: 'active',
+    confirmations,
+    approved_by: 'interactive-ui',
+  })
+  return approval.approval_receipt.id
+}
+
+export async function upsertTargetPrincipalExpectation(targetId: string, payload: TargetPrincipalExpectationPayload): Promise<{ expectation: TargetPrincipalExpectation; execution_enabled: boolean; findings_created: number; operation_id: string }> {
   const res = await fetch(`${API_URL}/targets/${encodeURIComponent(targetId)}/principal-matrix`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -4099,8 +4122,9 @@ export async function upsertTargetPrincipalExpectation(targetId: string, payload
   return res.json()
 }
 
-export async function deleteTargetPrincipalExpectation(targetId: string, expectationId: string): Promise<{ status: string; target_id: string; expectation_id: string; execution_enabled: boolean; findings_created: number }> {
-  const res = await fetch(`${API_URL}/targets/${encodeURIComponent(targetId)}/principal-matrix/${encodeURIComponent(expectationId)}`, { method: 'DELETE' })
+export async function deleteTargetPrincipalExpectation(targetId: string, expectationId: string, approvalReceiptId: string): Promise<{ status: string; target_id: string; expectation_id: string; execution_enabled: boolean; findings_created: number; operation_id: string }> {
+  const query = new URLSearchParams({ approval_receipt_id: approvalReceiptId })
+  const res = await fetch(`${API_URL}/targets/${encodeURIComponent(targetId)}/principal-matrix/${encodeURIComponent(expectationId)}?${query}`, { method: 'DELETE' })
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to delete principal expectation'))
   return res.json()
 }
