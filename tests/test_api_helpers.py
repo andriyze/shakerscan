@@ -7909,6 +7909,25 @@ def test_runtime_destination_scope_fails_closed_when_unverified():
     assert missing_destination["blocked_by"] == ["runtime_destination_unverified"]
 
 
+def test_runtime_destination_scope_blocks_missing_required_dns_observation():
+    guard = api_module._runtime_scope_guard_from_scope(_make_scope_row())
+
+    result = api_module.evaluate_runtime_destination_scope(
+        guard,
+        "https://app.example.com/orders",
+        resolution_observations=[],
+    )
+
+    assert result["status"] == "blocked"
+    assert "runtime_dns_unverified" in result["blocked_by"]
+    assert result["resolution_observations"] == [{
+        "host": "app.example.com",
+        "ips": [],
+        "verdict": "blocked",
+        "reason": "runtime_dns_unverified",
+    }]
+
+
 def test_validate_approval_receipt_rejects_non_uuid():
     conn = _approval_receipt_conn()
     with pytest.raises(api_module.HTTPException) as exc:

@@ -347,8 +347,8 @@ def _evaluate_runtime_dns_observations(
             pass
         ips = list(dict.fromkeys(observations_by_host.get(host, [])))
         if not ips:
-            warnings.append("runtime_dns_unverified")
-            results.append({"host": host, "ips": [], "verdict": "degraded", "reason": "runtime_dns_unverified"})
+            blocked.append("runtime_dns_unverified")
+            results.append({"host": host, "ips": [], "verdict": "blocked", "reason": "runtime_dns_unverified"})
             continue
         result: dict[str, Any] = {"host": host, "ips": ips, "verdict": "allowed"}
         for ip in ips:
@@ -441,7 +441,7 @@ def evaluate_runtime_destination_scope(
             payload.setdefault("checks", []).append({
                 "name": "runtime_dns_resolution",
                 "status": "blocked",
-                "message": "A runtime hostname resolved to a private, loopback, reserved, or invalid address.",
+                "message": "A runtime hostname resolution was missing, invalid, or outside the permitted network scope.",
             })
         elif dns_warnings:
             payload.setdefault("checks", []).append({

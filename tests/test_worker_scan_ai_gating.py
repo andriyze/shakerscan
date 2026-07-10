@@ -322,14 +322,14 @@ def test_runtime_scope_guard_checks_every_dast_redirect_hop():
     assert destinations[0]["redirect_urls"][0] == "https://evil.example.net/bounce"
 
 
-def test_runtime_scope_guard_degrades_when_runtime_dns_is_unobserved():
+def test_runtime_scope_guard_blocks_when_runtime_dns_is_unobserved():
     result = {
         "http": {
             "request_url": "https://app.example.com/start",
             "final_url": "https://app.example.com/final",
             "redirect_chain": ["https://app.example.com/final"],
         },
-        "findings": [{"title": "kept with degraded scope evidence"}],
+        "findings": [{"title": "must not persist"}],
         "result": {"score": 80, "grade": "B"},
     }
 
@@ -338,10 +338,11 @@ def test_runtime_scope_guard_degrades_when_runtime_dns_is_unobserved():
         {"runtime_scope_guard": _runtime_scope_guard_with_dns()},
     )
 
-    assert checked.get("error") is None
-    assert checked["findings"] == [{"title": "kept with degraded scope evidence"}]
-    assert checked["scan_metadata"]["runtime_scope_degraded"] is True
-    assert checked["scan_metadata"]["runtime_scope_check"]["status"] == "degraded"
+    assert checked["findings"] == []
+    assert checked["result"]["score"] is None
+    assert checked["scan_metadata"]["runtime_scope_blocked"] is True
+    assert checked["scan_metadata"]["runtime_scope_check"]["status"] == "blocked"
+    assert "runtime_dns_unverified" in checked["error"]
 
 
 def test_runtime_scope_guard_blocks_private_runtime_dns_resolution():
