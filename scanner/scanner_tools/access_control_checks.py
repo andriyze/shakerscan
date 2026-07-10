@@ -393,6 +393,60 @@ def _has_category_content(body: str, content_type: str, category: str) -> tuple[
 
     return True, "default_pass"
 
+
+_PROMETHEUS_SENSITIVE_METRIC_TOKENS = {
+    "identity": {"user", "users", "account", "accounts", "customer", "customers", "tenant", "tenants"},
+    "commerce": {
+        "order", "orders", "payment", "payments", "wallet", "wallets", "balance", "balances",
+        "transaction", "transactions", "revenue", "invoice", "invoices",
+    },
+    "security": {
+        "auth", "login", "logins", "token", "tokens", "credential", "credentials", "secret", "secrets",
+        "challenge", "challenges",
+    },
+}
+
+
+def _prometheus_sensitive_metric_proof(body: str, content_type: str) -> dict[str, Any] | None:
+    """Prove unauthenticated exposure of multiple sensitive metric classes."""
+    sample = str(body or "")[:262144]
+    ct_lower = str(content_type or "").lower()
+    if not sample or (
+        "text/plain" not in ct_lower
+        and "openmetrics" not in ct_lower
+        and not ("# help " in sample.lower() and "# type " in sample.lower())
+    ):
+        return None
+
+    metric_names: set[str] = set()
+    for line in sample.splitlines():
+        if not line or line.startswith("#"):
+            continue
+        match = re.match(r"^([A-Za-z_:][A-Za-z0-9_:]*)\s*(?:\{|\s)", line)
+        if match:
+            metric_names.add(match.group(1).lower())
+
+    matched_by_category: dict[str, list[str]] = {}
+    for category, tokens in _PROMETHEUS_SENSITIVE_METRIC_TOKENS.items():
+        matches = sorted({
+            name
+            for name in metric_names
+            if set(filter(None, re.split(r"[^a-z0-9]+", name))) & tokens
+        })
+        if matches:
+            matched_by_category[category] = matches[:10]
+
+    matched_names = sorted({name for names in matched_by_category.values() for name in names})
+    if len(matched_by_category) < 2 or len(matched_names) < 3:
+        return None
+    return {
+        "proof_type": "sensitive_content_exposure",
+        "proof_state": "verified",
+        "sensitive_metric_categories": sorted(matched_by_category),
+        "sensitive_metric_names": matched_names[:20],
+        "sensitive_metric_count": len(matched_names),
+    }
+
 # Paths that are intentionally public and should NOT be flagged as vulnerabilities
 # These are legitimate public endpoints, not security issues
 INTENTIONALLY_PUBLIC_PATHS = {
@@ -736,12 +790,17 @@ async def test_single_path(
                     # Validate that the response actually contains content appropriate for this category
                     content_type = finding.get("content_type", "")
                     is_valid_content, validation_reason = _has_category_content(body, content_type, category)
+                    finding["validation_reason"] = validation_reason
 
                     if not is_valid_content:
                         # Content doesn't match what we expect for this category
                         is_soft_404 = True
                         finding["content_validation_failed"] = True
                         finding["validation_reason"] = validation_reason
+                    elif category == "debug_dev":
+                        sensitive_metrics = _prometheus_sensitive_metric_proof(body, content_type)
+                        if sensitive_metrics:
+                            finding.update(sensitive_metrics)
 
                     # Legacy check: Also check if response is generic HTML when expecting a specific file
                     # SPAs often return their homepage/app shell for all paths
@@ -967,6 +1026,11 @@ def format_findings_for_scanner(
                     fb_finding.get("validation_reason")
                     or "Forced browsing content validation accepted this response"
                 ),
+                "proof_type": fb_finding.get("proof_type"),
+                "proof_state": fb_finding.get("proof_state"),
+                "sensitive_metric_categories": fb_finding.get("sensitive_metric_categories"),
+                "sensitive_metric_names": fb_finding.get("sensitive_metric_names"),
+                "sensitive_metric_count": fb_finding.get("sensitive_metric_count"),
             },
             "remediation": "Implement proper authentication and authorization controls. Consider using role-based access control (RBAC) and ensure all administrative endpoints require authentication.",
             "references": [

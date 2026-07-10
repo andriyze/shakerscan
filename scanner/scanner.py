@@ -8357,6 +8357,11 @@ async def build_report(target: str,
                             fb_finding.get("validation_reason")
                             or "Forced browsing content validation accepted this response"
                         ),
+                        "proof_type": fb_finding.get("proof_type"),
+                        "proof_state": fb_finding.get("proof_state"),
+                        "sensitive_metric_categories": fb_finding.get("sensitive_metric_categories"),
+                        "sensitive_metric_names": fb_finding.get("sensitive_metric_names"),
+                        "sensitive_metric_count": fb_finding.get("sensitive_metric_count"),
                     },
                     "CWE-425"  # Direct Request (Forced Browsing)
                 ))

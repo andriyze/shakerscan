@@ -59,6 +59,45 @@ def test_forced_browsing_accepts_prometheus_metrics_body(monkeypatch):
     assert metrics["accessible"] is True
     assert metrics["content_type"] == "text/plain"
     assert not metrics.get("content_validation_failed")
+    assert metrics.get("proof_type") is None
+
+
+def test_prometheus_sensitive_exposure_requires_multiple_metric_classes():
+    generic = """# HELP process_cpu_seconds_total CPU time
+# TYPE process_cpu_seconds_total counter
+process_cpu_seconds_total 1
+http_requests_total{status=\"200\"} 10
+"""
+    assert access_control_checks._prometheus_sensitive_metric_proof(generic, "text/plain") is None
+
+    sensitive = """# HELP service_users_registered Registered users
+# TYPE service_users_registered gauge
+service_users_registered 12
+service_orders_placed_total 8
+service_wallet_balance_total 500
+service_auth_challenges_total 3
+"""
+    proof = access_control_checks._prometheus_sensitive_metric_proof(sensitive, "text/plain; version=0.0.4")
+
+    assert proof is not None
+    assert proof["proof_type"] == "sensitive_content_exposure"
+    assert proof["proof_state"] == "verified"
+    assert proof["sensitive_metric_categories"] == ["commerce", "identity", "security"]
+    assert "service_wallet_balance_total" in proof["sensitive_metric_names"]
+
+    formatted = access_control_checks.format_findings_for_scanner({
+        "findings": [{
+            "path": "/observability",
+            "url": "https://app.test/observability",
+            "status_code": 200,
+            "category": "debug_dev",
+            "severity": "high",
+            "accessible": True,
+            **proof,
+        }],
+    }, "https://app.test")
+    assert formatted[0]["evidence"]["proof_type"] == "sensitive_content_exposure"
+    assert formatted[0]["evidence"]["sensitive_metric_count"] == proof["sensitive_metric_count"]
 
 
 
