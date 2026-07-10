@@ -1076,6 +1076,11 @@ DONE phase 39 for non-polling benchmark submission: `scripts/benchmark_targets.p
 queues exactly one fingerprint-current benchmark and exits with a content-free receipt, while
 requested two-user runs fail before submission unless both principals are minted successfully and
 their server-issued JWT identity claims prove they are distinct accounts.
+DONE phase 40 for honest BOLA budget telemetry: Smart scan progress and `bola_status` distinguish
+the discovered candidate inventory from the configured endpoint execution ceiling and report the
+scheduled upper bound. A large pre-cap URL pool is no longer presented as if every candidate were
+scheduled for active replay, while the existing `smart_bola_test` endpoint and deadline limits remain
+the authoritative execution controls.
 
 **Done when:** recorded two-user benchmark scorecards show the targeted miss becoming a deterministic
 finding, not merely an attempted endpoint.

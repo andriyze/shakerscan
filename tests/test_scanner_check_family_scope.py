@@ -55,6 +55,24 @@ def test_check_family_scope_marks_focused_bola():
     assert scope["legacy_flags"] == {"xss": False, "sqli": False}
 
 
+def test_bola_candidate_budget_distinguishes_inventory_from_execution_ceiling():
+    summary = scanner_mod.summarize_bola_candidate_budget(500, 300)
+
+    assert summary == {
+        "candidate_endpoints": 500,
+        "max_endpoints": 300,
+        "scheduled_endpoints_upper_bound": 300,
+    }
+
+
+def test_bola_candidate_budget_normalizes_invalid_or_negative_values():
+    assert scanner_mod.summarize_bola_candidate_budget("invalid", -5) == {
+        "candidate_endpoints": 0,
+        "max_endpoints": 0,
+        "scheduled_endpoints_upper_bound": 0,
+    }
+
+
 def test_check_family_scope_marks_focused_auth():
     scope = scanner_mod.build_check_family_scope(
         True,

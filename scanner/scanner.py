@@ -3366,6 +3366,23 @@ def resolve_focused_bola_poe_settings(max_endpoints: Any) -> dict[str, int]:
     }
 
 
+def summarize_bola_candidate_budget(candidate_count: Any, max_endpoints: Any) -> dict[str, int]:
+    """Describe BOLA inventory separately from the configured execution ceiling."""
+    try:
+        candidates = max(0, int(candidate_count or 0))
+    except (TypeError, ValueError):
+        candidates = 0
+    try:
+        endpoint_limit = max(0, int(max_endpoints or 0))
+    except (TypeError, ValueError):
+        endpoint_limit = 0
+    return {
+        "candidate_endpoints": candidates,
+        "max_endpoints": endpoint_limit,
+        "scheduled_endpoints_upper_bound": min(candidates, endpoint_limit),
+    }
+
+
 def focused_mode_keeps_phase4_bola(focused_family: str | None, bola_testing: bool) -> bool:
     """Focused BOLA still needs phase-4 check_bola; other focused families do not."""
     family = normalize_scanner_check_family(focused_family)
@@ -11213,23 +11230,38 @@ async def build_report(target: str,
                     _bola_blocked.append("no_second_user")
                 if not bola_urls:
                     _bola_blocked.append("no_endpoints")
+                bola_candidate_budget = summarize_bola_candidate_budget(
+                    len(bola_urls), smart_bola_max_endpoints
+                )
                 active_block["bola_status"] = {
                     "cross_user_enabled": bool(user2_session and auth_session),
                     "primary_auth": bool(auth_session),
                     "second_user": bool(user2_session),
                     "endpoints_available": len(bola_urls) if bola_urls else 0,
+                    **bola_candidate_budget,
                     # read-only multi-user replay today; write/BFLA is Lab/deep future work
                     "mode": "cross_principal_read" if (user2_session and auth_session) else (
                         "anonymous_vs_user1" if auth_session else "anonymous_only"),
                     "blocked_reasons": _bola_blocked,
                 }
                 if bola_urls:
-                    print(f"[scanner] Smart mode: Running BOLA/IDOR testing on {len(bola_urls)} discovered URLs", file=sys.stderr)
+                    print(
+                        "[scanner] Smart mode: BOLA/IDOR candidate inventory "
+                        f"{bola_candidate_budget['candidate_endpoints']} URLs; configured endpoint ceiling "
+                        f"{bola_candidate_budget['max_endpoints']}",
+                        file=sys.stderr,
+                    )
                     if user2_session:
                         print("[scanner] Multi-user BOLA: user2_session provided - cross-user comparison enabled", file=sys.stderr)
                     else:
                         print("[scanner] Single-user BOLA: no user2_session - unauthenticated access testing only", file=sys.stderr)
-                    emit_progress("active_bola", 94, f"starting BOLA/IDOR testing on {len(bola_urls)} URLs")
+                    emit_progress(
+                        "active_bola",
+                        94,
+                        "starting BOLA/IDOR testing; "
+                        f"candidates={bola_candidate_budget['candidate_endpoints']} "
+                        f"endpoint_ceiling={bola_candidate_budget['max_endpoints']}",
+                    )
 
                     # Budget for BOLA testing. On a rich app the discovered-URL
                     # set can be large enough that testing every template takes
