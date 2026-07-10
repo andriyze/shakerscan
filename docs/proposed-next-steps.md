@@ -559,8 +559,9 @@ raw shell execution or LLM-produced verified findings.
 9. **Registry-driven execution:** DONE phase 2 for fail-closed registry execution metadata:
    explicitly requested but unrunnable families now stay skipped with `registry_family_not_runnable`,
    enabled families expose dispatch adapters, and scan plans summarize requested blocked families.
-   Remaining work is migrating more detector internals out of legacy loops and into registry
-   iteration.
+   DONE phase 7 for independent scanner adapter contracts and reportable dispatch decisions across
+   every runnable scanner task family. An enabled plan cannot dispatch a detector when the
+   scanner-side adapter contract is missing or mismatched.
 10. **Refuter and integrity layer:** DONE phase 1 for refuter workflows for weak High/Criticals,
     AI Gate semantic hits, Model Intake metadata claims, parser-promoted/degraded output, and
     deployment-gating claims. Refuter plans now carry structured counterevidence bundles with review
@@ -1492,7 +1493,7 @@ challenged and corrected without deleting history, and corrections are visible i
 and deployment-gate story as the original claim.
 
 ### 10. Check-registry execution migration + proof contracts per family
-**Status: REGISTRY CONTRACT CONSOLIDATION + PASSIVE DISPATCH DONE; HIGH-RISK FAMILIES FAIL-CLOSED.** `api/check_registry.py` (`CheckFamilySpec`) is the family contract for API
+**Status: REGISTRY DISPATCH MIGRATION DONE FOR RUNNABLE FAMILIES; HIGH-RISK UNIMPLEMENTED FAMILIES FAIL-CLOSED.** `api/check_registry.py` (`CheckFamilySpec`) is the family contract for API
 validation and ASM scheduling and now carries `requires_auth_states` / `requires_credentials` /
 `risk_level` / `runnable` / `telemetry_schema` / `proof_contract` / `severity_rules`. Scanner
 `build_report()` now emits a registry-derived `scanner_execution_plan` in scan config, active
@@ -1519,19 +1520,23 @@ retain explicit skip metadata instead of starting the legacy executor. Focused s
 finding attribution, remediation, auth-state requirements, telemetry flags, and dispatch-adapter
 names now derive from that same registry instead of a second scanner-local registry. Passive
 header/config finding emission runs through a generic phase dispatcher and records completed,
-failed, or missing-adapter state in `scanner_execution_receipts`. Detector internals for some legacy
-modules still retain specialized loops. Planned `lfi`/`rce`/`ssrf` families remain explicitly
+failed, or missing-adapter state in `scanner_execution_receipts`. Every runnable scanner task family
+now passes through an independent scanner-side adapter contract; decisions are attached to reports
+and fail closed on missing, blocked, unrunnable, or mismatched adapters. Detector algorithms remain
+inside their specialized modules. Planned `lfi`/`rce`/`ssrf` families remain explicitly
 unrunnable: response validators alone are not bounded discovery executors and cannot justify claiming
 those families were dispatched.
 
-**Implement:** continue migrating `build_report()` module execution to registry iteration; add
-`proof_contract`, `severity_rules`, telemetry schema, safety gate, and report rollup per family;
-then make `lfi`/`rce`/`ssrf` runnable only when their deterministic proof contracts exist.
+**Implement:** make `lfi`/`rce`/`ssrf` runnable only when bounded executors and their deterministic
+proof contracts exist; their current fail-closed state is intentional, not unfinished dispatch.
 DONE phase 3 for mass-assignment registration and dispatch gating without expanding ASM focus or
 changing explicit `--mass-assignment-testing` behavior.
 DONE phase 4 for JWT basic/comprehensive task gating without exposing JWT as an ASM focus family.
 DONE phase 5 for Nuclei task gating without exposing templates as an ASM endpoint-test family.
 DONE phase 6 for canonical focused-family metadata and registry-driven passive report dispatch.
+DONE phase 7 for adapter-validated, reportable task dispatch decisions across SQLi, XSS, Nuclei,
+JWT, mass assignment, focused auth, and BOLA. Specialized detector internals stay module-owned;
+the registry and scanner adapter contract own whether those modules may run.
 
 **Done when:** adding a check family is a registry entry plus module integration, not edits scattered
 through `build_report`.

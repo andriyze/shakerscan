@@ -3125,25 +3125,15 @@ def build_scanner_execution_plan(
     }
 
 
-def registry_family_enabled(
-    scanner_execution_plan: dict[str, Any] | None,
-    family: str,
-    *,
-    fallback: bool = False,
-) -> bool:
-    """Return whether a scanner family is enabled by the registry execution plan.
-
-    Legacy module dispatch still runs SQLi/XSS through existing loops, but the
-    run/no-run gate now comes from the same registry plan attached to reports.
-    If a plan is unavailable, keep the caller-provided legacy fallback.
-    """
-    plan = scanner_execution_plan if isinstance(scanner_execution_plan, dict) else {}
-    for item in plan.get("families") or []:
-        if not isinstance(item, dict):
-            continue
-        if str(item.get("name") or "").strip().lower() == str(family or "").strip().lower():
-            return bool(item.get("enabled"))
-    return bool(fallback)
+SCANNER_REGISTRY_ADAPTER_CONTRACTS = {
+    "nuclei": "legacy_nuclei_template",
+    "sqli": "legacy_active_loop",
+    "xss": "legacy_active_loop",
+    "auth": "asm_endpoint_batch",
+    "bola": "asm_endpoint_batch",
+    "mass_assignment": "legacy_phase4_mass_assignment",
+    "jwt": "legacy_advanced_jwt",
+}
 
 
 def registry_dispatch_enabled(
@@ -3151,13 +3141,71 @@ def registry_dispatch_enabled(
     family: str,
     *,
     legacy_default: bool = False,
+    expected_adapter: str | None = None,
 ) -> bool:
-    """Gate focused-family dispatch through the registry without changing broad legacy scans."""
+    """Gate dispatch through a registry decision and optional adapter contract."""
+    return bool(registry_dispatch_decision(
+        scanner_execution_plan,
+        family,
+        legacy_default=legacy_default,
+        expected_adapter=expected_adapter,
+    )["dispatch_enabled"])
+
+
+def registry_dispatch_decision(
+    scanner_execution_plan: dict[str, Any] | None,
+    family: str,
+    *,
+    legacy_default: bool = False,
+    expected_adapter: str | None = None,
+) -> dict[str, Any]:
+    """Return a fail-closed, reportable family-to-adapter dispatch decision."""
     plan = scanner_execution_plan if isinstance(scanner_execution_plan, dict) else {}
     scope = plan.get("check_family_scope") if isinstance(plan.get("check_family_scope"), dict) else {}
-    if scope.get("requested_family"):
-        return registry_family_enabled(plan, family, fallback=legacy_default)
-    return bool(legacy_default)
+    normalized_family = str(family or "").strip().lower()
+    adapter_contract_missing = expected_adapter is None and normalized_family not in SCANNER_REGISTRY_ADAPTER_CONTRACTS
+    if expected_adapter is None:
+        expected_adapter = SCANNER_REGISTRY_ADAPTER_CONTRACTS.get(normalized_family)
+    family_row = next((
+        item for item in (plan.get("families") or [])
+        if isinstance(item, dict) and str(item.get("name") or "").strip().lower() == normalized_family
+    ), None)
+    decision = {
+        "family": normalized_family,
+        "phase": str((family_row or {}).get("phase") or "unknown"),
+        "dispatch_adapter": str((family_row or {}).get("dispatch_adapter") or "none"),
+        "expected_adapter": expected_adapter,
+        "dispatch_enabled": False,
+        "decision": "blocked",
+        "reason": "registry_family_missing",
+    }
+    if not family_row:
+        return decision
+    if adapter_contract_missing:
+        decision["reason"] = "scanner_adapter_contract_missing"
+        return decision
+    if not family_row.get("runnable"):
+        decision["reason"] = "registry_family_not_runnable"
+        return decision
+    blocked_by = [str(item) for item in (family_row.get("blocked_by") or []) if str(item)]
+    if blocked_by:
+        decision["reason"] = blocked_by[0]
+        decision["blocked_by"] = blocked_by
+        return decision
+    adapter = decision["dispatch_adapter"]
+    if expected_adapter and adapter != expected_adapter:
+        decision["reason"] = "registry_dispatch_adapter_mismatch"
+        return decision
+    requested_scope = bool(scope.get("requested_family"))
+    if family_row.get("enabled"):
+        decision.update({"dispatch_enabled": True, "decision": "dispatch", "reason": "registry_enabled"})
+        return decision
+    if not requested_scope and legacy_default:
+        decision.update({"dispatch_enabled": True, "decision": "dispatch", "reason": "registry_validated_legacy_broad"})
+        return decision
+    decision["decision"] = "skipped"
+    decision["reason"] = str(family_row.get("reason") or "registry_family_disabled")
+    return decision
 
 
 def dispatch_registry_report_phase(
@@ -3678,6 +3726,7 @@ async def build_report(target: str,
         focused_endpoints_only=bool(focused_endpoints_only or focused_manual_active_scope),
         zero_rediscovery=zero_rediscovery_scope,
     )
+    scanner_dispatch_decisions: list[dict[str, Any]] = []
     discovery_budget = scan_budget
     if focused_manual_active_scope:
         scan_budget = dict(scan_budget)
@@ -4733,11 +4782,12 @@ async def build_report(target: str,
 
     # New advanced vulnerability checks (smart/full/aggressive only)
     advanced_scan = (smart_mode or (complete_mode and complete_tier in ("full", "aggressive"))) and not focused_active_family
-    jwt_dispatch_enabled = registry_family_enabled(
+    jwt_dispatch_decision = registry_dispatch_decision(
         scanner_execution_plan,
         "jwt",
-        fallback=False,
     )
+    scanner_dispatch_decisions.append(jwt_dispatch_decision)
+    jwt_dispatch_enabled = bool(jwt_dispatch_decision["dispatch_enabled"])
     if advanced_scan and not public_only:
         nosql_task = asyncio.create_task(nosql_injection_test(base_url))
         ldap_task = asyncio.create_task(ldap_injection_test(base_url))
@@ -5324,11 +5374,13 @@ async def build_report(target: str,
             "reason": "zero_rediscovery_child",
         }
         nuclei_task = asyncio.create_task(dummy_nuclei_zero())
-    nuclei_registry_enabled = registry_family_enabled(
+    nuclei_dispatch_decision = registry_dispatch_decision(
         scanner_execution_plan,
         "nuclei",
-        fallback=bool(not public_only and not quick_mode and not focused_endpoints_only),
+        legacy_default=bool(not public_only and not quick_mode and not focused_endpoints_only),
     )
+    scanner_dispatch_decisions.append(nuclei_dispatch_decision)
+    nuclei_registry_enabled = bool(nuclei_dispatch_decision["dispatch_enabled"])
     if nuclei_task is None and not nuclei_registry_enabled:
         async def dummy_nuclei_registry(): return {
             "vulnerabilities": [],
@@ -5835,11 +5887,12 @@ async def build_report(target: str,
         forced_browsing_task = asyncio.create_task(dummy_forced_browsing())
 
     # Mass Assignment Check (requires auth for best results)
-    mass_assignment_dispatch_enabled = registry_family_enabled(
+    mass_assignment_dispatch_decision = registry_dispatch_decision(
         scanner_execution_plan,
         "mass_assignment",
-        fallback=False,
     )
+    scanner_dispatch_decisions.append(mass_assignment_dispatch_decision)
+    mass_assignment_dispatch_enabled = bool(mass_assignment_dispatch_decision["dispatch_enabled"])
     if mass_assignment_dispatch_enabled and not public_only:
         from scanner_tools.access_control_checks import check_mass_assignment
         mass_assignment_task = asyncio.create_task(check_mass_assignment(base_url, auth_session=auth_session))
@@ -8507,8 +8560,19 @@ async def build_report(target: str,
             if len(cand) >= max_active:
                 break
 
-        run_xss = registry_family_enabled(scanner_execution_plan, "xss", fallback=bool(active_xss))
-        run_sqli = registry_family_enabled(scanner_execution_plan, "sqli", fallback=bool(active_sqli))
+        xss_dispatch_decision = registry_dispatch_decision(
+            scanner_execution_plan,
+            "xss",
+            legacy_default=bool(active_xss),
+        )
+        sqli_dispatch_decision = registry_dispatch_decision(
+            scanner_execution_plan,
+            "sqli",
+            legacy_default=bool(active_sqli),
+        )
+        scanner_dispatch_decisions.extend([xss_dispatch_decision, sqli_dispatch_decision])
+        run_xss = bool(xss_dispatch_decision["dispatch_enabled"])
+        run_sqli = bool(sqli_dispatch_decision["dispatch_enabled"])
         active_block = {
             "targets": cand,
             "dalfox": [],
@@ -10830,11 +10894,13 @@ async def build_report(target: str,
         # so default broad scans do not reinterpret public endpoints as auth
         # obligations.
         auth_focused = focused_active_family_name == "auth"
-        auth_dispatch_enabled = registry_dispatch_enabled(
+        auth_dispatch_decision = registry_dispatch_decision(
             scanner_execution_plan,
             "auth",
             legacy_default=auth_focused,
         )
+        scanner_dispatch_decisions.append(auth_dispatch_decision)
+        auth_dispatch_enabled = bool(auth_dispatch_decision["dispatch_enabled"])
         if auth_dispatch_enabled and smart_mode and smart_succeeded and not public_only:
             try:
                 if auth_session:
@@ -10946,11 +11012,13 @@ async def build_report(target: str,
             focused_active_family_name,
             "bola_idor",
         )
-        bola_dispatch_enabled = registry_dispatch_enabled(
+        bola_dispatch_decision = registry_dispatch_decision(
             scanner_execution_plan,
             "bola",
             legacy_default=bool(bola_allowed_by_focus and (bola_focused or not focused_manual_active_scope)),
         )
+        scanner_dispatch_decisions.append(bola_dispatch_decision)
+        bola_dispatch_enabled = bool(bola_dispatch_decision["dispatch_enabled"])
         bola_eligible = (
             smart_mode
             and smart_succeeded
@@ -11367,6 +11435,8 @@ async def build_report(target: str,
             "[scanner] Parallel child shard: skipping duplicate posture/config findings",
             file=sys.stderr,
         )
+    if scanner_dispatch_decisions:
+        report["scanner_dispatch_decisions"] = scanner_dispatch_decisions
     passive_dispatch_receipts = dispatch_registry_report_phase(
         scanner_execution_plan,
         "passive",
