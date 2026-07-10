@@ -4,14 +4,14 @@
   "artifact_note": "Tracked benchmark scorecard. A tracked file is not a success claim: passed=true means every configured gate passed; passed=false means at least one configured gate failed.",
   "fleet": {
     "count": 16,
-    "current": 16,
-    "stale": 0,
+    "current": 0,
+    "stale": 16,
     "pending": 0,
     "fingerprints": [
-      "ddc6173b5b4864b4"
+      "97b6b81b7a9c63ed"
     ]
   },
-  "fleet_uniform": true,
+  "fleet_uniform": false,
   "rescore_after_retest": true,
   "seed_hypotheses": false,
   "targets": [
@@ -29,9 +29,9 @@
       ],
       "suspected_high_critical": 0,
       "false_positive_risk": 0.0,
-      "coverage_percent": 0.422,
-      "endpoints_discovered": 1506,
-      "endpoints_tested": 635,
+      "coverage_percent": 0.425,
+      "endpoints_discovered": 1500,
+      "endpoints_tested": 638,
       "budget_exhausted": false,
       "budget_exhausted_reason": null,
       "auth_blocked": false,
@@ -217,15 +217,15 @@
       "body_completion_diagnostics": {
         "body_attempts": 220,
         "attempted_params": 849,
-        "completed_params": 1443,
+        "completed_params": 1551,
         "parameter_completion_ratio": 0.0,
         "response_guided_completion_ratio": 0.0,
-        "probe_parameter_completion_ratio": 1.6996,
+        "probe_parameter_completion_ratio": 1.8269,
         "families": {
           "nosqli": {
             "body_attempts": 40,
-            "attempted_params": 143,
-            "completed_params": 143,
+            "attempted_params": 146,
+            "completed_params": 146,
             "response_guided_completion_attempts": 0,
             "validation_fields_added": 0,
             "validation_field_samples": [],
@@ -239,8 +239,8 @@
           },
           "sqli": {
             "body_attempts": 180,
-            "attempted_params": 706,
-            "completed_params": 1300,
+            "attempted_params": 703,
+            "completed_params": 1405,
             "response_guided_completion_attempts": 0,
             "validation_fields_added": 0,
             "validation_field_samples": [],
@@ -252,7 +252,7 @@
             },
             "parameter_completion_ratio": 0.0,
             "response_guided_completion_ratio": 0.0,
-            "probe_parameter_completion_ratio": 1.8414
+            "probe_parameter_completion_ratio": 1.9986
           }
         }
       },
@@ -266,7 +266,7 @@
       "grade_reliable": true,
       "report_degraded": false,
       "report_invariant_violations": [],
-      "scan_id": "330f5679-6ed3-431c-9356-f32109abcc07",
+      "scan_id": "148dd7f2-0e2a-401c-abfa-1bea3f80aea7",
       "target": "juice_shop",
       "gates": [
         {
@@ -331,9 +331,9 @@
           ],
           "suspected_high_critical": 0,
           "false_positive_risk": 0.0,
-          "coverage_percent": 0.422,
-          "endpoints_discovered": 1506,
-          "endpoints_tested": 635,
+          "coverage_percent": 0.425,
+          "endpoints_discovered": 1500,
+          "endpoints_tested": 638,
           "budget_exhausted": false,
           "budget_exhausted_reason": null,
           "auth_blocked": false,
@@ -519,15 +519,15 @@
           "body_completion_diagnostics": {
             "body_attempts": 220,
             "attempted_params": 849,
-            "completed_params": 1443,
+            "completed_params": 1551,
             "parameter_completion_ratio": 0.0,
             "response_guided_completion_ratio": 0.0,
-            "probe_parameter_completion_ratio": 1.6996,
+            "probe_parameter_completion_ratio": 1.8269,
             "families": {
               "nosqli": {
                 "body_attempts": 40,
-                "attempted_params": 143,
-                "completed_params": 143,
+                "attempted_params": 146,
+                "completed_params": 146,
                 "response_guided_completion_attempts": 0,
                 "validation_fields_added": 0,
                 "validation_field_samples": [],
@@ -541,8 +541,8 @@
               },
               "sqli": {
                 "body_attempts": 180,
-                "attempted_params": 706,
-                "completed_params": 1300,
+                "attempted_params": 703,
+                "completed_params": 1405,
                 "response_guided_completion_attempts": 0,
                 "validation_fields_added": 0,
                 "validation_field_samples": [],
@@ -554,7 +554,7 @@
                 },
                 "parameter_completion_ratio": 0.0,
                 "response_guided_completion_ratio": 0.0,
-                "probe_parameter_completion_ratio": 1.8414
+                "probe_parameter_completion_ratio": 1.9986
               }
             }
           },
@@ -582,9 +582,9 @@
           ],
           "suspected_high_critical": 0,
           "false_positive_risk": 0.0,
-          "coverage_percent": 0.422,
-          "endpoints_discovered": 1506,
-          "endpoints_tested": 635,
+          "coverage_percent": 0.425,
+          "endpoints_discovered": 1500,
+          "endpoints_tested": 638,
           "budget_exhausted": false,
           "budget_exhausted_reason": null,
           "auth_blocked": false,
@@ -770,15 +770,15 @@
           "body_completion_diagnostics": {
             "body_attempts": 220,
             "attempted_params": 849,
-            "completed_params": 1443,
+            "completed_params": 1551,
             "parameter_completion_ratio": 0.0,
             "response_guided_completion_ratio": 0.0,
-            "probe_parameter_completion_ratio": 1.6996,
+            "probe_parameter_completion_ratio": 1.8269,
             "families": {
               "nosqli": {
                 "body_attempts": 40,
-                "attempted_params": 143,
-                "completed_params": 143,
+                "attempted_params": 146,
+                "completed_params": 146,
                 "response_guided_completion_attempts": 0,
                 "validation_fields_added": 0,
                 "validation_field_samples": [],
@@ -792,8 +792,8 @@
               },
               "sqli": {
                 "body_attempts": 180,
-                "attempted_params": 706,
-                "completed_params": 1300,
+                "attempted_params": 703,
+                "completed_params": 1405,
                 "response_guided_completion_attempts": 0,
                 "validation_fields_added": 0,
                 "validation_field_samples": [],
@@ -805,7 +805,7 @@
                 },
                 "parameter_completion_ratio": 0.0,
                 "response_guided_completion_ratio": 0.0,
-                "probe_parameter_completion_ratio": 1.8414
+                "probe_parameter_completion_ratio": 1.9986
               }
             }
           },
