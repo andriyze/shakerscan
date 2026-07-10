@@ -347,8 +347,8 @@ def _evaluate_runtime_dns_observations(
             pass
         ips = list(dict.fromkeys(observations_by_host.get(host, [])))
         if not ips:
-            blocked.append("runtime_dns_unverified")
-            results.append({"host": host, "ips": [], "verdict": "blocked", "reason": "runtime_dns_unverified"})
+            warnings.append("runtime_dns_unverified")
+            results.append({"host": host, "ips": [], "verdict": "degraded", "reason": "runtime_dns_unverified"})
             continue
         result: dict[str, Any] = {"host": host, "ips": ips, "verdict": "allowed"}
         for ip in ips:

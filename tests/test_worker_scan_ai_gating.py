@@ -254,6 +254,35 @@ def test_runtime_scope_guard_allows_ai_gate_runtime_destination_in_scope():
     assert checked["scan_metadata"]["runtime_scope_check"]["status"] == "allowed"
 
 
+def test_runtime_scope_guard_degrades_ai_gate_when_only_final_hop_dns_is_observed():
+    result = {
+        "ai_gate": {
+            "runtime_destinations": [
+                {
+                    "label": "ai_gate_request",
+                    "url": "https://app.example.com/api/chat",
+                    "final_url": "https://api.example.com/v1/chat",
+                    "redirect_urls": ["https://api.example.com/v1/chat"],
+                    "resolved_host": "api.example.com",
+                    "resolved_ips": ["8.8.8.8"],
+                }
+            ],
+        },
+        "findings": [{"title": "ai finding must persist"}],
+        "result": {"score": 75, "grade": "C"},
+    }
+
+    checked = worker._apply_runtime_scope_guard_to_result(
+        result,
+        {"runtime_scope_guard": _runtime_scope_guard_with_dns(), "run_kind": "ai_api"},
+    )
+
+    assert checked.get("error") is None
+    assert checked["findings"] == [{"title": "ai finding must persist"}]
+    assert checked["scan_metadata"]["runtime_scope_check"]["status"] == "degraded"
+    assert checked["scan_metadata"]["runtime_scope_check"]["warnings"] == ["runtime_dns_unverified"]
+
+
 def test_runtime_scope_guard_blocks_model_intake_runtime_redirect_out_of_scope():
     result = {
         "model_intake": {
@@ -322,14 +351,14 @@ def test_runtime_scope_guard_checks_every_dast_redirect_hop():
     assert destinations[0]["redirect_urls"][0] == "https://evil.example.net/bounce"
 
 
-def test_runtime_scope_guard_blocks_when_runtime_dns_is_unobserved():
+def test_runtime_scope_guard_degrades_without_stripping_when_runtime_dns_is_unobserved():
     result = {
         "http": {
             "request_url": "https://app.example.com/start",
             "final_url": "https://app.example.com/final",
             "redirect_chain": ["https://app.example.com/final"],
         },
-        "findings": [{"title": "must not persist"}],
+        "findings": [{"title": "must persist as degraded evidence"}],
         "result": {"score": 80, "grade": "B"},
     }
 
@@ -338,11 +367,12 @@ def test_runtime_scope_guard_blocks_when_runtime_dns_is_unobserved():
         {"runtime_scope_guard": _runtime_scope_guard_with_dns()},
     )
 
-    assert checked["findings"] == []
-    assert checked["result"]["score"] is None
-    assert checked["scan_metadata"]["runtime_scope_blocked"] is True
-    assert checked["scan_metadata"]["runtime_scope_check"]["status"] == "blocked"
-    assert "runtime_dns_unverified" in checked["error"]
+    assert checked["findings"] == [{"title": "must persist as degraded evidence"}]
+    assert checked["result"] == {"score": 80, "grade": "B"}
+    assert checked["scan_metadata"]["runtime_scope_degraded"] is True
+    assert checked["scan_metadata"]["runtime_scope_check"]["status"] == "degraded"
+    assert "runtime_dns_unverified" in checked["scan_metadata"]["runtime_scope_degraded_reason"]
+    assert "error" not in checked
 
 
 def test_runtime_scope_guard_blocks_private_runtime_dns_resolution():

@@ -143,7 +143,9 @@ Use these waves to decide sequence when a T3MP3ST idea competes with detector wo
 3. **Safety receipts and audit:** DONE phase 1 for scope/approval receipts and optional plus
    policy-required enforcement, queued runtime-scope guard payloads, a deterministic actual-destination
    re-check helper, DAST worker final-URL enforcement, AI Gate/Model Intake runtime destination
-   capture, redirect-chain/resolution audit, runtime-scope blocked/degraded command-result rows, and
+   capture, redirect-chain/resolution audit, runtime-scope blocked/degraded command-result rows
+   (missing per-hop DNS telemetry degrades while observed out-of-scope destinations or disallowed
+   resolutions block), and
    campaign action records. Future adapters must satisfy the same contract before becoming runnable.
 4. **Planner evaluation before planner power:** DONE for fixture scoring, capability ping, strict
    parser validation, bounded Codex dry-run planning, and no-shell/scope/risk/AI-proof release gates.
