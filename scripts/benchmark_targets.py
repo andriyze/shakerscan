@@ -434,6 +434,14 @@ def _jwt_principal_identity(token):
     return None
 
 
+def _principal_identity_fingerprint(identity):
+    """Return a bounded, non-claim fingerprint for benchmark receipts."""
+    value = str(identity or "").strip()
+    if not value:
+        return None
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:16]
+
+
 def _report_invariants(report):
     """Run the shared report-invariant checker (§2/§10) — empty list == consistent."""
     try:
@@ -480,9 +488,14 @@ def collect_scorecard(report, fixture):
     auth_workflow = {
         "required_auth_states": required_auth_states,
         "observed_auth_states": observed_auth_states,
+        "principal_contexts_scheduled": observed_auth_states,
         "missing_auth_states": missing_auth_states,
         "two_principal_required": "user2" in required_auth_states,
+        "two_principal_contexts_scheduled": {"user1", "user2"}.issubset(set(observed_auth_states)),
         "two_principal_observed": {"user1", "user2"}.issubset(set(observed_auth_states)),
+        "two_principal_observed_semantics": "compatibility_alias_for_contexts_scheduled",
+        "principal_identities_validated": False,
+        "authenticated_responses_accepted": None,
         "status": "blocked" if missing_auth_states else ("ready" if required_auth_states else "not_required"),
         "blockers": (
             ["missing_required_auth_states"]
@@ -554,6 +567,16 @@ def apply_gates(card, fixture):
     invariant_violations = card.get("report_invariant_violations") or []
     chk("report_invariants_clean", not invariant_violations,
         "clean" if not invariant_violations else "; ".join(str(v) for v in invariant_violations[:5]))
+    completion_anomalies = (
+        (card.get("body_completion_diagnostics") or {}).get("telemetry_anomalies") or []
+    )
+    chk(
+        "completion_telemetry_consistent",
+        not completion_anomalies,
+        "clean" if not completion_anomalies else "; ".join(
+            str(item.get("reason") or item) for item in completion_anomalies[:5]
+        ),
+    )
     chk("grade_reliable", card.get("grade_reliable") is not False,
         f"grade_reliable={card.get('grade_reliable')}")
     chk("active_execution_ok", not bool(card.get("active_execution_failed")),
@@ -602,6 +625,14 @@ def submit_target(name, api, do_auth):
     opts = dict(fx.get("scan_options") or {})
     opts["require_current_workers"] = True
     two_user = False
+    principal_validation = {
+        "schema_version": "benchmark_principal_validation_v1",
+        "contexts_configured": [],
+        "distinct_identity_claims_validated": False,
+        "identity_fingerprints": [],
+        "validation_method": None,
+        "authenticated_responses_accepted": None,
+    }
     auth_cfg = fx.get("auth") if isinstance(fx.get("auth"), dict) else {}
     if do_auth and auth_cfg:
         principal_nonce = secrets.token_hex(6)
@@ -615,6 +646,7 @@ def submit_target(name, api, do_auth):
         if not t1:
             raise RuntimeError("failed to mint required benchmark user1 credentials")
         opts["auth_header"] = f"Bearer {t1}"
+        principal_validation["contexts_configured"].append("user1")
         requires_two_users = bool(auth_cfg.get("requires_two_users") or auth_cfg.get("user2_login"))
         if requires_two_users:
             t2 = mint_token(
@@ -633,6 +665,15 @@ def submit_target(name, api, do_auth):
                 raise RuntimeError("benchmark user1 and user2 resolved to the same principal identity")
             opts["user2_header"] = f"Bearer {t2}"
             two_user = True
+            principal_validation.update({
+                "contexts_configured": ["user1", "user2"],
+                "distinct_identity_claims_validated": True,
+                "identity_fingerprints": [
+                    _principal_identity_fingerprint(identity1),
+                    _principal_identity_fingerprint(identity2),
+                ],
+                "validation_method": "jwt_stable_claim",
+            })
     resp = _post(f"{api}/scans", {"target": fx["target_url"], "options": opts})
     scan_id = resp.get("id") or resp.get("scan_id")
     if not scan_id:
@@ -643,6 +684,7 @@ def submit_target(name, api, do_auth):
         "job_id": resp.get("job_id"),
         "status": resp.get("status"),
         "two_user": two_user,
+        "principal_validation": principal_validation,
         "require_current_workers": True,
     }
 
@@ -652,10 +694,12 @@ def run_target(name, api, timeout, do_auth, preset_scan_id=None, rescore_after_r
     report = None
     scan_id = preset_scan_id
     two_user = False
+    principal_validation = None
     if not scan_id:
         receipt = submit_target(name, api, do_auth)
         scan_id = receipt["scan_id"]
         two_user = receipt["two_user"]
+        principal_validation = receipt.get("principal_validation")
         print(f"[{name}] submitted scan {scan_id} (two_user={two_user})", flush=True)
         deadline = time.time() + timeout
         while time.time() < deadline:
@@ -681,6 +725,11 @@ def run_target(name, api, timeout, do_auth, preset_scan_id=None, rescore_after_r
     finish_card["report_degraded"] = bool(report.get("degraded") or meta.get("degraded") or result_block.get("degraded"))
     finish_card["report_invariant_violations"] = list(report.get("invariant_violations") or []) or _report_invariants(report)
     finish_card["two_user"] = two_user
+    if principal_validation:
+        finish_card["principal_validation"] = principal_validation
+        finish_card["auth_workflow"]["principal_identities_validated"] = bool(
+            principal_validation.get("distinct_identity_claims_validated")
+        )
 
     cards_by_phase = {"scan_finish": finish_card}
     scoring_card = finish_card
@@ -697,6 +746,11 @@ def run_target(name, api, timeout, do_auth, preset_scan_id=None, rescore_after_r
             post_card["phase"] = "post_retest"
             post_card["retest_settled"] = settled
             post_card["two_user"] = two_user
+            if principal_validation:
+                post_card["principal_validation"] = principal_validation
+                post_card["auth_workflow"]["principal_identities_validated"] = bool(
+                    principal_validation.get("distinct_identity_claims_validated")
+                )
             # The post-retest card is the scoring card, so carry over the report-level
             # trust signals from scan finish. A verified-count lift must not hide a
             # degraded report, active-lane failure, or invariant violation.

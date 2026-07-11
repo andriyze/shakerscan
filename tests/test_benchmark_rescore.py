@@ -183,6 +183,17 @@ def test_submit_target_requires_current_workers_and_returns_content_free_receipt
         "job_id": "job-1",
         "status": "queued",
         "two_user": True,
+        "principal_validation": {
+            "schema_version": "benchmark_principal_validation_v1",
+            "contexts_configured": ["user1", "user2"],
+            "distinct_identity_claims_validated": True,
+            "identity_fingerprints": [
+                b._principal_identity_fingerprint("email:user1@example.test"),
+                b._principal_identity_fingerprint("email:user2@example.test"),
+            ],
+            "validation_method": "jwt_stable_claim",
+            "authenticated_responses_accepted": None,
+        },
         "require_current_workers": True,
     }
     assert "secret" not in str(receipt)
@@ -208,6 +219,11 @@ def test_submit_target_uses_fresh_role_distinct_principal_accounts(monkeypatch):
         "bench.u2.run123@shaker.test",
     ]
     assert receipt["two_user"] is True
+    assert receipt["principal_validation"]["distinct_identity_claims_validated"] is True
+    assert receipt["principal_validation"]["identity_fingerprints"] == [
+        b._principal_identity_fingerprint("email:bench.u1.run123@shaker.test"),
+        b._principal_identity_fingerprint("email:bench.u2.run123@shaker.test"),
+    ]
     assert "run123" not in str(receipt)
 
 
@@ -303,6 +319,15 @@ def test_jwt_principal_identity_requires_stable_account_claim():
     assert b._jwt_principal_identity(_jwt(sub="account-42")) == "sub:account-42"
     assert b._jwt_principal_identity(_jwt(role="user")) is None
     assert b._jwt_principal_identity("opaque-token") is None
+
+
+def test_principal_identity_fingerprint_is_bounded_and_non_claim():
+    identity = "email:user@example.test"
+    fingerprint = b._principal_identity_fingerprint(identity)
+
+    assert len(fingerprint) == 16
+    assert identity not in fingerprint
+    assert fingerprint == b._principal_identity_fingerprint(identity)
 
 
 def test_apply_gates_fails_report_trust_signals():

@@ -270,10 +270,21 @@ def collect_body_completion_diagnostics(report: dict[str, Any]) -> dict[str, Any
     total_completed = sum(int(item["completed_params"]) for item in families.values())
     total_body_attempts = sum(int(item["body_attempts"]) for item in families.values())
     total_guided_attempts = sum(int(item["response_guided_completion_attempts"]) for item in families.values())
-    for item in families.values():
+    telemetry_anomalies: list[dict[str, Any]] = []
+    for family, item in families.items():
         attempted = int(item["attempted_params"])
+        completed = int(item["completed_params"])
         body_attempts = int(item["body_attempts"])
-        probe_ratio = round(int(item["completed_params"]) / max(1, attempted), 4)
+        if completed > attempted:
+            anomaly = {
+                "family": family,
+                "reason": "completed_params_exceed_attempted",
+                "attempted_params": attempted,
+                "completed_params": completed,
+            }
+            telemetry_anomalies.append(anomaly)
+            item["telemetry_anomalies"] = [anomaly]
+        probe_ratio = round(min(completed, attempted) / max(1, attempted), 4)
         guided_ratio = round(int(item["response_guided_completion_attempts"]) / max(1, body_attempts), 4)
         item["parameter_completion_ratio"] = guided_ratio
         item["response_guided_completion_ratio"] = guided_ratio
@@ -287,7 +298,10 @@ def collect_body_completion_diagnostics(report: dict[str, Any]) -> dict[str, Any
         "completed_params": total_completed,
         "parameter_completion_ratio": round(total_guided_attempts / max(1, total_body_attempts), 4),
         "response_guided_completion_ratio": round(total_guided_attempts / max(1, total_body_attempts), 4),
-        "probe_parameter_completion_ratio": round(total_completed / max(1, total_attempted), 4),
+        "probe_parameter_completion_ratio": round(
+            min(total_completed, total_attempted) / max(1, total_attempted), 4
+        ),
+        "telemetry_anomalies": telemetry_anomalies,
         "families": {family: families[family] for family in sorted(families)},
     }
 
@@ -334,9 +348,14 @@ def _collect_auth_workflow(
     return {
         "required_auth_states": sorted(required),
         "observed_auth_states": sorted(observed),
+        "principal_contexts_attempted": sorted(observed),
         "missing_auth_states": missing,
         "two_principal_required": two_principal_required,
+        "two_principal_contexts_attempted": two_principal_observed,
         "two_principal_observed": two_principal_observed,
+        "two_principal_observed_semantics": "compatibility_alias_for_contexts_attempted",
+        "principal_identities_validated": False,
+        "authenticated_responses_accepted": None,
         "status": "blocked" if blockers else ("ready" if required else "not_required"),
         "blockers": blockers,
         "authz_attempts_by_state_family_status": authz_attempts,

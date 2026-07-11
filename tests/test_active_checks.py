@@ -123,6 +123,38 @@ def test_sqli_get_filter_admits_query_params_only_endpoints():
     assert res["vulnerabilities_found"] >= 1
 
 
+def test_sqli_post_attempt_counts_each_completed_parameter_once(monkeypatch):
+    async def fake_run(_cmd, timeout=15):
+        return '{"ok":true}\n' + active_checks._CURL_STATUS_MARKER + "200", "", 0
+
+    monkeypatch.setattr(active_checks, "run", fake_run)
+    monkeypatch.setattr(
+        active_checks,
+        "_select_sqli_payloads",
+        lambda _dbms: [("'", "error_based", "bounded unit payload")],
+    )
+
+    result = asyncio.run(active_checks.smart_sqli_test(
+        "https://example.test",
+        [{
+            "url": "https://example.test/api/search",
+            "method": "POST",
+            "content_type": "application/json",
+            "body_params": ["query"],
+            "body_template": {"query": "test"},
+        }],
+        dbms="generic",
+        max_endpoints=1,
+        max_params_per_endpoint=1,
+        max_seconds=10,
+    ))
+
+    attempt = result["endpoint_attempts"][0]
+    assert attempt["attempted_params_count"] == 1
+    assert attempt["completed_params_count"] == 1
+    assert attempt["status"] == "completed"
+
+
 def test_check_sqli_response_catches_sqlite_error_without_fingerprint():
     # Detection is DBMS-agnostic: a SQLITE_ERROR in the response (absent from the
     # baseline) is proof even when dbms_detected is None.

@@ -7803,8 +7803,6 @@ async def smart_sqli_test(
 
             baseline_out, _, baseline_rc = await run(baseline_cmd, timeout=12)
             baseline_elapsed = time.time() - baseline_start
-            if attempt is not None:
-                attempt["completed_params_count"] += 1
 
             if baseline_rc != 0:
                 continue

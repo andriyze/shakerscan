@@ -72,6 +72,10 @@ def test_benchmark_summary_tracks_attempts_params_and_misses():
     assert summary["attempts"]["by_auth_state_family_status"]["user2|authz|completed"] == 1
     assert summary["auth_workflow"]["status"] == "ready"
     assert summary["auth_workflow"]["two_principal_observed"] is True
+    assert summary["auth_workflow"]["two_principal_contexts_attempted"] is True
+    assert summary["auth_workflow"]["principal_contexts_attempted"] == ["user1", "user2"]
+    assert summary["auth_workflow"]["two_principal_observed_semantics"] == "compatibility_alias_for_contexts_attempted"
+    assert summary["auth_workflow"]["principal_identities_validated"] is False
     assert summary["auth_workflow"]["missing_auth_states"] == []
     assert summary["parameters"]["attempted_by_location"]["query"] == 1
     assert summary["parameters"]["attempted_by_location"]["json"] == 2
@@ -211,6 +215,28 @@ def test_response_guided_completion_ratio_is_zero_without_added_fields():
 
     assert body["parameter_completion_ratio"] == 0.0
     assert body["probe_parameter_completion_ratio"] == 1.0
+
+
+def test_probe_completion_ratio_is_bounded_and_flags_invalid_telemetry():
+    body = build_benchmark_summary({
+        "active_checks": {"endpoint_attempts": [{
+            "family": "sqli",
+            "method": "POST",
+            "param_location": "body",
+            "attempted_params_count": 1,
+            "completed_params_count": 2,
+            "status": "completed",
+        }]},
+    })["parameters"]["body_completion"]
+
+    assert body["probe_parameter_completion_ratio"] == 1.0
+    assert body["families"]["sqli"]["probe_parameter_completion_ratio"] == 1.0
+    assert body["telemetry_anomalies"] == [{
+        "family": "sqli",
+        "reason": "completed_params_exceed_attempted",
+        "attempted_params": 1,
+        "completed_params": 2,
+    }]
 
 
 def test_benchmark_summary_records_proof_and_severity_gaps():
