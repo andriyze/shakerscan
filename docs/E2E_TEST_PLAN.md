@@ -1,6 +1,6 @@
 # ShakerScan End-to-End Test Plan
 
-**Status (2026-07-10):** the rebuilt local fleet passes Model Intake `9/9` with the real bounded
+**Status (2026-07-10):** the rebuilt local fleet passes Model Intake `10/10` with the real bounded
 Nex-N2-mini Hugging Face shard enabled, AI Gate `12/12`, and DAST `11/11`. `make e2e` remains the
 deterministic all-area gate and skips the external Hugging Face row; `make e2e-model-intake` enables
 that real-model row by default, while `make e2e-model-intake-fixture` is the explicit offline path.
@@ -13,7 +13,7 @@ Every recent escaped bug lived at an **integration seam that unit tests mocked o
 
 | Bug | What the unit test did | What an e2e test does |
 |---|---|---|
-| 206 partial-download → false `sha256_mismatch` | mocked `_download_http` / local files | fetch a real multi-shard HF model, assert `checksum_status != mismatch` |
+| 206 partial-download → false `sha256_mismatch` / false invalid safetensors header | mocked `_download_http` / local files | fetch a real multi-shard HF model, assert capped checksum semantics and full-size header validation |
 | AI judge redactor leaked secrets to the LLM | called `_redact_secrets_for_judge(...)` | plant a secret in a honey AI target, scan, assert it is absent from the stored transcript |
 | `UnboundLocalError` in Full Coverage | unit-tested `harvest_endpoints_with_meta` | run a real Full Coverage scan and assert it completes |
 | Principal-probe production bypass | tested `classify_production_safety` | run a production AI scan, assert the admin-impersonation probe never executes |
@@ -37,7 +37,7 @@ Every recent escaped bug lived at an **integration seam that unit tests mocked o
 | # | Real submit | Assertion | Catches |
 |---|---|---|---|
 | MI-1 | deterministic local large-artifact partial response | `checksum_status == known_unverified_truncated`; no `sha256_mismatch` | the 206 bug without external-network variance |
-| MI-1-HF | real `nex-agi/Nex-N2-mini` shard 1 (`make e2e-model-intake`) | `checksum_status == known_unverified_truncated`; no false full-digest mismatch | the real registry/range-fetch path |
+| MI-1-HF | real `nex-agi/Nex-N2-mini` shard 1 (`make e2e-model-intake`) | capped checksum is unverified; header offsets validate against the 4.74 GB declared size; no false mismatch/malformed finding | the real registry/range-fetch path |
 | MI-2 | small fully-downloadable artifact, correct digest | `checksum_status == verified`, `sha256_scope == full_artifact` | regression guard |
 | MI-3 | same, deliberately wrong `expected_sha256` | critical `sha256_mismatch` + `decision == block` | real tamper detection |
 | MI-4 | crafted `.pkl`/`.pt` with dangerous opcode | unsafe-serialization finding | serialization detector |

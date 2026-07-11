@@ -360,9 +360,10 @@ This makes AI Gate / Model Intake part of the same continuous control plane as D
 - **§3.13 MCP readiness** — `POST /ai/targets/{id}/mcp/live-readiness` runs credentialed JSON-RPC
   `initialize` + `tools/list` (+ unauth differential); checks audience/scopes/PKCE/WWW-Authenticate/
   overbroad schema; never calls `tools/call` (`ai_assurance.py`).
-- **§3.14 Parser-backed checks** — real safetensors header/offset validation, ONNX protobuf parse +
-  external-data/custom-op detection, GGUF magic/version, zip bomb/path-traversal/nested + embedded
-  `trust_remote_code`/chat-template inspection.
+- **§3.14 Parser-backed checks** — real safetensors header/offset validation, including capped-prefix
+  inspection against fetch/registry total size and an explicit indeterminate state when total size is
+  unavailable; ONNX protobuf parse + external-data/custom-op detection, GGUF magic/version, zip
+  bomb/path-traversal/nested + embedded `trust_remote_code`/chat-template inspection.
 - **§3.15 Governance validation** — SBOM CycloneDX/SPDX shape + component extraction, malware-scan
   staleness + required fields, eval required fields, approval required fields (SPDX normalization per R6).
 - **§4.1 Indirect prompt-injection harness** — fixture lifecycle (`_ensure_lifecycle_setup` /

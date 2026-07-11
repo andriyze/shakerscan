@@ -75,12 +75,23 @@ def run_model_intake() -> H.Scorecard:
     # PR gate. Runs only when SHAKERSCAN_E2E_HF=1.
     if os.environ.get("SHAKERSCAN_E2E_HF") == "1":
         try:
-            s = (_mi_scan({"artifact_url": NEX_N2_SHARD, "expected_sha256": NEX_N2_FULL_SHA,
-                           "metadata_json": {"license": "apache-2.0"}}, "MI-1-HF", timeout=300)
-                 .get("model_intake") or {}).get("summary") or {}
+            res = _mi_scan({"artifact_url": NEX_N2_SHARD, "expected_sha256": NEX_N2_FULL_SHA,
+                            "metadata_json": {"license": "apache-2.0"}}, "MI-1-HF", timeout=300)
+            intake = res.get("model_intake") or {}
+            s = intake.get("summary") or {}
+            fids = {str(f.get("id")) for f in (res.get("findings") or [])}
+            header = (((intake.get("supply_chain") or {}).get("format_inspection") or {})
+                      .get("safetensors_header") or {})
             sc.check("MI-1-HF real HF shard not false-mismatched",
                      s.get("checksum_status") == "known_unverified_truncated",
                      f"checksum_status={s.get('checksum_status')}")
+            sc.check("MI-1-HF truncated shard uses full size for structural validation",
+                     header.get("valid") is True
+                     and header.get("validation_complete") is True
+                     and header.get("payload_bounds_checked") is True
+                     and "model_intake:safetensors_header_invalid" not in fids,
+                     f"valid={header.get('valid')} payload_size={header.get('payload_size')} "
+                     f"findings={sorted(fids)[:6]}")
         except Exception as e:
             sc.error("MI-1-HF real HF intake", e)
     else:
