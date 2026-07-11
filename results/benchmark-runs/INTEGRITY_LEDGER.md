@@ -186,3 +186,37 @@ claim instead of deleting it.
 - Follow-up: persist a redacted principal-validation receipt, fix the impossible completion ratio,
   run seeded detector controls outside detector inputs, then close discovery as a universal
   technique and rerun unseeded. Never add crAPI route names to detector inputs.
+
+### 2026-07-11 — Seeded crAPI detector-isolation run: discovery is the primary gap (BOLA fires)
+
+- Date: 2026-07-11.
+- Artifacts: `results/benchmark-runs/benchmark-crapi.json` /
+  `benchmark-crapi-20260711T181451Z.json`, scan `230900f2-d587-4153-92fb-77d18e26e8d4`,
+  fleet `bdc8f1f724ec5043`.
+- Method (detector isolation, endpoints supplied OUTSIDE detector inputs): an authenticated
+  two-principal smart scan with the 4 crAPI routes supplied via the `custom_endpoints` scan
+  option (not a detector route list). Auto-sharded (4 shards) with the new heavy-shard budget
+  and BOLA producer/consumer affinity (`api/parallel_scan.py`, commit `6e796c4`): all 4 shards
+  completed (vs 3/4 killed by the 6-min cap on the unseeded run `85d3bafb`).
+- Result — the BOLA differential DOES fire once the route is supplied: a finding
+  "BOLA: Cross-user data access at /workshop/api/shop/orders/{id}" with cross-principal evidence
+  (`user1_status: 200, user2_status: 200`, numeric-id, response leaks another user's order+email).
+  The unseeded run found this route nowhere in the report; the seeded run detects a genuine BOLA.
+- But the scorecard is still 0/4 (`require_verified_bola` FAIL) because the finding is graded
+  `severity: medium, verified: False, confidence: 0.5` — below the fixture's `verified`/`high` bar.
+  Tier A (coupon NoSQL) was tested but did not fire; vehicle was not testable (fresh principal
+  owns no vehicle).
+- Verdict — the crAPI recall gap is TWO isolated, universal problems:
+  1. **Discovery gap (dominant):** authenticated API routes are never enumerated (auth-gated, no
+     links, auth-gated OpenAPI at `/identity/v3/api-docs` → 401), so the detector never runs on
+     them. This is the primary blocker. Fix = universal authed API discovery (OpenAPI/spec
+     ingestion, OPTIONS/JSON-link, JS/browser extraction).
+  2. **Proof-tier gap (secondary):** a confirmed cross-principal differential (matching user1/user2
+     200s on a numeric-id resource that leaks another principal's data) is under-graded to
+     medium/unverified. Fix = promote to verified/high when the returned object's owner is provably
+     a different principal than the requester.
+- Note: the fixes are universal engine techniques, not crAPI facts. Seeding here is a scan option
+  used for detector isolation, never a detector route list.
+- Impact: benchmark interpretation + roadmap. Re-scopes increment 0: auth works; the real work is
+  (1) authed API discovery, then (2) BOLA proof-tier promotion. Also validated the parallel scope
+  heavy-shard budget + affinity fix end-to-end (authed BOLA now completes under auto-sharding).
