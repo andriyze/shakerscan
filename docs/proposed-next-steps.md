@@ -28,9 +28,9 @@ item is implemented.
   allocator/attempt ledgers, parallel parent-plan-shard-merge, operational rebuild/fleet truth, and
   direct ASM timeline remediation links.
 - **Deferred-work implementation now underway:** cooperative cancellation is shared by
-  SQLi/XSS/Auth/BOLA and Phase 4, and the passive report phase now uses an async-capable registry
-  executor with adapter-contract validation and structured execution receipts. Recon, template, and
-  remaining active/report phases are not yet claimed migrated.
+  SQLi/XSS/Auth/BOLA and Phase 4, and the passive and Nuclei template report phases now use an
+  async-capable registry executor with adapter-contract validation and structured execution
+  receipts. Recon and remaining active/report phases are not yet claimed migrated.
 - **Implemented but still requiring live acceptance/soak:** authenticated crAPI detector recall after
   the rebuild, broader dynamic-allocation parity on large owned targets, and request-rate behavior at
   larger worker counts.
@@ -44,7 +44,7 @@ item is implemented.
 
 Verification snapshot on the rebuilt local fleet (2026-07-10):
 
-- Python suite: `1727 passed, 6 skipped`.
+- Python suite: `1728 passed, 6 skipped`.
 - Container runtime target: `33 passed` (with FastAPI deprecation warnings only).
 - UI: Next.js production build and TypeScript validation passed.
 - Planner fixtures: `10/10` passed; all 10 named release gates passed.

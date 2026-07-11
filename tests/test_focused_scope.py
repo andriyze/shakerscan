@@ -36,7 +36,8 @@ def test_scanner_zero_rediscovery_flag_guards_discovery_branches():
     assert "elif smart_mode and not zero_rediscovery_scope:\n        js_urls =" in source
     assert "if json_link_following and not public_only and not zero_rediscovery_scope" in source
     assert "if options_method_discovery and not public_only and not zero_rediscovery_scope" in source
-    assert "reason\": \"zero_rediscovery_child\"" in source
+    assert '"template",\n        {"legacy_nuclei_template": run_legacy_nuclei_template}' in source
+    assert "template_dispatch_receipts = await template_phase_task" in source
 
 
 def test_endpoint_focused_shards_do_not_apply_family_filter_or_grading():
@@ -49,14 +50,14 @@ def test_endpoint_focused_shards_do_not_apply_family_filter_or_grading():
     assert "coverage[\"focused_endpoint_scope\"] = True" in source
 
 
-def test_focused_manual_scope_disables_nuclei_before_delayed_launcher():
+def test_focused_manual_scope_disables_nuclei_before_registry_template_phase():
     from pathlib import Path
 
     source = Path(__file__).resolve().parents[1].joinpath("scanner", "scanner.py").read_text()
 
     focused_scope_index = source.index("if focused_manual_active_scope:")
     forced_budget_index = source.index('scan_budget["nuclei_max_targets"] = 0')
-    delayed_launcher_index = source.index("# Start nuclei once discovery has populated targets and auth is ready")
+    delayed_launcher_index = source.index("# Start the registry-owned template phase once discovery has populated")
 
     assert focused_scope_index < forced_budget_index < delayed_launcher_index
 

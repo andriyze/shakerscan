@@ -14,8 +14,9 @@ Current DAST-quality lesson from Juice Shop/crAPI validation: ASM must measure a
 campaign quality, not just endpoint touch count. The engine now proves real Critical SQLi and High
 BOLA/Authz on lab apps and has runnable registry contracts for XSS, mass-assignment, and JWT checks,
 but broad/stored XSS and workflow/write-BOLA remain recall/acceptance gaps that ASM should expose as
-family/proof/workflow gaps. Full registry iteration, broader telemetry, multi-node placement, and
-large-fleet soak remain deferred target architecture rather than shipped behavior.
+family/proof/workflow gaps. Passive posture and Nuclei template execution now run through the shared
+registry phase executor; recon and remaining active-phase migration, broader telemetry, multi-node
+placement, and large-fleet soak remain deferred target architecture rather than shipped behavior.
 **Date:** 2026-07-10
 **Related design:** [parallel-scan-architecture.md](parallel-scan-architecture.md),
 [multi-node-architecture.md](multi-node-architecture.md).

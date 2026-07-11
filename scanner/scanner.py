@@ -4819,8 +4819,8 @@ async def build_report(target: str,
             cors_task = asyncio.create_task(check_cors(base_url))
             takeover_task = asyncio.create_task(check_subdomain_takeover(host))
             exposed_task = asyncio.create_task(check_exposed_files(base_url, quick_mode=quick_mode))
-        # Delay nuclei start until discovery yields target URLs and auth context
-        nuclei_task = None
+        # Nuclei is dispatched by the registry template phase after discovery
+        # yields target URLs and auth context.
 
         # Nmap strategy:
         # - quick: very light (top 33)
@@ -4848,12 +4848,10 @@ async def build_report(target: str,
         async def dummy_cors(): return {"vulnerable": False, "issues": []}
         async def dummy_takeover(): return {"vulnerable": False, "cname": None, "issues": []}
         async def dummy_exposed(): return {"exposed_files": []}
-        async def dummy_nuclei(): return {"vulnerabilities": [], "info": [], "scan_completed": False, "templates_used": 0}
         async def dummy_nmap_full(): return {"open_ports": [], "services": [], "os_detection": {}, "vulnerabilities": [], "scan_completed": False}
         cors_task = asyncio.create_task(dummy_cors())
         takeover_task = asyncio.create_task(dummy_takeover())
         exposed_task = asyncio.create_task(dummy_exposed())
-        nuclei_task = asyncio.create_task(dummy_nuclei())
         nmap_full_task = asyncio.create_task(dummy_nmap_full())
 
     # Complete mode specific tasks
@@ -5454,34 +5452,20 @@ async def build_report(target: str,
         if user2_session:
             coverage_tracker.record_auth_state("user2")
 
-    # Start nuclei once discovery has populated targets and auth is ready
-    if zero_rediscovery_scope and nuclei_task is None:
-        async def dummy_nuclei_zero(): return {
-            "vulnerabilities": [],
-            "info": [],
-            "scan_completed": False,
-            "templates_used": 0,
-            "skipped": True,
-            "reason": "zero_rediscovery_child",
-        }
-        nuclei_task = asyncio.create_task(dummy_nuclei_zero())
-    nuclei_dispatch_decision = registry_dispatch_decision(
-        scanner_execution_plan,
-        "nuclei",
-    )
-    scanner_dispatch_decisions.append(nuclei_dispatch_decision)
-    nuclei_registry_enabled = bool(nuclei_dispatch_decision["dispatch_enabled"])
-    if nuclei_task is None and not nuclei_registry_enabled:
-        async def dummy_nuclei_registry(): return {
-            "vulnerabilities": [],
-            "info": [],
-            "scan_completed": False,
-            "templates_used": 0,
-            "skipped": True,
-            "reason": "registry_dispatch_disabled",
-        }
-        nuclei_task = asyncio.create_task(dummy_nuclei_registry())
-    if nuclei_task is None and not public_only:
+    # Start the registry-owned template phase once discovery has populated
+    # targets and auth is ready. The adapter stores its result in the existing
+    # report shape while the executor owns dispatch and receipt semantics.
+    nuclei_results: dict[str, Any] = {
+        "vulnerabilities": [],
+        "info": [],
+        "scan_completed": False,
+        "templates_used": 0,
+        "skipped": True,
+        "reason": "registry_template_not_dispatched",
+    }
+
+    async def run_legacy_nuclei_template() -> None:
+        nonlocal nuclei_results
         nuclei_target_limits = {
             "quick": 120,
             "standard": 400,
@@ -5502,25 +5486,30 @@ async def build_report(target: str,
 
         if nuclei_target_limit <= 0:
             print("[nuclei] Skipping nuclei: target budget is 0", file=sys.stderr)
-
-            async def dummy_nuclei_budget(): return {"vulnerabilities": [], "info": [], "scan_completed": False, "templates_used": 0, "skipped": True, "reason": "nuclei_target_budget_zero"}
-            nuclei_task = asyncio.create_task(dummy_nuclei_budget())
+            nuclei_results = {
+                "vulnerabilities": [],
+                "info": [],
+                "scan_completed": False,
+                "templates_used": 0,
+                "skipped": True,
+                "reason": "nuclei_target_budget_zero",
+            }
         elif smart_mode:
             print(
                 f"[scanner] Smart mode: Starting staged nuclei with {len(early_techs)} detected technologies"
                 f"{' (early stopping disabled)' if no_early_stop else ''}",
                 file=sys.stderr,
             )
-            nuclei_task = asyncio.create_task(staged_nuclei_scan(
+            nuclei_results = await staged_nuclei_scan(
                 base_url,
                 detected_tech=early_techs,
                 early_stopping=bool(scan_budget.get("nuclei_early_stop", True)) and not no_early_stop,
                 targets=crawl_urls,
                 auth_session=auth_session,
                 max_targets=nuclei_target_limit,
-            ))
+            )
         elif complete_mode:
-            nuclei_task = asyncio.create_task(nuclei_comprehensive_scan(
+            nuclei_results = await nuclei_comprehensive_scan(
                 base_url,
                 rate_limit=5,
                 timeout_per_request=15,
@@ -5528,15 +5517,21 @@ async def build_report(target: str,
                 targets=crawl_urls,
                 auth_session=auth_session,
                 max_targets=nuclei_target_limit,
-            ))
+            )
         else:
-            nuclei_task = asyncio.create_task(nuclei_scan(
+            nuclei_results = await nuclei_scan(
                 base_url,
                 quick_mode=quick_mode,
                 targets=crawl_urls,
                 auth_session=auth_session,
                 max_targets=nuclei_target_limit,
-            ))
+            )
+
+    template_phase_task = asyncio.create_task(dispatch_registry_report_phase(
+        scanner_execution_plan,
+        "template",
+        {"legacy_nuclei_template": run_legacy_nuclei_template},
+    ))
 
     # WebSocket endpoint discovery and testing
     browser_ws_endpoints = browser_res.get("websocket_endpoints", []) if browser_res else []
@@ -5555,7 +5550,16 @@ async def build_report(target: str,
     cors_results = await cors_task
     takeover_results = await takeover_task
     exposed_results = await exposed_task
-    nuclei_results = await nuclei_task
+    template_dispatch_receipts = await template_phase_task
+    template_receipt = next((
+        receipt for receipt in template_dispatch_receipts
+        if receipt.get("family") == "nuclei"
+    ), None)
+    if template_receipt and template_receipt.get("status") != "completed":
+        nuclei_results["skipped"] = True
+        nuclei_results["reason"] = str(
+            template_receipt.get("reason") or f"registry_template_{template_receipt.get('status')}"
+        )
     nmap_full_results = await nmap_full_task
 
     grpc_results = None
@@ -6680,6 +6684,8 @@ async def build_report(target: str,
         "discovery": discovery,
         "findings": []
     }
+    if template_dispatch_receipts:
+        report["scanner_execution_receipts"] = list(template_dispatch_receipts)
     report["tls"]["crypto_inventory"] = build_crypto_inventory(report["tls"], host, port)
 
     # Save initial checkpoint with baseline data

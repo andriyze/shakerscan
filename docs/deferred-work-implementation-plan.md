@@ -60,9 +60,10 @@ Done when:
 First foundation slice implemented: the report phase executor now accepts sync or async adapters,
 validates each adapter against `SCANNER_REGISTRY_ADAPTER_CONTRACTS`, observes cooperative
 cancellation, and emits structured skipped/blocked/cancelled/failed/completed receipts with the
-declared telemetry and proof contracts. Passive header/config finding emission uses this executor.
-Recon, template, and active-family execution still require phase-by-phase migration before Wave 2 is
-complete.
+declared telemetry and proof contracts. Passive header/config finding emission and the Nuclei
+template phase use this executor. Nuclei keeps its existing standard/comprehensive/staged adapters,
+but only the registry template phase can invoke them and its receipt is persisted in the report.
+Recon and active-family execution still require phase-by-phase migration before Wave 2 is complete.
 
 ## Wave 3: telemetry schema expansion
 

@@ -5,7 +5,8 @@ parent/plan/shard/merge orchestration, high-budget `coverage`, zero-rediscovery 
 pull allocation by default, static fallback, campaign attempt ledgers, fleet freshness, cancellation,
 and parent UI rollups. Continuous ASM is documented separately in
 [continuous-asm-architecture.md](continuous-asm-architecture.md). Parallelism remains the execution
-substrate, not the quality claim. Full `build_report()` registry iteration, request-accurate budgets
+substrate, not the quality claim. Passive posture and Nuclei template execution are registry-owned;
+full `build_report()` registry iteration, request-accurate budgets
 for internally discovered standalone traffic, cooperative cancellation in remaining legacy loops
 outside the now-covered SQLi/XSS/Auth/BOLA/Phase-4 paths, additional
 focused families, multi-node orchestration, and large-fleet parity/soak are not implemented claims.

@@ -225,6 +225,57 @@ def test_nuclei_dispatch_uses_registry_profile_gate():
     assert scanner_mod.registry_dispatch_decision(quick_plan, "nuclei")["dispatch_enabled"] is False
 
 
+def test_nuclei_template_phase_dispatches_only_registry_enabled_adapter():
+    called = []
+    standard_plan = scanner_mod.build_scanner_execution_plan(
+        scan_mode="standard",
+        public_only=False,
+        quick_mode=False,
+        active_checks=False,
+        check_family_scope={"families": []},
+        skip_global_checks=False,
+        focused_endpoints_only=False,
+        zero_rediscovery=False,
+    )
+    quick_plan = scanner_mod.build_scanner_execution_plan(
+        scan_mode="quick",
+        public_only=False,
+        quick_mode=True,
+        active_checks=False,
+        check_family_scope={"families": []},
+        skip_global_checks=False,
+        focused_endpoints_only=False,
+        zero_rediscovery=False,
+    )
+
+    async def nuclei_adapter():
+        await asyncio.sleep(0)
+        called.append("nuclei")
+
+    standard_receipts = asyncio.run(scanner_mod.dispatch_registry_report_phase(
+        standard_plan,
+        "template",
+        {"legacy_nuclei_template": nuclei_adapter},
+    ))
+    quick_receipts = asyncio.run(scanner_mod.dispatch_registry_report_phase(
+        quick_plan,
+        "template",
+        {"legacy_nuclei_template": nuclei_adapter},
+    ))
+
+    assert called == ["nuclei"]
+    assert standard_receipts == [{
+        "family": "nuclei",
+        "phase": "template",
+        "dispatch_adapter": "legacy_nuclei_template",
+        "status": "completed",
+        "telemetry_schema": "nuclei_template",
+        "proof_contract": ["template_id", "matched_at", "matcher_name", "request_url"],
+    }]
+    assert quick_receipts[0]["status"] == "skipped"
+    assert quick_receipts[0]["reason"] == "quick_mode"
+
+
 def test_resolve_active_check_flags_uses_registry_family_aliases():
     active_xss, active_sqli, family = scanner_mod.resolve_active_check_flags(check_family="sql")
 
