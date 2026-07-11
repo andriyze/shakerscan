@@ -51,25 +51,26 @@ Legend: ✅ implemented · 🟡 partial · 🔴 missing.
 | 4.4 | Model/data poisoning coverage | ✅ | Strict-policy-gated; no explicit data-source allowlist check |
 | 4.5 | Policy profiles + exception workflow | ✅ | DB-backed `policy_profiles` + `finding_exceptions` tables + CRUD; consumed by the deployment decision (R4) |
 
-**Net:** the breadth and most of the trust/safety semantics shipped. The materially-open items are
-**3.3** (the one true remaining P0 — signature verification is asserted, not enforced), the structural
-half of **3.4** (shared redaction helper, credential indirection, encryption-at-rest), and the two
-PARTIAL product features **4.3** (receipt crypto) and **4.5** (durable policy/exception registry).
+**Net (reconciled 2026-07-11):** the breadth and trust/safety semantics shipped. The former P0/P1
+items below — **R1** signature/provenance crypto, **R2a/b** shared redaction + encryption-at-rest,
+**R3** transcript response-time redaction, **R4** durable policy/exception registry, **R5** agent
+receipt hash-chain/signature verification, **R6a** production probe-safety filter, **R8** source-type
+taxonomy, **R9** AI surface inventory + attempt ledger — were **implemented, tested, and committed in
+the 2026-06-24 cycle** (see the banner above and each item's ✅ status row, which cites its proving
+symbol). The **only genuinely-open items** are the documented remainders: the broader DAST
+job-payload credential indirection (structural half of **3.4**, beyond the shipped worker-argv
+indirection), the **R6b** remainders (widget budget/cap parity, UI judging-gate surfacing, `onnx` in
+the scanner image), and the §3.6 `confirm_production` endpoint-hash refinement.
 
-### Updated priority order
+### Updated priority order (remaining work only)
 
 | Priority | Item | Why |
 |---|---|---|
-| **P0** | Real signature/provenance verification — **R1** | Strict Model Intake policy is not trustworthy while caller-supplied booleans can pass. |
-| **P0** | Shared redaction + credential indirection + encryption-at-rest — **R2** | AI targets/transcripts/model metadata are sensitive; foundational. |
-| **P0** | Transcript response-time redaction — **R3** | Storage-time controls are not enough; transcripts carry the exact secrets the scanner hunts. |
-| **P1** | Unified AI proof/evidence taxonomy — [target arch](#unified-ai-proof-and-evidence-taxonomy) | Prevents claimed / AI-judged evidence from rendering as verified. |
-| **P1** | Durable policy + exception registry — **R4** | Needed for deployment gates, audits, expiring risk acceptance. |
-| **P1** | Agent receipt hash-chain/signature verification — **R5** | Required before receipts can be called verified. |
-| **P1** | Model Intake source-type split — [target arch](#source-type-taxonomy-r8) | Fixes reporting, dashboards, deployment decisions, exposure-graph clarity. |
-| **P2** | Production probe-safety classification — **R6** | Makes AI Gate safer for real environments. |
-| **P2** | MCP `resources/list`, widget parity, per-profile caps, SPDX parsing — **R6** | Independent hardening. |
-| **P2** | AI surface inventory / attempt ledger — [target arch](#ai-surface-inventory-and-attempt-ledger-r9) | Aligns AI Gate/Model Intake with the DAST/ASM evidence-first architecture. |
+| **P2** | Broader DAST job-payload credential indirection (3.4 remainder) | Worker-argv indirection shipped; content-free credential refs across all job payloads remain architectural. |
+| **P2** | R6b remainders — widget budget/cap parity, UI judging-gate surfacing, `onnx` in scanner image | Independent hardening. |
+| **P3** | §3.6 `confirm_production` endpoint-hash refinement | Minor evidence-completeness polish. |
+
+*(R1/R2/R3/R4/R5/R6a/R8/R9 — previously listed here as P0/P1 — are done; see the 2026-06-24 banner and the ✅ status-at-a-glance rows.)*
 
 ---
 
@@ -343,7 +344,7 @@ This makes AI Gate / Model Intake part of the same continuous control plane as D
   `MODEL_INTAKE_ALLOW_LOCAL_FILES`, default off; rejects `file:`/no-scheme/absolute paths.
 - **§3.6 Production confirmation** — `environment=production` alone (not just `production_mode`) →
   409 unless `confirm_production`; evidence stored in `metadata_json`/`storage_options`
-  (`api.py`). (Probe filtering wired but inert — see R6.)
+  (`api.py`). (R6a: the 3-tier production probe-safety filter is effective — see §3.6 status row.)
 - **§3.7 Request budget** — real per-HTTP-call `RequestBudget` (`api/ai_gate/budget.py`) counting
   setup/preflight/turns/cleanup, with stop + telemetry; wired via `set_request_budget`.
 - **§3.8 Response cap** — `_read_response_text_capped` streams to `max_response_bytes`, marks
@@ -423,14 +424,14 @@ only after API/unit tests pass.
 | Goal | Met? |
 |------|------|
 | Model Intake never labels partial/claimed integrity as verified | ✅ (3.1) |
-| Strict policy can require real cryptographic signature/provenance verification | 🔴 **R1** |
-| Secrets redacted from API responses, results, transcripts, reports, logs, Redis jobs | 🟡 (3.4 surface done; **R2** structural) |
+| Strict policy can require real cryptographic signature/provenance verification | ✅ (R1, 2026-06-24) |
+| Secrets redacted from API responses, results, transcripts, reports, logs, Redis jobs | 🟡 (R2a/R2b done; broader DAST job-payload credential refs remain) |
 | Local artifact reads disabled by default | ✅ (3.5) |
-| AI Gate production scans require explicit confirmation + enforce probe safety | 🟡 (confirm ✅; probe filter inert — **R6**) |
+| AI Gate production scans require explicit confirmation + enforce probe safety | ✅ (confirm + R6a 3-tier probe filter, 2026-06-24) |
 | AI Gate budgets cap actual HTTP calls and response size | ✅ (3.7/3.8; widget parity in **R6**) |
 | AI Gate findings retestable individually | ✅ (3.9) |
 | RAG/agent targets can test ≥2 principals | ✅ (3.11) |
 | MCP readiness uses auth-aware, non-destructive protocol checks | ✅ (3.13) |
 | Reports show evidence quality clearly (deterministic / judged / claimed / verified / missing) | 🟡 (AI Gate judged/deterministic gate surfaced; broader evidence-quality surfacing remains) |
 | CI/CD can consume a stable deployment-decision endpoint | ✅ (4.2) |
-| Durable, auditable policy + exception registry | 🟡 **R4** |
+| Durable, auditable policy + exception registry | ✅ (R4, 2026-06-24) |

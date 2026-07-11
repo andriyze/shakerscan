@@ -1,10 +1,12 @@
 # Proposed Next Steps — Proof-First Continuous Exposure Management
 
-**Status:** implementation-complete for the bounded roadmap scope as of 2026-07-10. The rebuilt
+**Status:** **code-complete** for the bounded roadmap scope as of 2026-07-10; **live detector
+acceptance and Wave-6 runtime-hardening soak remain open** (this is not release-complete). The rebuilt
 local fleet passes the unit, runtime-container, UI production-build, planner-eval, and named release
-gates. Detector acceptance is only partly closed: the current-fleet Juice Shop scorecard passes, while
-the fresh authenticated crAPI scorecard must be rerun because its in-progress scan was explicitly
-cancelled before the requested full-stack rebuild. Reconciled with
+gates. Detector acceptance is only partly closed: the most recent passing Juice Shop scorecard is on
+fleet `ddc6173b` (recall 0.67, anonymous) and has **not** been re-run on the current fleet `bc6c357`;
+and the authenticated crAPI scorecard has never produced a green `two_user:True` artifact and must be
+run on the current fleet. Reconciled with
 `docs/t3mp3st-adoption-implementation-plan-updated.md`,
 `docs/archive/asm-parallel-improvement-plan.md`, `docs/parallel-scan-architecture.md`, and the
 current code. The contract-first proof layer, application graph/campaign consumer, externalized

@@ -115,3 +115,68 @@ claim instead of deleting it.
 - Follow-up: Keep post-processing additive to original proof artifacts. A retest
   verdict may update verification state, but must not erase the evidence that
   established the original deterministic or browser proof.
+
+### 2026-07-11 — Juice Shop scorecard flipped FAIL→PASS (recorded late)
+
+- Date: 2026-07-11 (documenting a flip that landed 2026-07-10 with no ledger entry).
+- Artifacts: `results/benchmark-runs/benchmark-juice_shop-20260710T150424Z.json`
+  (scan `148dd7f2`) and `results/benchmark-runs/benchmark-juice_shop.json` /
+  `…155033Z.json` (scan `330f5679`), both on fleet fingerprint `ddc6173b5b4864b4`.
+- Change: `verified_high_critical` moved 5→6 and `expected_recall` 5/9→6/9 (0.67),
+  flipping the `min_verified_high_critical: 6` gate to PASS. The driver is a single
+  genuine, universal, anonymous detection — `exposed-metrics` (`/metrics` accessible
+  debug/dev endpoint) — that started firing on the rebuilt `ddc6173b` fleet. Verified
+  by the raw scan `results/host.docker.internal/20260710_152629_95668e9f.json`, which
+  holds 6 genuinely-distinct verified High/Critical findings (2 SQLi, 1 browser-proven
+  DOM XSS, acquisitions.md, encrypt.pyc, /metrics).
+- Honesty caveats (why this is not a clean "current-fleet passes" claim):
+  1. The pass is **anonymous** (`two_user: False`, `auth_workflow.status: "blocked"`);
+     the auth-gated expectations `xss-reflected`, `bfla-users`, and `nosqli-reviews`
+     remain **missed**. Recall improved via one more anonymous finding, not authed coverage.
+  2. The passing run is on fleet `ddc6173b`, **not** the current fleet `bc6c357`; it has
+     not been re-run on the current build.
+  3. Scorecard evidence-label defect: `expected_found[exposed-ftp-listing].evidence`
+     shows the `/metrics` title, not its real `encrypt.pyc` evidence — the matcher's
+     `route_tokens()` drops sub-4-char routes (`/ftp`) and has no finding→expectation
+     dedup. The underlying distinct `/ftp` finding exists, so the count is honest, but
+     the label is wrong and the matcher is fragile.
+  4. `broken_access_control` appears in `verified_high_critical_families` via a COMPAT
+     alias (`sensitive_exposure → broken_access_control`) with **zero** backing
+     access-control findings — a cosmetic overclaim (flips no active gate).
+- Impact: benchmark interpretation only; no change to finding severity, detector inputs,
+  or production proof promotion.
+- Follow-up: (a) re-run on the current `bc6c357` fleet before any "current-fleet passes"
+  claim; (b) fix the matcher evidence-label + add finding→expectation dedup; (c) drop the
+  zero-backing `broken_access_control` alias; (d) the auth-gated misses require a working
+  two-principal authed run (see the architecture review's increment 0).
+
+### 2026-07-11 — First current-fleet authenticated crAPI scorecard (honest FAIL; root cause = discovery)
+
+- Date: 2026-07-11.
+- Artifacts: `results/benchmark-runs/benchmark-crapi.json` and
+  `benchmark-crapi-20260711T053205Z.json`, scan `85d3bafb-40a5-472e-8d64-eb954213f247`,
+  fleet fingerprint `bc6c357126e7fe53` (the **current** fleet).
+- What this establishes (positive): the first crAPI benchmark run with **two distinct
+  authenticated principals actually observed** — `two_user: True`,
+  `two_principal_observed: True`, `auth_workflow.status: "ready"`. The auth-bootstrap
+  fixes (`1fb3bac` host.docker.internal→127.0.0.1 mint bridge, `c146bdf` mint retry,
+  `bd1a5d5` distinct-identity guard) work end-to-end on current HEAD. The BOLA
+  differential engine ran (`bola_status.mode: cross_principal_read`,
+  `cross_user_enabled: True`, `candidate_endpoints: 325`).
+- Result (honest FAIL): `passed: False`, `expected_recall: 0.0`, `verified_high_critical: 1`
+  (an unrelated `.env` exposure). All 4 expected findings MISSED
+  (`bola-vehicle-location`, `bola-mechanic-report`, `bola-orders`, `sqli-coupon`);
+  `require_verified_bola` gate FAILED ("no verified BOLA").
+- Root cause (diagnosed): a **discovery gap, not an auth or BOLA-detector gap**. None of the
+  4 vulnerable crAPI routes (`/identity/api/v2/vehicle`, `/workshop/api/mechanic`,
+  `/workshop/api/shop/orders`, `/community/api/v2/coupon`) appear anywhere in the report —
+  discovery/crawl (235 endpoints) never enumerated crAPI's authenticated API surface, so the
+  BOLA engine's 325-candidate set did not include the vulnerable endpoints. The engine can
+  only prove BOLA on endpoints discovery feeds it.
+- Impact: benchmark interpretation + roadmap sequencing. It re-scopes "increment 0": the
+  auth-plumbing half is DONE and proven; the real detector work is authenticated
+  API-endpoint discovery (OpenAPI/spec ingestion, OPTIONS/JSON-link/gRPC discovery toggles,
+  JS/mobile endpoint extraction, or benchmark `custom_endpoints` seeding).
+- Follow-up: diagnose why authenticated API discovery misses crAPI's routes and close it as a
+  universal technique (not a crAPI-specific route list in the detector); then re-run to
+  confirm the BOLA differential fires once the routes are in the candidate set.

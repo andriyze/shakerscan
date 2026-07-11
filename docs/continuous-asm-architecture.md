@@ -515,8 +515,10 @@ Target behavior:
 - The parent report shows tested, partial, untested, auth-blocked, and rate-limited counts so the
   grade can be trusted or clearly marked limited.
 
-Static partitioning remains the shipped default and rollback path. Pull-based allocation is the end
-state because it handles uneven endpoints, retries, auth-state expansion, and large fleets better.
+Dynamic pull-based allocation is the shipped default (`coverage_allocation_mode()` in
+`api/parallel_scan.py` falls through to `dynamic`; set `COVERAGE_ALLOCATION_DEFAULT=static` to force
+the legacy path). Static partitioning remains the rollback/fallback path. Pull-based allocation is
+preferred because it handles uneven endpoints, retries, auth-state expansion, and large fleets better.
 
 ---
 
