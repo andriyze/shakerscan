@@ -2035,29 +2035,125 @@ async def fetch_openapi_schema(schema_url: str, auth_session: Any | None = None)
     }
 
 
-async def discover_openapi_schema(base_url: str, auth_session: Any | None = None) -> dict[str, Any] | None:
-    """Auto-discover and parse OpenAPI/Swagger schema from common paths.
+# Versioned spec suffixes worth probing UNDER a discovered service/path prefix.
+# Microservice APIs commonly mount their spec at ``/{service}/v3/api-docs`` (crAPI,
+# many SpringDoc apps), which a root-only probe never reaches. Kept small so the
+# extra requests stay bounded (suffixes x prefixes).
+_OPENAPI_PREFIX_SPEC_SUFFIXES = (
+    "/v3/api-docs",
+    "/v2/api-docs",
+    "/api-docs",
+    "/openapi.json",
+    "/swagger.json",
+)
+
+
+def _api_path_prefixes(urls: Any, limit: int = 8) -> list[str]:
+    """Return distinct leading path segments (service mounts) from discovered URLs.
+
+    ``"GET /workshop/api/shop/orders"`` -> ``"/workshop"``. Accepts "METHOD /path",
+    "/path", or full URLs. Used to probe for service-mounted OpenAPI specs that a
+    root-only probe misses.
+    """
+    _SKIP = {"static", "assets", "js", "css", "images", "img", "fonts", "favicon.ico"}
+    prefixes: list[str] = []
+    seen: set[str] = set()
+    for raw in (urls or []):
+        if not isinstance(raw, str) or not raw.strip():
+            continue
+        spec = raw.strip()
+        parts = spec.split(None, 2)
+        if len(parts) >= 2 and parts[0].upper() in {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}:
+            spec = parts[1]
+        try:
+            joined = spec if "://" in spec else "http://x" + (spec if spec.startswith("/") else "/" + spec)
+            path = urllib.parse.urlsplit(joined).path
+        except Exception:
+            continue
+        segments = [s for s in path.strip("/").split("/") if s]
+        if not segments:
+            continue
+        first = segments[0].lower()
+        key = "/" + first
+        if first in _SKIP or key in seen:
+            continue
+        seen.add(key)
+        prefixes.append(key)
+        if len(prefixes) >= limit:
+            break
+    return prefixes
+
+
+async def discover_openapi_schema(
+    base_url: str,
+    auth_session: Any | None = None,
+    extra_prefixes: Any | None = None,
+) -> dict[str, Any] | None:
+    """Auto-discover and parse OpenAPI/Swagger schema(s) from common paths.
+
+    Probes root-level spec paths AND, for each discovered service/path prefix, a
+    small set of versioned spec suffixes (``/{service}/v3/api-docs`` etc.), then
+    aggregates endpoints from EVERY spec found. A microservice app whose API is
+    split across per-service specs (or mounted under a service prefix) is fully
+    ingested instead of being missed by a root-only, first-hit probe. Auth-aware
+    for protected spec endpoints.
 
     Args:
-        base_url: The base URL to scan for OpenAPI schemas
-        auth_session: Optional authenticated session for protected schema endpoints
+        base_url: The base URL to scan for OpenAPI schemas.
+        auth_session: Optional authenticated session for protected spec endpoints.
+        extra_prefixes: Optional discovered path prefixes (or raw endpoint strings
+            to derive them from) to probe for service-mounted specs.
 
     Returns:
-        Dict with schema info if found, None otherwise
+        Dict with aggregated schema info (``endpoints`` deduped across all specs
+        found, ``schema_urls`` listing each spec URL), or None if none found.
     """
     import sys
 
-    for path in OPENAPI_DISCOVERY_PATHS:
-        url = urllib.parse.urljoin(base_url, path)
+    prefixes = extra_prefixes if isinstance(extra_prefixes, list) else []
+    # Callers may pass raw endpoint strings; derive prefixes if these aren't bare paths.
+    if prefixes and not all(isinstance(p, str) and p.startswith("/") and p.count("/") == 1 for p in prefixes):
+        prefixes = _api_path_prefixes(prefixes)
+
+    probe_urls: list[str] = [urllib.parse.urljoin(base_url, path) for path in OPENAPI_DISCOVERY_PATHS]
+    for prefix in prefixes[:8]:
+        for suffix in _OPENAPI_PREFIX_SPEC_SUFFIXES:
+            probe_urls.append(urllib.parse.urljoin(base_url, prefix.rstrip("/") + suffix))
+    probe_urls = _unique_preserve_order(probe_urls)
+
+    found: list[dict[str, Any]] = []
+    aggregated: list[dict[str, Any]] = []
+    seen_endpoints: set[tuple[str, str]] = set()
+    for url in probe_urls:
         schema = await fetch_openapi_schema(url, auth_session=auth_session)
-        if schema:
-            print(
-                f"[discovery] Auto-discovered OpenAPI schema at {url} "
-                f"(version {schema.get('version')}, {schema.get('endpoint_count', 0)} endpoints)",
-                file=sys.stderr
-            )
-            return schema
-    return None
+        if not schema:
+            continue
+        found.append(schema)
+        for endpoint in (schema.get("endpoints") or []):
+            key = (str(endpoint.get("method", "")).upper(), str(endpoint.get("path", "")))
+            if key in seen_endpoints:
+                continue
+            seen_endpoints.add(key)
+            aggregated.append(endpoint)
+        print(
+            f"[discovery] Auto-discovered OpenAPI schema at {url} "
+            f"(version {schema.get('version')}, {schema.get('endpoint_count', 0)} endpoints)",
+            file=sys.stderr,
+        )
+
+    if not found:
+        return None
+    primary = found[0]
+    return {
+        "url": primary.get("url"),
+        "schema_urls": [s.get("url") for s in found],
+        "version": primary.get("version"),
+        "title": primary.get("title"),
+        "endpoints": aggregated,
+        "endpoint_count": len(aggregated),
+        "auth_schemes": sorted({a for s in found for a in (s.get("auth_schemes") or [])}),
+        "spec": primary.get("spec"),
+    }
 
 
 async def deep_discovery_scan(base_url: str) -> dict[str, Any]:

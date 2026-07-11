@@ -9566,7 +9566,9 @@ async def build_report(target: str,
                                 explicit_schema = await fetch_openapi_schema(openapi_url, auth_session=auth_session)
                                 if explicit_schema:
                                     openapi_sources.append(explicit_schema)
-                            auto_schema = await discover_openapi_schema(base_url, auth_session=auth_session)
+                            auto_schema = await discover_openapi_schema(
+                                base_url, auth_session=auth_session, extra_prefixes=lookup_sources
+                            )
                             if auto_schema:
                                 openapi_sources.append(auto_schema)
 
@@ -12169,7 +12171,9 @@ async def build_report(target: str,
         # Pull the FULL API surface from the OpenAPI/Swagger spec so coverage is
         # not limited to this shard's worklist slice (path templates -> "1").
         try:
-            _oas = await discover_openapi_schema(base_url, auth_session=auth_session)
+            _oas = await discover_openapi_schema(
+                base_url, auth_session=auth_session, extra_prefixes=_ep_candidates
+            )
             for _e in ((_oas or {}).get("endpoints") or []):
                 _m, _p = _e.get("method"), _e.get("path")
                 if _m and _p:
