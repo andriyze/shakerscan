@@ -384,12 +384,22 @@ def mint_token(target_url, login_cfg, email, password):
                                   "securityQuestion": {"id": 1}, "securityAnswer": "x"})
         except Exception:
             pass
-    try:
-        resp = _post(base + login, {ef: email, pf: password})
-        # token under common shapes
-        return (resp.get("authentication", {}) or {}).get("token") or resp.get("token") or resp.get("access_token")
-    except Exception:
-        return None
+    for attempt, delay in enumerate((0.0, 0.25, 0.5, 1.0)):
+        if delay:
+            time.sleep(delay)
+        try:
+            resp = _post(base + login, {ef: email, pf: password})
+            token = (
+                (resp.get("authentication", {}) or {}).get("token")
+                or resp.get("token")
+                or resp.get("access_token")
+            )
+            if token:
+                return token
+        except Exception:
+            if attempt == 3:
+                return None
+    return None
 
 
 def _jwt_principal_identity(token):

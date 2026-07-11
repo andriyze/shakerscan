@@ -235,6 +235,34 @@ def test_mint_token_uses_distinct_stable_ten_digit_signup_numbers(monkeypatch):
     assert all(len(number) == 10 and number.isdigit() for number in first_numbers | second_numbers)
 
 
+def test_mint_token_retries_eventually_consistent_login_without_exposing_response(monkeypatch):
+    login_attempts = 0
+    delays = []
+
+    def fake_post(url, body, timeout=30):
+        nonlocal login_attempts
+        if not url.endswith("/auth/login"):
+            return {"status": 200}
+        login_attempts += 1
+        if login_attempts < 3:
+            raise RuntimeError("account not visible yet")
+        return {"token": "server-token"}
+
+    monkeypatch.setattr(b, "_post", fake_post)
+    monkeypatch.setattr(b.time, "sleep", delays.append)
+
+    token = b.mint_token(
+        "http://target.test",
+        {"url": "/identity/api/auth/login"},
+        "fresh@shaker.test",
+        "pass",
+    )
+
+    assert token == "server-token"
+    assert login_attempts == 3
+    assert delays == [0.25, 0.5]
+
+
 def test_submit_target_aborts_before_queueing_when_second_principal_is_missing(monkeypatch):
     tokens = iter(["user1-secret", None])
     monkeypatch.setattr(b, "mint_token", lambda *args, **kwargs: next(tokens))

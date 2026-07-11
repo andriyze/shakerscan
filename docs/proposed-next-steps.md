@@ -1094,7 +1094,8 @@ role-distinct test-account emails under one per-run nonce before comparing stabl
 identity claims. Prior benchmark accounts with stale passwords can no longer block a later authorized
 run, signup-only phone identifiers are deterministically unique per fresh account for APIs that
 enforce global phone uniqueness, and account identifiers remain absent from the content-free queue
-receipt.
+receipt. Login minting uses a bounded backoff after successful signup for targets whose identity
+service is briefly eventually consistent; failures remain content-free and fail before queueing.
 
 **Done when:** recorded two-user benchmark scorecards show the targeted miss becoming a deterministic
 finding, not merely an attempted endpoint.
