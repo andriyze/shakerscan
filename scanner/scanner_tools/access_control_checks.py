@@ -21,6 +21,7 @@ from typing import Any
 from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 
 from .common import run, detect_spa_catch_all, fetch_homepage_hash, is_same_as_homepage, _compute_content_hash
+from .cancellation import scanner_cancel_requested
 from .bola_comparison import (
     all_responses_equivalent,
     extract_user_specific_signals,
@@ -30,6 +31,15 @@ from .bola_comparison import (
 )
 
 FORCED_BROWSING_MAX_BODY_BYTES = 262_144
+
+
+def _mark_cooperative_cancel(results: dict[str, Any]) -> bool:
+    if not scanner_cancel_requested():
+        return False
+    results["cancelled"] = True
+    results["budget_exceeded"] = True
+    results["budget_exhausted_reason"] = "cancelled"
+    return True
 
 # =============================================================================
 # CONTENT VALIDATION PATTERNS - Validate that responses match expected content
@@ -2507,12 +2517,13 @@ def _finish_bola_endpoint_attempt(
     attempt: dict[str, Any] | None,
     *,
     budget_exceeded: bool = False,
+    budget_exhausted_reason: str = "time_budget",
 ) -> dict[str, Any] | None:
     if not attempt:
         return None
     if budget_exceeded:
         attempt["budget_exhausted"] = True
-        attempt["budget_exhausted_reason"] = "time_budget"
+        attempt["budget_exhausted_reason"] = budget_exhausted_reason
     completed = int(attempt.get("completed_params_count") or 0)
     expected = int(attempt.get("param_count") or 0)
     if completed <= 0:
@@ -2607,7 +2618,12 @@ def _finish_auth_attempt(
     completed: bool,
     skip_reason: str | None = None,
     error_summary: str | None = None,
+    cancelled: bool = False,
 ) -> dict[str, Any]:
+    if cancelled:
+        attempt["status"] = "partial" if int(attempt.get("attempted_params_count") or 0) else "skipped"
+        attempt["skip_reason"] = "cancelled"
+        return attempt
     if skip_reason:
         attempt["status"] = "skipped"
         attempt["skip_reason"] = skip_reason
@@ -2693,6 +2709,9 @@ async def smart_auth_access_test(
         "auth_required": 0,
         "skipped": 0,
         "endpoint_attempts": [],
+        "cancelled": False,
+        "budget_exceeded": False,
+        "budget_exhausted_reason": None,
     }
 
     auth_headers = _auth_session_headers(auth_session)
@@ -2711,6 +2730,8 @@ async def smart_auth_access_test(
             break
 
     for candidate in candidates:
+        if _mark_cooperative_cancel(results):
+            break
         attempt = _new_auth_endpoint_attempt(candidate)
         method = str(candidate.get("method") or "GET").upper()
         if method not in SAFE_AUTH_PROBE_METHODS:
@@ -2733,6 +2754,11 @@ async def smart_auth_access_test(
             headers=auth_headers,
             timeout=timeout,
         )
+        if _mark_cooperative_cancel(results):
+            results["endpoint_attempts"].append(
+                _finish_auth_attempt(attempt, completed=False, cancelled=True)
+            )
+            break
         anon_resp = await _fetch_auth_access_probe(
             candidate["url"],
             method=method,
@@ -2840,9 +2866,20 @@ async def authz_resource_replay_test(
         "cross_principal_violations": 0,
         "write_cross_principal_violations": 0,
         "budget_exceeded": False,
+        "cancelled": False,
+        "budget_exhausted_reason": None,
         "resource_map": [],
         "endpoint_attempts": [],
     }
+
+    def _stop_requested() -> bool:
+        if _mark_cooperative_cancel(results):
+            return True
+        if _deadline_exceeded():
+            results["budget_exceeded"] = True
+            results["budget_exhausted_reason"] = "time_budget_exhausted"
+            return True
+        return False
 
     user1_headers = _auth_session_headers(user1_session)
     user2_headers = _auth_session_headers(user2_session)
@@ -2905,15 +2942,20 @@ async def authz_resource_replay_test(
     ]
 
     for producer_url in producers:
-        if _deadline_exceeded():
-            results["budget_exceeded"] = True
+        if _stop_requested():
             break
         results["producers_tested"] += 1
         producer_endpoint = _bola_custom_endpoint(producer_url, "GET") or f"GET {producer_url}"
         producer_attempt = _new_authz_producer_attempt(producer_endpoint)
-        producer_attempt["attempted_params_count"] = 2
+        producer_attempt["attempted_params_count"] = 1
         try:
             user1_resp = await fetch_with_capture(producer_url, headers=user1_headers, timeout=timeout, budget_key="bola")
+            if _mark_cooperative_cancel(results):
+                producer_attempt["status"] = "partial"
+                producer_attempt["skip_reason"] = "cancelled"
+                results["endpoint_attempts"].append(producer_attempt)
+                break
+            producer_attempt["attempted_params_count"] = 2
             user2_listing_resp = await fetch_with_capture(producer_url, headers=user2_headers, timeout=timeout, budget_key="bola")
         except Exception as exc:
             producer_attempt["status"] = "partial"
@@ -2950,8 +2992,7 @@ async def authz_resource_replay_test(
         results["producer_ids_found"] += len(user1_refs)
 
         for ref in user1_refs:
-            if _deadline_exceeded():
-                results["budget_exceeded"] = True
+            if _stop_requested():
                 break
             object_id = str(ref.get("object_id") or "")
             if not object_id or object_id in user2_ids:
@@ -2973,8 +3014,11 @@ async def authz_resource_replay_test(
                 "sensitive_fields": ref.get("sensitive_fields") or [],
             })
             for candidate in candidates:
+                if _stop_requested():
+                    break
                 if results["replays_attempted"] >= max(1, int(max_replays or 1)):
                     results["budget_exceeded"] = True
+                    results["budget_exhausted_reason"] = "replay_budget_exhausted"
                     break
                 attempt = _new_authz_endpoint_attempt(
                     producer_endpoint=producer_endpoint,
@@ -2990,6 +3034,11 @@ async def authz_resource_replay_test(
                     owner_resp = await fetch_with_capture(
                         candidate["url"], headers=user1_headers, timeout=timeout, budget_key="bola"
                     )
+                    if _mark_cooperative_cancel(results):
+                        attempt["status"] = "partial"
+                        attempt["skip_reason"] = "cancelled"
+                        results["endpoint_attempts"].append(attempt)
+                        break
                     attacker_resp = await fetch_with_capture(
                         candidate["url"], headers=user2_headers, timeout=timeout, budget_key="bola"
                     )
@@ -3098,6 +3147,8 @@ async def authz_resource_replay_test(
                 if results["write_replays_attempted"] < max_write_replays:
                     write_candidate = _authz_write_replay_candidate(candidate)
                     if write_candidate:
+                        if _mark_cooperative_cancel(results):
+                            break
                         write_attempt = _new_authz_write_attempt(
                             producer_endpoint=producer_endpoint,
                             consumer_endpoint=write_candidate["custom_endpoint"],
@@ -3274,8 +3325,19 @@ async def smart_bola_test(
         "synthesized_urls_tested": 0,
         "synthesized_query_urls_tested": 0,
         "budget_exceeded": False,
+        "cancelled": False,
+        "budget_exhausted_reason": None,
         "endpoint_attempts": [],
     }
+
+    def _stop_requested() -> bool:
+        if _mark_cooperative_cancel(results):
+            return True
+        if _deadline is not None and _time.monotonic() >= _deadline:
+            results["budget_exceeded"] = True
+            results["budget_exhausted_reason"] = "time_budget_exhausted"
+            return True
+        return False
 
     def build_headers(session):
         """Snapshot auth headers + cookies for a session.
@@ -3293,6 +3355,9 @@ async def smart_bola_test(
                 cookie_str = "; ".join(f"{k}={v}" for k, v in cookies.items())
                 headers["Cookie"] = cookie_str
         return headers
+
+    if _stop_requested():
+        return results
 
     if user1_session is not None and user2_session is not None:
         authz_results = await authz_resource_replay_test(
@@ -3314,6 +3379,10 @@ async def smart_bola_test(
             results["vulnerable"] = True
         if authz_results.get("budget_exceeded"):
             results["budget_exceeded"] = True
+            results["budget_exhausted_reason"] = authz_results.get("budget_exhausted_reason")
+        if authz_results.get("cancelled"):
+            results["cancelled"] = True
+            return results
 
     # Synthesize resource URLs from collection endpoints
     synthesized_urls = synthesize_resource_urls_from_collections(
@@ -3347,6 +3416,8 @@ async def smart_bola_test(
     id_endpoints = {}  # path_template -> {pattern_type, original_ids, base_url}
 
     for url in all_urls_to_analyze:
+        if _stop_requested():
+            break
         for pattern, pattern_type in ID_PATTERNS:
             match = re.search(pattern, url)
             if match:
@@ -3370,10 +3441,9 @@ async def smart_bola_test(
     for template, info in list(id_endpoints.items())[:max_endpoints]:
         # Respect the overall budget: stop gracefully and keep findings so far
         # instead of being hard-cancelled (which discards partial results).
-        if _deadline is not None and _time.monotonic() >= _deadline:
-            results["budget_exceeded"] = True
+        if _stop_requested():
             print(
-                f"[bola] Overall budget reached after {results['endpoints_analyzed']} "
+                f"[bola] Stop requested after {results['endpoints_analyzed']} "
                 f"endpoints; returning {len(results['findings'])} findings gathered so far",
                 file=__import__('sys').stderr,
             )
@@ -3419,6 +3489,8 @@ async def smart_bola_test(
 
         # Test each ID
         for test_id in test_ids:
+            if _stop_requested():
+                break
             # Replace {id} with test ID
             test_url = template.replace('{id}', test_id)
             if attempt is not None:
@@ -3430,6 +3502,8 @@ async def smart_bola_test(
 
             # Test with user1
             user1_resp = await fetch_with_capture(test_url, headers=user1_headers, timeout=timeout, budget_key="bola")
+            if _mark_cooperative_cancel(results):
+                break
             user1_status = user1_resp.get("status_code", 0)
             user1_body = user1_resp.get("body", "")
 
@@ -3437,6 +3511,8 @@ async def smart_bola_test(
             # (cross-user comparison only makes sense with two authenticated users)
             if user2_session is not None:
                 user2_resp = await fetch_with_capture(test_url, headers=user2_headers, timeout=timeout, budget_key="bola")
+                if _mark_cooperative_cancel(results):
+                    break
                 user2_status = user2_resp.get("status_code", 0)
                 user2_body = user2_resp.get("body", "")
 
@@ -3490,6 +3566,8 @@ async def smart_bola_test(
 
             # Test without auth
             no_auth_resp = await fetch_with_capture(test_url, timeout=timeout, budget_key="bola")
+            if _mark_cooperative_cancel(results):
+                break
             no_auth_status = no_auth_resp.get("status_code", 0)
             no_auth_body = no_auth_resp.get("body", "")
             template_no_auth_statuses.add(no_auth_status)
@@ -3510,6 +3588,17 @@ async def smart_bola_test(
                     template_no_auth_fingerprints.add(_response_body_fingerprint(no_auth_body))
             if attempt is not None:
                 attempt["completed_params_count"] += 1
+
+        if results.get("cancelled"):
+            finished_attempt = _finish_bola_endpoint_attempt(
+                attempt,
+                budget_exceeded=True,
+                budget_exhausted_reason="cancelled",
+            )
+            if finished_attempt:
+                finished_attempt["skip_reason"] = "cancelled"
+                results["endpoint_attempts"].append(finished_attempt)
+            break
 
         if template_no_auth_candidates:
             sample = template_no_auth_candidates[0]
@@ -3553,6 +3642,8 @@ async def smart_bola_test(
         # Test method variations (PUT, DELETE, PATCH on GET endpoints)
         if user1_headers and results["endpoints_analyzed"] <= 10:  # Limit method testing
             for method in ["PUT", "DELETE", "PATCH"]:
+                if _stop_requested():
+                    break
                 results["method_variations_tested"] += 1
                 # Use the first discovered URL for method testing
                 method_url = info['example_url']

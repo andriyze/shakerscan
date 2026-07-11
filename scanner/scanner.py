@@ -71,6 +71,7 @@ from scanner_tools.focused_scope import (
 )
 from scanner_tools.coverage_tracker import CoverageTracker
 from scanner_tools.completion_status import build_scan_completion_status
+from scanner_tools.cancellation import scanner_cancel_requested, wait_for_scanner_cancel
 from scanner_tools.exposure_markers import exposure_severity
 from scanner_tools.adaptive_throttle import configure_throttle, get_throttle
 from scanner_tools.har_discovery import (
@@ -6163,9 +6164,35 @@ async def build_report(target: str,
             await _drain_task(task, name)
             return default
         start_ts = time.monotonic()
+        cancel_watch: asyncio.Task | None = None
         try:
+            if scanner_cancel_requested():
+                _phase4_log("skip", task=name, reason="cancelled")
+                report["scanner_cancellation"] = {
+                    "requested": True,
+                    "phase": "phase_4",
+                    "task": name,
+                }
+                _cancel_task(task, name)
+                await _drain_task(task, name)
+                return default
             _phase4_log("await", task=name, timeout=f"{timeout_sec}s")
-            done, pending = await asyncio.wait({task}, timeout=timeout_sec)
+            cancel_watch = asyncio.create_task(wait_for_scanner_cancel())
+            done, pending = await asyncio.wait(
+                {task, cancel_watch},
+                timeout=timeout_sec,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if cancel_watch in done:
+                _phase4_log("cancelled", task=name, elapsed=f"{time.monotonic() - start_ts:.2f}s")
+                report["scanner_cancellation"] = {
+                    "requested": True,
+                    "phase": "phase_4",
+                    "task": name,
+                }
+                _cancel_task(task, name)
+                await _drain_task(task, name)
+                return default
             if task in done:
                 try:
                     result = task.result()
@@ -6205,6 +6232,13 @@ async def build_report(target: str,
             _cancel_task(task, name)
             await _drain_task(task, name)
             return default
+        finally:
+            if cancel_watch is not None and not cancel_watch.done():
+                cancel_watch.cancel()
+                try:
+                    await cancel_watch
+                except asyncio.CancelledError:
+                    pass
 
     # Await Phase 4 Checks with timeouts
     file_upload_results = await await_with_timeout(file_upload_task, _phase4_timeout(90, "file_upload"), {"vulnerable": False, "upload_endpoints": [], "tested_endpoints": 0}, "file_upload")

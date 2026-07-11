@@ -21,6 +21,7 @@ from .exposure_markers import (
     guess_confidence,
 )
 from .active_prioritization import active_endpoint_score
+from .cancellation import scanner_cancel_requested
 
 try:
     import check_registry as _check_registry
@@ -89,13 +90,8 @@ def _emit_scan_progress(phase: str, pct: int, message: str) -> None:
 
 
 def _scanner_cancel_requested() -> bool:
-    cancel_file = os.environ.get("SHAKERSCAN_CANCEL_FILE")
-    if not cancel_file:
-        return False
-    try:
-        return os.path.exists(cancel_file)
-    except Exception:
-        return False
+    """Compatibility wrapper for existing active-check call sites/tests."""
+    return scanner_cancel_requested()
 
 
 def _coerce_param_names(raw: Any) -> list[str]:

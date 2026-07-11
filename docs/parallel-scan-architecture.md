@@ -6,7 +6,8 @@ pull allocation by default, static fallback, campaign attempt ledgers, fleet fre
 and parent UI rollups. Continuous ASM is documented separately in
 [continuous-asm-architecture.md](continuous-asm-architecture.md). Parallelism remains the execution
 substrate, not the quality claim. Full `build_report()` registry iteration, request-accurate budgets
-for internally discovered standalone traffic, deeper cooperative scanner cancellation, additional
+for internally discovered standalone traffic, cooperative cancellation in remaining legacy loops
+outside the now-covered SQLi/XSS/Auth/BOLA/Phase-4 paths, additional
 focused families, multi-node orchestration, and large-fleet parity/soak are not implemented claims.
 
 **Reconciled:** 2026-07-10 against current code, tests, and `proposed-next-steps.md`.
@@ -103,7 +104,8 @@ active checks over only their assigned endpoint slice. Duplicate target-global p
 suppressed after the first shard per auth state.
 
 **Still deferred (Phase 2):** full `build_report()` module iteration from the first-class check
-registry; deeper in-scanner cooperative cancellation checkpoints between long active-check loops;
+registry; cooperative cancellation checkpoints in remaining legacy loops beyond the shared
+SQLi/XSS/Auth/BOLA/Phase-4 cancellation contract;
 request-accurate budgets for internally discovered standalone scans; and more runnable focused
 families beyond SQLi/XSS/Auth/BOLA.
 
@@ -434,7 +436,7 @@ Each shard:
 ### 5.4 Failure & lifecycle handling
 - **Stale shards:** reuse the retest watchdog idea — a SETNX-locked reaper requeues or fails shards whose heartbeat expired, then still drives the barrier so merge isn't blocked forever.
 - **Partial success:** merge proceeds with whatever shards completed; parent result records `shards_succeeded/shards_total` and degrades grade confidence rather than failing the whole scan.
-- **Cancellation:** parent cancellation fans out to child shard rows and Redis cancel flags. Workers and merge jobs treat cancelled rows as terminal and refuse to overwrite them with late output. Worker-level cancel polling terminates the scanner process group; remaining polish is in-scanner cooperative checkpoints so long inner loops can clean up even more gracefully before SIGTERM.
+- **Cancellation:** parent cancellation fans out to child shard rows and Redis cancel flags. Workers and merge jobs treat cancelled rows as terminal and refuse to overwrite them with late output. Worker-level cancel polling terminates the scanner process group. SQLi/XSS/Auth/BOLA and Phase 4 now stop cooperatively from the same cancel file and retain partial telemetry; remaining legacy loops still rely on the process-group backstop.
 - **Idempotency:** shard jobs carry `(parent_id, shard_index, attempt)` like retest jobs so requeues don't double-run.
 
 ---
@@ -542,8 +544,8 @@ Do this **incrementally**: first carve `run_recon_stage` out (it already roughly
   Nuclei-category sharding and additional focused families remain deferred.
 - The check registry is authoritative for planning and scanner adapter validation across current
   runnable families. Full `build_report()` module iteration from the registry remains deferred.
-- Worker-level process-group cancellation is shipped; more granular cooperative checkpoints inside
-  long scanner active-check loops remain deferred (see Risks).
+- Worker-level process-group cancellation and cooperative SQLi/XSS/Auth/BOLA/Phase-4 checkpoints are
+  shipped; checkpoints in remaining legacy loops stay deferred (see Risks).
 - UI parent progress, per-shard contribution, aggregate auth/family rollups, campaign attempt facts,
   and runtime-versus-active-cap budget views are shipped.
 
@@ -552,7 +554,9 @@ Do this **incrementally**: first carve `run_recon_stage` out (it already roughly
 ## 12. Risks & mitigations
 
 - **Scanner monolith refactor risk.** Mitigate by keeping the single-worker path as `merge([shard(full)])` and golden-diffing reports against current output before/after.
-- **Cancellation cleanup is coarse-grained.** The worker now interrupts active scanner subprocess groups on cancel, and DB state stays terminal. `scanner/scanner.py` can still improve graceful cleanup by checking a cancel signal between long active-check loops before the worker has to send SIGTERM.
+- **Cancellation cleanup is mixed.** The worker interrupts scanner process groups and DB state stays
+  terminal. SQLi/XSS/Auth/BOLA and Phase 4 now observe the shared cancel file and preserve partial
+  state before SIGTERM; remaining legacy loops still need the same checkpoint contract.
 - **Auth session sharing across shards.** Stateful logins may not be cleanly serializable; mitigate by capturing a reusable token/cookie recipe in the recon stage and re-authing per shard on expiry (the scanner already re-auths).
 - **DBMS-fingerprint coupling.** Broadcast the fingerprint from the recon/plan stage so shards don't each re-detect and diverge.
 - **Resource exhaustion / target overload.** Each worker uses 2–4 GB / 1–2 cores, and a small lab app can fail under 20 simultaneous active shards. The per-parent Redis slot cap is now implemented; keep the default conservative and raise `options.shard_concurrency` only for targets known to tolerate it.

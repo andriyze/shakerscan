@@ -14,7 +14,7 @@ untrusted-worker transport remain a later program and do not block the local pro
 5. Do not start multi-node execution until local cancellation, leases, budgets, evidence, and fleet
    freshness are stable under load.
 
-## Wave 1: cooperative cancellation for current active families
+## Wave 1: cooperative cancellation for current active families - DONE
 
 **Why first:** registry migration increases the number of modules controlled by shared orchestration.
 Those modules need one reliable cooperative stop contract before execution moves.
@@ -32,6 +32,13 @@ Done when:
 - current active-family loops stop before the next network request;
 - reports distinguish cancellation from time-budget exhaustion;
 - the focused and complete Python suites pass.
+
+Implemented in the first slice: one shared cancellation helper now drives SQLi/XSS, focused Auth,
+authz replay/BOLA, and cancellation-aware Phase 4 waits. Auth/BOLA returns partial attempt telemetry
+with `budget_exhausted_reason=cancelled`; Phase 4 records `scanner_cancellation` and cancels the
+current task during the worker grace period. Worker process-group termination remains the backstop.
+Focused tests and the complete Python suite pass. Additional legacy loops are tracked under Wave 2/3
+adapter migration rather than being implied complete.
 
 ## Wave 2: registry-owned report execution
 
@@ -115,4 +122,3 @@ Prerequisites:
 
 State-changing MCP, arbitrary agent execution, untrusted raw workers, and post-exploitation tooling
 remain excluded unless separately designed and approved.
-

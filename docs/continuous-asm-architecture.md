@@ -68,9 +68,9 @@ editing.
 | Full Coverage dynamic allocation | Default shipped | Keep static fallback available and continue live parity/soak on large targets. |
 | Coverage x family dynamic allocation | Shipped for broad/SQLi/XSS; gated Auth/BOLA lanes when preconditions exist | Make shard count worker-aware; run shared recon once, then focused family lanes without diluting SQLi/XSS/BOLA budgets. |
 | Known-endpoint distributed rate limits | Shipped | Extend beyond known endpoint batches only when scanner telemetry can budget discovered requests accurately. |
-| First-class check registry | Authoritative planning and scanner adapter validation shipped for current runnable families | Full `build_report()` registry iteration and additional telemetry-backed focused families remain deferred. |
-| Operator-facing campaign/ASM UX | Bounded phase shipped: Action Center CTAs, Product Status, scheduler state, typed waves, target timeline, hypotheses, and safe remediation links | Add new actions only with tested confirmation boundaries; component-level UI harness coverage is still limited. |
-| DAST quality benchmark loop | Current-fleet Juice Shop scorecard passes; authenticated crAPI rerun pending after rebuild cancellation | Treat missing verified family recall as a benchmark failure; do not substitute endpoint-touch coverage. |
+| First-class check registry | Authoritative planning and scanner adapter validation shipped for current runnable families | Full `build_report()` registry iteration and additional telemetry-backed families remain deferred. |
+| Operator-facing campaign/ASM UX | Bounded phase shipped: Action Center CTAs, Product Status, scheduler activity, typed waves, target timeline, hypotheses, safe remediation links, and parent rollups | Add actions only with tested confirmation boundaries; component-level UI harness coverage remains limited. |
+| DAST quality benchmark loop | Current-fleet Juice Shop scorecard passes; authenticated crAPI rerun pending after rebuild cancellation | Treat missing verified family recall as a benchmark failure, not successful breadth. |
 | Multi-node WireGuard POC | Proposed/RFC | Build a two-VPS proof only after local queue/worker invariants stay green. |
 | Production multi-node fleet | Proposed/RFC | Add node registry, reliable queue leases, object evidence, and routing. |
 | HTTPS broker for untrusted workers | Future | Do not build until owned-fleet primitives are stable. |
@@ -635,6 +635,10 @@ Implemented:
 
 Implemented in this pass:
 
+- Scanner modules share the worker-provided `SHAKERSCAN_CANCEL_FILE` contract. SQLi/XSS, focused
+  Auth, authz replay/BOLA, and Phase 4 waits stop cooperatively between requests, preserve partial
+  attempt state, and distinguish `cancelled` from time-budget exhaustion; process-group termination
+  remains the hard backstop for remaining legacy loops.
 - Default `/scans` hides shard, ASM batch, and ASM recon rows unless internal flags are supplied.
 - ASM batches can request `check_family=sqli`, `check_family=xss`, credential-gated
   `check_family=auth`, or gated `check_family=bola` where the current scanner already supports

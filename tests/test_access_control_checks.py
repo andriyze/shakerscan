@@ -18,6 +18,70 @@ def _session(token: str) -> SimpleNamespace:
     )
 
 
+def test_focused_auth_stops_before_request_when_cancelled(monkeypatch):
+    monkeypatch.setattr(access_control_checks, "scanner_cancel_requested", lambda: True)
+
+    async def fail_fetch(*args, **kwargs):
+        raise AssertionError("focused auth must not issue a request after cancellation")
+
+    monkeypatch.setattr(access_control_checks, "_fetch_auth_access_probe", fail_fetch)
+    result = asyncio.run(access_control_checks.smart_auth_access_test(
+        "https://app.test",
+        ["GET /api/account"],
+        auth_session=_session("user1"),
+    ))
+
+    assert result["cancelled"] is True
+    assert result["budget_exhausted_reason"] == "cancelled"
+    assert result["endpoints_analyzed"] == 0
+
+
+def test_focused_auth_stops_between_principal_requests(monkeypatch):
+    cancelled = False
+    calls = 0
+
+    monkeypatch.setattr(access_control_checks, "scanner_cancel_requested", lambda: cancelled)
+
+    async def first_fetch(*args, **kwargs):
+        nonlocal cancelled, calls
+        calls += 1
+        cancelled = True
+        return {"status_code": 200, "body": '{"id":1}', "headers": {}, "error": None}
+
+    monkeypatch.setattr(access_control_checks, "_fetch_auth_access_probe", first_fetch)
+    result = asyncio.run(access_control_checks.smart_auth_access_test(
+        "https://app.test",
+        ["GET /api/account"],
+        auth_session=_session("user1"),
+    ))
+
+    assert calls == 1
+    assert result["cancelled"] is True
+    assert result["endpoint_attempts"][0]["status"] == "partial"
+    assert result["endpoint_attempts"][0]["skip_reason"] == "cancelled"
+
+
+def test_authz_replay_stops_before_request_when_cancelled(monkeypatch):
+    monkeypatch.setattr(access_control_checks, "scanner_cancel_requested", lambda: True)
+
+    async def fail_fetch(*args, **kwargs):
+        raise AssertionError("authz replay must not issue a request after cancellation")
+
+    import scanner_tools.proof_of_exploit as poe
+
+    monkeypatch.setattr(poe, "fetch_with_capture", fail_fetch)
+    result = asyncio.run(access_control_checks.authz_resource_replay_test(
+        "https://app.test",
+        ["/api/orders"],
+        _session("user1"),
+        _session("user2"),
+    ))
+
+    assert result["cancelled"] is True
+    assert result["budget_exhausted_reason"] == "cancelled"
+    assert result["producers_tested"] == 0
+
+
 def test_forced_browsing_debug_dev_metrics_is_high_not_critical():
     assert determine_severity(200, "debug_dev", "/metrics") == "high"
 

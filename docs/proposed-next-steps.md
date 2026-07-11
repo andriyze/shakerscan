@@ -32,7 +32,8 @@ item is implemented.
   larger worker counts.
 - **Deferred target architecture:** full `build_report()` iteration from the registry, telemetry and
   focused-family expansion beyond current contracts, request-accurate budgets for internally
-  discovered standalone traffic, deeper cooperative cancellation inside scanner loops, and
+  discovered standalone traffic, cooperative cancellation in remaining legacy loops outside the
+  now-covered SQLi/XSS/Auth/BOLA/Phase-4 paths, and
   multi-node placement/reliable leases/brokered untrusted workers.
 - **Intentionally excluded:** state-changing MCP, raw shell/arbitrary-code agent commands,
   post-exploitation/password-spraying tooling, and source- or AI-only verified findings.

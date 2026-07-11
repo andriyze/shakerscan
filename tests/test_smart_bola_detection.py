@@ -636,6 +636,29 @@ def test_smart_bola_respects_max_seconds_budget(monkeypatch):
     assert results.get("budget_exceeded") is True
 
 
+def test_smart_bola_stops_before_request_when_cancelled(monkeypatch):
+    import scanner_tools.access_control_checks as access_control_checks
+
+    monkeypatch.setattr(access_control_checks, "scanner_cancel_requested", lambda: True)
+
+    async def fail_fetch(*args, **kwargs):
+        raise AssertionError("BOLA must not issue a request after cancellation")
+
+    monkeypatch.setattr("scanner_tools.proof_of_exploit.fetch_with_capture", fail_fetch)
+    results = asyncio.run(
+        smart_bola_test(
+            base_url="https://example.com",
+            discovered_urls=["https://example.com/api/users/1"],
+            max_endpoints=5,
+            timeout=1,
+        )
+    )
+
+    assert results["cancelled"] is True
+    assert results["budget_exhausted_reason"] == "cancelled"
+    assert results["endpoints_analyzed"] == 0
+
+
 def test_smart_bola_no_budget_runs_to_completion(monkeypatch):
     # Without max_seconds the deadline machinery is inert (no early stop).
     async def fake_fetch(url, **kwargs):
