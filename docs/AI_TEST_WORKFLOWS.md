@@ -43,6 +43,17 @@ Completed AI Gate and Model Intake scans can be exported as evidence packs:
 ```bash
 curl http://localhost:8080/scans/{scan_id}/ai-redteam-report
 curl "http://localhost:8080/scans/{scan_id}/ai-redteam-report?format=markdown"
+curl http://localhost:8080/model-intake/scans/{scan_id}/evidence-export
+```
+
+Campaign review and bounded replay:
+
+```bash
+curl http://localhost:8080/ai/targets/{target_id}/campaign-history
+curl http://localhost:8080/ai/scans/{scan_id}/campaign-history
+curl -X POST http://localhost:8080/ai/scans/{scan_id}/replay \
+  -H "Content-Type: application/json" \
+  -d '{"mode":"errors"}'
 ```
 
 The catalog includes:
@@ -79,6 +90,10 @@ Recommended scans:
 ## Model Intake Pipeline
 
 Use `/settings/model-intake` and the `Model Intake Pipeline` scenario panel.
+
+The page can resolve supported registry references, preview trust requirements, and manage saved
+public-key/fingerprint trust anchors. Strict trust policies can require selected saved anchors; a
+metadata claim alone never satisfies cryptographic verification.
 
 Canonical Honey endpoints:
 - `GET /api/model-intake/scenarios`

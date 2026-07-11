@@ -180,7 +180,7 @@ Open this repo in Claude Code, Codex, OpenCode, or another agent that can read r
 ## Resources
 
 - **[Documentation Index](docs/README.md)** - Current references, architecture status, and the historical archive.
-- **[Functionality Reference](docs/functionality-reference.md)** - Complete map of what ShakerScan does across DAST and AI red teaming, with links out to the architecture and policy docs.
+- **[Functionality Reference](docs/functionality-reference.md)** - Canonical exhaustive catalog across DAST, ASM, AI, evidence, governance, API, UI, CLI, skills, agents, adapters, modules, and storage.
 - **[Visual Walkthrough](WALKTHROUGH.md)** - Terminal and web UI screenshots.
 - **[Smart Scan Policy](docs/SMART_SCAN_POLICY.md)** - Smart scan budgets, safety controls, and quality checks.
 - **[AI Test Workflows](docs/AI_TEST_WORKFLOWS.md)** - operator workflow and Honey endpoint contract for secure RAG/agent testing and model-intake approval checks.
@@ -224,19 +224,22 @@ Organize root domains and subdomains, filter the attack surface, launch per-targ
 
 ### Schedules
 
-Create recurring daily or weekly scans so important targets stay continuously monitored.
+Create recurring daily or weekly normal scans, Continuous ASM coverage waves, or approval-gated
+evidence-retention sweeps so important targets and stored evidence stay governed.
 
 ![Recurring scan schedules](docs/screenshots/schedules.png)
 
 ### Findings
 
-Filter and sort findings by source, severity, status, domain, recency, CVSS, first seen, or last seen. DAST and AI Gate findings share the same triage workflow.
+Filter and sort findings by DAST, AI Gate, Model Intake, ASM, or Manual source; severity, status,
+domain, recency, CVSS, first seen, or last seen. All sources share the same triage workflow.
 
 ![Findings filtered to shakerscan.com](docs/screenshots/findings-shakerscan-domain.png)
 
 ### AI Gate Findings
 
-Use the `AI` source filter to focus on model, chatbot, RAG, or MCP probe results, then combine it with severity and domain filters.
+Use the `AI Gate` source filter for chatbot, RAG, agent, or MCP probe results and `Model Intake` for
+artifact findings, then combine either with severity and domain filters.
 
 ![High AI findings filtered to shakerscan.com](docs/screenshots/findings-ai-high-shakerscan-domain.png)
 
@@ -262,6 +265,9 @@ Register AI targets, choose auth, select probe packs, run smoke or focused check
   - Headless browser crawl (Playwright) with API capture
   - Subdomain enumeration (Gungnir, Subfinder, crt.sh)
   - JavaScript dependency scanning and secret detection
+  - OpenAPI discovery and Schemathesis testing
+  - IP/ASN/domain intelligence, breach checks, typosquatting, and vendor risk
+  - SSH, SMTP, VPN/RDP/VNC, IoT, industrial, and database-service posture
 
 - **Active Vulnerability Testing** (opt-in)
   - XSS detection (dalfox), SQL injection testing (sqlmap)
@@ -269,6 +275,7 @@ Register AI targets, choose auth, select probe packs, run smoke or focused check
   - Coverage budget profiles (`fast`, `balanced`, `thorough`, `exhaustive`) plus advanced depth/time overrides
   - Auth-aware scanning across discovered endpoints
   - CSRF, IDOR, path traversal detection
+  - Mass assignment, JWT, webhook, WebSocket, OAuth, file-upload, and business-logic checks
 
 - **AI Gate and AI-Assisted Verification** (optional)
   - Chat, RAG, agent, and MCP probe packs
@@ -278,6 +285,7 @@ Register AI targets, choose auth, select probe packs, run smoke or focused check
   - Chat-style evidence views with probe, target response, classifier output, and raw evidence
   - Confidence scoring and false-positive reduction
   - Cross-finding correlation and attack-chain analysis
+  - AI surface/attempt inventory, bounded replay, and longitudinal campaign history
 
 - **Model Intake Checks**
   - Model provenance, checksum, signature/attestation verification status, model-card, and deployment approval checks
@@ -285,6 +293,14 @@ Register AI targets, choose auth, select probe packs, run smoke or focused check
   - Unsafe serialization detection for pickle-like artifacts, PyTorch archives, joblib/pickle files, and executable archive contents
   - License review, SBOM/dependency evidence, malware scan evidence, security evals, deployment restrictions, and monitoring-plan checks
   - Safe, non-executing artifact inspection for pre-deployment model approval workflows
+  - Saved trust anchors, strict trust preview, policy requirements, and evidence export
+
+- **Evidence, Governance, and Agent Operations**
+  - Content-addressed evidence objects, concrete evidence instances, manifests, bundles, and retention
+  - Mission campaigns, action ledger, cross-product timeline, hypotheses, and refuter reviews
+  - Scope and approval receipts, operation plans, command results, tool receipts, context packs, and decision traces
+  - Read-only MCP plus dry-run local-agent planning with schema and proof boundaries
+  - SARIF, baselines, known-finding suppression, CI quality gates, and GRC evidence mapping
 
 - **Modern Web Interface**
   - Real-time dashboard with metrics and scan management
@@ -456,11 +472,15 @@ claude    # Claude reads CLAUDE.md and understands the project
 | `/scan-full <url>` | Full assessment (asks permission first) |
 | `/scan-smart <url>` | Smart adaptive scan |
 | `/ai-gate` | Manage AI Gate targets and run AI safety probe packs |
-| `/model-intake` | Queue model artifact intake checks |
+| `/ai-security-session <url>` | Start an interactive browser security session |
 | `/findings` | List active vulnerabilities |
+| `/save-finding [session_id]` | Save a validated manual/session finding |
 | `/status` | Check scanner status |
 | `/subdomains <domain>` | Discover subdomains |
 | `/workers` | Manage scanner workers |
+| `/js-analyze <target|scan|file>` | Build a frontend route/API/secret inventory and scan seeds |
+| `/content-discovery <target|scan>` | Build route/file/API discovery seeds and custom endpoints |
+| `/review-skills [scope]` | Audit skill, command, and subagent contracts |
 
 ## Web UI Overview
 
@@ -468,12 +488,19 @@ claude    # Claude reads CLAUDE.md and understands the project
 - **Scans (`/scans`)**: filter by status/domain/search, cancel running jobs, re-scan
 - **Scan Report (`/scans/{id}`)**: live logs, progress bar, PDF export, compliance section, AI Gate evidence, and Model Intake artifact checks
 - **Exposure (`/exposure`)**: graph of domains, targets, APIs, auth roles, vendors, AI surfaces, MCP tools, model artifacts, scans, and findings
+- **Continuous ASM (`/asm`)**: scheduler state, endpoint and family proof coverage, gaps, recommendations, and campaign timeline
 - **Targets (`/targets`)**: hierarchical root/subdomains, filter and scan
-- **Schedules (`/schedules`)**: create/toggle/delete recurring daily/weekly scans
-- **Findings (`/findings`)**: filter by type (DAST, AI, Model Intake), severity/status/date/domain, bulk cleanup, CVSS sorting
+- **Application Graph (`/targets/{id}/graph`)**: route/object/principal nodes, auth boundaries, producer/consumer edges, and graph hypotheses
+- **Schedules (`/schedules`)**: normal scans, ASM waves, and approval-gated evidence-retention sweeps
+- **Findings (`/findings`)**: filter by DAST, AI Gate, Model Intake, ASM, or Manual source; severity/status/date/domain; bulk cleanup and CVSS sorting
 - **Finding Detail (`/findings/{id}`)**: triage buttons, analyst notes, evidence, AI analysis, remediation
+- **Interactive (`/interactive`)**: browser sessions, managed credentials, principals, authz expectations, endpoint replay, screenshots, and manual findings
 - **AI Gate (`/settings/ai-gate`)**: review inventory/candidates, add AI targets, test connectivity, run MCP readiness checks, choose auth, select probe packs/profiles, and run AI safety checks for chat, RAG, agent, and MCP surfaces
-- **Model Intake (`/settings/model-intake`)**: use model-intake presets and submit artifact checks for provenance, unsafe serialization, signing, checksum, model card, AIBOM, license, and approval metadata
+- **Model Intake (`/settings/model-intake`)**: resolve references, manage trust anchors, preview trust policy, and submit artifact checks
+- **Policy Profiles (`/settings/policy-profiles`)**: deployment-gate policy lifecycle for DAST, AI Gate, and Model Intake
+- **Exceptions (`/settings/exceptions`)**: finding-exception queue, metadata repair, expiry, and lifecycle sweep
+- **Command Arsenal (`/settings/arsenal`)**: commands, tools, receipts, plans, campaigns, hypotheses, refuters, local agents, context packs, and traces
+- **Settings (`/settings`)**: AI providers, scan execution, and automation policy
 - **New Scan (`/scan/new`)**: scan type picker, coverage budget selector, and advanced toggles
 
 ## Configuration

@@ -49,7 +49,8 @@ The scanner runs as Docker containers:
 - **PostgreSQL** - Stores scans, findings, targets
 - **Redis** - Job queue
 
-For a full map of product capabilities and pointers to the architecture/policy docs, see
+For the exhaustive generated capability catalog (all REST operations, registries, UI pages, CLI
+flags, skills, agents, adapters, modules, and durable tables) plus architecture/policy pointers, see
 [docs/functionality-reference.md](docs/functionality-reference.md).
 
 ## Current UI (Implemented)
@@ -58,14 +59,19 @@ For a full map of product capabilities and pointers to the architecture/policy d
 - **Scans (`/scans`)**: filter by status/domain/search, pagination (50/page), cancel running/pending scans, re-scan dropdown (all 6 scan types), auto-refresh every 5s. Shows target, type, status, score/grade, findings count, duration, date.
 - **Scan Detail (`/scans/{id}`)**: live logs with auto-scroll while running (5s refresh), progress bar + current phase, partial-results view for failed scans (warning banner), refreshed deployment decision, full report with PDF export, compliance section, resolved coverage budget, AI Gate evidence, and Model Intake artifact checks when complete. Preserves list filter context on back navigation.
 - **Exposure (`/exposure`)**: graph linking domains, targets, APIs, auth roles, third-party JS/vendors, cloud hints, AI targets, MCP tools, model artifacts, scans, and findings.
+- **Continuous ASM (`/asm`)**: target coverage, family proof rollups, scheduler decisions, endpoint inventory, gaps, recommendations, and target campaign timeline.
 - **New Scan (`/scan/new`)**: scan type grid (6 types with duration/description), coverage budget selector (`fast`, `balanced`, `thorough`, `exhaustive`), advanced option toggles (Active Testing, Nuclei Templates, Subdomain Discovery, Enhanced DNS, JS Dependency Scanning, JS Secret Scanning), and optional custom budget overrides. Warning for active testing types.
 - **Targets (`/targets`)**: hierarchical tree (root domains with collapsible subdomains), filter by discovery source/grade/has-findings, sort by domain/last-scanned/findings/score/date, search. Actions: add target, scan individual (dropdown), scan all in domain set, discover subdomains, create schedule (icon link). Shows subdomain count, scan count, findings count, grade per target.
-- **Schedules (`/schedules`)**: create/toggle/delete recurring daily/weekly actions. Supports normal scan schedules and typed ASM coverage-wave schedules (`schedule_kind: asm_improve`). Create modal with target dropdown, name, frequency, day-of-week selector, time (UTC), schedule type, and scan type when relevant. Auto-opens from targets page with pre-populated target.
-- **Findings (`/findings`)**: filter by type (DAST vs AI), severity/status/last-seen (7/30/60/90 days)/domain/search, sort by severity/first-seen/last-seen/CVSS. Pagination (50/page). **Bulk cleanup**: dry-run preview before deletion, filter by age (30-180+ days)/status/domain.
-- **Finding Detail (`/findings/{id}`)**: status triage buttons (active/resolved/false_positive/accepted_risk), **delete finding** with confirmation, DAST/AI type badge, analyst notes, CVSS, CWE link, evidence summary (URLs, payloads, parameters, status codes, response anomalies), remediation steps, AI analysis (verdict/confidence/rationale/recommendations), raw HTTP request/response, copy buttons for URLs/payloads/IDs, external links to vulnerable URLs.
+- **Schedules (`/schedules`)**: create/toggle/delete recurring daily/weekly actions. Supports normal scans, typed ASM coverage waves (`asm_improve`), and approval-gated evidence-retention sweeps (`evidence_retention_sweep`).
+- **Findings (`/findings`)**: filter by DAST, AI Gate, Model Intake, ASM, or Manual source plus severity/status/last-seen/domain/search; sort by severity/first-seen/last-seen/CVSS; bulk cleanup with dry-run preview.
+- **Finding Detail (`/findings/{id}`)**: status triage buttons (active/resolved/false_positive/accepted_risk), **delete finding** with confirmation, source badge, analyst notes, CVSS, CWE link, evidence summary (URLs, payloads, parameters, status codes, response anomalies), remediation steps, AI analysis (verdict/confidence/rationale/recommendations), raw HTTP request/response, copy buttons for URLs/payloads/IDs, external links to vulnerable URLs.
 - **AI Gate (`/settings/ai-gate`)**: create and manage AI targets, use Secure RAG + Agent presets, choose auth, target type, probe pack, profile, and environment, then queue AI safety scans for chat APIs, RAG APIs, agent traces, and MCP endpoints.
 - **Model Intake (`/settings/model-intake`)**: use model-intake presets and queue artifact checks with artifact URL, metadata URL/JSON, checksum, detached signature URL/value, public key URL/PEM, trusted key PEM/fingerprints, policy profile, model card, approval flags, timeout, and download cap.
 - **Policy Profiles (`/settings/policy-profiles`)**: create, edit, activate/deactivate, and delete deployment gate profiles for AI Gate, Model Intake, and DAST decisions. Model Intake can select saved active profiles.
+- **Interactive (`/interactive`)**: browser sessions, managed credential profiles, target principals, authz expectations, endpoint replay, screenshots, and explicit manual finding creation.
+- **Exceptions (`/settings/exceptions`)**: exception queue, owner/approver/control repair, expiry visibility, and lifecycle sweep.
+- **Command Arsenal (`/settings/arsenal`)**: command contracts, plans, scope/approval receipts, action ledger, hypotheses, refuters, tools, local agents, context packs, and decision traces.
+- **Settings (`/settings`)**: AI providers, scan execution policy, automation defaults, and approval-receipt enforcement.
 - **Application Graph (`/targets/{id}/graph`)**: inspect persisted route/object/principal nodes, producer/consumer/auth-boundary edges, node/edge filters, search, and selected-node connections.
 
 ## Your Role
@@ -257,7 +263,9 @@ curl -X POST "http://localhost:8080/session/{session_id}/findings" \
 
 Status options: `active`, `resolved`, `false_positive`, `accepted_risk`
 
-Finding type filter: use `source_type=dast` for non-AI findings and `source_type=ai` for AI Gate or AI-session findings. The UI intentionally exposes only these two product categories: **DAST** and **AI**.
+Finding source filters are first-class: `dast`, `ai`, `ai_gate`, `ai_session`, `model_intake`,
+`asm`, and `manual`. The UI exposes DAST, AI Gate, Model Intake, ASM, and Manual controls; use the
+broader `ai` API filter when AI Gate and AI-session findings should be combined.
 
 **Findings Query Parameters:**
 
@@ -265,7 +273,7 @@ Finding type filter: use `source_type=dast` for non-AI findings and `source_type
 |-----------|-------------|
 | `status` | Filter by status (active, resolved, false_positive, accepted_risk) |
 | `severity` | Filter by severity (critical, high, medium, low, info) |
-| `source_type` | Filter by product type: `dast` or `ai` |
+| `source_type` | `dast`, `ai`, `ai_gate`, `ai_session`, `model_intake`, `asm`, or `manual` |
 | `seen_within_days` | Only findings seen within N days (e.g., 7, 30, 60, 90) |
 | `root_domain` | Filter by root domain |
 | `target_id` | Filter by target ID |
@@ -617,7 +625,8 @@ After submitting an AI Gate scan, report the scan ID and UI link (`/scans/{scan_
 
 Model Intake checks model artifacts before deployment without importing or executing model code. It is available in the UI at `/settings/model-intake` and through REST APIs. It is for provenance, unsafe serialization, checksum/signature, model card, license review, SBOM/dependency evidence, malware scan evidence, security evals, deployment restrictions, monitoring plan, and deployment approval checks.
 
-Model Intake findings are stored as non-AI findings with `tool=model_intake`; `source_type=dast` includes them until the product adds a separate model-intake source filter.
+Model Intake findings use `tool/source=model_intake`, filter with `source_type=model_intake`, and are
+excluded from `source_type=dast`.
 
 The `/ai/test-scenarios` catalog also includes `model-intake-pipeline` presets and the canonical Honey model-intake routes: scenario registry, index, artifact/manifest/signature/card reads, submit, status, scan, approve, and deploy.
 
@@ -673,6 +682,17 @@ curl -X POST http://localhost:8080/schedules \
     "schedule_kind": "asm_improve",
     "frequency": "daily",
     "time_of_day": "02:00"
+  }'
+
+# Create a preview-only evidence retention sweep
+curl -X POST http://localhost:8080/schedules \
+  -H "Content-Type: application/json" \
+  -d '{
+    "schedule_kind": "evidence_retention_sweep",
+    "frequency": "weekly",
+    "day_of_week": 0,
+    "time_of_day": "03:00",
+    "scan_options": {"dry_run": true, "retention_class": "short", "limit": 100}
   }'
 
 # Update/toggle schedule

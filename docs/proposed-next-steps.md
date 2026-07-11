@@ -13,7 +13,7 @@ evidence-grounded 2026-07-11 architecture review.
 
 | Area | Current status | Evidence boundary |
 |---|---|---|
-| Unit and contract tests | Passing at the last verification checkpoint | Python `1759 passed, 6 skipped`; UI contracts `20/20` |
+| Unit and contract tests | Passing at the 2026-07-11 documentation checkpoint | Python `1762 passed, 6 skipped`; UI contracts `20/20` |
 | UI production build and browser QA | Passed | Next.js build plus desktop and 390 px scan/ASM/schedule QA |
 | Fleet freshness | Passed at last rebuild | 16/16 workers on `957b688918e9ea58`, zero stale at verification time |
 | Full current-build E2E | Open | Older Model Intake/AI Gate/DAST result counts have not been rerun on the latest rebuilt fleet |

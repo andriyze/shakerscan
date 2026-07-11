@@ -1,0 +1,81 @@
+import subprocess
+import sys
+from pathlib import Path
+import re
+
+from scripts import generate_capability_inventory as inventory
+
+
+ROOT = Path(__file__).resolve().parents[1]
+DOC = ROOT / "docs" / "functionality-reference.md"
+GENERATOR = ROOT / "scripts" / "generate_capability_inventory.py"
+
+
+def test_generated_capability_inventory_is_current():
+    result = subprocess.run(
+        [sys.executable, str(GENERATOR), "--check"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_functionality_reference_covers_every_product_surface():
+    text = DOC.read_text(encoding="utf-8")
+    required = (
+        "## 3. DAST",
+        "## 9. Scaling DAST",
+        "## 10. Attack-surface management",
+        "## 11. AI red teaming",
+        "Evidence instances and exports",
+        "Mission campaigns and action ledger",
+        "Hypothesis lifecycle",
+        "Refuter reviews",
+        "## 16. UI, CLI, skills, and agent surfaces",
+        "### Public REST Operations",
+        "### Check-Family Registry",
+        "### Command Arsenal",
+        "### Scanner CLI Flags",
+        "### Wrapper Commands, Make Targets, And Release Gates",
+        "### Runtime Environment-Key Inventory",
+        "### UI Pages",
+        "### Skills, Slash Commands, And Subagents",
+        "### Scanner Module Inventory",
+        "### Durable Storage Inventory",
+    )
+    assert [item for item in required if item not in text] == []
+    assert "All POST/PATCH bodies are JSON" not in text
+    assert "#13-where-to-go-deeper" not in text
+
+
+def test_inventory_extractors_cover_known_authoritative_surfaces():
+    assert len(inventory.api_operations()) >= 190
+    assert {"scan", "scan-smart", "help", "rebuild"} <= set(inventory.scanner_wrapper_commands())
+    assert {"test", "release-gates", "e2e-model-intake"} <= set(inventory.make_targets())
+    assert {"test:no-benchmark-fitting", "test:planner-scope"} <= set(inventory.release_gates())
+    env_names = {row["name"] for row in inventory.environment_variables()}
+    assert {"AI_URL", "DATABASE_URL", "REDIS_URL", "SHAKERSCAN_API_URL"} <= env_names
+
+
+def test_every_active_document_is_indexed_and_local_links_resolve():
+    index = (ROOT / "docs" / "README.md").read_text(encoding="utf-8")
+    linked_docs = {
+        Path(destination.split("#", 1)[0]).name
+        for destination in re.findall(r"\[[^]]+\]\(([^)]+\.md(?:#[^)]*)?)\)", index)
+    }
+    active_docs = {path.name for path in (ROOT / "docs").glob("*.md") if path.name != "README.md"}
+    assert active_docs <= linked_docs
+
+    documents = [ROOT / "README.md", ROOT / "AGENTS.md", ROOT / "CLAUDE.md", *(ROOT / "docs").glob("*.md")]
+    missing = []
+    for document in documents:
+        for destination in re.findall(r"\[[^]]+\]\(([^)]+)\)", document.read_text(encoding="utf-8")):
+            if destination.startswith(("http://", "https://", "mailto:", "#")):
+                continue
+            path_part = destination.split("#", 1)[0]
+            if path_part and not (document.parent / path_part).resolve().exists():
+                missing.append((str(document.relative_to(ROOT)), destination))
+    assert missing == []

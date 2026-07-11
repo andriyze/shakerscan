@@ -8,7 +8,7 @@ Code, database schemas, runtime receipts, and tests remain authoritative when a 
 
 | Document | Purpose |
 |---|---|
-| [`functionality-reference.md`](functionality-reference.md) | End-to-end map of shipped product behavior |
+| [`functionality-reference.md`](functionality-reference.md) | Canonical exhaustive product map plus generated code-surface inventory |
 | [`proposed-next-steps.md`](proposed-next-steps.md) | Single live hardening roadmap and acceptance status |
 | [`SMART_SCAN_POLICY.md`](SMART_SCAN_POLICY.md) | Smart-scan budget, proof, safety, and release policy |
 | [`owasp-coverage-matrix.md`](owasp-coverage-matrix.md) | Implemented DAST mechanisms mapped to OWASP categories |
@@ -34,6 +34,9 @@ Code, database schemas, runtime receipts, and tests remain authoritative when a 
 ## Maintenance Rule
 
 - Update a live document when behavior, schema, safety boundaries, or acceptance status changes.
+- Run `python3 scripts/generate_capability_inventory.py` after changing API, registry, CLI/wrapper,
+  Make/release-gate, runtime configuration, UI, skill/agent, adapter, scanner-module, or durable-table
+  surfaces; CI checks the generated block.
 - Move point-in-time reviews, completed plans, and execution prompts into [`archive/`](archive/README.md).
 - Never convert an old benchmark or E2E artifact into a current-build claim.
 - Keep benchmark hostnames, product nouns, answer-key routes, and expected findings out of detector inputs.

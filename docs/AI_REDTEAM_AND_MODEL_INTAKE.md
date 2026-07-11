@@ -496,7 +496,23 @@ Current behavior:
 - The exposure graph includes AI targets, MCP tools, model artifacts, scans, and findings when that data is present.
 - Finding detail includes analyst validation actions for true positive, false positive, duplicate, accepted risk, and retest needed.
 
-Current limitation: AI Gate findings are not retested through the normal DAST retest flow. Rerun the AI Gate target instead.
+AI Gate findings have a dedicated retest endpoint, and completed AI scans can replay all probes or a
+bounded selected/family/error/skipped slice. These flows preserve AI target context and production
+safety gates rather than entering the generic DAST request constructor.
+
+### Feature 19: Saved Model Intake trust anchors and evidence export
+
+Operators can resolve registry references, preview trust requirements, save public-key PEM or key
+fingerprint anchors, associate anchors with policy profiles/owners, and deactivate anchors without
+deleting audit history. Strict policy can require one or more saved anchors. Completed intake scans
+expose a dedicated hashed/redacted evidence export.
+
+### Feature 20: Durable AI surfaces, campaign history, and replay
+
+AI surfaces and their attempts are persisted independently of findings. Target-level and scan-level
+campaign history show context, decisions, coverage, findings, blocked/errored probes, budget stops,
+and readiness trend. Target history is exportable. Scan replay supports all, family, selected probe,
+skipped, and error reruns without relabeling historical results.
 
 ---
 
@@ -926,6 +942,14 @@ AI Gate:
 | `GET /ai/targets/{target_id}/runtime-risk` | Return agent/tool blast-radius summary |
 | `POST /ai/targets/{target_id}/scan` | Queue AI Gate scan |
 | `GET /ai/scans/{scan_id}/transcript` | Return probe transcripts |
+| `POST /ai/findings/{finding_id}/retest` | Queue a dedicated AI finding retest |
+| `GET /ai/scans/{scan_id}/campaign-history` | Read scan-context history and readiness trend |
+| `POST /ai/scans/{scan_id}/replay` | Replay all or a bounded probe/family/error/skipped slice |
+| `GET /ai/targets/{target_id}/campaign-history` | Read longitudinal target history |
+| `GET /ai/targets/{target_id}/campaign-history/export` | Export bounded target campaign history |
+| `POST /ai/surfaces/sync` | Normalize saved AI targets into durable surface inventory |
+| `GET /ai/surfaces` | List normalized AI surfaces |
+| `GET /ai/surfaces/{surface_id}/attempts` | List durable attempt facts for one surface |
 | `GET /ai/test-scenarios` | Return target/scenario templates |
 | `GET /ai/learning-guide` | Return AI learning guide data |
 | `GET /ai/test-cases` | Return probe/test-case catalog |
@@ -936,6 +960,13 @@ Model Intake:
 | Method/path | Purpose |
 |---|---|
 | `POST /model-intake/scan` | Queue Model Intake scan |
+| `POST /model-intake/resolve` | Normalize a registry/reference and return bounded candidates |
+| `POST /model-intake/targets/{target_id}/rescan` | Rescan a saved Model Intake target |
+| `GET /model-intake/trust-anchors` | List saved active/all trust anchors |
+| `POST /model-intake/trust-anchors` | Save a public-key/fingerprint trust anchor |
+| `PATCH /model-intake/trust-anchors/{anchor_id}` | Update trust-anchor metadata/material |
+| `DELETE /model-intake/trust-anchors/{anchor_id}` | Deactivate a trust anchor |
+| `GET /model-intake/scans/{scan_id}/evidence-export` | Export intake evidence metadata |
 
 Reports:
 
@@ -968,7 +999,7 @@ Primary pages:
 |---|---|
 | `/settings` | AI provider settings and Calibration Lab settings |
 | `/settings/ai-gate` | Create AI targets, apply templates, queue AI Gate scans |
-| `/settings/model-intake` | Queue Model Intake scans |
+| `/settings/model-intake` | Resolve references, manage saved trust anchors, preview trust, and queue intake scans |
 | `/scans/{scan_id}` | Review AI Gate or Model Intake result |
 | `/findings` | Filter and triage findings |
 | `/exposure` | Explore attack-surface graph including AI entities |
@@ -982,13 +1013,15 @@ AI Gate page:
 - Lets users preflight target connectivity.
 - Lets users run MCP readiness checks for MCP targets.
 - Lets users queue scans with selected pack/profile/environment.
-- Shows saved targets and last scan links.
+- Shows saved targets, last scan links, longitudinal campaign history, readiness trend, and history export.
 - Shows demo controls only when demo mode is enabled.
 
 Model Intake page:
 
 - Provides artifact and metadata inputs.
 - Supports presets.
+- Resolves registry references and candidate files.
+- Manages saved trust anchors and strict trust preview.
 - Queues a model-intake scan.
 - Sends the user to the regular scan detail page for results.
 

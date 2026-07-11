@@ -46,6 +46,10 @@ The scanner runs as Docker containers:
 - **PostgreSQL** - Stores scans, findings, targets
 - **Redis** - Job queue
 
+The canonical exhaustive catalog is `docs/functionality-reference.md`. Its generated appendix lists
+every current REST operation, registry command, UI page, CLI flag, skill, agent, adapter, scanner
+module, and durable table. This file is the concise agent workflow, not a competing full inventory.
+
 ## Your Role
 
 When users ask about security scanning:
@@ -60,7 +64,14 @@ For commands you run on the same machine as ShakerScan, use `http://localhost:80
 
 ## API Reference
 
-Base URL: `http://localhost:8080`. All POST/PATCH bodies are JSON (`Content-Type: application/json`).
+Base URL: `http://localhost:8080`. Most structured POST/PATCH operations use JSON; discovery and
+some control operations use query parameters or no body. Use `/openapi.json` or the exhaustive
+generated catalog in `docs/functionality-reference.md` for the exact method/path contract.
+
+The API also includes Command Arsenal, evidence instances/manifests/bundles/retention, mission
+campaigns and timeline, hypotheses/refuters, scope/approval receipts, context packs, decision traces,
+tool receipts, AI surface attempts/history/replay, Model Intake trust anchors, and application-graph
+hypothesis generation. These advanced surfaces are cataloged centrally instead of duplicated here.
 
 ### Submit a Scan
 
@@ -134,7 +145,9 @@ curl -X POST "http://localhost:8080/session/{session_id}/findings" \
 
 Status options: `active`, `resolved`, `false_positive`, `accepted_risk`.
 
-Finding type filter: `source_type=dast` for non-AI findings, `source_type=ai` for AI Gate or AI-session findings. The UI exposes only these two product categories: **DAST** and **AI**.
+Finding source filters: `dast`, `ai`, `ai_gate`, `ai_session`, `model_intake`, `asm`, and `manual`.
+The UI exposes DAST, AI Gate, Model Intake, ASM, and Manual controls; `ai` combines AI Gate and
+AI-session findings for API callers.
 
 **Findings Query Parameters:**
 
@@ -142,7 +155,7 @@ Finding type filter: `source_type=dast` for non-AI findings, `source_type=ai` fo
 |-----------|-------------|
 | `status` | active, resolved, false_positive, accepted_risk |
 | `severity` | critical, high, medium, low, info |
-| `source_type` | `dast` or `ai` |
+| `source_type` | `dast`, `ai`, `ai_gate`, `ai_session`, `model_intake`, `asm`, or `manual` |
 | `seen_within_days` | Only findings seen within N days |
 | `root_domain` | Filter by root domain |
 | `target_id` | Filter by target ID |
@@ -294,7 +307,8 @@ After submitting an AI Gate scan, report the scan ID and UI link (`/scans/{scan_
 
 Model Intake checks model artifacts before deployment without importing or executing model code. UI: `/settings/model-intake`. Covers provenance, unsafe serialization, checksum/signature, model card, license review, SBOM/dependency evidence, malware scan evidence, security evals, deployment restrictions, monitoring plan, and deployment approval checks.
 
-Model Intake findings are stored as non-AI findings with `tool=model_intake`; `source_type=dast` includes them until the product adds a separate model-intake source filter.
+Model Intake findings use `tool/source=model_intake`, filter with `source_type=model_intake`, and are
+excluded from `source_type=dast`.
 
 The `/ai/test-scenarios` catalog also includes `model-intake-pipeline` presets and the canonical Honey model-intake routes: scenario registry, index, artifact/manifest/signature/card reads, submit, status, scan, approve, and deploy.
 
@@ -325,15 +339,21 @@ After submitting a Model Intake scan, report the scan ID and UI link (`/scans/{s
 ```bash
 curl http://localhost:8080/schedules                              # List
 
-# Daily schedule
+# Daily normal scan
 curl -X POST http://localhost:8080/schedules \
   -d '{"target_id": "target-uuid", "frequency": "daily",
-       "time_of_day": "02:00", "scan_type": "standard"}'
+       "time_of_day": "02:00", "schedule_kind": "normal_scan", "scan_type": "standard"}'
 
-# Weekly schedule
+# Weekly ASM coverage wave
 curl -X POST http://localhost:8080/schedules \
   -d '{"target_id": "target-uuid", "frequency": "weekly",
-       "day_of_week": 1, "time_of_day": "03:00", "scan_type": "deep"}'
+       "day_of_week": 1, "time_of_day": "03:00", "schedule_kind": "asm_improve"}'
+
+# Preview-only evidence retention sweep
+curl -X POST http://localhost:8080/schedules \
+  -d '{"frequency":"weekly", "day_of_week":0, "time_of_day":"04:00",
+       "schedule_kind":"evidence_retention_sweep",
+       "scan_options":{"dry_run":true,"retention_class":"short","limit":100}}'
 
 # Update/toggle
 curl -X PATCH http://localhost:8080/schedules/{schedule_id} \
@@ -343,7 +363,9 @@ curl -X PATCH http://localhost:8080/schedules/{schedule_id} \
 curl -X DELETE http://localhost:8080/schedules/{schedule_id}
 ```
 
-Schedule fields: `target_id` (required), `frequency` (daily/weekly), `time_of_day` (HH:MM UTC), `day_of_week` (0-6, for weekly), `scan_type`, `name` (optional), `scan_options` (optional JSONB).
+Schedule kinds are `normal_scan`, `asm_improve`, and `evidence_retention_sweep`. Normal/ASM actions
+are target-scoped; retention sweeps can be global. Executing evidence deletion requires an approval
+receipt and preserves remote objects.
 
 ### Certificate Transparency Monitoring (Gungnir)
 
@@ -352,7 +374,7 @@ Monitor CT logs in real-time to discover new certificates issued for your domain
 ```bash
 ./scanner.sh gungnir start                                                # Start CT monitoring
 curl http://localhost:8080/gungnir/status                                 # Status
-curl "http://localhost:8080/gungnir/discoveries?domain=example.com"       # Discovered subdomains
+curl "http://localhost:8080/discovery?root_domain=example.com"           # Discovery runs
 ```
 
 ### Authenticated Scanning
@@ -807,6 +829,9 @@ Slash commands that turn ShakerScan evidence into seeds for smart scans, plus a 
 - `/review-skills [scope]` — audit local skill/command/agent surface for prompt bugs, broken refs, weak output contracts. Backed by `skills/review-skills/SKILL.md` + `skills-reviewer`.
 
 Typical pre-scan flow: `/js-analyze` → optionally pipe into `/content-discovery` → submit combined `custom_endpoints` to `/scan-smart`.
+
+All 13 installed slash commands and all skill/subagent manifests are enumerated in
+`docs/functionality-reference.md` §17.
 
 ## CLI Shortcuts
 

@@ -1,8 +1,11 @@
 # ShakerScan Functionality Reference — DAST + AI Red Teaming
 
-**Status:** Comprehensive functional reference for the whole product. This is the "what can ShakerScan
-actually do" map across both pillars: **DAST** (Dynamic Application Security Testing) and **AI red
-teaming** (AI Gate, Model Intake, AI Security Sessions, AI-assisted analysis).
+**Status:** Canonical exhaustive functional reference for the whole product. This is the "what can
+ShakerScan actually do" map across DAST, attack-surface management, AI security, evidence,
+governance, automation, UI, CLI, API, and agent-facing surfaces. The human-readable sections explain
+the behavior; the generated inventory in §17 enumerates every current public route, registry command,
+CLI flag, wrapper command, Make target, release gate, runtime configuration key, UI page, skill,
+agent, adapter, scanner module, and durable table.
 **Reconciled:** 2026-07-11
 **Audience:** users, operators, AI coding agents, and engineers who need one place that explains the
 product's functionality end to end.
@@ -11,7 +14,7 @@ product's functionality end to end.
 > writing. As with the sibling architecture docs, **the code, DB schema, and tests remain
 > authoritative** — file paths drift, so this reference prefers named files/symbols over line numbers.
 > Verify before depending on a detail. For implementation-depth and roadmap material, follow the
-> cross-links in [§13](#13-where-to-go-deeper).
+> cross-links in [§18](#18-where-to-go-deeper).
 
 ---
 
@@ -32,7 +35,9 @@ product's functionality end to end.
 13. [REST API reference (by area)](#13-rest-api-reference-by-area)
 14. [Configuration and integrated tools](#14-configuration-and-integrated-tools)
 15. [Safety model](#15-safety-model)
-16. [Where to go deeper](#16-where-to-go-deeper)
+16. [UI, CLI, skills, and agent surfaces](#16-ui-cli-skills-and-agent-surfaces)
+17. [Generated capability inventory](#17-generated-capability-inventory)
+18. [Where to go deeper](#18-where-to-go-deeper)
 
 ---
 
@@ -151,7 +156,8 @@ just want more or less depth.
 `active_max_endpoints` up to 10000, `max_urls` up to 100000, `active_max_seconds` up to 24h). Common
 knobs: `max_urls`, `browser_max_pages`, `api_probe_limit`, `nuclei_max_targets`, `active_max_seconds`,
 `active_max_endpoints`, `active_params_per_endpoint`, `smart_bola_max_endpoints`, `dom_xss_max_files`,
-`sqli_extract_max`, `oob_max_findings`, `active_worklist_max`.
+`sqli_extract_max`, `oob_max_findings`, `active_worklist_max`, `request_max`,
+`param_discovery_url_limit`, `param_discovery_max_params`, and `phase4_max_seconds`.
 
 The **smart** scan applies its own adaptive budget matrix (`SMART_SCAN_BUDGETS`) and supports
 `no_early_stop` + `thorough_params` shortcuts. See [`smart.md`](../smart.md) and
@@ -224,6 +230,16 @@ aggressive mode, with service/version detection.
 **Subdomain enumeration**: `subfinder` (passive), `gungnir` (CT logs), and crt.sh — see
 [§10](#10-attack-surface-management-discovery-ct-monitoring-schedules).
 
+**Historical and source-assisted discovery**: OpenAPI/Swagger schema discovery and Schemathesis
+execution; Wayback/Common Crawl/GAU helpers; JavaScript and browser-derived API bases; GraphQL schema
+recovery; gRPC reflection; virtual hosts; custom endpoint files, focus/avoid rules, and agent-produced
+`custom_endpoints`/`custom_list` seeds.
+
+**Threat intelligence and external posture**: opt-in DNSBL, AbuseIPDB, and VirusTotal IP reputation;
+typosquatting/lookalike-domain generation and resolution; WHOIS/RDAP domain age, expiry, and registrar
+analysis; certificate-transparency posture; ASN/hosting-provider/prefix/geography/multihoming facts;
+HIBP/GitHub-oriented breach and credential-leak checks; and third-party resource/vendor risk.
+
 Discovery toggles available in scan `options`: `json_link_following`, `options_method_discovery`,
 `grpc_discovery`, plus `custom_endpoints`, `custom_wordlist`, `custom_sqli_payloads`, and
 `custom_xss_payloads` for extension.
@@ -277,6 +293,14 @@ Race conditions (`race_condition_tests.py`) for checkout, coupons, balance, vote
 Nuclei template checks (`nuclei.py`, wave-staged in smart mode); infrastructure-leak checks
 (`infrastructure_checks.py`) for CI/CD config, cloud buckets, registries, k8s/terraform artifacts;
 critical checks (`critical_checks.py`) for default creds, directory listing, and verbose error pages.
+
+Opt-in infrastructure families also cover SSH authentication posture; SMTP STARTTLS, banner, MX, and
+safe open-relay checks; VPN, RDP/VNC, IoT, industrial-protocol, and database-service exposure; IP/ASN
+and domain intelligence; third-party vendor resources; webhook signature bypass; package-manager and
+backup artifacts; container registries; and Kubernetes/Terraform/cloud-storage exposure.
+
+OpenAPI schemas can be supplied explicitly or discovered and exercised through Schemathesis. The
+scanner records schema/test errors as evidence rather than treating process exit as proof.
 
 **Focused active filters** are available in `options`: `xss: true` runs only XSS active checks;
 `sqli: true` runs only SQLi.
@@ -335,14 +359,16 @@ Partial chains can be surfaced with `include_partial_attack_chains: true`.
 endpoints/parameters/templates discovered vs tested, by method and parameter location, plus discovery
 sources and auth states tested.
 
-**Compliance mapping** (`compliance_mapper.py`): OWASP Top 10, CWE, and control-framework context
-(SOC 2 / GDPR / PCI-DSS).
+**Compliance mapping** (`compliance_mapper.py`): OWASP Top 10, CWE, PCI DSS, SOC 2, HIPAA, GDPR, CIS
+Controls, control evidence requirements, business impact, remediation priority, and a GRC evidence
+matrix. These are evidence mappings, not certification claims.
 
 **Rich result object** (`result.*`): `http.csp_evaluation`, `http.security_headers`,
 `tls.certificate`, `tls.ocsp`, `dns`, `discovery.tech.items`, `discovery.browser_api_endpoints`,
 `discovery.browser_crawl`, `discovery.waf_detection`, `attack_chains`, `smart_coverage`, and — when AI
-is enabled — `ai_correlations` and `ai_logs.summary.cross_finding_correlations`. SARIF export is
-available (`sarif_output.py`); the UI offers PDF export.
+is enabled — `ai_correlations` and `ai_logs.summary.cross_finding_correlations`. SARIF 2.1 output,
+fingerprinted baselines, known-finding suppression, and severity-count quality gates are available
+through the scanner CLI; the UI offers PDF export.
 
 ---
 
@@ -420,9 +446,10 @@ are auto-added as targets (`discovery_source = gungnir-monitor`); if the root do
 discovered surface inherits the ASM policy. Controlled via `./scanner.sh gungnir start|stop|status`
 and `/gungnir/*` endpoints.
 
-**Schedules** (`schedule_runner`, `/schedules`): recurring daily/weekly scans per target with
-`time_of_day` (UTC), optional `day_of_week`, scan type, and `scan_options`, so important targets stay
-continuously monitored. Schedule listings include derived `schedule_health` when recent scan results
+**Schedules** (`schedule_runner`, `/schedules`): recurring daily/weekly actions with timezone and
+jitter support. `schedule_kind` supports normal scans, bounded `asm_improve` coverage waves, and
+`evidence_retention_sweep`. Retention sweeps default to preview; deletion requires a valid approval
+receipt and preserves remote objects. Schedule listings include derived `schedule_health` when recent scan results
 show repeated failures or timeout/heartbeat failures for the same active target/type pair, and the
 Dashboard Action Center links operators to the affected schedule plus the latest failed scan.
 
@@ -464,6 +491,10 @@ runs but the listed caveat applies — treat the caveat as load-bearing, not cos
 | Agent execution receipts | Shipped | Verifies content-hash, prev_hash chain, and signature (Ed25519/RSA/ECDSA). |
 | Deployment gate API | Shipped | Should converge on the unified proof/policy states. |
 | Durable policy + exception registry | Shipped | DB-backed `policy_profiles` + `finding_exceptions` + CRUD; consumed by the deployment decision; exceptions expire and re-open blocks. |
+| AI surface inventory and attempt ledger | Shipped | Stored surface/attempt facts are separate from findings and do not imply proof. |
+| AI campaign replay and longitudinal history | Shipped | Supports selected probe/family/error/skipped reruns; replay remains budgeted and production-gated. |
+| Model Intake saved trust anchors | Shipped | Write-managed public keys/fingerprints; inactive anchors do not satisfy strict policy. |
+| Model Intake evidence export | Shipped | Content-free/hashed export contracts preserve provenance and redaction boundaries. |
 
 ### AI proof and evidence states
 
@@ -572,6 +603,11 @@ Checks include:
   SBOM/AIBOM, malware-scan evidence, security-eval evidence, deployment restrictions, monitoring plan,
   and deployment approval.
 
+Saved trust anchors can be created, updated/deactivated, selected by policy, and previewed before a
+scan. `POST /model-intake/resolve` normalizes HTTP, Hugging Face, S3, GCS, Azure, OCI, and MLflow-like
+references and returns bounded candidate metadata; native authenticated byte fetching remains
+provider-dependent. Completed intake scans expose a dedicated evidence export.
+
 Result shape: `model_intake.checks.*`, `aibom`, `supply_chain`, `summary` (with the `decision`), and
 `artifact`. Findings are stored with `tool = model_intake` and filter independently through
 `source_type=model_intake`; they are excluded from `source_type=dast`. Sensitive URL params and
@@ -616,6 +652,15 @@ missing-signature/missing-approval model presets). Probe/test-case metadata is e
 `promptfoo`, `pyrit`, and `garak` formats (`/ai/test-cases/export`). See
 [`docs/AI_TEST_WORKFLOWS.md`](AI_TEST_WORKFLOWS.md).
 
+### 11.7 AI surface inventory, histories, replay, and evidence
+
+`/ai/surfaces/*` persists normalized AI surfaces and attempt facts independently of findings.
+AI-target and AI-scan campaign-history endpoints expose longitudinal decision, coverage, blocked,
+errored, and readiness-trend context; target history also has an export endpoint. Scan replay can
+rerun all probes or bounded slices selected by probe ID/family/error/skipped state while preserving
+the original target context and safety gates. Transcript reads support redacted default output and
+audited sensitive access only when the server policy allows it.
+
 ---
 
 ## 12. Cross-cutting: findings, exposure graph, workers, queue
@@ -636,6 +681,34 @@ Retention sweeps are dry-run by default, skip legal hold, can delete local objec
 explicitly executed, and report remote-object candidates as preserved because remote deletion is not
 yet supported.
 
+**Evidence instances and exports**: proof instances bind a concrete route/object/payload/principal
+pair to evidence objects, tool receipts, campaign actions, proof state, and retention policy. APIs
+list/record instances, export content-free manifests or bounded bundles, verify object hashes on
+read, and record export events. Retention classes are `short`, `standard`, `audit`, `legal_hold`, and
+`sensitive`; legal hold is never swept.
+
+**Mission campaigns and action ledger**: campaigns are durable operating wrappers over Continuous
+ASM, authenticated DAST, API authorization, AI red-team, Model Intake, benchmark, and retest work.
+Campaign actions retain plan/command/scope/approval/evidence/hypothesis/tool-receipt links and
+explicit execution state. The cross-product `/timeline` merges actions, scans, evidence, exports,
+refuter reviews, and upcoming schedules.
+
+**Hypothesis lifecycle**: source/spec hints, operation plans, benchmark artifacts, scanner signals,
+and application-graph producer/object/consumer facts can create source-only hypotheses. Hypotheses
+support dedupe, optimistic versions, leased claims, endorsements/refutations, signals, next-test
+planning, situation reports, and campaign linkage. Only exact existing deterministic finding proof
+can reconcile a hypothesis into the canonical finding path.
+
+**Refuter reviews**: durable support/question/weaken/refute signals challenge weak or high-impact
+claims. Summary, queue, execution, and verdict derivation APIs delegate to existing gated replay or
+retest primitives. Signal-only, failed, error, and AI-only results cannot create proof-backed verdicts.
+
+**Scope, approval, context, and decision contracts**: scope previews create bounded receipts;
+approval/denial receipts bind confirmations and expiry to that scope. Operation plans, command
+results, agent context packs, agent decision traces, tool receipts, evidence instances, and campaign
+actions are versioned/redacted audit records. Local-agent planning remains dry-run and parser-
+validated; it has no raw-shell command or direct finding authority.
+
 **Exposure graph** (`/exposure/*`): a derived graph across domains, targets, APIs, auth roles,
 vendors, AI surfaces, MCP tools, model artifacts, scans, and findings, with asset-centric breakdowns
 (by owner/tier/classification), change deltas over time, and attack-path views. Backs the UI
@@ -653,8 +726,10 @@ auto-retest-on-scan-complete policy.
 
 ## 13. REST API reference (by area)
 
-Base URL `http://localhost:8080`. All POST/PATCH bodies are JSON. FastAPI also serves the live schema
-at `/openapi.json`. (Endpoints grouped by area; see `api/api.py` for handlers. The agent-facing
+Base URL `http://localhost:8080`. Most structured POST/PATCH operations accept JSON, while some
+control and discovery operations use query parameters or no body. FastAPI also serves the live schema
+at `/openapi.json`. The curated groups below explain product areas; §17 is the exhaustive generated
+method/path catalog. (See `api/api.py` for handlers. The agent-facing
 how-to with request bodies is in [`CLAUDE.md`](../CLAUDE.md) / [`AGENTS.md`](../AGENTS.md).)
 
 **Health & settings**: `GET /` · `GET /health` · `GET|PUT /settings/ai` · `POST /settings/ai/test` ·
@@ -716,10 +791,19 @@ State-changing commands are not exposed. See [`docs/read-only-mcp.md`](read-only
 `POST /ai/surfaces/sync` · `GET /ai/surfaces` · `GET /ai/surfaces/{id}/attempts`
 
 **Model Intake**: `POST /model-intake/resolve` · `POST /model-intake/scan` ·
-`POST /model-intake/targets/{id}/rescan`
+`POST /model-intake/targets/{id}/rescan` · `GET|POST /model-intake/trust-anchors` ·
+`PATCH|DELETE /model-intake/trust-anchors/{id}` ·
+`GET /model-intake/scans/{id}/evidence-export`
 
 **Governance (deployment gate)**: `GET|POST /policy-profiles` · `PATCH|DELETE /policy-profiles/{id}` ·
-`GET|POST /finding-exceptions` · `PATCH|DELETE /finding-exceptions/{id}`
+`GET|POST /finding-exceptions` · `PATCH|DELETE /finding-exceptions/{id}` ·
+`POST /finding-exceptions/lifecycle/sweep`
+
+**Evidence and mission control**: `GET|POST /evidence/instances` · `GET /evidence/{id}` ·
+`GET /evidence/export-manifest` · `GET /evidence/export-bundle` ·
+`POST /evidence/retention/sweep` · `GET /timeline` · `GET|POST /arsenal/campaigns` ·
+`GET /arsenal/campaigns/{id}` · `POST /arsenal/campaigns/{id}/actions` ·
+`GET|POST /arsenal/tool-receipts`
 
 **AI Ops Router**: `POST /ai/ops/route`
 
@@ -768,9 +852,12 @@ explicit per-scan auth fields retain precedence, and undecryptable/expired profi
 - Deployment/binding: `SHAKERSCAN_BIND_HOST`, `SHAKERSCAN_PUBLIC_HOST`, `SHAKERSCAN_REMOTE`.
 
 **Integrated external tools**: `httpx` (HTTP probing), `katana` (crawling), `nuclei` (templates),
-`dalfox` (XSS), `sqlmap` (SQLi), `subfinder` (passive subdomains), `gungnir` (CT logs), `sslyze` +
-`testssl.sh` (TLS), `nmap` (ports), and Playwright (browser). Subprocess execution is concurrency-
-limited with per-tool timeouts and a global deadline.
+`ffuf`/`meg`/`dirb`/`gobuster` (content discovery), `dalfox`/XSStrike (XSS), `sqlmap`/commix
+(injection), `subfinder`/Gungnir/dnsrecon (domain discovery), `tlsx`/SSLyze/testssl.sh/OpenSSL (TLS),
+`nmap`/masscan/netcat (ports and services), `nikto`, `hydra`/`medusa`, `whois`, Shodan client support,
+and Playwright (browser). The authoritative execution-facing adapter catalog is generated in §17;
+an installed binary is not automatically a runnable ShakerScan adapter. Subprocess execution is
+concurrency-limited with per-tool timeouts and a global deadline.
 
 ---
 
@@ -797,7 +884,902 @@ limited with per-tool timeouts and a global deadline.
 
 ---
 
-## 16. Where to go deeper
+## 16. UI, CLI, skills, and agent surfaces
+
+### Web UI routes
+
+| Route | Operator capability |
+|---|---|
+| `/` | Dashboard metrics, queue, worker/resource controls, Gungnir, product status, and action center |
+| `/scan/new` | Scan type, parallel strategy, coverage budget, active options, auth, and custom budget submission |
+| `/scans` | Filter, inspect, cancel, and rescan logical scans without exposing internal rows by default |
+| `/scans/{id}` | Live progress/logs, report, proof/coverage, deployment decision, AI/Model Intake panels, replay, history, and PDF |
+| `/targets` | Hierarchical target inventory, search/filter/sort, scanning, discovery, and schedule entry points |
+| `/targets/{id}/graph` | Route/object/principal graph, producer/consumer/auth edges, and graph-derived hypotheses |
+| `/asm` | Coverage, scheduler state, proof-family gaps, recommendations, endpoint inventory, and campaign timeline |
+| `/exposure` | Cross-product graph, asset inventory, deltas, and attack paths |
+| `/findings` | Granular source/severity/status/domain/date filters, sorting, bulk triage, cleanup, and retest entry points |
+| `/findings/{id}` | Evidence, raw request/response, proof/retest history, notes, status, deletion, and remediation |
+| `/interactive` | Browser sessions, credential profiles, principals, authorization expectations, endpoint replay, and manual findings |
+| `/schedules` | Normal scans, ASM waves, and approval-gated evidence-retention schedules |
+| `/settings` | AI provider, scan execution, and automation policy settings |
+| `/settings/ai-gate` | AI target/principal lifecycle, inventory, readiness, probe packs, scans, and longitudinal history |
+| `/settings/model-intake` | Reference resolution, trust preview/anchors, presets, policy selection, and intake submission |
+| `/settings/policy-profiles` | Deployment policy profile lifecycle across DAST, AI Gate, and Model Intake |
+| `/settings/exceptions` | Finding-exception queue, repair, expiry visibility, and lifecycle sweep |
+| `/settings/arsenal` | Command contracts, receipts, plans, actions, hypotheses, refuters, tools, local agents, context packs, and traces |
+
+### API-only or partially UI-backed workflows
+
+Not every public operation should have a dedicated screen. The following are intentionally available
+primarily to CI, agents, integrations, or advanced operators: batch scan submission; target dedupe;
+raw result/result-folder reads; queue emergency clear; ASM prune; AI surface sync/attempt rows;
+content-free evidence manifests and bundle exports; direct evidence-instance/tool-receipt recording;
+mission campaign CRUD/linking and the cross-product timeline; hypothesis claim/signal/from-plan/from-
+benchmark/campaign planning; generic Arsenal execution; local-agent output parsing; bulk finding
+retest/update/manual creation; and AI Ops routing. §17 lists every operation so this boundary is
+visible rather than accidental.
+
+### Scanner CLI
+
+`scanner/scanner.py` supports direct quick/standard/deep/full/aggressive/smart execution, focused
+XSS/SQLi/family modes, public-only collection, explicit endpoints/files/OpenAPI schemas, browser and
+discovery controls, complete/threat-intel/exposure bundles, one- and two-user auth, OAuth and login
+flows, custom dictionaries, OOB callbacks, coverage budgets, compliance output, SARIF, baselines,
+quality gates, subdomain and Nuclei-only modes, tool health checks, and internal zero-rediscovery/
+focused-child execution. Every current flag and help string is generated in §17.
+
+`scanner.sh` is the operational wrapper for service lifecycle, health/doctor checks, scaling, logs,
+builds, dependency installation, direct scan submission, agent/MCP launch, Gungnir, environment
+inspection, and container shells. The Make targets provide stable end-to-end and release-gate entry
+points. Their complete current command names, release-gate names, and every explicit runtime
+environment key referenced by Python or Compose are generated in §17; values are intentionally
+never read into documentation.
+
+### Skills, slash commands, and specialized agents
+
+- `ai-security-session`: drives authorized interactive Playwright testing with explicit evidence and
+  finding-save boundaries.
+- `js-analyze`: converts bundles and browser evidence into routes, APIs, libraries, secret leads,
+  `custom_endpoints`, and content-discovery seeds.
+- `content-discovery`: builds generic and app-specific route/file/API lists and scanner/ffuf inputs.
+- `review-skills`: audits skills, commands, and subagents for broken references, unsafe prompts, and
+  missing gates or output contracts.
+
+The slash-command layer provides scan, smart/full scan, AI Gate, interactive session, finding list/
+save, subdomain, worker, status, JS analysis, content discovery, and skill-review workflows. Three
+specialized Claude subagents back JS analysis, content discovery, and skill review. The product also
+catalogs Codex, Claude Code, OpenCode, and Hermes local-agent capabilities; capability detection and
+dry-run planning do not grant execution or finding authority.
+
+---
+
+## 17. Generated capability inventory
+
+This appendix is generated directly from code and repository manifests. It is intentionally verbose:
+it is the exhaustive backstop behind the human-readable product map above.
+
+<!-- BEGIN GENERATED CAPABILITY INVENTORY -->
+
+> **Generated source inventory.** Run `python3 scripts/generate_capability_inventory.py` after
+> changing any inventoried surface. CI uses `--check`; do not edit this block manually.
+
+### Inventory Summary
+
+| Surface | Count | Source |
+|---|---|---|
+| Public REST operations | 194 | `api/api.py` FastAPI decorators |
+| Unique REST paths | 154 | `api/api.py` |
+| Check families | 13 | `api/check_registry.py` |
+| Command Arsenal commands | 73 | `api/command_arsenal.py` |
+| Tool adapters | 13 | `api/command_arsenal.py` |
+| Local-agent adapters | 4 | `api/command_arsenal.py` |
+| Scanner CLI flags | 158 | `scanner/scanner.py` |
+| Scanner wrapper commands | 22 | `scanner.sh` |
+| Make targets | 7 | `Makefile` |
+| Release gates | 10 | `scripts/release_gates.py` |
+| Runtime environment keys | 190 | Python sources + Compose manifests |
+| Scanner modules | 83 | `scanner/scanner_tools/` |
+| UI pages | 18 | `ui/src/app/` |
+| Skills | 4 | `skills/` |
+| Slash commands | 13 | `.claude/commands/` |
+| Specialized subagents | 3 | `.claude/agents/` |
+| Durable tables | 38 | `db/init.sql` + migrations |
+
+### Public REST Operations
+
+| Method | Path | Handler |
+|---|---|---|
+| `GET` | `/` | `root` |
+| `GET` | `/agents/local` | `local_agents` |
+| `POST` | `/agents/local/plan` | `local_agent_dry_run_plan` |
+| `POST` | `/agents/local/plan/parse` | `local_agent_parse_candidate_plan` |
+| `POST` | `/agents/local/test` | `local_agent_test` |
+| `POST` | `/ai/demo/run` | `run_ai_honey_demo` |
+| `POST` | `/ai/findings/{finding_id:path}/retest` | `retest_ai_finding` |
+| `GET` | `/ai/inventory` | `get_ai_inventory` |
+| `GET` | `/ai/learning-guide` | `get_ai_learning_guide` |
+| `POST` | `/ai/ops/route` | `ai_ops_route` |
+| `GET` | `/ai/scans/{scan_id}/campaign-history` | `get_ai_scan_campaign_history` |
+| `POST` | `/ai/scans/{scan_id}/replay` | `replay_ai_scan` |
+| `DELETE` | `/ai/scans/{scan_id}/transcript` | `purge_ai_scan_transcript` |
+| `GET` | `/ai/scans/{scan_id}/transcript` | `get_ai_scan_transcript` |
+| `GET` | `/ai/surfaces` | `list_ai_surfaces` |
+| `POST` | `/ai/surfaces/sync` | `sync_ai_surfaces` |
+| `GET` | `/ai/surfaces/{surface_id}/attempts` | `list_ai_surface_attempts` |
+| `GET` | `/ai/targets` | `list_ai_targets` |
+| `POST` | `/ai/targets` | `create_ai_target` |
+| `DELETE` | `/ai/targets/{target_id}` | `delete_ai_target` |
+| `PATCH` | `/ai/targets/{target_id}` | `update_ai_target` |
+| `GET` | `/ai/targets/{target_id}/campaign-history` | `get_ai_target_campaign_history` |
+| `GET` | `/ai/targets/{target_id}/campaign-history/export` | `get_ai_target_campaign_history_export` |
+| `POST` | `/ai/targets/{target_id}/mcp/live-readiness` | `test_ai_target_mcp_live_readiness` |
+| `GET` | `/ai/targets/{target_id}/principals` | `list_ai_target_principals` |
+| `POST` | `/ai/targets/{target_id}/principals` | `create_ai_target_principal` |
+| `DELETE` | `/ai/targets/{target_id}/principals/{principal_id}` | `delete_ai_target_principal` |
+| `PATCH` | `/ai/targets/{target_id}/principals/{principal_id}` | `update_ai_target_principal` |
+| `GET` | `/ai/targets/{target_id}/runtime-risk` | `get_ai_target_runtime_risk` |
+| `POST` | `/ai/targets/{target_id}/scan` | `scan_ai_target` |
+| `POST` | `/ai/targets/{target_id}/test` | `test_ai_target_connectivity` |
+| `GET` | `/ai/test-cases` | `list_ai_test_cases` |
+| `GET` | `/ai/test-cases/export` | `export_ai_test_cases` |
+| `GET` | `/ai/test-scenarios` | `list_ai_test_scenarios` |
+| `POST` | `/arsenal/approvals` | `arsenal_create_approval` |
+| `GET` | `/arsenal/campaign-actions` | `arsenal_campaign_actions` |
+| `POST` | `/arsenal/campaign-actions/{campaign_action_id}/authz-promote` | `arsenal_promote_authz_replay` |
+| `POST` | `/arsenal/campaign-actions/{campaign_action_id}/authz-replay` | `arsenal_execute_authz_replay` |
+| `GET` | `/arsenal/campaigns` | `arsenal_campaigns` |
+| `POST` | `/arsenal/campaigns` | `arsenal_create_campaign` |
+| `GET` | `/arsenal/campaigns/{campaign_id}` | `arsenal_campaign_detail` |
+| `POST` | `/arsenal/campaigns/{campaign_id}/actions` | `arsenal_link_campaign_action` |
+| `GET` | `/arsenal/command-results` | `arsenal_command_results` |
+| `GET` | `/arsenal/commands` | `arsenal_commands` |
+| `GET` | `/arsenal/context-packs` | `arsenal_agent_context_packs` |
+| `POST` | `/arsenal/context-packs` | `arsenal_create_agent_context_pack` |
+| `POST` | `/arsenal/context-packs/from-target` | `arsenal_create_agent_context_pack_from_target` |
+| `GET` | `/arsenal/contracts` | `arsenal_contracts` |
+| `GET` | `/arsenal/decision-traces` | `arsenal_agent_decision_traces` |
+| `POST` | `/arsenal/decision-traces` | `arsenal_create_agent_decision_trace` |
+| `POST` | `/arsenal/execute` | `arsenal_execute` |
+| `GET` | `/arsenal/hypotheses` | `arsenal_hypotheses` |
+| `POST` | `/arsenal/hypotheses` | `arsenal_record_hypothesis` |
+| `POST` | `/arsenal/hypotheses/from-benchmark` | `arsenal_generate_hypotheses_from_benchmark` |
+| `POST` | `/arsenal/hypotheses/from-plan` | `arsenal_generate_hypotheses_from_plan` |
+| `GET` | `/arsenal/hypotheses/situation-report` | `arsenal_hypothesis_situation_report` |
+| `POST` | `/arsenal/hypotheses/source-ingest` | `arsenal_generate_hypotheses_from_source` |
+| `POST` | `/arsenal/hypotheses/{hypothesis_id}/claim` | `arsenal_claim_hypothesis` |
+| `POST` | `/arsenal/hypotheses/{hypothesis_id}/plan-campaign` | `arsenal_plan_hypothesis_campaign` |
+| `POST` | `/arsenal/hypotheses/{hypothesis_id}/reconcile-proof` | `arsenal_reconcile_hypothesis_proof` |
+| `POST` | `/arsenal/hypotheses/{hypothesis_id}/signals` | `arsenal_append_hypothesis_signal` |
+| `GET` | `/arsenal/plans` | `arsenal_operation_plans` |
+| `POST` | `/arsenal/plans` | `arsenal_create_operation_plan` |
+| `GET` | `/arsenal/refuter-reviews` | `arsenal_refuter_reviews` |
+| `POST` | `/arsenal/refuter-reviews` | `arsenal_record_refuter_review` |
+| `POST` | `/arsenal/refuter-reviews/queue-from-summary` | `arsenal_queue_refuter_reviews_from_summary` |
+| `GET` | `/arsenal/refuter-reviews/summary` | `arsenal_refuter_review_summary` |
+| `POST` | `/arsenal/refuter-reviews/{refuter_review_id}/derive-verdict` | `arsenal_derive_refuter_review_verdict` |
+| `POST` | `/arsenal/refuter-reviews/{refuter_review_id}/execute` | `arsenal_execute_refuter_review_plan` |
+| `POST` | `/arsenal/scope/preview` | `arsenal_scope_preview` |
+| `GET` | `/arsenal/tool-receipts` | `arsenal_tool_receipts` |
+| `POST` | `/arsenal/tool-receipts` | `arsenal_record_tool_receipt` |
+| `GET` | `/arsenal/tools` | `arsenal_tools` |
+| `GET` | `/asm/check-families` | `asm_check_families` |
+| `GET` | `/dashboard` | `dashboard` |
+| `GET` | `/discovery` | `list_discovery_runs` |
+| `POST` | `/discovery` | `start_discovery` |
+| `GET` | `/discovery/{discovery_id}` | `get_discovery` |
+| `GET` | `/domains` | `list_domains` |
+| `GET` | `/evidence/export-bundle` | `evidence_export_bundle` |
+| `GET` | `/evidence/export-manifest` | `evidence_export_manifest` |
+| `GET` | `/evidence/instances` | `list_evidence_instances` |
+| `POST` | `/evidence/instances` | `record_evidence_instance` |
+| `POST` | `/evidence/retention/sweep` | `evidence_retention_sweep` |
+| `GET` | `/evidence/{evidence_id}` | `get_evidence_object` |
+| `GET` | `/exposure/assets` | `exposure_assets` |
+| `GET` | `/exposure/attack-paths` | `exposure_attack_paths` |
+| `GET` | `/exposure/changes` | `exposure_changes` |
+| `GET` | `/exposure/graph` | `exposure_graph` |
+| `GET` | `/exposure/nodes` | `exposure_nodes` |
+| `GET` | `/finding-exceptions` | `list_finding_exceptions` |
+| `POST` | `/finding-exceptions` | `create_finding_exception` |
+| `POST` | `/finding-exceptions/lifecycle/sweep` | `finding_exception_lifecycle_sweep` |
+| `DELETE` | `/finding-exceptions/{exception_id}` | `delete_finding_exception` |
+| `PATCH` | `/finding-exceptions/{exception_id}` | `update_finding_exception` |
+| `GET` | `/findings` | `list_findings` |
+| `POST` | `/findings/bulk` | `bulk_update_findings` |
+| `POST` | `/findings/cleanup` | `cleanup_findings` |
+| `POST` | `/findings/manual` | `create_manual_finding` |
+| `POST` | `/findings/retest` | `bulk_retest_findings` |
+| `DELETE` | `/findings/{finding_id:path}` | `delete_finding` |
+| `GET` | `/findings/{finding_id:path}` | `get_finding` |
+| `PATCH` | `/findings/{finding_id:path}` | `update_finding` |
+| `POST` | `/findings/{finding_id:path}/retest` | `retest_finding` |
+| `GET` | `/findings/{finding_id}/evidence` | `list_finding_evidence` |
+| `POST` | `/gungnir/start` | `gungnir_start` |
+| `GET` | `/gungnir/status` | `gungnir_status` |
+| `POST` | `/gungnir/stop` | `gungnir_stop` |
+| `GET` | `/health` | `health` |
+| `POST` | `/model-intake/resolve` | `resolve_model_intake` |
+| `POST` | `/model-intake/scan` | `scan_model_intake` |
+| `GET` | `/model-intake/scans/{scan_id}/evidence-export` | `get_model_intake_evidence_export` |
+| `POST` | `/model-intake/targets/{target_id}/rescan` | `rescan_model_intake_target` |
+| `GET` | `/model-intake/trust-anchors` | `list_model_intake_trust_anchors` |
+| `POST` | `/model-intake/trust-anchors` | `create_model_intake_trust_anchor` |
+| `DELETE` | `/model-intake/trust-anchors/{anchor_id}` | `deactivate_model_intake_trust_anchor` |
+| `PATCH` | `/model-intake/trust-anchors/{anchor_id}` | `update_model_intake_trust_anchor` |
+| `GET` | `/policy-profiles` | `list_policy_profiles` |
+| `POST` | `/policy-profiles` | `create_policy_profile` |
+| `DELETE` | `/policy-profiles/{profile_id}` | `delete_policy_profile` |
+| `PATCH` | `/policy-profiles/{profile_id}` | `update_policy_profile` |
+| `DELETE` | `/queue/clear` | `clear_queue` |
+| `GET` | `/queue/stats` | `queue_stats` |
+| `GET` | `/results` | `list_results` |
+| `GET` | `/results/{target_folder}/latest` | `get_latest_result` |
+| `GET` | `/retests/finding/{finding_id:path}` | `list_finding_retests` |
+| `GET` | `/retests/{retest_id}` | `get_retest` |
+| `GET` | `/scans` | `list_scans` |
+| `POST` | `/scans` | `submit_scan` |
+| `POST` | `/scans/batch` | `submit_batch` |
+| `GET` | `/scans/{scan_id}` | `get_scan` |
+| `GET` | `/scans/{scan_id}/ai-redteam-report` | `get_ai_redteam_report` |
+| `POST` | `/scans/{scan_id}/cancel` | `cancel_scan` |
+| `GET` | `/scans/{scan_id}/deployment-decision` | `get_scan_deployment_decision` |
+| `GET` | `/scans/{scan_id}/logs` | `get_scan_logs` |
+| `GET` | `/scans/{scan_id}/result` | `get_scan_result` |
+| `GET` | `/schedules` | `list_schedules` |
+| `POST` | `/schedules` | `create_schedule` |
+| `DELETE` | `/schedules/{schedule_id}` | `delete_schedule` |
+| `GET` | `/schedules/{schedule_id}` | `get_schedule` |
+| `PATCH` | `/schedules/{schedule_id}` | `update_schedule` |
+| `POST` | `/session/start` | `start_session` |
+| `DELETE` | `/session/{session_id}` | `end_session` |
+| `GET` | `/session/{session_id}` | `get_session_state` |
+| `POST` | `/session/{session_id}/action` | `session_action` |
+| `POST` | `/session/{session_id}/findings` | `create_session_finding` |
+| `POST` | `/session/{session_id}/screenshot` | `session_screenshot` |
+| `GET` | `/session/{session_id}/screenshot.png` | `session_screenshot_raw` |
+| `POST` | `/session/{session_id}/test-endpoint` | `session_test_endpoint` |
+| `GET` | `/sessions` | `list_sessions` |
+| `GET` | `/settings/ai` | `get_ai_settings` |
+| `PUT` | `/settings/ai` | `update_ai_settings` |
+| `POST` | `/settings/ai/test` | `test_ai_settings` |
+| `GET` | `/settings/automation` | `get_automation_settings` |
+| `PUT` | `/settings/automation` | `update_automation_settings` |
+| `GET` | `/settings/scan-execution` | `get_scan_execution_settings` |
+| `PUT` | `/settings/scan-execution` | `update_scan_execution_settings` |
+| `GET` | `/system/resources` | `get_system_resources` |
+| `GET` | `/targets` | `list_targets` |
+| `POST` | `/targets` | `create_target` |
+| `POST` | `/targets/dedupe` | `dedupe_targets` |
+| `GET` | `/targets/grouped` | `list_targets_grouped` |
+| `DELETE` | `/targets/{target_id}` | `delete_target` |
+| `GET` | `/targets/{target_id}` | `get_target` |
+| `PATCH` | `/targets/{target_id}` | `update_target` |
+| `GET` | `/targets/{target_id}/asm/activity` | `asm_activity` |
+| `GET` | `/targets/{target_id}/asm/coverage` | `asm_coverage` |
+| `GET` | `/targets/{target_id}/asm/diff` | `asm_diff` |
+| `GET` | `/targets/{target_id}/asm/endpoints` | `asm_list_endpoints` |
+| `GET` | `/targets/{target_id}/asm/gaps` | `asm_gaps` |
+| `POST` | `/targets/{target_id}/asm/improve` | `asm_improve` |
+| `GET` | `/targets/{target_id}/asm/policy` | `asm_get_policy` |
+| `PUT` | `/targets/{target_id}/asm/policy` | `asm_set_policy` |
+| `POST` | `/targets/{target_id}/asm/prune` | `asm_prune` |
+| `POST` | `/targets/{target_id}/asm/recon` | `asm_recon` |
+| `POST` | `/targets/{target_id}/asm/test` | `asm_test` |
+| `GET` | `/targets/{target_id}/credential-profiles` | `list_target_credential_profiles` |
+| `POST` | `/targets/{target_id}/credential-profiles` | `create_target_credential_profile` |
+| `DELETE` | `/targets/{target_id}/credential-profiles/{profile_id}` | `delete_target_credential_profile` |
+| `PATCH` | `/targets/{target_id}/credential-profiles/{profile_id}` | `update_target_credential_profile` |
+| `POST` | `/targets/{target_id}/credential-profiles/{profile_id}/rotate` | `rotate_target_credential_profile` |
+| `GET` | `/targets/{target_id}/graph` | `get_application_graph` |
+| `POST` | `/targets/{target_id}/graph/hypotheses` | `generate_application_graph_hypotheses` |
+| `GET` | `/targets/{target_id}/principal-matrix` | `list_target_principal_matrix` |
+| `POST` | `/targets/{target_id}/principal-matrix` | `upsert_target_principal_matrix` |
+| `DELETE` | `/targets/{target_id}/principal-matrix/{expectation_id}` | `delete_target_principal_expectation` |
+| `GET` | `/targets/{target_id}/principals` | `list_target_principals` |
+| `POST` | `/targets/{target_id}/principals` | `create_target_principal` |
+| `DELETE` | `/targets/{target_id}/principals/{principal_id}` | `delete_target_principal` |
+| `PATCH` | `/targets/{target_id}/principals/{principal_id}` | `update_target_principal` |
+| `POST` | `/targets/{target_id}/scan` | `scan_target` |
+| `GET` | `/timeline` | `mission_timeline` |
+| `GET` | `/workers` | `get_workers` |
+| `POST` | `/workers` | `scale_workers` |
+
+### Check-Family Registry
+
+| Name | Phase | Family | Active | Risk | Runnable | Adapter | Telemetry | Description |
+|---|---|---|---|---|---|---|---|---|
+| `auth` | active | access_control | True | medium | True | `asm_endpoint_batch` | `active_endpoint_attempt_v1` | Read-only authenticated-vs-anonymous access checks for focused ASM endpoint batches. |
+| `bola` | active | access_control | True | high | True | `asm_endpoint_batch` | `active_endpoint_attempt_v1` | Multi-user object authorization comparisons. Requires Lab/deep policy and two auth contexts. |
+| `business_logic` | active | workflow | True | high | False | `none` | `planned_workflow_attempt` | Workflow/business-logic testing. Planned for AI/manual-assisted campaigns. |
+| `headers` | passive | headers | False | low | True | `legacy_config_findings` | `planned_passive_attempt` | HTTP security header posture checks. |
+| `jwt` | active | authentication | True | medium | True | `legacy_advanced_jwt` | `jwt_probe_attempt_v1` | JWT algorithm, signature, key, and claim mutation checks with acceptance proof. |
+| `lfi` | active | server_side | True | high | False | `none` | `planned_high_risk_attempt` | File inclusion and path traversal checks. Planned and permission-gated. |
+| `mass_assignment` | active | access_control | True | medium | True | `legacy_phase4_mass_assignment` | `mass_assignment_attempt_v1` | Bounded privileged-field mutation with baseline-vs-response effect proof. |
+| `nuclei` | template | nuclei | False | low | True | `legacy_nuclei_template` | `nuclei_template` | Nuclei template checks by severity/tag. Not an ASM endpoint-test family yet. |
+| `rce` | active | server_side | True | high | False | `none` | `planned_high_risk_attempt` | Command/code execution checks. Planned and permission-gated. |
+| `recon` | recon | passive | False | low | True | `legacy_discovery` | `discovery` | Crawl, API/HAR/OpenAPI discovery, and passive surface refresh. |
+| `sqli` | active | injection | True | medium | True | `legacy_active_loop` | `active_endpoint_attempt_v1` | SQL injection probes and proof/extraction depth. |
+| `ssrf` | active | server_side | True | high | False | `none` | `planned_high_risk_attempt` | Server-side request forgery checks. Planned and permission-gated. |
+| `xss` | active | client | True | medium | True | `legacy_active_loop` | `active_endpoint_attempt_v1` | Reflected, stored, and DOM XSS probes. |
+
+### Command Arsenal
+
+| Command | Family | Status | Risk | HTTP | Path | Description |
+|---|---|---|---|---|---|---|
+| `agent_context_pack.generate_from_target` | governance | dry_run | read_only | POST | `/arsenal/context-packs/from-target` | Generate and persist a bounded AgentContextPack from stored target facts without executing work. |
+| `agent_context_pack.list` | governance | read_only | read_only | GET | `/arsenal/context-packs` | Read recent bounded AgentContextPack records. |
+| `agent_context_pack.record` | governance | dry_run | read_only | POST | `/arsenal/context-packs` | Validate and persist a bounded redacted AgentContextPack without executing work. |
+| `agent_decision_trace.list` | governance | read_only | read_only | GET | `/arsenal/decision-traces` | Read recent AgentDecisionTrace audit records. |
+| `agent_decision_trace.record` | governance | dry_run | read_only | POST | `/arsenal/decision-traces` | Validate and persist a dry-run AgentDecisionTrace without executing actions. |
+| `ai_gate.replay_probe` | ai_gate | gated | active | POST | `/ai/scans/{scan_id}/replay` | Queue focused AI Gate replay using original target/profile/probe context. |
+| `ai_gate.scan` | ai_gate | gated | active | POST | `/ai/targets/{target_id}/scan` | Queue an AI Gate scan for a saved AI target through the existing production and approval gates. |
+| `ai_gate.target_history_export` | ai_gate | read_only | read_only | GET | `/ai/targets/{target_id}/campaign-history/export` | Read a content-free AI Gate target campaign-history export with readiness trends, trend series, and report links. |
+| `ai_target.list` | ai_gate | read_only | read_only | GET | `/ai/targets` | List configured AI Gate targets and control metadata. |
+| `approval.record` | governance | gated | credential | POST | `/arsenal/approvals` | Persist an approval or denial receipt for an existing scope receipt without executing work. |
+| `asm.activity` | asm | read_only | read_only | GET | `/targets/{target_id}/asm/activity` | Read recent Continuous ASM recon/test activity and the target campaign timeline. |
+| `asm.gaps` | asm | read_only | read_only | GET | `/targets/{target_id}/asm/gaps` | Explain remaining Continuous ASM gaps and recommended campaigns for one target. |
+| `asm.improve` | asm | gated | active | POST | `/targets/{target_id}/asm/improve` | Queue or preview the next Continuous ASM action for one target. |
+| `asm.recon` | asm | gated | passive | POST | `/targets/{target_id}/asm/recon` | Queue an explicit Continuous ASM recon refresh for a target's persistent endpoint inventory. |
+| `asm.test` | asm | gated | active | POST | `/targets/{target_id}/asm/test` | Queue an async exploitation batch over untested/stale Continuous ASM inventory endpoints. |
+| `authz.promote_replay_finding` | authz | gated | credential | POST | `/arsenal/campaign-actions/{campaign_action_id}/authz-promote` | Promote a stored authz replay violation into a manual-source finding with replay evidence refs. Requires explicit authorization. |
+| `authz.replay_plan` | authz | gated | credential | POST | `/arsenal/campaign-actions/{campaign_action_id}/authz-replay` | Execute a stored deterministic authorization replay plan through an existing interactive session. Does not create findings automatically. |
+| `campaign.create` | governance | dry_run | read_only | POST | `/arsenal/campaigns` | Create a mission campaign record (the operating wrapper over ASM/scan/AI Gate/Model Intake/retest actions). Records only; queues no work and creates no findings. |
+| `campaign.get` | governance | read_only | read_only | GET | `/arsenal/campaigns/{campaign_id}` | Read one mission campaign plus its linked action-ledger rollup. |
+| `campaign.link_action` | governance | dry_run | read_only | POST | `/arsenal/campaigns/{campaign_id}/actions` | Link an existing command-result/action-ledger row to a mission campaign. Bookkeeping link only; changes no proof state and creates no findings. |
+| `campaign.list` | governance | read_only | read_only | GET | `/arsenal/campaigns` | Read recent mission campaign records. |
+| `campaign_action.list` | governance | read_only | read_only | GET | `/arsenal/campaign-actions` | Read recent campaign/action execution records derived from product actions and command results. |
+| `command_result.list` | governance | read_only | read_only | GET | `/arsenal/command-results` | Read recent Command Arsenal result/audit records for queued, partial, or blocked product actions. |
+| `deployment.decision` | governance | read_only | read_only | GET | `/scans/{scan_id}/deployment-decision` | Read deployment gate decision for a scan and policy profile. |
+| `evidence.export_bundle` | evidence | read_only | read_only | GET | `/evidence/export-bundle` | Read a content-free evidence export bundle descriptor or metadata zip with manifest hash, API replay paths, and retention/integrity summaries. |
+| `evidence.export_manifest` | evidence | read_only | read_only | GET | `/evidence/export-manifest` | Read a content-free evidence export manifest with hashes, storage URIs, retention classes, and integrity status. |
+| `evidence.get` | evidence | read_only | read_only | GET | `/findings/{finding_id}/evidence` | Read redacted durable evidence objects for a finding. |
+| `evidence.retention_sweep` | evidence | gated | active | POST | `/evidence/retention/sweep` | Preview or execute bounded evidence-object retention cleanup. dry_run=true is a safe preview; dry_run=false deletes rows/files and is gated (state-changing). legal_hold is never selected and active-finding evidence is never deleted. |
+| `evidence_instance.list` | evidence | read_only | read_only | GET | `/evidence/instances` | Read concrete evidence instances split from canonical findings. |
+| `evidence_instance.record` | evidence | dry_run | read_only | POST | `/evidence/instances` | Record a concrete evidence instance without updating finding proof state. |
+| `exposure.graph.get` | inventory | read_only | read_only | GET | `/exposure/graph` | Read the exposure graph built from existing targets, scans, AI targets, model artifacts, and findings. |
+| `finding.get` | findings | read_only | read_only | GET | `/findings/{finding_id}` | Read one finding by id or fingerprint. |
+| `finding.list` | findings | read_only | read_only | GET | `/findings` | List findings with filters and proof-state fields. |
+| `finding.retest` | findings | gated | active | POST | `/findings/{finding_id}/retest` | Queue deterministic or AI-assisted retest for one finding through existing retest gates. |
+| `finding_exception.lifecycle_sweep` | policy | gated | active | POST | `/finding-exceptions/lifecycle/sweep` | Preview or execute a bounded one-way exception lifecycle sweep. Only effective exceptions whose expires_at is in the past are marked expired; the sweep never renews, revokes, or deletes exceptions. |
+| `hypothesis.claim` | governance | dry_run | read_only | POST | `/arsenal/hypotheses/{hypothesis_id}/claim` | Claim a hypothesis using compare-and-set leasing; does not queue scanner work. |
+| `hypothesis.generate_from_benchmark` | governance | dry_run | read_only | POST | `/arsenal/hypotheses/from-benchmark` | Record benchmark scorecard follow-up rows as hypotheses only; benchmark misses cannot create findings or satisfy proof. |
+| `hypothesis.generate_from_graph` | governance | dry_run | read_only | POST | `/targets/{target_id}/graph/hypotheses` | Generate app-graph authorization hypotheses from persisted producer/object/consumer facts without queueing tests. |
+| `hypothesis.generate_from_plan` | governance | dry_run | read_only | POST | `/arsenal/hypotheses/from-plan` | Record saved dry-run OperationPlan actions as planner-signal hypotheses only; planner output cannot execute work or satisfy proof. |
+| `hypothesis.generate_from_source` | governance | dry_run | read_only | POST | `/arsenal/hypotheses/source-ingest` | Record bounded source/spec/package hints as hypotheses only; source text cannot create findings or satisfy runtime proof. |
+| `hypothesis.list` | governance | read_only | read_only | GET | `/arsenal/hypotheses` | Read deduped claimable/refutable hypotheses that have not become findings. |
+| `hypothesis.plan_campaign` | governance | dry_run | read_only | POST | `/arsenal/hypotheses/{hypothesis_id}/plan-campaign` | Create or link a mission campaign and planned action from a hypothesis next_test_action without executing the action. |
+| `hypothesis.reconcile_proof` | governance | gated | active | POST | `/arsenal/hypotheses/{hypothesis_id}/reconcile-proof` | Reconcile one executed campaign action back to its hypothesis using only exact deterministic finding proof already persisted by ShakerScan. |
+| `hypothesis.record` | governance | dry_run | read_only | POST | `/arsenal/hypotheses` | Record or endorse a deduped hypothesis without creating a finding or queueing work. |
+| `hypothesis.signal` | governance | dry_run | read_only | POST | `/arsenal/hypotheses/{hypothesis_id}/signals` | Append an endorsement or refutation signal to a hypothesis without changing findings or gates. |
+| `hypothesis.situation_report` | governance | read_only | read_only | GET | `/arsenal/hypotheses/situation-report` | Read a bounded hypothesis situation report with hot unclaimed leads, owned claims, blockers, terminal leads, missing preconditions, and application-graph context. |
+| `local_agent.list` | planner | read_only | read_only | GET | `/agents/local` | Read local planner capability records without reading auth artifacts or executing prompts. |
+| `local_agent.parse_plan` | planner | dry_run | read_only | POST | `/agents/local/plan/parse` | Fail-closed validation for raw local-agent planner JSON before any candidate can become an OperationPlan. |
+| `local_agent.plan_dry_run` | planner | dry_run | read_only | POST | `/agents/local/plan` | Persist a local-agent-labeled dry-run OperationPlan from a saved AgentContextPack without spawning a local agent. |
+| `local_agent.test` | planner | dry_run | read_only | POST | `/agents/local/test` | Run a bounded harmless local-agent capability ping without sending prompts or enabling planner execution. |
+| `mission.timeline` | governance | read_only | read_only | GET | `/timeline` | Read the cross-product mission timeline: command results, campaign actions, recent scans, evidence bindings, export events, refuter reviews, and upcoming schedules. |
+| `model_intake.evidence_export` | model_intake | read_only | read_only | GET | `/model-intake/scans/{scan_id}/evidence-export` | Read a content-free Model Intake evidence export with trust, AIBOM, policy, and replay hashes. |
+| `model_intake.scan` | model_intake | gated | passive | POST | `/model-intake/scan` | Queue a Model Intake artifact check through existing policy and artifact-fetch gates. |
+| `model_intake.trust_preview` | model_intake | read_only | read_only | CLIENT | `/settings/model-intake` | Preview Model Intake trust mode and policy readiness in the UI before queueing a scan. |
+| `operation_plan.list` | governance | read_only | read_only | GET | `/arsenal/plans` | Read recent dry-run OperationPlan records. |
+| `operation_plan.preview` | governance | dry_run | read_only | POST | `/arsenal/plans` | Validate and persist a dry-run OperationPlan without executing any action. |
+| `refuter_review.derive_verdict` | governance | gated | read_only | POST | `/arsenal/refuter-reviews/{refuter_review_id}/derive-verdict` | Record a refuter signal or deterministic proof-backed verdict from a completed finding verification row without changing product truth. |
+| `refuter_review.execute_plan` | governance | gated | active | POST | `/arsenal/refuter-reviews/{refuter_review_id}/execute` | Execute the next planned refuter automation step through existing gated retest/replay primitives. Does not directly change proof state or gates. |
+| `refuter_review.list` | governance | read_only | read_only | GET | `/arsenal/refuter-reviews` | Read durable refuter signals and proof-backed verdict records without changing findings. |
+| `refuter_review.queue_from_summary` | governance | dry_run | read_only | POST | `/arsenal/refuter-reviews/queue-from-summary` | Record signal-only refuter review work from the current weak-claim summary without mutating findings. |
+| `refuter_review.record` | governance | dry_run | read_only | POST | `/arsenal/refuter-reviews` | Record a refuter signal or evidence-backed verdict without directly changing findings, proof state, or gates. |
+| `refuter_review.summary` | governance | read_only | read_only | GET | `/arsenal/refuter-reviews/summary` | Read a bounded worklist of weak/high-impact findings that should be challenged, with non-executing deterministic automation plans. |
+| `scan.focused_family` | scans | gated | active | POST | `/scans` | Submit a focused DAST family campaign through existing scan submission gates. |
+| `scan.result` | scans | read_only | read_only | GET | `/scans/{scan_id}/result` | Read scan status and stored result JSON. |
+| `scope.preview` | governance | dry_run | read_only | POST | `/arsenal/scope/preview` | Validate and persist a fail-closed scope receipt preview without executing work. |
+| `target.get` | inventory | read_only | read_only | GET | `/targets/{target_id}` | Get one target and recent scan metadata. |
+| `target.list` | inventory | read_only | read_only | GET | `/targets` | List configured targets. |
+| `target.principal_matrix` | inventory | read_only | read_only | GET | `/targets/{target_id}/principal-matrix` | Read endpoint x principal/role expectations for authorization planning without queueing tests. |
+| `target.principal_matrix.record` | authorization_policy | gated | active | POST | `/targets/{target_id}/principal-matrix` | Record a non-executing endpoint principal expectation for future authz campaigns. |
+| `target.principals` | inventory | read_only | read_only | GET | `/targets/{target_id}/principals` | Read role/tenant principals configured for one web/API target. |
+| `tool.status` | tool_status | read_only | read_only | GET | `/arsenal/tools` | Read installed/runnable/waived/catalog status for integrated adapters. |
+| `tool_receipt.list` | evidence | read_only | read_only | GET | `/arsenal/tool-receipts` | Read durable receipts for existing tools/executors. |
+| `tool_receipt.record` | evidence | dry_run | read_only | POST | `/arsenal/tool-receipts` | Record an existing tool/executor receipt without running tools or creating findings. |
+
+### Tool And Local-Agent Adapters
+
+| Tool | Family | Status | Risk | Parser | Proof contract | Description |
+|---|---|---|---|---|---|---|
+| `ai_gate_probe_executor` | ai_red_team | runnable | active | `ai-gate-transcript-v1` | `deterministic-or-judge-evidence` | Internal AI Gate probe runner. |
+| `dalfox` | xss | wired | active | `dalfox-json-v1` | `xss-reflection-or-browser-proof` | Dalfox XSS scanner. |
+| `ffuf` | content_discovery | wired | active | `ffuf-json-v1` | `content-discovery-observation` | ffuf content discovery. |
+| `httpx` | http_probe | wired | passive | `httpx-json-v1` | `http-observation` | ProjectDiscovery httpx HTTP probing. |
+| `katana` | crawl | wired | passive | `katana-jsonl-v1` | `crawl-observation` | ProjectDiscovery katana crawler. |
+| `model_intake_signature_verifier` | model_trust | runnable | passive | `model-intake-summary-v1` | `cryptographic-signature-verification` | Internal cryptographic signature verifier. |
+| `nmap` | port_scan | gated | active | `nmap-xml-v1` | `open-port-observation` | nmap network service discovery. |
+| `nuclei` | template_vuln_scan | wired | active | `nuclei-jsonl-v1` | `template-match-with-request-response` | Nuclei template scanner. |
+| `playwright` | browser_proof | wired | active | `playwright-proof-v1` | `browser-observation` | Playwright browser proof execution. |
+| `sqlmap` | sqli | gated | active | `sqlmap-output-v1` | `sqli-dbms-or-error-proof` | sqlmap SQL injection verifier. |
+| `sslyze` | tls | wired | passive | `sslyze-json-v1` | `tls-protocol-observation` | SSLyze TLS scanner. |
+| `subfinder` | subdomain_discovery | wired | passive | `subfinder-lines-v1` | `passive-discovery` | ProjectDiscovery subfinder passive subdomain discovery. |
+| `testssl.sh` | tls | wired | passive | `testssl-json-v1` | `tls-protocol-observation` | testssl.sh TLS scanner. |
+
+| Agent | Display | Headless prompt | Timeout | Workdir isolation | Max prompt bytes | Max output bytes |
+|---|---|---|---|---|---|---|
+| `claude-code` | Claude Code | True | True | True | 120000 | 32000 |
+| `codex` | Codex | True | True | True | 120000 | 32000 |
+| `hermes` | Hermes | False | True | True | 64000 | 16000 |
+| `opencode` | OpenCode | True | True | True | 120000 | 32000 |
+
+### Scanner CLI Flags
+
+| Flag | Choices | Purpose |
+|---|---|---|
+| `--abuseipdb-key` | - | AbuseIPDB API key for enhanced IP reputation (env: ABUSEIPDB_API_KEY) |
+| `--active` | - | Run active security checks (dalfox/sqlmap) on discovered/synthetic URLs |
+| `--aggressive` | - | Aggressive mode - maximum coverage with aggressive testing (2+ hours) |
+| `--ai` | - | Enable AI-assisted verification of findings (non-invasive) |
+| `--ai-api-key` | - | AI provider API key |
+| `--ai-fallback-model` | - | Comma-separated fallback AI model IDs |
+| `--ai-mask-host` | - | Replacement host sent to AI instead of the real target (default: example.com) |
+| `--ai-url` | - | AI provider URL (HTTP endpoint) |
+| `--api-security-testing` | - | Test for API security issues (mass assignment, BFLA) |
+| `--api-token` | - | Bearer token for API testing (Authorization header) |
+| `--asn-discovery` | - | Enable ASN/IP discovery (hosting provider, geographic distribution, multi-homing) |
+| `--auth-config-file` | - | - |
+| `--auth-cookies` | - | Session cookies for authenticated scanning (e.g., 'session=abc; token=xyz') |
+| `--auth-header` | - | Authorization header for authenticated scanning (e.g., 'Bearer token123') |
+| `--auth-headers-json` | - | Custom auth headers as JSON (e.g., '{"X-API-Key": "abc"}') |
+| `--auth-scenario-json` | - | Auth scenario DSL JSON (login flow, credentials, success condition) |
+| `--auto-auth` | - | Attempt API login with provided credentials (JSON/form endpoints) |
+| `--avoid-rules-json` | - | JSON array of avoid rules to exclude endpoint scope |
+| `--backup-file-testing` | - | Test for exposed backup files |
+| `--baseline` | - | Baseline file to filter known issues (suppress matching findings) |
+| `--bola-testing` | - | Test for BOLA/IDOR vulnerabilities (API1:2023, broken object-level authorization) |
+| `--breach-check` | - | Check for credential breaches and leaks (HIBP, GitHub) |
+| `--budget-active-max-endpoints` | - | - |
+| `--budget-active-max-seconds` | - | - |
+| `--budget-active-params-per-endpoint` | - | - |
+| `--budget-active-worklist-max` | - | - |
+| `--budget-api-probe-limit` | - | - |
+| `--budget-browser-max-depth` | - | - |
+| `--budget-browser-max-pages` | - | - |
+| `--budget-disable-nuclei-early-stop` | - | - |
+| `--budget-discovery-depth` | - | - |
+| `--budget-max-duration-minutes` | - | - |
+| `--budget-max-findings-per-family` | - | -1 disables the per-family active finding cap |
+| `--budget-max-urls` | - | - |
+| `--budget-nuclei-max-targets` | - | - |
+| `--budget-param-discovery-max-params` | - | - |
+| `--budget-param-discovery-url-limit` | - | - |
+| `--budget-phase4-max-seconds` | - | - |
+| `--budget-profile` | fast, balanced, thorough, exhaustive | Depth/time budget profile. Scan type selects checks; budget controls how hard they run. |
+| `--budget-request-max` | - | - |
+| `--business-logic-testing` | - | Detect business logic vulnerability indicators |
+| `--check-family` | - | Run a scanner-supported active check family: all, sqli, or xss |
+| `--cicd-exposure` | - | Test for exposed CI/CD configuration files |
+| `--cloud-bucket-testing` | - | Test for publicly accessible cloud storage buckets |
+| `--cloud-ssrf` | - | Test for SSRF vulnerabilities targeting cloud metadata |
+| `--complete` | - | Complete scan mode - comprehensive security assessment (30-60 min) |
+| `--complete-tier` | safe, full, aggressive | Scan tier for complete mode: safe (30-45min), full (2-3hr), aggressive (3+hr) |
+| `--compliance-report` | - | Generate compliance report (PCI DSS, SOC 2, HIPAA, GDPR, CIS) |
+| `--create-baseline` | - | Create baseline file from scan results (save known issues) |
+| `--csrf-testing` | - | Test for CSRF vulnerabilities |
+| `--ct-monitoring` | - | Enable certificate transparency monitoring (CA diversity, suspicious certs) |
+| `--deep` | - | Deep scan - thorough passive assessment (30-60 min, alias for --complete) |
+| `--deep-discovery` | - | Enable deep discovery with ffuf (complete mode) |
+| `--deep-domxss` | - | Enable dalfox deep DOM XSS (spawns headless browser; heavy) |
+| `--default-creds-testing` | - | Test for default credentials (safe mode) |
+| `--deserialization-testing` | - | Test for insecure deserialization (detection only) |
+| `--dkim-enumeration` | - | Enumerate DKIM selectors |
+| `--dkim-selectors` | - | Comma-separated DKIM selectors to check (e.g., default,google) |
+| `--dom-xss-max-files` | - | - |
+| `--domain-intelligence` | - | Enable domain intelligence (WHOIS, age, expiration, registrar reputation) |
+| `--endpoints` | - | Manual endpoint (e.g., 'GET /api/v1/users id,email' or '/api/login') |
+| `--endpoints-file` | - | File with manual endpoints (one per line, same format as --endpoints) |
+| `--enhanced-dns` | - | Enable enhanced DNS checks (DKIM, SPF validation, zone transfer) |
+| `--exploit-level` | safe, moderate, aggressive | Exploit level for active tests |
+| `--exposure-client` | - | Enable client-side exposure checks (JS Dependencies, JS Secrets) |
+| `--exposure-infra` | - | Enable infrastructure exposure checks (CI/CD, Packages, Cloud Buckets, Backups, SSH, SMTP, Network Services, K8s/Terraform/Registry) |
+| `--fail-on-high` | - | Fail quality gate on high severity findings (alias for --max-high 0) |
+| `--file-upload-testing` | - | Test for file upload vulnerabilities |
+| `--focus-rules-json` | - | JSON array of focus rules to constrain endpoint scope |
+| `--focused-endpoints-only` | - | - |
+| `--forced-browsing` | - | Test for forced browsing/direct request vulnerabilities (privileged path enumeration) |
+| `--full` | - | Full assessment - ALL security tests including active XSS/SQLi (1-2 hours) |
+| `--github-token` | - | GitHub token for code search (env: GITHUB_TOKEN) |
+| `--grpc-discovery` | - | Enable gRPC reflection discovery (requires grpcurl) |
+| `--health-check` | - | Run tool health check and exit (validate all scanner tools are available) |
+| `--hibp-api-key` | - | HIBP API key for email breach lookups (env: HIBP_API_KEY) |
+| `--host-header-testing` | - | Test for host header injection |
+| `--idor-testing` | - | Test for IDOR/BOLA vulnerabilities |
+| `--include-partial-attack-chains` | - | Include partial attack chains in report (analyst mode) |
+| `--ip-reputation` | - | Check IP reputation against DNS blacklists and threat intelligence |
+| `--js-dependency-scanning` | - | Scan for vulnerable JavaScript dependencies (Retire.js methodology) |
+| `--js-secret-scanning` | - | Scan for hardcoded secrets in JavaScript files |
+| `--json-link-following` | - | Follow JSON/HATEOAS links to expand API endpoints |
+| `--kubernetes-exposure` | - | Test for exposed Kubernetes API servers |
+| `--login-extra-fields` | - | Extra form fields as JSON (e.g., '{"remember_me": "1"}') |
+| `--login-password` | - | Password for form-based login |
+| `--login-url` | - | Login page URL for form-based authentication (auto-detected if not provided) |
+| `--login-username` | - | Username for form-based login |
+| `--mass-assignment-testing` | - | Test for mass assignment vulnerabilities (CWE-915, privilege escalation via parameters) |
+| `--max-active` | - | Max URLs for active checks (default 10) |
+| `--max-critical` | - | Max critical findings before quality gate fails (default: 0) |
+| `--max-high` | - | Max high findings before quality gate fails (default: 0) |
+| `--max-medium` | - | Max medium findings before quality gate fails (-1 = unlimited) |
+| `--max-ports` | - | Max ports to scan in complete mode (default 1000) |
+| `--max-typo-checks` | - | Maximum typosquatting permutations to check (default: 100) |
+| `--model` | - | AI model identifier (provider specific) |
+| `--network-services` | - | Enable network services detection (VPN, RDP, VNC, IoT, Industrial, databases) |
+| `--no-browser` | - | Disable browser-based scanning, use curl only (faster but less data) |
+| `--no-early-stop` | - | Disable early stopping in smart scan (continue even after finding many vulns) |
+| `--no-verified-findings-only` | - | Keep all findings regardless of verification status |
+| `--nuclei` | - | Nuclei scan mode - comprehensive vulnerability scan with all templates (10-30 min) |
+| `--oauth-client-id` | - | OAuth 2.0 client ID |
+| `--oauth-client-secret` | - | OAuth 2.0 client secret |
+| `--oauth-password` | - | Password for OAuth password grant flow |
+| `--oauth-scope` | - | OAuth scopes (space-separated) |
+| `--oauth-token-url` | - | OAuth token endpoint URL (auto-discovered via OIDC if not provided) |
+| `--oauth-username` | - | Username for OAuth password grant flow |
+| `--oob-callback-url` | - | Out-of-band callback URL for blind SQLi verification (e.g., Burp Collaborator) |
+| `--oob-max-findings` | - | - |
+| `--oob-max-payloads` | - | - |
+| `--open-redirect-testing` | - | Test for open redirect vulnerabilities |
+| `--openapi` | - | OpenAPI/Swagger schema URL to test with Schemathesis |
+| `--options-method-discovery` | - | Use HTTP OPTIONS to enumerate allowed methods |
+| `--package-exposure` | - | Test for exposed package manager files |
+| `--password-reset-testing` | - | Test for password reset vulnerabilities |
+| `--path-traversal-testing` | - | Test for path traversal vulnerabilities |
+| `--port` | - | Server port |
+| `--pretty` | - | Pretty-print JSON |
+| `--public` | - | Public data collection only (no active scans) |
+| `--quality-gate` | - | Enable quality gate (exit code 1 if critical/high findings) |
+| `--quick` | - | Quick scan mode - faster but less thorough (affects active checks) |
+| `--rate-limiting-testing` | - | Test for missing rate limiting |
+| `--registry-exposure` | - | Test for exposed container registries |
+| `--sarif` | - | Output SARIF file for CI/CD integration (e.g., results.sarif) |
+| `--server` | - | Run FastAPI server |
+| `--session-mgmt-testing` | - | Test for session management issues |
+| `--show-suppressed` | - | Include suppressed findings in output (marked with suppressed=true) |
+| `--skip-global-checks` | - | Skip duplicate global exposure/posture checks in a parallel child shard |
+| `--smart` | - | Smart scan - adaptive scanning with staged templates, recursive discovery, and context-aware attacks |
+| `--smart-bola-max-endpoints` | - | - |
+| `--smtp-security` | - | Enable SMTP security testing (STARTTLS, open relay, banner analysis) |
+| `--sqli` | - | Run only SQLi active checks (implies --active) |
+| `--sqli-extract-max` | - | - |
+| `--ssh-port` | - | SSH port to scan (default 22) |
+| `--ssh-testing` | - | Test SSH configuration (password auth detection) |
+| `--standard` | - | Standard scan - balanced passive coverage (5-10 min) |
+| `--subdomain-quick` | - | Quick subdomain scan using Gungnir only (faster) |
+| `--subdomain-sources` | - | Comma-separated subdomain sources: gungnir,subfinder,crtsh (default: all) |
+| `--subfinder` | - | Subdomain discovery mode - comprehensive CT log and passive enumeration |
+| `--terraform-exposure` | - | Test for exposed Terraform state files |
+| `--thorough-params` | - | Test more parameters (100 endpoints x 10 params vs default 50x5) |
+| `--threat-intel` | - | Enable threat intelligence checks (IP Reputation, Breach Check, Vendor Risk, Typosquatting, Domain Intel, CT Monitoring, ASN Discovery, Enhanced DNS) |
+| `--twofa-bypass-testing` | - | Test for 2FA bypass vulnerabilities |
+| `--typosquatting` | - | Detect typosquatting/lookalike domains |
+| `--user2-cookies` | - | Session cookies for second user (BOLA comparison) |
+| `--user2-header` | - | Authorization header for second user (BOLA comparison) |
+| `--user2-login-password` | - | Password for second user form login |
+| `--user2-login-username` | - | Username for second user form login |
+| `--vendor-risk` | - | Assess third-party/vendor supply chain risk (CDN, analytics, dependencies) |
+| `--verified-findings-only` | - | Only keep findings with exploit verification evidence (default for smart scans) |
+| `--virustotal-key` | - | VirusTotal API key for enhanced IP reputation (env: VIRUSTOTAL_API_KEY) |
+| `--vuln-auth` | - | Enable all auth/access checks (CSRF, IDOR, Rate Limiting, 2FA, Password Reset, Session, Default Creds) |
+| `--vuln-injection` | - | Enable all injection checks (Path Traversal, Deserialization) |
+| `--vuln-web` | - | Enable all web app checks (File Upload, Open Redirect, Host Header, Business Logic, API Security, Forced Browsing, Cloud SSRF) |
+| `--websocket-testing` | - | Test WebSocket endpoints for CSWSH, auth bypass, and other vulnerabilities |
+| `--xss` | - | Run only XSS active checks (implies --active) |
+| `--zero-rediscovery` | - | - |
+| `--zone-transfer-test` | - | Test for DNS zone transfer (AXFR) vulnerability |
+
+### Wrapper Commands, Make Targets, And Release Gates
+
+| Surface | Names |
+|---|---|
+| `scanner.sh` commands | `agent`, `ai`, `build`, `doctor`, `env`, `gungnir`, `help`, `install-deps`, `logs`, `mcp`, `rebuild`, `reload`, `reset`, `restart`, `scale`, `scan`, `scan-full`, `scan-smart`, `shell`, `start`, `status`, `stop` |
+| Make targets | `e2e`, `e2e-ai-gate`, `e2e-dast`, `e2e-model-intake`, `e2e-model-intake-fixture`, `release-gates`, `test` |
+| Release gates | `test:evidence-provenance`, `test:fleet-current`, `test:hypothesis-proof-promotion`, `test:mcp-read-only`, `test:no-ai-verified`, `test:no-benchmark-fitting`, `test:no-phantom-tools`, `test:planner-no-shell`, `test:planner-risk`, `test:planner-scope` |
+
+### Runtime Environment-Key Inventory
+
+Only key names and declaring sources are documented; secret values are never read or emitted.
+
+| Environment key | Referenced by |
+|---|---|
+| `ABUSEIPDB_API_KEY` | `scanner/scanner.py` |
+| `AI_API_KEY` | `api/ai_gate_scan.py`, `api/api.py`, `api/worker.py`, `docker-compose.release.yml`, `docker-compose.yml`, `scanner/scanner.py` |
+| `AI_CLASSIFY_CHAIN_BUDGET_SECONDS` | `docker-compose.release.yml`, `docker-compose.yml`, `scanner/scanner_tools/ai_classifier.py` |
+| `AI_CLASSIFY_CIRCUIT_COOLDOWN_SECONDS` | `docker-compose.release.yml`, `docker-compose.yml`, `scanner/scanner_tools/ai_classifier.py` |
+| `AI_CLASSIFY_CIRCUIT_ERROR_THRESHOLD` | `docker-compose.release.yml`, `docker-compose.yml`, `scanner/scanner_tools/ai_classifier.py` |
+| `AI_CLASSIFY_CIRCUIT_WINDOW_SECONDS` | `docker-compose.release.yml`, `docker-compose.yml`, `scanner/scanner_tools/ai_classifier.py` |
+| `AI_CLASSIFY_MAX_FINDINGS_PER_BATCH` | `scanner/scanner_tools/ai_classifier.py` |
+| `AI_CLASSIFY_MAX_PROMPT_CHARS` | `scanner/scanner_tools/ai_classifier.py` |
+| `AI_CLASSIFY_MIN_SEVERITY` | `api/api.py`, `api/worker.py`, `docker-compose.release.yml`, `docker-compose.yml`, `scanner/scanner.py` |
+| `AI_CREDENTIAL_ENC_KEY` | `api/secret_store.py` |
+| `AI_DEMO_HONEY_PUBLIC_URL` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `AI_DEMO_HONEY_SCANNER_URL` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `AI_DEMO_MODE_ENABLED` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `AI_ESCALATION_MIN_SEVERITY` | `api/api.py`, `api/retest_contract.py`, `api/worker.py` |
+| `AI_FALLBACK_MODEL` | `api/api.py`, `api/worker.py`, `docker-compose.release.yml`, `docker-compose.yml`, `scanner/scanner.py` |
+| `AI_GATE_TRANSCRIPT_RETENTION_DAYS` | `api/ai_gate_scan.py` |
+| `AI_GATE_TRUSTED_RECEIPT_KEYS` | `api/ai_gate_scan.py` |
+| `AI_GATE_TRUSTED_RECEIPT_KEY_SHA256` | `api/ai_gate_scan.py` |
+| `AI_JUDGE_MODEL` | `api/ai_gate_scan.py` |
+| `AI_MASK_HOST` | `api/api.py`, `api/worker.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `AI_MODEL` | `api/ai_gate_scan.py`, `api/api.py`, `api/worker.py`, `docker-compose.release.yml`, `docker-compose.yml`, `scanner/scanner.py` |
+| `AI_OPS_ROUTER_EXECUTE_ENABLED` | `api/api.py` |
+| `AI_REASONING_RETRY_MAX_TOKENS` | `scanner/scanner_tools/ai_classifier.py` |
+| `AI_SCAN_CLASSIFICATION_ENABLED` | `api/api.py`, `api/worker.py`, `docker-compose.release.yml`, `docker-compose.yml`, `scanner/scanner.py` |
+| `AI_SETTINGS_KEY` | `api/api.py`, `api/worker.py` |
+| `AI_TRANSCRIPT_ALLOW_SENSITIVE` | `api/api.py` |
+| `AI_URL` | `api/ai_gate_scan.py`, `api/api.py`, `api/worker.py`, `docker-compose.release.yml`, `docker-compose.yml`, `scanner/scanner.py` |
+| `AI_VERIFY_ENABLED` | `api/api.py`, `api/worker.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `AI_VERIFY_MAX_PER_SCAN` | `api/worker.py` |
+| `AI_VERIFY_MIN_SEVERITY` | `api/api.py`, `api/retest_contract.py`, `api/worker.py`, `docker-compose.release.yml`, `docker-compose.yml`, `scanner/scanner.py` |
+| `AI_VERIFY_USE_BROWSER` | `api/worker.py` |
+| `APPROVAL_RECEIPTS_REQUIRED_FOR_STATE_CHANGING_ACTIONS` | `api/api.py` |
+| `ASM_DEFAULT_DOMAIN_RATE_PER_HOUR` | `api/asm_inventory.py` |
+| `ASM_DEFAULT_ENABLED` | `api/api.py` |
+| `ASM_GONE_RETENTION_DAYS` | `api/asm_inventory.py` |
+| `ASM_GONE_STREAK_THRESHOLD` | `api/asm_inventory.py` |
+| `ASM_REACHABILITY_SWEEP` | `api/asm_inventory.py` |
+| `ASM_SCAN_SWEEP_MAX` | `api/worker.py` |
+| `ASM_SCHEDULE_RETRY_MINUTES` | `api/api.py` |
+| `ASM_SOFT404_DETECT` | `api/asm_inventory.py` |
+| `ASM_SOFT404_SIZE_TOL_BYTES` | `api/asm_inventory.py` |
+| `ASM_VALIDATE_REACHABILITY` | `api/asm_inventory.py` |
+| `AUTOMATION_SETTINGS_KEY` | `api/api.py` |
+| `AUTO_FP_MIN_CONFIDENCE` | `api/api.py`, `api/retest_contract.py`, `api/worker.py` |
+| `AUTO_FP_ON_RETEST` | `api/api.py`, `api/retest_contract.py`, `api/worker.py` |
+| `AUTO_RETEST_MAX_ATTEMPTS` | `api/api.py`, `api/worker.py` |
+| `AUTO_RETEST_MAX_PER_SCAN` | `api/api.py`, `api/retest_contract.py`, `api/worker.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `AUTO_RETEST_MIN_SEVERITY` | `api/api.py`, `api/retest_contract.py`, `api/worker.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `AUTO_RETEST_ON_SCAN_COMPLETE` | `api/api.py`, `api/retest_contract.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `AUTO_SHARDING_ENABLED` | `api/api.py` |
+| `AUTO_SHARDING_MAX_SHARDS` | `api/api.py` |
+| `AUTO_SHARDING_MIN_WORKERS` | `api/api.py` |
+| `AUTO_SHARDING_STRATEGY` | `api/api.py` |
+| `AWS_ACCESS_KEY_ID` | `api/evidence_storage.py` |
+| `AWS_ENDPOINT_URL_S3` | `api/evidence_storage.py` |
+| `AWS_REGION` | `api/evidence_storage.py` |
+| `AWS_SECRET_ACCESS_KEY` | `api/evidence_storage.py` |
+| `AWS_SESSION_TOKEN` | `api/evidence_storage.py` |
+| `BUILD_FINGERPRINT` | `api/worker.py` |
+| `COVERAGE_ALLOCATION_DEFAULT` | `api/parallel_scan.py` |
+| `DATABASE_URL` | `api/api.py`, `api/gungnir_worker.py`, `api/worker.py`, `scanner/gungnir_worker.py` |
+| `DEFAULT_ASM_ENABLED` | `api/api.py` |
+| `DOMAIN_RATE_REQUEUE_DELAY_SECONDS` | `api/worker.py` |
+| `ENV` | `scanner/scanner_tools/remediation_kb.py` |
+| `EVIDENCE_INLINE_MAX_BYTES` | `api/evidence_storage.py` |
+| `EVIDENCE_S3_ACCESS_KEY_ID` | `api/evidence_storage.py` |
+| `EVIDENCE_S3_BUCKET` | `api/evidence_storage.py` |
+| `EVIDENCE_S3_ENDPOINT_URL` | `api/evidence_storage.py` |
+| `EVIDENCE_S3_PREFIX` | `api/evidence_storage.py` |
+| `EVIDENCE_S3_REGION` | `api/evidence_storage.py` |
+| `EVIDENCE_S3_SECRET_ACCESS_KEY` | `api/evidence_storage.py` |
+| `EVIDENCE_S3_SESSION_TOKEN` | `api/evidence_storage.py` |
+| `EVIDENCE_S3_TIMEOUT_SECONDS` | `api/evidence_storage.py` |
+| `EVIDENCE_STORAGE_BACKEND` | `api/evidence_storage.py` |
+| `FINALIZATION_HEARTBEAT_TIMEOUT_MINUTES` | `api/api.py` |
+| `FULL_COVERAGE_ALLOCATION_DEFAULT` | `api/parallel_scan.py` |
+| `GITHUB_TOKEN` | `scanner/scanner.py` |
+| `GIT_COMMIT` | `api/api.py`, `api/worker.py`, `docker-compose.release.yml`, `docker-compose.yml`, `scanner/scanner.py` |
+| `HEARTBEAT_INTERVAL_SECONDS` | `api/worker.py` |
+| `HF_TOKEN` | `scanner/scanner_tools/model_intake.py` |
+| `HIBP_API_KEY` | `scanner/scanner.py` |
+| `HOSTNAME` | `api/worker.py` |
+| `HOST_RESULTS_PATH` | `api/api.py` |
+| `LOCAL_ENV_FILE` | `api/api.py` |
+| `MODEL_INTAKE_ALLOW_LOCAL_FILES` | `scanner/scanner_tools/model_intake.py` |
+| `MODEL_INTAKE_TRUSTED_KEY_SHA256` | `scanner/scanner_tools/model_intake.py` |
+| `MODEL_INTAKE_TRUSTED_SIGNING_KEYS` | `scanner/scanner_tools/model_intake.py` |
+| `NUCLEI_TEMPLATES` | `scanner/scanner_tools/nuclei.py` |
+| `PARALLEL_SHARD_CONCURRENCY_HARD_MAX` | `api/worker.py` |
+| `PARALLEL_SHARD_MAX_PER_PARENT` | `api/worker.py` |
+| `PARALLEL_SHARD_REQUEUE_DELAY_SECONDS` | `api/worker.py` |
+| `PARALLEL_SHARD_SLOT_TTL_SECONDS` | `api/worker.py` |
+| `PARENT_STALE_TIMEOUT_MINUTES` | `api/api.py` |
+| `PLAYWRIGHT_BROWSERS_PATH` | `api/ai_gate/targets/widget_playwright.py`, `scanner/scanner_tools/form_login.py`, `scanner/scanner_tools/http_scanner.py` |
+| `PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD` | `scanner/scanner_tools/form_login.py`, `scanner/scanner_tools/http_scanner.py` |
+| `POSTGRES_PORT` | `docker-compose.yml` |
+| `PROOF_REQUIRED_FOR_SMART` | `api/api.py`, `api/retest_contract.py`, `api/worker.py`, `scanner/scanner.py` |
+| `REDIS_PORT` | `docker-compose.yml` |
+| `REDIS_URL` | `api/api.py`, `api/gungnir_worker.py`, `api/worker.py`, `scanner/gungnir_worker.py` |
+| `RESULTS_DIR` | `api/api.py`, `api/worker.py` |
+| `RETEST_AI_BUDGET_SECONDS` | `api/worker.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `RETEST_AI_CIRCUIT_COOLDOWN_SECONDS` | `api/worker.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `RETEST_AI_CIRCUIT_ERROR_THRESHOLD` | `api/worker.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `RETEST_AI_CIRCUIT_KEY` | `api/worker.py` |
+| `RETEST_AI_CIRCUIT_WINDOW_SECONDS` | `api/worker.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `RETEST_INCONCLUSIVE_MAX_REQUEUE` | `api/worker.py` |
+| `RETEST_INCONCLUSIVE_RETRY_AFTER_HOURS` | `api/worker.py` |
+| `RETEST_MAX_PARALLEL` | `api/worker.py` |
+| `RETEST_QUEUE_MAX_RETRIES` | `api/worker.py` |
+| `RETEST_QUEUE_NAME` | `api/api.py`, `api/worker.py` |
+| `RETEST_REQUEUE_DELAY_SECONDS` | `api/worker.py` |
+| `RETEST_RUNNING_STALE_SECONDS` | `api/worker.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `RETEST_RUNNING_TIMEOUT_MINUTES` | `api/api.py` |
+| `RETEST_SLOT_KEY` | `api/worker.py` |
+| `RETEST_SLOT_TTL_SECONDS` | `api/worker.py` |
+| `RETEST_SLOT_WAIT_MAX_SECONDS` | `api/worker.py` |
+| `RETEST_STALE_BATCH_SIZE` | `api/worker.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `RETEST_STALE_CHECK_INTERVAL_SECONDS` | `api/worker.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `RETEST_STALE_REQUEUE_LIMIT` | `api/worker.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `RETEST_WATCHDOG_LOCK_KEY` | `api/worker.py` |
+| `RETEST_WATCHDOG_LOCK_SECONDS` | `api/worker.py` |
+| `SCANNER_DALFOX_DEEP_DOMXSS` | `scanner/scanner_tools/active_checks.py` |
+| `SCANNER_DEBUG_ENDPOINTS` | `scanner/scanner.py` |
+| `SCANNER_DEBUG_NOSQL` | `scanner/scanner.py`, `scanner/scanner_tools/active_checks.py` |
+| `SCANNER_DEBUG_SQLMAP` | `scanner/scanner.py` |
+| `SCANNER_DNS_RESOLVERS` | `scanner/scanner.py` |
+| `SCANNER_IMAGE_REPO` | `docker-compose.release.yml` |
+| `SCANNER_IMAGE_TAG` | `docker-compose.release.yml` |
+| `SCANNER_MAX_CONCURRENT` | `scanner/scanner_tools/common.py` |
+| `SCANNER_SUBPROCESS_ARTIFACT_MAX_BYTES` | `scanner/scanner_tools/common.py` |
+| `SCANNER_SUBPROCESS_RECEIPT_LIMIT` | `scanner/scanner_tools/common.py` |
+| `SCANNER_VERSION` | `api/api.py`, `api/worker.py`, `docker-compose.release.yml`, `docker-compose.yml`, `scanner/scanner.py` |
+| `SCAN_CANCEL_POLL_SECONDS` | `api/worker.py` |
+| `SCAN_CHECKPOINT_FILE` | `scanner/scanner.py` |
+| `SCAN_COOPERATIVE_CANCEL_GRACE_SECONDS` | `api/worker.py` |
+| `SCAN_FAULTHANDLER` | `scanner/scanner.py` |
+| `SCAN_FORCED_BROWSING_MAX_SECONDS` | `scanner/scanner.py` |
+| `SCAN_FORCE_EXIT_ON_SHUTDOWN_TIMEOUT` | `scanner/scanner.py` |
+| `SCAN_KILL_GRACE_SECONDS` | `api/worker.py` |
+| `SCAN_LOG_TAIL` | `api/worker.py` |
+| `SCAN_LOG_TTL_SECONDS` | `api/worker.py` |
+| `SCAN_MAX_DURATION_DEFAULT_MINUTES` | `api/worker.py` |
+| `SCAN_MAX_DURATION_MINUTES` | `api/worker.py` |
+| `SCAN_PHASE4_CANCEL_GRACE` | `scanner/scanner.py` |
+| `SCAN_PHASE4_LOGS` | `scanner/scanner.py` |
+| `SCAN_PHASE4_MAX_SECONDS` | `scanner/scanner.py` |
+| `SCAN_PHASE4_TRACE` | `scanner/scanner.py` |
+| `SCAN_SETTINGS_KEY` | `api/api.py` |
+| `SCAN_SHUTDOWN_GRACE_SECONDS` | `scanner/scanner.py` |
+| `SCAN_VERIFICATION_MAX` | `scanner/scanner.py` |
+| `SHAKERSCAN_API_PORT` | `docker-compose.release.yml`, `docker-compose.yml` |
+| `SHAKERSCAN_API_URL` | `scripts/shakerscan_mcp.py` |
+| `SHAKERSCAN_ASM_DISPATCH_INTERVAL` | `api/api.py` |
+| `SHAKERSCAN_BIND_HOST` | `docker-compose.release.yml`, `docker-compose.yml` |
+| `SHAKERSCAN_CANCEL_FILE` | `scanner/scanner_tools/cancellation.py` |
+| `SHAKERSCAN_CUSTOM_WORDLIST` | `scanner/scanner_tools/discovery.py` |
+| `SHAKERSCAN_DEBUG_POST_INFER` | `scanner/scanner.py` |
+| `SHAKERSCAN_ENABLE_ADAPTIVE_THROTTLE` | `scanner/scanner.py` |
+| `SHAKERSCAN_MAX_ACTIVE_SCANS` | `api/api.py`, `api/worker.py` |
+| `SHAKERSCAN_MAX_WORKERS` | `api/api.py`, `docker-compose.yml` |
+| `SHAKERSCAN_MCP_ALLOW_REMOTE_API` | `scripts/shakerscan_mcp.py` |
+| `SHAKERSCAN_MCP_TIMEOUT_SECONDS` | `scripts/shakerscan_mcp.py` |
+| `SHAKERSCAN_PAYLOAD_PACK_MAX` | `scanner/scanner_tools/active_checks.py` |
+| `SHAKERSCAN_PER_WORKER_MEM_GB` | `api/api.py` |
+| `SHAKERSCAN_PUBLIC_API_URL` | `docker-compose.release.yml`, `docker-compose.yml` |
+| `SHAKERSCAN_REQUEST_BUDGET_DOMAIN` | `scanner/scanner.py` |
+| `SHAKERSCAN_REQUEST_BUDGET_LIMIT` | `scanner/scanner.py` |
+| `SHAKERSCAN_REQUEST_BUDGET_MODE` | `api/worker.py`, `scanner/scanner.py` |
+| `SHAKERSCAN_REQUEST_BUDGET_RESERVED` | `scanner/scanner.py` |
+| `SHAKERSCAN_SCAN_MEM_FRACTION` | `api/api.py` |
+| `SHAKERSCAN_SCAN_SLOT_MAX_WAIT_SECONDS` | `api/worker.py` |
+| `SHAKERSCAN_SCAN_SLOT_TTL_SECONDS` | `api/worker.py` |
+| `SHAKERSCAN_STALE_DURATION_GRACE_MIN` | `api/api.py` |
+| `SHAKERSCAN_STALE_FAIL_AFTER_SECONDS` | `api/worker.py` |
+| `SHAKERSCAN_STREAM_SCANNER_LOGS` | `api/worker.py` |
+| `SHAKERSCAN_UI_PORT` | `docker-compose.release.yml`, `docker-compose.yml` |
+| `SHAKERSCAN_WORKER_FAIL_CLOSED` | `api/worker.py` |
+| `SHAKERSCAN_WORKER_MEM_LIMIT_GB` | `api/api.py` |
+| `SMART_BOLA_LANE_MAX_SECONDS` | `scanner/scanner.py` |
+| `TESTSSL_BIN` | `scanner/scanner_tools/tls_scanner.py` |
+| `UI_IMAGE_REPO` | `docker-compose.release.yml` |
+| `VERIFICATION_MIN_SEVERITY` | `api/api.py`, `api/retest_contract.py`, `api/worker.py`, `scanner/scanner.py` |
+| `VIRUSTOTAL_API_KEY` | `scanner/scanner.py` |
+| `WORKER_ID` | `api/worker.py` |
+| `WORKER_IMAGE` | `api/worker.py` |
+| `WORKER_PREFLIGHT_ENABLED` | `api/worker.py` |
+| `WORKER_PREFLIGHT_REQUIRE_SCANNER` | `api/worker.py` |
+| `WORKER_PREFLIGHT_TIMEOUT_SECONDS` | `api/worker.py` |
+| `WORKER_QUEUE_BLOCK_SECONDS` | `api/worker.py` |
+| `WORKER_REDIS_SOCKET_TIMEOUT_SECONDS` | `api/worker.py` |
+
+### UI Pages
+
+| Route | Source |
+|---|---|
+| `/asm` | `ui/src/app/asm/page.tsx` |
+| `/exposure` | `ui/src/app/exposure/page.tsx` |
+| `/findings/{id}` | `ui/src/app/findings/[id]/page.tsx` |
+| `/findings` | `ui/src/app/findings/page.tsx` |
+| `/interactive` | `ui/src/app/interactive/page.tsx` |
+| `/` | `ui/src/app/page.tsx` |
+| `/scan/new` | `ui/src/app/scan/new/page.tsx` |
+| `/scans/{id}` | `ui/src/app/scans/[id]/page.tsx` |
+| `/scans` | `ui/src/app/scans/page.tsx` |
+| `/schedules` | `ui/src/app/schedules/page.tsx` |
+| `/settings/ai-gate` | `ui/src/app/settings/ai-gate/page.tsx` |
+| `/settings/arsenal` | `ui/src/app/settings/arsenal/page.tsx` |
+| `/settings/exceptions` | `ui/src/app/settings/exceptions/page.tsx` |
+| `/settings/model-intake` | `ui/src/app/settings/model-intake/page.tsx` |
+| `/settings` | `ui/src/app/settings/page.tsx` |
+| `/settings/policy-profiles` | `ui/src/app/settings/policy-profiles/page.tsx` |
+| `/targets/{id}/graph` | `ui/src/app/targets/[id]/graph/page.tsx` |
+| `/targets` | `ui/src/app/targets/page.tsx` |
+
+### Skills, Slash Commands, And Subagents
+
+| Skill | Purpose | Source |
+|---|---|---|
+| `ai-security-session` | Interactive Playwright session control for the ShakerScan `/session` API. Use when asked to start or drive an AI security testing session, perform manual browser actions, or run BOLA/IDOR testing via session endpoints. | `skills/ai-security-session/SKILL.md` |
+| `content-discovery` | Build target-specific content discovery seeds, path lists, and ShakerScan scan inputs from scan results, JS analysis, framework clues, and exposed docs. Use when asked for content discovery, wordlist generation, ffuf seeds, admin path discovery, hidden file discovery, route discovery, or custom endpoint seeding. | `skills/content-discovery/SKILL.md` |
+| `js-analyze` | Analyze JavaScript bundles, frontend routes, browser-captured APIs, libraries, and secrets for a ShakerScan target or completed scan. Use when asked for JS analysis, route analysis, frontend endpoint discovery, library review, source-map hints, or to build `custom_endpoints` for a ShakerScan scan. | `skills/js-analyze/SKILL.md` |
+| `review-skills` | Review ShakerScan skills, commands, and subagents for broken references, invalid Claude Code configuration, prompt anti-patterns, missing hard gates, missing outputs, and weak operational guidance. Use when asked to audit, review, or quality-check the skill system itself. | `skills/review-skills/SKILL.md` |
+
+| Slash command | Title | Purpose | Source |
+|---|---|---|---|
+| `/ai-gate` | AI Gate | Create/list AI Gate targets and queue AI safety scans. | `.claude/commands/ai-gate.md` |
+| `/ai-security-session` | AI Security Session | Use `API_BASE=${SHAKERSCAN_API_BASE:-http://localhost:8080}` for API calls. Use `UI_BASE=${SHAKERSCAN_UI_BASE:-http://localhost:3000}` for UI links; on a remote VPS, use the URL printed by `./scanner.sh start --remote` or `./scanner.sh status`. | `.claude/commands/ai-security-session.md` |
+| `/content-discovery` | Content Discovery | Build a high-signal route and file discovery plan for a target using ShakerScan evidence, JS outputs, and framework clues. | `.claude/commands/content-discovery.md` |
+| `/findings` | List Security Findings | Show security findings from scans. | `.claude/commands/findings.md` |
+| `/js-analyze` | JS Analyze | Run JavaScript and frontend attack-surface analysis for a target, completed scan, or supplied JS bundle set. | `.claude/commands/js-analyze.md` |
+| `/review-skills` | Review Skills | Review all ShakerScan skills, commands, and agents for prompt bugs and quality gaps. | `.claude/commands/review-skills.md` |
+| `/save-finding` | Save Finding | Use `API_BASE=${SHAKERSCAN_API_BASE:-http://localhost:8080}` for API calls. Use `UI_BASE=${SHAKERSCAN_UI_BASE:-http://localhost:3000}` for UI links; on a remote VPS, use the URL printed by `./scanner.sh start --remote` or `./scanner.sh status`. | `.claude/commands/save-finding.md` |
+| `/scan-full` | Full Security Assessment | Run a comprehensive security assessment with ALL security tests including active XSS/SQLi. | `.claude/commands/scan-full.md` |
+| `/scan-smart` | Smart Adaptive Scan | Run an intelligent adaptive security scan that adjusts based on findings. | `.claude/commands/scan-smart.md` |
+| `/scan` | Scan a target | Run a security scan on the specified target. | `.claude/commands/scan.md` |
+| `/status` | Scanner Status | Check the status of the Shaker Scan scanner. | `.claude/commands/status.md` |
+| `/subdomains` | Subdomain Discovery | Discover subdomains for a domain using CT logs and passive sources. | `.claude/commands/subdomains.md` |
+| `/workers` | Worker Management | View and scale scanner workers. | `.claude/commands/workers.md` |
+
+| Subagent | Model | Purpose | Source |
+|---|---|---|---|
+| `content-discovery-agent` | sonnet | Use this agent for high-signal route and file discovery, admin path seeding, API/spec path generation, and producing custom_list and custom_endpoints output for ShakerScan. | `.claude/agents/content-discovery-agent.md` |
+| `js-analysis-agent` | sonnet | Use this agent for JavaScript bundle analysis, frontend route discovery, browser-captured API review, library/version review, source-map hints, and ShakerScan custom_endpoints generation. | `.claude/agents/js-analysis-agent.md` |
+| `skills-reviewer` | opus | Use PROACTIVELY to review ShakerScan skills, commands, and agents for prompt bugs, bad gates, invalid frontmatter, broken references, or weak output contracts. | `.claude/agents/skills-reviewer.md` |
+
+### Scanner Module Inventory
+
+`access_control_checks.py`, `active_checks.py`, `active_enrichment_policy.py`, `active_prioritization.py`, `adaptive_throttle.py`, `ai_classifier.py`, `api_auth.py`, `api_security.py`, `approval_checks.py`, `asn_discovery.py`, `attack_chains.py`, `attempt_telemetry.py`, `auth_session.py`, `benchmark_summary.py`, `bola_comparison.py`, `brand_protection.py`, `breach_check.py`, `build_fingerprint.py`, `cancellation.py`, `client_side.py`, `common.py`, `completion_status.py`, `compliance_mapper.py`, `coverage_tracker.py`, `credential_check.py`, `critical_checks.py`, `ct_monitor.py`, `data_exposure.py`, `deduplication_engine.py`, `deserialization_tests.py`, `discovery.py`, `dns_enhanced.py`, `dom_xss_analyzer.py`, `domain_intel.py`, `exposure_markers.py`, `file_upload_tests.py`, `finding_correlator.py`, `finding_validator.py`, `focused_scope.py`, `form_login.py`, `github_recon.py`, `google_dorking.py`, `gopher_payloads.py`, `graphql_schema_recovery.py`, `grpc_discovery.py`, `gungnir.py`, `har_discovery.py`, `hash_routes.py`, `health_check.py`, `http_scanner.py`, `hunter_summary.py`, `infrastructure_checks.py`, `injection_extra_checks.py`, `ip_reputation.py`, `logging_checks.py`, `model_intake.py`, `network_services.py`, `nmap.py`, `nuclei.py`, `oauth_auth.py`, `oauth_tests.py`, `phase4_checks.py`, `proof_of_exploit.py`, `race_condition_tests.py`, `remediation_kb.py`, `report_gating.py`, `request_meter.py`, `resource_propagation.py`, `sarif_output.py`, `scan_delta.py`, `signal_types.py`, `smtp_scanner.py`, `ssh_scanner.py`, `subdomain_discovery.py`, `subfinder.py`, `tech_discovery.py`, `tls_scanner.py`, `vendor_risk.py`, `verification_engine.py`, `verification_phase.py`, `wayback_discovery.py`, `webhook_checks.py`, `websocket_security.py`
+
+### Durable Storage Inventory
+
+| Table | Declared by |
+|---|---|
+| `agent_context_packs` | `api/retest_contract.py` |
+| `agent_decision_traces` | `api/retest_contract.py` |
+| `ai_surface_attempts` | `db/init.sql` |
+| `ai_surfaces` | `db/init.sql` |
+| `ai_target_credentials` | `db/init.sql` |
+| `ai_target_principals` | `api/retest_contract.py` |
+| `ai_targets` | `db/init.sql` |
+| `app_schema_migrations` | `db/init.sql` |
+| `app_settings` | `api/retest_contract.py` |
+| `application_graph_edges` | `db/init.sql` |
+| `application_graph_nodes` | `db/init.sql` |
+| `approval_receipts` | `api/retest_contract.py` |
+| `asm_endpoint_attempts` | `db/init.sql` |
+| `campaign_actions` | `api/retest_contract.py` |
+| `campaigns` | `api/retest_contract.py` |
+| `command_results` | `api/retest_contract.py` |
+| `discovery_runs` | `db/init.sql` |
+| `evidence_instances` | `api/retest_contract.py` |
+| `evidence_objects` | `db/init.sql` |
+| `export_events` | `db/init.sql` |
+| `finding_exceptions` | `db/init.sql` |
+| `finding_verifications` | `db/init.sql` |
+| `findings` | `db/init.sql` |
+| `hypotheses` | `api/retest_contract.py` |
+| `model_intake_trust_anchors` | `db/init.sql` |
+| `operation_plans` | `api/retest_contract.py` |
+| `policy_profiles` | `db/init.sql` |
+| `refuter_reviews` | `api/retest_contract.py` |
+| `scan_campaigns` | `db/init.sql` |
+| `scans` | `db/init.sql` |
+| `schedules` | `db/init.sql` |
+| `scope_receipts` | `api/retest_contract.py` |
+| `target_credential_profiles` | `api/retest_contract.py` |
+| `target_endpoint_expectations` | `api/retest_contract.py` |
+| `target_endpoints` | `db/init.sql` |
+| `target_principals` | `api/retest_contract.py` |
+| `targets` | `db/init.sql` |
+| `tool_receipts` | `api/retest_contract.py` |
+
+<!-- END GENERATED CAPABILITY INVENTORY -->
+
+---
+
+## 18. Where to go deeper
 
 | Topic | Document |
 |-------|----------|

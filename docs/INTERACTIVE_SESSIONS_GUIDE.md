@@ -238,7 +238,9 @@ curl -X POST "http://localhost:8080/session/{session_id}/findings" \
   }'
 ```
 
-All findings appear in the UI at `http://localhost:3000/findings`. In the product type filter they are grouped under **AI** (`source_type=ai`) alongside AI Gate findings.
+All findings appear in the UI at `http://localhost:3000/findings` with an **AI Session** badge.
+API callers can filter them exactly with `source_type=ai_session` or combine AI Gate and session
+findings with the broader `source_type=ai` filter.
 
 ## Tips for Effective Sessions
 
