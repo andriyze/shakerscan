@@ -53,6 +53,15 @@ def test_ownership_confirmed_when_owner_present_requester_absent():
     assert acc._confirm_cross_principal_ownership(body, u1, u2) is True
 
 
+def test_ownership_confirmed_when_object_owned_by_third_party():
+    # crAPI shape: user2 fetches an object owned by a pre-seeded user that is neither
+    # user1 nor user2 -> still a cross-principal read (requester is not the owner).
+    u1 = _Session(_jwt({"email": "user1@example.com"}))
+    u2 = _Session(_jwt({"email": "user2@example.com"}))
+    body = json.dumps({"order": {"id": 11, "user": {"email": "victim@example.test"}}})
+    assert acc._confirm_cross_principal_ownership(body, u1, u2) is True
+
+
 def test_ownership_not_confirmed_when_requester_also_present():
     # Shared/multi-tenant resource that legitimately lists both users -> not a clean BOLA.
     u1 = _Session(_jwt({"email": "user1@example.com"}))

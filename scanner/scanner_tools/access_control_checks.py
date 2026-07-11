@@ -1901,20 +1901,29 @@ def _owner_identity_values(body: str, limit: int = 40) -> set[str]:
 def _confirm_cross_principal_ownership(
     owner_body: str, owner_session: Any, requester_session: Any
 ) -> bool:
-    """True when a replayed response reveals the OWNER principal's identity and NOT
-    the requester's — deterministic proof the requester accessed another user's object.
+    """True when a replayed response reveals an object owned by a principal OTHER than
+    the requester — deterministic proof of cross-principal object access.
 
-    Fails closed: if either identity is unresolvable (non-JWT auth) or the owner's
-    identity isn't present in the body, returns False (finding stays a suspected lead).
+    Requires the requester's identity to be resolvable (from its JWT) and ABSENT from
+    the response's owner-identity fields, with at least one owner identity present. The
+    object may be owned by the paired principal (``owner_session``) OR any third
+    principal (crAPI-style pre-seeded owners) — only the requester's non-ownership is
+    required. If the paired owner's identity IS present that is an additional positive
+    signal, but it is not required. Fails closed when the requester identity is
+    unresolvable (non-JWT/opaque auth) or no owner identity is present in the body.
     """
-    owner_ident = _principal_identity_values(owner_session)
     requester_ident = _principal_identity_values(requester_session)
-    if not owner_ident or not requester_ident:
+    if not requester_ident:
         return False
     body_idents = _owner_identity_values(owner_body)
     if not body_idents:
         return False
-    return bool(body_idents & owner_ident) and not (body_idents & requester_ident)
+    if body_idents & requester_ident:
+        # The requester's own identity is in the object -> not a clean cross-principal read.
+        return False
+    # An owner identity is present and it is not the requester's -> the requester
+    # received an object owned by another principal (the paired owner or a third party).
+    return True
 
 
 def _sensitive_fields_from_body(body: str) -> list[str]:
