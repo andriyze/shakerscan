@@ -1747,6 +1747,161 @@ async def run_schema_migrations(pool) -> None:
                 CREATE INDEX IF NOT EXISTS idx_agent_decision_traces_plan
                 ON agent_decision_traces(operation_plan_id, created_at DESC) WHERE operation_plan_id IS NOT NULL
             """)
+            # Bounded adaptive research agent. The model owns no authorization
+            # state: episodes reference durable scope/approval receipts and each
+            # immutable decision is validated before Arsenal dispatch.
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS research_episodes (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    target_id UUID NOT NULL REFERENCES targets(id) ON DELETE CASCADE,
+                    operation_plan_id UUID REFERENCES operation_plans(id) ON DELETE SET NULL,
+                    campaign_id UUID REFERENCES campaigns(id) ON DELETE SET NULL,
+                    objective TEXT NOT NULL,
+                    episode_version TEXT NOT NULL,
+                    planner JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    execution_mode TEXT NOT NULL DEFAULT 'read_only',
+                    status TEXT NOT NULL DEFAULT 'created',
+                    version INTEGER NOT NULL DEFAULT 1,
+                    max_risk_tier TEXT NOT NULL DEFAULT 'read_only',
+                    allowed_families JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    budget_limits JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    budget_used JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    scope_receipt_id TEXT REFERENCES scope_receipts(id) ON DELETE SET NULL,
+                    approval_receipt_id UUID REFERENCES approval_receipts(id) ON DELETE SET NULL,
+                    current_observation_id UUID,
+                    current_decision_id UUID,
+                    step_count INTEGER NOT NULL DEFAULT 0,
+                    cancel_requested BOOLEAN NOT NULL DEFAULT false,
+                    stop_reason TEXT,
+                    requested_input TEXT,
+                    lease_owner TEXT,
+                    lease_expires_at TIMESTAMPTZ,
+                    created_by TEXT,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    CONSTRAINT research_episodes_status_check CHECK (status IN (
+                        'created','awaiting_planner','validating_decision','dispatching',
+                        'awaiting_observation','awaiting_input','approval_required',
+                        'completed','cancelled','failed','budget_exhausted','blocked'
+                    )),
+                    CONSTRAINT research_episodes_execution_mode_check CHECK (execution_mode IN (
+                        'shadow','read_only','gated'
+                    )),
+                    CONSTRAINT research_episodes_risk_check CHECK (max_risk_tier IN (
+                        'read_only','passive','active','intrusive','credential','dangerous'
+                    )),
+                    CONSTRAINT research_episodes_step_count_check CHECK (step_count >= 0)
+                )
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_research_episodes_target
+                ON research_episodes(target_id, created_at DESC)
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_research_episodes_status
+                ON research_episodes(status, updated_at DESC)
+            """)
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS research_observations (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    episode_id UUID NOT NULL REFERENCES research_episodes(id) ON DELETE CASCADE,
+                    sequence INTEGER NOT NULL,
+                    observation_version TEXT NOT NULL,
+                    context_hash TEXT NOT NULL,
+                    episode_version INTEGER NOT NULL,
+                    observation_pack JSONB NOT NULL,
+                    previous_command_result_id UUID REFERENCES command_results(id) ON DELETE SET NULL,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    CONSTRAINT research_observations_sequence_check CHECK (sequence >= 0),
+                    CONSTRAINT research_observations_episode_sequence_unique UNIQUE (episode_id, sequence)
+                )
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_research_observations_episode
+                ON research_observations(episode_id, sequence DESC)
+            """)
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS research_decisions (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    episode_id UUID NOT NULL REFERENCES research_episodes(id) ON DELETE CASCADE,
+                    observation_id UUID NOT NULL REFERENCES research_observations(id) ON DELETE CASCADE,
+                    sequence INTEGER NOT NULL,
+                    decision_version TEXT NOT NULL,
+                    planner JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    decision_type TEXT NOT NULL,
+                    hypothesis_id UUID REFERENCES hypotheses(id) ON DELETE SET NULL,
+                    action JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    expected_signal TEXT,
+                    falsifier TEXT,
+                    reason TEXT,
+                    confidence DOUBLE PRECISION NOT NULL DEFAULT 0,
+                    requested_input TEXT,
+                    stop_reason TEXT,
+                    status TEXT NOT NULL,
+                    validation_errors JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    validation_warnings JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    policy_result JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    command_result_id UUID REFERENCES command_results(id) ON DELETE SET NULL,
+                    idempotency_key TEXT NOT NULL UNIQUE,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    CONSTRAINT research_decisions_type_check CHECK (decision_type IN (
+                        'execute_action','request_input','stop'
+                    )),
+                    CONSTRAINT research_decisions_status_check CHECK (status IN (
+                        'accepted','rejected','dispatching','completed','blocked','failed'
+                    )),
+                    CONSTRAINT research_decisions_confidence_check CHECK (confidence >= 0 AND confidence <= 1),
+                    CONSTRAINT research_decisions_sequence_check CHECK (sequence >= 1)
+                )
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_research_decisions_episode
+                ON research_decisions(episode_id, sequence DESC)
+            """)
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS research_events (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    episode_id UUID NOT NULL REFERENCES research_episodes(id) ON DELETE CASCADE,
+                    sequence BIGSERIAL,
+                    event_type TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    summary TEXT NOT NULL,
+                    observation_id UUID REFERENCES research_observations(id) ON DELETE SET NULL,
+                    decision_id UUID REFERENCES research_decisions(id) ON DELETE SET NULL,
+                    command_result_id UUID REFERENCES command_results(id) ON DELETE SET NULL,
+                    details JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_research_events_episode
+                ON research_events(episode_id, sequence)
+            """)
+            await conn.execute("""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM pg_constraint
+                        WHERE conname = 'research_episodes_current_observation_id_fkey'
+                          AND conrelid = 'research_episodes'::regclass
+                    ) THEN
+                        ALTER TABLE research_episodes
+                        ADD CONSTRAINT research_episodes_current_observation_id_fkey
+                        FOREIGN KEY (current_observation_id) REFERENCES research_observations(id) ON DELETE SET NULL;
+                    END IF;
+                    IF NOT EXISTS (
+                        SELECT 1 FROM pg_constraint
+                        WHERE conname = 'research_episodes_current_decision_id_fkey'
+                          AND conrelid = 'research_episodes'::regclass
+                    ) THEN
+                        ALTER TABLE research_episodes
+                        ADD CONSTRAINT research_episodes_current_decision_id_fkey
+                        FOREIGN KEY (current_decision_id) REFERENCES research_decisions(id) ON DELETE SET NULL;
+                    END IF;
+                END
+                $$
+            """)
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS model_intake_trust_anchors (
                     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

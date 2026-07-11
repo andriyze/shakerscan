@@ -1,7 +1,7 @@
 import AISettingsPanel from '@/components/AISettingsPanel'
 import ScanExecutionSettingsPanel from '@/components/ScanExecutionSettingsPanel'
 import Link from 'next/link'
-import { Bot, Boxes, PackageCheck, ShieldAlert, ShieldCheck, Wand2 } from 'lucide-react'
+import { Bot, Boxes, BrainCircuit, PackageCheck, ShieldAlert, ShieldCheck, Wand2 } from 'lucide-react'
 
 export default function SettingsPage() {
   return (
@@ -79,6 +79,22 @@ export default function SettingsPage() {
           </div>
         </div>
         <span className="text-sm text-teal-300">Open</span>
+      </Link>
+
+      <Link
+        href="/settings/research-agent"
+        className="flex items-center justify-between rounded-lg border border-gray-800 bg-gray-900 p-4 hover:bg-gray-800/80 focus:outline-none focus-visible:ring-2 focus-visible:ring-cyan-500 focus-visible:ring-offset-2 focus-visible:ring-offset-gray-950"
+      >
+        <div className="flex items-center gap-3">
+          <span className="flex h-10 w-10 items-center justify-center rounded-lg bg-cyan-600/20 text-cyan-300">
+            <BrainCircuit className="h-5 w-5" />
+          </span>
+          <div>
+            <h2 className="text-sm font-medium text-white">Research Agent</h2>
+            <p className="mt-1 text-sm text-gray-400">Bounded one-step planning over registered scanner actions</p>
+          </div>
+        </div>
+        <span className="text-sm text-cyan-300">Open</span>
       </Link>
 
       <Link

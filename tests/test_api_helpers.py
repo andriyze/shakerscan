@@ -8302,6 +8302,17 @@ def test_validate_approval_receipt_rejects_denial_receipt():
     assert "not an approval" in exc.value.detail
 
 
+def test_validate_approval_receipt_rejects_risk_escalation():
+    conn = _approval_receipt_conn(
+        approval_row=_make_approval_row(risk_tier="active"),
+        scope_row=_make_scope_row(),
+    )
+    with pytest.raises(api_module.HTTPException) as exc:
+        _run_validate(conn, APPROVAL_ID, risk_tier="intrusive")
+    assert exc.value.status_code == 400
+    assert "risk tier" in exc.value.detail
+
+
 def test_validate_approval_receipt_requires_confirm_authorized():
     conn = _approval_receipt_conn(
         approval_row=_make_approval_row(confirmations=[]),

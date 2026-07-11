@@ -1311,6 +1311,7 @@ print_help() {
     echo "  env                Show PATH, launcher, and runtime guidance"
     echo "  agent [name]       Start Codex, Claude, or OpenCode in this runtime dir"
     echo "  mcp                Start the read-only Command Arsenal MCP stdio adapter"
+    echo "  research <id> [N]  Run up to N bounded Codex decisions for a research episode"
     echo "  gungnir <cmd>      CT monitor: start, stop, status, logs"
     echo "  build              Build Docker images"
     echo "  rebuild [opts]     Rebuild Docker images (cached by default)"
@@ -1343,6 +1344,7 @@ print_help() {
     echo "  ./scanner.sh start --remote           # VPS access over Tailscale"
     echo "  ./scanner.sh env                      # Show PATH and agent launch commands"
     echo "  ./scanner.sh agent codex              # Start an AI agent with local docs loaded"
+    echo "  ./scanner.sh research <episode-id> 5  # Drive a bounded research episode"
     echo "  ./scanner.sh start --local            # Build locally and start"
     echo "  ./scanner.sh start -w 10              # Start with 10 workers"
     echo "  ./scanner.sh start --image-tag 0.4.2  # Use a specific published tag"
@@ -2121,7 +2123,7 @@ configure_runtime_mode "$COMMAND"
 
 # Dependency preflight for command execution
 case $COMMAND in
-    help|--help|-h|install-deps|doctor|env|agent|ai|mcp)
+    help|--help|-h|install-deps|doctor|env|agent|ai|mcp|research)
         ;;
     *)
         if ! ensure_command_dependencies "$COMMAND" "${ARGS[0]}"; then
@@ -2176,6 +2178,16 @@ case $COMMAND in
         ;;
     mcp)
         exec python3 "$SCRIPT_DIR/scripts/shakerscan_mcp.py"
+        ;;
+    research)
+        if [ -z "${ARGS[0]:-}" ]; then
+            echo "Usage: ./scanner.sh research <episode-id> [max-decisions]"
+            exit 1
+        fi
+        exec python3 "$SCRIPT_DIR/scripts/local_planner_adapter.py" episode \
+            --api-url "$(api_base_url)" \
+            --episode-id "${ARGS[0]}" \
+            --max-decisions "${ARGS[1]:-5}"
         ;;
     gungnir)
         gungnir_cmd "${ARGS[0]}"

@@ -770,6 +770,22 @@ Hypothesis proof reconciliation is separately approval-gated and can only link a
 `exploited` canonical finding with exact campaign-action, target, family, and route dimensions; it
 never creates or verifies a finding from lead context.
 
+**Bounded Research Agent**: `POST|GET /research/episodes` ·
+`GET /research/episodes/{id}` · `POST /research/episodes/{id}/plan-step` ·
+`POST /research/episodes/{id}/decisions` · `POST /research/episodes/{id}/observe` ·
+`POST /research/episodes/{id}/cancel`. An episode is a target-bound state machine over immutable,
+redacted `ObservationPack` rows and exactly-one-action `DecisionEpisode` rows. Decisions are bound to
+the current observation ID/hash, cannot carry receipts or credentials, must declare an expected
+signal and falsifier, and consume bounded step/action/time/request/model-token budgets. Shadow mode
+records decisions without dispatch. Read-only mode dispatches only the target-scoped inspection
+allowlist. Gated mode can additionally dispatch `asm.improve`, `asm.recon`, `asm.test`,
+`finding.retest`, and `scan.focused_family` through the existing Arsenal gateway when a matching
+scope/approval receipt and the global execution flag are present. Target IDs/URLs and receipts are
+injected by the server. The configured AI provider can plan one step from the UI/API; the host-side
+`./scanner.sh research <episode-id> [max-decisions]` runner uses an isolated ephemeral Codex process.
+Neither planner path can mint proof or findings. Cancellation terminates the episode and best-effort
+cancels linked pending/running scans.
+
 **Read-only MCP**: `./scanner.sh mcp` starts a stdio MCP adapter over `POST /arsenal/execute`.
 It exposes targets, ASM gaps, findings, content-free evidence manifests, the mission timeline,
 saved dry-run plans, and tool status. The adapter revalidates the live Arsenal catalog on every
@@ -924,13 +940,14 @@ concurrency-limited with per-tool timeouts and a global deadline.
 | `/settings/policy-profiles` | Deployment policy profile lifecycle across DAST, AI Gate, and Model Intake |
 | `/settings/exceptions` | Finding-exception queue, repair, expiry visibility, and lifecycle sweep |
 | `/settings/arsenal` | Command contracts, receipts, plans, actions, hypotheses (claim/signal/plan-campaign, from-plan/from-benchmark generators), refuters, tools, local agents, context packs, and traces |
+| `/settings/research-agent` | Create and inspect bounded shadow/read-only/gated research episodes, run configured-AI steps, inspect budgets/actions/decisions/events, refresh observations, and cancel episodes |
 
 ### API-only or partially UI-backed workflows
 
 Not every public operation should have a dedicated screen. The following remain intentionally available
 primarily to CI, agents, integrations, or advanced operators: raw result/result-folder reads; direct
 evidence-instance/tool-receipt recording; read-only MCP over Arsenal execute; generic Arsenal execution;
-local-agent output parsing; and bulk finding retest/update/manual creation. §17 lists every operation so
+local-agent output parsing; host-side Codex episode driving; and bulk finding retest/update/manual creation. §17 lists every operation so
 this boundary is visible rather than accidental.
 
 Several workflows that were previously API-only now have UI surfaces: the cross-product mission timeline
@@ -951,7 +968,8 @@ quality gates, subdomain and Nuclei-only modes, tool health checks, and internal
 focused-child execution. Every current flag and help string is generated in §17.
 
 `scanner.sh` is the operational wrapper for service lifecycle, health/doctor checks, scaling, logs,
-builds, dependency installation, direct scan submission, agent/MCP launch, Gungnir, environment
+builds, dependency installation, direct scan submission, agent/MCP launch, bounded host-side Codex
+research-episode driving, Gungnir, environment
 inspection, and container shells. The Make targets provide stable end-to-end and release-gate entry
 points. Their complete current command names, release-gate names, and every explicit runtime
 environment key referenced by Python or Compose are generated in §17; values are intentionally
@@ -970,8 +988,9 @@ never read into documentation.
 The slash-command layer provides scan, smart/full scan, AI Gate, interactive session, finding list/
 save, subdomain, worker, status, JS analysis, content discovery, and skill-review workflows. Three
 specialized Claude subagents back JS analysis, content discovery, and skill review. The product also
-catalogs Codex, Claude Code, OpenCode, and Hermes local-agent capabilities; capability detection and
-dry-run planning do not grant execution or finding authority.
+catalogs Codex, Claude Code, OpenCode, and Hermes local-agent capabilities. The Codex research runner
+can submit one schema-constrained decision at a time, but only the API policy controller can dispatch
+an accepted Arsenal action; local-agent output never grants execution or finding authority.
 
 ---
 
@@ -989,23 +1008,23 @@ it is the exhaustive backstop behind the human-readable product map above.
 
 | Surface | Count | Source |
 |---|---|---|
-| Public REST operations | 194 | `api/api.py` FastAPI decorators |
-| Unique REST paths | 154 | `api/api.py` |
+| Public REST operations | 201 | `api/api.py` FastAPI decorators |
+| Unique REST paths | 160 | `api/api.py` |
 | Check families | 13 | `api/check_registry.py` |
 | Command Arsenal commands | 73 | `api/command_arsenal.py` |
 | Tool adapters | 13 | `api/command_arsenal.py` |
 | Local-agent adapters | 4 | `api/command_arsenal.py` |
 | Scanner CLI flags | 158 | `scanner/scanner.py` |
-| Scanner wrapper commands | 22 | `scanner.sh` |
+| Scanner wrapper commands | 23 | `scanner.sh` |
 | Make targets | 7 | `Makefile` |
 | Release gates | 10 | `scripts/release_gates.py` |
 | Runtime environment keys | 190 | Python sources + Compose manifests |
 | Scanner modules | 83 | `scanner/scanner_tools/` |
-| UI pages | 23 | `ui/src/app/` |
+| UI pages | 24 | `ui/src/app/` |
 | Skills | 4 | `skills/` |
 | Slash commands | 13 | `.claude/commands/` |
 | Specialized subagents | 3 | `.claude/agents/` |
-| Durable tables | 38 | `db/init.sql` + migrations |
+| Durable tables | 42 | `db/init.sql` + migrations |
 
 ### Public REST Operations
 
@@ -1134,6 +1153,13 @@ it is the exhaustive backstop behind the human-readable product map above.
 | `PATCH` | `/policy-profiles/{profile_id}` | `update_policy_profile` |
 | `DELETE` | `/queue/clear` | `clear_queue` |
 | `GET` | `/queue/stats` | `queue_stats` |
+| `GET` | `/research/episodes` | `list_research_episodes` |
+| `POST` | `/research/episodes` | `create_research_episode` |
+| `GET` | `/research/episodes/{episode_id}` | `get_research_episode` |
+| `POST` | `/research/episodes/{episode_id}/cancel` | `cancel_research_episode` |
+| `POST` | `/research/episodes/{episode_id}/decisions` | `submit_research_decision` |
+| `POST` | `/research/episodes/{episode_id}/observe` | `refresh_research_observation` |
+| `POST` | `/research/episodes/{episode_id}/plan-step` | `plan_research_episode_step` |
 | `GET` | `/results` | `list_results` |
 | `GET` | `/results/{target_folder}/latest` | `get_latest_result` |
 | `GET` | `/retests/finding/{finding_id:path}` | `list_finding_retests` |
@@ -1494,7 +1520,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 
 | Surface | Names |
 |---|---|
-| `scanner.sh` commands | `agent`, `ai`, `build`, `doctor`, `env`, `gungnir`, `help`, `install-deps`, `logs`, `mcp`, `rebuild`, `reload`, `reset`, `restart`, `scale`, `scan`, `scan-full`, `scan-smart`, `shell`, `start`, `status`, `stop` |
+| `scanner.sh` commands | `agent`, `ai`, `build`, `doctor`, `env`, `gungnir`, `help`, `install-deps`, `logs`, `mcp`, `rebuild`, `reload`, `research`, `reset`, `restart`, `scale`, `scan`, `scan-full`, `scan-smart`, `shell`, `start`, `status`, `stop` |
 | Make targets | `e2e`, `e2e-ai-gate`, `e2e-dast`, `e2e-model-intake`, `e2e-model-intake-fixture`, `release-gates`, `test` |
 | Release gates | `test:evidence-provenance`, `test:fleet-current`, `test:hypothesis-proof-promotion`, `test:mcp-read-only`, `test:no-ai-verified`, `test:no-benchmark-fitting`, `test:no-phantom-tools`, `test:planner-no-shell`, `test:planner-risk`, `test:planner-scope` |
 
@@ -1719,6 +1745,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `/settings/model-intake` | `ui/src/app/settings/model-intake/page.tsx` |
 | `/settings` | `ui/src/app/settings/page.tsx` |
 | `/settings/policy-profiles` | `ui/src/app/settings/policy-profiles/page.tsx` |
+| `/settings/research-agent` | `ui/src/app/settings/research-agent/page.tsx` |
 | `/targets/{id}/graph` | `ui/src/app/targets/[id]/graph/page.tsx` |
 | `/targets` | `ui/src/app/targets/page.tsx` |
 | `/timeline` | `ui/src/app/timeline/page.tsx` |
@@ -1790,6 +1817,10 @@ Only key names and declaring sources are documented; secret values are never rea
 | `operation_plans` | `api/retest_contract.py` |
 | `policy_profiles` | `db/init.sql` |
 | `refuter_reviews` | `api/retest_contract.py` |
+| `research_decisions` | `api/retest_contract.py` |
+| `research_episodes` | `api/retest_contract.py` |
+| `research_events` | `api/retest_contract.py` |
+| `research_observations` | `api/retest_contract.py` |
 | `scan_campaigns` | `db/init.sql` |
 | `scans` | `db/init.sql` |
 | `schedules` | `db/init.sql` |

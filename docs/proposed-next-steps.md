@@ -2,8 +2,10 @@
 
 **Status (2026-07-11):** the bounded local/owned-target product is implemented, but it is not
 release-complete. Detector acceptance, strict registry authority, engine-wide cancellation,
-metering-quality contracts, and Wave 6 live parity/soak remain open. Multi-node and planner execution
-authority remain gated.
+metering-quality contracts, and Wave 6 live parity/soak remain open. The bounded Research Agent now
+ships shadow and read-only one-step loops plus receipt-gated selection of a narrow existing-action
+allowlist. Typed custom HTTP experiments, unattended production autonomy, and multi-node execution
+remain gated.
 
 This is the single live DAST/ASM status and dependency document. Historical implementation detail is
 preserved in the [archive](archive/README.md), including the completed deferred-wave plan and the
@@ -13,7 +15,7 @@ evidence-grounded 2026-07-11 architecture review.
 
 | Area | Current status | Evidence boundary |
 |---|---|---|
-| Unit and contract tests | Passing at the 2026-07-11 documentation checkpoint | Python `1762 passed, 6 skipped`; UI contracts `20/20` |
+| Unit and contract tests | Passing at the 2026-07-11 implementation checkpoint | Python `1794 passed, 6 skipped`; bounded-agent/API subset `317 passed` |
 | UI production build and browser QA | Passed | Next.js build plus desktop and 390 px scan/ASM/schedule QA |
 | Fleet freshness | Passed at last rebuild | 16/16 workers on `957b688918e9ea58`, zero stale at verification time |
 | Full current-build E2E | Open | Older Model Intake/AI Gate/DAST result counts have not been rerun on the latest rebuilt fleet |
@@ -114,8 +116,12 @@ runtime validators rather than descriptive metadata.
 
 AI may propose, prioritize, correlate, and explain. ShakerScan-owned deterministic contracts decide
 scope, approval, request construction, execution, proof, evidence, severity promotion, finding state,
-and deployment gates. A shadow planner has no execution authority. One-step action selection remains
-gated behind detector, registry, cancellation, budget, and parity acceptance.
+and deployment gates. The shipped Research Agent binds each single decision to an immutable
+`ObservationPack` hash, injects target and receipt authority server-side, rejects model-supplied
+control fields, reserves bounded budget, and dispatches only the explicit research allowlist through
+the existing Arsenal gateway. Shadow mode never dispatches; read-only mode cannot select gated
+commands; gated mode additionally requires a target-matching approval/scope receipt and
+`AI_OPS_ROUTER_EXECUTE_ENABLED=true`. AI output still cannot create or verify findings.
 
 ## 10. Registry and invocation contracts
 
@@ -148,9 +154,13 @@ benign-alternative controls. Do not optimize directly against benchmark routes o
 3. Registry bypass closure and runtime proof/severity validation.
 4. Engine-wide cancellation plus per-adapter metering-quality contracts.
 5. Quantitative dynamic/static parity, cancellation, rate, and current-fleet detector soak.
-6. ObservationPack/DecisionEpisode schemas, then shadow planner evaluation only.
-7. One-step gated planner selection only after all local gates remain green.
-8. Multi-node fencing/idempotency proof last.
+6. Expand held-out Research Agent evaluations beyond contract/scope/risk fixtures and measure useful
+   action selection, model cost, and retry behavior across configured and local planners.
+7. Add a typed `http.experiment` preview/compiler with endpoint/principal references, mutation DSL,
+   benign controls, deterministic predicates, and no raw shell or credentials.
+8. Admit typed experiments to lab/staging only after cancellation, metering, registry, proof, and
+   false-positive gates remain green.
+9. Multi-node fencing/idempotency proof last.
 
 ## Intentionally excluded
 

@@ -144,3 +144,87 @@ def test_plan_posts_only_parse_then_dry_run_persistence(monkeypatch, tmp_path):
     persisted_payload = calls[-1][2]
     assert persisted_payload["planner"]["eval_passed"] is True
     assert persisted_payload["planner"]["planner_execution_enabled"] is False
+
+
+def test_research_prompt_filters_blocked_commands_and_redacts_target_data():
+    prompt = adapter.build_research_prompt({
+        "id": "obs-1",
+        "context_hash": "a" * 64,
+        "observation_pack": {
+            "objective": "inspect",
+            "authorization": "Bearer secret-value",
+            "proposable_commands": [
+                {"name": "asm.gaps", "proposable": True},
+                {"name": "asm.test", "proposable": False, "blocked_by": ["approval_receipt_missing"]},
+            ],
+        },
+    })
+
+    assert "secret-value" not in prompt
+    assert '"name":"asm.gaps"' in prompt
+    assert '"name":"asm.test"' not in prompt
+    assert "one JSON object" in prompt
+
+
+def test_research_decision_schema_has_no_execution_or_receipt_fields():
+    schema = adapter.research_decision_schema()
+    properties = schema["properties"]
+
+    assert schema["additionalProperties"] is False
+    assert "execute" not in properties
+    assert "approval_receipt_id" not in properties
+    assert "scope_receipt_id" not in properties
+    assert properties["decision"]["enum"] == ["execute_action", "request_input", "stop"]
+
+
+def test_research_episode_runner_submits_one_decision_at_a_time(monkeypatch):
+    calls = []
+    states = [
+        {
+            "episode": {"id": "episode-1", "status": "awaiting_planner", "terminal": False},
+            "current_observation": {"id": "obs-1", "context_hash": "a" * 64, "observation_pack": {}},
+        },
+        {
+            "episode": {"id": "episode-1", "status": "completed", "terminal": True},
+            "current_observation": {"id": "obs-2", "context_hash": "b" * 64, "observation_pack": {}},
+        },
+    ]
+
+    monkeypatch.setattr(adapter, "codex_identity", lambda binary=None: {
+        "agent": "codex", "version": "1", "fingerprint": "fp",
+        "binary_path": "/codex", "adapter_version": adapter.ADAPTER_VERSION,
+    })
+    monkeypatch.setattr(adapter, "run_codex_research_decision", lambda *args, **kwargs: ({
+        "decision_version": adapter.RESEARCH_DECISION_VERSION,
+        "decision": "stop",
+        "observation_id": "obs-1",
+        "context_hash": "a" * 64,
+        "hypothesis_id": None,
+        "action": {"command": "", "parameters": {}},
+        "expected_signal": None,
+        "falsifier": None,
+        "reason": "done",
+        "confidence": 1,
+        "requested_input": None,
+        "stop_reason": "objective_complete",
+    }, {
+        "estimated_model_tokens": 100, "sandbox": "read-only", "tools_disabled": [],
+        "workdir_isolated": True, "provider_api_keys_stripped": True,
+        "model_tokens_metering": "estimated",
+    }))
+
+    def fake_api(base_url, path, *, method="GET", payload=None):
+        calls.append((method, path, payload))
+        if method == "GET":
+            return states.pop(0) if len(states) > 1 else states[0]
+        assert path == "/research/episodes/episode-1/decisions"
+        return {"accepted": True, "decision_id": "decision-1", "episode": {"status": "completed"}}
+
+    monkeypatch.setattr(adapter, "api_json", fake_api)
+    result = adapter.run_research_episode("http://api", "episode-1", max_decisions=5, timeout_seconds=30)
+
+    writes = [call for call in calls if call[0] == "POST"]
+    assert len(writes) == 1
+    assert writes[0][2]["execute"] is True
+    assert writes[0][2]["model_tokens_used"] == 100
+    assert result["decision_count"] == 1

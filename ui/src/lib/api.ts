@@ -263,6 +263,128 @@ export interface OperationPlanResponse {
   validated: boolean
 }
 
+export interface ResearchBudget {
+  steps: number
+  actions: number
+  active_actions: number
+  requests: number
+  seconds: number
+  model_tokens: number
+}
+
+export interface ResearchEpisode {
+  id: string
+  target_id: string
+  objective: string
+  episode_version: string
+  planner: Record<string, unknown>
+  execution_mode: 'shadow' | 'read_only' | 'gated'
+  status: string
+  version: number
+  max_risk_tier: string
+  allowed_families: string[]
+  budget_limits: ResearchBudget
+  budget_used: ResearchBudget
+  remaining_budget: ResearchBudget
+  scope_receipt_id?: string | null
+  approval_receipt_id?: string | null
+  current_observation_id?: string | null
+  current_decision_id?: string | null
+  step_count: number
+  cancel_requested: boolean
+  stop_reason?: string | null
+  requested_input?: string | null
+  terminal: boolean
+  execution_enabled: boolean
+  created_at?: string
+  updated_at?: string
+}
+
+export interface ResearchCommandProjection {
+  name: string
+  status: string
+  risk_tier: string
+  description?: string
+  parameters_schema: Record<string, unknown>
+  required_confirmations: string[]
+  proposable: boolean
+  currently_executable: boolean
+  blocked_by: string[]
+}
+
+export interface ResearchObservation {
+  id: string
+  episode_id: string
+  sequence: number
+  observation_version: string
+  context_hash: string
+  observation_pack: {
+    objective?: string
+    execution_mode?: string
+    current_gaps?: Array<Record<string, unknown>>
+    hypotheses_summary?: Array<Record<string, unknown>>
+    findings_summary?: Array<Record<string, unknown>>
+    remaining_budget?: ResearchBudget
+    proposable_commands?: ResearchCommandProjection[]
+    previous_observation?: Record<string, unknown>
+  }
+  previous_command_result_id?: string | null
+  created_at?: string
+}
+
+export interface ResearchDecision {
+  id: string
+  sequence: number
+  decision_type: string
+  action: { command?: string; parameters?: Record<string, unknown> }
+  expected_signal?: string | null
+  falsifier?: string | null
+  reason?: string | null
+  confidence: number
+  requested_input?: string | null
+  stop_reason?: string | null
+  status: string
+  validation_errors: string[]
+  validation_warnings: string[]
+  policy_result: Record<string, unknown>
+  command_result_id?: string | null
+  created_at?: string
+}
+
+export interface ResearchEvent {
+  id: string
+  event_type: string
+  status: string
+  summary: string
+  details: Record<string, unknown>
+  created_at?: string
+}
+
+export interface ResearchEpisodeDetail {
+  episode: ResearchEpisode
+  current_observation: ResearchObservation | null
+  observations: ResearchObservation[]
+  decisions: ResearchDecision[]
+  events: ResearchEvent[]
+  accepted?: boolean
+  dispatched?: boolean
+  decision_id?: string
+  planner_call?: Record<string, unknown>
+}
+
+export interface ResearchEpisodeCreateRequest {
+  target_id: string
+  objective: string
+  execution_mode: 'shadow' | 'read_only' | 'gated'
+  max_risk_tier: string
+  allowed_families?: string[]
+  max_steps: number
+  budget_limits?: Partial<ResearchBudget>
+  scope_receipt_id?: string
+  approval_receipt_id?: string
+  created_by?: string
+}
+
 export interface CommandResult {
   id: string
   command: string
@@ -2580,6 +2702,67 @@ export async function createAgentDecisionTrace(payload: AgentDecisionTraceReques
 export async function getAgentDecisionTraces(limit: number = 20): Promise<{ decision_traces: AgentDecisionTrace[]; execution_enabled: boolean; count: number }> {
   const res = await fetch(`${API_URL}/arsenal/decision-traces?limit=${limit}`)
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load decision traces'))
+  return res.json()
+}
+
+export async function getResearchEpisodes(params?: {
+  target_id?: string
+  status?: string
+  limit?: number
+}): Promise<{ episodes: ResearchEpisode[]; count: number }> {
+  const search = new URLSearchParams()
+  if (params?.target_id) search.set('target_id', params.target_id)
+  if (params?.status) search.set('status', params.status)
+  search.set('limit', String(params?.limit || 50))
+  const res = await fetch(`${API_URL}/research/episodes?${search}`)
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load research episodes'))
+  return res.json()
+}
+
+export async function getResearchEpisode(episodeId: string): Promise<ResearchEpisodeDetail> {
+  const res = await fetch(`${API_URL}/research/episodes/${encodeURIComponent(episodeId)}`)
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load research episode'))
+  return res.json()
+}
+
+export async function createResearchEpisode(payload: ResearchEpisodeCreateRequest): Promise<ResearchEpisodeDetail> {
+  const res = await fetch(`${API_URL}/research/episodes`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to create research episode'))
+  return res.json()
+}
+
+export async function planResearchEpisodeStep(episodeId: string, payload: {
+  execute?: boolean
+  timeout_seconds?: number
+  max_tokens?: number
+  created_by?: string
+} = {}): Promise<ResearchEpisodeDetail> {
+  const res = await fetch(`${API_URL}/research/episodes/${encodeURIComponent(episodeId)}/plan-step`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to run research planner step'))
+  return res.json()
+}
+
+export async function refreshResearchObservation(episodeId: string): Promise<ResearchEpisodeDetail> {
+  const res = await fetch(`${API_URL}/research/episodes/${encodeURIComponent(episodeId)}/observe`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ created_by: 'research_agent_ui' }),
+  })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to refresh research observation'))
+  return res.json()
+}
+
+export async function cancelResearchEpisode(episodeId: string): Promise<ResearchEpisodeDetail> {
+  const res = await fetch(`${API_URL}/research/episodes/${encodeURIComponent(episodeId)}/cancel`, { method: 'POST' })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to cancel research episode'))
   return res.json()
 }
 

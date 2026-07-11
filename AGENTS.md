@@ -71,6 +71,7 @@ flags, skills, agents, adapters, modules, and durable tables) plus architecture/
 - **Interactive (`/interactive`)**: browser sessions, managed credential profiles, target principals, authz expectations, endpoint replay, screenshots, and explicit manual finding creation.
 - **Exceptions (`/settings/exceptions`)**: exception queue, owner/approver/control repair, expiry visibility, and lifecycle sweep.
 - **Command Arsenal (`/settings/arsenal`)**: command contracts, plans, scope/approval receipts, action ledger, hypotheses, refuters, tools, local agents, context packs, and decision traces.
+- **Research Agent (`/settings/research-agent`)**: create target-bound shadow/read-only/gated research episodes, run one configured-AI decision at a time, inspect immutable observations, budgets, decisions, and events, refresh target state, and cancel the episode plus linked active scans.
 - **Settings (`/settings`)**: AI providers, scan execution policy, automation defaults, and approval-receipt enforcement.
 - **Application Graph (`/targets/{id}/graph`)**: inspect persisted route/object/principal nodes, producer/consumer/auth-boundary edges, node/edge filters, search, and selected-node connections.
 
@@ -415,6 +416,44 @@ curl -X POST http://localhost:8080/ai/ops/route \
 ```
 
 Active or budget-increasing intents return `dry_run: true` unless `execute`, `confirm_execution`, and `confirm_authorized` are true and the server has `AI_OPS_ROUTER_EXECUTE_ENABLED=true`. High-risk BOLA also requires `confirm_high_risk` plus auth context hints.
+
+### Bounded Research Agent
+
+Research episodes let a configured AI provider or an isolated host-side Codex process select one
+registered action at a time from a fresh, redacted target observation. The API remains authoritative
+for command schemas, target binding, scope, approval, risk, budget, execution, and proof.
+
+```bash
+# Create a five-step read-only episode
+curl -X POST http://localhost:8080/research/episodes \
+  -H "Content-Type: application/json" \
+  -d '{
+    "target_id": "target-uuid",
+    "objective": "Investigate the highest-value unexplained security gaps",
+    "execution_mode": "read_only",
+    "max_risk_tier": "read_only",
+    "max_steps": 5
+  }'
+
+# Run one step with the configured AI provider
+curl -X POST http://localhost:8080/research/episodes/{episode_id}/plan-step \
+  -H "Content-Type: application/json" \
+  -d '{"execute": true}'
+
+# Or drive the same episode with the signed-in local Codex CLI
+./scanner.sh research {episode_id} 5
+
+# Inspect or cancel
+curl http://localhost:8080/research/episodes/{episode_id}
+curl -X POST http://localhost:8080/research/episodes/{episode_id}/cancel
+```
+
+Modes are `shadow`, `read_only`, and `gated`. Gated episodes require a target-matching scope receipt,
+approval receipt, explicit active budgets, and `AI_OPS_ROUTER_EXECUTE_ENABLED=true`; the current
+allowlist is Continuous ASM recon/test/improve, focused-family scans, and finding retests. The model
+cannot provide receipt IDs in a decision, access credentials, use raw shell, or create verified
+findings. A decision must reference the current observation ID/hash and declare its expected signal
+and falsifier.
 
 ### Subdomain Discovery
 
