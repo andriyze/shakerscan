@@ -1,5 +1,8 @@
 # Implementation Plan — Roadmap Review (2026-06-25)
 
+> **ARCHIVED (2026-07-11).** This is a point-in-time review ledger. July code, tests, and benchmark
+> artifacts supersede its open/done ordering. Use [`../proposed-next-steps.md`](../proposed-next-steps.md).
+
 The review was accurate when written (spot-verified then: Juice Shop benchmark
 `artifact_status: failed_benchmark_scorecard`; no `evidence_objects`/`storage_uri`
 anywhere; worker reports but never refuses on submit-time fingerprint; UI

@@ -361,8 +361,8 @@ Build the fleet layer:
    Redis Streams consumer groups are the natural Redis-native option.
 5. **Distributed rate limiting:** use Redis token buckets keyed by target/root domain so
    adding worker instances does not accidentally multiply request pressure. Known-endpoint
-   ASM/Full Coverage worker batches already reserve endpoint budget this way; request-accurate
-   standalone scan budgets remain dependent on richer scanner telemetry.
+   ASM/Full Coverage worker batches already reserve endpoint budget this way; standalone scans need
+   explicit per-adapter metering quality before any hard distributed-cap claim.
 6. **Routing and affinity:** place jobs by labels such as region, egress group,
    private-network reachability, scan tier, or required tools.
 7. **Fleet operations:** support drain, disable, rolling image upgrade, version mismatch
@@ -616,14 +616,13 @@ Acceptance criteria:
 
 ## Final Recommendation
 
-Build multi-node in two layers:
+Keep multi-node deferred until local Wave 6 acceptance, then build it in layers:
 
-1. **Now:** owned worker VPSs over a private overlay, sharing Redis/Postgres with the
-   control plane. This proves that the current worker fleet can span hosts and gives
-   immediate throughput gains for independent scans.
-2. **Next:** add node-agent lifecycle management, centralized evidence, reliable queue
-   leases, request-accurate budget telemetry, and routing. This makes the owned fleet safe enough
-   for production.
+1. **First proof, after local gates:** owned worker VPSs over a private overlay with fencing tokens,
+   stale-owner-write prevention, idempotent delivery, centralized evidence, and executing-node scope
+   revalidation. A shared Redis/Postgres deployment alone is not a production claim.
+2. **Owned-fleet hardening:** add node-agent lifecycle management, drain/reschedule, partition and
+   clock-skew tests, brokered short-lived secrets, per-adapter budget telemetry, and routing.
 3. **Later:** add the HTTPS broker for untrusted or customer-hosted nodes. That is the
    correct zero-trust architecture, but it is more work than needed for the first owned
    multi-VPS fleet.
@@ -797,8 +796,8 @@ TARGET BEHAVIOR
 - Move evidence to S3/MinIO-compatible object storage.
 - Replace or wrap Redis list pop with Redis Streams consumer groups or equivalent ack/reclaim
   semantics.
-- Extend the shipped known-endpoint token buckets into request-accurate standalone budgets once
-  scanner telemetry can report discovered request pressure reliably.
+- Extend the shipped known-endpoint token buckets only for adapters with exact or enforceable
+  upper-bound metering; label all other standalone budget enforcement soft or unavailable.
 - Add routing labels for region, egress group, private reachability, scan tier, and tool
   requirements.
 - Record node/version/egress attribution on scan, shard, and attempt records.

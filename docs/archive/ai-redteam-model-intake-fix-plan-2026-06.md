@@ -1,5 +1,9 @@
 # AI Red-Teaming and Model Intake Fix Plan
 
+> **ARCHIVED (2026-07-11).** The bounded fixes in this June plan shipped or were superseded. Use
+> [`../functionality-reference.md`](../functionality-reference.md) for capabilities and
+> [`../proposed-next-steps.md`](../proposed-next-steps.md) for current hardening work.
+
 **Original audit:** last 30 commits ending `bfee04e`, 2026-05-23.
 **Status re-verified against code:** 2026-06-23.
 
@@ -198,7 +202,7 @@ tampered / broken-chain / wrong-key flagged; presence checks still fire); live r
 ## Target architecture (object models & flows)
 
 Everything in this section is **target/proposed**, not shipped. These object models deliberately
-converge with the DAST evidence-first work in [`proposed-next-steps.md`](proposed-next-steps.md)
+converge with the DAST evidence-first work in [`../proposed-next-steps.md`](../proposed-next-steps.md)
 (§2 application graph, §4 evidence object store, §5 finding/evidence split) — AI and DAST should share
 one inventory → evidence → proof-state → policy pipeline, not two parallel ones.
 
@@ -274,7 +278,7 @@ compensating_controls, expiry, status, audit_events }`.
 
 The deployment-decision endpoint should consume these durable records (today it reads a hard-coded
 profile dict plus payload-supplied exceptions). Converges with the evidence/exception direction in
-[`proposed-next-steps.md`](proposed-next-steps.md) §4–§5.
+[`../proposed-next-steps.md`](../proposed-next-steps.md) §4–§5.
 
 ### Verified-receipt requirements (R5)
 

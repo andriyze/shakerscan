@@ -150,33 +150,39 @@ claim instead of deleting it.
   zero-backing `broken_access_control` alias; (d) the auth-gated misses require a working
   two-principal authed run (see the architecture review's increment 0).
 
-### 2026-07-11 — First current-fleet authenticated crAPI scorecard (honest FAIL; root cause = discovery)
+### 2026-07-11 — First current-fleet authenticated crAPI scorecard (honest FAIL; discovery blocker confirmed)
 
 - Date: 2026-07-11.
 - Artifacts: `results/benchmark-runs/benchmark-crapi.json` and
   `benchmark-crapi-20260711T053205Z.json`, scan `85d3bafb-40a5-472e-8d64-eb954213f247`,
   fleet fingerprint `bc6c357126e7fe53` (the **current** fleet).
-- What this establishes (positive): the first crAPI benchmark run with **two distinct
-  authenticated principals actually observed** — `two_user: True`,
-  `two_principal_observed: True`, `auth_workflow.status: "ready"`. The auth-bootstrap
+- What this establishes (positive): the first crAPI benchmark run where the harness minted JWTs with
+  **two different stable identity claims** and the scanner scheduled both auth lanes —
+  `two_user: True`, `two_principal_observed: True`, `auth_workflow.status: "ready"`. The auth-bootstrap
   fixes (`1fb3bac` host.docker.internal→127.0.0.1 mint bridge, `c146bdf` mint retry,
   `bd1a5d5` distinct-identity guard) work end-to-end on current HEAD. The BOLA
-  differential engine ran (`bola_status.mode: cross_principal_read`,
+  differential lane ran (`bola_status.mode: cross_principal_read`,
   `cross_user_enabled: True`, `candidate_endpoints: 325`).
+- Evidence limit: `two_principal_observed` is a compatibility name derived from the presence of
+  `user1`/`user2` coverage lanes. The scorecard does not yet persist a redacted distinct-identity
+  receipt or prove that the target accepted each authenticated context. Do not read it as
+  server-observed identity proof.
 - Result (honest FAIL): `passed: False`, `expected_recall: 0.0`, `verified_high_critical: 1`
   (an unrelated `.env` exposure). All 4 expected findings MISSED
   (`bola-vehicle-location`, `bola-mechanic-report`, `bola-orders`, `sqli-coupon`);
   `require_verified_bola` gate FAILED ("no verified BOLA").
-- Root cause (diagnosed): a **discovery gap, not an auth or BOLA-detector gap**. None of the
+- Confirmed blocker: an **authenticated API discovery gap**. None of the
   4 vulnerable crAPI routes (`/identity/api/v2/vehicle`, `/workshop/api/mechanic`,
   `/workshop/api/shop/orders`, `/community/api/v2/coupon`) appear anywhere in the report —
   discovery/crawl (235 endpoints) never enumerated crAPI's authenticated API surface, so the
   BOLA engine's 325-candidate set did not include the vulnerable endpoints. The engine can
-  only prove BOLA on endpoints discovery feeds it.
-- Impact: benchmark interpretation + roadmap sequencing. It re-scopes "increment 0": the
-  auth-plumbing half is DONE and proven; the real detector work is authenticated
-  API-endpoint discovery (OpenAPI/spec ingestion, OPTIONS/JSON-link/gRPC discovery toggles,
-  JS/mobile endpoint extraction, or benchmark `custom_endpoints` seeding).
-- Follow-up: diagnose why authenticated API discovery misses crAPI's routes and close it as a
-  universal technique (not a crAPI-specific route list in the detector); then re-run to
-  confirm the BOLA differential fires once the routes are in the candidate set.
+  only prove BOLA on endpoints discovery feeds it. This run does **not** exonerate the detector: a
+  seeded endpoint-control run is still required to show that BOLA/SQLi proof succeeds when the
+  missing routes are supplied.
+- Impact: benchmark interpretation + roadmap sequencing. Auth bootstrap is partially proven at
+  submission, while accepted-auth observation, detector isolation, and authenticated API discovery
+  remain separate acceptance boundaries. Candidate universal discovery work includes OpenAPI/spec
+  ingestion, OPTIONS/JSON-link discovery, and JS/browser endpoint extraction.
+- Follow-up: persist a redacted principal-validation receipt, fix the impossible completion ratio,
+  run seeded detector controls outside detector inputs, then close discovery as a universal
+  technique and rerun unseeded. Never add crAPI route names to detector inputs.

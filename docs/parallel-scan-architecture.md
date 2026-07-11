@@ -6,12 +6,13 @@ pull allocation by default, static fallback, campaign attempt ledgers, fleet fre
 and parent UI rollups. Continuous ASM is documented separately in
 [continuous-asm-architecture.md](continuous-asm-architecture.md). Parallelism remains the execution
 substrate, not the quality claim. Generic recon, passive posture, Nuclei, JWT, mass-assignment,
-Auth/BOLA, and SQLi/XSS execution are registry-owned. Versioned attempt telemetry and opt-in
+Auth/BOLA, and SQLi/XSS have registry adapters, but strict authority remains partial because legacy
+phase-4 BOLA, NoSQL, and endpoint-scoped registered coverage can bypass the decision. Versioned attempt telemetry and opt-in
 enforcing request budgets for internally discovered standalone traffic are shipped; cooperative cancellation in remaining legacy loops
 outside the now-covered SQLi/XSS/Auth/BOLA/Phase-4 paths, additional
 focused families, multi-node orchestration, and large-fleet parity/soak are not implemented claims.
 
-**Reconciled:** 2026-07-10 against current code, tests, and `proposed-next-steps.md`.
+**Reconciled:** 2026-07-11 against current code, tests, benchmark artifacts, and `proposed-next-steps.md`.
 **Date:** 2026-06-23 (core implemented 2026-06-15)
 **Author:** Architecture audit (Claude Code)
 **Scope:** Make a single logical scan of one target fan out across the worker fleet; expand dictionaries, checks, and budgets that this parallelism makes affordable.
@@ -69,9 +70,9 @@ editing.
 | Full Coverage dynamic allocation | Default shipped | Keep static fallback available and continue live parity/soak on large targets. |
 | Coverage x family dynamic allocation | Shipped for broad/SQLi/XSS; gated Auth/BOLA lanes when preconditions exist | Make shard count worker-aware; run shared recon once, then focused family lanes without diluting SQLi/XSS/BOLA budgets. |
 | Known-endpoint distributed rate limits | Shipped | Standalone request-token reservation and metering are shipped opt-in; complete live rate soak before changing the compatibility default. |
-| First-class check registry | Authoritative for all current runnable report families | Add only telemetry-backed families with adapter/proof contracts. |
+| First-class check registry | Dispatch foundation shipped; strict authority partial | Close legacy registered-family bypasses and enforce proof/severity contracts. |
 | Operator-facing campaign/ASM UX | Bounded phase shipped with schedule/skip/remediation/rollup contract tests | Add actions only with tested confirmation boundaries. |
-| DAST quality benchmark loop | Current-fleet Juice Shop scorecard passes; authenticated crAPI rerun pending after rebuild cancellation | Treat missing verified family recall as a benchmark failure, not successful breadth. |
+| DAST quality benchmark loop | Juice Shop pass is on older fleet `ddc6173b`; current-fleet authenticated crAPI fails `0/4` | Seed detector-isolation controls, then improve universal authenticated discovery and rerun unseeded. |
 | Multi-node WireGuard POC | Proposed/RFC | Build a two-VPS proof only after local queue/worker invariants stay green. |
 | Production multi-node fleet | Proposed/RFC | Add node registry, reliable queue leases, object evidence, and routing. |
 | HTTPS broker for untrusted workers | Future | Do not build until owned-fleet primitives are stable. |
@@ -541,8 +542,9 @@ Do this **incrementally**: first carve `run_recon_stage` out (it already roughly
 **Phase 2 — Breadth & polish (partly shipped, partly deferred)**
 - Family/coverage-family sharding is shipped for broad/SQLi/XSS and explicit gated Auth/BOLA lanes;
   Nuclei-category sharding and additional focused families remain deferred.
-- The check registry is authoritative for planning and scanner adapter validation across current
-  runnable families. Full `build_report()` module iteration from the registry remains deferred.
+- The check registry is authoritative for planning and adapter identity validation, but not yet for
+  every registered-family request/finding. Phase-4 BOLA, NoSQL, and endpoint-scoped registered
+  coverage remain strict-authority gaps.
 - Worker-level process-group cancellation and cooperative SQLi/XSS/Auth/BOLA/Phase-4 checkpoints are
   shipped; checkpoints in remaining legacy loops stay deferred (see Risks).
 - UI parent progress, per-shard contribution, aggregate auth/family rollups, campaign attempt facts,

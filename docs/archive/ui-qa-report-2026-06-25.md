@@ -1,5 +1,8 @@
 # UI QA Report — click-through audit (2026-06-25)
 
+> **ARCHIVED (2026-07-11).** This report describes a June deployment. The UI contract suite,
+> production build, and rebuilt-stack browser QA supersede its live-state claims.
+
 Method: every route was loaded against the running app (`:3000`), the API endpoints
 each page calls were probed (`:8080`), and all page/component sources were read. Issues
 only — **no fixes applied**. Severity is user-impact, not effort.

@@ -1,6 +1,7 @@
 # Deferred Work Implementation Plan
 
-**Status:** Waves 1-5 implemented; Wave 6 rebuilt live acceptance pending; Wave 7 intentionally gated
+**Status:** cancellation, telemetry, request-meter infrastructure, and UI contracts are implemented;
+registry authority is partial; detector acceptance and Wave 6 soak remain open; Wave 7 is gated
 **Created:** 2026-07-10
 **Scope:** remaining local/owned-fleet architecture from the reconciled roadmap. Multi-node and
 untrusted-worker transport remain a later program and do not block the local proof-first product.
@@ -13,6 +14,22 @@ untrusted-worker transport remain a later program and do not block the local pro
 4. Do not mark soak or benchmark work complete without a fingerprint-current artifact.
 5. Do not start multi-node execution until local cancellation, leases, budgets, evidence, and fleet
    freshness are stable under load.
+
+## Immediate corrected sequence (2026-07-11)
+
+The current-fleet authenticated crAPI run proved that the benchmark harness can mint two different
+JWT identities and schedule both auth lanes. It failed `0/4`, and the expected routes were absent
+from the stored result. Treat discovery as a confirmed blocker, but do not call it the only root
+cause until seeded detector controls pass.
+
+1. Make benchmark auth and diagnostics evidentiary: redacted identity-validation receipts, bounded
+   discovery manifests, and valid completion metrics.
+2. Run seeded BOLA/SQLi controls to isolate detector correctness from discovery.
+3. Improve authenticated API discovery using universal spec/link/JS/browser techniques; rerun the
+   unseeded benchmark.
+4. Close registered-family execution bypasses and enforce declared proof/severity contracts.
+5. Finish engine-wide cancellation and per-adapter metering-quality contracts, then execute Wave 6.
+6. Keep planner authority and multi-node work behind those acceptance gates.
 
 ## Wave 1: cooperative cancellation for current active families - DONE
 
@@ -40,7 +57,7 @@ current task during the worker grace period. Worker process-group termination re
 Focused tests and the complete Python suite pass. Additional legacy loops are tracked under Wave 2/3
 adapter migration rather than being implied complete.
 
-## Wave 2: registry-owned report execution
+## Wave 2: registry-owned report execution - PARTIAL
 
 Deliverables:
 
@@ -57,7 +74,7 @@ Done when:
 - disabling a family in the registry prevents its adapter from executing even if legacy flags say yes;
 - every enabled family has a receipt and parser/proof contract.
 
-Implemented: the report phase executor accepts sync or async adapters,
+Implemented foundation: the report phase executor accepts sync or async adapters,
 validates each adapter against `SCANNER_REGISTRY_ADAPTER_CONTRACTS`, observes cooperative
 cancellation, and emits structured skipped/blocked/cancelled/failed/completed receipts with the
 declared telemetry and proof contracts. Generic recon, passive header/config finding emission, and
@@ -71,8 +88,13 @@ The active executor also supports explicit dependency-point family subsets and t
 adapters. JWT and Phase 4 mass-assignment now execute only through their registry adapters and emit
 versioned completion/finding/count telemetry. Focused Auth and BOLA/BFLA now execute through the
 `asm_endpoint_batch` adapter with blocked/cancelled/budget/access-violation receipts. SQLi and XSS
-now enter only through the shared `legacy_active_loop` registry batch adapter; registry disablement
-prevents that family from executing. Wave 2 is complete in code.
+enter through the shared `legacy_active_loop` registry batch adapter for the main active loop.
+
+Remaining strict-authority gaps: phase-4 `bola_testing -> check_bola`, advanced NoSQL execution, and
+endpoint-scoped registered auth/exposure checks can still issue requests and emit registered-family
+coverage outside the registry phase decision. Declared `proof_contract` and `severity_rules` are
+published but not enforced against emitted findings. Wave 2 is complete only when a registry `NO`
+prevents every registered-family request/finding even while each legacy condition says `YES`.
 
 ## Wave 3: telemetry schema expansion
 
@@ -96,14 +118,19 @@ Done when:
 - parent/ASM family coverage distinguishes attempted, completed, proved, blocked, cancelled, and
   partial states.
 
-## Wave 4: request-accurate standalone budgets
+## Wave 4: standalone request metering and bounded enforcement
 
-**Status: DONE in code; enforcing mode awaits Wave 6 soak before becoming the default.** Resolved
-budgets carry `request_max`. The request meter accounts for shared curl, httpx, aiohttp, urllib, and
-Playwright target traffic, disables hidden redirects when enforcing, and fails closed on external
-network tools whose internal request counts cannot be observed. Workers reserve enforcing-mode
-tokens in the shared root-domain bucket. Reports carry `request_meter_v1` telemetry and an execution
-receipt. Compatibility mode remains the default and records unmetered tool invocations.
+**Status: infrastructure DONE; contract formalization and soak OPEN.** Resolved budgets carry
+`request_max`. The request meter counts shared curl, httpx, aiohttp, urllib, and Playwright target
+traffic, disables hidden redirects when enforcing, and rejects known external network tools whose
+internal request counts cannot be observed. Workers reserve enforcing-mode tokens in the shared
+root-domain bucket. Reports carry `request_meter_v1` telemetry and an execution receipt.
+Compatibility mode remains the default and records unmetered tool invocations.
+
+Do not call this globally request-accurate. Add per-adapter `metering_quality` (`exact`,
+`adapter_reported`, `reserved_upper_bound`, `estimated`, `unknown`) and `budget_enforcement` (`hard`,
+`soft`, `unavailable`). A hard cap is claimable only for exact or enforceable upper-bound adapters;
+opaque subprocess adapters remain disabled or soft/unavailable.
 
 Deliverables:
 

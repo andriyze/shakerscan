@@ -15,3 +15,8 @@ is a current roadmap or reference.** For the live state, use:
 | `asm-parallel-improvement-plan.md` | Self-labeled investigation log; fixes committed. Its 3 still-open items (A4 / P6 / version-handshake) migrated to proposed-next-steps §8 |
 | `juice-shop-detection-gap-analysis.md` | Superseded by proposed-next-steps §1 + the committed benchmark scorecards |
 | `pre-release-test-report-2026-06-15.md` | Point-in-time QA snapshot of an old build |
+| `proposed-next-steps-implementation-ledger-2026-07-10.md` | Superseded long-form implementation ledger; live status now uses the concise top-level document |
+| `ai-redteam-model-intake-fix-plan-2026-06.md` | Completed June fix plan; remaining cross-product hardening moved to the live roadmap |
+| `roadmap-review-implementation-plan-2026-06-25.md` | Point-in-time review whose shipped/open statuses were superseded by July code and artifacts |
+| `ui-qa-report-2026-06-25.md` | Point-in-time UI audit; fixes and rebuilt browser acceptance supersede its live-state claims |
+| `t3mp3st-adoption-implementation-ledger-2026-07-10.md` | Bounded adoption history; no longer an active architecture or implementation plan |

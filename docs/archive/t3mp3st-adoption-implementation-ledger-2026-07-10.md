@@ -1,5 +1,9 @@
 # T3MP3ST Adoption Implementation Plan
 
+> **ARCHIVED (2026-07-11).** This records bounded T3MP3ST-derived adoption work. It is not an active
+> implementation plan. Current ordering is in [`../proposed-next-steps.md`](../proposed-next-steps.md)
+> and [`../deferred-work-implementation-plan.md`](../deferred-work-implementation-plan.md).
+
 **Status:** adopted design input; bounded adoption phases implemented, optional expansion deferred
 **Created:** 2026-07-05  
 **Updated:** 2026-07-10 after code/test reconciliation

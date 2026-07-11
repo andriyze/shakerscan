@@ -15,10 +15,11 @@ campaign quality, not just endpoint touch count. The engine now proves real Crit
 BOLA/Authz on lab apps and has runnable registry contracts for XSS, mass-assignment, and JWT checks,
 but broad/stored XSS and workflow/write-BOLA remain recall/acceptance gaps that ASM should expose as
 family/proof/workflow gaps. Generic recon, passive posture, Nuclei, JWT, mass-assignment, Auth/BOLA,
-and SQLi/XSS now run through registry adapters. Versioned attempt schemas and opt-in standalone
-request metering are shipped; additional families, multi-node placement, and live parity/rate soak
-remain deferred target architecture rather than shipped behavior.
-**Date:** 2026-07-10
+and SQLi/XSS main loops now run through registry adapters. Strict registry authority is still open:
+phase-4 BOLA, NoSQL, and endpoint-scoped registered coverage have legacy bypasses. Versioned attempt
+schemas and opt-in standalone request metering are shipped; detector acceptance, registry closure,
+multi-node placement, and live parity/rate soak remain open.
+**Date:** 2026-07-11
 **Related design:** [parallel-scan-architecture.md](parallel-scan-architecture.md),
 [multi-node-architecture.md](multi-node-architecture.md).
 
@@ -70,9 +71,9 @@ editing.
 | Full Coverage dynamic allocation | Default shipped | Keep static fallback available and continue live parity/soak on large targets. |
 | Coverage x family dynamic allocation | Shipped for broad/SQLi/XSS; gated Auth/BOLA lanes when preconditions exist | Make shard count worker-aware; run shared recon once, then focused family lanes without diluting SQLi/XSS/BOLA budgets. |
 | Known-endpoint distributed rate limits | Shipped | Standalone request-token reservation and metering are shipped opt-in; complete live rate soak before changing the compatibility default. |
-| First-class check registry | Authoritative for all current runnable report families | Add only telemetry-backed families with adapter/proof contracts. |
+| First-class check registry | Dispatch foundation shipped; strict authority partial | Close legacy registered-family bypasses and enforce proof/severity contracts. |
 | Operator-facing campaign/ASM UX | Bounded phase shipped with schedule/skip/remediation/rollup contract tests | Add actions only with tested confirmation boundaries. |
-| DAST quality benchmark loop | Current-fleet Juice Shop scorecard passes; authenticated crAPI rerun pending after rebuild cancellation | Treat missing verified family recall as a benchmark failure, not successful breadth. |
+| DAST quality benchmark loop | Juice Shop pass is on older fleet `ddc6173b`; current-fleet authenticated crAPI fails `0/4` | Seed detector-isolation controls, then improve universal authenticated discovery and rerun unseeded. |
 | Multi-node WireGuard POC | Proposed/RFC | Build a two-VPS proof only after local queue/worker invariants stay green. |
 | Production multi-node fleet | Proposed/RFC | Add node registry, reliable queue leases, object evidence, and routing. |
 | HTTPS broker for untrusted workers | Future | Do not build until owned-fleet primitives are stable. |
@@ -662,8 +663,8 @@ Implemented in this pass:
 
 Remaining:
 
-- Add further runnable focused families only with telemetry/proof contracts; current report families
-  are registry-owned.
+- Close strict-authority bypasses for current registered families, then add further runnable focused
+  families only with telemetry and enforced proof contracts.
 
 ### Phase B — Attempt Ledger + Durable Leases
 
@@ -751,8 +752,10 @@ New quality gaps to track:
 - **Coverage mode loses global checks:** parallel `coverage` detects fewer crit/high than a single
   Smart scan (zero-rediscovery children + fragmented global posture checks). Prefer single Smart for
   DAST-quality benchmarking; coverage is for breadth.
-- **Workflow/write-BOLA gap:** crAPI read-BOLA is proven; safe non-destructive write/BFLA and
-  workflow/object creation remain future Lab/deep-gated work.
+- **Authenticated BOLA gap:** current-fleet crAPI schedules two auth lanes but proves no expected
+  BOLA. Discovery is a confirmed blocker; seeded detector controls are still required before calling
+  the differential accepted. Safe non-destructive write/BFLA and workflow/object creation remain
+  future Lab/deep-gated work.
 - **Family/proof rollups:** `/asm/gaps` now returns `family_coverage` (completed vs attempts) and
   `recommended_campaigns`; it should keep distinguishing "endpoint attempted" from "SQLi proof
   attempted", "XSS browser proof attempted", and "BOLA cross-principal proof attempted".

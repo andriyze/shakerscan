@@ -441,13 +441,13 @@ The AI side has four capabilities:
 be backed by deterministic, cryptographic, parser-backed, protocol-backed, or replay-backed evidence.
 Findings carry proof quality explicitly (see [AI proof and evidence states](#ai-proof-and-evidence-states)
 below); AI is never the sole authority for verified status or severity promotion. For engineering-depth
-onboarding see [`AI_REDTEAM_AND_MODEL_INTAKE.md`](AI_REDTEAM_AND_MODEL_INTAKE.md); for the
-implemented-vs-remaining backlog see
-[`AI_REDTEAM_MODEL_INTAKE_FIX_PLAN.md`](AI_REDTEAM_MODEL_INTAKE_FIX_PLAN.md).
+onboarding see [`AI_REDTEAM_AND_MODEL_INTAKE.md`](AI_REDTEAM_AND_MODEL_INTAKE.md); current hardening
+work is tracked in [`proposed-next-steps.md`](proposed-next-steps.md). The completed June fix plan is
+preserved only as an [archived implementation record](archive/ai-redteam-model-intake-fix-plan-2026-06.md).
 
 ### AI capability status quick read
 
-Status reflects shipped behavior verified against code (2026-06-23). "Partial" means the capability
+Status reflects shipped behavior last reconciled against code (2026-07-11). "Partial" means the capability
 runs but the listed caveat applies — treat the caveat as load-bearing, not cosmetic.
 
 | Capability | Status | Trust / proof caveat |
@@ -472,9 +472,9 @@ Today a finding exposes a three-state proof level — `verified` (deterministic 
 deterministic proof blocks any AI downgrade. The **target** is one taxonomy unified across DAST and AI
 (`deterministic_verified`, `cryptographically_verified`, `claimed_present`, `ai_judged_likely`,
 `inconclusive`, `blocked`, `false_positive`) so that *claimed* metadata and *AI-judged* results can
-never render as *verified*. That taxonomy and its block/verified rules are tracked in
-[`AI_REDTEAM_MODEL_INTAKE_FIX_PLAN.md`](AI_REDTEAM_MODEL_INTAKE_FIX_PLAN.md) and converge with the DAST
-proof-state work in [`proposed-next-steps.md`](proposed-next-steps.md).
+never render as *verified*. Current proof-state hardening is tracked in
+[`proposed-next-steps.md`](proposed-next-steps.md); the original AI taxonomy design is retained in the
+[archived fix plan](archive/ai-redteam-model-intake-fix-plan-2026-06.md).
 
 ### 11.1 AI Gate
 
@@ -806,7 +806,8 @@ limited with per-tool timeouts and a global deadline.
 | Smart scan budgets, SLOs, release gates | [`SMART_SCAN_POLICY.md`](SMART_SCAN_POLICY.md) |
 | OWASP coverage and intentional gaps | [`owasp-coverage-matrix.md`](owasp-coverage-matrix.md) |
 | AI red teaming + model intake (engineering onboarding) | [`AI_REDTEAM_AND_MODEL_INTAKE.md`](AI_REDTEAM_AND_MODEL_INTAKE.md) |
-| AI red teaming + model intake — implemented-vs-remaining backlog | [`AI_REDTEAM_MODEL_INTAKE_FIX_PLAN.md`](AI_REDTEAM_MODEL_INTAKE_FIX_PLAN.md) |
+| Current product hardening roadmap | [`proposed-next-steps.md`](proposed-next-steps.md) |
+| Historical AI red teaming + model intake fix ledger | [`archive/ai-redteam-model-intake-fix-plan-2026-06.md`](archive/ai-redteam-model-intake-fix-plan-2026-06.md) |
 | AI test workflows + Honey contract | [`AI_TEST_WORKFLOWS.md`](AI_TEST_WORKFLOWS.md) |
 | Interactive AI security sessions | [`INTERACTIVE_SESSIONS_GUIDE.md`](INTERACTIVE_SESSIONS_GUIDE.md) |
 | Parallel scan architecture | [`parallel-scan-architecture.md`](parallel-scan-architecture.md) |
