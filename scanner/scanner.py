@@ -3334,6 +3334,126 @@ async def dispatch_registry_report_phase(
     return receipts
 
 
+async def discover_browser_seed_urls(
+    base_url: str,
+    seed_entry_urls: list[str],
+) -> list[str]:
+    """Extract bounded SPA/browser crawl seeds from the target's own JS."""
+    import httpx as _httpx
+
+    browser_seed_urls: list[str] = list(seed_entry_urls)
+    try:
+        print("[smart] Quick JS route discovery for browser crawl seeding", file=sys.stderr)
+        async with _httpx.AsyncClient(verify=False, timeout=15.0, follow_redirects=True) as client:
+            candidate_urls = list(dict.fromkeys([base_url, *seed_entry_urls]))
+
+            seed_base_url = base_url
+            html = ""
+            for candidate in candidate_urls:
+                try:
+                    resp = await client.get(candidate)
+                except Exception:
+                    continue
+                candidate_html = resp.text or ""
+                content_type = (resp.headers.get("content-type") or "").lower()
+                if candidate_html and (
+                    "text/html" in content_type
+                    or "<html" in candidate_html.lower()
+                    or "<script" in candidate_html.lower()
+                ):
+                    seed_base_url = candidate
+                    html = candidate_html
+                    break
+                if not html:
+                    seed_base_url = candidate
+                    html = candidate_html
+
+            script_urls: list[str] = []
+            script_pattern = r'<script[^>]+src=["\']([^"\']+)["\']'
+            for match in re.finditer(script_pattern, html, re.IGNORECASE):
+                src = match.group(1)
+                if src and not src.startswith("data:"):
+                    if src.startswith("//"):
+                        src = "https:" + src
+                    elif not src.startswith("http"):
+                        src = urllib.parse.urljoin(seed_base_url, src)
+                    script_urls.append(src)
+
+            route_patterns = [
+                r'''["'](/[a-zA-Z0-9_-]+(?:/[a-zA-Z0-9_-]+){0,3})["']''',
+                r'''path:\s*["']([^"']+)["']''',
+                r'''to:\s*["']([^"']+)["']''',
+            ]
+            hash_route_patterns = [
+                r'''["'](#/[^"']+)["']''',
+                r'''["'](#!/[^"']+)["']''',
+                r'''location\.hash\s*=\s*["']#?(/[^"']+)["']''',
+            ]
+            spa_patterns_ci = [
+                r'ng-app\s*=', r'ng-controller\s*=', r'\[ng-',
+                r'v-bind:', r'v-on:', r'v-model\s*=',
+                r':click\s*=', r'@click\s*=',
+            ]
+            spa_indicators_cs = [
+                "__NEXT_DATA__",
+                "__NUXT__",
+                "data-reactroot", "_reactRootContainer",
+                "data-v-",
+            ]
+            html_lower = html.lower()
+            is_spa = (
+                any(re.search(pattern, html_lower) for pattern in spa_patterns_ci)
+                or any(indicator in html for indicator in spa_indicators_cs)
+            )
+
+            for js_url in script_urls[:5]:
+                try:
+                    js_resp = await client.get(js_url)
+                    js_content = js_resp.text or ""
+                    if len(js_content) > 500_000 or len(js_content) < 1_000:
+                        continue
+                    for pattern in route_patterns:
+                        for match in re.finditer(pattern, js_content):
+                            route = match.group(1)
+                            if (
+                                route
+                                and route.startswith("/")
+                                and len(route) > 1
+                                and not any(
+                                    route.endswith(ext)
+                                    for ext in [".js", ".css", ".png", ".jpg", ".svg", ".ico"]
+                                )
+                            ):
+                                browser_seed_urls.append(route)
+                    for pattern in hash_route_patterns:
+                        for match in re.finditer(pattern, js_content):
+                            route = match.group(1)
+                            if route:
+                                browser_seed_urls.append(route if route.startswith("#") else "#" + route)
+                except Exception:
+                    continue
+
+            if is_spa:
+                browser_seed_urls.extend([
+                    "#/search?q=test",
+                    "#!/search?q=test",
+                    "#/login",
+                    "#/home",
+                ])
+    except Exception as exc:
+        print(f"[smart] Quick JS route discovery failed: {exc}", file=sys.stderr)
+        return []
+
+    browser_seed_urls = list(dict.fromkeys(browser_seed_urls))[:25]
+    if browser_seed_urls:
+        print(
+            f"[smart] Found {len(browser_seed_urls)} routes to seed browser crawl: "
+            f"{browser_seed_urls[:5]}...",
+            file=sys.stderr,
+        )
+    return browser_seed_urls
+
+
 def _focused_family_finding_matches(finding: dict[str, Any], family: str | None) -> bool:
     rules = FOCUSED_FAMILY_RULES.get(str(family or ""))
     if not rules:
@@ -4623,17 +4743,13 @@ async def build_report(target: str,
             return _empty_vendor_risk_result(base_url)
         vendor_risk_task = asyncio.create_task(dummy_vendor())
 
-    # discovery + browser
-    httpx_task  = asyncio.create_task(pd_httpx_probe(host, port))
-
-    # Skip katana crawling in public+quick mode (it can be slow)
-    # Determine discovery scan type based on mode
+    # Registry-owned discovery + browser phase. Configuration remains local,
+    # but all network-producing recon adapters are invoked only by the registry.
     if smart_mode:
         discovery_scan_type = "smart"
     elif quick_mode:
         discovery_scan_type = "quick"
     elif complete_mode:
-        # Map complete_tier to discovery scan type
         if complete_tier == "aggressive":
             discovery_scan_type = "aggressive"
         elif complete_tier == "full":
@@ -4643,23 +4759,6 @@ async def build_report(target: str,
     else:
         discovery_scan_type = "standard"
 
-    if zero_rediscovery_scope:
-        async def dummy_katana_zero(): return []
-        katana_task = asyncio.create_task(dummy_katana_zero())
-    elif public_only and quick_mode:
-        async def dummy_katana(): return []
-        katana_task = asyncio.create_task(dummy_katana())
-    elif smart_mode and not zero_rediscovery_scope:
-        # Smart mode: Use recursive discovery
-        # Note: signals=None because discovery runs before nuclei; nuclei signals are used
-        # later in run_smart_active_tests for adaptive XSS/SQLi testing
-        katana_task = asyncio.create_task(smart_discovery(base_url, signals=None, scan_type="smart", budget=discovery_budget))
-    else:
-        katana_task = asyncio.create_task(katana_crawl(base_url, scan_type=discovery_scan_type, budget=discovery_budget))
-
-    if auth_session:
-        await auth_session.refresh_if_needed()
-
     browser_crawl_limits = {
         "quick": {"max_pages": 3, "max_depth": 1},
         "standard": {"max_pages": 6, "max_depth": 2},
@@ -4668,151 +4767,67 @@ async def build_report(target: str,
         "aggressive": {"max_pages": 30, "max_depth": 3},
         "smart": {"max_pages": 30, "max_depth": 4},
     }
-    crawl_limits = browser_crawl_limits.get(discovery_scan_type, {"max_pages": 6, "max_depth": 2})
+    default_crawl_limits = browser_crawl_limits.get(
+        discovery_scan_type,
+        {"max_pages": 6, "max_depth": 2},
+    )
     crawl_limits = {
-        "max_pages": int(scan_budget.get("browser_max_pages") if scan_budget.get("browser_max_pages") is not None else crawl_limits["max_pages"]),
-        "max_depth": int(scan_budget.get("browser_max_depth") if scan_budget.get("browser_max_depth") is not None else crawl_limits["max_depth"]),
+        "max_pages": int(
+            scan_budget.get("browser_max_pages")
+            if scan_budget.get("browser_max_pages") is not None
+            else default_crawl_limits["max_pages"]
+        ),
+        "max_depth": int(
+            scan_budget.get("browser_max_depth")
+            if scan_budget.get("browser_max_depth") is not None
+            else default_crawl_limits["max_depth"]
+        ),
     }
-    # D1: discovery is decoupled from active focus. A focused check_family scan with
-    # NO explicit endpoints (e.g. check_family=xss) must still browser-crawl — that is
-    # where DOM/stored XSS and SPA routes are found. Only an explicit-endpoint or
-    # coverage-shard worklist (zero_rediscovery_scope) skips the crawl to stay fast.
-    enable_browser_crawl = (smart_mode or complete_mode or bool(auth_session)) and not zero_rediscovery_scope
+    enable_browser_crawl = (
+        smart_mode or complete_mode or bool(auth_session)
+    ) and not zero_rediscovery_scope
 
-    # For smart mode: Quick JS route discovery to seed browser crawl
-    # This helps SPAs by finding routes before the browser crawl starts
-    browser_seed_urls: list[str] = list(seed_entry_urls)
-    if smart_mode and not no_browser and not zero_rediscovery_scope:
-        try:
-            import re
-            import httpx as _httpx
+    httpx_meta: list[dict[str, Any]] = []
+    katana_result: Any = []
+    browser_res: dict[str, Any] | None = None
+    browser_fetch_error: str | None = None
+    browser_seed_urls: list[str] = []
 
-            print(f"[smart] Quick JS route discovery for browser crawl seeding", file=sys.stderr)
-            async with _httpx.AsyncClient(verify=False, timeout=15.0, follow_redirects=True) as client:
-                candidate_urls = [base_url]
-                if seed_entry_urls:
-                    candidate_urls.extend(seed_entry_urls)
-                candidate_urls = list(dict.fromkeys(candidate_urls))
+    async def run_legacy_discovery() -> RegistryPhaseOutcome:
+        nonlocal httpx_meta, katana_result, browser_res, browser_fetch_error, browser_seed_urls
 
-                seed_base_url = base_url
-                html = ""
-                for candidate in candidate_urls:
-                    try:
-                        resp = await client.get(candidate)
-                    except Exception:
-                        continue
-                    candidate_html = resp.text or ""
-                    content_type = (resp.headers.get("content-type") or "").lower()
-                    if candidate_html and (
-                        "text/html" in content_type
-                        or "<html" in candidate_html.lower()
-                        or "<script" in candidate_html.lower()
-                    ):
-                        seed_base_url = candidate
-                        html = candidate_html
-                        break
-                    if not html:
-                        seed_base_url = candidate
-                        html = candidate_html
-
-                # Extract script URLs from HTML
-                script_urls: list[str] = []
-                script_pattern = r'<script[^>]+src=["\']([^"\']+)["\']'
-                for match in re.finditer(script_pattern, html, re.IGNORECASE):
-                    src = match.group(1)
-                    if src and not src.startswith("data:"):
-                        if src.startswith("//"):
-                            src = "https:" + src
-                        elif not src.startswith("http"):
-                            src = urllib.parse.urljoin(seed_base_url, src)
-                        script_urls.append(src)
-
-                # Quick JS analysis for routes (limit to 5 scripts)
-                route_patterns = [
-                    r'''["'](/[a-zA-Z0-9_-]+(?:/[a-zA-Z0-9_-]+){0,3})["']''',  # Path strings
-                    r'''path:\s*["']([^"']+)["']''',  # path: '/route'
-                    r'''to:\s*["']([^"']+)["']''',  # to: '/route'
-                ]
-
-                # Hash route patterns for SPAs using hash-based routing
-                hash_route_patterns = [
-                    r'''["'](#/[^"']+)["']''',           # "#/search" or "#/page"
-                    r'''["'](#!/[^"']+)["']''',          # "#!/page" hashbang
-                    r'''location\.hash\s*=\s*["']#?(/[^"']+)["']''',  # location.hash = '#/route'
-                ]
-
-                # Detect SPA frameworks from HTML (use specific patterns to avoid false positives)
-                # Case-insensitive patterns (framework-specific attributes)
-                spa_patterns_ci = [
-                    r'ng-app\s*=', r'ng-controller\s*=', r'\[ng-',  # AngularJS directives
-                    r'v-bind:', r'v-on:', r'v-model\s*=',           # Vue.js directives
-                    r':click\s*=', r'@click\s*=',                   # Vue.js shorthand
-                ]
-                # Case-sensitive patterns (JS globals, specific markers)
-                spa_indicators_cs = [
-                    "__NEXT_DATA__",                       # Next.js hydration
-                    "__NUXT__",                            # Nuxt.js
-                    "data-reactroot", "_reactRootContainer",  # React specific
-                    "data-v-",                             # Vue.js scoped styles (hash suffix)
-                ]
-                html_lower = html.lower()
-                is_spa = (
-                    any(re.search(pat, html_lower) for pat in spa_patterns_ci) or
-                    any(ind in html for ind in spa_indicators_cs)
+        httpx_task = asyncio.create_task(pd_httpx_probe(host, port))
+        if public_only and quick_mode:
+            katana_task = asyncio.create_task(_focused_async_value([]))
+        elif smart_mode:
+            katana_task = asyncio.create_task(
+                smart_discovery(
+                    base_url,
+                    signals=None,
+                    scan_type="smart",
+                    budget=discovery_budget,
                 )
+            )
+        else:
+            katana_task = asyncio.create_task(
+                katana_crawl(
+                    base_url,
+                    scan_type=discovery_scan_type,
+                    budget=discovery_budget,
+                )
+            )
 
-                for js_url in script_urls[:5]:
-                    try:
-                        js_resp = await client.get(js_url)
-                        js_content = js_resp.text or ""
-                        if len(js_content) > 500000:  # Skip very large bundles (>500KB)
-                            continue
-                        if len(js_content) < 1000:  # Skip tiny files (likely not app bundles)
-                            continue
+        if auth_session:
+            await auth_session.refresh_if_needed()
 
-                        # Extract standard routes
-                        for pattern in route_patterns:
-                            for match in re.finditer(pattern, js_content):
-                                route = match.group(1)
-                                if route and route.startswith("/") and len(route) > 1:
-                                    # Filter out static assets and common non-routes
-                                    if not any(route.endswith(ext) for ext in [".js", ".css", ".png", ".jpg", ".svg", ".ico"]):
-                                        browser_seed_urls.append(route)
+        browser_seed_urls = list(seed_entry_urls)
+        if smart_mode and not no_browser:
+            browser_seed_urls = await discover_browser_seed_urls(
+                base_url,
+                seed_entry_urls,
+            )
 
-                        # Extract hash routes for SPAs
-                        for pattern in hash_route_patterns:
-                            for match in re.finditer(pattern, js_content):
-                                route = match.group(1)
-                                if route:
-                                    # Keep hash prefix for browser seed URLs
-                                    if not route.startswith("#"):
-                                        route = "#" + route
-                                    browser_seed_urls.append(route)
-                    except Exception:
-                        continue
-
-                # For detected SPAs, add common hash route patterns as candidates
-                if is_spa:
-                    common_hash_routes = [
-                        "#/search?q=test",
-                        "#!/search?q=test",
-                        "#/login",
-                        "#/home",
-                    ]
-                    browser_seed_urls.extend(common_hash_routes)
-
-                # Deduplicate and limit
-                browser_seed_urls = list(dict.fromkeys(browser_seed_urls))[:25]  # Increased limit for hash routes
-                if browser_seed_urls:
-                    print(f"[smart] Found {len(browser_seed_urls)} routes to seed browser crawl: {browser_seed_urls[:5]}...", file=sys.stderr)
-        except Exception as e:
-            print(f"[smart] Quick JS route discovery failed: {e}", file=sys.stderr)
-            browser_seed_urls = []
-
-    if zero_rediscovery_scope:
-        browser_task = asyncio.create_task(_focused_async_value(None))
-    else:
-        browser_task= asyncio.create_task(browser_fetch(
+        browser_task = asyncio.create_task(browser_fetch(
             base_url,
             "/tmp",
             no_browser or focused_manual_active_scope,
@@ -4823,6 +4838,38 @@ async def build_report(target: str,
             seed_urls=browser_seed_urls if browser_seed_urls else None,
         ))
 
+        httpx_meta = await httpx_task
+        katana_result = await katana_task
+        try:
+            browser_res = await browser_task
+        except Exception as exc:
+            browser_fetch_error = str(exc)
+            print(
+                f"[scanner] Browser fetch failed: {exc}, continuing without browser data",
+                file=sys.stderr,
+            )
+            browser_res = None
+
+        if isinstance(katana_result, dict):
+            discovered_count = len(katana_result.get("all_urls") or [])
+        else:
+            discovered_count = len(katana_result or [])
+        browser_page_count = len((browser_res or {}).get("page_urls") or [])
+        return RegistryPhaseOutcome(
+            "completed",
+            telemetry={
+                "httpx_observations": len(httpx_meta or []),
+                "discovered_urls": discovered_count,
+                "browser_pages": browser_page_count,
+                "browser_failed": bool(browser_fetch_error),
+            },
+        )
+
+    recon_phase_task = asyncio.create_task(dispatch_registry_report_phase(
+        scanner_execution_plan,
+        "recon",
+        {"legacy_discovery": run_legacy_discovery},
+    ))
     # Additional security checks
     if not public_only:
         if focused_scope.skip_posture() or skip_global_checks:
@@ -5046,16 +5093,15 @@ async def build_report(target: str,
             vhost_result = dict(VHOST_SHAPE)
         vhost_task = asyncio.create_task(_focused_async_value(vhost_result))
 
-    httpx_meta = await httpx_task
-    katana_result = await katana_task
-    browser_fetch_error = None
-    try:
-        browser_res = await browser_task
-    except Exception as e:
-        browser_fetch_error = str(e)
-        print(f"[scanner] Browser fetch failed: {e}, continuing without browser data", file=sys.stderr)
-        # Set browser_res to None on error - downstream code checks `if browser_res` before using
-        browser_res = None
+    recon_dispatch_receipts = await recon_phase_task
+    recon_receipt = next((
+        receipt for receipt in recon_dispatch_receipts
+        if receipt.get("family") == "recon"
+    ), None)
+    if recon_receipt and recon_receipt.get("status") != "completed":
+        browser_fetch_error = str(
+            recon_receipt.get("reason") or f"registry_recon_{recon_receipt.get('status')}"
+        )
 
     emit_progress("discovery", 30, "crawling and discovery")
 
@@ -6721,8 +6767,12 @@ async def build_report(target: str,
         "discovery": discovery,
         "findings": []
     }
-    if template_dispatch_receipts:
-        report["scanner_execution_receipts"] = list(template_dispatch_receipts)
+    initial_execution_receipts = [
+        *recon_dispatch_receipts,
+        *template_dispatch_receipts,
+    ]
+    if initial_execution_receipts:
+        report["scanner_execution_receipts"] = initial_execution_receipts
     report["tls"]["crypto_inventory"] = build_crypto_inventory(report["tls"], host, port)
 
     # Save initial checkpoint with baseline data

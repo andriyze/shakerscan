@@ -60,12 +60,14 @@ Done when:
 First foundation slice implemented: the report phase executor now accepts sync or async adapters,
 validates each adapter against `SCANNER_REGISTRY_ADAPTER_CONTRACTS`, observes cooperative
 cancellation, and emits structured skipped/blocked/cancelled/failed/completed receipts with the
-declared telemetry and proof contracts. Passive header/config finding emission and the Nuclei
-template phase use this executor. Nuclei keeps its existing standard/comprehensive/staged adapters,
+declared telemetry and proof contracts. Generic recon, passive header/config finding emission, and
+the Nuclei template phase use this executor. Recon now keeps HTTP probing, Katana/smart discovery,
+bounded JS route seeding, and browser crawl behind the `legacy_discovery` registry adapter. Nuclei
+keeps its existing standard/comprehensive/staged adapters,
 but only the registry template phase can invoke them and its receipt is persisted in the report.
 Typed adapter outcomes prevent a returned-but-incomplete tool run from being labeled completed;
 Nuclei receipts carry bounded completion/template/finding counts and fail when `scan_completed=false`.
-Recon and active-family execution still require phase-by-phase migration before Wave 2 is complete.
+Active-family execution still requires phase-by-phase migration before Wave 2 is complete.
 
 ## Wave 3: telemetry schema expansion
 

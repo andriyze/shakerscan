@@ -276,6 +276,54 @@ def test_nuclei_template_phase_dispatches_only_registry_enabled_adapter():
     assert quick_receipts[0]["reason"] == "quick_mode"
 
 
+def test_recon_phase_dispatches_normal_plan_and_skips_zero_rediscovery():
+    called = []
+    standard_plan = scanner_mod.build_scanner_execution_plan(
+        scan_mode="standard",
+        public_only=False,
+        quick_mode=False,
+        active_checks=False,
+        check_family_scope={"families": []},
+        skip_global_checks=False,
+        focused_endpoints_only=False,
+        zero_rediscovery=False,
+    )
+    zero_plan = scanner_mod.build_scanner_execution_plan(
+        scan_mode="smart",
+        public_only=False,
+        quick_mode=False,
+        active_checks=True,
+        check_family_scope={"families": ["sqli"], "focused": True},
+        skip_global_checks=True,
+        focused_endpoints_only=True,
+        zero_rediscovery=True,
+    )
+
+    async def recon_adapter():
+        called.append("recon")
+        return scanner_mod.RegistryPhaseOutcome(
+            "completed",
+            telemetry={"discovered_urls": 3, "browser_pages": 1},
+        )
+
+    standard_receipts = asyncio.run(scanner_mod.dispatch_registry_report_phase(
+        standard_plan,
+        "recon",
+        {"legacy_discovery": recon_adapter},
+    ))
+    zero_receipts = asyncio.run(scanner_mod.dispatch_registry_report_phase(
+        zero_plan,
+        "recon",
+        {"legacy_discovery": recon_adapter},
+    ))
+
+    assert called == ["recon"]
+    assert standard_receipts[0]["status"] == "completed"
+    assert standard_receipts[0]["adapter_telemetry"]["discovered_urls"] == 3
+    assert zero_receipts[0]["status"] == "skipped"
+    assert zero_receipts[0]["reason"] == "zero_rediscovery_scope"
+
+
 def test_resolve_active_check_flags_uses_registry_family_aliases():
     active_xss, active_sqli, family = scanner_mod.resolve_active_check_flags(check_family="sql")
 
