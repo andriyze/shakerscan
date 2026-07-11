@@ -27,36 +27,35 @@ item is implemented.
   EvidenceInstance/external storage, read-only MCP, current registry adapters, Continuous ASM
   allocator/attempt ledgers, parallel parent-plan-shard-merge, operational rebuild/fleet truth, and
   direct ASM timeline remediation links.
-- **Deferred-work implementation now underway:** cooperative cancellation is shared by
-  SQLi/XSS/Auth/BOLA and Phase 4, and generic recon, passive posture, and the Nuclei template phase
-  now use an
-  async-capable registry executor with adapter-contract validation and structured execution
-  receipts. Typed adapter outcomes keep incomplete Nuclei runs from being mislabeled completed.
-  JWT and Phase 4 mass-assignment now execute through dependency-point active registry adapters;
-  Auth and BOLA/BFLA now execute through `asm_endpoint_batch`; the shared SQLi/XSS loop remains to
-  be migrated before Wave 2 is complete.
+- **Deferred-work Waves 1-5 implemented:** cooperative cancellation is shared by
+  SQLi/XSS/Auth/BOLA and Phase 4. Generic recon, passive posture, Nuclei, JWT, mass-assignment,
+  Auth/BOLA, and the shared SQLi/XSS loop execute through registry adapters with structured
+  receipts. Versioned attempt telemetry degrades unknown/missing schemas, enforcing standalone
+  request budgets reserve root-domain tokens and meter shared clients, and the UI contract harness
+  covers schedules, skip reasons, remediation links, and parent/family coverage.
 - **Implemented but still requiring live acceptance/soak:** authenticated crAPI detector recall after
   the rebuild, broader dynamic-allocation parity on large owned targets, and request-rate behavior at
   larger worker counts.
-- **Deferred target architecture:** full `build_report()` iteration from the registry, telemetry and
-  focused-family expansion beyond current contracts, request-accurate budgets for internally
-  discovered standalone traffic, cooperative cancellation in remaining legacy loops outside the
-  now-covered SQLi/XSS/Auth/BOLA/Phase-4 paths, and
-  multi-node placement/reliable leases/brokered untrusted workers.
+- **Deferred target architecture:** additional telemetry-backed focused families, cooperative
+  cancellation in remaining legacy loops outside the now-covered SQLi/XSS/Auth/BOLA/Phase-4 paths,
+  multi-node placement/reliable queue leases, and brokered untrusted workers. Enforcing request
+  budgets remain opt-in until live parity/rate soak accepts them as the default.
 - **Intentionally excluded:** state-changing MCP, raw shell/arbitrary-code agent commands,
   post-exploitation/password-spraying tooling, and source- or AI-only verified findings.
 
 Verification snapshot on the rebuilt local fleet (2026-07-10):
 
-- Python suite: `1735 passed, 6 skipped`.
+- Python suite: `1756 passed, 6 skipped`.
 - Container runtime target: `33 passed` (with FastAPI deprecation warnings only).
-- UI: Next.js production build and TypeScript validation passed.
+- UI: `20/20` Node contract tests plus Next.js production build and TypeScript validation passed.
 - Planner fixtures: `10/10` passed; all 10 named release gates passed.
 - Live E2E: Model Intake passed `10/10`, including bounded checksum and full-size safetensors-header
   validation on the public Nex-N2-mini Hugging Face shard;
   AI Gate passed `12/12`; and DAST passed `12/12`, including template-receipt honesty plus bounded
   SQLi and DOM-XSS recall.
-- Worker preflight: 16/16 current on one fingerprint, zero stale workers.
+- Worker preflight: 16/16 current on fingerprint `bc6c357126e7fe53`, zero stale workers. The latest
+  deferred-work rebuild did not rerun live DAST/AI/Model Intake E2E because localhost execution was
+  denied; older E2E artifacts are not relabeled as current-build results.
 
 ## Report reconciliation (2026-07-05)
 

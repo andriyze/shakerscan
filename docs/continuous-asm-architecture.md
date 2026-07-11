@@ -14,9 +14,10 @@ Current DAST-quality lesson from Juice Shop/crAPI validation: ASM must measure a
 campaign quality, not just endpoint touch count. The engine now proves real Critical SQLi and High
 BOLA/Authz on lab apps and has runnable registry contracts for XSS, mass-assignment, and JWT checks,
 but broad/stored XSS and workflow/write-BOLA remain recall/acceptance gaps that ASM should expose as
-family/proof/workflow gaps. Generic recon, passive posture, and Nuclei template execution now run
-through the shared registry phase executor; remaining active-phase migration, broader telemetry, multi-node
-placement, and large-fleet soak remain deferred target architecture rather than shipped behavior.
+family/proof/workflow gaps. Generic recon, passive posture, Nuclei, JWT, mass-assignment, Auth/BOLA,
+and SQLi/XSS now run through registry adapters. Versioned attempt schemas and opt-in standalone
+request metering are shipped; additional families, multi-node placement, and live parity/rate soak
+remain deferred target architecture rather than shipped behavior.
 **Date:** 2026-07-10
 **Related design:** [parallel-scan-architecture.md](parallel-scan-architecture.md),
 [multi-node-architecture.md](multi-node-architecture.md).
@@ -65,12 +66,12 @@ editing.
 | Parallel parent/plan/shard/merge | Shipped | Maintain, harden, and extend only through focused increments. |
 | Coverage full-worklist fan-out | Shipped | Keep zero-rediscovery child mode stable while dynamic allocation soaks. |
 | ASM endpoint inventory | Shipped | Keep replay/auth identity aligned with scanner telemetry. |
-| ASM campaign/lease/attempt foundation | Shipped | Broaden scanner telemetry schemas beyond smart active SQLi/XSS/hash-route DOM XSS and focused BOLA/Auth. |
+| ASM campaign/lease/attempt foundation | Shipped | Add schemas only with new runnable families; unknown schemas remain partial. |
 | Full Coverage dynamic allocation | Default shipped | Keep static fallback available and continue live parity/soak on large targets. |
 | Coverage x family dynamic allocation | Shipped for broad/SQLi/XSS; gated Auth/BOLA lanes when preconditions exist | Make shard count worker-aware; run shared recon once, then focused family lanes without diluting SQLi/XSS/BOLA budgets. |
-| Known-endpoint distributed rate limits | Shipped | Extend beyond known endpoint batches only when scanner telemetry can budget discovered requests accurately. |
-| First-class check registry | Authoritative planning and scanner adapter validation shipped for current runnable families | Full `build_report()` registry iteration and additional telemetry-backed families remain deferred. |
-| Operator-facing campaign/ASM UX | Bounded phase shipped: Action Center CTAs, Product Status, scheduler activity, typed waves, target timeline, hypotheses, safe remediation links, and parent rollups | Add actions only with tested confirmation boundaries; component-level UI harness coverage remains limited. |
+| Known-endpoint distributed rate limits | Shipped | Standalone request-token reservation and metering are shipped opt-in; complete live rate soak before changing the compatibility default. |
+| First-class check registry | Authoritative for all current runnable report families | Add only telemetry-backed families with adapter/proof contracts. |
+| Operator-facing campaign/ASM UX | Bounded phase shipped with schedule/skip/remediation/rollup contract tests | Add actions only with tested confirmation boundaries. |
 | DAST quality benchmark loop | Current-fleet Juice Shop scorecard passes; authenticated crAPI rerun pending after rebuild cancellation | Treat missing verified family recall as a benchmark failure, not successful breadth. |
 | Multi-node WireGuard POC | Proposed/RFC | Build a two-VPS proof only after local queue/worker invariants stay green. |
 | Production multi-node fleet | Proposed/RFC | Add node registry, reliable queue leases, object evidence, and routing. |
@@ -659,9 +660,8 @@ Implemented in this pass:
 
 Remaining:
 
-- Migrate scanner `build_report()` module execution to registry iteration and add further runnable
-  focused families beyond the current `sqli`, `xss`, credential-gated `auth`, and explicit gated
-  `bola` paths.
+- Add further runnable focused families only with telemetry/proof contracts; current report families
+  are registry-owned.
 
 ### Phase B — Attempt Ledger + Durable Leases
 
@@ -788,9 +788,8 @@ Reconciled product state (2026-07-10):
 - The target campaign timeline now includes direct, bounded remediation links for Improve Coverage,
   schedule management, auth/principal setup, active scans, and completed scan review. These remain
   links into existing confirmed workflows, not a second execution path.
-- TypeScript production builds, browser QA, and API/helper tests cover the current UI contract.
-  A dedicated component-test harness for ASM schedule creation/editing and skip-reason rendering is
-  still deferred; do not describe component-level coverage as shipped.
+- TypeScript production builds, browser QA, API/helper tests, and the shared UI contract harness
+  cover ASM schedule creation/editing, skip reasons, remediation links, and parent/family rollups.
 
 ### Phase E — Multi-Node Readiness
 

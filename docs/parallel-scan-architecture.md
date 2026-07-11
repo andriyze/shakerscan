@@ -5,9 +5,9 @@ parent/plan/shard/merge orchestration, high-budget `coverage`, zero-rediscovery 
 pull allocation by default, static fallback, campaign attempt ledgers, fleet freshness, cancellation,
 and parent UI rollups. Continuous ASM is documented separately in
 [continuous-asm-architecture.md](continuous-asm-architecture.md). Parallelism remains the execution
-substrate, not the quality claim. Generic recon, passive posture, and Nuclei template execution are registry-owned;
-full `build_report()` registry iteration, request-accurate budgets
-for internally discovered standalone traffic, cooperative cancellation in remaining legacy loops
+substrate, not the quality claim. Generic recon, passive posture, Nuclei, JWT, mass-assignment,
+Auth/BOLA, and SQLi/XSS execution are registry-owned. Versioned attempt telemetry and opt-in
+enforcing request budgets for internally discovered standalone traffic are shipped; cooperative cancellation in remaining legacy loops
 outside the now-covered SQLi/XSS/Auth/BOLA/Phase-4 paths, additional
 focused families, multi-node orchestration, and large-fleet parity/soak are not implemented claims.
 
@@ -65,12 +65,12 @@ editing.
 | Parallel parent/plan/shard/merge | Shipped | Maintain, harden, and extend only through focused increments. |
 | Coverage full-worklist fan-out | Shipped | Keep zero-rediscovery child mode stable while dynamic allocation soaks. |
 | ASM endpoint inventory | Shipped | Keep replay/auth identity aligned with scanner telemetry. |
-| ASM campaign/lease/attempt foundation | Shipped | Broaden scanner telemetry schemas beyond smart active SQLi/XSS/hash-route DOM XSS and focused BOLA/Auth. |
+| ASM campaign/lease/attempt foundation | Shipped | Add schemas only with new runnable families; unknown schemas remain partial. |
 | Full Coverage dynamic allocation | Default shipped | Keep static fallback available and continue live parity/soak on large targets. |
 | Coverage x family dynamic allocation | Shipped for broad/SQLi/XSS; gated Auth/BOLA lanes when preconditions exist | Make shard count worker-aware; run shared recon once, then focused family lanes without diluting SQLi/XSS/BOLA budgets. |
-| Known-endpoint distributed rate limits | Shipped | Extend beyond known endpoint batches only when scanner telemetry can budget discovered requests accurately. |
-| First-class check registry | Authoritative planning and scanner adapter validation shipped for current runnable families | Full `build_report()` registry iteration and additional telemetry-backed families remain deferred. |
-| Operator-facing campaign/ASM UX | Bounded phase shipped: Action Center CTAs, Product Status, scheduler activity, typed waves, target timeline, hypotheses, safe remediation links, and parent rollups | Add actions only with tested confirmation boundaries; component-level UI harness coverage remains limited. |
+| Known-endpoint distributed rate limits | Shipped | Standalone request-token reservation and metering are shipped opt-in; complete live rate soak before changing the compatibility default. |
+| First-class check registry | Authoritative for all current runnable report families | Add only telemetry-backed families with adapter/proof contracts. |
+| Operator-facing campaign/ASM UX | Bounded phase shipped with schedule/skip/remediation/rollup contract tests | Add actions only with tested confirmation boundaries. |
 | DAST quality benchmark loop | Current-fleet Juice Shop scorecard passes; authenticated crAPI rerun pending after rebuild cancellation | Treat missing verified family recall as a benchmark failure, not successful breadth. |
 | Multi-node WireGuard POC | Proposed/RFC | Build a two-VPS proof only after local queue/worker invariants stay green. |
 | Production multi-node fleet | Proposed/RFC | Add node registry, reliable queue leases, object evidence, and routing. |
@@ -104,11 +104,9 @@ partitions it across shards. Coverage child shards carry `zero_rediscovery=true`
 active checks over only their assigned endpoint slice. Duplicate target-global probes are still
 suppressed after the first shard per auth state.
 
-**Still deferred (Phase 2):** full `build_report()` module iteration from the first-class check
-registry; cooperative cancellation checkpoints in remaining legacy loops beyond the shared
-SQLi/XSS/Auth/BOLA/Phase-4 cancellation contract;
-request-accurate budgets for internally discovered standalone scans; and more runnable focused
-families beyond SQLi/XSS/Auth/BOLA.
+**Still deferred (Phase 2):** cooperative cancellation checkpoints in remaining legacy loops beyond
+the shared SQLi/XSS/Auth/BOLA/Phase-4 contract; additional telemetry-backed focused families; live
+dynamic/static parity and enforcing request-budget rate soak; and multi-node queue/placement work.
 
 ---
 

@@ -218,9 +218,9 @@ Flow:
 This immediately improves throughput for batches and independent targets. If there are
 four VPSs with five workers each, the fleet can run about twenty worker jobs at once,
 subject to scan type, memory, CPU, and global rate limits.
-Known-endpoint ASM and Full Coverage work already reserves endpoint budget through
-shared Redis buckets; request-accurate standalone request budgets still depend on
-richer scanner telemetry.
+Known-endpoint ASM and Full Coverage work reserves endpoint budget through shared Redis buckets.
+Standalone scans now have an opt-in enforcing request meter and root-domain request-token
+reservation; compatibility mode remains the default until owned-fleet rate soak is accepted.
 
 The worker instances do not need to coordinate directly with each other to achieve this.
 They only need a shared scheduler/queue and a shared source of truth.
@@ -511,9 +511,9 @@ Implementation options:
 | Broker-side scheduler | Best in Phase 3. The broker leases only jobs a node is allowed to run. |
 
 Rate limiting must be global, not per node. Known-endpoint ASM and Full Coverage
-batches now use Redis token buckets keyed by root domain so local/owned workers do not
-multiply endpoint pressure. Production fleet work still needs request-accurate
-standalone budgets once scanner telemetry can report discovered requests reliably.
+batches use Redis token buckets keyed by root domain so local/owned workers do not
+multiply endpoint pressure. Standalone enforcing mode now reserves and meters request tokens;
+production fleet work still needs live multi-node rate soak before making it the default.
 
 ## 11. Security Model
 
@@ -551,7 +551,7 @@ Security requirements:
 | Evidence | Temporary local evidence is acceptable only for proof-of-concept. | S3/MinIO object storage required. |
 | Image distribution | Private registry with pinned tags. | Rolling upgrade and version compatibility checks. |
 | Queue | Shared default queue. | Leases, routing, retry policy, and idempotent shard completion. |
-| Rate limiting | Known-endpoint Redis buckets for ASM/Full Coverage batches. | Request-accurate standalone budgets and fleet soak. |
+| Rate limiting | Known-endpoint buckets plus opt-in standalone request metering/reservation. | Fleet soak, routing-aware global limits, and enforcing-by-default acceptance. |
 | Observability | Per-host logs. | Central logs, metrics, node audit trail, per-node scan attribution. |
 
 ## 13. First Milestones

@@ -1,6 +1,6 @@
 # Deferred Work Implementation Plan
 
-**Status:** active implementation plan
+**Status:** Waves 1-5 implemented; Wave 6 rebuilt live acceptance pending; Wave 7 intentionally gated
 **Created:** 2026-07-10
 **Scope:** remaining local/owned-fleet architecture from the reconciled roadmap. Multi-node and
 untrusted-worker transport remain a later program and do not block the local proof-first product.
@@ -57,7 +57,7 @@ Done when:
 - disabling a family in the registry prevents its adapter from executing even if legacy flags say yes;
 - every enabled family has a receipt and parser/proof contract.
 
-First foundation slice implemented: the report phase executor now accepts sync or async adapters,
+Implemented: the report phase executor accepts sync or async adapters,
 validates each adapter against `SCANNER_REGISTRY_ADAPTER_CONTRACTS`, observes cooperative
 cancellation, and emits structured skipped/blocked/cancelled/failed/completed receipts with the
 declared telemetry and proof contracts. Generic recon, passive header/config finding emission, and
@@ -70,10 +70,17 @@ Nuclei receipts carry bounded completion/template/finding counts and fail when `
 The active executor also supports explicit dependency-point family subsets and typed one-call batch
 adapters. JWT and Phase 4 mass-assignment now execute only through their registry adapters and emit
 versioned completion/finding/count telemetry. Focused Auth and BOLA/BFLA now execute through the
-`asm_endpoint_batch` adapter with blocked/cancelled/budget/access-violation receipts. The shared
-SQLi/XSS loop still requires migration before Wave 2 is complete.
+`asm_endpoint_batch` adapter with blocked/cancelled/budget/access-violation receipts. SQLi and XSS
+now enter only through the shared `legacy_active_loop` registry batch adapter; registry disablement
+prevents that family from executing. Wave 2 is complete in code.
 
 ## Wave 3: telemetry schema expansion
+
+**Status: DONE in code.** `mass_assignment_attempt_v1`, `jwt_probe_attempt_v1`, and
+`active_endpoint_attempt_v1` are normalized by the shared attempt contract. Scanner reports stamp
+the endpoint schema; worker merge rejects missing/unknown versions; ASM family coverage exposes
+attempted, completed, proved, blocked, cancelled, partial, and failed counts. Unversioned completed
+rows degrade to partial.
 
 Deliverables:
 
@@ -91,6 +98,13 @@ Done when:
 
 ## Wave 4: request-accurate standalone budgets
 
+**Status: DONE in code; enforcing mode awaits Wave 6 soak before becoming the default.** Resolved
+budgets carry `request_max`. The request meter accounts for shared curl, httpx, aiohttp, urllib, and
+Playwright target traffic, disables hidden redirects when enforcing, and fails closed on external
+network tools whose internal request counts cannot be observed. Workers reserve enforcing-mode
+tokens in the shared root-domain bucket. Reports carry `request_meter_v1` telemetry and an execution
+receipt. Compatibility mode remains the default and records unmetered tool invocations.
+
 Deliverables:
 
 - a shared request meter used by internal HTTP/browser/tool adapters;
@@ -107,6 +121,10 @@ Done when:
 
 ## Wave 5: UI component and contract harness
 
+**Status: DONE in code.** Shared UI contracts drive ASM schedule create/edit payloads, bounded
+skip-reason labels, internal-only remediation links, parent shard coverage, and family
+attempt/completion/proof counts. The Node contract suite and production Next.js build pass.
+
 Deliverables:
 
 - component-level tests for ASM schedule create/edit, skip reasons, remediation links, and parent
@@ -114,6 +132,14 @@ Deliverables:
 - keep production build/type checking and desktop/mobile browser QA as separate gates.
 
 ## Wave 6: live parity and soak
+
+**Status: NOT YET ACCEPTED.** The complete Python suite passes (`1756 passed, 6 skipped`), the UI
+contract suite passes (`20/20`), the production UI build passes, and a full rebuild/restart reports
+16/16 current workers on fingerprint `bc6c357126e7fe53`. The idle-worker queue check passed one full
+blocking interval without the prior Redis timeout loop. Dynamic/static parity, active cancellation
+load, multi-worker rate soak, and fresh detector scorecards still require live artifacts. The local
+E2E harness could not run in this session because localhost execution was denied by the execution
+environment; no pass is inferred.
 
 Run only on local or explicitly owned targets:
 
@@ -126,6 +152,10 @@ Artifacts must record build fingerprint, fleet freshness, allocation mode, attem
 counts, false-positive risk, and failures/timeouts. Soak is validation, not a substitute for tests.
 
 ## Wave 7: multi-node readiness, later program
+
+**Status: NOT STARTED by design.** Ordering rule 5 prohibits this wave until Wave 6 has accepted
+artifacts. Existing local leases, external evidence support, scope/approval gates, secret delivery,
+and fleet fingerprints are prerequisites, not a two-node production claim.
 
 Prerequisites:
 
