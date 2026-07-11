@@ -347,6 +347,17 @@ def run_dast() -> H.Scorecard:
             grade = res.get("grade") or (res.get("result") or {}).get("grade")
             sc.check("D-1 graded report produced", bool(grade), f"grade={grade}")
             sc.check("D-1 findings persisted (no save crash)", len(findings) > 0, f"findings={len(findings)}")
+            nuclei = ((res.get("discovery") or {}).get("nuclei") or {})
+            template_receipt = next((
+                receipt for receipt in (res.get("scanner_execution_receipts") or [])
+                if receipt.get("family") == "nuclei" and receipt.get("phase") == "template"
+            ), {})
+            expected_template_status = "completed" if nuclei.get("scan_completed") else "failed"
+            sc.check(
+                "D-1 template receipt matches Nuclei completion",
+                template_receipt.get("status") == expected_template_status,
+                f"receipt={template_receipt.get('status')} scan_completed={nuclei.get('scan_completed')}",
+            )
             # D-4: the 3 removed phantom attack chains must never be reported.
             chains = json.dumps((res.get("attack_chains") or {}))
             phantom = [c for c in ("auth_bypass_to_admin_access", "open_redirect_to_phishing",

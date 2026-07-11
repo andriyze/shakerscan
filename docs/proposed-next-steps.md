@@ -51,7 +51,8 @@ Verification snapshot on the rebuilt local fleet (2026-07-10):
 - Planner fixtures: `10/10` passed; all 10 named release gates passed.
 - Live E2E: Model Intake passed `10/10`, including bounded checksum and full-size safetensors-header
   validation on the public Nex-N2-mini Hugging Face shard;
-  AI Gate passed `12/12`; and DAST passed `11/11`, including bounded SQLi and DOM-XSS recall.
+  AI Gate passed `12/12`; and DAST passed `12/12`, including template-receipt honesty plus bounded
+  SQLi and DOM-XSS recall.
 - Worker preflight: 16/16 current on one fingerprint, zero stale workers.
 
 ## Report reconciliation (2026-07-05)

@@ -1,7 +1,7 @@
 # ShakerScan End-to-End Test Plan
 
 **Status (2026-07-10):** the rebuilt local fleet passes Model Intake `10/10` with the real bounded
-Nex-N2-mini Hugging Face shard enabled, AI Gate `12/12`, and DAST `11/11`. `make e2e` remains the
+Nex-N2-mini Hugging Face shard enabled, AI Gate `12/12`, and DAST `12/12`. `make e2e` remains the
 deterministic all-area gate and skips the external Hugging Face row; `make e2e-model-intake` enables
 that real-model row by default, while `make e2e-model-intake-fixture` is the explicit offline path.
 The worker fingerprint preflight rejects a stale/non-uniform fleet. Slow authenticated crAPI BOLA
@@ -64,6 +64,7 @@ What the fast runner (`run_e2e.py`) actually asserts:
 | # | Scenario (fast gate) | Assertion | Catches |
 |---|---|---|---|
 | D-1 | standard scan of Juice Shop | completes (no hang/crash/reap) + graded + findings persist | finalize-hang / NUL-crash class |
+| D-1 receipt | same standard scan | template receipt matches the underlying Nuclei completion state | adapter-return completion overclaim |
 | D-2 | bounded (un-sharded) active scan of the injectable login | critical SQLi detected | active SQLi recall (spot) |
 | D-3 | bounded active scan of the search | DOM XSS detected | active XSS recall (spot) |
 | D-4 | attack-chain assertions | the 3 removed phantom chains never appear | overclaim regression |
