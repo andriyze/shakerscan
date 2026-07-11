@@ -63,6 +63,8 @@ cancellation, and emits structured skipped/blocked/cancelled/failed/completed re
 declared telemetry and proof contracts. Passive header/config finding emission and the Nuclei
 template phase use this executor. Nuclei keeps its existing standard/comprehensive/staged adapters,
 but only the registry template phase can invoke them and its receipt is persisted in the report.
+Typed adapter outcomes prevent a returned-but-incomplete tool run from being labeled completed;
+Nuclei receipts carry bounded completion/template/finding counts and fail when `scan_completed=false`.
 Recon and active-family execution still require phase-by-phase migration before Wave 2 is complete.
 
 ## Wave 3: telemetry schema expansion

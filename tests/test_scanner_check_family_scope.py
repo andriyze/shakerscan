@@ -718,6 +718,58 @@ def test_registry_report_phase_awaits_async_adapter():
     assert receipts[0]["status"] == "completed"
 
 
+def test_registry_report_phase_uses_typed_adapter_outcome():
+    plan = {"families": [{
+        "name": "nuclei", "phase": "template", "enabled": True, "runnable": True,
+        "scanner_enabled": True, "blocked_by": [], "dispatch_adapter": "legacy_nuclei_template",
+        "telemetry_schema": "nuclei_template", "proof_contract": ["template_id"],
+    }]}
+
+    async def incomplete_nuclei():
+        return scanner_mod.RegistryPhaseOutcome(
+            "failed",
+            "nuclei_scan_incomplete",
+            {"scan_completed": False, "templates_used": 0, "findings_count": 0},
+        )
+
+    receipts = asyncio.run(scanner_mod.dispatch_registry_report_phase(
+        plan,
+        "template",
+        {"legacy_nuclei_template": incomplete_nuclei},
+    ))
+
+    assert receipts == [{
+        "family": "nuclei",
+        "phase": "template",
+        "dispatch_adapter": "legacy_nuclei_template",
+        "status": "failed",
+        "telemetry_schema": "nuclei_template",
+        "proof_contract": ["template_id"],
+        "reason": "nuclei_scan_incomplete",
+        "adapter_telemetry": {
+            "scan_completed": False,
+            "templates_used": 0,
+            "findings_count": 0,
+        },
+    }]
+
+
+def test_registry_report_phase_rejects_invalid_typed_adapter_outcome():
+    plan = {"families": [{
+        "name": "nuclei", "phase": "template", "enabled": True, "runnable": True,
+        "scanner_enabled": True, "blocked_by": [], "dispatch_adapter": "legacy_nuclei_template",
+    }]}
+
+    receipts = asyncio.run(scanner_mod.dispatch_registry_report_phase(
+        plan,
+        "template",
+        {"legacy_nuclei_template": lambda: scanner_mod.RegistryPhaseOutcome("partial")},
+    ))
+
+    assert receipts[0]["status"] == "failed"
+    assert receipts[0]["reason"] == "invalid_adapter_outcome_status:partial"
+
+
 def test_registry_report_phase_blocks_adapter_contract_drift():
     plan = {"families": [{
         "name": "headers", "phase": "passive", "enabled": True, "runnable": True,

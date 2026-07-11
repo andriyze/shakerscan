@@ -3159,6 +3159,13 @@ SCANNER_REGISTRY_ADAPTER_CONTRACTS = {
 }
 
 _SCANNER_REQUIRED_REGISTRY_FAMILIES = frozenset(SCANNER_REGISTRY_ADAPTER_CONTRACTS)
+_REGISTRY_PHASE_OUTCOME_STATUSES = frozenset({"skipped", "blocked", "failed", "cancelled", "completed"})
+
+
+class RegistryPhaseOutcome(NamedTuple):
+    status: str
+    reason: str | None = None
+    telemetry: dict[str, Any] | None = None
 
 
 def validate_scanner_execution_plan(plan: Any) -> dict[str, Any]:
@@ -3305,12 +3312,24 @@ async def dispatch_registry_report_phase(
         try:
             result = adapter()
             if inspect.isawaitable(result):
-                await result
+                result = await result
         except Exception as exc:
             receipt["status"] = "failed"
             receipt["reason"] = f"{type(exc).__name__}: {str(exc)[:200]}"
         else:
-            receipt["status"] = "completed"
+            if isinstance(result, RegistryPhaseOutcome):
+                outcome_status = str(result.status or "").strip().lower()
+                if outcome_status not in _REGISTRY_PHASE_OUTCOME_STATUSES:
+                    receipt["status"] = "failed"
+                    receipt["reason"] = f"invalid_adapter_outcome_status:{outcome_status or 'empty'}"
+                else:
+                    receipt["status"] = outcome_status
+                    if result.reason:
+                        receipt["reason"] = str(result.reason)[:200]
+                    if isinstance(result.telemetry, dict) and result.telemetry:
+                        receipt["adapter_telemetry"] = dict(result.telemetry)
+            else:
+                receipt["status"] = "completed"
         receipts.append(receipt)
     return receipts
 
@@ -5464,7 +5483,7 @@ async def build_report(target: str,
         "reason": "registry_template_not_dispatched",
     }
 
-    async def run_legacy_nuclei_template() -> None:
+    async def run_legacy_nuclei_template() -> RegistryPhaseOutcome:
         nonlocal nuclei_results
         nuclei_target_limits = {
             "quick": 120,
@@ -5494,6 +5513,11 @@ async def build_report(target: str,
                 "skipped": True,
                 "reason": "nuclei_target_budget_zero",
             }
+            return RegistryPhaseOutcome(
+                "skipped",
+                "nuclei_target_budget_zero",
+                {"scan_completed": False, "templates_used": 0, "findings_count": 0},
+            )
         elif smart_mode:
             print(
                 f"[scanner] Smart mode: Starting staged nuclei with {len(early_techs)} detected technologies"
@@ -5526,6 +5550,19 @@ async def build_report(target: str,
                 auth_session=auth_session,
                 max_targets=nuclei_target_limit,
             )
+
+        nuclei_findings_count = len(nuclei_results.get("vulnerabilities") or []) + len(
+            nuclei_results.get("info") or []
+        )
+        nuclei_telemetry = {
+            "scan_completed": bool(nuclei_results.get("scan_completed")),
+            "templates_used": int(nuclei_results.get("templates_used") or 0),
+            "findings_count": nuclei_findings_count,
+        }
+        if not nuclei_results.get("scan_completed"):
+            reason = str(nuclei_results.get("error") or "nuclei_scan_incomplete")
+            return RegistryPhaseOutcome("failed", reason, nuclei_telemetry)
+        return RegistryPhaseOutcome("completed", telemetry=nuclei_telemetry)
 
     template_phase_task = asyncio.create_task(dispatch_registry_report_phase(
         scanner_execution_plan,
