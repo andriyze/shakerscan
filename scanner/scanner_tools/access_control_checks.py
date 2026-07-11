@@ -3589,14 +3589,19 @@ async def smart_bola_test(
             if attempt is not None:
                 attempt["completed_params_count"] += 1
 
-        if results.get("cancelled"):
+        if results.get("cancelled") or results.get("budget_exceeded"):
+            stop_reason = (
+                "cancelled"
+                if results.get("cancelled")
+                else str(results.get("budget_exhausted_reason") or "time_budget_exhausted")
+            )
             finished_attempt = _finish_bola_endpoint_attempt(
                 attempt,
                 budget_exceeded=True,
-                budget_exhausted_reason="cancelled",
+                budget_exhausted_reason=stop_reason,
             )
             if finished_attempt:
-                finished_attempt["skip_reason"] = "cancelled"
+                finished_attempt["skip_reason"] = stop_reason
                 results["endpoint_attempts"].append(finished_attempt)
             break
 

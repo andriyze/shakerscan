@@ -3,6 +3,7 @@
 import asyncio
 import json
 import sys
+import time
 from types import SimpleNamespace
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
@@ -610,30 +611,36 @@ def test_smart_bola_respects_max_seconds_budget(monkeypatch):
     # budget and multiple ID-pattern templates, smart_bola_test must stop the
     # endpoint loop and flag budget_exceeded rather than running unbounded
     # (and without being hard-cancelled, which would discard partial results).
-    async def fake_fetch(url, **kwargs):
-        body = json.dumps({"user_id": 1, "email": "alice@acme.io"})
-        return _fake_http_response(url, 200, body)
-
-    monkeypatch.setattr(
-        "scanner_tools.proof_of_exploit.fetch_with_capture",
-        fake_fetch,
+    # Keep the deadline open through URL/template collection and the endpoint
+    # loop check, then expire it at the first per-ID check. Driving the
+    # coroutine directly is intentional: this path must return before issuing
+    # any async request, and avoids event-loop clock reads consuming the ticks.
+    ticks = iter([0.0] * 6 + [1.0])
+    monkeypatch.setattr(time, "monotonic", lambda: next(ticks, 1.0))
+    coroutine = smart_bola_test(
+        base_url="https://example.com",
+        discovered_urls=[
+            "https://example.com/api/users/1",
+            "https://example.com/api/orders/2",
+            "https://example.com/api/items/3",
+        ],
+        max_endpoints=50,
+        timeout=1,
+        max_seconds=0.5,
     )
 
-    results = asyncio.run(
-        smart_bola_test(
-            base_url="https://example.com",
-            discovered_urls=[
-                "https://example.com/api/users/1",
-                "https://example.com/api/orders/2",
-                "https://example.com/api/items/3",
-            ],
-            max_endpoints=50,
-            timeout=1,
-            max_seconds=0.0001,  # effectively already expired
-        )
-    )
+    try:
+        coroutine.send(None)
+    except StopIteration as completed:
+        results = completed.value
+    else:
+        coroutine.close()
+        raise AssertionError("budget expiry should stop before the first network await")
 
     assert results.get("budget_exceeded") is True
+    assert results.get("budget_exhausted_reason") == "time_budget_exhausted"
+    assert results["endpoint_attempts"][0]["status"] == "partial"
+    assert results["endpoint_attempts"][0]["skip_reason"] == "time_budget_exhausted"
 
 
 def test_smart_bola_stops_before_request_when_cancelled(monkeypatch):
