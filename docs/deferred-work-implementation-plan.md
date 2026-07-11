@@ -121,9 +121,11 @@ Done when:
 
 ## Wave 5: UI component and contract harness
 
-**Status: DONE in code.** Shared UI contracts drive ASM schedule create/edit payloads, bounded
-skip-reason labels, internal-only remediation links, parent shard coverage, and family
-attempt/completion/proof counts. The Node contract suite and production Next.js build pass.
+**Status: DONE.** Shared UI contracts drive ASM schedule create/edit payloads, bounded skip-reason
+labels, internal-only remediation links, parent shard coverage, and family attempt/completion/proof
+counts. The Node contract suite and production Next.js build pass. Rebuilt-stack browser QA also
+passes for desktop and 390 px mobile views of the scan budget controls, ASM family coverage, and
+schedule create/edit flows; wide endpoint tables remain contained in their horizontal scroll areas.
 
 Deliverables:
 
