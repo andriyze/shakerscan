@@ -1,8 +1,9 @@
 # ShakerScan — Reconciled Architecture & Roadmap Review
 
 **Mode:** REVIEW_AND_PLAN (no code changed in the review run).
-**As-of:** ShakerScan HEAD `87ee530` (2026-07-11), including the current-fleet authenticated crAPI
-scorecard from scan `85d3bafb`; T3MP3ST `main` HEAD `ae32cf5` (unchanged since prior review).
+**As-of:** ShakerScan HEAD `53cd5fc` (2026-07-11), including the current-fleet authenticated crAPI
+scorecard from scan `85d3bafb` and the first benchmark-truth fixes; T3MP3ST `main` HEAD `ae32cf5`
+(unchanged since prior review).
 **Method:** 5 read-only grounding agents + direct verification. Documentation treated as context; code + reproducible tests + live artifacts win.
 
 > Source-of-truth note: every "implemented/default/authoritative/tested" claim below was checked against the current code path, its tests, and (where relevant) a committed benchmark artifact. Contradictions are reported, not smoothed over.
@@ -130,6 +131,12 @@ Invariant: **the LLM chooses which question to ask; the deterministic engine dec
 - *Rollback:* omit new receipt fields and continue reading legacy scorecards. *Non-goals:* detector
   changes, registry migration, planner work.
 
+Progress: `53cd5fc` adds `benchmark_principal_validation_v1`, redacted identity fingerprints,
+explicit context-scheduled compatibility semantics, and a separate unknown server-acceptance state.
+It also removes SQLi's double completion increment, bounds completion ratios, emits telemetry
+anomalies, and fails a benchmark gate on inconsistent completion telemetry. A bounded discovery
+manifest and target-accepted-auth receipt remain open before increment 0 is accepted.
+
 **Increment 1 — Isolate detector correctness, then close universal authenticated discovery.** Add a
 test-only/benchmark-controlled seeded endpoint input to prove whether current BOLA and SQLi contracts
 detect the four expected route classes. Preserve that result separately from the unseeded benchmark.
@@ -191,5 +198,5 @@ Zero scope violations · zero hard-budget violations (hard-enforced adapters) ·
 *Grounded by read-only audits of auth/BOLA propagation, request accounting/budgets,
 dynamic-vs-static + multi-node primitives, invocation contracts + attempt schemas + registry
 authority, the stored crAPI scan result, and documentation contradictions. Verified directly:
-HEAD `87ee530`, current-fleet scorecard `85d3bafb`, coverage default = dynamic, expected routes absent
+HEAD `53cd5fc`, current-fleet scorecard `85d3bafb`, coverage default = dynamic, expected routes absent
 from the stored result, and T3MP3ST pinned at `ae32cf5`.*

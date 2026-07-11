@@ -26,6 +26,11 @@ and the evidence-grounded architecture review is
 | Request budgets | Compatibility by default | Meter exists; known opaque tools are rejected in enforce mode; per-adapter quality and soak remain open |
 | Multi-node | Design only | No fencing, stale-owner-write prevention, partition/skew acceptance, or brokered short-lived secrets |
 
+Current implementation progress: commit `53cd5fc` adds redacted principal-validation receipts for
+future benchmark submissions and fixes SQLi's double completion count. Completion ratios are bounded,
+and inconsistent telemetry now fails an explicit benchmark gate. The existing `85d3bafb` artifact
+predates that receipt and remains historical evidence with the limitations recorded in the ledger.
+
 ## 1. Detector acceptance
 
 The first current-fleet authenticated crAPI scorecard is an honest failure. The four required routes

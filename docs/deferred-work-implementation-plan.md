@@ -31,6 +31,12 @@ cause until seeded detector controls pass.
 5. Finish engine-wide cancellation and per-adapter metering-quality contracts, then execute Wave 6.
 6. Keep planner authority and multi-node work behind those acceptance gates.
 
+Progress: `53cd5fc` starts item 1. Future benchmark submissions now carry a redacted
+`benchmark_principal_validation_v1` receipt and explicitly leave target-accepted authentication
+unknown. SQLi completion telemetry no longer double-counts successful body parameters; diagnostic
+ratios are bounded and inconsistent input fails a benchmark gate. Bounded discovery manifests and
+accepted-auth observation remain open.
+
 ## Wave 1: cooperative cancellation for current active families - DONE
 
 **Why first:** registry migration increases the number of modules controlled by shared orchestration.
