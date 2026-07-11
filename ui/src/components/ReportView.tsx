@@ -10,6 +10,7 @@ import { getApiUrl } from '@/lib/api'
 import { gradeTextColor } from '@/components/ui'
 import { SEVERITY_BADGE_STYLES, type SeverityLevel } from '@/lib/constants'
 import { AlertTriangle, CheckCircle2 } from 'lucide-react'
+import { normalizeSkipReasons } from '@/lib/deferredWorkContracts'
 
 type RemediationStatus = 'open' | 'in_progress' | 'remediated' | 'false_positive' | 'accepted_risk'
 
@@ -529,6 +530,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
   const completionSkippedModules = Array.isArray(scanCompletionStatus.skipped_modules)
     ? scanCompletionStatus.skipped_modules
     : []
+  const completionSkipViews = normalizeSkipReasons(completionSkippedModules)
   const completionCappedEntries = Object.entries(asRecord(scanCompletionStatus.capped_lists))
     .filter(([, cap]: [string, any]) => cap && typeof cap === 'object' && cap.capped)
   const scan_config = scanData.scan_config || {}
@@ -950,25 +952,15 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
                   <div className="rounded border border-gray-800 bg-black/20 p-3">
                     <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-400">Skipped Modules</div>
                     <div className="flex flex-wrap gap-2">
-                      {completionSkippedModules.slice(0, 8).map((skip: any, index: number) => {
-                        // skip may be a string, an object with module/check, or
-                        // an arbitrary object — coerce defensively so we never
-                        // render "[object Object]".
-                        const isString = typeof skip === 'string'
-                        const label = isString
-                          ? skip
-                          : (skip?.module || skip?.check || skip?.name || `module_${index}`)
-                        const reason = !isString && skip?.reason ? skip.reason : null
-                        return (
-                          <span key={`${typeof label === 'string' ? label : index}-${index}`} className="rounded bg-gray-900 px-2 py-1 text-xs text-gray-300">
-                            {formatScanToken(label)}
-                            {reason ? `: ${formatScanToken(reason)}` : ''}
-                          </span>
-                        )
-                      })}
-                      {completionSkippedModules.length > 8 && (
+                      {completionSkipViews.items.map((skip) => (
+                        <span key={skip.key} className="rounded bg-gray-900 px-2 py-1 text-xs text-gray-300">
+                          {formatScanToken(skip.label)}
+                          {skip.reason ? `: ${formatScanToken(skip.reason)}` : ''}
+                        </span>
+                      ))}
+                      {completionSkipViews.remaining > 0 && (
                         <span className="rounded bg-gray-900 px-2 py-1 text-xs text-gray-500">
-                          +{completionSkippedModules.length - 8} more
+                          +{completionSkipViews.remaining} more
                         </span>
                       )}
                     </div>

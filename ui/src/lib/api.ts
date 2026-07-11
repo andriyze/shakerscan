@@ -1175,7 +1175,16 @@ export interface AsmSchedulerState {
   domain_rate_reserved?: number
 }
 
-export interface AsmFamilyCoverage { completed: number; attempts: number }
+export interface AsmFamilyCoverage {
+  attempted?: number
+  attempts: number
+  completed: number
+  proved?: number
+  blocked?: number
+  cancelled?: number
+  partial?: number
+  failed?: number
+}
 export interface AsmRecommendedCampaign {
   campaign: string
   label?: string

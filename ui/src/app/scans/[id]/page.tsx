@@ -8,6 +8,7 @@ import { SEVERITY_BADGE_STYLES, SEVERITY_LEVELS, type SeverityLevel } from '@/li
 import { Card, ErrorState, gradeTextColor } from '@/components/ui'
 import ReportView from '@/components/ReportView'
 import { buildAiGateCampaignReview, type AiGateCampaignReview } from '@/lib/aiGateCampaign'
+import { normalizeParentCoverage } from '@/lib/deferredWorkContracts'
 
 function formatScanTypeLabel(scan: any): string {
   if (scan?.scan_type === 'ai_gate' || scan?.run_kind?.startsWith('ai_')) {
@@ -917,13 +918,14 @@ function ShardContributionRollup({ rollup }: { rollup: any }) {
   const contribution = rollup?.contribution
   if (!contribution || typeof contribution !== 'object') return null
 
-  const assigned = coverageNumber(contribution.assigned_endpoints)
-  const attempted = coverageNumber(contribution.attempted_endpoints)
-  const selected = coverageNumber(contribution.active_endpoints_selected)
+  const normalizedCoverage = normalizeParentCoverage(contribution)
+  const assigned = normalizedCoverage.assigned
+  const attempted = normalizedCoverage.attempted
+  const selected = normalizedCoverage.selected
   const activeBudget = coverageNumber(contribution.active_max_seconds)
   const duration = coverageNumber(contribution.duration_seconds)
-  const telemetry = coverageNumber(contribution.telemetry_shards)
-  const contributing = coverageNumber(contribution.shards_with_contribution)
+  const telemetry = normalizedCoverage.telemetryShards
+  const contributing = normalizedCoverage.contributingShards
   const statusSummary = formatAttemptStatuses(contribution.attempt_statuses)
 
   return (

@@ -47,6 +47,7 @@ import {
   type Target,
 } from '@/lib/api'
 import { useUrlFilters } from '@/lib/useUrlFilters'
+import { normalizeFamilyCoverage, safeRemediationHref } from '@/lib/deferredWorkContracts'
 import {
   Badge,
   Button,
@@ -856,14 +857,17 @@ function CoverageAdvisorCard({
             <div className="space-y-1">
               <div className="text-[11px] uppercase text-gray-500">Family proof coverage</div>
               <div className="flex flex-wrap gap-1.5 text-xs">
-                {Object.entries(gaps.family_coverage).map(([fam, c]) => (
-                  <span key={fam} title={`${c.completed} proof-quality of ${c.attempts} attempts`}>
-                    <Badge
-                      className={c.completed > 0 ? 'bg-green-500/15 text-green-300' : 'bg-gray-800 text-gray-400'}>
-                      {fam}: {c.completed}/{c.attempts}
-                    </Badge>
-                  </span>
-                ))}
+                {Object.entries(gaps.family_coverage).map(([fam, c]) => {
+                  const coverage = normalizeFamilyCoverage(c as unknown as Record<string, unknown>)
+                  return (
+                    <span key={fam} title={coverage.label}>
+                      <Badge
+                        className={coverage.proved > 0 ? 'bg-green-500/15 text-green-300' : 'bg-gray-800 text-gray-400'}>
+                        {fam}: {coverage.proved}/{coverage.completed}/{coverage.attempted}
+                      </Badge>
+                    </span>
+                  )
+                })}
               </div>
             </div>
           )}
@@ -1154,6 +1158,7 @@ function ActivityCard({
         <div className="space-y-2">
           {timeline.map((event) => {
             const action = event.remediation
+            const actionHref = safeRemediationHref(action?.href)
             const content = (
               <div className="flex items-start justify-between gap-3 rounded-lg border border-gray-800 bg-gray-950/50 px-3 py-2 hover:border-gray-700">
                 <div className="min-w-0">
@@ -1177,9 +1182,9 @@ function ActivityCard({
                       <Sparkles className={`h-3.5 w-3.5 ${improving ? 'animate-pulse' : ''}`} />
                       {action.label}
                     </Button>
-                  ) : action?.href ? (
-                    <Link href={action.href} className="inline-flex items-center gap-1 text-blue-400 hover:text-blue-300">
-                      {action.label} <ExternalLink className="h-3 w-3" />
+                  ) : actionHref ? (
+                    <Link href={actionHref} className="inline-flex items-center gap-1 text-blue-400 hover:text-blue-300">
+                      {action?.label || 'Open remediation'} <ExternalLink className="h-3 w-3" />
                     </Link>
                   ) : event.href ? (
                     <Link href={event.href} className="text-blue-400 hover:text-blue-300">Open</Link>

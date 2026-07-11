@@ -10,6 +10,14 @@ import {
 import { SCAN_TYPES, type ScanType } from '@/lib/constants'
 import { Button, Card, CardSkeleton, ConfirmDialog, EmptyState, ErrorState, useToast } from '@/components/ui'
 import { utcTimeToLocalLabel } from '@/lib/format'
+import {
+  buildAsmScheduleOptions,
+  buildScheduleMutation,
+  readAsmScheduleOptions,
+  type AsmEndpointFilter,
+  type AsmFamily,
+  type ScheduleKind,
+} from '@/lib/deferredWorkContracts'
 
 const DAYS_OF_WEEK = [
   { value: 0, label: 'Monday' },
@@ -46,8 +54,6 @@ function formatRelativeTime(dateStr: string): string {
   }
 }
 
-type ScheduleKind = 'normal_scan' | 'asm_improve' | 'evidence_retention_sweep'
-
 function getScheduleKind(schedule: Schedule): ScheduleKind {
   if (schedule.schedule_kind === 'asm_improve') return 'asm_improve'
   if (schedule.schedule_kind === 'evidence_retention_sweep') return 'evidence_retention_sweep'
@@ -56,8 +62,6 @@ function getScheduleKind(schedule: Schedule): ScheduleKind {
   return 'normal_scan'
 }
 
-type AsmFamily = 'all' | 'sqli' | 'xss' | 'auth' | 'bola'
-type AsmEndpointFilter = 'all' | 'api'
 type RetentionClassFilter = 'all' | 'standard' | 'short' | 'audit' | 'sensitive'
 
 const ASM_FAMILIES: Array<{ value: AsmFamily; label: string; detail: string }> = [
@@ -222,27 +226,22 @@ function SchedulesContent() {
     setError('')
     try {
       const scan_options = buildScheduleOptions()
+      const mutation = buildScheduleMutation({
+        name: formName,
+        frequency: formFrequency,
+        dayOfWeek: formDayOfWeek,
+        timeOfDay: formTime,
+        kind: formKind,
+        scanType: formScanType,
+        scanOptions: scan_options,
+      })
       if (editingSchedule) {
-        await updateSchedule(editingSchedule.id, {
-          name: formName || undefined,
-          frequency: formFrequency,
-          day_of_week: formFrequency === 'weekly' ? formDayOfWeek : undefined,
-          time_of_day: formTime,
-          schedule_kind: formKind,
-          scan_type: formKind === 'normal_scan' ? formScanType : 'quick',
-          scan_options,
-        })
+        await updateSchedule(editingSchedule.id, mutation)
         toast.success('Schedule updated')
       } else {
         await createSchedule({
           target_id: formTargetId,
-          name: formName || undefined,
-          frequency: formFrequency,
-          day_of_week: formFrequency === 'weekly' ? formDayOfWeek : undefined,
-          time_of_day: formTime,
-          schedule_kind: formKind,
-          scan_type: formKind === 'normal_scan' ? formScanType : 'quick',
-          scan_options,
+          ...mutation,
         })
         toast.success('Schedule created')
       }
@@ -272,18 +271,18 @@ function SchedulesContent() {
       return options
     }
     if (formKind !== 'asm_improve') return {}
-    const options: Record<string, unknown> = {
-      batch_size: Math.max(1, Math.min(1000, Number(formAsmBatchSize) || 100)),
-      stale_days: Math.max(0, Number(formAsmStaleDays) || 0),
-    }
-    if (formAsmEndpointFilter !== 'all') options.endpoint_filter = formAsmEndpointFilter
-    if (formAsmFamily !== 'all') options.check_family = formAsmFamily
-    if (formAsmExploitDepth) options.exploit_depth = true
-    return options
+    return buildAsmScheduleOptions({
+      batchSize: formAsmBatchSize,
+      staleDays: formAsmStaleDays,
+      endpointFilter: formAsmEndpointFilter,
+      family: formAsmFamily,
+      exploitDepth: formAsmExploitDepth,
+    })
   }
 
   function openEdit(schedule: Schedule) {
     const options = scheduleOptions(schedule)
+    const asmOptions = readAsmScheduleOptions(options)
     setEditingSchedule(schedule)
     setFormTargetId(schedule.target_id)
     setFormName(schedule.name || '')
@@ -292,12 +291,11 @@ function SchedulesContent() {
     setFormTime((schedule.time_of_day || '02:00').slice(0, 5))
     setFormScanType((schedule.scan_type || 'standard') as ScanType)
     setFormKind(getScheduleKind(schedule))
-    setFormAsmBatchSize(numberOption(options, 'batch_size', 100))
-    setFormAsmStaleDays(numberOption(options, 'stale_days', 30))
-    setFormAsmEndpointFilter(String(options.endpoint_filter || options.asm_endpoint_filter || 'all') === 'api' ? 'api' : 'all')
-    const family = String(options.check_family || options.asm_check_family || 'all')
-    setFormAsmFamily(ASM_FAMILIES.some(f => f.value === family) ? family as AsmFamily : 'all')
-    setFormAsmExploitDepth(boolOption(options, 'exploit_depth'))
+    setFormAsmBatchSize(asmOptions.batchSize)
+    setFormAsmStaleDays(asmOptions.staleDays)
+    setFormAsmEndpointFilter(asmOptions.endpointFilter)
+    setFormAsmFamily(asmOptions.family)
+    setFormAsmExploitDepth(asmOptions.exploitDepth)
     setFormRetentionDryRun(boolOption(options, 'dry_run', true))
     setFormRetentionOlderDays(options.older_than_days === undefined || options.older_than_days === null ? '' : String(options.older_than_days))
     const retentionClass = String(options.retention_class || 'all')
