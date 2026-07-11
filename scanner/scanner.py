@@ -3168,6 +3168,30 @@ class RegistryPhaseOutcome(NamedTuple):
     telemetry: dict[str, Any] | None = None
 
 
+class RegistryPhaseBatchAdapter(NamedTuple):
+    handler: Any
+
+
+class RegistryPhaseBatchOutcome(NamedTuple):
+    outcomes: dict[str, RegistryPhaseOutcome]
+
+
+def _apply_registry_phase_outcome(
+    receipt: dict[str, Any],
+    outcome: RegistryPhaseOutcome,
+) -> None:
+    outcome_status = str(outcome.status or "").strip().lower()
+    if outcome_status not in _REGISTRY_PHASE_OUTCOME_STATUSES:
+        receipt["status"] = "failed"
+        receipt["reason"] = f"invalid_adapter_outcome_status:{outcome_status or 'empty'}"
+        return
+    receipt["status"] = outcome_status
+    if outcome.reason:
+        receipt["reason"] = str(outcome.reason)[:200]
+    if isinstance(outcome.telemetry, dict) and outcome.telemetry:
+        receipt["adapter_telemetry"] = dict(outcome.telemetry)
+
+
 def validate_scanner_execution_plan(plan: Any) -> dict[str, Any]:
     """Reject missing or partial registry plans before any detector dispatch."""
     if not isinstance(plan, dict):
@@ -3269,14 +3293,23 @@ async def dispatch_registry_report_phase(
     adapters: dict[str, Any],
     *,
     cancel_requested: Any = scanner_cancel_requested,
+    families: set[str] | frozenset[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Run one registry phase with validated sync/async adapter contracts."""
     receipts: list[dict[str, Any]] = []
     plan = scanner_execution_plan if isinstance(scanner_execution_plan, dict) else {}
+    selected_families = {
+        str(family).strip().lower()
+        for family in (families or set())
+        if str(family).strip()
+    }
+    batch_outcomes: dict[str, dict[str, RegistryPhaseOutcome]] = {}
     for family in plan.get("families") or []:
         if not isinstance(family, dict) or family.get("phase") != phase:
             continue
         family_name = str(family.get("name") or "").strip().lower()
+        if selected_families and family_name not in selected_families:
+            continue
         adapter_name = str(family.get("dispatch_adapter") or "")
         receipt = {
             "family": family_name,
@@ -3299,12 +3332,67 @@ async def dispatch_registry_report_phase(
                 receipt["blocked_by"] = list(decision.get("blocked_by") or [])
             receipts.append(receipt)
             continue
-        if cancel_requested():
+        if cancel_requested() and adapter_name not in batch_outcomes:
             receipt["status"] = "cancelled"
             receipt["reason"] = "scanner_cancel_requested"
             receipts.append(receipt)
             continue
         adapter = adapters.get(adapter_name)
+        if isinstance(adapter, RegistryPhaseBatchAdapter):
+            if adapter_name not in batch_outcomes:
+                batch_rows: list[dict[str, Any]] = []
+                for candidate in plan.get("families") or []:
+                    if not isinstance(candidate, dict) or candidate.get("phase") != phase:
+                        continue
+                    candidate_name = str(candidate.get("name") or "").strip().lower()
+                    if selected_families and candidate_name not in selected_families:
+                        continue
+                    if str(candidate.get("dispatch_adapter") or "") != adapter_name:
+                        continue
+                    candidate_decision = registry_dispatch_decision(
+                        plan,
+                        candidate_name,
+                        expected_adapter=SCANNER_REGISTRY_ADAPTER_CONTRACTS.get(candidate_name),
+                    )
+                    if candidate_decision.get("dispatch_enabled"):
+                        batch_rows.append(candidate)
+                try:
+                    batch_result = adapter.handler(tuple(batch_rows))
+                    if inspect.isawaitable(batch_result):
+                        batch_result = await batch_result
+                except Exception as exc:
+                    batch_outcomes[adapter_name] = {
+                        str(row.get("name") or "").strip().lower(): RegistryPhaseOutcome(
+                            "failed",
+                            f"{type(exc).__name__}: {str(exc)[:200]}",
+                        )
+                        for row in batch_rows
+                    }
+                else:
+                    if isinstance(batch_result, RegistryPhaseBatchOutcome):
+                        batch_outcomes[adapter_name] = {
+                            str(name).strip().lower(): outcome
+                            for name, outcome in batch_result.outcomes.items()
+                            if isinstance(outcome, RegistryPhaseOutcome)
+                        }
+                    elif isinstance(batch_result, RegistryPhaseOutcome):
+                        batch_outcomes[adapter_name] = {
+                            str(row.get("name") or "").strip().lower(): batch_result
+                            for row in batch_rows
+                        }
+                    else:
+                        batch_outcomes[adapter_name] = {
+                            str(row.get("name") or "").strip().lower(): RegistryPhaseOutcome("completed")
+                            for row in batch_rows
+                        }
+            outcome = batch_outcomes.get(adapter_name, {}).get(family_name)
+            if outcome is None:
+                receipt["status"] = "failed"
+                receipt["reason"] = "batch_adapter_family_outcome_missing"
+            else:
+                _apply_registry_phase_outcome(receipt, outcome)
+            receipts.append(receipt)
+            continue
         if not callable(adapter):
             receipt["reason"] = "dispatch_adapter_not_registered"
             receipts.append(receipt)
@@ -3318,16 +3406,7 @@ async def dispatch_registry_report_phase(
             receipt["reason"] = f"{type(exc).__name__}: {str(exc)[:200]}"
         else:
             if isinstance(result, RegistryPhaseOutcome):
-                outcome_status = str(result.status or "").strip().lower()
-                if outcome_status not in _REGISTRY_PHASE_OUTCOME_STATUSES:
-                    receipt["status"] = "failed"
-                    receipt["reason"] = f"invalid_adapter_outcome_status:{outcome_status or 'empty'}"
-                else:
-                    receipt["status"] = outcome_status
-                    if result.reason:
-                        receipt["reason"] = str(result.reason)[:200]
-                    if isinstance(result.telemetry, dict) and result.telemetry:
-                        receipt["adapter_telemetry"] = dict(result.telemetry)
+                _apply_registry_phase_outcome(receipt, result)
             else:
                 receipt["status"] = "completed"
         receipts.append(receipt)
@@ -3957,6 +4036,7 @@ async def build_report(target: str,
         zero_rediscovery=zero_rediscovery_scope,
     )
     scanner_dispatch_decisions: list[dict[str, Any]] = []
+    active_dispatch_receipts: list[dict[str, Any]] = []
     discovery_budget = scan_budget
     if focused_manual_active_scope:
         scan_budget = dict(scan_budget)
@@ -4937,26 +5017,61 @@ async def build_report(target: str,
 
     # New advanced vulnerability checks (smart/full/aggressive only)
     advanced_scan = (smart_mode or (complete_mode and complete_tier in ("full", "aggressive"))) and not focused_active_family
-    jwt_dispatch_decision = registry_dispatch_decision(
+    jwt_results: dict[str, Any] = {
+        "vulnerable": False,
+        "issues": [],
+        "evidence": [],
+        "skipped": True,
+        "reason": "registry_active_not_dispatched",
+    }
+    jwt_comprehensive_results: dict[str, Any] = {
+        "vulnerable": False,
+        "algorithm_confusion": {},
+        "kid_injection": {},
+        "claim_manipulation": {},
+        "findings": [],
+        "skipped": True,
+        "reason": "registry_active_not_dispatched",
+    }
+
+    async def run_legacy_advanced_jwt() -> RegistryPhaseOutcome:
+        nonlocal jwt_results, jwt_comprehensive_results
+        jwt_results, jwt_comprehensive_results = await asyncio.gather(
+            jwt_vulnerability_test(base_url, auth_session=auth_session),
+            jwt_comprehensive_test(base_url, None, auth_session),
+        )
+        finding_count = len(jwt_results.get("issues") or []) + len(
+            jwt_comprehensive_results.get("findings") or []
+        )
+        telemetry = {
+            "schema_version": "jwt_probe_result_v1",
+            "completed": True,
+            "finding_count": finding_count,
+            "vulnerable": bool(
+                jwt_results.get("vulnerable") or jwt_comprehensive_results.get("vulnerable")
+            ),
+        }
+        if jwt_results.get("error") or jwt_comprehensive_results.get("error"):
+            reason = str(
+                jwt_results.get("error")
+                or jwt_comprehensive_results.get("error")
+                or "jwt_adapter_failed"
+            )
+            return RegistryPhaseOutcome("failed", reason, telemetry)
+        return RegistryPhaseOutcome("completed", telemetry=telemetry)
+
+    jwt_phase_task = asyncio.create_task(dispatch_registry_report_phase(
         scanner_execution_plan,
-        "jwt",
-    )
-    scanner_dispatch_decisions.append(jwt_dispatch_decision)
-    jwt_dispatch_enabled = bool(jwt_dispatch_decision["dispatch_enabled"])
+        "active",
+        {"legacy_advanced_jwt": run_legacy_advanced_jwt},
+        families={"jwt"},
+    ))
     if advanced_scan and not public_only:
         nosql_task = asyncio.create_task(nosql_injection_test(base_url))
         ldap_task = asyncio.create_task(ldap_injection_test(base_url))
         xpath_task = asyncio.create_task(xpath_injection_test(base_url))
         ssti_task = asyncio.create_task(ssti_test(base_url))
         smuggling_task = asyncio.create_task(http_smuggling_test(base_url))
-        if jwt_dispatch_enabled:
-            jwt_task = asyncio.create_task(jwt_vulnerability_test(base_url, auth_session=auth_session))
-            jwt_comprehensive_task = asyncio.create_task(jwt_comprehensive_test(base_url, None, auth_session))
-        else:
-            async def dummy_registry_jwt(): return {"vulnerable": False, "issues": [], "evidence": [], "skipped": True, "reason": "registry_dispatch_disabled"}
-            async def dummy_registry_jwt_comprehensive(): return {"vulnerable": False, "algorithm_confusion": {}, "kid_injection": {}, "claim_manipulation": {}, "findings": [], "skipped": True, "reason": "registry_dispatch_disabled"}
-            jwt_task = asyncio.create_task(dummy_registry_jwt())
-            jwt_comprehensive_task = asyncio.create_task(dummy_registry_jwt_comprehensive())
         oauth_task = asyncio.create_task(oauth_vulnerability_test(base_url))
         session_task = asyncio.create_task(session_vulnerability_test(base_url))
         timing_task = asyncio.create_task(timing_attack_test(base_url))
@@ -4973,13 +5088,11 @@ async def build_report(target: str,
         async def dummy_xpath(): return {"vulnerable": False, "payloads_tested": [], "evidence": []}
         async def dummy_ssti(): return {"vulnerable": False, "payloads_tested": [], "evidence": []}
         async def dummy_smuggling(): return {"vulnerable": False, "technique": None, "evidence": []}
-        async def dummy_jwt(): return {"vulnerable": False, "issues": [], "evidence": []}
         async def dummy_oauth(): return {"vulnerable": False, "issues": [], "evidence": []}
         async def dummy_session(): return {"vulnerable": False, "issues": [], "evidence": []}
         async def dummy_timing(): return {"vulnerable": False, "evidence": []}
         async def dummy_graphql(): return {"vulnerable": False, "issues": [], "evidence": []}
         async def dummy_cache_poison(): return {"vulnerable": False, "issues": [], "evidence": []}
-        async def dummy_jwt_comprehensive(): return {"vulnerable": False, "algorithm_confusion": {}, "kid_injection": {}, "claim_manipulation": {}, "findings": []}
         async def dummy_graphql_comprehensive(): return {"vulnerable": False, "batch_attacks": {}, "depth_attacks": {}, "alias_idor": {}, "field_suggestions": {}, "findings": []}
         async def dummy_verb_tampering(): return {"vulnerable": False, "method_overrides": [], "findings": []}
         async def dummy_rate_limit(): return {"rate_limited": False, "headers": {}, "limits": {}, "findings": []}
@@ -4988,13 +5101,11 @@ async def build_report(target: str,
         xpath_task = asyncio.create_task(dummy_xpath())
         ssti_task = asyncio.create_task(dummy_ssti())
         smuggling_task = asyncio.create_task(dummy_smuggling())
-        jwt_task = asyncio.create_task(dummy_jwt())
         oauth_task = asyncio.create_task(dummy_oauth())
         session_task = asyncio.create_task(dummy_session())
         timing_task = asyncio.create_task(dummy_timing())
         graphql_task = asyncio.create_task(dummy_graphql())
         cache_poison_task = asyncio.create_task(dummy_cache_poison())
-        jwt_comprehensive_task = asyncio.create_task(dummy_jwt_comprehensive())
         graphql_comprehensive_task = asyncio.create_task(dummy_graphql_comprehensive())
         verb_tampering_task = asyncio.create_task(dummy_verb_tampering())
         rate_limit_task = asyncio.create_task(dummy_rate_limit())
@@ -5820,14 +5931,22 @@ async def build_report(target: str,
     xpath_results = await xpath_task
     ssti_results = await ssti_task
     smuggling_results = await smuggling_task
-    jwt_results = await jwt_task
+    jwt_dispatch_receipts = await jwt_phase_task
+    active_dispatch_receipts.extend(jwt_dispatch_receipts)
+    jwt_receipt = next((
+        receipt for receipt in jwt_dispatch_receipts
+        if receipt.get("family") == "jwt"
+    ), None)
+    if jwt_receipt and jwt_receipt.get("status") != "completed":
+        jwt_skip_reason = str(jwt_receipt.get("reason") or "registry_active_not_dispatched")
+        jwt_results["reason"] = jwt_skip_reason
+        jwt_comprehensive_results["reason"] = jwt_skip_reason
     oauth_results = await oauth_task
     session_results = await session_task
     timing_results = await timing_task
     graphql_results = await graphql_task
     cache_poison_results = await cache_poison_task
     # Enhanced security tests (new)
-    jwt_comprehensive_results = await jwt_comprehensive_task
     graphql_comprehensive_results = await graphql_comprehensive_task
     verb_tampering_results = await verb_tampering_task
     rate_limit_results = await rate_limit_task
@@ -6064,18 +6183,46 @@ async def build_report(target: str,
         forced_browsing_task = asyncio.create_task(dummy_forced_browsing())
 
     # Mass Assignment Check (requires auth for best results)
-    mass_assignment_dispatch_decision = registry_dispatch_decision(
-        scanner_execution_plan,
-        "mass_assignment",
-    )
-    scanner_dispatch_decisions.append(mass_assignment_dispatch_decision)
-    mass_assignment_dispatch_enabled = bool(mass_assignment_dispatch_decision["dispatch_enabled"])
-    if mass_assignment_dispatch_enabled and not public_only:
+    mass_assignment_results: dict[str, Any] = {
+        "vulnerable": False,
+        "findings": [],
+        "endpoints_tested": 0,
+        "parameters_tested": 0,
+        "skipped": True,
+        "reason": "registry_active_not_dispatched",
+    }
+
+    async def run_legacy_phase4_mass_assignment() -> RegistryPhaseOutcome:
+        nonlocal mass_assignment_results
         from scanner_tools.access_control_checks import check_mass_assignment
-        mass_assignment_task = asyncio.create_task(check_mass_assignment(base_url, auth_session=auth_session))
-    else:
-        async def dummy_mass_assignment(): return {"vulnerable": False, "findings": [], "endpoints_tested": 0, "parameters_tested": 0}
-        mass_assignment_task = asyncio.create_task(dummy_mass_assignment())
+
+        mass_assignment_results = await check_mass_assignment(
+            base_url,
+            auth_session=auth_session,
+        )
+        telemetry = {
+            "schema_version": "active_endpoint_attempt_v1",
+            "endpoints_tested": int(mass_assignment_results.get("endpoints_tested") or 0),
+            "parameters_tested": int(mass_assignment_results.get("parameters_tested") or 0),
+            "finding_count": len(mass_assignment_results.get("findings") or []),
+            "vulnerable": bool(mass_assignment_results.get("vulnerable")),
+        }
+        if mass_assignment_results.get("cancelled"):
+            return RegistryPhaseOutcome("cancelled", "scanner_cancel_requested", telemetry)
+        if mass_assignment_results.get("error"):
+            return RegistryPhaseOutcome(
+                "failed",
+                str(mass_assignment_results.get("error")),
+                telemetry,
+            )
+        return RegistryPhaseOutcome("completed", telemetry=telemetry)
+
+    mass_assignment_phase_task = asyncio.create_task(dispatch_registry_report_phase(
+        scanner_execution_plan,
+        "active",
+        {"legacy_phase4_mass_assignment": run_legacy_phase4_mass_assignment},
+        families={"mass_assignment"},
+    ))
 
     # BOLA/IDOR Check (requires auth for best results, user2_session enables true multi-user comparison)
     if bola_testing and not public_only:
@@ -6359,7 +6506,38 @@ async def build_report(target: str,
     injection_extra_results = await await_with_timeout(injection_extra_task, _phase4_timeout(120, "injection_extra"), {"findings": [], "tested": {}, "checks_run": [], "skipped_checks": []}, "injection_extra")
     api_security_p4_results = await await_with_timeout(api_security_p4_task, _phase4_timeout(90, "api_security_p4"), {"vulnerable": False, "mass_assignment_risks": [], "bfla_endpoints": []}, "api_security_p4")
     forced_browsing_results = await await_with_timeout(forced_browsing_task, _phase4_timeout(180, "forced_browsing"), {"vulnerable": False, "findings": [], "summary": {"critical": 0, "high": 0, "medium": 0, "info": 0}, "paths_tested": 0}, "forced_browsing")
-    mass_assignment_results = await await_with_timeout(mass_assignment_task, _phase4_timeout(60, "mass_assignment"), {"vulnerable": False, "findings": [], "endpoints_tested": 0, "parameters_tested": 0}, "mass_assignment")
+    mass_assignment_receipts = await await_with_timeout(
+        mass_assignment_phase_task,
+        _phase4_timeout(60, "mass_assignment"),
+        [],
+        "mass_assignment",
+    )
+    if isinstance(mass_assignment_receipts, list) and mass_assignment_receipts:
+        active_dispatch_receipts.extend(mass_assignment_receipts)
+        mass_assignment_receipt = next((
+            receipt for receipt in mass_assignment_receipts
+            if receipt.get("family") == "mass_assignment"
+        ), None)
+        if mass_assignment_receipt and mass_assignment_receipt.get("status") != "completed":
+            mass_assignment_results["reason"] = str(
+                mass_assignment_receipt.get("reason") or "registry_active_not_dispatched"
+            )
+    else:
+        mass_assignment_cancelled = scanner_cancel_requested()
+        active_dispatch_receipts.append({
+            "family": "mass_assignment",
+            "phase": "active",
+            "dispatch_adapter": "legacy_phase4_mass_assignment",
+            "status": "cancelled" if mass_assignment_cancelled else "failed",
+            "reason": "scanner_cancel_requested" if mass_assignment_cancelled else "phase4_timeout",
+            "telemetry_schema": "active_endpoint_attempt_v1",
+            "proof_contract": [
+                "method", "url", "field", "baseline_value", "observed_privilege_effect",
+            ],
+        })
+        mass_assignment_results["reason"] = (
+            "scanner_cancel_requested" if mass_assignment_cancelled else "phase4_timeout"
+        )
     bola_results = await await_with_timeout(bola_task, _phase4_timeout(120, "bola"), {"vulnerable": False, "findings": [], "endpoints_tested": 0, "access_violations": 0}, "bola")
     ssh_results = await await_with_timeout(ssh_task, _phase4_timeout(30, "ssh"), {"password_auth_enabled": False, "auth_methods": [], "findings": [], "scan_completed": False}, "ssh")
     race_condition_results = await await_with_timeout(race_condition_task, _phase4_timeout(90, "race_condition"), {"tested_endpoints": 0, "vulnerable_endpoints": 0, "findings": [], "results": []}, "race_condition")
@@ -6770,6 +6948,7 @@ async def build_report(target: str,
     initial_execution_receipts = [
         *recon_dispatch_receipts,
         *template_dispatch_receipts,
+        *active_dispatch_receipts,
     ]
     if initial_execution_receipts:
         report["scanner_execution_receipts"] = initial_execution_receipts

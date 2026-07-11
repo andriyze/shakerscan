@@ -851,6 +851,101 @@ def test_registry_report_phase_records_cancellation_without_dispatch():
     assert receipts[0]["reason"] == "scanner_cancel_requested"
 
 
+def test_registry_report_phase_limits_dispatch_to_explicit_family_subset():
+    called = []
+    plan = {"families": [
+        {
+            "name": "jwt", "phase": "active", "enabled": True, "runnable": True,
+            "scanner_enabled": True, "blocked_by": [], "dispatch_adapter": "legacy_advanced_jwt",
+        },
+        {
+            "name": "mass_assignment", "phase": "active", "enabled": True, "runnable": True,
+            "scanner_enabled": True, "blocked_by": [], "dispatch_adapter": "legacy_phase4_mass_assignment",
+        },
+    ]}
+
+    receipts = asyncio.run(scanner_mod.dispatch_registry_report_phase(
+        plan,
+        "active",
+        {
+            "legacy_advanced_jwt": lambda: called.append("jwt"),
+            "legacy_phase4_mass_assignment": lambda: called.append("mass_assignment"),
+        },
+        families={"jwt"},
+    ))
+
+    assert called == ["jwt"]
+    assert [receipt["family"] for receipt in receipts] == ["jwt"]
+
+
+def test_registry_report_phase_runs_shared_batch_adapter_once_with_family_outcomes():
+    calls = []
+    plan = {"families": [
+        {
+            "name": "sqli", "phase": "active", "enabled": True, "runnable": True,
+            "scanner_enabled": True, "blocked_by": [], "dispatch_adapter": "legacy_active_loop",
+        },
+        {
+            "name": "xss", "phase": "active", "enabled": True, "runnable": True,
+            "scanner_enabled": True, "blocked_by": [], "dispatch_adapter": "legacy_active_loop",
+        },
+    ]}
+
+    async def active_batch(rows):
+        calls.append([row["name"] for row in rows])
+        return scanner_mod.RegistryPhaseBatchOutcome({
+            "sqli": scanner_mod.RegistryPhaseOutcome(
+                "completed", telemetry={"attempted_params_count": 3}
+            ),
+            "xss": scanner_mod.RegistryPhaseOutcome(
+                "failed", "xss_budget_exhausted", {"attempted_params_count": 1}
+            ),
+        })
+
+    receipts = asyncio.run(scanner_mod.dispatch_registry_report_phase(
+        plan,
+        "active",
+        {
+            "legacy_active_loop": scanner_mod.RegistryPhaseBatchAdapter(active_batch),
+        },
+        families={"sqli", "xss"},
+    ))
+
+    assert calls == [["sqli", "xss"]]
+    assert [receipt["status"] for receipt in receipts] == ["completed", "failed"]
+    assert receipts[1]["reason"] == "xss_budget_exhausted"
+
+
+def test_registry_report_phase_fails_closed_when_batch_omits_family_outcome():
+    plan = {"families": [
+        {
+            "name": "sqli", "phase": "active", "enabled": True, "runnable": True,
+            "scanner_enabled": True, "blocked_by": [], "dispatch_adapter": "legacy_active_loop",
+        },
+        {
+            "name": "xss", "phase": "active", "enabled": True, "runnable": True,
+            "scanner_enabled": True, "blocked_by": [], "dispatch_adapter": "legacy_active_loop",
+        },
+    ]}
+
+    receipts = asyncio.run(scanner_mod.dispatch_registry_report_phase(
+        plan,
+        "active",
+        {
+            "legacy_active_loop": scanner_mod.RegistryPhaseBatchAdapter(
+                lambda rows: scanner_mod.RegistryPhaseBatchOutcome({
+                    "sqli": scanner_mod.RegistryPhaseOutcome("completed"),
+                })
+            ),
+        },
+        families={"sqli", "xss"},
+    ))
+
+    assert receipts[0]["status"] == "completed"
+    assert receipts[1]["status"] == "failed"
+    assert receipts[1]["reason"] == "batch_adapter_family_outcome_missing"
+
+
 def _load_reporting_module():
     import importlib.util as _ilu
     scanner_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "scanner"))

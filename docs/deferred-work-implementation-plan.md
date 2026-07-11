@@ -67,7 +67,10 @@ keeps its existing standard/comprehensive/staged adapters,
 but only the registry template phase can invoke them and its receipt is persisted in the report.
 Typed adapter outcomes prevent a returned-but-incomplete tool run from being labeled completed;
 Nuclei receipts carry bounded completion/template/finding counts and fail when `scan_completed=false`.
-Active-family execution still requires phase-by-phase migration before Wave 2 is complete.
+The active executor also supports explicit dependency-point family subsets and typed one-call batch
+adapters. JWT and Phase 4 mass-assignment now execute only through their registry adapters and emit
+versioned completion/finding/count telemetry. SQLi/XSS and Auth/BOLA still require phase-by-phase
+migration before Wave 2 is complete.
 
 ## Wave 3: telemetry schema expansion
 
