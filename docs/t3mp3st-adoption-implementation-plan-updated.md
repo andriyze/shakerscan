@@ -1,9 +1,34 @@
 # T3MP3ST Adoption Implementation Plan
 
-**Status:** canonical draft implementation plan  
+**Status:** adopted design input; bounded adoption phases implemented, optional expansion deferred
 **Created:** 2026-07-05  
-**Updated:** 2026-07-05 after deeper T3MP3ST source/architecture audit  
-**Scope:** documentation-only planning artifact. No code changes are implied by this document. This file proposes how ShakerScan can borrow useful ideas from T3MP3ST while preserving ShakerScan's proof-first DAST, Continuous ASM, AI Gate, and Model Intake architecture.
+**Updated:** 2026-07-10 after code/test reconciliation
+**Scope:** this remains the detailed design rationale for borrowing T3MP3ST's operating-model ideas.
+The implemented subset is recorded in `proposed-next-steps.md` and summarized below. Historical
+"should" and phase sections describe the target design; they are not blanket claims that optional
+agent execution, state-changing MCP, new tool families, or multi-node execution shipped.
+
+## Implementation reconciliation (2026-07-10)
+
+| Phase | Actual code state |
+| --- | --- |
+| 0. Contracts and labels | Implemented: schemas, maturity/risk labels, command/result, receipts, campaign/hypothesis/evidence contracts, ledgers, and route/tool mappings. |
+| 1. Action Center and timeline | Implemented: API-backed Action Center/Product Status, cross-product mission timeline, ASM scheduler/block reasons, and safe remediation links. |
+| 2. Read-only Arsenal/tool status | Implemented: catalog, integrated-tool status, no-phantom-tools gate, UI, and read-only dispatch adapters. |
+| 3. Scope/approval receipts | Implemented for current state-changing REST/Arsenal paths, including runtime redirect/DNS destination enforcement and durable audit rows. |
+| 4. Planner evaluations | Implemented: 10 deterministic fixtures, scorecards, strict parser, integrity ledger, and no-shell/scope/risk/AI-proof release gates. |
+| 5. Local-agent connector | Implemented only in bounded dry-run form: capability discovery/ping, redacted context packs, strict candidate parsing, deterministic dry-run plans, and a fixture-gated Codex adapter. No general privileged agent executor exists. |
+| 6. Hypotheses/refuters | Implemented: durable dedupe, endorsements, claim leases/CAS, situation reports, proof reconciliation, refuter reviews/signals, and timeline events. |
+| 7. Existing-tool receipts | Implemented for current DAST, browser, AI Gate, Model Intake, and ASM adapters. New offensive tools remain `catalog_only`. |
+| 8. Evidence phase 2 | Implemented for current scope: EvidenceInstance rows, local/S3-compatible objects, hashes, manifests/zip exports, retention, and degraded missing-evidence handling. |
+| 9. AI/Model campaign UX | Implemented: AI campaign review/rerun/replay/history/trends and Model Intake trust modes, preview, anchors, policy gaps, and evidence exports. |
+| 10. Source-informed DAST | Implemented as bounded inline/file parsing into runtime-proof-required graph/hypothesis signals. It is not a source scanner and cannot create verified findings. |
+| 11. MCP/new tools | Read-only MCP is implemented over Arsenal with server-side bounds. State-changing MCP and new tool families are intentionally deferred or out of scope. |
+
+Current validation: the complete Python suite, container runtime suite, UI production build/type
+check, planner fixture scorecard, and all named release gates pass on the rebuilt local fleet. Live
+detector acceptance remains a separate benchmark obligation; the current Juice Shop scorecard passes
+and authenticated crAPI must be rerun after the requested rebuild cancelled the prior run.
 
 ## Executive thesis
 
@@ -1500,7 +1525,15 @@ Do not implement local-agent planning until the planner eval harness and dry-run
 
 ---
 
-# Decisions needed before implementation
+# Decisions resolved by the bounded implementation
+
+The original questions are retained below for design history. The implemented answers are: local
+planning is opt-in/fixture-gated and dry-run only; REST Command Arsenal is the authoritative public
+surface; MCP shipped read-only after REST; campaign/hypothesis records preceded full evidence
+externalization; tool receipts are global and link to scans/campaign actions; integrity artifacts live
+under `results/benchmark-runs/` and `results/planner-evals/`; Codex is the first evaluated bounded
+adapter; new offensive tools remain catalog-only/out of scope; and the Dashboard plus target ASM
+timeline are the Action Center surfaces.
 
 1. Whether local-agent planning should be available in OSS by default or hidden behind an opt-in feature flag.
 2. Whether the first Command Arsenal surface should be public REST, internal-only, or both.

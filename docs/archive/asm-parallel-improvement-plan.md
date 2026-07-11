@@ -7,8 +7,8 @@ evidence/root-cause detail only. Current implementation direction lives in
 [continuous-asm-architecture.md](../continuous-asm-architecture.md), and
 [proposed-next-steps.md](../proposed-next-steps.md).
 
-**2026-07-05 audit note:** do not implement directly from this archive. The remaining A4/P6 and
-worker-rebuild/handshake follow-ups have been migrated into
+**2026-07-10 reconciliation note:** do not implement directly from this archive. A4, P6, and the
+worker-rebuild/fingerprint-handshake follow-ups were migrated into and completed under
 `docs/proposed-next-steps.md` under "Operational / inventory-hygiene follow-ups". The newer priority
 work is proof-first Continuous Exposure Management productization: dashboard product status and
 blocker counts, safe Action Center remediation flows, family-aware ASM quality, graph-driven authz
@@ -19,8 +19,9 @@ the target campaign timeline have shipped; do not use this archive to re-open th
 Each item lists the **evidence** observed, the **root cause**, and the **fix**.
 P1 (worker scaling), A1 (phantom-endpoint pollution), P2 (re-classified as a P1 skew symptom, not a
 planner bug), P3 (observability), P4 (re-classified as a stale-API skew + a misread, not a submit
-bug), A2, and P5 (batch granularity defaults) are **fixed & committed**; A4, P6, and the P1 follow-up
-(code-version handshake) remain.
+bug), A2, P5 (batch granularity defaults), A4, P6, and the P1 follow-up are now **fixed & committed**.
+The line-item text below is retained as a chronological investigation log; later reconciliation
+notes override any historical "remaining" wording.
 
 ## How this was found
 Ran Full Coverage scans against the three targets and inspected logs, the DB (scans,
@@ -143,9 +144,10 @@ not match the shipped design.
    slot-wait logging, so a future skew is visible immediately.
 4. **P4** (`parallel:true`→standalone) — ✅ resolved: stale-API skew + a misread, not a submit bug;
    contract locked by tests and GET detail now surfaces `parallel`.
-5. **Remaining:** **P1 follow-up** (scale-aware `rebuild/restart` recreates API-scaled workers + a
-   code-version handshake so a skewed worker/API refuses jobs instead of silently running old code
-   — this is the common root of P2 and P4), and **A2** (inventory GC for `gone`/unreachable rows).
+5. **Later closure:** the **P1 follow-up** is complete: `rebuild/restart` recreates the full scaled
+   fleet, workers report source fingerprints, freshness is exposed by `/workers`, and
+   `require_current_workers` jobs fail closed on stale workers. **A2** is also complete through the
+   reachability lifecycle and reversible `gone` retirement described below.
 
 ---
 
@@ -223,10 +225,13 @@ crAPI. **All completed with zero shard failures.**
   forever), cleanup runs both on-demand and automatically, and endpoints that come back are
   auto-resurrected — so we do **not** scan vanished endpoints indefinitely.
 
-### A4 — Cap synthetic endpoint permutation  🟡 MEDIUM
+### A4 — Cap synthetic endpoint permutation  ✅ FIXED
 - **Evidence:** 4475 versioned + 1677 resource-permuted Juice Shop paths, the bulk phantom.
-- **Fix:** gate synthetic/version-permutation generation behind A3 reachability and/or cap the
-  permutation breadth so generation can't dominate the worklist before filtering.
+- **Fix (done):** common synthetic active endpoints require API/reachability signal unless an
+  operator explicitly requests thorough parameter probing, and their burst is capped relative to
+  active budget before reachability filtering. BOLA collection-to-resource synthesis also has a
+  finite output cap. Regression coverage lives in `tests/test_active_endpoint_prioritization.py`
+  and access-control worklist tests.
 
 ### P5 — Dynamic-coverage batch granularity  ✅ FIXED (commit 5dd019e)
 - **Evidence:** dynamic shard durations spread 228–1319 s (~6×) on Juice Shop; with
@@ -237,16 +242,18 @@ crAPI. **All completed with zero shard failures.**
 - **Optional future tuning:** taper the claimed batch size as the worklist drains so terminal batches
   shrink further under very uneven endpoint costs.
 
-### P6 — API-scaled worker logs are invisible  🟢 LOW (observability)
+### P6 — API-scaled worker logs are invisible  ✅ FIXED
 - **Evidence:** plan jobs for the new scans ran on API-scaled workers 6–10, whose logs are **not**
   captured by `docker compose logs worker` (only the compose replicas) — the fan-out lines were
   invisible until querying each container directly.
-- **Fix:** a `scanner.sh logs` mode that aggregates *all* `shakerscan-worker-*` containers, not just
-  compose-managed ones.
+- **Fix (done):** `scanner.sh logs worker` / `workers` enumerates every matching worker container,
+  prefixes output with the container name, supports follow mode, and falls back to Compose logs when
+  no independently scaled worker containers are present.
 
 ### Round 2 status
 1. **A3** (soft-404 detection) — ✅ fixed (`6736dea`).
 2. **A2** (reachability persistence + `gone`-retirement + GC sweep) — ✅ fixed; validated live
    (honey 4022/5395 retired, real endpoints preserved, dispatcher excludes them).
-3. **Remaining:** **A4** (cap synthetic permutation — stop generating phantoms at the source),
-   **P6** (all-worker logs), optional P5 tapering, and the **P1 follow-up** (code-version handshake).
+3. **Later closure:** **A4**, **P6**, and the **P1 follow-up** are complete as described above and in
+   `docs/proposed-next-steps.md`. Optional terminal-batch tapering remains tuning/soak work, not a
+   correctness acceptance blocker.

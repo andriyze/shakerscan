@@ -1,6 +1,15 @@
 # Parallel Scanning Architecture — Design & Implementation Plan
 
-**Status:** Parallel-scan core (Phase 0 dictionaries + Phase 1 orchestration) implemented & deployed; high-budget `coverage` mode implemented; zero-rediscovery coverage child execution implemented; dynamic pull-based Full Coverage allocation is now the default for coverage parents, with explicit static slices kept as fallback. Continuous ASM is now documented separately in [continuous-asm-architecture.md](continuous-asm-architecture.md). Current DAST-quality lesson from Juice Shop/crAPI validation: parallelism is the execution substrate, not the goal. The scanner now proves real Critical SQLi and High BOLA/Authz on lab apps, but broad fan-out still needs worker-aware sizing, family-specific campaigns, and browser/stateful XSS/BOLA workflows to consistently raise true High/Critical coverage.
+**Status:** the bounded local/owned-fleet parallel core is implemented: Phase 0 dictionaries,
+parent/plan/shard/merge orchestration, high-budget `coverage`, zero-rediscovery children, dynamic
+pull allocation by default, static fallback, campaign attempt ledgers, fleet freshness, cancellation,
+and parent UI rollups. Continuous ASM is documented separately in
+[continuous-asm-architecture.md](continuous-asm-architecture.md). Parallelism remains the execution
+substrate, not the quality claim. Full `build_report()` registry iteration, request-accurate budgets
+for internally discovered standalone traffic, deeper cooperative scanner cancellation, additional
+focused families, multi-node orchestration, and large-fleet parity/soak are not implemented claims.
+
+**Reconciled:** 2026-07-10 against current code, tests, and `proposed-next-steps.md`.
 **Date:** 2026-06-23 (core implemented 2026-06-15)
 **Author:** Architecture audit (Claude Code)
 **Scope:** Make a single logical scan of one target fan out across the worker fleet; expand dictionaries, checks, and budgets that this parallelism makes affordable.
@@ -58,9 +67,9 @@ editing.
 | Full Coverage dynamic allocation | Default shipped | Keep static fallback available and continue live parity/soak on large targets. |
 | Coverage x family dynamic allocation | Shipped for broad/SQLi/XSS; gated Auth/BOLA lanes when preconditions exist | Make shard count worker-aware; run shared recon once, then focused family lanes without diluting SQLi/XSS/BOLA budgets. |
 | Known-endpoint distributed rate limits | Shipped | Extend beyond known endpoint batches only when scanner telemetry can budget discovered requests accurately. |
-| First-class check registry | Foundation + scanner boundary shipped | Migrate scanner `build_report()` module execution to registry iteration and add more runnable families beyond SQLi/XSS/Auth/BOLA. |
-| Operator-facing campaign/ASM UX | Phase 1 shipped; Dashboard Action Center CTAs, Product Status cards, ASM scheduler-state activity surfacing, typed ASM waves, and target timeline shipped | Add safe remediation entry points and family-aware campaign-quality agreement across dashboard, `/asm`, gaps, and scan detail. |
-| DAST quality benchmark loop | Active workstream | Treat "no XSS on Juice Shop" and "no workflow/write-BOLA on crAPI" as benchmark failures, not acceptable coverage. |
+| First-class check registry | Authoritative planning and scanner adapter validation shipped for current runnable families | Full `build_report()` registry iteration and additional telemetry-backed families remain deferred. |
+| Operator-facing campaign/ASM UX | Bounded phase shipped: Action Center CTAs, Product Status, scheduler activity, typed waves, target timeline, hypotheses, safe remediation links, and parent rollups | Add actions only with tested confirmation boundaries; component-level UI harness coverage remains limited. |
+| DAST quality benchmark loop | Current-fleet Juice Shop scorecard passes; authenticated crAPI rerun pending after rebuild cancellation | Treat missing verified family recall as a benchmark failure, not successful breadth. |
 | Multi-node WireGuard POC | Proposed/RFC | Build a two-VPS proof only after local queue/worker invariants stay green. |
 | Production multi-node fleet | Proposed/RFC | Add node registry, reliable queue leases, object evidence, and routing. |
 | HTTPS broker for untrusted workers | Future | Do not build until owned-fleet primitives are stable. |
@@ -528,12 +537,15 @@ Do this **incrementally**: first carve `run_recon_stage` out (it already roughly
 - Reuse retest slot/watchdog primitives for the barrier and stale recovery.
 - Global finding-cap + early-stop counters (§7).
 
-**Phase 2 — Breadth & polish**
-- Family-based and nuclei-category sharding (§6.2/6.4).
-- Check registry refactor (§8.3).
-- More granular cooperative cancel checkpoints inside scanner active-check loops (see Risks).
-- UI: parent progress, per-shard contribution, aggregate auth/family rollups, and runtime-versus-active-cap
-  budget view are shipped.
+**Phase 2 — Breadth & polish (partly shipped, partly deferred)**
+- Family/coverage-family sharding is shipped for broad/SQLi/XSS and explicit gated Auth/BOLA lanes;
+  Nuclei-category sharding and additional focused families remain deferred.
+- The check registry is authoritative for planning and scanner adapter validation across current
+  runnable families. Full `build_report()` module iteration from the registry remains deferred.
+- Worker-level process-group cancellation is shipped; more granular cooperative checkpoints inside
+  long scanner active-check loops remain deferred (see Risks).
+- UI parent progress, per-shard contribution, aggregate auth/family rollups, campaign attempt facts,
+  and runtime-versus-active-cap budget views are shipped.
 
 ---
 
@@ -684,7 +696,7 @@ partial-attempt fallback so old scans remain mergeable without inflating tested 
   telemetry can expose a reliable request budget.
 - **Richer UI rollups:** parent scan detail now shows campaign endpoint coverage from the attempt
   ledger, per-shard contribution facts, aggregate auth/family rollups, and runtime-versus-active-cap
-  budget view.
+  budget view. This is shipped; extend it only alongside new telemetry fields.
 
 ---
 

@@ -1,16 +1,51 @@
 # Proposed Next Steps — Proof-First Continuous Exposure Management
 
-**Status:** implementation-complete for the bounded roadmap scope as of 2026-07-09, pending fresh
-current-fleet benchmark validation of detector recall. Reconciled with
+**Status:** implementation-complete for the bounded roadmap scope as of 2026-07-10. The rebuilt
+local fleet passes the unit, runtime-container, UI production-build, planner-eval, and named release
+gates. Detector acceptance is only partly closed: the current-fleet Juice Shop scorecard passes, while
+the fresh authenticated crAPI scorecard must be rerun because its in-progress scan was explicitly
+cancelled before the requested full-stack rebuild. Reconciled with
 `docs/t3mp3st-adoption-implementation-plan-updated.md`,
 `docs/archive/asm-parallel-improvement-plan.md`, `docs/parallel-scan-architecture.md`, and the
 current code. The contract-first proof layer, application graph/campaign consumer, externalized
 evidence instances, current-tool receipts, target de-dupe, exception lifecycle, Model Intake trust,
 AI Gate campaigns, ASM scheduling, registry-validated scanner dispatch, Command Arsenal, scope and
 approval receipts, bounded Codex dry-run planning, refuters, and read-only MCP are implemented and
-wired. Historical phase notes remain below as an implementation ledger. The only open acceptance
-check is a fresh benchmark run on a fingerprint-current fleet; intentionally excluded expansion
-items are listed as non-goals, not implied TODOs.
+wired. Historical phase notes remain below as an implementation ledger. The open acceptance checks
+are fresh fingerprint-current detector scorecards; intentionally excluded expansion items are
+listed as non-goals or deferred architecture, not implied completed work.
+
+### Cross-document reality check (2026-07-10)
+
+This file is the authoritative bounded implementation record. The related T3MP3ST, Continuous ASM,
+parallel-scan, and archived live-investigation documents contain target architecture and historical
+phase text as well as shipped behavior. They must not be read as claiming that every aspirational
+item is implemented.
+
+- **Implemented and verified in code/tests:** the bounded phases recorded as DONE below, including
+  Command Arsenal, receipts, planner safety, hypotheses/refuters, current-tool receipts,
+  EvidenceInstance/external storage, read-only MCP, current registry adapters, Continuous ASM
+  allocator/attempt ledgers, parallel parent-plan-shard-merge, operational rebuild/fleet truth, and
+  direct ASM timeline remediation links.
+- **Implemented but still requiring live acceptance/soak:** authenticated crAPI detector recall after
+  the rebuild, broader dynamic-allocation parity on large owned targets, and request-rate behavior at
+  larger worker counts.
+- **Deferred target architecture:** full `build_report()` iteration from the registry, telemetry and
+  focused-family expansion beyond current contracts, request-accurate budgets for internally
+  discovered standalone traffic, deeper cooperative cancellation inside scanner loops, and
+  multi-node placement/reliable leases/brokered untrusted workers.
+- **Intentionally excluded:** state-changing MCP, raw shell/arbitrary-code agent commands,
+  post-exploitation/password-spraying tooling, and source- or AI-only verified findings.
+
+Verification snapshot on the rebuilt local fleet (2026-07-10):
+
+- Python suite: `1715 passed, 6 skipped`.
+- Container runtime target: `33 passed` (with FastAPI deprecation warnings only).
+- UI: Next.js production build and TypeScript validation passed.
+- Planner fixtures: `10/10` passed; all 10 named release gates passed.
+- Live local E2E: Model Intake gate passed (`8/9`, one opt-in external Hugging Face case skipped),
+  AI Gate passed (`12/12`), and DAST passed (`11/11`, including bounded SQLi and DOM-XSS recall).
+- Worker preflight: 16/16 current on one fingerprint, zero stale workers.
 
 ## Report reconciliation (2026-07-05)
 
@@ -391,8 +426,10 @@ called at real sites — verify before re-proposing any of it:
   Execution only marks elapsed effective exceptions `expired`, preserves prior state in
   `edit_history`, and emits a command-result receipt; it never renews or deletes exceptions.
 - **Benchmark harness** — two-user run + post-retest re-score + fleet gate + invariant/active gates;
-  historical scorecards are committed to `results/benchmark-runs/`. A fresh current-fleet scorecard
-  remains the final acceptance check after this implementation series.
+  historical scorecards are committed to `results/benchmark-runs/`. The fresh current-fleet Juice
+  Shop scorecard passes. The authenticated crAPI scorecard remains the final detector-acceptance
+  check because the prior run was cancelled for the requested rebuild before it could produce an
+  artifact.
 
 ## Direction (north star)
 

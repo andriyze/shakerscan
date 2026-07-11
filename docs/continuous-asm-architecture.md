@@ -1,6 +1,6 @@
 # Continuous ASM Architecture — Current State and Target Design
 
-**Status:** first continuous ASM loop is shipped; correctness hardening for auth-aware inventory,
+**Status:** the bounded local/owned-fleet Continuous ASM loop is shipped; correctness hardening for auth-aware inventory,
 replay fidelity, partial-timeout coverage semantics, dispatcher rate reservation, ASM campaign
 records, durable endpoint leases, normalized ASM endpoint attempt rows, and one-shot Full Coverage
 campaign linkage with merge-time attempt rows are implemented. Scanner-level smart active
@@ -12,19 +12,23 @@ Coverage allocation is now the default for one-shot Full Coverage parents; `cove
 and `COVERAGE_ALLOCATION_DEFAULT=static` keep the legacy round-robin path available as fallback.
 Current DAST-quality lesson from Juice Shop/crAPI validation: ASM must measure and schedule
 campaign quality, not just endpoint touch count. The engine now proves real Critical SQLi and High
-BOLA/Authz on lab apps, but XSS, workflow/write-BOLA, mass-assignment, and JWT remain quality gaps
-that ASM should expose as family/proof/workflow gaps.
-**Date:** 2026-06-23
+BOLA/Authz on lab apps and has runnable registry contracts for XSS, mass-assignment, and JWT checks,
+but broad/stored XSS and workflow/write-BOLA remain recall/acceptance gaps that ASM should expose as
+family/proof/workflow gaps. Full registry iteration, broader telemetry, multi-node placement, and
+large-fleet soak remain deferred target architecture rather than shipped behavior.
+**Date:** 2026-07-10
 **Related design:** [parallel-scan-architecture.md](parallel-scan-architecture.md),
 [multi-node-architecture.md](multi-node-architecture.md).
 
-**2026-07-05 audit note:** Continuous ASM is the flagship surface for the product thesis in
+**2026-07-10 audit note:** Continuous ASM is the flagship surface for the product thesis in
 [proposed-next-steps.md](proposed-next-steps.md): proof-first Continuous Exposure Management for
 modern apps, APIs, and AI systems. External ASM vendors are strong at discovering and mapping unknown
 internet-facing assets; ShakerScan should differentiate by turning owned web/API surface into
 authenticated, replayable, proof-grade campaigns with honest coverage, attempt ledgers, and canonical
-evidence. The backend foundations are ahead of the operator workflow: graph-driven campaign
-consumers, detector recall campaigns, and exception remediation workflow depth are the next product priorities.
+evidence. Since the original audit, graph-driven campaign consumers, detector campaign routing,
+exception remediation, hypotheses, and safe timeline actions have shipped for the bounded product
+flow. Remaining work is the explicitly deferred registry/telemetry/family breadth and live soak
+listed below, not another parallel implementation of those workflows.
 First-pass next-action / skip-reason state is now live: ASM policy/gaps/improve/activity return `scheduler_state`, and
 dispatcher/scheduler decisions persist to `targets.metadata_json.asm_last_decision`. ASM waves are
 now a first-class schedule kind (`schedules.schedule_kind='asm_improve'`) with legacy
@@ -32,8 +36,9 @@ now a first-class schedule kind (`schedules.schedule_kind='asm_improve'`) with l
 campaign `timeline` that merges scheduler state, next ASM schedule, active scans, and recent
 campaign activity. Dashboard Product Status cards now expose API-backed blocker/running/stale counts
 and quick links across DAST, ASM, AI Gate, Model Intake, exceptions, deployment gates, and workers.
-The next ASM product work is not another schedule bridge or dashboard-count strip; it is
-family-aware campaign quality, graph-driven hypotheses, and safe remediation flow. Model Intake now
+Family-aware campaign quality, graph-driven hypotheses, and safe remediation flow are now present
+for the bounded roadmap: ASM activity includes hypotheses and timeline events carry tested links for
+improve, schedule, auth setup, and active-scan review. Model Intake now
 has guided trust modes, a pass/fail/advisory pre-submit preview, saved operator trust anchors, strict
 policy-profile required anchors, a dashboard trust-remediation route
 (`/settings/model-intake?remediate=trust`), and deployment decisions that explain policy-required
@@ -63,9 +68,9 @@ editing.
 | Full Coverage dynamic allocation | Default shipped | Keep static fallback available and continue live parity/soak on large targets. |
 | Coverage x family dynamic allocation | Shipped for broad/SQLi/XSS; gated Auth/BOLA lanes when preconditions exist | Make shard count worker-aware; run shared recon once, then focused family lanes without diluting SQLi/XSS/BOLA budgets. |
 | Known-endpoint distributed rate limits | Shipped | Extend beyond known endpoint batches only when scanner telemetry can budget discovered requests accurately. |
-| First-class check registry | Foundation + scanner boundary shipped | Migrate scanner `build_report()` module execution to registry iteration and add more runnable families beyond SQLi/XSS/Auth/BOLA. |
-| Operator-facing campaign/ASM UX | Phase 1 shipped; Dashboard Action Center CTAs, Product Status cards, ASM scheduler-state activity surfacing, typed ASM waves, and target timeline shipped | Add safe remediation entry points and family-aware campaign-quality agreement across dashboard, `/asm`, gaps, and scan detail. |
-| DAST quality benchmark loop | Active workstream | Treat "no XSS on Juice Shop" and "no workflow/write-BOLA on crAPI" as benchmark failures, not acceptable coverage. |
+| First-class check registry | Authoritative planning and scanner adapter validation shipped for current runnable families | Full `build_report()` registry iteration and additional telemetry-backed focused families remain deferred. |
+| Operator-facing campaign/ASM UX | Bounded phase shipped: Action Center CTAs, Product Status, scheduler state, typed waves, target timeline, hypotheses, and safe remediation links | Add new actions only with tested confirmation boundaries; component-level UI harness coverage is still limited. |
+| DAST quality benchmark loop | Current-fleet Juice Shop scorecard passes; authenticated crAPI rerun pending after rebuild cancellation | Treat missing verified family recall as a benchmark failure; do not substitute endpoint-touch coverage. |
 | Multi-node WireGuard POC | Proposed/RFC | Build a two-VPS proof only after local queue/worker invariants stay green. |
 | Production multi-node fleet | Proposed/RFC | Add node registry, reliable queue leases, object evidence, and routing. |
 | HTTPS broker for untrusted workers | Future | Do not build until owned-fleet primitives are stable. |
@@ -770,25 +775,26 @@ New quality gaps to track:
   valid scope/approval receipts mandatory before state-changing scans, ASM actions, AI Gate runs,
   Model Intake scans, or retests are queued.
 
-Remaining product work from the 2026-07-05 audit:
+Reconciled product state (2026-07-10):
 
-- ASM schedule editing now covers advanced batch fields, endpoint filter, focused family selection,
-  and Lab/deep BOLA gating, and scheduled execution applies those settings during claimable-work
-  selection and batch enqueue. Remaining schedule work is direct remediation/action wiring from the
-  campaign timeline.
-- Enrich the target campaign timeline with direct remediation/edit actions once each action has a
-  tested confirmation boundary. Phase 1 derives timeline facts from scheduler state, schedules,
-  active scans, and implementation scan/activity rows.
-- Add component-level UI tests for ASM schedule creation/editing and skip-reason display once the UI
-  test harness grows beyond helper-script coverage; current verification is TypeScript build plus
-  browser QA.
+- ASM schedule editing covers advanced batch fields, endpoint filters, focused family selection,
+  and Lab/deep BOLA gating; scheduled execution applies those settings during claimable-work
+  selection and batch enqueue.
+- The target campaign timeline now includes direct, bounded remediation links for Improve Coverage,
+  schedule management, auth/principal setup, active scans, and completed scan review. These remain
+  links into existing confirmed workflows, not a second execution path.
+- TypeScript production builds, browser QA, and API/helper tests cover the current UI contract.
+  A dedicated component-test harness for ASM schedule creation/editing and skip-reason rendering is
+  still deferred; do not describe component-level coverage as shipped.
 
 ### Phase E — Multi-Node Readiness
 
 - Shared token buckets and endpoint leases are now used by local/owned worker processes for
   known-endpoint ASM and Full Coverage execution.
-- Add worker placement metadata, reliable queue leases, and object-storage-backed artifacts before
-  remote VPS workers are allowed to run high-volume ASM/coverage campaigns.
+- **Deferred:** add worker placement metadata, reliable queue leases, and object-storage-backed
+  artifacts before remote VPS workers are allowed to run high-volume ASM/coverage campaigns. The
+  current implementation is for local/owned workers and does not claim production multi-node
+  orchestration.
 
 ---
 
