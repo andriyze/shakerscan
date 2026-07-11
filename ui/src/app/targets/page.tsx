@@ -3,10 +3,10 @@
 import { useEffect, useState, useRef, useCallback, Suspense } from 'react'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
-import { getTargetsGrouped, createTarget, scanTarget, discoverSubdomains, getGradeColor, type Target, type GroupedDomain } from '@/lib/api'
+import { getTargetsGrouped, createTarget, scanTarget, discoverSubdomains, dedupeTargets, getGradeColor, type Target, type GroupedDomain } from '@/lib/api'
 import { SCAN_TYPES, getScanOptions, DISCOVERY_SOURCES, GRADES, TARGET_SORT_OPTIONS, type ScanType, type SortOrder } from '@/lib/constants'
 import { useUrlFilters } from '@/lib/useUrlFilters'
-import { Card, CardSkeleton, ErrorState, useToast } from '@/components/ui'
+import { Card, CardSkeleton, ConfirmDialog, ErrorState, useToast } from '@/components/ui'
 
 const SEARCH_DEBOUNCE_MS = 300
 
@@ -61,6 +61,9 @@ function TargetsContent() {
   const [searchInput, setSearchInput] = useState<string>(filters.search || '')
   const [totalRootDomains, setTotalRootDomains] = useState(0)
   const [totalTargets, setTotalTargets] = useState(0)
+  const [dedupePreview, setDedupePreview] = useState<{ groups_found: number; targets_merged: number } | null>(null)
+  const [dedupeLoading, setDedupeLoading] = useState(false)
+  const [dedupeExecuting, setDedupeExecuting] = useState(false)
   const scanMenuRef = useRef<HTMLDivElement>(null)
   const scanAllMenuRef = useRef<HTMLDivElement>(null)
   const searchTimeout = useRef<NodeJS.Timeout | null>(null)
@@ -301,6 +304,37 @@ function TargetsContent() {
     }
   }
 
+  async function handleFindDuplicates() {
+    setDedupeLoading(true)
+    try {
+      const preview = await dedupeTargets(true)
+      if (preview.groups_found === 0) {
+        toast.success('No duplicate targets found')
+        setDedupePreview(null)
+      } else {
+        setDedupePreview({ groups_found: preview.groups_found, targets_merged: preview.targets_merged })
+      }
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to check for duplicates')
+    } finally {
+      setDedupeLoading(false)
+    }
+  }
+
+  async function handleExecuteDedupe() {
+    setDedupeExecuting(true)
+    try {
+      const res = await dedupeTargets(false)
+      toast.success(`Merged ${res.targets_merged} duplicate target(s) across ${res.groups_executed} group(s)`)
+      setDedupePreview(null)
+      fetchTargets()
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to merge duplicates')
+    } finally {
+      setDedupeExecuting(false)
+    }
+  }
+
   function toggleExpand(rootDomain: string) {
     setExpandedDomains(prev => {
       const next = new Set(prev)
@@ -347,16 +381,41 @@ function TargetsContent() {
           <h1 className="text-2xl font-bold text-white">Targets</h1>
           <p className="text-gray-400 mt-1">Manage your scan targets</p>
         </div>
-        <button
-          onClick={() => setShowAddModal(true)}
-          className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition-colors"
-        >
-          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
-          </svg>
-          Add Target
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={handleFindDuplicates}
+            disabled={dedupeLoading}
+            className="flex items-center gap-2 px-3 py-2 border border-gray-700 hover:bg-gray-800 disabled:opacity-50 text-gray-300 rounded-lg text-sm font-medium transition-colors"
+            title="Find and merge scheme/trailing-slash duplicate targets"
+          >
+            {dedupeLoading ? 'Checking…' : 'Find duplicates'}
+          </button>
+          <button
+            onClick={() => setShowAddModal(true)}
+            className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition-colors"
+          >
+            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+            </svg>
+            Add Target
+          </button>
+        </div>
       </div>
+
+      <ConfirmDialog
+        open={dedupePreview !== null}
+        title="Merge duplicate targets?"
+        message={
+          dedupePreview
+            ? `Found ${dedupePreview.groups_found} duplicate group(s) covering ${dedupePreview.targets_merged} target(s). Merging reassigns their scans, findings, endpoints, and schedules to one survivor and deletes the duplicates. This cannot be undone.`
+            : ''
+        }
+        confirmLabel="Merge duplicates"
+        danger
+        busy={dedupeExecuting}
+        onConfirm={handleExecuteDedupe}
+        onCancel={() => setDedupePreview(null)}
+      />
 
       {/* Filters */}
       <div className="flex gap-4 flex-wrap">

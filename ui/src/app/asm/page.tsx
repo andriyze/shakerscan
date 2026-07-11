@@ -16,6 +16,7 @@ import {
   Search,
   SlidersHorizontal,
   Sparkles,
+  Trash2,
 } from 'lucide-react'
 import {
   getAsmActivity,
@@ -28,6 +29,7 @@ import {
   getTargetsGrouped,
   getWorkers,
   improveAsmTarget,
+  pruneAsmInventory,
   reconAsmTarget,
   testAsmTarget,
   updateAsmPolicy,
@@ -676,7 +678,7 @@ function CoverageAdvisorCard({
   onRefresh: () => void
 }) {
   const toast = useToast()
-  const [busy, setBusy] = useState<'improve' | 'recon' | null>(null)
+  const [busy, setBusy] = useState<'improve' | 'recon' | 'prune' | null>(null)
   const [checkFamily, setCheckFamily] = useState('all')
   const [endpointFilter, setEndpointFilter] = useState('')
   const [checkFamilyOptions, setCheckFamilyOptions] = useState<AsmCheckFamilyOption[]>(FALLBACK_ASM_CHECK_FAMILY_OPTIONS)
@@ -731,6 +733,22 @@ function CoverageAdvisorCard({
       setTimeout(onRefresh, 700)
     } catch (e) {
       toast.error(e instanceof Error ? e.message : 'Failed to queue ASM recon')
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  // Re-probe reachability and retire phantom endpoints. Safe anytime (read-only
+  // GET probes + reversible bookkeeping), so it runs directly like recon above.
+  const runPrune = async () => {
+    setBusy('prune')
+    try {
+      const res = await pruneAsmInventory(targetId)
+      const sweep = res.sweep as { probed?: number; retired?: number }
+      toast.success(`Pruned inventory: probed ${sweep?.probed ?? 0}, retired ${sweep?.retired ?? 0} phantom endpoint(s)`)
+      setTimeout(onRefresh, 700)
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'Failed to prune ASM inventory')
     } finally {
       setBusy(null)
     }
@@ -955,6 +973,14 @@ function CoverageAdvisorCard({
           </Button>
           <Button variant="secondary" onClick={queueRecon} disabled={!!busy}>
             <Search className="h-4 w-4" /> {busy === 'recon' ? 'Queuing…' : 'Run discovery'}
+          </Button>
+          <Button
+            variant="secondary"
+            onClick={runPrune}
+            disabled={!!busy}
+            title="Re-probe reachability and retire phantom (404/soft-404) endpoints. Reversible."
+          >
+            <Trash2 className="h-4 w-4" /> {busy === 'prune' ? 'Pruning…' : 'Prune inventory'}
           </Button>
         </div>
       </div>

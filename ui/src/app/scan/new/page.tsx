@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { submitScan, getScanExecutionSettings, getTargets, getWorkers, type Target } from '@/lib/api'
+import { submitScan, submitBatch, getScanExecutionSettings, getTargets, getWorkers, type Target } from '@/lib/api'
 import {
   BUDGET_PROFILES,
   PARALLEL_STRATEGIES,
@@ -59,6 +59,8 @@ export default function NewScanPage() {
   const toast = useToast()
   const [target, setTarget] = useState('')
   const [targetError, setTargetError] = useState<string | null>(null)
+  const [batchMode, setBatchMode] = useState(false)
+  const [batchTargets, setBatchTargets] = useState('')
   const [existingTargets, setExistingTargets] = useState<Target[]>([])
   const [scanType, setScanType] = useState<ScanType>('quick')
   const [budgetProfile, setBudgetProfile] = useState<BudgetProfile>('balanced')
@@ -154,10 +156,24 @@ export default function NewScanPage() {
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
-    const validationError = validateTarget(target)
-    if (validationError) {
-      setTargetError(validationError)
-      return
+    let batchList: string[] = []
+    if (batchMode) {
+      batchList = batchTargets.split(/\n/).map((s) => s.trim()).filter(Boolean)
+      if (batchList.length === 0) {
+        setTargetError('Enter at least one target URL (one per line).')
+        return
+      }
+      const firstInvalid = batchList.map((t) => validateTarget(t)).find(Boolean)
+      if (firstInvalid) {
+        setTargetError(firstInvalid)
+        return
+      }
+    } else {
+      const validationError = validateTarget(target)
+      if (validationError) {
+        setTargetError(validationError)
+        return
+      }
     }
 
     setLoading(true)
@@ -245,13 +261,18 @@ export default function NewScanPage() {
           : {})
       }
 
-      const result = await submitScan(target.trim(), scanOptions)
-      toast.success(
-        result?.auto_sharded ? 'Auto-sharded scan started' : result?.parallel ? 'Parallel scan started' : 'Scan started',
-        result?.scan_id
-          ? { link: { href: `/scans/${result.scan_id}`, label: 'View scan' } }
-          : undefined
-      )
+      if (batchMode) {
+        const result = await submitBatch(batchList, scanOptions)
+        toast.success(`Queued ${result.count} scan(s)`, { link: { href: '/scans', label: 'View scans' } })
+      } else {
+        const result = await submitScan(target.trim(), scanOptions)
+        toast.success(
+          result?.auto_sharded ? 'Auto-sharded scan started' : result?.parallel ? 'Parallel scan started' : 'Scan started',
+          result?.scan_id
+            ? { link: { href: `/scans/${result.scan_id}`, label: 'View scan' } }
+            : undefined
+        )
+      }
       router.push(`/scans`)
     } catch (err) {
       toast.error(err instanceof Error && err.message ? err.message : 'Failed to submit scan. Is the API running?')
@@ -277,28 +298,57 @@ export default function NewScanPage() {
       <form onSubmit={handleSubmit} className="space-y-6">
         {/* Target Input */}
         <Card className="p-4">
-          <label htmlFor="scan-target" className="block text-sm font-medium text-gray-400 mb-2">
-            Target URL
-            {existingTargets.length > 0 && (
-              <span className="text-gray-500 font-normal"> — type a new URL or pick an existing target</span>
-            )}
-          </label>
-          <input
-            id="scan-target"
-            type="text"
-            list="existing-targets"
-            value={target}
-            onChange={(e) => {
-              setTarget(e.target.value)
-              if (targetError) setTargetError(null)
-            }}
-            placeholder="https://example.com"
-            aria-invalid={targetError ? true : undefined}
-            aria-describedby={targetError ? 'scan-target-error' : undefined}
-            className={`w-full px-4 py-3 bg-gray-800 border rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-blue-500 text-lg ${
-              targetError ? 'border-red-500/50' : 'border-gray-700'
-            }`}
-          />
+          <div className="mb-2 flex items-center justify-between">
+            <label htmlFor="scan-target" className="block text-sm font-medium text-gray-400">
+              {batchMode ? 'Target URLs (one per line)' : 'Target URL'}
+              {!batchMode && existingTargets.length > 0 && (
+                <span className="text-gray-500 font-normal"> — type a new URL or pick an existing target</span>
+              )}
+            </label>
+            <label className="flex items-center gap-2 text-xs text-gray-400">
+              <input
+                type="checkbox"
+                checked={batchMode}
+                onChange={(e) => { setBatchMode(e.target.checked); setTargetError(null) }}
+                className="accent-blue-500"
+              />
+              Batch (multiple targets)
+            </label>
+          </div>
+          {batchMode ? (
+            <textarea
+              id="scan-target"
+              value={batchTargets}
+              onChange={(e) => {
+                setBatchTargets(e.target.value)
+                if (targetError) setTargetError(null)
+              }}
+              rows={5}
+              placeholder={'https://example.com\nhttps://api.example.com\nhttps://staging.example.com'}
+              aria-invalid={targetError ? true : undefined}
+              aria-describedby={targetError ? 'scan-target-error' : undefined}
+              className={`w-full px-4 py-3 bg-gray-800 border rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-blue-500 font-mono text-sm ${
+                targetError ? 'border-red-500/50' : 'border-gray-700'
+              }`}
+            />
+          ) : (
+            <input
+              id="scan-target"
+              type="text"
+              list="existing-targets"
+              value={target}
+              onChange={(e) => {
+                setTarget(e.target.value)
+                if (targetError) setTargetError(null)
+              }}
+              placeholder="https://example.com"
+              aria-invalid={targetError ? true : undefined}
+              aria-describedby={targetError ? 'scan-target-error' : undefined}
+              className={`w-full px-4 py-3 bg-gray-800 border rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-blue-500 text-lg ${
+                targetError ? 'border-red-500/50' : 'border-gray-700'
+              }`}
+            />
+          )}
           {existingTargets.length > 0 && (
             <datalist id="existing-targets">
               {existingTargets.map((t) => (
@@ -669,7 +719,7 @@ export default function NewScanPage() {
               <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
               </svg>
-              Start Scan
+              {batchMode ? 'Start Batch Scan' : 'Start Scan'}
             </>
           )}
         </Button>

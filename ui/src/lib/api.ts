@@ -314,6 +314,149 @@ export interface CampaignAction {
   created_at?: string
 }
 
+// Cross-product mission timeline (GET /timeline). Events normalize command
+// results, campaign actions, scans, evidence bindings, refuters, and exports;
+// `upcoming` carries scheduled work with a `next_eligible_at`.
+export interface TimelineEvent {
+  event_id: string
+  kind: string
+  command?: string | null
+  action_name?: string | null
+  status: string
+  risk_tier?: string | null
+  dry_run?: boolean | null
+  target_id?: string | null
+  target_url?: string | null
+  scan_id?: string | null
+  active_scan_id?: string | null
+  operation_plan_id?: string | null
+  campaign_id?: string | null
+  mission_campaign_id?: string | null
+  campaign_action_id?: string | null
+  scope_receipt_id?: string | null
+  approval_receipt_id?: string | null
+  finding_ids?: string[]
+  evidence_object_ids?: string[]
+  tool_receipt_ids?: string[]
+  blocked_by?: string[]
+  next_action?: string | null
+  next_eligible_at?: string | null
+  scan_type?: string | null
+  name?: string | null
+  schedule_id?: string | null
+  operator_message?: string | null
+  created_at?: string | null
+}
+
+export interface TimelineResponse {
+  events: TimelineEvent[]
+  upcoming: TimelineEvent[]
+  count: number
+  statuses: string[]
+  execution_enabled: boolean
+}
+
+export interface CampaignDeploymentImpact {
+  linked_finding_count?: number
+  active_finding_count?: number
+  by_severity?: Record<string, number>
+  by_status?: Record<string, number>
+  estimated_default_blockers?: number
+  blocks_deployment_estimate?: boolean
+  partial?: boolean
+}
+
+export interface Campaign {
+  id: string
+  name?: string | null
+  objective: string
+  campaign_type: string
+  target_id?: string | null
+  target_scope: Record<string, unknown>
+  risk_tier: string
+  policy_profile?: string | null
+  planner: Record<string, unknown>
+  operation_plan_id?: string | null
+  context_hash?: string | null
+  status: string
+  deployment_impact: CampaignDeploymentImpact
+  metadata_json: Record<string, unknown>
+  created_by?: string | null
+  created_at: string
+  updated_at?: string | null
+  execution_enabled: boolean
+}
+
+export interface CampaignDetailResponse {
+  campaign: Campaign
+  actions: CampaignAction[]
+  action_count: number
+  total_action_count: number
+  status_rollup: Record<string, number>
+  deployment_impact: CampaignDeploymentImpact
+  execution_enabled: boolean
+}
+
+// Evidence surfaces (GET/POST /evidence/*). Concrete instances are split out of
+// findings; objects are content-addressed blobs; manifests/bundles are
+// content-free descriptors for audit/export.
+export interface EvidenceInstance {
+  id: string
+  finding_id?: string | null
+  evidence_object_id?: string | null
+  scan_id?: string | null
+  target_id?: string | null
+  concrete_url?: string | null
+  object_id?: string | null
+  payload_variant?: string | null
+  request_response_refs?: string[]
+  principal_pair?: Record<string, unknown> | null
+  proof_observation?: Record<string, unknown> | null
+  campaign_action_id?: string | null
+  tool_receipt_id?: string | null
+  redaction_profile?: string | null
+  hash?: string | null
+  retention_policy?: string | null
+  proof_state?: string | null
+  metadata_json?: Record<string, unknown>
+  created_by?: string | null
+  created_at?: string | null
+}
+
+export interface EvidenceExportManifest {
+  schema_version: string
+  generated_at: string
+  object_count: number
+  manifest_hash: string
+  retention_policy_days: Record<string, number | null>
+  retention_counts: Record<string, number>
+  storage_counts: Record<string, number>
+  integrity_counts: Record<string, number>
+  content_included: boolean
+  objects: Array<Record<string, unknown>>
+  filters: Record<string, unknown>
+}
+
+export interface EvidenceRetentionSweepResult {
+  dry_run: boolean
+  candidate_count: number
+  deleted_count: number
+  delete_local_files?: boolean
+  local_files?: { deleted: string[]; missing: string[]; errors: string[] }
+  remote_objects?: {
+    candidate_count: number
+    deleted_count: number
+    missing_count: number
+    failed_count: number
+    preserved_count: number
+    delete_supported: boolean
+  }
+  retention_policy_days?: Record<string, number | null>
+  candidates?: Array<Record<string, unknown>>
+  execution_enabled: boolean
+  operation_id?: string | null
+}
+
 export interface ArsenalExecutionResponse {
   command: string
   dispatched: boolean
@@ -1945,6 +2088,169 @@ export async function getCampaignActions(limit: number = 20): Promise<{ campaign
   return res.json()
 }
 
+// Cross-product mission timeline (read-only event feed).
+export async function getMissionTimeline(params?: {
+  limit?: number
+  target_id?: string
+  include_campaign_actions?: boolean
+  include_scans?: boolean
+  include_schedules?: boolean
+  include_evidence?: boolean
+  include_refuters?: boolean
+  include_exports?: boolean
+}): Promise<TimelineResponse> {
+  const searchParams = new URLSearchParams()
+  if (params?.limit) searchParams.set('limit', String(params.limit))
+  if (params?.target_id) searchParams.set('target_id', params.target_id)
+  const toggleKeys = [
+    'include_campaign_actions', 'include_scans', 'include_schedules',
+    'include_evidence', 'include_refuters', 'include_exports',
+  ] as const
+  for (const key of toggleKeys) {
+    const value = params?.[key]
+    if (value !== undefined) searchParams.set(key, value ? 'true' : 'false')
+  }
+  const query = searchParams.toString()
+  const res = await fetch(`${API_URL}/timeline${query ? `?${query}` : ''}`)
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load mission timeline'))
+  return res.json()
+}
+
+// Mission campaigns.
+export async function getCampaigns(params?: {
+  limit?: number
+  target_id?: string
+  status?: string
+}): Promise<{ campaigns: Campaign[]; execution_enabled: boolean; count: number }> {
+  const searchParams = new URLSearchParams()
+  if (params?.limit) searchParams.set('limit', String(params.limit))
+  if (params?.target_id) searchParams.set('target_id', params.target_id)
+  if (params?.status) searchParams.set('status', params.status)
+  const query = searchParams.toString()
+  const res = await fetch(`${API_URL}/arsenal/campaigns${query ? `?${query}` : ''}`)
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load campaigns'))
+  return res.json()
+}
+
+export async function getCampaign(id: string, actionLimit: number = 50): Promise<CampaignDetailResponse> {
+  const res = await fetch(`${API_URL}/arsenal/campaigns/${encodeURIComponent(id)}?action_limit=${actionLimit}`)
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load campaign'))
+  return res.json()
+}
+
+export async function createCampaign(payload: {
+  objective: string
+  campaign_type: string
+  name?: string
+  target_id?: string
+  target_scope?: Record<string, unknown>
+  risk_tier?: string
+  policy_profile?: string
+  status?: string
+  metadata_json?: Record<string, unknown>
+  created_by?: string
+}): Promise<{ campaign: Campaign }> {
+  const res = await fetch(`${API_URL}/arsenal/campaigns`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to create campaign'))
+  return res.json()
+}
+
+export async function linkCampaignAction(
+  id: string,
+  payload: { command_result_id?: string; campaign_action_id?: string }
+): Promise<{ campaign_id: string; linked_action: CampaignAction; execution_enabled: boolean }> {
+  const res = await fetch(`${API_URL}/arsenal/campaigns/${encodeURIComponent(id)}/actions`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to link campaign action'))
+  return res.json()
+}
+
+// Evidence browsing / export / retention.
+export async function getEvidenceInstances(params?: {
+  finding_id?: string
+  tool_receipt_id?: string
+  limit?: number
+}): Promise<{ evidence_instances: EvidenceInstance[]; count: number; execution_enabled: boolean }> {
+  const searchParams = new URLSearchParams()
+  if (params?.finding_id) searchParams.set('finding_id', params.finding_id)
+  if (params?.tool_receipt_id) searchParams.set('tool_receipt_id', params.tool_receipt_id)
+  if (params?.limit) searchParams.set('limit', String(params.limit))
+  const query = searchParams.toString()
+  const res = await fetch(`${API_URL}/evidence/instances${query ? `?${query}` : ''}`)
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load evidence instances'))
+  return res.json()
+}
+
+export async function getEvidenceObject(id: string): Promise<EvidenceObject> {
+  const res = await fetch(`${API_URL}/evidence/${encodeURIComponent(id)}`)
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load evidence object'))
+  return res.json()
+}
+
+function evidenceQuery(params?: {
+  finding_id?: string
+  scan_id?: string
+  retention_class?: string
+  limit?: number
+}): URLSearchParams {
+  const searchParams = new URLSearchParams()
+  if (params?.finding_id) searchParams.set('finding_id', params.finding_id)
+  if (params?.scan_id) searchParams.set('scan_id', params.scan_id)
+  if (params?.retention_class) searchParams.set('retention_class', params.retention_class)
+  if (params?.limit) searchParams.set('limit', String(params.limit))
+  return searchParams
+}
+
+export async function getEvidenceExportManifest(params?: {
+  finding_id?: string
+  scan_id?: string
+  retention_class?: string
+  limit?: number
+}): Promise<EvidenceExportManifest> {
+  const query = evidenceQuery(params).toString()
+  const res = await fetch(`${API_URL}/evidence/export-manifest${query ? `?${query}` : ''}`)
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load evidence export manifest'))
+  return res.json()
+}
+
+// `format=zip` returns bytes, so the caller downloads via this URL (anchor /
+// window.open) rather than parsing JSON.
+export function evidenceExportBundleUrl(params?: {
+  finding_id?: string
+  scan_id?: string
+  retention_class?: string
+  limit?: number
+}): string {
+  const query = evidenceQuery(params)
+  query.set('format', 'zip')
+  query.set('record_event', 'true')
+  return `${API_URL}/evidence/export-bundle?${query.toString()}`
+}
+
+export async function sweepEvidenceRetention(payload: {
+  dry_run?: boolean
+  older_than_days?: number
+  retention_class?: string
+  limit?: number
+  delete_local_files?: boolean
+  approval_receipt_id?: string
+}): Promise<EvidenceRetentionSweepResult> {
+  const res = await fetch(`${API_URL}/evidence/retention/sweep`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to run evidence retention sweep'))
+  return res.json()
+}
+
 export async function executeAuthzReplay(
   campaignActionId: string,
   payload: {
@@ -2040,6 +2346,99 @@ export async function generateSourceIngestHypotheses(payload: {
     body: JSON.stringify(payload),
   })
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to generate source-informed hypotheses'))
+  return res.json()
+}
+
+// Compare-and-set lease claim. 409 `hypothesis_not_claimable` on conflict —
+// getApiErrorMessage unwraps the structured detail message for display.
+export async function claimHypothesis(
+  hypothesisId: string,
+  payload: { owner: string; expected_version: number; lease_seconds?: number }
+): Promise<{ hypothesis: Hypothesis; claimed: boolean; execution_enabled: boolean }> {
+  const res = await fetch(`${API_URL}/arsenal/hypotheses/${encodeURIComponent(hypothesisId)}/claim`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to claim hypothesis'))
+  return res.json()
+}
+
+export async function appendHypothesisSignal(
+  hypothesisId: string,
+  payload: {
+    signal_type: 'endorsement' | 'refutation'
+    source: string
+    reason?: string
+    evidence_object_ids?: string[]
+    tool_receipt_ids?: string[]
+    confidence_delta?: number
+    status_hint?: 'support' | 'question' | 'weaken' | 'refute'
+    metadata_json?: Record<string, unknown>
+    created_by?: string
+  }
+): Promise<{ hypothesis: Hypothesis; execution_enabled: boolean }> {
+  const res = await fetch(`${API_URL}/arsenal/hypotheses/${encodeURIComponent(hypothesisId)}/signals`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to record hypothesis signal'))
+  return res.json()
+}
+
+export async function planHypothesisCampaign(
+  hypothesisId: string,
+  payload: { campaign_id?: string; campaign_name?: string; operator_message?: string; created_by?: string }
+): Promise<{ campaign?: Campaign; campaign_id?: string; linked_action?: CampaignAction; execution_enabled: boolean }> {
+  const res = await fetch(`${API_URL}/arsenal/hypotheses/${encodeURIComponent(hypothesisId)}/plan-campaign`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to plan campaign from hypothesis'))
+  return res.json()
+}
+
+export async function generateHypothesesFromPlan(payload: {
+  operation_plan_id: string
+  created_by?: string
+  max_actions?: number
+}): Promise<{ created: number; hypotheses: Hypothesis[]; execution_enabled: boolean }> {
+  const res = await fetch(`${API_URL}/arsenal/hypotheses/from-plan`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to generate hypotheses from plan'))
+  return res.json()
+}
+
+export interface BenchmarkFollowupItem {
+  expectation_id: string
+  family: string
+  benchmark?: string
+  route?: string
+  proof_required?: string
+  min_severity?: 'critical' | 'high' | 'medium' | 'low' | 'info'
+  status?: string
+  reason?: string
+}
+
+export async function generateHypothesesFromBenchmark(payload: {
+  benchmark: string
+  followups: BenchmarkFollowupItem[]
+  target_id?: string
+  scorecard_id?: string
+  scorecard_scan_id?: string
+  created_by?: string
+}): Promise<{ created: number; hypotheses: Hypothesis[]; execution_enabled: boolean }> {
+  const res = await fetch(`${API_URL}/arsenal/hypotheses/from-benchmark`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to generate hypotheses from benchmark'))
   return res.json()
 }
 
@@ -2473,6 +2872,107 @@ export async function cancelScan(id: string) {
   return res.json()
 }
 
+// Batch scan submission — queue the same options across many targets.
+export async function submitBatch(
+  targets: string[],
+  options: Record<string, unknown> = {}
+): Promise<{ jobs: unknown[]; count: number; status: string }> {
+  const res = await fetch(`${API_URL}/scans/batch`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ targets, options }),
+  })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to submit batch scan'))
+  return res.json()
+}
+
+// Merge scheme/trailing-slash duplicate target rows. Defaults to a dry-run preview.
+export async function dedupeTargets(dryRun: boolean = true): Promise<{
+  dry_run: boolean
+  groups_found: number
+  targets_merged: number
+  groups_executed: number
+  plan: Array<Record<string, unknown>>
+}> {
+  const res = await fetch(`${API_URL}/targets/dedupe?dry_run=${dryRun ? 'true' : 'false'}`, { method: 'POST' })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to dedupe targets'))
+  return res.json()
+}
+
+// Emergency: clear pending scan jobs (optionally retest jobs too).
+export async function clearQueue(includeRetests: boolean = false): Promise<{ cleared: number; retest_cleared: number }> {
+  const res = await fetch(`${API_URL}/queue/clear?include_retests=${includeRetests ? 'true' : 'false'}`, { method: 'DELETE' })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to clear queue'))
+  return res.json()
+}
+
+// ASM inventory prune: re-probe reachability and retire phantom endpoints. Safe anytime.
+export async function pruneAsmInventory(
+  targetId: string,
+  payload: { max_probe?: number; retire_threshold?: number } = {}
+): Promise<{
+  action: string
+  target_id: string
+  sweep: Record<string, unknown>
+  inventory_total_before?: number | null
+  inventory_testable_after?: number | null
+  gone_after?: number | null
+  reason: string
+}> {
+  const res = await fetch(`${API_URL}/targets/${encodeURIComponent(targetId)}/asm/prune`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to prune ASM inventory'))
+  return res.json()
+}
+
+// AI Operations Router — deterministic NL → safe API plan. Dry-runs unless
+// execution is confirmed AND the server flag AI_OPS_ROUTER_EXECUTE_ENABLED is set.
+export interface AIOpsPlannedCall {
+  method: string
+  path: string
+  body?: Record<string, unknown>
+}
+
+export interface AIOpsRouteResponse {
+  intent: string
+  dry_run: boolean
+  execute_requested: boolean
+  execution_allowed: boolean
+  execution_blocked_reason?: string | null
+  requires_confirmation: boolean
+  safety_preset?: string | null
+  missing_inputs: string[]
+  non_goals?: string[]
+  planned_api_call?: AIOpsPlannedCall | null
+  planned_api_calls?: AIOpsPlannedCall[]
+  explanation?: string | null
+  authorization_assumption?: string | null
+  blast_radius?: Record<string, unknown>
+}
+
+export async function routeAiOps(payload: {
+  prompt?: string
+  utterance?: string
+  target?: string
+  target_id?: string
+  execute?: boolean
+  confirm_execution?: boolean
+  confirm_authorized?: boolean
+  confirm_high_risk?: boolean
+  auth_context?: Record<string, unknown>
+}): Promise<AIOpsRouteResponse> {
+  const res = await fetch(`${API_URL}/ai/ops/route`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to route AI operation'))
+  return res.json()
+}
+
 // Targets
 export async function getTargets(params?: { includeInactive?: boolean }) {
   const searchParams = new URLSearchParams()
@@ -2754,10 +3254,15 @@ export interface EvidenceObject {
   finding_id?: string
   object_type: string
   content_sha256?: string
+  hash?: string
   size_bytes?: number
   storage_uri?: string
+  storage_backend?: string
   redaction_profile?: string
   retention_class?: string
+  integrity_status?: string
+  proof_state?: string
+  metadata_json?: Record<string, unknown>
   content?: unknown
   created_at?: string
 }
@@ -3684,6 +4189,73 @@ export interface AIInventory {
 export async function getAIInventory(): Promise<AIInventory> {
   const res = await fetch(`${API_URL}/ai/inventory`)
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to fetch AI inventory'))
+  return res.json()
+}
+
+// Durable AI surface inventory (GET /ai/surfaces) with attempt rollups, and the
+// per-surface attempt ledger backfilled from completed AI Gate scans.
+export interface AISurface {
+  id: string
+  ai_target_id: string
+  surface_type: string
+  endpoint_url: string
+  auth_kind?: string | null
+  owner?: string | null
+  environment?: string | null
+  risk_tier?: string | null
+  data_classification?: string | null
+  tools_count: number
+  metadata_json?: string | Record<string, unknown> | null
+  last_seen?: string | null
+  updated_at?: string | null
+  last_tested?: string | null
+  created_at?: string | null
+  attempt_count: number
+  last_attempt_at?: string | null
+  total_findings: number
+  total_crit_high: number
+}
+
+export interface AISurfaceAttempt {
+  id: string
+  surface_id: string
+  scan_id: string
+  probe_pack?: string | null
+  scan_profile?: string | null
+  environment?: string | null
+  families: string[]
+  status: string
+  proof_state?: string | null
+  findings_count: number
+  critical_high_count: number
+  started_at?: string | null
+  completed_at?: string | null
+  created_at?: string | null
+}
+
+export interface AISurfaceSyncResult {
+  surfaces_upserted: number
+  attempts_written: number
+  attempts_skipped_no_surface: number
+  scans_scanned: number
+  partial: boolean
+}
+
+export async function syncAISurfaces(): Promise<AISurfaceSyncResult> {
+  const res = await fetch(`${API_URL}/ai/surfaces/sync`, { method: 'POST' })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to sync AI surfaces'))
+  return res.json()
+}
+
+export async function getAISurfaces(): Promise<{ ai_surfaces: AISurface[] }> {
+  const res = await fetch(`${API_URL}/ai/surfaces`)
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load AI surfaces'))
+  return res.json()
+}
+
+export async function getAISurfaceAttempts(id: string): Promise<{ surface: AISurface; attempts: AISurfaceAttempt[] }> {
+  const res = await fetch(`${API_URL}/ai/surfaces/${encodeURIComponent(id)}/attempts`)
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load AI surface attempts'))
   return res.json()
 }
 

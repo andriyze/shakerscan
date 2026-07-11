@@ -890,35 +890,45 @@ concurrency-limited with per-tool timeouts and a global deadline.
 
 | Route | Operator capability |
 |---|---|
-| `/` | Dashboard metrics, queue, worker/resource controls, Gungnir, product status, and action center |
-| `/scan/new` | Scan type, parallel strategy, coverage budget, active options, auth, and custom budget submission |
+| `/` | Dashboard metrics, queue (with emergency clear), worker/resource controls, Gungnir, product status, and action center |
+| `/scan/new` | Scan type, parallel strategy, coverage budget, active options, auth, custom budget, and batch multi-target submission |
 | `/scans` | Filter, inspect, cancel, and rescan logical scans without exposing internal rows by default |
 | `/scans/{id}` | Live progress/logs, report, proof/coverage, deployment decision, AI/Model Intake panels, replay, history, and PDF |
-| `/targets` | Hierarchical target inventory, search/filter/sort, scanning, discovery, and schedule entry points |
+| `/targets` | Hierarchical target inventory, search/filter/sort, scanning, discovery, duplicate merge, and schedule entry points |
 | `/targets/{id}/graph` | Route/object/principal graph, producer/consumer/auth edges, and graph-derived hypotheses |
-| `/asm` | Coverage, scheduler state, proof-family gaps, recommendations, endpoint inventory, and campaign timeline |
+| `/asm` | Coverage, scheduler state, proof-family gaps, recommendations, endpoint inventory, inventory prune, and campaign timeline |
+| `/timeline` | Cross-product mission feed of command results, scans, schedules, evidence bindings, refuters, and exports |
+| `/campaigns` | Mission campaign list with lifecycle status and deployment-impact rollup; create new campaigns |
+| `/campaigns/{id}` | Campaign detail: deployment impact, status rollup, and the linked action ledger |
 | `/exposure` | Cross-product graph, asset inventory, deltas, and attack paths |
 | `/findings` | Granular source/severity/status/domain/date filters, sorting, bulk triage, cleanup, and retest entry points |
 | `/findings/{id}` | Evidence, raw request/response, proof/retest history, notes, status, deletion, and remediation |
+| `/evidence` | Evidence-instance inventory, single-object inspection, content-free export manifests/bundles, and approval-gated retention sweeps |
 | `/interactive` | Browser sessions, credential profiles, principals, authorization expectations, endpoint replay, and manual findings |
 | `/schedules` | Normal scans, ASM waves, and approval-gated evidence-retention schedules |
 | `/settings` | AI provider, scan execution, and automation policy settings |
-| `/settings/ai-gate` | AI target/principal lifecycle, inventory, readiness, probe packs, scans, and longitudinal history |
+| `/settings/ai-gate` | AI target/principal lifecycle, inventory, readiness, probe packs, scans, longitudinal history, and durable AI surface inventory |
+| `/settings/ai-ops-router` | Natural-language → safe API plan preview, with confirmation-gated execution |
 | `/settings/model-intake` | Reference resolution, trust preview/anchors, presets, policy selection, and intake submission |
 | `/settings/policy-profiles` | Deployment policy profile lifecycle across DAST, AI Gate, and Model Intake |
 | `/settings/exceptions` | Finding-exception queue, repair, expiry visibility, and lifecycle sweep |
-| `/settings/arsenal` | Command contracts, receipts, plans, actions, hypotheses, refuters, tools, local agents, context packs, and traces |
+| `/settings/arsenal` | Command contracts, receipts, plans, actions, hypotheses (claim/signal/plan-campaign, from-plan/from-benchmark generators), refuters, tools, local agents, context packs, and traces |
 
 ### API-only or partially UI-backed workflows
 
-Not every public operation should have a dedicated screen. The following are intentionally available
-primarily to CI, agents, integrations, or advanced operators: batch scan submission; target dedupe;
-raw result/result-folder reads; queue emergency clear; ASM prune; AI surface sync/attempt rows;
-content-free evidence manifests and bundle exports; direct evidence-instance/tool-receipt recording;
-mission campaign CRUD/linking and the cross-product timeline; hypothesis claim/signal/from-plan/from-
-benchmark/campaign planning; generic Arsenal execution; local-agent output parsing; bulk finding
-retest/update/manual creation; and AI Ops routing. §17 lists every operation so this boundary is
-visible rather than accidental.
+Not every public operation should have a dedicated screen. The following remain intentionally available
+primarily to CI, agents, integrations, or advanced operators: raw result/result-folder reads; direct
+evidence-instance/tool-receipt recording; read-only MCP over Arsenal execute; generic Arsenal execution;
+local-agent output parsing; and bulk finding retest/update/manual creation. §17 lists every operation so
+this boundary is visible rather than accidental.
+
+Several workflows that were previously API-only now have UI surfaces: the cross-product mission timeline
+(`/timeline`), mission campaign list/detail/create (`/campaigns`), evidence browsing plus content-free
+manifest/bundle export and approval-gated retention sweeps (`/evidence`), the durable AI surface inventory
+(inside `/settings/ai-gate`), hypothesis claim/signal/plan-campaign and the from-plan/from-benchmark
+generators (inside `/settings/arsenal`), the natural-language AI Operations Router (`/settings/ai-ops-router`),
+and the one-click operational actions batch scan (`/scan/new`), target dedupe (`/targets`), queue emergency
+clear (`/`), and ASM inventory prune (`/asm`).
 
 ### Scanner CLI
 
@@ -980,7 +990,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | Release gates | 10 | `scripts/release_gates.py` |
 | Runtime environment keys | 190 | Python sources + Compose manifests |
 | Scanner modules | 83 | `scanner/scanner_tools/` |
-| UI pages | 18 | `ui/src/app/` |
+| UI pages | 23 | `ui/src/app/` |
 | Skills | 4 | `skills/` |
 | Slash commands | 13 | `.claude/commands/` |
 | Specialized subagents | 3 | `.claude/agents/` |
@@ -1679,6 +1689,9 @@ Only key names and declaring sources are documented; secret values are never rea
 | Route | Source |
 |---|---|
 | `/asm` | `ui/src/app/asm/page.tsx` |
+| `/campaigns/{id}` | `ui/src/app/campaigns/[id]/page.tsx` |
+| `/campaigns` | `ui/src/app/campaigns/page.tsx` |
+| `/evidence` | `ui/src/app/evidence/page.tsx` |
 | `/exposure` | `ui/src/app/exposure/page.tsx` |
 | `/findings/{id}` | `ui/src/app/findings/[id]/page.tsx` |
 | `/findings` | `ui/src/app/findings/page.tsx` |
@@ -1689,6 +1702,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `/scans` | `ui/src/app/scans/page.tsx` |
 | `/schedules` | `ui/src/app/schedules/page.tsx` |
 | `/settings/ai-gate` | `ui/src/app/settings/ai-gate/page.tsx` |
+| `/settings/ai-ops-router` | `ui/src/app/settings/ai-ops-router/page.tsx` |
 | `/settings/arsenal` | `ui/src/app/settings/arsenal/page.tsx` |
 | `/settings/exceptions` | `ui/src/app/settings/exceptions/page.tsx` |
 | `/settings/model-intake` | `ui/src/app/settings/model-intake/page.tsx` |
@@ -1696,6 +1710,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `/settings/policy-profiles` | `ui/src/app/settings/policy-profiles/page.tsx` |
 | `/targets/{id}/graph` | `ui/src/app/targets/[id]/graph/page.tsx` |
 | `/targets` | `ui/src/app/targets/page.tsx` |
+| `/timeline` | `ui/src/app/timeline/page.tsx` |
 
 ### Skills, Slash Commands, And Subagents
 

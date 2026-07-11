@@ -2,12 +2,17 @@ export { Button, buttonClasses, type ButtonProps, type ButtonSize, type ButtonVa
 export { Card, SectionCard } from './Card'
 export {
   Badge,
+  CampaignStatusBadge,
   FindingStatusBadge,
+  HypothesisStatusBadge,
   ProofStateBadge,
+  RetentionClassBadge,
   RetestVerdictBadge,
+  RiskTierBadge,
   ScanStatusBadge,
   SeverityBadge,
   SourceTypeBadge,
+  TimelineStatusBadge,
   gradeTextColor,
 } from './Badge'
 export { EmptyState, type EmptyStateAction } from './EmptyState'

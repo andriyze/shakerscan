@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import Link from 'next/link'
 import { Bot, CheckCircle2, Clipboard, Download, Play, Plus, RefreshCw, ShieldCheck, Trash2, Wand2 } from 'lucide-react'
+import AISurfaceInventoryPanel from '@/components/AISurfaceInventoryPanel'
 import {
   Button,
   Card,
@@ -1548,6 +1549,8 @@ export default function AIGateSettingsPage() {
             })
           )}
         </div>
+
+      <AISurfaceInventoryPanel />
 
       <Card className="p-4">
         <div className="flex flex-wrap items-start justify-between gap-3">

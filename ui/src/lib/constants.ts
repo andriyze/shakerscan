@@ -229,6 +229,91 @@ export function gradeTextColorClass(grade?: string | null): string {
   return GRADE_TEXT_COLORS[key] ?? 'text-gray-500'
 }
 
+// ---------------------------------------------------------------------------
+// Command Arsenal / mission surfaces — risk tiers, mission-timeline statuses,
+// campaign lifecycle, evidence retention classes, and hypothesis lifecycle.
+// Class strings must stay literal so Tailwind's JIT can see them.
+// ---------------------------------------------------------------------------
+
+export const RISK_TIERS = ['read_only', 'passive', 'active', 'intrusive', 'credential', 'dangerous'] as const
+export type RiskTier = typeof RISK_TIERS[number]
+
+export const RISK_TIER_BADGE_STYLES: Record<RiskTier, string> = {
+  read_only: 'bg-gray-500/20 text-gray-400',
+  passive: 'bg-blue-500/20 text-blue-400',
+  active: 'bg-yellow-500/20 text-yellow-400',
+  intrusive: 'bg-orange-500/20 text-orange-400',
+  credential: 'bg-red-500/20 text-red-400',
+  dangerous: 'bg-red-700/30 text-red-300',
+}
+
+// Cross-product mission timeline (GET /timeline) statuses[].
+export const TIMELINE_STATUSES = [
+  'planned', 'blocked', 'approval_required', 'approved', 'queued', 'running',
+  'completed', 'partial', 'degraded', 'failed', 'cancelled', 'evidence_bound',
+  'retest_scheduled', 'refuter_requested',
+] as const
+export type TimelineStatus = typeof TIMELINE_STATUSES[number]
+
+export const TIMELINE_STATUS_BADGE_STYLES: Record<TimelineStatus, string> = {
+  planned: 'bg-gray-500/20 text-gray-400',
+  blocked: 'bg-amber-500/20 text-amber-300',
+  approval_required: 'bg-amber-500/20 text-amber-300',
+  approved: 'bg-blue-500/20 text-blue-400',
+  queued: 'bg-gray-500/20 text-gray-400',
+  running: 'bg-blue-500/20 text-blue-400',
+  completed: 'bg-green-500/20 text-green-400',
+  partial: 'bg-yellow-500/20 text-yellow-400',
+  degraded: 'bg-yellow-500/20 text-yellow-400',
+  failed: 'bg-red-500/20 text-red-400',
+  cancelled: 'bg-orange-500/20 text-orange-400',
+  evidence_bound: 'bg-emerald-500/20 text-emerald-300',
+  retest_scheduled: 'bg-purple-500/20 text-purple-400',
+  refuter_requested: 'bg-indigo-500/20 text-indigo-300',
+}
+
+// Mission campaign lifecycle (GET /arsenal/campaigns).
+export const CAMPAIGN_STATUS_BADGE_STYLES: Record<string, string> = {
+  planned: 'bg-gray-500/20 text-gray-400',
+  active: 'bg-blue-500/20 text-blue-400',
+  paused: 'bg-yellow-500/20 text-yellow-400',
+  completed: 'bg-green-500/20 text-green-400',
+  cancelled: 'bg-orange-500/20 text-orange-400',
+}
+
+export const CAMPAIGN_TYPE_LABELS: Record<string, string> = {
+  continuous_asm: 'Continuous ASM',
+  authenticated_dast: 'Authenticated DAST',
+  api_authz: 'API Authorization',
+  ai_red_team: 'AI Red Team',
+  model_intake: 'Model Intake',
+  benchmark: 'Benchmark',
+  incident_retest: 'Incident Retest',
+  source_informed_dast: 'Source-Informed DAST',
+  finding_retest: 'Finding Retest',
+  focused_family: 'Focused Family',
+}
+
+// Evidence retention classes (GET /evidence/*).
+export const RETENTION_CLASS_BADGE_STYLES: Record<string, string> = {
+  standard: 'bg-gray-500/20 text-gray-400',
+  short: 'bg-blue-500/20 text-blue-400',
+  sensitive: 'bg-amber-500/20 text-amber-300',
+  audit: 'bg-purple-500/20 text-purple-400',
+  legal_hold: 'bg-red-500/20 text-red-400',
+}
+
+// Hypothesis / lead lifecycle (GET /arsenal/hypotheses).
+export const HYPOTHESIS_STATUS_BADGE_STYLES: Record<string, string> = {
+  open: 'bg-gray-500/20 text-gray-400',
+  claimed: 'bg-blue-500/20 text-blue-400',
+  testing: 'bg-indigo-500/20 text-indigo-300',
+  supported: 'bg-emerald-500/20 text-emerald-300',
+  refuted: 'bg-red-500/20 text-red-400',
+  promoted: 'bg-green-500/20 text-green-400',
+  dead: 'bg-gray-700/40 text-gray-500',
+}
+
 // Helper to get scan type options for API calls
 export function getScanOptions(scanType: ScanType): Record<string, boolean | string> {
   const type = SCAN_TYPES.find(t => t.value === scanType)

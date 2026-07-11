@@ -1,17 +1,23 @@
 'use client'
 
 import { useEffect, useMemo, useState } from 'react'
+import { useRouter } from 'next/navigation'
 import { Boxes, CheckCircle2, RefreshCw, ShieldCheck, TerminalSquare, XCircle } from 'lucide-react'
 import {
   createAgentContextPack,
   createAgentDecisionTrace,
+  appendHypothesisSignal,
+  claimHypothesis,
   createLocalAgentDryRunPlan,
   createOperationPlan,
   createApprovalReceipt,
   deriveRefuterReviewVerdict,
   executeAuthzReplay,
   executeRefuterReviewPlan,
+  generateHypothesesFromBenchmark,
+  generateHypothesesFromPlan,
   generateSourceIngestHypotheses,
+  planHypothesisCampaign,
   getAgentContextPacks,
   getAgentDecisionTraces,
   getArsenalCommands,
@@ -63,7 +69,7 @@ import {
 } from '@/lib/api'
 import { authzExecutionFeedback, buildAuthzReplayReview, sessionMatchesTarget } from '@/lib/authzReplay'
 import { buildRefuterAnnotationPayload, buildRefuterReviewPlanView, refuterVerdictClass } from '@/lib/refuterReview'
-import { Badge, Button, Card, EmptyState, ErrorState, Skeleton } from '@/components/ui'
+import { Badge, Button, Card, EmptyState, ErrorState, HypothesisStatusBadge, Skeleton } from '@/components/ui'
 
 function statusClass(status: string): string {
   switch (status) {
@@ -422,6 +428,75 @@ function HypothesisRow({ hypothesis, approvalReceiptId, operator, onRefresh }: {
   const [reconciling, setReconciling] = useState(false)
   const [reconcileError, setReconcileError] = useState<string | null>(null)
   const [reconcileMessage, setReconcileMessage] = useState<string | null>(null)
+  // Lifecycle actions: claim (compare-and-set lease), append a signal, and plan a campaign.
+  const [busyAction, setBusyAction] = useState<null | 'claim' | 'plan' | 'signal'>(null)
+  const [actionError, setActionError] = useState<string | null>(null)
+  const [actionMessage, setActionMessage] = useState<string | null>(null)
+  const [plannedCampaignId, setPlannedCampaignId] = useState<string | null>(null)
+  const [showSignalForm, setShowSignalForm] = useState(false)
+  const [signalType, setSignalType] = useState<'endorsement' | 'refutation'>('endorsement')
+  const [signalSource, setSignalSource] = useState('operator-review')
+  const [signalReason, setSignalReason] = useState('')
+
+  const terminal = ['refuted', 'promoted', 'dead'].includes(displayStatus)
+  const canClaim = hypothesis.claimable !== false && !terminal
+
+  async function claimLead() {
+    if (window.confirm && !window.confirm('Claim this lead for testing? This takes a compare-and-set lease at the current version.')) return
+    setBusyAction('claim'); setActionError(null); setActionMessage(null)
+    try {
+      const result = await claimHypothesis(hypothesis.id, {
+        owner: operator || 'settings-arsenal',
+        expected_version: hypothesis.version,
+      })
+      setActionMessage(result.claimed ? `Claimed by ${result.hypothesis.claim_owner || operator}.` : 'Lead was not claimable.')
+      await onRefresh?.()
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : 'Failed to claim lead')
+      await onRefresh?.()
+    } finally {
+      setBusyAction(null)
+    }
+  }
+
+  async function submitSignal() {
+    if (!signalSource.trim()) { setActionError('A signal source is required.'); return }
+    setBusyAction('signal'); setActionError(null); setActionMessage(null)
+    try {
+      await appendHypothesisSignal(hypothesis.id, {
+        signal_type: signalType,
+        source: signalSource.trim(),
+        reason: signalReason.trim() || undefined,
+        created_by: operator || 'settings-arsenal',
+      })
+      setActionMessage(`Recorded ${signalType}.`)
+      setShowSignalForm(false); setSignalReason('')
+      await onRefresh?.()
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : 'Failed to record signal')
+    } finally {
+      setBusyAction(null)
+    }
+  }
+
+  async function planCampaign() {
+    if (window.confirm && !window.confirm('Plan a campaign from this lead? This creates a campaign + linked action (no scan is queued).')) return
+    setBusyAction('plan'); setActionError(null); setActionMessage(null)
+    try {
+      const result = await planHypothesisCampaign(hypothesis.id, {
+        campaign_name: (hypothesis.title || hypothesis.family || 'lead').slice(0, 120),
+        created_by: operator || 'settings-arsenal',
+      })
+      const campaignId = result.campaign?.id || result.campaign_id || null
+      setPlannedCampaignId(campaignId)
+      setActionMessage('Campaign planned.')
+      await onRefresh?.()
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : 'Failed to plan campaign')
+    } finally {
+      setBusyAction(null)
+    }
+  }
 
   async function reconcileProof() {
     if (!approvalReceiptId || !hypothesis.campaign_action_id) return
@@ -455,7 +530,7 @@ function HypothesisRow({ hypothesis, approvalReceiptId, operator, onRefresh }: {
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
             <span className="break-all font-mono text-sm text-white">{hypothesis.family}</span>
-            <Badge className={statusClass(displayStatus)}>{displayStatus}</Badge>
+            <HypothesisStatusBadge status={displayStatus} />
             {hypothesis.severity_guess && <Badge className={riskClass(hypothesis.severity_guess)}>{hypothesis.severity_guess}</Badge>}
             <Badge className="bg-gray-800 text-gray-300">{hypothesis.source}</Badge>
             {hypothesis.claim_state?.expired && <Badge className="bg-amber-500/15 text-amber-300">claim expired</Badge>}
@@ -506,6 +581,62 @@ function HypothesisRow({ hypothesis, approvalReceiptId, operator, onRefresh }: {
       )}
       {reconcileError && <p role="alert" className="mt-2 text-xs text-red-300">{reconcileError}</p>}
       {reconcileMessage && <p role="status" className="mt-2 text-xs text-gray-300">{reconcileMessage}</p>}
+
+      <div className="mt-2 flex flex-wrap items-center gap-2 border-t border-gray-800 pt-2">
+        {canClaim && (
+          <Button size="sm" variant="secondary" disabled={busyAction !== null} onClick={() => void claimLead()}>
+            {busyAction === 'claim' ? 'Claiming…' : 'Claim'}
+          </Button>
+        )}
+        <Button size="sm" variant="secondary" disabled={busyAction !== null} onClick={() => setShowSignalForm((v) => !v)}>
+          {showSignalForm ? 'Cancel signal' : 'Add signal'}
+        </Button>
+        {!terminal && (
+          <Button size="sm" variant="secondary" disabled={busyAction !== null} onClick={() => void planCampaign()}>
+            {busyAction === 'plan' ? 'Planning…' : 'Plan campaign'}
+          </Button>
+        )}
+        {plannedCampaignId && (
+          <a href={`/campaigns/${plannedCampaignId}`} className="text-xs text-blue-400 hover:text-blue-300">
+            View campaign →
+          </a>
+        )}
+      </div>
+
+      {showSignalForm && (
+        <div className="mt-2 space-y-2 rounded-md border border-gray-800 bg-gray-900 p-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <select
+              value={signalType}
+              onChange={(e) => setSignalType(e.target.value as 'endorsement' | 'refutation')}
+              className="rounded border border-gray-700 bg-gray-950 px-2 py-1 text-xs text-white focus:border-blue-500 focus:outline-none"
+            >
+              <option value="endorsement">endorsement</option>
+              <option value="refutation">refutation</option>
+            </select>
+            <input
+              type="text"
+              value={signalSource}
+              onChange={(e) => setSignalSource(e.target.value)}
+              placeholder="source"
+              className="w-40 rounded border border-gray-700 bg-gray-950 px-2 py-1 text-xs text-white placeholder-gray-600 focus:border-blue-500 focus:outline-none"
+            />
+            <input
+              type="text"
+              value={signalReason}
+              onChange={(e) => setSignalReason(e.target.value)}
+              placeholder="reason (optional)"
+              className="flex-1 rounded border border-gray-700 bg-gray-950 px-2 py-1 text-xs text-white placeholder-gray-600 focus:border-blue-500 focus:outline-none"
+            />
+            <Button size="sm" disabled={busyAction !== null} onClick={() => void submitSignal()}>
+              {busyAction === 'signal' ? 'Saving…' : 'Save'}
+            </Button>
+          </div>
+        </div>
+      )}
+
+      {actionError && <p role="alert" className="mt-2 text-xs text-red-300">{actionError}</p>}
+      {actionMessage && <p role="status" className="mt-2 text-xs text-gray-300">{actionMessage}</p>}
     </div>
   )
 }
@@ -519,7 +650,7 @@ function HypothesisReportRow({ item }: { item: HypothesisReportItem }) {
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
             <span className="break-all font-mono text-sm text-white">{item.family}</span>
-            <Badge className={statusClass(displayStatus)}>{displayStatus}</Badge>
+            <HypothesisStatusBadge status={displayStatus} />
             {item.severity_guess && <Badge className={riskClass(item.severity_guess)}>{item.severity_guess}</Badge>}
             <Badge className="bg-gray-800 text-gray-300">{item.source}</Badge>
             {claimOwner && <Badge className="bg-blue-500/15 text-blue-300">claim {claimOwner}</Badge>}
@@ -1085,6 +1216,16 @@ function ContractRow({
 }
 
 export default function ArsenalSettingsPage() {
+  const router = useRouter()
+  // The backend emits `next_action: /settings/arsenal?tab=timeline`; the mission
+  // timeline now lives at the dedicated /timeline page. Read the query on the
+  // client (no useSearchParams → this page needs no Suspense boundary).
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    if (new URLSearchParams(window.location.search).get('tab') === 'timeline') {
+      router.replace('/timeline')
+    }
+  }, [router])
   const [commands, setCommands] = useState<ArsenalCommandsResponse | null>(null)
   const [contracts, setContracts] = useState<ArsenalContractsResponse | null>(null)
   const [tools, setTools] = useState<ArsenalToolsResponse | null>(null)
@@ -1126,6 +1267,15 @@ export default function ArsenalSettingsPage() {
   const [sourceIngestResult, setSourceIngestResult] = useState<SourceIngestResult | null>(null)
   const [sourceIngestLoading, setSourceIngestLoading] = useState(false)
   const [sourceIngestError, setSourceIngestError] = useState<string | null>(null)
+  // Hypothesis generators: from a saved operation plan, and from benchmark misses.
+  const [fromPlanId, setFromPlanId] = useState('')
+  const [fromBenchmarkName, setFromBenchmarkName] = useState('juice-shop')
+  const [fromBenchmarkExpectation, setFromBenchmarkExpectation] = useState('')
+  const [fromBenchmarkFamily, setFromBenchmarkFamily] = useState('bola')
+  const [fromBenchmarkRoute, setFromBenchmarkRoute] = useState('')
+  const [generatorBusy, setGeneratorBusy] = useState<null | 'plan' | 'benchmark'>(null)
+  const [generatorMessage, setGeneratorMessage] = useState<string | null>(null)
+  const [generatorError, setGeneratorError] = useState<string | null>(null)
   const [refuterSummary, setRefuterSummary] = useState<RefuterWorkSummary | null>(null)
   const [refuterQueueResult, setRefuterQueueResult] = useState<RefuterQueueResult | null>(null)
   const [recentRefuterReviews, setRecentRefuterReviews] = useState<RefuterReview[]>([])
@@ -1291,6 +1441,47 @@ export default function ArsenalSettingsPage() {
       setSourceIngestError(err instanceof Error ? err.message : 'Failed to record source-informed hypothesis')
     } finally {
       setSourceIngestLoading(false)
+    }
+  }
+
+  async function submitFromPlan() {
+    if (!fromPlanId.trim()) { setGeneratorError('An operation plan ID is required.'); return }
+    setGeneratorBusy('plan'); setGeneratorError(null); setGeneratorMessage(null)
+    try {
+      const result = await generateHypothesesFromPlan({
+        operation_plan_id: fromPlanId.trim(),
+        created_by: approvalActor.trim() || 'operator',
+      })
+      setGeneratorMessage(`Recorded ${result.created} lead(s) from the plan.`)
+      await refreshHypotheses()
+    } catch (err) {
+      setGeneratorError(err instanceof Error ? err.message : 'Failed to generate hypotheses from plan')
+    } finally {
+      setGeneratorBusy(null)
+    }
+  }
+
+  async function submitFromBenchmark() {
+    if (!fromBenchmarkExpectation.trim() || !fromBenchmarkFamily.trim()) {
+      setGeneratorError('Expectation ID and family are required.'); return
+    }
+    setGeneratorBusy('benchmark'); setGeneratorError(null); setGeneratorMessage(null)
+    try {
+      const result = await generateHypothesesFromBenchmark({
+        benchmark: fromBenchmarkName.trim() || 'benchmark',
+        created_by: approvalActor.trim() || 'operator',
+        followups: [{
+          expectation_id: fromBenchmarkExpectation.trim(),
+          family: fromBenchmarkFamily.trim(),
+          route: fromBenchmarkRoute.trim() || undefined,
+        }],
+      })
+      setGeneratorMessage(`Recorded ${result.created} lead(s) from benchmark misses.`)
+      await refreshHypotheses()
+    } catch (err) {
+      setGeneratorError(err instanceof Error ? err.message : 'Failed to generate hypotheses from benchmark')
+    } finally {
+      setGeneratorBusy(null)
     }
   }
 
@@ -1864,6 +2055,63 @@ export default function ArsenalSettingsPage() {
             )}
           </div>
         )}
+      </Card>
+
+      <Card className="p-4">
+        <div className="mb-3 flex items-center gap-2">
+          <Boxes className="h-4 w-4 text-violet-300" aria-hidden="true" />
+          <h2 className="font-medium text-white">Generate Leads</h2>
+        </div>
+        <p className="mb-4 text-sm text-gray-400">
+          Turn a saved operation plan or benchmark misses into deduped hypotheses. These are worklist leads only — no scan is queued and no finding is created.
+        </p>
+        <div className="grid gap-4 md:grid-cols-2">
+          <div className="rounded-md border border-gray-800 bg-gray-950 p-3">
+            <h3 className="text-sm font-medium text-white">From operation plan</h3>
+            <label htmlFor="from-plan-id" className="mt-2 mb-1 block text-xs text-gray-400">Operation plan ID</label>
+            <input
+              id="from-plan-id"
+              type="text"
+              value={fromPlanId}
+              onChange={(e) => setFromPlanId(e.target.value)}
+              placeholder="OperationPlan UUID"
+              className="w-full rounded border border-gray-700 bg-gray-900 px-2 py-1.5 text-sm text-white placeholder-gray-600 focus:border-blue-500 focus:outline-none"
+            />
+            <Button size="sm" className="mt-3" disabled={generatorBusy !== null} onClick={() => void submitFromPlan()}>
+              {generatorBusy === 'plan' ? 'Generating…' : 'Generate from plan'}
+            </Button>
+          </div>
+          <div className="rounded-md border border-gray-800 bg-gray-950 p-3">
+            <h3 className="text-sm font-medium text-white">From benchmark misses</h3>
+            <div className="mt-2 grid grid-cols-2 gap-2">
+              <div>
+                <label htmlFor="from-bm-name" className="mb-1 block text-xs text-gray-400">Benchmark</label>
+                <input id="from-bm-name" type="text" value={fromBenchmarkName} onChange={(e) => setFromBenchmarkName(e.target.value)}
+                  className="w-full rounded border border-gray-700 bg-gray-900 px-2 py-1.5 text-sm text-white focus:border-blue-500 focus:outline-none" />
+              </div>
+              <div>
+                <label htmlFor="from-bm-family" className="mb-1 block text-xs text-gray-400">Family</label>
+                <input id="from-bm-family" type="text" value={fromBenchmarkFamily} onChange={(e) => setFromBenchmarkFamily(e.target.value)}
+                  className="w-full rounded border border-gray-700 bg-gray-900 px-2 py-1.5 text-sm text-white focus:border-blue-500 focus:outline-none" />
+              </div>
+              <div>
+                <label htmlFor="from-bm-exp" className="mb-1 block text-xs text-gray-400">Expectation ID</label>
+                <input id="from-bm-exp" type="text" value={fromBenchmarkExpectation} onChange={(e) => setFromBenchmarkExpectation(e.target.value)}
+                  placeholder="e.g. bola-basket-9" className="w-full rounded border border-gray-700 bg-gray-900 px-2 py-1.5 text-sm text-white placeholder-gray-600 focus:border-blue-500 focus:outline-none" />
+              </div>
+              <div>
+                <label htmlFor="from-bm-route" className="mb-1 block text-xs text-gray-400">Route (optional)</label>
+                <input id="from-bm-route" type="text" value={fromBenchmarkRoute} onChange={(e) => setFromBenchmarkRoute(e.target.value)}
+                  placeholder="/rest/basket/{id}" className="w-full rounded border border-gray-700 bg-gray-900 px-2 py-1.5 text-sm text-white placeholder-gray-600 focus:border-blue-500 focus:outline-none" />
+              </div>
+            </div>
+            <Button size="sm" className="mt-3" disabled={generatorBusy !== null} onClick={() => void submitFromBenchmark()}>
+              {generatorBusy === 'benchmark' ? 'Generating…' : 'Generate from benchmark'}
+            </Button>
+          </div>
+        </div>
+        {generatorError && <p role="alert" className="mt-3 text-xs text-red-300">{generatorError}</p>}
+        {generatorMessage && <p role="status" className="mt-3 text-xs text-gray-300">{generatorMessage}</p>}
       </Card>
 
       <Card className="p-4">

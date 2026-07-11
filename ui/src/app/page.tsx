@@ -3,10 +3,11 @@
 import { useEffect, useRef, useState } from 'react'
 import Link from 'next/link'
 import { AlertTriangle, ArrowRight, Bot, CalendarClock, Cpu, Gauge, PackageCheck, Rocket, ShieldCheck, Workflow } from 'lucide-react'
-import { getDashboard, getQueueStats, getWorkers, scaleWorkers, getSystemResources, getGungnirStatus, startGungnir, stopGungnir, getGradeColor, formatDate, type QueueStats, type WorkerStats, type SystemResources, type GungnirStatus, type DashboardActionItem, type DashboardProductStatusItem, type DashboardResponse } from '@/lib/api'
+import { getDashboard, getQueueStats, getWorkers, scaleWorkers, getSystemResources, getGungnirStatus, startGungnir, stopGungnir, clearQueue, getGradeColor, formatDate, type QueueStats, type WorkerStats, type SystemResources, type GungnirStatus, type DashboardActionItem, type DashboardProductStatusItem, type DashboardResponse } from '@/lib/api'
 import {
   Badge,
   Card,
+  ConfirmDialog,
   ErrorState,
   LastUpdated,
   ScanStatusBadge,
@@ -34,6 +35,9 @@ export default function Dashboard() {
   const [dashboardError, setDashboardError] = useState<string | null>(null)
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null)
   const [refreshing, setRefreshing] = useState(false)
+  const [showClearQueue, setShowClearQueue] = useState(false)
+  const [clearRetests, setClearRetests] = useState(false)
+  const [clearingQueue, setClearingQueue] = useState(false)
   const [queueError, setQueueError] = useState<string | null>(null)
   const [workersError, setWorkersError] = useState<string | null>(null)
   const [scaling, setScaling] = useState(false)
@@ -79,6 +83,20 @@ export default function Dashboard() {
       setQueueError('Queue status unavailable')
     } finally {
       queueInFlight.current = false
+    }
+  }
+
+  const handleClearQueue = async () => {
+    setClearingQueue(true)
+    try {
+      const res = await clearQueue(clearRetests)
+      toast.success(`Cleared ${res.cleared} pending job(s)${clearRetests ? ` + ${res.retest_cleared} retest job(s)` : ''}`)
+      await fetchQueueStats()
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to clear queue')
+    } finally {
+      setClearingQueue(false)
+      setShowClearQueue(false)
     }
   }
 
@@ -282,7 +300,16 @@ export default function Dashboard() {
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         {/* Queue Status */}
         <Card className="p-4">
-          <h2 className="text-sm font-medium text-gray-400 mb-3">Queue Status</h2>
+          <div className="flex items-center justify-between mb-3">
+            <h2 className="text-sm font-medium text-gray-400">Queue Status</h2>
+            <button
+              type="button"
+              onClick={() => { setClearRetests(false); setShowClearQueue(true) }}
+              className={`text-xs text-gray-500 hover:text-red-400 transition-colors rounded ${FOCUS_RING}`}
+            >
+              Emergency clear
+            </button>
+          </div>
           <div className="flex flex-wrap gap-4">
             <Link href="/scans?status=pending" className={`flex items-center gap-2 hover:opacity-80 transition-opacity rounded ${FOCUS_RING}`}>
               <div className={`w-2 h-2 rounded-full bg-yellow-500 ${queuePending !== '--' && queuePending > 0 ? 'animate-pulse' : ''}`}></div>
@@ -305,6 +332,25 @@ export default function Dashboard() {
             <p className="text-xs text-red-400 mt-3">{queueError}</p>
           )}
         </Card>
+
+        <ConfirmDialog
+          open={showClearQueue}
+          title="Clear the scan queue?"
+          message={
+            <div className="space-y-3">
+              <p>This removes all pending scan jobs from the queue. Running scans are not affected.</p>
+              <label className="flex items-center gap-2 text-sm text-gray-300">
+                <input type="checkbox" checked={clearRetests} onChange={(e) => setClearRetests(e.target.checked)} className="accent-red-500" />
+                Also clear pending retest jobs
+              </label>
+            </div>
+          }
+          confirmLabel="Clear queue"
+          danger
+          busy={clearingQueue}
+          onConfirm={handleClearQueue}
+          onCancel={() => setShowClearQueue(false)}
+        />
 
         {/* Workers & Resources */}
         <Card className="p-4">

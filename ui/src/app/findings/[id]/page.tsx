@@ -1211,7 +1211,14 @@ function FindingDetailContent() {
       )}
 
       {evidenceObjects.length > 0 && (
-        <SectionCard title="Durable Evidence Objects">
+        <SectionCard
+          title="Durable Evidence Objects"
+          actions={
+            <Link href={`/evidence?finding_id=${encodeURIComponent(findingId)}`} className="text-xs text-blue-400 hover:text-blue-300">
+              Browse in Evidence →
+            </Link>
+          }
+        >
           <p className="text-xs text-gray-500 mb-3">
             First-class evidence records — content hash, redaction profile, retention class, and storage URI.
             These persist independently of the embedded evidence above and survive worker churn.

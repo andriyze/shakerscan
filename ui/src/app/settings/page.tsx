@@ -1,7 +1,7 @@
 import AISettingsPanel from '@/components/AISettingsPanel'
 import ScanExecutionSettingsPanel from '@/components/ScanExecutionSettingsPanel'
 import Link from 'next/link'
-import { Bot, Boxes, PackageCheck, ShieldAlert, ShieldCheck } from 'lucide-react'
+import { Bot, Boxes, PackageCheck, ShieldAlert, ShieldCheck, Wand2 } from 'lucide-react'
 
 export default function SettingsPage() {
   return (
@@ -79,6 +79,22 @@ export default function SettingsPage() {
           </div>
         </div>
         <span className="text-sm text-teal-300">Open</span>
+      </Link>
+
+      <Link
+        href="/settings/ai-ops-router"
+        className="flex items-center justify-between rounded-lg border border-gray-800 bg-gray-900 p-4 hover:bg-gray-800/80 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2 focus-visible:ring-offset-gray-950"
+      >
+        <div className="flex items-center gap-3">
+          <span className="flex h-10 w-10 items-center justify-center rounded-lg bg-purple-600/20 text-purple-300">
+            <Wand2 className="h-5 w-5" />
+          </span>
+          <div>
+            <h2 className="text-sm font-medium text-white">AI Operations Router</h2>
+            <p className="mt-1 text-sm text-gray-400">Translate natural-language requests into safe, explicit API plans</p>
+          </div>
+        </div>
+        <span className="text-sm text-purple-300">Open</span>
       </Link>
 
       <Link
