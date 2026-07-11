@@ -4035,7 +4035,6 @@ async def build_report(target: str,
         focused_endpoints_only=bool(focused_endpoints_only or focused_manual_active_scope),
         zero_rediscovery=zero_rediscovery_scope,
     )
-    scanner_dispatch_decisions: list[dict[str, Any]] = []
     active_dispatch_receipts: list[dict[str, Any]] = []
     discovery_budget = scan_budget
     if focused_manual_active_scope:
@@ -8960,1298 +8959,1384 @@ async def build_report(target: str,
             if len(cand) >= max_active:
                 break
 
-        xss_dispatch_decision = registry_dispatch_decision(
-            scanner_execution_plan,
-            "xss",
-        )
-        sqli_dispatch_decision = registry_dispatch_decision(
-            scanner_execution_plan,
-            "sqli",
-        )
-        scanner_dispatch_decisions.extend([xss_dispatch_decision, sqli_dispatch_decision])
-        run_xss = bool(xss_dispatch_decision["dispatch_enabled"])
-        run_sqli = bool(sqli_dispatch_decision["dispatch_enabled"])
-        active_block = {
-            "targets": cand,
-            "dalfox": [],
-            "sqlmap": [],
-            "custom_sqli": [],
-            "custom_xss": [],
-            "filters": {"xss": run_xss, "sqli": run_sqli},
-            "check_family_scope": check_family_scope,
-            "scanner_execution_plan": scanner_execution_plan,
-        }
-        if synthetic_skipped_reason:
-            active_block.setdefault("warnings", []).append(synthetic_skipped_reason)
-        if cand_synthetic:
-            active_block["synthetic_targets_count"] = len(cand_synthetic)
-            active_block["synthetic_targets_sample"] = list(cand_synthetic)[:10]
+        active_block: dict[str, Any] = {}
+        run_xss = False
+        run_sqli = False
+        smart_succeeded = False
         post_active_budget_exhausted = False
+        endpoints: list[dict[str, Any]] = []
 
-        # Adaptive request throttle for the active phase. OPT-IN
-        # (SHAKERSCAN_ENABLE_ADAPTIVE_THROTTLE=1): the recall-instability it was
-        # meant to fix was root-caused to a SQLi worklist filter bug (query_params
-        # dropped), NOT target overload — the benchmark target showed only 0.077%
-        # request degradation. So this is off by default (it added risk without a
-        # proven benefit and can only pace a genuinely-overloaded target). Kept as
-        # a tool for hosts that ARE saturated by active probing.
-        if (run_sqli or run_xss or active_checks) and os.environ.get("SHAKERSCAN_ENABLE_ADAPTIVE_THROTTLE"):
-            configure_throttle(enabled=True)
-
-        # Smart mode: Use DBMS-aware and context-aware active tests
-        if smart_mode:
-            try:
-                # P1-2 FIX: Early DBMS detection for smarter SQLi testing
-                # Detect DBMS before building test plan to use DBMS-specific payloads
-                early_dbms = None
-                if run_sqli and cand:
-                    try:
-                        # ARCHITECTURE FIX: Intelligent URL selection for DBMS fingerprinting
-                        # Prioritize HAR-discovered endpoints (real DB interaction) over arbitrary URLs
-                        db_param_patterns = ["id", "user", "query", "search", "filter", "sort", "order", "page", "limit"]
-
-                        def score_url_for_dbms(url: str, is_har: bool = False) -> int:
-                            """Score URL for DBMS probing priority (higher = better)."""
-                            score = 0
-                            url_lower = url.lower()
-                            if is_har:
-                                score += 100  # HAR-discovered = highest priority
-                            if any(f"{p}=" in url_lower for p in db_param_patterns):
-                                score += 50  # Has DB-like parameters
-                            if "/api/" in url_lower or "/rest/" in url_lower:
-                                score += 30  # API endpoint
-                            if "?" in url:
-                                score += 10  # Has parameters
-                            return score
-
-                        # Collect candidate URLs with scores
-                        scored_urls = []
-                        # Add HAR endpoints with high priority
-                        if har_test_targets:
-                            for har_target in har_test_targets[:10]:
-                                url = har_target.get("url", "")
-                                if url and "?" in url:
-                                    scored_urls.append((score_url_for_dbms(url, is_har=True), url))
-                        # Add discovered URLs
-                        for u in cand:
-                            if "?" in u:
-                                scored_urls.append((score_url_for_dbms(u), u))
-
-                        # Sort by score (highest first), take top 5
-                        scored_urls.sort(key=lambda x: x[0], reverse=True)
-                        param_urls = [url for _, url in scored_urls[:5]]
-
-                        for probe_url in param_urls:
-                            dbms_result = await detect_dbms(probe_url)
-                            if dbms_result.get("dbms") and dbms_result.get("confidence", 0) > 0.5:
-                                early_dbms = dbms_result["dbms"]
-                                print(
-                                    f"[smart] Early DBMS detection: {early_dbms} "
-                                    f"(confidence: {dbms_result.get('confidence', 0):.0%})",
-                                    file=sys.stderr
-                                )
-                                break
-                    except Exception as e:
-                        print(f"[smart] Early DBMS detection failed: {e}", file=sys.stderr)
-
-                # Build endpoints dict for smart testing (GET params from discovered URLs)
-                endpoints = []
-                endpoint_index = {}
-
-                def _dedupe_list(items):
-                    seen_items = set()
-                    deduped = []
-                    for item in items or []:
-                        if item not in seen_items:
-                            seen_items.add(item)
-                            deduped.append(item)
-                    return deduped
-
-                def _normalize_endpoint_url(url: str) -> str:
-                    parsed = urllib.parse.urlparse(url)
-                    return urllib.parse.urlunparse((parsed.scheme, parsed.netloc, parsed.path or "/", "", "", ""))
-
-                def _normalize_allowed_methods(methods):
-                    allowed = []
-                    for raw in methods or []:
-                        if not raw:
-                            continue
-                        method = str(raw).strip().upper()
-                        if not method or method in allowed:
-                            continue
-                        allowed.append(method)
-                    return allowed
-
-                options_methods_by_url: dict[str, list[str]] = {}
-                if options_method_results and options_method_results.get("methods_by_url"):
-                    for opt_url, methods in (options_method_results.get("methods_by_url") or {}).items():
-                        if not opt_url or not methods:
-                            continue
-                        normalized = _normalize_endpoint_url(opt_url)
-                        filtered = [
-                            m for m in _normalize_allowed_methods(methods)
-                            if m in ("GET", "POST", "PUT", "PATCH", "DELETE")
-                        ]
-                        if filtered:
-                            options_methods_by_url[normalized] = filtered
-                debug_endpoint_discovery = _is_truthy_env(os.environ.get("SCANNER_DEBUG_ENDPOINTS"))
-                if debug_endpoint_discovery and options_methods_by_url:
-                    print(
-                        f"[DEBUG OPTIONS] methods_by_url={len(options_methods_by_url)}",
-                        file=sys.stderr
-                    )
-                    for i, (opt_url, methods) in enumerate(list(options_methods_by_url.items())[:5]):
-                        print(
-                            f"[DEBUG OPTIONS]   {i}: {opt_url} -> {methods}",
-                            file=sys.stderr
-                        )
-
-                # Endpoint-source priorities live in scanner_tools.active_prioritization
-                # as DEFAULT_SOURCE_PRIORITY so the merge logic here and the active-scan
-                # ordering downstream stay in lock-step. Keep aliases readable.
-                _SOURCE_PRIORITY = DEFAULT_SOURCE_PRIORITY
-                _DEFAULT_SOURCE_PRIORITY = DEFAULT_SOURCE_PRIORITY_VALUE
-
-                def _merge_endpoint(new_ep):
-                    url = new_ep.get("url")
-                    if not url:
-                        return False
-                    method = (new_ep.get("method") or "GET").upper()
-                    new_ep["method"] = method
-                    normalized_url = _normalize_endpoint_url(url)
-                    if normalized_url in options_methods_by_url:
-                        allowed = _dedupe_list(
-                            (new_ep.get("allowed_methods") or []) + options_methods_by_url[normalized_url]
-                        )
-                        if allowed:
-                            new_ep["allowed_methods"] = allowed
-                    key = _active_endpoint_contract_key(url, method)
-                    existing = endpoint_index.get(key)
-                    if not existing:
-                        _initialize_active_endpoint_contract(new_ep)
-                        endpoints.append(new_ep)
-                        endpoint_index[key] = new_ep
-                        return True
-                    _merge_active_endpoint_contract(existing, new_ep)
-                    return False
-
-                manual_get_count = 0
-                manual_post_count = 0
-                if manual_endpoints_norm:
-                    for ep in manual_endpoints_norm:
-                        if not isinstance(ep, dict):
-                            continue
-                        ep_url = ep.get("url")
-                        if not ep_url:
-                            continue
-                        method = (ep.get("method") or "GET").upper()
-                        if method == "GET":
-                            params = ep.get("params") or []
-                            param_defaults = ep.get("param_defaults") or {}
-                            if not params and param_defaults:
-                                params = list(param_defaults.keys())
-                            if params and _merge_endpoint({
-                                "url": ep_url,
-                                "method": "GET",
-                                "params": params,
-                                "param_defaults": param_defaults,
-                                "source": "manual",
-                            }):
-                                manual_get_count += 1
-                        elif method in ("POST", "PUT", "PATCH"):
-                            body_params = ep.get("body_params") or ep.get("params") or []
-                            if body_params and _merge_endpoint({
-                                "url": ep_url,
-                                "method": method,
-                                "body_params": body_params,
-                                "body_required_params": ep.get("body_required_params") or body_params,
-                                "body_param_defaults": ep.get("body_param_defaults") or {},
-                                "body_template": ep.get("body_template"),
-                                "content_type": ep.get("content_type") or "application/json",
-                                "source": "manual",
-                            }):
-                                manual_post_count += 1
-                if manual_get_count or manual_post_count:
-                    print(
-                        f"[scanner] Added {manual_get_count} GET and {manual_post_count} POST manual endpoints to smart testing",
-                        file=sys.stderr
-                    )
-
-                js_request_count = 0
-                for js_endpoint in _frontend_http_active_endpoints(base_url, js_bundle_analysis):
-                    if _merge_endpoint(js_endpoint):
-                        js_request_count += 1
-                if js_request_count:
-                    active_block["frontend_http_requests"] = js_request_count
-                    print(
-                        f"[scanner] Added {js_request_count} method-aware frontend HTTP requests to smart testing",
-                        file=sys.stderr,
-                    )
-
-                if not focused_manual_active_scope:
-                    har_candidate_paths = {
-                        _normalize_endpoint_url(str(candidate.get("url") or ""))
-                        for candidate in (har_test_targets or [])
-                        if candidate.get("url")
-                    }
-                    browser_candidate_paths = {
-                        _normalize_endpoint_url(str(candidate.get("url") or ""))
-                        for candidate in (browser_api_endpoints or [])
-                        if isinstance(candidate, dict) and candidate.get("url")
-                    }
-                    for u in cand:
-                        parsed = urllib.parse.urlparse(u)
-                        params = list(urllib.parse.parse_qs(parsed.query, keep_blank_values=True).keys())
-                        normalized_candidate = _normalize_endpoint_url(u)
-                        if u in cand_synthetic:
-                            source = "inferred"
-                        elif normalized_candidate in har_candidate_paths:
-                            source = "har_discovery"
-                        elif normalized_candidate in browser_candidate_paths:
-                            source = "browser_api_capture"
-                        else:
-                            source = "crawl"
-                        _merge_endpoint({"url": u, "method": "GET", "params": params, "source": source})
-
-                    lookup_added = 0
-                    lookup_sources: list[str] = []
-                    lookup_sources.extend(functional_urls or [])
-                    lookup_sources.extend(browser_urls or [])
-                    lookup_sources.extend(manual_urls or [])
-                    for ep in _path_value_lookup_active_endpoints(base_url, lookup_sources):
-                        if _merge_endpoint(ep):
-                            lookup_added += 1
-                    if lookup_added:
-                        active_block["active_path_value_lookup_routes"] = lookup_added
-                        print(
-                            f"[scanner] Added {lookup_added} queryless lookup routes for path-value active testing",
-                            file=sys.stderr,
-                        )
-
-                # Add inferred parameter endpoints from smart discovery (even if no query string)
-                if smart_discovery_data and not focused_manual_active_scope:
-                    for endpoint in smart_discovery_data.get("endpoints_with_params", []) or []:
-                        if not isinstance(endpoint, dict):
-                            continue
-                        ep_url = endpoint.get("url")
-                        params = endpoint.get("params") or []
-                        if ep_url and params:
-                            _merge_endpoint({"url": ep_url, "method": "GET", "params": params, "source": "crawl"})
-                    for ep_url, params in (smart_discovery_data.get("discovered_params") or {}).items():
-                        if ep_url and params:
-                            _merge_endpoint({"url": ep_url, "method": "GET", "params": params, "source": "crawl"})
-
-                # Add form-discovered endpoints (POST/GET) from discovery
-                def _is_token_param(name: str) -> bool:
-                    name_l = name.lower()
-                    return any(
-                        token in name_l for token in
-                        ("csrf", "xsrf", "authenticity", "nonce", "token", "_token", "__requestverificationtoken")
-                    )
-
-                def _iter_form_inputs(raw_inputs):
-                    if isinstance(raw_inputs, dict):
-                        for key, value in raw_inputs.items():
-                            if isinstance(value, dict):
-                                item = {"name": key, **value}
-                            else:
-                                item = {"name": key, "value": value}
-                            yield item
-                    elif isinstance(raw_inputs, list):
-                        for item in raw_inputs:
-                            yield item
-                    elif isinstance(raw_inputs, str):
-                        yield raw_inputs
-
-                def _normalize_form_url(form: dict) -> str | None:
-                    action = (
-                        form.get("action")
-                        or form.get("form_action")
-                        or form.get("endpoint")
-                        or form.get("url")
-                        or form.get("target")
-                    )
-                    page_url = (
-                        form.get("page")
-                        or form.get("page_url")
-                        or form.get("source")
-                        or form.get("referrer")
-                    )
-                    action = str(action or "").strip()
-                    if not action or action == "#":
-                        action = str(page_url or base_url).strip()
-                    if action.startswith("javascript:") or action.startswith("mailto:"):
-                        return None
-                    if page_url and not str(page_url).startswith(("http://", "https://")):
-                        page_url = urllib.parse.urljoin(base_url, str(page_url))
-                    return urllib.parse.urljoin(page_url or base_url, action)
-
-                def _form_content_type(form: dict) -> str:
-                    enctype = (form.get("enctype") or form.get("enc_type") or form.get("content_type") or "").lower()
-                    if "multipart/form-data" in enctype:
-                        return "multipart/form-data"
-                    if "application/json" in enctype:
-                        return "application/json"
-                    if "text/plain" in enctype:
-                        return "text/plain"
-                    return "application/x-www-form-urlencoded"
-
-                def _extract_form_fields(form: dict) -> tuple[list[str], list[str], dict[str, Any]]:
-                    raw_inputs = (
-                        form.get("inputs")
-                        or form.get("fields")
-                        or form.get("params")
-                        or form.get("form_fields")
-                        or form.get("input")
-                        or []
-                    )
-                    body_params = []
-                    required_params = []
-                    defaults: dict[str, Any] = {}
-                    for item in _iter_form_inputs(raw_inputs):
-                        name = None
-                        input_type = ""
-                        required = False
-                        value = None
-                        if isinstance(item, str):
-                            name = item
-                        elif isinstance(item, dict):
-                            name = item.get("name") or item.get("id") or item.get("key")
-                            input_type = (item.get("type") or item.get("input_type") or "").lower()
-                            required = bool(item.get("required") or item.get("is_required"))
-                            value = item.get("value") if item.get("value") is not None else item.get("default")
-                        if not name:
-                            continue
-                        if input_type in ("submit", "button", "reset", "image"):
-                            continue
-                        if input_type == "file":
-                            continue
-                        if value not in (None, ""):
-                            defaults[name] = value
-                        if _is_token_param(name):
-                            continue
-                        body_params.append(name)
-                        if required:
-                            required_params.append(name)
-                    if not body_params and defaults:
-                        body_params = list(defaults.keys())
-                    return _dedupe_list(body_params), _dedupe_list(required_params), defaults
-
-                if smart_discovery_data and not focused_manual_active_scope:
-                    forms = smart_discovery_data.get("forms", []) or []
-                    form_post_count = 0
-                    form_get_count = 0
-                    for form in forms:
-                        if not isinstance(form, dict):
-                            continue
-                        form_url = _normalize_form_url(form)
-                        if not form_url:
-                            continue
-                        method = (form.get("method") or form.get("http_method") or form.get("form_method") or "POST").upper()
-                        params, required_params, defaults = _extract_form_fields(form)
-                        if not params:
-                            continue
-                        if method == "GET":
-                            _merge_endpoint({"url": form_url, "method": "GET", "params": params, "source": "form"})
-                            form_get_count += 1
-                        elif method in ("POST", "PUT", "PATCH"):
-                            _merge_endpoint({
-                                "url": form_url,
-                                "method": method,
-                                "body_params": params,
-                                "body_required_params": required_params,
-                                "body_param_defaults": defaults,
-                                "content_type": _form_content_type(form),
-                                "source": "form",
-                            })
-                            form_post_count += 1
-                    if form_post_count or form_get_count:
-                        print(
-                            f"[scanner] Added {form_get_count} GET and {form_post_count} POST endpoints from form discovery",
-                            file=sys.stderr
-                        )
-
-                # Discover OpenAPI/Swagger schema endpoints for smart testing
-                if focused_manual_active_scope:
-                    print("[smart] Focused manual active scope: skipping OpenAPI and inferred endpoint expansion", file=sys.stderr)
-                else:
-                    try:
-                        openapi_sources = []
-                        if openapi_url:
-                            explicit_schema = await fetch_openapi_schema(openapi_url, auth_session=auth_session)
-                            if explicit_schema:
-                                openapi_sources.append(explicit_schema)
-                        auto_schema = await discover_openapi_schema(base_url, auth_session=auth_session)
-                        if auto_schema:
-                            openapi_sources.append(auto_schema)
-
-                        if openapi_sources:
-                            import re as path_re
-                            post_count = 0
-                            get_count = 0
-                            seen_specs = set()
-                            for schema in openapi_sources:
-                                schema_url = schema.get("url")
-                                if schema_url in seen_specs:
-                                    continue
-                                seen_specs.add(schema_url)
-                                for ep in schema.get("endpoints", []) or []:
-                                    method = ep.get("method")
-                                    path = ep.get("path", "")
-                                    if not method or not path:
-                                        continue
-                                    if "{" in path:
-                                        path = path_re.sub(r'\{[^}]+\}', '1', path)
-                                    full_url = urllib.parse.urljoin(base_url, path)
-                                    if method in ("POST", "PUT", "PATCH") and ep.get("body_params"):
-                                        if _merge_endpoint({
-                                            "url": full_url,
-                                            "method": method,
-                                            "body_params": ep["body_params"],
-                                            "body_required_params": ep.get("body_required_params", []),
-                                            "body_param_defaults": ep.get("body_param_defaults", {}),
-                                            "content_type": ep.get("content_type", "application/json"),
-                                            "source": "openapi",
-                                        }):
-                                            post_count += 1
-                                    elif method in ("GET", "DELETE", "HEAD", "OPTIONS") and ep.get("query_params"):
-                                        if _merge_endpoint({
-                                            "url": full_url,
-                                            "method": method,
-                                            "params": ep.get("query_params", []),
-                                            "source": "openapi",
-                                        }):
-                                            get_count += 1
-                                    else:
-                                        # Parameter-less (or path-param-only) OpenAPI endpoint.
-                                        # Still ingest it as a probe/crawl target so unauth
-                                        # sensitive-data exposure, IDOR, and access-control
-                                        # detectors can reach it. These are exactly the
-                                        # high-severity GET /api/.../token | /api/admin/api-keys
-                                        # | /api/.../{id} routes that carry no query string —
-                                        # previously dropped, so they were never tested.
-                                        if _merge_endpoint({
-                                            "url": full_url,
-                                            "method": method,
-                                            "params": ep.get("query_params", []),
-                                            "source": "openapi",
-                                        }):
-                                            if method in ("POST", "PUT", "PATCH"):
-                                                post_count += 1
-                                            else:
-                                                get_count += 1
-                            if post_count or get_count:
-                                print(f"[scanner] Added {get_count} GET and {post_count} POST endpoints from OpenAPI", file=sys.stderr)
-
-                            # Smart mode: optionally kick off Schemathesis when OpenAPI is found
-                            if schemathesis_task is None and not public_only:
-                                schema_url = openapi_url
-                                if not schema_url:
-                                    for schema in openapi_sources:
-                                        candidate_url = schema.get("url")
-                                        if candidate_url:
-                                            schema_url = candidate_url
-                                            break
-                                if schema_url:
-                                    schemathesis_schema_url = schema_url
-                                    schemathesis_task = asyncio.create_task(
-                                        schemathesis_run(
-                                            schema_url,
-                                            api_token,
-                                            base_url=base_url,
-                                            auth_session=auth_session,
-                                        )
-                                    )
-                    except Exception as e:
-                        print(f"[scanner] OpenAPI discovery failed: {e}", file=sys.stderr)
-
-                # Infer POST endpoints from discovered URLs (katana crawl results)
-                # This converts API paths like /api/auth/login, /workshop/api/shop/apply_coupon
-                # into POST endpoint candidates with inferred body parameters
-                # Skip when SPA catch-all detected — discovered URLs are phantom paths
-                _skip_post_inference = focused_manual_active_scope or (smart_discovery_data and smart_discovery_data.get("spa_catch_all"))
-                if _skip_post_inference:
-                    reason = "focused manual active scope" if focused_manual_active_scope else "SPA catch-all detected"
-                    print(f"[scanner] POST inference: skipped ({reason})", file=sys.stderr)
+        async def run_active_checks():
+            for u in cand:
                 try:
-                    # Patterns that suggest POST/mutation operations
-                    POST_INDICATORS = [
-                        "login", "signin", "signup", "register", "auth",
-                        "create", "add", "new", "insert",
-                        "update", "edit", "modify", "change",
-                        "delete", "remove",
-                        "submit", "send", "post",
-                        "apply", "validate", "verify", "confirm",
-                        "checkout", "payment", "pay", "purchase", "order",
-                        "upload", "import",
-                        "reset", "forgot", "recover",
-                        "contact", "feedback", "comment", "review",
-                        "subscribe", "unsubscribe",
-                        "coupon", "discount", "promo",
-                    ]
+                    # Run selected tools concurrently for each URL
+                    tasks: dict[str, asyncio.Task] = {}
+                    if run_xss:
+                        tasks["dalfox"] = asyncio.create_task(
+                            dalfox_one(u, quick_mode, auth_session=auth_session, deep_domxss=dalfox_deep_domxss)
+                        )
+                        tasks["custom_xss"] = asyncio.create_task(custom_xss_test(u, auth_session=auth_session))
+                    if run_sqli:
+                        tasks["sqlmap"] = asyncio.create_task(sqlmap_test(u, quick_mode, auth_session=auth_session))
+                        tasks["custom_sqli"] = asyncio.create_task(custom_sqli_test(u))
 
-                    # Parameter inference based on path segments
-                    PATH_TO_PARAMS = {
-                        "login": ["email", "username", "password"],
-                        "signin": ["email", "username", "password"],
-                        "signup": ["email", "username", "password", "name"],
-                        "register": ["email", "username", "password", "name"],
-                        "auth": ["email", "username", "password", "token"],
-                        "search": ["query", "q", "term", "keyword"],
-                        "order": ["product_id", "quantity", "id"],
-                        "checkout": ["cart_id", "payment_method", "address"],
-                        "payment": ["amount", "card", "token"],
-                        "coupon": ["coupon_code", "code", "coupon"],
-                        "apply": ["code", "id", "value"],
-                        "validate": ["code", "token", "value"],
-                        "verify": ["code", "token", "otp"],
-                        "reset": ["email", "token", "password"],
-                        "forgot": ["email"],
-                        "contact": ["email", "message", "name", "subject"],
-                        "feedback": ["message", "rating", "comment"],
-                        "comment": ["content", "text", "message", "post_id"],
-                        "review": ["rating", "comment", "product_id"],
-                        "upload": ["file", "name"],
-                        "user": ["id", "email", "username"],
-                        "product": ["id", "name", "price"],
-                        "shop": ["id", "product_id", "quantity"],
-                    }
+                    if not tasks:
+                        continue
 
-                    # Collect all discovered URLs from crawl
-                    all_discovered_urls = []
-                    if not _skip_post_inference:
-                        if crawl_urls:
-                            all_discovered_urls.extend(crawl_urls)
-                        if smart_discovery_data:
-                            all_discovered_urls.extend(smart_discovery_data.get("api_endpoints", []))
+                    # Wait for all with timeout
+                    try:
+                        per_url_timeout = 90 if quick_mode else 300  # 90s quick, 5min thorough
+                        results = await asyncio.wait_for(
+                            asyncio.gather(*tasks.values(), return_exceptions=True),
+                            timeout=per_url_timeout
+                        )
+                    except TimeoutError:
+                        continue
 
-                    print(f"[scanner] POST inference: {len(all_discovered_urls)} URLs to analyze (crawl_urls={len(crawl_urls) if crawl_urls else 0})", file=sys.stderr)
+                    results_by_name = dict(zip(tasks.keys(), results))
 
-                    inferred_post_count = 0
-                    seen_post_urls = set()
+                    # Process XSS results (dalfox_one returns dict with "findings" key)
+                    if run_xss:
+                        xss = results_by_name.get("dalfox")
+                        if not isinstance(xss, Exception) and xss:
+                            xss_findings = xss.get("findings", []) if isinstance(xss, dict) else xss
+                            xss_completed = xss.get("scan_completed", True) if isinstance(xss, dict) else True
+                            if xss_findings:
+                                active_block["dalfox"].extend(xss_findings)
+                                for f in xss_findings:
+                                    # Dalfox uses "severity" field with values "High", "Medium", "Low" (capitalized)
+                                    # XSS is ALWAYS at minimum medium severity (CVSS 6.1+) - never downgrade to low
+                                    dalfox_sev = (f.get("severity") or "medium").lower()
+                                    severity = "high" if dalfox_sev == "high" else "medium"
+                                    report["findings"].append(normalize_finding(
+                                        "dalfox", f.get("type","XSS"), severity,
+                                        {"url": u, "detail": f}
+                                    ))
+                            # Track scan status
+                            if not xss_completed and "dalfox_errors" not in active_block:
+                                active_block["dalfox_errors"] = []
+                            if not xss_completed:
+                                active_block["dalfox_errors"].append({"url": u, "error": xss.get("error")})
 
-                    for disc_url in all_discovered_urls:
-                        if not isinstance(disc_url, str):
-                            continue
-                        parsed = urllib.parse.urlparse(disc_url)
-                        path_lower = parsed.path.lower()
+                        custom_xss = results_by_name.get("custom_xss")
+                        if not isinstance(custom_xss, Exception) and custom_xss:
+                            if custom_xss.get("vulnerable"):
+                                active_block["custom_xss"].extend(custom_xss.get("findings", []))
+                                for f in custom_xss.get("findings", []):
+                                    report["findings"].append(normalize_finding(
+                                        "custom_xss",
+                                        f"Cross-Site Scripting ({f.get('payload_type', 'unknown')})",
+                                        f.get("severity", "medium"),
+                                        {
+                                            "url": f.get("url"),
+                                            "parameter": f.get("parameter"),
+                                            "payload": f.get("payload"),
+                                            "evidence": f.get("evidence"),
+                                            "context": f.get("context"),
+                                        },
+                                        "CWE-79"
+                                    ))
 
-                        # Build canonical URL without query params
-                        base_post_url = urllib.parse.urljoin(base_url, parsed.path.rstrip("/"))
-                        if base_post_url in seen_post_urls:
-                            continue
+                    # Process SQLi results (sqlmap_test returns dict with scan_completed flag)
+                    if run_sqli:
+                        srep = results_by_name.get("sqlmap")
+                        if not isinstance(srep, Exception) and srep:
+                            sql_completed = srep.get("scan_completed", True)
+                            if srep.get("vulnerable") or srep.get("summary") == "possible SQLi":
+                                active_block["sqlmap"].append({"url": u, **srep})
+                                report["findings"].append(normalize_finding(
+                                    "sqlmap", "Potential SQL injection", "high", {"url": u, "summary": srep.get("summary")}
+                                ))
+                            # Track scan status
+                            if not sql_completed:
+                                if "sqlmap_errors" not in active_block:
+                                    active_block["sqlmap_errors"] = []
+                                active_block["sqlmap_errors"].append({"url": u, "error": srep.get("error")})
 
-                        # Check if path suggests a POST operation
-                        is_post_candidate = False
-                        matched_params = []
-                        indicators_in_path = {ind for ind in POST_INDICATORS if ind in path_lower}
-                        primary_indicator = None
-                        matched_indicators: set[str] = set()
+                        custom_sql = results_by_name.get("custom_sqli")
+                        if not isinstance(custom_sql, Exception) and custom_sql:
+                            if custom_sql.get("vulnerable"):
+                                active_block["custom_sqli"].extend(custom_sql.get("findings", []))
+                                for f in custom_sql.get("findings", []):
+                                    report["findings"].append(normalize_finding(
+                                        "custom_sqli",
+                                        f"SQL Injection ({f.get('payload_type', 'unknown')})",
+                                        f.get("severity", "high"),
+                                        {
+                                            "url": f.get("url"),
+                                            "parameter": f.get("parameter"),
+                                            "payload": f.get("payload"),
+                                            "evidence": f.get("evidence"),
+                                        },
+                                        "CWE-89"
+                                    ))
+                except Exception:
+                    pass
 
-                        for indicator in POST_INDICATORS:
-                            if indicator in indicators_in_path:
-                                is_post_candidate = True
-                                primary_indicator = indicator
-                                matched_indicators.add(indicator)
-                                if indicator in PATH_TO_PARAMS:
-                                    matched_params.extend(PATH_TO_PARAMS[indicator])
-                                break
 
-                        # Also check individual path segments for substring matches
-                        # e.g., "apply_coupon" should match "coupon" in PATH_TO_PARAMS
-                        segments = [s for s in parsed.path.split("/") if s]
-                        for segment in segments:
-                            seg_lower = segment.lower()
-                            # Only enrich params for explicit indicator tokens (conservative)
-                            tokens = [t for t in re.split(r"[^a-z0-9]+", seg_lower) if t]
-                            for token in tokens:
-                                if token == primary_indicator:
-                                    continue
-                                if token in indicators_in_path and token in PATH_TO_PARAMS:
-                                    matched_indicators.add(token)
-                                    matched_params.extend(PATH_TO_PARAMS[token])
+        async def run_legacy_active_loop(
+            family_rows: tuple[dict[str, Any], ...],
+        ) -> RegistryPhaseBatchOutcome:
+            nonlocal active_block, run_xss, run_sqli
+            nonlocal smart_succeeded, post_active_budget_exhausted, endpoints
+            enabled_active_families = {
+                str(row.get("name") or "").strip().lower()
+                for row in family_rows
+            }
+            run_xss = "xss" in enabled_active_families
+            run_sqli = "sqli" in enabled_active_families
+            active_block = {
+                "targets": cand,
+                "dalfox": [],
+                "sqlmap": [],
+                "custom_sqli": [],
+                "custom_xss": [],
+                "filters": {"xss": run_xss, "sqli": run_sqli},
+                "check_family_scope": check_family_scope,
+                "scanner_execution_plan": scanner_execution_plan,
+            }
+            if synthetic_skipped_reason:
+                active_block.setdefault("warnings", []).append(synthetic_skipped_reason)
+            if cand_synthetic:
+                active_block["synthetic_targets_count"] = len(cand_synthetic)
+                active_block["synthetic_targets_sample"] = list(cand_synthetic)[:10]
+            post_active_budget_exhausted = False
 
-                        if is_post_candidate and matched_params:
-                            seen_post_urls.add(base_post_url)
-                            # Deduplicate params while preserving order
-                            unique_params = list(dict.fromkeys(matched_params))
-                            if _merge_endpoint({
-                                "url": base_post_url,
-                                "method": "POST",
-                                "body_params": unique_params[:8],
-                                "body_param_defaults": {},
-                                "content_type": "application/json",
-                                "source": "inferred",
-                            }):
-                                inferred_post_count += 1
-                                if os.environ.get("SHAKERSCAN_DEBUG_POST_INFER") == "1":
+            # Adaptive request throttle for the active phase. OPT-IN
+            # (SHAKERSCAN_ENABLE_ADAPTIVE_THROTTLE=1): the recall-instability it was
+            # meant to fix was root-caused to a SQLi worklist filter bug (query_params
+            # dropped), NOT target overload — the benchmark target showed only 0.077%
+            # request degradation. So this is off by default (it added risk without a
+            # proven benefit and can only pace a genuinely-overloaded target). Kept as
+            # a tool for hosts that ARE saturated by active probing.
+            if (run_sqli or run_xss or active_checks) and os.environ.get("SHAKERSCAN_ENABLE_ADAPTIVE_THROTTLE"):
+                configure_throttle(enabled=True)
+
+            # Smart mode: Use DBMS-aware and context-aware active tests
+            if smart_mode:
+                try:
+                    # P1-2 FIX: Early DBMS detection for smarter SQLi testing
+                    # Detect DBMS before building test plan to use DBMS-specific payloads
+                    early_dbms = None
+                    if run_sqli and cand:
+                        try:
+                            # ARCHITECTURE FIX: Intelligent URL selection for DBMS fingerprinting
+                            # Prioritize HAR-discovered endpoints (real DB interaction) over arbitrary URLs
+                            db_param_patterns = ["id", "user", "query", "search", "filter", "sort", "order", "page", "limit"]
+
+                            def score_url_for_dbms(url: str, is_har: bool = False) -> int:
+                                """Score URL for DBMS probing priority (higher = better)."""
+                                score = 0
+                                url_lower = url.lower()
+                                if is_har:
+                                    score += 100  # HAR-discovered = highest priority
+                                if any(f"{p}=" in url_lower for p in db_param_patterns):
+                                    score += 50  # Has DB-like parameters
+                                if "/api/" in url_lower or "/rest/" in url_lower:
+                                    score += 30  # API endpoint
+                                if "?" in url:
+                                    score += 10  # Has parameters
+                                return score
+
+                            # Collect candidate URLs with scores
+                            scored_urls = []
+                            # Add HAR endpoints with high priority
+                            if har_test_targets:
+                                for har_target in har_test_targets[:10]:
+                                    url = har_target.get("url", "")
+                                    if url and "?" in url:
+                                        scored_urls.append((score_url_for_dbms(url, is_har=True), url))
+                            # Add discovered URLs
+                            for u in cand:
+                                if "?" in u:
+                                    scored_urls.append((score_url_for_dbms(u), u))
+
+                            # Sort by score (highest first), take top 5
+                            scored_urls.sort(key=lambda x: x[0], reverse=True)
+                            param_urls = [url for _, url in scored_urls[:5]]
+
+                            for probe_url in param_urls:
+                                dbms_result = await detect_dbms(probe_url)
+                                if dbms_result.get("dbms") and dbms_result.get("confidence", 0) > 0.5:
+                                    early_dbms = dbms_result["dbms"]
                                     print(
-                                        f"[scanner][debug] POST infer url={base_post_url} path={parsed.path} "
-                                        f"indicators={sorted(matched_indicators)} params={unique_params[:8]}",
+                                        f"[smart] Early DBMS detection: {early_dbms} "
+                                        f"(confidence: {dbms_result.get('confidence', 0):.0%})",
                                         file=sys.stderr
                                     )
+                                    break
+                        except Exception as e:
+                            print(f"[smart] Early DBMS detection failed: {e}", file=sys.stderr)
 
-                    if inferred_post_count > 0:
-                        print(f"[scanner] Inferred {inferred_post_count} POST endpoints from discovered URLs", file=sys.stderr)
-                except Exception as e:
-                    print(f"[scanner] POST endpoint inference failed: {e}", file=sys.stderr)
+                    # Build endpoints dict for smart testing (GET params from discovered URLs)
+                    endpoints = []
+                    endpoint_index = {}
 
-                # Add common POST endpoint patterns for apps without OpenAPI
-                # Enabled in complete_mode (full/aggressive) and smart_mode since these
-                # are active scan types that should test POST body injection
-                if (complete_mode or smart_mode) and not focused_manual_active_scope:
-                    COMMON_POST_ENDPOINTS = [
-                        ("/api/auth/login", ["email", "username", "password"]),
-                        ("/api/login", ["email", "username", "password"]),
-                        ("/api/v1/login", ["email", "username", "password"]),
-                        ("/api/v2/user/login", ["email", "password"]),
-                        ("/api/search", ["query", "q", "term"]),
-                        ("/rest/user/login", ["email", "password"]),
-                        # Read-only endpoints safe to probe
-                        ("/api/users", ["id"]),
-                        ("/api/user", ["id"]),
-                        ("/api/products", ["id", "category"]),
-                    ]
-                    added_common = 0
-                    for path, params in COMMON_POST_ENDPOINTS:
-                        full_url = urllib.parse.urljoin(base_url, path)
-                        if _merge_endpoint({
-                            "url": full_url,
-                            "method": "POST",
-                            "body_params": params,
-                            "body_param_defaults": {},
-                            "content_type": "application/json",
-                            "source": "common",
-                        }):
-                            added_common += 1
-                    if added_common > 0:
-                        print(f"[scanner] Added {added_common} common POST endpoints (active scan mode)", file=sys.stderr)
+                    def _dedupe_list(items):
+                        seen_items = set()
+                        deduped = []
+                        for item in items or []:
+                            if item not in seen_items:
+                                seen_items.add(item)
+                                deduped.append(item)
+                        return deduped
 
-                # OPTIONS-based method discovery expansion
-                if options_method_results and options_method_results.get("methods_by_url") and not focused_manual_active_scope:
-                    def _infer_params_from_path(path: str, method: str) -> list[str]:
-                        path_lower = path.lower()
-                        if method in ("POST", "PUT", "PATCH"):
-                            if any(k in path_lower for k in ["login", "signin", "auth"]):
-                                return ["username", "email", "password"]
-                            if any(k in path_lower for k in ["register", "signup"]):
-                                return ["email", "username", "password", "name"]
-                            if any(k in path_lower for k in ["search", "query"]):
-                                return ["q", "query"]
-                            if any(k in path_lower for k in ["order", "cart", "checkout"]):
-                                return ["id", "product_id", "quantity"]
-                            return ["id", "name"]
-                        if "search" in path_lower or "query" in path_lower:
-                            return ["q", "query"]
-                        if any(k in path_lower for k in ["user", "account", "profile"]):
-                            return ["id", "user", "email"]
-                        return ["id"]
+                    def _normalize_endpoint_url(url: str) -> str:
+                        parsed = urllib.parse.urlparse(url)
+                        return urllib.parse.urlunparse((parsed.scheme, parsed.netloc, parsed.path or "/", "", "", ""))
 
-                    def _find_params_for_url(url: str) -> list[str]:
-                        target_norm = _normalize_endpoint_url(url)
-                        for ep in endpoints:
-                            if _normalize_endpoint_url(ep.get("url", "")) == target_norm:
-                                if ep.get("params"):
-                                    return list(ep.get("params") or [])
-                                if ep.get("body_params"):
-                                    return list(ep.get("body_params") or [])
-                        return []
-
-                    options_added = 0
-                    for opt_url, methods in (options_method_results.get("methods_by_url") or {}).items():
-                        if not opt_url or not methods:
-                            continue
-                        target_norm = _normalize_endpoint_url(opt_url)
-                        matching_contracts = [
-                            endpoint
-                            for endpoint in endpoints
-                            if _normalize_endpoint_url(str(endpoint.get("url") or "")) == target_norm
-                        ]
-                        if not any(_supports_options_method_expansion(endpoint) for endpoint in matching_contracts):
-                            continue
-                        parsed = urllib.parse.urlparse(opt_url)
-                        for method in methods:
-                            method_u = method.upper()
-                            if method_u not in ("GET", "POST", "PUT", "PATCH"):
+                    def _normalize_allowed_methods(methods):
+                        allowed = []
+                        for raw in methods or []:
+                            if not raw:
                                 continue
-                            params = _find_params_for_url(opt_url)
-                            if not params:
-                                params = _infer_params_from_path(parsed.path or "/", method_u)
-                            if method_u == "GET":
-                                if _merge_endpoint({"url": opt_url, "method": "GET", "params": params, "source": "options"}):
-                                    options_added += 1
-                            else:
-                                if _merge_endpoint({
-                                    "url": opt_url,
-                                    "method": method_u,
-                                    "body_params": params,
-                                    "body_param_defaults": {},
-                                    "content_type": "application/json",
-                                    "source": "options",
-                                }):
-                                    options_added += 1
+                            method = str(raw).strip().upper()
+                            if not method or method in allowed:
+                                continue
+                            allowed.append(method)
+                        return allowed
 
-                    if options_added > 0:
-                        print(f"[scanner] Added {options_added} endpoints from OPTIONS method discovery", file=sys.stderr)
-
-                # Add HAR-discovered endpoints with method/body params preserved
-                if har_test_targets and not focused_manual_active_scope:
-                    har_get_count = 0
-                    har_post_count = 0
-                    for har_target in har_test_targets:
-                        har_url = har_target.get("url")
-                        if not har_url:
-                            continue
-                        har_method = (har_target.get("method") or "GET").upper()
-                        har_params = har_target.get("params", {})
-                        har_param_values = har_target.get("param_values", {})
-                        har_content_type = har_target.get("content_type") or "application/json"
-                        har_body_template = har_target.get("body_template")
-
-                        if har_method == "GET":
-                            # params.query is now a list of param names from get_testable_endpoints
-                            query_params = har_params.get("query", [])
-                            query_defaults = har_param_values.get("query", {})
-                            if query_params and _merge_endpoint({
-                                "url": har_url,
-                                "method": "GET",
-                                "params": query_params,
-                                "param_defaults": query_defaults,
-                                "source": "har_discovery",
-                            }):
-                                har_get_count += 1
-                        elif har_method in ("POST", "PUT", "PATCH"):
-                            # params.body is now a list of param names from get_testable_endpoints
-                            body_params = har_params.get("body", [])
-                            body_defaults = har_param_values.get("body", {})
-                            if body_params and _merge_endpoint({
-                                "url": har_url,
-                                "method": har_method,
-                                "body_params": body_params,
-                                "body_param_defaults": body_defaults,
-                                "content_type": har_content_type,
-                                "body_template": har_body_template,
-                                "source": "har_discovery",
-                            }):
-                                har_post_count += 1
-
-                    if har_get_count or har_post_count:
-                        print(f"[scanner] Added {har_get_count} GET and {har_post_count} POST endpoints from HAR discovery", file=sys.stderr)
-
-                if not focused_manual_active_scope:
-                    hash_route_sources: list[Any] = []
-                    hash_route_sources.extend(browser_seed_urls or [])
-                    hash_route_sources.extend(crawl_urls or [])
-                    hash_route_sources.extend(seed_entry_urls or [])
-                    sec_sample = (sec_txt or {}).get("sample") if isinstance(sec_txt, dict) else None
-                    if sec_sample:
-                        hash_route_sources.append(sec_sample)
-                    for header_values in (chosen_headers or {}).values():
-                        if isinstance(header_values, list):
-                            hash_route_sources.extend(header_values)
-                        elif header_values:
-                            hash_route_sources.append(header_values)
-
-                    hash_route_added = 0
-                    for ep in build_hash_route_active_endpoints(base_url, hash_route_sources):
-                        if _merge_endpoint(ep):
-                            hash_route_added += 1
-                    if hash_route_added:
+                    options_methods_by_url: dict[str, list[str]] = {}
+                    if options_method_results and options_method_results.get("methods_by_url"):
+                        for opt_url, methods in (options_method_results.get("methods_by_url") or {}).items():
+                            if not opt_url or not methods:
+                                continue
+                            normalized = _normalize_endpoint_url(opt_url)
+                            filtered = [
+                                m for m in _normalize_allowed_methods(methods)
+                                if m in ("GET", "POST", "PUT", "PATCH", "DELETE")
+                            ]
+                            if filtered:
+                                options_methods_by_url[normalized] = filtered
+                    debug_endpoint_discovery = _is_truthy_env(os.environ.get("SCANNER_DEBUG_ENDPOINTS"))
+                    if debug_endpoint_discovery and options_methods_by_url:
                         print(
-                            f"[scanner] Added {hash_route_added} SPA hash-route endpoints for DOM XSS testing",
-                            file=sys.stderr,
-                        )
-
-                if endpoints:
-                    get_count = sum(1 for ep in endpoints if (ep.get("method") or "GET").upper() == "GET")
-                    post_count = sum(1 for ep in endpoints if (ep.get("method") or "GET").upper() in ("POST", "PUT", "PATCH"))
-                    allowed_count = sum(1 for ep in endpoints if ep.get("allowed_methods"))
-                    if debug_endpoint_discovery:
-                        print(
-                            f"[DEBUG SMART] endpoints={len(endpoints)} get={get_count} post={post_count} "
-                            f"allowed_methods={allowed_count}",
+                            f"[DEBUG OPTIONS] methods_by_url={len(options_methods_by_url)}",
                             file=sys.stderr
                         )
-                    if debug_endpoint_discovery and allowed_count:
-                        for i, ep in enumerate([e for e in endpoints if e.get("allowed_methods")][:5]):
+                        for i, (opt_url, methods) in enumerate(list(options_methods_by_url.items())[:5]):
                             print(
-                                f"[DEBUG SMART]   {i}: {ep.get('method')} {ep.get('url')} "
-                                f"allowed={ep.get('allowed_methods')}",
+                                f"[DEBUG OPTIONS]   {i}: {opt_url} -> {methods}",
                                 file=sys.stderr
                             )
 
-                # Get tech stack from discovery for DBMS hints
-                tech_stack = smart_discovery_data.get("tech_stack_guess", []) if smart_discovery_data else []
+                    # Endpoint-source priorities live in scanner_tools.active_prioritization
+                    # as DEFAULT_SOURCE_PRIORITY so the merge logic here and the active-scan
+                    # ordering downstream stay in lock-step. Keep aliases readable.
+                    _SOURCE_PRIORITY = DEFAULT_SOURCE_PRIORITY
+                    _DEFAULT_SOURCE_PRIORITY = DEFAULT_SOURCE_PRIORITY_VALUE
 
-                # Prioritize endpoints: high-signal params and sensitive API paths first,
-                # then real discovered endpoints before synthetic/inferred.
-                # Treat an explicit `0` as "no cap"; only fall back to max_active
-                # when the budget key is missing.
-                _budget_active_max = scan_budget.get("active_max_endpoints")
-                if _budget_active_max is None:
-                    active_endpoint_budget = int(max_active or 0)
-                else:
-                    active_endpoint_budget = int(_budget_active_max)
-                before_active_endpoints = len(endpoints)
-
-                # Re-test consumer/write routes against REAL object ids observed
-                # across the discovered surface, not the static "/{id}"->"/1"
-                # placeholder, so SQLi/XSS/BOLA probes hit live objects instead of
-                # 404ing before reaching vulnerable code (e.g. crAPI vehicle/order).
-                try:
-                    from scanner_tools.resource_propagation import enrich_endpoints_with_resource_ids
-                    _enriched_endpoints = enrich_endpoints_with_resource_ids(endpoints)
-                    _propagated = len(_enriched_endpoints) - len(endpoints)
-                    endpoints = _enriched_endpoints
-                    if _propagated:
-                        active_block["active_endpoints_resource_id_propagated"] = _propagated
-                except Exception as _rp_err:
-                    print(f"[scanner] resource-id propagation skipped: {_rp_err}", file=sys.stderr)
-
-                # Emit the FULL discovered worklist (pre-cap) so parallel
-                # `coverage` scans can partition every endpoint, not just the
-                # budget-capped/sampled subset. Universal for any smart scan.
-                try:
-                    _worklist_limit = int(scan_budget.get("active_worklist_max") or ACTIVE_WORKLIST_EMIT_LIMIT)
-                    active_block["active_worklist"] = _serialize_active_worklist(endpoints, limit=_worklist_limit)
-                    active_block["active_worklist_total"] = before_active_endpoints
-                except Exception as _wl_err:
-                    print(f"[scanner] active_worklist emit skipped: {_wl_err}", file=sys.stderr)
-
-                def _endpoint_distribution(items: list[dict[str, Any]], field: str) -> dict[str, int]:
-                    counts: dict[str, int] = {}
-                    for item in items:
-                        key = str(item.get(field) or "unknown")
-                        if field == "method":
-                            key = key.upper()
-                        counts[key] = counts.get(key, 0) + 1
-                    return dict(sorted(counts.items()))
-
-                active_block["active_endpoints_discovered_by_source"] = _endpoint_distribution(endpoints, "source")
-                active_block["active_endpoints_discovered_by_method"] = _endpoint_distribution(endpoints, "method")
-                active_candidate_endpoints = list(endpoints)
-                active_budgeted_endpoints = prioritize_active_endpoints(
-                    active_candidate_endpoints,
-                    budget=active_endpoint_budget,
-                    source_priority=_SOURCE_PRIORITY,
-                    # Focused lanes order the shared endpoint graph for their family
-                    # (SQLi -> login/search/order; XSS -> reflected/stored/SPA sinks).
-                    family=focused_active_family_name,
-                )
-                active_block["active_endpoint_budget"] = active_endpoint_budget
-                active_block["active_endpoints_discovered"] = before_active_endpoints
-                active_block["active_endpoints_selected"] = len(active_budgeted_endpoints)
-                active_block["active_endpoints_selected_by_source"] = _endpoint_distribution(active_budgeted_endpoints, "source")
-                active_block["active_endpoints_selected_by_method"] = _endpoint_distribution(active_budgeted_endpoints, "method")
-                active_block["active_execution_scope"] = "full_worklist_with_family_internal_caps"
-                active_block["active_family_input_endpoints"] = len(active_candidate_endpoints)
-                active_block["active_endpoint_budget_capped"] = bool(
-                    active_endpoint_budget and before_active_endpoints > len(active_budgeted_endpoints)
-                )
-                if active_endpoint_budget and before_active_endpoints > len(active_budgeted_endpoints):
-                    print(
-                        (
-                            "[scanner] Active endpoint budget cap: "
-                            f"{before_active_endpoints} -> {len(active_budgeted_endpoints)} "
-                            "(primary preview; family checks use full worklist with internal caps)"
-                        ),
-                        file=sys.stderr,
-                    )
-
-                # Log prioritization stats
-                source_counts = active_block.get("active_endpoints_selected_by_source") or {}
-                if source_counts:
-                    print(f"[scanner] Endpoint prioritization selected sources: {source_counts}", file=sys.stderr)
-
-                # Run smart active tests with DBMS detection and context-aware payloads
-                if auth_session:
-                    try:
-                        await auth_session.refresh_if_needed()
-                    except Exception as e:
-                        print(f"[scanner] Auth refresh before smart active tests failed: {e}", file=sys.stderr)
-
-                active_primary_max_seconds, active_enrichment_reserved_seconds = reserve_active_enrichment_budget(
-                    scan_budget.get("active_max_seconds"),
-                    primary_enabled=bool(run_sqli or run_xss),
-                    # Coverage shards (zero-rediscovery known-endpoint slices) spend their
-                    # whole budget on primary SQLi/XSS breadth; the recon backbone runs the
-                    # enrichment modules once for the whole parent.
-                    reserve_enrichment=not zero_rediscovery_scope,
-                )
-                active_block["active_total_max_seconds"] = scan_budget.get("active_max_seconds")
-                active_block["active_primary_max_seconds"] = active_primary_max_seconds
-                active_block["active_enrichment_reserved_seconds"] = active_enrichment_reserved_seconds
-                if active_enrichment_reserved_seconds:
-                    print(
-                        (
-                            "[active] Reserved post-active enrichment budget: "
-                            f"{active_enrichment_reserved_seconds:.0f}s "
-                            f"(primary probes <= {active_primary_max_seconds:.0f}s)"
-                        ),
-                        file=sys.stderr,
-                    )
-
-                # A zero/non-positive active-seconds budget means discovery-only recon
-                # (the coverage-planning pass: active_max_seconds=0, active_max_endpoints=1).
-                # The active worklist is already emitted above for harvest, so SKIP the
-                # active probes entirely — otherwise the recon ignores its 0s cap and runs
-                # broad SQLi/XSS against the live target (unsafe + slow; observed on a
-                # planning pass that probed /admin/api/auth/login with UNION SELECT).
-                active_budget_zero = float(scan_budget.get("active_max_seconds") or 0) <= 0
-                if (run_sqli or run_xss) and not active_budget_zero:
-                    smart_results = await run_smart_active_tests(
-                        url=base_url,
-                        endpoints=active_candidate_endpoints,
-                        tech_stack=tech_stack,
-                        dbms=early_dbms,  # P1-2 FIX: Use early-detected DBMS instead of auto-detect
-                        signals=nuclei_signals,  # Pass signals from nuclei findings
-                        auth_session=auth_session,  # Pass auth session for authenticated testing
-                        run_xss=run_xss,
-                        run_sqli=run_sqli,
-                        thorough_params=thorough_params,  # Test more params if --thorough-params flag is set
-                        active_max_seconds=active_primary_max_seconds,
-                        active_max_endpoints=scan_budget.get("active_max_endpoints"),
-                        active_params_per_endpoint=scan_budget.get("active_params_per_endpoint"),
-                        max_findings_per_family=scan_budget.get("max_findings_per_family"),
-                    )
-                else:
-                    if active_budget_zero and (run_sqli or run_xss):
-                        reason = "zero_active_budget_discovery_only"
-                    else:
-                        reason = f"focused_family_{focused_active_family_name}" if focused_active_family_name else "no_primary_active_families"
-                    active_block["primary_active_skipped"] = reason
-                    print(
-                        (
-                            "[active] Skipping primary SQLi/XSS probes: "
-                            f"{reason}; family-specific checks keep the active budget"
-                        ),
-                        file=sys.stderr,
-                    )
-                    smart_results = {
-                        "sqli": {},
-                        "xss": {},
-                        "endpoint_attempts": [],
-                        "budget": {
-                            "active_remaining_seconds": active_primary_max_seconds,
-                        },
-                    }
-                endpoint_attempts = smart_results.get("endpoint_attempts")
-                _append_endpoint_attempt_telemetry(active_block, endpoint_attempts)
-                smart_budget = smart_results.get("budget") or {}
-                active_remaining_after_smart = smart_budget.get("active_remaining_seconds")
-                try:
-                    active_remaining_after_smart = (
-                        float(active_remaining_after_smart)
-                        if active_remaining_after_smart is not None
-                        else None
-                    )
-                except (TypeError, ValueError):
-                    active_remaining_after_smart = None
-                active_primary_remaining_after_smart = active_remaining_after_smart
-                if active_remaining_after_smart is not None:
-                    active_remaining_after_smart = (
-                        active_remaining_after_smart + float(active_enrichment_reserved_seconds or 0.0)
-                    )
-                    active_block["active_primary_remaining_after_smart"] = round(active_primary_remaining_after_smart, 3)
-                    active_block["active_remaining_after_smart"] = round(active_remaining_after_smart, 3)
-
-                def _active_family_time_exhausted(family_stats: dict[str, Any] | None) -> bool:
-                    family_stats = family_stats or {}
-                    if not family_stats.get("budget_exhausted"):
+                    def _merge_endpoint(new_ep):
+                        url = new_ep.get("url")
+                        if not url:
+                            return False
+                        method = (new_ep.get("method") or "GET").upper()
+                        new_ep["method"] = method
+                        normalized_url = _normalize_endpoint_url(url)
+                        if normalized_url in options_methods_by_url:
+                            allowed = _dedupe_list(
+                                (new_ep.get("allowed_methods") or []) + options_methods_by_url[normalized_url]
+                            )
+                            if allowed:
+                                new_ep["allowed_methods"] = allowed
+                        key = _active_endpoint_contract_key(url, method)
+                        existing = endpoint_index.get(key)
+                        if not existing:
+                            _initialize_active_endpoint_contract(new_ep)
+                            endpoints.append(new_ep)
+                            endpoint_index[key] = new_ep
+                            return True
+                        _merge_active_endpoint_contract(existing, new_ep)
                         return False
-                    reason = family_stats.get("budget_exhausted_reason")
-                    # Finding caps limit report volume; they should not suppress
-                    # downstream verification/enrichment while time remains.
-                    return reason != "finding_cap"
 
-                primary_active_budget_exhausted = bool(
-                    _active_family_time_exhausted(smart_results.get("sqli"))
-                    or _active_family_time_exhausted(smart_results.get("xss"))
-                )
-                sqli_budget_reason = (smart_results.get("sqli") or {}).get("budget_exhausted_reason")
-                xss_budget_reason = (smart_results.get("xss") or {}).get("budget_exhausted_reason")
-                if sqli_budget_reason:
-                    active_block["smart_sqli_budget_exhausted_reason"] = sqli_budget_reason
-                if xss_budget_reason:
-                    active_block["smart_xss_budget_exhausted_reason"] = xss_budget_reason
-                if primary_active_budget_exhausted:
-                    active_block["primary_active_budget_exhausted"] = True
-                active_block["adaptive_throttle"] = get_throttle().telemetry()
-                post_active_budget_exhausted = (
-                    active_checks
-                    and active_remaining_after_smart is not None
-                    and active_remaining_after_smart < 15.0
-                )
-                if post_active_budget_exhausted:
-                    skip_reason = "active_time_budget_exhausted"
-                    active_block["post_active_enrichment_skipped"] = skip_reason
-                    remaining_text = (
-                        f"{active_remaining_after_smart:.1f}s"
-                        if active_remaining_after_smart is not None
-                        else "unknown"
-                    )
-                    print(
-                        (
-                            "[active] Skipping post-active enrichment probes: "
-                            f"{skip_reason}; active budget remaining {remaining_text}"
-                        ),
-                        file=sys.stderr,
-                    )
-
-                smart_sqli_findings = []
-                smart_xss_findings = []
-
-                if run_sqli:
-                    smart_sqli_findings = smart_results.get("sqli", {}).get("findings", [])
-                    active_block["smart_sqli"] = smart_sqli_findings
-                    active_block["get_endpoints_tested"] = smart_results.get("sqli", {}).get("get_endpoints_tested", 0)
-                    active_block["post_endpoints_tested"] = smart_results.get("sqli", {}).get("post_endpoints_tested", 0)
-                    active_block["smart_total_endpoints_tested"] = smart_results.get("total_endpoints_tested", 0)
-
-                    # Process smart SQLi results
-                    sqli_report_findings = {}
-                    if smart_sqli_findings:
-                        for f in smart_sqli_findings:
-                            method = f.get("method", "GET")
-                            title = f"SQL Injection ({f.get('dbms', 'unknown')} - {f.get('technique', 'unknown')})"
-                            if method != "GET":
-                                title = f"{method} {title}"  # e.g., "POST SQL Injection (...)"
-                            evidence_dict = {
-                                "type": f.get("type", "SQLi"),
-                                "url": f.get("url"),
-                                "method": method,
-                                "param": f.get("param"),
-                                "payload": f.get("payload"),
-                                "technique": f.get("technique"),
-                                "evidence": f.get("evidence"),
-                                "dbms": f.get("dbms"),
-                            }
-                            if f.get("request_headers"):
-                                evidence_dict["request_headers"] = f.get("request_headers")
-                            # Include content_type and body for POST verification
-                            if f.get("content_type"):
-                                evidence_dict["content_type"] = f.get("content_type")
-                            if f.get("body"):
-                                evidence_dict["body"] = f.get("body")
-                            normalized_sqli = normalize_finding(
-                                "smart_sqli",
-                                title,
-                                f.get("severity", "critical"),
-                                evidence_dict,
-                                "CWE-89"
-                            )
-                            report["findings"].append(normalized_sqli)
-                            sqli_report_findings[(f.get("url"), f.get("param"), method)] = normalized_sqli
-
-                    # Store DBMS detection info
-                    if smart_results.get("dbms_detected"):
-                        active_block["dbms_detected"] = smart_results["dbms_detected"]
-
-                    # SQLi Data Extraction - chain from confirmed SQLi to extract actual data
-                    # This provides proof of exploitation and upgrades severity
-                    if smart_sqli_findings:
-                        extraction_results = []
-                        for sqli_finding in smart_sqli_findings[:sqli_extract_max]:
-                            try:
-                                extraction = await sqli_data_extraction(
-                                    sqli_finding=sqli_finding,
-                                    auth_session=auth_session,
-                                    max_extractions=5
-                                )
-                                if extraction.get("extraction_successful"):
-                                    extraction_results.append({
-                                        "url": sqli_finding.get("url"),
-                                        "param": sqli_finding.get("param"),
-                                        **extraction
-                                    })
-                                    # Update the finding with extraction evidence
-                                    sqli_finding["extraction_evidence"] = extraction.get("evidence", [])
-                                    sqli_finding["extracted_data"] = extraction.get("extracted_data", {})
-                                    # Severity upgrade is automatic (already critical, but add flag)
-                                    sqli_finding["proof_of_exploitation"] = True
-                                    report_finding = sqli_report_findings.get((
-                                        sqli_finding.get("url"),
-                                        sqli_finding.get("param"),
-                                        sqli_finding.get("method", "GET"),
-                                    ))
-                                    if report_finding:
-                                        report_evidence = report_finding.setdefault("evidence", {})
-                                        report_evidence["verified"] = True
-                                        report_evidence["proof_of_exploitation"] = True
-                                        report_evidence["extraction_evidence"] = extraction.get("evidence", [])
-                                        report_evidence["extracted_data"] = extraction.get("extracted_data", {})
-                                        report_finding["verified"] = True
-                                        report_finding["proof_of_exploitation"] = True
-                                        report_finding["severity"] = extraction.get("severity_upgrade") or "critical"
-                                        report_finding["confidence"] = max(float(report_finding.get("confidence") or 0), 0.95)
-                                        report_finding["confidence_tier"] = "verified"
-                                        report_finding["cvss_score"] = max(float(report_finding.get("cvss_score") or 0), 9.1)
-                                        report_finding["validation"] = {
-                                            "verified": True,
-                                            "poe_proven": True,
-                                            "evidence_level": "confirmed_exploit",
-                                            "reason": "SQLi data extraction succeeded",
-                                        }
-                                    print(f"[scanner] SQLi data extraction successful for {sqli_finding.get('url')}", file=sys.stderr)
-                            except Exception as e:
-                                print(f"[scanner] SQLi extraction error: {e}", file=sys.stderr)
-
-                        if extraction_results:
-                            active_block["sqli_extraction"] = extraction_results
-
-                    # OOB SQLi Test - for blind SQLi detection via external callbacks
-                    # Requires a callback URL (e.g., Burp Collaborator) for verification
-                    oob_results = []
-                    if oob_callback_url and smart_sqli_findings:
-                        for sqli_finding in smart_sqli_findings[:oob_max_findings]:
-                            try:
-                                oob_result = await oob_sqli_test(
-                                    url=sqli_finding.get("url", ""),
-                                    param=sqli_finding.get("param", ""),
-                                    dbms=sqli_finding.get("dbms"),
-                                    callback_url=oob_callback_url,
-                                    auth_session=auth_session
-                                )
-                                if oob_result.get("payloads_sent"):
-                                    oob_results.append({
-                                        "url": sqli_finding.get("url"),
-                                        "param": sqli_finding.get("param"),
-                                        **oob_result
-                                    })
-                            except Exception as e:
-                                print(f"[scanner] OOB SQLi test error: {e}", file=sys.stderr)
-
-                    if oob_results:
-                        active_block["oob_sqli"] = oob_results
-                        # Add a finding that requires callback verification
-                        report["findings"].append(normalize_finding(
-                            "oob_sqli",
-                            "Potential Out-of-Band SQL Injection (requires callback verification)",
-                            "medium",  # Medium until callback confirms
-                            {
-                                "payloads_sent": len(oob_results),
-                                "callback_url": oob_callback_url,
-                                "note": "Check callback server for DNS/HTTP requests to confirm exploitation",
-                                "endpoints_tested": [r.get("url") for r in oob_results],
-                            },
-                            "CWE-89"
-                        ))
-
-                # Parameter-aware auxiliary injection tests + blind SSRF (OOB)
-                try:
-                    def _coerce_param_list(raw: Any) -> list[str]:
-                        if isinstance(raw, dict):
-                            return [str(k) for k in raw.keys() if k]
-                        if isinstance(raw, (list, tuple, set)):
-                            return [str(v) for v in raw if v]
-                        if isinstance(raw, str):
-                            return [raw] if raw else []
-                        return []
-
-                    def _build_query_url(test_url: str, defaults: dict[str, Any] | None) -> str:
-                        parsed = urllib.parse.urlparse(test_url)
-                        query_params = dict(urllib.parse.parse_qsl(parsed.query, keep_blank_values=True))
-                        if defaults:
-                            for name, value in defaults.items():
-                                if name not in query_params:
-                                    query_params[name] = str(value)
-                        if not query_params:
-                            return test_url
-                        new_query = urllib.parse.urlencode(query_params, doseq=True)
-                        return urllib.parse.urlunparse(parsed._replace(query=new_query))
-
-                    aux_get_limit = int(active_enrichment_limits.get("auxiliary_get_endpoints") or 4)
-                    aux_post_json_limit = int(active_enrichment_limits.get("auxiliary_post_json_endpoints") or 3)
-                    aux_param_limit = int(active_enrichment_limits.get("auxiliary_params_per_endpoint") or 3)
-                    aux_payload_limit = int(active_enrichment_limits.get("auxiliary_payloads_per_param") or 6)
-                    active_block["active_enrichment_limits"] = active_enrichment_limits
-
-                    auxiliary_injection_enabled = not (run_sqli and not run_xss)
-                    if not auxiliary_injection_enabled:
-                        record_active_enrichment_skip(active_block, "auxiliary_injection", "sql_tests_only")
-                        print("[active] Skipping auxiliary injection probes for SQLi-only scan", file=sys.stderr)
-                    else:
-                        auxiliary_decision = should_run_active_enrichment(
-                            "auxiliary_injection",
-                            post_active_budget_exhausted=post_active_budget_exhausted,
-                            active_block=active_block,
+                    manual_get_count = 0
+                    manual_post_count = 0
+                    if manual_endpoints_norm:
+                        for ep in manual_endpoints_norm:
+                            if not isinstance(ep, dict):
+                                continue
+                            ep_url = ep.get("url")
+                            if not ep_url:
+                                continue
+                            method = (ep.get("method") or "GET").upper()
+                            if method == "GET":
+                                params = ep.get("params") or []
+                                param_defaults = ep.get("param_defaults") or {}
+                                if not params and param_defaults:
+                                    params = list(param_defaults.keys())
+                                if params and _merge_endpoint({
+                                    "url": ep_url,
+                                    "method": "GET",
+                                    "params": params,
+                                    "param_defaults": param_defaults,
+                                    "source": "manual",
+                                }):
+                                    manual_get_count += 1
+                            elif method in ("POST", "PUT", "PATCH"):
+                                body_params = ep.get("body_params") or ep.get("params") or []
+                                if body_params and _merge_endpoint({
+                                    "url": ep_url,
+                                    "method": method,
+                                    "body_params": body_params,
+                                    "body_required_params": ep.get("body_required_params") or body_params,
+                                    "body_param_defaults": ep.get("body_param_defaults") or {},
+                                    "body_template": ep.get("body_template"),
+                                    "content_type": ep.get("content_type") or "application/json",
+                                    "source": "manual",
+                                }):
+                                    manual_post_count += 1
+                    if manual_get_count or manual_post_count:
+                        print(
+                            f"[scanner] Added {manual_get_count} GET and {manual_post_count} POST manual endpoints to smart testing",
+                            file=sys.stderr
                         )
-                        if not auxiliary_decision.run:
-                            auxiliary_injection_enabled = False
-                            record_active_enrichment_skip(
-                                active_block,
-                                "auxiliary_injection",
-                                auxiliary_decision.reason or "active_time_budget_exhausted",
-                            )
+
+                    js_request_count = 0
+                    for js_endpoint in _frontend_http_active_endpoints(base_url, js_bundle_analysis):
+                        if _merge_endpoint(js_endpoint):
+                            js_request_count += 1
+                    if js_request_count:
+                        active_block["frontend_http_requests"] = js_request_count
+                        print(
+                            f"[scanner] Added {js_request_count} method-aware frontend HTTP requests to smart testing",
+                            file=sys.stderr,
+                        )
+
+                    if not focused_manual_active_scope:
+                        har_candidate_paths = {
+                            _normalize_endpoint_url(str(candidate.get("url") or ""))
+                            for candidate in (har_test_targets or [])
+                            if candidate.get("url")
+                        }
+                        browser_candidate_paths = {
+                            _normalize_endpoint_url(str(candidate.get("url") or ""))
+                            for candidate in (browser_api_endpoints or [])
+                            if isinstance(candidate, dict) and candidate.get("url")
+                        }
+                        for u in cand:
+                            parsed = urllib.parse.urlparse(u)
+                            params = list(urllib.parse.parse_qs(parsed.query, keep_blank_values=True).keys())
+                            normalized_candidate = _normalize_endpoint_url(u)
+                            if u in cand_synthetic:
+                                source = "inferred"
+                            elif normalized_candidate in har_candidate_paths:
+                                source = "har_discovery"
+                            elif normalized_candidate in browser_candidate_paths:
+                                source = "browser_api_capture"
+                            else:
+                                source = "crawl"
+                            _merge_endpoint({"url": u, "method": "GET", "params": params, "source": source})
+
+                        lookup_added = 0
+                        lookup_sources: list[str] = []
+                        lookup_sources.extend(functional_urls or [])
+                        lookup_sources.extend(browser_urls or [])
+                        lookup_sources.extend(manual_urls or [])
+                        for ep in _path_value_lookup_active_endpoints(base_url, lookup_sources):
+                            if _merge_endpoint(ep):
+                                lookup_added += 1
+                        if lookup_added:
+                            active_block["active_path_value_lookup_routes"] = lookup_added
                             print(
-                                f"[active] Skipping auxiliary injection probes: {auxiliary_decision.reason}",
+                                f"[scanner] Added {lookup_added} queryless lookup routes for path-value active testing",
                                 file=sys.stderr,
                             )
 
-                    param_endpoints = []
-                    if auxiliary_injection_enabled:
-                        param_endpoints = [
-                            ep for ep in endpoints
-                            if (ep.get("method") or "GET").upper() == "GET"
-                            and _coerce_param_list(ep.get("params") or ep.get("query_params"))
-                        ]
-                        param_endpoints = param_endpoints[:aux_get_limit]
+                    # Add inferred parameter endpoints from smart discovery (even if no query string)
+                    if smart_discovery_data and not focused_manual_active_scope:
+                        for endpoint in smart_discovery_data.get("endpoints_with_params", []) or []:
+                            if not isinstance(endpoint, dict):
+                                continue
+                            ep_url = endpoint.get("url")
+                            params = endpoint.get("params") or []
+                            if ep_url and params:
+                                _merge_endpoint({"url": ep_url, "method": "GET", "params": params, "source": "crawl"})
+                        for ep_url, params in (smart_discovery_data.get("discovered_params") or {}).items():
+                            if ep_url and params:
+                                _merge_endpoint({"url": ep_url, "method": "GET", "params": params, "source": "crawl"})
 
-                    ssrf_param_keywords = {
-                        "url", "uri", "path", "dest", "redirect", "link", "proxy",
-                        "domain", "host", "site", "html", "val", "feed", "dir",
-                        "page", "callback", "webhook", "target", "src", "file",
-                        "reference", "ref", "fetch", "request", "load", "data",
-                        "image", "img", "pdf", "document", "download", "resource",
-                    }
-                    xxe_param_keywords = {"xml", "xxe", "file", "doc", "data", "payload", "content"}
+                    # Add form-discovered endpoints (POST/GET) from discovery
+                    def _is_token_param(name: str) -> bool:
+                        name_l = name.lower()
+                        return any(
+                            token in name_l for token in
+                            ("csrf", "xsrf", "authenticity", "nonce", "token", "_token", "__requestverificationtoken")
+                        )
 
-                    if param_endpoints:
-                        ldap_param = {"vulnerable": False, "payloads_tested": set(), "tested_params": set(), "evidence": []}
-                        xpath_param = {"vulnerable": False, "payloads_tested": set(), "tested_params": set(), "evidence": []}
-                        ssti_param = {"vulnerable": False, "payloads_tested": set(), "tested_params": set(), "evidence": []}
+                    def _iter_form_inputs(raw_inputs):
+                        if isinstance(raw_inputs, dict):
+                            for key, value in raw_inputs.items():
+                                if isinstance(value, dict):
+                                    item = {"name": key, **value}
+                                else:
+                                    item = {"name": key, "value": value}
+                                yield item
+                        elif isinstance(raw_inputs, list):
+                            for item in raw_inputs:
+                                yield item
+                        elif isinstance(raw_inputs, str):
+                            yield raw_inputs
 
-                        ssti_param_hints = {"template", "view", "render", "page", "tpl"}
+                    def _normalize_form_url(form: dict) -> str | None:
+                        action = (
+                            form.get("action")
+                            or form.get("form_action")
+                            or form.get("endpoint")
+                            or form.get("url")
+                            or form.get("target")
+                        )
+                        page_url = (
+                            form.get("page")
+                            or form.get("page_url")
+                            or form.get("source")
+                            or form.get("referrer")
+                        )
+                        action = str(action or "").strip()
+                        if not action or action == "#":
+                            action = str(page_url or base_url).strip()
+                        if action.startswith("javascript:") or action.startswith("mailto:"):
+                            return None
+                        if page_url and not str(page_url).startswith(("http://", "https://")):
+                            page_url = urllib.parse.urljoin(base_url, str(page_url))
+                        return urllib.parse.urljoin(page_url or base_url, action)
 
-                        for ep in param_endpoints:
-                            params = _coerce_param_list(ep.get("params") or ep.get("query_params"))
+                    def _form_content_type(form: dict) -> str:
+                        enctype = (form.get("enctype") or form.get("enc_type") or form.get("content_type") or "").lower()
+                        if "multipart/form-data" in enctype:
+                            return "multipart/form-data"
+                        if "application/json" in enctype:
+                            return "application/json"
+                        if "text/plain" in enctype:
+                            return "text/plain"
+                        return "application/x-www-form-urlencoded"
+
+                    def _extract_form_fields(form: dict) -> tuple[list[str], list[str], dict[str, Any]]:
+                        raw_inputs = (
+                            form.get("inputs")
+                            or form.get("fields")
+                            or form.get("params")
+                            or form.get("form_fields")
+                            or form.get("input")
+                            or []
+                        )
+                        body_params = []
+                        required_params = []
+                        defaults: dict[str, Any] = {}
+                        for item in _iter_form_inputs(raw_inputs):
+                            name = None
+                            input_type = ""
+                            required = False
+                            value = None
+                            if isinstance(item, str):
+                                name = item
+                            elif isinstance(item, dict):
+                                name = item.get("name") or item.get("id") or item.get("key")
+                                input_type = (item.get("type") or item.get("input_type") or "").lower()
+                                required = bool(item.get("required") or item.get("is_required"))
+                                value = item.get("value") if item.get("value") is not None else item.get("default")
+                            if not name:
+                                continue
+                            if input_type in ("submit", "button", "reset", "image"):
+                                continue
+                            if input_type == "file":
+                                continue
+                            if value not in (None, ""):
+                                defaults[name] = value
+                            if _is_token_param(name):
+                                continue
+                            body_params.append(name)
+                            if required:
+                                required_params.append(name)
+                        if not body_params and defaults:
+                            body_params = list(defaults.keys())
+                        return _dedupe_list(body_params), _dedupe_list(required_params), defaults
+
+                    if smart_discovery_data and not focused_manual_active_scope:
+                        forms = smart_discovery_data.get("forms", []) or []
+                        form_post_count = 0
+                        form_get_count = 0
+                        for form in forms:
+                            if not isinstance(form, dict):
+                                continue
+                            form_url = _normalize_form_url(form)
+                            if not form_url:
+                                continue
+                            method = (form.get("method") or form.get("http_method") or form.get("form_method") or "POST").upper()
+                            params, required_params, defaults = _extract_form_fields(form)
                             if not params:
                                 continue
-                            defaults = ep.get("param_defaults") or ep.get("query_param_defaults") or {}
-                            test_url = _build_query_url(ep.get("url", ""), defaults)
-                            if not test_url:
+                            if method == "GET":
+                                _merge_endpoint({"url": form_url, "method": "GET", "params": params, "source": "form"})
+                                form_get_count += 1
+                            elif method in ("POST", "PUT", "PATCH"):
+                                _merge_endpoint({
+                                    "url": form_url,
+                                    "method": method,
+                                    "body_params": params,
+                                    "body_required_params": required_params,
+                                    "body_param_defaults": defaults,
+                                    "content_type": _form_content_type(form),
+                                    "source": "form",
+                                })
+                                form_post_count += 1
+                        if form_post_count or form_get_count:
+                            print(
+                                f"[scanner] Added {form_get_count} GET and {form_post_count} POST endpoints from form discovery",
+                                file=sys.stderr
+                            )
+
+                    # Discover OpenAPI/Swagger schema endpoints for smart testing
+                    if focused_manual_active_scope:
+                        print("[smart] Focused manual active scope: skipping OpenAPI and inferred endpoint expansion", file=sys.stderr)
+                    else:
+                        try:
+                            openapi_sources = []
+                            if openapi_url:
+                                explicit_schema = await fetch_openapi_schema(openapi_url, auth_session=auth_session)
+                                if explicit_schema:
+                                    openapi_sources.append(explicit_schema)
+                            auto_schema = await discover_openapi_schema(base_url, auth_session=auth_session)
+                            if auto_schema:
+                                openapi_sources.append(auto_schema)
+
+                            if openapi_sources:
+                                import re as path_re
+                                post_count = 0
+                                get_count = 0
+                                seen_specs = set()
+                                for schema in openapi_sources:
+                                    schema_url = schema.get("url")
+                                    if schema_url in seen_specs:
+                                        continue
+                                    seen_specs.add(schema_url)
+                                    for ep in schema.get("endpoints", []) or []:
+                                        method = ep.get("method")
+                                        path = ep.get("path", "")
+                                        if not method or not path:
+                                            continue
+                                        if "{" in path:
+                                            path = path_re.sub(r'\{[^}]+\}', '1', path)
+                                        full_url = urllib.parse.urljoin(base_url, path)
+                                        if method in ("POST", "PUT", "PATCH") and ep.get("body_params"):
+                                            if _merge_endpoint({
+                                                "url": full_url,
+                                                "method": method,
+                                                "body_params": ep["body_params"],
+                                                "body_required_params": ep.get("body_required_params", []),
+                                                "body_param_defaults": ep.get("body_param_defaults", {}),
+                                                "content_type": ep.get("content_type", "application/json"),
+                                                "source": "openapi",
+                                            }):
+                                                post_count += 1
+                                        elif method in ("GET", "DELETE", "HEAD", "OPTIONS") and ep.get("query_params"):
+                                            if _merge_endpoint({
+                                                "url": full_url,
+                                                "method": method,
+                                                "params": ep.get("query_params", []),
+                                                "source": "openapi",
+                                            }):
+                                                get_count += 1
+                                        else:
+                                            # Parameter-less (or path-param-only) OpenAPI endpoint.
+                                            # Still ingest it as a probe/crawl target so unauth
+                                            # sensitive-data exposure, IDOR, and access-control
+                                            # detectors can reach it. These are exactly the
+                                            # high-severity GET /api/.../token | /api/admin/api-keys
+                                            # | /api/.../{id} routes that carry no query string —
+                                            # previously dropped, so they were never tested.
+                                            if _merge_endpoint({
+                                                "url": full_url,
+                                                "method": method,
+                                                "params": ep.get("query_params", []),
+                                                "source": "openapi",
+                                            }):
+                                                if method in ("POST", "PUT", "PATCH"):
+                                                    post_count += 1
+                                                else:
+                                                    get_count += 1
+                                if post_count or get_count:
+                                    print(f"[scanner] Added {get_count} GET and {post_count} POST endpoints from OpenAPI", file=sys.stderr)
+
+                                # Smart mode: optionally kick off Schemathesis when OpenAPI is found
+                                if schemathesis_task is None and not public_only:
+                                    schema_url = openapi_url
+                                    if not schema_url:
+                                        for schema in openapi_sources:
+                                            candidate_url = schema.get("url")
+                                            if candidate_url:
+                                                schema_url = candidate_url
+                                                break
+                                    if schema_url:
+                                        schemathesis_schema_url = schema_url
+                                        schemathesis_task = asyncio.create_task(
+                                            schemathesis_run(
+                                                schema_url,
+                                                api_token,
+                                                base_url=base_url,
+                                                auth_session=auth_session,
+                                            )
+                                        )
+                        except Exception as e:
+                            print(f"[scanner] OpenAPI discovery failed: {e}", file=sys.stderr)
+
+                    # Infer POST endpoints from discovered URLs (katana crawl results)
+                    # This converts API paths like /api/auth/login, /workshop/api/shop/apply_coupon
+                    # into POST endpoint candidates with inferred body parameters
+                    # Skip when SPA catch-all detected — discovered URLs are phantom paths
+                    _skip_post_inference = focused_manual_active_scope or (smart_discovery_data and smart_discovery_data.get("spa_catch_all"))
+                    if _skip_post_inference:
+                        reason = "focused manual active scope" if focused_manual_active_scope else "SPA catch-all detected"
+                        print(f"[scanner] POST inference: skipped ({reason})", file=sys.stderr)
+                    try:
+                        # Patterns that suggest POST/mutation operations
+                        POST_INDICATORS = [
+                            "login", "signin", "signup", "register", "auth",
+                            "create", "add", "new", "insert",
+                            "update", "edit", "modify", "change",
+                            "delete", "remove",
+                            "submit", "send", "post",
+                            "apply", "validate", "verify", "confirm",
+                            "checkout", "payment", "pay", "purchase", "order",
+                            "upload", "import",
+                            "reset", "forgot", "recover",
+                            "contact", "feedback", "comment", "review",
+                            "subscribe", "unsubscribe",
+                            "coupon", "discount", "promo",
+                        ]
+
+                        # Parameter inference based on path segments
+                        PATH_TO_PARAMS = {
+                            "login": ["email", "username", "password"],
+                            "signin": ["email", "username", "password"],
+                            "signup": ["email", "username", "password", "name"],
+                            "register": ["email", "username", "password", "name"],
+                            "auth": ["email", "username", "password", "token"],
+                            "search": ["query", "q", "term", "keyword"],
+                            "order": ["product_id", "quantity", "id"],
+                            "checkout": ["cart_id", "payment_method", "address"],
+                            "payment": ["amount", "card", "token"],
+                            "coupon": ["coupon_code", "code", "coupon"],
+                            "apply": ["code", "id", "value"],
+                            "validate": ["code", "token", "value"],
+                            "verify": ["code", "token", "otp"],
+                            "reset": ["email", "token", "password"],
+                            "forgot": ["email"],
+                            "contact": ["email", "message", "name", "subject"],
+                            "feedback": ["message", "rating", "comment"],
+                            "comment": ["content", "text", "message", "post_id"],
+                            "review": ["rating", "comment", "product_id"],
+                            "upload": ["file", "name"],
+                            "user": ["id", "email", "username"],
+                            "product": ["id", "name", "price"],
+                            "shop": ["id", "product_id", "quantity"],
+                        }
+
+                        # Collect all discovered URLs from crawl
+                        all_discovered_urls = []
+                        if not _skip_post_inference:
+                            if crawl_urls:
+                                all_discovered_urls.extend(crawl_urls)
+                            if smart_discovery_data:
+                                all_discovered_urls.extend(smart_discovery_data.get("api_endpoints", []))
+
+                        print(f"[scanner] POST inference: {len(all_discovered_urls)} URLs to analyze (crawl_urls={len(crawl_urls) if crawl_urls else 0})", file=sys.stderr)
+
+                        inferred_post_count = 0
+                        seen_post_urls = set()
+
+                        for disc_url in all_discovered_urls:
+                            if not isinstance(disc_url, str):
+                                continue
+                            parsed = urllib.parse.urlparse(disc_url)
+                            path_lower = parsed.path.lower()
+
+                            # Build canonical URL without query params
+                            base_post_url = urllib.parse.urljoin(base_url, parsed.path.rstrip("/"))
+                            if base_post_url in seen_post_urls:
                                 continue
 
-                            ldap_res = await ldap_injection_test(
-                                test_url,
-                                params_to_test=params,
-                                auth_session=auth_session,
-                                param_defaults=defaults,
-                                max_params=aux_param_limit,
-                                max_payloads=aux_payload_limit,
-                            )
-                            if ldap_res.get("vulnerable"):
-                                ldap_param["vulnerable"] = True
-                                ldap_param["evidence"].extend(ldap_res.get("evidence", []))
-                                ldap_param["payloads_tested"].update(ldap_res.get("payloads_tested", []))
-                                ldap_param["tested_params"].update(ldap_res.get("tested_params", []))
+                            # Check if path suggests a POST operation
+                            is_post_candidate = False
+                            matched_params = []
+                            indicators_in_path = {ind for ind in POST_INDICATORS if ind in path_lower}
+                            primary_indicator = None
+                            matched_indicators: set[str] = set()
 
-                            xpath_res = await xpath_injection_test(
-                                test_url,
-                                params_to_test=params,
-                                auth_session=auth_session,
-                                param_defaults=defaults,
-                                max_params=aux_param_limit,
-                                max_payloads=aux_payload_limit,
-                            )
-                            if xpath_res.get("vulnerable"):
-                                xpath_param["vulnerable"] = True
-                                xpath_param["evidence"].extend(xpath_res.get("evidence", []))
-                                xpath_param["payloads_tested"].update(xpath_res.get("payloads_tested", []))
-                                xpath_param["tested_params"].update(xpath_res.get("tested_params", []))
+                            for indicator in POST_INDICATORS:
+                                if indicator in indicators_in_path:
+                                    is_post_candidate = True
+                                    primary_indicator = indicator
+                                    matched_indicators.add(indicator)
+                                    if indicator in PATH_TO_PARAMS:
+                                        matched_params.extend(PATH_TO_PARAMS[indicator])
+                                    break
 
-                            if any(p.lower() in ssti_param_hints for p in params):
-                                ssti_res = await ssti_test(
+                            # Also check individual path segments for substring matches
+                            # e.g., "apply_coupon" should match "coupon" in PATH_TO_PARAMS
+                            segments = [s for s in parsed.path.split("/") if s]
+                            for segment in segments:
+                                seg_lower = segment.lower()
+                                # Only enrich params for explicit indicator tokens (conservative)
+                                tokens = [t for t in re.split(r"[^a-z0-9]+", seg_lower) if t]
+                                for token in tokens:
+                                    if token == primary_indicator:
+                                        continue
+                                    if token in indicators_in_path and token in PATH_TO_PARAMS:
+                                        matched_indicators.add(token)
+                                        matched_params.extend(PATH_TO_PARAMS[token])
+
+                            if is_post_candidate and matched_params:
+                                seen_post_urls.add(base_post_url)
+                                # Deduplicate params while preserving order
+                                unique_params = list(dict.fromkeys(matched_params))
+                                if _merge_endpoint({
+                                    "url": base_post_url,
+                                    "method": "POST",
+                                    "body_params": unique_params[:8],
+                                    "body_param_defaults": {},
+                                    "content_type": "application/json",
+                                    "source": "inferred",
+                                }):
+                                    inferred_post_count += 1
+                                    if os.environ.get("SHAKERSCAN_DEBUG_POST_INFER") == "1":
+                                        print(
+                                            f"[scanner][debug] POST infer url={base_post_url} path={parsed.path} "
+                                            f"indicators={sorted(matched_indicators)} params={unique_params[:8]}",
+                                            file=sys.stderr
+                                        )
+
+                        if inferred_post_count > 0:
+                            print(f"[scanner] Inferred {inferred_post_count} POST endpoints from discovered URLs", file=sys.stderr)
+                    except Exception as e:
+                        print(f"[scanner] POST endpoint inference failed: {e}", file=sys.stderr)
+
+                    # Add common POST endpoint patterns for apps without OpenAPI
+                    # Enabled in complete_mode (full/aggressive) and smart_mode since these
+                    # are active scan types that should test POST body injection
+                    if (complete_mode or smart_mode) and not focused_manual_active_scope:
+                        COMMON_POST_ENDPOINTS = [
+                            ("/api/auth/login", ["email", "username", "password"]),
+                            ("/api/login", ["email", "username", "password"]),
+                            ("/api/v1/login", ["email", "username", "password"]),
+                            ("/api/v2/user/login", ["email", "password"]),
+                            ("/api/search", ["query", "q", "term"]),
+                            ("/rest/user/login", ["email", "password"]),
+                            # Read-only endpoints safe to probe
+                            ("/api/users", ["id"]),
+                            ("/api/user", ["id"]),
+                            ("/api/products", ["id", "category"]),
+                        ]
+                        added_common = 0
+                        for path, params in COMMON_POST_ENDPOINTS:
+                            full_url = urllib.parse.urljoin(base_url, path)
+                            if _merge_endpoint({
+                                "url": full_url,
+                                "method": "POST",
+                                "body_params": params,
+                                "body_param_defaults": {},
+                                "content_type": "application/json",
+                                "source": "common",
+                            }):
+                                added_common += 1
+                        if added_common > 0:
+                            print(f"[scanner] Added {added_common} common POST endpoints (active scan mode)", file=sys.stderr)
+
+                    # OPTIONS-based method discovery expansion
+                    if options_method_results and options_method_results.get("methods_by_url") and not focused_manual_active_scope:
+                        def _infer_params_from_path(path: str, method: str) -> list[str]:
+                            path_lower = path.lower()
+                            if method in ("POST", "PUT", "PATCH"):
+                                if any(k in path_lower for k in ["login", "signin", "auth"]):
+                                    return ["username", "email", "password"]
+                                if any(k in path_lower for k in ["register", "signup"]):
+                                    return ["email", "username", "password", "name"]
+                                if any(k in path_lower for k in ["search", "query"]):
+                                    return ["q", "query"]
+                                if any(k in path_lower for k in ["order", "cart", "checkout"]):
+                                    return ["id", "product_id", "quantity"]
+                                return ["id", "name"]
+                            if "search" in path_lower or "query" in path_lower:
+                                return ["q", "query"]
+                            if any(k in path_lower for k in ["user", "account", "profile"]):
+                                return ["id", "user", "email"]
+                            return ["id"]
+
+                        def _find_params_for_url(url: str) -> list[str]:
+                            target_norm = _normalize_endpoint_url(url)
+                            for ep in endpoints:
+                                if _normalize_endpoint_url(ep.get("url", "")) == target_norm:
+                                    if ep.get("params"):
+                                        return list(ep.get("params") or [])
+                                    if ep.get("body_params"):
+                                        return list(ep.get("body_params") or [])
+                            return []
+
+                        options_added = 0
+                        for opt_url, methods in (options_method_results.get("methods_by_url") or {}).items():
+                            if not opt_url or not methods:
+                                continue
+                            target_norm = _normalize_endpoint_url(opt_url)
+                            matching_contracts = [
+                                endpoint
+                                for endpoint in endpoints
+                                if _normalize_endpoint_url(str(endpoint.get("url") or "")) == target_norm
+                            ]
+                            if not any(_supports_options_method_expansion(endpoint) for endpoint in matching_contracts):
+                                continue
+                            parsed = urllib.parse.urlparse(opt_url)
+                            for method in methods:
+                                method_u = method.upper()
+                                if method_u not in ("GET", "POST", "PUT", "PATCH"):
+                                    continue
+                                params = _find_params_for_url(opt_url)
+                                if not params:
+                                    params = _infer_params_from_path(parsed.path or "/", method_u)
+                                if method_u == "GET":
+                                    if _merge_endpoint({"url": opt_url, "method": "GET", "params": params, "source": "options"}):
+                                        options_added += 1
+                                else:
+                                    if _merge_endpoint({
+                                        "url": opt_url,
+                                        "method": method_u,
+                                        "body_params": params,
+                                        "body_param_defaults": {},
+                                        "content_type": "application/json",
+                                        "source": "options",
+                                    }):
+                                        options_added += 1
+
+                        if options_added > 0:
+                            print(f"[scanner] Added {options_added} endpoints from OPTIONS method discovery", file=sys.stderr)
+
+                    # Add HAR-discovered endpoints with method/body params preserved
+                    if har_test_targets and not focused_manual_active_scope:
+                        har_get_count = 0
+                        har_post_count = 0
+                        for har_target in har_test_targets:
+                            har_url = har_target.get("url")
+                            if not har_url:
+                                continue
+                            har_method = (har_target.get("method") or "GET").upper()
+                            har_params = har_target.get("params", {})
+                            har_param_values = har_target.get("param_values", {})
+                            har_content_type = har_target.get("content_type") or "application/json"
+                            har_body_template = har_target.get("body_template")
+
+                            if har_method == "GET":
+                                # params.query is now a list of param names from get_testable_endpoints
+                                query_params = har_params.get("query", [])
+                                query_defaults = har_param_values.get("query", {})
+                                if query_params and _merge_endpoint({
+                                    "url": har_url,
+                                    "method": "GET",
+                                    "params": query_params,
+                                    "param_defaults": query_defaults,
+                                    "source": "har_discovery",
+                                }):
+                                    har_get_count += 1
+                            elif har_method in ("POST", "PUT", "PATCH"):
+                                # params.body is now a list of param names from get_testable_endpoints
+                                body_params = har_params.get("body", [])
+                                body_defaults = har_param_values.get("body", {})
+                                if body_params and _merge_endpoint({
+                                    "url": har_url,
+                                    "method": har_method,
+                                    "body_params": body_params,
+                                    "body_param_defaults": body_defaults,
+                                    "content_type": har_content_type,
+                                    "body_template": har_body_template,
+                                    "source": "har_discovery",
+                                }):
+                                    har_post_count += 1
+
+                        if har_get_count or har_post_count:
+                            print(f"[scanner] Added {har_get_count} GET and {har_post_count} POST endpoints from HAR discovery", file=sys.stderr)
+
+                    if not focused_manual_active_scope:
+                        hash_route_sources: list[Any] = []
+                        hash_route_sources.extend(browser_seed_urls or [])
+                        hash_route_sources.extend(crawl_urls or [])
+                        hash_route_sources.extend(seed_entry_urls or [])
+                        sec_sample = (sec_txt or {}).get("sample") if isinstance(sec_txt, dict) else None
+                        if sec_sample:
+                            hash_route_sources.append(sec_sample)
+                        for header_values in (chosen_headers or {}).values():
+                            if isinstance(header_values, list):
+                                hash_route_sources.extend(header_values)
+                            elif header_values:
+                                hash_route_sources.append(header_values)
+
+                        hash_route_added = 0
+                        for ep in build_hash_route_active_endpoints(base_url, hash_route_sources):
+                            if _merge_endpoint(ep):
+                                hash_route_added += 1
+                        if hash_route_added:
+                            print(
+                                f"[scanner] Added {hash_route_added} SPA hash-route endpoints for DOM XSS testing",
+                                file=sys.stderr,
+                            )
+
+                    if endpoints:
+                        get_count = sum(1 for ep in endpoints if (ep.get("method") or "GET").upper() == "GET")
+                        post_count = sum(1 for ep in endpoints if (ep.get("method") or "GET").upper() in ("POST", "PUT", "PATCH"))
+                        allowed_count = sum(1 for ep in endpoints if ep.get("allowed_methods"))
+                        if debug_endpoint_discovery:
+                            print(
+                                f"[DEBUG SMART] endpoints={len(endpoints)} get={get_count} post={post_count} "
+                                f"allowed_methods={allowed_count}",
+                                file=sys.stderr
+                            )
+                        if debug_endpoint_discovery and allowed_count:
+                            for i, ep in enumerate([e for e in endpoints if e.get("allowed_methods")][:5]):
+                                print(
+                                    f"[DEBUG SMART]   {i}: {ep.get('method')} {ep.get('url')} "
+                                    f"allowed={ep.get('allowed_methods')}",
+                                    file=sys.stderr
+                                )
+
+                    # Get tech stack from discovery for DBMS hints
+                    tech_stack = smart_discovery_data.get("tech_stack_guess", []) if smart_discovery_data else []
+
+                    # Prioritize endpoints: high-signal params and sensitive API paths first,
+                    # then real discovered endpoints before synthetic/inferred.
+                    # Treat an explicit `0` as "no cap"; only fall back to max_active
+                    # when the budget key is missing.
+                    _budget_active_max = scan_budget.get("active_max_endpoints")
+                    if _budget_active_max is None:
+                        active_endpoint_budget = int(max_active or 0)
+                    else:
+                        active_endpoint_budget = int(_budget_active_max)
+                    before_active_endpoints = len(endpoints)
+
+                    # Re-test consumer/write routes against REAL object ids observed
+                    # across the discovered surface, not the static "/{id}"->"/1"
+                    # placeholder, so SQLi/XSS/BOLA probes hit live objects instead of
+                    # 404ing before reaching vulnerable code (e.g. crAPI vehicle/order).
+                    try:
+                        from scanner_tools.resource_propagation import enrich_endpoints_with_resource_ids
+                        _enriched_endpoints = enrich_endpoints_with_resource_ids(endpoints)
+                        _propagated = len(_enriched_endpoints) - len(endpoints)
+                        endpoints = _enriched_endpoints
+                        if _propagated:
+                            active_block["active_endpoints_resource_id_propagated"] = _propagated
+                    except Exception as _rp_err:
+                        print(f"[scanner] resource-id propagation skipped: {_rp_err}", file=sys.stderr)
+
+                    # Emit the FULL discovered worklist (pre-cap) so parallel
+                    # `coverage` scans can partition every endpoint, not just the
+                    # budget-capped/sampled subset. Universal for any smart scan.
+                    try:
+                        _worklist_limit = int(scan_budget.get("active_worklist_max") or ACTIVE_WORKLIST_EMIT_LIMIT)
+                        active_block["active_worklist"] = _serialize_active_worklist(endpoints, limit=_worklist_limit)
+                        active_block["active_worklist_total"] = before_active_endpoints
+                    except Exception as _wl_err:
+                        print(f"[scanner] active_worklist emit skipped: {_wl_err}", file=sys.stderr)
+
+                    def _endpoint_distribution(items: list[dict[str, Any]], field: str) -> dict[str, int]:
+                        counts: dict[str, int] = {}
+                        for item in items:
+                            key = str(item.get(field) or "unknown")
+                            if field == "method":
+                                key = key.upper()
+                            counts[key] = counts.get(key, 0) + 1
+                        return dict(sorted(counts.items()))
+
+                    active_block["active_endpoints_discovered_by_source"] = _endpoint_distribution(endpoints, "source")
+                    active_block["active_endpoints_discovered_by_method"] = _endpoint_distribution(endpoints, "method")
+                    active_candidate_endpoints = list(endpoints)
+                    active_budgeted_endpoints = prioritize_active_endpoints(
+                        active_candidate_endpoints,
+                        budget=active_endpoint_budget,
+                        source_priority=_SOURCE_PRIORITY,
+                        # Focused lanes order the shared endpoint graph for their family
+                        # (SQLi -> login/search/order; XSS -> reflected/stored/SPA sinks).
+                        family=focused_active_family_name,
+                    )
+                    active_block["active_endpoint_budget"] = active_endpoint_budget
+                    active_block["active_endpoints_discovered"] = before_active_endpoints
+                    active_block["active_endpoints_selected"] = len(active_budgeted_endpoints)
+                    active_block["active_endpoints_selected_by_source"] = _endpoint_distribution(active_budgeted_endpoints, "source")
+                    active_block["active_endpoints_selected_by_method"] = _endpoint_distribution(active_budgeted_endpoints, "method")
+                    active_block["active_execution_scope"] = "full_worklist_with_family_internal_caps"
+                    active_block["active_family_input_endpoints"] = len(active_candidate_endpoints)
+                    active_block["active_endpoint_budget_capped"] = bool(
+                        active_endpoint_budget and before_active_endpoints > len(active_budgeted_endpoints)
+                    )
+                    if active_endpoint_budget and before_active_endpoints > len(active_budgeted_endpoints):
+                        print(
+                            (
+                                "[scanner] Active endpoint budget cap: "
+                                f"{before_active_endpoints} -> {len(active_budgeted_endpoints)} "
+                                "(primary preview; family checks use full worklist with internal caps)"
+                            ),
+                            file=sys.stderr,
+                        )
+
+                    # Log prioritization stats
+                    source_counts = active_block.get("active_endpoints_selected_by_source") or {}
+                    if source_counts:
+                        print(f"[scanner] Endpoint prioritization selected sources: {source_counts}", file=sys.stderr)
+
+                    # Run smart active tests with DBMS detection and context-aware payloads
+                    if auth_session:
+                        try:
+                            await auth_session.refresh_if_needed()
+                        except Exception as e:
+                            print(f"[scanner] Auth refresh before smart active tests failed: {e}", file=sys.stderr)
+
+                    active_primary_max_seconds, active_enrichment_reserved_seconds = reserve_active_enrichment_budget(
+                        scan_budget.get("active_max_seconds"),
+                        primary_enabled=bool(run_sqli or run_xss),
+                        # Coverage shards (zero-rediscovery known-endpoint slices) spend their
+                        # whole budget on primary SQLi/XSS breadth; the recon backbone runs the
+                        # enrichment modules once for the whole parent.
+                        reserve_enrichment=not zero_rediscovery_scope,
+                    )
+                    active_block["active_total_max_seconds"] = scan_budget.get("active_max_seconds")
+                    active_block["active_primary_max_seconds"] = active_primary_max_seconds
+                    active_block["active_enrichment_reserved_seconds"] = active_enrichment_reserved_seconds
+                    if active_enrichment_reserved_seconds:
+                        print(
+                            (
+                                "[active] Reserved post-active enrichment budget: "
+                                f"{active_enrichment_reserved_seconds:.0f}s "
+                                f"(primary probes <= {active_primary_max_seconds:.0f}s)"
+                            ),
+                            file=sys.stderr,
+                        )
+
+                    # A zero/non-positive active-seconds budget means discovery-only recon
+                    # (the coverage-planning pass: active_max_seconds=0, active_max_endpoints=1).
+                    # The active worklist is already emitted above for harvest, so SKIP the
+                    # active probes entirely — otherwise the recon ignores its 0s cap and runs
+                    # broad SQLi/XSS against the live target (unsafe + slow; observed on a
+                    # planning pass that probed /admin/api/auth/login with UNION SELECT).
+                    active_budget_zero = float(scan_budget.get("active_max_seconds") or 0) <= 0
+                    if (run_sqli or run_xss) and not active_budget_zero:
+                        smart_results = await run_smart_active_tests(
+                            url=base_url,
+                            endpoints=active_candidate_endpoints,
+                            tech_stack=tech_stack,
+                            dbms=early_dbms,  # P1-2 FIX: Use early-detected DBMS instead of auto-detect
+                            signals=nuclei_signals,  # Pass signals from nuclei findings
+                            auth_session=auth_session,  # Pass auth session for authenticated testing
+                            run_xss=run_xss,
+                            run_sqli=run_sqli,
+                            thorough_params=thorough_params,  # Test more params if --thorough-params flag is set
+                            active_max_seconds=active_primary_max_seconds,
+                            active_max_endpoints=scan_budget.get("active_max_endpoints"),
+                            active_params_per_endpoint=scan_budget.get("active_params_per_endpoint"),
+                            max_findings_per_family=scan_budget.get("max_findings_per_family"),
+                        )
+                    else:
+                        if active_budget_zero and (run_sqli or run_xss):
+                            reason = "zero_active_budget_discovery_only"
+                        else:
+                            reason = f"focused_family_{focused_active_family_name}" if focused_active_family_name else "no_primary_active_families"
+                        active_block["primary_active_skipped"] = reason
+                        print(
+                            (
+                                "[active] Skipping primary SQLi/XSS probes: "
+                                f"{reason}; family-specific checks keep the active budget"
+                            ),
+                            file=sys.stderr,
+                        )
+                        smart_results = {
+                            "sqli": {},
+                            "xss": {},
+                            "endpoint_attempts": [],
+                            "budget": {
+                                "active_remaining_seconds": active_primary_max_seconds,
+                            },
+                        }
+                    endpoint_attempts = smart_results.get("endpoint_attempts")
+                    _append_endpoint_attempt_telemetry(active_block, endpoint_attempts)
+                    smart_budget = smart_results.get("budget") or {}
+                    active_remaining_after_smart = smart_budget.get("active_remaining_seconds")
+                    try:
+                        active_remaining_after_smart = (
+                            float(active_remaining_after_smart)
+                            if active_remaining_after_smart is not None
+                            else None
+                        )
+                    except (TypeError, ValueError):
+                        active_remaining_after_smart = None
+                    active_primary_remaining_after_smart = active_remaining_after_smart
+                    if active_remaining_after_smart is not None:
+                        active_remaining_after_smart = (
+                            active_remaining_after_smart + float(active_enrichment_reserved_seconds or 0.0)
+                        )
+                        active_block["active_primary_remaining_after_smart"] = round(active_primary_remaining_after_smart, 3)
+                        active_block["active_remaining_after_smart"] = round(active_remaining_after_smart, 3)
+
+                    def _active_family_time_exhausted(family_stats: dict[str, Any] | None) -> bool:
+                        family_stats = family_stats or {}
+                        if not family_stats.get("budget_exhausted"):
+                            return False
+                        reason = family_stats.get("budget_exhausted_reason")
+                        # Finding caps limit report volume; they should not suppress
+                        # downstream verification/enrichment while time remains.
+                        return reason != "finding_cap"
+
+                    primary_active_budget_exhausted = bool(
+                        _active_family_time_exhausted(smart_results.get("sqli"))
+                        or _active_family_time_exhausted(smart_results.get("xss"))
+                    )
+                    sqli_budget_reason = (smart_results.get("sqli") or {}).get("budget_exhausted_reason")
+                    xss_budget_reason = (smart_results.get("xss") or {}).get("budget_exhausted_reason")
+                    if sqli_budget_reason:
+                        active_block["smart_sqli_budget_exhausted_reason"] = sqli_budget_reason
+                    if xss_budget_reason:
+                        active_block["smart_xss_budget_exhausted_reason"] = xss_budget_reason
+                    if primary_active_budget_exhausted:
+                        active_block["primary_active_budget_exhausted"] = True
+                    active_block["adaptive_throttle"] = get_throttle().telemetry()
+                    post_active_budget_exhausted = (
+                        active_checks
+                        and active_remaining_after_smart is not None
+                        and active_remaining_after_smart < 15.0
+                    )
+                    if post_active_budget_exhausted:
+                        skip_reason = "active_time_budget_exhausted"
+                        active_block["post_active_enrichment_skipped"] = skip_reason
+                        remaining_text = (
+                            f"{active_remaining_after_smart:.1f}s"
+                            if active_remaining_after_smart is not None
+                            else "unknown"
+                        )
+                        print(
+                            (
+                                "[active] Skipping post-active enrichment probes: "
+                                f"{skip_reason}; active budget remaining {remaining_text}"
+                            ),
+                            file=sys.stderr,
+                        )
+
+                    smart_sqli_findings = []
+                    smart_xss_findings = []
+
+                    if run_sqli:
+                        smart_sqli_findings = smart_results.get("sqli", {}).get("findings", [])
+                        active_block["smart_sqli"] = smart_sqli_findings
+                        active_block["get_endpoints_tested"] = smart_results.get("sqli", {}).get("get_endpoints_tested", 0)
+                        active_block["post_endpoints_tested"] = smart_results.get("sqli", {}).get("post_endpoints_tested", 0)
+                        active_block["smart_total_endpoints_tested"] = smart_results.get("total_endpoints_tested", 0)
+
+                        # Process smart SQLi results
+                        sqli_report_findings = {}
+                        if smart_sqli_findings:
+                            for f in smart_sqli_findings:
+                                method = f.get("method", "GET")
+                                title = f"SQL Injection ({f.get('dbms', 'unknown')} - {f.get('technique', 'unknown')})"
+                                if method != "GET":
+                                    title = f"{method} {title}"  # e.g., "POST SQL Injection (...)"
+                                evidence_dict = {
+                                    "type": f.get("type", "SQLi"),
+                                    "url": f.get("url"),
+                                    "method": method,
+                                    "param": f.get("param"),
+                                    "payload": f.get("payload"),
+                                    "technique": f.get("technique"),
+                                    "evidence": f.get("evidence"),
+                                    "dbms": f.get("dbms"),
+                                }
+                                if f.get("request_headers"):
+                                    evidence_dict["request_headers"] = f.get("request_headers")
+                                # Include content_type and body for POST verification
+                                if f.get("content_type"):
+                                    evidence_dict["content_type"] = f.get("content_type")
+                                if f.get("body"):
+                                    evidence_dict["body"] = f.get("body")
+                                normalized_sqli = normalize_finding(
+                                    "smart_sqli",
+                                    title,
+                                    f.get("severity", "critical"),
+                                    evidence_dict,
+                                    "CWE-89"
+                                )
+                                report["findings"].append(normalized_sqli)
+                                sqli_report_findings[(f.get("url"), f.get("param"), method)] = normalized_sqli
+
+                        # Store DBMS detection info
+                        if smart_results.get("dbms_detected"):
+                            active_block["dbms_detected"] = smart_results["dbms_detected"]
+
+                        # SQLi Data Extraction - chain from confirmed SQLi to extract actual data
+                        # This provides proof of exploitation and upgrades severity
+                        if smart_sqli_findings:
+                            extraction_results = []
+                            for sqli_finding in smart_sqli_findings[:sqli_extract_max]:
+                                try:
+                                    extraction = await sqli_data_extraction(
+                                        sqli_finding=sqli_finding,
+                                        auth_session=auth_session,
+                                        max_extractions=5
+                                    )
+                                    if extraction.get("extraction_successful"):
+                                        extraction_results.append({
+                                            "url": sqli_finding.get("url"),
+                                            "param": sqli_finding.get("param"),
+                                            **extraction
+                                        })
+                                        # Update the finding with extraction evidence
+                                        sqli_finding["extraction_evidence"] = extraction.get("evidence", [])
+                                        sqli_finding["extracted_data"] = extraction.get("extracted_data", {})
+                                        # Severity upgrade is automatic (already critical, but add flag)
+                                        sqli_finding["proof_of_exploitation"] = True
+                                        report_finding = sqli_report_findings.get((
+                                            sqli_finding.get("url"),
+                                            sqli_finding.get("param"),
+                                            sqli_finding.get("method", "GET"),
+                                        ))
+                                        if report_finding:
+                                            report_evidence = report_finding.setdefault("evidence", {})
+                                            report_evidence["verified"] = True
+                                            report_evidence["proof_of_exploitation"] = True
+                                            report_evidence["extraction_evidence"] = extraction.get("evidence", [])
+                                            report_evidence["extracted_data"] = extraction.get("extracted_data", {})
+                                            report_finding["verified"] = True
+                                            report_finding["proof_of_exploitation"] = True
+                                            report_finding["severity"] = extraction.get("severity_upgrade") or "critical"
+                                            report_finding["confidence"] = max(float(report_finding.get("confidence") or 0), 0.95)
+                                            report_finding["confidence_tier"] = "verified"
+                                            report_finding["cvss_score"] = max(float(report_finding.get("cvss_score") or 0), 9.1)
+                                            report_finding["validation"] = {
+                                                "verified": True,
+                                                "poe_proven": True,
+                                                "evidence_level": "confirmed_exploit",
+                                                "reason": "SQLi data extraction succeeded",
+                                            }
+                                        print(f"[scanner] SQLi data extraction successful for {sqli_finding.get('url')}", file=sys.stderr)
+                                except Exception as e:
+                                    print(f"[scanner] SQLi extraction error: {e}", file=sys.stderr)
+
+                            if extraction_results:
+                                active_block["sqli_extraction"] = extraction_results
+
+                        # OOB SQLi Test - for blind SQLi detection via external callbacks
+                        # Requires a callback URL (e.g., Burp Collaborator) for verification
+                        oob_results = []
+                        if oob_callback_url and smart_sqli_findings:
+                            for sqli_finding in smart_sqli_findings[:oob_max_findings]:
+                                try:
+                                    oob_result = await oob_sqli_test(
+                                        url=sqli_finding.get("url", ""),
+                                        param=sqli_finding.get("param", ""),
+                                        dbms=sqli_finding.get("dbms"),
+                                        callback_url=oob_callback_url,
+                                        auth_session=auth_session
+                                    )
+                                    if oob_result.get("payloads_sent"):
+                                        oob_results.append({
+                                            "url": sqli_finding.get("url"),
+                                            "param": sqli_finding.get("param"),
+                                            **oob_result
+                                        })
+                                except Exception as e:
+                                    print(f"[scanner] OOB SQLi test error: {e}", file=sys.stderr)
+
+                        if oob_results:
+                            active_block["oob_sqli"] = oob_results
+                            # Add a finding that requires callback verification
+                            report["findings"].append(normalize_finding(
+                                "oob_sqli",
+                                "Potential Out-of-Band SQL Injection (requires callback verification)",
+                                "medium",  # Medium until callback confirms
+                                {
+                                    "payloads_sent": len(oob_results),
+                                    "callback_url": oob_callback_url,
+                                    "note": "Check callback server for DNS/HTTP requests to confirm exploitation",
+                                    "endpoints_tested": [r.get("url") for r in oob_results],
+                                },
+                                "CWE-89"
+                            ))
+
+                    # Parameter-aware auxiliary injection tests + blind SSRF (OOB)
+                    try:
+                        def _coerce_param_list(raw: Any) -> list[str]:
+                            if isinstance(raw, dict):
+                                return [str(k) for k in raw.keys() if k]
+                            if isinstance(raw, (list, tuple, set)):
+                                return [str(v) for v in raw if v]
+                            if isinstance(raw, str):
+                                return [raw] if raw else []
+                            return []
+
+                        def _build_query_url(test_url: str, defaults: dict[str, Any] | None) -> str:
+                            parsed = urllib.parse.urlparse(test_url)
+                            query_params = dict(urllib.parse.parse_qsl(parsed.query, keep_blank_values=True))
+                            if defaults:
+                                for name, value in defaults.items():
+                                    if name not in query_params:
+                                        query_params[name] = str(value)
+                            if not query_params:
+                                return test_url
+                            new_query = urllib.parse.urlencode(query_params, doseq=True)
+                            return urllib.parse.urlunparse(parsed._replace(query=new_query))
+
+                        aux_get_limit = int(active_enrichment_limits.get("auxiliary_get_endpoints") or 4)
+                        aux_post_json_limit = int(active_enrichment_limits.get("auxiliary_post_json_endpoints") or 3)
+                        aux_param_limit = int(active_enrichment_limits.get("auxiliary_params_per_endpoint") or 3)
+                        aux_payload_limit = int(active_enrichment_limits.get("auxiliary_payloads_per_param") or 6)
+                        active_block["active_enrichment_limits"] = active_enrichment_limits
+
+                        auxiliary_injection_enabled = not (run_sqli and not run_xss)
+                        if not auxiliary_injection_enabled:
+                            record_active_enrichment_skip(active_block, "auxiliary_injection", "sql_tests_only")
+                            print("[active] Skipping auxiliary injection probes for SQLi-only scan", file=sys.stderr)
+                        else:
+                            auxiliary_decision = should_run_active_enrichment(
+                                "auxiliary_injection",
+                                post_active_budget_exhausted=post_active_budget_exhausted,
+                                active_block=active_block,
+                            )
+                            if not auxiliary_decision.run:
+                                auxiliary_injection_enabled = False
+                                record_active_enrichment_skip(
+                                    active_block,
+                                    "auxiliary_injection",
+                                    auxiliary_decision.reason or "active_time_budget_exhausted",
+                                )
+                                print(
+                                    f"[active] Skipping auxiliary injection probes: {auxiliary_decision.reason}",
+                                    file=sys.stderr,
+                                )
+
+                        param_endpoints = []
+                        if auxiliary_injection_enabled:
+                            param_endpoints = [
+                                ep for ep in endpoints
+                                if (ep.get("method") or "GET").upper() == "GET"
+                                and _coerce_param_list(ep.get("params") or ep.get("query_params"))
+                            ]
+                            param_endpoints = param_endpoints[:aux_get_limit]
+
+                        ssrf_param_keywords = {
+                            "url", "uri", "path", "dest", "redirect", "link", "proxy",
+                            "domain", "host", "site", "html", "val", "feed", "dir",
+                            "page", "callback", "webhook", "target", "src", "file",
+                            "reference", "ref", "fetch", "request", "load", "data",
+                            "image", "img", "pdf", "document", "download", "resource",
+                        }
+                        xxe_param_keywords = {"xml", "xxe", "file", "doc", "data", "payload", "content"}
+
+                        if param_endpoints:
+                            ldap_param = {"vulnerable": False, "payloads_tested": set(), "tested_params": set(), "evidence": []}
+                            xpath_param = {"vulnerable": False, "payloads_tested": set(), "tested_params": set(), "evidence": []}
+                            ssti_param = {"vulnerable": False, "payloads_tested": set(), "tested_params": set(), "evidence": []}
+
+                            ssti_param_hints = {"template", "view", "render", "page", "tpl"}
+
+                            for ep in param_endpoints:
+                                params = _coerce_param_list(ep.get("params") or ep.get("query_params"))
+                                if not params:
+                                    continue
+                                defaults = ep.get("param_defaults") or ep.get("query_param_defaults") or {}
+                                test_url = _build_query_url(ep.get("url", ""), defaults)
+                                if not test_url:
+                                    continue
+
+                                ldap_res = await ldap_injection_test(
                                     test_url,
                                     params_to_test=params,
                                     auth_session=auth_session,
@@ -10259,1063 +10344,1194 @@ async def build_report(target: str,
                                     max_params=aux_param_limit,
                                     max_payloads=aux_payload_limit,
                                 )
-                                if ssti_res.get("vulnerable"):
-                                    ssti_param["vulnerable"] = True
-                                    ssti_param["evidence"].extend(ssti_res.get("evidence", []))
-                                    ssti_param["payloads_tested"].update(ssti_res.get("payloads_tested", []))
-                                    ssti_param["tested_params"].update(ssti_res.get("tested_params", []))
+                                if ldap_res.get("vulnerable"):
+                                    ldap_param["vulnerable"] = True
+                                    ldap_param["evidence"].extend(ldap_res.get("evidence", []))
+                                    ldap_param["payloads_tested"].update(ldap_res.get("payloads_tested", []))
+                                    ldap_param["tested_params"].update(ldap_res.get("tested_params", []))
 
-                        if ldap_param["vulnerable"]:
-                            active_block["ldap_param"] = {
-                                "payloads_tested": sorted(ldap_param["payloads_tested"]),
-                                "tested_params": sorted(ldap_param["tested_params"]),
-                                "evidence": ldap_param["evidence"][:10],
-                            }
-                            report["findings"].append(normalize_finding(
-                                "ldap_injection",
-                                "LDAP Injection (parameter-aware)",
-                                "high",
-                                {
-                                    "evidence": ldap_param["evidence"][:10],
-                                    "payloads_tested": len(ldap_param["payloads_tested"]),
+                                xpath_res = await xpath_injection_test(
+                                    test_url,
+                                    params_to_test=params,
+                                    auth_session=auth_session,
+                                    param_defaults=defaults,
+                                    max_params=aux_param_limit,
+                                    max_payloads=aux_payload_limit,
+                                )
+                                if xpath_res.get("vulnerable"):
+                                    xpath_param["vulnerable"] = True
+                                    xpath_param["evidence"].extend(xpath_res.get("evidence", []))
+                                    xpath_param["payloads_tested"].update(xpath_res.get("payloads_tested", []))
+                                    xpath_param["tested_params"].update(xpath_res.get("tested_params", []))
+
+                                if any(p.lower() in ssti_param_hints for p in params):
+                                    ssti_res = await ssti_test(
+                                        test_url,
+                                        params_to_test=params,
+                                        auth_session=auth_session,
+                                        param_defaults=defaults,
+                                        max_params=aux_param_limit,
+                                        max_payloads=aux_payload_limit,
+                                    )
+                                    if ssti_res.get("vulnerable"):
+                                        ssti_param["vulnerable"] = True
+                                        ssti_param["evidence"].extend(ssti_res.get("evidence", []))
+                                        ssti_param["payloads_tested"].update(ssti_res.get("payloads_tested", []))
+                                        ssti_param["tested_params"].update(ssti_res.get("tested_params", []))
+
+                            if ldap_param["vulnerable"]:
+                                active_block["ldap_param"] = {
+                                    "payloads_tested": sorted(ldap_param["payloads_tested"]),
                                     "tested_params": sorted(ldap_param["tested_params"]),
-                                },
-                                "CWE-90"
-                            ))
+                                    "evidence": ldap_param["evidence"][:10],
+                                }
+                                report["findings"].append(normalize_finding(
+                                    "ldap_injection",
+                                    "LDAP Injection (parameter-aware)",
+                                    "high",
+                                    {
+                                        "evidence": ldap_param["evidence"][:10],
+                                        "payloads_tested": len(ldap_param["payloads_tested"]),
+                                        "tested_params": sorted(ldap_param["tested_params"]),
+                                    },
+                                    "CWE-90"
+                                ))
 
-                        if xpath_param["vulnerable"]:
-                            active_block["xpath_param"] = {
-                                "payloads_tested": sorted(xpath_param["payloads_tested"]),
-                                "tested_params": sorted(xpath_param["tested_params"]),
-                                "evidence": xpath_param["evidence"][:10],
-                            }
-                            report["findings"].append(normalize_finding(
-                                "xpath_injection",
-                                "XPath Injection (parameter-aware)",
-                                "high",
-                                {
-                                    "evidence": xpath_param["evidence"][:10],
-                                    "payloads_tested": len(xpath_param["payloads_tested"]),
+                            if xpath_param["vulnerable"]:
+                                active_block["xpath_param"] = {
+                                    "payloads_tested": sorted(xpath_param["payloads_tested"]),
                                     "tested_params": sorted(xpath_param["tested_params"]),
-                                },
-                                "CWE-91"
-                            ))
+                                    "evidence": xpath_param["evidence"][:10],
+                                }
+                                report["findings"].append(normalize_finding(
+                                    "xpath_injection",
+                                    "XPath Injection (parameter-aware)",
+                                    "high",
+                                    {
+                                        "evidence": xpath_param["evidence"][:10],
+                                        "payloads_tested": len(xpath_param["payloads_tested"]),
+                                        "tested_params": sorted(xpath_param["tested_params"]),
+                                    },
+                                    "CWE-91"
+                                ))
 
-                        if ssti_param["vulnerable"]:
-                            active_block["ssti_param"] = {
-                                "payloads_tested": sorted(ssti_param["payloads_tested"]),
-                                "tested_params": sorted(ssti_param["tested_params"]),
-                                "evidence": ssti_param["evidence"][:10],
-                            }
-                            report["findings"].append(normalize_finding(
-                                "ssti",
-                                "Server-Side Template Injection (parameter-aware)",
-                                "critical",
-                                {
-                                    "evidence": ssti_param["evidence"][:10],
-                                    "payloads_tested": len(ssti_param["payloads_tested"]),
+                            if ssti_param["vulnerable"]:
+                                active_block["ssti_param"] = {
+                                    "payloads_tested": sorted(ssti_param["payloads_tested"]),
                                     "tested_params": sorted(ssti_param["tested_params"]),
-                                },
-                                "CWE-1336"
-                            ))
-
-                    # Parameter-aware POST/JSON injection tests
-                    post_json_endpoints = []
-                    if auxiliary_injection_enabled:
-                        post_json_endpoints = [
-                            ep for ep in endpoints
-                            if (ep.get("method") or "GET").upper() in ("POST", "PUT", "PATCH")
-                            and _coerce_param_list(ep.get("body_params") or ep.get("params"))
-                            and ("json" in (ep.get("content_type") or "application/json").lower())
-                        ]
-                        post_json_endpoints = post_json_endpoints[:aux_post_json_limit]
-
-                        # Always initialize: the post-loop reads (ldap_post["vulnerable"]
-                        # etc.) run unconditionally, so guarding the init behind
-                        # `if post_json_endpoints:` raised 'cannot access local variable
-                        # ldap_post' and aborted ALL param-injection checks on shards
-                        # with no POST/JSON endpoints. Empty loop is a harmless no-op.
-                        ldap_post = {"vulnerable": False, "payloads_tested": set(), "tested_params": set(), "evidence": []}
-                        xpath_post = {"vulnerable": False, "payloads_tested": set(), "tested_params": set(), "evidence": []}
-                        ssrf_post = {"vulnerable": False, "payloads_tested": set(), "tested_params": set(), "evidence": []}
-                        xxe_post = {"vulnerable": False, "payloads_tested": set(), "tested_params": set(), "evidence": []}
-                        mass_assignment_post = {"vulnerable": False, "tested_fields": set(), "evidence": []}
-
-                        for ep in post_json_endpoints:
-                            params = _coerce_param_list(ep.get("body_params") or ep.get("params"))
-                            if not params:
-                                continue
-                            defaults = ep.get("body_param_defaults") or {}
-                            method = (ep.get("method") or "POST").upper()
-                            content_type = ep.get("content_type") or "application/json"
-                            url = ep.get("url") or ""
-                            if not url:
-                                continue
-
-                            ldap_res = await ldap_injection_test_json_body(
-                                url=url,
-                                method=method,
-                                params=params,
-                                auth_session=auth_session,
-                                body_template=ep.get("body_template"),
-                                body_param_defaults=defaults,
-                                content_type=content_type,
-                                max_params=aux_param_limit,
-                                max_payloads=aux_payload_limit,
-                            )
-                            if ldap_res.get("vulnerable"):
-                                ldap_post["vulnerable"] = True
-                                ldap_post["evidence"].extend(ldap_res.get("findings", []))
-                                ldap_post["payloads_tested"].update(ldap_res.get("payloads_tested", []))
-                                ldap_post["tested_params"].update(ldap_res.get("tested_params", []))
-
-                            xpath_res = await xpath_injection_test_json_body(
-                                url=url,
-                                method=method,
-                                params=params,
-                                auth_session=auth_session,
-                                body_template=ep.get("body_template"),
-                                body_param_defaults=defaults,
-                                content_type=content_type,
-                                max_params=aux_param_limit,
-                                max_payloads=aux_payload_limit,
-                            )
-                            if xpath_res.get("vulnerable"):
-                                xpath_post["vulnerable"] = True
-                                xpath_post["evidence"].extend(xpath_res.get("findings", []))
-                                xpath_post["payloads_tested"].update(xpath_res.get("payloads_tested", []))
-                                xpath_post["tested_params"].update(xpath_res.get("tested_params", []))
-
-                            ssrf_params = [p for p in params if p.lower() in ssrf_param_keywords]
-                            if ssrf_params or thorough_params:
-                                ssrf_res = await ssrf_injection_test_json_body(
-                                    url=url,
-                                    method=method,
-                                    params=ssrf_params or params[:2],
-                                    auth_session=auth_session,
-                                    body_template=ep.get("body_template"),
-                                    body_param_defaults=defaults,
-                                    content_type=content_type,
-                                    max_params=min(3, aux_param_limit),
-                                    max_payloads=max(3, min(aux_payload_limit, 6)),
-                                )
-                                if ssrf_res.get("vulnerable"):
-                                    ssrf_post["vulnerable"] = True
-                                    ssrf_post["evidence"].extend(ssrf_res.get("findings", []))
-                                    ssrf_post["payloads_tested"].update(ssrf_res.get("payloads_tested", []))
-                                    ssrf_post["tested_params"].update(ssrf_res.get("tested_params", []))
-
-                            xxe_params = [p for p in params if any(k in p.lower() for k in xxe_param_keywords)]
-                            if xxe_params or thorough_params:
-                                xxe_res = await xxe_injection_test_json_body(
-                                    url=url,
-                                    method=method,
-                                    params=xxe_params or params[:2],
-                                    auth_session=auth_session,
-                                    body_template=ep.get("body_template"),
-                                    body_param_defaults=defaults,
-                                    content_type=content_type,
-                                    max_params=min(3, aux_param_limit),
-                                    max_payloads=max(2, min(aux_payload_limit, 4)),
-                                )
-                                if xxe_res.get("vulnerable"):
-                                    xxe_post["vulnerable"] = True
-                                    xxe_post["evidence"].extend(xxe_res.get("findings", []))
-                                    xxe_post["payloads_tested"].update(xxe_res.get("payloads_tested", []))
-                                    xxe_post["tested_params"].update(xxe_res.get("tested_params", []))
-
-                            mass_assignment_res = await mass_assignment_test_json_body(
-                                url=url,
-                                method=method,
-                                params=params,
-                                auth_session=auth_session,
-                                body_template=ep.get("body_template"),
-                                body_param_defaults=defaults,
-                                content_type=content_type,
-                                max_fields=max(4, min(10, aux_payload_limit + 2)),
-                            )
-                            _append_endpoint_attempt_telemetry(
-                                active_block,
-                                mass_assignment_res.get("endpoint_attempts"),
-                            )
-                            if mass_assignment_res.get("vulnerable"):
-                                mass_assignment_post["vulnerable"] = True
-                                mass_assignment_post["evidence"].extend(mass_assignment_res.get("findings", []))
-                                mass_assignment_post["tested_fields"].update(
-                                    f.get("parameter")
-                                    for f in mass_assignment_res.get("findings", [])
-                                    if f.get("parameter")
-                                )
-
-                        if ldap_post["vulnerable"]:
-                            active_block["ldap_json"] = {
-                                "payloads_tested": sorted(ldap_post["payloads_tested"]),
-                                "tested_params": sorted(ldap_post["tested_params"]),
-                                "evidence": ldap_post["evidence"][:10],
-                            }
-                            report["findings"].append(normalize_finding(
-                                "ldap_injection",
-                                "LDAP Injection (JSON body)",
-                                "high",
-                                {
-                                    "evidence": ldap_post["evidence"][:10],
-                                    "payloads_tested": len(ldap_post["payloads_tested"]),
-                                    "tested_params": sorted(ldap_post["tested_params"]),
-                                },
-                                "CWE-90"
-                            ))
-
-                        if xpath_post["vulnerable"]:
-                            active_block["xpath_json"] = {
-                                "payloads_tested": sorted(xpath_post["payloads_tested"]),
-                                "tested_params": sorted(xpath_post["tested_params"]),
-                                "evidence": xpath_post["evidence"][:10],
-                            }
-                            report["findings"].append(normalize_finding(
-                                "xpath_injection",
-                                "XPath Injection (JSON body)",
-                                "high",
-                                {
-                                    "evidence": xpath_post["evidence"][:10],
-                                    "payloads_tested": len(xpath_post["payloads_tested"]),
-                                    "tested_params": sorted(xpath_post["tested_params"]),
-                                },
-                                "CWE-91"
-                            ))
-
-                        if ssrf_post["vulnerable"]:
-                            active_block["ssrf_json"] = {
-                                "payloads_tested": sorted(ssrf_post["payloads_tested"]),
-                                "tested_params": sorted(ssrf_post["tested_params"]),
-                                "evidence": ssrf_post["evidence"][:10],
-                            }
-                            report["findings"].append(normalize_finding(
-                                "ssrf",
-                                "SSRF (JSON body)",
-                                "high",
-                                {
-                                    "evidence": ssrf_post["evidence"][:10],
-                                    "payloads_tested": len(ssrf_post["payloads_tested"]),
-                                    "tested_params": sorted(ssrf_post["tested_params"]),
-                                },
-                                "CWE-918"
-                            ))
-
-                        if xxe_post["vulnerable"]:
-                            active_block["xxe_json"] = {
-                                "payloads_tested": sorted(xxe_post["payloads_tested"]),
-                                "tested_params": sorted(xxe_post["tested_params"]),
-                                "evidence": xxe_post["evidence"][:10],
-                            }
-                            report["findings"].append(normalize_finding(
-                                "xxe_injection",
-                                "XXE (JSON body)",
-                                "high",
-                                {
-                                    "evidence": xxe_post["evidence"][:10],
-                                    "payloads_tested": len(xxe_post["payloads_tested"]),
-                                    "tested_params": sorted(xxe_post["tested_params"]),
-                                },
-                                "CWE-611"
-                            ))
-
-                        if mass_assignment_post["vulnerable"]:
-                            active_block["mass_assignment_json"] = {
-                                "tested_fields": sorted(mass_assignment_post["tested_fields"]),
-                                "evidence": mass_assignment_post["evidence"][:10],
-                            }
-                            report["findings"].append(normalize_finding(
-                                "mass_assignment",
-                                "Mass Assignment (JSON body)",
-                                "high",
-                                {
-                                    "evidence": mass_assignment_post["evidence"][:10],
-                                    "tested_fields": sorted(mass_assignment_post["tested_fields"]),
-                                },
-                                "CWE-915"
-                            ))
-
-                    # Blind SSRF (OOB) for smart mode when callback is provided
-                    if oob_callback_url:
-                        ssrf_results = []
-                        ssrf_get_limit = int(active_enrichment_limits.get("blind_ssrf_get_endpoints") or 5)
-                        ssrf_candidates = param_endpoints[:ssrf_get_limit] if param_endpoints else []
-                        for ep in ssrf_candidates:
-                            params = _coerce_param_list(ep.get("params") or ep.get("query_params"))
-                            if not params:
-                                continue
-                            ssrf_params = [p for p in params if p.lower() in ssrf_param_keywords]
-                            if not ssrf_params and not thorough_params:
-                                continue
-                            if not ssrf_params:
-                                ssrf_params = params[:2]
-                            defaults = ep.get("param_defaults") or ep.get("query_param_defaults") or {}
-                            test_url = _build_query_url(ep.get("url", ""), defaults)
-                            if not test_url:
-                                continue
-                            ssrf_res = await blind_ssrf_test(
-                                test_url,
-                                callback_domain=oob_callback_url,
-                                params_to_test=ssrf_params,
-                                auth_session=auth_session,
-                            )
-                            if ssrf_res.get("payloads_injected"):
-                                ssrf_results.append({
-                                    "url": test_url,
-                                    "params": ssrf_params,
-                                    **ssrf_res,
-                                })
-
-                        if ssrf_results:
-                            active_block["blind_ssrf"] = ssrf_results
-                            report["findings"].append(normalize_finding(
-                                "blind_ssrf",
-                                "Potential Blind SSRF (OOB callbacks sent)",
-                                "medium",
-                                {
-                                    "callback_domain": oob_callback_url,
-                                    "payloads_sent": sum(r.get("payloads_injected", 0) for r in ssrf_results),
-                                    "endpoints_tested": [r.get("url") for r in ssrf_results],
-                                    "note": "Check your callback server for DNS/HTTP hits to confirm SSRF.",
-                                },
-                                "CWE-918"
-                            ))
-
-                    # Stored XSS workflow
-                    try:
-                        stored_xss_decision = should_run_active_enrichment(
-                            "stored_xss",
-                            post_active_budget_exhausted=post_active_budget_exhausted,
-                            active_block=active_block,
-                        )
-                        if not stored_xss_decision.run:
-                            record_active_enrichment_skip(
-                                active_block,
-                                "stored_xss",
-                                stored_xss_decision.reason or "active_time_budget_exhausted",
-                            )
-                            print(f"[active] Skipping stored XSS workflow: {stored_xss_decision.reason}", file=sys.stderr)
-                        else:
-                            stored_urls = []
-                            if smart_discovery_data and isinstance(smart_discovery_data, dict):
-                                stored_urls.extend(smart_discovery_data.get("all_urls", []) or [])
-                            stored_urls.extend(crawl_urls or [])
-                            if browser_api_endpoints:
-                                for ep in browser_api_endpoints:
-                                    if isinstance(ep, dict) and ep.get("url"):
-                                        stored_urls.append(ep["url"])
-                                    elif isinstance(ep, str):
-                                        stored_urls.append(ep)
-                            stored_urls = list({u for u in stored_urls if isinstance(u, str)})
-
-                            stored_res = await stored_xss_workflow(
-                                base_url=base_url,
-                                endpoints=endpoints,
-                                discovered_urls=stored_urls,
-                                auth_session=auth_session,
-                                max_forms=int(active_enrichment_limits.get("stored_xss_max_forms") or 5),
-                                max_pages=int(active_enrichment_limits.get("stored_xss_max_pages") or 12),
-                            )
-                            active_block["stored_xss"] = stored_res
-                            if stored_res.get("vulnerable"):
-                                for finding in stored_res.get("findings", [])[:5]:
-                                    nf = normalize_finding(
-                                        "stored_xss",
-                                        "Stored XSS (workflow)",
-                                        finding.get("severity", "high"),
-                                        {
-                                            "type": "XSS",
-                                            "injection_url": finding.get("injection_url"),
-                                            "stored_url": finding.get("stored_url"),
-                                            "url": finding.get("stored_url"),
-                                            "param": finding.get("param"),
-                                            "payload": finding.get("payload"),
-                                            "payload_reflected": finding.get("payload_reflected"),
-                                            "snippet": finding.get("snippet"),
-                                            "method": finding.get("method"),
-                                            "verified": finding.get("verified", False),
-                                            "proof_state": finding.get("proof_state"),
-                                            "confidence": finding.get("confidence"),
-                                            "cvss_score": finding.get("cvss_score"),
-                                            "evidence": finding.get("evidence"),
-                                            "request_headers": finding.get("request_headers"),
-                                        },
-                                        "CWE-79"
-                                    )
-                                    if finding.get("browser_proof"):
-                                        nf["browser_proof"] = finding["browser_proof"]
-                                    if finding.get("poe_result"):
-                                        nf["poe_result"] = finding["poe_result"]
-                                    if finding.get("verified"):
-                                        nf["verified"] = True
-                                    if finding.get("proof_state"):
-                                        nf["proof_state"] = finding["proof_state"]
-                                    if finding.get("confidence") is not None:
-                                        nf["confidence"] = finding["confidence"]
-                                    if finding.get("cvss_score") is not None:
-                                        nf["cvss_score"] = finding["cvss_score"]
-                                    report["findings"].append(nf)
-                    except Exception as e:
-                        active_block["stored_xss_error"] = str(e)
-                except Exception as e:
-                    active_block["param_injection_error"] = str(e)
-
-                if run_xss:
-                    all_xss_findings = smart_results.get("xss", {}).get("findings", [])
-                    # Filter out hash-route DOM XSS (tracked separately in active_block["hash_route_dom_xss"])
-                    smart_xss_findings = [f for f in all_xss_findings if f.get("subtype") != "dom_xss_hash_route"]
-                    active_block["smart_xss"] = smart_xss_findings
-                    active_block["smart_reflections_found"] = smart_results.get("xss", {}).get("reflections_found", 0)
-                    active_block["xss_get_endpoints_tested"] = smart_results.get("xss", {}).get("get_endpoints_tested", 0)
-                    active_block["xss_post_endpoints_tested"] = smart_results.get("xss", {}).get("post_endpoints_tested", 0)
-
-                    # Process smart XSS results (hash-route DOM XSS handled separately below)
-                    for f in smart_xss_findings:
-                        report["findings"].append(normalize_finding(
-                            "smart_xss",
-                            f"Cross-Site Scripting ({f.get('context', 'unknown')})",
-                            f.get("severity", "high"),
-                            {
-                                "type": f.get("type", "XSS"),
-                                "url": f.get("url"),
-                                "param": f.get("param"),
-                                "payload": f.get("payload"),
-                                "evidence": f.get("evidence"),
-                                "context": f.get("context"),
-                            },
-                            "CWE-79"
-                        ))
-
-                # Hash-route DOM XSS is only relevant when XSS is in scope.
-                hash_route_dom_xss = smart_results.get("hash_route_dom_xss", {})
-                hash_route_findings = hash_route_dom_xss.get("findings", [])
-                if run_xss and hash_route_findings:
-                    active_block["hash_route_dom_xss"] = hash_route_findings
-                    active_block["hash_route_endpoints_tested"] = hash_route_dom_xss.get("endpoints_tested", 0)
-                    for f in hash_route_findings:
-                        nf = normalize_finding(
-                            "hash_route_dom_xss",
-                            f"DOM XSS in Hash Route ({f.get('technique', 'unknown')})",
-                            f.get("severity", "high"),
-                            {
-                                "type": "DOM XSS",
-                                "url": f.get("url"),
-                                "param": f.get("param") or f.get("parameter"),
-                                "payload": f.get("payload"),
-                                "evidence": f.get("evidence"),
-                                "verified": f.get("verified", False),
-                                # Browser-proven execution carries an explicit High CVSS so
-                                # the generic XSS base score can't cap it back to medium.
-                                "cvss_score": f.get("cvss_score"),
-                            },
-                            "CWE-79"
-                        )
-                        # Preserve the headless browser execution proof at top level so the
-                        # finding validator's execution-proof fast-path keeps a dialog-fired
-                        # DOM XSS verified. It cannot do HTTP-response context verification on
-                        # a browser-side finding and would otherwise downgrade it to medium.
-                        if f.get("browser_proof"):
-                            nf["browser_proof"] = f["browser_proof"]
-                        if f.get("verified"):
-                            nf["poe_result"] = {"proven": True, "confidence": f.get("confidence", 0.99)}
-                        report["findings"].append(nf)
-
-                # Record coverage for smart active tests
-                if coverage_tracker:
-                    sqli_stats = smart_results.get("sqli", {})
-                    xss_stats = smart_results.get("xss", {})
-                    total_endpoints = (
-                        sqli_stats.get("endpoints_tested", 0) +
-                        xss_stats.get("endpoints_tested", 0)
-                    )
-                    total_params = (
-                        sqli_stats.get("params_tested", 0) +
-                        xss_stats.get("params_tested", 0)
-                    )
-                    if total_endpoints > 0:
-                        coverage_tracker.record_endpoint_tested(count=total_endpoints)
-                    if total_params > 0:
-                        coverage_tracker.record_param_tested(count=total_params)
-
-                if run_sqli:
-                    sqlmap_decision = should_run_active_enrichment(
-                        "sqlmap",
-                        post_active_budget_exhausted=post_active_budget_exhausted,
-                        active_block=active_block,
-                    )
-                else:
-                    sqlmap_decision = None
-                if run_sqli and not sqlmap_decision.run:
-                    record_active_enrichment_skip(
-                        active_block,
-                        "sqlmap",
-                        sqlmap_decision.reason or "active_time_budget_exhausted",
-                        candidate_reason="post_active_budget",
-                    )
-                    print(f"[sqlmap] Skipping SQLMap verification: {sqlmap_decision.reason}", file=sys.stderr)
-                elif run_sqli:
-                    # Heuristic sqlmap verification on high-signal endpoints
-                    try:
-                        sqlmap_candidates: list[dict[str, Any]] = []
-                        seen_keys: set[tuple[str, str]] = set()
-                        endpoint_lookup = {
-                            (e.get("url"), e.get("method", "GET").upper()): e for e in endpoints
-                        }
-
-                        # PRIORITY: Always include manual/custom endpoints for SQLmap testing
-                        if manual_endpoints_norm:
-                            for ep in manual_endpoints_norm:
-                                if not isinstance(ep, dict):
-                                    continue
-                                ep_url = ep.get("url")
-                                if not ep_url:
-                                    continue
-                                method = (ep.get("method") or "GET").upper()
-                                key = (ep_url, method)
-                                if key in seen_keys:
-                                    continue
-                                # Build endpoint dict with params
-                                sqlmap_ep = {
-                                    "url": ep_url,
-                                    "method": method,
-                                    "source": "manual",
+                                    "evidence": ssti_param["evidence"][:10],
                                 }
-                                if method == "GET":
-                                    sqlmap_ep["params"] = ep.get("params") or []
-                                else:
-                                    sqlmap_ep["body_params"] = ep.get("body_params") or ep.get("params") or []
-                                    sqlmap_ep["content_type"] = ep.get("content_type") or "application/json"
-                                sqlmap_candidates.append({"endpoint": sqlmap_ep, "param": None, "reason": "manual_endpoint"})
-                                seen_keys.add(key)
-                            if sqlmap_candidates:
-                                print(
-                                    f"[sqlmap] Added {len(sqlmap_candidates)} manual endpoints for SQLmap testing",
-                                    file=sys.stderr
-                                )
+                                report["findings"].append(normalize_finding(
+                                    "ssti",
+                                    "Server-Side Template Injection (parameter-aware)",
+                                    "critical",
+                                    {
+                                        "evidence": ssti_param["evidence"][:10],
+                                        "payloads_tested": len(ssti_param["payloads_tested"]),
+                                        "tested_params": sorted(ssti_param["tested_params"]),
+                                    },
+                                    "CWE-1336"
+                                ))
 
-                        if smart_sqli_findings:
-                            max_sqlmap = 2 if quick_mode else 5
-                            for f in smart_sqli_findings:
-                                key = (f.get("url"), f.get("method", "GET").upper())
-                                if key in seen_keys:
-                                    continue
-                                endpoint = endpoint_lookup.get(key, {"url": f.get("url"), "method": f.get("method", "GET")})
-                                sqlmap_candidates.append({"endpoint": endpoint, "param": f.get("param"), "reason": "smart_sqli"})
-                                seen_keys.add(key)
-                                if len(sqlmap_candidates) >= max_sqlmap:
-                                    break
-                        elif nuclei_signals and (nuclei_signals.get("sql_errors") or nuclei_signals.get("auth_issues")):
-                            sql_priority_params = ["id", "user", "uid", "account", "login", "query", "search", "filter"]
-
-                            def score_endpoint(ep: dict[str, Any]) -> int:
-                                params = (ep.get("params", []) or []) + (ep.get("body_params", []) or [])
-                                return sum(1 for p in params if any(sp in p.lower() for sp in sql_priority_params))
-
-                            prioritized = sorted(endpoints, key=score_endpoint, reverse=True)
-                            limit = 2 if quick_mode else 5
-                            for ep in prioritized:
-                                if not (ep.get("params") or ep.get("body_params")):
-                                    continue
-                                key = (ep.get("url"), ep.get("method", "GET").upper())
-                                if key in seen_keys:
-                                    continue
-                                sqlmap_candidates.append({"endpoint": ep, "param": None, "reason": "signals"})
-                                seen_keys.add(key)
-                                if len(sqlmap_candidates) >= limit:
-                                    break
-
-                        # Add a small set of POST/PUT/PATCH endpoints for sqlmap coverage
-                        if len(sqlmap_candidates) < (2 if quick_mode else 4):
-                            post_endpoints = [
+                        # Parameter-aware POST/JSON injection tests
+                        post_json_endpoints = []
+                        if auxiliary_injection_enabled:
+                            post_json_endpoints = [
                                 ep for ep in endpoints
-                                if ep.get("method", "GET").upper() in ("POST", "PUT", "PATCH")
-                                and ep.get("body_params")
+                                if (ep.get("method") or "GET").upper() in ("POST", "PUT", "PATCH")
+                                and _coerce_param_list(ep.get("body_params") or ep.get("params"))
+                                and ("json" in (ep.get("content_type") or "application/json").lower())
                             ]
+                            post_json_endpoints = post_json_endpoints[:aux_post_json_limit]
 
-                            def score_post(ep: dict[str, Any]) -> int:
-                                params = ep.get("body_params", []) or []
-                                score = len(params)
-                                path = str(ep.get("url", "")).lower()
-                                if any(k in path for k in ["login", "auth", "search", "filter", "query"]):
-                                    score += 3
-                                return score
+                            # Always initialize: the post-loop reads (ldap_post["vulnerable"]
+                            # etc.) run unconditionally, so guarding the init behind
+                            # `if post_json_endpoints:` raised 'cannot access local variable
+                            # ldap_post' and aborted ALL param-injection checks on shards
+                            # with no POST/JSON endpoints. Empty loop is a harmless no-op.
+                            ldap_post = {"vulnerable": False, "payloads_tested": set(), "tested_params": set(), "evidence": []}
+                            xpath_post = {"vulnerable": False, "payloads_tested": set(), "tested_params": set(), "evidence": []}
+                            ssrf_post = {"vulnerable": False, "payloads_tested": set(), "tested_params": set(), "evidence": []}
+                            xxe_post = {"vulnerable": False, "payloads_tested": set(), "tested_params": set(), "evidence": []}
+                            mass_assignment_post = {"vulnerable": False, "tested_fields": set(), "evidence": []}
 
-                            post_endpoints = sorted(post_endpoints, key=score_post, reverse=True)
-                            extra_limit = 1 if quick_mode else 2
-                            for ep in post_endpoints:
-                                if extra_limit <= 0:
-                                    break
-                                key = (ep.get("url"), ep.get("method", "GET").upper())
-                                if key in seen_keys:
+                            for ep in post_json_endpoints:
+                                params = _coerce_param_list(ep.get("body_params") or ep.get("params"))
+                                if not params:
                                     continue
-                                sqlmap_candidates.append({"endpoint": ep, "param": None, "reason": "post_coverage"})
-                                seen_keys.add(key)
-                                extra_limit -= 1
-
-                        # Build index of captured Playwright requests for SQLmap replay
-                        # This allows us to use real headers/CSRF/body from browser traffic
-                        debug_sqlmap = os.environ.get("SCANNER_DEBUG_SQLMAP", "").lower() in ("1", "true", "yes")
-                        captured_index: dict[tuple[str, str, tuple[str, ...]], dict[str, Any]] = {}
-                        if browser_res:
-                            captured_requests = browser_res.get("captured_requests", [])
-                            target_host = urllib.parse.urlparse(base_url).netloc
-
-                            def _is_better_capture(new_req: dict[str, Any], old_req: dict[str, Any]) -> bool:
-                                """Prefer authenticated, successful, with body."""
-                                new_score = (
-                                    new_req.get("has_auth", False),
-                                    200 <= (new_req.get("status") or 0) < 400,
-                                    bool(new_req.get("post_data")),
-                                )
-                                old_score = (
-                                    old_req.get("has_auth", False),
-                                    200 <= (old_req.get("status") or 0) < 400,
-                                    bool(old_req.get("post_data")),
-                                )
-                                return new_score > old_score
-
-                            for cap_req in captured_requests:
-                                cap_url = cap_req.get("url", "")
-                                cap_parsed = urllib.parse.urlparse(cap_url)
-
-                                # Skip: different host
-                                if cap_parsed.netloc != target_host:
-                                    continue
-                                # Skip: not an API call
-                                if not cap_req.get("is_api_call"):
-                                    continue
-                                # Skip: multipart (file uploads)
-                                if "multipart/form-data" in cap_req.get("content_type", ""):
-                                    continue
-                                # Skip: huge bodies
-                                if cap_req.get("post_data") and len(cap_req.get("post_data", "")) > 50000:
+                                defaults = ep.get("body_param_defaults") or {}
+                                method = (ep.get("method") or "POST").upper()
+                                content_type = ep.get("content_type") or "application/json"
+                                url = ep.get("url") or ""
+                                if not url:
                                     continue
 
-                                # Build normalized key: (method, path, sorted_query_param_names)
-                                cap_method = cap_req.get("method", "GET").upper()
-                                cap_path = cap_parsed.path.rstrip("/") or "/"
-                                cap_query_params = tuple(sorted(urllib.parse.parse_qs(cap_parsed.query, keep_blank_values=True).keys()))
-                                cap_key = (cap_method, cap_path, cap_query_params)
-
-                                # Keep best capture for each key
-                                existing = captured_index.get(cap_key)
-                                if existing is None or _is_better_capture(cap_req, existing):
-                                    captured_index[cap_key] = cap_req
-
-                            if debug_sqlmap and captured_index:
-                                print(f"[DEBUG SQLMAP] indexed {len(captured_index)} captured requests for replay", file=sys.stderr)
-
-                        if sqlmap_candidates:
-                            if debug_sqlmap:
-                                print(
-                                    f"[DEBUG SQLMAP] candidates={len(sqlmap_candidates)}",
-                                    file=sys.stderr
-                                )
-                                for i, candidate in enumerate(sqlmap_candidates[:5]):
-                                    ep = candidate.get("endpoint", {}) or {}
-                                    print(
-                                        f"[DEBUG SQLMAP]   {i}: {ep.get('method', 'GET')} "
-                                        f"{ep.get('url')} param={candidate.get('param')} "
-                                        f"reason={candidate.get('reason')}",
-                                        file=sys.stderr,
-                                    )
-                            # Only use aggressive SQLmap for aggressive exploit level
-                            aggressive_sqlmap = exploit_level == "aggressive"
-                            sqlmap_quick_mode = quick_mode or focused_manual_active_scope
-                            if focused_manual_active_scope:
-                                print("[sqlmap] Focused manual active scope: using quick SQLMap profile", file=sys.stderr)
-                            # Get detected DBMS from smart_sqli for DBMS-aware SQLmap tuning
-                            detected_dbms = active_block.get("dbms_detected")
-
-                            # Build tasks with replay matching
-                            tasks: list[asyncio.Task[dict[str, Any]]] = []
-                            replay_flags: list[bool] = []  # Track which candidates use replay
-                            emit_progress(
-                                "active_sqlmap",
-                                94,
-                                f"starting SQLMap verification on {len(sqlmap_candidates)} candidates",
-                            )
-
-                            for c in sqlmap_candidates:
-                                ep = c["endpoint"]
-                                ep_url = ep.get("url", "")
-                                ep_method = ep.get("method", "GET").upper()
-                                ep_parsed = urllib.parse.urlparse(ep_url)
-                                ep_path = ep_parsed.path.rstrip("/") or "/"
-                                ep_query_params = tuple(sorted(urllib.parse.parse_qs(ep_parsed.query, keep_blank_values=True).keys()))
-
-                                # Build match key
-                                match_key = (ep_method, ep_path, ep_query_params)
-                                matched_capture = captured_index.get(match_key)
-
-                                # Use replay if we have a match AND:
-                                # - GET: always (preserves real headers/CSRF cookies)
-                                # - POST/PUT/PATCH: only if captured request has body
-                                use_replay = (
-                                    matched_capture is not None
-                                    and (
-                                        ep_method == "GET"  # GET: replay for headers even without body
-                                        or matched_capture.get("post_data")  # Non-GET: require body
-                                    )
-                                )
-
-                                if use_replay:
-                                    if debug_sqlmap:
-                                        print(
-                                            f"[DEBUG SQLMAP] using replay for {ep_method} {ep_path}",
-                                            file=sys.stderr,
-                                        )
-                                    tasks.append(
-                                        asyncio.create_task(
-                                            sqlmap_replay_request(
-                                                matched_capture,
-                                                auth_session=auth_session,
-                                                quick_mode=sqlmap_quick_mode,
-                                                aggressive=aggressive_sqlmap,
-                                                param=c.get("param"),
-                                                dbms=detected_dbms,
-                                            )
-                                        )
-                                    )
-                                    replay_flags.append(True)
-                                else:
-                                    tasks.append(
-                                        asyncio.create_task(
-                                            sqlmap_test_context(
-                                                ep,
-                                                quick_mode=sqlmap_quick_mode,
-                                                aggressive=aggressive_sqlmap,
-                                                auth_session=auth_session,
-                                                param=c.get("param"),
-                                                dbms=detected_dbms,
-                                            )
-                                        )
-                                    )
-                                    replay_flags.append(False)
-
-                            sqlmap_results = await asyncio.gather(*tasks, return_exceptions=True)
-                            emit_progress("active_sqlmap", 94, "SQLMap verification complete")
-
-                            for candidate, srep, used_replay in zip(sqlmap_candidates, sqlmap_results, replay_flags):
-                                if isinstance(srep, Exception):
-                                    active_block.setdefault("sqlmap_errors", []).append({
-                                        "url": candidate["endpoint"].get("url"),
-                                        "error": str(srep),
-                                    })
-                                    continue
-
-                                # Handle None result (replay failed to write request file)
-                                if srep is None:
-                                    active_block.setdefault("sqlmap_errors", []).append({
-                                        "url": candidate["endpoint"].get("url"),
-                                        "error": "replay request file write failed",
-                                    })
-                                    continue
-
-                                if srep.get("skipped"):
-                                    # Enhanced skip reason logging
-                                    skip_entry = {
-                                        "url": srep.get("url"),
-                                        "method": srep.get("method"),
-                                        "param": srep.get("param"),
-                                        "skip_reason": srep.get("skip_reason") or srep.get("error"),
-                                        "skip_details": srep.get("skip_details"),
-                                        "candidate_reason": candidate.get("reason"),
-                                        "replay": used_replay,
-                                    }
-                                    active_block.setdefault("sqlmap_skipped", []).append(skip_entry)
-                                    continue
-
-                                # Add replay traceability
-                                result_entry = {
-                                    **srep,
-                                    "reason": candidate.get("reason"),
-                                    "replay": used_replay,
-                                }
-                                if used_replay:
-                                    result_entry["replay_source"] = "playwright"
-                                active_block["sqlmap"].append(result_entry)
-                                if srep.get("vulnerable") or srep.get("summary") == "possible SQLi":
-                                    method = srep.get("method", "GET")
-                                    title = "Potential SQL injection"
-                                    if method != "GET":
-                                        title = f"{method} {title}"
-                                    report["findings"].append(normalize_finding(
-                                        "sqlmap", title, "high",
-                                        {"url": srep.get("url"), "summary": srep.get("summary"), "param": srep.get("param")}
-                                    ))
-                    except Exception as e:
-                        active_block.setdefault("sqlmap_errors", []).append({"error": str(e)})
-
-                # NoSQL Injection testing for JSON body endpoints.
-                # NoSQL is a core injection family (operator injection / auth
-                # bypass), not optional re-confirmation enrichment like SQLMap, so
-                # give it priority: run whenever SQLi runs and any meaningful active
-                # time remains, using a small dedicated floor (5s) instead of the
-                # generic 15s post-active threshold. This keeps body-based NoSQL
-                # from being the first thing dropped on smaller budget profiles —
-                # it is cheap (<=8 endpoints, a handful of requests each). Note the
-                # candidate endpoints must be reachable: auth-gated NoSQL sinks
-                # (e.g. Juice Shop PATCH /rest/products/reviews -> 401 anonymous)
-                # only surface when the scan carries the required auth context.
-                _nosql_remaining = active_block.get("active_remaining_after_smart")
-                nosql_budget_exhausted = (
-                    _nosql_remaining is not None and _nosql_remaining < 5.0
-                )
-                nosql_decision = (
-                    should_run_active_enrichment(
-                        "nosql_injection",
-                        post_active_budget_exhausted=nosql_budget_exhausted,
-                        active_block=active_block,
-                    )
-                    if run_sqli
-                    else None
-                )
-                if run_sqli and nosql_decision.run:
-                    try:
-                        debug_nosql = os.environ.get("SCANNER_DEBUG_NOSQL", "").lower() in ("1", "true", "yes")
-                        post_endpoints = [ep for ep in endpoints if ep.get("method") in ("POST", "PUT", "PATCH")]
-                        if debug_nosql:
-                            print(f"[DEBUG NoSQL] Total POST endpoints: {len(post_endpoints)}", file=sys.stderr)
-                            for i, ep in enumerate(post_endpoints[:5]):
-                                print(f"[DEBUG NoSQL]   {i}: {ep.get('url')} body_params={ep.get('body_params')} content_type={ep.get('content_type')}", file=sys.stderr)
-
-                        nosql_candidates = [
-                            ep for ep in endpoints
-                            if ep.get("method") in ("POST", "PUT", "PATCH")
-                            and ep.get("body_params")
-                            and (
-                                not ep.get("allowed_methods")
-                                or ep.get("method", "").upper() in [m.upper() for m in ep.get("allowed_methods", [])]
-                            )
-                            # Test if content_type is JSON or not specified (assume JSON for API endpoints)
-                            and (not ep.get("content_type") or "json" in ep.get("content_type", "").lower())
-                        ]
-                        nosql_query_candidates = [
-                            ep for ep in endpoints
-                            if (ep.get("method") or "GET").upper() == "GET"
-                            and (ep.get("params") or ep.get("query_params"))
-                            and (
-                                not ep.get("allowed_methods")
-                                or "GET" in [m.upper() for m in ep.get("allowed_methods", [])]
-                            )
-                            and not str(ep.get("url") or "").lower().endswith((".js", ".css", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico"))
-                        ]
-                        if debug_nosql:
-                            print(f"[DEBUG NoSQL] NoSQL candidates after filter: {len(nosql_candidates)}", file=sys.stderr)
-                            for i, ep in enumerate(nosql_candidates[:5]):
-                                print(f"[DEBUG NoSQL]   candidate {i}: {ep.get('url')} params={ep.get('body_params')}", file=sys.stderr)
-                            print(f"[DEBUG NoSQL] NoSQL query candidates after filter: {len(nosql_query_candidates)}", file=sys.stderr)
-                            for i, ep in enumerate(nosql_query_candidates[:5]):
-                                print(f"[DEBUG NoSQL]   query candidate {i}: {ep.get('url')} params={ep.get('params') or ep.get('query_params')}", file=sys.stderr)
-
-                        if nosql_candidates or nosql_query_candidates:
-                            active_block["nosql_injection"] = []
-                            nosql_limit = int(active_enrichment_limits.get("nosql_json_endpoints") or (3 if quick_mode else 8))
-                            emit_progress(
-                                "active_nosql",
-                                94,
-                                (
-                                    "starting NoSQL checks on "
-                                    f"{min(len(nosql_candidates), nosql_limit)} JSON and "
-                                    f"{min(len(nosql_query_candidates), nosql_limit)} query candidates"
-                                ),
-                            )
-                            for ep in nosql_query_candidates[:nosql_limit]:
-                                nosql_result = await nosql_injection_test(ep["url"])
-                                if nosql_result.get("vulnerable"):
-                                    nosql_result["url"] = ep.get("url")
-                                    nosql_result["method"] = "GET"
-                                    active_block["nosql_injection"].append(nosql_result)
-                                    for finding in nosql_result.get("findings") or nosql_result.get("evidence", []):
-                                        report["findings"].append(normalize_finding(
-                                            "nosql_injection",
-                                            f"NoSQL Injection in {finding.get('parameter', 'query')}",
-                                            "high",
-                                            {
-                                                "type": "nosql_injection",
-                                                "url": ep.get("url"),
-                                                "method": "GET",
-                                                "parameter": finding.get("parameter"),
-                                                "payload": finding.get("payload"),
-                                                "evidence_type": finding.get("evidence_type"),
-                                                "control_status": finding.get("control_status"),
-                                                "payload_status": finding.get("payload_status"),
-                                                "control_items": finding.get("control_items"),
-                                                "payload_items": finding.get("payload_items"),
-                                                "control_length": finding.get("control_length"),
-                                                "payload_length": finding.get("payload_length"),
-                                                "response_snippet": finding.get("response_snippet", "")[:200],
-                                            },
-                                            "CWE-943"
-                                        ))
-                            for ep in nosql_candidates[:nosql_limit]:
-                                nosql_result = await nosql_injection_test_json_body(
-                                    url=ep["url"],
-                                    method=ep["method"],
-                                    params=ep.get("body_params", []),
+                                ldap_res = await ldap_injection_test_json_body(
+                                    url=url,
+                                    method=method,
+                                    params=params,
                                     auth_session=auth_session,
                                     body_template=ep.get("body_template"),
-                                    body_param_defaults=ep.get("body_param_defaults") or {},
+                                    body_param_defaults=defaults,
+                                    content_type=content_type,
+                                    max_params=aux_param_limit,
+                                    max_payloads=aux_payload_limit,
+                                )
+                                if ldap_res.get("vulnerable"):
+                                    ldap_post["vulnerable"] = True
+                                    ldap_post["evidence"].extend(ldap_res.get("findings", []))
+                                    ldap_post["payloads_tested"].update(ldap_res.get("payloads_tested", []))
+                                    ldap_post["tested_params"].update(ldap_res.get("tested_params", []))
+
+                                xpath_res = await xpath_injection_test_json_body(
+                                    url=url,
+                                    method=method,
+                                    params=params,
+                                    auth_session=auth_session,
+                                    body_template=ep.get("body_template"),
+                                    body_param_defaults=defaults,
+                                    content_type=content_type,
+                                    max_params=aux_param_limit,
+                                    max_payloads=aux_payload_limit,
+                                )
+                                if xpath_res.get("vulnerable"):
+                                    xpath_post["vulnerable"] = True
+                                    xpath_post["evidence"].extend(xpath_res.get("findings", []))
+                                    xpath_post["payloads_tested"].update(xpath_res.get("payloads_tested", []))
+                                    xpath_post["tested_params"].update(xpath_res.get("tested_params", []))
+
+                                ssrf_params = [p for p in params if p.lower() in ssrf_param_keywords]
+                                if ssrf_params or thorough_params:
+                                    ssrf_res = await ssrf_injection_test_json_body(
+                                        url=url,
+                                        method=method,
+                                        params=ssrf_params or params[:2],
+                                        auth_session=auth_session,
+                                        body_template=ep.get("body_template"),
+                                        body_param_defaults=defaults,
+                                        content_type=content_type,
+                                        max_params=min(3, aux_param_limit),
+                                        max_payloads=max(3, min(aux_payload_limit, 6)),
+                                    )
+                                    if ssrf_res.get("vulnerable"):
+                                        ssrf_post["vulnerable"] = True
+                                        ssrf_post["evidence"].extend(ssrf_res.get("findings", []))
+                                        ssrf_post["payloads_tested"].update(ssrf_res.get("payloads_tested", []))
+                                        ssrf_post["tested_params"].update(ssrf_res.get("tested_params", []))
+
+                                xxe_params = [p for p in params if any(k in p.lower() for k in xxe_param_keywords)]
+                                if xxe_params or thorough_params:
+                                    xxe_res = await xxe_injection_test_json_body(
+                                        url=url,
+                                        method=method,
+                                        params=xxe_params or params[:2],
+                                        auth_session=auth_session,
+                                        body_template=ep.get("body_template"),
+                                        body_param_defaults=defaults,
+                                        content_type=content_type,
+                                        max_params=min(3, aux_param_limit),
+                                        max_payloads=max(2, min(aux_payload_limit, 4)),
+                                    )
+                                    if xxe_res.get("vulnerable"):
+                                        xxe_post["vulnerable"] = True
+                                        xxe_post["evidence"].extend(xxe_res.get("findings", []))
+                                        xxe_post["payloads_tested"].update(xxe_res.get("payloads_tested", []))
+                                        xxe_post["tested_params"].update(xxe_res.get("tested_params", []))
+
+                                mass_assignment_res = await mass_assignment_test_json_body(
+                                    url=url,
+                                    method=method,
+                                    params=params,
+                                    auth_session=auth_session,
+                                    body_template=ep.get("body_template"),
+                                    body_param_defaults=defaults,
+                                    content_type=content_type,
+                                    max_fields=max(4, min(10, aux_payload_limit + 2)),
                                 )
                                 _append_endpoint_attempt_telemetry(
                                     active_block,
-                                    nosql_result.get("endpoint_attempts"),
+                                    mass_assignment_res.get("endpoint_attempts"),
                                 )
-                                if nosql_result.get("vulnerable"):
-                                    active_block["nosql_injection"].append(nosql_result)
-                                    for finding in nosql_result.get("findings", []):
-                                        report["findings"].append(normalize_finding(
-                                            "nosql_injection",
-                                            f"NoSQL Injection in {finding.get('parameter', 'unknown')}",
-                                            "high",
+                                if mass_assignment_res.get("vulnerable"):
+                                    mass_assignment_post["vulnerable"] = True
+                                    mass_assignment_post["evidence"].extend(mass_assignment_res.get("findings", []))
+                                    mass_assignment_post["tested_fields"].update(
+                                        f.get("parameter")
+                                        for f in mass_assignment_res.get("findings", [])
+                                        if f.get("parameter")
+                                    )
+
+                            if ldap_post["vulnerable"]:
+                                active_block["ldap_json"] = {
+                                    "payloads_tested": sorted(ldap_post["payloads_tested"]),
+                                    "tested_params": sorted(ldap_post["tested_params"]),
+                                    "evidence": ldap_post["evidence"][:10],
+                                }
+                                report["findings"].append(normalize_finding(
+                                    "ldap_injection",
+                                    "LDAP Injection (JSON body)",
+                                    "high",
+                                    {
+                                        "evidence": ldap_post["evidence"][:10],
+                                        "payloads_tested": len(ldap_post["payloads_tested"]),
+                                        "tested_params": sorted(ldap_post["tested_params"]),
+                                    },
+                                    "CWE-90"
+                                ))
+
+                            if xpath_post["vulnerable"]:
+                                active_block["xpath_json"] = {
+                                    "payloads_tested": sorted(xpath_post["payloads_tested"]),
+                                    "tested_params": sorted(xpath_post["tested_params"]),
+                                    "evidence": xpath_post["evidence"][:10],
+                                }
+                                report["findings"].append(normalize_finding(
+                                    "xpath_injection",
+                                    "XPath Injection (JSON body)",
+                                    "high",
+                                    {
+                                        "evidence": xpath_post["evidence"][:10],
+                                        "payloads_tested": len(xpath_post["payloads_tested"]),
+                                        "tested_params": sorted(xpath_post["tested_params"]),
+                                    },
+                                    "CWE-91"
+                                ))
+
+                            if ssrf_post["vulnerable"]:
+                                active_block["ssrf_json"] = {
+                                    "payloads_tested": sorted(ssrf_post["payloads_tested"]),
+                                    "tested_params": sorted(ssrf_post["tested_params"]),
+                                    "evidence": ssrf_post["evidence"][:10],
+                                }
+                                report["findings"].append(normalize_finding(
+                                    "ssrf",
+                                    "SSRF (JSON body)",
+                                    "high",
+                                    {
+                                        "evidence": ssrf_post["evidence"][:10],
+                                        "payloads_tested": len(ssrf_post["payloads_tested"]),
+                                        "tested_params": sorted(ssrf_post["tested_params"]),
+                                    },
+                                    "CWE-918"
+                                ))
+
+                            if xxe_post["vulnerable"]:
+                                active_block["xxe_json"] = {
+                                    "payloads_tested": sorted(xxe_post["payloads_tested"]),
+                                    "tested_params": sorted(xxe_post["tested_params"]),
+                                    "evidence": xxe_post["evidence"][:10],
+                                }
+                                report["findings"].append(normalize_finding(
+                                    "xxe_injection",
+                                    "XXE (JSON body)",
+                                    "high",
+                                    {
+                                        "evidence": xxe_post["evidence"][:10],
+                                        "payloads_tested": len(xxe_post["payloads_tested"]),
+                                        "tested_params": sorted(xxe_post["tested_params"]),
+                                    },
+                                    "CWE-611"
+                                ))
+
+                            if mass_assignment_post["vulnerable"]:
+                                active_block["mass_assignment_json"] = {
+                                    "tested_fields": sorted(mass_assignment_post["tested_fields"]),
+                                    "evidence": mass_assignment_post["evidence"][:10],
+                                }
+                                report["findings"].append(normalize_finding(
+                                    "mass_assignment",
+                                    "Mass Assignment (JSON body)",
+                                    "high",
+                                    {
+                                        "evidence": mass_assignment_post["evidence"][:10],
+                                        "tested_fields": sorted(mass_assignment_post["tested_fields"]),
+                                    },
+                                    "CWE-915"
+                                ))
+
+                        # Blind SSRF (OOB) for smart mode when callback is provided
+                        if oob_callback_url:
+                            ssrf_results = []
+                            ssrf_get_limit = int(active_enrichment_limits.get("blind_ssrf_get_endpoints") or 5)
+                            ssrf_candidates = param_endpoints[:ssrf_get_limit] if param_endpoints else []
+                            for ep in ssrf_candidates:
+                                params = _coerce_param_list(ep.get("params") or ep.get("query_params"))
+                                if not params:
+                                    continue
+                                ssrf_params = [p for p in params if p.lower() in ssrf_param_keywords]
+                                if not ssrf_params and not thorough_params:
+                                    continue
+                                if not ssrf_params:
+                                    ssrf_params = params[:2]
+                                defaults = ep.get("param_defaults") or ep.get("query_param_defaults") or {}
+                                test_url = _build_query_url(ep.get("url", ""), defaults)
+                                if not test_url:
+                                    continue
+                                ssrf_res = await blind_ssrf_test(
+                                    test_url,
+                                    callback_domain=oob_callback_url,
+                                    params_to_test=ssrf_params,
+                                    auth_session=auth_session,
+                                )
+                                if ssrf_res.get("payloads_injected"):
+                                    ssrf_results.append({
+                                        "url": test_url,
+                                        "params": ssrf_params,
+                                        **ssrf_res,
+                                    })
+
+                            if ssrf_results:
+                                active_block["blind_ssrf"] = ssrf_results
+                                report["findings"].append(normalize_finding(
+                                    "blind_ssrf",
+                                    "Potential Blind SSRF (OOB callbacks sent)",
+                                    "medium",
+                                    {
+                                        "callback_domain": oob_callback_url,
+                                        "payloads_sent": sum(r.get("payloads_injected", 0) for r in ssrf_results),
+                                        "endpoints_tested": [r.get("url") for r in ssrf_results],
+                                        "note": "Check your callback server for DNS/HTTP hits to confirm SSRF.",
+                                    },
+                                    "CWE-918"
+                                ))
+
+                        # Stored XSS workflow
+                        try:
+                            stored_xss_decision = should_run_active_enrichment(
+                                "stored_xss",
+                                post_active_budget_exhausted=post_active_budget_exhausted,
+                                active_block=active_block,
+                            )
+                            if not stored_xss_decision.run:
+                                record_active_enrichment_skip(
+                                    active_block,
+                                    "stored_xss",
+                                    stored_xss_decision.reason or "active_time_budget_exhausted",
+                                )
+                                print(f"[active] Skipping stored XSS workflow: {stored_xss_decision.reason}", file=sys.stderr)
+                            else:
+                                stored_urls = []
+                                if smart_discovery_data and isinstance(smart_discovery_data, dict):
+                                    stored_urls.extend(smart_discovery_data.get("all_urls", []) or [])
+                                stored_urls.extend(crawl_urls or [])
+                                if browser_api_endpoints:
+                                    for ep in browser_api_endpoints:
+                                        if isinstance(ep, dict) and ep.get("url"):
+                                            stored_urls.append(ep["url"])
+                                        elif isinstance(ep, str):
+                                            stored_urls.append(ep)
+                                stored_urls = list({u for u in stored_urls if isinstance(u, str)})
+
+                                stored_res = await stored_xss_workflow(
+                                    base_url=base_url,
+                                    endpoints=endpoints,
+                                    discovered_urls=stored_urls,
+                                    auth_session=auth_session,
+                                    max_forms=int(active_enrichment_limits.get("stored_xss_max_forms") or 5),
+                                    max_pages=int(active_enrichment_limits.get("stored_xss_max_pages") or 12),
+                                )
+                                active_block["stored_xss"] = stored_res
+                                if stored_res.get("vulnerable"):
+                                    for finding in stored_res.get("findings", [])[:5]:
+                                        nf = normalize_finding(
+                                            "stored_xss",
+                                            "Stored XSS (workflow)",
+                                            finding.get("severity", "high"),
                                             {
-                                                "type": "nosql_injection",
-                                                "url": nosql_result.get("url"),
-                                                "method": nosql_result.get("method"),
-                                                "parameter": finding.get("parameter"),
+                                                "type": "XSS",
+                                                "injection_url": finding.get("injection_url"),
+                                                "stored_url": finding.get("stored_url"),
+                                                "url": finding.get("stored_url"),
+                                                "param": finding.get("param"),
                                                 "payload": finding.get("payload"),
-                                                "evidence_type": finding.get("evidence_type"),
-                                                "control_status": finding.get("control_status"),
-                                                "payload_status": finding.get("payload_status"),
-                                                "control_items": finding.get("control_items"),
-                                                "payload_items": finding.get("payload_items"),
-                                                "control_length": finding.get("control_length"),
-                                                "payload_length": finding.get("payload_length"),
-                                                "response_snippet": finding.get("response_snippet", "")[:200],
+                                                "payload_reflected": finding.get("payload_reflected"),
+                                                "snippet": finding.get("snippet"),
+                                                "method": finding.get("method"),
+                                                "verified": finding.get("verified", False),
+                                                "proof_state": finding.get("proof_state"),
+                                                "confidence": finding.get("confidence"),
+                                                "cvss_score": finding.get("cvss_score"),
+                                                "evidence": finding.get("evidence"),
+                                                "request_headers": finding.get("request_headers"),
                                             },
-                                            "CWE-943"
-                                        ))
-                            emit_progress("active_nosql", 94, "NoSQL JSON body checks complete")
+                                            "CWE-79"
+                                        )
+                                        if finding.get("browser_proof"):
+                                            nf["browser_proof"] = finding["browser_proof"]
+                                        if finding.get("poe_result"):
+                                            nf["poe_result"] = finding["poe_result"]
+                                        if finding.get("verified"):
+                                            nf["verified"] = True
+                                        if finding.get("proof_state"):
+                                            nf["proof_state"] = finding["proof_state"]
+                                        if finding.get("confidence") is not None:
+                                            nf["confidence"] = finding["confidence"]
+                                        if finding.get("cvss_score") is not None:
+                                            nf["cvss_score"] = finding["cvss_score"]
+                                        report["findings"].append(nf)
+                        except Exception as e:
+                            active_block["stored_xss_error"] = str(e)
                     except Exception as e:
-                        active_block.setdefault("nosql_errors", []).append({"error": str(e)})
-                elif run_sqli and not nosql_decision.run:
-                    record_active_enrichment_skip(
-                        active_block,
-                        "nosql_injection",
-                        nosql_decision.reason or "active_time_budget_exhausted",
-                    )
-                    print(f"[active] Skipping NoSQL injection probes: {nosql_decision.reason}", file=sys.stderr)
+                        active_block["param_injection_error"] = str(e)
 
-            except Exception as e:
-                active_block["smart_error"] = str(e)
-                # Smart mode failed - will fall back to legacy checks below
+                    if run_xss:
+                        all_xss_findings = smart_results.get("xss", {}).get("findings", [])
+                        # Filter out hash-route DOM XSS (tracked separately in active_block["hash_route_dom_xss"])
+                        smart_xss_findings = [f for f in all_xss_findings if f.get("subtype") != "dom_xss_hash_route"]
+                        active_block["smart_xss"] = smart_xss_findings
+                        active_block["smart_reflections_found"] = smart_results.get("xss", {}).get("reflections_found", 0)
+                        active_block["xss_get_endpoints_tested"] = smart_results.get("xss", {}).get("get_endpoints_tested", 0)
+                        active_block["xss_post_endpoints_tested"] = smart_results.get("xss", {}).get("post_endpoints_tested", 0)
 
-        # Track if smart mode ran successfully (no error)
-        smart_succeeded = smart_mode and "smart_error" not in active_block
-
-        # DOM XSS Analysis - run in broad smart mode after smart active tests.
-        # Focused manual active scans keep reporting limited to the requested family.
-        dom_xss_allowed_by_focus = focused_family_allows_active_module(
-            focused_active_family_name,
-            "dom_xss",
-        )
-        # DOM XSS must run for a focused XSS lane (dom_xss_allowed_by_focus already
-        # gates by family: broad and focused-xss allow it, focused-sqli does not).
-        # Only skip it for explicit-worklist coverage shards (no browser data).
-        dom_xss_eligible = (
-            smart_mode
-            and smart_succeeded
-            and dom_xss_allowed_by_focus
-            and not zero_rediscovery_scope
-        )
-        dom_xss_decision = (
-            should_run_active_enrichment(
-                "dom_xss",
-                post_active_budget_exhausted=post_active_budget_exhausted,
-                active_block=active_block,
-            )
-            if dom_xss_eligible
-            else None
-        )
-        if dom_xss_eligible and dom_xss_decision.run:
-            try:
-                # Get JS URLs from discovery data or crawl results (optional - function can self-discover)
-                js_urls_for_dom_xss = []
-                if smart_discovery_data:
-                    js_urls_for_dom_xss = [
-                        u for u in smart_discovery_data.get("all_urls", [])
-                        if u and (u.endswith(".js") or ".js?" in u)
-                    ]
-                if not js_urls_for_dom_xss and crawl_urls:
-                    js_urls_for_dom_xss = [
-                        u for u in crawl_urls
-                        if u and (u.endswith(".js") or ".js?" in u)
-                    ]
-                if seed_js_urls:
-                    js_urls_for_dom_xss.extend([u for u in seed_js_urls if u])
-                if js_urls_for_dom_xss:
-                    js_urls_for_dom_xss = list(dict.fromkeys(js_urls_for_dom_xss))
-
-                # Always run DOM XSS analysis - function will self-discover JS if none provided
-                if js_urls_for_dom_xss:
-                    print(f"[scanner] Smart mode: Running DOM XSS analysis on {min(len(js_urls_for_dom_xss), dom_xss_max_files)} JS files (max: {dom_xss_max_files})", file=sys.stderr)
-                else:
-                    print(f"[scanner] Smart mode: Running DOM XSS analysis (self-discovering JS files, max: {dom_xss_max_files})", file=sys.stderr)
-                emit_progress("active_dom_analysis", 94, "starting DOM XSS static analysis")
-
-                dom_xss_results = await dom_xss_analysis(
-                    url=base_url,
-                    js_urls=js_urls_for_dom_xss[:dom_xss_max_files] if js_urls_for_dom_xss else None,
-                    auth_session=auth_session,
-                    max_files=dom_xss_max_files
-                )
-
-                active_block["dom_xss"] = dom_xss_results
-                emit_progress("active_dom_analysis", 94, "DOM XSS static analysis complete")
-
-                # Add normalized findings for DOM XSS vulnerabilities
-                if dom_xss_results.get("findings"):
-                    for f in dom_xss_results["findings"]:
-                        # Only report findings with source nearby (higher confidence)
-                        if f.get("source_nearby"):
-                            severity = f.get("severity", "medium")
+                        # Process smart XSS results (hash-route DOM XSS handled separately below)
+                        for f in smart_xss_findings:
                             report["findings"].append(normalize_finding(
-                                "dom_xss",
-                                f"DOM-Based XSS ({f.get('sink_type', 'unknown sink')})",
-                                severity,
+                                "smart_xss",
+                                f"Cross-Site Scripting ({f.get('context', 'unknown')})",
+                                f.get("severity", "high"),
                                 {
-                                    "file": f.get("file"),
-                                    "line": f.get("line"),
-                                    "snippet": f.get("snippet"),
-                                    "sink_type": f.get("sink_type"),
-                                    "source_pattern": f.get("source_pattern"),
-                                    "source_nearby": f.get("source_nearby"),  # Include for validation
+                                    "type": f.get("type", "XSS"),
+                                    "url": f.get("url"),
+                                    "param": f.get("param"),
+                                    "payload": f.get("payload"),
                                     "evidence": f.get("evidence"),
-                                    "confidence": f.get("confidence", 0.7),
+                                    "context": f.get("context"),
                                 },
                                 "CWE-79"
                             ))
-                    print(f"[scanner] DOM XSS analysis: found {len(dom_xss_results['findings'])} potential vulnerabilities", file=sys.stderr)
-            except Exception as e:
-                active_block["dom_xss_error"] = str(e)
-                print(f"[scanner] DOM XSS analysis error: {e}", file=sys.stderr)
-        elif smart_mode and smart_succeeded and not focused_manual_active_scope and not dom_xss_allowed_by_focus:
-            reason = f"focused_family_{focused_active_family_name}"
-            record_active_enrichment_skip(active_block, "dom_xss", reason)
-            active_block.setdefault("active_enrichment_decisions", {})["dom_xss"] = {
-                "run": False,
-                "reason": reason,
-            }
-            print(f"[scanner] Skipping DOM XSS analysis: {reason}", file=sys.stderr)
-        elif (
-            smart_mode
-            and smart_succeeded
-            and not focused_manual_active_scope
-            and dom_xss_decision
-            and not dom_xss_decision.run
-        ):
-            record_active_enrichment_skip(
-                active_block,
-                "dom_xss",
-                dom_xss_decision.reason or "active_time_budget_exhausted",
-            )
-            print(f"[scanner] Skipping DOM XSS analysis: {dom_xss_decision.reason}", file=sys.stderr)
 
-        # Focused Auth Testing - read-only authenticated-vs-anonymous checks
-        # for claimed endpoints. This is explicit-only through check_family=auth
-        # so default broad scans do not reinterpret public endpoints as auth
-        # obligations.
+                    # Hash-route DOM XSS is only relevant when XSS is in scope.
+                    hash_route_dom_xss = smart_results.get("hash_route_dom_xss", {})
+                    hash_route_findings = hash_route_dom_xss.get("findings", [])
+                    if run_xss and hash_route_findings:
+                        active_block["hash_route_dom_xss"] = hash_route_findings
+                        active_block["hash_route_endpoints_tested"] = hash_route_dom_xss.get("endpoints_tested", 0)
+                        for f in hash_route_findings:
+                            nf = normalize_finding(
+                                "hash_route_dom_xss",
+                                f"DOM XSS in Hash Route ({f.get('technique', 'unknown')})",
+                                f.get("severity", "high"),
+                                {
+                                    "type": "DOM XSS",
+                                    "url": f.get("url"),
+                                    "param": f.get("param") or f.get("parameter"),
+                                    "payload": f.get("payload"),
+                                    "evidence": f.get("evidence"),
+                                    "verified": f.get("verified", False),
+                                    # Browser-proven execution carries an explicit High CVSS so
+                                    # the generic XSS base score can't cap it back to medium.
+                                    "cvss_score": f.get("cvss_score"),
+                                },
+                                "CWE-79"
+                            )
+                            # Preserve the headless browser execution proof at top level so the
+                            # finding validator's execution-proof fast-path keeps a dialog-fired
+                            # DOM XSS verified. It cannot do HTTP-response context verification on
+                            # a browser-side finding and would otherwise downgrade it to medium.
+                            if f.get("browser_proof"):
+                                nf["browser_proof"] = f["browser_proof"]
+                            if f.get("verified"):
+                                nf["poe_result"] = {"proven": True, "confidence": f.get("confidence", 0.99)}
+                            report["findings"].append(nf)
+
+                    # Record coverage for smart active tests
+                    if coverage_tracker:
+                        sqli_stats = smart_results.get("sqli", {})
+                        xss_stats = smart_results.get("xss", {})
+                        total_endpoints = (
+                            sqli_stats.get("endpoints_tested", 0) +
+                            xss_stats.get("endpoints_tested", 0)
+                        )
+                        total_params = (
+                            sqli_stats.get("params_tested", 0) +
+                            xss_stats.get("params_tested", 0)
+                        )
+                        if total_endpoints > 0:
+                            coverage_tracker.record_endpoint_tested(count=total_endpoints)
+                        if total_params > 0:
+                            coverage_tracker.record_param_tested(count=total_params)
+
+                    if run_sqli:
+                        sqlmap_decision = should_run_active_enrichment(
+                            "sqlmap",
+                            post_active_budget_exhausted=post_active_budget_exhausted,
+                            active_block=active_block,
+                        )
+                    else:
+                        sqlmap_decision = None
+                    if run_sqli and not sqlmap_decision.run:
+                        record_active_enrichment_skip(
+                            active_block,
+                            "sqlmap",
+                            sqlmap_decision.reason or "active_time_budget_exhausted",
+                            candidate_reason="post_active_budget",
+                        )
+                        print(f"[sqlmap] Skipping SQLMap verification: {sqlmap_decision.reason}", file=sys.stderr)
+                    elif run_sqli:
+                        # Heuristic sqlmap verification on high-signal endpoints
+                        try:
+                            sqlmap_candidates: list[dict[str, Any]] = []
+                            seen_keys: set[tuple[str, str]] = set()
+                            endpoint_lookup = {
+                                (e.get("url"), e.get("method", "GET").upper()): e for e in endpoints
+                            }
+
+                            # PRIORITY: Always include manual/custom endpoints for SQLmap testing
+                            if manual_endpoints_norm:
+                                for ep in manual_endpoints_norm:
+                                    if not isinstance(ep, dict):
+                                        continue
+                                    ep_url = ep.get("url")
+                                    if not ep_url:
+                                        continue
+                                    method = (ep.get("method") or "GET").upper()
+                                    key = (ep_url, method)
+                                    if key in seen_keys:
+                                        continue
+                                    # Build endpoint dict with params
+                                    sqlmap_ep = {
+                                        "url": ep_url,
+                                        "method": method,
+                                        "source": "manual",
+                                    }
+                                    if method == "GET":
+                                        sqlmap_ep["params"] = ep.get("params") or []
+                                    else:
+                                        sqlmap_ep["body_params"] = ep.get("body_params") or ep.get("params") or []
+                                        sqlmap_ep["content_type"] = ep.get("content_type") or "application/json"
+                                    sqlmap_candidates.append({"endpoint": sqlmap_ep, "param": None, "reason": "manual_endpoint"})
+                                    seen_keys.add(key)
+                                if sqlmap_candidates:
+                                    print(
+                                        f"[sqlmap] Added {len(sqlmap_candidates)} manual endpoints for SQLmap testing",
+                                        file=sys.stderr
+                                    )
+
+                            if smart_sqli_findings:
+                                max_sqlmap = 2 if quick_mode else 5
+                                for f in smart_sqli_findings:
+                                    key = (f.get("url"), f.get("method", "GET").upper())
+                                    if key in seen_keys:
+                                        continue
+                                    endpoint = endpoint_lookup.get(key, {"url": f.get("url"), "method": f.get("method", "GET")})
+                                    sqlmap_candidates.append({"endpoint": endpoint, "param": f.get("param"), "reason": "smart_sqli"})
+                                    seen_keys.add(key)
+                                    if len(sqlmap_candidates) >= max_sqlmap:
+                                        break
+                            elif nuclei_signals and (nuclei_signals.get("sql_errors") or nuclei_signals.get("auth_issues")):
+                                sql_priority_params = ["id", "user", "uid", "account", "login", "query", "search", "filter"]
+
+                                def score_endpoint(ep: dict[str, Any]) -> int:
+                                    params = (ep.get("params", []) or []) + (ep.get("body_params", []) or [])
+                                    return sum(1 for p in params if any(sp in p.lower() for sp in sql_priority_params))
+
+                                prioritized = sorted(endpoints, key=score_endpoint, reverse=True)
+                                limit = 2 if quick_mode else 5
+                                for ep in prioritized:
+                                    if not (ep.get("params") or ep.get("body_params")):
+                                        continue
+                                    key = (ep.get("url"), ep.get("method", "GET").upper())
+                                    if key in seen_keys:
+                                        continue
+                                    sqlmap_candidates.append({"endpoint": ep, "param": None, "reason": "signals"})
+                                    seen_keys.add(key)
+                                    if len(sqlmap_candidates) >= limit:
+                                        break
+
+                            # Add a small set of POST/PUT/PATCH endpoints for sqlmap coverage
+                            if len(sqlmap_candidates) < (2 if quick_mode else 4):
+                                post_endpoints = [
+                                    ep for ep in endpoints
+                                    if ep.get("method", "GET").upper() in ("POST", "PUT", "PATCH")
+                                    and ep.get("body_params")
+                                ]
+
+                                def score_post(ep: dict[str, Any]) -> int:
+                                    params = ep.get("body_params", []) or []
+                                    score = len(params)
+                                    path = str(ep.get("url", "")).lower()
+                                    if any(k in path for k in ["login", "auth", "search", "filter", "query"]):
+                                        score += 3
+                                    return score
+
+                                post_endpoints = sorted(post_endpoints, key=score_post, reverse=True)
+                                extra_limit = 1 if quick_mode else 2
+                                for ep in post_endpoints:
+                                    if extra_limit <= 0:
+                                        break
+                                    key = (ep.get("url"), ep.get("method", "GET").upper())
+                                    if key in seen_keys:
+                                        continue
+                                    sqlmap_candidates.append({"endpoint": ep, "param": None, "reason": "post_coverage"})
+                                    seen_keys.add(key)
+                                    extra_limit -= 1
+
+                            # Build index of captured Playwright requests for SQLmap replay
+                            # This allows us to use real headers/CSRF/body from browser traffic
+                            debug_sqlmap = os.environ.get("SCANNER_DEBUG_SQLMAP", "").lower() in ("1", "true", "yes")
+                            captured_index: dict[tuple[str, str, tuple[str, ...]], dict[str, Any]] = {}
+                            if browser_res:
+                                captured_requests = browser_res.get("captured_requests", [])
+                                target_host = urllib.parse.urlparse(base_url).netloc
+
+                                def _is_better_capture(new_req: dict[str, Any], old_req: dict[str, Any]) -> bool:
+                                    """Prefer authenticated, successful, with body."""
+                                    new_score = (
+                                        new_req.get("has_auth", False),
+                                        200 <= (new_req.get("status") or 0) < 400,
+                                        bool(new_req.get("post_data")),
+                                    )
+                                    old_score = (
+                                        old_req.get("has_auth", False),
+                                        200 <= (old_req.get("status") or 0) < 400,
+                                        bool(old_req.get("post_data")),
+                                    )
+                                    return new_score > old_score
+
+                                for cap_req in captured_requests:
+                                    cap_url = cap_req.get("url", "")
+                                    cap_parsed = urllib.parse.urlparse(cap_url)
+
+                                    # Skip: different host
+                                    if cap_parsed.netloc != target_host:
+                                        continue
+                                    # Skip: not an API call
+                                    if not cap_req.get("is_api_call"):
+                                        continue
+                                    # Skip: multipart (file uploads)
+                                    if "multipart/form-data" in cap_req.get("content_type", ""):
+                                        continue
+                                    # Skip: huge bodies
+                                    if cap_req.get("post_data") and len(cap_req.get("post_data", "")) > 50000:
+                                        continue
+
+                                    # Build normalized key: (method, path, sorted_query_param_names)
+                                    cap_method = cap_req.get("method", "GET").upper()
+                                    cap_path = cap_parsed.path.rstrip("/") or "/"
+                                    cap_query_params = tuple(sorted(urllib.parse.parse_qs(cap_parsed.query, keep_blank_values=True).keys()))
+                                    cap_key = (cap_method, cap_path, cap_query_params)
+
+                                    # Keep best capture for each key
+                                    existing = captured_index.get(cap_key)
+                                    if existing is None or _is_better_capture(cap_req, existing):
+                                        captured_index[cap_key] = cap_req
+
+                                if debug_sqlmap and captured_index:
+                                    print(f"[DEBUG SQLMAP] indexed {len(captured_index)} captured requests for replay", file=sys.stderr)
+
+                            if sqlmap_candidates:
+                                if debug_sqlmap:
+                                    print(
+                                        f"[DEBUG SQLMAP] candidates={len(sqlmap_candidates)}",
+                                        file=sys.stderr
+                                    )
+                                    for i, candidate in enumerate(sqlmap_candidates[:5]):
+                                        ep = candidate.get("endpoint", {}) or {}
+                                        print(
+                                            f"[DEBUG SQLMAP]   {i}: {ep.get('method', 'GET')} "
+                                            f"{ep.get('url')} param={candidate.get('param')} "
+                                            f"reason={candidate.get('reason')}",
+                                            file=sys.stderr,
+                                        )
+                                # Only use aggressive SQLmap for aggressive exploit level
+                                aggressive_sqlmap = exploit_level == "aggressive"
+                                sqlmap_quick_mode = quick_mode or focused_manual_active_scope
+                                if focused_manual_active_scope:
+                                    print("[sqlmap] Focused manual active scope: using quick SQLMap profile", file=sys.stderr)
+                                # Get detected DBMS from smart_sqli for DBMS-aware SQLmap tuning
+                                detected_dbms = active_block.get("dbms_detected")
+
+                                # Build tasks with replay matching
+                                tasks: list[asyncio.Task[dict[str, Any]]] = []
+                                replay_flags: list[bool] = []  # Track which candidates use replay
+                                emit_progress(
+                                    "active_sqlmap",
+                                    94,
+                                    f"starting SQLMap verification on {len(sqlmap_candidates)} candidates",
+                                )
+
+                                for c in sqlmap_candidates:
+                                    ep = c["endpoint"]
+                                    ep_url = ep.get("url", "")
+                                    ep_method = ep.get("method", "GET").upper()
+                                    ep_parsed = urllib.parse.urlparse(ep_url)
+                                    ep_path = ep_parsed.path.rstrip("/") or "/"
+                                    ep_query_params = tuple(sorted(urllib.parse.parse_qs(ep_parsed.query, keep_blank_values=True).keys()))
+
+                                    # Build match key
+                                    match_key = (ep_method, ep_path, ep_query_params)
+                                    matched_capture = captured_index.get(match_key)
+
+                                    # Use replay if we have a match AND:
+                                    # - GET: always (preserves real headers/CSRF cookies)
+                                    # - POST/PUT/PATCH: only if captured request has body
+                                    use_replay = (
+                                        matched_capture is not None
+                                        and (
+                                            ep_method == "GET"  # GET: replay for headers even without body
+                                            or matched_capture.get("post_data")  # Non-GET: require body
+                                        )
+                                    )
+
+                                    if use_replay:
+                                        if debug_sqlmap:
+                                            print(
+                                                f"[DEBUG SQLMAP] using replay for {ep_method} {ep_path}",
+                                                file=sys.stderr,
+                                            )
+                                        tasks.append(
+                                            asyncio.create_task(
+                                                sqlmap_replay_request(
+                                                    matched_capture,
+                                                    auth_session=auth_session,
+                                                    quick_mode=sqlmap_quick_mode,
+                                                    aggressive=aggressive_sqlmap,
+                                                    param=c.get("param"),
+                                                    dbms=detected_dbms,
+                                                )
+                                            )
+                                        )
+                                        replay_flags.append(True)
+                                    else:
+                                        tasks.append(
+                                            asyncio.create_task(
+                                                sqlmap_test_context(
+                                                    ep,
+                                                    quick_mode=sqlmap_quick_mode,
+                                                    aggressive=aggressive_sqlmap,
+                                                    auth_session=auth_session,
+                                                    param=c.get("param"),
+                                                    dbms=detected_dbms,
+                                                )
+                                            )
+                                        )
+                                        replay_flags.append(False)
+
+                                sqlmap_results = await asyncio.gather(*tasks, return_exceptions=True)
+                                emit_progress("active_sqlmap", 94, "SQLMap verification complete")
+
+                                for candidate, srep, used_replay in zip(sqlmap_candidates, sqlmap_results, replay_flags):
+                                    if isinstance(srep, Exception):
+                                        active_block.setdefault("sqlmap_errors", []).append({
+                                            "url": candidate["endpoint"].get("url"),
+                                            "error": str(srep),
+                                        })
+                                        continue
+
+                                    # Handle None result (replay failed to write request file)
+                                    if srep is None:
+                                        active_block.setdefault("sqlmap_errors", []).append({
+                                            "url": candidate["endpoint"].get("url"),
+                                            "error": "replay request file write failed",
+                                        })
+                                        continue
+
+                                    if srep.get("skipped"):
+                                        # Enhanced skip reason logging
+                                        skip_entry = {
+                                            "url": srep.get("url"),
+                                            "method": srep.get("method"),
+                                            "param": srep.get("param"),
+                                            "skip_reason": srep.get("skip_reason") or srep.get("error"),
+                                            "skip_details": srep.get("skip_details"),
+                                            "candidate_reason": candidate.get("reason"),
+                                            "replay": used_replay,
+                                        }
+                                        active_block.setdefault("sqlmap_skipped", []).append(skip_entry)
+                                        continue
+
+                                    # Add replay traceability
+                                    result_entry = {
+                                        **srep,
+                                        "reason": candidate.get("reason"),
+                                        "replay": used_replay,
+                                    }
+                                    if used_replay:
+                                        result_entry["replay_source"] = "playwright"
+                                    active_block["sqlmap"].append(result_entry)
+                                    if srep.get("vulnerable") or srep.get("summary") == "possible SQLi":
+                                        method = srep.get("method", "GET")
+                                        title = "Potential SQL injection"
+                                        if method != "GET":
+                                            title = f"{method} {title}"
+                                        report["findings"].append(normalize_finding(
+                                            "sqlmap", title, "high",
+                                            {"url": srep.get("url"), "summary": srep.get("summary"), "param": srep.get("param")}
+                                        ))
+                        except Exception as e:
+                            active_block.setdefault("sqlmap_errors", []).append({"error": str(e)})
+
+                    # NoSQL Injection testing for JSON body endpoints.
+                    # NoSQL is a core injection family (operator injection / auth
+                    # bypass), not optional re-confirmation enrichment like SQLMap, so
+                    # give it priority: run whenever SQLi runs and any meaningful active
+                    # time remains, using a small dedicated floor (5s) instead of the
+                    # generic 15s post-active threshold. This keeps body-based NoSQL
+                    # from being the first thing dropped on smaller budget profiles —
+                    # it is cheap (<=8 endpoints, a handful of requests each). Note the
+                    # candidate endpoints must be reachable: auth-gated NoSQL sinks
+                    # (e.g. Juice Shop PATCH /rest/products/reviews -> 401 anonymous)
+                    # only surface when the scan carries the required auth context.
+                    _nosql_remaining = active_block.get("active_remaining_after_smart")
+                    nosql_budget_exhausted = (
+                        _nosql_remaining is not None and _nosql_remaining < 5.0
+                    )
+                    nosql_decision = (
+                        should_run_active_enrichment(
+                            "nosql_injection",
+                            post_active_budget_exhausted=nosql_budget_exhausted,
+                            active_block=active_block,
+                        )
+                        if run_sqli
+                        else None
+                    )
+                    if run_sqli and nosql_decision.run:
+                        try:
+                            debug_nosql = os.environ.get("SCANNER_DEBUG_NOSQL", "").lower() in ("1", "true", "yes")
+                            post_endpoints = [ep for ep in endpoints if ep.get("method") in ("POST", "PUT", "PATCH")]
+                            if debug_nosql:
+                                print(f"[DEBUG NoSQL] Total POST endpoints: {len(post_endpoints)}", file=sys.stderr)
+                                for i, ep in enumerate(post_endpoints[:5]):
+                                    print(f"[DEBUG NoSQL]   {i}: {ep.get('url')} body_params={ep.get('body_params')} content_type={ep.get('content_type')}", file=sys.stderr)
+
+                            nosql_candidates = [
+                                ep for ep in endpoints
+                                if ep.get("method") in ("POST", "PUT", "PATCH")
+                                and ep.get("body_params")
+                                and (
+                                    not ep.get("allowed_methods")
+                                    or ep.get("method", "").upper() in [m.upper() for m in ep.get("allowed_methods", [])]
+                                )
+                                # Test if content_type is JSON or not specified (assume JSON for API endpoints)
+                                and (not ep.get("content_type") or "json" in ep.get("content_type", "").lower())
+                            ]
+                            nosql_query_candidates = [
+                                ep for ep in endpoints
+                                if (ep.get("method") or "GET").upper() == "GET"
+                                and (ep.get("params") or ep.get("query_params"))
+                                and (
+                                    not ep.get("allowed_methods")
+                                    or "GET" in [m.upper() for m in ep.get("allowed_methods", [])]
+                                )
+                                and not str(ep.get("url") or "").lower().endswith((".js", ".css", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico"))
+                            ]
+                            if debug_nosql:
+                                print(f"[DEBUG NoSQL] NoSQL candidates after filter: {len(nosql_candidates)}", file=sys.stderr)
+                                for i, ep in enumerate(nosql_candidates[:5]):
+                                    print(f"[DEBUG NoSQL]   candidate {i}: {ep.get('url')} params={ep.get('body_params')}", file=sys.stderr)
+                                print(f"[DEBUG NoSQL] NoSQL query candidates after filter: {len(nosql_query_candidates)}", file=sys.stderr)
+                                for i, ep in enumerate(nosql_query_candidates[:5]):
+                                    print(f"[DEBUG NoSQL]   query candidate {i}: {ep.get('url')} params={ep.get('params') or ep.get('query_params')}", file=sys.stderr)
+
+                            if nosql_candidates or nosql_query_candidates:
+                                active_block["nosql_injection"] = []
+                                nosql_limit = int(active_enrichment_limits.get("nosql_json_endpoints") or (3 if quick_mode else 8))
+                                emit_progress(
+                                    "active_nosql",
+                                    94,
+                                    (
+                                        "starting NoSQL checks on "
+                                        f"{min(len(nosql_candidates), nosql_limit)} JSON and "
+                                        f"{min(len(nosql_query_candidates), nosql_limit)} query candidates"
+                                    ),
+                                )
+                                for ep in nosql_query_candidates[:nosql_limit]:
+                                    nosql_result = await nosql_injection_test(ep["url"])
+                                    if nosql_result.get("vulnerable"):
+                                        nosql_result["url"] = ep.get("url")
+                                        nosql_result["method"] = "GET"
+                                        active_block["nosql_injection"].append(nosql_result)
+                                        for finding in nosql_result.get("findings") or nosql_result.get("evidence", []):
+                                            report["findings"].append(normalize_finding(
+                                                "nosql_injection",
+                                                f"NoSQL Injection in {finding.get('parameter', 'query')}",
+                                                "high",
+                                                {
+                                                    "type": "nosql_injection",
+                                                    "url": ep.get("url"),
+                                                    "method": "GET",
+                                                    "parameter": finding.get("parameter"),
+                                                    "payload": finding.get("payload"),
+                                                    "evidence_type": finding.get("evidence_type"),
+                                                    "control_status": finding.get("control_status"),
+                                                    "payload_status": finding.get("payload_status"),
+                                                    "control_items": finding.get("control_items"),
+                                                    "payload_items": finding.get("payload_items"),
+                                                    "control_length": finding.get("control_length"),
+                                                    "payload_length": finding.get("payload_length"),
+                                                    "response_snippet": finding.get("response_snippet", "")[:200],
+                                                },
+                                                "CWE-943"
+                                            ))
+                                for ep in nosql_candidates[:nosql_limit]:
+                                    nosql_result = await nosql_injection_test_json_body(
+                                        url=ep["url"],
+                                        method=ep["method"],
+                                        params=ep.get("body_params", []),
+                                        auth_session=auth_session,
+                                        body_template=ep.get("body_template"),
+                                        body_param_defaults=ep.get("body_param_defaults") or {},
+                                    )
+                                    _append_endpoint_attempt_telemetry(
+                                        active_block,
+                                        nosql_result.get("endpoint_attempts"),
+                                    )
+                                    if nosql_result.get("vulnerable"):
+                                        active_block["nosql_injection"].append(nosql_result)
+                                        for finding in nosql_result.get("findings", []):
+                                            report["findings"].append(normalize_finding(
+                                                "nosql_injection",
+                                                f"NoSQL Injection in {finding.get('parameter', 'unknown')}",
+                                                "high",
+                                                {
+                                                    "type": "nosql_injection",
+                                                    "url": nosql_result.get("url"),
+                                                    "method": nosql_result.get("method"),
+                                                    "parameter": finding.get("parameter"),
+                                                    "payload": finding.get("payload"),
+                                                    "evidence_type": finding.get("evidence_type"),
+                                                    "control_status": finding.get("control_status"),
+                                                    "payload_status": finding.get("payload_status"),
+                                                    "control_items": finding.get("control_items"),
+                                                    "payload_items": finding.get("payload_items"),
+                                                    "control_length": finding.get("control_length"),
+                                                    "payload_length": finding.get("payload_length"),
+                                                    "response_snippet": finding.get("response_snippet", "")[:200],
+                                                },
+                                                "CWE-943"
+                                            ))
+                                emit_progress("active_nosql", 94, "NoSQL JSON body checks complete")
+                        except Exception as e:
+                            active_block.setdefault("nosql_errors", []).append({"error": str(e)})
+                    elif run_sqli and not nosql_decision.run:
+                        record_active_enrichment_skip(
+                            active_block,
+                            "nosql_injection",
+                            nosql_decision.reason or "active_time_budget_exhausted",
+                        )
+                        print(f"[active] Skipping NoSQL injection probes: {nosql_decision.reason}", file=sys.stderr)
+
+                except Exception as e:
+                    active_block["smart_error"] = str(e)
+                    # Smart mode failed - will fall back to legacy checks below
+
+            # Track if smart mode ran successfully (no error)
+            smart_succeeded = smart_mode and "smart_error" not in active_block
+
+            # DOM XSS Analysis - run in broad smart mode after smart active tests.
+            # Focused manual active scans keep reporting limited to the requested family.
+            dom_xss_allowed_by_focus = focused_family_allows_active_module(
+                focused_active_family_name,
+                "dom_xss",
+            )
+            # DOM XSS must run for a focused XSS lane (dom_xss_allowed_by_focus already
+            # gates by family: broad and focused-xss allow it, focused-sqli does not).
+            # Only skip it for explicit-worklist coverage shards (no browser data).
+            dom_xss_eligible = (
+                smart_mode
+                and smart_succeeded
+                and dom_xss_allowed_by_focus
+                and not zero_rediscovery_scope
+            )
+            dom_xss_decision = (
+                should_run_active_enrichment(
+                    "dom_xss",
+                    post_active_budget_exhausted=post_active_budget_exhausted,
+                    active_block=active_block,
+                )
+                if dom_xss_eligible
+                else None
+            )
+            if dom_xss_eligible and dom_xss_decision.run:
+                try:
+                    # Get JS URLs from discovery data or crawl results (optional - function can self-discover)
+                    js_urls_for_dom_xss = []
+                    if smart_discovery_data:
+                        js_urls_for_dom_xss = [
+                            u for u in smart_discovery_data.get("all_urls", [])
+                            if u and (u.endswith(".js") or ".js?" in u)
+                        ]
+                    if not js_urls_for_dom_xss and crawl_urls:
+                        js_urls_for_dom_xss = [
+                            u for u in crawl_urls
+                            if u and (u.endswith(".js") or ".js?" in u)
+                        ]
+                    if seed_js_urls:
+                        js_urls_for_dom_xss.extend([u for u in seed_js_urls if u])
+                    if js_urls_for_dom_xss:
+                        js_urls_for_dom_xss = list(dict.fromkeys(js_urls_for_dom_xss))
+
+                    # Always run DOM XSS analysis - function will self-discover JS if none provided
+                    if js_urls_for_dom_xss:
+                        print(f"[scanner] Smart mode: Running DOM XSS analysis on {min(len(js_urls_for_dom_xss), dom_xss_max_files)} JS files (max: {dom_xss_max_files})", file=sys.stderr)
+                    else:
+                        print(f"[scanner] Smart mode: Running DOM XSS analysis (self-discovering JS files, max: {dom_xss_max_files})", file=sys.stderr)
+                    emit_progress("active_dom_analysis", 94, "starting DOM XSS static analysis")
+
+                    dom_xss_results = await dom_xss_analysis(
+                        url=base_url,
+                        js_urls=js_urls_for_dom_xss[:dom_xss_max_files] if js_urls_for_dom_xss else None,
+                        auth_session=auth_session,
+                        max_files=dom_xss_max_files
+                    )
+
+                    active_block["dom_xss"] = dom_xss_results
+                    emit_progress("active_dom_analysis", 94, "DOM XSS static analysis complete")
+
+                    # Add normalized findings for DOM XSS vulnerabilities
+                    if dom_xss_results.get("findings"):
+                        for f in dom_xss_results["findings"]:
+                            # Only report findings with source nearby (higher confidence)
+                            if f.get("source_nearby"):
+                                severity = f.get("severity", "medium")
+                                report["findings"].append(normalize_finding(
+                                    "dom_xss",
+                                    f"DOM-Based XSS ({f.get('sink_type', 'unknown sink')})",
+                                    severity,
+                                    {
+                                        "file": f.get("file"),
+                                        "line": f.get("line"),
+                                        "snippet": f.get("snippet"),
+                                        "sink_type": f.get("sink_type"),
+                                        "source_pattern": f.get("source_pattern"),
+                                        "source_nearby": f.get("source_nearby"),  # Include for validation
+                                        "evidence": f.get("evidence"),
+                                        "confidence": f.get("confidence", 0.7),
+                                    },
+                                    "CWE-79"
+                                ))
+                        print(f"[scanner] DOM XSS analysis: found {len(dom_xss_results['findings'])} potential vulnerabilities", file=sys.stderr)
+                except Exception as e:
+                    active_block["dom_xss_error"] = str(e)
+                    print(f"[scanner] DOM XSS analysis error: {e}", file=sys.stderr)
+            elif smart_mode and smart_succeeded and not focused_manual_active_scope and not dom_xss_allowed_by_focus:
+                reason = f"focused_family_{focused_active_family_name}"
+                record_active_enrichment_skip(active_block, "dom_xss", reason)
+                active_block.setdefault("active_enrichment_decisions", {})["dom_xss"] = {
+                    "run": False,
+                    "reason": reason,
+                }
+                print(f"[scanner] Skipping DOM XSS analysis: {reason}", file=sys.stderr)
+            elif (
+                smart_mode
+                and smart_succeeded
+                and not focused_manual_active_scope
+                and dom_xss_decision
+                and not dom_xss_decision.run
+            ):
+                record_active_enrichment_skip(
+                    active_block,
+                    "dom_xss",
+                    dom_xss_decision.reason or "active_time_budget_exhausted",
+                )
+                print(f"[scanner] Skipping DOM XSS analysis: {dom_xss_decision.reason}", file=sys.stderr)
+
+            # Focused Auth Testing - read-only authenticated-vs-anonymous checks
+            # for claimed endpoints. This is explicit-only through check_family=auth
+            # so default broad scans do not reinterpret public endpoints as auth
+            # obligations.
+
+            legacy_fallback_timed_out = False
+            if not smart_succeeded:
+                try:
+                    total_timeout = 300 if quick_mode else 900
+                    await asyncio.wait_for(run_active_checks(), timeout=total_timeout)
+                except TimeoutError:
+                    legacy_fallback_timed_out = True
+                    active_block["legacy_active_timeout"] = True
+
+            family_outcomes: dict[str, RegistryPhaseOutcome] = {}
+            endpoint_attempts = [
+                attempt for attempt in (active_block.get("endpoint_attempts") or [])
+                if isinstance(attempt, dict)
+            ]
+            for family_row in family_rows:
+                family_name = str(family_row.get("name") or "").strip().lower()
+                family_attempts = [
+                    attempt for attempt in endpoint_attempts
+                    if str(attempt.get("family") or "").strip().lower() == family_name
+                ]
+                budget_reason = active_block.get(
+                    f"smart_{family_name}_budget_exhausted_reason"
+                )
+                telemetry = {
+                    "schema_version": "active_endpoint_attempt_v1",
+                    "attempted_endpoints_count": len(family_attempts),
+                    "attempted_params_count": sum(
+                        int(attempt.get("attempted_params_count") or 0)
+                        for attempt in family_attempts
+                    ),
+                    "completed_params_count": sum(
+                        int(attempt.get("completed_params_count") or 0)
+                        for attempt in family_attempts
+                    ),
+                    "finding_count": len([
+                        finding for finding in (report.get("findings") or [])
+                        if _focused_family_finding_matches(finding, family_name)
+                    ]),
+                    "budget_exhausted_reason": budget_reason,
+                    "legacy_fallback_used": not smart_succeeded,
+                }
+                if scanner_cancel_requested():
+                    family_outcomes[family_name] = RegistryPhaseOutcome(
+                        "cancelled",
+                        "scanner_cancel_requested",
+                        telemetry,
+                    )
+                elif legacy_fallback_timed_out:
+                    family_outcomes[family_name] = RegistryPhaseOutcome(
+                        "failed",
+                        "legacy_active_timeout",
+                        telemetry,
+                    )
+                elif budget_reason:
+                    family_outcomes[family_name] = RegistryPhaseOutcome(
+                        "failed",
+                        str(budget_reason),
+                        telemetry,
+                    )
+                else:
+                    family_outcomes[family_name] = RegistryPhaseOutcome(
+                        "completed",
+                        telemetry=telemetry,
+                    )
+            return RegistryPhaseBatchOutcome(family_outcomes)
+
+        primary_active_receipts = await dispatch_registry_report_phase(
+            scanner_execution_plan,
+            "active",
+            {
+                "legacy_active_loop": RegistryPhaseBatchAdapter(
+                    run_legacy_active_loop
+                ),
+            },
+            families={"sqli", "xss"},
+        )
+        active_dispatch_receipts.extend(primary_active_receipts)
+        if not active_block:
+            endpoints = [
+                {
+                    "url": url,
+                    "method": "GET",
+                    "params": list(urllib.parse.parse_qs(
+                        urllib.parse.urlparse(url).query,
+                        keep_blank_values=True,
+                    )),
+                    "source": "registry_non_injection_context",
+                }
+                for url in cand
+            ]
+            active_block = {
+                "targets": cand,
+                "dalfox": [],
+                "sqlmap": [],
+                "custom_sqli": [],
+                "custom_xss": [],
+                "filters": {"xss": False, "sqli": False},
+                "check_family_scope": check_family_scope,
+                "scanner_execution_plan": scanner_execution_plan,
+            }
+            smart_succeeded = bool(smart_mode)
         async def run_asm_endpoint_batch_auth() -> RegistryPhaseOutcome:
             if not smart_mode or not smart_succeeded or public_only:
                 return RegistryPhaseOutcome(
@@ -11806,121 +12022,6 @@ async def build_report(target: str,
             families={"bola"},
         )
         active_dispatch_receipts.extend(bola_dispatch_receipts)
-        async def run_active_checks():
-            for u in cand:
-                try:
-                    # Run selected tools concurrently for each URL
-                    tasks: dict[str, asyncio.Task] = {}
-                    if run_xss:
-                        tasks["dalfox"] = asyncio.create_task(
-                            dalfox_one(u, quick_mode, auth_session=auth_session, deep_domxss=dalfox_deep_domxss)
-                        )
-                        tasks["custom_xss"] = asyncio.create_task(custom_xss_test(u, auth_session=auth_session))
-                    if run_sqli:
-                        tasks["sqlmap"] = asyncio.create_task(sqlmap_test(u, quick_mode, auth_session=auth_session))
-                        tasks["custom_sqli"] = asyncio.create_task(custom_sqli_test(u))
-
-                    if not tasks:
-                        continue
-
-                    # Wait for all with timeout
-                    try:
-                        per_url_timeout = 90 if quick_mode else 300  # 90s quick, 5min thorough
-                        results = await asyncio.wait_for(
-                            asyncio.gather(*tasks.values(), return_exceptions=True),
-                            timeout=per_url_timeout
-                        )
-                    except TimeoutError:
-                        continue
-
-                    results_by_name = dict(zip(tasks.keys(), results))
-
-                    # Process XSS results (dalfox_one returns dict with "findings" key)
-                    if run_xss:
-                        xss = results_by_name.get("dalfox")
-                        if not isinstance(xss, Exception) and xss:
-                            xss_findings = xss.get("findings", []) if isinstance(xss, dict) else xss
-                            xss_completed = xss.get("scan_completed", True) if isinstance(xss, dict) else True
-                            if xss_findings:
-                                active_block["dalfox"].extend(xss_findings)
-                                for f in xss_findings:
-                                    # Dalfox uses "severity" field with values "High", "Medium", "Low" (capitalized)
-                                    # XSS is ALWAYS at minimum medium severity (CVSS 6.1+) - never downgrade to low
-                                    dalfox_sev = (f.get("severity") or "medium").lower()
-                                    severity = "high" if dalfox_sev == "high" else "medium"
-                                    report["findings"].append(normalize_finding(
-                                        "dalfox", f.get("type","XSS"), severity,
-                                        {"url": u, "detail": f}
-                                    ))
-                            # Track scan status
-                            if not xss_completed and "dalfox_errors" not in active_block:
-                                active_block["dalfox_errors"] = []
-                            if not xss_completed:
-                                active_block["dalfox_errors"].append({"url": u, "error": xss.get("error")})
-
-                        custom_xss = results_by_name.get("custom_xss")
-                        if not isinstance(custom_xss, Exception) and custom_xss:
-                            if custom_xss.get("vulnerable"):
-                                active_block["custom_xss"].extend(custom_xss.get("findings", []))
-                                for f in custom_xss.get("findings", []):
-                                    report["findings"].append(normalize_finding(
-                                        "custom_xss",
-                                        f"Cross-Site Scripting ({f.get('payload_type', 'unknown')})",
-                                        f.get("severity", "medium"),
-                                        {
-                                            "url": f.get("url"),
-                                            "parameter": f.get("parameter"),
-                                            "payload": f.get("payload"),
-                                            "evidence": f.get("evidence"),
-                                            "context": f.get("context"),
-                                        },
-                                        "CWE-79"
-                                    ))
-
-                    # Process SQLi results (sqlmap_test returns dict with scan_completed flag)
-                    if run_sqli:
-                        srep = results_by_name.get("sqlmap")
-                        if not isinstance(srep, Exception) and srep:
-                            sql_completed = srep.get("scan_completed", True)
-                            if srep.get("vulnerable") or srep.get("summary") == "possible SQLi":
-                                active_block["sqlmap"].append({"url": u, **srep})
-                                report["findings"].append(normalize_finding(
-                                    "sqlmap", "Potential SQL injection", "high", {"url": u, "summary": srep.get("summary")}
-                                ))
-                            # Track scan status
-                            if not sql_completed:
-                                if "sqlmap_errors" not in active_block:
-                                    active_block["sqlmap_errors"] = []
-                                active_block["sqlmap_errors"].append({"url": u, "error": srep.get("error")})
-
-                        custom_sql = results_by_name.get("custom_sqli")
-                        if not isinstance(custom_sql, Exception) and custom_sql:
-                            if custom_sql.get("vulnerable"):
-                                active_block["custom_sqli"].extend(custom_sql.get("findings", []))
-                                for f in custom_sql.get("findings", []):
-                                    report["findings"].append(normalize_finding(
-                                        "custom_sqli",
-                                        f"SQL Injection ({f.get('payload_type', 'unknown')})",
-                                        f.get("severity", "high"),
-                                        {
-                                            "url": f.get("url"),
-                                            "parameter": f.get("parameter"),
-                                            "payload": f.get("payload"),
-                                            "evidence": f.get("evidence"),
-                                        },
-                                        "CWE-89"
-                                    ))
-                except Exception:
-                    pass
-
-
-        # Run legacy active checks if NOT in smart mode, OR if smart mode errored (fallback)
-        if not smart_succeeded:
-            try:
-                total_timeout = 300 if quick_mode else 900  # 5min quick, 15min thorough
-                await asyncio.wait_for(run_active_checks(), timeout=total_timeout)
-            except TimeoutError:
-                pass  # Continue with partial results
         report["active_checks"] = active_block
     elif active_checks and public_only:
         # Document that active checks were requested but skipped due to public_only mode
@@ -11967,8 +12068,6 @@ async def build_report(target: str,
         if receipt_key not in persisted_receipt_keys:
             report.setdefault("scanner_execution_receipts", []).append(receipt)
             persisted_receipt_keys.add(receipt_key)
-    if scanner_dispatch_decisions:
-        report["scanner_dispatch_decisions"] = scanner_dispatch_decisions
     passive_dispatch_receipts = await dispatch_registry_report_phase(
         scanner_execution_plan,
         "passive",

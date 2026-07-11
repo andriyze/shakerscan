@@ -950,8 +950,12 @@ def test_registry_report_phase_fails_closed_when_batch_omits_family_outcome():
 def test_auth_and_bola_network_checks_are_registry_adapter_owned():
     source = Path(scanner_mod.__file__).read_text(encoding="utf-8")
 
+    assert "xss_dispatch_decision = registry_dispatch_decision" not in source
+    assert "sqli_dispatch_decision = registry_dispatch_decision" not in source
     assert "auth_dispatch_decision = registry_dispatch_decision" not in source
     assert "bola_dispatch_decision = registry_dispatch_decision" not in source
+    assert "async def run_legacy_active_loop(" in source
+    assert "RegistryPhaseBatchAdapter(\n                    run_legacy_active_loop" in source
     assert "async def run_asm_endpoint_batch_auth()" in source
     assert "async def run_asm_endpoint_batch_bola()" in source
     assert 'families={"auth"}' in source
