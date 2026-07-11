@@ -38,6 +38,11 @@ from fastapi.responses import Response, JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 try:
+    from scanner_tools.build_fingerprint import hash_source_files, runtime_file_map, source_file_map
+except ModuleNotFoundError:
+    from scanner.scanner_tools.build_fingerprint import hash_source_files, runtime_file_map, source_file_map
+
+try:
     from constants import SMART_SCAN_BUDGETS, resolve_scan_budget, resolve_or_consume_budget
 except ModuleNotFoundError as exc:
     if exc.name != "constants":
@@ -6838,54 +6843,10 @@ def expected_build_fingerprint() -> Optional[str]:
     # Must match (by basename) scanner.SCANNER_FINGERPRINT_FILES and the worker's
     # report set, including worker.py and the output-shaping modules, so a worker
     # running stale orchestration/output code is not reported as build_current.
-    workspace = {
-        "scanner.py": "/workspace/scanner/scanner.py",
-        "active_checks.py": "/workspace/scanner/scanner_tools/active_checks.py",
-        "parallel_scan.py": "/workspace/api/parallel_scan.py",
-        "finding_validator.py": "/workspace/scanner/scanner_tools/finding_validator.py",
-        "worker.py": "/workspace/api/worker.py",
-        "constants.py": "/workspace/scanner/constants.py",
-        "findings.py": "/workspace/scanner/findings.py",
-        "grading.py": "/workspace/scanner/grading.py",
-        "reporting.py": "/workspace/scanner/reporting.py",
-        "data_exposure.py": "/workspace/scanner/scanner_tools/data_exposure.py",
-        "webhook_checks.py": "/workspace/scanner/scanner_tools/webhook_checks.py",
-        "approval_checks.py": "/workspace/scanner/scanner_tools/approval_checks.py",
-        "access_control_checks.py": "/workspace/scanner/scanner_tools/access_control_checks.py",
-        "attempt_telemetry.py": "/workspace/scanner/scanner_tools/attempt_telemetry.py",
-        "request_meter.py": "/workspace/scanner/scanner_tools/request_meter.py",
-        "auth_session.py": "/workspace/scanner/scanner_tools/auth_session.py",
-        "oauth_auth.py": "/workspace/scanner/scanner_tools/oauth_auth.py",
-        "infrastructure_checks.py": "/workspace/scanner/scanner_tools/infrastructure_checks.py",
-        "model_intake.py": "/workspace/scanner/scanner_tools/model_intake.py",
-        "redaction.py": "/workspace/scanner/redaction.py",
-        "ai_gate_scan.py": "/workspace/api/ai_gate_scan.py",
-    }
-    if all(os.path.exists(p) for p in workspace.values()):
-        return _hash_source_files(workspace)
-    return _hash_source_files({
-        "scanner.py": "/app/scanner.py",
-        "active_checks.py": "/app/scanner_tools/active_checks.py",
-        "parallel_scan.py": "/app/parallel_scan.py",
-        "finding_validator.py": "/app/scanner_tools/finding_validator.py",
-        "worker.py": "/app/worker.py",
-        "constants.py": "/app/constants.py",
-        "findings.py": "/app/findings.py",
-        "grading.py": "/app/grading.py",
-        "reporting.py": "/app/reporting.py",
-        "data_exposure.py": "/app/scanner_tools/data_exposure.py",
-        "webhook_checks.py": "/app/scanner_tools/webhook_checks.py",
-        "approval_checks.py": "/app/scanner_tools/approval_checks.py",
-        "access_control_checks.py": "/app/scanner_tools/access_control_checks.py",
-        "attempt_telemetry.py": "/app/scanner_tools/attempt_telemetry.py",
-        "request_meter.py": "/app/scanner_tools/request_meter.py",
-        "auth_session.py": "/app/scanner_tools/auth_session.py",
-        "oauth_auth.py": "/app/scanner_tools/oauth_auth.py",
-        "infrastructure_checks.py": "/app/scanner_tools/infrastructure_checks.py",
-        "model_intake.py": "/app/scanner_tools/model_intake.py",
-        "redaction.py": "/app/redaction.py",
-        "ai_gate_scan.py": "/app/ai_gate_scan.py",
-    })
+    workspace_fingerprint = hash_source_files(source_file_map(), require_all=True)
+    if workspace_fingerprint:
+        return workspace_fingerprint
+    return hash_source_files(runtime_file_map(), require_all=True)
 
 
 def _git_head_short(repo: str = "/workspace") -> Optional[str]:

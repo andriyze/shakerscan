@@ -16,6 +16,20 @@ import worker  # noqa: E402
 CURRENT_FP = "deadbeefcafef00d"
 
 
+def test_worker_redis_socket_timeout_exceeds_blocking_pop(monkeypatch):
+    captured = {}
+
+    def fake_from_url(url, **kwargs):
+        captured.update({"url": url, **kwargs})
+        return object()
+
+    monkeypatch.setattr(worker.redis, "from_url", fake_from_url)
+    worker.get_redis()
+
+    assert captured["socket_timeout"] > worker.WORKER_QUEUE_BLOCK_SECONDS
+    assert captured["socket_connect_timeout"] == 10
+
+
 def _job(expected, require=True, **extra):
     opts = {"require_current_workers": require}
     if expected is not None:

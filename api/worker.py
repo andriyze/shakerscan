@@ -45,10 +45,18 @@ from retest_contract import (
 )
 import parallel_scan
 import asm_inventory
-from scanner_tools.attempt_telemetry import (
-    endpoint_attempt_schema_from_report,
-    normalize_endpoint_attempt,
-)
+try:
+    from scanner_tools.attempt_telemetry import (
+        endpoint_attempt_schema_from_report,
+        normalize_endpoint_attempt,
+    )
+    from scanner_tools.build_fingerprint import hash_source_files, runtime_file_map
+except ModuleNotFoundError:
+    from scanner.scanner_tools.attempt_telemetry import (
+        endpoint_attempt_schema_from_report,
+        normalize_endpoint_attempt,
+    )
+    from scanner.scanner_tools.build_fingerprint import hash_source_files, runtime_file_map
 from evidence_storage import store_evidence_content
 from secret_store import decrypt_secret
 try:
@@ -75,6 +83,11 @@ SCANNER_PATH = '/app/scanner.py'
 SCAN_LOG_TAIL = int(os.environ.get('SCAN_LOG_TAIL', '200'))
 SCAN_LOG_TTL_SECONDS = int(os.environ.get('SCAN_LOG_TTL_SECONDS', '86400'))
 HEARTBEAT_INTERVAL_SECONDS = int(os.environ.get('HEARTBEAT_INTERVAL_SECONDS', '30'))
+WORKER_QUEUE_BLOCK_SECONDS = max(1, int(os.environ.get("WORKER_QUEUE_BLOCK_SECONDS", "30")))
+WORKER_REDIS_SOCKET_TIMEOUT_SECONDS = max(
+    WORKER_QUEUE_BLOCK_SECONDS + 5,
+    int(os.environ.get("WORKER_REDIS_SOCKET_TIMEOUT_SECONDS", "35")),
+)
 TOOL_RECEIPT_ADAPTER_VERSION = "2026-07-05.v1"
 
 # Maximum allowed duration per scan type (minutes) - worker-side safety net
@@ -1197,7 +1210,11 @@ print(json.dumps(report, sort_keys=True))
 
 
 def get_redis():
-    return redis.from_url(REDIS_URL)
+    return redis.from_url(
+        REDIS_URL,
+        socket_timeout=WORKER_REDIS_SOCKET_TIMEOUT_SECONDS,
+        socket_connect_timeout=10,
+    )
 
 
 def _published_scanner_version() -> str | None:
@@ -9015,7 +9032,10 @@ async def async_main():
                         last_stale_check_monotonic = now_mono
 
                 # Use run_in_executor for blocking Redis pop
-                result = await loop.run_in_executor(None, lambda: r.blpop(queue_keys, timeout=30))
+                result = await loop.run_in_executor(
+                    None,
+                    lambda: r.blpop(queue_keys, timeout=WORKER_QUEUE_BLOCK_SECONDS),
+                )
                 if result is None:
                     # Re-report build identity while idle so the per-worker version
                     # label converges to the API-published commit after a deploy (the
@@ -9051,39 +9071,7 @@ async def async_main():
 def _worker_build_fingerprint() -> str | None:
     """Source-tree checksum of this worker's runtime (keyed by basename so it
     matches the API's host-checkout fingerprint when the code is current)."""
-    import hashlib
-    # Keep this set identical (by basename) to scanner.SCANNER_FINGERPRINT_FILES and
-    # api.expected_build_fingerprint so worker/scanner/API agree when current — and
-    # so a stale worker.py (orchestration: reaper/merge/queue/cancel/shard) is caught.
-    file_map = {
-        "scanner.py": "/app/scanner.py",
-        "active_checks.py": "/app/scanner_tools/active_checks.py",
-        "parallel_scan.py": "/app/parallel_scan.py",
-        "finding_validator.py": "/app/scanner_tools/finding_validator.py",
-        "worker.py": "/app/worker.py",
-        "constants.py": "/app/constants.py",
-        "findings.py": "/app/findings.py",
-        "grading.py": "/app/grading.py",
-        "reporting.py": "/app/reporting.py",
-        "data_exposure.py": "/app/scanner_tools/data_exposure.py",
-        "webhook_checks.py": "/app/scanner_tools/webhook_checks.py",
-        "approval_checks.py": "/app/scanner_tools/approval_checks.py",
-        "access_control_checks.py": "/app/scanner_tools/access_control_checks.py",
-        "infrastructure_checks.py": "/app/scanner_tools/infrastructure_checks.py",
-        "model_intake.py": "/app/scanner_tools/model_intake.py",
-        "redaction.py": "/app/redaction.py",
-        "ai_gate_scan.py": "/app/ai_gate_scan.py",
-    }
-    h = hashlib.sha256()
-    hashed = 0
-    for name in sorted(file_map):
-        try:
-            with open(file_map[name], "rb") as fh:
-                h.update(name.encode()); h.update(b"\0"); h.update(fh.read())
-            hashed += 1
-        except OSError:
-            continue
-    return h.hexdigest()[:16] if hashed else None
+    return hash_source_files(runtime_file_map(), require_all=True)
 
 
 def report_worker_build_fingerprint() -> None:

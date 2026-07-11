@@ -19,7 +19,10 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from scanner_tools.attempt_telemetry import ENDPOINT_ATTEMPT_SCHEMA_V1
+try:
+    from scanner_tools.attempt_telemetry import ENDPOINT_ATTEMPT_SCHEMA_V1
+except ModuleNotFoundError:
+    from scanner.scanner_tools.attempt_telemetry import ENDPOINT_ATTEMPT_SCHEMA_V1
 
 # Job type for the async exploitation pipeline (routed in worker.process_job).
 EXPLOIT_BATCH_JOB_TYPE = "exploit_batch"

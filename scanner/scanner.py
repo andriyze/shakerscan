@@ -85,6 +85,7 @@ from scanner_tools.request_meter import (
     get_request_meter,
     install_async_client_metering,
 )
+from scanner_tools.build_fingerprint import hash_source_files, runtime_file_map
 from scanner_tools.exposure_markers import exposure_severity
 from scanner_tools.adaptive_throttle import configure_throttle, get_throttle
 from scanner_tools.har_discovery import (
@@ -122,51 +123,14 @@ def _compute_source_fingerprint(file_map: dict[str, str]) -> str | None:
     different checksum. Keyed by basename so the API (hashing the host checkout)
     and the worker (hashing /app) produce the SAME value when the code matches.
     """
-    import hashlib
-    h = hashlib.sha256()
-    hashed = 0
-    for name in sorted(file_map):
-        try:
-            with open(file_map[name], "rb") as fh:
-                h.update(name.encode())
-                h.update(b"\0")
-                h.update(fh.read())
-            hashed += 1
-        except OSError:
-            continue
-    return h.hexdigest()[:16] if hashed else None
+    return hash_source_files(file_map)
 
 
 # The scanner subprocess runs inside the worker container; hash its /app runtime.
 # Includes orchestration (worker.py, parallel_scan.py) and output-shaping modules
 # (constants/findings/grading/reporting) so a stale worker image is flagged for the
 # whole class of bugs that change scan behavior or output, not just the detectors.
-SCANNER_FINGERPRINT_FILES = {
-    "scanner.py": "/app/scanner.py",
-    "active_checks.py": "/app/scanner_tools/active_checks.py",
-    "parallel_scan.py": "/app/parallel_scan.py",
-    "finding_validator.py": "/app/scanner_tools/finding_validator.py",
-    "worker.py": "/app/worker.py",
-    "constants.py": "/app/constants.py",
-    "findings.py": "/app/findings.py",
-    "grading.py": "/app/grading.py",
-    "reporting.py": "/app/reporting.py",
-    "data_exposure.py": "/app/scanner_tools/data_exposure.py",
-    "webhook_checks.py": "/app/scanner_tools/webhook_checks.py",
-    "approval_checks.py": "/app/scanner_tools/approval_checks.py",
-    "access_control_checks.py": "/app/scanner_tools/access_control_checks.py",
-    "attempt_telemetry.py": "/app/scanner_tools/attempt_telemetry.py",
-    "request_meter.py": "/app/scanner_tools/request_meter.py",
-    "auth_session.py": "/app/scanner_tools/auth_session.py",
-    "oauth_auth.py": "/app/scanner_tools/oauth_auth.py",
-    "infrastructure_checks.py": "/app/scanner_tools/infrastructure_checks.py",
-    # AI-gate / model-intake / redaction paths run in the worker too; include them
-    # so a stale copy of these (the skew that caused intermittent false mismatches)
-    # is reported as build_current=false instead of slipping through.
-    "model_intake.py": "/app/scanner_tools/model_intake.py",
-    "redaction.py": "/app/redaction.py",
-    "ai_gate_scan.py": "/app/ai_gate_scan.py",
-}
+SCANNER_FINGERPRINT_FILES = runtime_file_map()
 SCANNER_BUILD_FINGERPRINT = _compute_source_fingerprint(SCANNER_FINGERPRINT_FILES)
 CHECKPOINT_FILE = os.environ.get("SCAN_CHECKPOINT_FILE")
 
