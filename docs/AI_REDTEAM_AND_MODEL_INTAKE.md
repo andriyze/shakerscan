@@ -1,5 +1,8 @@
 # AI Red-Teaming and Model Intake - Engineering Onboarding
 
+**Status:** live engineering reference, reconciled 2026-07-11. Code, schemas, and tests remain
+authoritative; current hardening priorities live in [`proposed-next-steps.md`](proposed-next-steps.md).
+
 This is the onboarding reference for the AI-security parts of ShakerScan:
 
 - **AI Gate**: red-team style testing for AI application surfaces such as chat APIs, RAG endpoints, agent traces, MCP traces, and browser widgets.
@@ -460,7 +463,10 @@ Implemented evidence categories:
 - Deployment approval
 - Monitoring plan
 
-Current limitation: several checks are still evidence-presence checks. ShakerScan records signature-verification status and generates an AIBOM, but it does not yet run a full cryptographic verifier for every registry type or a real AV/YARA engine.
+Current limitation: several checks are still evidence-presence checks. ShakerScan performs real
+detached-signature verification for supplied Ed25519, RSA-PSS, and ECDSA keys/signatures and
+generates an AIBOM, but registry-native Sigstore/cosign/in-toto verification and a real AV/YARA
+engine are not built in.
 
 ### Feature 17: Model Intake decisions
 

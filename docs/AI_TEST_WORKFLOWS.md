@@ -1,5 +1,10 @@
 # AI Test Workflows
 
+**Status:** live operator workflow, reconciled 2026-07-11. The generic APIs work with configured
+targets; Honey routes are optional calibration fixtures, not detector inputs or product prerequisites.
+
+Run active workflows only against local systems or targets you own and are authorized to test.
+
 ShakerScan has two focused AI security workflows for demos and controlled research targets.
 
 ## Scenario Catalog
@@ -44,7 +49,7 @@ The catalog includes:
 - Secure RAG + agent target templates for RAG, agent trace, and MCP trace endpoints.
 - Required control metadata for threat model, retrieval ACLs, tool authorization, logging, cloud design, and governance mapping.
 - Model-intake presets for safe, unsafe pickle, PyTorch archive, embedded executable, tampered checksum, and missing-approval artifacts.
-- Honey-side route contracts for later calibration against `https://honey.shakerscan.com/`.
+- Optional Honey-side route contracts for controlled calibration against `https://honey.shakerscan.com/`.
 
 ## Secure RAG + Agent
 

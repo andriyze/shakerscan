@@ -1,5 +1,9 @@
 # Deferred Work Implementation Plan
 
+> **ARCHIVED (2026-07-11).** This is the completed/partial wave ledger at its final checkpoint.
+> Remaining registry, detector, metering, soak, and multi-node gates are maintained only in
+> [`../proposed-next-steps.md`](../proposed-next-steps.md).
+
 **Status:** cancellation, telemetry, request-meter infrastructure, and UI contracts are implemented;
 registry authority is partial; detector acceptance and Wave 6 soak remain open; Wave 7 is gated
 **Created:** 2026-07-10

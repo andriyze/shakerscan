@@ -1,5 +1,8 @@
 # Honey Model Intake Implementation Prompt
 
+> **ARCHIVED (2026-07-11).** Completed external implementation prompt. Current Model Intake behavior
+> is documented in [`../functionality-reference.md`](../functionality-reference.md).
+
 Use this prompt with the LLM/code agent that owns `https://honey.shakerscan.com/`.
 
 ```text

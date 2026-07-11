@@ -1,10 +1,8 @@
 # ShakerScan End-to-End Test Plan
 
-**Status (2026-07-10):** the Model Intake `10/10` / AI Gate `12/12` / DAST `12/12` pass counts below
-were recorded on an **earlier fleet** and have **not** been re-run on the current fleet `bc6c357`
-(the most recent deferred-work rebuild reports E2E "could not run in this session … no pass inferred"
-— see `deferred-work-implementation-plan.md`). Treat these counts as the last known-good E2E result,
-not a current-build claim, until re-run on `bc6c357`. `make e2e` remains the deterministic all-area
+**Status (reconciled 2026-07-11):** the Model Intake `10/10` / AI Gate `12/12` / DAST `12/12` pass
+counts below were recorded on an **earlier fleet** and have not been rerun on the latest rebuilt
+fleet. Treat them as the last known-good E2E result, not a current-build claim. `make e2e` remains the deterministic all-area
 gate and skips the external Hugging Face row; `make e2e-model-intake` enables that real-model row by
 default, while `make e2e-model-intake-fixture` is the explicit offline path. The worker fingerprint
 preflight rejects a stale/non-uniform fleet. Slow authenticated crAPI BOLA recall remains in the

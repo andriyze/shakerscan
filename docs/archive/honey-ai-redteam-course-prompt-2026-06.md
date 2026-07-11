@@ -1,5 +1,8 @@
 # Honey AI Red-Team Course-Mode Prompt
 
+> **ARCHIVED (2026-07-11).** Completed external implementation prompt retained for scenario-design
+> history only. It is not a current ShakerScan implementation plan.
+
 Use this prompt with the LLM/code agent that owns the Honey vulnerable server.
 
 ```text

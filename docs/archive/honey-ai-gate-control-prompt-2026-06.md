@@ -1,5 +1,8 @@
 # Honey AI Gate Control-Evidence Prompt
 
+> **ARCHIVED (2026-07-11).** Completed external implementation prompt. Use
+> [`../AI_TEST_WORKFLOWS.md`](../AI_TEST_WORKFLOWS.md) for the current operator contract.
+
 Use this prompt with the LLM/code agent that owns `https://honey.shakerscan.com/`.
 
 ```text

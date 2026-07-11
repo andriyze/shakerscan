@@ -8,42 +8,10 @@ DOCS = [
     ROOT / "docs" / "multi-node-architecture.md",
 ]
 STATUS_MATRIX_DOCS = DOCS[:2]
-
-REQUIRED_PROMPT_CONTRACT_BLOCKS = [
-    "MODE",
-    "EDIT PERMISSION",
-    "STATUS PREFLIGHT",
-    "DO NOT TOUCH",
-    "AUTHORIZATION / BLAST RADIUS",
-    "DATA CONTRACTS",
-    "ROLLOUT / FALLBACK",
-    "FAILURE-MODE MATRIX",
-    "TEST COMMANDS",
-    "OUTPUT FORMAT",
-]
-
-REQUIRED_CONCRETE_PROMPT_BLOCKS = [
-    "ROLE",
-    "MODE",
-    "EDIT PERMISSION",
-    "TASK",
-    "SOURCE OF TRUTH",
-    "STATUS PREFLIGHT",
-    "CURRENT STATE",
-    "TARGET BEHAVIOR",
-    "NON-GOALS",
-    "DO NOT TOUCH",
-    "SAFETY INVARIANTS",
-    "AUTHORIZATION / BLAST RADIUS",
-    "DATA CONTRACTS",
-    "MIGRATION / BACKFILL / COMPATIBILITY",
-    "ROLLOUT / FALLBACK",
-    "FAILURE-MODE MATRIX",
-    "OBSERVABILITY / UI / REPORT BEHAVIOR",
-    "ACCEPTANCE CRITERIA",
-    "TESTS REQUIRED",
-    "TEST COMMANDS",
-    "OUTPUT FORMAT",
+ARCHIVED_PROMPT_DOCS = [
+    ROOT / "docs" / "archive" / "parallel-scan-agent-task-appendix-2026-07.md",
+    ROOT / "docs" / "archive" / "continuous-asm-agent-task-appendix-2026-07.md",
+    ROOT / "docs" / "archive" / "multi-node-agent-task-appendix-2026-07.md",
 ]
 
 
@@ -69,38 +37,12 @@ def test_architecture_docs_share_identical_status_matrix():
     assert blocks == {name: canonical for name in blocks}
 
 
-def _appendix_contract_block(path: Path) -> str:
-    text = path.read_text()
-    start = text.index("### Required prompt contract")
-    end = text.index("Hard rule:", start)
-    return text[start:end]
-
-
-def _concrete_prompt_blocks(path: Path) -> dict[str, str]:
-    text = path.read_text()
-    chunks = text.split("### Prompt: ")
-    prompts: dict[str, str] = {}
-    for chunk in chunks[1:]:
-        title, body = chunk.split("\n", 1)
-        prompts[title.strip()] = body
-    return prompts
-
-
-def test_architecture_prompt_contracts_include_mandatory_blocks():
-    missing: dict[str, list[str]] = {}
+def test_architecture_prompt_appendices_are_archived_not_live():
     for doc in DOCS:
-        contract = _appendix_contract_block(doc)
-        absent = [block for block in REQUIRED_PROMPT_CONTRACT_BLOCKS if block not in contract]
-        if absent:
-            missing[doc.name] = absent
-    assert missing == {}
+        assert "AI Agent Task Appendix" not in doc.read_text()
 
-
-def test_concrete_architecture_prompts_include_execution_gates():
-    missing: dict[str, list[str]] = {}
-    for doc in DOCS:
-        for title, body in _concrete_prompt_blocks(doc).items():
-            absent = [block for block in REQUIRED_CONCRETE_PROMPT_BLOCKS if block not in body]
-            if absent:
-                missing[f"{doc.name}: {title}"] = absent
-    assert missing == {}
+    for doc in ARCHIVED_PROMPT_DOCS:
+        text = doc.read_text()
+        assert doc.is_file()
+        assert "**Archived:**" in text
+        assert "AI Agent Task Appendix" in text

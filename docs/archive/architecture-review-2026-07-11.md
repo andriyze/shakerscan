@@ -1,5 +1,8 @@
 # ShakerScan — Reconciled Architecture & Roadmap Review
 
+> **ARCHIVED (2026-07-11).** Point-in-time review retained as evidence. Its open work and acceptance
+> boundaries were migrated to [`../proposed-next-steps.md`](../proposed-next-steps.md).
+
 **Mode:** REVIEW_AND_PLAN (no code changed in the review run).
 **As-of:** ShakerScan HEAD `53cd5fc` (2026-07-11), including the current-fleet authenticated crAPI
 scorecard from scan `85d3bafb` and the first benchmark-truth fixes; T3MP3ST `main` HEAD `ae32cf5`

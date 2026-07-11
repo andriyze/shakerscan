@@ -1,6 +1,13 @@
 # Interactive AI Security Sessions - User Guide
 
-A real-time, browser-based security testing mode where you and Claude collaborate to find vulnerabilities that automated scanners miss. Claude controls a headless Playwright browser, takes screenshots, and tests endpoints while you guide the exploration.
+**Status:** live guide, reconciled 2026-07-11. Interactive sessions are agent-driven manual testing,
+not autonomous proof or permission to test a third party. Use them only for local systems or targets
+you own and are authorized to test. Saving a finding is an explicit operator action.
+
+A real-time, browser-based security testing mode where you and a coding agent collaborate to investigate
+behavior that automated scans may miss. The agent drives ShakerScan's headless Playwright session API,
+takes screenshots, and tests endpoints while you guide the exploration. The conversations below are
+illustrative; they are not claims that a vulnerability will exist or that every action is automatic.
 
 ## What You Can Do
 

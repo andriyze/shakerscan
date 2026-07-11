@@ -3,7 +3,7 @@
 **Status:** Comprehensive functional reference for the whole product. This is the "what can ShakerScan
 actually do" map across both pillars: **DAST** (Dynamic Application Security Testing) and **AI red
 teaming** (AI Gate, Model Intake, AI Security Sessions, AI-assisted analysis).
-**Date:** 2026-07-07
+**Reconciled:** 2026-07-11
 **Audience:** users, operators, AI coding agents, and engineers who need one place that explains the
 product's functionality end to end.
 
@@ -573,8 +573,9 @@ Checks include:
   and deployment approval.
 
 Result shape: `model_intake.checks.*`, `aibom`, `supply_chain`, `summary` (with the `decision`), and
-`artifact`. Findings are stored with `tool = model_intake`; `source_type=dast` includes them until a
-dedicated model-intake source filter exists. Sensitive URL params and metadata keys are redacted.
+`artifact`. Findings are stored with `tool = model_intake` and filter independently through
+`source_type=model_intake`; they are excluded from `source_type=dast`. Sensitive URL params and
+metadata keys are redacted.
 
 ### 11.3 AI Security Sessions (interactive)
 
@@ -622,8 +623,8 @@ missing-signature/missing-approval model presets). Probe/test-case metadata is e
 **Findings lifecycle**: every DAST, AI Gate, AI-session, and model-intake result lands in one
 `findings` table, de-duplicated by `(target_id, fingerprint)`. Findings have a status
 (`active` / `resolved` / `false_positive` / `accepted_risk`), CVSS, CWE/OWASP tags, evidence,
-optional AI verdict fields, and verification history. The UI groups findings into two product
-categories — **DAST** and **AI** — but the API `source_type` filter is first-class and granular:
+optional AI verdict fields, and verification history. The UI exposes DAST, AI Gate, Model Intake,
+ASM, and Manual filters; the API `source_type` filter is first-class and more granular:
 `dast`, `ai`, `ai_gate`, `ai_session`, `model_intake`, `asm`, `manual`. `model_intake` and the AI
 sources filter **separately** from `dast` (R8).
 Findings support filtering, sorting, bulk update/cleanup, manual creation, and per-finding retest.

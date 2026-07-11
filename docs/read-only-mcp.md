@@ -1,5 +1,7 @@
 # Read-only MCP
 
+**Status:** shipped and contract-tested as of 2026-07-11.
+
 ShakerScan includes a fail-closed MCP stdio adapter over the REST Command Arsenal.
 It exposes stored product state only and does not expose scan submission, ASM
 mutation, retests, replay, policy writes, shell, or arbitrary code execution.
@@ -42,3 +44,7 @@ requires the mapped command to remain `read_only`, `read_only` risk, and `GET`.
 Calls then go through `POST /arsenal/execute`, preserving normal command-result
 auditing. Catalog drift, redirects, oversized responses, unavailable APIs, and
 unexpected dispatch results fail closed.
+
+Input schemas enforce UUIDs, enums, required fields, and per-tool numeric bounds before dispatch;
+the REST Arsenal validates the command contract again. The transport also caps request and response
+sizes and rejects redirects.

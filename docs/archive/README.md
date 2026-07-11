@@ -20,3 +20,12 @@ is a current roadmap or reference.** For the live state, use:
 | `roadmap-review-implementation-plan-2026-06-25.md` | Point-in-time review whose shipped/open statuses were superseded by July code and artifacts |
 | `ui-qa-report-2026-06-25.md` | Point-in-time UI audit; fixes and rebuilt browser acceptance supersede its live-state claims |
 | `t3mp3st-adoption-implementation-ledger-2026-07-10.md` | Bounded adoption history; no longer an active architecture or implementation plan |
+| `honey-ai-gate-control-prompt-2026-06.md` | Completed external Honey implementation prompt; current operator contract is in `AI_TEST_WORKFLOWS.md` |
+| `honey-ai-redteam-course-prompt-2026-06.md` | Completed external Honey implementation prompt; retained only for scenario-design history |
+| `honey-model-intake-prompt-2026-06.md` | Completed external Honey implementation prompt; current Model Intake behavior is documented in the functionality reference |
+| `continuous-asm-agent-task-appendix-2026-07.md` | Historical implementation prompts removed from the live Continuous ASM architecture |
+| `parallel-scan-agent-task-appendix-2026-07.md` | Historical implementation prompts removed from the live parallel-scan architecture |
+| `multi-node-agent-task-appendix-2026-07.md` | Historical fleet prompts; live multi-node document remains an RFC, not a shipped claim |
+| `architecture-review-2026-07-11.md` | Point-in-time reconciled review; findings were migrated into the single live roadmap |
+| `deferred-work-implementation-plan-2026-07-11.md` | Completed/partial wave ledger; all remaining dependencies are represented in `proposed-next-steps.md` |
+| `owasp-injection-integrity-implementation-plan-2026-06.md` | Completed injection/integrity implementation record removed from the live coverage matrix |

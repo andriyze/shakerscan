@@ -5,22 +5,20 @@ release-complete. Detector acceptance, strict registry authority, engine-wide ca
 metering-quality contracts, and Wave 6 live parity/soak remain open. Multi-node and planner execution
 authority remain gated.
 
-This is the live DAST/ASM status document. Historical implementation detail is preserved in
-[`archive/proposed-next-steps-implementation-ledger-2026-07-10.md`](archive/proposed-next-steps-implementation-ledger-2026-07-10.md).
-The active dependency plan is [`deferred-work-implementation-plan.md`](deferred-work-implementation-plan.md),
-and the evidence-grounded architecture review is
-[`architecture-review-2026-07-11.md`](architecture-review-2026-07-11.md).
+This is the single live DAST/ASM status and dependency document. Historical implementation detail is
+preserved in the [archive](archive/README.md), including the completed deferred-wave plan and the
+evidence-grounded 2026-07-11 architecture review.
 
 ## Current acceptance snapshot
 
 | Area | Current status | Evidence boundary |
 |---|---|---|
-| Unit and contract tests | Passing at the last rebuilt checkpoint | Python `1756 passed, 6 skipped`; UI contracts `20/20` |
+| Unit and contract tests | Passing at the last verification checkpoint | Python `1759 passed, 6 skipped`; UI contracts `20/20` |
 | UI production build and browser QA | Passed | Next.js build plus desktop and 390 px scan/ASM/schedule QA |
-| Fleet freshness | Passed at rebuild | 16/16 workers on `bc6c357126e7fe53`, zero stale |
-| Full current-build E2E | Open | Older Model Intake/AI Gate/DAST results were not rerun on `bc6c357` |
+| Fleet freshness | Passed at last rebuild | 16/16 workers on `957b688918e9ea58`, zero stale at verification time |
+| Full current-build E2E | Open | Older Model Intake/AI Gate/DAST result counts have not been rerun on the latest rebuilt fleet |
 | Juice Shop benchmark | Non-current pass | `6/9` on anonymous fleet `ddc6173b`; not a current-fleet claim |
-| Authenticated crAPI benchmark | Current-fleet fail | scan `85d3bafb`: `0/4`, no verified BOLA |
+| Authenticated crAPI benchmark | Non-current failure artifact | scan `85d3bafb`: `0/4`, no verified BOLA; it predates the benchmark-truth fix and latest rebuild |
 | Auth bootstrap | Partially proven | Harness minted different JWT identity claims and scheduled two auth lanes; server acceptance is not yet receipt-backed |
 | Registry authority | Partial | Main adapters are registry-dispatched, but phase-4 BOLA, NoSQL, and endpoint-scoped registered coverage still bypass the strict decision boundary |
 | Request budgets | Compatibility by default | Meter exists; known opaque tools are rejected in enforce mode; per-adapter quality and soak remain open |
@@ -33,7 +31,7 @@ predates that receipt and remains historical evidence with the limitations recor
 
 ## 1. Detector acceptance
 
-The first current-fleet authenticated crAPI scorecard is an honest failure. The four required routes
+The first authenticated crAPI scorecard on the then-current fleet is an honest failure. The four required routes
 were absent from the stored scan result, so authenticated API discovery is a confirmed blocker. That
 does not prove the BOLA or SQLi detector would succeed if those routes were supplied.
 
@@ -53,9 +51,9 @@ Every report block, count, grade, deployment decision, and parent rollup must de
 canonical finding set and declared execution receipts. Missing or invalid telemetry degrades the
 report; it never implies clean, completed, or covered.
 
-The current crAPI artifact exposed an invalid `probe_parameter_completion_ratio` above `1.0`.
-Completion counters must be made semantically consistent or renamed, and report invariants must
-reject impossible ratios.
+The crAPI artifact exposed an invalid `probe_parameter_completion_ratio` above `1.0`. Commit
+`53cd5fc` removed SQLi's double-count and made inconsistent completion telemetry fail the benchmark
+gate. Future scorecards still need to prove the corrected receipt through the full submission path.
 
 ## 3. Fleet and build truth
 
