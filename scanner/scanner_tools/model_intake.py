@@ -532,6 +532,35 @@ def _parse_content_range(value: str | None) -> dict[str, int | None] | None:
     }
 
 
+def _artifact_size_for_inspection(
+    artifact_meta: dict[str, Any],
+    metadata: dict[str, Any],
+    artifact_bytes: bytes,
+    *,
+    truncated: bool,
+) -> tuple[int | None, str | None]:
+    candidates: list[tuple[Any, str]] = [
+        (artifact_meta.get("bytes_total"), "fetch.bytes_total"),
+    ]
+    content_range = _parse_content_range(str(artifact_meta.get("content_range") or ""))
+    if content_range:
+        candidates.append((content_range.get("total"), "fetch.content_range"))
+    if not truncated:
+        candidates.append((len(artifact_bytes), "observed_complete_artifact"))
+    candidates.append((metadata.get("artifact_size_bytes"), "metadata.artifact_size_bytes"))
+
+    for raw_size, source in candidates:
+        if isinstance(raw_size, bool):
+            continue
+        try:
+            size = int(raw_size)
+        except (TypeError, ValueError):
+            continue
+        if size > 0:
+            return size, source
+    return None, None
+
+
 def _download_http(
     url: str,
     max_bytes: int,
@@ -1495,25 +1524,44 @@ def _scan_suspicious_loader_markers(data: bytes, zip_info: dict[str, Any]) -> li
     return list(deduped.values())[:25]
 
 
-def _inspect_safetensors(data: bytes) -> dict[str, Any]:
-    header: dict[str, Any] = {"present": False, "valid_json": False, "valid": False}
+def _inspect_safetensors(
+    data: bytes,
+    *,
+    artifact_truncated: bool = False,
+    artifact_size: int | None = None,
+    artifact_size_source: str | None = None,
+) -> dict[str, Any]:
+    header: dict[str, Any] = {
+        "present": False,
+        "valid_json": False,
+        "valid": False,
+        "conclusive_invalid": False,
+        "validation_complete": False,
+    }
     if len(data) < 8:
         header["error"] = "too_short_for_header_length"
+        header["conclusive_invalid"] = not artifact_truncated
+        header["valid"] = False if header["conclusive_invalid"] else None
         return header
 
     header_len = int.from_bytes(data[:8], "little", signed=False)
     header["length"] = header_len
     if header_len <= 0:
         header["error"] = "empty_header"
+        header["conclusive_invalid"] = True
         return header
     if header_len > 100_000_000:
         header["error"] = "header_length_unreasonable"
+        header["conclusive_invalid"] = True
         return header
     if header_len > 1_048_576:
         header["error"] = "header_exceeds_intake_limit"
+        header["valid"] = None
         return header
     if len(data) < 8 + header_len:
-        header["error"] = "truncated_header"
+        header["error"] = "header_not_fully_observed" if artifact_truncated else "truncated_header"
+        header["conclusive_invalid"] = not artifact_truncated
+        header["valid"] = False if header["conclusive_invalid"] else None
         return header
 
     duplicate_keys: list[str] = []
@@ -1535,10 +1583,12 @@ def _inspect_safetensors(data: bytes) -> dict[str, Any]:
         )
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         header["error"] = f"{type(exc).__name__}: {str(exc)[:120]}"
+        header["conclusive_invalid"] = True
         return header
 
     if not isinstance(parsed, dict):
         header["error"] = "header_json_not_object"
+        header["conclusive_invalid"] = True
         return header
 
     header["present"] = True
@@ -1561,7 +1611,13 @@ def _inspect_safetensors(data: bytes) -> dict[str, Any]:
 
     tensor_ranges: list[tuple[int, int, str]] = []
     invalid_tensors: list[dict[str, Any]] = []
-    payload_size = max(0, len(data) - 8 - header_len)
+    payload_size: int | None = None
+    if not artifact_truncated:
+        payload_size = max(0, len(data) - 8 - header_len)
+        artifact_size_source = artifact_size_source or "observed_complete_artifact"
+    elif artifact_size is not None and artifact_size >= 8 + header_len:
+        payload_size = artifact_size - 8 - header_len
+
     for name, tensor in parsed.items():
         if name == "__metadata__":
             continue
@@ -1577,7 +1633,7 @@ def _inspect_safetensors(data: bytes) -> dict[str, Any]:
             invalid_tensors.append({"tensor": name, "reason": "missing_or_invalid_data_offsets"})
             continue
         start, end = offsets
-        if start < 0 or end < start or end > payload_size:
+        if start < 0 or end < start or (payload_size is not None and end > payload_size):
             invalid_tensors.append({
                 "tensor": name,
                 "reason": "offset_out_of_bounds",
@@ -1598,14 +1654,21 @@ def _inspect_safetensors(data: bytes) -> dict[str, Any]:
                 "start": current[0],
             })
 
+    conclusive_invalid = bool(duplicate_keys or invalid_tensors or overlaps)
+    validation_complete = payload_size is not None
     header.update({
-        "valid": not duplicate_keys and not invalid_tensors and not overlaps,
+        "valid": False if conclusive_invalid else True if validation_complete else None,
+        "conclusive_invalid": conclusive_invalid,
+        "validation_complete": validation_complete,
         "tensor_count": len([key for key in parsed.keys() if key != "__metadata__"]),
         "metadata_keys": metadata_keys,
         "suspicious_metadata_keys": sorted(set(suspicious_metadata_keys))[:25],
         "invalid_tensors": invalid_tensors[:25],
         "overlapping_tensors": overlaps[:25],
         "payload_size": payload_size,
+        "payload_bounds_checked": payload_size is not None,
+        "artifact_size": artifact_size if artifact_size is not None else len(data) if not artifact_truncated else None,
+        "artifact_size_source": artifact_size_source,
     })
     return header
 
@@ -1698,7 +1761,16 @@ def _inspect_gguf(data: bytes) -> dict[str, Any]:
     }
 
 
-def _inspect_format(name: str, ext: str, data: bytes, zip_info: dict[str, Any]) -> dict[str, Any]:
+def _inspect_format(
+    name: str,
+    ext: str,
+    data: bytes,
+    zip_info: dict[str, Any],
+    *,
+    artifact_truncated: bool = False,
+    artifact_size: int | None = None,
+    artifact_size_source: str | None = None,
+) -> dict[str, Any]:
     inspection: dict[str, Any] = {
         "artifact_name": name,
         "extension": ext,
@@ -1706,7 +1778,12 @@ def _inspect_format(name: str, ext: str, data: bytes, zip_info: dict[str, Any]) 
         "lower_code_execution_risk": ext in SAFER_MODEL_EXTENSIONS,
     }
     if ext == ".safetensors":
-        inspection["safetensors_header"] = _inspect_safetensors(data)
+        inspection["safetensors_header"] = _inspect_safetensors(
+            data,
+            artifact_truncated=artifact_truncated,
+            artifact_size=artifact_size,
+            artifact_size_source=artifact_size_source,
+        )
     elif ext == ".onnx":
         inspection["onnx"] = _inspect_onnx(data)
     elif ext == ".gguf":
@@ -1902,7 +1979,21 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
     )
     eval_policy = _eval_policy(eval_ref, strict=strict_governance, expected_sha256=expected_sha256)
     approval_policy = _approval_policy(metadata, deployment_approved=deployment_approved, strict=strict_governance)
-    format_inspection = _inspect_format(name, ext, artifact_bytes, zip_info)
+    artifact_size, artifact_size_source = _artifact_size_for_inspection(
+        artifact_meta,
+        metadata,
+        artifact_bytes,
+        truncated=artifact_truncated,
+    )
+    format_inspection = _inspect_format(
+        name,
+        ext,
+        artifact_bytes,
+        zip_info,
+        artifact_truncated=artifact_truncated,
+        artifact_size=artifact_size,
+        artifact_size_source=artifact_size_source,
+    )
     suspicious_loader_markers = _scan_suspicious_loader_markers(artifact_bytes, zip_info)
     aibom_hash = str(expected_sha256 or sha256 or "").strip() or None
     aibom = _generate_aibom(
@@ -2091,7 +2182,7 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
         ))
 
     safetensors_header = format_inspection.get("safetensors_header") if isinstance(format_inspection.get("safetensors_header"), dict) else {}
-    if ext == ".safetensors" and artifact_bytes and not safetensors_header.get("valid"):
+    if ext == ".safetensors" and artifact_bytes and safetensors_header.get("conclusive_invalid"):
         findings.append(_finding(
             finding_id="safetensors_header_invalid",
             title="Safetensors header failed structural validation",
@@ -2443,7 +2534,17 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
         }
         for f in findings
     )
-    if ext in SAFER_MODEL_EXTENSIONS and not any(f["id"].endswith("unsafe_serialization") for f in findings) and not format_specific_blocked:
+    format_specific_indeterminate = bool(
+        ext == ".safetensors"
+        and safetensors_header.get("valid") is None
+        and not safetensors_header.get("conclusive_invalid")
+    )
+    if (
+        ext in SAFER_MODEL_EXTENSIONS
+        and not any(f["id"].endswith("unsafe_serialization") for f in findings)
+        and not format_specific_blocked
+        and not format_specific_indeterminate
+    ):
         format_posture = "safer_static_format"
     elif ext in RISKY_EXTENSIONS or pickle_like:
         format_posture = "unsafe_executable_serialization"
@@ -2462,7 +2563,7 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
         checksum_policy_status = "review"
     else:
         checksum_policy_status = "not_required"
-    format_specific_ok = not any(
+    format_specific_ok: bool | None = not any(
         finding["id"] in {
             "model_intake:safetensors_header_invalid",
             "model_intake:onnx_external_data_reference",
@@ -2471,6 +2572,8 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
         }
         for finding in findings
     )
+    if format_specific_indeterminate:
+        format_specific_ok = None
 
     score = max(0, 100 - sum(_severity_score(f.get("severity", "info")) for f in findings))
     safe_artifact_ref = redact_model_intake_value(artifact_ref)

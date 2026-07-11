@@ -204,6 +204,81 @@ def test_model_intake_does_not_compare_full_hash_to_truncated_sample(monkeypatch
     assert result["model_intake"]["checks"]["checksum"] is False
 
 
+def test_model_intake_validates_truncated_safetensors_against_declared_artifact_size(monkeypatch):
+    header = b'{"weight":{"dtype":"F32","shape":[25],"data_offsets":[0,100]}}'
+    prefix = len(header).to_bytes(8, "little") + header + b"\0\0\0\0"
+    full_size = 8 + len(header) + 100
+
+    def fake_download_http(url, max_bytes, timeout_seconds, headers=None):
+        return prefix, {
+            "source": "huggingface",
+            "status": 206,
+            "bytes_observed": len(prefix),
+            "truncated": True,
+        }
+
+    monkeypatch.setattr(model_intake, "_download_http", fake_download_http)
+
+    result = asyncio.run(
+        run_model_intake_scan(
+            "hf://acme/ranker@abc123/model.safetensors",
+            {
+                "require_deployment_approval": False,
+                "require_hash": False,
+                "require_signature": False,
+                "require_model_governance": False,
+                "metadata_json": {"artifact_size_bytes": full_size},
+            },
+        )
+    )
+
+    finding_ids = {finding["id"] for finding in result["findings"]}
+    inspection = result["model_intake"]["supply_chain"]["format_inspection"]["safetensors_header"]
+    assert "model_intake:safetensors_header_invalid" not in finding_ids
+    assert inspection["valid"] is True
+    assert inspection["validation_complete"] is True
+    assert inspection["payload_size"] == 100
+    assert inspection["artifact_size_source"] == "metadata.artifact_size_bytes"
+    assert result["model_intake"]["summary"]["format_posture"] == "safer_static_format"
+
+
+def test_model_intake_treats_truncated_safetensors_without_total_size_as_indeterminate(monkeypatch):
+    header = b'{"weight":{"dtype":"F32","shape":[25],"data_offsets":[0,100]}}'
+    prefix = len(header).to_bytes(8, "little") + header + b"\0\0\0\0"
+
+    def fake_download_http(url, max_bytes, timeout_seconds, headers=None):
+        return prefix, {
+            "source": "huggingface",
+            "status": 206,
+            "bytes_observed": len(prefix),
+            "truncated": True,
+        }
+
+    monkeypatch.setattr(model_intake, "_download_http", fake_download_http)
+
+    result = asyncio.run(
+        run_model_intake_scan(
+            "hf://acme/ranker@abc123/model.safetensors",
+            {
+                "require_deployment_approval": False,
+                "require_hash": False,
+                "require_signature": False,
+                "require_model_governance": False,
+            },
+        )
+    )
+
+    finding_ids = {finding["id"] for finding in result["findings"]}
+    inspection = result["model_intake"]["supply_chain"]["format_inspection"]["safetensors_header"]
+    assert "model_intake:safetensors_header_invalid" not in finding_ids
+    assert inspection["valid"] is None
+    assert inspection["conclusive_invalid"] is False
+    assert inspection["validation_complete"] is False
+    assert inspection["payload_bounds_checked"] is False
+    assert result["model_intake"]["checks"]["format_specific_inspection"] is None
+    assert result["model_intake"]["summary"]["format_posture"] == "unknown_or_unclassified_format"
+
+
 def test_model_intake_allows_low_and_info_advisories():
     assert _intake_decision([{"severity": "low"}, {"severity": "info"}])["decision"] == "allow"
     assert _intake_decision([{"severity": "medium"}])["decision"] == "review"
