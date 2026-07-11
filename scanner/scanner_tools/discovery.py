@@ -2046,6 +2046,9 @@ _OPENAPI_PREFIX_SPEC_SUFFIXES = (
     "/openapi.json",
     "/swagger.json",
 )
+OPENAPI_DISCOVERY_MAX_PROBES = 80
+OPENAPI_DISCOVERY_CONCURRENCY = 8
+OPENAPI_DISCOVERY_DEADLINE_SECONDS = 60.0
 
 
 def _api_path_prefixes(urls: Any, limit: int = 8) -> list[str]:
@@ -2088,6 +2091,7 @@ async def discover_openapi_schema(
     base_url: str,
     auth_session: Any | None = None,
     extra_prefixes: Any | None = None,
+    deadline_seconds: float = OPENAPI_DISCOVERY_DEADLINE_SECONDS,
 ) -> dict[str, Any] | None:
     """Auto-discover and parse OpenAPI/Swagger schema(s) from common paths.
 
@@ -2115,17 +2119,43 @@ async def discover_openapi_schema(
     if prefixes and not all(isinstance(p, str) and p.startswith("/") and p.count("/") == 1 for p in prefixes):
         prefixes = _api_path_prefixes(prefixes)
 
-    probe_urls: list[str] = [urllib.parse.urljoin(base_url, path) for path in OPENAPI_DISCOVERY_PATHS]
+    priority_root_paths = (
+        "/openapi.json", "/swagger.json", "/v3/api-docs", "/v2/api-docs", "/api-docs",
+    )
+    probe_urls: list[str] = [urllib.parse.urljoin(base_url, path) for path in priority_root_paths]
     for prefix in prefixes[:8]:
         for suffix in _OPENAPI_PREFIX_SPEC_SUFFIXES:
             probe_urls.append(urllib.parse.urljoin(base_url, prefix.rstrip("/") + suffix))
-    probe_urls = _unique_preserve_order(probe_urls)
+    probe_urls.extend(urllib.parse.urljoin(base_url, path) for path in OPENAPI_DISCOVERY_PATHS)
+    probe_urls = _unique_preserve_order(probe_urls)[:OPENAPI_DISCOVERY_MAX_PROBES]
 
     found: list[dict[str, Any]] = []
     aggregated: list[dict[str, Any]] = []
     seen_endpoints: set[tuple[str, str]] = set()
+    semaphore = asyncio.Semaphore(OPENAPI_DISCOVERY_CONCURRENCY)
+
+    async def _bounded_fetch(url: str) -> tuple[str, dict[str, Any] | None]:
+        async with semaphore:
+            return url, await fetch_openapi_schema(url, auth_session=auth_session)
+
+    tasks = [asyncio.create_task(_bounded_fetch(url)) for url in probe_urls]
+    done, pending = await asyncio.wait(tasks, timeout=max(0.01, float(deadline_seconds)))
+    for task in pending:
+        task.cancel()
+    if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
+
+    completed: dict[str, dict[str, Any] | None] = {}
+    for task in done:
+        try:
+            url, schema = task.result()
+            completed[url] = schema
+        except Exception:
+            continue
+
+    # Preserve deterministic URL priority even though fetches complete concurrently.
     for url in probe_urls:
-        schema = await fetch_openapi_schema(url, auth_session=auth_session)
+        schema = completed.get(url)
         if not schema:
             continue
         found.append(schema)

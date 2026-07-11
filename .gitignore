@@ -22,6 +22,7 @@ results/benchmark-runs/*
 node_modules/
 .next/
 *.tsbuildinfo
+ui/next-env.d.ts
 *.log
 bun.lockb
 

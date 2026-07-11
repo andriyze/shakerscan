@@ -88,3 +88,23 @@ def test_discover_openapi_returns_none_when_no_spec(monkeypatch):
         discovery.discover_openapi_schema("http://t/", extra_prefixes=["/identity"])
     )
     assert result is None
+
+
+def test_discover_openapi_enforces_global_deadline_and_concurrency(monkeypatch):
+    calls: list[str] = []
+
+    async def stalled_fetch(url, auth_session=None):
+        calls.append(url)
+        await asyncio.sleep(60)
+
+    monkeypatch.setattr(discovery, "fetch_openapi_schema", stalled_fetch)
+    result = asyncio.run(
+        discovery.discover_openapi_schema(
+            "http://t/",
+            extra_prefixes=["/identity"],
+            deadline_seconds=0.01,
+        )
+    )
+
+    assert result is None
+    assert 1 <= len(calls) <= discovery.OPENAPI_DISCOVERY_CONCURRENCY

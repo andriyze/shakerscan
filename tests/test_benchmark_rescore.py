@@ -227,6 +227,46 @@ def test_submit_target_uses_fresh_role_distinct_principal_accounts(monkeypatch):
     assert "run123" not in str(receipt)
 
 
+def _verified_bola_report(principal_validated: bool):
+    return {
+        "findings": [{
+            "title": "BOLA control-backed cross-principal replay",
+            "severity": "high",
+            "verified": True,
+            "evidence": {
+                "proof_type": "cross_principal_replay",
+                "owner_status": 200,
+                "attacker_status": 200,
+            },
+        }],
+        "smart_coverage": {"auth_states_tested": ["user1", "user2"]},
+        "scan_metadata": {"options": {"benchmark_principal_validation": {
+            "distinct_identity_claims_validated": principal_validated,
+        }}},
+    }
+
+
+def test_verified_bola_gate_requires_distinct_accepted_principals():
+    fixture = {
+        "auth": {"user1_login": {}, "user2_login": {}, "requires_two_users": True},
+        "gates": {"require_verified_bola": True},
+    }
+    card = b.collect_scorecard(_verified_bola_report(True), fixture)
+    gate = next(item for item in b.apply_gates(card, fixture) if item["gate"] == "require_verified_bola")
+    assert gate["pass"] is True
+    assert card["auth_workflow"]["authenticated_responses_accepted"] is True
+
+
+def test_verified_bola_gate_rejects_unvalidated_principals():
+    fixture = {
+        "auth": {"user1_login": {}, "user2_login": {}, "requires_two_users": True},
+        "gates": {"require_verified_bola": True},
+    }
+    card = b.collect_scorecard(_verified_bola_report(False), fixture)
+    gate = next(item for item in b.apply_gates(card, fixture) if item["gate"] == "require_verified_bola")
+    assert gate["pass"] is False
+
+
 def test_mint_token_uses_distinct_stable_ten_digit_signup_numbers(monkeypatch):
     signup_bodies = []
 

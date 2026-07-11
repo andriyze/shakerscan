@@ -55,7 +55,7 @@ flags, skills, agents, adapters, modules, and durable tables) plus architecture/
 
 ## Current UI (Implemented)
 
-- **Dashboard (`/`)**: real-time metrics (targets, scans, findings, avg score), queue stats (pending/running/completed/failed with clickable links), worker scaling (1-20 with +/- controls), Gungnir CT monitor toggle, recent scans list (last 5), critical/high findings list (last 5). Auto-refreshes every 10-30s.
+- **Dashboard (`/`)**: real-time metrics (targets, scans, findings, avg score), a compact top-right operations bar for live pending/running queue state, emergency clear, worker count/scaling/stale-build warning, and Gungnir CT status/toggle; plus recent scans and critical/high findings. Auto-refreshes every 10-30s.
 - **Scans (`/scans`)**: filter by status/domain/search, pagination (50/page), cancel running/pending scans, re-scan dropdown (all 6 scan types), auto-refresh every 5s. Shows target, type, status, score/grade, findings count, duration, date.
 - **Scan Detail (`/scans/{id}`)**: live logs with auto-scroll while running (5s refresh), progress bar + current phase, partial-results view for failed scans (warning banner), refreshed deployment decision, full report with PDF export, compliance section, resolved coverage budget, AI Gate evidence, and Model Intake artifact checks when complete. Preserves list filter context on back navigation.
 - **Exposure (`/exposure`)**: graph linking domains, targets, APIs, auth roles, third-party JS/vendors, cloud hints, AI targets, MCP tools, model artifacts, scans, and findings.
@@ -83,7 +83,7 @@ When users ask about security scanning, you should:
 **DAST-quality / benchmarking notes:**
 - **Never measure on a build-stale fleet.** Check `GET /workers` `build_current` (fingerprint-authoritative) and restart workers before validation scans. Scans stamp `expected_build_fingerprint_at_submit`/`stale_worker_count_at_submit`; pass `require_current_workers: true` to fail-closed on a stale fleet.
 - **For DAST-quality benchmarking use a single Smart scan, not parallel `coverage`.** Coverage mode detects fewer crit/high (zero-rediscovery children skip the browser/DOM-XSS + global posture checks where many crit/highs live). Coverage is for breadth.
-- **Benchmark scorecards:** `python3 scripts/benchmark_targets.py <juice_shop|crapi|honey> --auth` (submits, polls, scores verified-vs-suspected, coverage, gates). Fixtures in `tests/fixtures/benchmarks/*.yaml`. Score an existing scan with `--scan-id`.
+- **Benchmark scorecards:** `python3 scripts/benchmark_targets.py <juice_shop|crapi|honey> --auth` (submits, polls, scores verified-vs-suspected, coverage, gates). Fixtures in `tests/fixtures/benchmarks/*.yaml`. Score an existing scan with `--scan-id`. A verified-BOLA gate also requires a persisted distinct-principal receipt and successful owner/attacker responses; a finding label alone cannot pass it.
 - **Agent-safe benchmark submission:** use `python3 scripts/benchmark_targets.py <target> --auth --submit-only` to require a current fleet, mint required principals, queue exactly one scan, print a content-free receipt, and exit. Report the scan ID/UI link and stop; score it on a later request with `--scan-id`.
 - **Model Intake validation:** use `make e2e-model-intake` for the real public-model path. It enables the bounded Nex-N2-mini Hugging Face shard check and verifies that a capped partial download is reported as `known_unverified_truncated`, never as a false hash mismatch. Use `make e2e-model-intake-fixture` only when external network access is intentionally unavailable.
 - **ASM gaps** (`GET /targets/{id}/asm/gaps`) returns `family_coverage` (completed vs attempts) and `recommended_campaigns` (recon / add_credentials / sqli_wave / xss_wave / bola_wave / retest_stale). Reports carry `verification_summary` (verified vs suspected, unproven crit/high).
@@ -166,6 +166,10 @@ curl -X POST http://localhost:8080/scans/{scan_id}/cancel
 ```
 
 ### Batch Scans
+
+Batch submission accepts 1-50 targets, removes duplicates, and returns `queued_count`,
+`failed_count`, and per-target `errors`; `status: partial` means some scans were queued and others
+were rejected. Do not report the requested count as queued.
 
 ```bash
 curl -X POST http://localhost:8080/scans/batch \

@@ -3821,6 +3821,7 @@ async def build_report(target: str,
         reserved=request_reserved,
     )
     request_meter_hooks = install_async_client_metering()
+    openapi_endpoint_cache: list[dict[str, Any]] = []
     requested_active_family = normalize_scanner_check_family(active_check_family)
     focused_active_family_name = None
     if active_checks and requested_active_family and requested_active_family != "all":
@@ -9573,6 +9574,8 @@ async def build_report(target: str,
                                 openapi_sources.append(auto_schema)
 
                             if openapi_sources:
+                                for schema in openapi_sources:
+                                    openapi_endpoint_cache.extend(schema.get("endpoints") or [])
                                 import re as path_re
                                 post_count = 0
                                 get_count = 0
@@ -12168,13 +12171,16 @@ async def build_report(target: str,
         for _ep in (manual_endpoints_norm or []):
             if isinstance(_ep, dict) and _ep.get("url"):
                 _ep_candidates.append(_ep["url"])
-        # Pull the FULL API surface from the OpenAPI/Swagger spec so coverage is
-        # not limited to this shard's worklist slice (path templates -> "1").
+        # Pull the FULL API surface from the already-discovered OpenAPI/Swagger
+        # specs so coverage is not limited to this shard's worklist slice. If the
+        # earlier smart-discovery phase did not run, perform one bounded discovery.
         try:
-            _oas = await discover_openapi_schema(
-                base_url, auth_session=auth_session, extra_prefixes=_ep_candidates
-            )
-            for _e in ((_oas or {}).get("endpoints") or []):
+            if not openapi_endpoint_cache:
+                _oas = await discover_openapi_schema(
+                    base_url, auth_session=auth_session, extra_prefixes=_ep_candidates
+                )
+                openapi_endpoint_cache.extend((_oas or {}).get("endpoints") or [])
+            for _e in openapi_endpoint_cache:
                 _m, _p = _e.get("method"), _e.get("path")
                 if _m and _p:
                     _ep_candidates.append(f"{_m} {_id_re.sub(r'[{][^}]+[}]', '1', _p)}")

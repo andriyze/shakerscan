@@ -245,3 +245,24 @@ claim instead of deleting it.
   principal owns none; mechanic/coupon: separate). FP-risk 0.33 (1 unrelated suspected lead).
 - Impact: the universal BOLA proof-tier promotion is proven — a confirmed cross-principal differential
   now yields a verified/high finding whenever the routes are available.
+
+### 2026-07-11 — Correction: identity-only BOLA promotion and scorecard pass invalidated
+
+- The prior `94ac5c7f-fe4f-4773-84c2-a33096097e82` pass claim above is **invalid**. The generic
+  equivalent-response lane treated any non-requester identity in a body as proof of unauthorized
+  ownership. That does not establish authorization failure and can promote public profiles or
+  support/contact data. The stored scorecard also records
+  `principal_identities_validated: false` and `authenticated_responses_accepted: null`.
+- Corrective rule: generic equivalent user-specific responses remain suspected, even when the paired
+  owner's identity appears. Deterministic `cross_principal_replay` requires an independent control,
+  such as an owner object absent from the attacker's authorized listing or an explicit deny
+  expectation. Benchmark `require_verified_bola` additionally requires a persisted non-secret
+  distinct-principal receipt and successful owner/attacker responses.
+- Artifact handling: the old timestamped scorecard remains as an immutable record of what the old
+  harness reported; it must not be cited as a valid pass. The corrected harness rescored the same
+  scan on the uniform `83caa0b39bc3710c` fleet and wrote
+  `benchmark-crapi-20260711T221914Z.json` plus the stable `benchmark-crapi.json` pointer. Result:
+  `1/4`, overall **FAIL**; `require_verified_bola` fails with
+  `principal_identities_validated=false` and `authenticated_responses_accepted=false`.
+- This correction reduces the current accepted crAPI recall claim back to no valid passing artifact.
+  It is a proof-discipline correction, not a detector recall regression and not benchmark fitting.

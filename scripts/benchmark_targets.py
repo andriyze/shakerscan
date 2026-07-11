@@ -502,6 +502,35 @@ def collect_scorecard(report, fixture):
             + (["missing_second_principal"] if "user2" in missing_auth_states else [])
         ) if missing_auth_states else [],
     }
+    scan_options = ((report.get("scan_metadata") or {}).get("options") or {})
+    principal_validation = scan_options.get("benchmark_principal_validation") \
+        if isinstance(scan_options, dict) else None
+    if isinstance(principal_validation, dict):
+        auth_workflow["principal_identities_validated"] = bool(
+            principal_validation.get("distinct_identity_claims_validated")
+        )
+    accepted_auth_replay = False
+    for finding, _hay, classes, _sev, verified, _browser in enriched:
+        if not verified or "bola" not in classes:
+            continue
+        evidence = finding.get("evidence")
+        if isinstance(evidence, str):
+            try:
+                evidence = json.loads(evidence)
+            except (TypeError, ValueError):
+                evidence = {}
+        if not isinstance(evidence, dict):
+            continue
+        owner_status = evidence.get("owner_status", evidence.get("user1_status"))
+        attacker_status = evidence.get("attacker_status", evidence.get("user2_status"))
+        try:
+            accepted_auth_replay = 200 <= int(owner_status) < 300 and 200 <= int(attacker_status) < 300
+        except (TypeError, ValueError):
+            accepted_auth_replay = False
+        if accepted_auth_replay:
+            break
+    if auth_workflow["principal_identities_validated"]:
+        auth_workflow["authenticated_responses_accepted"] = accepted_auth_replay
 
     expected = fixture.get("expected", [])
     found, missed = [], []
@@ -601,8 +630,19 @@ def apply_gates(card, fixture):
         ok = "xss" in (card.get("browser_proven_high_critical_families") or [])
         chk("require_browser_proven_xss", ok, "browser XSS present" if ok else "no browser-proven XSS")
     if gates.get("require_verified_bola"):
-        ok = "bola" in (card.get("verified_high_critical_families") or [])
-        chk("require_verified_bola", ok, "verified BOLA present" if ok else "no verified BOLA")
+        workflow = card.get("auth_workflow") or {}
+        has_bola = "bola" in (card.get("verified_high_critical_families") or [])
+        principals_valid = workflow.get("principal_identities_validated") is True
+        responses_accepted = workflow.get("authenticated_responses_accepted") is True
+        ok = has_bola and principals_valid and responses_accepted
+        chk(
+            "require_verified_bola",
+            ok,
+            "verified control-backed BOLA with distinct accepted principals" if ok else (
+                f"verified_bola={has_bola}, principal_identities_validated={principals_valid}, "
+                f"authenticated_responses_accepted={responses_accepted}"
+            ),
+        )
     return results
 
 
@@ -674,6 +714,7 @@ def submit_target(name, api, do_auth):
                 ],
                 "validation_method": "jwt_stable_claim",
             })
+    opts["benchmark_principal_validation"] = principal_validation
     resp = _post(f"{api}/scans", {"target": fx["target_url"], "options": opts})
     scan_id = resp.get("id") or resp.get("scan_id")
     if not scan_id:

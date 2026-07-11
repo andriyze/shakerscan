@@ -27,6 +27,7 @@ export default function AIOpsRouterPage() {
   const [prompt, setPrompt] = useState('')
   const [target, setTarget] = useState('')
   const [result, setResult] = useState<AIOpsRouteResponse | null>(null)
+  const [previewInput, setPreviewInput] = useState<{ prompt: string; target?: string } | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -38,12 +39,24 @@ export default function AIOpsRouterPage() {
 
   const allConfirmed = confirmAuthorized && confirmHighRisk
 
+  function invalidatePreview() {
+    setResult(null)
+    setPreviewInput(null)
+    setConfirmAuthorized(false)
+    setConfirmHighRisk(false)
+    setConfirmExecute(false)
+  }
+
   async function preview() {
     if (!prompt.trim()) { setError('Enter a natural-language request.'); return }
     setLoading(true); setError(null)
     try {
-      const res = await routeAiOps({ prompt: prompt.trim(), target: target.trim() || undefined })
+      const input = { prompt: prompt.trim(), target: target.trim() || undefined }
+      const res = await routeAiOps(input)
       setResult(res)
+      setPreviewInput(input)
+      setConfirmAuthorized(false)
+      setConfirmHighRisk(false)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to route request')
     } finally {
@@ -52,11 +65,14 @@ export default function AIOpsRouterPage() {
   }
 
   async function execute() {
+    if (!previewInput) {
+      toast.error('Preview the current request before executing it')
+      return
+    }
     setExecuting(true)
     try {
       const res = await routeAiOps({
-        prompt: prompt.trim(),
-        target: target.trim() || undefined,
+        ...previewInput,
         execute: true,
         confirm_execution: true,
         confirm_authorized: confirmAuthorized,
@@ -73,6 +89,8 @@ export default function AIOpsRouterPage() {
     } finally {
       setExecuting(false)
       setConfirmExecute(false)
+      setConfirmAuthorized(false)
+      setConfirmHighRisk(false)
     }
   }
 
@@ -98,7 +116,7 @@ export default function AIOpsRouterPage() {
           <textarea
             id="ops-prompt"
             value={prompt}
-            onChange={(e) => setPrompt(e.target.value)}
+            onChange={(e) => { setPrompt(e.target.value); invalidatePreview() }}
             rows={3}
             placeholder="e.g. Run full coverage on this target, or improve ASM coverage for the API"
             className="w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white placeholder-gray-600 focus:border-blue-500 focus:outline-none"
@@ -110,7 +128,7 @@ export default function AIOpsRouterPage() {
             id="ops-target"
             type="text"
             value={target}
-            onChange={(e) => setTarget(e.target.value)}
+            onChange={(e) => { setTarget(e.target.value); invalidatePreview() }}
             placeholder="https://example.com"
             className="w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white placeholder-gray-600 focus:border-blue-500 focus:outline-none"
           />
@@ -189,7 +207,9 @@ export default function AIOpsRouterPage() {
       <ConfirmDialog
         open={confirmExecute}
         title="Execute this operation?"
-        message="This asks the server to queue the planned API call. It will still be denied unless execution is enabled server-side."
+        message={previewInput
+          ? `Queue the previewed operation for ${previewInput.target || 'the selected target'}. Editing the request invalidates this confirmation.`
+          : 'Preview the request again before execution.'}
         confirmLabel="Execute"
         danger
         busy={executing}

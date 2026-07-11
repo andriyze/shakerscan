@@ -2,8 +2,8 @@
 
 import { useEffect, useRef, useState } from 'react'
 import Link from 'next/link'
-import { AlertTriangle, ArrowRight, Bot, CalendarClock, Cpu, Gauge, PackageCheck, Rocket, ShieldCheck, Workflow } from 'lucide-react'
-import { getDashboard, getQueueStats, getWorkers, scaleWorkers, getSystemResources, getGungnirStatus, startGungnir, stopGungnir, clearQueue, getGradeColor, formatDate, type QueueStats, type WorkerStats, type SystemResources, type GungnirStatus, type DashboardActionItem, type DashboardProductStatusItem, type DashboardResponse } from '@/lib/api'
+import { AlertTriangle, ArrowRight, Bot, CalendarClock, Gauge, ListTodo, Minus, PackageCheck, Plus, RadioTower, Rocket, Server, ShieldCheck, Trash2, Workflow } from 'lucide-react'
+import { getDashboard, getQueueStats, getWorkers, scaleWorkers, getGungnirStatus, startGungnir, stopGungnir, clearQueue, getGradeColor, formatDate, type QueueStats, type WorkerStats, type GungnirStatus, type DashboardActionItem, type DashboardProductStatusItem, type DashboardResponse } from '@/lib/api'
 import {
   Badge,
   Card,
@@ -29,7 +29,6 @@ export default function Dashboard() {
   const [data, setData] = useState<DashboardResponse | null>(null)
   const [queue, setQueue] = useState<QueueStats | null>(null)
   const [workers, setWorkers] = useState<WorkerStats | null>(null)
-  const [systemResources, setSystemResources] = useState<SystemResources | null>(null)
   const [gungnir, setGungnir] = useState<GungnirStatus | null>(null)
   const [dashboardLoading, setDashboardLoading] = useState(true)
   const [dashboardError, setDashboardError] = useState<string | null>(null)
@@ -127,14 +126,6 @@ export default function Dashboard() {
     }
   }
 
-  const fetchSystemResources = async () => {
-    try {
-      setSystemResources(await getSystemResources())
-    } catch {
-      setSystemResources({ available: false, error: 'unavailable' })
-    }
-  }
-
   useEffect(() => {
     fetchDashboard(true)
     const interval = setInterval(() => fetchDashboard(false), DASHBOARD_REFRESH_MS)
@@ -150,12 +141,6 @@ export default function Dashboard() {
   useEffect(() => {
     fetchWorkers()
     const interval = setInterval(fetchWorkers, WORKERS_REFRESH_MS)
-    return () => clearInterval(interval)
-  }, [])
-
-  useEffect(() => {
-    fetchSystemResources()
-    const interval = setInterval(fetchSystemResources, WORKERS_REFRESH_MS)
     return () => clearInterval(interval)
   }, [])
 
@@ -226,35 +211,137 @@ export default function Dashboard() {
     : '--'
   const queuePending = queue ? queue.pending : '--'
   const queueRunning = queue ? queue.running : '--'
-  const queueCompleted = queue ? queue.completed : '--'
-  const queueFailed = queue ? queue.failed : '--'
   const workerCount = workers?.count
   const workersKnown = workerCount !== undefined && workerCount >= 0
   const maxWorkers = workers?.max_allowed && workers.max_allowed > 0 ? workers.max_allowed : 20
   const staleCount = workers?.stale_workers?.length ?? 0
-  // Busy workers ~= jobs currently running; idle = running workers - busy.
-  const busyWorkers = typeof queue?.running === 'number' ? Math.min(queue.running, workerCount ?? 0) : null
-  const idleWorkers = workersKnown && busyWorkers !== null ? Math.max(0, (workerCount as number) - busyWorkers) : null
-  const workerLabel = workersError
-    ? workersError
-    : workersKnown
-      ? `${workerCount} running`
-      : 'Workers unavailable'
-  // Docker resource ceiling (Docker Desktop VM allocation on mac/win; host on Linux).
-  const dockerGiB = systemResources?.available && systemResources.mem_total_bytes
-    ? systemResources.mem_total_bytes / 1024 ** 3
-    : null
-  const scaleOptions = Array.from(new Set([1, 2, 3, 5, 10, 15, 20, 25, 30, 40].filter(n => n <= maxWorkers)))
 
   return (
     <div className="space-y-6">
-      <div className="flex items-start justify-between gap-4">
+      <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
         <div>
           <h1 className="text-2xl font-bold text-white">Dashboard</h1>
           <p className="text-gray-400 mt-1">Security scanning overview</p>
         </div>
-        <LastUpdated updatedAt={lastUpdated} onRefresh={handleManualRefresh} refreshing={refreshing} />
+        <div className="flex w-full flex-wrap items-center gap-2 xl:w-auto xl:justify-end">
+          <div className="flex h-10 items-center gap-2 rounded-lg border border-gray-800 bg-gray-900 px-2.5" aria-label="Scan queue">
+            <ListTodo className="h-4 w-4 shrink-0 text-gray-500" aria-hidden="true" />
+            {queueError ? (
+              <span className="flex items-center gap-1.5 text-xs text-red-300" title={queueError}>
+                <AlertTriangle className="h-3.5 w-3.5" aria-hidden="true" /> Queue unavailable
+              </span>
+            ) : (
+              <>
+                <Link
+                  href="/scans?status=pending"
+                  title={`${queuePending} pending scans`}
+                  className={`flex items-center gap-1.5 rounded text-xs text-gray-300 hover:text-white ${FOCUS_RING}`}
+                >
+                  <span className={`h-2 w-2 rounded-full bg-amber-400 ${queuePending !== '--' && queuePending > 0 ? 'animate-pulse' : ''}`} />
+                  <span className="font-medium tabular-nums">{queuePending}</span>
+                  <span className="hidden text-gray-500 sm:inline">pending</span>
+                </Link>
+                <Link
+                  href="/scans?status=running"
+                  title={`${queueRunning} running scans`}
+                  className={`flex items-center gap-1.5 rounded text-xs text-gray-300 hover:text-white ${FOCUS_RING}`}
+                >
+                  <span className={`h-2 w-2 rounded-full bg-blue-500 ${queueRunning !== '--' && queueRunning > 0 ? 'animate-pulse' : ''}`} />
+                  <span className="font-medium tabular-nums">{queueRunning}</span>
+                  <span className="hidden text-gray-500 sm:inline">running</span>
+                </Link>
+              </>
+            )}
+            <button
+              type="button"
+              onClick={() => { setClearRetests(false); setShowClearQueue(true) }}
+              aria-label="Emergency clear pending jobs"
+              title="Emergency clear pending jobs"
+              className={`ml-0.5 flex h-7 w-7 items-center justify-center rounded text-gray-600 transition-colors hover:bg-red-500/10 hover:text-red-400 ${FOCUS_RING}`}
+            >
+              <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
+            </button>
+          </div>
+
+          <div
+            className="flex h-10 items-center gap-2 rounded-lg border border-gray-800 bg-gray-900 px-2.5"
+            title={workersError || `${workerCount ?? '--'} of ${maxWorkers} workers running`}
+          >
+            <Server className="h-4 w-4 shrink-0 text-gray-500" aria-hidden="true" />
+            <span className="min-w-6 text-center text-sm font-medium tabular-nums text-white">
+              {workersKnown ? workerCount : '--'}
+            </span>
+            <span className="hidden text-xs text-gray-500 sm:inline">workers</span>
+            {staleCount > 0 && (
+              <span className="rounded bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-medium text-amber-300" title="Workers running an outdated build">
+                {staleCount} stale
+              </span>
+            )}
+            <span className="h-5 w-px bg-gray-800" aria-hidden="true" />
+            <button
+              type="button"
+              onClick={() => handleScale(Math.max(1, (workerCount || 1) - 1))}
+              disabled={scaling || !workersKnown || (workerCount || 0) <= 1}
+              aria-label="Decrease worker count"
+              title="Decrease worker count"
+              className={`flex h-7 w-7 items-center justify-center rounded text-gray-400 transition-colors hover:bg-gray-800 hover:text-white disabled:cursor-not-allowed disabled:opacity-30 ${FOCUS_RING}`}
+            >
+              <Minus className="h-3.5 w-3.5" aria-hidden="true" />
+            </button>
+            <button
+              type="button"
+              onClick={() => handleScale(Math.min(maxWorkers, (workerCount || 1) + 1))}
+              disabled={scaling || !workersKnown || (workerCount || 0) >= maxWorkers}
+              aria-label="Increase worker count"
+              title="Increase worker count"
+              className={`flex h-7 w-7 items-center justify-center rounded text-gray-400 transition-colors hover:bg-gray-800 hover:text-white disabled:cursor-not-allowed disabled:opacity-30 ${FOCUS_RING}`}
+            >
+              <Plus className="h-3.5 w-3.5" aria-hidden="true" />
+            </button>
+          </div>
+
+          <button
+            type="button"
+            onClick={handleGungnirToggle}
+            disabled={gungnirActionLoading}
+            aria-label={gungnir?.running ? 'Stop Gungnir CT monitor' : 'Start Gungnir CT monitor'}
+            title={gungnir?.running
+              ? `Stop CT monitor · ${gungnir.domains_monitored} domains · ${gungnir.session_found} found this session`
+              : 'Start Certificate Transparency monitor'}
+            className={`flex h-10 items-center gap-2 rounded-lg border px-3 text-xs font-medium transition-colors disabled:opacity-50 ${FOCUS_RING} ${
+              gungnir?.running
+                ? 'border-emerald-800/60 bg-emerald-500/10 text-emerald-300 hover:bg-emerald-500/15'
+                : 'border-gray-800 bg-gray-900 text-gray-400 hover:bg-gray-800 hover:text-gray-200'
+            }`}
+          >
+            <RadioTower className={`h-4 w-4 ${gungnir?.running ? 'text-emerald-400' : 'text-gray-500'}`} aria-hidden="true" />
+            <span>CT</span>
+            <span className={`h-2 w-2 rounded-full ${gungnir?.running ? 'animate-pulse bg-emerald-400' : 'bg-gray-600'}`} aria-hidden="true" />
+            <span className="text-gray-500">{gungnirActionLoading ? '…' : gungnir?.running ? 'on' : 'off'}</span>
+          </button>
+
+          <LastUpdated updatedAt={lastUpdated} onRefresh={handleManualRefresh} refreshing={refreshing} />
+        </div>
       </div>
+
+      <ConfirmDialog
+        open={showClearQueue}
+        title="Clear the scan queue?"
+        message={
+          <div className="space-y-3">
+            <p>This removes all pending scan jobs from the queue. Running scans are not affected.</p>
+            <label className="flex items-center gap-2 text-sm text-gray-300">
+              <input type="checkbox" checked={clearRetests} onChange={(e) => setClearRetests(e.target.checked)} className="accent-red-500" />
+              Also clear pending retest jobs
+            </label>
+          </div>
+        }
+        confirmLabel="Clear queue"
+        danger
+        busy={clearingQueue}
+        onConfirm={handleClearQueue}
+        onCancel={() => setShowClearQueue(false)}
+      />
 
       {dashboardError && (
         <ErrorState message={dashboardError} onRetry={() => fetchDashboard(true)} />
@@ -295,199 +382,6 @@ export default function Dashboard() {
       <ProductStatusStrip items={data?.product_status || []} loading={dashboardLoading && !data} />
 
       <ActionCenter items={data?.action_center || []} loading={dashboardLoading && !data} />
-
-      {/* Queue Status & Worker Control */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        {/* Queue Status */}
-        <Card className="p-4">
-          <div className="flex items-center justify-between mb-3">
-            <h2 className="text-sm font-medium text-gray-400">Queue Status</h2>
-            <button
-              type="button"
-              onClick={() => { setClearRetests(false); setShowClearQueue(true) }}
-              className={`text-xs text-gray-500 hover:text-red-400 transition-colors rounded ${FOCUS_RING}`}
-            >
-              Emergency clear
-            </button>
-          </div>
-          <div className="flex flex-wrap gap-4">
-            <Link href="/scans?status=pending" className={`flex items-center gap-2 hover:opacity-80 transition-opacity rounded ${FOCUS_RING}`}>
-              <div className={`w-2 h-2 rounded-full bg-yellow-500 ${queuePending !== '--' && queuePending > 0 ? 'animate-pulse' : ''}`}></div>
-              <span className="text-sm">{queuePending} pending</span>
-            </Link>
-            <Link href="/scans?status=running" className={`flex items-center gap-2 hover:opacity-80 transition-opacity rounded ${FOCUS_RING}`}>
-              <div className={`w-2 h-2 rounded-full bg-blue-500 ${queueRunning !== '--' && queueRunning > 0 ? 'animate-pulse' : ''}`}></div>
-              <span className="text-sm">{queueRunning} running</span>
-            </Link>
-            <Link href="/scans?status=completed" className={`flex items-center gap-2 hover:opacity-80 transition-opacity rounded ${FOCUS_RING}`}>
-              <div className="w-2 h-2 rounded-full bg-green-500"></div>
-              <span className="text-sm">{queueCompleted} completed</span>
-            </Link>
-            <Link href="/scans?status=failed" className={`flex items-center gap-2 hover:opacity-80 transition-opacity rounded ${FOCUS_RING}`}>
-              <div className="w-2 h-2 rounded-full bg-red-500"></div>
-              <span className="text-sm">{queueFailed} failed</span>
-            </Link>
-          </div>
-          {queueError && (
-            <p className="text-xs text-red-400 mt-3">{queueError}</p>
-          )}
-        </Card>
-
-        <ConfirmDialog
-          open={showClearQueue}
-          title="Clear the scan queue?"
-          message={
-            <div className="space-y-3">
-              <p>This removes all pending scan jobs from the queue. Running scans are not affected.</p>
-              <label className="flex items-center gap-2 text-sm text-gray-300">
-                <input type="checkbox" checked={clearRetests} onChange={(e) => setClearRetests(e.target.checked)} className="accent-red-500" />
-                Also clear pending retest jobs
-              </label>
-            </div>
-          }
-          confirmLabel="Clear queue"
-          danger
-          busy={clearingQueue}
-          onConfirm={handleClearQueue}
-          onCancel={() => setShowClearQueue(false)}
-        />
-
-        {/* Workers & Resources */}
-        <Card className="p-4">
-          <div className="flex items-center justify-between mb-3">
-            <h2 className="text-sm font-medium text-gray-400">Workers &amp; Resources</h2>
-            {staleCount > 0 && (
-              <span
-                title="Workers running an outdated build (version skew). Re-scale to refresh."
-                className="text-xs px-1.5 py-0.5 rounded bg-amber-900/40 text-amber-400 border border-amber-800/50"
-              >
-                ⚠ {staleCount} stale
-              </span>
-            )}
-          </div>
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <WorkerIcon />
-              <span className="text-sm">{workerLabel}{workersKnown ? <span className="text-gray-500"> / {maxWorkers} max</span> : null}</span>
-            </div>
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                onClick={() => handleScale(Math.max(1, (workerCount || 1) - 1))}
-                disabled={scaling || !workersKnown || (workerCount || 0) <= 1}
-                aria-label="Decrease worker count"
-                className={`px-2 py-1 bg-gray-800 hover:bg-gray-700 disabled:opacity-50 disabled:cursor-not-allowed rounded text-sm ${FOCUS_RING}`}
-              >
-                -
-              </button>
-              <span className="text-sm font-medium w-8 text-center">{workersKnown ? workerCount : '?'}</span>
-              <button
-                type="button"
-                onClick={() => handleScale(Math.min(maxWorkers, (workerCount || 1) + 1))}
-                disabled={scaling || !workersKnown || (workerCount || 0) >= maxWorkers}
-                aria-label="Increase worker count"
-                className={`px-2 py-1 bg-gray-800 hover:bg-gray-700 disabled:opacity-50 disabled:cursor-not-allowed rounded text-sm ${FOCUS_RING}`}
-              >
-                +
-              </button>
-              <select
-                value=""
-                onChange={(e) => handleScale(parseInt(e.target.value))}
-                disabled={scaling || !workersKnown}
-                aria-label="Scale workers to a specific count"
-                className={`ml-2 px-2 py-1 bg-gray-800 border border-gray-700 rounded text-sm disabled:opacity-50 ${FOCUS_RING}`}
-              >
-                <option value="">Scale to...</option>
-                {scaleOptions.map(n => (
-                  <option key={n} value={n}>{n} workers</option>
-                ))}
-              </select>
-            </div>
-          </div>
-
-          {/* busy / idle / capacity */}
-          {workersKnown && (
-            <div className="mt-3 flex items-center gap-4 text-xs">
-              <span className="flex items-center gap-1.5">
-                <span className={`w-2 h-2 rounded-full bg-blue-500 ${busyWorkers ? 'animate-pulse' : ''}`}></span>
-                <span className="text-gray-400">{busyWorkers ?? '--'} busy</span>
-              </span>
-              <span className="flex items-center gap-1.5">
-                <span className="w-2 h-2 rounded-full bg-green-500"></span>
-                <span className="text-gray-400">{idleWorkers ?? '--'} idle</span>
-              </span>
-              <span className="text-gray-600">capacity {maxWorkers}</span>
-            </div>
-          )}
-
-          {/* Docker engine resources (Desktop VM allocation on mac/win, host on Linux) */}
-          <div className="mt-3 pt-3 border-t border-gray-800 text-xs text-gray-400">
-            {systemResources?.available ? (
-              <div className="flex items-center gap-4">
-                <span title="vCPUs available to the Docker engine">{systemResources.cpus ?? '--'} CPU</span>
-                <span title="RAM available to the Docker engine">{dockerGiB !== null ? `${dockerGiB.toFixed(1)} GiB` : '-- GiB'} RAM</span>
-                <span className="text-gray-600">
-                  {systemResources.is_desktop_vm
-                    ? `Docker Desktop VM${systemResources.operating_system ? ` · ${systemResources.operating_system}` : ''}`
-                    : (systemResources.operating_system || 'Docker host')}
-                </span>
-              </div>
-            ) : (
-              <span className="text-gray-600">Docker resource info unavailable</span>
-            )}
-          </div>
-          {scaling && (
-            <p className="text-xs text-blue-400 mt-2">Scaling workers...</p>
-          )}
-        </Card>
-      </div>
-
-      {/* Gungnir CT Monitor */}
-      <Card className="p-4">
-        <div className="flex items-center justify-between">
-          <div>
-            <h2 className="text-sm font-medium text-gray-400">Gungnir CT Monitor</h2>
-            <p className="text-xs text-gray-500 mt-1">Real-time Certificate Transparency monitoring</p>
-          </div>
-          <div className="flex items-center gap-4">
-            <div className="text-right text-sm">
-              <div className="flex items-center gap-2">
-                <div className={`w-2 h-2 rounded-full ${gungnir?.running ? 'bg-green-500 animate-pulse' : 'bg-gray-500'}`}></div>
-                <span className={gungnir?.running ? 'text-green-400' : 'text-gray-400'}>
-                  {gungnir?.running ? 'Running' : 'Stopped'}
-                </span>
-              </div>
-              {gungnir?.running && (
-                <p className="text-xs text-gray-500 mt-1">
-                  {gungnir.domains_monitored} domains - {gungnir.session_found} found this session
-                </p>
-              )}
-            </div>
-            <button
-              type="button"
-              onClick={handleGungnirToggle}
-              disabled={gungnirActionLoading}
-              className={`px-3 py-1.5 rounded text-sm font-medium transition-colors disabled:opacity-50 ${FOCUS_RING} ${
-                gungnir?.running
-                  ? 'bg-red-500/20 text-red-400 hover:bg-red-500/30'
-                  : 'bg-green-500/20 text-green-400 hover:bg-green-500/30'
-              }`}
-            >
-              {gungnirActionLoading ? '...' : gungnir?.running ? 'Stop' : 'Start'}
-            </button>
-          </div>
-        </div>
-        {gungnir?.last_discovery && (
-          <p className="text-xs text-gray-500 mt-2">
-            Last discovery: <span className="text-gray-400">{gungnir.last_discovery}</span>
-          </p>
-        )}
-        {gungnir?.subdomains_found ? (
-          <p className="text-xs text-gray-500 mt-1">
-            Total subdomains discovered: <span className="text-gray-400">{gungnir.subdomains_found}</span>
-          </p>
-        ) : null}
-      </Card>
 
       {/* Recent Scans & Findings */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
@@ -575,14 +469,14 @@ function ProductStatusStrip({
   items: DashboardProductStatusItem[]
   loading: boolean
 }) {
-  const visibleItems = items.slice(0, 7)
+  const visibleItems = items.filter((item) => item.id !== 'workers').slice(0, 6)
 
   return (
     <Card className="p-4">
       <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
         <div>
           <h2 className="font-medium text-white">Product Status</h2>
-          <p className="mt-1 text-sm text-gray-400">Blockers and quick links across DAST, ASM, AI, model trust, policy, and workers</p>
+          <p className="mt-1 text-sm text-gray-400">Blockers and quick links across DAST, ASM, AI, model trust, and policy</p>
         </div>
         {visibleItems.length > 0 && (
           <Badge className="bg-gray-800 text-gray-300">{visibleItems.length} areas</Badge>
@@ -723,8 +617,6 @@ function productStatusIcon(id: string) {
       return AlertTriangle
     case 'deployment':
       return Rocket
-    case 'workers':
-      return Cpu
     case 'dast':
       return ShieldCheck
     default:
@@ -949,14 +841,6 @@ function ScoreIcon() {
   return (
     <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
-    </svg>
-  )
-}
-
-function WorkerIcon() {
-  return (
-    <svg className="w-4 h-4 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
-      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 12h14M5 12a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v4a2 2 0 01-2 2M5 12a2 2 0 00-2 2v4a2 2 0 002 2h14a2 2 0 002-2v-4a2 2 0 00-2-2m-2-4h.01M17 16h.01" />
     </svg>
   )
 }

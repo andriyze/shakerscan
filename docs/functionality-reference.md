@@ -230,8 +230,10 @@ aggressive mode, with service/version detection.
 **Subdomain enumeration**: `subfinder` (passive), `gungnir` (CT logs), and crt.sh — see
 [§10](#10-attack-surface-management-discovery-ct-monitoring-schedules).
 
-**Historical and source-assisted discovery**: OpenAPI/Swagger schema discovery and Schemathesis
-execution; Wayback/Common Crawl/GAU helpers; JavaScript and browser-derived API bases; GraphQL schema
+**Historical and source-assisted discovery**: OpenAPI/Swagger schema discovery uses prioritized,
+bounded concurrent probes under one global deadline and reuses the result across later active phases;
+explicit schemas can also be exercised through Schemathesis. Wayback/Common Crawl/GAU helpers;
+JavaScript and browser-derived API bases; GraphQL schema
 recovery; gRPC reflection; virtual hosts; custom endpoint files, focus/avoid rules, and agent-produced
 `custom_endpoints`/`custom_list` seeds.
 
@@ -643,6 +645,8 @@ SQLi/XSS/BOLA requests. Active, state-changing, or budget-increasing intents sta
 `execute=true`, explicit confirmations, and `AI_OPS_ROUTER_EXECUTE_ENABLED=true` are all present;
 BOLA additionally requires primary + second-user auth context. Ambiguous language never upgrades a
 Safe/Balanced plan to Lab.
+The UI binds execution confirmation to the exact prompt and target that produced the visible preview;
+editing either input invalidates the preview and clears its confirmations.
 
 ### 11.6 Test scenario catalog and Honey demo
 
@@ -692,6 +696,13 @@ ASM, authenticated DAST, API authorization, AI red-team, Model Intake, benchmark
 Campaign actions retain plan/command/scope/approval/evidence/hypothesis/tool-receipt links and
 explicit execution state. The cross-product `/timeline` merges actions, scans, evidence, exports,
 refuter reviews, and upcoming schedules.
+Campaign list/detail reads compute current finding impact across every linked action in one live
+rollup. The displayed critical/high blocker count is explicitly a default-policy estimate, not the
+authoritative per-scan deployment decision.
+
+**Batch scan submission**: `POST /scans/batch` accepts 1-50 targets, de-duplicates them, and returns
+accepted jobs plus per-target failures. Partial queueing is explicit (`status: partial`) rather than
+being reported as all-or-nothing success.
 
 **Hypothesis lifecycle**: source/spec hints, operation plans, benchmark artifacts, scanner signals,
 and application-graph producer/object/consumer facts can create source-only hypotheses. Hypotheses
@@ -890,16 +901,16 @@ concurrency-limited with per-tool timeouts and a global deadline.
 
 | Route | Operator capability |
 |---|---|
-| `/` | Dashboard metrics, queue (with emergency clear), worker/resource controls, Gungnir, product status, and action center |
-| `/scan/new` | Scan type, parallel strategy, coverage budget, active options, auth, custom budget, and batch multi-target submission |
+| `/` | Dashboard metrics plus a compact live-operations header for pending/running queue state, emergency clear, worker scaling/freshness, and Gungnir CT; product status and action center follow below |
+| `/scan/new` | Scan type, parallel strategy, coverage budget, active options, auth, custom budget, and bounded batch submission with partial-failure receipts |
 | `/scans` | Filter, inspect, cancel, and rescan logical scans without exposing internal rows by default |
 | `/scans/{id}` | Live progress/logs, report, proof/coverage, deployment decision, AI/Model Intake panels, replay, history, and PDF |
 | `/targets` | Hierarchical target inventory, search/filter/sort, scanning, discovery, duplicate merge, and schedule entry points |
 | `/targets/{id}/graph` | Route/object/principal graph, producer/consumer/auth edges, and graph-derived hypotheses |
 | `/asm` | Coverage, scheduler state, proof-family gaps, recommendations, endpoint inventory, inventory prune, and campaign timeline |
 | `/timeline` | Cross-product mission feed of command results, scans, schedules, evidence bindings, refuters, and exports |
-| `/campaigns` | Mission campaign list with lifecycle status and deployment-impact rollup; create new campaigns |
-| `/campaigns/{id}` | Campaign detail: deployment impact, status rollup, and the linked action ledger |
+| `/campaigns` | Mission campaign list with lifecycle status and live linked-finding impact; create new campaigns |
+| `/campaigns/{id}` | Campaign detail: live default-policy impact estimate, all-action status rollup, and the bounded action ledger |
 | `/exposure` | Cross-product graph, asset inventory, deltas, and attack paths |
 | `/findings` | Granular source/severity/status/domain/date filters, sorting, bulk triage, cleanup, and retest entry points |
 | `/findings/{id}` | Evidence, raw request/response, proof/retest history, notes, status, deletion, and remediation |

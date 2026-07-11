@@ -1,10 +1,9 @@
-"""Tests for BOLA proof-tier promotion via cross-principal ownership.
+"""Tests for paired-owner identity signals used by BOLA triage.
 
 A smart_bola cross-user lead is a *suspected* finding until it can prove the
 requester received an object it does not own. These tests pin the ownership
-proof: it promotes (deterministic ``cross_principal_replay`` proof) only when the
-owner principal's identity is present in the response and the requester's is not,
-and fails closed otherwise (shared resource, or non-JWT/opaque auth).
+Identity in a body can strengthen a lead but cannot prove authorization failure.
+Deterministic promotion requires the separate listing/expectation differential.
 """
 
 import base64
@@ -40,7 +39,7 @@ def test_non_jwt_auth_yields_no_identity():
     assert acc._principal_identity_values(_Session(None)) == set()
 
 
-def test_owner_identity_values_pulls_emails_and_owner_fields():
+def test_owner_identity_values_pulls_explicit_owner_fields():
     body = json.dumps({"order": {"id": 11, "user": {"email": "user1@example.com", "username": "alice"}}})
     vals = acc._owner_identity_values(body)
     assert "user1@example.com" in vals and "alice" in vals
@@ -53,13 +52,19 @@ def test_ownership_confirmed_when_owner_present_requester_absent():
     assert acc._confirm_cross_principal_ownership(body, u1, u2) is True
 
 
-def test_ownership_confirmed_when_object_owned_by_third_party():
-    # crAPI shape: user2 fetches an object owned by a pre-seeded user that is neither
-    # user1 nor user2 -> still a cross-principal read (requester is not the owner).
+def test_third_party_identity_is_not_paired_owner_signal():
     u1 = _Session(_jwt({"email": "user1@example.com"}))
     u2 = _Session(_jwt({"email": "user2@example.com"}))
     body = json.dumps({"order": {"id": 11, "user": {"email": "victim@example.test"}}})
-    assert acc._confirm_cross_principal_ownership(body, u1, u2) is True
+    assert acc._confirm_cross_principal_ownership(body, u1, u2) is False
+
+
+def test_public_support_email_is_not_treated_as_owner():
+    u1 = _Session(_jwt({"email": "user1@example.com"}))
+    u2 = _Session(_jwt({"email": "user2@example.com"}))
+    body = json.dumps({"profile": {"name": "Store", "support_email": "help@example.com"}})
+    assert acc._owner_identity_values(body) == set()
+    assert acc._confirm_cross_principal_ownership(body, u1, u2) is False
 
 
 def test_ownership_not_confirmed_when_requester_also_present():

@@ -433,20 +433,12 @@ def _endpoint_path(endpoint_spec: str) -> str:
 
 # Auth-context option keys. Their presence marks a shard as "heavy": authenticated
 # scans pay login/token-refresh/second-principal overhead on top of active testing.
-_AUTH_OPTION_KEYS = (
-    "auth_header",
-    "auth_cookies",
-    "auth_headers_json",
-    "login_username",
-    "login_password",
-    "user2_header",
-    "user2_cookies",
-)
-
-
 def _options_have_auth(options: dict[str, Any]) -> bool:
     """True when the scan carries any authentication context."""
-    return any(options.get(key) for key in _AUTH_OPTION_KEYS)
+    return (
+        any(options.get(key) for key in (*_PRIMARY_AUTH_KEYS, *_SECONDARY_AUTH_KEYS))
+        or bool(_managed_auth_refs(options))
+    )
 
 
 # A path segment that identifies a specific resource instance (numeric id, UUID,

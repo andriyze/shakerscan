@@ -3075,6 +3075,10 @@ class ScanOptions(BaseModel):
         default=None,
         description="Optional durable approval receipt to validate and stamp on state-changing scan submissions.",
     )
+    benchmark_principal_validation: Optional[dict[str, Any]] = Field(
+        default=None,
+        description="Non-secret benchmark receipt proving distinct configured principals.",
+    )
 
     @field_validator("check_family", "asm_check_family")
     @classmethod
@@ -3089,7 +3093,7 @@ class ScanRequest(BaseModel):
 
 
 class BatchRequest(BaseModel):
-    targets: list[str]
+    targets: list[str] = Field(min_length=1, max_length=50)
     options: ScanOptions = Field(default_factory=ScanOptions)
 
 
@@ -11844,17 +11848,32 @@ async def submit_scan(request: ScanRequest):
 
 @app.post("/scans/batch")
 async def submit_batch(request: BatchRequest):
-    """Submit multiple scan jobs."""
-    jobs = []
-    for target in request.targets:
-        req = ScanRequest(target=target, options=request.options)
-        result = await submit_scan(req)
-        jobs.append(result)
+    """Submit a bounded batch and report every accepted and rejected target."""
+    jobs: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
+    targets = list(dict.fromkeys(str(target).strip() for target in request.targets if str(target).strip()))
+    for target in targets:
+        req = ScanRequest(target=target, options=request.options.model_copy(deep=True))
+        try:
+            jobs.append(await submit_scan(req))
+        except HTTPException as exc:
+            errors.append({"target": target, "status_code": exc.status_code, "error": exc.detail})
+        except Exception:
+            logger.exception("Batch scan submission failed for %s", target)
+            errors.append({
+                "target": target,
+                "status_code": 500,
+                "error": "Internal scan submission error",
+            })
 
     return {
-        'jobs': jobs,
-        'count': len(jobs),
-        'status': 'queued'
+        "jobs": jobs,
+        "errors": errors,
+        "count": len(jobs),
+        "queued_count": len(jobs),
+        "failed_count": len(errors),
+        "requested_count": len(targets),
+        "status": "queued" if not errors else ("partial" if jobs else "failed"),
     }
 
 
@@ -20801,8 +20820,15 @@ async def arsenal_campaigns(
             target_uuid,
             status,
         )
+        campaign_ids = [row["id"] for row in rows]
+        live_impact = await _campaign_live_finding_impact(conn, campaign_ids)
+    campaigns = []
+    for row in rows:
+        campaign = _public_campaign_row(row)
+        campaign["deployment_impact"] = live_impact.get(row["id"], _campaign_deployment_impact([]))
+        campaigns.append(campaign)
     return {
-        "campaigns": [_public_campaign_row(row) for row in rows],
+        "campaigns": campaigns,
         "execution_enabled": False,
         "count": len(rows),
     }
@@ -20845,6 +20871,58 @@ def _campaign_deployment_impact(
     }
 
 
+async def _campaign_live_finding_impact(
+    conn: Any,
+    campaign_ids: Sequence[uuid.UUID],
+) -> dict[uuid.UUID, dict[str, Any]]:
+    """Compute current finding impact across every linked campaign action."""
+    if not campaign_ids:
+        return {}
+    rows = await conn.fetch(
+        """
+        SELECT ca.mission_campaign_id,
+               linked.finding_id,
+               f.id,
+               f.severity,
+               f.status
+        FROM campaign_actions ca
+        CROSS JOIN LATERAL jsonb_array_elements_text(
+            COALESCE(ca.finding_ids, '[]'::jsonb)
+        ) AS linked(finding_id)
+        LEFT JOIN findings f ON f.id::text = linked.finding_id
+        WHERE ca.mission_campaign_id = ANY($1::uuid[])
+        """,
+        list(campaign_ids),
+    )
+    grouped: dict[uuid.UUID, list[dict[str, Any]]] = {campaign_id: [] for campaign_id in campaign_ids}
+    unresolved: set[uuid.UUID] = set()
+    seen: dict[uuid.UUID, set[str]] = {campaign_id: set() for campaign_id in campaign_ids}
+    for row in rows:
+        campaign_id = row["mission_campaign_id"]
+        if isinstance(campaign_id, str):
+            try:
+                campaign_id = uuid.UUID(campaign_id)
+            except ValueError:
+                continue
+        data = row_to_dict(row)
+        if campaign_id not in grouped:
+            continue
+        finding_id = str(data.get("finding_id") or "")
+        if not data.get("id"):
+            unresolved.add(campaign_id)
+            continue
+        if finding_id in seen[campaign_id]:
+            continue
+        seen[campaign_id].add(finding_id)
+        grouped[campaign_id].append(data)
+    return {
+        campaign_id: _campaign_deployment_impact(
+            grouped[campaign_id], partial=campaign_id in unresolved
+        )
+        for campaign_id in campaign_ids
+    }
+
+
 @app.get("/arsenal/campaigns/{campaign_id}")
 async def arsenal_campaign_detail(campaign_id: str, action_limit: int = Query(50, ge=1, le=200)):
     """Read one campaign plus a rollup of its linked action ledger and finding impact."""
@@ -20871,32 +20949,22 @@ async def arsenal_campaign_detail(campaign_id: str, action_limit: int = Query(50
             action_limit,
         )
         actions = [_public_campaign_action_row(a) for a in action_rows]
-        finding_ids: list[str] = []
-        seen: set[str] = set()
-        for action in actions:
-            for fid in (action.get("finding_ids") or []):
-                key = str(fid).strip()
-                if key and key not in seen:
-                    seen.add(key)
-                    finding_ids.append(key)
-        finding_uuids = [uuid.UUID(fid) for fid in finding_ids if _optional_uuid(fid)]
-        finding_rows: list[Any] = []
-        if finding_uuids:
-            finding_rows = await conn.fetch(
-                "SELECT id, severity, status FROM findings WHERE id = ANY($1::uuid[])",
-                finding_uuids,
-            )
-    status_rollup: dict[str, int] = {}
-    for action in actions:
-        key = str(action.get("status") or "unknown")
-        status_rollup[key] = status_rollup.get(key, 0) + 1
-    # Impact is over the linked findings of the returned (bounded) actions; flag when the
-    # campaign has more actions than were fetched so the rollup is not read as complete.
-    deployment_impact = _campaign_deployment_impact(
-        finding_rows, partial=total_action_count > len(actions)
-    )
+        impact_by_campaign = await _campaign_live_finding_impact(conn, [campaign_uuid])
+        status_rows = await conn.fetch(
+            """
+            SELECT COALESCE(status, 'unknown') AS status, COUNT(*) AS count
+            FROM campaign_actions
+            WHERE mission_campaign_id = $1
+            GROUP BY COALESCE(status, 'unknown')
+            """,
+            campaign_uuid,
+        )
+    status_rollup = {str(item["status"]): int(item["count"]) for item in status_rows}
+    deployment_impact = impact_by_campaign.get(campaign_uuid, _campaign_deployment_impact([]))
+    campaign = _public_campaign_row(row)
+    campaign["deployment_impact"] = deployment_impact
     return {
-        "campaign": _public_campaign_row(row),
+        "campaign": campaign,
         "actions": actions,
         "action_count": len(actions),
         "total_action_count": total_action_count,

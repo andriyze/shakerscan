@@ -1822,7 +1822,6 @@ def _resource_ids_from_response(body: str) -> set[str]:
     return {ref["object_id"] for ref in _extract_resource_refs_from_json(body) if ref.get("object_id")}
 
 
-_EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
 # JSON keys whose value identifies the OWNER of a resource / a principal.
 _OWNER_IDENTITY_FIELDS = frozenset({
     "email", "username", "user_name", "user_id", "userid", "owner", "owner_id",
@@ -1868,12 +1867,10 @@ def _principal_identity_values(session: Any) -> set[str]:
 
 
 def _owner_identity_values(body: str, limit: int = 40) -> set[str]:
-    """Identity-like values present in a response body (emails + owner-field values)."""
+    """Identity values from explicit owner/principal fields in a JSON response."""
     values: set[str] = set()
     if not body:
         return values
-    for email in _EMAIL_RE.findall(body)[:limit]:
-        values.add(email.lower())
     try:
         parsed = json.loads(body)
     except Exception:
@@ -1901,29 +1898,19 @@ def _owner_identity_values(body: str, limit: int = 40) -> set[str]:
 def _confirm_cross_principal_ownership(
     owner_body: str, owner_session: Any, requester_session: Any
 ) -> bool:
-    """True when a replayed response reveals an object owned by a principal OTHER than
-    the requester — deterministic proof of cross-principal object access.
+    """Return a paired-owner identity signal, never standalone authorization proof.
 
-    Requires the requester's identity to be resolvable (from its JWT) and ABSENT from
-    the response's owner-identity fields, with at least one owner identity present. The
-    object may be owned by the paired principal (``owner_session``) OR any third
-    principal (crAPI-style pre-seeded owners) — only the requester's non-ownership is
-    required. If the paired owner's identity IS present that is an additional positive
-    signal, but it is not required. Fails closed when the requester identity is
-    unresolvable (non-JWT/opaque auth) or no owner identity is present in the body.
+    A response email or owner-like field is not enough to establish that the requester
+    lacks access. This helper only confirms that the paired owner's identity is present
+    and the requester's is absent. Callers must still retain the suspected tier unless
+    they also have an independent listing/expectation differential.
     """
+    owner_ident = _principal_identity_values(owner_session)
     requester_ident = _principal_identity_values(requester_session)
-    if not requester_ident:
+    if not owner_ident or not requester_ident or owner_ident == requester_ident:
         return False
     body_idents = _owner_identity_values(owner_body)
-    if not body_idents:
-        return False
-    if body_idents & requester_ident:
-        # The requester's own identity is in the object -> not a clean cross-principal read.
-        return False
-    # An owner identity is present and it is not the requester's -> the requester
-    # received an object owned by another principal (the paired owner or a third party).
-    return True
+    return bool(body_idents & owner_ident) and not bool(body_idents & requester_ident)
 
 
 def _sensitive_fields_from_body(body: str) -> list[str]:
@@ -3680,11 +3667,12 @@ async def smart_bola_test(
                                 similarity = response_similarity(user1_body, user2_body)
                                 results["cross_user_violations"] += 1
                                 path_hash = hashlib.sha256(f"{test_url}:crossuser".encode()).hexdigest()[:8]
-                                # Deterministic ownership proof: user2's response reveals
-                                # user1's identity and NOT user2's, proving user2 read an
-                                # object it does not own. Only then promote past the
-                                # suspected lead to a verified cross-principal finding.
-                                ownership_confirmed = _confirm_cross_principal_ownership(
+                                # A paired-owner identity is supporting evidence only.
+                                # The generic ID loop has no attacker-listing or policy
+                                # control, so equivalent responses cannot prove user2 is
+                                # unauthorized. Deterministic promotion is reserved for
+                                # authz_resource_replay_test's listing differential.
+                                paired_owner_identity = _confirm_cross_principal_ownership(
                                     user2_body, user1_session, user2_session
                                 )
                                 finding = {
@@ -3702,47 +3690,24 @@ async def smart_bola_test(
                                         "responses_equivalent": True,
                                         "response_similarity": round(similarity, 3),
                                         "user_specific_signals": user_signals[:8],
+                                        "paired_owner_identity_observed": paired_owner_identity,
                                         "response_snippet": user1_body[:300],
                                     },
+                                    "severity": "high",
+                                    "suspected": True,
+                                    "needs_verification": True,
+                                    "verification_reason": (
+                                        "Both users received equivalent user-specific data for the same "
+                                        "resource ID; prove the object is absent from user2's authorized "
+                                        "listing or compare against an explicit deny expectation."
+                                    ),
+                                    "confidence": 0.65 if paired_owner_identity else 0.6,
+                                    "description": (
+                                        f"Both test users received equivalent user-specific data for resource ID {test_id}. "
+                                        "This is a BOLA lead, but the response alone does not prove user2 lacks access."
+                                    ),
+                                    "remediation": "Implement object-level authorization and verify requesting user owns the resource.",
                                 }
-                                if ownership_confirmed:
-                                    finding.update({
-                                        "severity": "high",
-                                        "confidence": 0.85,
-                                        "proof_type": "cross_principal_replay",
-                                        "severity_rationale": (
-                                            "High: user2 received an object whose owner identity matches "
-                                            "user1 and not user2 — deterministic cross-principal object access."
-                                        ),
-                                        "description": (
-                                            f"User2 accessed resource ID {test_id} and received data whose owner "
-                                            "identity is user1 (present) and not user2 (absent) — broken "
-                                            "object-level authorization."
-                                        ),
-                                        "remediation": "Authorize every object read against the requesting principal.",
-                                    })
-                                    finding["evidence"].update({
-                                        "proof_type": "cross_principal_replay",
-                                        "ownership_confirmed": True,
-                                        "owner_principal": "user1",
-                                        "requester_principal": "user2",
-                                    })
-                                else:
-                                    finding.update({
-                                        "severity": "high",
-                                        "suspected": True,
-                                        "needs_verification": True,
-                                        "verification_reason": (
-                                            "Both users received equivalent user-specific data for the same "
-                                            "resource ID; confirm the second user is not an owner/admin."
-                                        ),
-                                        "confidence": 0.6,
-                                        "description": (
-                                            f"Both test users received equivalent user-specific data for resource ID {test_id}. "
-                                            "If user2 does not own this resource, this is missing object-level authorization."
-                                        ),
-                                        "remediation": "Implement object-level authorization. Verify requesting user owns the resource.",
-                                    })
                                 results["findings"].append(finding)
 
             # Test without auth

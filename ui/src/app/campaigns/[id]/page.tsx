@@ -85,7 +85,7 @@ export default function CampaignDetailPage() {
             </div>
           </div>
 
-          <SectionCard title="Deployment impact">
+          <SectionCard title="Current finding impact">
             {impact && Object.keys(impact).length > 0 ? (
               <div className="space-y-4">
                 <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
@@ -95,10 +95,10 @@ export default function CampaignDetailPage() {
                     value={impact.active_finding_count ?? 0}
                     accent={impact.active_finding_count ? 'text-yellow-400' : 'text-white'}
                   />
-                  <Stat label="Default blockers" value={impact.estimated_default_blockers ?? 0} />
+                  <Stat label="Default blockers (estimate)" value={impact.estimated_default_blockers ?? 0} />
                   <Stat
-                    label="Blocks deploy?"
-                    value={impact.blocks_deployment_estimate ? 'Yes' : 'No'}
+                    label="Default policy estimate"
+                    value={impact.blocks_deployment_estimate ? 'Would block' : 'No blockers'}
                     accent={impact.blocks_deployment_estimate ? 'text-red-400' : 'text-green-400'}
                   />
                 </div>
@@ -116,6 +116,9 @@ export default function CampaignDetailPage() {
                 {impact.partial && (
                   <p className="text-xs text-amber-400">Rollup is partial — some linked findings could not be resolved.</p>
                 )}
+                <p className="text-xs text-gray-500">
+                  This is a live default-threshold estimate. The authoritative deployment decision is computed per scan using its policy profile, proof state, and exceptions.
+                </p>
               </div>
             ) : (
               <p className="text-sm text-gray-500">No linked findings yet.</p>

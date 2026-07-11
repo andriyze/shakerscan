@@ -18,7 +18,7 @@ evidence-grounded 2026-07-11 architecture review.
 | Fleet freshness | Passed at last rebuild | 16/16 workers on `957b688918e9ea58`, zero stale at verification time |
 | Full current-build E2E | Open | Older Model Intake/AI Gate/DAST result counts have not been rerun on the latest rebuilt fleet |
 | Juice Shop benchmark | Non-current pass | `6/9` on anonymous fleet `ddc6173b`; not a current-fleet claim |
-| Authenticated crAPI benchmark | Non-current failure artifact | scan `85d3bafb`: `0/4`, no verified BOLA; it predates the benchmark-truth fix and latest rebuild |
+| Authenticated crAPI benchmark | Corrected rescore fails | scan `94ac5c7f` was previously marked passing from an identity-only BOLA heuristic. The 2026-07-11 corrected rescore is `1/4` but fails `require_verified_bola`: no persisted distinct-principal receipt and no independent authorization control. |
 | Auth bootstrap | Partially proven | Harness minted different JWT identity claims and scheduled two auth lanes; server acceptance is not yet receipt-backed |
 | Registry authority | Partial | Main adapters are registry-dispatched, but phase-4 BOLA, NoSQL, and endpoint-scoped registered coverage still bypass the strict decision boundary |
 | Request budgets | Compatibility by default | Meter exists; known opaque tools are rejected in enforce mode; per-adapter quality and soak remain open |

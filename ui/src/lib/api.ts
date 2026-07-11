@@ -2876,7 +2876,15 @@ export async function cancelScan(id: string) {
 export async function submitBatch(
   targets: string[],
   options: Record<string, unknown> = {}
-): Promise<{ jobs: unknown[]; count: number; status: string }> {
+): Promise<{
+  jobs: unknown[]
+  errors: Array<{ target: string; status_code: number; error: unknown }>
+  count: number
+  queued_count: number
+  failed_count: number
+  requested_count: number
+  status: 'queued' | 'partial' | 'failed'
+}> {
   const res = await fetch(`${API_URL}/scans/batch`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },

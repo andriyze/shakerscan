@@ -69,7 +69,7 @@ function CampaignsContent() {
         <div>
           <h1 className="text-2xl font-bold text-white">Mission Campaigns</h1>
           <p className="mt-1 text-gray-400">
-            Group related security work and track its deployment impact. Campaigns are bookkeeping records — creating one queues no scan.
+            Group related security work and track current linked-finding impact. Campaigns are bookkeeping records — creating one queues no scan.
           </p>
         </div>
         <div className="flex items-center gap-3">

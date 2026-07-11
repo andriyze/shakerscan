@@ -6199,6 +6199,71 @@ def test_campaign_deployment_impact_empty_is_non_blocking():
     assert impact["partial"] is False
 
 
+class _CampaignImpactConn:
+    async def fetch(self, _query, _campaign_ids):
+        campaign_id = _campaign_ids[0]
+        return [
+            {
+                "mission_campaign_id": campaign_id,
+                "finding_id": "f1",
+                "id": "f1",
+                "severity": "high",
+                "status": "active",
+            },
+            {
+                "mission_campaign_id": campaign_id,
+                "finding_id": "f1",
+                "id": "f1",
+                "severity": "high",
+                "status": "active",
+            },
+            {
+                "mission_campaign_id": campaign_id,
+                "finding_id": "missing",
+                "id": None,
+                "severity": None,
+                "status": None,
+            },
+        ]
+
+
+def test_campaign_live_impact_deduplicates_and_marks_unresolved_links():
+    campaign_id = uuid.uuid4()
+    impact = asyncio.run(
+        api_module._campaign_live_finding_impact(_CampaignImpactConn(), [campaign_id])
+    )[campaign_id]
+    assert impact["linked_finding_count"] == 1
+    assert impact["estimated_default_blockers"] == 1
+    assert impact["partial"] is True
+
+
+def test_batch_request_caps_target_count():
+    with pytest.raises(api_module.ValidationError):
+        api_module.BatchRequest(targets=[f"https://t{i}.test" for i in range(51)])
+
+
+def test_batch_submission_reports_partial_failures_and_deduplicates(monkeypatch):
+    async def fake_submit(req):
+        if req.target == "https://bad.test":
+            raise api_module.HTTPException(status_code=422, detail="rejected")
+        return {"scan_id": "scan-1", "target": req.target}
+
+    monkeypatch.setattr(api_module, "submit_scan", fake_submit)
+    request = api_module.BatchRequest(
+        targets=["https://good.test", "https://bad.test", "https://good.test"]
+    )
+    result = asyncio.run(api_module.submit_batch(request))
+    assert result["status"] == "partial"
+    assert result["queued_count"] == 1
+    assert result["failed_count"] == 1
+    assert result["requested_count"] == 2
+    assert result["errors"] == [{
+        "target": "https://bad.test",
+        "status_code": 422,
+        "error": "rejected",
+    }]
+
+
 def test_persist_campaign_rejects_unknown_target():
     conn = _CampaignConn(target_exists=False)
     req = api_module.CampaignRequest(

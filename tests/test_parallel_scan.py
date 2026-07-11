@@ -15,6 +15,15 @@ import parallel_scan  # noqa: E402
 from parallel_scan import plan_shards, reconcile_parallel_parent  # noqa: E402
 
 
+def test_auth_costing_recognizes_managed_profiles_and_auth_flows():
+    assert parallel_scan._options_have_auth({
+        "managed_credential_profiles": [{"auth_state": "user1", "profile_id": "p1"}],
+    }) is True
+    assert parallel_scan._options_have_auth({"auto_auth": True}) is True
+    assert parallel_scan._options_have_auth({"auth_scenario_json": "{}"}) is True
+    assert parallel_scan._options_have_auth({}) is False
+
+
 # ---------------------------------------------------------------------------
 # Planner: family strategy
 # ---------------------------------------------------------------------------

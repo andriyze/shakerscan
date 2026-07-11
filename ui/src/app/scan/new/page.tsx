@@ -158,7 +158,7 @@ export default function NewScanPage() {
     e.preventDefault()
     let batchList: string[] = []
     if (batchMode) {
-      batchList = batchTargets.split(/\n/).map((s) => s.trim()).filter(Boolean)
+      batchList = Array.from(new Set(batchTargets.split(/\n/).map((s) => s.trim()).filter(Boolean)))
       if (batchList.length === 0) {
         setTargetError('Enter at least one target URL (one per line).')
         return
@@ -166,6 +166,10 @@ export default function NewScanPage() {
       const firstInvalid = batchList.map((t) => validateTarget(t)).find(Boolean)
       if (firstInvalid) {
         setTargetError(firstInvalid)
+        return
+      }
+      if (batchList.length > 50) {
+        setTargetError(`Batch scans support at most 50 unique targets; ${batchList.length} were provided.`)
         return
       }
     } else {
@@ -263,7 +267,17 @@ export default function NewScanPage() {
 
       if (batchMode) {
         const result = await submitBatch(batchList, scanOptions)
-        toast.success(`Queued ${result.count} scan(s)`, { link: { href: '/scans', label: 'View scans' } })
+        if (result.status === 'failed') {
+          const firstError = result.errors[0]?.error
+          toast.error(`No scans were queued${firstError ? `: ${String(firstError)}` : '.'}`)
+          setLoading(false)
+          return
+        }
+        const message = result.status === 'partial'
+          ? `Queued ${result.queued_count}; ${result.failed_count} target(s) were rejected`
+          : `Queued ${result.queued_count} scan(s)`
+        const notify = result.status === 'partial' ? toast.info : toast.success
+        notify(message, { link: { href: '/scans', label: 'View scans' } })
       } else {
         const result = await submitScan(target.trim(), scanOptions)
         toast.success(
@@ -316,6 +330,7 @@ export default function NewScanPage() {
             </label>
           </div>
           {batchMode ? (
+            <div>
             <textarea
               id="scan-target"
               value={batchTargets}
@@ -331,6 +346,10 @@ export default function NewScanPage() {
                 targetError ? 'border-red-500/50' : 'border-gray-700'
               }`}
             />
+            <p className="mt-1 text-right text-xs text-gray-500">
+              {new Set(batchTargets.split(/\n/).map((line) => line.trim()).filter(Boolean)).size} / 50 unique targets
+            </p>
+            </div>
           ) : (
             <input
               id="scan-target"
