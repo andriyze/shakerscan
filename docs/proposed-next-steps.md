@@ -43,8 +43,8 @@ Verification snapshot on the rebuilt local fleet (2026-07-10):
 - Container runtime target: `33 passed` (with FastAPI deprecation warnings only).
 - UI: Next.js production build and TypeScript validation passed.
 - Planner fixtures: `10/10` passed; all 10 named release gates passed.
-- Live local E2E: Model Intake gate passed (`8/9`, one opt-in external Hugging Face case skipped),
-  AI Gate passed (`12/12`), and DAST passed (`11/11`, including bounded SQLi and DOM-XSS recall).
+- Live E2E: Model Intake passed `9/9`, including the bounded public Nex-N2-mini Hugging Face shard;
+  AI Gate passed `12/12`; and DAST passed `11/11`, including bounded SQLi and DOM-XSS recall.
 - Worker preflight: 16/16 current on one fingerprint, zero stale workers.
 
 ## Report reconciliation (2026-07-05)

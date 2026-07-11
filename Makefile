@@ -1,13 +1,17 @@
 # ShakerScan developer targets.
 PY ?= python3
 
-.PHONY: e2e e2e-model-intake e2e-ai-gate e2e-dast test release-gates
+.PHONY: e2e e2e-model-intake e2e-model-intake-fixture e2e-ai-gate e2e-dast test release-gates
 
 ## Full end-to-end suite against the live stack + honey targets (hard gate).
 e2e:
 	$(PY) tests/e2e/run_e2e.py --area all
 
 e2e-model-intake:
+	SHAKERSCAN_E2E_HF=1 $(PY) tests/e2e/run_e2e.py --area model_intake
+
+## Offline/deterministic Model Intake subset for environments without external network access.
+e2e-model-intake-fixture:
 	$(PY) tests/e2e/run_e2e.py --area model_intake
 
 e2e-ai-gate:
