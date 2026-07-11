@@ -27,6 +27,10 @@ item is implemented.
   EvidenceInstance/external storage, read-only MCP, current registry adapters, Continuous ASM
   allocator/attempt ledgers, parallel parent-plan-shard-merge, operational rebuild/fleet truth, and
   direct ASM timeline remediation links.
+- **Deferred-work implementation now underway:** cooperative cancellation is shared by
+  SQLi/XSS/Auth/BOLA and Phase 4, and the passive report phase now uses an async-capable registry
+  executor with adapter-contract validation and structured execution receipts. Recon, template, and
+  remaining active/report phases are not yet claimed migrated.
 - **Implemented but still requiring live acceptance/soak:** authenticated crAPI detector recall after
   the rebuild, broader dynamic-allocation parity on large owned targets, and request-rate behavior at
   larger worker counts.

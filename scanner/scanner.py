@@ -6,6 +6,7 @@ import faulthandler
 import fnmatch
 import hashlib
 import hmac
+import inspect
 import json
 import logging
 import os
@@ -3146,6 +3147,8 @@ def build_scanner_execution_plan(
 
 
 SCANNER_REGISTRY_ADAPTER_CONTRACTS = {
+    "recon": "legacy_discovery",
+    "headers": "legacy_config_findings",
     "nuclei": "legacy_nuclei_template",
     "sqli": "legacy_active_loop",
     "xss": "legacy_active_loop",
@@ -3155,11 +3158,7 @@ SCANNER_REGISTRY_ADAPTER_CONTRACTS = {
     "jwt": "legacy_advanced_jwt",
 }
 
-_SCANNER_REQUIRED_REGISTRY_FAMILIES = frozenset({
-    "recon",
-    "headers",
-    *SCANNER_REGISTRY_ADAPTER_CONTRACTS,
-})
+_SCANNER_REQUIRED_REGISTRY_FAMILIES = frozenset(SCANNER_REGISTRY_ADAPTER_CONTRACTS)
 
 
 def validate_scanner_execution_plan(plan: Any) -> dict[str, Any]:
@@ -3257,31 +3256,56 @@ def registry_dispatch_decision(
     return decision
 
 
-def dispatch_registry_report_phase(
+async def dispatch_registry_report_phase(
     scanner_execution_plan: dict[str, Any] | None,
     phase: str,
     adapters: dict[str, Any],
+    *,
+    cancel_requested: Any = scanner_cancel_requested,
 ) -> list[dict[str, Any]]:
-    """Run enabled synchronous report adapters declared by the canonical registry."""
+    """Run one registry phase with validated sync/async adapter contracts."""
     receipts: list[dict[str, Any]] = []
     plan = scanner_execution_plan if isinstance(scanner_execution_plan, dict) else {}
     for family in plan.get("families") or []:
-        if not isinstance(family, dict) or not family.get("enabled") or family.get("phase") != phase:
+        if not isinstance(family, dict) or family.get("phase") != phase:
             continue
+        family_name = str(family.get("name") or "").strip().lower()
         adapter_name = str(family.get("dispatch_adapter") or "")
-        adapter = adapters.get(adapter_name)
         receipt = {
-            "family": str(family.get("name") or ""),
+            "family": family_name,
             "phase": phase,
             "dispatch_adapter": adapter_name or "none",
             "status": "blocked",
+            "telemetry_schema": family.get("telemetry_schema"),
+            "proof_contract": list(family.get("proof_contract") or []),
         }
+        expected_adapter = SCANNER_REGISTRY_ADAPTER_CONTRACTS.get(family_name)
+        decision = registry_dispatch_decision(
+            plan,
+            family_name,
+            expected_adapter=expected_adapter,
+        )
+        if not decision.get("dispatch_enabled"):
+            receipt["status"] = "blocked" if decision.get("decision") == "blocked" else "skipped"
+            receipt["reason"] = str(decision.get("reason") or "registry_family_disabled")
+            if decision.get("blocked_by"):
+                receipt["blocked_by"] = list(decision.get("blocked_by") or [])
+            receipts.append(receipt)
+            continue
+        if cancel_requested():
+            receipt["status"] = "cancelled"
+            receipt["reason"] = "scanner_cancel_requested"
+            receipts.append(receipt)
+            continue
+        adapter = adapters.get(adapter_name)
         if not callable(adapter):
             receipt["reason"] = "dispatch_adapter_not_registered"
             receipts.append(receipt)
             continue
         try:
-            adapter()
+            result = adapter()
+            if inspect.isawaitable(result):
+                await result
         except Exception as exc:
             receipt["status"] = "failed"
             receipt["reason"] = f"{type(exc).__name__}: {str(exc)[:200]}"
@@ -11577,7 +11601,7 @@ async def build_report(target: str,
         )
     if scanner_dispatch_decisions:
         report["scanner_dispatch_decisions"] = scanner_dispatch_decisions
-    passive_dispatch_receipts = dispatch_registry_report_phase(
+    passive_dispatch_receipts = await dispatch_registry_report_phase(
         scanner_execution_plan,
         "passive",
         {"legacy_config_findings": lambda: emit_config_findings(report)},

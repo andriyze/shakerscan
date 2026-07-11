@@ -1,3 +1,4 @@
+import asyncio
 import importlib.util
 import os
 import sys
@@ -599,30 +600,104 @@ def test_registry_dispatch_decision_keeps_disabled_broad_family_skipped():
 def test_registry_report_phase_dispatches_only_enabled_declared_adapters():
     called = []
     plan = {"families": [
-        {"name": "headers", "phase": "passive", "enabled": True, "dispatch_adapter": "headers_adapter"},
+        {
+            "name": "headers", "phase": "passive", "enabled": True, "runnable": True,
+            "scanner_enabled": True, "blocked_by": [], "dispatch_adapter": "legacy_config_findings",
+            "telemetry_schema": "planned_passive_attempt", "proof_contract": ["response_headers"],
+        },
         {"name": "recon", "phase": "recon", "enabled": True, "dispatch_adapter": "recon_adapter"},
-        {"name": "other", "phase": "passive", "enabled": False, "dispatch_adapter": "other_adapter"},
     ]}
 
-    receipts = scanner_mod.dispatch_registry_report_phase(
-        plan, "passive", {"headers_adapter": lambda: called.append("headers")}
-    )
+    receipts = asyncio.run(scanner_mod.dispatch_registry_report_phase(
+        plan, "passive", {"legacy_config_findings": lambda: called.append("headers")}
+    ))
 
     assert called == ["headers"]
-    assert receipts == [{
-        "family": "headers", "phase": "passive", "dispatch_adapter": "headers_adapter", "status": "completed",
-    }]
+    assert receipts[0]["status"] == "completed"
+    assert receipts[0]["dispatch_adapter"] == "legacy_config_findings"
+    assert receipts[0]["telemetry_schema"] == "planned_passive_attempt"
+    assert receipts[0]["proof_contract"] == ["response_headers"]
+
+
+def test_registry_report_phase_records_disabled_family_as_skipped():
+    called = []
+    plan = {"families": [{
+        "name": "headers", "phase": "passive", "enabled": False, "runnable": True,
+        "scanner_enabled": True, "blocked_by": [], "reason": "global_checks_skipped",
+        "dispatch_adapter": "legacy_config_findings",
+    }]}
+
+    receipts = asyncio.run(scanner_mod.dispatch_registry_report_phase(
+        plan, "passive", {"legacy_config_findings": lambda: called.append("headers")}
+    ))
+
+    assert called == []
+    assert receipts[0]["status"] == "skipped"
+    assert receipts[0]["reason"] == "global_checks_skipped"
 
 
 def test_registry_report_phase_records_missing_adapter_without_running():
     plan = {"families": [{
-        "name": "headers", "phase": "passive", "enabled": True, "dispatch_adapter": "missing",
+        "name": "headers", "phase": "passive", "enabled": True, "runnable": True,
+        "scanner_enabled": True, "blocked_by": [], "dispatch_adapter": "legacy_config_findings",
     }]}
 
-    receipts = scanner_mod.dispatch_registry_report_phase(plan, "passive", {})
+    receipts = asyncio.run(scanner_mod.dispatch_registry_report_phase(plan, "passive", {}))
 
     assert receipts[0]["status"] == "blocked"
     assert receipts[0]["reason"] == "dispatch_adapter_not_registered"
+
+
+def test_registry_report_phase_awaits_async_adapter():
+    called = []
+    plan = {"families": [{
+        "name": "headers", "phase": "passive", "enabled": True, "runnable": True,
+        "scanner_enabled": True, "blocked_by": [], "dispatch_adapter": "legacy_config_findings",
+    }]}
+
+    async def adapter():
+        await asyncio.sleep(0)
+        called.append("headers")
+
+    receipts = asyncio.run(scanner_mod.dispatch_registry_report_phase(
+        plan, "passive", {"legacy_config_findings": adapter}
+    ))
+
+    assert called == ["headers"]
+    assert receipts[0]["status"] == "completed"
+
+
+def test_registry_report_phase_blocks_adapter_contract_drift():
+    plan = {"families": [{
+        "name": "headers", "phase": "passive", "enabled": True, "runnable": True,
+        "scanner_enabled": True, "blocked_by": [], "dispatch_adapter": "wrong_adapter",
+    }]}
+
+    receipts = asyncio.run(scanner_mod.dispatch_registry_report_phase(
+        plan, "passive", {"wrong_adapter": lambda: None}
+    ))
+
+    assert receipts[0]["status"] == "blocked"
+    assert receipts[0]["reason"] == "registry_dispatch_adapter_mismatch"
+
+
+def test_registry_report_phase_records_cancellation_without_dispatch():
+    called = []
+    plan = {"families": [{
+        "name": "headers", "phase": "passive", "enabled": True, "runnable": True,
+        "scanner_enabled": True, "blocked_by": [], "dispatch_adapter": "legacy_config_findings",
+    }]}
+
+    receipts = asyncio.run(scanner_mod.dispatch_registry_report_phase(
+        plan,
+        "passive",
+        {"legacy_config_findings": lambda: called.append("headers")},
+        cancel_requested=lambda: True,
+    ))
+
+    assert called == []
+    assert receipts[0]["status"] == "cancelled"
+    assert receipts[0]["reason"] == "scanner_cancel_requested"
 
 
 def _load_reporting_module():

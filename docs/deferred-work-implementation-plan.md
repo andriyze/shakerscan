@@ -57,6 +57,13 @@ Done when:
 - disabling a family in the registry prevents its adapter from executing even if legacy flags say yes;
 - every enabled family has a receipt and parser/proof contract.
 
+First foundation slice implemented: the report phase executor now accepts sync or async adapters,
+validates each adapter against `SCANNER_REGISTRY_ADAPTER_CONTRACTS`, observes cooperative
+cancellation, and emits structured skipped/blocked/cancelled/failed/completed receipts with the
+declared telemetry and proof contracts. Passive header/config finding emission uses this executor.
+Recon, template, and active-family execution still require phase-by-phase migration before Wave 2 is
+complete.
+
 ## Wave 3: telemetry schema expansion
 
 Deliverables:
