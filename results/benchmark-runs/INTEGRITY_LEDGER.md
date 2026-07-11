@@ -220,3 +220,28 @@ claim instead of deleting it.
 - Impact: benchmark interpretation + roadmap. Re-scopes increment 0: auth works; the real work is
   (1) authed API discovery, then (2) BOLA proof-tier promotion. Also validated the parallel scope
   heavy-shard budget + affinity fix end-to-end (authed BOLA now completes under auto-sharding).
+
+### 2026-07-11 — BOLA proof-tier fix VALIDATED live; crAPI 0/4 → 1/4 (require_verified_bola PASS)
+
+- Date: 2026-07-11.
+- Artifacts: `results/benchmark-runs/benchmark-crapi.json` /
+  `benchmark-crapi-20260711T194145Z.json`, scan `94ac5c7f-fe4f-4773-84c2-a33096097e82`, seeded
+  authed two-principal run with the proof-tier code live (commits `6e90d7b` + `9cc254e`).
+- Result: the `bola-orders` cross-principal BOLA now grades `severity: high`, `verified: True`,
+  `proof_state: exploited`, `proof_type: cross_principal_replay`, `ownership_confirmed: True`.
+  Evidence: user2 (a fresh test principal) read `/workshop/api/shop/orders/11`, an order owned by a
+  different pre-seeded user (`codex-u1@…`); user2's own identity is absent from the response, so the
+  ownership proof confirms cross-principal access. Scorecard: `require_verified_bola` **PASS**,
+  `expected_recall` 0.0 → **0.25 (1/4)**, `verified_high_critical` 2.
+- Bug found + fixed during validation (`9cc254e`): the first proof-tier build required the owner to
+  be user1 specifically and stayed suspected/medium when the real owner was a third principal — the
+  common BOLA shape. Corrected to promote when the requester's identity is resolvable and absent
+  from the owner-identity fields (owner may be the paired principal or any third party). Fails closed
+  on non-JWT/opaque auth, no owner identity in the body, or the requester's own identity present.
+- Honesty: this is a SEEDED run (crAPI has no discoverable API surface for universal techniques — no
+  OpenAPI spec: `/identity/v3/api-docs` is 404 with a valid token; the earlier 401 was auth
+  middleware on a non-existent path). Seeding is the intended `custom_endpoints` mechanism for
+  API-only targets, not a detector route list. Remaining 3 expectations still missed (vehicle: fresh
+  principal owns none; mechanic/coupon: separate). FP-risk 0.33 (1 unrelated suspected lead).
+- Impact: the universal BOLA proof-tier promotion is proven — a confirmed cross-principal differential
+  now yields a verified/high finding whenever the routes are available.
