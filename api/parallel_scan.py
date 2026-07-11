@@ -50,6 +50,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+import re
 import uuid
 from dataclasses import dataclass, field
 from typing import Any
@@ -428,6 +429,94 @@ def _endpoint_path(endpoint_spec: str) -> str:
         return urlparse(raw).path or "/"
     except Exception:
         return "/"
+
+
+# Auth-context option keys. Their presence marks a shard as "heavy": authenticated
+# scans pay login/token-refresh/second-principal overhead on top of active testing.
+_AUTH_OPTION_KEYS = (
+    "auth_header",
+    "auth_cookies",
+    "auth_headers_json",
+    "login_username",
+    "login_password",
+    "user2_header",
+    "user2_cookies",
+)
+
+
+def _options_have_auth(options: dict[str, Any]) -> bool:
+    """True when the scan carries any authentication context."""
+    return any(options.get(key) for key in _AUTH_OPTION_KEYS)
+
+
+# A path segment that identifies a specific resource instance (numeric id, UUID,
+# long hex/opaque token, ``{template}`` or ``:param``). Everything before the first
+# such segment is the static "resource family" prefix.
+_ID_SEGMENT_RE = re.compile(
+    r"^(?:\d+"
+    r"|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+    r"|[0-9a-f]{16,}"
+    r"|\{.*\}"
+    r"|:.+)$",
+    re.IGNORECASE,
+)
+
+
+def _route_family_key(path: str) -> tuple[str, ...]:
+    """Return the static path prefix before the first id-like segment.
+
+    A collection route (``/shop/orders``) and its item routes (``/shop/orders/1``)
+    share a family key, as do ``/vehicle/vehicles`` and ``/vehicle/{id}/location``
+    (compared prefix-wise). Endpoints in the same family MUST stay on one scope
+    shard: cross-principal BOLA harvests resource ids from the producer's response
+    and replays them as the second principal, so splitting a producer from its
+    consumer across shards silently defeats the differential.
+    """
+    segments = [seg for seg in (path or "").strip("/").split("/") if seg]
+    prefix: list[str] = []
+    for seg in segments:
+        if _ID_SEGMENT_RE.match(seg):
+            break
+        prefix.append(seg.lower())
+    return tuple(prefix)
+
+
+def _prefix_compatible(a: tuple[str, ...], b: tuple[str, ...]) -> bool:
+    """True when one non-empty family key is a prefix of the other (same resource root)."""
+    if not a or not b:
+        return False
+    short, long = (a, b) if len(a) <= len(b) else (b, a)
+    return long[: len(short)] == short
+
+
+def _partition_by_affinity(endpoints: list[str], n: int) -> list[list[str]]:
+    """Round-robin endpoints across ``n`` buckets, keeping same-resource-family
+    endpoints (a collection and its ``/{id}`` children) together on one bucket.
+
+    Falls back to plain round-robin behaviour for endpoints with no shared family
+    (each becomes its own singleton cluster), so independent endpoints still fan out.
+    """
+    if n <= 1:
+        return [list(endpoints)] if endpoints else []
+    clusters: list[dict[str, Any]] = []
+    for endpoint in endpoints:
+        key = _route_family_key(_endpoint_path(endpoint))
+        placed = False
+        for cluster in clusters:
+            if _prefix_compatible(cluster["key"], key):
+                cluster["eps"].append(endpoint)
+                if len(key) < len(cluster["key"]):
+                    cluster["key"] = key  # keep the most general (shortest) root
+                placed = True
+                break
+        if not placed:
+            clusters.append({"key": key, "eps": [endpoint]})
+    # Largest clusters first so bucket sizes stay balanced.
+    clusters.sort(key=lambda c: len(c["eps"]), reverse=True)
+    buckets: list[list[str]] = [[] for _ in range(n)]
+    for i, cluster in enumerate(clusters):
+        buckets[i % n].extend(cluster["eps"])
+    return [b for b in buckets if b]
 
 
 def _is_static_asset_endpoint(endpoint_spec: str) -> bool:
@@ -1312,9 +1401,21 @@ def _plan_scope(
             f"scope strategy needs >=2 endpoints to fan out; got {len(endpoints)} "
             "- falling back to a single shard"
         )
-    buckets = _partition_round_robin(list(endpoints), max(1, n))
+    # Keep a resource collection and its ``/{id}`` children on the same shard so a
+    # cross-principal BOLA differential can still harvest producer ids and replay
+    # them as the second principal (plain round-robin would split them).
+    buckets = _partition_by_affinity(list(endpoints), max(1, n))
     if len(buckets) < n:
         notes.append(f"scope shards reduced to {len(buckets)} (fewer endpoints than requested)")
+    # Authenticated / exploit-depth scans do real work per shard (login, token
+    # refresh, cross-principal replay, DBMS fingerprinting) and starve under the
+    # raw-speed budget below.
+    heavy = bool(parent_options.get("exploit_depth")) or _options_have_auth(parent_options)
+    if heavy:
+        notes.append(
+            "scope shards carry auth/exploit_depth: raised per-shard wall-clock + active "
+            "budget and kept resource-family endpoints together for cross-principal BOLA"
+        )
     shards: list[ShardSpec] = []
     for i, slice_eps in enumerate(buckets):
         opts = _base_child_options(parent_options)
@@ -1323,23 +1424,33 @@ def _plan_scope(
         # Trim discovery and active breadth unless the caller provided stricter
         # custom caps. This is the raw speed path for known API endpoints.
         endpoint_count = max(1, len(slice_eps))
-        _merge_custom_budget_defaults(
-            opts,
-            {
-                "max_duration_minutes": max(5, min(10, 4 + (2 * endpoint_count))),
-                "max_urls": 150,
-                "browser_max_pages": 5,
-                "browser_max_depth": 1,
-                "param_discovery_url_limit": min(endpoint_count, 3),
-                "param_discovery_max_params": 4,
-                "nuclei_max_targets": 120,
-                "phase4_max_seconds": 20,
-                "active_max_seconds": min(120, max(60, 30 * endpoint_count)),
-                "active_max_endpoints": endpoint_count,
-                "active_params_per_endpoint": 2,
-                "smart_bola_max_endpoints": endpoint_count,
-            },
-        )
+        budget_defaults = {
+            "max_duration_minutes": max(5, min(10, 4 + (2 * endpoint_count))),
+            "max_urls": 150,
+            "browser_max_pages": 5,
+            "browser_max_depth": 1,
+            "param_discovery_url_limit": min(endpoint_count, 3),
+            "param_discovery_max_params": 4,
+            "nuclei_max_targets": 120,
+            "phase4_max_seconds": 20,
+            "active_max_seconds": min(120, max(60, 30 * endpoint_count)),
+            "active_max_endpoints": endpoint_count,
+            "active_params_per_endpoint": 2,
+            "smart_bola_max_endpoints": endpoint_count,
+        }
+        if heavy:
+            # Raise only the time knobs; discovery stays lean because the endpoints
+            # are explicit. Without this an authed BOLA shard trips the max-duration
+            # reaper (observed: 3/4 crAPI BOLA shards killed at the 6-min cap).
+            budget_defaults.update(
+                {
+                    "max_duration_minutes": max(20, min(45, 10 + (5 * endpoint_count))),
+                    "phase4_max_seconds": min(600, max(180, 120 * endpoint_count)),
+                    "active_max_seconds": min(1200, max(300, 180 * endpoint_count)),
+                    "active_params_per_endpoint": 4,
+                }
+            )
+        _merge_custom_budget_defaults(opts, budget_defaults)
         shards.append(ShardSpec(index=i, label=f"scope[{i}]", options=opts))
     return shards
 

@@ -165,6 +165,89 @@ def test_scope_falls_back_to_family_with_one_endpoint():
     assert plan.strategy == "family"
 
 
+def test_scope_keeps_bola_producer_and_consumer_on_one_shard():
+    # A collection (producer of resource ids) and its /{id} consumer must land on
+    # the SAME shard, or the cross-principal BOLA differential can't harvest an id
+    # from the producer response and replay it as the second principal.
+    eps = [
+        "GET /workshop/api/shop/orders",
+        "GET /workshop/api/shop/orders/1",
+        "GET /identity/api/v2/vehicle/vehicles",
+        "GET /identity/api/v2/vehicle/5/location",
+        "POST /community/api/v2/coupon/validate-coupon json:{\"coupon_code\":\"x\"}",
+    ]
+    plan = plan_shards(
+        {
+            "scan_type": "smart",
+            "custom_endpoints": eps,
+            "exploit_depth": True,
+            "auth_header": "Bearer t",
+            "user2_header": "Bearer u",
+        },
+        scan_type="smart",
+        strategy="scope",
+        requested_shards=5,
+    )
+    assert plan.strategy == "scope"
+
+    def shard_of(ep):
+        return next(i for i, s in enumerate(plan.shards) if ep in s.options["custom_endpoints"])
+
+    # producer + consumer co-located for both resource families
+    assert shard_of("GET /workshop/api/shop/orders") == shard_of("GET /workshop/api/shop/orders/1")
+    assert shard_of("GET /identity/api/v2/vehicle/vehicles") == shard_of(
+        "GET /identity/api/v2/vehicle/5/location"
+    )
+    # every endpoint still assigned exactly once
+    assigned = [e for s in plan.shards for e in s.options["custom_endpoints"]]
+    assert sorted(assigned) == sorted(eps)
+
+
+def test_scope_heavy_shards_get_more_wallclock_and_active_budget():
+    # exploit_depth (or auth) shards need real wall-clock or they hit the reaper.
+    eps = ["GET /api/a", "GET /api/b"]
+    plan = plan_shards(
+        {"scan_type": "smart", "custom_endpoints": eps, "exploit_depth": True},
+        scan_type="smart",
+        strategy="scope",
+        requested_shards=2,
+    )
+    for s in plan.shards:
+        b = s.options["custom_budget"]
+        # 1 endpoint/shard heavy: floor of 20 min (vs light 6) + 300s active (vs 60)
+        assert b["max_duration_minutes"] == 20
+        assert b["active_max_seconds"] == 300
+        assert b["phase4_max_seconds"] == 180
+        assert b["active_params_per_endpoint"] == 4
+
+
+def test_scope_auth_alone_marks_shard_heavy():
+    eps = ["GET /api/a", "GET /api/b"]
+    plan = plan_shards(
+        {"scan_type": "smart", "custom_endpoints": eps, "auth_header": "Bearer t"},
+        scan_type="smart",
+        strategy="scope",
+        requested_shards=2,
+    )
+    assert all(s.options["custom_budget"]["max_duration_minutes"] == 20 for s in plan.shards)
+
+
+def test_scope_light_shards_keep_raw_speed_budget():
+    # No auth / no exploit_depth => unchanged raw-speed budget (regression guard).
+    eps = ["GET /api/a", "GET /api/b"]
+    plan = plan_shards(
+        {"scan_type": "smart", "custom_endpoints": eps},
+        scan_type="smart",
+        strategy="scope",
+        requested_shards=2,
+    )
+    for s in plan.shards:
+        b = s.options["custom_budget"]
+        assert b["max_duration_minutes"] == 6  # 4 + 2*1
+        assert b["active_max_seconds"] == 60
+        assert b["phase4_max_seconds"] == 20
+
+
 # ---------------------------------------------------------------------------
 # Planner: invariants
 # ---------------------------------------------------------------------------
