@@ -61,6 +61,60 @@ def test_focused_auth_stops_between_principal_requests(monkeypatch):
     assert result["endpoint_attempts"][0]["skip_reason"] == "cancelled"
 
 
+def test_mass_assignment_stops_before_request_when_cancelled(monkeypatch):
+    monkeypatch.setattr(access_control_checks, "scanner_cancel_requested", lambda: True)
+    import scanner_tools.proof_of_exploit as poe
+
+    async def fail_fetch(*args, **kwargs):
+        raise AssertionError("mass assignment must not request after cancellation")
+
+    monkeypatch.setattr(poe, "fetch_with_capture", fail_fetch)
+    result = asyncio.run(access_control_checks.check_mass_assignment(
+        "https://app.test",
+        endpoints=["/api/profile"],
+    ))
+
+    assert result["cancelled"] is True
+    assert result["budget_exhausted_reason"] == "cancelled"
+    assert result["endpoint_attempts"] == []
+
+
+def test_mass_assignment_emits_versioned_endpoint_attempt(monkeypatch):
+    monkeypatch.setattr(access_control_checks, "scanner_cancel_requested", lambda: False)
+    monkeypatch.setattr(
+        access_control_checks,
+        "MASS_ASSIGNMENT_PARAMS",
+        {"admin_flags": [("is_admin", True)]},
+    )
+    import scanner_tools.proof_of_exploit as poe
+
+    async def fake_fetch(url, **kwargs):
+        if kwargs.get("method"):
+            return {"status_code": 200, "body": '{"is_admin":true}'}
+        return {"status_code": 200, "body": "{}"}
+
+    monkeypatch.setattr(poe, "fetch_with_capture", fake_fetch)
+    result = asyncio.run(access_control_checks.check_mass_assignment(
+        "https://app.test",
+        endpoints=["/api/profile"],
+    ))
+
+    assert result["endpoint_attempt_schema_version"] == "active_endpoint_attempt_v1"
+    assert result["parameters_tested"] == 1
+    assert result["endpoint_attempts"] == [{
+        "custom_endpoint": "POST /api/profile",
+        "family": "mass_assignment",
+        "method": "POST",
+        "url": "https://app.test/api/profile",
+        "param_count": 1,
+        "attempted_params_count": 1,
+        "completed_params_count": 1,
+        "status": "completed",
+        "proof_observed": True,
+        "proof_types": ["observed_privilege_field_acceptance"],
+    }]
+
+
 def test_authz_replay_stops_before_request_when_cancelled(monkeypatch):
     monkeypatch.setattr(access_control_checks, "scanner_cancel_requested", lambda: True)
 

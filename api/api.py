@@ -6847,6 +6847,7 @@ def expected_build_fingerprint() -> Optional[str]:
         "webhook_checks.py": "/workspace/scanner/scanner_tools/webhook_checks.py",
         "approval_checks.py": "/workspace/scanner/scanner_tools/approval_checks.py",
         "access_control_checks.py": "/workspace/scanner/scanner_tools/access_control_checks.py",
+        "attempt_telemetry.py": "/workspace/scanner/scanner_tools/attempt_telemetry.py",
         "infrastructure_checks.py": "/workspace/scanner/scanner_tools/infrastructure_checks.py",
         "model_intake.py": "/workspace/scanner/scanner_tools/model_intake.py",
         "redaction.py": "/workspace/scanner/redaction.py",
@@ -6868,6 +6869,7 @@ def expected_build_fingerprint() -> Optional[str]:
         "webhook_checks.py": "/app/scanner_tools/webhook_checks.py",
         "approval_checks.py": "/app/scanner_tools/approval_checks.py",
         "access_control_checks.py": "/app/scanner_tools/access_control_checks.py",
+        "attempt_telemetry.py": "/app/scanner_tools/attempt_telemetry.py",
         "infrastructure_checks.py": "/app/scanner_tools/infrastructure_checks.py",
         "model_intake.py": "/app/scanner_tools/model_intake.py",
         "redaction.py": "/app/redaction.py",
@@ -24860,7 +24862,29 @@ async def asm_gaps(target_id: str):
         family_rows = await conn.fetch(
             """
             SELECT COALESCE(check_family, 'all') AS family,
-                   COUNT(*) FILTER (WHERE status = 'completed') AS completed,
+                   COUNT(*) FILTER (
+                       WHERE status = 'completed'
+                         AND scanner_telemetry_json #>> '{endpoint_attempt,schema_version}' = 'active_endpoint_attempt_v1'
+                   ) AS completed,
+                   COUNT(*) FILTER (
+                       WHERE scanner_telemetry_json #>> '{endpoint_attempt,proof_observed}' = 'true'
+                   ) AS proved,
+                   COUNT(*) FILTER (WHERE status IN ('auth_missing', 'auth_failed')) AS blocked,
+                   COUNT(*) FILTER (
+                       WHERE (
+                           status IN ('partial', 'timeout')
+                           AND COALESCE(scanner_telemetry_json #>> '{endpoint_attempt,cancelled}', 'false') <> 'true'
+                           AND COALESCE(error_summary, '') <> 'cancelled'
+                       ) OR (
+                           status = 'completed'
+                           AND scanner_telemetry_json #>> '{endpoint_attempt,schema_version}' IS DISTINCT FROM 'active_endpoint_attempt_v1'
+                       )
+                   ) AS partial,
+                   COUNT(*) FILTER (
+                       WHERE scanner_telemetry_json #>> '{endpoint_attempt,cancelled}' = 'true'
+                          OR error_summary = 'cancelled'
+                   ) AS cancelled,
+                   COUNT(*) FILTER (WHERE status = 'error') AS failed,
                    COUNT(*) AS attempts
             FROM asm_endpoint_attempts
             WHERE endpoint_id IN (SELECT id FROM target_endpoints WHERE target_id = $1)
@@ -24918,7 +24942,17 @@ async def asm_gaps(target_id: str):
 
     attempt_counts = {str(r["status"]): int(r["count"] or 0) for r in attempt_rows}
     family_coverage = {
-        str(r["family"]): {"completed": int(r["completed"] or 0), "attempts": int(r["attempts"] or 0)}
+        str(r["family"]): {
+            "attempted": int(r["attempts"] or 0),
+            "completed": int(r["completed"] or 0),
+            "proved": int(r["proved"] or 0),
+            "blocked": int(r["blocked"] or 0),
+            "cancelled": int(r["cancelled"] or 0),
+            "partial": int(r["partial"] or 0),
+            "failed": int(r["failed"] or 0),
+            # Backward-compatible alias for existing API/UI consumers.
+            "attempts": int(r["attempts"] or 0),
+        }
         for r in family_rows
     }
     recommendation = _asm_recommendation(

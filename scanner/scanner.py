@@ -73,6 +73,13 @@ from scanner_tools.focused_scope import (
 from scanner_tools.coverage_tracker import CoverageTracker
 from scanner_tools.completion_status import build_scan_completion_status
 from scanner_tools.cancellation import scanner_cancel_requested, wait_for_scanner_cancel
+from scanner_tools.attempt_telemetry import (
+    ENDPOINT_ATTEMPT_SCHEMA_V1,
+    JWT_PROBE_ATTEMPT_SCHEMA_V1,
+    MASS_ASSIGNMENT_ATTEMPT_SCHEMA_V1,
+    normalize_endpoint_attempt,
+    normalize_registry_attempt_telemetry,
+)
 from scanner_tools.exposure_markers import exposure_severity
 from scanner_tools.adaptive_throttle import configure_throttle, get_throttle
 from scanner_tools.har_discovery import (
@@ -143,6 +150,7 @@ SCANNER_FINGERPRINT_FILES = {
     "webhook_checks.py": "/app/scanner_tools/webhook_checks.py",
     "approval_checks.py": "/app/scanner_tools/approval_checks.py",
     "access_control_checks.py": "/app/scanner_tools/access_control_checks.py",
+    "attempt_telemetry.py": "/app/scanner_tools/attempt_telemetry.py",
     "infrastructure_checks.py": "/app/scanner_tools/infrastructure_checks.py",
     # AI-gate / model-intake / redaction paths run in the worker too; include them
     # so a stale copy of these (the skew that caused intermittent false mismatches)
@@ -3640,10 +3648,17 @@ def _append_endpoint_attempt_telemetry(active_block: dict[str, Any], attempts: A
     existing = active_block.get("endpoint_attempts")
     if not isinstance(existing, list):
         existing = []
-    existing.extend(attempt for attempt in attempts if isinstance(attempt, dict) and attempt.get("custom_endpoint"))
+    for attempt in attempts:
+        normalized = normalize_endpoint_attempt(
+            attempt,
+            schema_version=ENDPOINT_ATTEMPT_SCHEMA_V1,
+        )
+        if normalized:
+            existing.append(normalized)
     active_block["endpoint_attempts"] = existing
     active_block["endpoint_attempts_total"] = len(existing)
     active_block["per_endpoint_telemetry"] = True
+    active_block["endpoint_attempt_schema_version"] = ENDPOINT_ATTEMPT_SCHEMA_V1
 
 
 async def build_report(target: str,
@@ -5042,21 +5057,50 @@ async def build_report(target: str,
         finding_count = len(jwt_results.get("issues") or []) + len(
             jwt_comprehensive_results.get("findings") or []
         )
-        telemetry = {
-            "schema_version": "jwt_probe_result_v1",
-            "completed": True,
+        errors = [
+            str(value.get("error"))[:500]
+            for value in (jwt_results, jwt_comprehensive_results)
+            if value.get("error")
+        ]
+        tests_run = list(dict.fromkeys(
+            str(item)
+            for item in (jwt_comprehensive_results.get("tests_run") or [])
+            if item
+        ))
+        token_found = bool(
+            jwt_results.get("token_found")
+            or jwt_comprehensive_results.get("token_found")
+            or tests_run
+        )
+        cancelled = scanner_cancel_requested()
+        status = "cancelled" if cancelled else (
+            "blocked" if errors and not token_found else ("partial" if errors else "completed")
+        )
+        telemetry = normalize_registry_attempt_telemetry({
+            "schema_version": JWT_PROBE_ATTEMPT_SCHEMA_V1,
+            "status": status,
+            "endpoint_count": 1,
+            "method_count": 1,
+            "parameter_count": len(tests_run),
+            "attempted_count": len(tests_run),
+            "completed_count": len(tests_run) if not errors and not cancelled else 0,
             "finding_count": finding_count,
             "vulnerable": bool(
                 jwt_results.get("vulnerable") or jwt_comprehensive_results.get("vulnerable")
             ),
-        }
-        if jwt_results.get("error") or jwt_comprehensive_results.get("error"):
-            reason = str(
-                jwt_results.get("error")
-                or jwt_comprehensive_results.get("error")
-                or "jwt_adapter_failed"
-            )
-            return RegistryPhaseOutcome("failed", reason, telemetry)
+            "proof_observed": bool(
+                jwt_results.get("evidence") or jwt_comprehensive_results.get("evidence")
+            ),
+            "skip_reason": "jwt_token_unavailable" if status == "blocked" else None,
+            "error_summary": "; ".join(errors) if errors and status != "blocked" else None,
+            "cancelled": cancelled,
+        }, expected_schema=JWT_PROBE_ATTEMPT_SCHEMA_V1) or {}
+        if cancelled:
+            return RegistryPhaseOutcome("cancelled", "scanner_cancel_requested", telemetry)
+        if status == "blocked":
+            return RegistryPhaseOutcome("blocked", "jwt_token_unavailable", telemetry)
+        if errors:
+            return RegistryPhaseOutcome("failed", "; ".join(errors), telemetry)
         return RegistryPhaseOutcome("completed", telemetry=telemetry)
 
     jwt_phase_task = asyncio.create_task(dispatch_registry_report_phase(
@@ -6199,15 +6243,47 @@ async def build_report(target: str,
             base_url,
             auth_session=auth_session,
         )
-        telemetry = {
-            "schema_version": "active_endpoint_attempt_v1",
-            "endpoints_tested": int(mass_assignment_results.get("endpoints_tested") or 0),
-            "parameters_tested": int(mass_assignment_results.get("parameters_tested") or 0),
+        endpoint_attempts = mass_assignment_results.get("endpoint_attempts") or []
+        attempted_count = sum(
+            int(item.get("attempted_params_count") or 0)
+            for item in endpoint_attempts if isinstance(item, dict)
+        )
+        completed_count = sum(
+            int(item.get("completed_params_count") or 0)
+            for item in endpoint_attempts if isinstance(item, dict)
+        )
+        cancelled = bool(mass_assignment_results.get("cancelled"))
+        all_skipped = bool(endpoint_attempts) and all(
+            str(item.get("status") or "") == "skipped"
+            for item in endpoint_attempts if isinstance(item, dict)
+        )
+        telemetry_status = "cancelled" if cancelled else (
+            "skipped" if all_skipped else (
+                "partial" if completed_count < attempted_count else "completed"
+            )
+        )
+        telemetry = normalize_registry_attempt_telemetry({
+            "schema_version": MASS_ASSIGNMENT_ATTEMPT_SCHEMA_V1,
+            "status": telemetry_status,
+            "endpoint_count": int(mass_assignment_results.get("endpoints_tested") or 0),
+            "method_count": 3,
+            "parameter_count": int(mass_assignment_results.get("parameters_tested") or 0),
+            "attempted_count": attempted_count,
+            "completed_count": completed_count,
             "finding_count": len(mass_assignment_results.get("findings") or []),
             "vulnerable": bool(mass_assignment_results.get("vulnerable")),
-        }
-        if mass_assignment_results.get("cancelled"):
+            "proof_observed": any(
+                bool(item.get("proof_observed"))
+                for item in endpoint_attempts if isinstance(item, dict)
+            ),
+            "cancelled": cancelled,
+            "skip_reason": "no_accessible_endpoints" if all_skipped else None,
+            "budget_exhausted_reason": mass_assignment_results.get("budget_exhausted_reason"),
+        }, expected_schema=MASS_ASSIGNMENT_ATTEMPT_SCHEMA_V1) or {}
+        if cancelled:
             return RegistryPhaseOutcome("cancelled", "scanner_cancel_requested", telemetry)
+        if all_skipped:
+            return RegistryPhaseOutcome("skipped", "no_accessible_endpoints", telemetry)
         if mass_assignment_results.get("error"):
             return RegistryPhaseOutcome(
                 "failed",
@@ -6529,7 +6605,7 @@ async def build_report(target: str,
             "dispatch_adapter": "legacy_phase4_mass_assignment",
             "status": "cancelled" if mass_assignment_cancelled else "failed",
             "reason": "scanner_cancel_requested" if mass_assignment_cancelled else "phase4_timeout",
-            "telemetry_schema": "active_endpoint_attempt_v1",
+            "telemetry_schema": MASS_ASSIGNMENT_ATTEMPT_SCHEMA_V1,
             "proof_contract": [
                 "method", "url", "field", "baseline_value", "observed_privilege_effect",
             ],
@@ -8960,6 +9036,10 @@ async def build_report(target: str,
                 break
 
         active_block: dict[str, Any] = {}
+        _append_endpoint_attempt_telemetry(
+            active_block,
+            mass_assignment_results.get("endpoint_attempts"),
+        )
         run_xss = False
         run_sqli = False
         smart_succeeded = False

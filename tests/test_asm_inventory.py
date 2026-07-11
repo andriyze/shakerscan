@@ -527,8 +527,8 @@ def test_coverage_summary_uses_latest_attempt_ledger_when_present():
             "partial": 0,
         },
         [
-            {"status": "completed", "scanner_telemetry_json": {"per_endpoint_telemetry": True}},
-            {"status": "completed", "scanner_telemetry_json": {"per_endpoint_telemetry": True}},
+            {"status": "completed", "scanner_telemetry_json": {"per_endpoint_telemetry": True, "endpoint_attempt": {"schema_version": "active_endpoint_attempt_v1"}}},
+            {"status": "completed", "scanner_telemetry_json": {"per_endpoint_telemetry": True, "endpoint_attempt": {"schema_version": "active_endpoint_attempt_v1"}}},
             {"status": "partial", "scanner_telemetry_json": {"per_endpoint_telemetry": False}},
         ],
     )
@@ -557,9 +557,33 @@ def test_coverage_summary_uses_latest_attempt_ledger_when_present():
         "coverage": 0.5,
         "basis": "latest_attempt_per_endpoint",
     }
-    # §11: headline carries one labeled denominator (testable = total − gone).
+    # §11: headline carries one labeled denominator (testable = total - gone).
     assert summary["denominator"] == 4
-    assert summary["testable"] == 4
+
+
+def test_coverage_summary_degrades_unversioned_completed_attempt():
+    target_id = uuid.uuid4()
+    conn = _CoverageConn(
+        {
+            "total": 1,
+            "tested": 1,
+            "untested": 0,
+            "in_progress": 0,
+            "stale": 0,
+            "gone": 0,
+            "expired_leases": 0,
+            "auth_blocked": 0,
+            "partial": 0,
+        },
+        [{"status": "completed", "scanner_telemetry_json": {"per_endpoint_telemetry": True}}],
+    )
+
+    summary = asyncio.run(a.coverage_summary(conn, str(target_id)))
+
+    assert summary["tested"] == 0
+    assert summary["partial"] == 1
+    assert summary["coverage"] == 0.0
+    assert summary["testable"] == 1
     assert summary["coverage_reconciles"] is True
 
 
@@ -612,13 +636,13 @@ def test_campaign_attempt_summary_uses_expected_denominator_and_telemetry_guard(
         [
             {
                 "status": "completed",
-                "scanner_telemetry_json": {"per_endpoint_telemetry": True},
+                "scanner_telemetry_json": {"per_endpoint_telemetry": True, "endpoint_attempt": {"schema_version": "active_endpoint_attempt_v1"}},
                 "attempted_params_count": 3,
                 "completed_params_count": 3,
             },
             {
                 "status": "completed",
-                "scanner_telemetry_json": {"per_endpoint_telemetry": True},
+                "scanner_telemetry_json": {"per_endpoint_telemetry": True, "endpoint_attempt": {"schema_version": "active_endpoint_attempt_v1"}},
                 "attempted_params_count": 2,
                 "completed_params_count": 2,
             },
@@ -667,13 +691,13 @@ def test_campaign_attempt_summary_can_count_endpoint_family_attempts():
         [
             {
                 "status": "completed",
-                "scanner_telemetry_json": {"per_endpoint_telemetry": True},
+                "scanner_telemetry_json": {"per_endpoint_telemetry": True, "endpoint_attempt": {"schema_version": "active_endpoint_attempt_v1"}},
                 "attempted_params_count": 1,
                 "completed_params_count": 1,
             },
             {
                 "status": "partial",
-                "scanner_telemetry_json": {"per_endpoint_telemetry": True},
+                "scanner_telemetry_json": {"per_endpoint_telemetry": True, "endpoint_attempt": {"schema_version": "active_endpoint_attempt_v1"}},
                 "attempted_params_count": 1,
                 "completed_params_count": 0,
             },

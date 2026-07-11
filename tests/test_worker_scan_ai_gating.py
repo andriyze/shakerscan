@@ -2017,6 +2017,7 @@ def test_active_endpoint_attempts_from_report_filters_valid_entries():
     attempts = worker._active_endpoint_attempts_from_report(
         {
             "active_checks": {
+                "endpoint_attempt_schema_version": "active_endpoint_attempt_v1",
                 "endpoint_attempts": [
                     {"custom_endpoint": "GET /a?id=1", "status": "completed"},
                     {"status": "completed"},
@@ -2026,13 +2027,30 @@ def test_active_endpoint_attempts_from_report_filters_valid_entries():
         }
     )
 
-    assert attempts == [{"custom_endpoint": "GET /a?id=1", "status": "completed"}]
+    assert len(attempts) == 1
+    assert attempts[0]["custom_endpoint"] == "GET /a?id=1"
+    assert attempts[0]["schema_version"] == "active_endpoint_attempt_v1"
 
 
 def test_active_endpoint_telemetry_present_for_empty_attempt_list():
-    report = {"active_checks": {"per_endpoint_telemetry": True, "endpoint_attempts": []}}
+    report = {"active_checks": {
+        "endpoint_attempt_schema_version": "active_endpoint_attempt_v1",
+        "per_endpoint_telemetry": True,
+        "endpoint_attempts": [],
+    }}
 
     assert worker._active_endpoint_telemetry_present(report) is True
+    assert worker._active_endpoint_attempts_from_report(report) == []
+
+
+def test_active_endpoint_telemetry_rejects_unknown_schema():
+    report = {"active_checks": {
+        "endpoint_attempt_schema_version": "active_endpoint_attempt_v99",
+        "per_endpoint_telemetry": True,
+        "endpoint_attempts": [{"custom_endpoint": "GET /a", "status": "completed"}],
+    }}
+
+    assert worker._active_endpoint_telemetry_present(report) is False
     assert worker._active_endpoint_attempts_from_report(report) == []
 
 
@@ -2047,6 +2065,18 @@ def test_ledger_status_from_endpoint_attempt_maps_time_budget_to_timeout():
 
     assert status == "timeout"
     assert summary == "time_budget"
+
+
+def test_ledger_status_preserves_block_cancel_and_error_outcomes():
+    assert worker._ledger_status_from_endpoint_attempt({
+        "status": "skipped", "skip_reason": "auth_missing",
+    }) == ("auth_missing", "auth_missing")
+    assert worker._ledger_status_from_endpoint_attempt({
+        "status": "cancelled", "cancelled": True,
+    }) == ("partial", "cancelled")
+    assert worker._ledger_status_from_endpoint_attempt({
+        "status": "failed", "error_summary": "connection reset",
+    }) == ("error", "connection reset")
 
 
 def test_record_endpoint_telemetry_attempts_uses_per_endpoint_counts(monkeypatch):
@@ -2694,6 +2724,7 @@ def test_dynamic_coverage_batch_records_parent_attempts_and_reconciles(monkeypat
             "findings": [{"title": "Proof", "severity": "high", "tool": "test"}],
             "result": {"score": 80, "grade": "B"},
             "active_checks": {
+                "endpoint_attempt_schema_version": "active_endpoint_attempt_v1",
                 "per_endpoint_telemetry": True,
                 "endpoint_attempts": [
                     {
@@ -2806,6 +2837,7 @@ def test_dynamic_bola_batch_preserves_phase4_budget_and_comparator(monkeypatch):
             "findings": [{"title": "BOLA proof", "severity": "critical", "tool": "bola"}],
             "result": {"score": 50, "grade": "F"},
             "active_checks": {
+                "endpoint_attempt_schema_version": "active_endpoint_attempt_v1",
                 "per_endpoint_telemetry": True,
                 "endpoint_attempts": [
                     {
@@ -2930,6 +2962,7 @@ def test_exploit_batch_partial_domain_rate_grant_releases_ungranted_endpoints(mo
             "findings": [],
             "result": {"score": 95, "grade": "A"},
             "active_checks": {
+                "endpoint_attempt_schema_version": "active_endpoint_attempt_v1",
                 "per_endpoint_telemetry": True,
                 "endpoint_attempts": [
                     {

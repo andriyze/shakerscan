@@ -37,12 +37,12 @@ def test_registry_exposes_runnable_asm_focus_families():
     assert r.CHECK_REGISTRY_BY_NAME["auth"].requires_credentials is True
     mass_assignment = r.CHECK_REGISTRY_BY_NAME["mass_assignment"]
     assert mass_assignment.runnable is True
-    assert mass_assignment.telemetry_schema == "active_endpoint_attempt_v1"
+    assert mass_assignment.telemetry_schema == "mass_assignment_attempt_v1"
     assert "observed_privilege_effect" in mass_assignment.proof_contract
     assert "CWE-915" in mass_assignment.finding_cwes
     jwt = r.CHECK_REGISTRY_BY_NAME["jwt"]
     assert jwt.runnable is True
-    assert jwt.telemetry_schema == "jwt_probe_result_v1"
+    assert jwt.telemetry_schema == "jwt_probe_attempt_v1"
     assert "jwt" in jwt.finding_title_markers
     assert "forged_status" in jwt.proof_contract
     nuclei = r.CHECK_REGISTRY_BY_NAME["nuclei"]

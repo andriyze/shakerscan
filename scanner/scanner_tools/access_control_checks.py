@@ -1168,6 +1168,9 @@ async def check_mass_assignment(
         "findings": [],
         "endpoints_tested": 0,
         "parameters_tested": 0,
+        "endpoint_attempt_schema_version": "active_endpoint_attempt_v1",
+        "endpoint_attempts": [],
+        "cancelled": False,
     }
 
     # Default endpoints to test
@@ -1191,19 +1194,45 @@ async def check_mass_assignment(
 
     headers["Content-Type"] = "application/json"
 
+    expected_parameters = sum(len(params) for params in MASS_ASSIGNMENT_PARAMS.values())
     for endpoint in endpoints:
+        if _mark_cooperative_cancel(results):
+            break
         url = urljoin(base_url, endpoint)
         results["endpoints_tested"] += 1
+        path = urlsplit(url).path or "/"
+        attempt = {
+            "custom_endpoint": f"POST {path}",
+            "family": "mass_assignment",
+            "method": "POST",
+            "url": url,
+            "param_count": expected_parameters,
+            "attempted_params_count": 0,
+            "completed_params_count": 0,
+            "status": "started",
+            "proof_observed": False,
+        }
 
         # First, make a baseline request to see if endpoint exists
         baseline = await fetch_with_capture(url, headers=headers, timeout=timeout)
         if baseline.get("status_code", 0) not in [200, 201, 204, 400, 422]:
+            attempt["status"] = "skipped"
+            attempt["skip_reason"] = "endpoint_not_accessible"
+            results["endpoint_attempts"].append(attempt)
             continue  # Endpoint doesn't exist or not accessible
 
         # Test each category of mass assignment parameters
         for category, params in MASS_ASSIGNMENT_PARAMS.items():
             for param_name, param_value in params:
+                if _mark_cooperative_cancel(results):
+                    attempt["status"] = "partial"
+                    attempt["cancelled"] = True
+                    attempt["skip_reason"] = "cancelled"
+                    attempt["budget_exhausted_reason"] = "cancelled"
+                    results["endpoint_attempts"].append(attempt)
+                    return results
                 results["parameters_tested"] += 1
+                attempt["attempted_params_count"] += 1
 
                 # Build test payload
                 import json
@@ -1223,6 +1252,7 @@ async def check_mass_assignment(
                 patch_response = await fetch_with_capture(
                     url, method="PATCH", data=payload, headers=headers, timeout=timeout
                 )
+                attempt["completed_params_count"] += 1
 
                 # Analyze responses for signs of acceptance
                 for method, response in [("POST", post_response), ("PUT", put_response), ("PATCH", patch_response)]:
@@ -1260,7 +1290,18 @@ async def check_mass_assignment(
                                     "cwe": "CWE-915",
                                     "owasp": "API6:2023 - Unrestricted Access to Sensitive Business Flows",
                                 })
+                                attempt["proof_observed"] = True
+                                attempt.setdefault("proof_types", []).append(
+                                    "observed_privilege_field_acceptance"
+                                )
                                 break  # Found for this param, move to next
+
+        attempt["status"] = (
+            "completed"
+            if attempt["completed_params_count"] == attempt["attempted_params_count"]
+            else "partial"
+        )
+        results["endpoint_attempts"].append(attempt)
 
     return results
 

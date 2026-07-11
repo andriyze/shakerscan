@@ -189,7 +189,7 @@ CHECK_REGISTRY: tuple[CheckFamilySpec, ...] = (
         label="Mass Assignment",
         is_active=True,
         risk_level="medium",
-        telemetry_schema="active_endpoint_attempt_v1",
+        telemetry_schema="mass_assignment_attempt_v1",
         proof_contract=("method", "url", "field", "baseline_value", "observed_privilege_effect"),
         severity_rules={
             "high_requires": ["persisted_or_response_privilege_effect"],
@@ -211,7 +211,7 @@ CHECK_REGISTRY: tuple[CheckFamilySpec, ...] = (
         label="JWT Security",
         is_active=True,
         risk_level="medium",
-        telemetry_schema="jwt_probe_result_v1",
+        telemetry_schema="jwt_probe_attempt_v1",
         proof_contract=("token_source", "mutation", "baseline_status", "forged_status", "acceptance_delta"),
         severity_rules={
             "critical_requires": ["forged_token_accepted_with_privileged_effect"],

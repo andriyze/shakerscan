@@ -19,6 +19,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from scanner_tools.attempt_telemetry import ENDPOINT_ATTEMPT_SCHEMA_V1
+
 # Job type for the async exploitation pipeline (routed in worker.process_job).
 EXPLOIT_BATCH_JOB_TYPE = "exploit_batch"
 # Scan roles created by the continuous dispatcher (docs §16 Phase 3).
@@ -1119,6 +1121,22 @@ def _attempt_telemetry_true(telemetry: Any, key: str) -> bool:
     return str(value or "").strip().lower() == "true"
 
 
+def _attempt_telemetry_schema_declared(telemetry: Any) -> bool:
+    if isinstance(telemetry, str):
+        try:
+            import json
+            telemetry = json.loads(telemetry)
+        except Exception:
+            return False
+    if not isinstance(telemetry, dict):
+        return False
+    endpoint_attempt = telemetry.get("endpoint_attempt")
+    return bool(
+        isinstance(endpoint_attempt, dict)
+        and endpoint_attempt.get("schema_version") == ENDPOINT_ATTEMPT_SCHEMA_V1
+    )
+
+
 def normalize_attempt_status_for_coverage(status: Any, telemetry: Any = None) -> str:
     """Normalize attempt status before coverage accounting.
 
@@ -1127,7 +1145,10 @@ def normalize_attempt_status_for_coverage(status: Any, telemetry: Any = None) ->
     was exercised.
     """
     normalized = str(status or "").strip().lower()
-    if normalized == "completed" and not _attempt_telemetry_true(telemetry, "per_endpoint_telemetry"):
+    if normalized == "completed" and (
+        not _attempt_telemetry_true(telemetry, "per_endpoint_telemetry")
+        or not _attempt_telemetry_schema_declared(telemetry)
+    ):
         return "partial"
     return normalized
 

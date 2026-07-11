@@ -45,6 +45,10 @@ from retest_contract import (
 )
 import parallel_scan
 import asm_inventory
+from scanner_tools.attempt_telemetry import (
+    endpoint_attempt_schema_from_report,
+    normalize_endpoint_attempt,
+)
 from evidence_storage import store_evidence_content
 from secret_store import decrypt_secret
 try:
@@ -6585,19 +6589,23 @@ def _asm_scan_options_for_auth_state(
 
 def _active_endpoint_attempts_from_report(report: dict | None) -> list[dict[str, Any]]:
     active = (report or {}).get('active_checks') if isinstance(report, dict) else None
+    schema_version = endpoint_attempt_schema_from_report(report)
     attempts = active.get('endpoint_attempts') if isinstance(active, dict) else None
     if not isinstance(attempts, list):
         return []
     out: list[dict[str, Any]] = []
     for attempt in attempts:
-        if isinstance(attempt, dict) and attempt.get('custom_endpoint'):
-            out.append(attempt)
+        normalized = normalize_endpoint_attempt(attempt, schema_version=schema_version)
+        if normalized:
+            out.append(normalized)
     return out
 
 
 def _active_endpoint_telemetry_present(report: dict | None) -> bool:
     active = (report or {}).get('active_checks') if isinstance(report, dict) else None
     if not isinstance(active, dict):
+        return False
+    if endpoint_attempt_schema_from_report(report) is None:
         return False
     return bool(active.get('per_endpoint_telemetry')) or isinstance(active.get('endpoint_attempts'), list)
 
@@ -6607,8 +6615,18 @@ def _ledger_status_from_endpoint_attempt(attempt: dict[str, Any]) -> tuple[str, 
     reason = attempt.get('budget_exhausted_reason') or attempt.get('skip_reason')
     if status == 'completed':
         return 'completed', None
-    if reason == 'time_budget':
-        return 'timeout', 'time_budget'
+    if reason in {'time_budget', 'time_budget_exhausted'}:
+        return 'timeout', str(reason)
+    if reason in {'auth_missing', 'auth_failed'}:
+        return str(reason), str(reason)
+    if reason == 'rate_limited':
+        return 'rate_limited', 'rate_limited'
+    if status == 'cancelled' or reason == 'cancelled' or attempt.get('cancelled'):
+        return 'partial', 'cancelled'
+    if status == 'failed':
+        return 'error', str(attempt.get('error_summary') or reason or 'failed')
+    if status == 'blocked':
+        return 'partial', str(reason or 'blocked')
     if status == 'skipped':
         return 'partial', str(reason or 'skipped')
     if status in {'partial', 'started'}:

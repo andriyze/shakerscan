@@ -18,7 +18,10 @@ def _rows(statuses):
     return [
         {
             "status": s,
-            "scanner_telemetry_json": {"per_endpoint_telemetry": True},
+            "scanner_telemetry_json": {
+                "per_endpoint_telemetry": True,
+                "endpoint_attempt": {"schema_version": "active_endpoint_attempt_v1"},
+            },
             "attempted_params_count": 1,
             "completed_params_count": 1,
         }
