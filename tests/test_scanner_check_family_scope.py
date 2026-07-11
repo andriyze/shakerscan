@@ -2,6 +2,7 @@ import asyncio
 import importlib.util
 import os
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -944,6 +945,17 @@ def test_registry_report_phase_fails_closed_when_batch_omits_family_outcome():
     assert receipts[0]["status"] == "completed"
     assert receipts[1]["status"] == "failed"
     assert receipts[1]["reason"] == "batch_adapter_family_outcome_missing"
+
+
+def test_auth_and_bola_network_checks_are_registry_adapter_owned():
+    source = Path(scanner_mod.__file__).read_text(encoding="utf-8")
+
+    assert "auth_dispatch_decision = registry_dispatch_decision" not in source
+    assert "bola_dispatch_decision = registry_dispatch_decision" not in source
+    assert "async def run_asm_endpoint_batch_auth()" in source
+    assert "async def run_asm_endpoint_batch_bola()" in source
+    assert 'families={"auth"}' in source
+    assert 'families={"bola"}' in source
 
 
 def _load_reporting_module():

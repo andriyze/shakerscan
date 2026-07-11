@@ -11316,419 +11316,496 @@ async def build_report(target: str,
         # for claimed endpoints. This is explicit-only through check_family=auth
         # so default broad scans do not reinterpret public endpoints as auth
         # obligations.
-        auth_focused = focused_active_family_name == "auth"
-        auth_dispatch_decision = registry_dispatch_decision(
-            scanner_execution_plan,
-            "auth",
-        )
-        scanner_dispatch_decisions.append(auth_dispatch_decision)
-        auth_dispatch_enabled = bool(auth_dispatch_decision["dispatch_enabled"])
-        if auth_dispatch_enabled and smart_mode and smart_succeeded and not public_only:
+        async def run_asm_endpoint_batch_auth() -> RegistryPhaseOutcome:
+            if not smart_mode or not smart_succeeded or public_only:
+                return RegistryPhaseOutcome(
+                    "skipped",
+                    "auth_runtime_ineligible",
+                    {"schema_version": "active_endpoint_attempt_v1", "endpoints_tested": 0},
+                )
             try:
                 if auth_session:
                     try:
                         await auth_session.refresh_if_needed()
-                    except Exception as e:
-                        print(f"[scanner] Auth refresh before focused auth tests failed: {e}", file=sys.stderr)
-                emit_progress("active_auth", 94, f"starting authentication checks on {len(endpoints)} endpoints")
+                    except Exception as exc:
+                        print(
+                            f"[scanner] Auth refresh before focused auth tests failed: {exc}",
+                            file=sys.stderr,
+                        )
+                emit_progress(
+                    "active_auth",
+                    94,
+                    f"starting authentication checks on {len(endpoints)} endpoints",
+                )
                 auth_results = await smart_auth_access_test(
                     base_url=base_url,
                     endpoints=endpoints,
                     auth_session=auth_session,
-                    max_endpoints=int(scan_budget.get("active_max_endpoints") or smart_bola_max_endpoints or 50),
+                    max_endpoints=int(
+                        scan_budget.get("active_max_endpoints")
+                        or smart_bola_max_endpoints
+                        or 50
+                    ),
                     timeout=10,
                 )
                 active_block["smart_auth"] = auth_results
-                _append_endpoint_attempt_telemetry(active_block, auth_results.get("endpoint_attempts"))
+                _append_endpoint_attempt_telemetry(
+                    active_block,
+                    auth_results.get("endpoint_attempts"),
+                )
                 emit_progress("active_auth", 94, "authentication checks complete")
 
-                for f in auth_results.get("findings") or []:
-                    evidence = dict(f.get("evidence") or {})
-                    nf = normalize_finding(
+                for finding in auth_results.get("findings") or []:
+                    evidence = dict(finding.get("evidence") or {})
+                    normalized = normalize_finding(
                         "smart_auth",
-                        f.get("title", "Authentication access-control issue"),
-                        f.get("severity", "high"),
+                        finding.get("title", "Authentication access-control issue"),
+                        finding.get("severity", "high"),
                         evidence,
-                        f.get("cwe", "CWE-306"),
+                        finding.get("cwe", "CWE-306"),
                     )
-                    if f.get("confidence") is not None:
-                        nf["confidence"] = f["confidence"]
-                    report["findings"].append(nf)
-                if auth_results.get("findings"):
-                    print(f"[scanner] Focused auth: found {len(auth_results['findings'])} findings", file=sys.stderr)
+                    if finding.get("confidence") is not None:
+                        normalized["confidence"] = finding["confidence"]
+                    report["findings"].append(normalized)
+                finding_count = len(auth_results.get("findings") or [])
+                if finding_count:
+                    print(f"[scanner] Focused auth: found {finding_count} findings", file=sys.stderr)
                 else:
                     print(
-                        f"[scanner] Focused auth: no findings (tested {auth_results.get('endpoints_analyzed', 0)} endpoints)",
+                        f"[scanner] Focused auth: no findings "
+                        f"(tested {auth_results.get('endpoints_analyzed', 0)} endpoints)",
                         file=sys.stderr,
                     )
-            except Exception as e:
-                active_block["smart_auth_error"] = str(e)
-                print(f"[scanner] Focused auth error: {e}", file=sys.stderr)
-
-        # Broken function-level authorization (BFLA) on sensitive collection
-        # endpoints needs only primary auth plus an anonymous-vs-authenticated
-        # differential. Keep it independent from the heavier BOLA lane, which can
-        # be skipped by budget or second-user policy.
-        collection_authz_result: dict[str, Any] | None = None
-        collection_authz_allowed_by_focus = focused_family_allows_active_module(
-            focused_active_family_name,
-            "bola_idor",
-        )
-        if (
-            smart_mode
-            and smart_succeeded
-            and not public_only
-            and not focused_manual_active_scope
-            and auth_session
-            and collection_authz_allowed_by_focus
-        ):
-            try:
-                from scanner_tools.access_control_checks import check_collection_authz
-
-                collection_candidates = _collect_collection_authz_candidate_urls(
-                    base_url,
-                    smart_discovery_data=smart_discovery_data if isinstance(smart_discovery_data, dict) else None,
-                    crawl_urls=crawl_urls,
-                    endpoints=endpoints,
-                    browser_api_endpoints=browser_api_endpoints,
-                    js_bundle_analysis=js_bundle_analysis if isinstance(js_bundle_analysis, dict) else None,
-                    har_discovery_result=har_discovery_result,
-                )
-                collection_authz_result = await check_collection_authz(
-                    base_url,
-                    discovered_urls=collection_candidates,
-                    auth_session=auth_session,
-                    timeout=10,
-                    max_endpoints=smart_bola_max_endpoints,
-                )
-                active_block["collection_authz"] = {
-                    "endpoints_tested": collection_authz_result.get("endpoints_tested", 0),
-                    "vulnerable": collection_authz_result.get("vulnerable", False),
-                    "skipped_reason": collection_authz_result.get("skipped_reason"),
-                    "candidate_count": len(collection_candidates),
+                telemetry = {
+                    "schema_version": "active_endpoint_attempt_v1",
+                    "endpoints_tested": int(auth_results.get("endpoints_analyzed") or 0),
+                    "finding_count": finding_count,
+                    "cancelled": bool(auth_results.get("cancelled")),
+                    "budget_exhausted_reason": auth_results.get("budget_exhausted_reason"),
                 }
-                for f in collection_authz_result.get("findings", []):
-                    nf = normalize_finding(
-                        str(f.get("tool") or "bfla"),
-                        str(f.get("title")),
-                        str(f.get("severity") or "high"),
-                        f.get("evidence") or {},
-                        f.get("cwe") or "CWE-285",
+                if auth_results.get("cancelled"):
+                    return RegistryPhaseOutcome(
+                        "cancelled",
+                        "scanner_cancel_requested",
+                        telemetry,
                     )
-                    nf["verified"] = True
-                    nf["cvss_score"] = 7.5
-                    report["findings"].append(nf)
-                if collection_authz_result.get("findings"):
-                    print(f"[scanner] BFLA: found {len(collection_authz_result['findings'])} broken-authorization collection(s)", file=sys.stderr)
-            except Exception as e:
-                active_block["collection_authz_error"] = str(e)
-                print(f"[scanner] BFLA collection-authz error: {e}", file=sys.stderr)
+                return RegistryPhaseOutcome("completed", telemetry=telemetry)
+            except Exception as exc:
+                active_block["smart_auth_error"] = str(exc)
+                print(f"[scanner] Focused auth error: {exc}", file=sys.stderr)
+                return RegistryPhaseOutcome("failed", f"{type(exc).__name__}: {str(exc)[:160]}")
 
-        # Smart BOLA Testing - run in smart mode to detect authorization issues.
-        # Focused BOLA batches are allowed through the otherwise broad
-        # focused-scope skip gate; other focused families keep BOLA disabled.
-        # user2_session enables the multi-user comparison required by the
-        # registry/API gate for ASM BOLA campaigns.
-        bola_focused = focused_active_family_name == "bola"
-        bola_allowed_by_focus = focused_family_allows_active_module(
-            focused_active_family_name,
-            "bola_idor",
-        )
-        bola_dispatch_decision = registry_dispatch_decision(
+        auth_dispatch_receipts = await dispatch_registry_report_phase(
             scanner_execution_plan,
-            "bola",
+            "active",
+            {"asm_endpoint_batch": run_asm_endpoint_batch_auth},
+            families={"auth"},
         )
-        scanner_dispatch_decisions.append(bola_dispatch_decision)
-        bola_dispatch_enabled = bool(bola_dispatch_decision["dispatch_enabled"])
-        bola_eligible = (
-            smart_mode
-            and smart_succeeded
-            and not public_only
-            and bola_dispatch_enabled
-        )
-        bola_decision = (
-            bola_enrichment_decision(
-                bola_focused=bola_focused,
-                post_active_budget_exhausted=post_active_budget_exhausted,
-                active_block=active_block,
-            )
-            if bola_eligible
-            else None
-        )
-        if bola_focused and family_requires_two_auth_states("bola") and (not auth_session or not user2_session):
-            active_block["smart_bola"] = {
-                "vulnerable": False,
-                "findings": [],
-                "endpoints_analyzed": 0,
-                "skipped": True,
-                "reason": "multi_user_credentials_required",
-                "endpoint_attempts": [],
-            }
-            record_active_enrichment_skip(
-                active_block,
+        active_dispatch_receipts.extend(auth_dispatch_receipts)
+        async def run_asm_endpoint_batch_bola() -> RegistryPhaseOutcome:
+            # Broken function-level authorization (BFLA) on sensitive collection
+            # endpoints needs only primary auth plus an anonymous-vs-authenticated
+            # differential. Keep it independent from the heavier BOLA lane, which can
+            # be skipped by budget or second-user policy.
+            collection_authz_result: dict[str, Any] | None = None
+            collection_authz_allowed_by_focus = focused_family_allows_active_module(
+                focused_active_family_name,
                 "bola_idor",
-                "multi_user_credentials_required",
             )
-            print("[scanner] Skipping focused BOLA: primary and second-user credentials are required", file=sys.stderr)
-        elif smart_mode and smart_succeeded and not public_only and not bola_allowed_by_focus:
-            reason = f"focused_family_{focused_active_family_name}"
-            record_active_enrichment_skip(active_block, "bola_idor", reason)
-            active_block.setdefault("active_enrichment_decisions", {})["bola_idor"] = {
-                "run": False,
-                "reason": reason,
-            }
-            print(f"[scanner] Skipping BOLA/IDOR testing: {reason}", file=sys.stderr)
-        elif bola_eligible and bola_decision.run:
-            try:
-                # Get discovered URLs from crawl + smart discovery + JS/HAR for BOLA pattern analysis
-                bola_urls: list[str] = []
-                bola_param_endpoints: list[dict[str, Any]] = []
+            if (
+                smart_mode
+                and smart_succeeded
+                and not public_only
+                and not focused_manual_active_scope
+                and auth_session
+                and collection_authz_allowed_by_focus
+            ):
+                try:
+                    from scanner_tools.access_control_checks import check_collection_authz
 
-                def _normalize_bola_url(raw_url: str) -> str | None:
-                    if not raw_url or not isinstance(raw_url, str):
-                        return None
-                    u = raw_url.strip()
-                    if not u:
-                        return None
-                    if u.startswith("//"):
-                        u = "https:" + u
-                    if u.startswith("/"):
-                        u = urllib.parse.urljoin(base_url, u)
-                    if not u.startswith("http"):
-                        u = urllib.parse.urljoin(base_url + "/", u)
-                    return u
-
-                def _add_bola_urls(urls: list[str] | None) -> None:
-                    if not urls:
-                        return
-                    for u in urls:
-                        normalized = _normalize_bola_url(u)
-                        if normalized:
-                            bola_urls.append(normalized)
-
-                if smart_discovery_data:
-                    _add_bola_urls(smart_discovery_data.get("all_urls", []))
-                    _add_bola_urls(smart_discovery_data.get("api_endpoints", []))
-                    _add_bola_urls(smart_discovery_data.get("parameterized_urls", []))
-                    _add_bola_urls(smart_discovery_data.get("recursive_paths", []))
-                    bola_param_endpoints.extend(smart_discovery_data.get("endpoints_with_params", []) or [])
-
-                if crawl_urls:
-                    _add_bola_urls(crawl_urls)
-
-                if endpoints:
-                    endpoint_urls: list[str] = []
-                    for ep in endpoints:
-                        ep_url = ep.get("url") or ep.get("path")
-                        if ep_url:
-                            endpoint_urls.append(str(ep_url))
-                            params = ep.get("params") or ep.get("query_params") or ep.get("body_params") or []
-                            if params:
-                                bola_param_endpoints.append({"url": str(ep_url), "params": params})
-                    _add_bola_urls(endpoint_urls)
-
-                if browser_api_endpoints:
-                    _add_bola_urls(browser_api_endpoints)
-
-                if js_bundle_analysis and isinstance(js_bundle_analysis, dict):
-                    _add_bola_urls(js_bundle_analysis.get("api_endpoints", []))
-
-                if har_discovery_result and getattr(har_discovery_result, "endpoints", None):
-                    for ep in har_discovery_result.endpoints:
-                        ep_url = getattr(ep, "url", None)
-                        if ep_url:
-                            _add_bola_urls([ep_url])
-                        # Collect query param hints for synthesis
-                        params: list[str] = []
-                        query_params = getattr(ep, "query_params", None)
-                        if isinstance(query_params, dict):
-                            params = list(query_params.keys())
-                        elif isinstance(query_params, list):
-                            params = [p for p in query_params if isinstance(p, str)]
-                        if params and ep_url:
-                            bola_param_endpoints.append({"url": ep_url, "params": params})
-
-                # Deduplicate and cap
-                bola_urls = list(dict.fromkeys(bola_urls))[:500]
-
-                # §6: record WHY cross-principal BOLA could/couldn't run, so low
-                # coverage reads as an explainable blocked state, not silent absence.
-                _bola_blocked: list[str] = []
-                if not auth_session:
-                    _bola_blocked.append("no_primary_auth")
-                if not user2_session:
-                    _bola_blocked.append("no_second_user")
-                if not bola_urls:
-                    _bola_blocked.append("no_endpoints")
-                bola_candidate_budget = summarize_bola_candidate_budget(
-                    len(bola_urls), smart_bola_max_endpoints
-                )
-                active_block["bola_status"] = {
-                    "cross_user_enabled": bool(user2_session and auth_session),
-                    "primary_auth": bool(auth_session),
-                    "second_user": bool(user2_session),
-                    "endpoints_available": len(bola_urls) if bola_urls else 0,
-                    **bola_candidate_budget,
-                    # read-only multi-user replay today; write/BFLA is Lab/deep future work
-                    "mode": "cross_principal_read" if (user2_session and auth_session) else (
-                        "anonymous_vs_user1" if auth_session else "anonymous_only"),
-                    "blocked_reasons": _bola_blocked,
-                }
-                if bola_urls:
-                    print(
-                        "[scanner] Smart mode: BOLA/IDOR candidate inventory "
-                        f"{bola_candidate_budget['candidate_endpoints']} URLs; configured endpoint ceiling "
-                        f"{bola_candidate_budget['max_endpoints']}",
-                        file=sys.stderr,
+                    collection_candidates = _collect_collection_authz_candidate_urls(
+                        base_url,
+                        smart_discovery_data=smart_discovery_data if isinstance(smart_discovery_data, dict) else None,
+                        crawl_urls=crawl_urls,
+                        endpoints=endpoints,
+                        browser_api_endpoints=browser_api_endpoints,
+                        js_bundle_analysis=js_bundle_analysis if isinstance(js_bundle_analysis, dict) else None,
+                        har_discovery_result=har_discovery_result,
                     )
-                    if user2_session:
-                        print("[scanner] Multi-user BOLA: user2_session provided - cross-user comparison enabled", file=sys.stderr)
-                    else:
-                        print("[scanner] Single-user BOLA: no user2_session - unauthenticated access testing only", file=sys.stderr)
-                    emit_progress(
-                        "active_bola",
-                        94,
-                        "starting BOLA/IDOR testing; "
-                        f"candidates={bola_candidate_budget['candidate_endpoints']} "
-                        f"endpoint_ceiling={bola_candidate_budget['max_endpoints']}",
+                    collection_authz_result = await check_collection_authz(
+                        base_url,
+                        discovered_urls=collection_candidates,
+                        auth_session=auth_session,
+                        timeout=10,
+                        max_endpoints=smart_bola_max_endpoints,
                     )
-
-                    # Budget for BOLA testing. On a rich app the discovered-URL
-                    # set can be large enough that testing every template takes
-                    # many minutes. smart_bola_test self-bounds to `max_seconds`
-                    # and returns the findings gathered so far; the outer
-                    # asyncio.wait_for is only a hard backstop (deadline + grace)
-                    # for the pathological case where a request hangs past its
-                    # own timeout. The internal graceful stop preserves partial
-                    # findings that a hard cancel would discard.
-                    bola_overall_deadline = resolve_bola_deadline_seconds(scan_budget, custom_budget)
-                    # Smart-mode BOLA is one lane of the broad active mix, not the
-                    # whole scan. Its resolver carries a 5-min floor and can equal
-                    # the full active budget, so on a rich app it ran ~8-14 min
-                    # *on top of* SQLi/XSS and blocked the scan from completing.
-                    # Cap the non-focused lane hard; focused BOLA keeps its budget.
-                    if not bola_focused:
-                        bola_overall_deadline = min(bola_overall_deadline, SMART_BOLA_LANE_MAX_SECONDS)
-                    if bola_focused:
-                        try:
-                            from scanner_tools.proof_of_exploit import PoEConfig, configure_poe
-
-                            focused_bola_poe_settings = resolve_focused_bola_poe_settings(smart_bola_max_endpoints)
-                            focused_poe = PoEConfig.safe()
-                            focused_poe.bola_max_requests_per_target = focused_bola_poe_settings["bola_max_requests_per_target"]
-                            focused_poe.rate_limit_ms = focused_bola_poe_settings["rate_limit_ms"]
-                            configure_poe(focused_poe)
-                            active_block["focused_bola_request_budget"] = focused_poe.bola_max_requests_per_target
-                            active_block["focused_bola_rate_limit_ms"] = focused_poe.rate_limit_ms
-                            print(
-                                (
-                                    "[scanner] Focused BOLA PoE request budget: "
-                                    f"{focused_poe.bola_max_requests_per_target}, "
-                                    f"rate_limit_ms={focused_poe.rate_limit_ms}"
-                                ),
-                                file=sys.stderr,
-                            )
-                        except Exception as e:
-                            print(f"[scanner] Failed to configure focused BOLA PoE budget: {e}", file=sys.stderr)
-                    try:
-                        bola_results = await asyncio.wait_for(
-                            smart_bola_test(
-                                base_url=base_url,
-                                discovered_urls=bola_urls,
-                                user1_session=auth_session,
-                                user2_session=user2_session,  # Only runs cross-user tests if provided
-                                param_endpoints=bola_param_endpoints,
-                                max_endpoints=smart_bola_max_endpoints,
-                                timeout=10,
-                                max_seconds=bola_overall_deadline,
-                            ),
-                            timeout=bola_overall_deadline + 60,
+                    active_block["collection_authz"] = {
+                        "endpoints_tested": collection_authz_result.get("endpoints_tested", 0),
+                        "vulnerable": collection_authz_result.get("vulnerable", False),
+                        "skipped_reason": collection_authz_result.get("skipped_reason"),
+                        "candidate_count": len(collection_candidates),
+                    }
+                    for f in collection_authz_result.get("findings", []):
+                        nf = normalize_finding(
+                            str(f.get("tool") or "bfla"),
+                            str(f.get("title")),
+                            str(f.get("severity") or "high"),
+                            f.get("evidence") or {},
+                            f.get("cwe") or "CWE-285",
                         )
-                    except (asyncio.TimeoutError, TimeoutError):
+                        nf["verified"] = True
+                        nf["cvss_score"] = 7.5
+                        report["findings"].append(nf)
+                    if collection_authz_result.get("findings"):
+                        print(f"[scanner] BFLA: found {len(collection_authz_result['findings'])} broken-authorization collection(s)", file=sys.stderr)
+                except Exception as e:
+                    active_block["collection_authz_error"] = str(e)
+                    print(f"[scanner] BFLA collection-authz error: {e}", file=sys.stderr)
+
+            # Smart BOLA Testing - run in smart mode to detect authorization issues.
+            # Focused BOLA batches are allowed through the otherwise broad
+            # focused-scope skip gate; other focused families keep BOLA disabled.
+            # user2_session enables the multi-user comparison required by the
+            # registry/API gate for ASM BOLA campaigns.
+            bola_focused = focused_active_family_name == "bola"
+            bola_allowed_by_focus = focused_family_allows_active_module(
+                focused_active_family_name,
+                "bola_idor",
+            )
+            bola_dispatch_enabled = True
+            bola_eligible = (
+                smart_mode
+                and smart_succeeded
+                and not public_only
+                and bola_dispatch_enabled
+            )
+            bola_decision = (
+                bola_enrichment_decision(
+                    bola_focused=bola_focused,
+                    post_active_budget_exhausted=post_active_budget_exhausted,
+                    active_block=active_block,
+                )
+                if bola_eligible
+                else None
+            )
+            if bola_focused and family_requires_two_auth_states("bola") and (not auth_session or not user2_session):
+                active_block["smart_bola"] = {
+                    "vulnerable": False,
+                    "findings": [],
+                    "endpoints_analyzed": 0,
+                    "skipped": True,
+                    "reason": "multi_user_credentials_required",
+                    "endpoint_attempts": [],
+                }
+                record_active_enrichment_skip(
+                    active_block,
+                    "bola_idor",
+                    "multi_user_credentials_required",
+                )
+                print("[scanner] Skipping focused BOLA: primary and second-user credentials are required", file=sys.stderr)
+            elif smart_mode and smart_succeeded and not public_only and not bola_allowed_by_focus:
+                reason = f"focused_family_{focused_active_family_name}"
+                record_active_enrichment_skip(active_block, "bola_idor", reason)
+                active_block.setdefault("active_enrichment_decisions", {})["bola_idor"] = {
+                    "run": False,
+                    "reason": reason,
+                }
+                print(f"[scanner] Skipping BOLA/IDOR testing: {reason}", file=sys.stderr)
+            elif bola_eligible and bola_decision.run:
+                try:
+                    # Get discovered URLs from crawl + smart discovery + JS/HAR for BOLA pattern analysis
+                    bola_urls: list[str] = []
+                    bola_param_endpoints: list[dict[str, Any]] = []
+
+                    def _normalize_bola_url(raw_url: str) -> str | None:
+                        if not raw_url or not isinstance(raw_url, str):
+                            return None
+                        u = raw_url.strip()
+                        if not u:
+                            return None
+                        if u.startswith("//"):
+                            u = "https:" + u
+                        if u.startswith("/"):
+                            u = urllib.parse.urljoin(base_url, u)
+                        if not u.startswith("http"):
+                            u = urllib.parse.urljoin(base_url + "/", u)
+                        return u
+
+                    def _add_bola_urls(urls: list[str] | None) -> None:
+                        if not urls:
+                            return
+                        for u in urls:
+                            normalized = _normalize_bola_url(u)
+                            if normalized:
+                                bola_urls.append(normalized)
+
+                    if smart_discovery_data:
+                        _add_bola_urls(smart_discovery_data.get("all_urls", []))
+                        _add_bola_urls(smart_discovery_data.get("api_endpoints", []))
+                        _add_bola_urls(smart_discovery_data.get("parameterized_urls", []))
+                        _add_bola_urls(smart_discovery_data.get("recursive_paths", []))
+                        bola_param_endpoints.extend(smart_discovery_data.get("endpoints_with_params", []) or [])
+
+                    if crawl_urls:
+                        _add_bola_urls(crawl_urls)
+
+                    if endpoints:
+                        endpoint_urls: list[str] = []
+                        for ep in endpoints:
+                            ep_url = ep.get("url") or ep.get("path")
+                            if ep_url:
+                                endpoint_urls.append(str(ep_url))
+                                params = ep.get("params") or ep.get("query_params") or ep.get("body_params") or []
+                                if params:
+                                    bola_param_endpoints.append({"url": str(ep_url), "params": params})
+                        _add_bola_urls(endpoint_urls)
+
+                    if browser_api_endpoints:
+                        _add_bola_urls(browser_api_endpoints)
+
+                    if js_bundle_analysis and isinstance(js_bundle_analysis, dict):
+                        _add_bola_urls(js_bundle_analysis.get("api_endpoints", []))
+
+                    if har_discovery_result and getattr(har_discovery_result, "endpoints", None):
+                        for ep in har_discovery_result.endpoints:
+                            ep_url = getattr(ep, "url", None)
+                            if ep_url:
+                                _add_bola_urls([ep_url])
+                            # Collect query param hints for synthesis
+                            params: list[str] = []
+                            query_params = getattr(ep, "query_params", None)
+                            if isinstance(query_params, dict):
+                                params = list(query_params.keys())
+                            elif isinstance(query_params, list):
+                                params = [p for p in query_params if isinstance(p, str)]
+                            if params and ep_url:
+                                bola_param_endpoints.append({"url": ep_url, "params": params})
+
+                    # Deduplicate and cap
+                    bola_urls = list(dict.fromkeys(bola_urls))[:500]
+
+                    # §6: record WHY cross-principal BOLA could/couldn't run, so low
+                    # coverage reads as an explainable blocked state, not silent absence.
+                    _bola_blocked: list[str] = []
+                    if not auth_session:
+                        _bola_blocked.append("no_primary_auth")
+                    if not user2_session:
+                        _bola_blocked.append("no_second_user")
+                    if not bola_urls:
+                        _bola_blocked.append("no_endpoints")
+                    bola_candidate_budget = summarize_bola_candidate_budget(
+                        len(bola_urls), smart_bola_max_endpoints
+                    )
+                    active_block["bola_status"] = {
+                        "cross_user_enabled": bool(user2_session and auth_session),
+                        "primary_auth": bool(auth_session),
+                        "second_user": bool(user2_session),
+                        "endpoints_available": len(bola_urls) if bola_urls else 0,
+                        **bola_candidate_budget,
+                        # read-only multi-user replay today; write/BFLA is Lab/deep future work
+                        "mode": "cross_principal_read" if (user2_session and auth_session) else (
+                            "anonymous_vs_user1" if auth_session else "anonymous_only"),
+                        "blocked_reasons": _bola_blocked,
+                    }
+                    if bola_urls:
                         print(
-                            f"[scanner] Smart BOLA testing exceeded {bola_overall_deadline + 60}s hard deadline "
-                            "(target slow/unreachable?); recording partial coverage",
+                            "[scanner] Smart mode: BOLA/IDOR candidate inventory "
+                            f"{bola_candidate_budget['candidate_endpoints']} URLs; configured endpoint ceiling "
+                            f"{bola_candidate_budget['max_endpoints']}",
                             file=sys.stderr,
                         )
-                        bola_results = {
-                            "vulnerable": False, "findings": [], "endpoints_analyzed": 0,
-                            "id_patterns_found": 0, "access_violations": 0, "cross_user_violations": 0,
-                            "timed_out": True, "deadline_seconds": bola_overall_deadline,
-                        }
-                        record_active_enrichment_skip(
-                            active_block, "bola_idor", "bola_overall_deadline_exceeded"
+                        if user2_session:
+                            print("[scanner] Multi-user BOLA: user2_session provided - cross-user comparison enabled", file=sys.stderr)
+                        else:
+                            print("[scanner] Single-user BOLA: no user2_session - unauthenticated access testing only", file=sys.stderr)
+                        emit_progress(
+                            "active_bola",
+                            94,
+                            "starting BOLA/IDOR testing; "
+                            f"candidates={bola_candidate_budget['candidate_endpoints']} "
+                            f"endpoint_ceiling={bola_candidate_budget['max_endpoints']}",
                         )
 
-                    active_block["smart_bola"] = bola_results
-                    _append_endpoint_attempt_telemetry(active_block, bola_results.get("endpoint_attempts"))
-                    emit_progress("active_bola", 94, "BOLA/IDOR testing complete")
+                        # Budget for BOLA testing. On a rich app the discovered-URL
+                        # set can be large enough that testing every template takes
+                        # many minutes. smart_bola_test self-bounds to `max_seconds`
+                        # and returns the findings gathered so far; the outer
+                        # asyncio.wait_for is only a hard backstop (deadline + grace)
+                        # for the pathological case where a request hangs past its
+                        # own timeout. The internal graceful stop preserves partial
+                        # findings that a hard cancel would discard.
+                        bola_overall_deadline = resolve_bola_deadline_seconds(scan_budget, custom_budget)
+                        # Smart-mode BOLA is one lane of the broad active mix, not the
+                        # whole scan. Its resolver carries a 5-min floor and can equal
+                        # the full active budget, so on a rich app it ran ~8-14 min
+                        # *on top of* SQLi/XSS and blocked the scan from completing.
+                        # Cap the non-focused lane hard; focused BOLA keeps its budget.
+                        if not bola_focused:
+                            bola_overall_deadline = min(bola_overall_deadline, SMART_BOLA_LANE_MAX_SECONDS)
+                        if bola_focused:
+                            try:
+                                from scanner_tools.proof_of_exploit import PoEConfig, configure_poe
 
-                    # Add findings to report (shared builder preserves the
-                    # cross-user evidence and triage classification).
-                    if bola_results.get("findings"):
-                        for f in bola_results["findings"]:
-                            _append_bola_finding(
-                                report, f,
-                                tool=str(f.get("tool") or "smart_bola"),
-                                default_title="BOLA/IDOR Vulnerability",
+                                focused_bola_poe_settings = resolve_focused_bola_poe_settings(smart_bola_max_endpoints)
+                                focused_poe = PoEConfig.safe()
+                                focused_poe.bola_max_requests_per_target = focused_bola_poe_settings["bola_max_requests_per_target"]
+                                focused_poe.rate_limit_ms = focused_bola_poe_settings["rate_limit_ms"]
+                                configure_poe(focused_poe)
+                                active_block["focused_bola_request_budget"] = focused_poe.bola_max_requests_per_target
+                                active_block["focused_bola_rate_limit_ms"] = focused_poe.rate_limit_ms
+                                print(
+                                    (
+                                        "[scanner] Focused BOLA PoE request budget: "
+                                        f"{focused_poe.bola_max_requests_per_target}, "
+                                        f"rate_limit_ms={focused_poe.rate_limit_ms}"
+                                    ),
+                                    file=sys.stderr,
+                                )
+                            except Exception as e:
+                                print(f"[scanner] Failed to configure focused BOLA PoE budget: {e}", file=sys.stderr)
+                        try:
+                            bola_results = await asyncio.wait_for(
+                                smart_bola_test(
+                                    base_url=base_url,
+                                    discovered_urls=bola_urls,
+                                    user1_session=auth_session,
+                                    user2_session=user2_session,  # Only runs cross-user tests if provided
+                                    param_endpoints=bola_param_endpoints,
+                                    max_endpoints=smart_bola_max_endpoints,
+                                    timeout=10,
+                                    max_seconds=bola_overall_deadline,
+                                ),
+                                timeout=bola_overall_deadline + 60,
                             )
-                        print(f"[scanner] Smart BOLA: found {len(bola_results['findings'])} vulnerabilities", file=sys.stderr)
-                    else:
-                        print(f"[scanner] Smart BOLA: no vulnerabilities found (tested {bola_results.get('endpoints_analyzed', 0)} endpoints)", file=sys.stderr)
-
-                # Broken function-level authorization (BFLA) on sensitive
-                # collection endpoints: a collection that denies anonymous but
-                # returns bulk cross-principal records to any authenticated user
-                # (e.g. /api/Users -> the full user list incl. admin). Needs a
-                # primary auth context; no-op anonymously. The anon-vs-authed
-                # differential is deterministic proof, so findings arrive verified.
-                if auth_session and collection_authz_result is None:
-                    try:
-                        from scanner_tools.access_control_checks import check_collection_authz
-                        collection_authz = await check_collection_authz(
-                            base_url,
-                            discovered_urls=bola_urls,
-                            auth_session=auth_session,
-                            timeout=10,
-                            max_endpoints=smart_bola_max_endpoints,
-                        )
-                        active_block["collection_authz"] = {
-                            "endpoints_tested": collection_authz.get("endpoints_tested", 0),
-                            "vulnerable": collection_authz.get("vulnerable", False),
-                            "skipped_reason": collection_authz.get("skipped_reason"),
-                        }
-                        for f in collection_authz.get("findings", []):
-                            nf = normalize_finding(
-                                str(f.get("tool") or "bfla"),
-                                str(f.get("title")),
-                                str(f.get("severity") or "high"),
-                                f.get("evidence") or {},
-                                f.get("cwe") or "CWE-285",
+                        except (asyncio.TimeoutError, TimeoutError):
+                            print(
+                                f"[scanner] Smart BOLA testing exceeded {bola_overall_deadline + 60}s hard deadline "
+                                "(target slow/unreachable?); recording partial coverage",
+                                file=sys.stderr,
                             )
-                            # Deterministic anon-vs-authed differential: carry the
-                            # pre-verified state through so the verification phase
-                            # skips it (it would otherwise route to the cross-user
-                            # BOLA prover, which needs user2 and would downgrade).
-                            nf["verified"] = True
-                            nf["cvss_score"] = 7.5
-                            report["findings"].append(nf)
-                        if collection_authz.get("findings"):
-                            print(f"[scanner] BFLA: found {len(collection_authz['findings'])} broken-authorization collection(s)", file=sys.stderr)
-                    except Exception as e:
-                        active_block["collection_authz_error"] = str(e)
-                        print(f"[scanner] BFLA collection-authz error: {e}", file=sys.stderr)
-            except Exception as e:
-                active_block["smart_bola_error"] = str(e)
-                print(f"[scanner] Smart BOLA error: {e}", file=sys.stderr)
-        elif smart_mode and smart_succeeded and not public_only and not focused_manual_active_scope and bola_decision and not bola_decision.run:
-            record_active_enrichment_skip(
-                active_block,
-                "bola_idor",
-                bola_decision.reason or "active_time_budget_exhausted",
-            )
-            print(f"[scanner] Skipping BOLA/IDOR testing: {bola_decision.reason}", file=sys.stderr)
+                            bola_results = {
+                                "vulnerable": False, "findings": [], "endpoints_analyzed": 0,
+                                "id_patterns_found": 0, "access_violations": 0, "cross_user_violations": 0,
+                                "timed_out": True, "deadline_seconds": bola_overall_deadline,
+                            }
+                            record_active_enrichment_skip(
+                                active_block, "bola_idor", "bola_overall_deadline_exceeded"
+                            )
 
-        # Run active checks with a global timeout (standard mode or smart fallback on error)
+                        active_block["smart_bola"] = bola_results
+                        _append_endpoint_attempt_telemetry(active_block, bola_results.get("endpoint_attempts"))
+                        emit_progress("active_bola", 94, "BOLA/IDOR testing complete")
+
+                        # Add findings to report (shared builder preserves the
+                        # cross-user evidence and triage classification).
+                        if bola_results.get("findings"):
+                            for f in bola_results["findings"]:
+                                _append_bola_finding(
+                                    report, f,
+                                    tool=str(f.get("tool") or "smart_bola"),
+                                    default_title="BOLA/IDOR Vulnerability",
+                                )
+                            print(f"[scanner] Smart BOLA: found {len(bola_results['findings'])} vulnerabilities", file=sys.stderr)
+                        else:
+                            print(f"[scanner] Smart BOLA: no vulnerabilities found (tested {bola_results.get('endpoints_analyzed', 0)} endpoints)", file=sys.stderr)
+
+                    # Broken function-level authorization (BFLA) on sensitive
+                    # collection endpoints: a collection that denies anonymous but
+                    # returns bulk cross-principal records to any authenticated user
+                    # (e.g. /api/Users -> the full user list incl. admin). Needs a
+                    # primary auth context; no-op anonymously. The anon-vs-authed
+                    # differential is deterministic proof, so findings arrive verified.
+                    if auth_session and collection_authz_result is None:
+                        try:
+                            from scanner_tools.access_control_checks import check_collection_authz
+                            collection_authz = await check_collection_authz(
+                                base_url,
+                                discovered_urls=bola_urls,
+                                auth_session=auth_session,
+                                timeout=10,
+                                max_endpoints=smart_bola_max_endpoints,
+                            )
+                            active_block["collection_authz"] = {
+                                "endpoints_tested": collection_authz.get("endpoints_tested", 0),
+                                "vulnerable": collection_authz.get("vulnerable", False),
+                                "skipped_reason": collection_authz.get("skipped_reason"),
+                            }
+                            for f in collection_authz.get("findings", []):
+                                nf = normalize_finding(
+                                    str(f.get("tool") or "bfla"),
+                                    str(f.get("title")),
+                                    str(f.get("severity") or "high"),
+                                    f.get("evidence") or {},
+                                    f.get("cwe") or "CWE-285",
+                                )
+                                # Deterministic anon-vs-authed differential: carry the
+                                # pre-verified state through so the verification phase
+                                # skips it (it would otherwise route to the cross-user
+                                # BOLA prover, which needs user2 and would downgrade).
+                                nf["verified"] = True
+                                nf["cvss_score"] = 7.5
+                                report["findings"].append(nf)
+                            if collection_authz.get("findings"):
+                                print(f"[scanner] BFLA: found {len(collection_authz['findings'])} broken-authorization collection(s)", file=sys.stderr)
+                        except Exception as e:
+                            active_block["collection_authz_error"] = str(e)
+                            print(f"[scanner] BFLA collection-authz error: {e}", file=sys.stderr)
+                except Exception as e:
+                    active_block["smart_bola_error"] = str(e)
+                    print(f"[scanner] Smart BOLA error: {e}", file=sys.stderr)
+            elif smart_mode and smart_succeeded and not public_only and not focused_manual_active_scope and bola_decision and not bola_decision.run:
+                record_active_enrichment_skip(
+                    active_block,
+                    "bola_idor",
+                    bola_decision.reason or "active_time_budget_exhausted",
+                )
+                print(f"[scanner] Skipping BOLA/IDOR testing: {bola_decision.reason}", file=sys.stderr)
+
+            # Run active checks with a global timeout (standard mode or smart fallback on error)
+            bola_state = active_block.get("smart_bola") or {}
+            telemetry = {
+                "schema_version": "active_endpoint_attempt_v1",
+                "endpoints_tested": int(
+                    bola_state.get("endpoints_analyzed")
+                    or bola_state.get("endpoints_tested")
+                    or 0
+                ),
+                "finding_count": len(bola_state.get("findings") or []),
+                "access_violations": int(bola_state.get("access_violations") or 0),
+                "cross_user_violations": int(bola_state.get("cross_user_violations") or 0),
+                "cancelled": bool(bola_state.get("cancelled")),
+                "budget_exhausted_reason": bola_state.get("budget_exhausted_reason"),
+            }
+            if active_block.get("smart_bola_error"):
+                return RegistryPhaseOutcome(
+                    "failed",
+                    str(active_block.get("smart_bola_error"))[:200],
+                    telemetry,
+                )
+            if bola_state.get("cancelled"):
+                return RegistryPhaseOutcome(
+                    "cancelled",
+                    "scanner_cancel_requested",
+                    telemetry,
+                )
+            bola_reason = str(bola_state.get("reason") or "")
+            if bola_reason == "multi_user_credentials_required":
+                return RegistryPhaseOutcome("blocked", bola_reason, telemetry)
+            if bola_state.get("skipped"):
+                return RegistryPhaseOutcome(
+                    "skipped",
+                    bola_reason or "bola_runtime_skipped",
+                    telemetry,
+                )
+            return RegistryPhaseOutcome("completed", telemetry=telemetry)
+
+        bola_dispatch_receipts = await dispatch_registry_report_phase(
+            scanner_execution_plan,
+            "active",
+            {"asm_endpoint_batch": run_asm_endpoint_batch_bola},
+            families={"bola"},
+        )
+        active_dispatch_receipts.extend(bola_dispatch_receipts)
         async def run_active_checks():
             for u in cand:
                 try:
@@ -11836,6 +11913,7 @@ async def build_report(target: str,
                 except Exception:
                     pass
 
+
         # Run legacy active checks if NOT in smart mode, OR if smart mode errored (fallback)
         if not smart_succeeded:
             try:
@@ -11871,6 +11949,24 @@ async def build_report(target: str,
             "[scanner] Parallel child shard: skipping duplicate posture/config findings",
             file=sys.stderr,
         )
+    persisted_receipt_keys = {
+        (
+            str(receipt.get("phase") or ""),
+            str(receipt.get("family") or ""),
+            str(receipt.get("dispatch_adapter") or ""),
+        )
+        for receipt in (report.get("scanner_execution_receipts") or [])
+        if isinstance(receipt, dict)
+    }
+    for receipt in active_dispatch_receipts:
+        receipt_key = (
+            str(receipt.get("phase") or ""),
+            str(receipt.get("family") or ""),
+            str(receipt.get("dispatch_adapter") or ""),
+        )
+        if receipt_key not in persisted_receipt_keys:
+            report.setdefault("scanner_execution_receipts", []).append(receipt)
+            persisted_receipt_keys.add(receipt_key)
     if scanner_dispatch_decisions:
         report["scanner_dispatch_decisions"] = scanner_dispatch_decisions
     passive_dispatch_receipts = await dispatch_registry_report_phase(

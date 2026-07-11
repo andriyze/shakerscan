@@ -69,8 +69,9 @@ Typed adapter outcomes prevent a returned-but-incomplete tool run from being lab
 Nuclei receipts carry bounded completion/template/finding counts and fail when `scan_completed=false`.
 The active executor also supports explicit dependency-point family subsets and typed one-call batch
 adapters. JWT and Phase 4 mass-assignment now execute only through their registry adapters and emit
-versioned completion/finding/count telemetry. SQLi/XSS and Auth/BOLA still require phase-by-phase
-migration before Wave 2 is complete.
+versioned completion/finding/count telemetry. Focused Auth and BOLA/BFLA now execute through the
+`asm_endpoint_batch` adapter with blocked/cancelled/budget/access-violation receipts. The shared
+SQLi/XSS loop still requires migration before Wave 2 is complete.
 
 ## Wave 3: telemetry schema expansion
 
