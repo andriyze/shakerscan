@@ -22,6 +22,7 @@ import re
 import secrets
 import sys
 import time
+import urllib.parse
 import urllib.request
 
 try:
@@ -402,6 +403,17 @@ def mint_token(target_url, login_cfg, email, password):
     return None
 
 
+def credential_bootstrap_url(target_url):
+    """Translate Docker's host alias for a helper running on the host itself."""
+    parsed = urllib.parse.urlsplit(target_url)
+    if parsed.hostname != "host.docker.internal":
+        return target_url
+    host = "127.0.0.1"
+    if parsed.port:
+        host = f"{host}:{parsed.port}"
+    return urllib.parse.urlunsplit((parsed.scheme, host, parsed.path, parsed.query, parsed.fragment))
+
+
 def _jwt_principal_identity(token):
     """Extract a stable principal claim from a server-issued JWT for comparison."""
     parts = str(token or "").split(".")
@@ -593,8 +605,9 @@ def submit_target(name, api, do_auth):
     auth_cfg = fx.get("auth") if isinstance(fx.get("auth"), dict) else {}
     if do_auth and auth_cfg:
         principal_nonce = secrets.token_hex(6)
+        auth_target_url = credential_bootstrap_url(fx["target_url"])
         t1 = mint_token(
-            fx["target_url"],
+            auth_target_url,
             auth_cfg.get("user1_login", {}),
             f"bench.u1.{principal_nonce}@shaker.test",
             "Bench!Pass1",
@@ -605,7 +618,7 @@ def submit_target(name, api, do_auth):
         requires_two_users = bool(auth_cfg.get("requires_two_users") or auth_cfg.get("user2_login"))
         if requires_two_users:
             t2 = mint_token(
-                fx["target_url"],
+                auth_target_url,
                 auth_cfg.get("user2_login", auth_cfg.get("user1_login", {})),
                 f"bench.u2.{principal_nonce}@shaker.test",
                 "Bench!Pass2",

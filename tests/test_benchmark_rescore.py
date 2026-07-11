@@ -263,6 +263,11 @@ def test_mint_token_retries_eventually_consistent_login_without_exposing_respons
     assert delays == [0.25, 0.5]
 
 
+def test_credential_bootstrap_url_maps_docker_host_alias_to_loopback():
+    assert b.credential_bootstrap_url("http://host.docker.internal:8888") == "http://127.0.0.1:8888"
+    assert b.credential_bootstrap_url("https://example.test:8443/api") == "https://example.test:8443/api"
+
+
 def test_submit_target_aborts_before_queueing_when_second_principal_is_missing(monkeypatch):
     tokens = iter(["user1-secret", None])
     monkeypatch.setattr(b, "mint_token", lambda *args, **kwargs: next(tokens))
