@@ -12,6 +12,7 @@ All functions follow async patterns and return structured dictionaries.
 """
 
 import asyncio
+import base64
 import hashlib
 import json
 import re
@@ -1821,6 +1822,101 @@ def _resource_ids_from_response(body: str) -> set[str]:
     return {ref["object_id"] for ref in _extract_resource_refs_from_json(body) if ref.get("object_id")}
 
 
+_EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
+# JSON keys whose value identifies the OWNER of a resource / a principal.
+_OWNER_IDENTITY_FIELDS = frozenset({
+    "email", "username", "user_name", "user_id", "userid", "owner", "owner_id",
+    "ownerid", "sub", "account", "account_id", "accountid", "preferred_username",
+})
+
+
+def _decode_jwt_claims(token: str) -> dict[str, Any]:
+    """Best-effort decode of a JWT payload (no signature check — identity read only)."""
+    try:
+        parts = token.split(".")
+        if len(parts) < 2:
+            return {}
+        payload = parts[1] + "=" * (-len(parts[1]) % 4)
+        decoded = base64.urlsafe_b64decode(payload).decode("utf-8", "replace")
+        claims = json.loads(decoded)
+        return claims if isinstance(claims, dict) else {}
+    except Exception:
+        return {}
+
+
+def _principal_identity_values(session: Any) -> set[str]:
+    """Stable identity strings for a principal, decoded from its JWT bearer token.
+
+    Returns an empty set for non-JWT/opaque auth (so ownership can't be spoofed into
+    a false-confirm — the caller stays at the suspected tier when identity is unknown).
+    """
+    if session is None:
+        return set()
+    config = getattr(session, "config", None)
+    headers = dict(getattr(config, "headers", None) or {}) if config is not None else {}
+    auth = headers.get("Authorization") or headers.get("authorization") or ""
+    match = re.match(r"bearer\s+(\S+)", str(auth), re.IGNORECASE)
+    if not match:
+        return set()
+    claims = _decode_jwt_claims(match.group(1))
+    values: set[str] = set()
+    for key in ("email", "sub", "user_id", "userId", "username", "preferred_username", "name"):
+        value = claims.get(key)
+        if isinstance(value, (str, int)) and str(value).strip():
+            values.add(str(value).strip().lower())
+    return values
+
+
+def _owner_identity_values(body: str, limit: int = 40) -> set[str]:
+    """Identity-like values present in a response body (emails + owner-field values)."""
+    values: set[str] = set()
+    if not body:
+        return values
+    for email in _EMAIL_RE.findall(body)[:limit]:
+        values.add(email.lower())
+    try:
+        parsed = json.loads(body)
+    except Exception:
+        return values
+
+    def _walk(node: Any, depth: int = 0) -> None:
+        if depth > 6 or len(values) > limit:
+            return
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if isinstance(value, (str, int)) and str(key).lower().replace("-", "_") in _OWNER_IDENTITY_FIELDS:
+                    token = str(value).strip().lower()
+                    if token:
+                        values.add(token)
+                else:
+                    _walk(value, depth + 1)
+        elif isinstance(node, list):
+            for item in node[:20]:
+                _walk(item, depth + 1)
+
+    _walk(parsed)
+    return values
+
+
+def _confirm_cross_principal_ownership(
+    owner_body: str, owner_session: Any, requester_session: Any
+) -> bool:
+    """True when a replayed response reveals the OWNER principal's identity and NOT
+    the requester's — deterministic proof the requester accessed another user's object.
+
+    Fails closed: if either identity is unresolvable (non-JWT auth) or the owner's
+    identity isn't present in the body, returns False (finding stays a suspected lead).
+    """
+    owner_ident = _principal_identity_values(owner_session)
+    requester_ident = _principal_identity_values(requester_session)
+    if not owner_ident or not requester_ident:
+        return False
+    body_idents = _owner_identity_values(owner_body)
+    if not body_idents:
+        return False
+    return bool(body_idents & owner_ident) and not (body_idents & requester_ident)
+
+
 def _sensitive_fields_from_body(body: str) -> list[str]:
     parsed = _parse_json_body(body)
     if parsed is None:
@@ -3575,18 +3671,19 @@ async def smart_bola_test(
                                 similarity = response_similarity(user1_body, user2_body)
                                 results["cross_user_violations"] += 1
                                 path_hash = hashlib.sha256(f"{test_url}:crossuser".encode()).hexdigest()[:8]
-                                results["findings"].append({
+                                # Deterministic ownership proof: user2's response reveals
+                                # user1's identity and NOT user2's, proving user2 read an
+                                # object it does not own. Only then promote past the
+                                # suspected lead to a verified cross-principal finding.
+                                ownership_confirmed = _confirm_cross_principal_ownership(
+                                    user2_body, user1_session, user2_session
+                                )
+                                finding = {
                                     "id": f"smart_bola:{path_hash}",
                                     "tool": "smart_bola",
                                     "title": f"BOLA: Cross-user data access at {template}",
-                                    "severity": "high",
-                                    "suspected": True,
-                                    "needs_verification": True,
-                                    "verification_reason": (
-                                        "Both users received equivalent user-specific data for the same "
-                                        "resource ID; confirm the second user is not an owner/admin."
-                                    ),
-                                    "confidence": 0.6,
+                                    "cwe": "CWE-639",
+                                    "owasp": "API1:2023 - Broken Object Level Authorization",
                                     "evidence": {
                                         "url": test_url,
                                         "test_id": test_id,
@@ -3598,12 +3695,46 @@ async def smart_bola_test(
                                         "user_specific_signals": user_signals[:8],
                                         "response_snippet": user1_body[:300],
                                     },
-                                    "description": f"Both test users received equivalent user-specific data for resource ID {test_id}. "
-                                                 "If user2 does not own this resource, this is missing object-level authorization.",
-                                    "remediation": "Implement object-level authorization. Verify requesting user owns the resource.",
-                                    "cwe": "CWE-639",
-                                    "owasp": "API1:2023 - Broken Object Level Authorization",
-                                })
+                                }
+                                if ownership_confirmed:
+                                    finding.update({
+                                        "severity": "high",
+                                        "confidence": 0.85,
+                                        "proof_type": "cross_principal_replay",
+                                        "severity_rationale": (
+                                            "High: user2 received an object whose owner identity matches "
+                                            "user1 and not user2 — deterministic cross-principal object access."
+                                        ),
+                                        "description": (
+                                            f"User2 accessed resource ID {test_id} and received data whose owner "
+                                            "identity is user1 (present) and not user2 (absent) — broken "
+                                            "object-level authorization."
+                                        ),
+                                        "remediation": "Authorize every object read against the requesting principal.",
+                                    })
+                                    finding["evidence"].update({
+                                        "proof_type": "cross_principal_replay",
+                                        "ownership_confirmed": True,
+                                        "owner_principal": "user1",
+                                        "requester_principal": "user2",
+                                    })
+                                else:
+                                    finding.update({
+                                        "severity": "high",
+                                        "suspected": True,
+                                        "needs_verification": True,
+                                        "verification_reason": (
+                                            "Both users received equivalent user-specific data for the same "
+                                            "resource ID; confirm the second user is not an owner/admin."
+                                        ),
+                                        "confidence": 0.6,
+                                        "description": (
+                                            f"Both test users received equivalent user-specific data for resource ID {test_id}. "
+                                            "If user2 does not own this resource, this is missing object-level authorization."
+                                        ),
+                                        "remediation": "Implement object-level authorization. Verify requesting user owns the resource.",
+                                    })
+                                results["findings"].append(finding)
 
             # Test without auth
             no_auth_resp = await fetch_with_capture(test_url, timeout=timeout, budget_key="bola")
