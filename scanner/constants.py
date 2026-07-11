@@ -71,6 +71,7 @@ SCAN_BUDGET_FIELDS = {
     "sqli_extract_max",
     "oob_max_findings",
     "active_worklist_max",
+    "request_max",
 }
 
 # Hard ceilings for custom_budget overrides. These are intentionally MUCH higher
@@ -97,6 +98,7 @@ SCAN_BUDGET_CEILINGS = {
     "sqli_extract_max": 100,
     "oob_max_findings": 100,
     "active_worklist_max": 100000,
+    "request_max": 1_000_000,
 }
 
 
@@ -299,6 +301,25 @@ def normalize_budget_profile(value: Any) -> str:
     return profile if profile in SCAN_BUDGET_PROFILES else DEFAULT_SCAN_BUDGET_PROFILE
 
 
+def derive_request_max(budget: dict[str, Any]) -> int:
+    """Conservative request ceiling for one standalone scan budget contract."""
+    def _count(key: str) -> int:
+        try:
+            return max(0, int(budget.get(key) or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    discovery = _count("max_urls") + _count("api_probe_limit")
+    browser = _count("browser_max_pages") * 20
+    template = _count("nuclei_max_targets") * 3
+    active = (
+        _count("active_max_endpoints")
+        * max(1, _count("active_params_per_endpoint"))
+        * 24
+    )
+    return max(1, min(SCAN_BUDGET_CEILINGS["request_max"], discovery + browser + template + active))
+
+
 def resolve_scan_budget(
     scan_type: str | None,
     budget_profile: str | None = None,
@@ -337,6 +358,8 @@ def resolve_scan_budget(
                 value = ceiling
             budget[key] = value
 
+    if budget.get("request_max") is None:
+        budget["request_max"] = derive_request_max(budget)
     budget.setdefault("budget_source", "resolved")
     return budget
 

@@ -22,7 +22,14 @@ def test_resolve_scan_budget_applies_profile_defaults():
     assert thorough["budget_profile"] == "thorough"
     assert thorough["max_urls"] > fast["max_urls"]
     assert thorough["active_max_endpoints"] > fast["active_max_endpoints"]
+    assert thorough["request_max"] > fast["request_max"]
     assert thorough["nuclei_early_stop"] is False
+
+
+def test_request_budget_override_is_bounded_and_stamped():
+    budget = resolve_scan_budget("smart", "balanced", {"request_max": 321})
+
+    assert budget["request_max"] == 321
 
 
 def test_resolve_scan_budget_accepts_safe_custom_overrides():

@@ -109,6 +109,7 @@ export default function NewScanPage() {
     user2_cookies: ''
   })
   const [customBudgetEnabled, setCustomBudgetEnabled] = useState(false)
+  const [enforceRequestBudget, setEnforceRequestBudget] = useState(false)
   const [customBudget, setCustomBudget] = useState({
     max_duration_minutes: '',
     discovery_depth: '',
@@ -124,6 +125,7 @@ export default function NewScanPage() {
     active_max_endpoints: '',
     active_params_per_endpoint: '',
     active_worklist_max: '',
+    request_max: '',
     max_findings_per_family: '',
     smart_bola_max_endpoints: '',
     dom_xss_max_files: '',
@@ -218,6 +220,7 @@ export default function NewScanPage() {
       const scanOptions: Record<string, unknown> = {
         ...getScanOptions(scanType),
         budget_profile: isCoverageMode ? (isDeepCoverage ? 'exhaustive' : 'thorough') : budgetProfile,
+        request_budget_mode: enforceRequestBudget ? 'enforce' : 'compatibility',
         ...(isParallelMode && customEndpoints.length > 0 ? { custom_endpoints: customEndpoints } : {}),
         ...(executionMode === 'normal' ? { parallel: false } : {}),
         ...(isParallelMode
@@ -615,6 +618,12 @@ export default function NewScanPage() {
                   </div>
                 </div>
               </div>
+              <OptionToggle
+                label="Enforce Request Budget"
+                description="Stop outbound target requests at the resolved request limit"
+                checked={enforceRequestBudget}
+                onChange={setEnforceRequestBudget}
+              />
               <OptionToggle
                 label="Custom Budget"
                 description="Override selected depth and timeout limits"

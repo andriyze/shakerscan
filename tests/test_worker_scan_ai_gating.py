@@ -1997,6 +1997,34 @@ def test_run_scan_maps_active_worklist_budget_flag(monkeypatch):
     assert captured["cmd"][captured["cmd"].index("--budget-active-worklist-max") + 1] == "50000"
 
 
+def test_run_scan_passes_enforcing_request_budget_contract(monkeypatch):
+    captured = {}
+
+    async def _fake_create_subprocess_exec(*cmd, **kwargs):
+        captured["cmd"] = list(cmd)
+        captured["env"] = kwargs.get("env") or {}
+        return _FakeProcess(b'{"ok": true, "findings": []}')
+
+    monkeypatch.setattr(worker.asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+    monkeypatch.setattr(worker, "_load_runtime_ai_settings", lambda: {})
+
+    result = asyncio.run(worker.run_scan(
+        "https://example.com",
+        {
+            "scan_type": "smart",
+            "request_budget_mode": "enforce",
+            "request_budget_reserved": 50,
+            "custom_budget": {"request_max": 77},
+        },
+    ))
+
+    assert result.get("ok") is True
+    assert captured["cmd"][captured["cmd"].index("--budget-request-max") + 1] == "77"
+    assert captured["env"]["SHAKERSCAN_REQUEST_BUDGET_MODE"] == "enforce"
+    assert captured["env"]["SHAKERSCAN_REQUEST_BUDGET_LIMIT"] == "77"
+    assert captured["env"]["SHAKERSCAN_REQUEST_BUDGET_RESERVED"] == "50"
+
+
 def test_standalone_scan_rate_reservation_uses_resolved_active_budget():
     assert worker._standalone_scan_rate_reservation_amount({"scan_type": "quick"}) == 0
     assert worker._standalone_scan_rate_reservation_amount({
@@ -2011,6 +2039,14 @@ def test_standalone_scan_rate_reservation_uses_resolved_active_budget():
         "scan_type": "standard",
         "custom_endpoints": ["GET /a", "POST /b json:{\"x\":1}"],
     }) == 2
+
+
+def test_standalone_enforcing_request_budget_reserves_request_tokens():
+    assert worker._standalone_scan_rate_reservation_amount({
+        "scan_type": "smart",
+        "request_budget_mode": "enforce",
+        "custom_budget": {"request_max": 77},
+    }) == 77
 
 
 def test_active_endpoint_attempts_from_report_filters_valid_entries():

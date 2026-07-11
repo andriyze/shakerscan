@@ -80,6 +80,11 @@ from scanner_tools.attempt_telemetry import (
     normalize_endpoint_attempt,
     normalize_registry_attempt_telemetry,
 )
+from scanner_tools.request_meter import (
+    configure_request_meter,
+    get_request_meter,
+    install_async_client_metering,
+)
 from scanner_tools.exposure_markers import exposure_severity
 from scanner_tools.adaptive_throttle import configure_throttle, get_throttle
 from scanner_tools.har_discovery import (
@@ -151,6 +156,9 @@ SCANNER_FINGERPRINT_FILES = {
     "approval_checks.py": "/app/scanner_tools/approval_checks.py",
     "access_control_checks.py": "/app/scanner_tools/access_control_checks.py",
     "attempt_telemetry.py": "/app/scanner_tools/attempt_telemetry.py",
+    "request_meter.py": "/app/scanner_tools/request_meter.py",
+    "auth_session.py": "/app/scanner_tools/auth_session.py",
+    "oauth_auth.py": "/app/scanner_tools/oauth_auth.py",
     "infrastructure_checks.py": "/app/scanner_tools/infrastructure_checks.py",
     # AI-gate / model-intake / redaction paths run in the worker too; include them
     # so a stale copy of these (the skew that caused intermittent false mismatches)
@@ -3830,6 +3838,25 @@ async def build_report(target: str,
     if thorough_params and not effective_budget_profile and not custom_budget:
         effective_budget_profile = "thorough"
     scan_budget = resolve_scan_budget(budget_scan_type, effective_budget_profile, custom_budget)
+    request_limit = int(scan_budget.get("request_max") or 0)
+    env_request_limit = os.environ.get("SHAKERSCAN_REQUEST_BUDGET_LIMIT")
+    if env_request_limit is not None:
+        try:
+            request_limit = min(request_limit, max(0, int(env_request_limit)))
+        except (TypeError, ValueError):
+            pass
+    try:
+        request_reserved = max(0, int(os.environ.get("SHAKERSCAN_REQUEST_BUDGET_RESERVED") or 0))
+    except (TypeError, ValueError):
+        request_reserved = 0
+    request_meter = configure_request_meter(
+        limit=request_limit,
+        target_host=os.environ.get("SHAKERSCAN_REQUEST_BUDGET_DOMAIN") or target_host,
+        mode=os.environ.get("SHAKERSCAN_REQUEST_BUDGET_MODE", "compatibility"),
+        planned=int(scan_budget.get("request_max") or 0),
+        reserved=request_reserved,
+    )
+    request_meter_hooks = install_async_client_metering()
     requested_active_family = normalize_scanner_check_family(active_check_family)
     focused_active_family_name = None
     if active_checks and requested_active_family and requested_active_family != "all":
@@ -12688,6 +12715,33 @@ async def build_report(target: str,
     # Use the scan_session_id we created at the start for consistency
     # Enhanced metadata includes checks_skipped for transparency
     checks_skipped = []
+    request_budget_telemetry = request_meter.snapshot()
+    request_budget_telemetry["hooks"] = request_meter_hooks
+    report["request_budget"] = request_budget_telemetry
+    request_budget_stopped = bool(
+        request_budget_telemetry.get("rejected_requests")
+        and request_budget_telemetry.get("mode") == "enforce"
+    )
+    report.setdefault("scanner_execution_receipts", []).append({
+        "family": "request_budget",
+        "phase": "scan",
+        "dispatch_adapter": "shared_request_meter",
+        "status": "failed" if request_budget_stopped else "completed",
+        "reason": "request_budget_exhausted" if request_budget_stopped else "request_budget_accounted",
+        "telemetry_schema": "request_meter_v1",
+        "proof_contract": [
+            "planned_requests", "reserved_requests", "attempted_requests",
+            "completed_requests", "retried_requests", "rejected_requests",
+        ],
+        "telemetry": request_budget_telemetry,
+    })
+    if request_budget_stopped:
+        checks_skipped.append({
+            "check": "outbound_requests",
+            "reason": "request_budget_exhausted",
+            "impact": "remaining network-backed checks were not run",
+            "configured": True,
+        })
     if active_checks and public_only:
         checks_skipped.append({
             "check": "active_checks",
@@ -12886,6 +12940,7 @@ async def build_report(target: str,
         checks_skipped=checks_skipped,
         active_block=report.get("active_checks"),
         discovery_summary=discovery_summary,
+        request_budget=report.get("request_budget"),
     )
     if isinstance(report.get("scan_metadata"), dict):
         report["scan_metadata"]["scan_completion_status"] = report["scan_completion_status"]
@@ -13677,6 +13732,7 @@ async def cli_main():
     ap.add_argument("--budget-active-max-endpoints", type=int, dest="budget_active_max_endpoints")
     ap.add_argument("--budget-active-params-per-endpoint", type=int, dest="budget_active_params_per_endpoint")
     ap.add_argument("--budget-active-worklist-max", type=int, dest="budget_active_worklist_max")
+    ap.add_argument("--budget-request-max", type=int, dest="budget_request_max")
     ap.add_argument("--budget-max-findings-per-family", type=int, dest="budget_max_findings_per_family",
                     help="-1 disables the per-family active finding cap")
     # Safety/performance limits
@@ -14581,6 +14637,7 @@ async def cli_main():
             "active_max_endpoints": getattr(args, "budget_active_max_endpoints", None),
             "active_params_per_endpoint": getattr(args, "budget_active_params_per_endpoint", None),
             "active_worklist_max": getattr(args, "budget_active_worklist_max", None),
+            "request_max": getattr(args, "budget_request_max", None),
             "max_findings_per_family": (
                 None if getattr(args, "budget_max_findings_per_family", None) == -1
                 else getattr(args, "budget_max_findings_per_family", None)

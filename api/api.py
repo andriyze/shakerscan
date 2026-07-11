@@ -2998,6 +2998,11 @@ class ScanOptions(BaseModel):
         default=None,
         description="Advanced per-scan budget overrides such as max_urls, active_max_seconds, or browser_max_pages.",
     )
+    request_budget_mode: str = Field(
+        default="compatibility",
+        pattern="^(off|compatibility|enforce)$",
+        description="Outbound target request accounting mode for standalone scans.",
+    )
 
     # Safety/performance limits
     smart_bola_max_endpoints: Optional[int] = Field(
@@ -6848,6 +6853,9 @@ def expected_build_fingerprint() -> Optional[str]:
         "approval_checks.py": "/workspace/scanner/scanner_tools/approval_checks.py",
         "access_control_checks.py": "/workspace/scanner/scanner_tools/access_control_checks.py",
         "attempt_telemetry.py": "/workspace/scanner/scanner_tools/attempt_telemetry.py",
+        "request_meter.py": "/workspace/scanner/scanner_tools/request_meter.py",
+        "auth_session.py": "/workspace/scanner/scanner_tools/auth_session.py",
+        "oauth_auth.py": "/workspace/scanner/scanner_tools/oauth_auth.py",
         "infrastructure_checks.py": "/workspace/scanner/scanner_tools/infrastructure_checks.py",
         "model_intake.py": "/workspace/scanner/scanner_tools/model_intake.py",
         "redaction.py": "/workspace/scanner/redaction.py",
@@ -6870,6 +6878,9 @@ def expected_build_fingerprint() -> Optional[str]:
         "approval_checks.py": "/app/scanner_tools/approval_checks.py",
         "access_control_checks.py": "/app/scanner_tools/access_control_checks.py",
         "attempt_telemetry.py": "/app/scanner_tools/attempt_telemetry.py",
+        "request_meter.py": "/app/scanner_tools/request_meter.py",
+        "auth_session.py": "/app/scanner_tools/auth_session.py",
+        "oauth_auth.py": "/app/scanner_tools/oauth_auth.py",
         "infrastructure_checks.py": "/app/scanner_tools/infrastructure_checks.py",
         "model_intake.py": "/app/scanner_tools/model_intake.py",
         "redaction.py": "/app/redaction.py",

@@ -538,6 +538,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
       ? `${formatCheckFamilyName(scan_config.focused_active_family)} only`
       : null)
   const resolved_budget = scan_config.resolved_budget || scan.options?.resolved_budget || {}
+  const requestBudget = scanData.request_budget || {}
   const budgetProfile = scan_config.budget_profile || scan.options?.budget_profile || resolved_budget.budget_profile
   const coverage = scanData.coverage || {}
   const smart_coverage = scanData.smart_coverage || {}
@@ -866,6 +867,12 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
                   {resolved_budget.max_urls ? `${resolved_budget.max_urls} URLs` : ''}
                   {resolved_budget.max_urls && resolved_budget.active_max_endpoints ? ' / ' : ''}
                   {resolved_budget.active_max_endpoints ? `${resolved_budget.active_max_endpoints} active endpoints` : ''}
+                </p>
+              )}
+              {(requestBudget.request_limit !== undefined || resolved_budget.request_max) && (
+                <p className="mt-1 text-xs text-gray-500">
+                  {requestBudget.attempted_requests || 0}/{requestBudget.request_limit ?? resolved_budget.request_max} requests
+                  {requestBudget.mode ? ` (${requestBudget.mode})` : ''}
                 </p>
               )}
             </div>

@@ -1906,6 +1906,7 @@ async def run_scan(target: str, options: dict, scan_id: str | None = None, job_i
             "active_max_endpoints": "--budget-active-max-endpoints",
             "active_params_per_endpoint": "--budget-active-params-per-endpoint",
             "active_worklist_max": "--budget-active-worklist-max",
+            "request_max": "--budget-request-max",
             "dom_xss_max_files": "--dom-xss-max-files",
             "smart_bola_max_endpoints": "--smart-bola-max-endpoints",
             "sqli_extract_max": "--sqli-extract-max",
@@ -2044,6 +2045,29 @@ async def run_scan(target: str, options: dict, scan_id: str | None = None, job_i
         _policy_overrides["proof_required_for_smart"] = options.get("proof_required_for_smart")
     _policy_for_env = VerificationPolicy.from_env(overrides=_policy_overrides)
     scan_env["PROOF_REQUIRED_FOR_SMART"] = "true" if _policy_for_env.proof_required_for_smart else "false"
+    request_budget_mode = str(
+        options.get("request_budget_mode")
+        or os.environ.get("SHAKERSCAN_REQUEST_BUDGET_MODE")
+        or "compatibility"
+    ).strip().lower()
+    if request_budget_mode not in {"off", "compatibility", "enforce"}:
+        request_budget_mode = "compatibility"
+    scan_env["SHAKERSCAN_REQUEST_BUDGET_MODE"] = request_budget_mode
+    resolved_request_budget = resolve_or_consume_budget(
+        scan_type or "standard",
+        options=options,
+        budget_profile=options.get("budget_profile"),
+        custom_budget=custom_budget if isinstance(custom_budget, dict) else None,
+    )
+    scan_env["SHAKERSCAN_REQUEST_BUDGET_LIMIT"] = str(
+        max(0, int(resolved_request_budget.get("request_max") or 0))
+    )
+    if options.get("request_budget_reserved") is not None:
+        scan_env["SHAKERSCAN_REQUEST_BUDGET_RESERVED"] = str(
+            max(0, int(options.get("request_budget_reserved") or 0))
+        )
+    if options.get("request_budget_domain"):
+        scan_env["SHAKERSCAN_REQUEST_BUDGET_DOMAIN"] = str(options["request_budget_domain"])
     if scan_id:
         checkpoint_file = RESULTS_DIR / f"{scan_id}_checkpoint.json"
         scan_env["SCAN_CHECKPOINT_FILE"] = str(checkpoint_file)
@@ -4064,6 +4088,23 @@ def _standalone_scan_rate_reservation_amount(options: dict[str, Any] | None) -> 
     up front instead of fail-opening unlimited discovered requests.
     """
     opts = options or {}
+    request_budget_mode = str(
+        opts.get("request_budget_mode")
+        or os.environ.get("SHAKERSCAN_REQUEST_BUDGET_MODE")
+        or "compatibility"
+    ).strip().lower()
+    if request_budget_mode == "enforce":
+        custom_budget = opts.get("custom_budget") if isinstance(opts.get("custom_budget"), dict) else {}
+        try:
+            resolved = resolve_or_consume_budget(
+                str(opts.get("scan_type") or "standard"),
+                options=opts,
+                budget_profile=opts.get("budget_profile"),
+                custom_budget=custom_budget,
+            )
+            return max(0, int(resolved.get("request_max") or 0))
+        except Exception:
+            return 0
     known = _known_endpoint_count(opts)
     if known > 0:
         return known
@@ -6109,6 +6150,11 @@ async def process_scan_job(job_data: dict):
             ai_target_id = str(row['ai_target_id']) if row['ai_target_id'] else None
 
     reserve_amount = _standalone_scan_rate_reservation_amount(options)
+    enforcing_request_budget = str(
+        options.get("request_budget_mode")
+        or os.environ.get("SHAKERSCAN_REQUEST_BUDGET_MODE")
+        or "compatibility"
+    ).strip().lower() == "enforce"
     if reserve_amount > 0 and target_id:
         try:
             async with db_pool.acquire() as conn:
@@ -6144,14 +6190,27 @@ async def process_scan_job(job_data: dict):
         if 0 < granted < reserve_amount:
             options = dict(options or {})
             budget = dict(options.get("custom_budget") or {})
-            budget["active_max_endpoints"] = granted
+            if enforcing_request_budget:
+                budget["request_max"] = granted
+            else:
+                budget["active_max_endpoints"] = granted
             options["custom_budget"] = budget
-            options["domain_rate_active_endpoint_grant"] = granted
+            options[
+                "domain_rate_request_grant"
+                if enforcing_request_budget
+                else "domain_rate_active_endpoint_grant"
+            ] = granted
             print(
-                f"[{job_id[:8]}] domain rate limited standalone scan active endpoint budget "
+                f"[{job_id[:8]}] domain rate limited standalone scan "
+                f"{'request' if enforcing_request_budget else 'active endpoint'} budget "
                 f"to {granted}/{reserve_amount} for {rate.get('root_domain') or 'unknown'}",
                 flush=True,
             )
+        if granted > 0:
+            options = dict(options or {})
+            options["request_budget_reserved"] = granted
+            if rate.get("root_domain"):
+                options["request_budget_domain"] = str(rate["root_domain"])
 
     # Initial progress
     await update_scan_progress(scan_id, "starting", 5, job_id=job_id)

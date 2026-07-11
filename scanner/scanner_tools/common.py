@@ -12,6 +12,11 @@ import urllib.request
 from datetime import UTC, datetime
 from typing import Any
 
+try:
+    from .request_meter import RequestBudgetExceeded, get_request_meter
+except ImportError:  # pragma: no cover - flat-module fallback
+    from request_meter import RequestBudgetExceeded, get_request_meter
+
 try:  # sibling module; tolerate flat (/app) execution
     from .adaptive_throttle import get_throttle as _get_active_throttle
 except ImportError:  # pragma: no cover - flat-module fallback
@@ -246,14 +251,54 @@ async def run(
     # scan; it paces the shared request stream so a single-process target under
     # load stops returning degraded responses that make detectors flake. No-op
     # unless explicitly enabled (non-active scans are unaffected).
-    is_http_request = bool(cmd) and cmd[0] == "curl"
+    tool_basename = os.path.basename(cmd[0]) if cmd else "subprocess"
+    is_http_request = tool_basename == "curl"
+    request_urls = [
+        value for value in cmd
+        if isinstance(value, str) and value.startswith(("http://", "https://"))
+    ]
+    request_url = request_urls[-1] if request_urls else None
+    unmetered_network_tools = {
+        "dalfox", "ffuf", "httpx", "katana", "meg", "nikto", "nuclei",
+        "sqlmap", "xsstrike.py",
+    }
+    meter = get_request_meter()
+    if is_http_request and meter.enforcing and request_url and "-L" in cmd:
+        bounded_cmd: list[str] = []
+        skip_next = False
+        for value in cmd:
+            if skip_next:
+                skip_next = False
+                continue
+            if value in {"-L", "--location"}:
+                continue
+            if value == "--max-redirs":
+                skip_next = True
+                continue
+            bounded_cmd.append(value)
+        cmd = bounded_cmd
+    if tool_basename in unmetered_network_tools:
+        try:
+            meter.record_unmetered_tool(tool=tool_basename, target_url=request_url)
+        except RequestBudgetExceeded as exc:
+            return "", str(exc), 75
     _throttle = _get_active_throttle() if (is_http_request and _get_active_throttle) else None
 
     async with _get_semaphore():
         for attempt in range(retry + 1):
             proc = None
+            metered_request = False
             use_process_group = kill_process_group and os.name == "posix"
             tool_name = cmd[0] if cmd else "subprocess"
+            if is_http_request and request_url:
+                try:
+                    metered_request = meter.before_request(
+                        phase="curl",
+                        url=request_url,
+                        retry=attempt > 0,
+                    )
+                except RequestBudgetExceeded as exc:
+                    return "", str(exc), 75
             if _throttle is not None:
                 await _throttle.before()
             _req_started = time.monotonic()
@@ -356,6 +401,9 @@ async def run(
                     error=str(e),
                 )
                 return "", str(e), 1
+            finally:
+                if metered_request:
+                    meter.record_completion(phase="curl", url=request_url)
         return "", "Max retries exceeded", 1
 
 

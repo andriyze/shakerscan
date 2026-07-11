@@ -175,32 +175,12 @@ async def _http_request(
 
     cmd.append(url)
 
-    proc = None
     try:
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
-        try:
-            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-        except TimeoutError:
-            # Kill the subprocess on timeout to prevent orphans
-            try:
-                proc.kill()
-                await proc.wait()
-            except Exception:
-                pass
-            return {"status": 0, "body": "", "error": "timeout"}
-        except asyncio.CancelledError:
-            if proc:
-                try:
-                    proc.kill()
-                    await proc.wait()
-                except Exception:
-                    pass
-            raise
-        output = stdout.decode("utf-8", errors="replace")
+        from .common import run
+
+        output, error, rc = await run(cmd, timeout=timeout)
+        if rc != 0:
+            return {"status": 0, "body": "", "error": error or f"curl failed with code {rc}"}
 
         # Split response body and status code
         lines = output.rsplit("\n", 2)
@@ -219,12 +199,6 @@ async def _http_request(
     except TimeoutError:
         return {"status": 0, "body": "", "error": "timeout"}
     except asyncio.CancelledError:
-        if proc:
-            try:
-                proc.kill()
-                await proc.wait()
-            except Exception:
-                pass
         raise
     except Exception as e:
         return {"status": 0, "body": "", "error": str(e)}
