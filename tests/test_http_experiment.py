@@ -368,3 +368,32 @@ def test_rendered_header_name_cannot_become_credential_header():
 def test_normalize_experiment_rejects_sensitive_request_and_selected_fields(override, error):
     with pytest.raises(experiment.ExperimentContractError, match=error):
         experiment.normalize_experiment("https://example.test", _payload(**override))
+
+
+def test_normalize_experiment_rejects_non_ascii_header():
+    with pytest.raises(experiment.ExperimentContractError, match="header_not_ascii"):
+        experiment.normalize_experiment("https://example.test", _payload(headers={"X-Test": "€uro"}))
+
+
+def test_execute_experiment_fails_closed_on_non_ascii_header_from_variable():
+    # A non-ASCII value extracted from the target's own response, rendered into a later header, must
+    # fail closed (recorded step error) rather than raise an uncaught UnicodeEncodeError.
+    def handler(request):
+        if request.url.path == "/a":
+            return httpx.Response(200, json={"v": "€uro"})
+        return httpx.Response(200, json={})
+
+    result = asyncio.run(experiment.execute_experiment(
+        "https://example.test",
+        {
+            "steps": [
+                {"label": "control", "method": "GET", "path": "/a",
+                 "extract": [{"name": "v", "source": "json", "path": "$.v"}]},
+                {"label": "mutation", "method": "GET", "path": "/b", "headers": {"X-Test": "${v}"}},
+            ]
+        },
+        transport=httpx.MockTransport(handler),
+    ))
+
+    assert result["observations"][0]["error"] is None
+    assert result["observations"][1]["error"] == "rendered_header_invalid:X-Test"

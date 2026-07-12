@@ -13,7 +13,7 @@ from urllib.parse import urljoin, urlparse
 import httpx
 
 
-HTTP_EXPERIMENT_VERSION = "http-experiment-2026-07-12.v3"
+HTTP_EXPERIMENT_VERSION = "http-experiment-2026-07-12.v4"
 ALLOWED_METHODS = {"GET", "HEAD", "OPTIONS", "POST", "PUT", "PATCH", "DELETE"}
 FORBIDDEN_HEADERS = {"authorization", "cookie", "host", "proxy-authorization", "x-api-key"}
 MAX_STEPS = 4
@@ -203,6 +203,8 @@ def normalize_experiment(target_url: str, raw: Any) -> dict[str, Any]:
             header_value = str(value)[:1000]
             if "\r" in name or "\n" in name or "\r" in header_value or "\n" in header_value:
                 raise ExperimentContractError(f"step_{index}_header_contains_control_character")
+            if not name.isascii() or not header_value.isascii():
+                raise ExperimentContractError(f"step_{index}_header_not_ascii")
             normalized_headers[name[:120]] = header_value
             normalized_header_names.add(lower_name)
         body = item.get("json_body")
@@ -433,7 +435,12 @@ async def execute_experiment(target_url: str, raw: Any, *, transport: httpx.Asyn
                         or "\n" in str(name)
                     ):
                         raise ExperimentContractError(f"rendered_header_forbidden:{lower_name}")
-                    if len(str(value).encode("utf-8")) > 1000 or "\r" in str(value) or "\n" in str(value):
+                    if (
+                        len(str(value).encode("utf-8")) > 1000
+                        or "\r" in str(value)
+                        or "\n" in str(value)
+                        or not str(value).isascii()
+                    ):
                         raise ExperimentContractError(f"rendered_header_invalid:{name}")
                     rendered_header_names.add(lower_name)
                 for field_name, rendered_value in (
@@ -514,7 +521,7 @@ async def execute_experiment(target_url: str, raw: Any, *, transport: httpx.Asyn
                     },
                     "error": None,
                 })
-            except (httpx.HTTPError, ExperimentContractError) as exc:
+            except (httpx.HTTPError, ExperimentContractError, UnicodeError, ValueError) as exc:
                 observations.append({
                     "label": step["label"],
                     "role": step["role"],

@@ -59,7 +59,7 @@ Acceptance evidence:
 
 ### Wave 2: Chained values and richer differentials
 
-**Status: complete and committed (`332ae2b`), hardened in `5f0482e` (contract `http-experiment-2026-07-12.v3`). One residual acceptance-hardening item is open — see "Residual" below.**
+**Status: complete and committed (`332ae2b`), hardened in `5f0482e`; the non-ASCII-header fail-open residual is now fixed (contract `http-experiment-2026-07-12.v4`). See "Residual (resolved)" below.**
 
 Scope:
 
@@ -91,7 +91,7 @@ Acceptance evidence:
 - two successful requests, JSON/header/timing deltas recorded, extracted value persisted only as hash/length, zero findings created;
 - the global execution gate was restored to disabled and the ephemeral target/server were removed after validation.
 
-Residual (open, tracked under §4.3): a non-ASCII header name or value still fails *open* — `client.build_request` raises an uncaught `UnicodeEncodeError` before the recording transaction, so the run returns 500 with no tool receipt / evidence / command result written, and it is reachable from the target's own response (a Unicode value extracted into a later step's header). This violates the §1 "fails closed = recorded" invariant; the missing/ambiguous-variable and post-substitution origin-escape paths already fail closed correctly. Fix: reject non-ASCII header names/values in `normalize`/rendered-header checks and widen the executor `except` to `UnicodeError`.
+Residual (RESOLVED): the non-ASCII-header fail-*open* is fixed. `normalize_experiment` and the rendered-header check reject non-ASCII header names/values, and the executor `except` now also catches `UnicodeError`/`ValueError`, so a non-ASCII header — including one extracted from the target's own response and rendered into a later step — now fails *closed*: a static header is rejected at the contract boundary (422) and a variable-rendered one is recorded as a step error (never an uncaught 500). Regression-tested in `tests/test_http_experiment.py`.
 
 ### Wave 3: Principal-bound stateful workflow runtime
 
