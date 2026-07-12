@@ -281,6 +281,9 @@ export default function AdaptiveLeadsPage() {
           <Link href="/settings/research-agent" className="text-sm text-gray-400 hover:text-white inline-flex items-center gap-1">
             <ArrowLeft className="h-4 w-4" /> Episodes
           </Link>
+          <Link href="/settings/research-agent/experiment" className="text-sm text-emerald-300 hover:text-emerald-200 inline-flex items-center gap-1">
+            <FlaskConical className="h-4 w-4" /> Experiment
+          </Link>
           <Button variant="secondary" size="sm" onClick={() => load().catch(() => undefined)} disabled={loading || busy}>
             <RefreshCw className="h-4 w-4" /> Refresh
           </Button>

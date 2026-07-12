@@ -2527,6 +2527,37 @@ export async function evaluateFamilyProof(payload: {
   return res.json()
 }
 
+// --- Bounded HTTP differential experiment builder (Wave 2 + 8) ---
+
+export interface ArsenalExecuteResult {
+  command: string
+  dispatched: boolean
+  dry_run: boolean
+  execution_blocked_reason?: string
+  result?: Record<string, unknown>
+  operation_id?: string | null
+  action_state?: Record<string, unknown>
+  command_result?: Record<string, unknown>
+  execution_enabled: boolean
+}
+
+export async function executeArsenalCommand(payload: {
+  command: string
+  parameters: Record<string, unknown>
+  execute?: boolean
+  confirmations?: string[]
+  approval_receipt_id?: string
+  created_by?: string
+}): Promise<ArsenalExecuteResult> {
+  const res = await fetch(`${API_URL}/arsenal/execute`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Arsenal execution failed'))
+  return res.json()
+}
+
 export async function reconcileHypothesisProof(
   hypothesisId: string,
   payload: {

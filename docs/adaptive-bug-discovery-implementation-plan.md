@@ -236,7 +236,7 @@ Acceptance:
 
 ### Wave 8: Research Agent UI
 
-**Status: adaptive workbench implemented & Next-build-verified. Existing `/settings/research-agent` runs planner episodes ("Run step"); new `/settings/research-agent/leads` ("Adaptive Leads & Proof", in the sidebar) surfaces the deterministic scheduler with priority breakdowns (Wave 6), gated lifecycle transitions showing only legal edges with refuting rendered as verification-gated (Wave 4), and the family proof handoff — contract picker → structured-evidence checkboxes → verdict/promotable (Wave 5). The full control/mutation/verify experiment step-editor remains as below.**
+**Status: adaptive workbench implemented & Next-build-verified. Existing `/settings/research-agent` runs planner episodes ("Run step"); new `/settings/research-agent/leads` ("Adaptive Leads & Proof", in the sidebar) surfaces the deterministic scheduler with priority breakdowns (Wave 6), gated lifecycle transitions showing only legal edges with refuting rendered as verification-gated (Wave 4), and the family proof handoff — contract picker → structured-evidence checkboxes → verdict/promotable (Wave 5). The control/mutation/verify experiment step-editor is `/settings/research-agent/experiment` (2–4 steps: method/path/query/headers/JSON body/role/compare_to, no raw JSON; submits a dry-run and surfaces the active-execution gate state).**
 
 Scope:
 
