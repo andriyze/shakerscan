@@ -26754,6 +26754,21 @@ async def launch_research_episode(req: ResearchLaunchRequest):
         family = _research_finding_family(finding)
         allowed_families = [family] if family else []
 
+    if req.mission_profile == "target_hunt":
+        # Seed the hunt with DAST-residue / application-graph leads (auth-boundary edges and
+        # producer->consumer object flows persisted from prior scans) so the loop investigates
+        # unexplained residue rather than re-verifying findings the scanner already reported.
+        # The observation ranks with require_residue=True, so without these leads the ranked
+        # board is empty and the planner degrades to generic scanning. Best-effort: the graph
+        # only exists after a prior scan, and seeding must never block a launch.
+        try:
+            await generate_application_graph_hypotheses(
+                str(target_id),
+                created_by=f"hunt_launch:{req.created_by or 'operator'}",
+            )
+        except Exception:
+            logger.warning("Hunt residue seeding failed for target %s", target_id, exc_info=True)
+
     create_request = ResearchEpisodeRequest(
         target_id=str(target_id),
         objective=objective,

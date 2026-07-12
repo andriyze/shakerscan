@@ -161,6 +161,15 @@ def test_only_explicit_command_sets_can_be_research_actuators():
     assert "target.principal_matrix.record" not in agent.GATED_RESEARCH_COMMANDS
 
 
+def test_residue_graph_generator_is_a_reachable_readonly_hunt_command():
+    # Residue-driven hunts depend on the loop being able to (re)generate application-graph
+    # authorization leads. It is a read-only, target-bound lead producer (no active probing,
+    # no findings), so it belongs in the read-only allowlist, never the gated actuator set.
+    assert "hypothesis.generate_from_graph" in agent.READ_ONLY_RESEARCH_COMMANDS
+    assert "hypothesis.generate_from_graph" in agent.TARGET_BOUND_COMMANDS
+    assert "hypothesis.generate_from_graph" not in agent.GATED_RESEARCH_COMMANDS
+
+
 def test_http_experiment_reserves_worst_case_request_budget():
     command = _command("experiment.http_diff", risk="active", status="gated")
     command["request_cost"] = 4
