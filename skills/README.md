@@ -45,11 +45,13 @@ Available skills in this folder:
 - `js-analyze/` - JS bundle, frontend route, library, and secret analysis with ShakerScan `custom_endpoints` output
 - `content-discovery/` - target-specific route and file discovery plans with `custom_list` and `custom_endpoints` output
 - `review-skills/` - audit the repo’s skills, commands, and agents as a severity-ordered review
+- `research-agent/` - bounded adaptive research episodes using Codex, Claude/agent decisions, or the configured UI provider
 
 Project-local command and agent entrypoints live under:
 - `.claude/commands/js-analyze.md`
 - `.claude/commands/content-discovery.md`
 - `.claude/commands/review-skills.md`
+- `.claude/commands/research.md`
 - `.claude/agents/js-analysis-agent.md`
 - `.claude/agents/content-discovery-agent.md`
 - `.claude/agents/skills-reviewer.md`
@@ -96,6 +98,12 @@ Agents that support HTTP tools can call these endpoints directly. Agents that su
 | `/schedules/{id}` | PATCH/DELETE | Update or remove a schedule |
 | `/workers` | GET/POST | View/scale worker count (1-20) |
 | `/settings/ai` | GET/PUT | View/update runtime AI settings (optional `.env` persistence) |
+| `/research/episodes` | GET/POST | List/create bounded adaptive research episodes |
+| `/research/episodes/{id}` | GET | Read the current immutable observation, decisions, budgets, and events |
+| `/research/episodes/{id}/plan-step` | POST | Run one planner step with the AI provider configured in settings |
+| `/research/episodes/{id}/decisions` | POST | Submit one structured decision from Codex, Claude, or another agent |
+| `/research/episodes/{id}/observe` | POST | Refresh bounded target state for an awaiting episode |
+| `/research/episodes/{id}/cancel` | POST | Cancel an episode and its linked active scans |
 | `/ai/targets` | GET/POST | List/create AI Gate targets |
 | `/ai/targets/{id}` | PATCH/DELETE | Update/deactivate an AI Gate target |
 | `/ai/targets/{id}/scan` | POST | Queue an AI Gate probe-pack scan |
