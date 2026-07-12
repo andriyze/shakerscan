@@ -141,6 +141,7 @@ import parallel_scan
 import asm_inventory
 import adjudicate
 import hypothesis_lifecycle
+import hypothesis_scheduler
 from http_experiment import ExperimentContractError, execute_experiment
 from workflow_experiment import (
     WorkflowContractError,
@@ -22972,7 +22973,7 @@ async def arsenal_hypotheses(
             target_uuid = uuid.UUID(str(target_id))
         except ValueError:
             raise HTTPException(status_code=400, detail="target_id must be a UUID")
-    if status and status not in {"open", "claimed", "testing", "supported", "refuted", "promoted", "dead"}:
+    if status and status not in {"open", "claimed", "testing", "supported", "refuted", "blocked", "exhausted", "promoted", "dead"}:
         raise HTTPException(status_code=400, detail="invalid hypothesis status")
     async with db_pool.acquire() as conn:
         rows = await conn.fetch(
@@ -23010,6 +23011,51 @@ async def arsenal_hypotheses(
         "execution_enabled": False,
         "count": len(rows),
     }
+
+
+@app.get("/arsenal/hypotheses/schedule")
+async def arsenal_schedule_hypotheses(
+    target_id: Optional[str] = Query(None, description="Rank actionable hypotheses for one target."),
+    limit: int = Query(50, ge=1, le=200),
+    remaining_requests: Optional[int] = Query(None, ge=0, description="Defer leads whose request_cost exceeds this."),
+    auth_available: bool = Query(False, description="Whether primary auth is available for this target."),
+):
+    """Deterministic, explainable ranking of actionable hypotheses (Wave 6).
+
+    `priority = impact + boundary_value + novelty + evidence_strength + reachability
+    - request_cost - prior_failures - blocker_penalty`. Read-only — schedules and executes nothing;
+    terminal/blocked/exhausted leads are excluded and over-budget leads are deferred.
+    """
+    target_uuid = None
+    if target_id:
+        try:
+            target_uuid = uuid.UUID(str(target_id))
+        except ValueError:
+            raise HTTPException(status_code=400, detail="target_id must be a UUID")
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT * FROM hypotheses WHERE ($1::uuid IS NULL OR target_id = $1) ORDER BY updated_at DESC LIMIT 200",
+            target_uuid,
+        )
+    hyps = [_public_hypothesis_row(row) for row in rows]
+    completed = [
+        str(h.get("dedupe_key"))
+        for h in hyps
+        if str(h.get("effective_status") or h.get("status")) in {"refuted", "promoted", "dead", "exhausted"}
+        and h.get("dedupe_key")
+    ]
+    result = hypothesis_scheduler.rank_hypotheses(
+        hyps,
+        context={
+            "completed_dimensions": completed,
+            "auth_available": bool(auth_available),
+            "remaining_requests": remaining_requests,
+        },
+    )
+    by_id = {str(h.get("id")): h for h in hyps}
+    result["scheduled"] = [{**entry, "hypothesis": by_id.get(str(entry["hypothesis_id"]))} for entry in result["scheduled"][:limit]]
+    result["execution_enabled"] = False
+    return result
 
 
 @app.get("/arsenal/hypotheses/situation-report")

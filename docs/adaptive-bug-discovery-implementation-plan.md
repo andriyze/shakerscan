@@ -173,6 +173,8 @@ Acceptance:
 
 ### Wave 6: Bug-bounty-oriented scheduling
 
+**Status: deterministic ranking implemented & live-verified. Pure `api/hypothesis_scheduler.py` (host-tested) computes the stored, explainable priority breakdown; terminal/blocked/exhausted leads are excluded, over-budget leads deferred, and an LLM `hint_delta` is clamped to ±2 so it can never override the scope/proof/identity/budget gates. Read-only `GET /arsenal/hypotheses/schedule`. Novelty is computed against completed/refuted dedupe dimensions.**
+
 Priority signals:
 
 - authenticated and undocumented APIs;
