@@ -142,6 +142,7 @@ import asm_inventory
 import adjudicate
 import hypothesis_lifecycle
 import hypothesis_scheduler
+import family_proof
 from http_experiment import ExperimentContractError, execute_experiment
 from workflow_experiment import (
     WorkflowContractError,
@@ -23056,6 +23057,93 @@ async def arsenal_schedule_hypotheses(
     result["scheduled"] = [{**entry, "hypothesis": by_id.get(str(entry["hypothesis_id"]))} for entry in result["scheduled"][:limit]]
     result["execution_enabled"] = False
     return result
+
+
+class FamilyProofHandoffRequest(BaseModel):
+    family: str = Field(min_length=1, max_length=80)
+    evidence: dict[str, Any] = Field(default_factory=dict)
+    target_id: Optional[str] = None
+    concrete_url: Optional[str] = None
+    experiment_id: Optional[str] = None
+    tool_receipt_ids: list[str] = Field(default_factory=list)
+    principals: dict[str, Any] = Field(default_factory=dict)
+    created_by: Optional[str] = Field(default=None, max_length=120)
+
+
+@app.get("/arsenal/family-proof/contracts")
+async def arsenal_family_proof_contracts():
+    """The registry-authoritative family proof contracts (Wave 5). Read-only."""
+    return {
+        "version": family_proof.FAMILY_PROOF_VERSION,
+        "families": family_proof.supported_families(),
+        "contracts": family_proof.FAMILY_CONTRACTS,
+        "aliases": family_proof.FAMILY_ALIASES,
+        "verdicts": sorted(family_proof.VERDICTS),
+        "execution_enabled": False,
+    }
+
+
+@app.post("/arsenal/family-proof/evaluate")
+async def arsenal_family_proof_evaluate(req: FamilyProofHandoffRequest):
+    """Deterministic finding-family proof handoff (Wave 5).
+
+    Evaluates the registry-authoritative family proof contract against *structured* evidence and
+    records a durable proof receipt (evidence instance). Only `verified` is promotable; unsupported
+    families fail closed (`blocked`); no LLM label or generic anomaly can reach `verified`. Records
+    evidence but never auto-creates a finding here — promotion stays with the deterministic path.
+    """
+    verdict = family_proof.evaluate_family_proof(req.family, req.evidence)
+    proof_state = {
+        "verified": "verified",
+        "supported_unverified": "suspected",
+        "refuted": "refuted",
+        "inconclusive": "inconclusive",
+        "blocked": "unverified",
+    }.get(verdict["verdict"], "unverified")
+    strength = (
+        "cross_principal_verified" if verdict["verdict"] == "verified"
+        else "reproduced" if verdict["verdict"] == "supported_unverified"
+        else "signal"
+    )
+    target_uuid = _uuid_or_400(req.target_id, "target id") if req.target_id else None
+    evidence_id = None
+    async with db_pool.acquire() as conn:
+        async with conn.transaction():
+            ev_result = await _record_evidence_instance(conn, EvidenceInstanceRequest(
+                target_id=str(target_uuid) if target_uuid else None,
+                concrete_url=req.concrete_url,
+                principal_pair=req.principals if isinstance(req.principals, dict) else {},
+                tool_receipt_id=(req.tool_receipt_ids[0] if req.tool_receipt_ids else None),
+                proof_state=proof_state,
+                proof_observation={
+                    "family": verdict["family"],
+                    "cwe": verdict["cwe"],
+                    "verdict": verdict["verdict"],
+                    "reason": verdict["reason"],
+                    "requirements": verdict["requirements"],
+                    "met": verdict["met"],
+                    "missing": verdict["missing"],
+                    "experiment_id": req.experiment_id,
+                },
+                metadata_json={
+                    "family_proof_version": verdict["version"],
+                    "evidence_strength": strength,
+                    "promotable": verdict["promotable"],
+                    "reexecuted_at_handoff": verdict.get("reexecuted_at_handoff"),
+                    "finding_created": False,
+                },
+                created_by=req.created_by or "family_proof_handoff",
+            ))
+            evidence = ev_result.get("evidence_instance") or {}
+            evidence_id = str(evidence.get("id")) if evidence.get("id") else None
+    return {
+        **verdict,
+        "proof_state": proof_state,
+        "evidence_strength": strength,
+        "evidence_instance_id": evidence_id,
+        "findings_created": 0,
+        "execution_enabled": False,
+    }
 
 
 @app.get("/arsenal/hypotheses/situation-report")

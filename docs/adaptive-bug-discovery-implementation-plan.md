@@ -153,6 +153,8 @@ Acceptance:
 
 ### Wave 5: Deterministic finding-family handoffs
 
+**Status: registry + evaluation implemented & live-verified. Pure `api/family_proof.py` (host-tested) holds the per-family proof contracts (bola [idor→bola], mass_assignment, injection, auth_bypass [bfla→auth_bypass], workflow, data_exposure); `evaluate_family_proof` returns `verified`/`supported_unverified`/`refuted`/`inconclusive`/`blocked` from *structured evidence only* — an LLM label or generic anomaly can never reach `verified`, unsupported families fail closed, and `verified` requires a live re-execution flag. `GET /arsenal/family-proof/contracts` + `POST /arsenal/family-proof/evaluate` (records a durable proof receipt; only `verified` is promotable). Auto-promotion + generalised live re-execution across every family remain (authz-replay already re-executes at promotion for BOLA).**
+
 Experiment evidence may request, but never replace, these verifiers:
 
 - BOLA/IDOR: distinct identity, ownership, cross-principal access, denial/control, reproducibility;
