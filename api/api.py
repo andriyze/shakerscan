@@ -15400,13 +15400,21 @@ async def _build_agent_context_pack_from_target(conn, req: AgentContextPackFromT
             target_uuid,
         )
         hypotheses_summary = [_public_hypothesis_row(row) for row in hypothesis_rows]
-        completed_dimensions = [
-            str(item.get("dedupe_key"))
-            for item in hypotheses_summary
-            if str(item.get("effective_status") or item.get("status"))
-            in {"refuted", "promoted", "dead", "exhausted"}
-            and item.get("dedupe_key")
-        ]
+        # Novelty memory: the summary above holds only actionable (open/claimed/testing/supported)
+        # rows, so completed dimensions must be read from the terminal rows directly -- otherwise
+        # every dimension looks novel forever and the scheduler keeps re-proposing dead leads.
+        completed_rows = await conn.fetch(
+            """
+            SELECT dedupe_key FROM hypotheses
+            WHERE target_id = $1
+              AND status IN ('refuted','promoted','dead','exhausted')
+              AND dedupe_key IS NOT NULL
+            ORDER BY updated_at DESC
+            LIMIT 200
+            """,
+            target_uuid,
+        )
+        completed_dimensions = [str(row["dedupe_key"]) for row in completed_rows if row["dedupe_key"]]
         schedule = hypothesis_scheduler.rank_hypotheses(
             hypotheses_summary,
             context={

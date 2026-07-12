@@ -3133,9 +3133,11 @@ def _hypothesis_dedupe_part(value: Any, *, lower: bool = False) -> str | None:
 
 
 def _product_signal_hypothesis_key(family: str, dimensions: dict[str, Any]) -> str:
+    # scan_id is deliberately NOT part of the identity: the same unexplained finding from every
+    # recurring scan must endorse/reopen the one canonical lead, not mint a scan-specific copy.
+    # scan_id lives in the endorsement + dedupe_dimensions as provenance instead.
     ordered = (
         "product",
-        "scan_id",
         "target_id",
         "ai_target_id",
         "artifact",
