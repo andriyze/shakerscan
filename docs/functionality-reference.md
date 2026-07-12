@@ -791,7 +791,11 @@ anonymous control/mutation/verification requests using relative same-origin path
 bodies, bounded query/header mutations, and named scalar extraction from non-sensitive JSON paths
 or response headers. Later steps may reference extracted resource values as `${name}`; every
 rendered request is revalidated before dispatch. It forbids model-supplied credential/host headers
-and redirects, caps bytes while streaming responses, and records status/body/JSON-shape,
+and redirects. Variable references and extract names are preflighted across the complete experiment,
+so undeclared, forward, duplicate, or over-budget variables fail before any request is sent. Query
+and form values are constrained to bounded scalars. Responses are closed after a capped streaming
+prefix, extracted values are persisted as hash/length metadata, and failed steps are marked
+non-comparable instead of producing synthetic deltas. The result records status/body/JSON-shape,
 selected JSON/header, timing, and before/after comparisons in a tool receipt plus an `unverified` evidence instance. The
 research budget reserves four requests before dispatch. Experiment signals cannot directly create
 or verify findings; a family-specific deterministic verifier must establish proof.

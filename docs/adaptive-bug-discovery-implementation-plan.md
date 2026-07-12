@@ -57,7 +57,7 @@ Acceptance evidence:
 
 ### Wave 2: Chained values and richer differentials
 
-**Status: in progress.**
+**Status: complete in the current working tree; 2026-07-12 acceptance passed.**
 
 Scope:
 
@@ -79,6 +79,15 @@ Acceptance:
 - response cap is enforced during streaming;
 - evidence remains redacted and unverified;
 - full suite, rebuild, and runtime smoke pass.
+
+Acceptance evidence:
+
+- real Arsenal execution against an ephemeral owned localhost fixture reused an extracted resource ID in a later request;
+- operation `ef1992a5-c89f-4995-80ba-e622a81edeed`;
+- evidence instance `7c8ef07a-c27c-4018-9d43-f8f7623db03c`;
+- tool receipt `d957cb65-b4c5-44dc-9a90-73cd531dad7b`;
+- two successful requests, JSON/header/timing deltas recorded, extracted value persisted only as hash/length, zero findings created;
+- the global execution gate was restored to disabled and the ephemeral target/server were removed after validation.
 
 ### Wave 3: Principal-bound stateful workflow runtime
 
@@ -264,4 +273,3 @@ Each feature commit requires focused tests. Each runtime wave requires a full su
 - direct LLM finding creation or proof classification;
 - destructive cleanup without explicit typed rollback and approval;
 - distributed/multi-node execution without fencing and stale-owner-write protection.
-

@@ -1,6 +1,6 @@
 # Documentation Index
 
-**Reconciled:** 2026-07-11. Top-level documents are maintained references or active designs. Dated
+**Reconciled:** 2026-07-12. Top-level documents are maintained references or active designs. Dated
 audits, completed implementation prompts, and superseded plans belong in [`archive/`](archive/README.md).
 Code, database schemas, runtime receipts, and tests remain authoritative when a document disagrees.
 
@@ -14,6 +14,7 @@ Code, database schemas, runtime receipts, and tests remain authoritative when a 
 | [`owasp-coverage-matrix.md`](owasp-coverage-matrix.md) | Implemented DAST mechanisms mapped to OWASP categories |
 | [`E2E_TEST_PLAN.md`](E2E_TEST_PLAN.md) | Real-stack E2E scope, cases, and freshness rules |
 | [`read-only-mcp.md`](read-only-mcp.md) | Read-only MCP adapter contract and boundaries |
+| [`adaptive-bug-discovery-implementation-plan.md`](adaptive-bug-discovery-implementation-plan.md) | Active delivery plan for bounded adaptive experiments, workflows, hypotheses, proof handoffs, scheduling, metrics, and UI |
 
 ## AI Security
 

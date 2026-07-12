@@ -21760,11 +21760,11 @@ async def _arsenal_dispatch_http_diff(p: dict[str, Any], approval_receipt_id: st
         async with conn.transaction():
             receipt_result = await _record_tool_receipt(conn, ToolReceiptRequest(
                 tool_name="experiment.http_diff",
-                adapter_version="2026-07-12.v1",
+                adapter_version="2026-07-12.v2",
                 redacted_argv=["experiment.http_diff", str(target_uuid), f"steps:{safe_result.get('request_count', 0)}"],
                 target_scope={"target_id": str(target_uuid), "target_url": str(target["url"]), "same_origin_only": True},
                 approval_receipt_id=approval_receipt_id,
-                status="failed" if failed_count == safe_result.get("request_count") else "success",
+                status="failed" if failed_count == safe_result.get("step_count") else "success",
                 parser_status="parsed",
                 started_at=started_at.isoformat(),
                 finished_at=finished_at.isoformat(),
