@@ -32,6 +32,7 @@ Use ShakerScan's research episode controller for adaptive investigation. The age
 - Do not bypass a rejected decision. Read its validation errors and choose a new bounded step.
 - Active work requires a `gated` episode, receipts, the execution feature flag, and existing command-specific checks.
 - `experiment.http_diff` may use only relative same-origin paths and anonymous headers. Use two to four steps with the first as the control; never place credentials or receipt data in a step.
+- A step may use `json_body` or `form_body`, extract a non-sensitive scalar with `extract`, and reference it in later steps as `${name}`. Use `role: verify` and `compare_to` for before/after side-effect checks.
 - Treat HTTP experiment differences as leads. Route them to a deterministic family verifier before describing a vulnerability as proven.
 
 ## API Skeleton

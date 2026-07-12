@@ -1,3 +1,4 @@
+import asyncio
 import sys
 from pathlib import Path
 
@@ -67,3 +68,86 @@ def test_response_summary_redacts_common_secret_fields():
 
     assert "abc123" not in summary["body_sample"]
     assert summary["json_keys"] == ["id", "token"]
+
+
+def test_normalize_experiment_supports_form_extract_and_selected_fields():
+    payload = _payload(
+        method="POST",
+        form_body={"object_id": "${resource_id}"},
+        extract=[{"name": "next_id", "source": "json", "path": "$.data.id"}],
+        select_json=["$.data.owner"],
+        select_headers=["etag"],
+        role="verify",
+        compare_to="control",
+    )
+
+    normalized = experiment.normalize_experiment("https://example.test", payload)
+
+    assert normalized["steps"][1]["form_body"] == {"object_id": "${resource_id}"}
+    assert normalized["steps"][1]["extract"][0]["name"] == "next_id"
+    assert normalized["steps"][1]["role"] == "verify"
+
+
+def test_normalize_experiment_rejects_sensitive_extraction():
+    with pytest.raises(experiment.ExperimentContractError, match="sensitive_value_forbidden"):
+        experiment.normalize_experiment(
+            "https://example.test",
+            _payload(extract=[{"name": "access_token", "source": "json", "path": "$.token"}]),
+        )
+
+
+def test_execute_experiment_chains_extracted_resource_and_compares_selected_values():
+    seen = []
+
+    def handler(request: httpx.Request):
+        seen.append(str(request.url))
+        if request.url.path == "/objects":
+            return httpx.Response(200, json={"data": {"id": 7, "owner": "user1"}}, headers={"etag": "a"})
+        return httpx.Response(200, json={"data": {"id": 7, "owner": "user2"}}, headers={"etag": "b"})
+
+    payload = {
+        "steps": [
+            {
+                "label": "control",
+                "method": "GET",
+                "path": "/objects",
+                "extract": [{"name": "resource_id", "source": "json", "path": "$.data.id"}],
+                "select_json": ["$.data.owner"],
+                "select_headers": ["etag"],
+            },
+            {
+                "label": "verify",
+                "role": "verify",
+                "method": "GET",
+                "path": "/objects/${resource_id}",
+                "select_json": ["$.data.owner"],
+                "select_headers": ["etag"],
+            },
+        ]
+    }
+
+    result = asyncio.run(experiment.execute_experiment(
+        "https://example.test", payload, transport=httpx.MockTransport(handler)
+    ))
+
+    assert seen[1].endswith("/objects/7")
+    assert result["variable_names"] == ["resource_id"]
+    assert result["comparisons"][0]["side_effect_check"] is True
+    assert result["comparisons"][0]["selected_json_changed"] == {"$.data.owner": ["user1", "user2"]}
+    assert result["comparisons"][0]["selected_headers_changed"] == {"etag": ["a", "b"]}
+    assert isinstance(result["observations"][0]["response"]["elapsed_ms"], int)
+
+
+def test_execute_experiment_fails_closed_on_missing_variable():
+    result = asyncio.run(experiment.execute_experiment(
+        "https://example.test",
+        {
+            "steps": [
+                {"label": "control", "method": "GET", "path": "/objects"},
+                {"label": "mutation", "method": "GET", "path": "/objects/${missing}"},
+            ]
+        },
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, json={})),
+    ))
+
+    assert result["observations"][1]["error"] == "variable_not_available:missing"

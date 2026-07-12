@@ -787,9 +787,12 @@ Neither planner path can mint proof or findings. Cancellation terminates the epi
 cancels linked pending/running scans.
 
 `experiment.http_diff` is the first typed adaptive experiment actuator. It accepts two to four
-anonymous control/mutation requests using relative same-origin paths, forbids model-supplied
-credential/host headers and redirects, caps request and response sizes and timeouts, and records
-status/body/JSON-shape comparisons in a tool receipt plus an `unverified` evidence instance. The
+anonymous control/mutation/verification requests using relative same-origin paths, JSON or form
+bodies, bounded query/header mutations, and named scalar extraction from non-sensitive JSON paths
+or response headers. Later steps may reference extracted resource values as `${name}`; every
+rendered request is revalidated before dispatch. It forbids model-supplied credential/host headers
+and redirects, caps bytes while streaming responses, and records status/body/JSON-shape,
+selected JSON/header, timing, and before/after comparisons in a tool receipt plus an `unverified` evidence instance. The
 research budget reserves four requests before dispatch. Experiment signals cannot directly create
 or verify findings; a family-specific deterministic verifier must establish proof.
 
@@ -1559,7 +1562,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `AI_JUDGE_MODEL` | `api/ai_gate_scan.py` |
 | `AI_MASK_HOST` | `api/api.py`, `api/worker.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `AI_MODEL` | `api/ai_gate_scan.py`, `api/api.py`, `api/worker.py`, `docker-compose.release.yml`, `docker-compose.yml`, `scanner/scanner.py` |
-| `AI_OPS_ROUTER_EXECUTE_ENABLED` | `api/api.py` |
+| `AI_OPS_ROUTER_EXECUTE_ENABLED` | `api/api.py`, `docker-compose.yml` |
 | `AI_REASONING_RETRY_MAX_TOKENS` | `scanner/scanner_tools/ai_classifier.py` |
 | `AI_SCAN_CLASSIFICATION_ENABLED` | `api/api.py`, `api/worker.py`, `docker-compose.release.yml`, `docker-compose.yml`, `scanner/scanner.py` |
 | `AI_SETTINGS_KEY` | `api/api.py`, `api/worker.py` |
