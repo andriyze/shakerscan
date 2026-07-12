@@ -90,3 +90,14 @@ def test_promotion_gate_only_passes_verified_reexecuted():
         False, "not_reexecuted_at_handoff",
     )
     assert fp.promotion_gate({}) == (False, "not_verified:none")
+
+
+def test_caller_claim_preflight_can_neither_verify_nor_refute():
+    asserted_verified = fp.evaluate_claim_preflight("bola", _full("bola"))
+    assert asserted_verified["verdict"] == "supported_unverified"
+    assert asserted_verified["reexecuted_at_handoff"] is False
+    assert asserted_verified["promotable"] is False
+
+    asserted_refuted = fp.evaluate_claim_preflight("bola", {"cross_principal_denied": True})
+    assert asserted_refuted["verdict"] == "inconclusive"
+    assert asserted_refuted["promotable"] is False

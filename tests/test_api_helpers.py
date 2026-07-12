@@ -4209,6 +4209,125 @@ def test_record_refuter_review_is_non_mutating():
     assert result["refuter_review"]["status"] == "recorded"
 
 
+def test_record_refuter_review_rejects_spoofed_receipt_ids_as_terminal_proof():
+    finding_id = uuid.uuid4()
+
+    class _FakeConn:
+        async def fetchrow(self, query, *args):
+            if "SELECT * FROM finding_verifications" in query:
+                return None
+            return {
+                "id": uuid.uuid4(), "subject_type": args[0], "subject_id": args[1],
+                "target_id": args[2], "finding_id": args[3], "hypothesis_id": args[4],
+                "campaign_id": args[5], "trigger_reason": args[6], "refuter_signal": args[7],
+                "refuter_verdict": args[8], "verdict_basis": args[9], "confidence_delta": args[10],
+                "evidence_object_ids": args[11], "tool_receipt_ids": args[12],
+                "counterevidence": args[13], "notes": args[14], "status": args[15],
+                "metadata_json": args[16], "created_by": args[17],
+            }
+
+    result = asyncio.run(api_module._record_refuter_review(_FakeConn(), api_module.RefuterReviewRequest(
+        subject_type="finding",
+        finding_id=str(finding_id),
+        trigger_reason="caller claims a replay contradicted the finding",
+        refuter_signal="refute",
+        refuter_verdict="refuted",
+        verdict_basis="deterministic_replay",
+        tool_receipt_ids=[str(uuid.uuid4())],
+        evidence_object_ids=[str(uuid.uuid4())],
+        counterevidence={"cite": {"observed": True}},
+    )))
+
+    review = result["refuter_review"]
+    assert review["refuter_verdict"] == "inconclusive"
+    assert review["refuter_signal"] == "question"
+    assert review["metadata_json"]["negative_gate"]["reason"] == "refute_reference_not_verified"
+
+
+def test_refuter_reference_rederives_completed_proof_and_rejects_replay_command_only():
+    finding_id = uuid.uuid4()
+    verification_id = uuid.uuid4()
+
+    class _FakeConn:
+        def __init__(self, proof):
+            self.proof = proof
+
+        async def fetchrow(self, query, *args):
+            return {
+                "id": verification_id,
+                "finding_id": finding_id,
+                "status": "completed",
+                "verification_mode": "deterministic",
+                "verdict": "false_positive",
+                "proof": self.proof,
+                "artifacts": {},
+                "replay_commands": ["curl example"],
+            }
+
+    assert asyncio.run(api_module._refuter_verification_reference_valid(
+        _FakeConn({"control_status": 403}),
+        verification_id=verification_id,
+        finding_uuid=finding_id,
+        target_uuid=None,
+    )) is True
+    assert asyncio.run(api_module._refuter_verification_reference_valid(
+        _FakeConn({}),
+        verification_id=verification_id,
+        finding_uuid=finding_id,
+        target_uuid=None,
+    )) is False
+
+
+def test_hypothesis_refutation_rejects_nonexistent_verification(monkeypatch):
+    hypothesis_id = uuid.uuid4()
+    verification_id = uuid.uuid4()
+
+    class _FakeConn:
+        async def fetchrow(self, query, *args):
+            if "SELECT * FROM hypotheses" in query:
+                return {
+                    "id": hypothesis_id, "target_id": uuid.uuid4(), "status": "testing", "version": 1,
+                    "family": "bola", "next_test_action": {"falsifier": "403", "expected_signal": "403"},
+                    "evidence_object_ids": [], "tool_receipt_ids": [], "endorsements": [],
+                    "refutations": [], "metadata_json": {},
+                }
+            if "SELECT * FROM finding_verifications" in query:
+                return None
+            return None
+
+    monkeypatch.setattr(api_module, "db_pool", _pool_for(_FakeConn()))
+    req = api_module.HypothesisTransitionRequest(
+        to="refuted",
+        expected_version=1,
+        refuted_by={"verification_id": str(verification_id), "basis": "deterministic_replay"},
+    )
+    with pytest.raises(api_module.HTTPException) as exc:
+        asyncio.run(api_module.arsenal_transition_hypothesis(str(hypothesis_id), req))
+    assert exc.value.status_code == 422
+    assert exc.value.detail["error"] == "refutation_reference_not_verified"
+
+
+def test_hypothesis_transition_cannot_bypass_proof_reconciliation_for_promotion(monkeypatch):
+    hypothesis_id = uuid.uuid4()
+
+    class _FakeConn:
+        async def fetchrow(self, query, *args):
+            if "SELECT * FROM hypotheses" in query:
+                return {
+                    "id": hypothesis_id, "target_id": uuid.uuid4(), "status": "supported", "version": 1,
+                    "family": "bola", "next_test_action": {}, "evidence_object_ids": [],
+                    "tool_receipt_ids": [], "endorsements": [], "refutations": [], "metadata_json": {},
+                }
+            return None
+
+    monkeypatch.setattr(api_module, "db_pool", _pool_for(_FakeConn()))
+    req = api_module.HypothesisTransitionRequest(to="promoted", expected_version=1)
+    with pytest.raises(api_module.HTTPException) as exc:
+        asyncio.run(api_module.arsenal_transition_hypothesis(str(hypothesis_id), req))
+    assert exc.value.status_code == 422
+    assert exc.value.detail["error"] == "promotion_requires_proof_reconciliation"
+
+
 def test_refuter_work_summary_triggers_weak_ai_and_model_claims():
     weak_id = uuid.uuid4()
     ai_id = uuid.uuid4()

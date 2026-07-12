@@ -84,6 +84,17 @@ def test_panel_below_min_is_inconclusive():
     assert panel["survives"] is True
 
 
+def test_downgraded_votes_cannot_pad_terminal_quorum():
+    panel = adjudicate.adjudicate_panel([
+        {"refuter_verdict": "refuted", **DET_CITE},
+        {"refuter_verdict": "refuted", "verdict_basis": "signal_only"},
+    ])
+    assert panel["participating"] == 1
+    assert panel["panel_size"] == 2
+    assert panel["verdict"] == "inconclusive"
+    assert panel["reason"] == "panel_below_min"
+
+
 def test_negative_gate_accepts_deterministic_reference():
     ok, reason = adjudicate.require_deterministic_refutation(
         {"verdict_basis": "deterministic_replay", "refuted_by": {"verification_id": "abc"}}

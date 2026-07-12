@@ -572,11 +572,6 @@ def _ai_safe_commands_for_finding(f: dict, base_url: str, host: str) -> list[str
     return cmds[:3]
 
 
-# Allowlist of test honeypot domains where vulnerabilities ARE intentional and real
-# Findings on these domains should NOT be marked as false positives due to honeypot indicators
-HONEYPOT_TEST_DOMAINS = {"honey.shakerscan.com", "test.shakerscan.com"}
-
-
 def _ai_rule_verdict(f: dict, http_status: str | None, target_host: str = "") -> tuple[str, float, str]:
     """Heuristic verdict when no external AI provider configured."""
     title = (f.get("title") or "").lower()
@@ -592,10 +587,8 @@ def _ai_rule_verdict(f: dict, http_status: str | None, target_host: str = "") ->
         rationale.append("Static misconfiguration derived from observed headers/records")
         return "true_positive", 0.95, "; ".join(rationale)
 
-    # Check if this is a known test honeypot domain - skip honeypot detection
-    is_test_honeypot = any(domain in target_host.lower() for domain in HONEYPOT_TEST_DOMAINS)
-
-    # Honeypot heuristic (only for non-test domains)
+    # Honeypot heuristic. Benchmark/test hostnames must not change detector behavior; an explicit
+    # verified exploit proof above is the host-independent way an intentional target wins this gate.
     snippet = (ev.get("response_snippet") or "").lower()
     # Consider nested evidence structures for honeypot indicators
     nested_blob = ""
@@ -603,7 +596,7 @@ def _ai_rule_verdict(f: dict, http_status: str | None, target_host: str = "") ->
         nested_blob = json.dumps(ev, default=str).lower()
     except Exception:
         nested_blob = str(ev).lower()
-    if not is_test_honeypot and (
+    if (
         "honeypot" in snippet or "enterprise security testing honeypot" in snippet or
         "honeypot" in nested_blob or "enterprise security testing honeypot" in nested_blob or
         (http_status and " 405" in http_status)):

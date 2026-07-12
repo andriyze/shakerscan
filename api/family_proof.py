@@ -136,6 +136,27 @@ def supported_families() -> list[str]:
     return sorted(FAMILY_CONTRACTS)
 
 
+def evaluate_claim_preflight(family: Any, evidence: Any) -> dict[str, Any]:
+    """Evaluate untrusted assertions without manufacturing terminal proof state.
+
+    Workbench checkboxes can show which contract fields are missing, but they are not observations
+    from a live verifier. They can therefore neither verify nor refute a claim and are never
+    promotable, even if a caller supplies the re-execution flag.
+    """
+    asserted = dict(evidence) if isinstance(evidence, dict) else {}
+    asserted["reexecuted_at_handoff"] = False
+    result = evaluate_family_proof(family, asserted)
+    if result["verdict"] == "refuted":
+        return {
+            **result,
+            "verdict": "inconclusive",
+            "reason": "caller_asserted_refutation_requires_live_verification",
+            "reexecuted_at_handoff": False,
+            "promotable": False,
+        }
+    return {**result, "reexecuted_at_handoff": False, "promotable": False}
+
+
 PROMOTION_MIN_STRENGTH = "cross_principal_verified"
 
 

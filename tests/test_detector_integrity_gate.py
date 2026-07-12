@@ -7,6 +7,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 DETECTOR_MODULES = (
     ROOT / "scanner" / "scanner.py",
+    ROOT / "scanner" / "reporting.py",
     *sorted((ROOT / "scanner" / "scanner_tools").rglob("*.py")),
 )
 PROHIBITED_EXECUTABLE_LITERALS = (

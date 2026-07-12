@@ -1034,8 +1034,8 @@ it is the exhaustive backstop behind the human-readable product map above.
 
 | Surface | Count | Source |
 |---|---|---|
-| Public REST operations | 202 | `api/api.py` FastAPI decorators |
-| Unique REST paths | 161 | `api/api.py` |
+| Public REST operations | 207 | `api/api.py` FastAPI decorators |
+| Unique REST paths | 166 | `api/api.py` |
 | Check families | 13 | `api/check_registry.py` |
 | Command Arsenal commands | 75 | `api/command_arsenal.py` |
 | Tool adapters | 13 | `api/command_arsenal.py` |
@@ -1046,7 +1046,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | Release gates | 10 | `scripts/release_gates.py` |
 | Runtime environment keys | 190 | Python sources + Compose manifests |
 | Scanner modules | 83 | `scanner/scanner_tools/` |
-| UI pages | 24 | `ui/src/app/` |
+| UI pages | 26 | `ui/src/app/` |
 | Skills | 5 | `skills/` |
 | Slash commands | 14 | `.claude/commands/` |
 | Specialized subagents | 3 | `.claude/agents/` |
@@ -1107,16 +1107,21 @@ it is the exhaustive backstop behind the human-readable product map above.
 | `GET` | `/arsenal/decision-traces` | `arsenal_agent_decision_traces` |
 | `POST` | `/arsenal/decision-traces` | `arsenal_create_agent_decision_trace` |
 | `POST` | `/arsenal/execute` | `arsenal_execute` |
+| `GET` | `/arsenal/family-proof/contracts` | `arsenal_family_proof_contracts` |
+| `POST` | `/arsenal/family-proof/evaluate` | `arsenal_family_proof_evaluate` |
+| `GET` | `/arsenal/findings/{finding_id}/refuter-panel` | `arsenal_finding_refuter_panel` |
 | `GET` | `/arsenal/hypotheses` | `arsenal_hypotheses` |
 | `POST` | `/arsenal/hypotheses` | `arsenal_record_hypothesis` |
 | `POST` | `/arsenal/hypotheses/from-benchmark` | `arsenal_generate_hypotheses_from_benchmark` |
 | `POST` | `/arsenal/hypotheses/from-plan` | `arsenal_generate_hypotheses_from_plan` |
+| `GET` | `/arsenal/hypotheses/schedule` | `arsenal_schedule_hypotheses` |
 | `GET` | `/arsenal/hypotheses/situation-report` | `arsenal_hypothesis_situation_report` |
 | `POST` | `/arsenal/hypotheses/source-ingest` | `arsenal_generate_hypotheses_from_source` |
 | `POST` | `/arsenal/hypotheses/{hypothesis_id}/claim` | `arsenal_claim_hypothesis` |
 | `POST` | `/arsenal/hypotheses/{hypothesis_id}/plan-campaign` | `arsenal_plan_hypothesis_campaign` |
 | `POST` | `/arsenal/hypotheses/{hypothesis_id}/reconcile-proof` | `arsenal_reconcile_hypothesis_proof` |
 | `POST` | `/arsenal/hypotheses/{hypothesis_id}/signals` | `arsenal_append_hypothesis_signal` |
+| `POST` | `/arsenal/hypotheses/{hypothesis_id}/transition` | `arsenal_transition_hypothesis` |
 | `GET` | `/arsenal/plans` | `arsenal_operation_plans` |
 | `POST` | `/arsenal/plans` | `arsenal_create_operation_plan` |
 | `GET` | `/arsenal/refuter-reviews` | `arsenal_refuter_reviews` |
@@ -1774,6 +1779,8 @@ Only key names and declaring sources are documented; secret values are never rea
 | `/settings/model-intake` | `ui/src/app/settings/model-intake/page.tsx` |
 | `/settings` | `ui/src/app/settings/page.tsx` |
 | `/settings/policy-profiles` | `ui/src/app/settings/policy-profiles/page.tsx` |
+| `/settings/research-agent/experiment` | `ui/src/app/settings/research-agent/experiment/page.tsx` |
+| `/settings/research-agent/leads` | `ui/src/app/settings/research-agent/leads/page.tsx` |
 | `/settings/research-agent` | `ui/src/app/settings/research-agent/page.tsx` |
 | `/targets/{id}/graph` | `ui/src/app/targets/[id]/graph/page.tsx` |
 | `/targets` | `ui/src/app/targets/page.tsx` |

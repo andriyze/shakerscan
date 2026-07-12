@@ -59,7 +59,7 @@ const navItems = [
   },
   {
     href: '/settings/research-agent/leads',
-    label: 'Adaptive Leads',
+    label: 'Investigations',
     icon: <Bot className="w-5 h-5" />,
   },
   {

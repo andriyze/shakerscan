@@ -109,7 +109,10 @@ def adjudicate_panel(votes: list[dict[str, Any]] | None, *, min_panel: int = 2) 
     supported_count = len(support_votes)
     downgrades = [c for c in checked if c["downgraded"]]
 
-    if len(checked) < max(1, int(min_panel)):
+    # Only terminal votes participate in quorum.  Otherwise a caller could pad a
+    # panel with downgraded/inconclusive rows and let one corroborated refute
+    # become a "majority" of the single participating vote.
+    if total < max(1, int(min_panel)):
         verdict, reason = "inconclusive", "panel_below_min"
     elif total == 0:
         verdict, reason = "inconclusive", "no_terminal_votes"

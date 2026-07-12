@@ -121,7 +121,7 @@ Acceptance:
 
 ### Wave 4: Adaptive hypothesis engine
 
-**Status: lifecycle implemented & live-verified. `blocked`/`exhausted` states added (idempotent schema migration); pure `api/hypothesis_lifecycle.py` state machine (host-tested) enforces legal edges, requires a falsifier + expected signal before `testing`, and applies the deterministic negative gate on `refuted`; gated `POST /arsenal/hypotheses/{id}/transition` endpoint. Signal-source ingestion + canonical dedupe pre-date this and remain as below.**
+**Status: core lifecycle implemented; acceptance remains partial.** `blocked`/`exhausted` states and the pure state machine are present. The transition endpoint now resolves a terminal refutation/dead transition to an existing, completed, deterministic, proof-backed verification on the same target; caller-supplied IDs alone are insufficient. Direct `promoted` transitions are rejected in favor of the approval-gated proof-reconciliation path. Parked leads are excluded from both the public `claimable` result and the compare-and-set claim query. Broader signal-source acceptance and repeated-falsification policy still need artifact-backed validation.
 
 Signal sources:
 
@@ -153,7 +153,7 @@ Acceptance:
 
 ### Wave 5: Deterministic finding-family handoffs
 
-**Status: registry + evaluation implemented & live-verified. Pure `api/family_proof.py` (host-tested) holds the per-family proof contracts (bola [idor→bola], mass_assignment, injection, auth_bypass [bfla→auth_bypass], workflow, data_exposure); `evaluate_family_proof` returns `verified`/`supported_unverified`/`refuted`/`inconclusive`/`blocked` from *structured evidence only* — an LLM label or generic anomaly can never reach `verified`, unsupported families fail closed, and `verified` requires a live re-execution flag. `GET /arsenal/family-proof/contracts` + `POST /arsenal/family-proof/evaluate` (records a durable proof receipt; only `verified` is promotable). Auto-promotion + generalised live re-execution across every family remain (authz-replay already re-executes at promotion for BOLA).**
+**Status: contract registry and claim preflight implemented; live family handoffs remain incomplete.** Pure `api/family_proof.py` contains the family predicates and promotion gate. `POST /arsenal/family-proof/evaluate` accepts caller assertions, so it is deliberately limited to an unverified signal receipt: it cannot return `verified`, terminally `refuted`, `cross_principal_verified`, or promotable evidence. Per-family server-side actuators, provenance validation, and promotion-time re-execution remain required (authz replay already covers part of BOLA).
 
 Experiment evidence may request, but never replace, these verifiers:
 
@@ -175,7 +175,7 @@ Acceptance:
 
 ### Wave 6: Bug-bounty-oriented scheduling
 
-**Status: deterministic ranking implemented & live-verified. Pure `api/hypothesis_scheduler.py` (host-tested) computes the stored, explainable priority breakdown; terminal/blocked/exhausted leads are excluded, over-budget leads deferred, and an LLM `hint_delta` is clamped to ±2 so it can never override the scope/proof/identity/budget gates. Read-only `GET /arsenal/hypotheses/schedule`. Novelty is computed against completed/refuted dedupe dimensions.**
+**Status: deterministic request-cost ranking implemented; acceptance remains partial.** The pure scheduler returns an explainable score breakdown, excludes inactive leads, defers over-request-budget work, and clamps `hint_delta`. The breakdown is returned rather than durably stored, remaining-time cost is not enforced, and `auth_available` is currently caller-provided rather than derived from target principal receipts. Novelty uses completed dedupe keys but needs stronger dimension-level validation.
 
 Priority signals:
 
@@ -203,7 +203,7 @@ Acceptance:
 
 ### Wave 7: Recall measurement
 
-**Status: re-derivable acceptance + anti-fitting guard implemented (host-tested). `scripts/verify_acceptance.py` recomputes each app's scorecard from the committed raw artifact via the shared `benchmark_targets` predicate (never trusts a stored score) and fails on drift against a committed `acceptance.json` oracle; `tests/test_no_fitting.py` is a build-failing guard rejecting benchmark nouns in detector/planner string literals (comments/docstrings are allowed rationale). The broader metric surface + evaluation-set automation remain as below.**
+**Status: initial acceptance fixture and noun guard implemented; acceptance remains partial.** `scripts/verify_acceptance.py` rechecks the committed sample against its oracle. `tests/test_no_fitting.py` scans production Python string literals without the former broad path-substring exclusions that accidentally skipped modules named `*_tests.py`. It currently guards named benchmark products, not the full hostname/answer-key-route invariant, and the broader metric/evaluation-set automation remains outstanding.
 
 Metrics:
 
@@ -236,7 +236,7 @@ Acceptance:
 
 ### Wave 8: Research Agent UI
 
-**Status: adaptive workbench implemented & Next-build-verified. Existing `/settings/research-agent` runs planner episodes ("Run step"); new `/settings/research-agent/leads` ("Adaptive Leads & Proof", in the sidebar) surfaces the deterministic scheduler with priority breakdowns (Wave 6), gated lifecycle transitions showing only legal edges with refuting rendered as verification-gated (Wave 4), and the family proof handoff — contract picker → structured-evidence checkboxes → verdict/promotable (Wave 5). The control/mutation/verify experiment step-editor is `/settings/research-agent/experiment` (2–4 steps: method/path/query/headers/JSON body/role/compare_to, no raw JSON; submits a dry-run and surfaces the active-execution gate state).**
+**Status: operator-oriented investigation workspace implemented; execution remains partial.** The leads page now follows a War Room/PackBoard model: target and request-budget context, a bounded prioritized worklist, human-readable reasons, one selected work order, explicit support/falsifier rules, product-specific next actions, and a read-only proof checklist. Manual proof checkboxes and raw lifecycle controls were removed. The experiment page is a three-stage target/decision-rule → request-sequence → review flow with templates, progressive request details, readiness validation, and an explicit “no requests sent” dry-run result. It still does not execute through the approval flow or implement form bodies, extraction, selected fields, receipt status, comparison tables, artifact links, or complete responsive Playwright QA.
 
 Scope:
 
@@ -262,7 +262,7 @@ Acceptance:
 
 ### Wave 9: Agent and provider integration
 
-**Status: substantially implemented (pre-existing). The Codex launcher (`./scanner.sh research`), the Claude/agent `research` skill, the configured provider (`/settings/ai` + `plan_research_episode_step`), and the direct API all submit typed decisions through one `submit_research_decision` path that records versioned DecisionEpisode rows (`decision-episode-2026-07-11.v1`); schema omissions are normalized only when deterministic (commit `92f93d1`). The Wave 4–7 gates (negative gate, lifecycle transitions, scheduler, family proof) apply uniformly regardless of which planner produced the decision.**
+**Status: common decision submission is substantially implemented (pre-existing); cross-wave integration is not complete.** The launcher, configured provider, and direct API share typed decision submission and DecisionEpisode persistence. The new lifecycle, scheduler, and family-preflight endpoints are separate surfaces and have not yet been demonstrated as uniformly enforced on every planner-produced action.
 
 - Codex local runner receives the same command schema and bounded observations;
 - Claude/agent skill documents typed experiments and proof handoffs;
@@ -279,13 +279,13 @@ Recall is only useful if precision holds, so every state change — promotion *a
 
 One pure module (no db/httpx/engine imports) holds the promotion and refutation predicates, so the live path and any offline recompute (§4.3 / Wave 7) cannot drift; it is pinned by a self-test and `tests/test_adjudicate.py`.
 
-- **Negative gate (implemented, wired, live-verified).** The mirror of "no LLM output can create a finding": no refutation can *dismiss* one unless a deterministic re-run observed the claimed mitigation. Enforced at the universal refuter-review record chokepoint (`_canonical_refuter_review` → `_apply_refuter_negative_gate` in `api/api.py`): a `refuted` verdict carrying a deterministic *label* but no corroborating evidence/proof fail-safe **downgrades** to non-refuting and records the reason. Verified against the running API — an uncorroborated `refuted` review persists as `inconclusive` with a `negative_gate` audit stamp; a receipt/proof-backed one stands.
+- **Negative gate (implemented, strengthened; runtime revalidation pending).** A terminal refuter review now needs a real completed deterministic `finding_verifications` row, a refuting outcome, matching finding/target context, and persisted proof or artifacts. A replay command by itself is not proof. Arbitrary receipt IDs or caller-set `cite.observed` no longer suffice. Hypothesis `refuted`/`dead` transitions resolve the same class of verification rather than accepting a syntactically non-empty reference.
 - **Deterministic cite-check.** A refutation counts only when its claimed mitigation is observed in a deterministic re-run — a real 403 / ownership-enforcement signal from a control-leg `experiment.http_diff`, backed by a tool receipt / evidence instance (or the verification's proof/artifacts/replay commands). The HTTP-behaviour analogue of "the cited guard exists in source."
-- **Refuter panel, strict majority, ties → survive (wired).** `adjudicate_panel` dismisses only on a strict majority of *counted* refutations (`refuted * 2 > participating`); an even split or an inconclusive panel leaves the finding standing. Single-vote enforcement runs at the record chokepoint; `GET /arsenal/findings/{id}/refuter-panel` adjudicates a finding's full review panel (live-verified: 2 corroborated refutes + 1 support → `refuted`).
+- **Refuter panel, strict majority, ties → survive (wired).** `adjudicate_panel` dismisses only on a strict majority of terminal participants and requires the minimum quorum to be terminal participants; downgraded/inconclusive rows cannot pad quorum. The endpoint is read-only and does not itself change a finding.
 
 ### 4.2 Evidence-strength ladder and re-execute-at-promotion
 
-The ladder `claimed < signal < reproduced < cross_principal_verified` ships in `api/adjudicate.py` and is now a durable, migrated `evidence_instances.evidence_strength` column, written by the family-proof handoff (which stamps `cross_principal_verified` on a `verified` result — live-verified). `family_proof.promotion_gate` is the deterministic gate every finding-creation path must consult: it passes only a `verified`, re-executed proof and fails closed otherwise. Remaining: wire auto-finding-creation for every family to invoke the per-family live actuator re-run at promotion (authz-replay already does this for BOLA).
+The ladder `claimed < signal < reproduced < cross_principal_verified` ships in `api/adjudicate.py` and is durable on evidence instances. The public family preflight writes only `signal`; it cannot stamp the top rung. `family_proof.promotion_gate` expresses the intended predicate, but uniform wiring across every finding-creation path has not yet been established. Remaining: invoke trusted per-family live actuators at promotion and prove every creation path consults the same gate.
 
 ### 4.3 Re-derivable acceptance
 
@@ -296,12 +296,12 @@ Wave and family acceptance are executable predicates over committed artifacts, n
 1. `feat(research): add bounded HTTP differential experiments` — complete (`e786806`).
 2. `feat(research): add chained experiment values and rich comparisons` — complete (`332ae2b`), hardened (`5f0482e`). *(Shipped under commit titles "Enhance HTTP experiment diffing…" / "Harden HTTP experiment normalization…".)*
 3. `feat(research): add principal-bound stateful workflows` — core runtime complete (`75680a7`).
-4. `feat(research): Wave 4 hypothesis lifecycle` — complete (`a608b59`): blocked/exhausted states + gated transitions.
-5. `feat(research): Wave 5 deterministic family proof handoffs` — complete (`3642b4b`): registry + evaluation.
-6. `feat(research): Wave 6 deterministic hypothesis scheduling` — complete (`ebf2fca`).
-7. `feat(metrics): Wave 7 re-derivable acceptance + anti-fitting guard` — complete (`725397a`).
-8. `feat(ui): Wave 8 adaptive workbench` — complete (`d1762aa`).
-9. `docs(research): Wave 9 status reconcile` — complete (`984d96d`); provider integration pre-existing.
+4. `feat(research): Wave 4 hypothesis lifecycle` — core landed (`a608b59`); acceptance partial.
+5. `feat(research): Wave 5 deterministic family proof handoffs` — registry/preflight landed (`3642b4b`); live actuators incomplete.
+6. `feat(research): Wave 6 deterministic hypothesis scheduling` — request-cost ranking landed (`ebf2fca`); time/auth/storage gaps remain.
+7. `feat(metrics): Wave 7 re-derivable acceptance + anti-fitting guard` — initial fixture/guard landed (`725397a`); full metrics and contamination coverage incomplete.
+8. `feat(ui): Wave 8 adaptive workbench` — partial workbench landed (`d1762aa`); execution and QA scope incomplete.
+9. `docs(research): Wave 9 status reconcile` — status documentation landed (`984d96d`); uniform gate integration remains to prove.
 
 The shared verification-and-proof architecture (§4) landed first in `f32ef38`
 (pure `api/adjudicate.py` + the symmetric negative gate). Remaining depth per

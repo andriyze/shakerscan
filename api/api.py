@@ -17332,6 +17332,45 @@ def _canonical_refuter_review(req: RefuterReviewRequest) -> dict[str, Any]:
     return _apply_refuter_negative_gate(canonical)
 
 
+async def _refuter_verification_reference_valid(
+    conn,
+    *,
+    verification_id: Any,
+    finding_uuid: uuid.UUID | None,
+    target_uuid: uuid.UUID | None,
+) -> bool:
+    """Re-derive a terminal refutation from its durable verification, never from stored labels."""
+    if not verification_id or finding_uuid is None:
+        return False
+    try:
+        verification_uuid = uuid.UUID(str(verification_id))
+    except ValueError:
+        return False
+    row = await conn.fetchrow(
+        """
+        SELECT * FROM finding_verifications
+        WHERE id=$1 AND finding_id=$2
+          AND ($3::uuid IS NULL OR target_id=$3)
+        """,
+        verification_uuid,
+        finding_uuid,
+        target_uuid,
+    )
+    verification = row_to_dict(row) if row else {}
+    if not verification or str(verification.get("status") or "").lower() != "completed":
+        return False
+    outcome = _refuter_review_from_verification_outcome(verification)
+    proof_backed = bool(
+        _decode_json_value(verification.get("proof"))
+        or _decode_json_value(verification.get("artifacts"))
+    )
+    return bool(
+        outcome.get("deterministic_basis") is True
+        and outcome.get("refuter_verdict") == "refuted"
+        and proof_backed
+    )
+
+
 async def _record_refuter_review(conn, req: RefuterReviewRequest) -> dict[str, Any]:
     payload = _canonical_refuter_review(req)
     try:
@@ -17345,6 +17384,31 @@ async def _record_refuter_review(conn, req: RefuterReviewRequest) -> dict[str, A
         raise HTTPException(status_code=400, detail="finding refuter review requires finding_id or subject_id")
     if payload["subject_type"] == "hypothesis" and not (hypothesis_uuid or payload.get("subject_id")):
         raise HTTPException(status_code=400, detail="hypothesis refuter review requires hypothesis_id or subject_id")
+    if payload.get("refuter_verdict") == "refuted":
+        counter = payload.get("counterevidence") if isinstance(payload.get("counterevidence"), dict) else {}
+        verification_id = str(counter.get("verification_id") or "").strip()
+        reference_valid = bool(
+            payload.get("subject_type") == "finding"
+            and await _refuter_verification_reference_valid(
+                conn,
+                verification_id=verification_id,
+                finding_uuid=finding_uuid,
+                target_uuid=target_uuid,
+            )
+        )
+        if not reference_valid:
+            payload["metadata_json"] = {
+                **(payload.get("metadata_json") or {}),
+                "negative_gate": {
+                    "downgraded": True,
+                    "reason": "refute_reference_not_verified",
+                    "original_verdict": "refuted",
+                    "verification_id": verification_id or None,
+                },
+            }
+            payload["refuter_verdict"] = "inconclusive"
+            payload["refuter_signal"] = "question"
+            payload["status"] = "verdict_recorded"
     row = await conn.fetchrow(
         """
         INSERT INTO refuter_reviews (
@@ -23088,26 +23152,21 @@ async def arsenal_family_proof_contracts():
 
 @app.post("/arsenal/family-proof/evaluate")
 async def arsenal_family_proof_evaluate(req: FamilyProofHandoffRequest):
-    """Deterministic finding-family proof handoff (Wave 5).
+    """Evaluate caller-asserted family evidence as a non-promotable preflight.
 
-    Evaluates the registry-authoritative family proof contract against *structured* evidence and
-    records a durable proof receipt (evidence instance). Only `verified` is promotable; unsupported
-    families fail closed (`blocked`); no LLM label or generic anomaly can reach `verified`. Records
-    evidence but never auto-creates a finding here — promotion stays with the deterministic path.
+    This public endpoint does not execute a verifier, so its booleans are claims rather than proof.
+    It records a signal receipt but cannot return ``verified``/``refuted`` or promotable evidence.
+    Trusted live handoffs must use the family actuator and promotion gate instead.
     """
-    verdict = family_proof.evaluate_family_proof(req.family, req.evidence)
+    verdict = family_proof.evaluate_claim_preflight(req.family, req.evidence)
     proof_state = {
         "verified": "verified",
         "supported_unverified": "suspected",
-        "refuted": "refuted",
+        "refuted": "inconclusive",
         "inconclusive": "inconclusive",
         "blocked": "unverified",
     }.get(verdict["verdict"], "unverified")
-    strength = (
-        "cross_principal_verified" if verdict["verdict"] == "verified"
-        else "reproduced" if verdict["verdict"] == "supported_unverified"
-        else "signal"
-    )
+    strength = "signal"
     target_uuid = _uuid_or_400(req.target_id, "target id") if req.target_id else None
     evidence_id = None
     async with db_pool.acquire() as conn:
@@ -23134,6 +23193,7 @@ async def arsenal_family_proof_evaluate(req: FamilyProofHandoffRequest):
                     "evidence_strength": strength,
                     "promotable": verdict["promotable"],
                     "reexecuted_at_handoff": verdict.get("reexecuted_at_handoff"),
+                    "trust_boundary": "caller_asserted_preflight",
                     "finding_created": False,
                 },
                 created_by=req.created_by or "family_proof_handoff",
@@ -23319,7 +23379,7 @@ async def arsenal_claim_hypothesis(hypothesis_id: str, req: HypothesisClaimReque
                 updated_at = NOW()
             WHERE id = $1
               AND version = $2
-              AND status NOT IN ('refuted','promoted','dead')
+              AND status NOT IN ('refuted','promoted','dead','blocked','exhausted')
               AND (
                 claim_lease_expires_at IS NULL
                 OR claim_lease_expires_at < NOW()
@@ -23392,6 +23452,14 @@ async def arsenal_transition_hypothesis(hypothesis_id: str, req: HypothesisTrans
                 status_code=409,
                 detail={"error": "illegal_transition", "reason": reason, "from": from_state, "to": to_state},
             )
+        if to_state == "promoted":
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "error": "promotion_requires_proof_reconciliation",
+                    "reason": "use the approval-gated hypothesis proof reconciliation path",
+                },
+            )
         refuted_by = req.refuted_by if isinstance(req.refuted_by, dict) else {}
         if to_state in hypothesis_lifecycle.REFUTING_TARGETS:
             gate_ok, gate_reason = adjudicate.require_deterministic_refutation({
@@ -23402,6 +23470,48 @@ async def arsenal_transition_hypothesis(hypothesis_id: str, req: HypothesisTrans
                 raise HTTPException(
                     status_code=422,
                     detail={"error": "refutation_not_deterministic", "reason": gate_reason},
+                )
+            verification_id = str(refuted_by.get("verification_id") or "").strip()
+            if not verification_id:
+                raise HTTPException(
+                    status_code=422,
+                    detail={"error": "refutation_reference_not_verified", "reason": "verification_id_required"},
+                )
+            try:
+                verification_uuid = uuid.UUID(verification_id)
+            except ValueError:
+                raise HTTPException(
+                    status_code=422,
+                    detail={"error": "refutation_reference_not_verified", "reason": "verification_id_invalid"},
+                )
+            verification_row = await conn.fetchrow(
+                "SELECT * FROM finding_verifications WHERE id=$1",
+                verification_uuid,
+            )
+            verification = row_to_dict(verification_row) if verification_row else {}
+            derived = _refuter_review_from_verification_outcome(verification) if verification else {}
+            proof_backed = bool(
+                _decode_json_value(verification.get("proof"))
+                or _decode_json_value(verification.get("artifacts"))
+            )
+            target_matches = bool(
+                not hyp.get("target_id")
+                or (
+                    verification.get("target_id")
+                    and str(hyp["target_id"]) == str(verification["target_id"])
+                )
+            )
+            if not (
+                verification
+                and str(verification.get("status") or "").lower() == "completed"
+                and derived.get("deterministic_basis") is True
+                and derived.get("refuter_verdict") == "refuted"
+                and proof_backed
+                and target_matches
+            ):
+                raise HTTPException(
+                    status_code=422,
+                    detail={"error": "refutation_reference_not_verified", "reason": "verification_not_deterministic_refuting_proof"},
                 )
         meta_patch: dict[str, Any] = {
             "last_transition": {
@@ -23533,6 +23643,13 @@ async def arsenal_finding_refuter_panel(
     majority of corroborated refutes dismisses. Changes no finding.
     """
     async with db_pool.acquire() as conn:
+        finding_row = await get_finding_record(conn, finding_id)
+        finding_uuid = None
+        if finding_row:
+            try:
+                finding_uuid = uuid.UUID(str(finding_row["id"]))
+            except (KeyError, TypeError, ValueError):
+                finding_uuid = None
         rows = await conn.fetch(
             """
             SELECT *
@@ -23543,8 +23660,28 @@ async def arsenal_finding_refuter_panel(
             """,
             finding_id,
         )
-    reviews = [_public_refuter_review_row(row) for row in rows]
-    votes = [adjudicate.vote_from_review(review) for review in reviews]
+        reviews = [_public_refuter_review_row(row) for row in rows]
+        votes: list[dict[str, Any]] = []
+        for review in reviews:
+            vote = adjudicate.vote_from_review(review)
+            if vote.get("refuter_verdict") == "refuted":
+                counter = review.get("counterevidence") if isinstance(review.get("counterevidence"), dict) else {}
+                target_uuid = None
+                try:
+                    target_uuid = _optional_uuid(review.get("target_id"))
+                except ValueError:
+                    pass
+                valid = await _refuter_verification_reference_valid(
+                    conn,
+                    verification_id=counter.get("verification_id"),
+                    finding_uuid=finding_uuid,
+                    target_uuid=target_uuid,
+                )
+                if not valid:
+                    vote["tool_receipt_ids"] = []
+                    vote["evidence_object_ids"] = []
+                    vote["cite"] = {"observed": False, "mitigation": ""}
+            votes.append(vote)
     panel = adjudicate.adjudicate_panel(votes, min_panel=min_panel)
     return {
         "finding_id": finding_id,

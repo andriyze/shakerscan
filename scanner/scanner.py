@@ -290,7 +290,6 @@ try:
         _redact_body_for_report,
         _mask_structure,
         _generate_fallback_executive_summary,
-        HONEYPOT_TEST_DOMAINS,
     )
 except ImportError:
     try:
@@ -320,7 +319,6 @@ except ImportError:
             _redact_body_for_report,
             _mask_structure,
             _generate_fallback_executive_summary,
-            HONEYPOT_TEST_DOMAINS,
         )
     except ImportError:
         from constants import NUCLEI_PROMOTE_TEMPLATES, SMART_SCAN_BUDGETS
@@ -349,7 +347,6 @@ except ImportError:
             _redact_body_for_report,
             _mask_structure,
             _generate_fallback_executive_summary,
-            HONEYPOT_TEST_DOMAINS,
         )
 
 # Alias for backward compatibility (inline code used different name)

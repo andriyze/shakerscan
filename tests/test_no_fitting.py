@@ -18,23 +18,27 @@ ROOT = Path(__file__).resolve().parents[1]
 
 # Benchmark app / product nouns that must not be a detector INPUT. Intentionally specific — "owasp"
 # is a legitimate general term (OWASP LLM, CSP guidance) and is NOT forbidden.
-FORBIDDEN = re.compile(r"juice[\s_-]?shop|juiceshop|(?<![a-z])crapi(?![a-z])", re.IGNORECASE)
+FORBIDDEN = re.compile(
+    r"juice[\s_-]?shop|juiceshop|(?<![a-z])crapi(?![a-z])|honey\.shakerscan\.com",
+    re.IGNORECASE,
+)
 
 # Production detector/planner surface.
 SCAN_ROOTS = [ROOT / "scanner", ROOT / "api"]
 
-# Path fragments whose files are fixtures/harness/demo, not production detector logic.
-EXCLUDE_FRAGMENTS = (
-    "test", "benchmark", "honey", "/demo", "scenario", "__pycache__",
-    "/payloads/", "/wordlists/", "/results/", "/fixtures/",
-)
+# Exact fixture/harness directory names.  Do not use substring matching here: production modules
+# such as ``oauth_tests.py`` and a checkout living below ``.../test-workspace`` must still be scanned.
+EXCLUDE_DIRS = {"tests", "test", "benchmarks", "benchmark", "fixtures", "results", "__pycache__"}
+EXCLUDE_FILES = {"ai_demo_scenarios.py"}  # explicit user-facing demo fixture catalog, not detector/planner logic
 
 
 def _production_py_files():
     for root in SCAN_ROOTS:
         for path in root.rglob("*.py"):
-            low = str(path).lower()
-            if any(fragment in low for fragment in EXCLUDE_FRAGMENTS):
+            if path.name.lower() in EXCLUDE_FILES:
+                continue
+            relative_parts = {part.lower() for part in path.relative_to(ROOT).parts[:-1]}
+            if relative_parts & EXCLUDE_DIRS:
                 continue
             yield path
 
