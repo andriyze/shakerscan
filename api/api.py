@@ -23856,41 +23856,45 @@ async def create_research_episode(req: ResearchEpisodeRequest):
         raise HTTPException(status_code=400, detail="planner metadata contains a forbidden secret field")
 
     async with db_pool.acquire() as conn:
-        async with conn.transaction():
-            target = await conn.fetchrow(
-                "SELECT id, url, discovery_source FROM targets WHERE id=$1 AND is_active=true",
-                target_uuid,
+        # Validations (incl. the gated approval check, which persists a durable "blocked"
+        # audit row via _deny on denial) run OUTSIDE an explicit transaction, so a denied
+        # creation's audit trail is not rolled back. Only the episode INSERT + first
+        # observation are wrapped in a transaction so they stay atomic.
+        target = await conn.fetchrow(
+            "SELECT id, url, discovery_source FROM targets WHERE id=$1 AND is_active=true",
+            target_uuid,
+        )
+        if not target:
+            raise HTTPException(status_code=404, detail="Active target not found")
+        parsed_target = urllib.parse.urlparse(str(target["url"] or ""))
+        if parsed_target.scheme not in {"http", "https"} or not parsed_target.hostname:
+            raise HTTPException(status_code=400, detail="Research episodes require an absolute HTTP(S) web/API target")
+        if str(target["discovery_source"] or "") == "model-intake":
+            raise HTTPException(status_code=400, detail="Model Intake artifacts are not web/API research targets")
+        scope_receipt_id = req.scope_receipt_id
+        approval_receipt_id = req.approval_receipt_id
+        if req.execution_mode == "gated":
+            approval = await _validate_approval_receipt_for_action(
+                conn,
+                approval_receipt_id,
+                target_url=str(target["url"]),
+                target_id=target_uuid,
+                action_name="research_episode.create",
+                command="research.episode",
+                risk_tier=req.max_risk_tier,
+                created_by=req.created_by,
+                always_require_receipt=True,
             )
-            if not target:
-                raise HTTPException(status_code=404, detail="Active target not found")
-            parsed_target = urllib.parse.urlparse(str(target["url"] or ""))
-            if parsed_target.scheme not in {"http", "https"} or not parsed_target.hostname:
-                raise HTTPException(status_code=400, detail="Research episodes require an absolute HTTP(S) web/API target")
-            if str(target["discovery_source"] or "") == "model-intake":
-                raise HTTPException(status_code=400, detail="Model Intake artifacts are not web/API research targets")
-            scope_receipt_id = req.scope_receipt_id
-            approval_receipt_id = req.approval_receipt_id
-            if req.execution_mode == "gated":
-                approval = await _validate_approval_receipt_for_action(
-                    conn,
-                    approval_receipt_id,
-                    target_url=str(target["url"]),
-                    target_id=target_uuid,
-                    action_name="research_episode.create",
-                    command="research.episode",
-                    risk_tier=req.max_risk_tier,
-                    created_by=req.created_by,
-                    always_require_receipt=True,
-                )
-                if scope_receipt_id and str(approval.get("scope_receipt_id")) != str(scope_receipt_id):
-                    raise HTTPException(status_code=400, detail="Episode scope receipt does not match approval receipt")
-                scope_receipt_id = str(approval.get("scope_receipt_id"))
-            operation_plan_id = _optional_uuid(req.operation_plan_id)
-            campaign_id = _optional_uuid(req.campaign_id)
-            if operation_plan_id and not await conn.fetchval("SELECT 1 FROM operation_plans WHERE id=$1", operation_plan_id):
-                raise HTTPException(status_code=404, detail="Operation plan not found")
-            if campaign_id and not await conn.fetchval("SELECT 1 FROM campaigns WHERE id=$1", campaign_id):
-                raise HTTPException(status_code=404, detail="Campaign not found")
+            if scope_receipt_id and str(approval.get("scope_receipt_id")) != str(scope_receipt_id):
+                raise HTTPException(status_code=400, detail="Episode scope receipt does not match approval receipt")
+            scope_receipt_id = str(approval.get("scope_receipt_id"))
+        operation_plan_id = _optional_uuid(req.operation_plan_id)
+        campaign_id = _optional_uuid(req.campaign_id)
+        if operation_plan_id and not await conn.fetchval("SELECT 1 FROM operation_plans WHERE id=$1", operation_plan_id):
+            raise HTTPException(status_code=404, detail="Operation plan not found")
+        if campaign_id and not await conn.fetchval("SELECT 1 FROM campaigns WHERE id=$1", campaign_id):
+            raise HTTPException(status_code=404, detail="Campaign not found")
+        async with conn.transaction():
             row = await conn.fetchrow(
                 """
                 INSERT INTO research_episodes (
@@ -23957,6 +23961,12 @@ async def get_research_episode(episode_id: str):
         return await _research_episode_detail(conn, episode_id)
 
 
+# Hard cap on observations per episode. POST /observe consumes no budget, so bound
+# unbounded row growth (each observation row is itself size-bounded). 500 is generous
+# relative to the <=25-step episode budget.
+RESEARCH_MAX_OBSERVATIONS_PER_EPISODE = 500
+
+
 @app.post("/research/episodes/{episode_id}/observe")
 async def refresh_research_observation(episode_id: str, req: ResearchObservationRequest):
     async with db_pool.acquire() as conn:
@@ -23965,6 +23975,14 @@ async def refresh_research_observation(episode_id: str, req: ResearchObservation
             episode = _public_research_episode_row(row)
             if episode.get("terminal") or episode.get("cancel_requested"):
                 raise HTTPException(status_code=409, detail="Terminal or cancelled episodes cannot create observations")
+            observation_count = await conn.fetchval(
+                "SELECT COUNT(*) FROM research_observations WHERE episode_id=$1", row["id"]
+            )
+            if observation_count >= RESEARCH_MAX_OBSERVATIONS_PER_EPISODE:
+                raise HTTPException(
+                    status_code=429,
+                    detail=f"Research episode observation limit reached ({RESEARCH_MAX_OBSERVATIONS_PER_EPISODE})",
+                )
             observation = await _build_research_observation(
                 conn,
                 row,
