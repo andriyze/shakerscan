@@ -23517,6 +23517,40 @@ async def arsenal_refuter_reviews(
     }
 
 
+@app.get("/arsenal/findings/{finding_id}/refuter-panel")
+async def arsenal_finding_refuter_panel(
+    finding_id: str,
+    min_panel: int = Query(2, ge=1, le=10),
+):
+    """Adjudicate the refuter-review panel for a finding (strict majority, ties → survive).
+
+    Read-only: gathers the finding's durable refuter reviews and runs the shared deterministic
+    adjudicator (`api/adjudicate.py`). Uncorroborated refute votes fail-safe downgrade; only a strict
+    majority of corroborated refutes dismisses. Changes no finding.
+    """
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT *
+            FROM refuter_reviews
+            WHERE subject_type = 'finding' AND (finding_id::text = $1 OR subject_id = $1)
+            ORDER BY created_at DESC
+            LIMIT 50
+            """,
+            finding_id,
+        )
+    reviews = [_public_refuter_review_row(row) for row in rows]
+    votes = [adjudicate.vote_from_review(review) for review in reviews]
+    panel = adjudicate.adjudicate_panel(votes, min_panel=min_panel)
+    return {
+        "finding_id": finding_id,
+        "panel": panel,
+        "review_count": len(reviews),
+        "reviews": reviews,
+        "execution_enabled": False,
+    }
+
+
 @app.get("/arsenal/refuter-reviews/summary")
 async def arsenal_refuter_review_summary(
     limit: int = Query(20, ge=1, le=100),
