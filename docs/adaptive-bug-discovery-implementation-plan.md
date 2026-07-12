@@ -16,7 +16,9 @@ The work is successful when ShakerScan can explore unfamiliar web/API workflows 
 - distinct-principal and ownership checks precede authorization conclusions;
 - experiment anomalies remain unverified signals until a family proof contract succeeds;
 - benchmark hostnames, product nouns, and answer-key routes are prohibited detector/planner inputs;
-- no LLM response can directly create or verify a finding.
+- no LLM response can directly create or verify a finding;
+- symmetrically, no LLM response can dismiss or close a finding/hypothesis: a `refuted`/`false_positive` transition requires a deterministic, re-executed basis and a concrete `refuted_by` reference (a verification or experiment-signal id), and an uncorroborated (`signal_only`) refutation fail-safe downgrades to "stands";
+- wave and family acceptance is re-derived from committed artifacts (tool receipts, evidence instances, comparisons), never a stored or asserted verdict — and "fails closed" means the failure is *recorded as evidence*, not merely rejected.
 
 ## 2. Planner entry points
 
@@ -57,7 +59,7 @@ Acceptance evidence:
 
 ### Wave 2: Chained values and richer differentials
 
-**Status: complete in the current working tree; 2026-07-12 acceptance passed.**
+**Status: complete and committed (`332ae2b`), hardened in `5f0482e` (contract `http-experiment-2026-07-12.v3`). One residual acceptance-hardening item is open — see "Residual" below.**
 
 Scope:
 
@@ -89,9 +91,11 @@ Acceptance evidence:
 - two successful requests, JSON/header/timing deltas recorded, extracted value persisted only as hash/length, zero findings created;
 - the global execution gate was restored to disabled and the ephemeral target/server were removed after validation.
 
+Residual (open, tracked under §4.3): a non-ASCII header name or value still fails *open* — `client.build_request` raises an uncaught `UnicodeEncodeError` before the recording transaction, so the run returns 500 with no tool receipt / evidence / command result written, and it is reachable from the target's own response (a Unicode value extracted into a later step's header). This violates the §1 "fails closed = recorded" invariant; the missing/ambiguous-variable and post-substitution origin-escape paths already fail closed correctly. Fix: reject non-ASCII header names/values in `normalize`/rendered-header checks and widen the executor `except` to `UnicodeError`.
+
 ### Wave 3: Principal-bound stateful workflow runtime
 
-**Status: core runtime complete in the current working tree. Deterministic acceptance and rebuild pass; owned-target live validation remains pending because the local fixture approval was unavailable.**
+**Status: core runtime committed (`75680a7`). Deterministic acceptance and rebuild pass; owned-target live validation remains pending because the local fixture approval was unavailable.**
 
 Scope:
 
@@ -135,6 +139,7 @@ Lifecycle:
 - equivalent hypotheses merge signals rather than repeat requests;
 - attempt count, request cost, last outcome, blockers, and next eligibility persisted;
 - repeated falsification or exhausted budget closes the hypothesis;
+- a `refuted`/`blocked` transition records a deterministic `refuted_by` (a verification or experiment-signal id) and is rejected when the basis is not deterministic — the negative gate of §4.1; a model label alone can never close a lead;
 - new evidence can reopen only through an explicit versioned transition.
 
 Acceptance:
@@ -155,7 +160,7 @@ Experiment evidence may request, but never replace, these verifiers:
 - workflow/business-logic bypass: expected transition invariant plus before/after state evidence;
 - data exposure: sensitive value evidence, not name-only classification.
 
-Each adapter returns one of: `verified`, `supported_unverified`, `refuted`, `inconclusive`, or `blocked`. Only `verified` output satisfying the existing family proof contract can create/promote a finding.
+Each adapter returns one of: `verified`, `supported_unverified`, `refuted`, `inconclusive`, or `blocked`. Only `verified` output satisfying the existing family proof contract can create/promote a finding. `verified` requires the family proof contract to be **re-executed live at handoff** (a stored outcome is a claim; a contract that fires at promotion time is proof), and promotion, refutation, and the evidence-strength ladder all run through the shared deterministic adjudicator (§4).
 
 Acceptance:
 
@@ -217,6 +222,8 @@ Acceptance:
 - scorecards distinguish discovery, signal, proof, and promotion failures;
 - build fingerprint and worker freshness are mandatory;
 - baseline and candidate runs use comparable budgets;
+- every headline metric re-derives from committed artifacts via a `verify-acceptance` recompute — the stored score is never trusted; the verdict is recomputed from raw receipts/evidence plus a committed per-family oracle, and CI fails on drift;
+- a build-failing anti-fitting guard rejects any benchmark hostname, product noun, or answer-key route that leaks into detector/planner code (mechanising the §1 invariant);
 - no benchmark-specific route or noun enters production detector/planner code.
 
 ### Wave 8: Research Agent UI
@@ -252,11 +259,31 @@ Acceptance:
 - schema omissions are normalized only when deterministic and unambiguous;
 - all planner paths produce equivalent DecisionEpisode records.
 
-## 4. Commit boundaries
+## 4. Verification and proof architecture
 
-1. `feat(research): add bounded HTTP differential experiments` - complete (`e786806`).
-2. `feat(research): add chained experiment values and rich comparisons`.
-3. `feat(research): add principal-bound stateful workflows`.
+Recall is only useful if precision holds, so every state change — promotion *and* dismissal — is gated by a deterministic, re-executable predicate rather than a model's opinion. These mechanics are cross-wave: Waves 4–5 consume them and Wave 7 re-derives against them.
+
+### 4.1 Shared adjudicator — `api/adjudicate.py` (implemented)
+
+One pure module (no db/httpx/engine imports) holds the promotion and refutation predicates, so the live path and any offline recompute (§4.3 / Wave 7) cannot drift; it is pinned by a self-test and `tests/test_adjudicate.py`.
+
+- **Negative gate (implemented, wired, live-verified).** The mirror of "no LLM output can create a finding": no refutation can *dismiss* one unless a deterministic re-run observed the claimed mitigation. Enforced at the universal refuter-review record chokepoint (`_canonical_refuter_review` → `_apply_refuter_negative_gate` in `api/api.py`): a `refuted` verdict carrying a deterministic *label* but no corroborating evidence/proof fail-safe **downgrades** to non-refuting and records the reason. Verified against the running API — an uncorroborated `refuted` review persists as `inconclusive` with a `negative_gate` audit stamp; a receipt/proof-backed one stands.
+- **Deterministic cite-check.** A refutation counts only when its claimed mitigation is observed in a deterministic re-run — a real 403 / ownership-enforcement signal from a control-leg `experiment.http_diff`, backed by a tool receipt / evidence instance (or the verification's proof/artifacts/replay commands). The HTTP-behaviour analogue of "the cited guard exists in source."
+- **Refuter panel, strict majority, ties → survive (available).** `adjudicate_panel` dismisses only on a strict majority of *counted* refutations (`refuted * 2 > participating`); an even split or an inconclusive panel leaves the finding standing. Single-vote enforcement is wired today; multi-vote generation is the next increment.
+
+### 4.2 Evidence-strength ladder and re-execute-at-promotion
+
+The ladder `claimed < signal < reproduced < cross_principal_verified` ships in `api/adjudicate.py`. Target state: promotion requires the top rung **and** a *fresh* re-execution of the family proof contract at handoff — generalising the authz-replay differential-at-promotion check to every Wave 5 family; a stored `reproduced: true` is a claim, a contract that fires live at promotion time is proof. The `evidence_instances` strength column and the generalised promotion gate are the next increment.
+
+### 4.3 Re-derivable acceptance
+
+Wave and family acceptance are executable predicates over committed artifacts, not prose. Each wave commits its raw tool receipts, evidence instances, and comparisons plus a per-family expected-outcome oracle; a `verify-acceptance` recompute re-derives the verdict at CI and fails on drift (the stored verdict is never trusted). "Fails closed" is defined to mean the failure is *recorded* — an unrecorded crash (the Wave 2 residual) does not satisfy it. A build-failing anti-fitting guard mechanises the §1 no-benchmark-nouns invariant. The discipline is borrowed from a reviewed reference implementation whose every headline number re-derives from committed data by a single command.
+
+## 5. Commit boundaries
+
+1. `feat(research): add bounded HTTP differential experiments` — complete (`e786806`).
+2. `feat(research): add chained experiment values and rich comparisons` — complete (`332ae2b`), hardened (`5f0482e`). *(Shipped under commit titles "Enhance HTTP experiment diffing…" / "Harden HTTP experiment normalization…".)*
+3. `feat(research): add principal-bound stateful workflows` — core runtime complete (`75680a7`).
 4. `feat(research): add adaptive hypothesis lifecycle`.
 5. `feat(research): add deterministic experiment proof handoffs`.
 6. `feat(research): add impact-aware hypothesis scheduling`.
@@ -266,7 +293,7 @@ Acceptance:
 
 Each feature commit requires focused tests. Each runtime wave requires a full suite and rebuild before live validation. The execution gate must be restored to disabled after temporary local E2E use.
 
-## 5. Out of scope until separately approved
+## 6. Out of scope until separately approved
 
 - unrestricted shell, arbitrary code, or arbitrary URL execution;
 - cross-origin experiment requests;

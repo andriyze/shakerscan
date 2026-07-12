@@ -139,6 +139,7 @@ from retest_contract import (
 )
 import parallel_scan
 import asm_inventory
+import adjudicate
 from http_experiment import ExperimentContractError, execute_experiment
 from workflow_experiment import (
     WorkflowContractError,
@@ -17247,6 +17248,52 @@ def _refuter_review_requests_from_summary(
     return requests
 
 
+def _refuter_counterevidence_corroborates(counterevidence: Any) -> bool:
+    """A refutation is corroborated when a deterministic re-run actually observed the mitigation.
+
+    For ShakerScan that evidence lives in the verification proof / artifacts / replay commands (or an
+    explicit observed cite) — the HTTP-behaviour analogue of "the cited guard exists in source".
+    """
+    if not isinstance(counterevidence, dict):
+        return False
+    if counterevidence.get("proof") or counterevidence.get("artifacts") or counterevidence.get("replay_commands"):
+        return True
+    cite = counterevidence.get("cite")
+    return isinstance(cite, dict) and bool(cite.get("observed"))
+
+
+def _apply_refuter_negative_gate(canonical: dict[str, Any]) -> dict[str, Any]:
+    """Symmetric negative gate: a terminal REFUTE must be deterministically corroborated.
+
+    The mirror of "no LLM output can create a finding": no refutation can dismiss one unless a
+    deterministic re-run observed the claimed mitigation. Uses the shared pure ``adjudicate`` module
+    so the live path and any offline recompute cannot drift. An uncorroborated ``refuted`` verdict
+    fail-safe downgrades to non-refuting and records the reason — a hallucinated refutation must
+    never bury a real finding, because dedupe would then block re-discovery. Supported/weakened/
+    inconclusive verdicts pass through unchanged.
+    """
+    checked = adjudicate.citecheck_vote({
+        "refuter_verdict": canonical.get("refuter_verdict"),
+        "verdict_basis": canonical.get("verdict_basis"),
+        "tool_receipt_ids": canonical.get("tool_receipt_ids"),
+        "evidence_object_ids": canonical.get("evidence_object_ids"),
+        "cite": {"observed": _refuter_counterevidence_corroborates(canonical.get("counterevidence"))},
+    })
+    if checked["downgraded"]:
+        canonical["metadata_json"] = {
+            **(canonical.get("metadata_json") or {}),
+            "negative_gate": {
+                "downgraded": True,
+                "reason": checked["reason"],
+                "original_verdict": canonical.get("refuter_verdict"),
+                "original_signal": canonical.get("refuter_signal"),
+            },
+        }
+        canonical["refuter_verdict"] = "inconclusive"
+        canonical["refuter_signal"] = "question"
+    return canonical
+
+
 def _canonical_refuter_review(req: RefuterReviewRequest) -> dict[str, Any]:
     payload = req.model_dump(mode="json")
     verdict = str(payload.get("refuter_verdict") or "").strip() or None
@@ -17258,7 +17305,7 @@ def _canonical_refuter_review(req: RefuterReviewRequest) -> dict[str, Any]:
         )
     if basis != "signal_only" and not verdict:
         raise HTTPException(status_code=400, detail="non-signal refuter basis requires refuter_verdict")
-    return {
+    canonical = {
         "subject_type": str(payload.get("subject_type") or "").strip(),
         "subject_id": str(payload.get("subject_id") or "").strip() or None,
         "target_id": str(payload.get("target_id") or "").strip() or None,
@@ -17278,6 +17325,7 @@ def _canonical_refuter_review(req: RefuterReviewRequest) -> dict[str, Any]:
         "created_by": str(payload.get("created_by") or "").strip() or None,
         "status": "verdict_recorded" if verdict else "recorded",
     }
+    return _apply_refuter_negative_gate(canonical)
 
 
 async def _record_refuter_review(conn, req: RefuterReviewRequest) -> dict[str, Any]:
