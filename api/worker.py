@@ -3503,6 +3503,24 @@ async def persist_product_signal_hypotheses(
     async with db_pool.acquire() as conn:
         for payload in hypotheses:
             target_uuid = uuid.UUID(payload["target_id"]) if payload.get("target_id") else None
+            # The scanner lead's next_test_action carries a finding FINGERPRINT, but the research
+            # controller's finding.retest requires a canonical DB finding UUID (findings were just
+            # persisted above). Resolve fingerprint -> UUID by (target_id, fingerprint) so the
+            # suggested retest is runnable instead of failing finding_id_must_be_uuid.
+            action = payload.get("next_test_action")
+            if isinstance(action, dict) and target_uuid is not None and isinstance(action.get("parameters"), dict):
+                params = action["parameters"]
+                fid = str(params.get("finding_id") or "").strip()
+                if fid:
+                    try:
+                        uuid.UUID(fid)
+                    except ValueError:
+                        row = await conn.fetchrow(
+                            "SELECT id FROM findings WHERE target_id=$1 AND fingerprint=$2 "
+                            "ORDER BY last_seen_at DESC NULLS LAST LIMIT 1",
+                            target_uuid, fid,
+                        )
+                        params["finding_id"] = str(row["id"]) if row else None
             endorsement = {
                 **(payload.get("endorsement") or {}),
                 "recorded_at": utc_now_iso(),
