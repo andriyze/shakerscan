@@ -149,6 +149,7 @@ from workflow_experiment import (
     WorkflowContractError,
     execute_workflow,
     normalize_workflow,
+    server_corroborated_predicates,
     validate_principal_contexts,
 )
 from research_agent import (
@@ -22465,12 +22466,12 @@ def _trusted_workflow_family_proof(
     allowed = set(contract.get("requires") or []) | set(contract.get("refute_if") or [])
 
     def passed_predicates(result: dict[str, Any]) -> set[str]:
-        return {
-            str(item.get("predicate") or "").strip().lower()
-            for item in result.get("assertion_results") or []
-            if isinstance(item, dict) and item.get("passed") is True
-            and str(item.get("predicate") or "").strip().lower() in allowed
-        }
+        # The model's predicate LABEL is never trusted. server_corroborated_predicates confirms
+        # each predicate's security meaning from the live observations (real sensitive values,
+        # distinct authenticated principals, genuine access/denial differentials); we then keep
+        # only those in this family's contract. Injection and any uncorroborated predicate fail
+        # closed, so a generic passing assertion can no longer mint a verified finding.
+        return server_corroborated_predicates(result) & allowed
 
     first_predicates = passed_predicates(first)
     replay_predicates = passed_predicates(replay)
@@ -22677,7 +22678,10 @@ async def _arsenal_dispatch_workflow(p: dict[str, Any], approval_receipt_id: str
     finished_at = datetime.now(timezone.utc)
     safe_result = _redact_agent_payload(executed)
     safe_replay = _redact_agent_payload(replayed)
-    trusted_proof = _trusted_workflow_family_proof(safe_result, safe_replay)
+    # Derive the proof from the RAW results so the server-computed sensitive-value categories
+    # (and full status/principal/comparison signals) survive redaction. The proof object itself
+    # carries only predicate labels + booleans, never raw response values.
+    trusted_proof = _trusted_workflow_family_proof(executed, replayed)
     failed_count = sum(1 for item in safe_result.get("observations", []) if item.get("error"))
     result_status = "partial" if failed_count or safe_result.get("cancelled") else "completed"
     async with db_pool.acquire() as conn:

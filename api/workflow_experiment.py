@@ -149,6 +149,185 @@ def evaluate_assertions(workflow: dict[str, Any], observations: list[dict[str, A
     return results
 
 
+# --- Server-side sensitive-VALUE classifier (values, not field names) --------------------
+# A data_exposure promotion must be grounded in an actual sensitive value the server observed
+# in a live response, never in a model-supplied predicate label. Patterns are deliberately
+# high-precision: a false positive would wrongly promote a finding, so the safe failure mode
+# is a miss (fail closed), not a false "verified".
+_SENSITIVE_VALUE_PATTERNS: tuple[tuple[str, "re.Pattern[str]"], ...] = (
+    ("jwt", re.compile(r"eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}")),
+    ("private_key", re.compile(r"-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP )?PRIVATE KEY-----")),
+    ("aws_access_key", re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b")),
+    ("google_api_key", re.compile(r"\bAIza[0-9A-Za-z_-]{35}\b")),
+    ("slack_token", re.compile(r"\bxox[baprs]-[0-9A-Za-z-]{10,}")),
+    ("stripe_key", re.compile(r"\bsk_live_[0-9A-Za-z]{16,}\b")),
+    ("ssn", re.compile(r"\b\d{3}-\d{2}-\d{4}\b")),
+    ("bearer_token", re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._-]{24,}")),
+)
+
+_CARD_CANDIDATE = re.compile(r"\b(?:\d[ -]?){13,19}\b")
+
+
+def _luhn_ok(digits: str) -> bool:
+    total = 0
+    for index, ch in enumerate(reversed(digits)):
+        value = ord(ch) - 48
+        if index % 2 == 1:
+            value *= 2
+            if value > 9:
+                value -= 9
+        total += value
+    return total % 10 == 0
+
+
+def _classify_sensitive_values(text: str) -> list[str]:
+    """Return high-precision sensitive-value category labels found in a live response body.
+
+    Returns only category labels (e.g. "jwt", "ssn"), never the raw values, so the signal is
+    safe to persist on an observation.
+    """
+    if not text:
+        return []
+    sample = text[:MAX_BODY_BYTES]
+    categories: set[str] = set()
+    for label, pattern in _SENSITIVE_VALUE_PATTERNS:
+        if pattern.search(sample):
+            categories.add(label)
+    for match in _CARD_CANDIDATE.finditer(sample):
+        digits = re.sub(r"[ -]", "", match.group())
+        if 13 <= len(digits) <= 19 and digits[0] in "3456" and _luhn_ok(digits):
+            categories.add("credit_card")
+            break
+    return sorted(categories)
+
+
+# --- Server-corroborated family predicates ----------------------------------------------
+# A workflow's model declares assertions (mechanical checks) and CLAIMS a security predicate
+# for each. The claim is never trusted: the security MEANING of every predicate is confirmed
+# here from server-computed signals (real sensitive values, distinct authenticated principals,
+# genuine access/denial differentials). Predicates the server cannot independently confirm are
+# not granted (fail closed); injection is never workflow-proven and hands off to the
+# deterministic SQLi/XSS/SSTI verifiers.
+def _obs_status(obs: dict[str, Any]) -> int | None:
+    response = obs.get("response") if isinstance(obs.get("response"), dict) else {}
+    status = response.get("status")
+    return status if isinstance(status, int) else None
+
+
+def _obs_success(obs: dict[str, Any]) -> bool:
+    status = _obs_status(obs)
+    return status is not None and 200 <= status < 300 and not obs.get("error")
+
+
+def _obs_authenticated(obs: dict[str, Any]) -> bool:
+    return str(obs.get("principal") or "anonymous").strip().lower() != "anonymous"
+
+
+def _comparison_changed(comparison: dict[str, Any]) -> bool:
+    return any(bool(comparison.get(key)) for key in (
+        "state_changed", "status_changed", "body_changed",
+        "selected_json_changed", "selected_headers_changed",
+    ))
+
+
+def _server_confirms_predicate(
+    predicate: str,
+    assertion: dict[str, Any],
+    by_label: dict[str, dict[str, Any]],
+    by_pair: dict[tuple[str, str], dict[str, Any]],
+) -> bool:
+    step = by_label.get(str(assertion.get("step") or ""), {})
+    control = by_label.get(str(assertion.get("control") or ""), {})
+    candidate = by_label.get(str(assertion.get("candidate") or ""), {})
+    comparison = by_pair.get((str(assertion.get("control") or ""), str(assertion.get("candidate") or "")), {})
+    changed = _comparison_changed(comparison)
+    equivalent = bool(comparison.get("comparable")) and not changed
+    step_principals = [
+        str(by_label.get(str(label), {}).get("principal") or "").strip().lower()
+        for label in (assertion.get("steps") or [])
+    ]
+    step_principals = [p for p in step_principals if p]
+
+    # data_exposure: require an actual server-classified sensitive VALUE, never HTTP status.
+    if predicate == "sensitive_value_present":
+        return bool((step or candidate).get("sensitive_value_categories"))
+    if predicate == "name_only_classification":  # refute: sensitive-looking keys, no values
+        target = step or candidate
+        response = target.get("response") if isinstance(target.get("response"), dict) else {}
+        keys = response.get("json_keys") or []
+        return (not target.get("sensitive_value_categories")) and any(_sensitive_name(str(k)) for k in keys)
+
+    # bola: a distinct AUTHENTICATED principal genuinely received the owner's object.
+    if predicate in {"ownership_established", "cross_principal_access"}:
+        distinct = (
+            _obs_authenticated(control) and _obs_authenticated(candidate)
+            and str(control.get("principal") or "").lower() != str(candidate.get("principal") or "").lower()
+        )
+        return distinct and equivalent and _obs_success(candidate)
+    if predicate == "distinct_identity":
+        return (
+            len(step_principals) >= 2
+            and len(set(step_principals)) == len(step_principals)
+            and all(p != "anonymous" for p in step_principals)
+        )
+    if predicate == "same_account":  # refute
+        return len(step_principals) >= 2 and len(set(step_principals)) < len(step_principals)
+    if predicate == "cross_principal_denied":  # refute: the cross principal was actually denied
+        return not _obs_success(candidate or step)
+
+    # auth_bypass: an unauthenticated request reached a resource a control shows needs auth.
+    if predicate == "protected_resource_accessed":
+        return _obs_success(step or candidate)
+    if predicate == "unauthenticated_control":
+        target = step or candidate
+        return str(target.get("principal") or "anonymous").lower() == "anonymous" and (_obs_success(target) or changed)
+    if predicate == "access_denied_unauthenticated":  # refute
+        target = step or candidate
+        return str(target.get("principal") or "anonymous").lower() == "anonymous" and not _obs_success(target)
+
+    # mass_assignment: a forbidden field was accepted with an observable change; control rejected.
+    if predicate == "forbidden_field_accepted":
+        return _obs_success(step or candidate)
+    if predicate == "observable_state_change":
+        return changed
+    if predicate in {"control_rejected", "forbidden_field_rejected"}:
+        return (not _obs_success(step or candidate)) or changed
+
+    # workflow: a state-transition invariant was broken (or held, for the refuter).
+    if predicate in {"transition_invariant_broken", "before_after_state"}:
+        return changed
+    if predicate in {"invariant_held", "control_equivalent"}:  # refute
+        return equivalent
+
+    # injection is never proven by a generic workflow; hand off to deterministic verifiers.
+    if predicate in {"payload_control_differential", "deterministic_family_proof"}:
+        return False
+
+    return False  # unknown / uncorroborated predicate -> fail closed
+
+
+def server_corroborated_predicates(result: dict[str, Any]) -> set[str]:
+    """Server-confirmed family predicates for a single workflow execution.
+
+    Reads only server-computed signals from the observations/comparisons; the model's
+    predicate label selects which server check to run, and is never itself treated as proof.
+    """
+    observations = [o for o in (result.get("observations") or []) if isinstance(o, dict)]
+    by_label = {str(o.get("label")): o for o in observations}
+    by_pair = {
+        (str(c.get("control")), str(c.get("candidate"))): c
+        for c in (result.get("comparisons") or []) if isinstance(c, dict)
+    }
+    granted: set[str] = set()
+    for assertion in result.get("assertion_results") or []:
+        if not isinstance(assertion, dict) or assertion.get("passed") is not True:
+            continue
+        predicate = str(assertion.get("predicate") or "").strip().lower()
+        if predicate and _server_confirms_predicate(predicate, assertion, by_label, by_pair):
+            granted.add(predicate)
+    return granted
+
+
 class WorkflowContractError(ExperimentContractError):
     pass
 
@@ -448,6 +627,7 @@ async def execute_workflow(
                     continue
                 break
             extracted: dict[str, str] = {}
+            sensitive_value_categories: list[str] = []
             response: dict[str, Any] | None = None
             request_view: dict[str, Any] = {"kind": step["kind"], "principal": step["principal"]}
             error: str | None = None
@@ -507,9 +687,11 @@ async def execute_workflow(
                         await http_response.aclose()
                     body = b"".join(chunks)
                     response = response_summary(http_response, body, elapsed_ms=round((time.perf_counter() - request_started) * 1000))
+                    body_text = body[:MAX_BODY_BYTES].decode(http_response.encoding or "utf-8", errors="replace")
+                    sensitive_value_categories = _classify_sensitive_values(body_text)
                     parsed: Any = None
                     try:
-                        parsed = json.loads(body[:MAX_BODY_BYTES].decode(http_response.encoding or "utf-8", errors="replace"))
+                        parsed = json.loads(body_text)
                     except (TypeError, ValueError):
                         pass
                     for spec in step["extract"]:
@@ -553,6 +735,7 @@ async def execute_workflow(
                 "label": step["label"], "kind": step["kind"], "principal": step["principal"],
                 "checkpoint": step["checkpoint"], "compare_to": step["compare_to"],
                 "request": request_view, "response": response,
+                "sensitive_value_categories": sensitive_value_categories if not error else [],
                 "extracted": {name: {"sha256": hashlib.sha256(value.encode()).hexdigest(), "length": len(value)} for name, value in extracted.items()} if not error else {},
                 "error": error,
             })

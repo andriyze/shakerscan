@@ -155,3 +155,87 @@ def test_mutating_workflow_requires_and_verifies_restoration():
     unsafe = {**payload, "steps": payload["steps"][:2], "assertions": payload["assertions"][:1]}
     with pytest.raises(workflow.WorkflowContractError, match="cleanup_or_rollback"):
         workflow.normalize_workflow("https://example.test", unsafe)
+
+
+# --- P0: promotion predicates must be server-corroborated, never trusted from the model label ---
+
+def test_generic_200_cannot_be_labelled_a_sensitive_value_finding():
+    # Reproduced P0: a public endpoint returning {"status":"ok"} twice, with a status_in:[200]
+    # assertion the model LABELS sensitive_value_present, must NOT corroborate data_exposure.
+    result = {
+        "observations": [
+            {"label": "read", "principal": "anonymous",
+             "response": {"status": 200, "json_keys": ["status"]},
+             "sensitive_value_categories": []},
+        ],
+        "comparisons": [],
+        "assertion_results": [
+            {"id": "a1", "type": "status_in", "step": "read", "values": [200],
+             "predicate": "sensitive_value_present", "passed": True},
+        ],
+    }
+    assert workflow.server_corroborated_predicates(result) == set()
+
+
+def test_real_sensitive_value_corroborates_data_exposure():
+    result = {
+        "observations": [
+            {"label": "read", "principal": "anonymous",
+             "response": {"status": 200, "json_keys": ["token"]},
+             "sensitive_value_categories": ["jwt"]},
+        ],
+        "comparisons": [],
+        "assertion_results": [
+            {"id": "a1", "type": "status_in", "step": "read", "values": [200],
+             "predicate": "sensitive_value_present", "passed": True},
+        ],
+    }
+    assert "sensitive_value_present" in workflow.server_corroborated_predicates(result)
+
+
+def test_sensitive_value_classifier_matches_values_not_names():
+    assert workflow._classify_sensitive_values('{"status":"ok"}') == []
+    assert workflow._classify_sensitive_values('{"token_name":"my token"}') == []  # name only, no value
+    assert "jwt" in workflow._classify_sensitive_values(
+        'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.abcdefghij')
+    assert "ssn" in workflow._classify_sensitive_values('{"ssn":"123-45-6789"}')
+
+
+def test_cross_principal_access_requires_distinct_authenticated_principals_and_equivalence():
+    shared = {
+        "observations": [
+            {"label": "owner", "principal": "user1", "response": {"status": 200}},
+            {"label": "attacker", "principal": "user2", "response": {"status": 200}},
+        ],
+        "comparisons": [{"control": "owner", "candidate": "attacker", "comparable": True,
+                         "state_changed": False, "status_changed": False, "body_changed": False}],
+        "assertion_results": [{"id": "x", "type": "comparison_equivalent", "control": "owner",
+                               "candidate": "attacker", "predicate": "cross_principal_access", "passed": True}],
+    }
+    assert "cross_principal_access" in workflow.server_corroborated_predicates(shared)
+
+    # Two ANONYMOUS identical public responses must NOT corroborate cross-principal access.
+    anon = {
+        "observations": [
+            {"label": "a", "principal": "anonymous", "response": {"status": 200}},
+            {"label": "b", "principal": "anonymous", "response": {"status": 200}},
+        ],
+        "comparisons": [{"control": "a", "candidate": "b", "comparable": True, "body_changed": False}],
+        "assertion_results": [{"id": "x", "type": "comparison_equivalent", "control": "a",
+                               "candidate": "b", "predicate": "cross_principal_access", "passed": True}],
+    }
+    assert "cross_principal_access" not in workflow.server_corroborated_predicates(anon)
+
+
+def test_injection_predicates_are_never_workflow_corroborated():
+    result = {
+        "observations": [{"label": "p", "principal": "anonymous", "response": {"status": 200}}],
+        "comparisons": [{"control": "c", "candidate": "p", "comparable": True, "body_changed": True}],
+        "assertion_results": [
+            {"id": "i1", "type": "comparison_changed", "control": "c", "candidate": "p",
+             "predicate": "payload_control_differential", "passed": True},
+            {"id": "i2", "type": "status_in", "step": "p", "values": [200],
+             "predicate": "deterministic_family_proof", "passed": True},
+        ],
+    }
+    assert workflow.server_corroborated_predicates(result) == set()
