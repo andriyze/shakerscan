@@ -33,9 +33,13 @@ def test_managed_profile_auth_replaces_prior_identity_and_records_server_binding
 
     class _Context:
         cleared = False
+        headers = None
 
         async def clear_cookies(self):
             self.cleared = True
+
+        async def set_extra_http_headers(self, headers):
+            self.headers = dict(headers)
 
     context = _Context()
     session._contexts["user1"] = context
@@ -51,6 +55,7 @@ def test_managed_profile_auth_replaces_prior_identity_and_records_server_binding
     user = session.state.users["user1"]
     assert result["success"] is True
     assert context.cleared is True
+    assert context.headers == {"Authorization": "Bearer new"}
     assert user.headers == {"Authorization": "Bearer new"}
     assert user.cookies == {}
     assert user.credential_profile_id == "new-profile"

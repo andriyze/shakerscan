@@ -33,6 +33,8 @@ Use ShakerScan's research episode controller for adaptive investigation. The age
 - Active work requires a `gated` episode, receipts, the execution feature flag, and existing command-specific checks.
 - `experiment.http_diff` may use only relative same-origin paths and anonymous headers. Use two to four steps with the first as the control; never place credentials or receipt data in a step.
 - A step may use `json_body` or `form_body`, extract a non-sensitive scalar with `extract`, and reference it in later steps as `${name}`. Use `role: verify` and `compare_to` for before/after side-effect checks.
+- Use `experiment.workflow` only when managed target principals are already configured. Supply a caller-generated `workflow_id`, two to twelve typed HTTP/browser steps, principal slots, and checkpoints; never supply credential material. Cross-principal runs fail closed unless ShakerScan can prove distinct profiles and account identities.
+- Workflow browser actions are limited to same-origin navigate, click, non-sensitive fill, submit, bounded wait, and scalar extract. Use `POST /experiments/workflows/{workflow_id}/cancel` to stop an active run; partial output remains unverified.
 - Treat HTTP experiment differences as leads. Route them to a deterministic family verifier before describing a vulnerability as proven.
 
 ## API Skeleton

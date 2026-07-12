@@ -91,6 +91,8 @@ Acceptance evidence:
 
 ### Wave 3: Principal-bound stateful workflow runtime
 
+**Status: core runtime complete in the current working tree. Deterministic acceptance and rebuild pass; owned-target live validation remains pending because the local fixture approval was unavailable.**
+
 Scope:
 
 - typed API workflow steps and bounded browser actions;

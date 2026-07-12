@@ -646,6 +646,16 @@ class InteractiveSession:
             auth_method = "cookie"
 
         is_authenticated = bool("Authorization" in merged_headers or merged_cookies)
+        try:
+            context = self._contexts.get(user)
+            if context:
+                await context.set_extra_http_headers(merged_headers)
+        except Exception:
+            return {
+                "success": False,
+                "error": "Failed to apply authorization headers to browser context.",
+                "action": "set_auth",
+            }
         self.state.users[user] = UserSession(
             name=user,
             cookies=merged_cookies,

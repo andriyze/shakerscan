@@ -779,7 +779,7 @@ the current observation ID/hash, cannot carry receipts or credentials, must decl
 signal and falsifier, and consume bounded step/action/time/request/model-token budgets. Shadow mode
 records decisions without dispatch. Read-only mode dispatches only the target-scoped inspection
 allowlist. Gated mode can additionally dispatch `asm.improve`, `asm.recon`, `asm.test`,
-`finding.retest`, `scan.focused_family`, and `experiment.http_diff` through the existing Arsenal gateway when a matching
+`finding.retest`, `scan.focused_family`, `experiment.http_diff`, and `experiment.workflow` through the existing Arsenal gateway when a matching
 scope/approval receipt and the global execution flag are present. Target IDs/URLs and receipts are
 injected by the server. The configured AI provider can plan one step from the UI/API; the host-side
 `./scanner.sh research <episode-id> [max-decisions]` runner uses an isolated ephemeral Codex process.
@@ -799,6 +799,18 @@ non-comparable instead of producing synthetic deltas. The result records status/
 selected JSON/header, timing, and before/after comparisons in a tool receipt plus an `unverified` evidence instance. The
 research budget reserves four requests before dispatch. Experiment signals cannot directly create
 or verify findings; a family-specific deterministic verifier must establish proof.
+
+`experiment.workflow` extends the actuator with two to twelve typed HTTP/browser steps and
+server-resolved principal slots (`anonymous`, `user1`, `user2`, `admin`, or `tenant:<id>`). It
+supports before/mutation/after/action/cleanup/rollback checkpoints, same-origin navigation, click,
+fill, submit, bounded wait, scalar extraction, and shared `${name}` resources. Credential profiles
+are decrypted only in API memory and are never accepted in planner parameters. Cross-principal
+workflows require distinct profile IDs and distinct verified account fingerprints before any target
+or browser request. Results contain content-free principal/profile/role/tenant identity receipts,
+bounded mixed HTTP/browser observations, and unverified comparisons. A caller-supplied workflow UUID
+allows cooperative cancellation through `POST /experiments/workflows/{id}/cancel`; cancellation is
+checked between steps and browser contexts always close in a `finally` block. Workflow output cannot
+create or verify a finding.
 
 **Read-only MCP**: `./scanner.sh mcp` starts a stdio MCP adapter over `POST /arsenal/execute`.
 It exposes targets, ASM gaps, findings, content-free evidence manifests, the mission timeline,
@@ -1022,10 +1034,10 @@ it is the exhaustive backstop behind the human-readable product map above.
 
 | Surface | Count | Source |
 |---|---|---|
-| Public REST operations | 201 | `api/api.py` FastAPI decorators |
-| Unique REST paths | 160 | `api/api.py` |
+| Public REST operations | 202 | `api/api.py` FastAPI decorators |
+| Unique REST paths | 161 | `api/api.py` |
 | Check families | 13 | `api/check_registry.py` |
-| Command Arsenal commands | 74 | `api/command_arsenal.py` |
+| Command Arsenal commands | 75 | `api/command_arsenal.py` |
 | Tool adapters | 13 | `api/command_arsenal.py` |
 | Local-agent adapters | 4 | `api/command_arsenal.py` |
 | Scanner CLI flags | 158 | `scanner/scanner.py` |
@@ -1129,6 +1141,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | `POST` | `/evidence/instances` | `record_evidence_instance` |
 | `POST` | `/evidence/retention/sweep` | `evidence_retention_sweep` |
 | `GET` | `/evidence/{evidence_id}` | `get_evidence_object` |
+| `POST` | `/experiments/workflows/{workflow_id}/cancel` | `cancel_workflow_experiment` |
 | `GET` | `/exposure/assets` | `exposure_assets` |
 | `GET` | `/exposure/attack-paths` | `exposure_attack_paths` |
 | `GET` | `/exposure/changes` | `exposure_changes` |
@@ -1299,6 +1312,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | `evidence_instance.list` | evidence | read_only | read_only | GET | `/evidence/instances` | Read concrete evidence instances split from canonical findings. |
 | `evidence_instance.record` | evidence | dry_run | read_only | POST | `/evidence/instances` | Record a concrete evidence instance without updating finding proof state. |
 | `experiment.http_diff` | research | gated | active | POST | `/arsenal/execute` | Run a bounded same-origin control/mutation HTTP experiment and record unverified differential evidence. |
+| `experiment.workflow` | research | gated | credential | POST | `/arsenal/execute` | Run a bounded principal-bound HTTP/browser workflow and record unverified state-transition evidence. |
 | `exposure.graph.get` | inventory | read_only | read_only | GET | `/exposure/graph` | Read the exposure graph built from existing targets, scans, AI targets, model artifacts, and findings. |
 | `finding.get` | findings | read_only | read_only | GET | `/findings/{finding_id}` | Read one finding by id or fingerprint. |
 | `finding.list` | findings | read_only | read_only | GET | `/findings` | List findings with filters and proof-state fields. |

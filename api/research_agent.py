@@ -56,6 +56,7 @@ GATED_RESEARCH_COMMANDS = {
     "asm.test",
     "finding.retest",
     "experiment.http_diff",
+    "experiment.workflow",
     "scan.focused_family",
 }
 
@@ -67,6 +68,7 @@ TARGET_BOUND_COMMANDS = {
     "asm.test",
     "deployment.decision",
     "experiment.http_diff",
+    "experiment.workflow",
     "finding.list",
     "hypothesis.list",
     "hypothesis.situation_report",

@@ -140,6 +140,12 @@ from retest_contract import (
 import parallel_scan
 import asm_inventory
 from http_experiment import ExperimentContractError, execute_experiment
+from workflow_experiment import (
+    WorkflowContractError,
+    execute_workflow,
+    normalize_workflow,
+    validate_principal_contexts,
+)
 from research_agent import (
     GATED_RESEARCH_COMMANDS,
     READ_ONLY_RESEARCH_COMMANDS,
@@ -21837,6 +21843,309 @@ async def _arsenal_dispatch_http_diff(p: dict[str, Any], approval_receipt_id: st
     }
 
 
+_active_workflow_cancellations: dict[str, asyncio.Event] = {}
+
+
+def _workflow_identity_fingerprint(principal_metadata: Any, profile_metadata: Any, secret: str, auth_kind: str) -> str | None:
+    sources = [_decode_json_value(principal_metadata) or {}, _decode_json_value(profile_metadata) or {}]
+    identity: str | None = None
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        for key in ("principal_identity", "account_id", "subject_id", "user_id", "email"):
+            value = str(source.get(key) or "").strip().lower()
+            if value:
+                identity = f"{key}:{value}"
+                break
+        if identity:
+            break
+    if not identity and auth_kind == "authorization_header":
+        token = secret.split(None, 1)[1] if secret.lower().startswith("bearer ") and " " in secret else secret
+        parts = token.split(".")
+        if len(parts) == 3:
+            try:
+                payload = json.loads(base64.urlsafe_b64decode(parts[1] + "=" * (-len(parts[1]) % 4)))
+            except (ValueError, TypeError, json.JSONDecodeError):
+                payload = {}
+            if isinstance(payload, dict):
+                for key in ("account_id", "user_id", "email", "sub"):
+                    value = str(payload.get(key) or "").strip().lower()
+                    if value and not (key == "sub" and value in {"user", "customer", "generic"}):
+                        identity = f"{key}:{value}"
+                        break
+    return hashlib.sha256(identity.encode()).hexdigest() if identity else None
+
+
+def _workflow_cookie_map(secret: str) -> dict[str, str]:
+    cookies: dict[str, str] = {}
+    for item in secret.split(";"):
+        name, separator, value = item.strip().partition("=")
+        if separator and name:
+            cookies[name] = value
+    return cookies
+
+
+async def _resolve_workflow_principal_contexts(
+    conn: Any,
+    target_uuid: uuid.UUID,
+    used_slots: set[str],
+) -> dict[str, dict[str, Any]]:
+    rows = await conn.fetch(
+        """
+        SELECT p.id AS principal_id, p.label, p.role, p.tenant_id, p.auth_state,
+               p.metadata_json AS principal_metadata, cp.id AS profile_id,
+               cp.auth_kind, cp.secret_value, cp.metadata_json AS profile_metadata
+        FROM target_principals p
+        JOIN target_credential_profiles cp
+          ON cp.target_id = p.target_id
+         AND lower(cp.name) = lower(p.credential_profile)
+        WHERE p.target_id = $1
+          AND p.is_active = true
+          AND cp.is_active = true
+          AND (cp.expires_at IS NULL OR cp.expires_at > NOW())
+        ORDER BY p.updated_at DESC
+        """,
+        target_uuid,
+    )
+    candidates: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        payload = row_to_dict(row)
+        slots = {str(payload.get("auth_state") or "").strip().lower()}
+        if str(payload.get("role") or "").strip().lower() == "admin":
+            slots.add("admin")
+        tenant = str(payload.get("tenant_id") or "").strip().lower()
+        if tenant:
+            slots.add(f"tenant:{tenant}")
+        for slot in slots:
+            if slot in used_slots:
+                candidates.setdefault(slot, []).append(payload)
+    contexts: dict[str, dict[str, Any]] = {}
+    for slot in sorted(used_slots - {"anonymous"}):
+        matches = candidates.get(slot) or []
+        if not matches:
+            raise WorkflowContractError(f"principal_context_missing:{slot}")
+        if len(matches) > 1:
+            raise WorkflowContractError(f"principal_context_ambiguous:{slot}")
+        row = matches[0]
+        secret = str(decrypt_secret(row.get("secret_value")) or "").strip()
+        if not secret:
+            raise WorkflowContractError(f"principal_profile_secret_unavailable:{slot}")
+        auth_kind = str(row.get("auth_kind") or "").strip()
+        headers = {"Authorization": secret} if auth_kind == "authorization_header" else {}
+        cookies = _workflow_cookie_map(secret) if auth_kind == "cookie" else {}
+        if not headers and not cookies:
+            raise WorkflowContractError(f"principal_profile_auth_kind_invalid:{slot}")
+        contexts[slot] = {
+            "principal_id": str(row.get("principal_id")),
+            "profile_id": str(row.get("profile_id")),
+            "identity_fingerprint": _workflow_identity_fingerprint(
+                row.get("principal_metadata"), row.get("profile_metadata"), secret, auth_kind
+            ),
+            "role": row.get("role"),
+            "tenant_id": row.get("tenant_id"),
+            "headers": headers,
+            "cookies": cookies,
+        }
+    return contexts
+
+
+@app.post("/experiments/workflows/{workflow_id}/cancel")
+async def cancel_workflow_experiment(workflow_id: str):
+    workflow_uuid = _uuid_or_400(workflow_id, "workflow id")
+    event = _active_workflow_cancellations.get(str(workflow_uuid))
+    if not event:
+        raise HTTPException(status_code=404, detail="Active workflow not found")
+    event.set()
+    return {"workflow_id": str(workflow_uuid), "cancel_requested": True, "finding_created": False}
+
+
+async def _execute_workflow_runtime(
+    target_url: str,
+    workflow_payload: dict[str, Any],
+    normalized: dict[str, Any],
+    principal_contexts: dict[str, dict[str, Any]],
+    cancel_event: asyncio.Event,
+) -> dict[str, Any]:
+    manager = None
+    session = None
+    browser_slots_applied: set[str] = set()
+    try:
+        if any(step["kind"] == "browser" for step in normalized["steps"]):
+            manager = await InteractiveSessionManager.get_instance()
+            session = await manager.create_session(target_url, RESULTS_DIR)
+            started = await session.start()
+            if not started.get("success"):
+                raise WorkflowContractError(str(started.get("error") or "browser_session_start_failed"))
+
+        async def browser_action(slot: str, action: str, data: dict[str, Any]) -> dict[str, Any]:
+            if not session:
+                return {"success": False, "error": "browser_runtime_unavailable"}
+            user = "default" if slot == "anonymous" else slot
+            if slot != "anonymous" and slot not in browser_slots_applied:
+                context = principal_contexts[slot]
+                auth_data: dict[str, Any]
+                if context.get("headers"):
+                    auth_data = {"auth_header": context["headers"]["Authorization"]}
+                else:
+                    auth_data = {"cookies": context.get("cookies") or {}}
+                auth_data.update({
+                    "_credential_profile_id": context["profile_id"],
+                    "_principal_auth_state": slot,
+                    "_replace_auth_state": True,
+                })
+                auth_result = await session.action({"action": "set_auth", "user": user, "data": auth_data})
+                if not auth_result.get("success"):
+                    return {"success": False, "error": "managed_principal_auth_failed"}
+                browser_slots_applied.add(slot)
+            action_data = dict(data)
+            if action == "navigate":
+                action_data["url"] = action_data.pop("path")
+            result = await session.action({"action": action, "user": user, "data": action_data})
+            if action == "extract" and result.get("success"):
+                values = result.get("values")
+                if isinstance(values, list) and len(values) == 1 and not isinstance(values[0], (dict, list)):
+                    result["value"] = values[0]
+                else:
+                    return {"success": False, "error": "browser_extract_missing_or_ambiguous"}
+            return result
+
+        return await execute_workflow(
+            target_url,
+            workflow_payload,
+            principal_contexts=principal_contexts,
+            browser_action=browser_action if session else None,
+            cancelled=cancel_event.is_set,
+        )
+    finally:
+        if manager and session:
+            await manager.close_session(session.session_id)
+
+
+async def _arsenal_dispatch_workflow(p: dict[str, Any], approval_receipt_id: str | None) -> dict[str, Any]:
+    target_uuid = _uuid_or_400(str(p.get("target_id") or ""), "target id")
+    workflow_uuid = _uuid_or_400(str(p.get("workflow_id") or ""), "workflow id")
+    workflow_id = str(workflow_uuid)
+    if workflow_id in _active_workflow_cancellations:
+        raise HTTPException(status_code=409, detail="Workflow is already active")
+    async with db_pool.acquire() as conn:
+        target = await conn.fetchrow(
+            "SELECT id, url, is_active, discovery_source FROM targets WHERE id=$1",
+            target_uuid,
+        )
+        if not target or not target["is_active"]:
+            raise HTTPException(status_code=404, detail="Active target not found")
+        if str(target["discovery_source"] or "") == "model-intake":
+            raise HTTPException(status_code=400, detail="Model Intake artifacts are not workflow targets")
+        workflow_payload = {
+            key: value for key, value in p.items()
+            if key in {"objective", "expected_signal", "falsifier", "timeout_seconds", "steps"}
+        }
+        try:
+            normalized = normalize_workflow(str(target["url"]), workflow_payload)
+            used_slots = {step["principal"] for step in normalized["steps"]}
+            principal_contexts = await _resolve_workflow_principal_contexts(conn, target_uuid, used_slots)
+            validate_principal_contexts(principal_contexts, used_slots)
+        except WorkflowContractError as exc:
+            raise HTTPException(status_code=422, detail={"error": "invalid_workflow", "violation": str(exc)}) from exc
+
+    cancel_event = asyncio.Event()
+    _active_workflow_cancellations[workflow_id] = cancel_event
+    started_at = datetime.now(timezone.utc)
+    try:
+        executed = await _execute_workflow_runtime(
+            str(target["url"]),
+            workflow_payload,
+            normalized,
+            principal_contexts,
+            cancel_event,
+        )
+    except WorkflowContractError as exc:
+        raise HTTPException(status_code=422, detail={"error": "workflow_execution_failed", "violation": str(exc)}) from exc
+    finally:
+        _active_workflow_cancellations.pop(workflow_id, None)
+
+    finished_at = datetime.now(timezone.utc)
+    safe_result = _redact_agent_payload(executed)
+    failed_count = sum(1 for item in safe_result.get("observations", []) if item.get("error"))
+    result_status = "partial" if failed_count or safe_result.get("cancelled") else "completed"
+    async with db_pool.acquire() as conn:
+        async with conn.transaction():
+            receipt_result = await _record_tool_receipt(conn, ToolReceiptRequest(
+                tool_name="experiment.workflow",
+                adapter_version="2026-07-12.v1",
+                redacted_argv=["experiment.workflow", str(target_uuid), workflow_id, f"steps:{safe_result.get('step_count', 0)}"],
+                target_scope={"target_id": str(target_uuid), "target_url": str(target["url"]), "same_origin_only": True},
+                approval_receipt_id=approval_receipt_id,
+                status="failed" if failed_count == safe_result.get("step_count") else "success",
+                parser_status="parsed",
+                started_at=started_at.isoformat(),
+                finished_at=finished_at.isoformat(),
+                redaction_summary="Managed credentials resolved in memory; persisted workflow values are bounded and redacted.",
+                metadata_json={
+                    "workflow_id": workflow_id,
+                    "version": safe_result.get("version"),
+                    "step_count": safe_result.get("step_count"),
+                    "request_count": safe_result.get("request_count"),
+                    "principal_receipts": safe_result.get("principal_receipts") or [],
+                    "cancelled": safe_result.get("cancelled"),
+                    "finding_created": False,
+                    "proof_state": "unverified_workflow_signal",
+                },
+                created_by="research_principal_workflow",
+            ))
+            receipt = receipt_result.get("tool_receipt") or {}
+            evidence_result = await _record_evidence_instance(conn, EvidenceInstanceRequest(
+                target_id=str(target_uuid),
+                concrete_url=str(target["url"]),
+                request_response_refs=[
+                    f"{item.get('kind')}:{item.get('label')}:{item.get('principal')}"
+                    for item in safe_result.get("observations", [])
+                ],
+                proof_observation={
+                    "workflow_id": workflow_id,
+                    "objective": safe_result.get("objective"),
+                    "expected_signal": safe_result.get("expected_signal"),
+                    "falsifier": safe_result.get("falsifier"),
+                    "principal_receipts": safe_result.get("principal_receipts") or [],
+                    "observations": safe_result.get("observations") or [],
+                    "comparisons": safe_result.get("comparisons") or [],
+                },
+                tool_receipt_id=str(receipt.get("id")) if receipt.get("id") else None,
+                proof_state="unverified",
+                metadata_json={"workflow_version": safe_result.get("version"), "finding_created": False, "promotion_allowed": False},
+                created_by="research_principal_workflow",
+            ))
+            evidence = evidence_result.get("evidence_instance") or {}
+            command_result = await _record_command_result(
+                conn,
+                command="experiment.workflow",
+                status=result_status,
+                risk_tier="credential",
+                approval_receipt_id=approval_receipt_id,
+                tool_receipt_ids=[str(receipt.get("id"))] if receipt.get("id") else [],
+                operator_message="Principal-bound workflow completed; all signals remain unverified.",
+                result_json={
+                    "workflow": safe_result,
+                    "evidence_instance_id": str(evidence.get("id")) if evidence.get("id") else None,
+                    "tool_receipt_id": str(receipt.get("id")) if receipt.get("id") else None,
+                    "findings_created": 0,
+                    "verified_findings_created": 0,
+                },
+                created_by="research_principal_workflow",
+            )
+    return {
+        "status": result_status,
+        "operation_id": command_result["id"],
+        "workflow_id": workflow_id,
+        "workflow": safe_result,
+        "evidence_instance_id": str(evidence.get("id")) if evidence.get("id") else None,
+        "tool_receipt_id": str(receipt.get("id")) if receipt.get("id") else None,
+        "findings_created": 0,
+        "verified_findings_created": 0,
+        "proof_state": "unverified_workflow_signal",
+    }
+
+
 def _arsenal_readonly_adapters() -> dict[str, Any]:
     return {
         "campaign.list": _arsenal_dispatch_campaign_list,
@@ -21917,6 +22226,7 @@ def _arsenal_gated_adapters() -> dict[str, Any]:
         "target.principal_matrix.record": _arsenal_dispatch_target_principal_matrix_record,
         "hypothesis.reconcile_proof": _arsenal_dispatch_hypothesis_reconcile_proof,
         "experiment.http_diff": _arsenal_dispatch_http_diff,
+        "experiment.workflow": _arsenal_dispatch_workflow,
     }
 
 

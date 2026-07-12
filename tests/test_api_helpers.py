@@ -6,6 +6,7 @@ JSON-decode helper that have grown enough surface to be worth pinning.
 
 import asyncio
 import base64
+import hashlib
 import io
 import json
 import os
@@ -9233,3 +9234,65 @@ def test_http_experiment_has_wired_gated_dispatch_adapter():
     assert command["risk_tier"] == "active"
     assert command["request_cost"] == 4
     assert api_module._arsenal_gated_adapters()["experiment.http_diff"] is api_module._arsenal_dispatch_http_diff
+
+
+def test_principal_workflow_has_wired_gated_dispatch_adapter():
+    command = api_module._research_command_catalog()["experiment.workflow"]
+
+    assert command["status"] == "gated"
+    assert command["risk_tier"] == "credential"
+    assert command["request_cost"] == 12
+    assert "workflow_id" in command["parameters_schema"]
+    assert api_module._arsenal_gated_adapters()["experiment.workflow"] is api_module._arsenal_dispatch_workflow
+
+
+def test_workflow_identity_fingerprint_uses_metadata_without_exposing_identity():
+    fingerprint = api_module._workflow_identity_fingerprint(
+        {"account_id": "Account-42"}, {}, "Bearer opaque-secret", "authorization_header"
+    )
+
+    assert fingerprint == hashlib.sha256(b"account_id:account-42").hexdigest()
+    assert "Account-42" not in fingerprint
+
+
+def test_workflow_runtime_closes_browser_session_after_cancellation(monkeypatch):
+    closed = []
+
+    class Session:
+        session_id = "workflow-session"
+
+        async def start(self):
+            return {"success": True}
+
+    class Manager:
+        async def create_session(self, target_url, results_dir):
+            return Session()
+
+        async def close_session(self, session_id):
+            closed.append(session_id)
+            return True
+
+    class ManagerFactory:
+        @staticmethod
+        async def get_instance():
+            return Manager()
+
+    async def fake_execute(*args, **kwargs):
+        assert kwargs["cancelled"]() is True
+        return {"cancelled": True, "observations": [], "finding_created": False}
+
+    monkeypatch.setattr(api_module, "InteractiveSessionManager", ManagerFactory)
+    monkeypatch.setattr(api_module, "execute_workflow", fake_execute)
+    event = asyncio.Event()
+    event.set()
+
+    result = asyncio.run(api_module._execute_workflow_runtime(
+        "https://example.test",
+        {"steps": []},
+        {"steps": [{"kind": "browser"}]},
+        {},
+        event,
+    ))
+
+    assert result["cancelled"] is True
+    assert closed == ["workflow-session"]
