@@ -119,3 +119,39 @@ def test_browser_action_data_is_strictly_typed():
             {"label": "one", "path": "/a"},
             {"label": "two", "kind": "browser", "action": "navigate", "data": {"path": "/ok", "allow_out_of_scope": True}},
         ]})
+
+
+def test_mutating_workflow_requires_and_verifies_restoration():
+    state = {"owner": "user1"}
+
+    def handler(request):
+        if request.method == "PATCH":
+            state["owner"] = "user2"
+        elif request.method == "PUT":
+            state["owner"] = "user1"
+        return httpx.Response(200, json={"owner": state["owner"]})
+
+    payload = {
+        "proof_family": "workflow",
+        "steps": [
+            {"label": "before", "checkpoint": "before", "method": "GET", "path": "/object"},
+            {"label": "mutate", "checkpoint": "mutation", "method": "PATCH", "path": "/object", "json_body": {"owner": "user2"}, "compare_to": "before"},
+            {"label": "cleanup", "checkpoint": "cleanup", "method": "PUT", "path": "/object", "json_body": {"owner": "user1"}},
+            {"label": "restored", "checkpoint": "after", "method": "GET", "path": "/object", "compare_to": "before"},
+        ],
+        "assertions": [
+            {"type": "comparison_changed", "control": "before", "candidate": "mutate", "predicate": "transition_invariant_broken"},
+            {"type": "restored", "control": "before", "candidate": "restored", "predicate": "before_after_state"},
+        ],
+    }
+    result = asyncio.run(workflow.execute_workflow(
+        "https://example.test", payload, principal_contexts={}, transport=httpx.MockTransport(handler)
+    ))
+    assert result["mutating"] is True
+    assert result["assertions_passed"] is True
+    assert result["restoration_verified"] is True
+    assert state["owner"] == "user1"
+
+    unsafe = {**payload, "steps": payload["steps"][:2], "assertions": payload["assertions"][:1]}
+    with pytest.raises(workflow.WorkflowContractError, match="cleanup_or_rollback"):
+        workflow.normalize_workflow("https://example.test", unsafe)

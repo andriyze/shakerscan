@@ -63,11 +63,20 @@ def score_hypothesis(h: dict[str, Any], *, context: dict[str, Any] | None = None
     na = _next_action(h)
     family = str(h.get("family") or "").strip().lower()
     status = str(h.get("effective_status") or h.get("status") or "").strip().lower()
+    source = str(h.get("source") or "").strip().lower()
+    residue_backed = source in {"app_graph", "benchmark", "dast", "scan", "scanner", "asm"} or bool(
+        md.get("unexplained_residue") or md.get("graph_edge_id") or md.get("edge_id")
+        or md.get("source_scan_id") or md.get("baseline_scan_id")
+    )
 
     # Terminal or parked leads are excluded from scheduling regardless of any hint.
     if not hypothesis_lifecycle.is_actionable(status):
         return {"hypothesis_id": h.get("id"), "priority": None, "excluded": True,
                 "exclude_reason": f"not_actionable:{status}", "breakdown": {}, "version": SCHEDULER_VERSION}
+    if ctx.get("require_residue") and not residue_backed:
+        return {"hypothesis_id": h.get("id"), "priority": None, "excluded": True,
+                "exclude_reason": "not_backed_by_dast_residue_or_graph", "breakdown": {},
+                "residue_backed": False, "version": SCHEDULER_VERSION}
 
     impact = _SEVERITY_IMPACT.get(str(h.get("severity_guess") or "").strip().lower(), 2.0)
 
@@ -118,6 +127,7 @@ def score_hypothesis(h: dict[str, Any], *, context: dict[str, Any] | None = None
         "breakdown": {**breakdown, "hint_delta": hint},
         "request_cost": request_cost,
         "version": SCHEDULER_VERSION,
+        "residue_backed": residue_backed,
     }
 
 

@@ -77,6 +77,16 @@ def test_cost_aware_deferral():
     assert r["counts"]["scheduled"] == 0
 
 
+def test_autonomous_schedule_requires_dast_residue_or_graph_source():
+    generic = _h(id="generic", source="manual")
+    graph = _h(id="graph", source="app_graph")
+    ranked = sched.rank_hypotheses(
+        [generic, graph], context={"auth_available": True, "require_residue": True}
+    )
+    assert [item["hypothesis_id"] for item in ranked["scheduled"]] == ["graph"]
+    assert ranked["excluded"][0]["exclude_reason"] == "not_backed_by_dast_residue_or_graph"
+
+
 def test_breakdown_is_explainable():
     s = sched.score_hypothesis(_h(id="a"), context={"auth_available": True})
     for key in ("impact", "boundary_value", "novelty", "evidence_strength", "reachability",

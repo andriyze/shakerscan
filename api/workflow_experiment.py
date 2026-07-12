@@ -34,10 +34,119 @@ WORKFLOW_VERSION = "principal-workflow-2026-07-12.v1"
 MAX_WORKFLOW_STEPS = 12
 MAX_WORKFLOW_VARIABLES = 40
 MAX_WORKFLOW_SECONDS = 180
+MAX_WORKFLOW_ASSERTIONS = 16
 ALLOWED_STEP_KINDS = {"http", "browser"}
 ALLOWED_CHECKPOINTS = {"before", "mutation", "after", "action", "cleanup", "rollback"}
 ALLOWED_BROWSER_ACTIONS = {"navigate", "click", "fill", "submit", "wait", "extract"}
 PRINCIPAL_SLOT_PATTERN = re.compile(r"^(anonymous|user1|user2|admin|tenant:[A-Za-z0-9_.-]{1,80})$")
+ASSERTION_TYPES = {
+    "status_in", "status_not_in", "comparison_changed", "comparison_equivalent",
+    "distinct_principals", "restored",
+}
+PREDICATE_ASSERTION_TYPES = {
+    "distinct_identity": {"distinct_principals"},
+    "ownership_established": {"status_in", "comparison_equivalent"},
+    "cross_principal_access": {"status_in", "comparison_equivalent"},
+    "denial_control": {"status_not_in", "comparison_changed"},
+    "cross_principal_denied": {"status_not_in"},
+    "same_account": {"distinct_principals"},
+    "forbidden_field_accepted": {"status_in"},
+    "observable_state_change": {"comparison_changed"},
+    "control_rejected": {"status_not_in", "comparison_changed"},
+    "forbidden_field_rejected": {"status_not_in"},
+    "payload_control_differential": {"comparison_changed"},
+    "deterministic_family_proof": {"comparison_changed", "status_in"},
+    "control_equivalent": {"comparison_equivalent"},
+    "protected_resource_accessed": {"status_in"},
+    "unauthenticated_control": {"status_not_in", "comparison_changed"},
+    "access_denied_unauthenticated": {"status_not_in"},
+    "transition_invariant_broken": {"comparison_changed"},
+    "before_after_state": {"comparison_changed", "restored"},
+    "invariant_held": {"comparison_equivalent"},
+    "sensitive_value_present": {"comparison_changed", "status_in"},
+    "name_only_classification": {"comparison_equivalent"},
+}
+
+
+def _normalize_assertions(raw: Any, labels: set[str]) -> list[dict[str, Any]]:
+    items = raw if isinstance(raw, list) else []
+    if len(items) > MAX_WORKFLOW_ASSERTIONS:
+        raise WorkflowContractError("workflow_assertion_limit_exceeded")
+    normalized: list[dict[str, Any]] = []
+    for index, item in enumerate(items):
+        if not isinstance(item, dict):
+            raise WorkflowContractError(f"assertion_{index}_must_be_object")
+        assertion_type = str(item.get("type") or "").strip().lower()
+        if assertion_type not in ASSERTION_TYPES:
+            raise WorkflowContractError(f"assertion_{index}_type_not_allowed")
+        step = str(item.get("step") or "").strip()
+        control = str(item.get("control") or "").strip()
+        candidate = str(item.get("candidate") or "").strip()
+        steps = [str(value).strip() for value in (item.get("steps") or []) if str(value).strip()]
+        referenced = {value for value in (step, control, candidate, *steps) if value}
+        if not referenced or not referenced.issubset(labels):
+            raise WorkflowContractError(f"assertion_{index}_references_unknown_step")
+        values: list[int] = []
+        if assertion_type in {"status_in", "status_not_in"}:
+            if not step:
+                raise WorkflowContractError(f"assertion_{index}_step_required")
+            try:
+                values = sorted({int(value) for value in item.get("values") or []})
+            except (TypeError, ValueError) as exc:
+                raise WorkflowContractError(f"assertion_{index}_status_values_invalid") from exc
+            if not values or any(value < 100 or value > 599 for value in values):
+                raise WorkflowContractError(f"assertion_{index}_status_values_invalid")
+        elif assertion_type in {"comparison_changed", "comparison_equivalent", "restored"}:
+            if not control or not candidate or control == candidate:
+                raise WorkflowContractError(f"assertion_{index}_comparison_steps_required")
+        elif assertion_type == "distinct_principals" and len(set(steps)) < 2:
+            raise WorkflowContractError(f"assertion_{index}_distinct_steps_required")
+        predicate = str(item.get("predicate") or "").strip().lower()[:80] or None
+        if predicate and assertion_type not in PREDICATE_ASSERTION_TYPES.get(predicate, set()):
+            raise WorkflowContractError(f"assertion_{index}_predicate_type_mismatch")
+        normalized.append({
+            "id": str(item.get("id") or f"assertion_{index + 1}").strip()[:80],
+            "type": assertion_type,
+            "step": step or None,
+            "control": control or None,
+            "candidate": candidate or None,
+            "steps": steps,
+            "values": values,
+            "predicate": predicate,
+        })
+    return normalized
+
+
+def evaluate_assertions(workflow: dict[str, Any], observations: list[dict[str, Any]], comparisons: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    by_label = {str(item.get("label") or ""): item for item in observations}
+    by_pair = {(str(item.get("control") or ""), str(item.get("candidate") or "")): item for item in comparisons}
+    results: list[dict[str, Any]] = []
+    for assertion in workflow.get("assertions") or []:
+        assertion_type = assertion["type"]
+        passed = False
+        observed: dict[str, Any] = {}
+        if assertion_type in {"status_in", "status_not_in"}:
+            observation = by_label.get(str(assertion.get("step") or ""), {})
+            response = observation.get("response") if isinstance(observation.get("response"), dict) else {}
+            status = response.get("status")
+            passed = not observation.get("error") and isinstance(status, int) and (
+                status in assertion["values"] if assertion_type == "status_in" else status not in assertion["values"]
+            )
+            observed = {"status": status, "error": observation.get("error")}
+        elif assertion_type in {"comparison_changed", "comparison_equivalent", "restored"}:
+            comparison = by_pair.get((str(assertion.get("control") or ""), str(assertion.get("candidate") or "")), {})
+            changed = any(bool(comparison.get(key)) for key in (
+                "state_changed", "status_changed", "body_changed", "selected_json_changed", "selected_headers_changed"
+            ))
+            comparable = bool(comparison.get("comparable"))
+            passed = comparable and (not changed if assertion_type in {"comparison_equivalent", "restored"} else changed)
+            observed = {"comparable": comparable, "changed": changed}
+        elif assertion_type == "distinct_principals":
+            principals = [str(by_label.get(label, {}).get("principal") or "") for label in assertion["steps"]]
+            passed = all(principals) and len(set(principals)) == len(principals)
+            observed = {"distinct_count": len(set(principals)), "step_count": len(principals)}
+        results.append({**assertion, "passed": passed, "observed": observed})
+    return results
 
 
 class WorkflowContractError(ExperimentContractError):
@@ -228,6 +337,35 @@ def normalize_workflow(target_url: str, raw: Any) -> dict[str, Any]:
         declared.update(extract_names)
         normalized.append(normalized_step)
 
+    assertions = _normalize_assertions(payload.get("assertions"), labels)
+    steps_by_label = {step["label"]: step for step in normalized}
+    for index, assertion in enumerate(assertions):
+        if assertion["type"] in {"comparison_changed", "comparison_equivalent", "restored"}:
+            candidate_step = steps_by_label.get(str(assertion.get("candidate") or ""), {})
+            if candidate_step.get("compare_to") != assertion.get("control"):
+                raise WorkflowContractError(f"assertion_{index}_must_match_candidate_compare_to")
+    write_steps = [
+        step for step in normalized
+        if step.get("kind") == "http" and step.get("method") in {"PUT", "PATCH", "DELETE"}
+        and step.get("checkpoint") not in {"cleanup", "rollback"}
+    ]
+    mutation_steps = [
+        step for step in normalized
+        if step.get("checkpoint") == "mutation" and (
+            (step.get("kind") == "http" and step.get("method") in {"POST", "PUT", "PATCH", "DELETE"})
+            or (step.get("kind") == "browser" and step.get("action") in {"click", "fill", "submit"})
+        )
+    ]
+    restoration_steps = [step for step in normalized if step.get("checkpoint") in {"cleanup", "rollback"}]
+    restoration_assertions = [item for item in assertions if item.get("type") == "restored"]
+    if write_steps or mutation_steps:
+        if not restoration_steps:
+            raise WorkflowContractError("mutating_workflow_requires_cleanup_or_rollback_step")
+        if not restoration_assertions:
+            raise WorkflowContractError("mutating_workflow_requires_restoration_assertion")
+        last_mutation = max(normalized.index(step) for step in (write_steps or mutation_steps))
+        if any(normalized.index(step) <= last_mutation for step in restoration_steps):
+            raise WorkflowContractError("cleanup_or_rollback_must_follow_mutation")
     timeout_seconds = max(1, min(int(payload.get("timeout_seconds") or 30), MAX_WORKFLOW_SECONDS))
     return {
         "version": WORKFLOW_VERSION,
@@ -237,6 +375,9 @@ def normalize_workflow(target_url: str, raw: Any) -> dict[str, Any]:
         "target_url": target_url,
         "timeout_seconds": timeout_seconds,
         "steps": normalized,
+        "proof_family": str(payload.get("proof_family") or "workflow").strip().lower()[:80],
+        "assertions": assertions,
+        "mutating": bool(write_steps or mutation_steps),
     }
 
 
@@ -293,12 +434,18 @@ async def execute_workflow(
     variables: dict[str, str] = {}
     observations: list[dict[str, Any]] = []
     request_count = 0
+    mutation_succeeded = False
     started = time.monotonic()
     timeout = httpx.Timeout(min(workflow["timeout_seconds"], 15))
     async with httpx.AsyncClient(timeout=timeout, follow_redirects=False, trust_env=False, transport=transport) as client:
         for step in workflow["steps"]:
-            if (cancelled and cancelled()) or time.monotonic() - started > workflow["timeout_seconds"]:
-                observations.append({"label": step["label"], "kind": step["kind"], "error": "workflow_cancelled_or_timed_out"})
+            interrupted = (cancelled and cancelled()) or time.monotonic() - started > workflow["timeout_seconds"]
+            if interrupted and not (
+                mutation_succeeded and step.get("checkpoint") in {"cleanup", "rollback"}
+            ):
+                observations.append({"label": step["label"], "kind": step["kind"], "checkpoint": step.get("checkpoint"), "error": "workflow_cancelled_or_timed_out"})
+                if mutation_succeeded:
+                    continue
                 break
             extracted: dict[str, str] = {}
             response: dict[str, Any] | None = None
@@ -409,6 +556,8 @@ async def execute_workflow(
                 "extracted": {name: {"sha256": hashlib.sha256(value.encode()).hexdigest(), "length": len(value)} for name, value in extracted.items()} if not error else {},
                 "error": error,
             })
+            if step.get("checkpoint") == "mutation" and not error:
+                mutation_succeeded = True
     by_label = {item["label"]: item for item in observations}
     comparisons: list[dict[str, Any]] = []
     for item in observations:
@@ -420,6 +569,9 @@ async def execute_workflow(
         else:
             comparison = {"comparable": not control.get("error") and not item.get("error"), "state_changed": control.get("response") != item.get("response")}
         comparisons.append({"control": item["compare_to"], "candidate": item["label"], **comparison})
+    assertion_results = evaluate_assertions(workflow, observations, comparisons)
+    restoration_results = [item for item in assertion_results if item.get("type") == "restored"]
+    cleanup_observations = [item for item in observations if item.get("checkpoint") in {"cleanup", "rollback"}]
     return {
         "version": WORKFLOW_VERSION,
         "objective": workflow["objective"],
@@ -431,6 +583,14 @@ async def execute_workflow(
         "variable_names": sorted(variables),
         "observations": observations,
         "comparisons": comparisons,
+        "proof_family": workflow["proof_family"],
+        "assertion_results": assertion_results,
+        "assertions_passed": bool(assertion_results) and all(item.get("passed") for item in assertion_results),
+        "restoration_verified": (not workflow["mutating"]) or (
+            bool(restoration_results) and all(item.get("passed") for item in restoration_results)
+            and bool(cleanup_observations) and all(not item.get("error") for item in cleanup_observations)
+        ),
+        "mutating": workflow["mutating"],
         "cancelled": any(item.get("error") == "workflow_cancelled_or_timed_out" for item in observations),
         "finding_created": False,
         "proof_state": "unverified_workflow_signal",

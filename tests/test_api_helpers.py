@@ -11021,6 +11021,27 @@ def test_principal_workflow_has_wired_gated_dispatch_adapter():
     assert api_module._arsenal_gated_adapters()["experiment.workflow"] is api_module._arsenal_dispatch_workflow
 
 
+def test_trusted_workflow_proof_requires_stable_replay_and_restoration():
+    execution = {
+        "proof_family": "workflow",
+        "restoration_verified": True,
+        "observations": [{"label": "before", "error": None}],
+        "assertion_results": [
+            {"id": "broken", "type": "comparison_changed", "predicate": "transition_invariant_broken", "passed": True},
+            {"id": "restored", "type": "restored", "predicate": "before_after_state", "passed": True},
+        ],
+    }
+    proof = api_module._trusted_workflow_family_proof(execution, execution)
+    assert proof["verdict"] == "verified"
+    assert proof["promotable"] is True
+    assert proof["reproduction_count"] == 2
+
+    failed_replay = {**execution, "restoration_verified": False}
+    proof = api_module._trusted_workflow_family_proof(execution, failed_replay)
+    assert proof["promotable"] is False
+    assert proof["reexecuted_at_handoff"] is False
+
+
 def test_workflow_identity_fingerprint_uses_metadata_without_exposing_identity():
     fingerprint = api_module._workflow_identity_fingerprint(
         {"account_id": "Account-42"}, {}, "Bearer opaque-secret", "authorization_header"

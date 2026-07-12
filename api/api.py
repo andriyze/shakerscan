@@ -15414,6 +15414,7 @@ async def _build_agent_context_pack_from_target(conn, req: AgentContextPackFromT
                     bool(item.get("credential_configured"))
                     for item in principal_summary.get("principals", [])
                 ),
+                "require_residue": True,
             },
         )
         by_id = {str(item.get("id")): item for item in hypotheses_summary}
@@ -22454,6 +22455,166 @@ async def _execute_workflow_runtime(
             await manager.close_session(session.session_id)
 
 
+def _trusted_workflow_family_proof(
+    first: dict[str, Any],
+    replay: dict[str, Any],
+) -> dict[str, Any]:
+    """Derive family predicates only from matching, server-evaluated live assertions."""
+    family = family_proof.canonical_family(first.get("proof_family"))
+    contract = family_proof.FAMILY_CONTRACTS.get(family) or {}
+    allowed = set(contract.get("requires") or []) | set(contract.get("refute_if") or [])
+
+    def passed_predicates(result: dict[str, Any]) -> set[str]:
+        return {
+            str(item.get("predicate") or "").strip().lower()
+            for item in result.get("assertion_results") or []
+            if isinstance(item, dict) and item.get("passed") is True
+            and str(item.get("predicate") or "").strip().lower() in allowed
+        }
+
+    first_predicates = passed_predicates(first)
+    replay_predicates = passed_predicates(replay)
+    stable_predicates = first_predicates & replay_predicates
+    first_shape = [
+        (item.get("id"), item.get("type"), bool(item.get("passed")))
+        for item in first.get("assertion_results") or [] if isinstance(item, dict)
+    ]
+    replay_shape = [
+        (item.get("id"), item.get("type"), bool(item.get("passed")))
+        for item in replay.get("assertion_results") or [] if isinstance(item, dict)
+    ]
+    stable = bool(first_shape) and first_shape == replay_shape
+    restoration_verified = bool(first.get("restoration_verified") and replay.get("restoration_verified"))
+    no_errors = not any(
+        item.get("error")
+        for result in (first, replay)
+        for item in result.get("observations") or []
+        if isinstance(item, dict)
+    )
+    evidence = {predicate: True for predicate in stable_predicates}
+    evidence["reexecuted_at_handoff"] = bool(stable and restoration_verified and no_errors)
+    proof = family_proof.evaluate_family_proof(family, evidence)
+    proof.update({
+        "stable_assertions": stable,
+        "stable_predicates": sorted(stable_predicates),
+        "restoration_verified": restoration_verified,
+        "execution_errors_absent": no_errors,
+        "reproduction_count": 2,
+    })
+    return proof
+
+
+async def _promote_trusted_workflow_finding(
+    conn: Any,
+    *,
+    target_uuid: uuid.UUID,
+    target_url: str,
+    hypothesis_id: str,
+    workflow_id: str,
+    proof: dict[str, Any],
+    first: dict[str, Any],
+    replay: dict[str, Any],
+    evidence_instance_id: str | None,
+    tool_receipt_id: str | None,
+) -> dict[str, Any] | None:
+    promotable, _reason = family_proof.promotion_gate(proof)
+    if not promotable or not hypothesis_id:
+        return None
+    hypothesis_row = await conn.fetchrow(
+        "SELECT * FROM hypotheses WHERE id=$1 AND target_id=$2",
+        _uuid_or_400(hypothesis_id, "hypothesis id"),
+        target_uuid,
+    )
+    if not hypothesis_row:
+        return None
+    hypothesis = _public_hypothesis_row(hypothesis_row)
+    family = str(proof.get("family") or "workflow")
+    fingerprint = hashlib.sha256(
+        f"{target_uuid}:autonomous_workflow:{hypothesis_id}:{family}".encode()
+    ).hexdigest()[:32]
+    title = str(hypothesis.get("title") or f"Verified {family.replace('_', ' ')} invariant violation")[:500]
+    severity = str(hypothesis.get("severity_guess") or "high").lower()
+    if severity not in {"critical", "high", "medium", "low", "info"}:
+        severity = "high"
+    evidence = _redact_finding_evidence({
+        "proof": "Independent live workflow replay satisfied the deterministic family-proof contract.",
+        "family_proof": proof,
+        "autonomous_workflow": {
+            "workflow_id": workflow_id,
+            "hypothesis_id": hypothesis_id,
+            "reproduction_count": 2,
+            "first_assertions": first.get("assertion_results") or [],
+            "replay_assertions": replay.get("assertion_results") or [],
+            "restoration_verified": proof.get("restoration_verified"),
+            "evidence_instance_id": evidence_instance_id,
+            "tool_receipt_id": tool_receipt_id,
+        },
+    })
+    existing = await conn.fetchrow(
+        "SELECT id, status FROM findings WHERE target_id=$1 AND fingerprint=$2",
+        target_uuid,
+        fingerprint,
+    )
+    if existing:
+        finding_id = existing["id"]
+        status = "resurfaced" if str(existing.get("status") or "") == "resolved" else "duplicate"
+        await conn.execute(
+            """
+            UPDATE findings SET status='active', last_seen_at=NOW(),
+                last_verification_status='still_vulnerable',
+                last_verification_verdict='exploited',
+                last_verification_confidence=1.0, last_verified_at=NOW(),
+                evidence=$2::jsonb, updated_at=NOW()
+            WHERE id=$1
+            """,
+            finding_id,
+            json.dumps(evidence),
+        )
+    else:
+        finding_id = await conn.fetchval(
+            """
+            INSERT INTO findings (
+                target_id, fingerprint, title, description, severity, cvss_score,
+                tool, cwe, url, evidence, notes, source, status,
+                last_verification_status, last_verification_verdict,
+                last_verification_confidence, last_verified_at
+            ) VALUES (
+                $1,$2,$3,$4,$5,$6,'autonomous_workflow',$7,$8,$9::jsonb,
+                $10,'ai_session','active','still_vulnerable','exploited',1.0,NOW()
+            ) RETURNING id
+            """,
+            target_uuid,
+            fingerprint,
+            title,
+            str(hypothesis.get("description") or "Verified by two independent live workflow executions with deterministic assertions and restoration checks."),
+            severity,
+            {"critical": 9.1, "high": 8.1, "medium": 5.3, "low": 3.1, "info": 0.0}[severity],
+            proof.get("cwe"),
+            target_url,
+            json.dumps(evidence),
+            "Created only after trusted live replay passed family proof and promotion gates.",
+        )
+        status = "created"
+    if evidence_instance_id and _optional_uuid(evidence_instance_id):
+        await conn.execute(
+            "UPDATE evidence_instances SET finding_id=$1, proof_state='verified' WHERE id=$2",
+            finding_id,
+            uuid.UUID(evidence_instance_id),
+        )
+    await conn.execute(
+        """
+        UPDATE hypotheses SET status='promoted',
+            promoted_finding_ids=(SELECT COALESCE(jsonb_agg(DISTINCT value), '[]'::jsonb)
+                FROM jsonb_array_elements_text(promoted_finding_ids || $2::jsonb) AS value),
+            terminal_reason='trusted_workflow_family_proof', version=version+1, updated_at=NOW()
+        WHERE id=$1
+        """,
+        uuid.UUID(hypothesis_id),
+        json.dumps([str(finding_id)]),
+    )
+    return {"finding_id": str(finding_id), "fingerprint": fingerprint, "status": status}
+
+
 async def _arsenal_dispatch_workflow(p: dict[str, Any], approval_receipt_id: str | None) -> dict[str, Any]:
     target_uuid = _uuid_or_400(str(p.get("target_id") or ""), "target id")
     hypothesis_id = str(p.get("_research_hypothesis_id") or "").strip() or None
@@ -22472,7 +22633,7 @@ async def _arsenal_dispatch_workflow(p: dict[str, Any], approval_receipt_id: str
             raise HTTPException(status_code=400, detail="Model Intake artifacts are not workflow targets")
         workflow_payload = {
             key: value for key, value in p.items()
-            if key in {"objective", "expected_signal", "falsifier", "timeout_seconds", "steps"}
+            if key in {"objective", "expected_signal", "falsifier", "proof_family", "assertions", "timeout_seconds", "steps"}
         }
         try:
             normalized = normalize_workflow(str(target["url"]), workflow_payload)
@@ -22493,6 +22654,21 @@ async def _arsenal_dispatch_workflow(p: dict[str, Any], approval_receipt_id: str
             principal_contexts,
             cancel_event,
         )
+        if executed.get("restoration_verified") is not True:
+            replayed = {
+                "proof_family": executed.get("proof_family"),
+                "observations": [], "assertion_results": [],
+                "restoration_verified": False,
+                "replay_blocked_reason": "first_execution_restoration_not_verified",
+            }
+        else:
+            replayed = await _execute_workflow_runtime(
+                str(target["url"]),
+                workflow_payload,
+                normalized,
+                principal_contexts,
+                cancel_event,
+            )
     except WorkflowContractError as exc:
         raise HTTPException(status_code=422, detail={"error": "workflow_execution_failed", "violation": str(exc)}) from exc
     finally:
@@ -22500,6 +22676,8 @@ async def _arsenal_dispatch_workflow(p: dict[str, Any], approval_receipt_id: str
 
     finished_at = datetime.now(timezone.utc)
     safe_result = _redact_agent_payload(executed)
+    safe_replay = _redact_agent_payload(replayed)
+    trusted_proof = _trusted_workflow_family_proof(safe_result, safe_replay)
     failed_count = sum(1 for item in safe_result.get("observations", []) if item.get("error"))
     result_status = "partial" if failed_count or safe_result.get("cancelled") else "completed"
     async with db_pool.acquire() as conn:
@@ -22520,10 +22698,12 @@ async def _arsenal_dispatch_workflow(p: dict[str, Any], approval_receipt_id: str
                     "version": safe_result.get("version"),
                     "step_count": safe_result.get("step_count"),
                     "request_count": safe_result.get("request_count"),
+                    "replay_request_count": safe_replay.get("request_count"),
                     "principal_receipts": safe_result.get("principal_receipts") or [],
                     "cancelled": safe_result.get("cancelled"),
                     "finding_created": False,
-                    "proof_state": "unverified_workflow_signal",
+                    "proof_state": "verified" if trusted_proof.get("promotable") else "unverified_workflow_signal",
+                    "family_proof": trusted_proof,
                     "hypothesis_id": hypothesis_id,
                 },
                 created_by="research_principal_workflow",
@@ -22544,28 +22724,67 @@ async def _arsenal_dispatch_workflow(p: dict[str, Any], approval_receipt_id: str
                     "principal_receipts": safe_result.get("principal_receipts") or [],
                     "observations": safe_result.get("observations") or [],
                     "comparisons": safe_result.get("comparisons") or [],
+                    "assertion_results": safe_result.get("assertion_results") or [],
+                    "replay_assertion_results": safe_replay.get("assertion_results") or [],
+                    "family_proof": trusted_proof,
                 },
                 tool_receipt_id=str(receipt.get("id")) if receipt.get("id") else None,
-                proof_state="unverified",
-                metadata_json={"workflow_version": safe_result.get("version"), "finding_created": False, "promotion_allowed": False, "hypothesis_id": hypothesis_id},
+                proof_state="verified" if trusted_proof.get("promotable") else "unverified",
+                metadata_json={"workflow_version": safe_result.get("version"), "finding_created": False, "promotion_allowed": bool(trusted_proof.get("promotable")), "hypothesis_id": hypothesis_id, "reproduction_count": 2},
                 created_by="research_principal_workflow",
             ))
             evidence = evidence_result.get("evidence_instance") or {}
+            promotion = await _promote_trusted_workflow_finding(
+                conn,
+                target_uuid=target_uuid,
+                target_url=str(target["url"]),
+                hypothesis_id=hypothesis_id or "",
+                workflow_id=workflow_id,
+                proof=trusted_proof,
+                first=safe_result,
+                replay=safe_replay,
+                evidence_instance_id=str(evidence.get("id")) if evidence.get("id") else None,
+                tool_receipt_id=str(receipt.get("id")) if receipt.get("id") else None,
+            )
+            finding_ids = [promotion["finding_id"]] if promotion else []
+            if receipt.get("id"):
+                await conn.execute(
+                    """
+                    UPDATE tool_receipts
+                    SET metadata_json = metadata_json || $2::jsonb
+                    WHERE id=$1
+                    """,
+                    uuid.UUID(str(receipt["id"])),
+                    json.dumps({
+                        "finding_created": bool(promotion and promotion.get("status") == "created"),
+                        "finding_id": promotion.get("finding_id") if promotion else None,
+                        "proof_state": "verified" if promotion else "unverified_workflow_signal",
+                    }),
+                )
             command_result = await _record_command_result(
                 conn,
                 command="experiment.workflow",
                 status=result_status,
                 risk_tier="credential",
                 approval_receipt_id=approval_receipt_id,
+                finding_ids=finding_ids,
+                hypothesis_ids=[hypothesis_id] if hypothesis_id else [],
                 tool_receipt_ids=[str(receipt.get("id"))] if receipt.get("id") else [],
-                operator_message="Principal-bound workflow completed; all signals remain unverified.",
+                operator_message=(
+                    "Independent replay passed deterministic proof and created or refreshed a verified finding."
+                    if promotion else
+                    "Principal-bound workflow completed; proof remained unverified or was safely refuted."
+                ),
                 result_json={
                     "workflow": safe_result,
+                    "replay": safe_replay,
+                    "family_proof": trusted_proof,
+                    "promotion": promotion,
                     "hypothesis_id": hypothesis_id,
                     "evidence_instance_id": str(evidence.get("id")) if evidence.get("id") else None,
                     "tool_receipt_id": str(receipt.get("id")) if receipt.get("id") else None,
-                    "findings_created": 0,
-                    "verified_findings_created": 0,
+                    "findings_created": 1 if promotion and promotion.get("status") == "created" else 0,
+                    "verified_findings_created": 1 if promotion else 0,
                 },
                 created_by="research_principal_workflow",
             )
@@ -22574,11 +22793,14 @@ async def _arsenal_dispatch_workflow(p: dict[str, Any], approval_receipt_id: str
         "operation_id": command_result["id"],
         "workflow_id": workflow_id,
         "workflow": safe_result,
+        "replay": safe_replay,
+        "family_proof": trusted_proof,
+        "promotion": promotion,
         "evidence_instance_id": str(evidence.get("id")) if evidence.get("id") else None,
         "tool_receipt_id": str(receipt.get("id")) if receipt.get("id") else None,
-        "findings_created": 0,
-        "verified_findings_created": 0,
-        "proof_state": "unverified_workflow_signal",
+        "findings_created": 1 if promotion and promotion.get("status") == "created" else 0,
+        "verified_findings_created": 1 if promotion else 0,
+        "proof_state": "verified" if promotion else "unverified_workflow_signal",
     }
 
 
@@ -24803,7 +25025,12 @@ def _research_command_catalog() -> dict[str, dict[str, Any]]:
     return _operation_plan_allowed_commands()
 
 
-def _research_autonomous_parameter_schema(name: str, schema: dict[str, Any]) -> dict[str, Any]:
+def _research_autonomous_parameter_schema(
+    name: str,
+    schema: dict[str, Any],
+    *,
+    allow_cleanup_safe_writes: bool = False,
+) -> dict[str, Any]:
     projected = copy.deepcopy(schema)
     if name not in {"experiment.http_diff", "experiment.workflow"}:
         return projected
@@ -24825,7 +25052,8 @@ def _research_autonomous_parameter_schema(name: str, schema: dict[str, Any]) -> 
             for nested in value:
                 constrain_methods(nested)
 
-    constrain_methods(projected)
+    if not (name == "experiment.workflow" and allow_cleanup_safe_writes):
+        constrain_methods(projected)
     return projected
 
 
@@ -24856,7 +25084,13 @@ def _research_command_views(episode: dict[str, Any]) -> list[dict[str, Any]]:
             execution_feature_enabled=gate_enabled,
         )
         parameter_schema = (
-            _research_autonomous_parameter_schema(name, dict(view.get("parameters_schema") or {}))
+            _research_autonomous_parameter_schema(
+                name,
+                dict(view.get("parameters_schema") or {}),
+                allow_cleanup_safe_writes=(
+                    str(episode.get("max_risk_tier") or "") == "credential"
+                ),
+            )
             if isinstance(view.get("parameters_schema"), dict)
             else {}
         )
@@ -24881,9 +25115,11 @@ def _research_command_views(episode: dict[str, Any]) -> list[dict[str, Any]]:
             server_supplied.append("finding_id")
         view["parameters_schema"] = parameter_schema
         if name in {"experiment.http_diff", "experiment.workflow"}:
-            view["autonomous_constraints"] = [
-                "DELETE, PUT, and PATCH are unavailable to unattended research experiments; use a manual typed experiment with explicit cleanup for destructive writes.",
-            ]
+            view["autonomous_constraints"] = ([
+                "PUT, PATCH, and DELETE require Deep Hunt, a cleanup/rollback step after mutation, a typed restoration assertion, and successful independent replay.",
+            ] if name == "experiment.workflow" and str(episode.get("max_risk_tier") or "") == "credential" else [
+                "DELETE, PUT, and PATCH are unavailable at this tier; use Deep Hunt with typed cleanup and restoration assertions.",
+            ])
         view["server_supplied_parameters"] = sorted(set(server_supplied))
         blocked = list(view.get("blocked_by") or [])
         if mode == "shadow":
@@ -25033,7 +25269,7 @@ def _research_experiment_projection(source: Any) -> dict[str, Any]:
         projection["observations"] = observations
     for key in (
         "workflow_id", "evidence_instance_id", "tool_receipt_id", "proof_state",
-        "findings_created", "verified_findings_created",
+        "findings_created", "verified_findings_created", "family_proof", "promotion",
     ):
         if payload.get(key) not in (None, "", [], {}):
             projection[key] = payload.get(key)
@@ -26259,6 +26495,63 @@ async def research_readiness():
     }
 
 
+@app.get("/research/episodes/{episode_id}/benchmark")
+async def research_episode_benchmark(
+    episode_id: str,
+    baseline_scan_id: str = Query(..., description="Completed Smart-scan baseline with options.benchmark_request_budget."),
+):
+    """Score autonomous net-new verified findings against an explicitly equal-budget DAST baseline."""
+    async with db_pool.acquire() as conn:
+        episode_row = await _research_episode_or_404(conn, episode_id)
+        episode = _public_research_episode_row(episode_row)
+        baseline_uuid = _uuid_or_400(baseline_scan_id, "baseline scan id")
+        baseline = await conn.fetchrow(
+            "SELECT id, target_id, scan_type, status, options FROM scans WHERE id=$1",
+            baseline_uuid,
+        )
+        if not baseline or baseline["target_id"] != episode_row["target_id"]:
+            raise HTTPException(status_code=400, detail="Baseline scan must belong to the episode target")
+        if str(baseline["status"] or "") != "completed" or str(baseline["scan_type"] or "") != "smart":
+            raise HTTPException(status_code=400, detail="Baseline must be a completed Smart scan")
+        options = _decode_json_value(baseline["options"]) or {}
+        baseline_budget = _int_or_none(options.get("benchmark_request_budget"))
+        episode_budget = int((episode.get("budget_limits") or {}).get("requests") or 0)
+        if baseline_budget is None:
+            raise HTTPException(status_code=400, detail="Baseline lacks options.benchmark_request_budget")
+        equal_budget = baseline_budget == episode_budget
+        baseline_rows = await conn.fetch(
+            "SELECT id, fingerprint FROM findings WHERE scan_id=$1",
+            baseline_uuid,
+        )
+        autonomous_rows = await conn.fetch(
+            """
+            SELECT id, fingerprint, title, severity, last_verification_verdict
+            FROM findings
+            WHERE target_id=$1 AND tool='autonomous_workflow'
+              AND created_at >= $2
+              AND last_verification_verdict='exploited'
+            ORDER BY created_at
+            """,
+            episode_row["target_id"],
+            episode_row["created_at"],
+        )
+    baseline_fingerprints = {str(row["fingerprint"] or "") for row in baseline_rows}
+    net_new = [row_to_dict(row) for row in autonomous_rows if str(row["fingerprint"] or "") not in baseline_fingerprints]
+    return {
+        "episode_id": str(episode_row["id"]),
+        "baseline_scan_id": str(baseline_uuid),
+        "baseline_request_budget": baseline_budget,
+        "autonomous_request_budget": episode_budget,
+        "equal_budget": equal_budget,
+        "gate_passed": bool(equal_budget and net_new),
+        "net_new_verified_findings": net_new,
+        "net_new_verified_count": len(net_new),
+        "autonomous_verified_count": len(autonomous_rows),
+        "baseline_finding_count": len(baseline_rows),
+        "metric": "net_new_verified_findings_not_independently_produced_by_equal_budget_smart_scan",
+    }
+
+
 async def _reuse_research_launch_episode(
     conn,
     *,
@@ -26832,12 +27125,27 @@ async def submit_research_decision(episode_id: str, req: ResearchDecisionRequest
             ))
             status = "rejected" if errors else "accepted"
             hypothesis_id = _optional_uuid(normalized.get("hypothesis_id"))
-            if hypothesis_id and not await conn.fetchval(
-                "SELECT 1 FROM hypotheses WHERE id=$1 AND target_id=$2", hypothesis_id, episode_row["target_id"]
-            ):
-                errors.append("hypothesis_not_found_for_target")
-                status = "rejected"
-                hypothesis_id = None
+            if hypothesis_id:
+                bound_hypothesis = await conn.fetchrow(
+                    "SELECT source, metadata_json FROM hypotheses WHERE id=$1 AND target_id=$2",
+                    hypothesis_id,
+                    episode_row["target_id"],
+                )
+                if not bound_hypothesis:
+                    errors.append("hypothesis_not_found_for_target")
+                    status = "rejected"
+                    hypothesis_id = None
+                elif normalized.get("action", {}).get("command") in {"experiment.http_diff", "experiment.workflow"}:
+                    metadata = _decode_json_value(bound_hypothesis.get("metadata_json")) or {}
+                    source = str(bound_hypothesis.get("source") or "").strip().lower()
+                    residue_backed = source in {"app_graph", "benchmark", "dast", "scan", "scanner", "asm"} or bool(
+                        metadata.get("unexplained_residue") or metadata.get("graph_edge_id")
+                        or metadata.get("edge_id") or metadata.get("source_scan_id")
+                        or metadata.get("baseline_scan_id")
+                    )
+                    if not residue_backed:
+                        errors.append("experiment_hypothesis_must_be_backed_by_dast_residue_or_graph")
+                        status = "rejected"
             decision_row = await conn.fetchrow(
                 """
                 INSERT INTO research_decisions (

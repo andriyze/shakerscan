@@ -173,6 +173,15 @@ function EpisodeProgress({ detail, running }: { detail: ResearchEpisodeDetail; r
   const stepLimit = episode.budget_limits.steps
   const percent = stepLimit ? Math.min(100, Math.round((episode.step_count / stepLimit) * 100)) : 0
   const focus = detail.current_observation?.observation_pack.focus || {}
+  const previousObservation = detail.current_observation?.observation_pack.previous_observation
+  const previous = previousObservation && typeof previousObservation === 'object'
+    ? previousObservation as Record<string, unknown> : {}
+  const experimentResult = previous.experiment_result && typeof previous.experiment_result === 'object'
+    ? previous.experiment_result as Record<string, unknown> : {}
+  const familyProof = experimentResult.family_proof && typeof experimentResult.family_proof === 'object'
+    ? experimentResult.family_proof as Record<string, unknown> : {}
+  const promotion = experimentResult.promotion && typeof experimentResult.promotion === 'object'
+    ? experimentResult.promotion as Record<string, unknown> : {}
   const focusedFindingId = episode.subject?.type === 'finding' ? episode.subject.id : undefined
   const findingVerdict = (
     typeof focus.latest_retest_verdict === 'string' && focus.latest_retest_verdict
@@ -222,6 +231,18 @@ function EpisodeProgress({ detail, running }: { detail: ResearchEpisodeDetail; r
               <Link href={`/findings/${encodeURIComponent(focusedFindingId)}`} className="rounded border border-current/30 px-3 py-1.5 text-xs font-medium hover:bg-white/5">Open focused finding</Link>
             </div>
             {episode.stop_reason ? <p className="mt-2 text-sm opacity-80">{episode.stop_reason.replaceAll('_', ' ')}</p> : null}
+          </div>
+        ) : null}
+        {typeof familyProof.verdict === 'string' ? (
+          <div className={`rounded-lg border p-4 ${familyProof.verdict === 'verified' ? 'border-emerald-500/30 bg-emerald-500/[0.08]' : 'border-amber-500/30 bg-amber-500/[0.06]'}`}>
+            <p className="text-xs font-semibold uppercase tracking-wider text-gray-400">Trusted workflow proof</p>
+            <div className="mt-1 flex flex-wrap items-center gap-2">
+              <span className="text-lg font-semibold capitalize text-white">{familyProof.verdict.replaceAll('_', ' ')}</span>
+              {typeof familyProof.family === 'string' ? <Badge className="bg-gray-800 text-gray-300">{familyProof.family.replaceAll('_', ' ')}</Badge> : null}
+              {familyProof.reproduction_count === 2 ? <Badge className="bg-emerald-500/10 text-emerald-300">reproduced twice</Badge> : null}
+              {familyProof.restoration_verified === true ? <Badge className="bg-blue-500/10 text-blue-300">state restored</Badge> : null}
+            </div>
+            {typeof promotion.finding_id === 'string' ? <Link href={`/findings/${encodeURIComponent(promotion.finding_id)}`} className="mt-3 inline-flex rounded border border-emerald-400/30 px-3 py-1.5 text-xs font-medium text-emerald-200 hover:bg-emerald-500/10">Open verified finding <ArrowRight className="ml-1 h-3.5 w-3.5" /></Link> : null}
           </div>
         ) : null}
 

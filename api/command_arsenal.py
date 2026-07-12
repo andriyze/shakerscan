@@ -747,6 +747,27 @@ COMMANDS: tuple[ArsenalCommand, ...] = (
             "objective": {"type": "string", "maxLength": 1000},
             "expected_signal": {"type": "string", "maxLength": 1000},
             "falsifier": {"type": "string", "maxLength": 1000},
+            "proof_family": {
+                "type": "string",
+                "enum": ["bola", "mass_assignment", "injection", "auth_bypass", "workflow", "data_exposure"],
+            },
+            "assertions": {
+                "type": "array", "minItems": 1, "maxItems": 16,
+                "items": {
+                    "type": "object", "additionalProperties": False,
+                    "required": ["type"],
+                    "properties": {
+                        "id": {"type": "string", "maxLength": 80},
+                        "type": {"type": "string", "enum": ["status_in", "status_not_in", "comparison_changed", "comparison_equivalent", "distinct_principals", "restored"]},
+                        "step": {"type": "string", "maxLength": 80},
+                        "control": {"type": "string", "maxLength": 80},
+                        "candidate": {"type": "string", "maxLength": 80},
+                        "steps": {"type": "array", "minItems": 2, "maxItems": 4, "items": {"type": "string", "maxLength": 80}},
+                        "values": {"type": "array", "minItems": 1, "maxItems": 20, "items": {"type": "integer", "minimum": 100, "maximum": 599}},
+                        "predicate": {"type": "string", "maxLength": 80},
+                    },
+                },
+            },
             "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 180},
             "steps": {
                 "type": "array",
