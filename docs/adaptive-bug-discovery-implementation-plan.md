@@ -260,6 +260,8 @@ Acceptance:
 
 ### Wave 9: Agent and provider integration
 
+**Status: substantially implemented (pre-existing). The Codex launcher (`./scanner.sh research`), the Claude/agent `research` skill, the configured provider (`/settings/ai` + `plan_research_episode_step`), and the direct API all submit typed decisions through one `submit_research_decision` path that records versioned DecisionEpisode rows (`decision-episode-2026-07-11.v1`); schema omissions are normalized only when deterministic (commit `92f93d1`). The Wave 4–7 gates (negative gate, lifecycle transitions, scheduler, family proof) apply uniformly regardless of which planner produced the decision.**
+
 - Codex local runner receives the same command schema and bounded observations;
 - Claude/agent skill documents typed experiments and proof handoffs;
 - UI provider uses `/settings/ai`, including OpenRouter/OpenAI-compatible endpoints;
