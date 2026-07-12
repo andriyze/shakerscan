@@ -146,12 +146,17 @@ def action_cost(command: dict[str, Any]) -> dict[str, int]:
     risk = str(command.get("risk_tier") or "read_only")
     timeout = max(1, min(int(command.get("timeout_seconds") or 30), 600))
     active = 1 if RISK_TIER_ORDER.get(risk, 99) >= RISK_TIER_ORDER["active"] else 0
+    requests = max(1, int(command.get("request_cost") or 1)) if active else 0
+    # experiment.workflow is always executed twice -- the initial run plus an independent trusted
+    # replay at promotion -- so reserve the worst-case two-run request/time budget up front instead
+    # of under-reserving by half and letting a hunt overrun its request/time cap.
+    runs = 2 if str(command.get("name") or "") == "experiment.workflow" else 1
     return {
         "steps": 1,
         "actions": 1,
         "active_actions": active,
-        "requests": max(1, int(command.get("request_cost") or 1)) if active else 0,
-        "seconds": timeout,
+        "requests": requests * runs,
+        "seconds": timeout * runs,
         "model_tokens": 0,
     }
 

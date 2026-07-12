@@ -177,3 +177,19 @@ def test_http_experiment_reserves_worst_case_request_budget():
     assert agent.action_cost(command)["requests"] == 4
     assert "experiment.http_diff" in agent.GATED_RESEARCH_COMMANDS
     assert "experiment.http_diff" in agent.TARGET_BOUND_COMMANDS
+
+
+def test_workflow_reserves_two_run_budget_for_trusted_replay():
+    # experiment.workflow runs twice (execute + independent trusted replay at promotion); the
+    # reserved budget must be the two-run worst case so a hunt cannot overrun its request/time cap.
+    command = _command("experiment.workflow", risk="active", status="gated")
+    command["request_cost"] = 12
+    command["timeout_seconds"] = 210
+    cost = agent.action_cost(command)
+    assert cost["requests"] == 24
+    assert cost["seconds"] == 420
+
+    # A single-run active command is unaffected.
+    http = _command("experiment.http_diff", risk="active", status="gated")
+    http["request_cost"] = 4
+    assert agent.action_cost(http)["requests"] == 4
