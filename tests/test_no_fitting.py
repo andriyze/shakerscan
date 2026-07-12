@@ -19,17 +19,21 @@ ROOT = Path(__file__).resolve().parents[1]
 # Benchmark app / product nouns that must not be a detector INPUT. Intentionally specific — "owasp"
 # is a legitimate general term (OWASP LLM, CSP guidance) and is NOT forbidden.
 FORBIDDEN = re.compile(
-    r"juice[\s_-]?shop|juiceshop|(?<![a-z])crapi(?![a-z])|honey\.shakerscan\.com",
+    r"juice[\s_-]?shop|juiceshop|(?<![a-z])crapi(?![a-z])|(?:honey|test)\.shakerscan\.com",
     re.IGNORECASE,
 )
 
 # Production detector/planner surface.
-SCAN_ROOTS = [ROOT / "scanner", ROOT / "api"]
+SCAN_ROOTS = [ROOT / "scanner", ROOT / "api", ROOT / "scripts"]
 
 # Exact fixture/harness directory names.  Do not use substring matching here: production modules
 # such as ``oauth_tests.py`` and a checkout living below ``.../test-workspace`` must still be scanned.
 EXCLUDE_DIRS = {"tests", "test", "benchmarks", "benchmark", "fixtures", "results", "__pycache__"}
-EXCLUDE_FILES = {"ai_demo_scenarios.py"}  # explicit user-facing demo fixture catalog, not detector/planner logic
+EXCLUDE_FILES = {
+    "ai_demo_scenarios.py",  # explicit user-facing demo fixture catalog
+    "honey_calibration.py",  # benchmark harness with an intentionally fixed benchmark target
+    "verify_acceptance.py",  # release scorecard that selects named benchmark fixtures
+}
 
 
 def _production_py_files():
@@ -54,12 +58,28 @@ def _docstring_node_ids(tree: ast.AST) -> set[int]:
     return ids
 
 
+def _static_string_value(node: ast.AST):
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.Constant) and isinstance(node.value, bytes):
+        return node.value.decode("utf-8", errors="replace")
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left = _static_string_value(node.left)
+        right = _static_string_value(node.right)
+        if left is not None and right is not None:
+            return left + right
+    return None
+
+
 def _code_string_literals(source: str):
     tree = ast.parse(source)
     docstrings = _docstring_node_ids(tree)
     for node in ast.walk(tree):
-        if isinstance(node, ast.Constant) and isinstance(node.value, str) and id(node) not in docstrings:
-            yield node.value, getattr(node, "lineno", 0)
+        if id(node) in docstrings:
+            continue
+        value = _static_string_value(node)
+        if value is not None:
+            yield value, getattr(node, "lineno", 0)
 
 
 def test_no_benchmark_nouns_in_detector_string_literals():
@@ -94,3 +114,8 @@ def test_guard_would_catch_a_planted_leak():
 
     clean = 'x = 1  # crAPI comment is fine\ndef f():\n    """Juice Shop rationale is fine."""\n    return 2\n'
     assert [v for v, _ in _code_string_literals(clean) if FORBIDDEN.search(v)] == []
+
+    evasions = 'HOST = "test." + "shakerscan.com"\nAPP = b"cra" + b"pi"\n'
+    hits = [v for v, _ in _code_string_literals(evasions) if FORBIDDEN.search(v)]
+    assert "test.shakerscan.com" in hits
+    assert "crapi" in hits

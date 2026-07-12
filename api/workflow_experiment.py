@@ -17,7 +17,9 @@ from http_experiment import (
     MAX_BODY_BYTES,
     ExperimentContractError,
     _bounded_json_size,
+    _contains_control_character,
     _json_path_get,
+    _mapping_contains_control_character,
     _origin,
     _render_variables,
     _sensitive_name,
@@ -81,10 +83,15 @@ def _normalize_mapping(index: int, field: str, raw: Any, *, max_items: int) -> d
         name = str(key).strip()
         if not name or len(name) > 120 or name in result or _sensitive_name(name):
             raise WorkflowContractError(f"step_{index}_{field}_key_forbidden")
+        if _contains_control_character(name):
+            raise WorkflowContractError(f"step_{index}_{field}_contains_control_character")
         values = item if isinstance(item, list) else [item]
         if not values or any(nested is None or isinstance(nested, (dict, list)) for nested in values):
             raise WorkflowContractError(f"step_{index}_{field}_value_must_be_scalar")
-        result[name] = [str(nested)[:1000] for nested in values] if isinstance(item, list) else str(item)[:1000]
+        normalized_values = [str(nested)[:1000] for nested in values]
+        if any(_contains_control_character(nested) for nested in normalized_values):
+            raise WorkflowContractError(f"step_{index}_{field}_contains_control_character")
+        result[name] = normalized_values if isinstance(item, list) else normalized_values[0]
     return result
 
 
@@ -132,6 +139,8 @@ def normalize_workflow(target_url: str, raw: Any) -> dict[str, Any]:
                 raise WorkflowContractError(f"step_{index}_method_not_allowed")
             if not path.startswith("/") or path.startswith("//") or len(path.encode()) > 2000:
                 raise WorkflowContractError(f"step_{index}_path_must_be_relative")
+            if _contains_control_character(path):
+                raise WorkflowContractError(f"step_{index}_path_contains_control_character")
             rendered_url = urljoin(target_url, path)
             if _origin(rendered_url) != target_origin:
                 raise WorkflowContractError(f"step_{index}_resolved_outside_target_origin")
@@ -182,6 +191,8 @@ def normalize_workflow(target_url: str, raw: Any) -> dict[str, Any]:
                 path = str(data.get("path") or "").strip()
                 if not path.startswith("/") or path.startswith("//") or _origin(urljoin(target_url, path)) != target_origin:
                     raise WorkflowContractError(f"step_{index}_browser_path_must_be_relative")
+                if _contains_control_character(path):
+                    raise WorkflowContractError(f"step_{index}_browser_path_contains_control_character")
             if action in {"click", "fill", "submit", "wait", "extract"}:
                 selector = str(data.get("selector") or "").strip()
                 if not selector or len(selector) > 500:
@@ -305,6 +316,8 @@ async def execute_workflow(
                     form_body = _render_variables(step["form_body"], variables)
                     if len(str(path).encode()) > 4000:
                         raise WorkflowContractError("rendered_path_exceeds_size_limit")
+                    if _contains_control_character(path):
+                        raise WorkflowContractError("rendered_path_contains_control_character")
                     _bounded_json_size(query)
                     _bounded_json_size(json_body)
                     _bounded_json_size(form_body)
@@ -312,15 +325,17 @@ async def execute_workflow(
                         not str(name).strip()
                         or str(name).strip().lower() in FORBIDDEN_HEADERS
                         or _sensitive_name(name)
-                        or "\r" in str(name)
-                        or "\n" in str(name)
-                        or "\r" in str(value)
-                        or "\n" in str(value)
+                        or _contains_control_character(name)
+                        or _contains_control_character(value)
+                        or not str(name).isascii()
+                        or not str(value).isascii()
                         for name, value in headers.items()
                     ):
                         raise WorkflowContractError("rendered_header_forbidden")
                     if any(_sensitive_object_key(value) for value in (query, json_body, form_body)):
                         raise WorkflowContractError("rendered_sensitive_key_forbidden")
+                    if _mapping_contains_control_character(query):
+                        raise WorkflowContractError("rendered_query_contains_control_character")
                     context = principal_contexts.get(step["principal"], {})
                     auth_headers = context.get("headers") if isinstance(context.get("headers"), dict) else {}
                     cookies = context.get("cookies") if isinstance(context.get("cookies"), dict) else {}
@@ -354,7 +369,10 @@ async def execute_workflow(
                         value = _json_path_get(parsed, spec["selector"]) if spec["source"] == "json" else http_response.headers.get(spec["selector"])
                         if value is None:
                             raise WorkflowContractError(f"extract_value_missing:{spec['name']}")
-                        extracted[spec["name"]] = str(value)[:1000]
+                        rendered_value = str(value)[:1000]
+                        if _contains_control_character(rendered_value):
+                            raise WorkflowContractError(f"extract_value_contains_control_character:{spec['name']}")
+                        extracted[spec["name"]] = rendered_value
                 else:
                     if not browser_action:
                         raise WorkflowContractError("browser_runtime_unavailable")
@@ -377,9 +395,12 @@ async def execute_workflow(
                         value = result.get("value")
                         if value is None or isinstance(value, (dict, list)):
                             raise WorkflowContractError(f"extract_value_missing:{spec['name']}")
-                        extracted[spec["name"]] = str(value)[:1000]
+                        rendered_value = str(value)[:1000]
+                        if _contains_control_character(rendered_value):
+                            raise WorkflowContractError(f"extract_value_contains_control_character:{spec['name']}")
+                        extracted[spec["name"]] = rendered_value
                 variables.update(extracted)
-            except (httpx.HTTPError, WorkflowContractError) as exc:
+            except (httpx.InvalidURL, httpx.HTTPError, WorkflowContractError, UnicodeError, ValueError) as exc:
                 error = str(exc) if isinstance(exc, WorkflowContractError) else type(exc).__name__
             observations.append({
                 "label": step["label"], "kind": step["kind"], "principal": step["principal"],

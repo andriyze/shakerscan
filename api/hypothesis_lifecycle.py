@@ -47,9 +47,10 @@ TRANSITIONS: dict[str, frozenset[str]] = {
     "dead": frozenset(),
 }
 
-# Transitions whose target dismisses/closes a lead as not-a-bug; these require a deterministic
-# ``refuted_by`` reference (checked by the caller via adjudicate.require_deterministic_refutation).
-REFUTING_TARGETS: frozenset[str] = frozenset({"refuted", "dead"})
+# A refutation is a proof-bearing statement that the hypothesis is false. ``dead`` is instead an
+# operator's administrative close for duplicate, obsolete, or out-of-scope work and must remain
+# reachable without manufacturing counter-proof.
+REFUTING_TARGETS: frozenset[str] = frozenset({"refuted"})
 
 
 def is_terminal(status: Any) -> bool:

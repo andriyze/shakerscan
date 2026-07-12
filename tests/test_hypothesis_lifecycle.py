@@ -61,7 +61,7 @@ def test_refuting_target_is_a_legal_edge_here():
     # lifecycle only certifies the edge is legal.
     assert lc.evaluate_transition("testing", "refuted") == (True, None)
     assert "refuted" in lc.REFUTING_TARGETS
-    assert "dead" in lc.REFUTING_TARGETS
+    assert "dead" not in lc.REFUTING_TARGETS
 
 
 def test_all_states_covered_by_transition_table():

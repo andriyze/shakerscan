@@ -1780,6 +1780,9 @@ async def run_schema_migrations(pool) -> None:
                     current_decision_id UUID,
                     step_count INTEGER NOT NULL DEFAULT 0,
                     cancel_requested BOOLEAN NOT NULL DEFAULT false,
+                    autopilot_enabled BOOLEAN NOT NULL DEFAULT false,
+                    autopilot_error TEXT,
+                    autopilot_consecutive_failures INTEGER NOT NULL DEFAULT 0,
                     stop_reason TEXT,
                     requested_input TEXT,
                     lease_owner TEXT,
@@ -1800,6 +1803,17 @@ async def run_schema_migrations(pool) -> None:
                     )),
                     CONSTRAINT research_episodes_step_count_check CHECK (step_count >= 0)
                 )
+            """)
+            await conn.execute("""
+                ALTER TABLE research_episodes
+                ADD COLUMN IF NOT EXISTS autopilot_enabled BOOLEAN NOT NULL DEFAULT false,
+                ADD COLUMN IF NOT EXISTS autopilot_error TEXT,
+                ADD COLUMN IF NOT EXISTS autopilot_consecutive_failures INTEGER NOT NULL DEFAULT 0
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_research_episodes_autopilot
+                ON research_episodes(updated_at)
+                WHERE autopilot_enabled = true AND status = 'awaiting_planner'
             """)
             await conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_research_episodes_target

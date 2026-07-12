@@ -1,33 +1,99 @@
 'use client'
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { BrainCircuit, PauseCircle, Play, Plus, RefreshCw, ShieldCheck, Target as TargetIcon, XCircle } from 'lucide-react'
+import Link from 'next/link'
+import {
+  Activity, ArrowRight, BrainCircuit, Check, ChevronDown, CircleStop, History,
+  Pause, Play, RefreshCw, Rocket, ShieldCheck, Sparkles, Zap,
+} from 'lucide-react'
 import {
   cancelResearchEpisode,
   createResearchEpisode,
+  createTargetPolicyApproval,
+  getAISettings,
   getResearchEpisode,
   getResearchEpisodes,
   getTargets,
-  planResearchEpisodeStep,
   refreshResearchObservation,
+  setResearchEpisodeAutopilot,
+  type ResearchBudget,
   type ResearchEpisode,
   type ResearchEpisodeDetail,
   type Target,
 } from '@/lib/api'
-import { Badge, Button, EmptyState, ErrorState, Skeleton } from '@/components/ui'
+import { Badge, Button, Card, EmptyState, ErrorState, Skeleton, buttonClasses } from '@/components/ui'
 
-const FAMILY_OPTIONS = ['sqli', 'xss', 'auth', 'bola']
+type Intensity = 'analyze' | 'hunt' | 'relentless'
+
+const PROFILES: Record<Intensity, {
+  name: string
+  eyebrow: string
+  description: string
+  mode: 'read_only' | 'gated'
+  maxSteps: number
+  risk: 'read_only' | 'active'
+  budget: ResearchBudget
+  tone: string
+}> = {
+  analyze: {
+    name: 'Analyze', eyebrow: 'No active probes',
+    description: 'Let the LLM inspect coverage, findings, graph context, and gaps without queueing active work.',
+    mode: 'read_only', maxSteps: 8, risk: 'read_only',
+    budget: { steps: 8, actions: 8, active_actions: 0, requests: 0, seconds: 600, model_tokens: 75000 },
+    tone: 'border-cyan-500/30 bg-cyan-500/[0.05]',
+  },
+  hunt: {
+    name: 'Autonomous hunt', eyebrow: 'Recommended',
+    description: 'Continuously select and run bounded recon, focused tests, ASM work, and deterministic retests.',
+    mode: 'gated', maxSteps: 15, risk: 'active',
+    budget: { steps: 15, actions: 15, active_actions: 6, requests: 250, seconds: 1800, model_tokens: 150000 },
+    tone: 'border-blue-500/50 bg-blue-500/[0.08]',
+  },
+  relentless: {
+    name: 'Relentless', eyebrow: 'Maximum bounded depth',
+    description: 'Give the investigator the full supported step, request, time, and active-action budgets.',
+    mode: 'gated', maxSteps: 25, risk: 'active',
+    budget: { steps: 25, actions: 25, active_actions: 10, requests: 500, seconds: 3600, model_tokens: 250000 },
+    tone: 'border-orange-500/40 bg-orange-500/[0.06]',
+  },
+}
+
+const ACTIVE_FAMILIES = ['sqli', 'xss', 'auth', 'bola']
+
+function targetLabel(target: Target): string {
+  const known: Record<string, string> = {
+    'http://host.docker.internal:3001': 'OWASP Juice Shop (local)',
+    'http://juice-shop:3000': 'OWASP Juice Shop (container)',
+    'http://host.docker.internal:8888': 'OWASP crAPI (local)',
+    'http://localhost:8888': 'OWASP crAPI (host)',
+    'https://honey.shakerscan.com': 'ShakerScan Honey',
+  }
+  const name = target.name || known[target.url]
+  return name ? `${name} — ${target.url}` : target.url
+}
 
 function statusClass(status: string): string {
   if (['completed', 'accepted'].includes(status)) return 'bg-green-500/15 text-green-300'
-  if (['awaiting_planner', 'dispatching', 'awaiting_observation'].includes(status)) return 'bg-blue-500/15 text-blue-300'
+  if (['created', 'awaiting_planner', 'dispatching', 'awaiting_observation'].includes(status)) return 'bg-blue-500/15 text-blue-300'
   if (['awaiting_input', 'approval_required'].includes(status)) return 'bg-amber-500/15 text-amber-300'
   if (['cancelled', 'failed', 'blocked', 'budget_exhausted', 'rejected'].includes(status)) return 'bg-red-500/15 text-red-300'
   return 'bg-gray-800 text-gray-300'
 }
 
+function statusLabel(status: string): string {
+  return ({
+    awaiting_planner: 'Thinking', dispatching: 'Running action', awaiting_observation: 'Reading evidence',
+    awaiting_input: 'Needs input', approval_required: 'Needs approval', budget_exhausted: 'Budget exhausted',
+  } as Record<string, string>)[status] || status.replaceAll('_', ' ')
+}
+
+function episodeStatusLabel(episode: ResearchEpisode): string {
+  if (episode.status === 'awaiting_planner' && !episode.autopilot_enabled) return 'Paused'
+  return statusLabel(episode.status)
+}
+
 function shortDate(value?: string): string {
-  if (!value) return 'unknown'
+  if (!value) return ''
   const date = new Date(value)
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString()
 }
@@ -37,278 +103,236 @@ function budgetPercent(remaining: number, limit: number): number {
   return Math.max(0, Math.min(100, Math.round((remaining / limit) * 100)))
 }
 
+function actionLabel(command?: string): string {
+  if (!command) return 'Planner decision'
+  return command.replaceAll('.', ' › ').replaceAll('_', ' ')
+}
+
+function IntensityCard({ value, selected, onSelect }: { value: Intensity; selected: boolean; onSelect: () => void }) {
+  const profile = PROFILES[value]
+  return (
+    <button type="button" onClick={onSelect} className={`relative rounded-xl border p-4 text-left transition-colors ${selected ? profile.tone : 'border-gray-800 bg-gray-950/50 hover:border-gray-700'}`}>
+      <div className="flex items-start justify-between gap-3">
+        <div><div className="text-xs font-medium uppercase tracking-wider text-gray-500">{profile.eyebrow}</div><h3 className="mt-1 font-semibold text-white">{profile.name}</h3></div>
+        <div className={`flex h-5 w-5 items-center justify-center rounded-full border ${selected ? 'border-blue-400 bg-blue-500 text-white' : 'border-gray-700'}`}>{selected ? <Check className="h-3.5 w-3.5" /> : null}</div>
+      </div>
+      <p className="mt-2 text-xs leading-5 text-gray-400">{profile.description}</p>
+      <div className="mt-3 flex flex-wrap gap-1.5 text-[11px] text-gray-500"><span>{profile.maxSteps} steps</span><span>·</span><span>{profile.budget.requests} requests</span><span>·</span><span>{profile.budget.active_actions} active actions</span></div>
+    </button>
+  )
+}
+
+function EpisodeProgress({ detail, running }: { detail: ResearchEpisodeDetail; running: boolean }) {
+  const episode = detail.episode
+  const stepLimit = episode.budget_limits.steps
+  const percent = stepLimit ? Math.min(100, Math.round((episode.step_count / stepLimit) * 100)) : 0
+  return (
+    <Card className="overflow-hidden">
+      <div className="border-b border-gray-800 bg-gradient-to-r from-blue-500/10 to-transparent p-5">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-2"><Badge className={statusClass(episode.status)}>{running ? 'Autopilot running' : episodeStatusLabel(episode)}</Badge><Badge className="bg-gray-800 text-gray-300">{episode.execution_mode === 'gated' ? 'active' : 'analysis only'}</Badge></div>
+          <span className="text-xs text-gray-500">Step {episode.step_count} of {stepLimit}</span>
+        </div>
+        <h2 className="mt-3 text-xl font-semibold text-white">{episode.objective}</h2>
+        <div className="mt-4 h-2 overflow-hidden rounded-full bg-gray-800"><div className="h-full rounded-full bg-blue-500 transition-all" style={{ width: `${percent}%` }} /></div>
+      </div>
+
+      <div className="grid gap-5 p-5">
+        {episode.autopilot_error ? <div className="rounded-lg border border-red-500/30 bg-red-500/[0.08] p-3 text-sm text-red-200">Autopilot error: {episode.autopilot_error}</div> : null}
+        {episode.requested_input ? <div className="rounded-lg border border-amber-500/30 bg-amber-500/[0.08] p-3 text-sm text-amber-200">{episode.requested_input}</div> : null}
+
+        <section>
+          <div className="flex items-center justify-between"><h3 className="text-xs font-semibold uppercase tracking-wider text-gray-500">Investigator activity</h3><span className="text-xs text-gray-600">newest first</span></div>
+          <div className="mt-3 grid gap-2">
+            {!detail.decisions.length ? <div className="rounded-lg border border-dashed border-gray-800 p-5 text-center text-sm text-gray-500">The LLM has not selected its first action yet.</div> : detail.decisions.slice(0, 8).map((decision) => (
+              <div key={decision.id} className="rounded-lg border border-gray-800 bg-gray-950/40 p-3">
+                <div className="flex flex-wrap items-center gap-2"><span className="text-sm font-medium capitalize text-gray-200">{actionLabel(decision.action.command || decision.decision_type)}</span><Badge className={statusClass(decision.status)}>{statusLabel(decision.status)}</Badge><span className="ml-auto text-xs text-gray-600">{Math.round(decision.confidence * 100)}% confidence</span></div>
+                {decision.reason ? <p className="mt-1.5 text-sm leading-5 text-gray-400">{decision.reason}</p> : null}
+                {decision.validation_errors.length ? <p className="mt-2 text-xs text-red-300">Blocked: {decision.validation_errors.join(', ')}</p> : null}
+              </div>
+            ))}
+          </div>
+        </section>
+
+        <details className="rounded-lg border border-gray-800 bg-gray-950/30">
+          <summary className="flex cursor-pointer list-none items-center justify-between px-3 py-2.5 text-xs font-medium text-gray-500 hover:text-gray-300"><span>Technical budgets and event log</span><ChevronDown className="h-4 w-4" /></summary>
+          <div className="grid gap-4 border-t border-gray-800 p-3">
+            <div className="grid gap-3 sm:grid-cols-3">
+              {(['steps', 'active_actions', 'requests'] as const).map((key) => {
+                const remaining = episode.remaining_budget[key]
+                const limit = episode.budget_limits[key]
+                return <div key={key}><div className="flex justify-between text-xs"><span className="text-gray-500">{key.replace('_', ' ')}</span><span className="text-gray-300">{remaining} / {limit}</span></div><div className="mt-1.5 h-1.5 overflow-hidden rounded bg-gray-800"><div className="h-full bg-cyan-400" style={{ width: `${budgetPercent(remaining, limit)}%` }} /></div></div>
+              })}
+            </div>
+            <div className="grid gap-2">{detail.events.slice(0, 12).map((event) => <div key={event.id} className="flex items-start gap-2 text-xs"><ShieldCheck className="mt-0.5 h-3.5 w-3.5 flex-none text-gray-600" /><span className="text-gray-400">{event.summary}</span><span className="ml-auto flex-none text-gray-700">{shortDate(event.created_at)}</span></div>)}</div>
+          </div>
+        </details>
+      </div>
+    </Card>
+  )
+}
+
 export default function ResearchAgentPage() {
   const [targets, setTargets] = useState<Target[]>([])
   const [episodes, setEpisodes] = useState<ResearchEpisode[]>([])
   const [selected, setSelected] = useState<ResearchEpisodeDetail | null>(null)
   const [targetId, setTargetId] = useState('')
-  const [objective, setObjective] = useState('Investigate the highest-value unexplained security gaps for this target.')
-  const [mode, setMode] = useState<'shadow' | 'read_only' | 'gated'>('read_only')
-  const [maxSteps, setMaxSteps] = useState(5)
-  const [families, setFamilies] = useState<string[]>([])
-  const [scopeReceiptId, setScopeReceiptId] = useState('')
-  const [approvalReceiptId, setApprovalReceiptId] = useState('')
+  const [objective, setObjective] = useState('Find and verify the highest-impact security weaknesses on this target. Prioritize authorization, injection, sensitive data exposure, and workflow abuse. Keep investigating until the budget is exhausted or no valuable action remains.')
+  const [intensity, setIntensity] = useState<Intensity>('hunt')
+  const [families, setFamilies] = useState<string[]>(ACTIVE_FAMILIES)
+  const [autopilot, setAutopilot] = useState(true)
+  const [authorized, setAuthorized] = useState(false)
+  const [aiReady, setAiReady] = useState<boolean | null>(null)
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
+  const profile = PROFILES[intensity]
+  const activeTarget = useMemo(() => targets.find((target) => target.id === targetId), [targetId, targets])
+  const autoRunning = Boolean(selected?.episode.autopilot_enabled && !selected.episode.terminal)
+
   const loadEpisodes = useCallback(async () => {
-    const data = await getResearchEpisodes({ limit: 50 })
+    const data = await getResearchEpisodes({ limit: 30 })
     setEpisodes(data.episodes || [])
     return data.episodes || []
   }, [])
 
   useEffect(() => {
     let cancelled = false
-    Promise.all([getTargets(), getResearchEpisodes({ limit: 50 })])
-      .then(([targetData, episodeData]) => {
-        if (cancelled) return
-        const rows: Target[] = Array.isArray(targetData?.targets) ? targetData.targets : Array.isArray(targetData) ? targetData : []
-        const webTargets = rows.filter((target) => /^https?:\/\//i.test(target.url) && target.discovery_source !== 'model-intake')
-        setTargets(webTargets)
-        setTargetId(webTargets[0]?.id || '')
-        setEpisodes(episodeData.episodes || [])
-      })
-      .catch((err) => { if (!cancelled) setError(err instanceof Error ? err.message : 'Failed to load research agent') })
+    Promise.all([getTargets(), getResearchEpisodes({ limit: 30 }), getAISettings()]).then(([targetData, episodeData, ai]) => {
+      if (cancelled) return
+      const rows: Target[] = Array.isArray(targetData?.targets) ? targetData.targets : Array.isArray(targetData) ? targetData : []
+      const webTargets = rows.filter((target) => /^https?:\/\//i.test(target.url) && target.discovery_source !== 'model-intake')
+      setTargets(webTargets); setTargetId(webTargets[0]?.id || '')
+      setEpisodes(episodeData.episodes || [])
+      setAiReady(Boolean(ai.ai_url && ai.ai_model && ai.ai_api_key_configured))
+    }).catch((err) => { if (!cancelled) setError(err instanceof Error ? err.message : 'Failed to load autonomous investigator') })
       .finally(() => { if (!cancelled) setLoading(false) })
     return () => { cancelled = true }
   }, [])
 
   useEffect(() => {
     if (!selected?.episode.id || selected.episode.terminal) return
-    const id = window.setInterval(() => {
-      getResearchEpisode(selected.episode.id).then(setSelected).catch(() => undefined)
-    }, 5000)
-    return () => window.clearInterval(id)
+    const timer = window.setInterval(() => getResearchEpisode(selected.episode.id).then(setSelected).catch(() => undefined), 2000)
+    return () => window.clearInterval(timer)
   }, [selected?.episode.id, selected?.episode.terminal])
 
-  const selectedTarget = useMemo(
-    () => targets.find((target) => target.id === selected?.episode.target_id),
-    [selected?.episode.target_id, targets],
-  )
-
   const openEpisode = async (id: string) => {
-    setBusy(true)
-    setError(null)
-    try {
-      setSelected(await getResearchEpisode(id))
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load episode')
-    } finally {
-      setBusy(false)
-    }
+    setBusy(true); setError(null)
+    try { setSelected(await getResearchEpisode(id)) }
+    catch (err) { setError(err instanceof Error ? err.message : 'Failed to load investigation') }
+    finally { setBusy(false) }
   }
 
-  const createEpisode = async () => {
-    if (!targetId || !objective.trim()) return
-    setBusy(true)
-    setError(null)
+  const startInvestigation = async () => {
+    if (!activeTarget || !objective.trim() || !aiReady) return
+    if (profile.mode === 'gated' && !authorized) { setError('Confirm that you own or are authorized to test this target.'); return }
+    setBusy(true); setError(null)
     try {
+      let approvalReceiptId: string | undefined
+      if (profile.mode === 'gated') approvalReceiptId = await createTargetPolicyApproval(activeTarget.id, activeTarget.url)
       const detail = await createResearchEpisode({
-        target_id: targetId,
+        target_id: activeTarget.id,
         objective: objective.trim(),
-        execution_mode: mode,
-        max_risk_tier: mode === 'gated' ? 'active' : 'read_only',
-        allowed_families: families,
-        max_steps: maxSteps,
-        budget_limits: mode === 'gated'
-          ? { steps: maxSteps, actions: maxSteps, active_actions: Math.min(maxSteps, 3), requests: 100, seconds: 900, model_tokens: 50000 }
-          : { steps: maxSteps, actions: maxSteps, active_actions: 0, requests: 0, seconds: 300, model_tokens: 50000 },
-        scope_receipt_id: scopeReceiptId.trim() || undefined,
-        approval_receipt_id: approvalReceiptId.trim() || undefined,
-        created_by: 'research_agent_ui',
+        execution_mode: profile.mode,
+        max_risk_tier: profile.risk,
+        allowed_families: profile.mode === 'gated' ? families : [],
+        max_steps: profile.maxSteps,
+        budget_limits: profile.budget,
+        approval_receipt_id: approvalReceiptId,
+        autopilot,
+        created_by: 'autonomous_investigation_ui',
       })
       setSelected(detail)
       await loadEpisodes()
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to create episode')
-    } finally {
       setBusy(false)
-    }
+    } catch (err) { setError(err instanceof Error ? err.message : 'Failed to start investigation'); setBusy(false) }
   }
 
-  const runStep = async () => {
+  const continueInvestigation = async () => {
     if (!selected) return
-    setBusy(true)
-    setError(null)
-    try {
-      const detail = await planResearchEpisodeStep(selected.episode.id, { execute: true, timeout_seconds: 90, max_tokens: 3000 })
-      setSelected(detail)
-      await loadEpisodes()
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Planner step failed')
-    } finally {
-      setBusy(false)
-    }
+    setBusy(true); setError(null)
+    try { setSelected(await setResearchEpisodeAutopilot(selected.episode.id, true)); await loadEpisodes() }
+    catch (err) { setError(err instanceof Error ? err.message : 'Failed to resume autonomous investigation') }
+    finally { setBusy(false) }
+  }
+
+  const pauseAutopilot = async () => {
+    if (!selected) return
+    setBusy(true); setError(null)
+    try { setSelected(await setResearchEpisodeAutopilot(selected.episode.id, false)); await loadEpisodes() }
+    catch (err) { setError(err instanceof Error ? err.message : 'Failed to pause autonomous investigation') }
+    finally { setBusy(false) }
   }
 
   const refreshObservation = async () => {
     if (!selected) return
-    setBusy(true)
-    setError(null)
-    try {
-      setSelected(await refreshResearchObservation(selected.episode.id))
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Observation refresh failed')
-    } finally {
-      setBusy(false)
-    }
+    setBusy(true); setError(null)
+    try { setSelected(await refreshResearchObservation(selected.episode.id)) }
+    catch (err) { setError(err instanceof Error ? err.message : 'Observation refresh failed') }
+    finally { setBusy(false) }
   }
 
   const cancelEpisode = async () => {
     if (!selected) return
-    setBusy(true)
-    setError(null)
-    try {
-      setSelected(await cancelResearchEpisode(selected.episode.id))
-      await loadEpisodes()
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Cancellation failed')
-    } finally {
-      setBusy(false)
-    }
+    setBusy(true); setError(null)
+    try { setSelected(await cancelResearchEpisode(selected.episode.id)); await loadEpisodes() }
+    catch (err) { setError(err instanceof Error ? err.message : 'Cancellation failed') }
+    finally { setBusy(false) }
   }
 
   if (loading) return <Skeleton className="h-96" />
 
   return (
-    <div className="space-y-6">
-      <header className="flex flex-wrap items-start justify-between gap-4">
-        <div>
-          <div className="flex items-center gap-2">
-            <BrainCircuit className="h-6 w-6 text-cyan-300" />
-            <h1 className="text-2xl font-bold text-white">Research Agent</h1>
-          </div>
-          <p className="mt-1 text-sm text-gray-400">Bounded adaptive investigation over registered ShakerScan actions</p>
-        </div>
-        <Button variant="secondary" onClick={() => loadEpisodes().catch(() => undefined)} title="Refresh episodes">
-          <RefreshCw className="h-4 w-4" />
-          Refresh
-        </Button>
+    <div className="mx-auto max-w-7xl px-4 py-6">
+      <header className="flex flex-col gap-4 border-b border-gray-800 pb-5 sm:flex-row sm:items-end sm:justify-between">
+        <div><div className="flex items-center gap-2 text-sm text-blue-300"><BrainCircuit className="h-4 w-4" />Research Agent</div><h1 className="mt-1 text-3xl font-bold tracking-tight text-white">Autonomous investigation</h1><p className="mt-2 max-w-3xl text-sm leading-6 text-gray-400">Give the LLM a target and objective. It will repeatedly choose the next ShakerScan action, inspect the evidence, and continue until it reaches a conclusion or exhausts the budget.</p></div>
+        <nav className="flex rounded-lg border border-gray-800 bg-gray-950 p-1 text-sm"><span className="rounded-md bg-gray-800 px-3 py-1.5 text-white">Run investigator</span><Link href="/settings/research-agent/leads" className="px-3 py-1.5 text-gray-400 hover:text-white">Lead backlog</Link><Link href="/settings/research-agent/experiment" className="px-3 py-1.5 text-gray-400 hover:text-white">Manual test</Link></nav>
       </header>
 
-      {error && <ErrorState message={error} />}
+      {error ? <div className="mt-4"><ErrorState message={error} /></div> : null}
 
-      <section className="border-y border-gray-800 py-5">
-        <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_auto]">
-          <div className="grid gap-4 md:grid-cols-2">
-            <label className="text-sm text-gray-300">
-              Target
-              <select value={targetId} onChange={(event) => setTargetId(event.target.value)} className="mt-1 w-full rounded-md border border-gray-700 bg-gray-950 px-3 py-2 text-white">
-                {targets.map((target) => <option key={target.id} value={target.id}>{target.name || target.url}</option>)}
-              </select>
-            </label>
-            <label className="text-sm text-gray-300">
-              Step budget
-              <input type="number" min={1} max={25} value={maxSteps} onChange={(event) => setMaxSteps(Math.max(1, Math.min(25, Number(event.target.value) || 1)))} className="mt-1 w-full rounded-md border border-gray-700 bg-gray-950 px-3 py-2 text-white" />
-            </label>
-            <label className="text-sm text-gray-300 md:col-span-2">
-              Objective
-              <textarea value={objective} onChange={(event) => setObjective(event.target.value)} rows={3} maxLength={2000} className="mt-1 w-full resize-y rounded-md border border-gray-700 bg-gray-950 px-3 py-2 text-white" />
-            </label>
-          </div>
-          <div className="flex items-end">
-            <Button onClick={createEpisode} disabled={busy || !targetId || !objective.trim()}>
-              <Plus className="h-4 w-4" />
-              Create episode
-            </Button>
-          </div>
-        </div>
+      <div className="mt-5 grid gap-5 xl:grid-cols-[minmax(0,1fr)_360px]">
+        <main className="grid gap-5">
+          <Card className="overflow-hidden">
+            <div className="border-b border-gray-800 bg-gradient-to-r from-blue-500/10 via-transparent to-transparent p-5"><div className="flex items-center justify-between gap-3"><div><div className="text-xs font-semibold uppercase tracking-wider text-blue-300">New mission</div><h2 className="mt-1 text-xl font-semibold text-white">What should the investigator accomplish?</h2></div><div className={`flex items-center gap-2 rounded-full px-3 py-1.5 text-xs ${aiReady ? 'bg-emerald-500/10 text-emerald-300' : 'bg-red-500/10 text-red-300'}`}><span className={`h-2 w-2 rounded-full ${aiReady ? 'bg-emerald-400' : 'bg-red-400'}`} />{aiReady ? 'LLM brain ready' : 'Configure AI provider'}</div></div></div>
+            <div className="grid gap-5 p-5">
+              <label className="text-xs font-medium text-gray-400">Target
+                <select value={targetId} onChange={(event) => { setTargetId(event.target.value); setAuthorized(false) }} className="mt-1.5 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2.5 text-sm text-white">{targets.map((target) => <option key={target.id} value={target.id}>{targetLabel(target)}</option>)}</select>
+              </label>
+              <label className="text-xs font-medium text-gray-400">Objective
+                <textarea value={objective} onChange={(event) => setObjective(event.target.value)} rows={4} maxLength={2000} className="mt-1.5 w-full resize-y rounded-lg border border-gray-700 bg-gray-950 px-3 py-2.5 text-sm leading-6 text-white" />
+              </label>
 
-        <div className="mt-4 flex flex-wrap gap-2">
-          {(['shadow', 'read_only', 'gated'] as const).map((item) => (
-            <button key={item} type="button" onClick={() => setMode(item)} className={`rounded-md border px-3 py-1.5 text-sm ${mode === item ? 'border-cyan-400 bg-cyan-500/15 text-cyan-200' : 'border-gray-700 text-gray-400 hover:text-white'}`}>
-              {item.replace('_', ' ')}
-            </button>
-          ))}
-          <span className="mx-1 h-8 w-px bg-gray-800" />
-          {FAMILY_OPTIONS.map((family) => (
-            <label key={family} className="flex items-center gap-2 rounded-md border border-gray-800 px-2.5 py-1.5 text-sm text-gray-300">
-              <input type="checkbox" checked={families.includes(family)} onChange={() => setFamilies((current) => current.includes(family) ? current.filter((item) => item !== family) : [...current, family])} />
-              {family.toUpperCase()}
-            </label>
-          ))}
-        </div>
-
-        {mode === 'gated' && (
-          <div className="mt-4 grid gap-4 md:grid-cols-2">
-            <label className="text-sm text-gray-300">Scope receipt<input value={scopeReceiptId} onChange={(event) => setScopeReceiptId(event.target.value)} className="mt-1 w-full rounded-md border border-gray-700 bg-gray-950 px-3 py-2 font-mono text-sm text-white" /></label>
-            <label className="text-sm text-gray-300">Approval receipt<input value={approvalReceiptId} onChange={(event) => setApprovalReceiptId(event.target.value)} className="mt-1 w-full rounded-md border border-gray-700 bg-gray-950 px-3 py-2 font-mono text-sm text-white" /></label>
-          </div>
-        )}
-      </section>
-
-      <div className="grid gap-6 xl:grid-cols-[320px_minmax(0,1fr)]">
-        <aside className="space-y-2">
-          <h2 className="text-sm font-semibold text-gray-300">Episodes</h2>
-          {episodes.length === 0 ? <EmptyState message="No research episodes" /> : episodes.map((episode) => (
-            <button key={episode.id} type="button" onClick={() => openEpisode(episode.id)} className={`w-full rounded-md border p-3 text-left ${selected?.episode.id === episode.id ? 'border-cyan-500 bg-cyan-500/10' : 'border-gray-800 bg-gray-950 hover:border-gray-700'}`}>
-              <div className="flex items-start justify-between gap-2"><span className="line-clamp-2 text-sm text-white">{episode.objective}</span><Badge className={statusClass(episode.status)}>{episode.status.replaceAll('_', ' ')}</Badge></div>
-              <div className="mt-2 flex items-center gap-2 text-xs text-gray-500"><TargetIcon className="h-3.5 w-3.5" /><span className="truncate">{targets.find((target) => target.id === episode.target_id)?.url || episode.target_id}</span></div>
-            </button>
-          ))}
-        </aside>
-
-        <main className="min-w-0">
-          {!selected ? <EmptyState message="Select an episode" /> : (
-            <div className="space-y-6">
-              <div className="flex flex-wrap items-start justify-between gap-3 border-b border-gray-800 pb-4">
-                <div className="min-w-0">
-                  <div className="flex flex-wrap items-center gap-2"><Badge className={statusClass(selected.episode.status)}>{selected.episode.status.replaceAll('_', ' ')}</Badge><Badge className="bg-gray-800 text-gray-300">{selected.episode.execution_mode.replace('_', ' ')}</Badge><Badge className="bg-gray-800 text-gray-300">{selected.episode.max_risk_tier}</Badge></div>
-                  <h2 className="mt-2 text-lg font-semibold text-white">{selected.episode.objective}</h2>
-                  <p className="mt-1 break-all text-sm text-gray-500">{selectedTarget?.url || selected.episode.target_id}</p>
-                </div>
-                <div className="flex gap-2">
-                  <Button variant="secondary" onClick={refreshObservation} disabled={busy || selected.episode.terminal} title="Refresh observation"><RefreshCw className="h-4 w-4" /></Button>
-                  <Button onClick={runStep} disabled={busy || selected.episode.status !== 'awaiting_planner'}><Play className="h-4 w-4" />Run step</Button>
-                  <Button variant="danger" onClick={cancelEpisode} disabled={busy || selected.episode.terminal} title="Cancel episode"><XCircle className="h-4 w-4" /></Button>
+              <div className="rounded-xl border border-blue-500/25 bg-blue-500/[0.05] p-4">
+                <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+                  <div className="grid gap-2">
+                    {profile.mode === 'gated' ? <label className="flex cursor-pointer items-start gap-3"><input type="checkbox" checked={authorized} onChange={(event) => setAuthorized(event.target.checked)} className="mt-1" /><span><span className="text-sm font-medium text-orange-200">I own this target or have explicit permission to test it.</span><span className="mt-0.5 block text-xs text-gray-500">Creates a target-scoped approval for active testing.</span></span></label> : null}
+                    <label className="flex cursor-pointer items-start gap-3"><input type="checkbox" checked={autopilot} onChange={(event) => setAutopilot(event.target.checked)} className="mt-1" /><span><span className="block text-sm font-medium text-gray-200">Continue automatically</span><span className="mt-0.5 block text-xs text-gray-500">Runs on the server and continues if you close this page.</span></span></label>
+                  </div>
+                  <Button onClick={startInvestigation} disabled={busy || autoRunning || !targetId || !objective.trim() || !aiReady || (profile.mode === 'gated' && !authorized)} className="min-w-56"><Rocket className="h-4 w-4" />{busy ? 'Starting…' : `Start ${profile.name.toLowerCase()}`}</Button>
                 </div>
               </div>
 
-              <section>
-                <h3 className="text-sm font-semibold text-gray-300">Budget</h3>
-                <div className="mt-3 grid gap-3 sm:grid-cols-3">
-                  {(['steps', 'actions', 'model_tokens'] as const).map((key) => {
-                    const remaining = selected.episode.remaining_budget[key]
-                    const limit = selected.episode.budget_limits[key]
-                    return <div key={key} className="border-l-2 border-gray-700 pl-3"><div className="flex justify-between text-sm"><span className="text-gray-400">{key.replace('_', ' ')}</span><span className="text-white">{remaining} / {limit}</span></div><div className="mt-2 h-1.5 overflow-hidden rounded bg-gray-800"><div className="h-full bg-cyan-400" style={{ width: `${budgetPercent(remaining, limit)}%` }} /></div></div>
-                  })}
-                </div>
-              </section>
+              <section><h3 className="text-xs font-medium text-gray-400">Investigation intensity</h3><div className="mt-2 grid gap-3 md:grid-cols-3">{(['analyze', 'hunt', 'relentless'] as Intensity[]).map((value) => <IntensityCard key={value} value={value} selected={intensity === value} onSelect={() => { setIntensity(value); if (value === 'analyze') setAuthorized(false) }} />)}</div></section>
 
-              {selected.episode.requested_input && <div className="flex gap-3 border border-amber-700/50 bg-amber-500/10 p-3 text-sm text-amber-200"><PauseCircle className="mt-0.5 h-4 w-4 shrink-0" />{selected.episode.requested_input}</div>}
-
-              <section>
-                <div className="flex items-center justify-between"><h3 className="text-sm font-semibold text-gray-300">Available actions</h3><span className="text-xs text-gray-500">observation {selected.current_observation?.sequence ?? 0}</span></div>
-                <div className="mt-3 flex flex-wrap gap-2">
-                  {(selected.current_observation?.observation_pack.proposable_commands || []).filter((command) => command.proposable).map((command) => <Badge key={command.name} className={command.currently_executable ? 'bg-green-500/15 text-green-300' : 'bg-amber-500/15 text-amber-300'}>{command.name}</Badge>)}
-                </div>
-              </section>
-
-              <section>
-                <h3 className="text-sm font-semibold text-gray-300">Decisions</h3>
-                <div className="mt-3 divide-y divide-gray-800 border-y border-gray-800">
-                  {selected.decisions.length === 0 ? <div className="py-5 text-sm text-gray-500">No decisions recorded</div> : selected.decisions.map((decision) => (
-                    <div key={decision.id} className="py-3">
-                      <div className="flex flex-wrap items-center gap-2"><span className="font-mono text-sm text-white">{decision.action.command || decision.decision_type}</span><Badge className={statusClass(decision.status)}>{decision.status}</Badge><span className="text-xs text-gray-500">{Math.round(decision.confidence * 100)}%</span></div>
-                      {decision.reason && <p className="mt-1 text-sm text-gray-400">{decision.reason}</p>}
-                      {decision.expected_signal && <p className="mt-2 text-xs text-gray-500">Signal: {decision.expected_signal}</p>}
-                      {decision.falsifier && <p className="mt-1 text-xs text-gray-500">Falsifier: {decision.falsifier}</p>}
-                      {decision.validation_errors.length > 0 && <div className="mt-2 flex flex-wrap gap-1">{decision.validation_errors.map((item) => <Badge key={item} className="bg-red-500/15 text-red-300">{item}</Badge>)}</div>}
-                    </div>
-                  ))}
-                </div>
-              </section>
-
-              <section>
-                <h3 className="text-sm font-semibold text-gray-300">Episode log</h3>
-                <div className="mt-3 space-y-2">
-                  {selected.events.slice(0, 20).map((event) => <div key={event.id} className="flex items-start gap-3 text-sm"><ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-gray-600" /><div><span className="text-gray-300">{event.summary}</span><span className="ml-2 text-xs text-gray-600">{shortDate(event.created_at)}</span></div></div>)}
-                </div>
-              </section>
+              <details className="rounded-lg border border-gray-800 bg-gray-950/30"><summary className="flex cursor-pointer list-none items-center justify-between px-3 py-2.5 text-xs font-medium text-gray-500 hover:text-gray-300"><span>Advanced family focus</span><ChevronDown className="h-4 w-4" /></summary><div className="flex flex-wrap gap-2 border-t border-gray-800 p-3">{ACTIVE_FAMILIES.map((family) => <label key={family} className="flex items-center gap-2 rounded-lg border border-gray-800 px-3 py-2 text-xs text-gray-300"><input type="checkbox" checked={families.includes(family)} onChange={() => setFamilies((current) => current.includes(family) ? current.filter((item) => item !== family) : [...current, family])} />{family.toUpperCase()}</label>)}</div></details>
             </div>
-          )}
+          </Card>
+
+          {selected ? <section>
+            <div className="mb-3 flex flex-wrap items-center justify-between gap-3"><div><h2 className="font-semibold text-white">Current investigation</h2><p className="mt-1 text-xs text-gray-500">The server investigator updates after every LLM decision and ShakerScan action.</p></div><div className="flex gap-2">{autoRunning ? <Button variant="secondary" onClick={() => pauseAutopilot().catch(() => undefined)} disabled={busy}><Pause className="h-4 w-4" />Pause</Button> : selected.episode.status === 'awaiting_planner' && !selected.episode.terminal ? <Button onClick={continueInvestigation} disabled={busy}><Play className="h-4 w-4" />Resume autopilot</Button> : null}<Button variant="secondary" onClick={refreshObservation} disabled={busy || autoRunning || selected.episode.terminal} title="Refresh evidence"><RefreshCw className="h-4 w-4" /></Button><Button variant="danger" onClick={cancelEpisode} disabled={busy || selected.episode.terminal}><CircleStop className="h-4 w-4" />Stop</Button></div></div>
+            <EpisodeProgress detail={selected} running={autoRunning} />
+          </section> : null}
         </main>
+
+        <aside className="grid content-start gap-4">
+          <Card className="p-4"><div className="flex items-center gap-2"><Sparkles className="h-4 w-4 text-blue-300" /><h2 className="font-semibold text-gray-200">What autopilot does</h2></div><div className="mt-4 grid gap-3">{[['1', 'Observe', 'Load current gaps, leads, findings, graph, scope, and budgets.'], ['2', 'Choose', 'Ask the configured LLM for one concrete action and falsifier.'], ['3', 'Execute', 'Run it through ShakerScan’s scope, approval, and command gates.'], ['4', 'Learn and repeat', 'Record evidence, refresh target state, and choose the next action.']].map(([n, title, body]) => <div key={n} className="flex gap-3"><span className="flex h-6 w-6 flex-none items-center justify-center rounded-full bg-blue-500/15 text-xs text-blue-200">{n}</span><div><div className="text-sm font-medium text-gray-300">{title}</div><p className="mt-0.5 text-xs leading-5 text-gray-500">{body}</p></div></div>)}</div></Card>
+
+          <Card className="p-4"><div className="flex items-center justify-between"><div className="flex items-center gap-2"><History className="h-4 w-4 text-gray-400" /><h2 className="font-semibold text-gray-200">Previous runs</h2></div><Button variant="ghost" size="sm" onClick={() => loadEpisodes().catch(() => undefined)}><RefreshCw className="h-3.5 w-3.5" /></Button></div>{!episodes.length ? <div className="mt-4"><EmptyState message="No investigations yet" /></div> : <div className="mt-3 grid max-h-[520px] gap-2 overflow-y-auto">{episodes.map((episode) => <button key={episode.id} type="button" onClick={() => openEpisode(episode.id)} className={`rounded-lg border p-3 text-left ${selected?.episode.id === episode.id ? 'border-blue-500/50 bg-blue-500/[0.07]' : 'border-gray-800 bg-gray-950/40 hover:border-gray-700'}`}><div className="flex items-start gap-2"><Activity className="mt-0.5 h-4 w-4 flex-none text-gray-600" /><div className="min-w-0 flex-1"><p className="line-clamp-2 text-sm text-gray-300">{episode.objective}</p><div className="mt-2 flex items-center gap-2"><Badge className={statusClass(episode.status)}>{episodeStatusLabel(episode)}</Badge><span className="text-[11px] text-gray-600">{episode.step_count}/{episode.budget_limits.steps} steps</span></div></div></div></button>)}</div>}</Card>
+
+          {!aiReady ? <Card className="border-red-500/30 bg-red-500/[0.05] p-4"><div className="flex items-center gap-2 text-red-300"><Zap className="h-4 w-4" /><span className="text-sm font-medium">LLM provider required</span></div><p className="mt-2 text-xs leading-5 text-gray-500">Configure an OpenAI-compatible provider before starting autonomous investigation.</p><Link href="/settings" className={`${buttonClasses('secondary', 'sm')} mt-3`}>Open AI settings <ArrowRight className="h-3.5 w-3.5" /></Link></Card> : null}
+        </aside>
       </div>
     </div>
   )

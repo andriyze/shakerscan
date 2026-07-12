@@ -71,7 +71,7 @@ flags, skills, agents, adapters, modules, and durable tables) plus architecture/
 - **Interactive (`/interactive`)**: browser sessions, managed credential profiles, target principals, authz expectations, endpoint replay, screenshots, and explicit manual finding creation.
 - **Exceptions (`/settings/exceptions`)**: exception queue, owner/approver/control repair, expiry visibility, and lifecycle sweep.
 - **Command Arsenal (`/settings/arsenal`)**: command contracts, plans, scope/approval receipts, action ledger, hypotheses, refuters, tools, local agents, context packs, and decision traces.
-- **Research Agent (`/settings/research-agent`)**: create target-bound shadow/read-only/gated research episodes, run one configured-AI decision at a time, inspect immutable observations, budgets, decisions, and events, refresh target state, and cancel the episode plus linked active scans.
+- **Autonomous Hunt (`/settings/research-agent`)**: create target-bound analysis or gated active episodes and optionally run them with durable server-side autopilot. The controller leases one episode at a time, waits for linked scans, retries transient/planner-policy failures with bounded feedback, and continues if the browser closes. Inspect immutable observations, budgets, decisions, errors, and events; pause/resume or cancel the episode plus linked active scans. The lead backlog remains at `/settings/research-agent/leads`.
 - **Settings (`/settings`)**: AI providers, scan execution policy, automation defaults, and approval-receipt enforcement.
 - **Application Graph (`/targets/{id}/graph`)**: inspect persisted route/object/principal nodes, producer/consumer/auth-boundary edges, node/edge filters, search, and selected-node connections.
 
@@ -432,7 +432,8 @@ curl -X POST http://localhost:8080/research/episodes \
     "objective": "Investigate the highest-value unexplained security gaps",
     "execution_mode": "read_only",
     "max_risk_tier": "read_only",
-    "max_steps": 5
+    "max_steps": 5,
+    "autopilot": true
   }'
 
 # Run one step with the configured AI provider
@@ -445,6 +446,8 @@ curl -X POST http://localhost:8080/research/episodes/{episode_id}/plan-step \
 
 # Inspect or cancel
 curl http://localhost:8080/research/episodes/{episode_id}
+curl -X PUT http://localhost:8080/research/episodes/{episode_id}/autopilot \
+  -H "Content-Type: application/json" -d '{"enabled":false}'
 curl -X POST http://localhost:8080/research/episodes/{episode_id}/cancel
 ```
 

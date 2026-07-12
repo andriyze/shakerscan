@@ -1034,8 +1034,8 @@ it is the exhaustive backstop behind the human-readable product map above.
 
 | Surface | Count | Source |
 |---|---|---|
-| Public REST operations | 207 | `api/api.py` FastAPI decorators |
-| Unique REST paths | 166 | `api/api.py` |
+| Public REST operations | 208 | `api/api.py` FastAPI decorators |
+| Unique REST paths | 167 | `api/api.py` |
 | Check families | 13 | `api/check_registry.py` |
 | Command Arsenal commands | 75 | `api/command_arsenal.py` |
 | Tool adapters | 13 | `api/command_arsenal.py` |
@@ -1188,6 +1188,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | `GET` | `/research/episodes` | `list_research_episodes` |
 | `POST` | `/research/episodes` | `create_research_episode` |
 | `GET` | `/research/episodes/{episode_id}` | `get_research_episode` |
+| `PUT` | `/research/episodes/{episode_id}/autopilot` | `set_research_episode_autopilot` |
 | `POST` | `/research/episodes/{episode_id}/cancel` | `cancel_research_episode` |
 | `POST` | `/research/episodes/{episode_id}/decisions` | `submit_research_decision` |
 | `POST` | `/research/episodes/{episode_id}/observe` | `refresh_research_observation` |

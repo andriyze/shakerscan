@@ -50,6 +50,14 @@ def test_normalize_experiment_rejects_header_control_characters():
         experiment.normalize_experiment("https://example.test", _payload(headers={"X-Test": "ok\r\nHost: other"}))
 
 
+@pytest.mark.parametrize("control", ["\x00", "\x01", "\x1b", "\x7f"])
+def test_normalize_experiment_rejects_all_url_control_characters(control):
+    with pytest.raises(experiment.ExperimentContractError, match="control_character"):
+        experiment.normalize_experiment("https://example.test", _payload(path=f"/items{control}suffix"))
+    with pytest.raises(experiment.ExperimentContractError, match="control_character"):
+        experiment.normalize_experiment("https://example.test", _payload(query={"id": f"a{control}b"}))
+
+
 def test_compare_summaries_reports_structural_deltas():
     result = experiment.compare_summaries(
         {"status": 403, "content_length": 10, "body_sha256": "a", "body_sample": "denied", "json_keys": ["error"]},
@@ -397,3 +405,28 @@ def test_execute_experiment_fails_closed_on_non_ascii_header_from_variable():
 
     assert result["observations"][0]["error"] is None
     assert result["observations"][1]["error"] == "rendered_header_invalid:X-Test"
+
+
+def test_execute_experiment_rejects_target_derived_control_character_before_request_build():
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(200, json={"id": "a\u0000b"})
+
+    result = asyncio.run(experiment.execute_experiment(
+        "https://example.test",
+        {
+            "steps": [
+                {"label": "control", "method": "GET", "path": "/objects",
+                 "extract": [{"name": "object_id", "source": "json", "path": "$.id"}]},
+                {"label": "mutation", "method": "GET", "path": "/objects/${object_id}"},
+            ]
+        },
+        transport=httpx.MockTransport(handler),
+    ))
+
+    assert len(calls) == 1
+    assert result["request_count"] == 1
+    assert result["observations"][0]["error"] == "extract_value_contains_control_character:object_id"
+    assert result["observations"][1]["error"] == "variable_not_available:object_id"

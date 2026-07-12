@@ -30,6 +30,27 @@ class ExperimentContractError(ValueError):
     pass
 
 
+def _contains_control_character(value: Any) -> bool:
+    """Reject C0/DEL characters before values reach URL/header codecs.
+
+    Target-derived values are allowed to flow between bounded experiment steps, so this must cover
+    more than CR/LF.  In particular httpx.InvalidURL is not an HTTPError and NUL/ESC/DEL can make
+    request construction raise outside the normal transport exception hierarchy.
+    """
+    return any(ord(character) < 0x20 or ord(character) == 0x7F for character in str(value))
+
+
+def _mapping_contains_control_character(value: Any) -> bool:
+    if isinstance(value, dict):
+        return any(
+            _contains_control_character(key) or _mapping_contains_control_character(nested)
+            for key, nested in value.items()
+        )
+    if isinstance(value, (list, tuple)):
+        return any(_mapping_contains_control_character(nested) for nested in value)
+    return _contains_control_character(value)
+
+
 def _origin(value: str) -> tuple[str, str, int]:
     parsed = urlparse(value)
     if parsed.scheme not in {"http", "https"} or not parsed.hostname:
@@ -119,6 +140,8 @@ def _normalize_scalar_mapping(index: int, field: str, value: Any, *, max_items: 
         name = str(key).strip()[:120]
         if not name:
             raise ExperimentContractError(f"step_{index}_{field}_key_invalid")
+        if _contains_control_character(name):
+            raise ExperimentContractError(f"step_{index}_{field}_contains_control_character")
         if name in normalized:
             raise ExperimentContractError(f"step_{index}_{field}_key_ambiguous")
         if _sensitive_name(name):
@@ -126,7 +149,10 @@ def _normalize_scalar_mapping(index: int, field: str, value: Any, *, max_items: 
         values = item if isinstance(item, list) else [item]
         if not values or any(nested is None or isinstance(nested, (dict, list)) for nested in values):
             raise ExperimentContractError(f"step_{index}_{field}_value_must_be_scalar")
-        normalized[name] = [str(nested)[:1000] for nested in values] if isinstance(item, list) else str(item)[:1000]
+        normalized_values = [str(nested)[:1000] for nested in values]
+        if any(_contains_control_character(nested) for nested in normalized_values):
+            raise ExperimentContractError(f"step_{index}_{field}_contains_control_character")
+        normalized[name] = normalized_values if isinstance(item, list) else normalized_values[0]
     return normalized
 
 
@@ -187,7 +213,7 @@ def normalize_experiment(target_url: str, raw: Any) -> dict[str, Any]:
         parsed_path = urlparse(path)
         if not path.startswith("/") or parsed_path.scheme or parsed_path.netloc or path.startswith("//"):
             raise ExperimentContractError(f"step_{index}_path_must_be_relative")
-        if "\r" in path or "\n" in path:
+        if _contains_control_character(path):
             raise ExperimentContractError(f"step_{index}_path_contains_control_character")
         query = _normalize_scalar_mapping(index, "query", item.get("query"), max_items=30)
         headers = item.get("headers") if isinstance(item.get("headers"), dict) else {}
@@ -201,7 +227,7 @@ def normalize_experiment(target_url: str, raw: Any) -> dict[str, Any]:
             if lower_name in normalized_header_names:
                 raise ExperimentContractError(f"step_{index}_header_ambiguous:{lower_name}")
             header_value = str(value)[:1000]
-            if "\r" in name or "\n" in name or "\r" in header_value or "\n" in header_value:
+            if _contains_control_character(name) or _contains_control_character(header_value):
                 raise ExperimentContractError(f"step_{index}_header_contains_control_character")
             if not name.isascii() or not header_value.isascii():
                 raise ExperimentContractError(f"step_{index}_header_not_ascii")
@@ -419,6 +445,8 @@ async def execute_experiment(target_url: str, raw: Any, *, transport: httpx.Asyn
                 rendered_form = _render_variables(step["form_body"], variables)
                 if len(str(rendered_path).encode("utf-8")) > 4000:
                     raise ExperimentContractError("rendered_path_exceeds_size_limit")
+                if _contains_control_character(rendered_path):
+                    raise ExperimentContractError("rendered_path_contains_control_character")
                 _bounded_json_size(rendered_query)
                 _bounded_json_size(rendered_json)
                 _bounded_json_size(rendered_form)
@@ -431,14 +459,13 @@ async def execute_experiment(target_url: str, raw: Any, *, transport: httpx.Asyn
                         or _sensitive_name(lower_name)
                         or lower_name in rendered_header_names
                         or len(str(name).encode("utf-8")) > 120
-                        or "\r" in str(name)
-                        or "\n" in str(name)
+                        or _contains_control_character(name)
+                        or not str(name).isascii()
                     ):
                         raise ExperimentContractError(f"rendered_header_forbidden:{lower_name}")
                     if (
                         len(str(value).encode("utf-8")) > 1000
-                        or "\r" in str(value)
-                        or "\n" in str(value)
+                        or _contains_control_character(value)
                         or not str(value).isascii()
                     ):
                         raise ExperimentContractError(f"rendered_header_invalid:{name}")
@@ -450,6 +477,8 @@ async def execute_experiment(target_url: str, raw: Any, *, transport: httpx.Asyn
                 ):
                     if _sensitive_object_key(rendered_value):
                         raise ExperimentContractError(f"rendered_{field_name}_sensitive_key_forbidden")
+                if _mapping_contains_control_character(rendered_query):
+                    raise ExperimentContractError("rendered_query_contains_control_character")
                 request_view = {
                     "method": step["method"],
                     "path": rendered_path,
@@ -504,6 +533,8 @@ async def execute_experiment(target_url: str, raw: Any, *, transport: httpx.Asyn
                     if value is None:
                         raise ExperimentContractError(f"extract_value_missing:{spec['name']}")
                     rendered_value = str(value)[:1000]
+                    if _contains_control_character(rendered_value):
+                        raise ExperimentContractError(f"extract_value_contains_control_character:{spec['name']}")
                     extracted[spec["name"]] = rendered_value
                 variables.update(extracted)
                 observations.append({
@@ -521,7 +552,7 @@ async def execute_experiment(target_url: str, raw: Any, *, transport: httpx.Asyn
                     },
                     "error": None,
                 })
-            except (httpx.HTTPError, ExperimentContractError, UnicodeError, ValueError) as exc:
+            except (httpx.InvalidURL, httpx.HTTPError, ExperimentContractError, UnicodeError, ValueError) as exc:
                 observations.append({
                     "label": step["label"],
                     "role": step["role"],

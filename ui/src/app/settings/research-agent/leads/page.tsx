@@ -4,7 +4,8 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import Link from 'next/link'
 import {
   ArrowRight, Bot, CheckCircle2, ChevronRight, CircleDot,
-  Gauge, Lightbulb, LockKeyhole, Pause, RefreshCw, Route, ShieldCheck, Target,
+  Lightbulb, LockKeyhole, Pause, RefreshCw, Route, ShieldCheck,
+  Trash2,
 } from 'lucide-react'
 import {
   getFamilyProofContracts,
@@ -110,7 +111,7 @@ function PriorityReason({ lead }: { lead: ScheduledLead }) {
   return <span>{reasons.length ? reasons.join(' · ') : 'ranked from available evidence and test cost'}</span>
 }
 
-function LeadCard({ lead, selected, onSelect }: { lead: ScheduledLead; selected: boolean; onSelect: () => void }) {
+function LeadCard({ lead, rank, selected, onSelect }: { lead: ScheduledLead; rank: number; selected: boolean; onSelect: () => void }) {
   const h = lead.hypothesis
   const status = String(h?.effective_status || h?.status || 'open')
   return (
@@ -133,8 +134,8 @@ function LeadCard({ lead, selected, onSelect }: { lead: ScheduledLead; selected:
           </div>
         </div>
         <div className="text-right">
-          <div className="font-mono text-xl text-white">{lead.priority?.toFixed(1) ?? '—'}</div>
-          <div className="text-[10px] uppercase tracking-wider text-gray-600">priority</div>
+          <div className="font-mono text-lg text-gray-300">#{rank}</div>
+          <div className="text-[10px] uppercase tracking-wider text-gray-600">recommended</div>
         </div>
         <ChevronRight className="mt-2 h-4 w-4 text-gray-600" />
       </div>
@@ -173,6 +174,13 @@ function LeadInspector({ lead, contracts, busy, onTransition }: {
             <Badge className="bg-gray-800 text-gray-300"><Route className="mr-1 h-3 w-3" />{h.source.replaceAll('_', ' ')}</Badge>
             {h.cwe ? <Badge className="bg-gray-800 text-gray-300">{h.cwe}</Badge> : null}
           </div>
+          <div className="mt-4 rounded-xl border border-blue-500/25 bg-blue-500/[0.08] p-3">
+            <div className="text-xs font-medium text-blue-200">Recommended next step</div>
+            <p className="mt-1 text-xs leading-5 text-gray-400">{action.description}</p>
+            <Link href={action.href} className={`${buttonClasses('primary', 'md')} mt-3 w-full`}>
+              {action.label} <ArrowRight className="h-4 w-4" />
+            </Link>
+          </div>
         </div>
 
         <div className="grid gap-5 p-5">
@@ -190,18 +198,16 @@ function LeadInspector({ lead, contracts, busy, onTransition }: {
             </div>
           </section>
 
-          <section>
-            <h3 className="text-xs font-semibold uppercase tracking-wider text-gray-500">Safe next step</h3>
-            <p className="mt-1 text-sm text-gray-400">{action.description}</p>
-            <div className="mt-3 flex flex-wrap gap-2">
-              <Link href={action.href} className={buttonClasses('primary', 'md')}>
-                {action.label} <ArrowRight className="h-4 w-4" />
-              </Link>
+          <details className="rounded-lg border border-gray-800 bg-gray-950/30">
+            <summary className="cursor-pointer px-3 py-2.5 text-xs font-medium text-gray-500 hover:text-gray-300">Manage this lead</summary>
+            <div className="flex flex-wrap gap-2 border-t border-gray-800 p-3">
               {status === 'open' ? <Button variant="secondary" onClick={() => onTransition(lead, 'claimed')} disabled={busy}>Start review</Button> : null}
-              {['claimed', 'testing', 'supported'].includes(status) ? <Button variant="ghost" onClick={() => onTransition(lead, 'open')} disabled={busy}>Release</Button> : null}
+              {['claimed', 'testing'].includes(status) ? <Button variant="ghost" onClick={() => onTransition(lead, 'open')} disabled={busy}>Release</Button> : null}
+              {status === 'supported' ? <Button variant="secondary" onClick={() => onTransition(lead, 'testing')} disabled={busy}>Retest signal</Button> : null}
               {['open', 'claimed', 'testing', 'supported'].includes(status) ? <Button variant="ghost" onClick={() => onTransition(lead, 'blocked')} disabled={busy}><Pause className="h-4 w-4" /> Park</Button> : null}
+              {['open', 'claimed'].includes(status) ? <Button variant="danger" onClick={() => onTransition(lead, 'dead')} disabled={busy}><Trash2 className="h-4 w-4" />Dismiss</Button> : null}
             </div>
-          </section>
+          </details>
         </div>
       </Card>
 
@@ -229,7 +235,6 @@ function LeadInspector({ lead, contracts, busy, onTransition }: {
 export default function InvestigationWorkspacePage() {
   const [targets, setTargets] = useState<TargetLite[]>([])
   const [targetId, setTargetId] = useState('')
-  const [budget, setBudget] = useState(12)
   const [data, setData] = useState<HypothesisScheduleResponse | null>(null)
   const [contracts, setContracts] = useState<FamilyProofContracts | null>(null)
   const [selectedId, setSelectedId] = useState('')
@@ -237,6 +242,7 @@ export default function InvestigationWorkspacePage() {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
+  const [transitionError, setTransitionError] = useState<string | null>(null)
 
   useEffect(() => {
     Promise.all([getTargets(), getFamilyProofContracts()]).then(([targetData, proofData]) => {
@@ -249,12 +255,12 @@ export default function InvestigationWorkspacePage() {
   const load = useCallback(async () => {
     setLoading(true); setError(null)
     try {
-      const next = await scheduleHypotheses({ targetId: targetId || undefined, remainingRequests: budget, limit: 50 })
+      const next = await scheduleHypotheses({ targetId: targetId || undefined, remainingRequests: 12, limit: 50 })
       setData(next)
       setSelectedId((current) => current && next.scheduled.some((x) => x.hypothesis_id === current) ? current : (next.scheduled[0]?.hypothesis_id || ''))
     } catch (e) { setError(e instanceof Error ? e.message : 'Failed to load investigation leads') }
     finally { setLoading(false) }
-  }, [targetId, budget])
+  }, [targetId])
 
   useEffect(() => { load().catch(() => undefined) }, [load])
 
@@ -264,12 +270,12 @@ export default function InvestigationWorkspacePage() {
   const transition = useCallback(async (lead: ScheduledLead, to: string) => {
     const h = lead.hypothesis
     if (!h) return
-    setBusy(true); setNotice(null)
+    setBusy(true); setNotice(null); setTransitionError(null)
     try {
       const result = await transitionHypothesis(h.id, { to, expected_version: h.version, reason: `investigation workspace: ${to}` })
       setNotice(`${familyLabel(h.family)} moved to ${statusLabel(result.to).toLowerCase()}.`)
       await load()
-    } catch (e) { setNotice(e instanceof Error ? e.message : 'The update was rejected') }
+    } catch (e) { setTransitionError(e instanceof Error ? e.message : 'The update was rejected') }
     finally { setBusy(false) }
   }, [load])
 
@@ -279,26 +285,32 @@ export default function InvestigationWorkspacePage() {
         <div>
           <div className="flex items-center gap-2 text-sm text-blue-300"><Bot className="h-4 w-4" /> Research Agent</div>
           <h1 className="mt-1 text-3xl font-bold tracking-tight text-white">Investigation workspace</h1>
-          <p className="mt-2 max-w-2xl text-sm leading-6 text-gray-400">Prioritized security leads, bounded work orders, and clear proof requirements. Leads are not findings until live verification succeeds.</p>
+          <p className="mt-2 max-w-2xl text-sm leading-6 text-gray-400">Choose one security lead, review what would prove or disprove it, then open its recommended verification workflow.</p>
         </div>
         <nav className="flex rounded-lg border border-gray-800 bg-gray-950 p-1 text-sm">
-          <span className="rounded-md bg-gray-800 px-3 py-1.5 text-white">Leads</span>
-          <Link href="/settings/research-agent/experiment" className="px-3 py-1.5 text-gray-400 hover:text-white">Experiment</Link>
-          <Link href="/settings/research-agent" className="px-3 py-1.5 text-gray-400 hover:text-white">Episodes</Link>
+          <span className="rounded-md bg-gray-800 px-3 py-1.5 text-white">Choose lead</span>
+          <Link href="/settings/research-agent/experiment" className="px-3 py-1.5 text-gray-400 hover:text-white">Build test</Link>
+          <Link href="/settings/research-agent" className="px-3 py-1.5 text-gray-400 hover:text-white">Agent runs</Link>
         </nav>
       </header>
 
+      <Card className="mt-5 border-blue-500/20 bg-blue-500/[0.04] p-4">
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-center">
+          <div className="mr-3"><div className="text-xs font-semibold uppercase tracking-wider text-blue-300">Start here</div><p className="mt-1 text-sm text-gray-400">This page helps you choose and prepare one investigation. It does not automatically run every lead.</p></div>
+          <div className="grid flex-1 gap-2 sm:grid-cols-3">
+            <div className="flex items-center gap-2 rounded-lg bg-gray-950/50 px-3 py-2 text-sm text-gray-300"><span className="flex h-6 w-6 flex-none items-center justify-center rounded-full bg-blue-500/20 text-xs text-blue-200">1</span>Choose a target</div>
+            <div className="flex items-center gap-2 rounded-lg bg-gray-950/50 px-3 py-2 text-sm text-gray-300"><span className="flex h-6 w-6 flex-none items-center justify-center rounded-full bg-blue-500/20 text-xs text-blue-200">2</span>Click one lead</div>
+            <div className="flex items-center gap-2 rounded-lg bg-gray-950/50 px-3 py-2 text-sm text-gray-300"><span className="flex h-6 w-6 flex-none items-center justify-center rounded-full bg-blue-500/20 text-xs text-blue-200">3</span>Use the blue next-step button</div>
+          </div>
+        </div>
+      </Card>
+
       <Card className="mt-5 p-4">
-        <div className="grid gap-4 md:grid-cols-[minmax(260px,1fr)_180px_auto] md:items-end">
-          <label className="text-xs font-medium text-gray-400">Target
+        <div className="grid gap-4 md:grid-cols-[minmax(260px,1fr)_auto] md:items-end">
+          <label className="text-xs font-medium text-gray-400">1. Choose a target
             <select value={targetId} onChange={(e) => setTargetId(e.target.value)} className="mt-1.5 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-gray-200">
               <option value="">All registered targets</option>
               {targets.map((t) => <option key={t.id} value={t.id}>{t.name ? `${t.name} — ` : ''}{t.url}</option>)}
-            </select>
-          </label>
-          <label className="text-xs font-medium text-gray-400">Request budget
-            <select value={budget} onChange={(e) => setBudget(Number(e.target.value))} className="mt-1.5 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-gray-200">
-              <option value={6}>Focused · 6</option><option value={12}>Balanced · 12</option><option value={24}>Extended · 24</option>
             </select>
           </label>
           <Button variant="secondary" onClick={() => load().catch(() => undefined)} disabled={loading || busy}><RefreshCw className="h-4 w-4" />Refresh</Button>
@@ -306,20 +318,15 @@ export default function InvestigationWorkspacePage() {
       </Card>
 
       {notice ? <div className="mt-4 rounded-lg border border-blue-500/20 bg-blue-500/[0.07] px-4 py-3 text-sm text-blue-200">{notice}</div> : null}
-
-      <div className="mt-5 grid gap-4 sm:grid-cols-3">
-        <Card className="p-4"><div className="flex items-center gap-2 text-xs text-gray-500"><Target className="h-4 w-4 text-blue-300" />Ready to investigate</div><div className="mt-2 text-2xl font-semibold text-white">{data?.counts.scheduled ?? '—'}</div></Card>
-        <Card className="p-4"><div className="flex items-center gap-2 text-xs text-gray-500"><Gauge className="h-4 w-4 text-amber-300" />Deferred by budget</div><div className="mt-2 text-2xl font-semibold text-white">{data?.counts.deferred ?? '—'}</div></Card>
-        <Card className="p-4"><div className="flex items-center gap-2 text-xs text-gray-500"><ShieldCheck className="h-4 w-4 text-emerald-300" />Proof-backed findings</div><div className="mt-2 text-sm font-medium text-gray-300">Created only after verification</div></Card>
-      </div>
+      {transitionError ? <div className="mt-4 rounded-lg border border-red-500/30 bg-red-500/[0.08] px-4 py-3 text-sm text-red-200">{transitionError}</div> : null}
 
       <div className="mt-5 grid gap-5 xl:grid-cols-[minmax(0,1fr)_430px]">
         <section>
-          <div className="mb-3 flex items-end justify-between"><div><h2 className="font-semibold text-white">Recommended next work</h2><p className="mt-1 text-xs text-gray-500">Ranked by impact, boundary value, novelty, reachability, and cost.</p></div></div>
+          <div className="mb-3 flex items-end justify-between"><div><h2 className="font-semibold text-white">2. Choose one lead <span className="ml-1 text-sm font-normal text-gray-500">({data?.counts.scheduled ?? 0} ready)</span></h2><p className="mt-1 text-xs text-gray-500">The first card is ShakerScan’s recommendation. Click any card to change the work order on the right.</p></div></div>
           {loading ? <div className="grid gap-3"><Skeleton className="h-28" /><Skeleton className="h-28" /></div>
             : error ? <ErrorState message={error} onRetry={() => load().catch(() => undefined)} />
-            : !data?.scheduled.length ? <EmptyState message="No leads are ready" hint="Try a different target or increase the request budget. New leads also appear after discovery and application-graph analysis." />
-            : <><div className="grid gap-3">{visibleLeads.map((lead) => <LeadCard key={lead.hypothesis_id} lead={lead} selected={selectedId === lead.hypothesis_id} onSelect={() => setSelectedId(lead.hypothesis_id)} />)}</div>{data.counts.scheduled > visibleLeads.length ? <p className="mt-3 text-center text-xs text-gray-600">Showing the top {visibleLeads.length} of {data.counts.scheduled}. Choose a target to narrow the worklist.</p> : null}</>}
+            : !data?.scheduled.length ? <EmptyState message="No leads are ready" hint="Try a different target. New leads appear after discovery, scans, and application-graph analysis." />
+            : <><div className="grid gap-3">{visibleLeads.map((lead, index) => <LeadCard key={lead.hypothesis_id} lead={lead} rank={index + 1} selected={selectedId === lead.hypothesis_id} onSelect={() => setSelectedId(lead.hypothesis_id)} />)}</div>{data.counts.scheduled > visibleLeads.length ? <p className="mt-3 text-center text-xs text-gray-600">Showing the top {visibleLeads.length} of {data.counts.scheduled}. Choose a target to narrow the worklist.</p> : null}</>}
         </section>
         <aside><LeadInspector lead={selected} contracts={contracts} busy={busy} onTransition={transition} /></aside>
       </div>

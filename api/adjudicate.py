@@ -142,7 +142,7 @@ def require_deterministic_refutation(transition: dict[str, Any]) -> tuple[bool, 
     """Gate a hypothesis->refuted / finding->false_positive transition (the negative gate).
 
     Returns ``(ok, reason)``. A dismissal is allowed ONLY when it carries a deterministic basis AND
-    a concrete ``refuted_by`` reference (a verification_id or experiment_signal_id) whose source is
+    a concrete ``refuted_by.verification_id`` whose source is
     not an LLM/planner. Fail-closed: anything missing/model-sourced -> ``(False, reason)``.
     """
     basis = str(transition.get("verdict_basis") or transition.get("basis") or "").strip().lower()
@@ -154,7 +154,6 @@ def require_deterministic_refutation(transition: dict[str, Any]) -> tuple[bool, 
     source = str(refuted_by.get("source") or "").strip().lower()
     ref = str(
         refuted_by.get("verification_id")
-        or refuted_by.get("experiment_signal_id")
         or refuted_by.get("ref")
         or ""
     ).strip()

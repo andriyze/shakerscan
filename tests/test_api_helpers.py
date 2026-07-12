@@ -4307,6 +4307,106 @@ def test_hypothesis_refutation_rejects_nonexistent_verification(monkeypatch):
     assert exc.value.detail["error"] == "refutation_reference_not_verified"
 
 
+def test_hypothesis_dead_is_administrative_and_needs_no_refutation(monkeypatch):
+    hypothesis_id = uuid.uuid4()
+    target_id = uuid.uuid4()
+
+    class _FakeConn:
+        async def fetchrow(self, query, *args):
+            sql = str(query)
+            if "SELECT * FROM hypotheses" in sql:
+                return {
+                    "id": hypothesis_id, "target_id": target_id, "status": "open", "version": 1,
+                    "family": "sqli", "next_test_action": {}, "evidence_object_ids": [],
+                    "tool_receipt_ids": [], "promoted_finding_ids": [], "endorsements": [],
+                    "refutations": [], "metadata_json": {},
+                }
+            if "UPDATE hypotheses" in sql:
+                assert args[-1] == "open"
+                return {
+                    "id": hypothesis_id, "target_id": target_id, "status": "dead", "version": 2,
+                    "family": "sqli", "next_test_action": {}, "evidence_object_ids": [],
+                    "tool_receipt_ids": [], "promoted_finding_ids": [], "endorsements": [],
+                    "refutations": [], "metadata_json": {},
+                }
+            raise AssertionError(sql)
+
+    monkeypatch.setattr(api_module, "db_pool", _pool_for(_FakeConn()))
+    result = asyncio.run(api_module.arsenal_transition_hypothesis(
+        str(hypothesis_id),
+        api_module.HypothesisTransitionRequest(to="dead", expected_version=1, reason="duplicate"),
+    ))
+
+    assert result["to"] == "dead"
+    assert result["hypothesis"]["status"] == "dead"
+
+
+def test_hypothesis_refutation_rejects_unrelated_same_target_verification(monkeypatch):
+    hypothesis_id = uuid.uuid4()
+    verification_id = uuid.uuid4()
+    target_id = uuid.uuid4()
+    finding_id = uuid.uuid4()
+
+    class _FakeConn:
+        async def fetchrow(self, query, *args):
+            sql = str(query)
+            if "SELECT * FROM hypotheses" in sql:
+                return {
+                    "id": hypothesis_id, "target_id": target_id, "status": "testing", "version": 1,
+                    "family": "bola", "next_test_action": {"falsifier": "denied", "expected_signal": "cross-user access"},
+                    "evidence_object_ids": [], "tool_receipt_ids": [], "promoted_finding_ids": [],
+                    "endorsements": [], "refutations": [],
+                    "metadata_json": {"dedupe_dimensions": {"route": "/api/orders/{id}", "method": "get"}},
+                }
+            if "FROM finding_verifications" in sql:
+                return {
+                    "id": verification_id, "finding_id": finding_id, "target_id": target_id,
+                    "status": "completed", "verification_mode": "deterministic", "verdict": "false_positive",
+                    "proof": {"control_status": 403}, "artifacts": {},
+                }
+            if "SELECT * FROM findings" in sql:
+                return {
+                    "id": finding_id, "target_id": target_id, "title": "Unrelated reflected XSS",
+                    "tool": "smart_xss", "cwe": "CWE-79", "url": "https://app.test/search?q=x",
+                    "evidence": {"method": "GET", "parameter": "q"}, "request": {},
+                }
+            raise AssertionError(sql)
+
+    monkeypatch.setattr(api_module, "db_pool", _pool_for(_FakeConn()))
+    req = api_module.HypothesisTransitionRequest(
+        to="refuted",
+        expected_version=1,
+        refuted_by={"verification_id": str(verification_id), "basis": "deterministic_replay"},
+    )
+    with pytest.raises(api_module.HTTPException) as exc:
+        asyncio.run(api_module.arsenal_transition_hypothesis(str(hypothesis_id), req))
+
+    assert exc.value.status_code == 422
+    assert exc.value.detail["reason"] == "verification_not_bound_to_hypothesis_proof"
+
+
+def test_hypothesis_subject_binding_requires_exact_reference_or_specific_dimensions():
+    finding = {
+        "id": uuid.uuid4(),
+        "fingerprint": "finding-fingerprint-1",
+        "url": "https://app.test/api/orders/42",
+        "evidence": {"method": "GET", "object_key": "order.id"},
+        "request": {},
+    }
+
+    assert api_module._hypothesis_subject_matches_finding(
+        {"metadata_json": {"finding_fingerprint": "finding-fingerprint-1"}}, finding
+    ) is True
+    assert api_module._hypothesis_subject_matches_finding(
+        {"metadata_json": {"dedupe_dimensions": {}}}, finding
+    ) is False
+    assert api_module._hypothesis_subject_matches_finding(
+        {"metadata_json": {"dedupe_dimensions": {
+            "route": "/api/orders/{id}", "method": "get", "object_key": "order.id",
+        }}}, finding
+    ) is True
+
+
 def test_hypothesis_transition_cannot_bypass_proof_reconciliation_for_promotion(monkeypatch):
     hypothesis_id = uuid.uuid4()
 
@@ -4592,6 +4692,15 @@ def test_refuter_queue_from_summary_records_unreviewed_signal_only_reviews():
     calls = {"fetch": 0, "fetchrow": []}
 
     class _FakeConn:
+        def transaction(self):
+            return self
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
         async def fetch(self, query, *args):
             calls["fetch"] += 1
             if "FROM findings" in query:
@@ -9290,6 +9399,84 @@ def test_research_planner_binds_provider_decision_to_current_observation():
     assert bound["observation_id"] == observation["id"]
     assert bound["context_hash"] == observation["context_hash"]
     assert response["observation_id"] == "provider-controlled"
+
+
+def test_research_planner_supplies_semantic_defaults_for_nullable_terminal_fields():
+    observation = {"id": "observation-1", "context_hash": "a" * 64}
+
+    stopped = api_module._bind_research_decision_to_observation(
+        {"decision": "stop", "stop_reason": None, "reason": None}, observation
+    )
+    requested = api_module._bind_research_decision_to_observation(
+        {"decision": "request_input", "requested_input": None, "reason": None}, observation
+    )
+
+    assert stopped["stop_reason"] == "planner_concluded_no_further_action"
+    assert requested["requested_input"] == "Operator input is required to continue."
+
+
+def test_research_planner_schema_constrains_action_to_current_proposable_commands():
+    schema = api_module._research_decision_json_schema(["target.get", "asm.gaps", "asm.gaps"])
+
+    command_schema = schema["schema"]["properties"]["action"]["properties"]["command"]
+    assert command_schema["enum"] == ["asm.gaps", "target.get"]
+
+
+def test_research_planner_recovers_unique_read_only_command_from_registered_description():
+    observation = {
+        "id": "observation-1",
+        "context_hash": "a" * 64,
+        "observation_pack": {
+            "proposable_commands": [
+                {"name": "asm.gaps", "proposable": True, "risk_tier": "read_only",
+                 "description": "Explain remaining ASM gaps and recommended campaigns for one target.",
+                 "parameters_schema": {"target_id": {}}},
+                {"name": "target.get", "proposable": True, "risk_tier": "read_only",
+                 "description": "Get one target and recent scan metadata.",
+                 "parameters_schema": {"target_id": {}}},
+            ]
+        },
+    }
+    bound = api_module._bind_research_decision_to_observation(
+        {
+            "decision": "execute_action",
+            "action": {"command": "", "parameters": {"target_id": "target-1"}},
+            "expected_signal": "A gap report listing remaining coverage and recommended campaigns",
+            "falsifier": "No gap or campaign recommendations are returned",
+        },
+        observation,
+    )
+
+    assert bound["action"]["command"] == "asm.gaps"
+
+
+def test_research_planner_never_semantically_guesses_active_command():
+    observation = {
+        "observation_pack": {"proposable_commands": [{
+            "name": "asm.test", "proposable": True, "risk_tier": "active",
+            "description": "Run active endpoint tests for remaining gaps.",
+            "parameters_schema": {"target_id": {}},
+        }]}
+    }
+    response = {
+        "decision": "execute_action", "action": {"command": "", "parameters": {"target_id": "target-1"}},
+        "expected_signal": "Active endpoint test results for gaps", "falsifier": "No tests run",
+    }
+
+    assert api_module._infer_blank_read_only_command(response, observation) is None
+
+
+def test_research_planner_rejection_feedback_is_bounded_for_next_observation():
+    errors = ["unknown_command:", "x" * 500]
+    feedback = {
+        "planner_rejection": {
+            "validation_errors": [str(item)[:300] for item in errors[:20]],
+            "instruction": "Choose a named proposable command or provide a valid stop/input decision.",
+        }
+    }
+
+    assert feedback["planner_rejection"]["validation_errors"][0] == "unknown_command:"
+    assert len(feedback["planner_rejection"]["validation_errors"][1]) == 300
 
 
 def test_research_planner_infers_unambiguous_action_discriminator():

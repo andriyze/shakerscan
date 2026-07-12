@@ -58,9 +58,14 @@ const navItems = [
     icon: <FileArchive className="w-5 h-5" />,
   },
   {
+    href: '/settings/research-agent',
+    label: 'Autonomous Hunt',
+    icon: <Bot className="w-5 h-5" />,
+  },
+  {
     href: '/settings/research-agent/leads',
     label: 'Investigations',
-    icon: <Bot className="w-5 h-5" />,
+    icon: <Crosshair className="w-5 h-5" />,
   },
   {
     href: '/exposure',
@@ -119,6 +124,9 @@ function NavContent({ pathname }: { pathname: string }) {
   const isActive = (href: string) => {
     if (href === '/') {
       return pathname === '/'
+    }
+    if (href === '/settings/research-agent') {
+      return pathname === href
     }
     return pathname.startsWith(href)
   }

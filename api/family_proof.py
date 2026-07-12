@@ -161,11 +161,13 @@ PROMOTION_MIN_STRENGTH = "cross_principal_verified"
 
 
 def promotion_gate(result: dict[str, Any] | None) -> tuple[bool, str | None]:
-    """The deterministic gate every finding-creation path must consult (Wave 5).
+    """Deterministic promotion predicate for trusted live family-proof callers.
 
     Only a `verified`, live-re-executed family proof may promote to a finding — a stored outcome is a
     claim, `verified` already requires ``reexecuted_at_handoff`` and carries the top evidence-strength
-    rung. Returns ``(ok, reason)``; fail-closed on anything less.
+    rung. Uniform wiring across legacy finding-creation paths is tracked separately; this helper must
+    not be described as enforced where a caller does not invoke it. Returns ``(ok, reason)`` and
+    fails closed on anything less.
     """
     r = result or {}
     verdict = str(r.get("verdict") or "")

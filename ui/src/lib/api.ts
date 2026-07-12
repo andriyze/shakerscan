@@ -45,8 +45,12 @@ async function getApiErrorMessage(res: Response, fallback: string): Promise<stri
       const msgs = detail.map((d) => (typeof d?.msg === 'string' ? d.msg : null)).filter(Boolean)
       if (msgs.length) return msgs.join('; ')
     }
-    // Structured errors raised as { detail: { error, message, ... } }.
-    if (detail && typeof detail === 'object' && typeof detail.message === 'string') return detail.message
+    // Structured errors raised as { detail: { error, message, reason, ... } }.
+    if (detail && typeof detail === 'object') {
+      if (typeof detail.message === 'string') return detail.message
+      if (typeof detail.reason === 'string') return detail.reason
+      if (typeof detail.error === 'string') return detail.error
+    }
     if (typeof data?.message === 'string') return data.message
   } catch {
     // Ignore JSON parse errors and use fallback.
@@ -292,6 +296,9 @@ export interface ResearchEpisode {
   current_decision_id?: string | null
   step_count: number
   cancel_requested: boolean
+  autopilot_enabled: boolean
+  autopilot_error?: string | null
+  autopilot_consecutive_failures: number
   stop_reason?: string | null
   requested_input?: string | null
   terminal: boolean
@@ -383,6 +390,7 @@ export interface ResearchEpisodeCreateRequest {
   scope_receipt_id?: string
   approval_receipt_id?: string
   created_by?: string
+  autopilot?: boolean
 }
 
 export interface CommandResult {
@@ -2496,37 +2504,6 @@ export async function getFamilyProofContracts(): Promise<FamilyProofContracts> {
   return res.json()
 }
 
-export interface FamilyProofVerdict {
-  family: string
-  cwe: string | null
-  verdict: string
-  reason: string
-  requirements: string[]
-  met: string[]
-  missing: string[]
-  refuted_by?: string[]
-  promotable: boolean
-  proof_state: string
-  evidence_strength: string
-  evidence_instance_id: string | null
-}
-
-export async function evaluateFamilyProof(payload: {
-  family: string
-  evidence: Record<string, boolean>
-  target_id?: string
-  concrete_url?: string
-  created_by?: string
-}): Promise<FamilyProofVerdict> {
-  const res = await fetch(`${API_URL}/arsenal/family-proof/evaluate`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-  })
-  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Family proof evaluation failed'))
-  return res.json()
-}
-
 // --- Bounded HTTP differential experiment builder (Wave 2 + 8) ---
 
 export interface ArsenalExecuteResult {
@@ -2889,6 +2866,16 @@ export async function planResearchEpisodeStep(episodeId: string, payload: {
     body: JSON.stringify(payload),
   })
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to run research planner step'))
+  return res.json()
+}
+
+export async function setResearchEpisodeAutopilot(episodeId: string, enabled: boolean): Promise<ResearchEpisodeDetail> {
+  const res = await fetch(`${API_URL}/research/episodes/${encodeURIComponent(episodeId)}/autopilot`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ enabled, created_by: 'research_agent_ui' }),
+  })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, enabled ? 'Failed to resume autopilot' : 'Failed to pause autopilot'))
   return res.json()
 }
 
