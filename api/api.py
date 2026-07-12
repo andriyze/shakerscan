@@ -24405,6 +24405,48 @@ def _research_planner_messages(observation: dict[str, Any]) -> list[dict[str, st
     ]
 
 
+def _bind_research_decision_to_observation(
+    response: dict[str, Any], observation: dict[str, Any]
+) -> dict[str, Any]:
+    """Bind provider output to the server-selected immutable observation."""
+    bound = dict(response)
+    action = bound.get("action")
+    if isinstance(action, dict) and not str(action.get("command") or "").strip():
+        parameter_names = set((action.get("parameters") or {}).keys()) if isinstance(action.get("parameters"), dict) else set()
+        pack = observation.get("observation_pack") if isinstance(observation.get("observation_pack"), dict) else {}
+        candidates = []
+        for projected in pack.get("proposable_commands") or []:
+            if not isinstance(projected, dict) or not projected.get("proposable"):
+                continue
+            schema = projected.get("parameters_schema") if isinstance(projected.get("parameters_schema"), dict) else {}
+            if parameter_names and parameter_names.issubset(schema.keys()):
+                candidates.append(str(projected.get("name") or ""))
+        candidates = [name for name in candidates if name]
+        if len(candidates) == 1:
+            action = dict(action)
+            action["command"] = candidates[0]
+            bound["action"] = action
+    if not bound.get("decision"):
+        action = bound.get("action")
+        has_action = isinstance(action, dict) and bool(action.get("command"))
+        has_input = bool(bound.get("requested_input"))
+        has_stop = bool(bound.get("stop_reason"))
+        inferred = [
+            name for name, present in (
+                ("execute_action", has_action),
+                ("request_input", has_input),
+                ("stop", has_stop),
+            )
+            if present
+        ]
+        if len(inferred) == 1:
+            bound["decision"] = inferred[0]
+    bound["decision_version"] = RESEARCH_DECISION_VERSION
+    bound["observation_id"] = str(observation.get("id") or "")
+    bound["context_hash"] = str(observation.get("context_hash") or "")
+    return bound
+
+
 def _load_research_ai_provider():
     for module_name in ("scanner_tools.ai_classifier", "scanner.scanner_tools.ai_classifier"):
         try:
@@ -24456,7 +24498,7 @@ async def plan_research_episode_step(episode_id: str, req: ResearchPlannerStepRe
     estimated_tokens = max(1, (prompt_bytes + output_bytes + 3) // 4)
     try:
         decision_req = ResearchDecisionRequest(
-            **response,
+            **_bind_research_decision_to_observation(response, observation),
             planner={
                 "kind": "configured_ai",
                 "model": str(provider_meta.get("model") or ai_model)[:200],

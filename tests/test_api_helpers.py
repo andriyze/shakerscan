@@ -9150,3 +9150,77 @@ def test_finding_exception_lifecycle_sweep_execution_requires_receipt_and_audits
     update_query = conn.fetch_calls[1][0]
     assert "transition', 'lifecycle_sweep'" in update_query
     assert "status = 'expired'" in update_query
+
+
+def test_research_planner_binds_provider_decision_to_current_observation():
+    response = {
+        "decision": "stop",
+        "observation_id": "provider-controlled",
+        "context_hash": "provider-controlled",
+        "stop_reason": "No useful next action",
+    }
+    observation = {
+        "id": "11111111-1111-4111-8111-111111111111",
+        "context_hash": "a" * 64,
+    }
+
+    bound = api_module._bind_research_decision_to_observation(response, observation)
+
+    assert bound["decision_version"] == api_module.RESEARCH_DECISION_VERSION
+    assert bound["observation_id"] == observation["id"]
+    assert bound["context_hash"] == observation["context_hash"]
+    assert response["observation_id"] == "provider-controlled"
+
+
+def test_research_planner_infers_unambiguous_action_discriminator():
+    bound = api_module._bind_research_decision_to_observation(
+        {"action": {"command": "asm.gaps", "parameters": {}}},
+        {"id": "observation-1", "context_hash": "a" * 64},
+    )
+
+    assert bound["decision"] == "execute_action"
+
+
+def test_research_planner_does_not_infer_ambiguous_discriminator():
+    bound = api_module._bind_research_decision_to_observation(
+        {
+            "action": {"command": "asm.gaps", "parameters": {}},
+            "stop_reason": "also stop",
+        },
+        {"id": "observation-1", "context_hash": "a" * 64},
+    )
+
+    assert "decision" not in bound
+
+
+def test_research_planner_recovers_only_unique_proposable_command_shape():
+    observation = {
+        "id": "observation-1",
+        "context_hash": "a" * 64,
+        "observation_pack": {
+            "proposable_commands": [
+                {
+                    "name": "hypothesis.situation_report",
+                    "proposable": True,
+                    "parameters_schema": {"target_id": {}, "include_graph": {}, "limit": {}},
+                },
+                {
+                    "name": "target.get",
+                    "proposable": True,
+                    "parameters_schema": {"target_id": {}},
+                },
+            ]
+        },
+    }
+
+    bound = api_module._bind_research_decision_to_observation(
+        {"decision": "execute_action", "action": {"command": "", "parameters": {"include_graph": True}}},
+        observation,
+    )
+    ambiguous = api_module._bind_research_decision_to_observation(
+        {"decision": "execute_action", "action": {"command": "", "parameters": {"target_id": "target-1"}}},
+        observation,
+    )
+
+    assert bound["action"]["command"] == "hypothesis.situation_report"
+    assert ambiguous["action"]["command"] == ""
