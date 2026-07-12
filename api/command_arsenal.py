@@ -15,7 +15,7 @@ from typing import Any
 import uuid
 
 
-ARSENAL_SCHEMA_VERSION = "2026-07-12.v2"
+ARSENAL_SCHEMA_VERSION = "2026-07-12.v3"
 
 COMMAND_STATUSES = (
     "contract",
@@ -98,6 +98,312 @@ class LocalAgentSpec:
     max_prompt_bytes: int
     max_output_bytes: int
     risk_notes: tuple[str, ...]
+
+
+_EXPERIMENT_HTTP_METHODS = ("GET", "HEAD", "OPTIONS", "POST", "PUT", "PATCH", "DELETE")
+_EXPERIMENT_STEP_ROLES = ("control", "mutation", "verify")
+_WORKFLOW_STEP_KINDS = ("http", "browser")
+_WORKFLOW_CHECKPOINTS = ("before", "mutation", "after", "action", "cleanup", "rollback")
+_WORKFLOW_BROWSER_ACTIONS = ("navigate", "click", "fill", "submit", "wait", "extract")
+
+
+def _request_scalar_schema() -> dict[str, Any]:
+    """JSON scalars accepted by the experiment normalizers before string rendering."""
+    return {
+        "oneOf": [
+            {"type": "string", "maxLength": 1000},
+            {"type": "number"},
+            {"type": "boolean"},
+        ]
+    }
+
+
+def _scalar_mapping_schema(*, max_properties: int) -> dict[str, Any]:
+    scalar = _request_scalar_schema()
+    return {
+        "type": "object",
+        "maxProperties": max_properties,
+        "propertyNames": {"type": "string", "minLength": 1, "maxLength": 120},
+        "additionalProperties": {
+            "oneOf": [
+                scalar,
+                {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": _request_scalar_schema(),
+                },
+            ]
+        },
+    }
+
+
+def _http_extract_schema() -> dict[str, Any]:
+    return {
+        "oneOf": [
+            {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["name", "path"],
+                "properties": {
+                    "name": {"type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_]{0,63}$"},
+                    "source": {"type": "string", "const": "json", "default": "json"},
+                    "path": {"type": "string", "pattern": "^\\$\\.", "maxLength": 300},
+                },
+            },
+            {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["name", "source", "header"],
+                "properties": {
+                    "name": {"type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_]{0,63}$"},
+                    "source": {"type": "string", "const": "header"},
+                    "header": {"type": "string", "minLength": 1, "maxLength": 300},
+                },
+            },
+        ]
+    }
+
+
+def _browser_extract_schema() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["name", "selector"],
+        "properties": {
+            "name": {"type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_]{0,63}$"},
+            "selector": {"type": "string", "minLength": 1, "maxLength": 500},
+            "attribute": {"type": "string", "minLength": 1, "maxLength": 120, "default": "text"},
+        },
+    }
+
+
+def _http_experiment_step_schema() -> dict[str, Any]:
+    """Planner-facing strict subset of normalize_experiment's executable step grammar."""
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["label", "method", "path", "role"],
+        "properties": {
+            "label": {"type": "string", "minLength": 1, "maxLength": 80},
+            "method": {"type": "string", "enum": list(_EXPERIMENT_HTTP_METHODS)},
+            "path": {
+                "type": "string",
+                "pattern": "^/(?!/)",
+                "maxLength": 2000,
+                "description": "Same-origin relative path. Absolute and scheme-relative URLs are rejected.",
+            },
+            "query": _scalar_mapping_schema(max_properties=30),
+            "headers": {
+                "type": "object",
+                "maxProperties": 20,
+                "propertyNames": {"type": "string", "minLength": 1, "maxLength": 120},
+                "additionalProperties": {"type": "string", "maxLength": 1000},
+                "description": "Model-supplied credential, cookie, Host, and API-key headers are rejected.",
+            },
+            "json_body": {
+                "description": "A JSON value of at most 16 KiB. Credential-like keys are rejected."
+            },
+            "form_body": _scalar_mapping_schema(max_properties=50),
+            "extract": {
+                "type": "array",
+                "maxItems": 8,
+                "items": _http_extract_schema(),
+            },
+            "select_json": {
+                "type": "array",
+                "maxItems": 20,
+                "items": {"type": "string", "pattern": "^\\$\\.", "maxLength": 300},
+            },
+            "select_headers": {
+                "type": "array",
+                "maxItems": 20,
+                "items": {"type": "string", "minLength": 1, "maxLength": 120},
+            },
+            "role": {
+                "type": "string",
+                "enum": list(_EXPERIMENT_STEP_ROLES),
+                "description": "The first step must be control; later steps must be mutation or verify.",
+            },
+            "compare_to": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 80,
+                "description": "Label of a prior step; defaults to the first control step.",
+            },
+        },
+        "allOf": [
+            {
+                "if": {
+                    "properties": {"method": {"enum": ["GET", "HEAD", "OPTIONS"]}},
+                    "required": ["method"],
+                },
+                "then": {
+                    "not": {
+                        "anyOf": [
+                            {"required": ["json_body"]},
+                            {"required": ["form_body"]},
+                        ]
+                    }
+                },
+            },
+            {"not": {"required": ["json_body", "form_body"]}},
+        ],
+    }
+
+
+def _workflow_principal_schema() -> dict[str, Any]:
+    return {
+        "oneOf": [
+            {"type": "string", "enum": ["anonymous", "user1", "user2", "admin"]},
+            {"type": "string", "pattern": "^tenant:[A-Za-z0-9_.-]{1,80}$"},
+        ],
+        "description": "A managed principal slot; raw credentials are never accepted in a workflow step.",
+    }
+
+
+def _workflow_browser_data_schemas() -> dict[str, dict[str, Any]]:
+    selector = {"type": "string", "minLength": 1, "maxLength": 500}
+    return {
+        "navigate": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["path"],
+            "properties": {
+                "path": {"type": "string", "pattern": "^/(?!/)", "maxLength": 2000},
+            },
+        },
+        "click": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["selector"],
+            "properties": {"selector": selector},
+        },
+        "fill": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["selector"],
+            "properties": {
+                "selector": selector,
+                "value": _request_scalar_schema(),
+            },
+        },
+        "submit": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["selector"],
+            "properties": {"selector": selector},
+        },
+        "wait": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["selector"],
+            "properties": {
+                "selector": selector,
+                "timeout": {"type": "integer", "minimum": 0, "maximum": 10000, "default": 5000},
+            },
+        },
+        "extract": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["selector"],
+            "properties": {
+                "selector": selector,
+                "attribute": {"type": "string", "minLength": 1, "maxLength": 120},
+            },
+        },
+    }
+
+
+def _workflow_step_schema() -> dict[str, Any]:
+    """Planner-facing discriminated schema for normalize_workflow step objects."""
+    browser_data = _workflow_browser_data_schemas()
+    common_properties: dict[str, Any] = {
+        "label": {"type": "string", "minLength": 1, "maxLength": 80},
+        "kind": {"type": "string", "enum": list(_WORKFLOW_STEP_KINDS)},
+        "principal": _workflow_principal_schema(),
+        "checkpoint": {"type": "string", "enum": list(_WORKFLOW_CHECKPOINTS)},
+        "compare_to": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80,
+            "description": "Label of a prior step.",
+        },
+        "method": {"type": "string", "enum": list(_EXPERIMENT_HTTP_METHODS)},
+        "path": {"type": "string", "pattern": "^/(?!/)", "maxLength": 2000},
+        "query": _scalar_mapping_schema(max_properties=30),
+        "headers": _scalar_mapping_schema(max_properties=20),
+        "json_body": {
+            "description": "A JSON value of at most 16 KiB. Credential-like keys are rejected."
+        },
+        "form_body": _scalar_mapping_schema(max_properties=50),
+        "action": {"type": "string", "enum": list(_WORKFLOW_BROWSER_ACTIONS)},
+        "data": {
+            "oneOf": [
+                {"title": action, **schema}
+                for action, schema in browser_data.items()
+            ]
+        },
+        "extract": {
+            "type": "array",
+            "maxItems": 8,
+            "items": {
+                "oneOf": [_http_extract_schema(), _browser_extract_schema()],
+            },
+        },
+    }
+    http_only = ["method", "path", "query", "headers", "json_body", "form_body"]
+    browser_only = ["action", "data"]
+    conditions: list[dict[str, Any]] = [
+        {
+            "if": {"properties": {"kind": {"const": "http"}}, "required": ["kind"]},
+            "then": {
+                "required": ["method", "path"],
+                "not": {"anyOf": [{"required": [name]} for name in browser_only]},
+                "properties": {
+                    "extract": {"type": "array", "maxItems": 8, "items": _http_extract_schema()},
+                },
+            },
+        },
+        {
+            "if": {"properties": {"kind": {"const": "browser"}}, "required": ["kind"]},
+            "then": {
+                "required": ["action", "data"],
+                "not": {"anyOf": [{"required": [name]} for name in http_only]},
+            },
+        },
+        {"not": {"required": ["json_body", "form_body"]}},
+    ]
+    for action, data_schema in browser_data.items():
+        action_contract: dict[str, Any] = {
+            "properties": {
+                "data": data_schema,
+                "extract": {"type": "array", "maxItems": 0},
+            }
+        }
+        if action == "extract":
+            action_contract = {
+                "required": ["extract"],
+                "properties": {
+                    "data": data_schema,
+                    "extract": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 1,
+                        "items": _browser_extract_schema(),
+                    },
+                },
+            }
+        conditions.append({
+            "if": {"properties": {"action": {"const": action}}, "required": ["action"]},
+            "then": action_contract,
+        })
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["label", "kind", "principal", "checkpoint"],
+        "properties": common_properties,
+        "allOf": conditions,
+    }
 
 
 COMMANDS: tuple[ArsenalCommand, ...] = (
@@ -413,7 +719,12 @@ COMMANDS: tuple[ArsenalCommand, ...] = (
             "expected_signal": {"type": "string", "maxLength": 1000},
             "falsifier": {"type": "string", "maxLength": 1000},
             "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 15},
-            "steps": {"type": "array", "minItems": 2, "maxItems": 4},
+            "steps": {
+                "type": "array",
+                "minItems": 2,
+                "maxItems": 4,
+                "items": _http_experiment_step_schema(),
+            },
         },
         required_confirmations=("confirm_authorized",),
         evidence_contract=("observations", "comparisons", "evidence_instance_id", "tool_receipt_id"),
@@ -437,7 +748,12 @@ COMMANDS: tuple[ArsenalCommand, ...] = (
             "expected_signal": {"type": "string", "maxLength": 1000},
             "falsifier": {"type": "string", "maxLength": 1000},
             "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 180},
-            "steps": {"type": "array", "minItems": 2, "maxItems": 12},
+            "steps": {
+                "type": "array",
+                "minItems": 2,
+                "maxItems": 12,
+                "items": _workflow_step_schema(),
+            },
         },
         required_confirmations=("confirm_authorized",),
         evidence_contract=("principal_receipts", "observations", "comparisons", "evidence_instance_id", "tool_receipt_id"),

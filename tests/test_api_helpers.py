@@ -995,6 +995,289 @@ class _RecordingRedis:
         self.hset_calls.append((args, kwargs))
 
 
+class _AsmEnqueueConn:
+    def __init__(self, *, fail_queue_failure_update=False):
+        self.executes = []
+        self.fail_queue_failure_update = fail_queue_failure_update
+
+    async def execute(self, query, *args):
+        self.executes.append((query, args))
+        if self.fail_queue_failure_update and "UPDATE scans" in query:
+            raise RuntimeError("database unavailable during compensation")
+        return "OK"
+
+
+async def _fake_create_asm_campaign(*_args, **_kwargs):
+    return "22222222-2222-4222-8222-222222222222"
+
+
+def test_enqueue_asm_exploit_batch_fails_committed_scan_when_queue_handoff_fails(monkeypatch):
+    conn = _AsmEnqueueConn()
+    redis_client = _FailingRedis()
+    monkeypatch.setattr(api_module.asm_inventory, "create_campaign", _fake_create_asm_campaign)
+
+    with pytest.raises(RuntimeError, match="redis down"):
+        asyncio.run(api_module._enqueue_asm_exploit_batch(
+            conn,
+            redis_client,
+            "11111111-1111-4111-8111-111111111111",
+            "https://example.test",
+            {},
+            batch_size=10,
+            stale_days=30,
+            exploit_depth=False,
+        ))
+
+    insert = next(item for item in conn.executes if "INSERT INTO scans" in item[0])
+    failed = next(item for item in conn.executes if "UPDATE scans" in item[0])
+    campaign_failed = next(item for item in conn.executes if "UPDATE scan_campaigns" in item[0])
+    assert failed[1][0] == insert[1][0]
+    assert "WHERE id=$1 AND status='pending'" in failed[0]
+    assert "queue handoff could not be durably confirmed" in failed[1][1]
+    assert campaign_failed[1] == (
+        uuid.UUID("22222222-2222-4222-8222-222222222222"),
+        insert[1][0],
+    )
+    assert "other.campaign_id=campaign.id AND other.id<>$2" in campaign_failed[0]
+    assert json.loads(insert[1][4])["queue_handoff_confirmed"] is False
+    assert len(redis_client.rpush_calls) == 1
+
+
+def test_enqueue_asm_recon_preserves_queue_error_when_failure_cas_also_fails(monkeypatch):
+    conn = _AsmEnqueueConn(fail_queue_failure_update=True)
+    redis_client = _FailingRedis()
+    monkeypatch.setattr(api_module.asm_inventory, "create_campaign", _fake_create_asm_campaign)
+
+    with pytest.raises(RuntimeError, match="redis down"):
+        asyncio.run(api_module._enqueue_asm_recon(
+            conn,
+            redis_client,
+            "11111111-1111-4111-8111-111111111111",
+            "https://example.test",
+            {},
+        ))
+
+    assert any("INSERT INTO scans" in query for query, _args in conn.executes)
+    failed = next(item for item in conn.executes if "UPDATE scans" in item[0])
+    assert "WHERE id=$1 AND status='pending'" in failed[0]
+    assert "queue handoff could not be durably confirmed" in failed[1][1]
+    assert len(redis_client.rpush_calls) == 1
+
+
+def test_enqueue_asm_recon_metadata_cache_failure_does_not_mask_durable_queue(monkeypatch):
+    class MetadataFailingRedis(_RecordingRedis):
+        def hset(self, *args, **kwargs):
+            super().hset(*args, **kwargs)
+            raise RuntimeError("metadata cache down")
+
+    conn = _AsmEnqueueConn()
+    redis_client = MetadataFailingRedis()
+    monkeypatch.setattr(api_module.asm_inventory, "create_campaign", _fake_create_asm_campaign)
+
+    result = asyncio.run(api_module._enqueue_asm_recon(
+        conn,
+        redis_client,
+        "11111111-1111-4111-8111-111111111111",
+        "https://example.test",
+        {},
+    ))
+
+    assert result["scan_id"]
+    assert len(redis_client.rpush_calls) == 1
+    assert len(redis_client.hset_calls) == 1
+    assert any(
+        "SET status='queued'" in query and "queue_handoff_confirmed" in query
+        for query, _args in conn.executes
+    )
+    assert not any("SET status='failed'" in query for query, _args in conn.executes)
+
+
+@pytest.mark.parametrize("kind", ["exploit", "recon"])
+def test_asm_enqueue_persists_research_dispatch_correlation_before_queue_handoff(
+    monkeypatch, kind,
+):
+    conn = _AsmEnqueueConn()
+    redis_client = _RecordingRedis()
+    monkeypatch.setattr(api_module.asm_inventory, "create_campaign", _fake_create_asm_campaign)
+    correlation = (
+        "research_episode:11111111-1111-4111-8111-111111111111:"
+        "decision:22222222-2222-4222-8222-222222222222"
+    )
+    token = api_module._ARSENAL_CREATED_BY_CONTEXT.set(correlation)
+    try:
+        if kind == "exploit":
+            asyncio.run(api_module._enqueue_asm_exploit_batch(
+                conn,
+                redis_client,
+                "33333333-3333-4333-8333-333333333333",
+                "https://example.test",
+                {},
+                batch_size=10,
+                stale_days=30,
+                exploit_depth=False,
+            ))
+        else:
+            asyncio.run(api_module._enqueue_asm_recon(
+                conn,
+                redis_client,
+                "33333333-3333-4333-8333-333333333333",
+                "https://example.test",
+                {},
+            ))
+    finally:
+        api_module._ARSENAL_CREATED_BY_CONTEXT.reset(token)
+
+    insert = next(item for item in conn.executes if "INSERT INTO scans" in item[0])
+    persisted_options = json.loads(insert[1][4])
+    queued_payload = json.loads(redis_client.rpush_calls[0][1])
+    assert persisted_options["research_dispatch_correlation"] == correlation
+    assert persisted_options["queue_handoff_confirmed"] is False
+    assert queued_payload["research_dispatch_correlation"] == correlation
+
+
+@pytest.mark.parametrize(
+    ("kind", "readback_status"),
+    [
+        ("exploit", "queued"),
+        ("recon", "running"),
+        ("exploit", "failed"),
+        ("recon", "cancelled"),
+    ],
+)
+def test_enqueue_asm_confirmation_ack_loss_uses_exact_fresh_readback(
+    monkeypatch, kind, readback_status,
+):
+    class AckLostConn(_AsmEnqueueConn):
+        async def execute(self, query, *args):
+            self.executes.append((query, args))
+            if "SET status='queued'" in query:
+                raise RuntimeError("confirmation acknowledgement lost")
+            return "UPDATE 1"
+
+    primary = AckLostConn()
+
+    class ReadbackConn:
+        async def fetchrow(self, query, *args):
+            insert = next(item for item in primary.executes if "INSERT INTO scans" in item[0])
+            options = json.loads(insert[1][4])
+            options["queue_handoff_confirmed"] = True
+            return {
+                "status": readback_status,
+                "job_id": insert[1][3],
+                "campaign_id": insert[1][-1],
+                "options": options,
+            }
+
+    redis_client = _RecordingRedis()
+    monkeypatch.setattr(api_module.asm_inventory, "create_campaign", _fake_create_asm_campaign)
+    monkeypatch.setattr(api_module, "db_pool", _FakePool(ReadbackConn()))
+
+    if kind == "exploit":
+        result = asyncio.run(api_module._enqueue_asm_exploit_batch(
+            primary,
+            redis_client,
+            "11111111-1111-4111-8111-111111111111",
+            "https://example.test",
+            {},
+            batch_size=10,
+            stale_days=30,
+            exploit_depth=False,
+        ))
+    else:
+        result = asyncio.run(api_module._enqueue_asm_recon(
+            primary,
+            redis_client,
+            "11111111-1111-4111-8111-111111111111",
+            "https://example.test",
+            {},
+        ))
+
+    assert result["scan_id"]
+    assert len(redis_client.rpush_calls) == 1
+    assert len(redis_client.hset_calls) == 1
+    assert not any("SET status='failed'" in query for query, _args in primary.executes)
+
+
+@pytest.mark.parametrize("kind", ["exploit", "recon"])
+def test_enqueue_asm_confirmation_write_failure_fails_scan_and_campaign(monkeypatch, kind):
+    class ConfirmationFailingConn(_AsmEnqueueConn):
+        async def execute(self, query, *args):
+            self.executes.append((query, args))
+            if "SET status='queued'" in query:
+                raise RuntimeError("confirmation write failed")
+            return "UPDATE 1"
+
+    conn = ConfirmationFailingConn()
+    redis_client = _RecordingRedis()
+    monkeypatch.setattr(api_module.asm_inventory, "create_campaign", _fake_create_asm_campaign)
+    monkeypatch.setattr(api_module, "db_pool", None)
+
+    with pytest.raises(RuntimeError, match="confirmation write failed"):
+        if kind == "exploit":
+            asyncio.run(api_module._enqueue_asm_exploit_batch(
+                conn,
+                redis_client,
+                "11111111-1111-4111-8111-111111111111",
+                "https://example.test",
+                {},
+                batch_size=10,
+                stale_days=30,
+                exploit_depth=False,
+            ))
+        else:
+            asyncio.run(api_module._enqueue_asm_recon(
+                conn,
+                redis_client,
+                "11111111-1111-4111-8111-111111111111",
+                "https://example.test",
+                {},
+            ))
+
+    assert len(redis_client.rpush_calls) == 1
+    assert redis_client.hset_calls == []
+    failed_scan = next(
+        item for item in conn.executes
+        if "SET status='failed'" in item[0] and "UPDATE scans" in item[0]
+    )
+    failed_campaign = next(item for item in conn.executes if "UPDATE scan_campaigns" in item[0])
+    assert "queue handoff could not be durably confirmed" in failed_scan[1][1]
+    assert failed_campaign[1][0] == uuid.UUID("22222222-2222-4222-8222-222222222222")
+
+
+def test_reconcile_stale_unconfirmed_asm_handoff_fails_scan_and_owned_campaign():
+    scan_id = uuid.UUID("11111111-1111-4111-8111-111111111111")
+    campaign_id = uuid.UUID("22222222-2222-4222-8222-222222222222")
+
+    class Conn:
+        def __init__(self):
+            self.executions = []
+
+        async def fetch(self, query, *args):
+            assert "queue_handoff_confirmed" in query
+            return [{"id": scan_id, "campaign_id": campaign_id}]
+
+        async def fetchval(self, query, *args):
+            self.executions.append((query, args))
+            assert "SET status='failed'" in query
+            return scan_id
+
+        async def execute(self, query, *args):
+            self.executions.append((query, args))
+            return "UPDATE 1"
+
+    conn = Conn()
+    repaired = asyncio.run(api_module._reconcile_unconfirmed_asm_queue_handoffs(conn))
+
+    assert repaired == 1
+    assert any(
+        "options->>'queue_handoff_confirmed'='false'" in query
+        for query, _args in conn.executions
+    )
+    campaign_update = next(item for item in conn.executions if "UPDATE scan_campaigns" in item[0])
+    assert campaign_update[1] == (campaign_id, scan_id)
+    assert "other.campaign_id=campaign.id AND other.id<>$2" in campaign_update[0]
+
+
 def _due_schedule():
     return {
         "id": uuid.uuid4(),
@@ -9381,6 +9664,260 @@ def test_finding_exception_lifecycle_sweep_execution_requires_receipt_and_audits
     assert "status = 'expired'" in update_query
 
 
+def test_compact_research_observation_preserves_small_pack_without_rewriting():
+    pack = {
+        "observation_version": "2026-07-12.v1",
+        "episode_id": "11111111-1111-4111-8111-111111111111",
+        "mission": {"profile": "target_hunt", "subject": {"type": "target", "id": "target-1"}},
+        "focus": {},
+        "remaining_budget": {"steps": 3, "model_units": 2000},
+        "recent_actions": [],
+        "proposable_commands": [{"name": "asm.gaps", "proposable": True}],
+    }
+
+    assert api_module._compact_research_observation_pack(pack) == pack
+
+
+def test_research_previous_result_digest_keeps_typed_outcome_without_raw_blob():
+    digest = api_module._research_previous_result_digest({
+        "execution_blocked_reason": "arsenal_rejected",
+        "error": {
+            "error": "invalid_experiment",
+            "violation": "step_1_method_not_allowed",
+            "noise": "x" * 100_000,
+        },
+        "command_result": {
+            "id": "result-1",
+            "status": "queued",
+            "scan_id": "scan-1",
+            "result_json": {
+                "selected_action": "test",
+                "check_family": "xss",
+                "batch_size": 50,
+                "recommendation": {"next_action": "test", "reason": "coverage gap"},
+                "raw_blob": "x" * 100_000,
+            },
+        },
+    })
+
+    result_json = digest["command_result"]["result_json"]
+    assert result_json["selected_action"] == "test"
+    assert result_json["check_family"] == "xss"
+    assert result_json["batch_size"] == 50
+    assert "raw_blob" not in result_json
+    assert digest["error"] == {
+        "error": "invalid_experiment",
+        "violation": "step_1_method_not_allowed",
+    }
+    assert api_module._json_size_bytes(digest) < 10_000
+
+
+def test_compact_research_observation_hard_caps_adversarial_nested_pack():
+    huge = "💥" * 1200
+    commands = []
+    for index in range(25):
+        properties = {
+            f"parameter_{property_index}_{huge[:20]}": {
+                "type": "string",
+                "description": huge,
+                "enum": [f"choice-{choice}-{huge}" for choice in range(2)],
+                "x-adversarial": {f"nested-{nested}": huge for nested in range(3)},
+            }
+            for property_index in range(2)
+        }
+        if index == 0:
+            properties = {
+                "check_family": {
+                    "type": "string",
+                    "enum": ["xss", "sqli", "bola"],
+                    "description": huge,
+                }
+            }
+        parameters_schema = {
+            "type": "object",
+            "required": list(properties),
+            "properties": properties,
+            "description": huge,
+        }
+        if index == 0:
+            # Match the real Arsenal catalog shape: a flat property map.
+            parameters_schema = properties
+        commands.append({
+            "name": f"command.{index}",
+            "description": f"Run bounded command {index} and inspect its result. {huge}",
+            "risk_tier": "active",
+            "proposable": True,
+            "currently_executable": True,
+            "reserved_cost": {"steps": 1, "actions": 1, "requests": 100, "seconds": 600},
+            "server_supplied_parameters": ["target_id"],
+            "blocked_by": [],
+            "parameters_schema": parameters_schema,
+        })
+    pack = {
+        "observation_version": "2026-07-12.v1",
+        "episode_id": "11111111-1111-4111-8111-111111111111",
+        "episode_version": 9,
+        "sequence": 7,
+        "objective": huge,
+        "execution_mode": "gated",
+        "max_risk_tier": "active",
+        "allowed_families": ["xss", "sqli"],
+        "mission": {
+            "profile": "verify_finding",
+            "subject": {
+                "type": "finding",
+                "id": "22222222-2222-4222-8222-222222222222",
+                "family": "xss",
+                "title": huge,
+                "adversarial": {f"mission-{index}": huge for index in range(6)},
+            },
+            "allowed_commands": [item["name"] for item in commands],
+            "adversarial": [{f"nested-{index}": huge} for index in range(10)],
+        },
+        "focus": {
+            "type": "finding",
+            "id": "22222222-2222-4222-8222-222222222222",
+            "target_id": "33333333-3333-4333-8333-333333333333",
+            "title": huge,
+            "status": "active",
+            "family": "xss",
+            "last_verification_verdict": "exploited",
+            "latest_retest_id": "44444444-4444-4444-8444-444444444444",
+            "latest_retest_status": "completed",
+            "latest_retest_verdict": "exploited",
+            "adversarial": [{f"focus-{index}": huge} for index in range(10)],
+        },
+        "target_summary": {"target_id": "target-1", "url": "https://example.test", "noise": huge},
+        "current_surface": {
+            "coverage": {f"coverage-{index}": huge for index in range(8)},
+            "sample_endpoints": [{f"endpoint-{index}": huge} for index in range(10)],
+        },
+        "current_gaps": [
+            {"kind": f"gap-{index}", "count": index, "reason": huge, "nested": {"noise": huge}}
+            for index in range(12)
+        ],
+        "hypotheses_summary": [{"id": index, "reason": huge} for index in range(10)],
+        "findings_summary": [{"id": index, "description": huge} for index in range(10)],
+        "known_preconditions": {f"precondition-{index}": huge for index in range(8)},
+        "remaining_budget": {
+            "steps": 8,
+            "actions": 7,
+            "active_actions": 3,
+            "requests": 200,
+            "seconds": 900,
+            "model_units": 50000,
+        },
+        "proposable_commands": commands,
+        "recent_actions": [
+            {
+                "sequence": index,
+                "decision_type": "execute_action",
+                "status": "completed",
+                "action": {
+                    "command": f"command.{index}",
+                    "parameters": {"check_family": "xss", "untrusted": huge},
+                },
+                "reason": huge,
+                "result": {"status": "completed", "scan_id": f"scan-{index}", "noise": huge},
+            }
+            for index in range(8)
+        ],
+        "previous_observation": {
+            "command": "scan.focused_family",
+            "result": {f"nested-{index}": huge for index in range(8)},
+        },
+        "planner_contract": {"select_exactly_one": True, "noise": huge},
+    }
+
+    compacted = api_module._compact_research_observation_pack(pack)
+    persisted = dict(compacted)
+    persisted["context_hash"] = "a" * 64
+
+    assert api_module._json_size_bytes(compacted) <= (
+        api_module.RESEARCH_OBSERVATION_MAX_BYTES - 96
+    )
+    assert api_module._json_size_bytes(persisted) <= api_module.RESEARCH_OBSERVATION_MAX_BYTES
+    assert compacted["mission"]["profile"] == "verify_finding"
+    assert compacted["mission"]["subject"]["id"] == "22222222-2222-4222-8222-222222222222"
+    assert compacted["focus"]["id"] == "22222222-2222-4222-8222-222222222222"
+    assert compacted["focus"]["last_verification_verdict"] == "exploited"
+    assert compacted["focus"]["latest_retest_verdict"] == "exploited"
+    assert compacted["remaining_budget"] == pack["remaining_budget"]
+    assert compacted["recent_actions"][0]["action"]["command"] == "command.0"
+    assert [item["name"] for item in compacted["proposable_commands"]] == [
+        f"command.{index}" for index in range(25)
+    ]
+    first_schema = compacted["proposable_commands"][0]["parameters_schema"]
+    assert first_schema["check_family"]["enum"] == ["xss", "sqli", "bola"]
+    assert "description" not in first_schema["check_family"]
+    assert compacted["proposable_commands"][0]["description"].startswith("Run bounded command 0")
+    assert compacted["proposable_commands"][0]["reserved_cost"]["requests"] == 100
+
+
+def test_compacted_real_experiment_schema_survives_into_provider_prompt():
+    catalog_command = api_module._research_command_catalog()["experiment.http_diff"]
+    projected = api_module._research_command_projection(
+        catalog_command,
+        max_risk_tier="active",
+        has_approval=True,
+        execution_feature_enabled=True,
+    )
+    projected["parameters_schema"] = api_module._research_autonomous_parameter_schema(
+        "experiment.http_diff",
+        projected["parameters_schema"],
+    )
+    projected["reserved_cost"] = {"steps": 1, "actions": 1, "requests": 4, "seconds": 120}
+    pack = {
+        "observation_version": "2026-07-12.v1",
+        "episode_id": "11111111-1111-4111-8111-111111111111",
+        "objective": "Test the most useful bounded differential",
+        "execution_mode": "gated",
+        "mission": {"profile": "target_hunt", "subject": {"type": "target", "id": "target-1"}},
+        "remaining_budget": {"steps": 5, "actions": 4, "requests": 100, "seconds": 600},
+        "proposable_commands": [projected],
+        "current_gaps": [{"kind": f"gap-{index}", "reason": "x" * 4000} for index in range(80)],
+        "findings_summary": [{"id": f"finding-{index}", "title": f"Finding {index}", "severity": "high"} for index in range(8)],
+        "current_surface": {
+            "sample_endpoints": [{"method": "POST", "path": f"/api/items/{index}"} for index in range(8)]
+        },
+        "recent_actions": [],
+    }
+
+    compacted = api_module._compact_research_observation_pack(pack)
+    assert compacted["observation_compaction"]["applied"] is True
+    observation = {
+        "id": "22222222-2222-4222-8222-222222222222",
+        "context_hash": "a" * 64,
+        "observation_pack": compacted,
+    }
+    user_payload = json.loads(api_module._research_planner_messages(observation)[1]["content"])
+    http_schema = user_payload["observation_pack"]["proposable_commands"][0]["parameters_schema"]
+
+    def collect_enums(value):
+        result = []
+        if isinstance(value, dict):
+            if isinstance(value.get("enum"), list):
+                result.extend(value["enum"])
+            for nested in value.values():
+                result.extend(collect_enums(nested))
+        elif isinstance(value, list):
+            for nested in value:
+                result.extend(collect_enums(nested))
+        return result
+
+    method_values = {str(item) for item in collect_enums(http_schema)}
+    assert {"GET", "POST"}.issubset(method_values)
+    assert "DELETE" not in method_values
+    step_schema = http_schema["steps"]["items"]
+    assert step_schema["allOf"][0]["if"]["properties"]["method"]["enum"] == [
+        "GET", "HEAD", "OPTIONS",
+    ]
+    assert step_schema["allOf"][0]["then"]["not"]["anyOf"]
+    assert step_schema["allOf"][1]["not"]["required"] == ["json_body", "form_body"]
+    assert user_payload["observation_pack"]["current_surface"]["sample_endpoints"][0]["path"] == "/api/items/0"
+    assert len(user_payload["observation_pack"]["findings_summary"]) == 8
+
+
 def test_research_planner_binds_provider_decision_to_current_observation():
     response = {
         "decision": "stop",
@@ -9401,7 +9938,7 @@ def test_research_planner_binds_provider_decision_to_current_observation():
     assert response["observation_id"] == "provider-controlled"
 
 
-def test_research_planner_supplies_semantic_defaults_for_nullable_terminal_fields():
+def test_research_planner_marks_terminal_compatibility_repairs_but_provider_contract_rejects_them():
     observation = {"id": "observation-1", "context_hash": "a" * 64}
 
     stopped = api_module._bind_research_decision_to_observation(
@@ -9413,13 +9950,914 @@ def test_research_planner_supplies_semantic_defaults_for_nullable_terminal_field
 
     assert stopped["stop_reason"] == "planner_concluded_no_further_action"
     assert requested["requested_input"] == "Operator input is required to continue."
+    assert "stop_reason_defaulted" in stopped["_harness_repairs"]
+    assert "requested_input_defaulted" in requested["_harness_repairs"]
+    assert api_module._research_provider_contract_error(
+        {"decision": "stop", "stop_reason": None, "reason": None}, observation
+    ) == "stop_reason_required"
+    assert api_module._research_provider_contract_error(
+        {"decision": "request_input", "requested_input": None, "reason": None}, observation
+    ) == "requested_input_required"
 
 
 def test_research_planner_schema_constrains_action_to_current_proposable_commands():
     schema = api_module._research_decision_json_schema(["target.get", "asm.gaps", "asm.gaps"])
 
     command_schema = schema["schema"]["properties"]["action"]["properties"]["command"]
-    assert command_schema["enum"] == ["asm.gaps", "target.get"]
+    assert command_schema["enum"] == ["", "asm.gaps", "target.get"]
+    execute_branch = schema["schema"]["allOf"][0]["then"]["properties"]
+    assert execute_branch["action"]["properties"]["command"]["enum"] == ["asm.gaps", "target.get"]
+    assert execute_branch["expected_signal"]["minLength"] == 1
+    assert execute_branch["falsifier"]["minLength"] == 1
+
+
+def test_research_planner_schema_binds_observation_and_allows_terminal_empty_action():
+    schema = api_module._research_decision_json_schema(
+        ["asm.gaps"], observation_id="observation-1", context_hash="b" * 64
+    )["schema"]
+
+    assert schema["properties"]["observation_id"] == {"const": "observation-1"}
+    assert schema["properties"]["context_hash"] == {"const": "b" * 64}
+    terminal_branch = next(
+        branch["then"]["properties"]["action"]["properties"]
+        for branch in schema["allOf"]
+        if branch.get("if", {}).get("properties", {}).get("decision", {}).get("enum")
+    )
+    assert terminal_branch["command"] == {"const": ""}
+    assert terminal_branch["parameters"]["maxProperties"] == 0
+    stop_branch = next(
+        branch for branch in schema["allOf"]
+        if branch.get("if", {}).get("properties", {}).get("decision", {}).get("const") == "stop"
+    )
+    assert stop_branch["then"]["properties"]["stop_reason"]["minLength"] == 20
+
+
+def test_research_decision_request_forbids_unknown_control_fields():
+    with pytest.raises(api_module.ValidationError):
+        api_module.ResearchDecisionRequest(
+            decision="stop",
+            observation_id="observation-1",
+            context_hash="a" * 64,
+            stop_reason="done",
+            approval_receipt_id="model-controlled",
+        )
+
+
+def test_research_provider_contract_rejects_semantically_empty_action():
+    observation = {
+        "id": "observation-1",
+        "context_hash": "a" * 64,
+        "observation_pack": {
+            "proposable_commands": [{
+                "name": "asm.gaps", "proposable": True, "risk_tier": "read_only",
+                "description": "Explain remaining ASM gaps and campaigns.",
+                "parameters_schema": {"target_id": {}},
+            }]
+        },
+    }
+    invalid = {
+        "decision": "execute_action",
+        "action": {"command": "asm.gaps", "parameters": {"target_id": "target-1"}},
+        "expected_signal": "",
+        "falsifier": "",
+    }
+    valid = {
+        **invalid,
+        "expected_signal": "A prioritized gap report",
+        "falsifier": "The report contains no gaps or recommendations",
+    }
+
+    assert api_module._research_provider_contract_error(invalid, observation) == (
+        "expected_signal_required,falsifier_required"
+    )
+    assert api_module._research_provider_contract_error(valid, observation) is None
+
+
+def test_research_provider_contract_rejects_vague_or_premature_stop():
+    observation = {
+        "id": "observation-1",
+        "context_hash": "a" * 64,
+        "observation_pack": {
+            "proposable_commands": [{"name": "asm.gaps", "proposable": True}],
+            "recent_actions": [],
+        },
+    }
+    vague = {
+        "decision": "stop",
+        "action": {"command": "", "parameters": {}},
+        "stop_reason": "done",
+    }
+    premature = {
+        **vague,
+        "stop_reason": "No further work is needed based on the current evidence.",
+    }
+    concluded = {
+        **premature,
+        "stop_reason": "The completed gap review found no reachable untested surface; monitor after deployment.",
+    }
+
+    assert api_module._research_provider_contract_error(vague, observation) == "stop_reason_too_vague"
+    assert api_module._research_provider_contract_error(premature, observation) == (
+        "premature_stop_before_evidence_action"
+    )
+    observation["observation_pack"]["recent_actions"] = [{"status": "rejected"}]
+    assert api_module._research_provider_contract_error(concluded, observation) == (
+        "premature_stop_before_evidence_action"
+    )
+    observation["observation_pack"]["recent_actions"] = [{
+        "decision_type": "execute_action",
+        "status": "completed",
+        "command_result_id": "result-1",
+    }]
+    assert api_module._research_provider_contract_error(concluded, observation) is None
+
+
+def test_research_provider_contract_requires_active_evidence_when_hunt_can_act():
+    response = {
+        "decision": "stop",
+        "action": {"command": "", "parameters": {}},
+        "stop_reason": "The target metadata was reviewed; no additional work is recommended at this time.",
+    }
+    observation = {
+        "id": "observation-1",
+        "context_hash": "a" * 64,
+        "observation_pack": {
+            "mission": {"profile": "target_hunt"},
+            "proposable_commands": [
+                {"name": "target.get", "proposable": True},
+                {"name": "scan.focused_family", "proposable": True},
+            ],
+            "recent_actions": [{
+                "decision_type": "execute_action",
+                "status": "completed",
+                "action": {"command": "target.get", "parameters": {}},
+            }],
+        },
+    }
+
+    assert api_module._research_provider_contract_error(response, observation) == (
+        "premature_stop_before_active_evidence"
+    )
+    observation["observation_pack"]["recent_actions"].insert(0, {
+        "decision_type": "execute_action",
+        "status": "completed",
+        "action": {"command": "scan.focused_family", "parameters": {"check_family": "xss"}},
+    })
+    assert api_module._research_provider_contract_error(response, observation) is None
+
+
+def test_research_provider_contract_rejects_extra_fields_and_invalid_types_before_acceptance():
+    observation = {
+        "id": "observation-1",
+        "context_hash": "a" * 64,
+        "observation_pack": {
+            "proposable_commands": [{"name": "asm.gaps", "proposable": True}],
+            "recent_actions": [],
+        },
+    }
+    base = {
+        "decision": "execute_action",
+        "action": {"command": "asm.gaps", "parameters": {}},
+        "expected_signal": "A bounded gap report",
+        "falsifier": "No gap information is returned",
+        "confidence": 0.7,
+    }
+
+    assert api_module._research_provider_contract_error(
+        {**base, "approval_receipt_id": "model-controlled"}, observation
+    ) == "unexpected_fields:approval_receipt_id"
+    invalid_type = api_module._research_provider_contract_error(
+        {**base, "confidence": "very high"}, observation
+    )
+    assert invalid_type and invalid_type.startswith("decision_schema_invalid:confidence:")
+    too_long = api_module._research_provider_contract_error(
+        {**base, "reason": "x" * 2001}, observation
+    )
+    assert too_long and too_long.startswith("decision_schema_invalid:reason:")
+
+
+def test_research_dispatch_async_reference_detects_scans_and_retests():
+    scan = api_module._research_dispatch_async_ref({
+        "command_result": {"status": "queued", "scan_id": "scan-1", "result_json": {}}
+    })
+    retest = api_module._research_dispatch_async_ref({
+        "command_result": {
+            "status": "retest_scheduled", "scan_id": None,
+            "result_json": {"retest_id": "retest-1"},
+        }
+    })
+
+    assert scan == {"kind": "scan", "id": "scan-1", "status": "queued"}
+    assert retest == {"kind": "finding_retest", "id": "retest-1", "status": "retest_scheduled"}
+
+
+@pytest.mark.parametrize(
+    ("finding", "expected"),
+    [
+        ({"source": "scan", "tool": "nuclei", "ai_target_id": None}, True),
+        ({"source": "asm", "tool": "smart_xss", "ai_target_id": None}, True),
+        ({"source": "manual", "tool": "manual", "ai_target_id": None}, True),
+        ({"source": "ai_gate", "tool": "ai_gate", "ai_target_id": None}, False),
+        ({"source": "ai_session", "tool": "manual", "ai_target_id": None}, False),
+        ({"source": "model_intake", "tool": "model_intake", "ai_target_id": None}, False),
+        ({"source": "scan", "tool": "nuclei", "ai_target_id": "ai-target"}, False),
+    ],
+)
+def test_research_finding_web_subject_gate(finding, expected):
+    assert api_module._research_finding_is_web(finding) is expected
+
+
+def test_research_finding_queries_project_legacy_columns_without_schema_drift():
+    target_id = "11111111-1111-4111-8111-111111111111"
+    finding_id = "22222222-2222-4222-8222-222222222222"
+    queries = []
+
+    class Conn:
+        async def fetchrow(self, query, *args):
+            queries.append(query)
+            return {
+                "id": uuid.UUID(finding_id),
+                "target_id": uuid.UUID(target_id),
+                "title": "DOM XSS",
+                "severity": "high",
+                "status": "active",
+                "category": "smart_xss",
+                "tool": "smart_xss",
+                "cwe": "CWE-79",
+                "url": "https://example.test/#/search?q=x",
+                "source": "scan",
+                "ai_target_id": None,
+            }
+
+        async def fetchval(self, query, *args):
+            return None
+
+    conn = Conn()
+    episode = {
+        "target_id": target_id,
+        "planner": {
+            "mission": {
+                "profile": "verify_finding",
+                "subject": {"type": "finding", "id": finding_id},
+            }
+        },
+        "allowed_families": ["xss"],
+    }
+    focus = asyncio.run(api_module._research_focus_snapshot(conn, episode))
+    params, errors = asyncio.run(api_module._research_prepare_action(
+        conn,
+        episode,
+        {"action": {"parameters": {}}},
+        api_module._research_command_catalog()["finding.get"],
+    ))
+
+    assert focus["category"] == "smart_xss"
+    assert params["finding_id"] == finding_id
+    assert errors == []
+    assert all("f.category" not in query and "f.param" not in query for query in queries)
+    assert any("tool AS category" in query for query in queries)
+
+
+def test_research_autonomous_http_experiment_hides_and_rejects_destructive_methods():
+    command = api_module._research_command_catalog()["experiment.http_diff"]
+    projected = api_module._research_autonomous_parameter_schema(
+        "experiment.http_diff",
+        command["parameters_schema"],
+    )
+
+    def enums(value):
+        found = []
+        if isinstance(value, dict):
+            if isinstance(value.get("enum"), list):
+                found.append(value["enum"])
+            for nested in value.values():
+                found.extend(enums(nested))
+        elif isinstance(value, list):
+            for nested in value:
+                found.extend(enums(nested))
+        return found
+
+    method_values = {str(item) for enum in enums(projected) for item in enum}
+    assert "POST" in method_values
+    assert not {"PUT", "PATCH", "DELETE"} & method_values
+
+    class Conn:
+        pass
+
+    params, errors = asyncio.run(api_module._research_prepare_action(
+        Conn(),
+        {
+            "target_id": "11111111-1111-4111-8111-111111111111",
+            "planner": {"mission": {"profile": "target_hunt", "subject": {"type": "target"}}},
+            "allowed_families": [],
+        },
+        {
+            "action": {
+                "parameters": {
+                    "steps": [
+                        {"role": "control", "method": "GET", "path": "/api/items"},
+                        {"role": "mutation", "method": "DELETE", "path": "/api/items/1"},
+                    ]
+                }
+            }
+        },
+        command,
+    ))
+
+    assert params["target_id"] == "11111111-1111-4111-8111-111111111111"
+    assert "autonomous_experiment_destructive_method_forbidden:DELETE" in errors
+
+
+def test_research_autonomous_workflow_rejects_delete_but_allows_browser_and_form_post():
+    command = api_module._research_command_catalog()["experiment.workflow"]
+    projected = api_module._research_autonomous_parameter_schema(
+        "experiment.workflow",
+        command["parameters_schema"],
+    )
+
+    def method_values(value):
+        found = set()
+        if isinstance(value, dict):
+            enum = value.get("enum")
+            if isinstance(enum, list):
+                found.update(str(item) for item in enum if str(item) in {
+                    "GET", "HEAD", "OPTIONS", "POST", "PUT", "PATCH", "DELETE",
+                })
+            for nested in value.values():
+                found.update(method_values(nested))
+        elif isinstance(value, list):
+            for nested in value:
+                found.update(method_values(nested))
+        return found
+
+    assert "POST" in method_values(projected)
+    assert not {"PUT", "PATCH", "DELETE"} & method_values(projected)
+    # Projection is a deep copy: manual typed workflows retain the full runtime contract.
+    assert {"PUT", "PATCH", "DELETE"} <= method_values(command["parameters_schema"])
+
+    class Conn:
+        pass
+
+    episode = {
+        "target_id": "11111111-1111-4111-8111-111111111111",
+        "planner": {"mission": {"profile": "target_hunt", "subject": {"type": "target"}}},
+        "allowed_families": [],
+    }
+    base = {
+        "workflow_id": "22222222-2222-4222-8222-222222222222",
+        "objective": "Compare a bounded state change",
+        "expected_signal": "The submitted form changes the observable state",
+        "falsifier": "The state remains unchanged",
+    }
+    _params, destructive_errors = asyncio.run(api_module._research_prepare_action(
+        Conn(),
+        episode,
+        {"action": {"parameters": {
+            **base,
+            "steps": [
+                {"label": "before", "kind": "http", "principal": "anonymous",
+                 "checkpoint": "before", "method": "GET", "path": "/api/items/1"},
+                {"label": "delete", "kind": "http", "principal": "anonymous",
+                 "checkpoint": "action", "method": "DELETE", "path": "/api/items/1",
+                 "compare_to": "before"},
+            ],
+        }}},
+        command,
+    ))
+    assert "autonomous_experiment_destructive_method_forbidden:DELETE" in destructive_errors
+
+    safe_params, safe_errors = asyncio.run(api_module._research_prepare_action(
+        Conn(),
+        episode,
+        {"action": {"parameters": {
+            **base,
+            "steps": [
+                {"label": "open", "kind": "browser", "principal": "anonymous",
+                 "checkpoint": "before", "action": "navigate", "data": {"path": "/items"}},
+                {"label": "submit", "kind": "http", "principal": "anonymous",
+                 "checkpoint": "action", "method": "POST", "path": "/api/items",
+                 "form_body": {"name": "research-probe"}},
+            ],
+        }}},
+        command,
+    ))
+    assert safe_errors == []
+    normalized = api_module.normalize_workflow("https://example.test", safe_params)
+    assert normalized["steps"][0]["kind"] == "browser"
+    assert normalized["steps"][1]["method"] == "POST"
+
+
+def test_research_provider_probe_exercises_server_bound_action_contract(monkeypatch):
+    captured = {}
+
+    async def fake_provider(**kwargs):
+        captured.update(kwargs)
+        return ({
+            "decision_version": "decision-episode-2026-07-11.v1",
+            "decision": "execute_action",
+            "observation_id": "00000000-0000-4000-8000-000000000001",
+            "context_hash": "a" * 64,
+            "hypothesis_id": None,
+            "action": {"command": "asm.gaps", "parameters": {}},
+            "expected_signal": "The target's remaining ASM gaps are enumerated.",
+            "falsifier": "The target has no remaining ASM gaps.",
+            "reason": "Inspect the available gaps before selecting any active work.",
+            "confidence": 0.9,
+            "requested_input": None,
+            "stop_reason": None,
+            "_provider_meta": {"model_used": "test-model", "mode_used": "json_schema"},
+        }, None, 12)
+
+    monkeypatch.setattr(api_module, "_load_effective_ai_settings", lambda: {
+        "ai_url": "https://provider.example/v1/chat/completions",
+        "ai_api_key": "test-key",
+        "ai_model": "test-model",
+        "ai_model_fallback": "",
+    })
+    monkeypatch.setattr(api_module, "_load_research_ai_provider", lambda: fake_provider)
+
+    result = asyncio.run(api_module.test_ai_settings(
+        api_module.AISettingsProbeRequest(scope="research")
+    ))
+
+    assert result["probe"]["native_contract_pass"] is True
+    assert result["probe"]["action_contract_pass"] is True
+    assert result["probe"]["response"]["action"] == {"command": "asm.gaps", "parameters": {}}
+    prompt = json.dumps(captured["messages"])
+    assert "server_supplied_parameters" in prompt
+    assert "target_id" in prompt
+
+
+def test_research_autopilot_operator_control_races_are_not_planner_errors():
+    assert api_module._research_autopilot_expected_control_race(
+        api_module.HTTPException(status_code=409, detail="Research autopilot was paused before dispatch")
+    ) is True
+    assert api_module._research_autopilot_expected_control_race(
+        api_module.HTTPException(status_code=409, detail="Research episode is terminal or cancelled")
+    ) is True
+    assert api_module._research_autopilot_expected_control_race(
+        api_module.HTTPException(status_code=409, detail="Research episode is not awaiting a planner decision")
+    ) is False
+    assert api_module._research_autopilot_expected_control_race(RuntimeError("provider failed")) is False
+
+
+def test_research_command_views_hide_actions_that_exceed_remaining_budget(monkeypatch):
+    monkeypatch.setattr(api_module, "_ai_ops_execute_enabled", lambda: True)
+    monkeypatch.setattr(api_module, "_research_command_catalog", lambda: {
+        "target.get": {
+            "name": "target.get",
+            "status": "read_only",
+            "risk_tier": "read_only",
+            "description": "Read one target.",
+            "parameters_schema": {"target_id": {"type": "string"}},
+            "timeout_seconds": 10,
+        },
+        "finding.retest": {
+            "name": "finding.retest",
+            "status": "gated",
+            "risk_tier": "active",
+            "description": "Retest one finding.",
+            "parameters_schema": {"finding_id": {"type": "string"}},
+            "timeout_seconds": 30,
+            "request_cost": 1,
+        },
+    })
+    episode = {
+        "execution_mode": "gated",
+        "max_risk_tier": "active",
+        "approval_receipt_id": "approval-1",
+        "scope_receipt_id": "scope-1",
+        "planner": {},
+        "budget_limits": {
+            "steps": 6,
+            "actions": 6,
+            "active_actions": 1,
+            "requests": 1,
+            "seconds": 900,
+            "model_tokens": 75000,
+        },
+        "budget_used": {
+            "steps": 1,
+            "actions": 1,
+            "active_actions": 1,
+            "requests": 1,
+            "seconds": 30,
+            "model_tokens": 1000,
+        },
+    }
+
+    views = {item["name"]: item for item in api_module._research_command_views(episode)}
+
+    assert views["target.get"]["proposable"] is True
+    assert views["target.get"]["currently_executable"] is True
+    assert views["finding.retest"]["proposable"] is False
+    assert views["finding.retest"]["currently_executable"] is False
+    assert "budget_exhausted:active_actions" in views["finding.retest"]["blocked_by"]
+    assert "budget_exhausted:requests" in views["finding.retest"]["blocked_by"]
+
+
+def test_research_command_views_hide_read_only_actions_when_step_budget_is_spent(monkeypatch):
+    monkeypatch.setattr(api_module, "_research_command_catalog", lambda: {
+        "target.get": {
+            "name": "target.get",
+            "status": "read_only",
+            "risk_tier": "read_only",
+            "parameters_schema": {"target_id": {"type": "string"}},
+            "timeout_seconds": 10,
+        },
+    })
+    episode = {
+        "execution_mode": "read_only",
+        "max_risk_tier": "read_only",
+        "planner": {},
+        "budget_limits": {
+            "steps": 1,
+            "actions": 1,
+            "active_actions": 0,
+            "requests": 0,
+            "seconds": 60,
+            "model_tokens": 10000,
+        },
+        "budget_used": {
+            "steps": 1,
+            "actions": 1,
+            "active_actions": 0,
+            "requests": 0,
+            "seconds": 10,
+            "model_tokens": 1000,
+        },
+    }
+
+    view = api_module._research_command_views(episode)[0]
+
+    assert view["proposable"] is False
+    assert view["currently_executable"] is False
+    assert "budget_exhausted:steps" in view["blocked_by"]
+    assert "budget_exhausted:actions" in view["blocked_by"]
+
+
+class _ResearchPreviousActionConn:
+    def __init__(self, actions):
+        self.actions = actions if isinstance(actions, list) else [actions]
+
+    async def fetch(self, _query, *_args):
+        return [
+            {
+                "action": json.dumps(action),
+                "status": "completed",
+                "policy_result": json.dumps({
+                    "dispatched": action.get("command") in api_module.GATED_RESEARCH_COMMANDS,
+                }),
+                "command_result_id": (
+                    "result-1" if action.get("command") in api_module.GATED_RESEARCH_COMMANDS else None
+                ),
+            }
+            for action in self.actions
+            if action is not None
+        ]
+
+
+def test_research_duplicate_guard_compares_normalized_command_and_parameters():
+    conn = _ResearchPreviousActionConn({
+        "command": "scan.focused_family",
+        "parameters": {"target_id": "target-1", "check_family": "xss"},
+    })
+    duplicate = asyncio.run(api_module._research_is_consecutive_duplicate_action(
+        conn,
+        "11111111-1111-4111-8111-111111111111",
+        {"command": "scan.focused_family", "parameters": {"check_family": "xss", "target_id": "target-1"}},
+    ))
+    different = asyncio.run(api_module._research_is_consecutive_duplicate_action(
+        conn,
+        "11111111-1111-4111-8111-111111111111",
+        {"command": "scan.focused_family", "parameters": {"check_family": "sqli", "target_id": "target-1"}},
+    ))
+
+    assert duplicate is True
+    assert different is False
+
+
+def test_research_duplicate_guard_ignores_read_only_churn_but_allows_after_state_change():
+    repeated = {
+        "command": "asm.gaps",
+        "parameters": {"target_id": "target-1"},
+    }
+    read_only_churn = {
+        "command": "arsenal.situation_report",
+        "parameters": {"target_id": "target-1"},
+    }
+    state_change = {
+        "command": "asm.improve",
+        "parameters": {"target_id": "target-1", "check_family": "xss"},
+    }
+
+    blocked = asyncio.run(api_module._research_is_consecutive_duplicate_action(
+        _ResearchPreviousActionConn([read_only_churn, repeated]),
+        "11111111-1111-4111-8111-111111111111",
+        repeated,
+    ))
+    allowed = asyncio.run(api_module._research_is_consecutive_duplicate_action(
+        _ResearchPreviousActionConn([state_change, repeated]),
+        "11111111-1111-4111-8111-111111111111",
+        repeated,
+    ))
+
+    assert blocked is True
+    assert allowed is False
+
+
+class _StaleResearchDispatchConn:
+    def __init__(self, row):
+        self.row = row
+        self.executions = []
+
+    async def fetch(self, _query, *_args):
+        return [self.row]
+
+    async def execute(self, query, *args):
+        self.executions.append((query, args))
+        return "UPDATE 1"
+
+
+def _stale_dispatch_row(*, receipt_status="queued", receipt=True, retest=False):
+    episode_id = uuid.uuid4()
+    decision_id = uuid.uuid4()
+    return {
+        "id": episode_id,
+        "decision_id": decision_id,
+        "current_decision_id": decision_id,
+        "linked_command_result_id": None,
+        "recovered_command_result_id": uuid.uuid4() if receipt else None,
+        "recovered_command_status": receipt_status if receipt else None,
+        "recovered_command_dry_run": False,
+        "recovered_scan_id": None,
+        "recovered_scan_status": None,
+        "recovered_scan_job_id": None,
+        "recovered_scan_campaign_id": None,
+        "recovered_retest_id": uuid.uuid4() if retest else None,
+        "recovered_finding_id": uuid.uuid4() if retest else None,
+        "recovered_retest_status": "queued" if retest else None,
+        "policy_result": json.dumps({
+            "cost_reserved": {
+                "steps": 1, "actions": 1, "active_actions": 1,
+                "requests": 100, "seconds": 600, "model_tokens": 250,
+            }
+        }),
+        "action": json.dumps({"command": "scan.focused_family", "parameters": {"check_family": "xss"}}),
+        "budget_used": json.dumps({
+            "steps": 0, "actions": 0, "active_actions": 0,
+            "requests": 0, "seconds": 0, "model_tokens": 0,
+        }),
+        "budget_limits": json.dumps({
+            "steps": 8, "actions": 7, "active_actions": 3,
+            "requests": 250, "seconds": 1800, "model_tokens": 75000,
+        }),
+        "step_count": 0,
+    }
+
+
+@pytest.mark.parametrize(("receipt_status", "expected_decision_status", "expected_requests"), [
+    ("queued", "dispatching", 100),
+    ("blocked", "blocked", 0),
+])
+def test_reconcile_stale_research_dispatch_attaches_correlated_receipt_and_settles_cost(
+    monkeypatch, receipt_status, expected_decision_status, expected_requests,
+):
+    row = _stale_dispatch_row(receipt_status=receipt_status)
+    conn = _StaleResearchDispatchConn(row)
+    events = []
+
+    async def fake_event(_conn, episode_id, **kwargs):
+        events.append((episode_id, kwargs))
+        return {}
+
+    monkeypatch.setattr(api_module, "_record_research_event", fake_event)
+    repaired = asyncio.run(api_module._reconcile_stale_research_dispatches(conn))
+
+    assert repaired == 1
+    decision_update = next(item for item in conn.executions if "UPDATE research_decisions" in item[0])
+    assert decision_update[1][-1] == expected_decision_status
+    episode_update = next(item for item in conn.executions if "budget_used=$3::jsonb" in item[0])
+    settled_budget = json.loads(episode_update[1][2])
+    assert settled_budget["requests"] == expected_requests
+    assert settled_budget["model_tokens"] == 250
+    assert str(events[-1][1]["command_result_id"]) == str(row["recovered_command_result_id"])
+
+
+def test_reconcile_stale_research_dispatch_synthesizes_retest_receipt(monkeypatch):
+    row = _stale_dispatch_row(receipt=False, retest=True)
+    conn = _StaleResearchDispatchConn(row)
+    created = []
+
+    async def fake_record(_conn, **kwargs):
+        created.append(kwargs)
+        return {"id": str(uuid.uuid4()), "status": kwargs["status"], "dry_run": False}
+
+    async def fake_event(*args, **kwargs):
+        return {}
+
+    monkeypatch.setattr(api_module, "_record_command_result", fake_record)
+    monkeypatch.setattr(api_module, "_record_research_event", fake_event)
+
+    assert asyncio.run(api_module._reconcile_stale_research_dispatches(conn)) == 1
+    assert created[0]["command"] == "finding.retest"
+    assert created[0]["result_json"]["retest_id"] == str(row["recovered_retest_id"])
+    assert created[0]["created_by"].endswith(f"decision:{row['decision_id']}")
+
+
+def test_reconcile_stale_research_dispatch_synthesizes_correlated_asm_scan_receipt(monkeypatch):
+    row = _stale_dispatch_row(receipt=False, retest=False)
+    row.update({
+        "action": json.dumps({"command": "asm.improve", "parameters": {"check_family": "xss"}}),
+        "recovered_scan_id": uuid.uuid4(),
+        "recovered_scan_status": "running",
+        "recovered_scan_job_id": "asm-job-1",
+        "recovered_scan_campaign_id": uuid.uuid4(),
+    })
+    conn = _StaleResearchDispatchConn(row)
+    created = []
+
+    async def fake_record(_conn, **kwargs):
+        created.append(kwargs)
+        return {"id": str(uuid.uuid4()), "status": kwargs["status"], "dry_run": False}
+
+    async def fake_event(*args, **kwargs):
+        return {}
+
+    monkeypatch.setattr(api_module, "_record_command_result", fake_record)
+    monkeypatch.setattr(api_module, "_record_research_event", fake_event)
+
+    assert asyncio.run(api_module._reconcile_stale_research_dispatches(conn)) == 1
+    assert created[0]["command"] == "asm.improve"
+    assert created[0]["scan_id"] == row["recovered_scan_id"]
+    assert created[0]["campaign_id"] == row["recovered_scan_campaign_id"]
+    assert created[0]["result_json"]["recovered_from_scan_correlation"] is True
+    assert created[0]["created_by"].endswith(f"decision:{row['decision_id']}")
+
+
+def test_reconcile_stale_research_dispatch_without_receipt_blocks_without_replay(monkeypatch):
+    row = _stale_dispatch_row(receipt=False, retest=False)
+    conn = _StaleResearchDispatchConn(row)
+
+    async def fake_event(*args, **kwargs):
+        return {}
+
+    monkeypatch.setattr(api_module, "_record_research_event", fake_event)
+    assert asyncio.run(api_module._reconcile_stale_research_dispatches(conn)) == 1
+    assert any("SET status='blocked'" in query for query, _args in conn.executions)
+    assert any("dispatch_outcome_unknown" in query for query, _args in conn.executions)
+
+
+def test_orphan_reconciler_does_not_trust_stale_queued_metadata_hash(monkeypatch):
+    scan_id = uuid.uuid4()
+
+    class Redis:
+        def ping(self):
+            return True
+
+        def lrange(self, _queue, _start, _end):
+            return []
+
+        def hgetall(self, key):
+            assert key == "job:lost-job"
+            return {b"status": b"queued", b"target": b"https://example.test"}
+
+    class Conn:
+        def __init__(self):
+            self.fetch_count = 0
+            self.failed = []
+
+        async def fetch(self, query, *args):
+            self.fetch_count += 1
+            if "JOIN scans" in query:
+                return [{"episode_id": uuid.uuid4(), "id": scan_id, "job_id": "lost-job"}]
+            return []
+
+        async def fetchval(self, query, *args):
+            self.failed.append((query, args))
+            return scan_id
+
+        async def execute(self, query, *args):
+            self.failed.append((query, args))
+            return "UPDATE 1"
+
+    async def fake_event(*args, **kwargs):
+        return {}
+
+    conn = Conn()
+    monkeypatch.setattr(api_module, "get_redis", lambda: Redis())
+    monkeypatch.setattr(api_module, "_record_research_event", fake_event)
+
+    assert asyncio.run(api_module._reconcile_research_orphaned_queue_work(conn)) == 1
+    assert any("Research dispatch queue handoff was not durable" in query for query, _args in conn.failed)
+
+
+def test_queue_presence_accepts_only_membership_or_fresh_worker_lease():
+    now = datetime(2026, 7, 12, 12, 0, tzinfo=timezone.utc)
+
+    class Redis:
+        def __init__(self, metadata):
+            self.metadata = metadata
+
+        def hgetall(self, _key):
+            return self.metadata
+
+    stale_queued = Redis({b"status": b"queued"})
+    fresh_lease = Redis({
+        b"status": b"queued",
+        b"processing_lease_at": b"2026-07-12T11:59:30+00:00",
+    })
+    stale_lease = Redis({
+        b"status": b"queued",
+        b"processing_lease_at": b"2026-07-12T11:50:00+00:00",
+    })
+
+    assert api_module._research_queue_presence(
+        stale_queued, queue_ids=set(), job_id="job-1", metadata_key="job:job-1", now=now,
+    ) is False
+    assert api_module._research_queue_presence(
+        fresh_lease, queue_ids=set(), job_id="job-1", metadata_key="job:job-1", now=now,
+    ) is True
+    assert api_module._research_queue_presence(
+        stale_lease, queue_ids=set(), job_id="job-1", metadata_key="job:job-1", now=now,
+    ) is False
+    assert api_module._research_queue_presence(
+        stale_queued, queue_ids={"job-1"}, job_id="job-1", metadata_key="job:job-1", now=now,
+    ) is True
+
+
+def test_research_cancel_reaches_scan_correlated_before_command_receipt(monkeypatch):
+    episode_id = uuid.uuid4()
+    decision_id = uuid.uuid4()
+    scan_id = uuid.uuid4()
+
+    class Transaction:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+    class Conn:
+        def __init__(self):
+            self.queries = []
+
+        def transaction(self):
+            return Transaction()
+
+        async def fetchrow(self, query, *args):
+            self.queries.append((query, args))
+            if "FROM research_episodes" in query:
+                return {
+                    "id": episode_id,
+                    "target_id": uuid.uuid4(),
+                    "status": "dispatching",
+                    "cancel_requested": False,
+                    "planner": {},
+                    "allowed_families": [],
+                    "budget_limits": {"steps": 5},
+                    "budget_used": {},
+                    "current_decision_id": decision_id,
+                    "version": 1,
+                }
+            raise AssertionError(f"unexpected fetchrow: {query}")
+
+        async def fetch(self, query, *args):
+            self.queries.append((query, args))
+            if "SELECT DISTINCT s.id AS scan_id" in query:
+                assert "research_dispatch_correlation" in query
+                return [{"scan_id": scan_id}]
+            if "SELECT DISTINCT fv.id" in query:
+                assert "fv.requested_by" in query
+                return []
+            return []
+
+        async def execute(self, query, *args):
+            self.queries.append((query, args))
+            return "UPDATE 1"
+
+    conn = Conn()
+    cancelled = []
+
+    async def fake_cancel(scan_ref):
+        cancelled.append(scan_ref)
+        return {}
+
+    async def fake_event(*args, **kwargs):
+        return {}
+
+    async def fake_detail(_conn, _episode_id):
+        return {"episode": {"id": str(episode_id), "status": "cancelled"}}
+
+    monkeypatch.setattr(api_module, "db_pool", _FakePool(conn))
+    monkeypatch.setattr(api_module, "cancel_scan", fake_cancel)
+    monkeypatch.setattr(api_module, "_record_research_event", fake_event)
+    monkeypatch.setattr(api_module, "_research_episode_detail", fake_detail)
+
+    result = asyncio.run(api_module.cancel_research_episode(str(episode_id)))
+
+    assert cancelled == [str(scan_id)]
+    assert result["cancelled_scan_ids"] == [str(scan_id)]
 
 
 def test_research_planner_recovers_unique_read_only_command_from_registered_description():

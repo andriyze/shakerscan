@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import Link from 'next/link'
+import { useRouter } from 'next/navigation'
 import {
   Activity, ArrowRight, BrainCircuit, Check, ChevronDown, CircleStop, History,
   Pause, Play, RefreshCw, Rocket, ShieldCheck, Sparkles, Zap,
@@ -10,9 +11,10 @@ import {
   cancelResearchEpisode,
   createResearchEpisode,
   createTargetPolicyApproval,
-  getAISettings,
   getResearchEpisode,
   getResearchEpisodes,
+  getResearchReadiness,
+  getTarget,
   getTargets,
   refreshResearchObservation,
   setResearchEpisodeAutopilot,
@@ -39,21 +41,21 @@ const PROFILES: Record<Intensity, {
     name: 'Analyze', eyebrow: 'No active probes',
     description: 'Let the LLM inspect coverage, findings, graph context, and gaps without queueing active work.',
     mode: 'read_only', maxSteps: 8, risk: 'read_only',
-    budget: { steps: 8, actions: 8, active_actions: 0, requests: 0, seconds: 600, model_tokens: 75000 },
+    budget: { steps: 8, actions: 7, active_actions: 0, requests: 0, seconds: 600, model_tokens: 75000 },
     tone: 'border-cyan-500/30 bg-cyan-500/[0.05]',
   },
   hunt: {
     name: 'Autonomous hunt', eyebrow: 'Recommended',
     description: 'Continuously select and run bounded recon, focused tests, ASM work, and deterministic retests.',
     mode: 'gated', maxSteps: 15, risk: 'active',
-    budget: { steps: 15, actions: 15, active_actions: 6, requests: 250, seconds: 1800, model_tokens: 150000 },
+    budget: { steps: 15, actions: 14, active_actions: 6, requests: 250, seconds: 1800, model_tokens: 150000 },
     tone: 'border-blue-500/50 bg-blue-500/[0.08]',
   },
   relentless: {
     name: 'Relentless', eyebrow: 'Maximum bounded depth',
     description: 'Give the investigator the full supported step, request, time, and active-action budgets.',
     mode: 'gated', maxSteps: 25, risk: 'active',
-    budget: { steps: 25, actions: 25, active_actions: 10, requests: 500, seconds: 3600, model_tokens: 250000 },
+    budget: { steps: 25, actions: 24, active_actions: 10, requests: 500, seconds: 3600, model_tokens: 250000 },
     tone: 'border-orange-500/40 bg-orange-500/[0.06]',
   },
 }
@@ -108,6 +110,43 @@ function actionLabel(command?: string): string {
   return command.replaceAll('.', ' › ').replaceAll('_', ' ')
 }
 
+function plannerDiagnostics(planner?: Record<string, unknown>): string[] {
+  if (!planner) return []
+  const text = (key: string) => typeof planner[key] === 'string' ? planner[key] as string : ''
+  const number = (key: string) => typeof planner[key] === 'number' ? planner[key] as number : null
+  const used = text('model')
+  const requested = text('requested_model')
+  const fallback = number('fallback_index')
+  const attempt = number('attempt_index')
+  const repairs = Array.isArray(planner.harness_repairs)
+    ? planner.harness_repairs.filter((item): item is string => typeof item === 'string')
+    : []
+  const usage = planner.usage && typeof planner.usage === 'object'
+    ? planner.usage as Record<string, unknown>
+    : {}
+  const totalUnits = typeof usage.total_units === 'number' ? usage.total_units : null
+  const diagnostics: string[] = []
+  if (used) diagnostics.push(requested && requested !== used
+    ? `Model route: ${requested} → ${used}`
+    : `Model route: ${used}${fallback === 0 ? ' (primary)' : ''}`)
+  const protocol = [text('provider_kind'), text('provider_mode')].filter(Boolean).join(' / ')
+  if (protocol) diagnostics.push(`Provider contract: ${protocol}`)
+  if (planner.schema_validated === true) diagnostics.push(
+    repairs.length ? `Schema validated after harness repair: ${repairs.join(', ')}` : 'Schema validated natively; no harness repair',
+  )
+  else if (repairs.length) diagnostics.push(`Harness repairs: ${repairs.join(', ')}`)
+  if (fallback !== null || attempt !== null) diagnostics.push(
+    `Attempt ${(attempt ?? 0) + 1}; fallback route ${fallback ?? 0}`,
+  )
+  const latency = number('latency_ms')
+  if (totalUnits !== null || latency !== null) diagnostics.push([
+    totalUnits !== null ? `${totalUnits.toLocaleString()} provider units` : '',
+    latency !== null ? `${latency.toLocaleString()} ms` : '',
+    text('metering_quality') ? `${text('metering_quality')} metering` : '',
+  ].filter(Boolean).join(' · '))
+  return diagnostics
+}
+
 function IntensityCard({ value, selected, onSelect }: { value: Intensity; selected: boolean; onSelect: () => void }) {
   const profile = PROFILES[value]
   return (
@@ -117,7 +156,7 @@ function IntensityCard({ value, selected, onSelect }: { value: Intensity; select
         <div className={`flex h-5 w-5 items-center justify-center rounded-full border ${selected ? 'border-blue-400 bg-blue-500 text-white' : 'border-gray-700'}`}>{selected ? <Check className="h-3.5 w-3.5" /> : null}</div>
       </div>
       <p className="mt-2 text-xs leading-5 text-gray-400">{profile.description}</p>
-      <div className="mt-3 flex flex-wrap gap-1.5 text-[11px] text-gray-500"><span>{profile.maxSteps} steps</span><span>·</span><span>{profile.budget.requests} requests</span><span>·</span><span>{profile.budget.active_actions} active actions</span></div>
+      <div className="mt-3 flex flex-wrap gap-1.5 text-[11px] text-gray-500"><span>{profile.maxSteps} steps</span><span>·</span><span>{profile.budget.requests} request units</span><span>·</span><span>{profile.budget.active_actions} active actions</span></div>
     </button>
   )
 }
@@ -126,6 +165,20 @@ function EpisodeProgress({ detail, running }: { detail: ResearchEpisodeDetail; r
   const episode = detail.episode
   const stepLimit = episode.budget_limits.steps
   const percent = stepLimit ? Math.min(100, Math.round((episode.step_count / stepLimit) * 100)) : 0
+  const focus = detail.current_observation?.observation_pack.focus || {}
+  const focusedFindingId = episode.subject?.type === 'finding' ? episode.subject.id : undefined
+  const findingVerdict = (
+    typeof focus.latest_retest_verdict === 'string' && focus.latest_retest_verdict
+      ? focus.latest_retest_verdict
+      : typeof focus.last_verification_verdict === 'string'
+        ? focus.last_verification_verdict
+        : ''
+  )
+  const verdictTone = ['exploited', 'likely_vulnerable'].includes(findingVerdict)
+    ? 'border-red-500/30 bg-red-500/[0.08] text-red-100'
+    : ['likely_fixed', 'false_positive'].includes(findingVerdict)
+      ? 'border-green-500/30 bg-green-500/[0.08] text-green-100'
+      : 'border-gray-700 bg-gray-900/50 text-gray-200'
   return (
     <Card className="overflow-hidden">
       <div className="border-b border-gray-800 bg-gradient-to-r from-blue-500/10 to-transparent p-5">
@@ -140,17 +193,44 @@ function EpisodeProgress({ detail, running }: { detail: ResearchEpisodeDetail; r
       <div className="grid gap-5 p-5">
         {episode.autopilot_error ? <div className="rounded-lg border border-red-500/30 bg-red-500/[0.08] p-3 text-sm text-red-200">Autopilot error: {episode.autopilot_error}</div> : null}
         {episode.requested_input ? <div className="rounded-lg border border-amber-500/30 bg-amber-500/[0.08] p-3 text-sm text-amber-200">{episode.requested_input}</div> : null}
+        {detail.waiting_on?.length ? (
+          <div className="rounded-lg border border-blue-500/30 bg-blue-500/[0.08] p-3 text-sm text-blue-100">
+            Waiting for evidence before the LLM chooses another action:{' '}
+            {detail.waiting_on.map((work, index) => (
+              <span key={`${work.kind}-${work.id}`}>
+                {index ? ', ' : ''}
+                {work.ui_path ? <Link href={work.ui_path} className="font-medium underline underline-offset-2">{work.kind.replaceAll('_', ' ')} {work.id.slice(0, 8)}</Link> : `${work.kind} ${work.id.slice(0, 8)}`}
+                {' '}({work.status})
+              </span>
+            ))}
+          </div>
+        ) : null}
+        {focusedFindingId && (episode.terminal || findingVerdict) ? (
+          <div className={`rounded-lg border p-4 ${verdictTone}`}>
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-wider opacity-70">Finding outcome</p>
+                <p className="mt-1 text-lg font-semibold">{findingVerdict ? findingVerdict.replaceAll('_', ' ') : 'No conclusive proof verdict'}</p>
+              </div>
+              <Link href={`/findings/${encodeURIComponent(focusedFindingId)}`} className="rounded border border-current/30 px-3 py-1.5 text-xs font-medium hover:bg-white/5">Open focused finding</Link>
+            </div>
+            {episode.stop_reason ? <p className="mt-2 text-sm opacity-80">{episode.stop_reason.replaceAll('_', ' ')}</p> : null}
+          </div>
+        ) : null}
 
         <section>
           <div className="flex items-center justify-between"><h3 className="text-xs font-semibold uppercase tracking-wider text-gray-500">Investigator activity</h3><span className="text-xs text-gray-600">newest first</span></div>
           <div className="mt-3 grid gap-2">
-            {!detail.decisions.length ? <div className="rounded-lg border border-dashed border-gray-800 p-5 text-center text-sm text-gray-500">The LLM has not selected its first action yet.</div> : detail.decisions.slice(0, 8).map((decision) => (
-              <div key={decision.id} className="rounded-lg border border-gray-800 bg-gray-950/40 p-3">
-                <div className="flex flex-wrap items-center gap-2"><span className="text-sm font-medium capitalize text-gray-200">{actionLabel(decision.action.command || decision.decision_type)}</span><Badge className={statusClass(decision.status)}>{statusLabel(decision.status)}</Badge><span className="ml-auto text-xs text-gray-600">{Math.round(decision.confidence * 100)}% confidence</span></div>
+            {!detail.decisions.length ? <div className="rounded-lg border border-dashed border-gray-800 p-5 text-center text-sm text-gray-500">The LLM has not selected its first action yet.</div> : detail.decisions.slice(0, 8).map((decision) => {
+              const diagnostics = plannerDiagnostics(decision.planner)
+              const fallbackIndex = typeof decision.planner?.fallback_index === 'number' ? decision.planner.fallback_index : 0
+              return <div key={decision.id} className="rounded-lg border border-gray-800 bg-gray-950/40 p-3">
+                <div className="flex flex-wrap items-center gap-2"><span className="text-sm font-medium capitalize text-gray-200">{actionLabel(decision.action.command || decision.decision_type)}</span><Badge className={statusClass(decision.status)}>{statusLabel(decision.status)}</Badge>{typeof decision.planner?.model === 'string' ? <Badge className={fallbackIndex > 0 ? 'bg-amber-500/10 text-amber-300' : 'bg-violet-500/10 text-violet-300'}>{decision.planner.model}{fallbackIndex > 0 ? ` · fallback ${fallbackIndex}` : ''}</Badge> : null}<span className="ml-auto text-xs text-gray-600">{Math.round(decision.confidence * 100)}% confidence</span></div>
                 {decision.reason ? <p className="mt-1.5 text-sm leading-5 text-gray-400">{decision.reason}</p> : null}
                 {decision.validation_errors.length ? <p className="mt-2 text-xs text-red-300">Blocked: {decision.validation_errors.join(', ')}</p> : null}
+                {diagnostics.length ? <details className="mt-2 rounded border border-gray-800 bg-black/20 px-2.5 py-2"><summary className="cursor-pointer text-[11px] font-medium text-gray-500 hover:text-gray-300">Model + harness diagnostics</summary><ul className="mt-2 grid gap-1 text-[11px] text-gray-500">{diagnostics.map((item) => <li key={item}>{item}</li>)}</ul></details> : null}
               </div>
-            ))}
+            })}
           </div>
         </section>
 
@@ -161,7 +241,8 @@ function EpisodeProgress({ detail, running }: { detail: ResearchEpisodeDetail; r
               {(['steps', 'active_actions', 'requests'] as const).map((key) => {
                 const remaining = episode.remaining_budget[key]
                 const limit = episode.budget_limits[key]
-                return <div key={key}><div className="flex justify-between text-xs"><span className="text-gray-500">{key.replace('_', ' ')}</span><span className="text-gray-300">{remaining} / {limit}</span></div><div className="mt-1.5 h-1.5 overflow-hidden rounded bg-gray-800"><div className="h-full bg-cyan-400" style={{ width: `${budgetPercent(remaining, limit)}%` }} /></div></div>
+                const label = key === 'requests' ? 'request units' : key.replace('_', ' ')
+                return <div key={key}><div className="flex justify-between text-xs"><span className="text-gray-500">{label}</span><span className="text-gray-300">{remaining} / {limit}</span></div><div className="mt-1.5 h-1.5 overflow-hidden rounded bg-gray-800"><div className="h-full bg-cyan-400" style={{ width: `${budgetPercent(remaining, limit)}%` }} /></div></div>
               })}
             </div>
             <div className="grid gap-2">{detail.events.slice(0, 12).map((event) => <div key={event.id} className="flex items-start gap-2 text-xs"><ShieldCheck className="mt-0.5 h-3.5 w-3.5 flex-none text-gray-600" /><span className="text-gray-400">{event.summary}</span><span className="ml-auto flex-none text-gray-700">{shortDate(event.created_at)}</span></div>)}</div>
@@ -173,6 +254,7 @@ function EpisodeProgress({ detail, running }: { detail: ResearchEpisodeDetail; r
 }
 
 export default function ResearchAgentPage() {
+  const router = useRouter()
   const [targets, setTargets] = useState<Target[]>([])
   const [episodes, setEpisodes] = useState<ResearchEpisode[]>([])
   const [selected, setSelected] = useState<ResearchEpisodeDetail | null>(null)
@@ -183,6 +265,7 @@ export default function ResearchAgentPage() {
   const [autopilot, setAutopilot] = useState(true)
   const [authorized, setAuthorized] = useState(false)
   const [aiReady, setAiReady] = useState<boolean | null>(null)
+  const [executionReady, setExecutionReady] = useState<boolean | null>(null)
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -199,13 +282,30 @@ export default function ResearchAgentPage() {
 
   useEffect(() => {
     let cancelled = false
-    Promise.all([getTargets(), getResearchEpisodes({ limit: 30 }), getAISettings()]).then(([targetData, episodeData, ai]) => {
+    const requestedEpisodeId = new URLSearchParams(window.location.search).get('episode_id')?.trim() || ''
+    const requestedEpisode = requestedEpisodeId
+      ? getResearchEpisode(requestedEpisodeId)
+          .then((detail) => ({ detail, error: null as string | null }))
+          .catch((err) => ({ detail: null, error: err instanceof Error ? err.message : 'Failed to load requested investigation' }))
+      : Promise.resolve({ detail: null, error: null as string | null })
+    Promise.all([getTargets(), getResearchEpisodes({ limit: 30 }), getResearchReadiness(), requestedEpisode]).then(async ([targetData, episodeData, readiness, requested]) => {
       if (cancelled) return
       const rows: Target[] = Array.isArray(targetData?.targets) ? targetData.targets : Array.isArray(targetData) ? targetData : []
       const webTargets = rows.filter((target) => /^https?:\/\//i.test(target.url) && target.discovery_source !== 'model-intake')
-      setTargets(webTargets); setTargetId(webTargets[0]?.id || '')
+      const requestedTargetId = requested.detail?.episode.target_id || ''
+      if (requestedTargetId && !webTargets.some((target) => target.id === requestedTargetId)) {
+        const requestedTarget = await getTarget(requestedTargetId).catch(() => null)
+        if (requestedTarget && /^https?:\/\//i.test(requestedTarget.url) && requestedTarget.discovery_source !== 'model-intake') {
+          webTargets.unshift(requestedTarget)
+        }
+      }
+      if (cancelled) return
+      setTargets(webTargets); setTargetId(requestedTargetId || webTargets[0]?.id || '')
       setEpisodes(episodeData.episodes || [])
-      setAiReady(Boolean(ai.ai_url && ai.ai_model && ai.ai_api_key_configured))
+      if (requested.detail) setSelected(requested.detail)
+      if (requested.error) setError(requested.error)
+      setAiReady(readiness.planner_ready)
+      setExecutionReady(readiness.execution_enabled)
     }).catch((err) => { if (!cancelled) setError(err instanceof Error ? err.message : 'Failed to load autonomous investigator') })
       .finally(() => { if (!cancelled) setLoading(false) })
     return () => { cancelled = true }
@@ -219,13 +319,17 @@ export default function ResearchAgentPage() {
 
   const openEpisode = async (id: string) => {
     setBusy(true); setError(null)
-    try { setSelected(await getResearchEpisode(id)) }
+    try {
+      setSelected(await getResearchEpisode(id))
+      router.replace(`/settings/research-agent?episode_id=${encodeURIComponent(id)}`)
+    }
     catch (err) { setError(err instanceof Error ? err.message : 'Failed to load investigation') }
     finally { setBusy(false) }
   }
 
   const startInvestigation = async () => {
     if (!activeTarget || !objective.trim() || !aiReady) return
+    if (profile.mode === 'gated' && !executionReady) { setError('Autonomous active execution is disabled by server policy.'); return }
     if (profile.mode === 'gated' && !authorized) { setError('Confirm that you own or are authorized to test this target.'); return }
     setBusy(true); setError(null)
     try {
@@ -244,6 +348,7 @@ export default function ResearchAgentPage() {
         created_by: 'autonomous_investigation_ui',
       })
       setSelected(detail)
+      router.replace(`/settings/research-agent?episode_id=${encodeURIComponent(detail.episode.id)}`)
       await loadEpisodes()
       setBusy(false)
     } catch (err) { setError(err instanceof Error ? err.message : 'Failed to start investigation'); setBusy(false) }
@@ -295,7 +400,7 @@ export default function ResearchAgentPage() {
       <div className="mt-5 grid gap-5 xl:grid-cols-[minmax(0,1fr)_360px]">
         <main className="grid gap-5">
           <Card className="overflow-hidden">
-            <div className="border-b border-gray-800 bg-gradient-to-r from-blue-500/10 via-transparent to-transparent p-5"><div className="flex items-center justify-between gap-3"><div><div className="text-xs font-semibold uppercase tracking-wider text-blue-300">New mission</div><h2 className="mt-1 text-xl font-semibold text-white">What should the investigator accomplish?</h2></div><div className={`flex items-center gap-2 rounded-full px-3 py-1.5 text-xs ${aiReady ? 'bg-emerald-500/10 text-emerald-300' : 'bg-red-500/10 text-red-300'}`}><span className={`h-2 w-2 rounded-full ${aiReady ? 'bg-emerald-400' : 'bg-red-400'}`} />{aiReady ? 'LLM brain ready' : 'Configure AI provider'}</div></div></div>
+            <div className="border-b border-gray-800 bg-gradient-to-r from-blue-500/10 via-transparent to-transparent p-5"><div className="flex items-center justify-between gap-3"><div><div className="text-xs font-semibold uppercase tracking-wider text-blue-300">New mission</div><h2 className="mt-1 text-xl font-semibold text-white">What should the investigator accomplish?</h2></div><div className={`flex items-center gap-2 rounded-full px-3 py-1.5 text-xs ${aiReady ? 'bg-emerald-500/10 text-emerald-300' : 'bg-red-500/10 text-red-300'}`} title={aiReady ? 'Provider URL, key, and model are configured. Open a decision diagnostic to verify the live contract.' : undefined}><span className={`h-2 w-2 rounded-full ${aiReady ? 'bg-emerald-400' : 'bg-red-400'}`} />{aiReady ? 'LLM configured' : 'Configure AI provider'}</div></div></div>
             <div className="grid gap-5 p-5">
               <label className="text-xs font-medium text-gray-400">Target
                 <select value={targetId} onChange={(event) => { setTargetId(event.target.value); setAuthorized(false) }} className="mt-1.5 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2.5 text-sm text-white">{targets.map((target) => <option key={target.id} value={target.id}>{targetLabel(target)}</option>)}</select>
@@ -307,10 +412,11 @@ export default function ResearchAgentPage() {
               <div className="rounded-xl border border-blue-500/25 bg-blue-500/[0.05] p-4">
                 <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
                   <div className="grid gap-2">
+                    {profile.mode === 'gated' && executionReady === false ? <div className="rounded-md border border-red-500/25 bg-red-500/[0.06] px-3 py-2 text-xs text-red-200">Active autonomous execution is disabled in server policy. Analyze mode remains available.</div> : null}
                     {profile.mode === 'gated' ? <label className="flex cursor-pointer items-start gap-3"><input type="checkbox" checked={authorized} onChange={(event) => setAuthorized(event.target.checked)} className="mt-1" /><span><span className="text-sm font-medium text-orange-200">I own this target or have explicit permission to test it.</span><span className="mt-0.5 block text-xs text-gray-500">Creates a target-scoped approval for active testing.</span></span></label> : null}
                     <label className="flex cursor-pointer items-start gap-3"><input type="checkbox" checked={autopilot} onChange={(event) => setAutopilot(event.target.checked)} className="mt-1" /><span><span className="block text-sm font-medium text-gray-200">Continue automatically</span><span className="mt-0.5 block text-xs text-gray-500">Runs on the server and continues if you close this page.</span></span></label>
                   </div>
-                  <Button onClick={startInvestigation} disabled={busy || autoRunning || !targetId || !objective.trim() || !aiReady || (profile.mode === 'gated' && !authorized)} className="min-w-56"><Rocket className="h-4 w-4" />{busy ? 'Starting…' : `Start ${profile.name.toLowerCase()}`}</Button>
+                  <Button onClick={startInvestigation} disabled={busy || autoRunning || !targetId || !objective.trim() || !aiReady || (profile.mode === 'gated' && (!authorized || !executionReady))} className="min-w-56"><Rocket className="h-4 w-4" />{busy ? 'Starting…' : `Start ${profile.name.toLowerCase()}`}</Button>
                 </div>
               </div>
 

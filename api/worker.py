@@ -68,6 +68,12 @@ try:
     from constants import resolve_scan_budget, resolve_or_consume_budget
 except ImportError:
     from scanner.constants import resolve_scan_budget, resolve_or_consume_budget
+try:
+    from findings import templated_finding_identity as _templated_finding_identity
+except ModuleNotFoundError as exc:
+    if exc.name != "findings":
+        raise
+    from scanner.findings import templated_finding_identity as _templated_finding_identity
 
 # Configuration
 REDIS_URL = os.environ.get('REDIS_URL', 'redis://localhost:6379')
@@ -2465,8 +2471,7 @@ def generate_finding_fingerprint(finding: dict) -> str:
     """
     # Templated identity for endpoint findings — primary count-explosion fix.
     try:
-        from findings import templated_finding_identity
-        templated = templated_finding_identity(finding)
+        templated = _templated_finding_identity(finding)
     except Exception:
         templated = None
     if templated:
@@ -4939,13 +4944,6 @@ async def process_finding_retest_job(job_data: dict):
         return
 
     try:
-        r.hset(retest_key, mapping={
-            "status": "running",
-            "verification_id": verification_id,
-            "started_at": now.isoformat(),
-            "attempt": str(attempt),
-        })
-
         async with db_pool.acquire() as conn:
             verification = await conn.fetchrow("""
                 SELECT fv.*, f.title, f.tool, f.evidence, f.url as finding_url,
@@ -4967,14 +4965,44 @@ async def process_finding_retest_job(job_data: dict):
                 print(f"[retest:{job_id[:8]}] Verification not found: {verification_id}", flush=True)
                 return
 
-            await conn.execute("""
+            claimed = await conn.fetchrow("""
                 UPDATE finding_verifications
                 SET status = 'running',
                     started_at = NOW(),
                     attempt_count = GREATEST(COALESCE(attempt_count, 0), $2),
                     updated_at = NOW()
-                WHERE id = $1
+                WHERE id = $1 AND status = 'queued'
+                RETURNING id
             """, verification["id"], attempt)
+            if not claimed:
+                current_status = await conn.fetchval(
+                    "SELECT status FROM finding_verifications WHERE id=$1",
+                    verification["id"],
+                )
+                if str(current_status or "") == "cancelled":
+                    r.hset(retest_key, mapping={
+                        "status": "cancelled",
+                        "verification_id": verification_id,
+                        "finding_id": str(verification["finding_id"]),
+                    })
+                    r.expire(retest_key, 86400)
+                    print(f"[retest:{job_id[:8]}] Retest cancelled before execution", flush=True)
+                    return
+                r.hset(retest_key, mapping={
+                    "status": str(current_status or "ignored"),
+                    "verification_id": verification_id,
+                    "note": "duplicate_or_nonqueued_retest_job",
+                })
+                r.expire(retest_key, 86400)
+                return
+
+            r.hset(retest_key, mapping={
+                "status": "running",
+                "verification_id": verification_id,
+                "started_at": now.isoformat(),
+                "attempt": str(attempt),
+            })
+
             await conn.execute("""
                 UPDATE findings
                 SET last_verification_status = 'running',
@@ -6104,6 +6132,81 @@ def _failure_result_for_scan_error(result: dict[str, Any], error: Any, diag: Any
     }
 
 
+_QUEUE_HANDOFF_CONFIRMATION_KEY = "queue_handoff_confirmed"
+QUEUE_HANDOFF_CONFIRM_RECHECKS = 5
+QUEUE_HANDOFF_CONFIRM_RECHECK_SECONDS = 0.1
+
+
+def _queue_handoff_confirmation_marker(row: Any) -> bool | None:
+    raw_options = _row_get(row, "options")
+    options = parse_json_field(raw_options) if raw_options is not None else {}
+    if not isinstance(options, dict) or _QUEUE_HANDOFF_CONFIRMATION_KEY not in options:
+        return None
+    return options.get(_QUEUE_HANDOFF_CONFIRMATION_KEY) is True
+
+
+async def _confirmed_scan_handoff_status(scan_id: str) -> str:
+    """Wait briefly for a two-phase queue handoff, then fail it closed.
+
+    Legacy scans have no marker and remain claimable. New ASM enqueue paths persist
+    ``false`` before RPUSH and flip it to ``true`` only after Redis acknowledges.
+    """
+    scan_uuid = uuid.UUID(str(scan_id))
+    row = None
+    for attempt in range(QUEUE_HANDOFF_CONFIRM_RECHECKS + 1):
+        async with db_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT status, options, campaign_id FROM scans WHERE id=$1",
+                scan_uuid,
+            )
+        if not row:
+            return "missing"
+        status = str(_row_get(row, "status") or "missing")
+        marker = _queue_handoff_confirmation_marker(row)
+        if marker is not False or status not in {"pending", "queued"}:
+            return status
+        if attempt < QUEUE_HANDOFF_CONFIRM_RECHECKS:
+            await asyncio.sleep(QUEUE_HANDOFF_CONFIRM_RECHECK_SECONDS)
+
+    async with db_pool.acquire() as conn:
+        failed = await conn.fetchrow(
+            """
+            UPDATE scans
+            SET status='failed', progress=100, current_phase='queue_failed',
+                error_message='Queue handoff confirmation was not persisted before the worker deadline; active work was not started.',
+                completed_at=NOW()
+            WHERE id=$1 AND status IN ('pending','queued')
+              AND options->>'queue_handoff_confirmed'='false'
+            RETURNING status, campaign_id
+            """,
+            scan_uuid,
+        )
+        if failed:
+            campaign_id = _row_get(failed, "campaign_id")
+            if campaign_id:
+                await conn.execute(
+                    """
+                    UPDATE scan_campaigns campaign
+                    SET status='failed', completed_at=COALESCE(completed_at, NOW()), updated_at=NOW()
+                    WHERE campaign.id=$1 AND campaign.status='active'
+                      AND EXISTS (
+                          SELECT 1 FROM scans owner
+                          WHERE owner.id=$2 AND owner.campaign_id=campaign.id
+                            AND owner.status='failed'
+                      )
+                      AND NOT EXISTS (
+                          SELECT 1 FROM scans other
+                          WHERE other.campaign_id=campaign.id AND other.id<>$2
+                      )
+                    """,
+                    campaign_id,
+                    scan_uuid,
+                )
+            return "failed"
+        latest = await conn.fetchval("SELECT status FROM scans WHERE id=$1", scan_uuid)
+        return str(latest or "missing")
+
+
 async def process_scan_job(job_data: dict):
     """Process a scan job."""
     job_id = job_data.get('job_id', 'unknown')
@@ -6123,13 +6226,16 @@ async def process_scan_job(job_data: dict):
     r = get_redis()
     now = utc_now()
 
-    async with db_pool.acquire() as conn:
-        current = await conn.fetchrow("SELECT status FROM scans WHERE id = $1", uuid.UUID(scan_id))
-    if current and current['status'] == 'cancelled':
-        print(f"[{job_id[:8]}] Scan already cancelled; skipping", flush=True)
+    current_status = await _confirmed_scan_handoff_status(scan_id)
+    if current_status not in {'pending', 'queued'}:
+        print(f"[{job_id[:8]}] Scan is {current_status}; queued worker job skipped", flush=True)
         r.hset(
             f"job:{job_id}",
-            mapping={'status': 'cancelled', 'progress': '100', 'current_phase': 'cancelled'},
+            mapping={
+                'status': current_status,
+                'progress': '100' if current_status in {'completed', 'cancelled', 'failed'} else '0',
+                'current_phase': current_status,
+            },
         )
         r.expire(f"job:{job_id}", 86400)
         return
@@ -6149,13 +6255,22 @@ async def process_scan_job(job_data: dict):
     async with db_pool.acquire() as conn:
         update_result = await conn.execute("""
             UPDATE scans SET status = 'running', started_at = $1
-            WHERE id = $2 AND status <> 'cancelled'
+            WHERE id = $2 AND status IN ('pending', 'queued')
         """, now, uuid.UUID(scan_id))
         if update_result.endswith("0"):
-            print(f"[{job_id[:8]}] Scan cancelled before start; skipping", flush=True)
+            latest_status = await conn.fetchval(
+                "SELECT status FROM scans WHERE id=$1",
+                uuid.UUID(scan_id),
+            )
+            latest_status = str(latest_status or 'not_claimable')
+            print(f"[{job_id[:8]}] Scan became {latest_status} before worker claim; skipping", flush=True)
             r.hset(
                 f"job:{job_id}",
-                mapping={'status': 'cancelled', 'progress': '100', 'current_phase': 'cancelled'},
+                mapping={
+                    'status': latest_status,
+                    'progress': '100' if latest_status in {'completed', 'cancelled', 'failed'} else '0',
+                    'current_phase': latest_status,
+                },
             )
             r.expire(f"job:{job_id}", 86400)
             return
@@ -8352,6 +8467,66 @@ async def process_exploit_batch_job(job_data: dict):
             await asyncio.sleep(PARALLEL_SHARD_REQUEUE_DELAY_SECONDS)
             return
 
+    handoff_status = await _confirmed_scan_handoff_status(scan_id)
+    if handoff_status not in {'pending', 'queued'}:
+        print(
+            f"[asm {job_id[:8]}] scan is {handoff_status}; queued worker job skipped",
+            flush=True,
+        )
+        r.hset(
+            f"job:{job_id}",
+            mapping={
+                'status': handoff_status,
+                'scan_id': scan_id or '',
+                'progress': '100' if handoff_status in {'completed', 'cancelled', 'failed'} else '0',
+                'current_phase': handoff_status,
+            },
+        )
+        r.expire(f"job:{job_id}", 86400)
+        if slot_acquired:
+            _release_parallel_shard_slot(r, parent_id)
+        return
+
+    # Claim the durable scan row before leasing endpoints. This makes a failed or
+    # cancelled row authoritative even when Redis accepted RPUSH but the API lost
+    # the response and marked its pending handoff failed.
+    async with db_pool.acquire() as conn:
+        scan_claim = await conn.execute(
+            """
+            UPDATE scans SET status='running', started_at=COALESCE(started_at, $1),
+                current_phase='asm_claiming'
+            WHERE id=$2 AND status IN ('pending', 'queued')
+            """,
+            now,
+            uuid.UUID(scan_id),
+        )
+        if scan_claim.endswith("0"):
+            current_status = await conn.fetchval(
+                "SELECT status FROM scans WHERE id=$1",
+                uuid.UUID(scan_id),
+            )
+        else:
+            current_status = "running"
+    if scan_claim.endswith("0"):
+        current_status = str(current_status or "not_claimable")
+        print(
+            f"[asm {job_id[:8]}] scan is {current_status}; queued worker job skipped",
+            flush=True,
+        )
+        r.hset(
+            f"job:{job_id}",
+            mapping={
+                'status': current_status,
+                'scan_id': scan_id or '',
+                'progress': '100' if current_status in {'completed', 'cancelled', 'failed'} else '0',
+                'current_phase': current_status,
+            },
+        )
+        r.expire(f"job:{job_id}", 86400)
+        if slot_acquired:
+            _release_parallel_shard_slot(r, parent_id)
+        return
+
     # Claim the next batch (priority-ordered, FOR UPDATE SKIP LOCKED → work-stealing).
     claimed: list[dict] = []
     try:
@@ -8420,6 +8595,24 @@ async def process_exploit_batch_job(job_data: dict):
         if slot_acquired:
             _release_parallel_shard_slot(r, parent_id)
             slot_acquired = False
+        async with db_pool.acquire() as conn:
+            released_claim = await conn.execute(
+                """
+                UPDATE scans
+                SET status='pending', started_at=NULL, current_phase='waiting_for_domain_rate'
+                WHERE id=$1 AND status='running'
+                """,
+                uuid.UUID(scan_id),
+            )
+        if released_claim.endswith("0"):
+            # Cancellation or another terminal transition won the race. Do not put
+            # a terminal scan back on the queue merely because its rate slot closed.
+            current_status = str(current_status or "not_claimable")
+            print(
+                f"[asm {job_id[:8]}] scan became terminal before domain-rate requeue; skipping",
+                flush=True,
+            )
+            return
         await _requeue_for_domain_rate(
             r,
             job_data,
@@ -8613,8 +8806,9 @@ async def process_exploit_batch_job(job_data: dict):
     async with db_pool.acquire() as conn:
         update_result = await conn.execute(
             """
-            UPDATE scans SET status='running', started_at=$1, current_phase='asm_exploit'
-            WHERE id=$2 AND status <> 'cancelled'
+            UPDATE scans SET status='running', started_at=COALESCE(started_at, $1),
+                current_phase='asm_exploit'
+            WHERE id=$2 AND status='running'
             """,
             now, uuid.UUID(scan_id),
         )
@@ -9034,6 +9228,26 @@ async def process_job(job_data: dict):
         await process_scan_job(job_data)
 
 
+def _mark_worker_processing_lease(r, job_data: dict[str, Any], source_queue: str) -> None:
+    """Stamp a short-lived proof that this worker removed the job from Redis.
+
+    Queue membership disappears at BLPOP, before the durable DB row is claimed.
+    The API orphan reconciler accepts this timestamp only for a brief grace
+    window, so a worker crash cannot leave a stale ``status=queued`` hash looking
+    like durable work for the hash's full one-day TTL.
+    """
+    job_id = str(job_data.get("job_id") or "").strip()
+    if not job_id:
+        return
+    is_retest = source_queue == RETEST_QUEUE_NAME or job_data.get("type") == "finding_retest"
+    key = f"retest_job:{job_id}" if is_retest else f"job:{job_id}"
+    r.hset(key, mapping={
+        "processing_lease_at": utc_now_iso(),
+        "processing_queue": source_queue,
+    })
+    r.expire(key, 86400)
+
+
 async def async_main():
     """Async main worker loop - uses single event loop for database pool."""
     print("Initializing worker...", flush=True)
@@ -9084,8 +9298,19 @@ async def async_main():
                         pass
                     continue  # Timeout, continue polling
 
-                _, job_json = result
+                source_queue_raw, job_json = result
+                source_queue = (
+                    source_queue_raw.decode("utf-8", "replace")
+                    if isinstance(source_queue_raw, bytes)
+                    else str(source_queue_raw)
+                )
                 job_data = json.loads(job_json)
+                try:
+                    _mark_worker_processing_lease(r, job_data, source_queue)
+                except Exception as lease_err:
+                    # This marker is recovery metadata, never authority to run.
+                    # The durable DB claim in each handler remains authoritative.
+                    print(f"[worker] processing lease metadata error: {lease_err}", flush=True)
                 await process_job(job_data)
             except asyncio.CancelledError:
                 # Graceful shutdown requested (SIGTERM/SIGINT)

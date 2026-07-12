@@ -1,11 +1,12 @@
 'use client'
 
 import { useEffect, useMemo, useRef, useState, useCallback, Suspense } from 'react'
-import { Check, Copy, ExternalLink, Loader2 } from 'lucide-react'
+import { BrainCircuit, Check, Copy, ExternalLink, Loader2 } from 'lucide-react'
 import { useParams, useSearchParams, useRouter } from 'next/navigation'
 import Link from 'next/link'
 import {
   formatDate,
+  createTargetPolicyApproval,
   createFindingException,
   deleteFindingException,
   extractFindingTriage,
@@ -14,6 +15,8 @@ import {
   getFindingRetests,
   getFindingEvidence,
   getPolicyProfiles,
+  getResearchReadiness,
+  launchResearchEpisode,
   retestFinding,
   retestAiFinding,
   updateFinding,
@@ -60,6 +63,33 @@ function getFindingSourceType(finding: Finding): FindingSourceType {
 function isAiReplayFinding(finding: Finding): boolean {
   const sourceType = getFindingSourceType(finding)
   return sourceType === 'AI Gate' || sourceType === 'AI Session'
+}
+
+function autonomousWebTargetUrl(finding: Finding): string | null {
+  const sourceType = getFindingSourceType(finding)
+  if (!finding.target_id || !(['DAST', 'ASM', 'Manual'] as FindingSourceType[]).includes(sourceType)) return null
+  const candidate = finding.target_url || finding.url
+  if (!candidate) return null
+  try {
+    const parsed = new URL(candidate)
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:' ? parsed.toString() : null
+  } catch {
+    return null
+  }
+}
+
+function autonomousUnsupportedReason(finding: Finding): string {
+  const sourceType = getFindingSourceType(finding)
+  if (sourceType === 'Model Intake') {
+    return 'Model Intake findings must be investigated by re-running the artifact check.'
+  }
+  if (sourceType === 'AI Gate' || sourceType === 'AI Session') {
+    return 'AI findings use their dedicated replay workflow; autonomous web hunts support DAST, ASM, and manual findings.'
+  }
+  if (!finding.target_id) {
+    return 'This finding is not linked to a ShakerScan web target.'
+  }
+  return 'Autonomous investigation requires an HTTP or HTTPS target.'
 }
 
 function InfoItem({ label, children }: { label: string; children: React.ReactNode }) {
@@ -266,6 +296,8 @@ function FindingDetailContent() {
   const [statusUpdating, setStatusUpdating] = useState(false)
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false)
   const [deleting, setDeleting] = useState(false)
+  const [autonomousConfirmOpen, setAutonomousConfirmOpen] = useState(false)
+  const [autonomousLoading, setAutonomousLoading] = useState(false)
   const [retestLoading, setRetestLoading] = useState(false)
   const [retestMessage, setRetestMessage] = useState<string | null>(null)
   const [retestMode, setRetestMode] = useState<'tiered' | 'deterministic' | 'ai' | 'same_probe' | 'same_family' | 'strict_replay'>('tiered')
@@ -494,6 +526,38 @@ function FindingDetailContent() {
     }
   }
 
+  async function handleAutonomousInvestigation() {
+    if (!finding || autonomousLoading) return
+    const targetUrl = autonomousWebTargetUrl(finding)
+    if (!finding.target_id || !targetUrl) {
+      toast.error(autonomousUnsupportedReason(finding))
+      return
+    }
+    try {
+      setAutonomousLoading(true)
+      const readiness = await getResearchReadiness()
+      if (!readiness.planner_ready) throw new Error('Configure an AI model before starting an autonomous investigation.')
+      if (!readiness.execution_enabled) throw new Error('Autonomous active execution is disabled by server policy.')
+      const approvalReceiptId = await createTargetPolicyApproval(finding.target_id, targetUrl, 30)
+      const detail = await launchResearchEpisode({
+        subject_type: 'finding',
+        subject_id: finding.id,
+        mission_profile: 'verify_finding',
+        intensity: 'hunt',
+        approval_receipt_id: approvalReceiptId,
+        autopilot: true,
+        created_by: 'finding_detail_ui',
+      })
+      setAutonomousConfirmOpen(false)
+      toast.success(detail.reused ? 'Opened the existing autonomous investigation' : 'Autonomous investigation started')
+      router.push(`/settings/research-agent?episode_id=${encodeURIComponent(detail.episode.id)}`)
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to start autonomous investigation')
+    } finally {
+      setAutonomousLoading(false)
+    }
+  }
+
   const evidence = useMemo(() => parseEvidence(finding?.evidence), [finding?.evidence])
   const primaryUrl = finding?.url || evidence.url || finding?.target_url || ''
   const request = finding?.request || evidence.request
@@ -509,6 +573,7 @@ function FindingDetailContent() {
       : ''
   const rawEvidenceObject = useMemo(() => asEvidenceObject(rawEvidence), [rawEvidence])
   const isAiFinding = finding ? isAiReplayFinding(finding) : false
+  const autonomousTargetUrl = finding ? autonomousWebTargetUrl(finding) : null
   const latestRetest = retestHistory[0]
   // An inconclusive retest that is retryable means "we couldn't decide, try
   // again" — distinct from a terminal verdict. Surfaced so users understand the
@@ -579,29 +644,53 @@ function FindingDetailContent() {
           <h1 className="text-2xl font-bold text-white">Finding Detail</h1>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <RetestVerdictBadge
-            verdict={finding.last_verification_verdict}
-            pending={hasPendingRetest}
-          />
-          <select
-            value={selectedRetestMode}
-            onChange={(e) => setRetestMode(e.target.value as typeof retestMode)}
-            className="px-2 py-1.5 bg-gray-900 border border-gray-700 rounded-lg text-xs text-gray-200 focus:outline-none focus:border-blue-500"
-            title="Retest mode"
-            aria-label="Retest mode"
-          >
-            {retestOptions.map((option) => (
-              <option key={option.value} value={option.value}>{option.label}</option>
-            ))}
-          </select>
           <button
-            onClick={handleRetest}
-            disabled={retestLoading || !retestSupported}
-            title={!retestSupported ? retestUnsupportedMessage : undefined}
-            className="px-3 py-1.5 bg-blue-900/50 text-blue-300 rounded-lg text-sm hover:bg-blue-900/80 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            type="button"
+            onClick={() => setAutonomousConfirmOpen(true)}
+            disabled={!autonomousTargetUrl || autonomousLoading || hasPendingRetest}
+            title={
+              hasPendingRetest
+                ? 'A proof replay is already queued or running for this finding.'
+                : autonomousTargetUrl
+                  ? 'Inspect this finding, run at most one bounded proof replay, and conclude from its result.'
+                  : autonomousUnsupportedReason(finding)
+            }
+            className="inline-flex items-center gap-2 rounded-lg bg-violet-600 px-3 py-2 text-sm font-medium text-white transition-colors hover:bg-violet-500 disabled:cursor-not-allowed disabled:opacity-45"
           >
-            {retestLoading ? 'Queueing...' : 'Retest Finding'}
+            <BrainCircuit className="h-4 w-4" />
+            Investigate autonomously
           </button>
+          {(!autonomousTargetUrl || hasPendingRetest) && (
+            <span className={`max-w-64 text-xs leading-4 ${hasPendingRetest ? 'text-gray-500' : 'text-amber-300/80'}`}>
+              {hasPendingRetest ? 'Available after the current proof replay finishes.' : autonomousUnsupportedReason(finding)}
+            </span>
+          )}
+          <div className="flex flex-wrap items-center gap-2 rounded-lg border border-gray-800 bg-gray-950/50 p-1">
+            <span className="pl-1 text-[10px] font-semibold uppercase tracking-wider text-gray-500">Proof replay</span>
+            <RetestVerdictBadge
+              verdict={finding.last_verification_verdict}
+              pending={hasPendingRetest}
+            />
+            <select
+              value={selectedRetestMode}
+              onChange={(e) => setRetestMode(e.target.value as typeof retestMode)}
+              className="px-2 py-1.5 bg-gray-900 border border-gray-700 rounded-lg text-xs text-gray-200 focus:outline-none focus:border-blue-500"
+              title="Retest mode"
+              aria-label="Retest mode"
+            >
+              {retestOptions.map((option) => (
+                <option key={option.value} value={option.value}>{option.label}</option>
+              ))}
+            </select>
+            <button
+              onClick={handleRetest}
+              disabled={retestLoading || hasPendingRetest || !retestSupported}
+              title={!retestSupported ? retestUnsupportedMessage : hasPendingRetest ? 'A proof replay is already queued or running.' : 'Replay this finding with one bounded verifier'}
+              className="px-3 py-1.5 bg-blue-900/50 text-blue-300 rounded-lg text-sm hover:bg-blue-900/80 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {retestLoading ? 'Queueing...' : 'Retest Finding'}
+            </button>
+          </div>
           <button
             onClick={() => setDeleteConfirmOpen(true)}
             className="px-3 py-1.5 bg-red-900/50 text-red-400 rounded-lg text-sm hover:bg-red-900/80 transition-colors"
@@ -610,6 +699,21 @@ function FindingDetailContent() {
           </button>
         </div>
       </div>
+
+      <ConfirmDialog
+        open={autonomousConfirmOpen}
+        title="Authorize autonomous investigation"
+        message={
+          <div className="space-y-2">
+            <p>The investigator will inspect this exact finding, run at most one bounded proof replay against <span className="font-medium text-gray-200">{autonomousTargetUrl}</span>, wait for the result, and conclude.</p>
+            <p>Continue only if you own this target or have explicit permission to test it. Active authorization expires after 30 minutes; the investigation keeps running on the server if you leave the page.</p>
+          </div>
+        }
+        confirmLabel="Authorize and start"
+        busy={autonomousLoading}
+        onConfirm={handleAutonomousInvestigation}
+        onCancel={() => setAutonomousConfirmOpen(false)}
+      />
 
       <ConfirmDialog
         open={deleteConfirmOpen}

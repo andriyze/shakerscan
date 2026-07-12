@@ -864,6 +864,149 @@ class _FakeJobRedis:
         self.values.pop(key, None)
 
 
+def test_worker_marks_fresh_processing_lease_immediately_after_queue_pop():
+    cases = [
+        (worker.QUEUE_NAME, "scan", "job:job-1"),
+        (worker.RETEST_QUEUE_NAME, "finding_retest", "retest_job:job-1"),
+    ]
+    for source_queue, job_type, expected_key in cases:
+        redis = _FakeJobRedis()
+        worker._mark_worker_processing_lease(
+            redis,
+            {"job_id": "job-1", "type": job_type},
+            source_queue,
+        )
+
+        key, _args, mapping = redis.hashes[-1]
+        assert key == expected_key
+        assert mapping["processing_lease_at"]
+        assert mapping["processing_queue"] == source_queue
+        assert redis.expired[-1] == (expected_key, 86400)
+
+
+class _LostRetestClaimConnection:
+    def __init__(self, *, verification, current_status):
+        self.verification = verification
+        self.current_status = current_status
+        self.fetchrow_calls = []
+        self.fetchval_calls = []
+        self.execute_calls = []
+
+    async def fetchrow(self, query, *args):
+        self.fetchrow_calls.append((query, args))
+        if "FROM finding_verifications fv" in query:
+            return self.verification
+        if "UPDATE finding_verifications" in query and "status = 'queued'" in query:
+            return None
+        raise AssertionError(f"unexpected fetchrow after retest claim was lost: {query}")
+
+    async def fetchval(self, query, *args):
+        self.fetchval_calls.append((query, args))
+        assert "SELECT status FROM finding_verifications" in query
+        return self.current_status
+
+    async def execute(self, query, *args):
+        self.execute_calls.append((query, args))
+        raise AssertionError(f"retest losing its claim must not update proof state: {query}")
+
+
+class _LostRetestClaimPool:
+    def __init__(self, conn):
+        self.conn = conn
+
+    def acquire(self):
+        return self
+
+    async def __aenter__(self):
+        return self.conn
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
+def test_finding_retest_lost_atomic_claim_never_runs_provers(monkeypatch):
+    verification_id = uuid.uuid4()
+    finding_id = uuid.uuid4()
+    job_id = "lost-retest-claim"
+    verification = {
+        "id": verification_id,
+        "finding_id": finding_id,
+        "finding_type": "xss",
+    }
+    payload = worker.build_retest_job_payload(
+        job_id=job_id,
+        verification_id=str(verification_id),
+        finding_id=str(finding_id),
+        submitted_at=datetime.now(timezone.utc).isoformat(),
+        trigger="unit_test",
+    )
+    work_calls = {"runtime_settings": 0, "deterministic": 0, "slot_releases": 0}
+
+    def fail_if_runtime_settings_are_loaded():
+        work_calls["runtime_settings"] += 1
+        raise AssertionError("AI preparation must not run after another actor wins the claim")
+
+    async def fail_if_deterministic_prover_runs(_verification):
+        work_calls["deterministic"] += 1
+        raise AssertionError("deterministic prover must not run after the claim is lost")
+
+    monkeypatch.setattr(worker, "_try_acquire_retest_slot", lambda _redis: True)
+    monkeypatch.setattr(worker, "_load_runtime_ai_settings", fail_if_runtime_settings_are_loaded)
+    monkeypatch.setattr(worker, "run_finding_retest", fail_if_deterministic_prover_runs)
+    monkeypatch.setattr(
+        worker,
+        "_release_retest_slot",
+        lambda _redis: work_calls.__setitem__("slot_releases", work_calls["slot_releases"] + 1),
+    )
+
+    for current_status, expected_mapping in (
+        (
+            "cancelled",
+            {
+                "status": "cancelled",
+                "verification_id": str(verification_id),
+                "finding_id": str(finding_id),
+            },
+        ),
+        (
+            "running",
+            {
+                "status": "running",
+                "verification_id": str(verification_id),
+                "note": "duplicate_or_nonqueued_retest_job",
+            },
+        ),
+    ):
+        conn = _LostRetestClaimConnection(
+            verification=verification,
+            current_status=current_status,
+        )
+        redis = _FakeJobRedis()
+        monkeypatch.setattr(worker, "db_pool", _LostRetestClaimPool(conn))
+        monkeypatch.setattr(worker, "get_redis", lambda: redis)
+
+        asyncio.run(worker.process_finding_retest_job(payload))
+
+        assert len(conn.fetchrow_calls) == 2
+        claim_query, claim_args = conn.fetchrow_calls[1]
+        assert "WHERE id = $1 AND status = 'queued'" in claim_query
+        assert claim_args == (verification_id, 1)
+        assert len(conn.fetchval_calls) == 1
+        assert conn.execute_calls == []
+        assert redis.hashes[-1] == (
+            f"retest_job:{job_id}",
+            (),
+            expected_mapping,
+        )
+        assert redis.expired[-1] == (f"retest_job:{job_id}", 86400)
+
+    assert work_calls == {
+        "runtime_settings": 0,
+        "deterministic": 0,
+        "slot_releases": 2,
+    }
+
+
 def test_internal_ai_gate_executor_receipt_is_recorded_and_redacted():
     receipt_id = uuid.uuid4()
     conn = _FakeReceiptConnection(receipt_id)
@@ -1450,7 +1593,7 @@ class _FakeCancelRedis:
 
 
 class _FakeAsmConn:
-    def __init__(self, *, child_status="running", parent_status="running", running_update_result="UPDATE 1"):
+    def __init__(self, *, child_status="pending", parent_status="running", running_update_result="UPDATE 1"):
         self.executions = []
         self.child_status = child_status
         self.parent_status = parent_status
@@ -1507,6 +1650,163 @@ class _FakeAsmPool:
 
     async def __aexit__(self, exc_type, exc, tb):
         return False
+
+
+def test_scan_worker_does_not_revive_failed_queue_handoff_during_claim(monkeypatch):
+    class ClaimRaceConn:
+        def __init__(self):
+            self.executions = []
+            self.status = "pending"
+
+        async def fetchrow(self, query, *args):
+            if "UPDATE scans" in query and "queue_handoff_confirmed" in query:
+                self.executions.append((query, args))
+                if self.status == "pending":
+                    self.status = "failed"
+                    return {
+                        "status": "failed",
+                        "campaign_id": "44444444-4444-4444-8444-444444444444",
+                    }
+                return None
+            if "SELECT status" in query and "FROM scans" in query:
+                return {
+                    "status": self.status,
+                    "options": {"queue_handoff_confirmed": False},
+                    "campaign_id": "44444444-4444-4444-8444-444444444444",
+                }
+            raise AssertionError(f"unexpected fetchrow: {query}")
+
+        async def fetchval(self, query, *args):
+            assert "SELECT status FROM scans" in query
+            return self.status
+
+        async def execute(self, query, *args):
+            self.executions.append((query, args))
+            if "UPDATE scan_campaigns" in query:
+                return "UPDATE 1"
+            raise AssertionError(f"worker must not claim the failed scan: {query}")
+
+    conn = ClaimRaceConn()
+    redis = _FakeJobRedis()
+    run_calls = []
+
+    async def forbidden_run_scan(*args, **kwargs):
+        run_calls.append((args, kwargs))
+        raise AssertionError("failed queue handoff must not reach the scanner")
+
+    monkeypatch.setattr(worker, "db_pool", _FakeAsmPool(conn))
+    monkeypatch.setattr(worker, "get_redis", lambda: redis)
+    monkeypatch.setattr(worker, "run_scan", forbidden_run_scan)
+    monkeypatch.setattr(worker, "QUEUE_HANDOFF_CONFIRM_RECHECKS", 1)
+    monkeypatch.setattr(worker, "QUEUE_HANDOFF_CONFIRM_RECHECK_SECONDS", 0)
+
+    asyncio.run(worker.process_scan_job({
+        "job_id": "job-lost-rpush-response",
+        "scan_id": "22222222-2222-4222-8222-222222222222",
+        "target": "https://example.test",
+        "options": {"scan_type": "smart"},
+    }))
+
+    assert run_calls == []
+    failure_query = next(query for query, _args in conn.executions if "UPDATE scans" in query)
+    assert "options->>'queue_handoff_confirmed'='false'" in failure_query
+    assert any("UPDATE scan_campaigns" in query for query, _args in conn.executions)
+    assert redis.hashes[-1][2]["status"] == "failed"
+
+
+def test_exploit_worker_does_not_claim_endpoints_for_failed_queue_handoff(monkeypatch):
+    class FailedHandoffConn(_FakeAsmConn):
+        def __init__(self):
+            super().__init__(child_status="pending")
+            self.status = "pending"
+
+        async def fetchrow(self, query, *args):
+            if "UPDATE scans" in query and "queue_handoff_confirmed" in query:
+                self.executions.append((query, args))
+                self.status = "failed"
+                return {
+                    "status": "failed",
+                    "campaign_id": "44444444-4444-4444-8444-444444444444",
+                }
+            if "SELECT status" in query and "FROM scans" in query:
+                return {
+                    "status": self.status,
+                    "options": {"queue_handoff_confirmed": False},
+                    "campaign_id": "44444444-4444-4444-8444-444444444444",
+                }
+            return await super().fetchrow(query, *args)
+
+        async def fetchval(self, query, *args):
+            assert "SELECT status FROM scans" in query
+            return self.status
+
+    conn = FailedHandoffConn()
+    redis = _FakeJobRedis()
+    claim_calls = []
+
+    async def forbidden_claim(*args, **kwargs):
+        claim_calls.append((args, kwargs))
+        raise AssertionError("failed queue handoff must not lease endpoints")
+
+    monkeypatch.setattr(worker, "db_pool", _FakeAsmPool(conn))
+    monkeypatch.setattr(worker, "get_redis", lambda: redis)
+    monkeypatch.setattr(worker.asm_inventory, "claim_test_batch", forbidden_claim)
+    monkeypatch.setattr(worker, "QUEUE_HANDOFF_CONFIRM_RECHECKS", 1)
+    monkeypatch.setattr(worker, "QUEUE_HANDOFF_CONFIRM_RECHECK_SECONDS", 0)
+
+    asyncio.run(worker.process_exploit_batch_job({
+        "job_id": "job-lost-rpush-response",
+        "scan_id": "22222222-2222-4222-8222-222222222222",
+        "target_id": "33333333-3333-4333-8333-333333333333",
+        "target": "https://example.test",
+        "campaign_id": "44444444-4444-4444-8444-444444444444",
+        "batch_size": 1,
+        "options": {"scan_type": "smart"},
+    }))
+
+    assert claim_calls == []
+    failure_query = next(query for query, _args in conn.executions if "UPDATE scans" in query)
+    assert "options->>'queue_handoff_confirmed'='false'" in failure_query
+    assert redis.hashes[-1][2]["status"] == "failed"
+
+
+def test_worker_waits_for_fast_queue_handoff_confirmation(monkeypatch):
+    class ConfirmationRaceConn:
+        def __init__(self):
+            self.confirmed = False
+            self.failure_updates = 0
+
+        async def fetchrow(self, query, *args):
+            if "UPDATE scans" in query:
+                self.failure_updates += 1
+                return None
+            return {
+                "status": "queued" if self.confirmed else "pending",
+                "options": {"queue_handoff_confirmed": self.confirmed},
+                "campaign_id": "44444444-4444-4444-8444-444444444444",
+            }
+
+        async def fetchval(self, query, *args):
+            return "queued" if self.confirmed else "pending"
+
+    conn = ConfirmationRaceConn()
+    sleeps = []
+
+    async def confirm_during_worker_recheck(delay):
+        sleeps.append(delay)
+        conn.confirmed = True
+
+    monkeypatch.setattr(worker, "db_pool", _FakeAsmPool(conn))
+    monkeypatch.setattr(worker.asyncio, "sleep", confirm_during_worker_recheck)
+    monkeypatch.setattr(worker, "QUEUE_HANDOFF_CONFIRM_RECHECKS", 1)
+
+    status = asyncio.run(worker._confirmed_scan_handoff_status(
+        "22222222-2222-4222-8222-222222222222"
+    ))
+
+    assert status == "queued"
+    assert sleeps == [worker.QUEUE_HANDOFF_CONFIRM_RECHECK_SECONDS]
+    assert conn.failure_updates == 0
 
 
 class _FakePlanConn:
@@ -3099,7 +3399,7 @@ def test_dynamic_coverage_batch_parent_cancelled_before_claim_does_not_claim(mon
 def test_dynamic_coverage_batch_claim_is_scoped_to_shard_auth_state(monkeypatch):
     calls = {"claim": None, "reconcile": None}
     redis = _FakeJobRedis()
-    conn = _FakeAsmConn(child_status="running", parent_status="running")
+    conn = _FakeAsmConn(child_status="pending", parent_status="running")
 
     async def fake_claim_test_batch(conn, target_id, **kwargs):
         calls["claim"] = {"target_id": target_id, **kwargs}

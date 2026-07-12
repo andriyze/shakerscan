@@ -58,20 +58,20 @@ flags, skills, agents, adapters, modules, and durable tables) plus architecture/
 - **Dashboard (`/`)**: real-time metrics (targets, scans, findings, avg score), a compact top-right operations bar for live pending/running queue state, emergency clear, worker count/scaling/stale-build warning, and Gungnir CT status/toggle; plus recent scans and critical/high findings. Auto-refreshes every 10-30s.
 - **Scans (`/scans`)**: filter by status/domain/search, pagination (50/page), cancel running/pending scans, re-scan dropdown (all 6 scan types), auto-refresh every 5s. Shows target, type, status, score/grade, findings count, duration, date.
 - **Scan Detail (`/scans/{id}`)**: live logs with auto-scroll while running (5s refresh), progress bar + current phase, partial-results view for failed scans (warning banner), refreshed deployment decision, full report with PDF export, compliance section, resolved coverage budget, AI Gate evidence, and Model Intake artifact checks when complete. Preserves list filter context on back navigation.
-- **Exposure (`/exposure`)**: graph linking domains, targets, APIs, auth roles, third-party JS/vendors, cloud hints, AI targets, MCP tools, model artifacts, scans, and findings.
-- **Continuous ASM (`/asm`)**: target coverage, family proof rollups, scheduler decisions, endpoint inventory, gaps, recommendations, and target campaign timeline.
+- **Exposure (`/exposure`)**: graph linking domains, targets, APIs, auth roles, third-party JS/vendors, cloud hints, AI targets, MCP tools, model artifacts, scans, and findings. Registered web assets expose a separate **Investigate autonomously** action that launches a target-bound hunt after readiness and authorization checks.
+- **Continuous ASM (`/asm`)**: target coverage, family proof rollups, scheduler decisions, endpoint inventory, gaps, recommendations, and target campaign timeline. **Close gaps autonomously** launches an ASM-bound mission; ordinary improve/test actions remain available separately.
 - **New Scan (`/scan/new`)**: scan type grid (6 types with duration/description), coverage budget selector (`fast`, `balanced`, `thorough`, `exhaustive`), advanced option toggles (Active Testing, Nuclei Templates, Subdomain Discovery, Enhanced DNS, JS Dependency Scanning, JS Secret Scanning), and optional custom budget overrides. Warning for active testing types.
 - **Targets (`/targets`)**: hierarchical tree (root domains with collapsible subdomains), filter by discovery source/grade/has-findings, sort by domain/last-scanned/findings/score/date, search. Actions: add target, scan individual (dropdown), scan all in domain set, discover subdomains, create schedule (icon link). Shows subdomain count, scan count, findings count, grade per target.
 - **Schedules (`/schedules`)**: create/toggle/delete recurring daily/weekly actions. Supports normal scans, typed ASM coverage waves (`asm_improve`), and approval-gated evidence-retention sweeps (`evidence_retention_sweep`).
 - **Findings (`/findings`)**: filter by DAST, AI Gate, Model Intake, ASM, or Manual source plus severity/status/last-seen/domain/search; sort by severity/first-seen/last-seen/CVSS; bulk cleanup with dry-run preview.
-- **Finding Detail (`/findings/{id}`)**: status triage buttons (active/resolved/false_positive/accepted_risk), **delete finding** with confirmation, source badge, analyst notes, CVSS, CWE link, evidence summary (URLs, payloads, parameters, status codes, response anomalies), remediation steps, AI analysis (verdict/confidence/rationale/recommendations), raw HTTP request/response, copy buttons for URLs/payloads/IDs, external links to vulnerable URLs.
+- **Finding Detail (`/findings/{id}`)**: status triage buttons (active/resolved/false_positive/accepted_risk), **delete finding** with confirmation, source badge, analyst notes, CVSS, CWE link, evidence summary (URLs, payloads, parameters, status codes, response anomalies), remediation steps, AI analysis (verdict/confidence/rationale/recommendations), raw HTTP request/response, copy buttons for URLs/payloads/IDs, external links to vulnerable URLs, one-shot proof replay, and a separate **Investigate autonomously** action for target-linked DAST/ASM/manual web findings. The autonomous exact-finding mission may run at most one bounded proof replay, waits for it, and returns to a visible outcome.
 - **AI Gate (`/settings/ai-gate`)**: create and manage AI targets, use Secure RAG + Agent presets, choose auth, target type, probe pack, profile, and environment, then queue AI safety scans for chat APIs, RAG APIs, agent traces, and MCP endpoints.
 - **Model Intake (`/settings/model-intake`)**: use model-intake presets and queue artifact checks with artifact URL, metadata URL/JSON, checksum, detached signature URL/value, public key URL/PEM, trusted key PEM/fingerprints, policy profile, model card, approval flags, timeout, and download cap.
 - **Policy Profiles (`/settings/policy-profiles`)**: create, edit, activate/deactivate, and delete deployment gate profiles for AI Gate, Model Intake, and DAST decisions. Model Intake can select saved active profiles.
 - **Interactive (`/interactive`)**: browser sessions, managed credential profiles, target principals, authz expectations, endpoint replay, screenshots, and explicit manual finding creation.
 - **Exceptions (`/settings/exceptions`)**: exception queue, owner/approver/control repair, expiry visibility, and lifecycle sweep.
 - **Command Arsenal (`/settings/arsenal`)**: command contracts, plans, scope/approval receipts, action ledger, hypotheses, refuters, tools, local agents, context packs, and decision traces.
-- **Autonomous Hunt (`/settings/research-agent`)**: create target-bound analysis or gated active episodes and optionally run them with durable server-side autopilot. The controller leases one episode at a time, waits for linked scans, retries transient/planner-policy failures with bounded feedback, and continues if the browser closes. Inspect immutable observations, budgets, decisions, errors, and events; pause/resume or cancel the episode plus linked active scans. The lead backlog remains at `/settings/research-agent/leads`.
+- **Autonomous Hunt (`/settings/research-agent`)**: create target-bound analysis or gated active episodes and optionally run them with durable server-side autopilot. Subject-bound launch profiles cover target hunts, exact-finding verification, and ASM gap closure. The controller leases one episode at a time, waits for linked scans and finding retests, rejects duplicate no-progress actions, reserves a final conclusion turn, meters failed provider attempts, and continues if the browser closes. Inspect the actual model, immutable observations, linked work, finding outcome, request-unit budgets, decisions, errors, and events; pause/resume or cancel the episode plus linked work. The lead backlog remains at `/settings/research-agent/leads`.
 - **Settings (`/settings`)**: AI providers, scan execution policy, automation defaults, and approval-receipt enforcement.
 - **Application Graph (`/targets/{id}/graph`)**: inspect persisted route/object/principal nodes, producer/consumer/auth-boundary edges, node/edge filters, search, and selected-node connections.
 
@@ -424,6 +424,22 @@ registered action at a time from a fresh, redacted target observation. The API r
 for command schemas, target binding, scope, approval, risk, budget, execution, and proof.
 
 ```bash
+# Check whether the configured planner and active-execution gate are ready
+curl http://localhost:8080/research/readiness
+
+# Preferred one-click launch for an exact web finding. Gated execution also requires a current,
+# target-matching approval receipt created through the normal scope/approval APIs.
+curl -X POST http://localhost:8080/research/launch \
+  -H "Content-Type: application/json" \
+  -d '{
+    "subject_type": "finding",
+    "subject_id": "finding-uuid",
+    "mission_profile": "verify_finding",
+    "intensity": "hunt",
+    "approval_receipt_id": "approval-uuid",
+    "autopilot": true
+  }'
+
 # Create a five-step read-only episode
 curl -X POST http://localhost:8080/research/episodes \
   -H "Content-Type: application/json" \
@@ -433,7 +449,7 @@ curl -X POST http://localhost:8080/research/episodes \
     "execution_mode": "read_only",
     "max_risk_tier": "read_only",
     "max_steps": 5,
-    "autopilot": true
+    "autopilot": false
   }'
 
 # Run one step with the configured AI provider
@@ -441,7 +457,8 @@ curl -X POST http://localhost:8080/research/episodes/{episode_id}/plan-step \
   -H "Content-Type: application/json" \
   -d '{"execute": true}'
 
-# Or drive the same episode with the signed-in local Codex CLI
+# Or drive this autopilot-disabled episode with the signed-in local Codex CLI.
+# The local runner fails fast if server autopilot is enabled so two planners cannot race.
 ./scanner.sh research {episode_id} 5
 
 # Inspect or cancel
@@ -456,7 +473,9 @@ approval receipt, explicit active budgets, and `AI_OPS_ROUTER_EXECUTE_ENABLED=tr
 allowlist is Continuous ASM recon/test/improve, focused-family scans, and finding retests. The model
 cannot provide receipt IDs in a decision, access credentials, use raw shell, or create verified
 findings. A decision must reference the current observation ID/hash and declare its expected signal
-and falsifier.
+and falsifier. Request budgets shown for queued scans/ASM work are conservative reservation units,
+not a claim of exact outbound HTTP metering. Autopilot waits for both linked scans and retests before
+creating exactly one result-bearing observation and choosing another action.
 
 ### Subdomain Discovery
 

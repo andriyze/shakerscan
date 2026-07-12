@@ -770,28 +770,42 @@ Hypothesis proof reconciliation is separately approval-gated and can only link a
 `exploited` canonical finding with exact campaign-action, target, family, and route dimensions; it
 never creates or verifies a finding from lead context.
 
-**Bounded Research Agent**: `POST|GET /research/episodes` ·
-`GET /research/episodes/{id}` · `POST /research/episodes/{id}/plan-step` ·
-`POST /research/episodes/{id}/decisions` · `POST /research/episodes/{id}/observe` ·
+**Bounded Research Agent**: `GET /research/readiness` · `POST /research/launch` ·
+`POST|GET /research/episodes` · `GET /research/episodes/{id}` ·
+`POST /research/episodes/{id}/plan-step` · `POST /research/episodes/{id}/decisions` ·
+`POST /research/episodes/{id}/observe` · `POST /research/episodes/{id}/settle` ·
 `POST /research/episodes/{id}/cancel`. An episode is a target-bound state machine over immutable,
 redacted `ObservationPack` rows and exactly-one-action `DecisionEpisode` rows. Decisions are bound to
 the current observation ID/hash, cannot carry receipts or credentials, must declare an expected
-signal and falsifier, and consume bounded step/action/time/request/model-token budgets. Shadow mode
+signal and falsifier, and consume bounded step/action/time/request/model-token budgets. The launch
+API supplies server-owned target-hunt, exact-finding, and ASM-gap missions, deduplicates concurrent
+one-click launches, and reserves a final synthesis step. The UI launches these missions from Finding
+Detail, Continuous ASM, and registered web assets in Exposure as well as from the main Autonomous
+Hunt page. Linked scans and finding retests must settle
+before exactly one result-bearing observation is attached. No-progress duplicate actions are rejected
+until a state-changing action occurs, and provider failures meter model usage before retry. Scan/ASM
+request values are conservative reservation units rather than exact HTTP counts. Shadow mode
 records decisions without dispatch. Read-only mode dispatches only the target-scoped inspection
 allowlist. Gated mode can additionally dispatch `asm.improve`, `asm.recon`, `asm.test`,
 `finding.retest`, `scan.focused_family`, `experiment.http_diff`, and `experiment.workflow` through the existing Arsenal gateway when a matching
 scope/approval receipt and the global execution flag are present. Target IDs/URLs and receipts are
 injected by the server. The configured AI provider can plan one step from the UI/API; the host-side
-`./scanner.sh research <episode-id> [max-decisions]` runner uses an isolated ephemeral Codex process.
-Neither planner path can mint proof or findings. Cancellation terminates the episode and best-effort
-cancels linked pending/running scans.
+`./scanner.sh research <episode-id> [max-decisions]` uses an isolated ephemeral Codex process and
+fails fast when server autopilot is enabled for the episode, preventing two planners from racing the
+same immutable observation. Pause server autopilot before invoking the local runner. The command
+prints a compact decision/episode receipt and UI path instead of the full observation pack.
+Neither planner path can mint proof or findings. Cancellation terminates the episode, cancels linked
+queued retests and pending/running scans where possible, and reports already-running retests as
+continuing rather than pretending they stopped.
 
 `experiment.http_diff` is the first typed adaptive experiment actuator. It accepts two to four
 anonymous control/mutation/verification requests using relative same-origin paths, JSON or form
 bodies, bounded query/header mutations, and named scalar extraction from non-sensitive JSON paths
 or response headers. Later steps may reference extracted resource values as `${name}`; every
 rendered request is revalidated before dispatch. It forbids model-supplied credential/host headers
-and redirects. Variable references and extract names are preflighted across the complete experiment,
+and redirects. Autonomous planner proposals are limited to non-destructive `GET`, `HEAD`, `OPTIONS`,
+and `POST`; the manual typed-experiment surface retains the broader runtime method contract. Variable
+references and extract names are preflighted across the complete experiment,
 so undeclared, forward, duplicate, or over-budget variables fail before any request is sent. Query
 and form values are constrained to bounded scalars. Responses are closed after a capped streaming
 prefix, extracted values are persisted as hash/length metadata, and failed steps are marked
@@ -810,7 +824,9 @@ or browser request. Results contain content-free principal/profile/role/tenant i
 bounded mixed HTTP/browser observations, and unverified comparisons. A caller-supplied workflow UUID
 allows cooperative cancellation through `POST /experiments/workflows/{id}/cancel`; cancellation is
 checked between steps and browser contexts always close in a `finally` block. Workflow output cannot
-create or verify a finding.
+create or verify a finding. Unattended research exposes only `GET`, `HEAD`, `OPTIONS`, and `POST`
+HTTP steps for both experiment commands; `PUT`, `PATCH`, and `DELETE` remain available only through
+manual typed experiment execution with explicit operator control and cleanup.
 
 **Read-only MCP**: `./scanner.sh mcp` starts a stdio MCP adapter over `POST /arsenal/execute`.
 It exposes targets, ASM gaps, findings, content-free evidence manifests, the mission timeline,
@@ -1034,8 +1050,8 @@ it is the exhaustive backstop behind the human-readable product map above.
 
 | Surface | Count | Source |
 |---|---|---|
-| Public REST operations | 208 | `api/api.py` FastAPI decorators |
-| Unique REST paths | 167 | `api/api.py` |
+| Public REST operations | 211 | `api/api.py` FastAPI decorators |
+| Unique REST paths | 170 | `api/api.py` |
 | Check families | 13 | `api/check_registry.py` |
 | Command Arsenal commands | 75 | `api/command_arsenal.py` |
 | Tool adapters | 13 | `api/command_arsenal.py` |
@@ -1193,6 +1209,9 @@ it is the exhaustive backstop behind the human-readable product map above.
 | `POST` | `/research/episodes/{episode_id}/decisions` | `submit_research_decision` |
 | `POST` | `/research/episodes/{episode_id}/observe` | `refresh_research_observation` |
 | `POST` | `/research/episodes/{episode_id}/plan-step` | `plan_research_episode_step` |
+| `POST` | `/research/episodes/{episode_id}/settle` | `settle_research_episode` |
+| `POST` | `/research/launch` | `launch_research_episode` |
+| `GET` | `/research/readiness` | `research_readiness` |
 | `GET` | `/results` | `list_results` |
 | `GET` | `/results/{target_folder}/latest` | `get_latest_result` |
 | `GET` | `/retests/finding/{finding_id:path}` | `list_finding_retests` |

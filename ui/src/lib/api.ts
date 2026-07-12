@@ -282,6 +282,9 @@ export interface ResearchEpisode {
   objective: string
   episode_version: string
   planner: Record<string, unknown>
+  mission_profile?: string
+  subject?: { type?: string; id?: string; title?: string; family?: string }
+  allowed_commands?: string[]
   execution_mode: 'shadow' | 'read_only' | 'gated'
   status: string
   version: number
@@ -328,11 +331,14 @@ export interface ResearchObservation {
   observation_pack: {
     objective?: string
     execution_mode?: string
+    mission?: Record<string, unknown>
+    focus?: Record<string, unknown>
     current_gaps?: Array<Record<string, unknown>>
     hypotheses_summary?: Array<Record<string, unknown>>
     findings_summary?: Array<Record<string, unknown>>
     remaining_budget?: ResearchBudget
     proposable_commands?: ResearchCommandProjection[]
+    recent_actions?: Array<Record<string, unknown>>
     previous_observation?: Record<string, unknown>
   }
   previous_command_result_id?: string | null
@@ -354,6 +360,7 @@ export interface ResearchDecision {
   validation_errors: string[]
   validation_warnings: string[]
   policy_result: Record<string, unknown>
+  planner?: Record<string, unknown>
   command_result_id?: string | null
   created_at?: string
 }
@@ -373,6 +380,12 @@ export interface ResearchEpisodeDetail {
   observations: ResearchObservation[]
   decisions: ResearchDecision[]
   events: ResearchEvent[]
+  waiting_on?: Array<{
+    kind: 'scan' | 'finding_retest' | string
+    id: string
+    status: string
+    ui_path?: string
+  }>
   accepted?: boolean
   dispatched?: boolean
   decision_id?: string
@@ -391,6 +404,29 @@ export interface ResearchEpisodeCreateRequest {
   approval_receipt_id?: string
   created_by?: string
   autopilot?: boolean
+}
+
+export interface ResearchEpisodeLaunchRequest {
+  subject_type: 'target' | 'finding' | 'asm'
+  subject_id: string
+  mission_profile: 'target_hunt' | 'verify_finding' | 'close_asm_gaps'
+  intensity: 'analyze' | 'hunt' | 'relentless'
+  approval_receipt_id?: string
+  autopilot?: boolean
+  force_new?: boolean
+  created_by?: string
+}
+
+export interface ResearchEpisodeLaunchResponse extends ResearchEpisodeDetail {
+  ui_path?: string
+  reused: boolean
+}
+
+export interface ResearchReadiness {
+  planner_ready: boolean
+  execution_enabled: boolean
+  model?: string | null
+  fallback_models: string[]
 }
 
 export interface CommandResult {
@@ -1822,7 +1858,7 @@ export interface AutomationSettingsUpdate extends ScanExecutionSettingsUpdate {
 
 export interface AIProbeResponse {
   status: 'ok' | 'failed'
-  scope: 'scan' | 'verify'
+  scope: 'scan' | 'verify' | 'research'
   probe: {
     ok: boolean
     error?: string | null
@@ -2854,6 +2890,22 @@ export async function createResearchEpisode(payload: ResearchEpisodeCreateReques
   return res.json()
 }
 
+export async function launchResearchEpisode(payload: ResearchEpisodeLaunchRequest): Promise<ResearchEpisodeLaunchResponse> {
+  const res = await fetch(`${API_URL}/research/launch`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to launch autonomous investigation'))
+  return res.json()
+}
+
+export async function getResearchReadiness(): Promise<ResearchReadiness> {
+  const res = await fetch(`${API_URL}/research/readiness`)
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to check autonomous investigation readiness'))
+  return res.json()
+}
+
 export async function planResearchEpisodeStep(episodeId: string, payload: {
   execute?: boolean
   timeout_seconds?: number
@@ -3294,6 +3346,12 @@ export async function routeAiOps(payload: {
 }
 
 // Targets
+export async function getTarget(targetId: string): Promise<Target> {
+  const res = await fetch(`${API_URL}/targets/${encodeURIComponent(targetId)}`)
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to fetch target'))
+  return res.json()
+}
+
 export async function getTargets(params?: { includeInactive?: boolean }) {
   const searchParams = new URLSearchParams()
   if (params?.includeInactive) searchParams.set('include_inactive', 'true')
@@ -4262,7 +4320,7 @@ export async function updateAutomationSettings(data: AutomationSettingsUpdate): 
 }
 
 export async function testAISettings(data: {
-  scope: 'scan' | 'verify'
+  scope: 'scan' | 'verify' | 'research'
   ai_url?: string
   ai_api_key?: string
   ai_model?: string
@@ -5060,7 +5118,7 @@ export async function deactivateTargetPrincipal(targetId: string, principalId: s
   return res.json()
 }
 
-export async function createTargetPolicyApproval(targetId: string, targetUrl: string): Promise<string> {
+export async function createTargetPolicyApproval(targetId: string, targetUrl: string, ttlMinutes: number = 120): Promise<string> {
   const parsed = new URL(targetUrl)
   const scope = await previewScopeReceipt({
     url: targetUrl,
@@ -5078,6 +5136,7 @@ export async function createTargetPolicyApproval(targetId: string, targetUrl: st
     risk_tier: 'active',
     confirmations,
     approved_by: 'interactive-ui',
+    expires_at: new Date(Date.now() + Math.max(5, Math.min(ttlMinutes, 24 * 60)) * 60_000).toISOString(),
   })
   return approval.approval_receipt.id
 }

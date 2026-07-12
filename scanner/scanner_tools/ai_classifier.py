@@ -12,7 +12,7 @@ import re
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import urlparse
 
 try:
@@ -848,6 +848,75 @@ async def _sleep_with_budget(delay_seconds: float, deadline_monotonic: float | N
     return True
 
 
+def _write_provider_failure_meta(
+    sink: dict[str, Any] | None,
+    *,
+    model_requested: str,
+    provider_kind: str | None,
+    attempts: list[dict[str, Any]] | None = None,
+    usage: dict[str, int] | None = None,
+    planning_units_spent: int = 0,
+    errors: list[str] | None = None,
+    latency_ms: int | None = None,
+) -> None:
+    """Write bounded, non-secret failure provenance without changing the call result tuple.
+
+    The research controller persists this dictionary through a redactor that intentionally hides
+    credential- and token-shaped keys.  Unit-neutral names keep model usage observable while the
+    provider client's public return contract remains backward compatible.
+    """
+    if sink is None:
+        return
+
+    bounded_attempts: list[dict[str, Any]] = []
+    for raw_attempt in (attempts or [])[-12:]:
+        bounded_attempts.append({
+            "model": str(raw_attempt.get("model") or "")[:160] or None,
+            "mode": str(raw_attempt.get("mode") or "")[:80] or None,
+            "attempt": max(0, int(raw_attempt.get("attempt") or 0)),
+            "request_sent": bool(raw_attempt.get("request_sent")),
+        })
+
+    compact_errors: list[str] = []
+    for raw_error in errors or []:
+        error = " ".join(str(raw_error or "").split())[:400]
+        if error and error not in compact_errors:
+            compact_errors.append(error)
+        if len(compact_errors) >= 3:
+            break
+
+    usage = usage or {}
+    neutral_usage = {
+        "prompt_units": max(0, int(usage.get("prompt_units") or 0)),
+        "completion_units": max(0, int(usage.get("completion_units") or 0)),
+        "total_units": max(0, int(usage.get("total_units") or 0)),
+    }
+    attempted_models = list(dict.fromkeys(
+        str(item.get("model")) for item in bounded_attempts if item.get("model")
+    ))
+    attempted_modes = list(dict.fromkeys(
+        str(item.get("mode")) for item in bounded_attempts if item.get("mode")
+    ))
+    last_attempt = bounded_attempts[-1] if bounded_attempts else None
+
+    sink.clear()
+    sink.update({
+        "model_requested": str(model_requested or "")[:160] or None,
+        "provider_kind": str(provider_kind or "")[:80] or None,
+        "attempted_models": attempted_models,
+        "attempted_modes": attempted_modes,
+        "attempt_count": len(attempts or []),
+        "attempts": bounded_attempts,
+        "last_model_attempted": last_attempt.get("model") if last_attempt else None,
+        "last_mode_attempted": last_attempt.get("mode") if last_attempt else None,
+        "usage": neutral_usage,
+        "planning_units_spent": max(0, int(planning_units_spent or 0)),
+        "errors": compact_errors,
+        "error": "; ".join(compact_errors)[:800] or "AI provider call failed",
+        "latency_ms": max(0, int(latency_ms or 0)),
+    })
+
+
 async def call_ai_provider(
     ai_url: str,
     ai_api_key: str,
@@ -860,6 +929,9 @@ async def call_ai_provider(
     fallback_models: str | list[str] | None = None,
     overall_budget_seconds: int | None = None,
     use_circuit_breaker: bool = True,
+    response_validator: Callable[[dict[str, Any]], str | None] | None = None,
+    token_budget: int | None = None,
+    failure_meta_sink: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any] | None, str | None, int | None]:
     """
     Call AI provider and parse JSON response with model/mode fallback.
@@ -873,20 +945,49 @@ async def call_ai_provider(
         fallback_models: Optional comma-separated string or list of fallback model IDs.
         overall_budget_seconds: Optional hard cap for the entire model/mode fallback chain.
         use_circuit_breaker: When true, fail fast while transient provider failures are cooling down.
+        response_validator: Optional semantic validator. Return an error string to make the
+            provider client retry/downgrade/fall back instead of accepting a merely parseable dict.
+        token_budget: Optional hard planning-unit cap across retries, modes, and fallback models.
+        failure_meta_sink: Optional mutable dictionary populated with bounded provenance and
+            cumulative usage whenever this call returns a failure. It is cleared on entry and is
+            intentionally not part of the return tuple for compatibility with existing callers.
 
     Returns:
         Tuple of (parsed_response, error_message, latency_ms)
     """
+    if failure_meta_sink is not None:
+        failure_meta_sink.clear()
+
     if aiohttp is None:
         logger.error("AI validation failed: aiohttp not installed")
+        _write_provider_failure_meta(
+            failure_meta_sink,
+            model_requested=model,
+            provider_kind=None,
+            errors=["aiohttp not installed"],
+        )
         return None, "aiohttp not installed", None
 
     if not ai_url or not ai_api_key:
+        _write_provider_failure_meta(
+            failure_meta_sink,
+            model_requested=model,
+            provider_kind=_provider_kind_from_url(ai_url) if ai_url else None,
+            errors=["AI provider URL/API key not configured"],
+        )
         return None, "AI provider URL/API key not configured", None
 
     model_chain = _parse_model_chain(model, fallback_models)
     if not model_chain:
+        _write_provider_failure_meta(
+            failure_meta_sink,
+            model_requested=model,
+            provider_kind=_provider_kind_from_url(ai_url),
+            errors=["AI model not configured"],
+        )
         return None, "AI model not configured", None
+
+    provider_kind = _provider_kind_from_url(ai_url)
 
     effective_budget_seconds = (
         AI_CLASSIFY_CHAIN_BUDGET_SECONDS
@@ -908,16 +1009,25 @@ async def call_ai_provider(
                 "after repeated transient failures"
             )
             logger.warning(error)
+            _write_provider_failure_meta(
+                failure_meta_sink,
+                model_requested=model,
+                provider_kind=provider_kind,
+                errors=[error],
+                latency_ms=0,
+            )
             return None, error, 0
 
-    provider_kind = _provider_kind_from_url(ai_url)
     headers = _build_request_headers(ai_api_key, provider_kind)
     total_start = time.time()
     cumulative_latency_ms = 0
     attempt_errors: list[str] = []
     budget_error: str | None = None
+    usage_totals = {"prompt_units": 0, "completion_units": 0, "total_units": 0}
+    planning_units_spent = 0
+    attempted_routes: list[dict[str, Any]] = []
 
-    for model_name in model_chain:
+    for model_index, model_name in enumerate(model_chain):
         if _is_budget_exhausted(budget_deadline_monotonic):
             budget_error = f"AI provider budget exceeded {effective_budget_seconds}s"
             break
@@ -927,7 +1037,7 @@ async def call_ai_provider(
         else:
             mode_candidates = _build_response_format_candidates(model_name, json_schema)
 
-        for mode_name, response_format in mode_candidates:
+        for mode_index, (mode_name, response_format) in enumerate(mode_candidates):
             if _is_budget_exhausted(budget_deadline_monotonic):
                 budget_error = f"AI provider budget exceeded {effective_budget_seconds}s"
                 break
@@ -936,6 +1046,13 @@ async def call_ai_provider(
             strict_retry = False
 
             for attempt in range(AI_RETRY_ATTEMPTS):
+                attempt_route = {
+                    "model": model_name,
+                    "mode": mode_name,
+                    "attempt": attempt,
+                    "request_sent": False,
+                }
+                attempted_routes.append(attempt_route)
                 if _is_budget_exhausted(budget_deadline_monotonic):
                     mode_error = f"AI provider budget exceeded {effective_budget_seconds}s"
                     budget_error = mode_error
@@ -949,6 +1066,23 @@ async def call_ai_provider(
                     max_tokens_for_attempt = min(
                         MAX_REASONING_RETRY_TOKENS,
                         max(max_tokens_for_attempt + 1000, max_tokens_for_attempt * 2),
+                    )
+                if token_budget is not None:
+                    remaining_token_units = max(0, int(token_budget) - planning_units_spent)
+                    prompt_reservation = max(
+                        1,
+                        (
+                            sum(len(str(item.get("content") or "").encode("utf-8")) for item in messages_for_attempt)
+                            + 2
+                        ) // 3,
+                    )
+                    if remaining_token_units <= prompt_reservation:
+                        mode_error = f"AI provider token budget exhausted ({token_budget})"
+                        budget_error = mode_error
+                        break
+                    max_tokens_for_attempt = max(
+                        1,
+                        min(max_tokens_for_attempt, remaining_token_units - prompt_reservation),
                     )
 
                 body = _build_request_body(
@@ -973,6 +1107,7 @@ async def call_ai_provider(
 
                     timeout = aiohttp.ClientTimeout(total=request_timeout_seconds)
                     async with aiohttp.ClientSession(timeout=timeout) as sess:
+                        attempt_route["request_sent"] = True
                         async with sess.post(ai_url, json=body, headers=headers) as resp:
                             latency_ms = int((time.time() - start) * 1000)
                             cumulative_latency_ms += latency_ms
@@ -995,6 +1130,16 @@ async def call_ai_provider(
 
                                 # Auth errors are definitive; no point rotating models.
                                 if resp.status in {401, 403}:
+                                    _write_provider_failure_meta(
+                                        failure_meta_sink,
+                                        model_requested=model,
+                                        provider_kind=provider_kind,
+                                        attempts=attempted_routes,
+                                        usage=usage_totals,
+                                        planning_units_spent=planning_units_spent,
+                                        errors=[mode_error],
+                                        latency_ms=cumulative_latency_ms,
+                                    )
                                     return None, mode_error, cumulative_latency_ms
 
                                 # If response_format is rejected, try less strict mode.
@@ -1019,8 +1164,49 @@ async def call_ai_provider(
                                     continue
                                 break
 
+                            usage = response_data.get("usage") if isinstance(response_data, dict) else None
+                            attempt_total_units = 0
+                            if isinstance(usage, dict):
+                                try:
+                                    prompt_units = max(0, int(
+                                        usage.get("prompt_tokens") or usage.get("input_tokens") or 0
+                                    ))
+                                except (TypeError, ValueError):
+                                    prompt_units = 0
+                                try:
+                                    completion_units = max(0, int(
+                                        usage.get("completion_tokens") or usage.get("output_tokens") or 0
+                                    ))
+                                except (TypeError, ValueError):
+                                    completion_units = 0
+                                try:
+                                    attempt_total_units = max(0, int(usage.get("total_tokens") or 0))
+                                except (TypeError, ValueError):
+                                    attempt_total_units = 0
+                                if not attempt_total_units:
+                                    attempt_total_units = prompt_units + completion_units
+                                usage_totals["prompt_units"] += prompt_units
+                                usage_totals["completion_units"] += completion_units
+
                             parsed = _extract_direct_parsed_json(response_data)
+                            parse_method = "provider_parsed" if parsed is not None else "content_json"
                             content_text, reasoning_text = _extract_content_and_reasoning(response_data)
+                            if not attempt_total_units:
+                                attempt_total_units = max(
+                                    1,
+                                    (
+                                        sum(len(str(item.get("content") or "").encode("utf-8")) for item in messages_for_attempt)
+                                        + len(str(content_text or "").encode("utf-8"))
+                                        + len(str(reasoning_text or "").encode("utf-8"))
+                                        + 3
+                                    ) // 4,
+                                )
+                            usage_totals["total_units"] += attempt_total_units
+                            planning_units_spent += attempt_total_units
+                            if token_budget is not None and planning_units_spent > int(token_budget):
+                                mode_error = f"AI provider token budget exceeded ({planning_units_spent}/{token_budget})"
+                                budget_error = mode_error
+                                break
                             if parsed is None and content_text:
                                 parsed = _extract_json_payload(content_text)
 
@@ -1044,12 +1230,48 @@ async def call_ai_provider(
                                 mode_error = "AI response JSON is not an object"
                                 break
 
+                            if response_validator is not None:
+                                try:
+                                    validation_error = response_validator(parsed)
+                                except Exception as exc:
+                                    validation_error = f"validator_error:{type(exc).__name__}"
+                                if validation_error:
+                                    mode_error = f"Semantic JSON contract rejected: {str(validation_error)[:300]}"
+                                    if attempt < AI_RETRY_ATTEMPTS - 1 and not strict_retry:
+                                        strict_retry = True
+                                        if not await _sleep_with_budget(AI_RETRY_BASE_DELAY, budget_deadline_monotonic):
+                                            mode_error = f"AI provider budget exceeded {effective_budget_seconds}s"
+                                            budget_error = mode_error
+                                            break
+                                        continue
+                                    break
+
+                            finish_reason = None
+                            if isinstance(response_data, dict):
+                                choices = response_data.get("choices")
+                                if isinstance(choices, list) and choices and isinstance(choices[0], dict):
+                                    finish_reason = choices[0].get("finish_reason")
+
                             parsed["_provider_meta"] = {
                                 "model_used": model_name,
                                 "mode_used": mode_name,
                                 "provider_kind": provider_kind,
                                 "latency_ms": latency_ms,
                                 "reasoning_present": bool(reasoning_text),
+                                "parse_method": parse_method,
+                                "fallback_index": model_index,
+                                "mode_index": mode_index,
+                                "attempt_index": attempt,
+                                "finish_reason": str(finish_reason or "")[:80] or None,
+                                "schema_validated": response_validator is not None,
+                                "usage": {
+                                    "prompt_tokens": usage_totals["prompt_units"],
+                                    "completion_tokens": usage_totals["completion_units"],
+                                    "total_tokens": usage_totals["total_units"],
+                                },
+                                "usage_units": dict(usage_totals),
+                                "token_units_spent": planning_units_spent,
+                                "planning_units_spent": planning_units_spent,
                             }
                             if use_circuit_breaker:
                                 _clear_provider_circuit_state()
@@ -1126,6 +1348,16 @@ async def call_ai_provider(
             )
 
     logger.warning(f"AI provider call failed after model/mode fallback chain: {compact_error}")
+    _write_provider_failure_meta(
+        failure_meta_sink,
+        model_requested=model,
+        provider_kind=provider_kind,
+        attempts=attempted_routes,
+        usage=usage_totals,
+        planning_units_spent=planning_units_spent,
+        errors=unique_errors or [compact_error],
+        latency_ms=cumulative_latency_ms or total_latency,
+    )
     return None, compact_error, cumulative_latency_ms or total_latency
 
 

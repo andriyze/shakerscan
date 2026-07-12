@@ -5,6 +5,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "api"))
 
 import command_arsenal as arsenal  # noqa: E402
+import http_experiment  # noqa: E402
+import workflow_experiment  # noqa: E402
 
 
 def test_command_catalog_is_read_only_by_default():
@@ -251,6 +253,144 @@ def test_state_changing_commands_are_gated_not_executable_shortcuts():
         assert cmd["scope_fields"]
         assert cmd["evidence_contract"]
         assert "execute_shell" not in cmd["name"]
+
+
+def test_http_experiment_catalog_exposes_the_bounded_runtime_step_contract():
+    commands = {item["name"]: item for item in arsenal.describe_commands()["commands"]}
+    schema = commands["experiment.http_diff"]["parameters_schema"]
+    steps = schema["steps"]
+    item = steps["items"]
+    properties = item["properties"]
+
+    assert (steps["minItems"], steps["maxItems"]) == (2, http_experiment.MAX_STEPS)
+    assert item["additionalProperties"] is False
+    assert item["required"] == ["label", "method", "path", "role"]
+    assert set(properties) == {
+        "label", "method", "path", "query", "headers", "json_body", "form_body",
+        "extract", "select_json", "select_headers", "role", "compare_to",
+    }
+    assert set(properties["method"]["enum"]) == http_experiment.ALLOWED_METHODS
+    assert properties["path"]["pattern"] == "^/(?!/)"
+    assert properties["query"]["maxProperties"] == 30
+    assert properties["headers"]["maxProperties"] == 20
+    assert properties["form_body"]["maxProperties"] == 50
+    assert properties["extract"]["maxItems"] == http_experiment.MAX_EXTRACTS_PER_STEP
+    assert properties["select_json"]["maxItems"] == 20
+    assert properties["select_headers"]["maxItems"] == 20
+    assert set(properties["role"]["enum"]) == {"control", "mutation", "verify"}
+
+    json_extract, header_extract = properties["extract"]["items"]["oneOf"]
+    assert json_extract["required"] == ["name", "path"]
+    assert json_extract["properties"]["source"]["const"] == "json"
+    assert header_extract["required"] == ["name", "source", "header"]
+    assert header_extract["properties"]["source"]["const"] == "header"
+
+    # Every method advertised to the planner must survive the actual normalizer.
+    for method in properties["method"]["enum"]:
+        normalized = http_experiment.normalize_experiment("https://example.test", {
+            "steps": [
+                {"label": "control", "method": "GET", "path": "/objects/1", "role": "control"},
+                {"label": "candidate", "method": method, "path": "/objects/2", "role": "mutation"},
+            ]
+        })
+        assert normalized["steps"][1]["method"] == method
+
+
+def test_workflow_catalog_exposes_discriminated_http_and_browser_step_contracts():
+    commands = {item["name"]: item for item in arsenal.describe_commands()["commands"]}
+    schema = commands["experiment.workflow"]["parameters_schema"]
+    steps = schema["steps"]
+    item = steps["items"]
+    properties = item["properties"]
+
+    assert (steps["minItems"], steps["maxItems"]) == (2, workflow_experiment.MAX_WORKFLOW_STEPS)
+    assert item["additionalProperties"] is False
+    assert item["required"] == ["label", "kind", "principal", "checkpoint"]
+    assert set(properties) == {
+        "label", "kind", "principal", "checkpoint", "compare_to", "method", "path",
+        "query", "headers", "json_body", "form_body", "action", "data", "extract",
+    }
+    assert set(properties["kind"]["enum"]) == workflow_experiment.ALLOWED_STEP_KINDS
+    assert set(properties["method"]["enum"]) == workflow_experiment.ALLOWED_METHODS
+    assert set(properties["checkpoint"]["enum"]) == workflow_experiment.ALLOWED_CHECKPOINTS
+    assert set(properties["action"]["enum"]) == workflow_experiment.ALLOWED_BROWSER_ACTIONS
+
+    principal_variants = properties["principal"]["oneOf"]
+    assert set(principal_variants[0]["enum"]) == {"anonymous", "user1", "user2", "admin"}
+    assert principal_variants[1]["pattern"] == "^tenant:[A-Za-z0-9_.-]{1,80}$"
+    assert properties["query"]["maxProperties"] == 30
+    assert properties["headers"]["maxProperties"] == 20
+    assert properties["form_body"]["maxProperties"] == 50
+
+    data_variants = {variant["title"]: variant for variant in properties["data"]["oneOf"]}
+    assert set(data_variants) == workflow_experiment.ALLOWED_BROWSER_ACTIONS
+    assert data_variants["navigate"]["required"] == ["path"]
+    assert data_variants["fill"]["required"] == ["selector"]
+    assert data_variants["wait"]["properties"]["timeout"]["maximum"] == 10_000
+
+    action_conditions = {
+        condition["if"]["properties"]["action"]["const"]: condition["then"]
+        for condition in item["allOf"]
+        if "action" in condition.get("if", {}).get("properties", {})
+    }
+    assert set(action_conditions) == workflow_experiment.ALLOWED_BROWSER_ACTIONS
+    assert action_conditions["extract"]["required"] == ["extract"]
+    assert action_conditions["extract"]["properties"]["extract"]["minItems"] == 1
+    for action in workflow_experiment.ALLOWED_BROWSER_ACTIONS - {"extract"}:
+        assert action_conditions[action]["properties"]["extract"]["maxItems"] == 0
+
+
+def test_every_advertised_workflow_action_and_principal_normalizes():
+    command = {
+        item["name"]: item for item in arsenal.describe_commands()["commands"]
+    }["experiment.workflow"]
+    properties = command["parameters_schema"]["steps"]["items"]["properties"]
+    action_data = {
+        "navigate": {"path": "/objects/2"},
+        "click": {"selector": "#open"},
+        "fill": {"selector": "#name", "value": "candidate"},
+        "submit": {"selector": "form"},
+        "wait": {"selector": "#ready", "timeout": 1000},
+        "extract": {"selector": "#result", "attribute": "text"},
+    }
+
+    for action in properties["action"]["enum"]:
+        browser_step = {
+            "label": f"browser-{action}",
+            "kind": "browser",
+            "principal": "anonymous",
+            "checkpoint": "action",
+            "action": action,
+            "data": action_data[action],
+        }
+        if action == "extract":
+            browser_step["extract"] = [{"name": "result_value", "selector": "#result", "attribute": "text"}]
+        normalized = workflow_experiment.normalize_workflow("https://example.test", {
+            "steps": [
+                {
+                    "label": "control", "kind": "http", "principal": "anonymous",
+                    "checkpoint": "before", "method": "GET", "path": "/objects/1",
+                },
+                browser_step,
+            ]
+        })
+        assert normalized["steps"][1]["action"] == action
+
+    principal_examples = [*properties["principal"]["oneOf"][0]["enum"], "tenant:acme-1"]
+    for principal in principal_examples:
+        normalized = workflow_experiment.normalize_workflow("https://example.test", {
+            "steps": [
+                {
+                    "label": "control", "kind": "http", "principal": "anonymous",
+                    "checkpoint": "before", "method": "GET", "path": "/objects/1",
+                },
+                {
+                    "label": "candidate", "kind": "http", "principal": principal,
+                    "checkpoint": "after", "method": "GET", "path": "/objects/2",
+                },
+            ]
+        })
+        assert normalized["steps"][1]["principal"] == principal
 
 
 def test_no_raw_shell_or_generic_execution_commands_are_exposed():

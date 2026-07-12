@@ -1448,6 +1448,10 @@ async def run_schema_migrations(pool) -> None:
                 ON command_results(campaign_id, created_at DESC) WHERE campaign_id IS NOT NULL
             """)
             await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_command_results_created_by
+                ON command_results(created_by, created_at DESC) WHERE created_by IS NOT NULL
+            """)
+            await conn.execute("""
                 CREATE TABLE IF NOT EXISTS campaign_actions (
                     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                     campaign_id UUID REFERENCES scan_campaigns(id) ON DELETE SET NULL,
@@ -1816,12 +1820,31 @@ async def run_schema_migrations(pool) -> None:
                 WHERE autopilot_enabled = true AND status = 'awaiting_planner'
             """)
             await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_research_episodes_autopilot_work
+                ON research_episodes(updated_at)
+                WHERE autopilot_enabled = true
+                  AND status IN ('awaiting_planner', 'awaiting_observation')
+            """)
+            await conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_research_episodes_target
                 ON research_episodes(target_id, created_at DESC)
             """)
             await conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_research_episodes_status
                 ON research_episodes(status, updated_at DESC)
+            """)
+            await conn.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_research_episodes_active_launch
+                ON research_episodes (
+                    target_id,
+                    (planner #>> '{mission,profile}'),
+                    (planner #>> '{mission,subject,type}'),
+                    (planner #>> '{mission,subject,id}'),
+                    execution_mode,
+                    (planner->>'launch_intensity')
+                )
+                WHERE planner->>'dedupe_launch' = 'true'
+                  AND status NOT IN ('completed','cancelled','failed','budget_exhausted','blocked')
             """)
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS research_observations (
@@ -2119,6 +2142,7 @@ async def run_schema_migrations(pool) -> None:
                 "CREATE INDEX IF NOT EXISTS idx_finding_verifications_verdict ON finding_verifications(verdict)",
                 "CREATE INDEX IF NOT EXISTS idx_finding_verifications_job_id ON finding_verifications(job_id) WHERE job_id IS NOT NULL",
                 "CREATE INDEX IF NOT EXISTS idx_finding_verifications_retry_class ON finding_verifications(retry_class) WHERE retry_class IS NOT NULL",
+                "CREATE INDEX IF NOT EXISTS idx_finding_verifications_requested_by ON finding_verifications(requested_by, created_at DESC) WHERE requested_by IS NOT NULL",
                 # Sort/filter hot paths for the /findings list endpoint.
                 "CREATE INDEX IF NOT EXISTS idx_findings_last_seen ON findings(last_seen_at DESC NULLS LAST)",
             ]:

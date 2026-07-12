@@ -7,6 +7,7 @@ FastAPI server with PostgreSQL persistence and Redis queue.
 import asyncio
 import base64
 import copy
+import contextvars
 import fnmatch
 import hashlib
 import io
@@ -159,7 +160,9 @@ from research_agent import (
     RISK_TIER_ORDER as RESEARCH_RISK_TIER_ORDER,
     TARGET_BOUND_COMMANDS,
     TERMINAL_EPISODE_STATUSES,
+    action_cost as _research_action_cost,
     apply_cost as _research_apply_cost,
+    budget_violations as _research_budget_violations,
     canonical_hash as _research_canonical_hash,
     command_projection as _research_command_projection,
     normalize_budget_limits as _research_normalize_budget_limits,
@@ -307,6 +310,10 @@ SCAN_SETTINGS_KEY = os.environ.get("SCAN_SETTINGS_KEY", "settings:scan")
 AUTOMATION_SETTINGS_KEY = os.environ.get("AUTOMATION_SETTINGS_KEY", "settings:automation")
 LOCAL_ENV_FILE = Path(os.environ.get("LOCAL_ENV_FILE", "/workspace/.env"))
 logger = logging.getLogger(__name__)
+_ARSENAL_CREATED_BY_CONTEXT: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "arsenal_created_by",
+    default=None,
+)
 
 # Maximum allowed duration per scan type (minutes) - safety net
 MAX_SCAN_DURATION = {
@@ -3825,6 +3832,8 @@ class AgentDecisionTraceRequest(BaseModel):
 
 
 class ResearchEpisodeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     target_id: str
     objective: str = Field(min_length=1, max_length=2000)
     planner: dict[str, Any] = Field(default_factory=lambda: {"kind": "local_agent", "agent": "codex"})
@@ -3837,11 +3846,19 @@ class ResearchEpisodeRequest(BaseModel):
     approval_receipt_id: Optional[str] = None
     operation_plan_id: Optional[str] = None
     campaign_id: Optional[str] = None
+    subject_type: str = Field(default="target", pattern="^(target|finding|asm)$")
+    subject_id: Optional[str] = Field(default=None, max_length=200)
+    mission_profile: str = Field(
+        default="target_hunt",
+        pattern="^(target_hunt|verify_finding|close_asm_gaps)$",
+    )
     created_by: Optional[str] = Field(default="research_agent_operator", max_length=120)
     autopilot: bool = False
 
 
 class ResearchDecisionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     decision_version: str = Field(default=RESEARCH_DECISION_VERSION)
     decision: str = Field(pattern="^(execute_action|request_input|stop)$")
     observation_id: str
@@ -3875,6 +3892,19 @@ class ResearchPlannerStepRequest(BaseModel):
 class ResearchAutopilotRequest(BaseModel):
     enabled: bool
     created_by: Optional[str] = Field(default="research_agent_operator", max_length=120)
+
+
+class ResearchLaunchRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    subject_type: str = Field(pattern="^(target|finding|asm)$")
+    subject_id: str = Field(min_length=1, max_length=200)
+    mission_profile: str = Field(pattern="^(target_hunt|verify_finding|close_asm_gaps)$")
+    intensity: str = Field(default="hunt", pattern="^(analyze|hunt|relentless)$")
+    approval_receipt_id: Optional[str] = None
+    autopilot: bool = True
+    force_new: bool = False
+    created_by: Optional[str] = Field(default="research_launch_api", max_length=120)
 
 
 class FindingsBulkRetestRequest(BaseModel):
@@ -3997,7 +4027,7 @@ class AutomationSettingsUpdate(ScanExecutionSettingsUpdate):
 
 
 class AISettingsProbeRequest(BaseModel):
-    scope: str = Field(default="scan", pattern="^(scan|verify)$")
+    scope: str = Field(default="scan", pattern="^(scan|verify|research)$")
     ai_url: Optional[str] = None
     ai_api_key: Optional[str] = None
     ai_model: Optional[str] = None
@@ -7400,17 +7430,17 @@ async def update_ai_settings(request: AISettingsUpdate):
 
 @app.post("/settings/ai/test")
 async def test_ai_settings(request: AISettingsProbeRequest):
-    """Test AI provider connectivity/parsing for scan or verify scope."""
+    """Test AI provider connectivity/parsing or the research decision contract."""
     effective = _load_effective_ai_settings()
     scope = request.scope
 
     if scope == "verify":
-        ai_url = (request.ai_url or effective.get("ai_url") or "").strip()
-        ai_api_key = (request.ai_api_key or effective.get("ai_api_key") or "").strip()
-        ai_model = (request.ai_model or effective.get("ai_model") or "").strip()
+        ai_url = (request.ai_url or effective.get("ai_verify_url") or effective.get("ai_url") or "").strip()
+        ai_api_key = (request.ai_api_key or effective.get("ai_verify_api_key") or effective.get("ai_api_key") or "").strip()
+        ai_model = (request.ai_model or effective.get("ai_verify_model") or effective.get("ai_model") or "").strip()
         fallback_models = request.ai_fallback_model
         if fallback_models is None:
-            fallback_models = effective.get("ai_model_fallback") or ""
+            fallback_models = effective.get("ai_verify_model_fallback") or effective.get("ai_model_fallback") or ""
     else:
         ai_url = (request.ai_url or effective.get("ai_url") or "").strip()
         ai_api_key = (request.ai_api_key or effective.get("ai_api_key") or "").strip()
@@ -7425,6 +7455,81 @@ async def test_ai_settings(request: AISettingsProbeRequest):
         raise HTTPException(status_code=400, detail="AI API key is required for probe")
     if not ai_model:
         raise HTTPException(status_code=400, detail="AI model is required for probe")
+
+    if scope == "research":
+        call_provider = _load_research_ai_provider()
+        if not call_provider:
+            raise HTTPException(status_code=503, detail="Shared AI provider client is unavailable")
+        observation = {
+            "id": "00000000-0000-4000-8000-000000000001",
+            "context_hash": "a" * 64,
+            "observation_pack": {
+                "objective": "Run the available harmless read-only ASM gap inspection now.",
+                "execution_mode": "read_only",
+                "target": {
+                    "id": "11111111-1111-4111-8111-111111111111",
+                    "url": "https://example.test",
+                },
+                "current_gaps": [{"kind": "untested_endpoints", "count": 3}],
+                "recent_actions": [],
+                "proposable_commands": [{
+                    "name": "asm.gaps", "proposable": True, "currently_executable": True,
+                    "risk_tier": "read_only", "description": "Explain ASM gaps for one target.",
+                    "parameters_schema": {},
+                    "server_supplied_parameters": ["target_id"],
+                }],
+            },
+        }
+        failure_meta: dict[str, Any] = {}
+        response, error, latency_ms = await call_provider(
+            ai_url=ai_url,
+            ai_api_key=ai_api_key,
+            model=ai_model,
+            messages=_research_planner_messages(observation),
+            timeout_seconds=60,
+            max_tokens=1500,
+            temperature=0.1,
+            json_schema=_research_decision_json_schema(
+                ["asm.gaps"],
+                observation_id=observation["id"],
+                context_hash=observation["context_hash"],
+            ),
+            fallback_models=(fallback_models or "").strip() or None,
+            overall_budget_seconds=60,
+            response_validator=lambda value: _research_provider_contract_error(value, observation),
+            use_circuit_breaker=False,
+            failure_meta_sink=failure_meta,
+        )
+        provider_meta = (
+            response.pop("_provider_meta", {})
+            if isinstance(response, dict) and isinstance(response.get("_provider_meta"), dict)
+            else failure_meta
+        )
+        bound = _bind_research_decision_to_observation(response or {}, observation) if response else None
+        repairs = bound.pop("_harness_repairs", []) if isinstance(bound, dict) else []
+        compatible = bool(response and not error)
+        action_contract_pass = bool(
+            isinstance(bound, dict)
+            and bound.get("decision") == "execute_action"
+            and isinstance(bound.get("action"), dict)
+            and bound["action"].get("command") == "asm.gaps"
+        )
+        return {
+            "status": "ok" if compatible else "failed",
+            "scope": scope,
+            "probe": {
+                "ok": compatible,
+                "native_contract_pass": compatible and not repairs,
+                "action_contract_pass": action_contract_pass,
+                "contract_grade": "native" if compatible and not repairs else "repaired" if compatible else "failed",
+                "error": error,
+                "latency_ms": latency_ms,
+                "provider_meta": _bounded_research_payload(provider_meta),
+                "response": _bounded_research_payload(bound) if bound else None,
+                "harness_repairs": repairs,
+                "execution_enabled": False,
+            },
+        }
 
     probe = await _probe_ai_provider(
         ai_url=ai_url,
@@ -14297,6 +14402,83 @@ def _public_command_result_row(row: Any) -> dict[str, Any]:
     return payload
 
 
+RESEARCH_MISSION_COMMANDS: dict[str, set[str] | None] = {
+    # None means the normal bounded research allowlist for the target.
+    "target_hunt": None,
+    "verify_finding": {"target.get", "finding.get", "finding.retest"},
+    "close_asm_gaps": {
+        "target.get", "target.principals", "target.principal_matrix",
+        "asm.activity", "asm.gaps", "asm.improve", "asm.recon", "asm.test",
+    },
+}
+
+RESEARCH_LAUNCH_PROFILES: dict[str, dict[str, Any]] = {
+    "analyze": {
+        "execution_mode": "read_only", "max_risk_tier": "read_only",
+        "max_steps": 8,
+        "budget_limits": {
+            "steps": 8, "actions": 7, "active_actions": 0, "requests": 0,
+            "seconds": 600, "model_tokens": 75000,
+        },
+    },
+    "hunt": {
+        "execution_mode": "gated", "max_risk_tier": "active",
+        "max_steps": 15,
+        "budget_limits": {
+            "steps": 15, "actions": 14, "active_actions": 6, "requests": 250,
+            "seconds": 1800, "model_tokens": 150000,
+        },
+    },
+    "relentless": {
+        "execution_mode": "gated", "max_risk_tier": "active",
+        "max_steps": 25,
+        "budget_limits": {
+            "steps": 25, "actions": 24, "active_actions": 10, "requests": 500,
+            "seconds": 3600, "model_tokens": 250000,
+        },
+    },
+}
+
+
+def _research_mission(episode: dict[str, Any]) -> dict[str, Any]:
+    planner = episode.get("planner") if isinstance(episode.get("planner"), dict) else {}
+    mission = planner.get("mission") if isinstance(planner.get("mission"), dict) else {}
+    return mission
+
+
+def _research_finding_family(finding: Any) -> str | None:
+    if not finding:
+        return None
+    values = []
+    for key in ("category", "tool", "title", "cwe"):
+        try:
+            values.append(str(finding.get(key) or ""))
+        except AttributeError:
+            values.append("")
+    text = " ".join(values).lower()
+    if any(token in text for token in ("sqli", "sql injection", "cwe-89")):
+        return "sqli"
+    if any(token in text for token in ("xss", "cross-site scripting", "cwe-79")):
+        return "xss"
+    if any(token in text for token in ("bola", "idor", "object access", "cwe-639")):
+        return "bola"
+    if any(token in text for token in ("auth", "session", "jwt", "cwe-287")):
+        return "auth"
+    return None
+
+
+def _research_finding_is_web(finding: Any) -> bool:
+    if not finding:
+        return False
+    source = str(finding.get("source") or "scan").strip().lower()
+    tool = str(finding.get("tool") or "").strip().lower()
+    return (
+        not finding.get("ai_target_id")
+        and source not in {"ai_gate", "ai_session", "model_intake"}
+        and tool != "model_intake"
+    )
+
+
 def _bounded_research_payload(value: Any, *, depth: int = 0) -> Any:
     """Redact and bound planner-visible observations before persistence."""
     if depth > 6:
@@ -14334,6 +14516,10 @@ def _public_research_episode_row(row: Any) -> dict[str, Any]:
         payload.get("execution_mode") != "shadow"
         and (payload.get("execution_mode") == "read_only" or _ai_ops_execute_enabled())
     )
+    mission = _research_mission(payload)
+    payload["mission_profile"] = mission.get("profile") or "target_hunt"
+    payload["subject"] = mission.get("subject") or {"type": "target", "id": payload.get("target_id")}
+    payload["allowed_commands"] = mission.get("allowed_commands") or []
     return payload
 
 
@@ -18503,6 +18689,7 @@ async def _record_command_result(
     result_json: dict[str, Any] | None = None,
     created_by: str | None = None,
 ) -> dict[str, Any]:
+    effective_created_by = _ARSENAL_CREATED_BY_CONTEXT.get() or created_by
     row = await conn.fetchrow(
         """
         INSERT INTO command_results (
@@ -18535,7 +18722,7 @@ async def _record_command_result(
         next_action,
         operator_message,
         json.dumps(redact_sensitive(result_json or {}, redact_strings=True, scrub_text=True)),
-        created_by,
+        effective_created_by,
     )
     result = _public_command_result_row(row)
     await _record_campaign_action_from_command_result(conn, result)
@@ -21789,6 +21976,9 @@ async def _arsenal_dispatch_finding_retest(p: dict[str, Any], approval_receipt_i
         for k in ("finding_type", "target", "original_url", "param", "payload", "method", "request_body", "requested_by")
         if p.get(k) is not None
     }
+    fields["requested_by"] = (
+        str(p.get("requested_by") or _ARSENAL_CREATED_BY_CONTEXT.get() or "api")[:200]
+    )
     body = FindingRetestRequest(approval_receipt_id=approval_receipt_id or p.get("approval_receipt_id"), **fields)
     return await retest_finding(finding_id, body, mode=p.get("mode"))
 
@@ -22838,16 +23028,23 @@ async def _arsenal_execute(conn, req: ArsenalExecuteRequest) -> dict[str, Any]:
         }
 
     # The dispatched handler records its own command_result audit row.
-    result = await adapter(req.parameters, req.approval_receipt_id)
+    context_token = _ARSENAL_CREATED_BY_CONTEXT.set(req.created_by)
+    try:
+        result = await adapter(req.parameters, req.approval_receipt_id)
+    finally:
+        _ARSENAL_CREATED_BY_CONTEXT.reset(context_token)
     operation_id = result.get("operation_id") if isinstance(result, dict) else None
     command_result = None
     await _link_command_result_to_campaign(conn, req.campaign_id, operation_id)
     command_result = await _command_result_response_row(conn, operation_id)
     linked_action = await _link_command_result_to_campaign_action(conn, req.campaign_action_id, command_result)
+    dispatched = bool(operation_id)
+    blocked_reason = None if dispatched else "adapter_returned_no_operation_receipt"
     return {
         "command": req.command,
-        "dispatched": True,
+        "dispatched": dispatched,
         "dry_run": False,
+        "execution_blocked_reason": blocked_reason,
         "result": result,
         "operation_id": operation_id,
         "command_result": command_result,
@@ -22857,17 +23054,18 @@ async def _arsenal_execute(conn, req: ArsenalExecuteRequest) -> dict[str, Any]:
             catalog_status=status,
             risk_tier=risk_tier,
             phase=str(result.get("status") or "dispatched") if isinstance(result, dict) else "dispatched",
-            dispatched=True,
+            dispatched=dispatched,
             dry_run=False,
-            execution_enabled=True,
+            execution_enabled=dispatched,
             operation_id=operation_id,
             command_result=command_result,
             gate_enabled=gate_on,
             missing_confirmations=[],
-            adapter_status="dispatched",
+            blocked_reason=blocked_reason,
+            adapter_status="dispatched" if dispatched else "no_operation_receipt",
         ),
         "campaign_action": linked_action,
-        "execution_enabled": True,
+        "execution_enabled": dispatched,
     }
 
 
@@ -23033,17 +23231,24 @@ async def _arsenal_execute_detached(req: ArsenalExecuteRequest) -> dict[str, Any
             "execution_enabled": False,
         }
 
-    result = await adapter(req.parameters, req.approval_receipt_id)
+    context_token = _ARSENAL_CREATED_BY_CONTEXT.set(req.created_by)
+    try:
+        result = await adapter(req.parameters, req.approval_receipt_id)
+    finally:
+        _ARSENAL_CREATED_BY_CONTEXT.reset(context_token)
     operation_id = result.get("operation_id") if isinstance(result, dict) else None
     command_result = None
     async with db_pool.acquire() as conn:
         await _link_command_result_to_campaign(conn, req.campaign_id, operation_id)
         command_result = await _command_result_response_row(conn, operation_id)
         linked_action = await _link_command_result_to_campaign_action(conn, req.campaign_action_id, command_result)
+    dispatched = bool(operation_id)
+    blocked_reason = None if dispatched else "adapter_returned_no_operation_receipt"
     return {
         "command": req.command,
-        "dispatched": True,
+        "dispatched": dispatched,
         "dry_run": False,
+        "execution_blocked_reason": blocked_reason,
         "result": result,
         "operation_id": operation_id,
         "command_result": command_result,
@@ -23053,17 +23258,18 @@ async def _arsenal_execute_detached(req: ArsenalExecuteRequest) -> dict[str, Any
             catalog_status=status,
             risk_tier=risk_tier,
             phase=str(result.get("status") or "dispatched") if isinstance(result, dict) else "dispatched",
-            dispatched=True,
+            dispatched=dispatched,
             dry_run=False,
-            execution_enabled=True,
+            execution_enabled=dispatched,
             operation_id=operation_id,
             command_result=command_result,
             gate_enabled=gate_on,
             missing_confirmations=[],
-            adapter_status="dispatched",
+            blocked_reason=blocked_reason,
+            adapter_status="dispatched" if dispatched else "no_operation_receipt",
         ),
         "campaign_action": linked_action,
-        "execution_enabled": True,
+        "execution_enabled": dispatched,
     }
 
 
@@ -24522,14 +24728,51 @@ def _research_command_catalog() -> dict[str, dict[str, Any]]:
     return _operation_plan_allowed_commands()
 
 
+def _research_autonomous_parameter_schema(name: str, schema: dict[str, Any]) -> dict[str, Any]:
+    projected = copy.deepcopy(schema)
+    if name not in {"experiment.http_diff", "experiment.workflow"}:
+        return projected
+
+    def constrain_methods(value: Any) -> None:
+        if isinstance(value, dict):
+            enum = value.get("enum")
+            if isinstance(enum, list) and any(
+                str(item).upper() in {"GET", "HEAD", "OPTIONS", "POST", "PUT", "PATCH", "DELETE"}
+                for item in enum
+            ):
+                value["enum"] = [
+                    item for item in enum
+                    if str(item).upper() not in {"PUT", "PATCH", "DELETE"}
+                ]
+            for nested in value.values():
+                constrain_methods(nested)
+        elif isinstance(value, list):
+            for nested in value:
+                constrain_methods(nested)
+
+    constrain_methods(projected)
+    return projected
+
+
 def _research_command_views(episode: dict[str, Any]) -> list[dict[str, Any]]:
     mode = str(episode.get("execution_mode") or "read_only")
     has_approval = bool(episode.get("approval_receipt_id") and episode.get("scope_receipt_id"))
     gate_enabled = _ai_ops_execute_enabled()
+    mission = _research_mission(episode)
+    profile = str(mission.get("profile") or "target_hunt")
+    configured_allowlist = mission.get("allowed_commands")
+    profile_allowlist = RESEARCH_MISSION_COMMANDS.get(profile)
+    allowed_commands = (
+        {str(item) for item in configured_allowlist if str(item)}
+        if isinstance(configured_allowlist, list)
+        else profile_allowlist
+    )
     views: list[dict[str, Any]] = []
     for command in _research_command_catalog().values():
         name = str(command.get("name") or "")
         if name not in READ_ONLY_RESEARCH_COMMANDS and name not in GATED_RESEARCH_COMMANDS:
+            continue
+        if allowed_commands is not None and name not in allowed_commands:
             continue
         view = _research_command_projection(
             command,
@@ -24537,6 +24780,36 @@ def _research_command_views(episode: dict[str, Any]) -> list[dict[str, Any]]:
             has_approval=has_approval,
             execution_feature_enabled=gate_enabled,
         )
+        parameter_schema = (
+            _research_autonomous_parameter_schema(name, dict(view.get("parameters_schema") or {}))
+            if isinstance(view.get("parameters_schema"), dict)
+            else {}
+        )
+        server_supplied = []
+        for control_name in ("approval_receipt_id", "scope_receipt_id", "confirmations", "execute"):
+            if control_name in parameter_schema:
+                parameter_schema.pop(control_name, None)
+                server_supplied.append(control_name)
+        if name in TARGET_BOUND_COMMANDS and "target_id" in parameter_schema:
+            parameter_schema.pop("target_id", None)
+            server_supplied.append("target_id")
+        if name == "scan.focused_family" and "target" in parameter_schema:
+            parameter_schema.pop("target", None)
+            server_supplied.append("target")
+        subject = mission.get("subject") if isinstance(mission.get("subject"), dict) else {}
+        if (
+            name in {"finding.get", "finding.retest"}
+            and str(subject.get("type") or "") == "finding"
+            and "finding_id" in parameter_schema
+        ):
+            parameter_schema.pop("finding_id", None)
+            server_supplied.append("finding_id")
+        view["parameters_schema"] = parameter_schema
+        if name in {"experiment.http_diff", "experiment.workflow"}:
+            view["autonomous_constraints"] = [
+                "DELETE, PUT, and PATCH are unavailable to unattended research experiments; use a manual typed experiment with explicit cleanup for destructive writes.",
+            ]
+        view["server_supplied_parameters"] = sorted(set(server_supplied))
         blocked = list(view.get("blocked_by") or [])
         if mode == "shadow":
             blocked = [reason for reason in blocked if reason not in {"approval_receipt_missing", "execution_feature_disabled"}]
@@ -24550,9 +24823,571 @@ def _research_command_views(episode: dict[str, Any]) -> list[dict[str, Any]]:
             blocked.append("episode_mode_read_only")
             view["proposable"] = False
             view["currently_executable"] = False
+        projected_cost = _research_parameterized_action_cost(
+            command,
+            {},
+            _research_action_cost(command),
+        )
+        view["reserved_cost"] = projected_cost
+        budget_blocks = _research_budget_violations(
+            episode.get("budget_limits") or {},
+            episode.get("budget_used") or {},
+            projected_cost,
+        )
+        launch_intensity = str((episode.get("planner") or {}).get("launch_intensity") or "")
+        if launch_intensity and int((episode.get("remaining_budget") or {}).get("steps") or 0) <= 1:
+            budget_blocks.append("budget_reserved_for_conclusion")
+        if budget_blocks:
+            blocked.extend(budget_blocks)
+            view["proposable"] = False
+            view["currently_executable"] = False
         view["blocked_by"] = list(dict.fromkeys(blocked))
         views.append(view)
     return sorted(views, key=lambda item: (not item.get("proposable"), item.get("name") or ""))
+
+
+async def _research_recent_actions(conn, episode_id: str | uuid.UUID) -> list[dict[str, Any]]:
+    rows = await conn.fetch(
+        """
+        SELECT rd.sequence, rd.decision_type, rd.status, rd.action, rd.reason,
+               rd.expected_signal, rd.falsifier, rd.validation_errors,
+               rd.command_result_id, cr.status AS command_status, cr.scan_id,
+               cr.result_json
+        FROM research_decisions rd
+        LEFT JOIN command_results cr ON cr.id=rd.command_result_id
+        WHERE rd.episode_id=$1
+        ORDER BY rd.sequence DESC
+        LIMIT 8
+        """,
+        _optional_uuid(episode_id),
+    )
+    actions: list[dict[str, Any]] = []
+    for row in rows:
+        item = row_to_dict(row)
+        item["action"] = _decode_json_value(item.get("action")) or {}
+        item["validation_errors"] = _decode_json_value(item.get("validation_errors")) or []
+        result_json = _decode_json_value(item.get("result_json")) or {}
+        item["result"] = {
+            "status": item.pop("command_status", None),
+            "scan_id": item.pop("scan_id", None),
+            "retest_id": result_json.get("retest_id") if isinstance(result_json, dict) else None,
+        }
+        item.pop("result_json", None)
+        actions.append(_bounded_research_payload(item))
+    return actions
+
+
+async def _research_focus_snapshot(conn, episode: dict[str, Any]) -> dict[str, Any]:
+    mission = _research_mission(episode)
+    subject = mission.get("subject") if isinstance(mission.get("subject"), dict) else {}
+    if str(subject.get("type") or "") != "finding" or not subject.get("id"):
+        return {}
+    try:
+        finding_id = uuid.UUID(str(subject["id"]))
+    except (TypeError, ValueError):
+        return {"type": "finding", "id": str(subject.get("id") or ""), "status": "invalid_subject"}
+    row = await conn.fetchrow(
+        """
+        SELECT f.id, f.target_id, f.title, f.severity, f.status,
+               f.tool AS category, f.tool, f.cwe, f.url,
+               COALESCE(f.evidence->>'param', f.evidence->>'parameter') AS param,
+               f.description, f.first_seen_at, f.last_seen_at,
+               f.last_verification_verdict, f.last_verified_at,
+               fv.id AS latest_retest_id, fv.status AS latest_retest_status,
+               fv.verdict AS latest_retest_verdict, fv.confidence AS latest_retest_confidence,
+               fv.completed_at AS latest_retest_completed_at
+        FROM findings f
+        LEFT JOIN LATERAL (
+            SELECT id, status, verdict, confidence, completed_at
+            FROM finding_verifications
+            WHERE finding_id=f.id
+            ORDER BY created_at DESC
+            LIMIT 1
+        ) fv ON true
+        WHERE f.id=$1 AND f.target_id=$2
+        """,
+        finding_id,
+        _optional_uuid(episode.get("target_id")),
+    )
+    if not row:
+        return {"type": "finding", "id": str(finding_id), "status": "not_found"}
+    snapshot = row_to_dict(row)
+    snapshot["type"] = "finding"
+    snapshot["family"] = _research_finding_family(snapshot)
+    return _bounded_research_payload(snapshot)
+
+
+RESEARCH_OBSERVATION_MAX_BYTES = 48 * 1024
+
+
+def _research_previous_result_digest(value: Any) -> dict[str, Any]:
+    result = value if isinstance(value, dict) else {}
+    raw_error = result.get("error")
+    if isinstance(raw_error, dict):
+        error_digest: Any = {
+            key: str(raw_error.get(key) or "")[:800]
+            for key in ("error", "violation", "message", "reason", "detail")
+            if raw_error.get(key) not in (None, "", [], {})
+        }
+    elif raw_error not in (None, ""):
+        error_digest = str(raw_error)[:800]
+    else:
+        error_digest = None
+    command_result = result.get("command_result") if isinstance(result.get("command_result"), dict) else {}
+    result_json = (
+        command_result.get("result_json")
+        if isinstance(command_result.get("result_json"), dict)
+        else {}
+    )
+    nested = result.get("result") if isinstance(result.get("result"), dict) else {}
+    digest = {
+        "command": result.get("command"),
+        "dispatched": result.get("dispatched"),
+        "execution_blocked_reason": result.get("execution_blocked_reason"),
+        "error": error_digest,
+        "operation_id": result.get("operation_id"),
+        "command_result": {
+            key: command_result.get(key)
+            for key in (
+                "id", "status", "command", "scan_id", "finding_ids", "hypothesis_ids",
+                "evidence_object_ids", "next_action", "operator_message",
+            )
+            if command_result.get(key) not in (None, "", [], {})
+        },
+        "result_summary": {
+            key: nested.get(key)
+            for key in (
+                "action", "reason", "status", "scan_id", "retest_id", "finding_id",
+                "coverage", "recommendation", "recommended_campaigns", "family_coverage",
+                "verification_summary", "findings_count", "score", "grade", "error_message",
+            )
+            if nested.get(key) not in (None, "", [], {})
+        },
+    }
+    typed_result_json = {
+        key: result_json.get(key)
+        for key in (
+            "target_id", "selected_action", "status", "reason", "scan_id", "retest_id",
+            "finding_id", "batch_size", "stale_days", "check_family", "endpoint_filter",
+            "mode", "finding_type", "scan_type", "findings_count", "score", "grade",
+            "verification_summary", "family_coverage", "recommendation",
+        )
+        if result_json.get(key) not in (None, "", [], {})
+    }
+    if typed_result_json:
+        digest["command_result"]["result_json"] = typed_result_json
+    # _research_latest_action_result is already a digest; retain its useful typed links.
+    if isinstance(result.get("decision"), dict):
+        digest["decision"] = result["decision"]
+    if isinstance(result.get("linked_work"), list):
+        digest["linked_work"] = result["linked_work"][:10]
+    return _bounded_research_payload(digest)
+
+
+def _compact_research_observation_pack(pack: dict[str, Any]) -> dict[str, Any]:
+    # Redact once, then bound the already-redacted tree. Calling
+    # _bounded_research_payload recursively re-runs whole-subtree redaction at every
+    # level, which turns a merely large schema into superlinear CPU work.
+    redacted = _redact_agent_payload(pack)
+
+    def _bound_once(value: Any, depth: int = 0) -> Any:
+        if depth > 16:
+            return "[truncated]"
+        if isinstance(value, dict):
+            return {
+                str(key)[:120]: _bound_once(nested, depth + 1)
+                for key, nested in list(value.items())[:80]
+            }
+        if isinstance(value, (list, tuple)):
+            return [_bound_once(item, depth + 1) for item in value[:100]]
+        if isinstance(value, str):
+            return value[:4000]
+        if isinstance(value, (int, float)) or value is None:
+            return value
+        return str(value)[:4000]
+
+    bounded = _bound_once(redacted)
+
+    # _build_research_observation adds a 64-character context_hash after compaction.
+    # Reserve enough room for that key (including JSON punctuation) so the persisted
+    # observation, rather than only this intermediate value, remains below 48 KiB.
+    context_hash_reserve = 96
+    payload_limit = RESEARCH_OBSERVATION_MAX_BYTES - context_hash_reserve
+    if _json_size_bytes(bounded) <= payload_limit:
+        return bounded
+
+    def _text(value: Any, limit: int = 240) -> str:
+        return str(value or "")[:limit]
+
+    def _scalars(
+        value: Any,
+        keys: tuple[str, ...],
+        *,
+        text_limit: int = 240,
+    ) -> dict[str, Any]:
+        source = value if isinstance(value, dict) else {}
+        result: dict[str, Any] = {}
+        for key in keys:
+            nested = source.get(key)
+            if nested in (None, "", [], {}):
+                continue
+            if isinstance(nested, (str, bytes)):
+                result[key] = _text(nested, text_limit)
+            elif isinstance(nested, (int, float, bool)):
+                result[key] = nested
+            else:
+                result[key] = _text(nested, text_limit)
+        return result
+
+    def _string_list(value: Any, *, count: int, item_limit: int = 120) -> list[str]:
+        if not isinstance(value, (list, tuple)):
+            return []
+        return [_text(item, item_limit) for item in value[:count] if item not in (None, "")]
+
+    def _schema_projection(value: Any, depth: int = 0) -> dict[str, Any]:
+        """Retain decision-relevant JSON Schema shape without copying arbitrary annotations."""
+        source = value if isinstance(value, dict) else {}
+        if depth > 6:
+            return {}
+        schema_keywords = {
+            "type", "format", "const", "minimum", "maximum", "exclusiveMinimum",
+            "exclusiveMaximum", "minLength", "maxLength", "minItems", "maxItems",
+            "additionalProperties", "enum", "required", "properties", "items",
+            "oneOf", "anyOf", "allOf", "if", "then", "else", "not",
+            "pattern", "default",
+        }
+        # Arsenal exposes a flat property map rather than a full {type, properties} schema.
+        # Preserve that real contract shape when observations must be compacted.
+        if depth == 0 and source and not (set(source) & schema_keywords):
+            return {
+                _text(name, 80): _schema_projection(schema, depth + 1)
+                for name, schema in list(source.items())[:20]
+                if isinstance(schema, dict)
+            }
+        projected = _scalars(
+            source,
+            (
+                "type", "format", "const", "minimum", "maximum", "exclusiveMinimum",
+                "exclusiveMaximum", "minLength", "maxLength", "minItems", "maxItems",
+                "additionalProperties", "pattern", "default",
+            ),
+            text_limit=120,
+        )
+        if isinstance(source.get("enum"), list):
+            projected["enum"] = [
+                item if isinstance(item, (int, float, bool)) else _text(item, 80)
+                for item in source["enum"][:8]
+            ]
+        required = _string_list(source.get("required"), count=20, item_limit=80)
+        if required:
+            projected["required"] = required
+        properties = source.get("properties") if isinstance(source.get("properties"), dict) else {}
+        if properties:
+            projected["properties"] = {
+                _text(name, 80): _schema_projection(schema, depth + 1)
+                for name, schema in list(properties.items())[:20]
+            }
+        items = _schema_projection(source.get("items"), depth + 1)
+        if items:
+            projected["items"] = items
+        for combinator in ("oneOf", "anyOf", "allOf"):
+            branches = source.get(combinator) if isinstance(source.get(combinator), list) else []
+            projected_branches = [
+                branch
+                for branch in (
+                    _schema_projection(item, depth + 1) for item in branches[:6]
+                )
+                if branch
+            ]
+            if projected_branches:
+                projected[combinator] = projected_branches
+        for conditional in ("if", "then", "else", "not"):
+            branch = source.get(conditional)
+            if isinstance(branch, dict):
+                # Empty schemas are meaningful (for example ``not: {}``), so
+                # retain the keyword even when projection yields an empty map.
+                projected[conditional] = _schema_projection(branch, depth + 1)
+        return projected
+
+    mission_source = bounded.get("mission") if isinstance(bounded.get("mission"), dict) else {}
+    subject_source = (
+        mission_source.get("subject") if isinstance(mission_source.get("subject"), dict) else {}
+    )
+    mission = _scalars(mission_source, ("profile",), text_limit=120)
+    mission["subject"] = _scalars(
+        subject_source,
+        ("type", "id", "target_id", "family", "status", "title"),
+        text_limit=300,
+    )
+    mission_commands = _string_list(
+        mission_source.get("allowed_commands"), count=40, item_limit=120
+    )
+    if mission_commands:
+        mission["allowed_commands"] = mission_commands
+
+    focus = _scalars(
+        bounded.get("focus"),
+        (
+            "type", "id", "target_id", "title", "severity", "status", "category", "tool",
+            "cwe", "url", "param", "family", "last_verification_verdict", "last_verified_at",
+            "latest_retest_id", "latest_retest_status", "latest_retest_verdict",
+            "latest_retest_confidence", "latest_retest_completed_at",
+        ),
+        text_limit=500,
+    )
+
+    budget_source = (
+        bounded.get("remaining_budget") if isinstance(bounded.get("remaining_budget"), dict) else {}
+    )
+    remaining_budget = _scalars(
+        budget_source,
+        ("steps", "actions", "active_actions", "requests", "seconds", "model_units"),
+        text_limit=80,
+    )
+    # Preserve future numeric budget dimensions too, while bounding adversarial keys.
+    for key, value in list(budget_source.items())[:20]:
+        key = _text(key, 80)
+        if key not in remaining_budget and isinstance(value, (int, float, bool)):
+            remaining_budget[key] = value
+
+    actions: list[dict[str, Any]] = []
+    for raw_action in list(bounded.get("recent_actions") or [])[:6]:
+        if not isinstance(raw_action, dict):
+            continue
+        digest = _scalars(
+            raw_action,
+            ("sequence", "decision_type", "status", "command_result_id"),
+            text_limit=160,
+        )
+        action = raw_action.get("action") if isinstance(raw_action.get("action"), dict) else {}
+        action_digest = _scalars(action, ("command",), text_limit=120)
+        parameters = action.get("parameters") if isinstance(action.get("parameters"), dict) else {}
+        parameter_digest = _scalars(
+            parameters,
+            (
+                "check_family", "finding_id", "endpoint_filter", "batch_size", "stale_days",
+                "exploit_depth", "mode", "scan_type",
+            ),
+            text_limit=160,
+        )
+        if parameter_digest:
+            action_digest["parameters"] = parameter_digest
+        if action_digest:
+            digest["action"] = action_digest
+        result = raw_action.get("result") if isinstance(raw_action.get("result"), dict) else {}
+        result_digest = _scalars(result, ("status", "scan_id", "retest_id"), text_limit=160)
+        if result_digest:
+            digest["result"] = result_digest
+        actions.append(digest)
+
+    command_sources = [
+        item for item in list(bounded.get("proposable_commands") or [])[:25]
+        if isinstance(item, dict) and item.get("name")
+    ]
+    commands: list[dict[str, Any]] = []
+    for item in command_sources:
+        command = _scalars(
+            item,
+            ("name", "risk_tier", "proposable", "currently_executable"),
+            text_limit=160,
+        )
+        if isinstance(item.get("reserved_cost"), dict):
+            command["reserved_cost"] = _scalars(
+                item["reserved_cost"],
+                ("steps", "actions", "active_actions", "requests", "seconds", "model_tokens"),
+                text_limit=80,
+            )
+        server_supplied = _string_list(
+            item.get("server_supplied_parameters"), count=12, item_limit=80
+        )
+        blocked_by = _string_list(item.get("blocked_by"), count=8, item_limit=120)
+        autonomous_constraints = _string_list(
+            item.get("autonomous_constraints"), count=4, item_limit=300
+        )
+        if server_supplied:
+            command["server_supplied_parameters"] = server_supplied
+        if blocked_by:
+            command["blocked_by"] = blocked_by
+        if autonomous_constraints:
+            command["autonomous_constraints"] = autonomous_constraints
+        commands.append(command)
+
+    compacted: dict[str, Any] = _scalars(
+        bounded,
+        (
+            "observation_version", "episode_id", "episode_version", "sequence", "objective",
+            "execution_mode", "max_risk_tier",
+        ),
+        text_limit=800,
+    )
+    compacted.update({
+        "allowed_families": _string_list(bounded.get("allowed_families"), count=20, item_limit=80),
+        "mission": mission,
+        "focus": focus,
+        "remaining_budget": remaining_budget,
+        "recent_actions": actions,
+        "proposable_commands": commands,
+        "observation_compaction": {
+            "applied": True,
+            "max_bytes": RESEARCH_OBSERVATION_MAX_BYTES,
+            "context_hash_reserve_bytes": context_hash_reserve,
+        },
+    })
+
+    def _add_if_fits(key: str, value: Any) -> None:
+        if value in (None, "", [], {}):
+            return
+        compacted[key] = value
+        if _json_size_bytes(compacted) > payload_limit:
+            compacted.pop(key, None)
+
+    target_summary = _scalars(
+        bounded.get("target_summary"),
+        ("target_id", "url", "root_domain", "name", "environment", "status"),
+        text_limit=500,
+    )
+    _add_if_fits("target_summary", target_summary)
+
+    surface_source = (
+        bounded.get("current_surface") if isinstance(bounded.get("current_surface"), dict) else {}
+    )
+    surface = _scalars(
+        surface_source,
+        ("asm_enabled", "asm_last_test_at", "asm_last_recon_at"),
+        text_limit=200,
+    )
+    for key in ("coverage", "endpoint_counts"):
+        if isinstance(surface_source.get(key), dict):
+            surface[key] = _scalars(
+                surface_source[key], tuple(list(surface_source[key].keys())[:20]), text_limit=120
+            )
+    endpoint_samples = []
+    for endpoint in list(surface_source.get("sample_endpoints") or [])[:8]:
+        projected = _scalars(
+            endpoint,
+            ("method", "path", "url", "route", "status", "source", "content_type"),
+            text_limit=300,
+        )
+        if projected:
+            endpoint_samples.append(projected)
+    if endpoint_samples:
+        surface["sample_endpoints"] = endpoint_samples
+    _add_if_fits("current_surface", surface)
+
+    hypotheses = []
+    for hypothesis in list(bounded.get("hypotheses_summary") or [])[:5]:
+        projected = _scalars(
+            hypothesis,
+            (
+                "id", "claim", "title", "family", "status", "route", "path", "priority",
+                "evidence_strength", "next_action", "blocked_by",
+            ),
+            text_limit=320,
+        )
+        if projected:
+            hypotheses.append(projected)
+    _add_if_fits("hypotheses_summary", hypotheses)
+
+    findings = []
+    for finding in list(bounded.get("findings_summary") or [])[:8]:
+        projected = _scalars(
+            finding,
+            (
+                "id", "title", "severity", "status", "category", "tool", "cwe", "url",
+                "family", "proof_state", "last_verification_verdict", "last_verified_at",
+            ),
+            text_limit=400,
+        )
+        if projected:
+            findings.append(projected)
+    _add_if_fits("findings_summary", findings)
+
+    gaps = []
+    for gap in list(bounded.get("current_gaps") or [])[:8]:
+        projected = _scalars(
+            gap,
+            (
+                "kind", "family", "status", "count", "completed", "attempts", "stale",
+                "recommendation", "next_safe_command", "reason",
+            ),
+            text_limit=300,
+        )
+        if projected:
+            gaps.append(projected)
+    _add_if_fits("current_gaps", gaps)
+
+    _add_if_fits(
+        "known_preconditions",
+        _scalars(
+            bounded.get("known_preconditions"),
+            tuple(list((bounded.get("known_preconditions") or {}).keys())[:20])
+            if isinstance(bounded.get("known_preconditions"), dict) else (),
+            text_limit=160,
+        ),
+    )
+    _add_if_fits(
+        "previous_observation",
+        _research_previous_result_digest(bounded.get("previous_observation") or {}),
+    )
+    _add_if_fits(
+        "planner_contract",
+        _scalars(
+            bounded.get("planner_contract"),
+            tuple(list((bounded.get("planner_contract") or {}).keys())[:20])
+            if isinstance(bounded.get("planner_contract"), dict) else (),
+            text_limit=120,
+        ),
+    )
+
+    # Descriptions materially improve model command selection, but command names and gates are
+    # mandatory. Admit descriptions opportunistically so wide UTF-8 text never evicts commands.
+    for index, source in enumerate(command_sources):
+        description = _text(source.get("description"), 200)
+        if not description:
+            continue
+        compacted["proposable_commands"][index]["description"] = description
+        if _json_size_bytes(compacted) > payload_limit:
+            compacted["proposable_commands"][index].pop("description", None)
+
+    # Add decision-relevant parameter schemas in command priority order only while
+    # they fit. Command names remain available even when an adversarial schema is
+    # too large to include.
+    for index, source in enumerate(command_sources):
+        schema = _schema_projection(source.get("parameters_schema"))
+        if not schema:
+            continue
+        compacted["proposable_commands"][index]["parameters_schema"] = schema
+        if _json_size_bytes(compacted) > payload_limit:
+            compacted["proposable_commands"][index].pop("parameters_schema", None)
+
+    # Fixed-width projections above should already fit comfortably. This final
+    # deterministic safety valve makes the byte ceiling an invariant even if new
+    # fields or unusually wide UTF-8 values are introduced later.
+    if _json_size_bytes(compacted) > payload_limit:
+        for item in reversed(compacted["proposable_commands"]):
+            item.pop("parameters_schema", None)
+            item.pop("description", None)
+            if _json_size_bytes(compacted) <= payload_limit:
+                break
+    while _json_size_bytes(compacted) > payload_limit and compacted["proposable_commands"]:
+        compacted["proposable_commands"].pop()
+    while _json_size_bytes(compacted) > payload_limit and len(compacted["recent_actions"]) > 1:
+        compacted["recent_actions"].pop()
+    if _json_size_bytes(compacted) > payload_limit:
+        compacted["mission"].pop("allowed_commands", None)
+        compacted["focus"] = _scalars(
+            compacted.get("focus"),
+            (
+                "type", "id", "target_id", "status", "family", "last_verification_verdict",
+                "latest_retest_id", "latest_retest_status", "latest_retest_verdict",
+            ),
+            text_limit=160,
+        )
+    if _json_size_bytes(compacted) > payload_limit:
+        # All remaining values are fixed-width identity, verdict, budget, and action
+        # digests. A programming error is preferable to persisting an oversized pack.
+        raise ValueError("research observation compaction exceeded the 48 KiB byte limit")
+    return compacted
 
 
 async def _build_research_observation(
@@ -24579,6 +25414,19 @@ async def _build_research_observation(
     )
     context = context_req.model_dump(mode="json")
     commands = _research_command_views(episode)
+    mission = _research_mission(episode)
+    focus = await _research_focus_snapshot(conn, episode)
+    if str(focus.get("latest_retest_status") or "") in {"queued", "running"}:
+        for projected in commands:
+            if projected.get("name") != "finding.retest":
+                continue
+            projected["proposable"] = False
+            projected["currently_executable"] = False
+            projected["blocked_by"] = list(dict.fromkeys([
+                *(projected.get("blocked_by") or []),
+                "finding_retest_already_active",
+            ]))
+    recent_actions = await _research_recent_actions(conn, episode["id"])
     sequence = int(await conn.fetchval(
         "SELECT COALESCE(MAX(sequence), -1) + 1 FROM research_observations WHERE episode_id=$1",
         episode["id"],
@@ -24592,6 +25440,8 @@ async def _build_research_observation(
         "execution_mode": episode.get("execution_mode"),
         "max_risk_tier": episode.get("max_risk_tier"),
         "allowed_families": episode.get("allowed_families") or [],
+        "mission": mission,
+        "focus": focus,
         "target_summary": context.get("target_summary") or {},
         "current_surface": context.get("current_surface") or {},
         "current_gaps": context.get("current_gaps") or [],
@@ -24605,7 +25455,8 @@ async def _build_research_observation(
             for key, value in (episode.get("remaining_budget") or {}).items()
         },
         "proposable_commands": commands,
-        "previous_observation": _bounded_research_payload(previous_result or {}),
+        "recent_actions": recent_actions,
+        "previous_observation": _research_previous_result_digest(previous_result or {}),
         "planner_contract": {
             "select_exactly_one": True,
             "allowed_decisions": ["execute_action", "request_input", "stop"],
@@ -24614,9 +25465,10 @@ async def _build_research_observation(
             "secrets_forbidden": True,
             "verified_finding_claims_forbidden": True,
             "expected_signal_and_falsifier_required_for_actions": True,
+            "identical_consecutive_actions_forbidden": True,
         },
     }
-    pack = _bounded_research_payload(pack)
+    pack = _compact_research_observation_pack(pack)
     context_hash = _research_canonical_hash(pack)
     pack["context_hash"] = context_hash
     row = await conn.fetchrow(
@@ -24636,16 +25488,22 @@ async def _build_research_observation(
         _optional_uuid(previous_command_result_id),
     )
     status = next_status or "awaiting_planner"
-    await conn.execute(
+    update_result = await conn.execute(
         """
         UPDATE research_episodes
-        SET current_observation_id=$2, status=$3, version=version+1, updated_at=NOW()
-        WHERE id=$1
+        SET current_observation_id=$2, status=$3,
+            requested_input=CASE WHEN $3='awaiting_planner' THEN NULL ELSE requested_input END,
+            version=version+1, updated_at=NOW()
+        WHERE id=$1 AND cancel_requested=false
+          AND status NOT IN ('completed','cancelled','failed','budget_exhausted','blocked')
         """,
         episode["id"],
         row["id"],
         status,
     )
+    if update_result == "UPDATE 0":
+        await conn.execute("DELETE FROM research_observations WHERE id=$1", row["id"])
+        raise HTTPException(status_code=409, detail="Episode changed before observation could be attached")
     await _record_research_event(
         conn,
         episode["id"],
@@ -24657,6 +25515,170 @@ async def _build_research_observation(
         details={"context_hash": context_hash, "proposable_count": sum(1 for item in commands if item.get("proposable"))},
     )
     return _public_research_observation_row(row)
+
+
+async def _research_async_work(
+    conn,
+    episode_id: str | uuid.UUID,
+    *,
+    active_only: bool = True,
+) -> list[dict[str, Any]]:
+    episode_uuid = _optional_uuid(episode_id)
+    scan_status_clause = "AND s.status IN ('pending','queued','running')" if active_only else ""
+    retest_status_clause = "AND fv.status IN ('queued','running')" if active_only else ""
+    scan_rows = await conn.fetch(
+        f"""
+        SELECT DISTINCT s.id, s.status, s.progress, s.current_phase, s.scan_type,
+               s.findings_count, s.score, s.grade, s.error_message, s.created_at,
+               s.completed_at, cr.id AS command_result_id
+        FROM research_decisions rd
+        JOIN command_results cr ON cr.id=rd.command_result_id
+        JOIN scans s ON s.id=cr.scan_id
+        WHERE rd.episode_id=$1 {scan_status_clause}
+        ORDER BY s.created_at DESC
+        """,
+        episode_uuid,
+    )
+    retest_rows = await conn.fetch(
+        f"""
+        SELECT DISTINCT fv.id, fv.status, fv.verdict, fv.result_status, fv.confidence,
+               fv.finding_id, fv.error_message, fv.created_at, fv.completed_at,
+               cr.id AS command_result_id
+        FROM research_decisions rd
+        JOIN command_results cr ON cr.id=rd.command_result_id
+        JOIN finding_verifications fv ON fv.id::text=cr.result_json->>'retest_id'
+        WHERE rd.episode_id=$1 {retest_status_clause}
+        ORDER BY fv.created_at DESC
+        """,
+        episode_uuid,
+    )
+    work: list[dict[str, Any]] = []
+    for row in scan_rows:
+        item = row_to_dict(row)
+        item["kind"] = "scan"
+        item["ui_path"] = f"/scans/{item['id']}"
+        work.append(_bounded_research_payload(item))
+    for row in retest_rows:
+        item = row_to_dict(row)
+        item["kind"] = "finding_retest"
+        item["ui_path"] = f"/findings/{item['finding_id']}"
+        work.append(_bounded_research_payload(item))
+    return sorted(work, key=lambda item: str(item.get("created_at") or ""), reverse=True)
+
+
+async def _research_latest_action_result(conn, episode_id: str | uuid.UUID) -> dict[str, Any]:
+    decision_row = await conn.fetchrow(
+        """
+        SELECT * FROM research_decisions
+        WHERE episode_id=$1 AND command_result_id IS NOT NULL
+        ORDER BY sequence DESC
+        LIMIT 1
+        """,
+        _optional_uuid(episode_id),
+    )
+    if not decision_row:
+        return {}
+    decision = _public_research_decision_row(decision_row)
+    command_result_row = await conn.fetchrow(
+        "SELECT * FROM command_results WHERE id=$1",
+        decision_row["command_result_id"],
+    )
+    command_result = _public_command_result_row(command_result_row) if command_result_row else None
+    work = await _research_async_work(conn, episode_id, active_only=False)
+    linked_id = str(decision_row["command_result_id"])
+    linked_work = [item for item in work if str(item.get("command_result_id") or "") == linked_id]
+    return _bounded_research_payload({
+        "decision": {
+            "id": decision.get("id"),
+            "sequence": decision.get("sequence"),
+            "status": decision.get("status"),
+            "action": decision.get("action") or {},
+            "expected_signal": decision.get("expected_signal"),
+            "falsifier": decision.get("falsifier"),
+        },
+        "command_result": command_result or {},
+        "linked_work": linked_work,
+    })
+
+
+async def _settle_research_awaiting_observation(conn, episode_row: Any) -> dict[str, Any]:
+    episode = _public_research_episode_row(episode_row)
+    if str(episode.get("status") or "") != "awaiting_observation" or episode.get("cancel_requested"):
+        return {"settled": False, "reason": "episode_not_waiting"}
+    active_work = await _research_async_work(conn, episode_row["id"], active_only=True)
+    if active_work:
+        return {"settled": False, "reason": "work_active", "waiting_on": active_work}
+    result_context = await _research_latest_action_result(conn, episode_row["id"])
+    terminal = int(episode.get("step_count") or 0) >= int(
+        (episode.get("budget_limits") or {}).get("steps") or 1
+    )
+    # Exhausting action capacity is not a successful conclusion. Launch profiles reserve a
+    # final planner turn so the model can synthesize the observed evidence and explicitly stop.
+    # Legacy episodes that spend their last step on work end as incomplete, never "completed".
+    next_status = "budget_exhausted" if terminal else "awaiting_planner"
+    command_result = (
+        result_context.get("command_result")
+        if isinstance(result_context.get("command_result"), dict)
+        else {}
+    )
+    decision_context = (
+        result_context.get("decision")
+        if isinstance(result_context.get("decision"), dict)
+        else {}
+    )
+    observed_decision_status = str(decision_context.get("status") or "completed")
+    command_result_id = command_result.get("id")
+    await conn.execute(
+        """
+        UPDATE research_decisions
+        SET status='completed', updated_at=NOW()
+        WHERE episode_id=$1 AND status='dispatching' AND command_result_id=$2
+        """,
+        episode_row["id"], _optional_uuid(command_result_id),
+    )
+    await _record_research_event(
+        conn,
+        episode_row["id"],
+        event_type="action_observed",
+        status=observed_decision_status,
+        summary=(
+            "Observed completed asynchronous action"
+            if observed_decision_status == "completed"
+            else f"Observed asynchronous action outcome: {observed_decision_status}"
+        ),
+        command_result_id=command_result_id,
+        details={"linked_work": result_context.get("linked_work") or []},
+    )
+    await _build_research_observation(
+        conn,
+        episode_row,
+        previous_result=result_context,
+        previous_command_result_id=command_result_id,
+        next_status=next_status,
+    )
+    return {
+        "settled": True,
+        "next_status": next_status,
+        "command_result_id": command_result_id,
+        "result_context": result_context,
+    }
+
+
+def _research_dispatch_async_ref(dispatch_result: Any) -> dict[str, Any] | None:
+    if not isinstance(dispatch_result, dict):
+        return None
+    command_result = dispatch_result.get("command_result")
+    if not isinstance(command_result, dict):
+        command_result = {}
+    scan_id = command_result.get("scan_id")
+    result_json = command_result.get("result_json") if isinstance(command_result.get("result_json"), dict) else {}
+    retest_id = result_json.get("retest_id")
+    status = str(command_result.get("status") or "")
+    if scan_id and status in {"planned", "approved", "queued", "running"}:
+        return {"kind": "scan", "id": str(scan_id), "status": status}
+    if retest_id and status in {"retest_scheduled", "queued", "running"}:
+        return {"kind": "finding_retest", "id": str(retest_id), "status": status}
+    return None
 
 
 async def _research_episode_detail(conn, episode_id: str) -> dict[str, Any]:
@@ -24674,12 +25696,29 @@ async def _research_episode_detail(conn, episode_id: str) -> dict[str, Any]:
         "SELECT * FROM research_events WHERE episode_id=$1 ORDER BY sequence DESC LIMIT 100",
         episode_row["id"],
     )
+    waiting_on = await _research_async_work(conn, episode_row["id"], active_only=True)
+    current_observation = next(
+        (
+            _public_research_observation_row(row)
+            for row in observations
+            if str(row["id"]) == str(episode.get("current_observation_id") or "")
+        ),
+        None,
+    )
+    if current_observation is None and episode.get("current_observation_id"):
+        current_row = await conn.fetchrow(
+            "SELECT * FROM research_observations WHERE id=$1 AND episode_id=$2",
+            _optional_uuid(episode.get("current_observation_id")),
+            episode_row["id"],
+        )
+        current_observation = _public_research_observation_row(current_row) if current_row else None
     return {
         "episode": episode,
-        "current_observation": _public_research_observation_row(observations[0]) if observations else None,
+        "current_observation": current_observation,
         "observations": [_public_research_observation_row(row) for row in observations],
         "decisions": [_public_research_decision_row(row) for row in decisions],
         "events": [_public_research_event_row(row) for row in events],
+        "waiting_on": waiting_on,
     }
 
 
@@ -24711,6 +25750,8 @@ async def _research_prepare_action(
     params = dict(decision.get("action", {}).get("parameters") or {})
     errors: list[str] = []
     target_id = str(episode.get("target_id") or "")
+    mission = _research_mission(episode)
+    subject = mission.get("subject") if isinstance(mission.get("subject"), dict) else {}
     schema = command.get("parameters_schema") if isinstance(command.get("parameters_schema"), dict) else {}
     unknown = sorted(set(params) - set(schema))
     errors.extend(f"action_parameter_not_declared:{name}" for name in unknown)
@@ -24729,7 +25770,17 @@ async def _research_prepare_action(
                 errors.append("action_target_url_mismatch")
             params["target"] = str(target_url)
     if command.get("name") in {"finding.get", "finding.retest"}:
+        focused_finding_id = (
+            str(subject.get("id") or "").strip()
+            if str(subject.get("type") or "") == "finding"
+            else ""
+        )
         finding_id = str(params.get("finding_id") or "").strip()
+        if focused_finding_id:
+            if finding_id and finding_id != focused_finding_id:
+                errors.append("action_finding_id_mismatch")
+            finding_id = focused_finding_id
+            params["finding_id"] = focused_finding_id
         if not finding_id:
             errors.append("finding_id_required")
         else:
@@ -24738,9 +25789,27 @@ async def _research_prepare_action(
             except ValueError:
                 errors.append("finding_id_must_be_uuid")
             else:
-                finding_target = await conn.fetchval("SELECT target_id FROM findings WHERE id=$1", finding_uuid)
-                if str(finding_target or "") != target_id:
+                finding_row = await conn.fetchrow(
+                    "SELECT target_id, tool AS category, tool, title, cwe FROM findings WHERE id=$1",
+                    finding_uuid,
+                )
+                if str((finding_row or {}).get("target_id") or "") != target_id:
                     errors.append("finding_outside_episode_target")
+                finding_family = _research_finding_family(finding_row)
+                allowed_families = {str(item) for item in episode.get("allowed_families") or []}
+                if allowed_families and finding_family and finding_family not in allowed_families:
+                    errors.append("finding_family_not_allowed")
+                if command.get("name") == "finding.retest":
+                    active_retest = await conn.fetchval(
+                        """
+                        SELECT id FROM finding_verifications
+                        WHERE finding_id=$1 AND status IN ('queued','running')
+                        ORDER BY created_at DESC LIMIT 1
+                        """,
+                        finding_uuid,
+                    )
+                    if active_retest:
+                        errors.append("finding_retest_already_active")
     if command.get("name") in {"scan.result", "deployment.decision"}:
         scan_id = str(params.get("scan_id") or "").strip()
         if not scan_id:
@@ -24756,8 +25825,33 @@ async def _research_prepare_action(
                     errors.append("scan_outside_episode_target")
     allowed_families = {str(item) for item in episode.get("allowed_families") or []}
     check_family = str(params.get("check_family") or "").strip()
+    if command.get("name") == "scan.focused_family" and not check_family:
+        errors.append("check_family_required")
+    if (
+        command.get("name") in {"asm.improve", "asm.test"}
+        and not check_family
+        and 0 < len(allowed_families) < 4
+    ):
+        if len(allowed_families) == 1:
+            check_family = next(iter(allowed_families))
+            params["check_family"] = check_family
+        else:
+            errors.append("check_family_required_for_scoped_episode")
     if allowed_families and check_family and check_family not in allowed_families:
         errors.append("action_family_not_allowed")
+    if command.get("name") in {"experiment.http_diff", "experiment.workflow"}:
+        steps = params.get("steps") if isinstance(params.get("steps"), list) else []
+        destructive_methods = sorted({
+            str(step.get("method") or "GET").strip().upper()
+            for step in steps
+            if isinstance(step, dict)
+            and str(step.get("method") or "GET").strip().upper() in {"PUT", "PATCH", "DELETE"}
+        })
+        if destructive_methods:
+            errors.append(
+                "autonomous_experiment_destructive_method_forbidden:"
+                + ",".join(destructive_methods)
+            )
     errors.extend(f"model_control_field_forbidden:{path}" for path in _research_forbidden_control_paths(params))
     if _contains_forbidden_context_key(params):
         errors.append("action_parameters_contain_secret_field")
@@ -24772,6 +25866,83 @@ async def _research_prepare_action(
     return params, list(dict.fromkeys(errors))
 
 
+async def _research_is_consecutive_duplicate_action(
+    conn,
+    episode_id: str | uuid.UUID,
+    action: dict[str, Any],
+) -> bool:
+    previous_rows = await conn.fetch(
+        """
+        SELECT action, status, policy_result, command_result_id
+        FROM research_decisions
+        WHERE episode_id=$1 AND decision_type='execute_action'
+          AND status IN ('accepted','dispatching','completed','blocked')
+        ORDER BY sequence DESC
+        LIMIT 20
+        """,
+        _optional_uuid(episode_id),
+    )
+    if not previous_rows:
+        return False
+    comparable = {
+        "command": str(action.get("command") or "").strip(),
+        "parameters": action.get("parameters") if isinstance(action.get("parameters"), dict) else {},
+    }
+    fingerprint = _research_canonical_hash(comparable)
+    intervening_state_change = False
+    for row in previous_rows:
+        previous_action = _decode_json_value(row["action"]) or {}
+        previous_comparable = {
+            "command": str(previous_action.get("command") or "").strip(),
+            "parameters": (
+                previous_action.get("parameters")
+                if isinstance(previous_action.get("parameters"), dict)
+                else {}
+            ),
+        }
+        if _research_canonical_hash(previous_comparable) == fingerprint:
+            return not intervening_state_change
+        policy_result = _decode_json_value(row.get("policy_result")) or {}
+        changed_state = bool(policy_result.get("dispatched")) or bool(
+            row.get("command_result_id")
+            and str(row.get("status") or "") in {"dispatching", "completed"}
+        )
+        if previous_comparable["command"] in GATED_RESEARCH_COMMANDS and changed_state:
+            intervening_state_change = True
+    return False
+
+
+def _research_parameterized_action_cost(
+    command: dict[str, Any],
+    parameters: dict[str, Any],
+    base_cost: dict[str, Any] | None,
+) -> dict[str, int]:
+    """Reserve conservative target-work units for queued operations.
+
+    The worker's exact HTTP count is not available at dispatch time, so these are explicit
+    reservation units, not a false claim of exact network metering.
+    """
+    cost = {key: max(0, int(value or 0)) for key, value in (base_cost or {}).items()}
+    name = str(command.get("name") or "")
+    if name == "scan.focused_family":
+        cost["requests"] = max(cost.get("requests", 0), 100)
+        cost["seconds"] = max(cost.get("seconds", 0), 600)
+    elif name in {"asm.test", "asm.improve"}:
+        try:
+            batch_size = max(1, min(int(parameters.get("batch_size") or 50), 100))
+        except (TypeError, ValueError):
+            batch_size = 50
+        cost["requests"] = max(cost.get("requests", 0), batch_size)
+        cost["seconds"] = max(cost.get("seconds", 0), 180)
+    elif name == "asm.recon":
+        cost["requests"] = max(cost.get("requests", 0), 25)
+        cost["seconds"] = max(cost.get("seconds", 0), 180)
+    elif name == "finding.retest":
+        cost["requests"] = max(cost.get("requests", 0), 4)
+        cost["seconds"] = max(cost.get("seconds", 0), 120)
+    return cost
+
+
 @app.post("/research/episodes")
 async def create_research_episode(req: ResearchEpisodeRequest):
     target_uuid = _uuid_or_400(req.target_id, "target id")
@@ -24781,8 +25952,22 @@ async def create_research_episode(req: ResearchEpisodeRequest):
         raise HTTPException(status_code=400, detail="gated episodes require max_risk_tier=active or higher")
     budget_limits = _research_normalize_budget_limits(req.budget_limits, max_steps=req.max_steps)
     planner = _bounded_research_payload(req.planner or {})
+    if not isinstance(planner, dict):
+        planner = {}
     if _contains_forbidden_context_key(req.planner):
         raise HTTPException(status_code=400, detail="planner metadata contains a forbidden secret field")
+
+    profile_commands = RESEARCH_MISSION_COMMANDS.get(req.mission_profile)
+    expected_subject_types = {
+        "target_hunt": {"target"},
+        "verify_finding": {"finding"},
+        "close_asm_gaps": {"target", "asm"},
+    }
+    if req.subject_type not in expected_subject_types[req.mission_profile]:
+        raise HTTPException(status_code=400, detail="Mission profile does not support this subject type")
+    subject_id = str(req.subject_id or req.target_id).strip()
+    subject_uuid = _uuid_or_400(subject_id, "research subject id")
+    allowed_families = [str(item).strip() for item in req.allowed_families if str(item).strip()]
 
     async with db_pool.acquire() as conn:
         # Validations (incl. the gated approval check, which persists a durable "blocked"
@@ -24800,6 +25985,32 @@ async def create_research_episode(req: ResearchEpisodeRequest):
             raise HTTPException(status_code=400, detail="Research episodes require an absolute HTTP(S) web/API target")
         if str(target["discovery_source"] or "") == "model-intake":
             raise HTTPException(status_code=400, detail="Model Intake artifacts are not web/API research targets")
+        subject_summary: dict[str, Any] = {"type": req.subject_type, "id": str(subject_uuid)}
+        if req.subject_type in {"target", "asm"}:
+            if subject_uuid != target_uuid:
+                raise HTTPException(status_code=400, detail="Research subject does not match target")
+        elif req.subject_type == "finding":
+            finding = await conn.fetchrow(
+                "SELECT id, target_id, title, tool AS category, tool, cwe, source, ai_target_id FROM findings WHERE id=$1",
+                subject_uuid,
+            )
+            if not finding:
+                raise HTTPException(status_code=404, detail="Finding subject not found")
+            if finding["target_id"] != target_uuid:
+                raise HTTPException(status_code=400, detail="Finding subject is outside the episode target")
+            if not _research_finding_is_web(finding):
+                raise HTTPException(status_code=400, detail="Finding subject is not a DAST/ASM/manual web finding")
+            subject_summary["title"] = str(finding["title"] or "")[:300]
+            family = _research_finding_family(finding)
+            if family:
+                subject_summary["family"] = family
+                if not allowed_families:
+                    allowed_families = [family]
+        planner["mission"] = {
+            "profile": req.mission_profile,
+            "subject": subject_summary,
+            "allowed_commands": sorted(profile_commands) if profile_commands is not None else None,
+        }
         scope_receipt_id = req.scope_receipt_id
         approval_receipt_id = req.approval_receipt_id
         if req.execution_mode == "gated":
@@ -24842,7 +26053,7 @@ async def create_research_episode(req: ResearchEpisodeRequest):
                 json.dumps(planner),
                 req.execution_mode,
                 req.max_risk_tier,
-                json.dumps([str(item).strip() for item in req.allowed_families if str(item).strip()]),
+                json.dumps(allowed_families),
                 json.dumps(budget_limits),
                 json.dumps(_research_normalize_budget_used({})),
                 scope_receipt_id,
@@ -24860,6 +26071,291 @@ async def create_research_episode(req: ResearchEpisodeRequest):
             )
             await _build_research_observation(conn, row)
         return await _research_episode_detail(conn, str(row["id"]))
+
+
+@app.get("/research/readiness")
+async def research_readiness():
+    settings = _load_effective_ai_settings()
+    planner_ready = all(
+        str(settings.get(key) or "").strip()
+        for key in ("ai_url", "ai_api_key", "ai_model")
+    )
+    return {
+        "planner_ready": planner_ready,
+        "execution_enabled": _ai_ops_execute_enabled(),
+        "model": str(settings.get("ai_model") or "")[:200] or None,
+        "fallback_models": [
+            item.strip()
+            for item in str(settings.get("ai_model_fallback") or "").split(",")
+            if item.strip()
+        ],
+    }
+
+
+async def _reuse_research_launch_episode(
+    conn,
+    *,
+    existing: Any,
+    req: ResearchLaunchRequest,
+    launch_profile: dict[str, Any],
+    target_id: uuid.UUID,
+    target_url: str,
+) -> dict[str, Any]:
+    if str(existing["status"]) == "awaiting_input":
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "existing_episode_requires_input",
+                "episode_id": str(existing["id"]),
+                "ui_path": f"/settings/research-agent?episode_id={existing['id']}",
+            },
+        )
+    approval_id: uuid.UUID | None = None
+    scope_id: str | None = None
+    if launch_profile["execution_mode"] == "gated":
+        approval = await _validate_approval_receipt_for_action(
+            conn,
+            req.approval_receipt_id,
+            target_url=target_url,
+            target_id=target_id,
+            action_name="research_episode.resume",
+            command="research.episode",
+            risk_tier=launch_profile["max_risk_tier"],
+            created_by=req.created_by,
+            always_require_receipt=True,
+        )
+        approval_id = _optional_uuid(req.approval_receipt_id)
+        scope_id = str(approval.get("scope_receipt_id") or "") or None
+    updated = await conn.fetchrow(
+        """
+        UPDATE research_episodes
+        SET approval_receipt_id=COALESCE($2, approval_receipt_id),
+            scope_receipt_id=COALESCE($3, scope_receipt_id),
+            autopilot_enabled=$4, autopilot_error=NULL,
+            autopilot_consecutive_failures=0, updated_at=NOW()
+        WHERE id=$1
+        RETURNING *
+        """,
+        existing["id"],
+        approval_id,
+        scope_id,
+        req.autopilot,
+    )
+    detail = await _research_episode_detail(conn, str(updated["id"]))
+    detail["reused"] = True
+    detail["ui_path"] = f"/settings/research-agent?episode_id={updated['id']}"
+    return detail
+
+
+@app.post("/research/launch")
+async def launch_research_episode(req: ResearchLaunchRequest):
+    """Launch or reopen a server-defined, subject-bound autonomous mission."""
+    expected_subject_types = {
+        "target_hunt": {"target"},
+        "verify_finding": {"finding"},
+        "close_asm_gaps": {"target", "asm"},
+    }
+    if req.subject_type not in expected_subject_types[req.mission_profile]:
+        raise HTTPException(status_code=400, detail="Mission profile does not support this subject type")
+
+    launch_profile = dict(RESEARCH_LAUNCH_PROFILES[req.intensity])
+    if req.autopilot:
+        settings = _load_effective_ai_settings()
+        if not all(str(settings.get(key) or "").strip() for key in ("ai_url", "ai_api_key", "ai_model")):
+            raise HTTPException(status_code=409, detail="Autonomous planner is not configured in AI settings")
+    if launch_profile["execution_mode"] == "gated" and not _ai_ops_execute_enabled():
+        raise HTTPException(status_code=409, detail="Autonomous active execution is disabled by server policy")
+
+    subject_uuid = _uuid_or_400(req.subject_id, "research subject id")
+    finding: Any = None
+    async with db_pool.acquire() as conn:
+        if req.subject_type == "finding":
+            finding = await conn.fetchrow(
+                """
+                SELECT f.id, f.target_id, f.title, f.severity,
+                       f.tool AS category, f.tool, f.cwe,
+                       f.source, f.ai_target_id,
+                       t.url AS target_url
+                FROM findings f
+                JOIN targets t ON t.id=f.target_id AND t.is_active=true
+                WHERE f.id=$1
+                """,
+                subject_uuid,
+            )
+            if not finding:
+                raise HTTPException(status_code=404, detail="Web finding subject not found")
+            if not _research_finding_is_web(finding):
+                raise HTTPException(status_code=400, detail="AI Gate, AI Session, and Model Intake findings use dedicated replay workflows")
+            target_id = finding["target_id"]
+            target_url = str(finding["target_url"] or "")
+        else:
+            target_id = subject_uuid
+            target = await conn.fetchrow(
+                "SELECT id, url FROM targets WHERE id=$1 AND is_active=true",
+                target_id,
+            )
+            if not target:
+                raise HTTPException(status_code=404, detail="Active target subject not found")
+            target_url = str(target["url"] or "")
+
+        if not req.force_new:
+            existing = await conn.fetchrow(
+                """
+                SELECT * FROM research_episodes
+                WHERE target_id=$1
+                  AND planner->'mission'->>'profile'=$2
+                  AND planner->'mission'->'subject'->>'type'=$3
+                  AND planner->'mission'->'subject'->>'id'=$4
+                  AND execution_mode=$5
+                  AND COALESCE(planner->>'launch_intensity', 'unknown')=$6
+                  AND status NOT IN ('completed','cancelled','failed','budget_exhausted','blocked')
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                target_id,
+                req.mission_profile,
+                req.subject_type,
+                str(subject_uuid),
+                launch_profile["execution_mode"],
+                req.intensity,
+            )
+            if existing:
+                return await _reuse_research_launch_episode(
+                    conn,
+                    existing=existing,
+                    req=req,
+                    launch_profile=launch_profile,
+                    target_id=target_id,
+                    target_url=target_url,
+                )
+
+        if req.subject_type == "finding":
+            active_retest = await conn.fetchrow(
+                """
+                SELECT id, status FROM finding_verifications
+                WHERE finding_id=$1 AND status IN ('queued','running')
+                ORDER BY created_at DESC LIMIT 1
+                """,
+                subject_uuid,
+            )
+            if active_retest:
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "error": "finding_retest_already_active",
+                        "retest_id": str(active_retest["id"]),
+                        "status": str(active_retest["status"]),
+                        "ui_path": f"/findings/{subject_uuid}",
+                    },
+                )
+
+    budget_limits = dict(launch_profile["budget_limits"])
+    max_steps = int(launch_profile["max_steps"])
+    if req.mission_profile == "verify_finding":
+        if req.intensity == "analyze":
+            max_steps = 4
+            budget_limits.update({
+                "steps": 4, "actions": 3, "active_actions": 0, "requests": 0,
+                "seconds": 300, "model_tokens": 40000,
+            })
+        else:
+            # One proof replay is enough for a finding-focused mission. The controller must
+            # observe that result before any follow-up reasoning.
+            max_steps = 6
+            budget_limits.update({
+                "steps": 6, "actions": 5, "active_actions": 1, "requests": 25,
+                "seconds": 900, "model_tokens": 75000,
+            })
+        title = str(finding["title"] or "finding")[:300]
+        objective = (
+            f"Determine whether finding {subject_uuid} ({title}) is reproducible and current. "
+            "Inspect this exact finding first, run at most one bounded deterministic/tiered retest "
+            "when authorized, wait for its proof result, then stop with the verdict, remaining "
+            "uncertainty, and recommended next step. Do not launch unrelated target-wide work."
+        )
+    elif req.mission_profile == "close_asm_gaps":
+        objective = (
+            "Improve this target's most important ASM coverage gaps. Inspect current gaps and "
+            "activity, choose the next bounded ASM action, wait for each result, avoid duplicate "
+            "actions, and stop when no decision-relevant gap can be improved within budget."
+        )
+    else:
+        objective = (
+            "Find and verify the highest-impact security weaknesses on this target. Prioritize "
+            "authorization, injection, sensitive-data exposure, and workflow abuse. Learn from "
+            "each completed action, never repeat an identical no-progress action, and stop when "
+            "the budget is exhausted or no valuable bounded action remains."
+        )
+
+    allowed_families = []
+    if launch_profile["execution_mode"] == "gated":
+        allowed_families = ["sqli", "xss", "auth", "bola"]
+    if finding:
+        family = _research_finding_family(finding)
+        allowed_families = [family] if family else []
+
+    create_request = ResearchEpisodeRequest(
+        target_id=str(target_id),
+        objective=objective,
+        planner={
+            "kind": "configured_ai",
+            "created_by": req.created_by,
+            "launch_intensity": req.intensity,
+            "dedupe_launch": not req.force_new,
+        },
+        execution_mode=launch_profile["execution_mode"],
+        max_risk_tier=launch_profile["max_risk_tier"],
+        allowed_families=allowed_families,
+        max_steps=max_steps,
+        budget_limits=budget_limits,
+        approval_receipt_id=req.approval_receipt_id,
+        subject_type=req.subject_type,
+        subject_id=str(subject_uuid),
+        mission_profile=req.mission_profile,
+        created_by=req.created_by,
+        autopilot=req.autopilot,
+    )
+    try:
+        detail = await create_research_episode(create_request)
+    except asyncpg.UniqueViolationError:
+        # A concurrent identical one-click launch won the partial unique index race. Reuse its
+        # durable mission instead of creating duplicate work.
+        if req.force_new:
+            raise
+        async with db_pool.acquire() as conn:
+            existing = await conn.fetchrow(
+                """
+                SELECT * FROM research_episodes
+                WHERE target_id=$1
+                  AND planner->'mission'->>'profile'=$2
+                  AND planner->'mission'->'subject'->>'type'=$3
+                  AND planner->'mission'->'subject'->>'id'=$4
+                  AND execution_mode=$5
+                  AND planner->>'launch_intensity'=$6
+                  AND planner->>'dedupe_launch'='true'
+                  AND status NOT IN ('completed','cancelled','failed','budget_exhausted','blocked')
+                ORDER BY created_at DESC LIMIT 1
+                """,
+                target_id,
+                req.mission_profile,
+                req.subject_type,
+                str(subject_uuid),
+                launch_profile["execution_mode"],
+                req.intensity,
+            )
+            if not existing:
+                raise
+            return await _reuse_research_launch_episode(
+                conn,
+                existing=existing,
+                req=req,
+                launch_profile=launch_profile,
+                target_id=target_id,
+                target_url=target_url,
+            )
+    detail["reused"] = False
+    detail["ui_path"] = f"/settings/research-agent?episode_id={detail['episode']['id']}"
+    return detail
 
 
 @app.get("/research/episodes")
@@ -24906,6 +26402,12 @@ async def refresh_research_observation(episode_id: str, req: ResearchObservation
             episode = _public_research_episode_row(row)
             if episode.get("terminal") or episode.get("cancel_requested"):
                 raise HTTPException(status_code=409, detail="Terminal or cancelled episodes cannot create observations")
+            if str(episode.get("status") or "") not in {"awaiting_planner", "awaiting_input"}:
+                raise HTTPException(status_code=409, detail="Episode is waiting for an action result")
+            if row.get("lease_owner") and row.get("lease_expires_at"):
+                lease_active = await conn.fetchval("SELECT $1::timestamptz > NOW()", row["lease_expires_at"])
+                if lease_active:
+                    raise HTTPException(status_code=409, detail="Episode planner currently holds the observation lease")
             observation_count = await conn.fetchval(
                 "SELECT COUNT(*) FROM research_observations WHERE episode_id=$1", row["id"]
             )
@@ -24925,6 +26427,8 @@ async def refresh_research_observation(episode_id: str, req: ResearchObservation
 @app.post("/research/episodes/{episode_id}/cancel")
 async def cancel_research_episode(episode_id: str):
     scan_ids: list[str] = []
+    cancelled_retest_ids: list[str] = []
+    continuing_retest_ids: list[str] = []
     async with db_pool.acquire() as conn:
         async with conn.transaction():
             row = await _research_episode_or_404(conn, episode_id, for_update=True)
@@ -24933,15 +26437,63 @@ async def cancel_research_episode(episode_id: str):
                 return await _research_episode_detail(conn, episode_id)
             scan_rows = await conn.fetch(
                 """
-                SELECT DISTINCT cr.scan_id
+                SELECT DISTINCT s.id AS scan_id
                 FROM research_decisions rd
-                JOIN command_results cr ON cr.id = rd.command_result_id
-                JOIN scans s ON s.id = cr.scan_id
+                LEFT JOIN command_results cr ON cr.id = rd.command_result_id
+                JOIN scans s ON (
+                    s.id = cr.scan_id
+                    OR s.options->>'research_dispatch_correlation' = (
+                        'research_episode:' || rd.episode_id::text || ':decision:' || rd.id::text
+                    )
+                )
                 WHERE rd.episode_id=$1 AND s.status IN ('pending','queued','running')
                 """,
                 row["id"],
             )
             scan_ids = [str(item["scan_id"]) for item in scan_rows if item["scan_id"]]
+            retest_rows = await conn.fetch(
+                """
+                SELECT DISTINCT fv.id, fv.status, fv.finding_id
+                FROM research_decisions rd
+                LEFT JOIN command_results cr ON cr.id=rd.command_result_id
+                JOIN finding_verifications fv ON (
+                    fv.id::text=cr.result_json->>'retest_id'
+                    OR fv.requested_by=(
+                        'research_episode:' || rd.episode_id::text || ':decision:' || rd.id::text
+                    )
+                )
+                WHERE rd.episode_id=$1 AND fv.status IN ('queued','running')
+                """,
+                row["id"],
+            )
+            queued_retest_ids = [item["id"] for item in retest_rows if item["status"] == "queued"]
+            continuing_retest_ids = [str(item["id"]) for item in retest_rows if item["status"] == "running"]
+            if queued_retest_ids:
+                cancelled = await conn.fetch(
+                    """
+                    UPDATE finding_verifications
+                    SET status='cancelled', result_status='cancelled', verdict='cancelled',
+                        verdict_reason='Parent research episode cancelled before retest started.',
+                        completed_at=NOW(), updated_at=NOW()
+                    WHERE id=ANY($1::uuid[]) AND status='queued'
+                    RETURNING id
+                    """,
+                    queued_retest_ids,
+                )
+                cancelled_retest_ids = [str(item["id"]) for item in cancelled]
+                cancelled_finding_ids = [
+                    item["finding_id"] for item in retest_rows
+                    if item["status"] == "queued" and str(item["id"]) in set(cancelled_retest_ids)
+                ]
+                if cancelled_finding_ids:
+                    await conn.execute(
+                        """
+                        UPDATE findings
+                        SET last_verification_status='cancelled', updated_at=NOW()
+                        WHERE id=ANY($1::uuid[])
+                        """,
+                        cancelled_finding_ids,
+                    )
             await conn.execute(
                 """
                 UPDATE research_episodes
@@ -24952,25 +26504,67 @@ async def cancel_research_episode(episode_id: str):
                 """,
                 row["id"],
             )
+            await conn.execute(
+                """
+                UPDATE research_decisions
+                SET status='blocked', validation_errors=(validation_errors || '["episode_cancelled"]'::jsonb),
+                    updated_at=NOW()
+                WHERE episode_id=$1 AND status='dispatching'
+                """,
+                row["id"],
+            )
             await _record_research_event(
                 conn,
                 row["id"],
                 event_type="episode_cancelled",
                 status="cancelled",
                 summary="Research episode cancelled by operator",
-                details={"linked_scan_ids": scan_ids},
+                details={
+                    "linked_scan_ids": scan_ids,
+                    "cancelled_retest_ids": cancelled_retest_ids,
+                    "continuing_retest_ids": continuing_retest_ids,
+                },
             )
     cancelled_scans: list[str] = []
+    cancel_failed_scan_ids: list[str] = []
     for scan_id in scan_ids:
         try:
             await cancel_scan(scan_id)
             cancelled_scans.append(scan_id)
-        except HTTPException:
+        except Exception:
+            cancel_failed_scan_ids.append(scan_id)
             continue
     async with db_pool.acquire() as conn:
+        if cancel_failed_scan_ids:
+            await _record_research_event(
+                conn,
+                _uuid_or_400(episode_id, "episode id"),
+                event_type="scan_cancellation_failed",
+                status="failed",
+                summary="One or more linked scans could not be cancelled",
+                details={"scan_ids": cancel_failed_scan_ids},
+            )
         detail = await _research_episode_detail(conn, episode_id)
     detail["cancelled_scan_ids"] = cancelled_scans
+    detail["cancel_failed_scan_ids"] = cancel_failed_scan_ids
+    detail["cancelled_retest_ids"] = cancelled_retest_ids
+    detail["continuing_retest_ids"] = continuing_retest_ids
     return detail
+
+
+@app.post("/research/episodes/{episode_id}/settle")
+async def settle_research_episode(episode_id: str):
+    """Attach a completed async scan/retest result without polling or planning another step."""
+    async with db_pool.acquire() as conn:
+        async with conn.transaction():
+            row = await _research_episode_or_404(conn, episode_id, for_update=True)
+            episode = _public_research_episode_row(row)
+            if episode.get("terminal"):
+                return {"settled": False, "reason": "episode_terminal", **(await _research_episode_detail(conn, episode_id))}
+            if str(episode.get("status") or "") != "awaiting_observation":
+                return {"settled": False, "reason": "episode_not_waiting", **(await _research_episode_detail(conn, episode_id))}
+            settlement = await _settle_research_awaiting_observation(conn, row)
+        return {**settlement, **(await _research_episode_detail(conn, episode_id))}
 
 
 @app.post("/research/episodes/{episode_id}/decisions")
@@ -24988,6 +26582,11 @@ async def submit_research_decision(episode_id: str, req: ResearchDecisionRequest
             episode = _public_research_episode_row(episode_row)
             if episode.get("terminal") or episode.get("cancel_requested"):
                 raise HTTPException(status_code=409, detail="Research episode is terminal or cancelled")
+            if (
+                str((req.planner or {}).get("created_by") or "") == "server_autopilot"
+                and not episode.get("autopilot_enabled")
+            ):
+                raise HTTPException(status_code=409, detail="Research autopilot was paused before dispatch")
             if episode.get("status") != "awaiting_planner":
                 raise HTTPException(status_code=409, detail="Research episode is not awaiting a planner decision")
             observation_row = await conn.fetchrow(
@@ -25019,9 +26618,22 @@ async def submit_research_decision(episode_id: str, req: ResearchDecisionRequest
                 errors.append("budget_exhausted:model_tokens")
             command = catalog.get(normalized.get("action", {}).get("command") or "")
             if normalized.get("decision") == "execute_action" and command:
+                launch_intensity = str((episode.get("planner") or {}).get("launch_intensity") or "")
+                if launch_intensity and int((episode.get("remaining_budget") or {}).get("steps") or 0) <= 1:
+                    errors.append("budget_reserved_for_conclusion")
                 params, parameter_errors = await _research_prepare_action(conn, episode, normalized, command)
                 normalized["action"]["parameters"] = params
                 errors.extend(parameter_errors)
+                cost = _research_parameterized_action_cost(command, params, cost)
+                errors.extend(_research_budget_violations(
+                    episode.get("budget_limits"), episode.get("budget_used"), cost
+                ))
+                if await _research_is_consecutive_duplicate_action(
+                    conn,
+                    episode_row["id"],
+                    normalized.get("action") or {},
+                ):
+                    errors.append("repeated_action_without_state_change")
                 mode = str(episode.get("execution_mode") or "read_only")
                 if mode == "read_only" and command.get("name") in GATED_RESEARCH_COMMANDS:
                     errors.append("gated_command_forbidden_in_read_only_episode")
@@ -25178,7 +26790,7 @@ async def submit_research_decision(episode_id: str, req: ResearchDecisionRequest
                     confirmations=confirmations,
                     approval_receipt_id=str(episode.get("approval_receipt_id") or "") or None,
                     scope_receipt_id=str(episode.get("scope_receipt_id") or "") or None,
-                    created_by=f"research_episode:{episode_id}",
+                    created_by=f"research_episode:{episode_id}:decision:{decision_id}",
                     campaign_id=str(episode.get("campaign_id") or "") or None,
                 )
 
@@ -25212,107 +26824,295 @@ async def submit_research_decision(episode_id: str, req: ResearchDecisionRequest
     command_result = dispatch_result.get("command_result") if isinstance(dispatch_result.get("command_result"), dict) else {}
     command_result_id = command_result.get("id") or dispatch_result.get("operation_id")
     dispatched = bool(dispatch_result.get("dispatched"))
-    decision_status = "completed" if dispatched or mode == "shadow" else "blocked"
+    async_ref = _research_dispatch_async_ref(dispatch_result) if dispatched else None
+    decision_status = "dispatching" if async_ref else ("completed" if dispatched or mode == "shadow" else "blocked")
+    cancelled_during_settlement = False
+    settlement_already_recovered = False
+    compensation_scan_id: str | None = None
+    compensation_error: str | None = None
     async with db_pool.acquire() as conn:
         async with conn.transaction():
             episode_row = await _research_episode_or_404(conn, episode_id, for_update=True)
             episode = _public_research_episode_row(episode_row)
-            if episode.get("cancel_requested"):
+            same_decision = str(episode.get("current_decision_id") or "") == str(decision_id)
+            if str(episode.get("status") or "") == "awaiting_observation" and same_decision:
+                # Stale-dispatch recovery already attached/settled the durable receipt. The
+                # original slow adapter may still return; make that return idempotent.
                 await conn.execute(
-                    "UPDATE research_decisions SET status='blocked', policy_result=$2::jsonb, updated_at=NOW() WHERE id=$1",
-                    decision_id, json.dumps({"cancelled_before_settlement": True}),
+                    """
+                    UPDATE research_decisions
+                    SET command_result_id=COALESCE(command_result_id, $2), updated_at=NOW()
+                    WHERE id=$1
+                    """,
+                    decision_id,
+                    _optional_uuid(command_result_id),
                 )
-                return {"accepted": False, **(await _research_episode_detail(conn, episode_id))}
-            used = _research_apply_cost(episode.get("budget_used") or {}, cost or {})
-            next_step = int(episode.get("step_count") or 0) + 1
-            max_steps = int((episode.get("budget_limits") or {}).get("steps") or 1)
-            terminal = next_step >= max_steps or int(_research_remaining_budget(episode.get("budget_limits"), used).get("actions") or 0) <= 0
-            next_status = "completed" if terminal else "awaiting_planner"
-            stop_reason = "max_steps_reached" if terminal else None
-            policy_result = {
-                "execution_mode": mode,
-                "dispatched": dispatched,
-                "execution_blocked_reason": dispatch_result.get("execution_blocked_reason"),
-                "cost_settled": cost or {},
-                "observation_summary": _bounded_research_payload(dispatch_result),
-            }
-            await conn.execute(
-                """
-                UPDATE research_decisions
-                SET status=$2, command_result_id=$3, policy_result=$4::jsonb, updated_at=NOW()
-                WHERE id=$1
-                """,
-                decision_id, decision_status, _optional_uuid(command_result_id), json.dumps(policy_result),
-            )
-            await conn.execute(
-                """
-                UPDATE research_episodes
-                SET status='awaiting_observation', step_count=$2, budget_used=$3::jsonb,
-                    stop_reason=COALESCE($4, stop_reason), version=version+1, updated_at=NOW()
-                WHERE id=$1
-                """,
-                episode_row["id"], next_step, json.dumps(used), stop_reason,
-            )
-            await _record_research_event(
-                conn, episode_row["id"], event_type="action_observed", status=decision_status,
-                summary=f"Observed {normalized.get('action', {}).get('command')}: {'dispatched' if dispatched else 'not dispatched'}",
-                decision_id=decision_id, command_result_id=command_result_id,
-                details={"dispatched": dispatched, "blocked_reason": dispatch_result.get("execution_blocked_reason")},
-            )
-            refreshed = await conn.fetchrow("SELECT * FROM research_episodes WHERE id=$1", episode_row["id"])
-            await _build_research_observation(
-                conn,
-                refreshed,
-                previous_result=dispatch_result,
-                previous_command_result_id=command_result_id,
-                next_status=next_status,
-            )
+                settlement_already_recovered = True
+            elif episode.get("cancel_requested") or str(episode.get("status") or "") != "dispatching" or not same_decision:
+                settled_cost = dict(cost or {})
+                if not dispatched and mode != "shadow":
+                    settled_cost["active_actions"] = 0
+                    settled_cost["requests"] = 0
+                    settled_cost["seconds"] = 0
+                used = _research_apply_cost(episode.get("budget_used") or {}, settled_cost)
+                await conn.execute(
+                    """
+                    UPDATE research_decisions
+                    SET status='blocked', command_result_id=$2, policy_result=$3::jsonb, updated_at=NOW()
+                    WHERE id=$1
+                    """,
+                    decision_id,
+                    _optional_uuid(command_result_id),
+                    json.dumps({
+                        "cancelled_before_settlement": True,
+                        "async_work": async_ref,
+                        "cost_settled": settled_cost,
+                        "observation_summary": _bounded_research_payload(dispatch_result),
+                    }),
+                )
+                await conn.execute(
+                    """
+                    UPDATE research_episodes
+                    SET step_count=step_count+1, budget_used=$2::jsonb,
+                        version=version+1, updated_at=NOW()
+                    WHERE id=$1
+                    """,
+                    episode_row["id"],
+                    json.dumps(used),
+                )
+                if async_ref and async_ref.get("kind") == "finding_retest":
+                    cancelled_finding_id = await conn.fetchval(
+                        """
+                        UPDATE finding_verifications
+                        SET status='cancelled', result_status='cancelled', verdict='cancelled',
+                            verdict_reason='Research episode cancelled during dispatch.',
+                            completed_at=NOW(), updated_at=NOW()
+                        WHERE id=$1 AND status='queued'
+                        RETURNING finding_id
+                        """,
+                        _optional_uuid(async_ref.get("id")),
+                    )
+                    if cancelled_finding_id:
+                        await conn.execute(
+                            """
+                            UPDATE findings f
+                            SET last_verification_status='cancelled', updated_at=NOW()
+                            WHERE f.id=$1
+                              AND NOT EXISTS (
+                                  SELECT 1 FROM finding_verifications active
+                                  WHERE active.finding_id=f.id AND active.status IN ('queued','running')
+                              )
+                              AND (
+                                  SELECT latest.id FROM finding_verifications latest
+                                  WHERE latest.finding_id=f.id
+                                  ORDER BY latest.created_at DESC LIMIT 1
+                              )=$2
+                            """,
+                            cancelled_finding_id,
+                            _optional_uuid(async_ref.get("id")),
+                        )
+                elif async_ref and async_ref.get("kind") == "scan":
+                    compensation_scan_id = str(async_ref.get("id"))
+                await _record_research_event(
+                    conn,
+                    episode_row["id"],
+                    event_type="dispatch_compensated",
+                    status="cancelled",
+                    summary="Recorded compensation for work returned after its dispatch lease was no longer current",
+                    decision_id=decision_id,
+                    command_result_id=command_result_id,
+                    details={
+                        "async_work": async_ref,
+                        "cost_settled": settled_cost,
+                        "episode_status": episode.get("status"),
+                        "same_decision": same_decision,
+                    },
+                )
+                cancelled_during_settlement = True
+            else:
+                settled_cost = dict(cost or {})
+                if not dispatched and mode != "shadow":
+                    # A rejected/busy/no-op adapter may consume a planner step, but it did not spend
+                    # target requests, active-action capacity, or execution time.
+                    settled_cost["active_actions"] = 0
+                    settled_cost["requests"] = 0
+                    settled_cost["seconds"] = 0
+                used = _research_apply_cost(episode.get("budget_used") or {}, settled_cost)
+                next_step = int(episode.get("step_count") or 0) + 1
+                max_steps = int((episode.get("budget_limits") or {}).get("steps") or 1)
+                terminal = next_step >= max_steps
+                next_status = "budget_exhausted" if terminal else "awaiting_planner"
+                stop_reason = "max_steps_reached_without_conclusion" if terminal else None
+                policy_result = {
+                    "execution_mode": mode,
+                    "dispatched": dispatched,
+                    "execution_blocked_reason": dispatch_result.get("execution_blocked_reason"),
+                    "cost_settled": settled_cost,
+                    "async_work": async_ref,
+                    "observation_summary": _bounded_research_payload(dispatch_result),
+                }
+                await conn.execute(
+                    """
+                    UPDATE research_decisions
+                    SET status=$2, command_result_id=$3, policy_result=$4::jsonb, updated_at=NOW()
+                    WHERE id=$1
+                    """,
+                    decision_id, decision_status, _optional_uuid(command_result_id), json.dumps(policy_result),
+                )
+                await conn.execute(
+                    """
+                    UPDATE research_episodes
+                    SET status='awaiting_observation', step_count=$2, budget_used=$3::jsonb,
+                        stop_reason=COALESCE($4, stop_reason), version=version+1, updated_at=NOW()
+                    WHERE id=$1
+                    """,
+                    episode_row["id"], next_step, json.dumps(used), stop_reason,
+                )
+                if async_ref:
+                    await _record_research_event(
+                        conn, episode_row["id"], event_type="action_waiting", status="awaiting_observation",
+                        summary=f"Waiting for {async_ref['kind']} {async_ref['id']}",
+                        decision_id=decision_id, command_result_id=command_result_id,
+                        details={"dispatched": True, "async_work": async_ref},
+                    )
+                else:
+                    await _record_research_event(
+                        conn, episode_row["id"], event_type="action_observed", status=decision_status,
+                        summary=f"Observed {normalized.get('action', {}).get('command')}: {'dispatched' if dispatched else 'not dispatched'}",
+                        decision_id=decision_id, command_result_id=command_result_id,
+                        details={"dispatched": dispatched, "blocked_reason": dispatch_result.get("execution_blocked_reason")},
+                    )
+                    refreshed = await conn.fetchrow("SELECT * FROM research_episodes WHERE id=$1", episode_row["id"])
+                    await _build_research_observation(
+                        conn,
+                        refreshed,
+                        previous_result=dispatch_result,
+                        previous_command_result_id=command_result_id,
+                        next_status=next_status,
+                    )
+    if cancelled_during_settlement and compensation_scan_id:
+        try:
+            await cancel_scan(compensation_scan_id)
+        except Exception as exc:
+            compensation_error = f"{type(exc).__name__}: {str(exc)[:300]}"
+        async with db_pool.acquire() as conn:
+            async with conn.transaction():
+                await _record_research_event(
+                    conn,
+                    _uuid_or_400(episode_id, "episode id"),
+                    event_type="dispatch_compensation_result",
+                    status="failed" if compensation_error else "cancelled",
+                    summary=(
+                        "Failed to cancel scan queued during episode cancellation"
+                        if compensation_error
+                        else "Cancelled scan queued during episode cancellation"
+                    ),
+                    decision_id=decision_id,
+                    command_result_id=command_result_id,
+                    details={"scan_id": compensation_scan_id, "error": compensation_error},
+                )
+    async with db_pool.acquire() as conn:
         detail = await _research_episode_detail(conn, episode_id)
+    if settlement_already_recovered:
+        return {
+            "accepted": True,
+            "recovered_settlement": True,
+            "dispatched": dispatched,
+            "decision_id": str(decision_id),
+            **detail,
+        }
+    if cancelled_during_settlement:
+        return {
+            "accepted": False,
+            "dispatch_compensation_scan_id": compensation_scan_id,
+            "dispatch_compensation_error": compensation_error,
+            **detail,
+        }
     return {"accepted": True, "dispatched": dispatched, "decision_id": str(decision_id), **detail}
 
 
-def _research_decision_json_schema(command_names: Sequence[str] | None = None) -> dict[str, Any]:
+def _research_decision_json_schema(
+    command_names: Sequence[str] | None = None,
+    *,
+    observation_id: str | None = None,
+    context_hash: str | None = None,
+) -> dict[str, Any]:
     allowed_commands = sorted({str(name).strip() for name in (command_names or []) if str(name).strip()})
-    return {
-        "name": "shakerscan_research_decision",
-        "schema": {
-            "type": "object",
-            "additionalProperties": False,
-            "required": [
-                "decision_version", "decision", "observation_id", "context_hash",
-                "hypothesis_id", "action", "expected_signal", "falsifier", "reason",
-                "confidence", "requested_input", "stop_reason",
-            ],
-            "properties": {
-                "decision_version": {"type": "string", "enum": [RESEARCH_DECISION_VERSION]},
-                "decision": {"type": "string", "enum": ["execute_action", "request_input", "stop"]},
-                "observation_id": {"type": "string"},
-                "context_hash": {"type": "string"},
-                "hypothesis_id": {"type": ["string", "null"]},
-                "action": {
-                    "type": "object",
-                    "additionalProperties": False,
-                    "required": ["command", "parameters"],
-                    "properties": {
-                        "command": {"type": "string", "enum": allowed_commands or [""]},
-                        "parameters": {"type": "object"},
-                    },
+    schema: dict[str, Any] = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": [
+            "decision_version", "decision", "observation_id", "context_hash",
+            "hypothesis_id", "action", "expected_signal", "falsifier", "reason",
+            "confidence", "requested_input", "stop_reason",
+        ],
+        "properties": {
+            "decision_version": {"type": "string", "enum": [RESEARCH_DECISION_VERSION]},
+            "decision": {
+                "type": "string",
+                "enum": (["execute_action"] if allowed_commands else []) + ["request_input", "stop"],
+            },
+            "observation_id": ({"const": observation_id} if observation_id else {"type": "string"}),
+            "context_hash": ({"const": context_hash} if context_hash else {"type": "string"}),
+            "hypothesis_id": {"type": ["string", "null"]},
+            "action": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["command", "parameters"],
+                "properties": {
+                    "command": {"type": "string", "enum": ["", *allowed_commands]},
+                    "parameters": {"type": "object"},
                 },
-                "expected_signal": {"type": "string"},
-                "falsifier": {"type": "string"},
-                "reason": {"type": "string"},
-                "confidence": {"type": "number", "minimum": 0, "maximum": 1},
-                "requested_input": {"type": "string"},
-                "stop_reason": {"type": "string"},
+            },
+            "expected_signal": {"type": ["string", "null"]},
+            "falsifier": {"type": ["string", "null"]},
+            "reason": {"type": ["string", "null"]},
+            "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+            "requested_input": {"type": ["string", "null"]},
+            "stop_reason": {"type": ["string", "null"]},
+        },
+    }
+    schema["allOf"] = ([{
+        "if": {"properties": {"decision": {"const": "execute_action"}}},
+        "then": {
+            "properties": {
+                "action": {"properties": {"command": {"type": "string", "enum": allowed_commands}}},
+                "expected_signal": {"type": "string", "minLength": 1},
+                "falsifier": {"type": "string", "minLength": 1},
             },
         },
+    }] if allowed_commands else []) + [{
+        "if": {"properties": {"decision": {"enum": ["request_input", "stop"]}}},
+        "then": {
+            "properties": {
+                "action": {
+                    "properties": {
+                        "command": {"const": ""},
+                        "parameters": {"type": "object", "maxProperties": 0},
+                    },
+                },
+            },
+        },
+    }, {
+        "if": {"properties": {"decision": {"const": "stop"}}},
+        "then": {"properties": {"stop_reason": {"type": "string", "minLength": 20}}},
+    }, {
+        "if": {"properties": {"decision": {"const": "request_input"}}},
+        "then": {"properties": {"requested_input": {"type": "string", "minLength": 10}}},
+    }]
+    return {
+        "name": "shakerscan_research_decision",
+        "schema": schema,
         "strict": True,
     }
 
 
 def _research_planner_messages(observation: dict[str, Any]) -> list[dict[str, str]]:
     pack = observation.get("observation_pack") if isinstance(observation.get("observation_pack"), dict) else {}
-    bounded = _bounded_research_payload(pack)
+    # Packs are already redacted, hard-capped, hashed, and persisted by the server. Applying the
+    # generic depth-6 redactor again here destroys the deep typed experiment schema in the actual
+    # provider prompt even when persistence kept it intact.
+    bounded = copy.deepcopy(pack)
     bounded["proposable_commands"] = [
         item for item in bounded.get("proposable_commands", [])
         if isinstance(item, dict) and item.get("proposable")
@@ -25334,7 +27134,9 @@ def _research_planner_messages(observation: dict[str, Any]) -> list[dict[str, st
                 "because the initial observation is large: inspect at least one useful read-only source when one "
                 "is proposable. A stop decision must include a concrete stop_reason summarizing the evidence, "
                 "remaining uncertainty, and best next recommendation. Return only the "
-                "requested JSON object and copy observation_id/context_hash exactly."
+                "requested JSON object and copy observation_id/context_hash exactly. Never repeat an identical "
+                "command with identical parameters when it appears in recent_actions; use the completed result "
+                "to choose a different action or stop. For stop/request_input, use an empty action command and parameters."
             ),
         },
         {"role": "user", "content": json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)},
@@ -25394,6 +27196,7 @@ def _bind_research_decision_to_observation(
 ) -> dict[str, Any]:
     """Bind provider output to the server-selected immutable observation."""
     bound = dict(response)
+    repairs: list[str] = []
     action = bound.get("action")
     if isinstance(action, dict) and not str(action.get("command") or "").strip():
         parameter_names = set((action.get("parameters") or {}).keys()) if isinstance(action.get("parameters"), dict) else set()
@@ -25410,12 +27213,14 @@ def _bind_research_decision_to_observation(
             action = dict(action)
             action["command"] = candidates[0]
             bound["action"] = action
+            repairs.append("command_inferred_from_parameter_shape")
         elif bound.get("decision") == "execute_action":
             inferred_command = _infer_blank_read_only_command(bound, observation)
             if inferred_command:
                 action = dict(action)
                 action["command"] = inferred_command
                 bound["action"] = action
+                repairs.append("read_only_command_inferred_from_intent")
     if not bound.get("decision"):
         action = bound.get("action")
         has_action = isinstance(action, dict) and bool(action.get("command"))
@@ -25431,19 +27236,126 @@ def _bind_research_decision_to_observation(
         ]
         if len(inferred) == 1:
             bound["decision"] = inferred[0]
+            repairs.append("decision_type_inferred")
     # Some OpenAI-compatible providers still omit semantic fields despite the structured schema.
     # Bind safe, non-authorizing defaults so a
     # valid stop/request-input intent cannot spin the controller on a cosmetic omission.
     if bound.get("decision") == "stop" and not str(bound.get("stop_reason") or "").strip():
         bound["stop_reason"] = str(bound.get("reason") or "planner_concluded_no_further_action").strip()[:500]
+        repairs.append("stop_reason_defaulted")
     if bound.get("decision") == "request_input" and not str(bound.get("requested_input") or "").strip():
         bound["requested_input"] = str(bound.get("reason") or "Operator input is required to continue.").strip()[:2000]
+        repairs.append("requested_input_defaulted")
     if bound.get("decision") in {"stop", "request_input"}:
         bound["action"] = {"command": "", "parameters": {}}
+    if str(bound.get("decision_version") or "") != RESEARCH_DECISION_VERSION:
+        repairs.append("decision_version_server_bound")
     bound["decision_version"] = RESEARCH_DECISION_VERSION
+    if str(bound.get("observation_id") or "") != str(observation.get("id") or ""):
+        repairs.append("observation_id_server_bound")
+    if str(bound.get("context_hash") or "") != str(observation.get("context_hash") or ""):
+        repairs.append("context_hash_server_bound")
     bound["observation_id"] = str(observation.get("id") or "")
     bound["context_hash"] = str(observation.get("context_hash") or "")
+    bound["_harness_repairs"] = list(dict.fromkeys(repairs))
     return bound
+
+
+def _research_provider_contract_error(
+    response: dict[str, Any],
+    observation: dict[str, Any],
+) -> str | None:
+    # Compatibility repair may bind harmless structural omissions, but terminal meaning must
+    # come from the planner. A server-invented stop/input explanation can make malformed output
+    # look like a genuine conclusion and prematurely end an investigation.
+    raw_decision = str(response.get("decision") or "")
+    if raw_decision == "request_input" and not str(response.get("requested_input") or "").strip():
+        return "requested_input_required"
+    if raw_decision == "stop" and not str(response.get("stop_reason") or "").strip():
+        return "stop_reason_required"
+    provider_fields = {
+        "decision_version", "decision", "observation_id", "context_hash", "hypothesis_id",
+        "action", "expected_signal", "falsifier", "reason", "confidence", "requested_input",
+        "stop_reason",
+    }
+    unexpected = sorted(set(response) - provider_fields)
+    if unexpected:
+        return "unexpected_fields:" + ",".join(str(item)[:80] for item in unexpected[:10])
+    bound = _bind_research_decision_to_observation(response, observation)
+    typed_candidate = dict(bound)
+    typed_candidate.pop("_harness_repairs", None)
+    try:
+        ResearchDecisionRequest(**typed_candidate)
+    except ValidationError as exc:
+        violations = []
+        for item in exc.errors()[:8]:
+            location = ".".join(str(part) for part in item.get("loc") or []) or "decision"
+            violations.append(f"{location}:{item.get('type') or 'invalid'}")
+        return "decision_schema_invalid:" + ",".join(violations)
+    decision = str(bound.get("decision") or "")
+    if decision not in {"execute_action", "request_input", "stop"}:
+        return "decision_type_invalid"
+    if decision == "execute_action":
+        action = bound.get("action") if isinstance(bound.get("action"), dict) else {}
+        command = str(action.get("command") or "").strip()
+        pack = observation.get("observation_pack") if isinstance(observation.get("observation_pack"), dict) else {}
+        allowed = {
+            str(item.get("name") or "")
+            for item in pack.get("proposable_commands") or []
+            if isinstance(item, dict) and item.get("proposable")
+        }
+        errors = []
+        if not command or command not in allowed:
+            errors.append("command_not_proposable")
+        if not str(bound.get("expected_signal") or "").strip():
+            errors.append("expected_signal_required")
+        if not str(bound.get("falsifier") or "").strip():
+            errors.append("falsifier_required")
+        return ",".join(errors) or None
+    if decision == "request_input" and not str(bound.get("requested_input") or "").strip():
+        return "requested_input_required"
+    if decision == "stop":
+        stop_reason = str(bound.get("stop_reason") or "").strip()
+        if not stop_reason:
+            return "stop_reason_required"
+        if len(stop_reason) < 20:
+            return "stop_reason_too_vague"
+        pack = observation.get("observation_pack") if isinstance(observation.get("observation_pack"), dict) else {}
+        has_proposable_work = any(
+            isinstance(item, dict) and item.get("proposable")
+            for item in pack.get("proposable_commands") or []
+        )
+        has_observed_action = any(
+            isinstance(item, dict)
+            and str(item.get("decision_type") or "") == "execute_action"
+            and str(item.get("status") or "") == "completed"
+            for item in pack.get("recent_actions") or []
+        )
+        if has_proposable_work and not has_observed_action:
+            return "premature_stop_before_evidence_action"
+        viable_gated_commands = {
+            str(item.get("name") or "")
+            for item in pack.get("proposable_commands") or []
+            if isinstance(item, dict)
+            and item.get("proposable")
+            and str(item.get("name") or "") in GATED_RESEARCH_COMMANDS
+        }
+        completed_gated_action = any(
+            isinstance(item, dict)
+            and str(item.get("decision_type") or "") == "execute_action"
+            and str(item.get("status") or "") == "completed"
+            and str((item.get("action") or {}).get("command") or "") in GATED_RESEARCH_COMMANDS
+            for item in pack.get("recent_actions") or []
+        )
+        mission = pack.get("mission") if isinstance(pack.get("mission"), dict) else {}
+        if (
+            str(mission.get("profile") or "target_hunt")
+            in {"target_hunt", "verify_finding", "close_asm_gaps"}
+            and viable_gated_commands
+            and not completed_gated_action
+        ):
+            return "premature_stop_before_active_evidence"
+    return None
 
 
 def _load_research_ai_provider():
@@ -25455,6 +27367,120 @@ def _load_research_ai_provider():
         except Exception:
             continue
     return None
+
+
+async def _mark_research_model_budget_exhausted(
+    conn,
+    *,
+    episode_id: str,
+    observation_id: str,
+    summary: str,
+    details: dict[str, Any],
+) -> bool:
+    """End only the still-current planner turn without fabricating model spend."""
+    row = await conn.fetchrow(
+        """
+        UPDATE research_episodes
+        SET status='budget_exhausted', stop_reason='model_token_budget_exhausted',
+            autopilot_enabled=false, updated_at=NOW()
+        WHERE id=$1 AND status='awaiting_planner' AND cancel_requested=false
+          AND current_observation_id=$2
+        RETURNING id
+        """,
+        _uuid_or_400(episode_id, "episode id"),
+        _optional_uuid(observation_id),
+    )
+    if not row:
+        return False
+    await _record_research_event(
+        conn,
+        row["id"],
+        event_type="model_budget_exhausted",
+        status="budget_exhausted",
+        summary=summary,
+        observation_id=observation_id,
+        details=details,
+    )
+    return True
+
+
+async def _record_research_planner_failure(
+    conn,
+    *,
+    episode_id: str,
+    observation_id: str,
+    error: str,
+    failure_meta: dict[str, Any],
+    force_budget_exhausted: bool,
+) -> dict[str, Any] | None:
+    """Persist failed-attempt metering against the still-current observation."""
+    row = await conn.fetchrow(
+        "SELECT * FROM research_episodes WHERE id=$1 FOR UPDATE",
+        _uuid_or_400(episode_id, "episode id"),
+    )
+    if (
+        not row
+        or str(row["status"]) != "awaiting_planner"
+        or bool(row["cancel_requested"])
+        or str(row["current_observation_id"] or "") != observation_id
+    ):
+        return None
+    episode = _public_research_episode_row(row)
+    try:
+        metered_units = max(0, int(failure_meta.get("planning_units_spent") or 0))
+    except (TypeError, ValueError):
+        metered_units = 0
+    used = _research_normalize_budget_used(episode.get("budget_used") or {})
+    used["model_tokens"] += metered_units
+    model_limit = int((episode.get("budget_limits") or {}).get("model_tokens") or 0)
+    exhausted = force_budget_exhausted or used["model_tokens"] >= model_limit
+    status = "budget_exhausted" if exhausted else "awaiting_planner"
+    await conn.execute(
+        """
+        UPDATE research_episodes
+        SET status=$2, budget_used=$3::jsonb,
+            stop_reason=CASE WHEN $2='budget_exhausted' THEN 'model_token_budget_exhausted' ELSE stop_reason END,
+            autopilot_enabled=CASE WHEN $2='budget_exhausted' THEN false ELSE autopilot_enabled END,
+            updated_at=NOW()
+        WHERE id=$1
+        """,
+        row["id"],
+        status,
+        json.dumps(used),
+    )
+    await _record_research_event(
+        conn,
+        row["id"],
+        event_type="planner_provider_failed",
+        status=status,
+        summary=(
+            "Planner fallback chain reached the episode model budget"
+            if exhausted
+            else "Planner provider call failed before producing a valid decision"
+        ),
+        observation_id=observation_id,
+        details={
+            "error": str(error)[:500],
+            "metered_model_units": metered_units,
+            "provider": _bounded_research_payload(failure_meta),
+        },
+    )
+    if not exhausted:
+        refreshed = await conn.fetchrow("SELECT * FROM research_episodes WHERE id=$1", row["id"])
+        await _build_research_observation(
+            conn,
+            refreshed,
+            previous_result={
+                "execution_blocked_reason": "planner_provider_failed",
+                "result": {
+                    "status": "planner_provider_failed",
+                    "reason": str(error)[:500],
+                    "error_message": str(error)[:500],
+                },
+            },
+            next_status="awaiting_planner",
+        )
+    return {"status": status, "metered_model_units": metered_units}
 
 
 async def _plan_research_episode_step(episode_id: str, req: ResearchPlannerStepRequest):
@@ -25476,12 +27502,33 @@ async def _plan_research_episode_step(episode_id: str, req: ResearchPlannerStepR
     if not call_provider:
         raise HTTPException(status_code=503, detail="Shared AI provider client is unavailable")
     messages = _research_planner_messages(observation)
+    remaining_model_units = int((episode.get("remaining_budget") or {}).get("model_tokens") or 0)
+    prompt_bytes = sum(len(str(item.get("content") or "").encode("utf-8")) for item in messages)
+    prompt_reservation = max(1, (prompt_bytes + 2) // 3)
+    if remaining_model_units <= prompt_reservation + 128:
+        async with db_pool.acquire() as conn:
+            async with conn.transaction():
+                changed = await _mark_research_model_budget_exhausted(
+                    conn,
+                    episode_id=episode_id,
+                    observation_id=str(observation.get("id") or ""),
+                    summary="Remaining model budget cannot fit another bounded planner prompt",
+                    details={
+                        "remaining_model_units": remaining_model_units,
+                        "prompt_reservation": prompt_reservation,
+                    },
+                )
+            if not changed:
+                raise HTTPException(status_code=409, detail="Planner observation is no longer current")
+            detail = await _research_episode_detail(conn, episode_id)
+        return {"accepted": False, "planner_call": {"error": "model_token_budget_exhausted"}, **detail}
     observation_pack = observation.get("observation_pack") if isinstance(observation.get("observation_pack"), dict) else {}
     command_names = [
         str(item.get("name") or "")
         for item in observation_pack.get("proposable_commands") or []
         if isinstance(item, dict) and item.get("proposable") and item.get("name")
     ]
+    failure_meta: dict[str, Any] = {}
     response, error, latency_ms = await call_provider(
         ai_url=ai_url,
         ai_api_key=ai_key,
@@ -25490,38 +27537,105 @@ async def _plan_research_episode_step(episode_id: str, req: ResearchPlannerStepR
         timeout_seconds=req.timeout_seconds,
         max_tokens=req.max_tokens,
         temperature=0.1,
-        json_schema=_research_decision_json_schema(command_names),
+        json_schema=_research_decision_json_schema(
+            command_names,
+            observation_id=str(observation.get("id") or ""),
+            context_hash=str(observation.get("context_hash") or ""),
+        ),
         fallback_models=settings.get("ai_model_fallback"),
         overall_budget_seconds=req.timeout_seconds,
+        response_validator=lambda value: _research_provider_contract_error(value, observation),
+        token_budget=remaining_model_units,
+        failure_meta_sink=failure_meta,
+        use_circuit_breaker=False,
     )
     if error or not isinstance(response, dict):
-        raise HTTPException(status_code=502, detail=f"Research planner failed: {str(error or 'invalid response')[:300]}")
+        error_text = str(error or "invalid response")[:500]
+        async with db_pool.acquire() as conn:
+            async with conn.transaction():
+                failure = await _record_research_planner_failure(
+                    conn,
+                    episode_id=episode_id,
+                    observation_id=str(observation.get("id") or ""),
+                    error=error_text,
+                    failure_meta=failure_meta,
+                    force_budget_exhausted="token budget" in error_text.lower(),
+                )
+            if not failure:
+                raise HTTPException(status_code=409, detail="Planner observation is no longer current")
+            if failure["status"] == "budget_exhausted":
+                detail = await _research_episode_detail(conn, episode_id)
+                return {
+                    "accepted": False,
+                    "planner_call": {
+                        "error": error_text[:300],
+                        "provider": _bounded_research_payload(failure_meta),
+                    },
+                    **detail,
+                }
+        raise HTTPException(status_code=502, detail=f"Research planner failed: {error_text[:300]}")
     provider_meta = response.pop("_provider_meta", {}) if isinstance(response.get("_provider_meta"), dict) else {}
-    prompt_bytes = sum(len(str(item.get("content") or "").encode("utf-8")) for item in messages)
     output_bytes = len(json.dumps(response, default=str).encode("utf-8"))
     estimated_tokens = max(1, (prompt_bytes + output_bytes + 3) // 4)
+    usage = (
+        provider_meta.get("usage_units")
+        if isinstance(provider_meta.get("usage_units"), dict)
+        else provider_meta.get("usage") if isinstance(provider_meta.get("usage"), dict) else {}
+    )
+    try:
+        provider_tokens = max(
+            0,
+            int(
+                provider_meta.get("planning_units_spent")
+                or provider_meta.get("token_units_spent")
+                or usage.get("total_units")
+                or usage.get("total_tokens")
+                or 0
+            ),
+        )
+    except (TypeError, ValueError):
+        provider_tokens = 0
+    model_tokens_used = provider_tokens or estimated_tokens
+    bound_response = _bind_research_decision_to_observation(response, observation)
+    harness_repairs = bound_response.pop("_harness_repairs", [])
+    actual_model = str(provider_meta.get("model_used") or provider_meta.get("model") or ai_model)[:200]
+    actual_mode = str(provider_meta.get("mode_used") or provider_meta.get("mode") or "unknown")[:80]
     try:
         decision_req = ResearchDecisionRequest(
-            **_bind_research_decision_to_observation(response, observation),
+            **bound_response,
             planner={
                 "kind": "configured_ai",
-                "model": str(provider_meta.get("model") or ai_model)[:200],
-                "provider_mode": str(provider_meta.get("mode") or "structured_json")[:80],
+                "requested_model": ai_model[:200],
+                "model": actual_model,
+                "provider_mode": actual_mode,
+                "provider_kind": str(provider_meta.get("provider_kind") or "unknown")[:80],
+                "parse_method": str(provider_meta.get("parse_method") or "unknown")[:80],
+                "fallback_index": max(0, int(provider_meta.get("fallback_index") or 0)),
+                "mode_index": max(0, int(provider_meta.get("mode_index") or 0)),
+                "attempt_index": max(0, int(provider_meta.get("attempt_index") or 0)),
+                "finish_reason": str(provider_meta.get("finish_reason") or "")[:80] or None,
+                "schema_validated": bool(provider_meta.get("schema_validated")),
+                "reasoning_present": bool(provider_meta.get("reasoning_present")),
+                "harness_repairs": [str(item)[:100] for item in harness_repairs[:20]],
+                "usage": _bounded_research_payload(usage),
                 "latency_ms": latency_ms,
-                "metering_quality": "estimated",
+                "metering_quality": "provider" if provider_tokens else "estimated",
                 "created_by": req.created_by,
             },
-            model_tokens_used=estimated_tokens,
+            model_tokens_used=model_tokens_used,
             execute=req.execute,
         )
     except ValidationError as exc:
         raise HTTPException(status_code=422, detail={"error": "planner_decision_schema_invalid", "violations": exc.errors()}) from exc
     result = await submit_research_decision(episode_id, decision_req)
     result["planner_call"] = {
-        "model": str(provider_meta.get("model") or ai_model)[:200],
+        "requested_model": ai_model[:200],
+        "model": actual_model,
+        "provider_mode": actual_mode,
         "latency_ms": latency_ms,
-        "estimated_tokens": estimated_tokens,
-        "metering_quality": "estimated",
+        "model_tokens": model_tokens_used,
+        "metering_quality": "provider" if provider_tokens else "estimated",
+        "harness_repairs": harness_repairs,
     }
     return result
 
@@ -25567,7 +27681,10 @@ async def _release_research_autopilot_lease(
             UPDATE research_episodes
             SET lease_owner=NULL, lease_expires_at=NULL, autopilot_error=NULL,
                 autopilot_consecutive_failures=0,
-                autopilot_enabled=CASE WHEN status='awaiting_planner' THEN autopilot_enabled ELSE false END,
+                autopilot_enabled=CASE
+                    WHEN status IN ('awaiting_planner','awaiting_observation') THEN autopilot_enabled
+                    ELSE false
+                END,
                 updated_at=NOW()
             WHERE id=$1 AND lease_owner=$2
             """,
@@ -25575,24 +27692,509 @@ async def _release_research_autopilot_lease(
         )
 
 
+def _research_autopilot_expected_control_race(exc: Exception) -> bool:
+    """Operator pause/cancel racing a model call is control flow, not a planner failure."""
+    if not isinstance(exc, HTTPException) or int(exc.status_code or 0) != 409:
+        return False
+    detail = str(exc.detail or "")
+    return detail in {
+        "Research autopilot was paused before dispatch",
+        "Research episode is terminal or cancelled",
+    }
+
+
+async def _reconcile_stale_research_dispatches(conn) -> int:
+    """Fail closed on expired dispatch windows; never replay an uncertain active action."""
+    rows = await conn.fetch(
+        """
+        SELECT re.*, rd.id AS decision_id, rd.command_result_id AS linked_command_result_id,
+               rd.policy_result, rd.action,
+               recovered.id AS recovered_command_result_id,
+               recovered.status AS recovered_command_status,
+               recovered.dry_run AS recovered_command_dry_run,
+               recovered_scan.id AS recovered_scan_id,
+               recovered_scan.status AS recovered_scan_status,
+               recovered_scan.job_id AS recovered_scan_job_id,
+               recovered_scan.campaign_id AS recovered_scan_campaign_id,
+               fv.id AS recovered_retest_id, fv.finding_id AS recovered_finding_id,
+               fv.status AS recovered_retest_status
+        FROM research_episodes re
+        LEFT JOIN research_decisions rd ON rd.id=re.current_decision_id
+        LEFT JOIN LATERAL (
+            SELECT cr.id, cr.status, cr.dry_run
+            FROM command_results cr
+            WHERE rd.command_result_id IS NULL
+              AND cr.created_by=(
+                  'research_episode:' || re.id::text || ':decision:' || rd.id::text
+              )
+            ORDER BY cr.created_at DESC
+            LIMIT 1
+        ) recovered ON true
+        LEFT JOIN LATERAL (
+            SELECT s.id, s.status, s.job_id, s.campaign_id
+            FROM scans s
+            WHERE rd.command_result_id IS NULL
+              AND recovered.id IS NULL
+              AND s.options->>'research_dispatch_correlation'=(
+                  'research_episode:' || re.id::text || ':decision:' || rd.id::text
+              )
+            ORDER BY s.created_at DESC
+            LIMIT 1
+        ) recovered_scan ON true
+        LEFT JOIN LATERAL (
+            SELECT verification.id, verification.finding_id, verification.status
+            FROM finding_verifications verification
+            WHERE rd.command_result_id IS NULL
+              AND recovered.id IS NULL
+              AND recovered_scan.id IS NULL
+              AND verification.requested_by=(
+                  'research_episode:' || re.id::text || ':decision:' || rd.id::text
+              )
+            ORDER BY verification.created_at DESC
+            LIMIT 1
+        ) fv ON true
+        WHERE re.status='dispatching'
+          AND re.updated_at < NOW() - INTERVAL '5 minutes'
+        ORDER BY re.updated_at ASC
+        FOR UPDATE OF re SKIP LOCKED
+        LIMIT 10
+    """
+    )
+    repaired = 0
+    for row in rows:
+        receipt_id = row["linked_command_result_id"] or row["recovered_command_result_id"]
+        recovered_status = str(row["recovered_command_status"] or "")
+        recovered_dry_run = bool(row["recovered_command_dry_run"])
+        correlation = f"research_episode:{row['id']}:decision:{row['decision_id']}"
+        if not receipt_id and row.get("recovered_scan_id"):
+            action = _decode_json_value(row.get("action")) or {}
+            command_name = str(action.get("command") or "asm.improve").strip()
+            command = _research_command_catalog().get(command_name) or {}
+            scan_status = str(row.get("recovered_scan_status") or "unknown")
+            receipt_status = (
+                "queued" if scan_status in {"pending", "queued"}
+                else "running" if scan_status == "running"
+                else scan_status
+            )
+            synthesized = await _record_command_result(
+                conn,
+                command=command_name,
+                status=receipt_status,
+                risk_tier=str(command.get("risk_tier") or "active"),
+                campaign_id=row.get("recovered_scan_campaign_id"),
+                scan_id=row["recovered_scan_id"],
+                operator_message="Recovered ASM scan queued by an interrupted research dispatch",
+                result_json={
+                    "scan_id": str(row["recovered_scan_id"]),
+                    "job_id": str(row.get("recovered_scan_job_id") or ""),
+                    "status": scan_status,
+                    "recovered_from_scan_correlation": True,
+                },
+                next_action=f"/scans/{row['recovered_scan_id']}",
+                created_by=correlation,
+            )
+            receipt_id = synthesized["id"]
+            recovered_status = str(synthesized.get("status") or "")
+            recovered_dry_run = bool(synthesized.get("dry_run"))
+        if not receipt_id and row["recovered_retest_id"]:
+            synthesized = await _record_command_result(
+                conn,
+                command="finding.retest",
+                status=(
+                    "retest_scheduled"
+                    if str(row["recovered_retest_status"] or "") in {"queued", "running"}
+                    else str(row["recovered_retest_status"] or "completed")
+                ),
+                risk_tier="active",
+                finding_ids=[str(row["recovered_finding_id"])],
+                operator_message="Recovered finding retest queued by an interrupted research dispatch",
+                result_json={
+                    "finding_id": str(row["recovered_finding_id"]),
+                    "retest_id": str(row["recovered_retest_id"]),
+                    "status": str(row["recovered_retest_status"] or "unknown"),
+                },
+                next_action=f"/findings/{row['recovered_finding_id']}",
+                created_by=correlation,
+            )
+            receipt_id = synthesized["id"]
+            recovered_status = str(synthesized.get("status") or "")
+            recovered_dry_run = bool(synthesized.get("dry_run"))
+        if receipt_id:
+            if not row["linked_command_result_id"]:
+                policy_result = _decode_json_value(row["policy_result"]) or {}
+                settled_cost = dict(policy_result.get("cost_reserved") or {})
+                if recovered_dry_run or recovered_status in {
+                    "blocked", "approval_required", "failed", "cancelled",
+                }:
+                    settled_cost["active_actions"] = 0
+                    settled_cost["requests"] = 0
+                    settled_cost["seconds"] = 0
+                recovered_decision_status = (
+                    "blocked"
+                    if recovered_dry_run or recovered_status in {
+                        "blocked", "approval_required", "failed", "cancelled",
+                    }
+                    else "dispatching"
+                )
+                used = _research_apply_cost(
+                    _decode_json_value(row["budget_used"]) or {},
+                    settled_cost,
+                )
+                next_step = int(row["step_count"] or 0) + 1
+                max_steps = int((_decode_json_value(row["budget_limits"]) or {}).get("steps") or 1)
+                await conn.execute(
+                    """
+                    UPDATE research_decisions
+                    SET command_result_id=$2, status=$4,
+                        policy_result=$3::jsonb, updated_at=NOW()
+                    WHERE id=$1 AND command_result_id IS NULL
+                    """,
+                    row["decision_id"],
+                    _optional_uuid(receipt_id),
+                    json.dumps({
+                        **policy_result,
+                        "recovered_dispatch": True,
+                        "cost_settled": settled_cost,
+                    }),
+                    recovered_decision_status,
+                )
+                await conn.execute(
+                    """
+                    UPDATE research_episodes
+                    SET status='awaiting_observation', step_count=$2,
+                        budget_used=$3::jsonb,
+                        stop_reason=CASE WHEN $2 >= $4 THEN 'max_steps_reached_without_conclusion' ELSE stop_reason END,
+                        lease_owner=NULL, lease_expires_at=NULL,
+                        autopilot_error='recovered_expired_dispatch_with_receipt',
+                        version=version+1, updated_at=NOW()
+                    WHERE id=$1
+                    """,
+                    row["id"], next_step, json.dumps(used), max_steps,
+                )
+            else:
+                await conn.execute(
+                    """
+                    UPDATE research_episodes
+                    SET status='awaiting_observation', lease_owner=NULL, lease_expires_at=NULL,
+                        autopilot_error='recovered_expired_dispatch_with_receipt', updated_at=NOW()
+                    WHERE id=$1
+                    """,
+                    row["id"],
+                )
+            summary = "Recovered expired dispatch from its durable command receipt"
+            status = "awaiting_observation"
+        else:
+            await conn.execute(
+                """
+                UPDATE research_episodes
+                SET status='blocked', autopilot_enabled=false, lease_owner=NULL,
+                    lease_expires_at=NULL, stop_reason='dispatch_outcome_unknown',
+                    autopilot_error='dispatch_outcome_unknown_no_replay', updated_at=NOW()
+                WHERE id=$1
+                """,
+                row["id"],
+            )
+            await conn.execute(
+                """
+                UPDATE research_decisions
+                SET status='blocked', validation_errors=(validation_errors || '["dispatch_outcome_unknown"]'::jsonb),
+                    updated_at=NOW()
+                WHERE id=$1 AND status='dispatching'
+                """,
+                row["decision_id"],
+            )
+            summary = "Blocked expired dispatch with no durable receipt; action was not replayed"
+            status = "blocked"
+        await _record_research_event(
+            conn,
+            row["id"],
+            event_type="dispatch_reconciled",
+            status=status,
+            summary=summary,
+            decision_id=row["decision_id"],
+            command_result_id=receipt_id,
+        )
+        repaired += 1
+    return repaired
+
+
+def _research_queued_job_ids(redis_client, queue_name: str) -> set[str]:
+    queued: set[str] = set()
+    for raw in redis_client.lrange(queue_name, 0, -1):
+        try:
+            payload = json.loads(raw)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if isinstance(payload, dict) and payload.get("job_id"):
+            queued.add(str(payload["job_id"]))
+    return queued
+
+
+RESEARCH_PROCESSING_LEASE_MAX_AGE_SECONDS = 120
+
+
+def _redis_hash_text(payload: Any) -> dict[str, str]:
+    if not isinstance(payload, dict):
+        return {}
+    result: dict[str, str] = {}
+    for raw_key, raw_value in payload.items():
+        key = raw_key.decode("utf-8", "replace") if isinstance(raw_key, bytes) else str(raw_key)
+        value = raw_value.decode("utf-8", "replace") if isinstance(raw_value, bytes) else str(raw_value)
+        result[key] = value
+    return result
+
+
+def _research_fresh_processing_lease(
+    metadata: Any,
+    *,
+    now: datetime | None = None,
+    max_age_seconds: int = RESEARCH_PROCESSING_LEASE_MAX_AGE_SECONDS,
+) -> bool:
+    """Accept only a worker-authored, recent pop/heartbeat marker.
+
+    The API's ordinary ``status=queued`` cache hash is not queue durability: it
+    survives BLPOP, worker crashes, and queue clearing. Workers stamp
+    ``processing_lease_at`` immediately after BLPOP; running jobs also maintain
+    ``heartbeat``. Either timestamp is useful only while fresh.
+    """
+    values = _redis_hash_text(metadata)
+    raw_timestamp = values.get("processing_lease_at") or values.get("heartbeat")
+    if not raw_timestamp:
+        return False
+    try:
+        parsed = datetime.fromisoformat(raw_timestamp.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return False
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    current = now or datetime.now(timezone.utc)
+    age_seconds = (current - parsed.astimezone(timezone.utc)).total_seconds()
+    return -5 <= age_seconds <= max(1, int(max_age_seconds))
+
+
+def _research_queue_presence(
+    redis_client,
+    *,
+    queue_ids: set[str],
+    job_id: str,
+    metadata_key: str,
+    now: datetime | None = None,
+) -> bool | None:
+    """Return True for durable/fresh work, False for proven orphan, None if unknown."""
+    if not job_id:
+        return False
+    if job_id in queue_ids:
+        return True
+    try:
+        metadata = redis_client.hgetall(metadata_key)
+    except Exception:
+        # A partial Redis read cannot prove absence; retry on the next sweep.
+        return None
+    return _research_fresh_processing_lease(metadata, now=now)
+
+
+async def _reconcile_unconfirmed_asm_queue_handoffs(conn) -> int:
+    """Fail stale two-phase ASM handoffs that died before queue confirmation."""
+    rows = await conn.fetch(
+        """
+        SELECT id, campaign_id
+        FROM scans
+        WHERE status='pending'
+          AND options->>'queue_handoff_confirmed'='false'
+          AND created_at < NOW() - INTERVAL '5 minutes'
+        ORDER BY created_at ASC
+        FOR UPDATE SKIP LOCKED
+        LIMIT 25
+        """
+    )
+    repaired = 0
+    for row in rows:
+        changed = await conn.fetchval(
+            """
+            UPDATE scans
+            SET status='failed', progress=100, current_phase='queue_failed',
+                error_message='Queue handoff confirmation remained absent after the recovery deadline; active work was not started.',
+                completed_at=NOW()
+            WHERE id=$1 AND status='pending'
+              AND options->>'queue_handoff_confirmed'='false'
+            RETURNING id
+            """,
+            row["id"],
+        )
+        if not changed:
+            continue
+        campaign_id = row.get("campaign_id")
+        if campaign_id:
+            await conn.execute(
+                """
+                UPDATE scan_campaigns campaign
+                SET status='failed', completed_at=COALESCE(completed_at, NOW()), updated_at=NOW()
+                WHERE campaign.id=$1 AND campaign.status='active'
+                  AND EXISTS (
+                      SELECT 1 FROM scans owner
+                      WHERE owner.id=$2 AND owner.campaign_id=campaign.id
+                        AND owner.status='failed'
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1 FROM scans other
+                      WHERE other.campaign_id=campaign.id AND other.id<>$2
+                  )
+                """,
+                campaign_id,
+                row["id"],
+            )
+        repaired += 1
+    return repaired
+
+
+async def _reconcile_research_orphaned_queue_work(conn) -> int:
+    """Fail closed work committed to Postgres but lost before its Redis enqueue."""
+    try:
+        redis_client = get_redis()
+        redis_client.ping()
+        scan_queue_ids = _research_queued_job_ids(redis_client, QUEUE_NAME)
+        retest_queue_ids = _research_queued_job_ids(redis_client, RETEST_QUEUE_NAME)
+    except Exception:
+        # Queue visibility is required to prove a job is orphaned.
+        return 0
+
+    scan_rows = await conn.fetch(
+        """
+        SELECT re.id AS episode_id, s.id, s.job_id
+        FROM research_episodes re
+        JOIN research_decisions rd ON rd.episode_id=re.id
+        JOIN command_results cr ON cr.id=rd.command_result_id
+        JOIN scans s ON s.id=cr.scan_id
+        WHERE re.status='awaiting_observation' AND re.cancel_requested=false
+          AND s.status IN ('pending','queued')
+          AND s.created_at < NOW() - INTERVAL '5 minutes'
+        FOR UPDATE OF s SKIP LOCKED
+        LIMIT 25
+        """
+    )
+    retest_rows = await conn.fetch(
+        """
+        SELECT re.id AS episode_id, fv.id, fv.job_id, fv.finding_id
+        FROM research_episodes re
+        JOIN research_decisions rd ON rd.episode_id=re.id
+        JOIN command_results cr ON cr.id=rd.command_result_id
+        JOIN finding_verifications fv ON fv.id::text=cr.result_json->>'retest_id'
+        WHERE re.status='awaiting_observation' AND re.cancel_requested=false
+          AND fv.status='queued'
+          AND fv.created_at < NOW() - INTERVAL '5 minutes'
+        FOR UPDATE OF fv SKIP LOCKED
+        LIMIT 25
+        """
+    )
+    repaired = 0
+    for row in scan_rows:
+        job_id = str(row["job_id"] or "")
+        presence = _research_queue_presence(
+            redis_client,
+            queue_ids=scan_queue_ids,
+            job_id=job_id,
+            metadata_key=f"job:{job_id}",
+        )
+        if presence is not False:
+            continue
+        changed = await conn.fetchval(
+            """
+            UPDATE scans
+            SET status='failed', progress=100, current_phase='terminated', completed_at=NOW(),
+                error_message='Research dispatch queue handoff was not durable; job was never enqueued.'
+            WHERE id=$1 AND status IN ('pending','queued')
+            RETURNING id
+            """,
+            row["id"],
+        )
+        if changed:
+            await _record_research_event(
+                conn,
+                row["episode_id"],
+                event_type="orphaned_queue_work_failed",
+                status="failed",
+                summary="Marked a scan failed because its durable queue handoff was missing",
+                details={"kind": "scan", "scan_id": str(row["id"]), "job_id": job_id},
+            )
+            repaired += 1
+    for row in retest_rows:
+        job_id = str(row["job_id"] or "")
+        presence = _research_queue_presence(
+            redis_client,
+            queue_ids=retest_queue_ids,
+            job_id=job_id,
+            metadata_key=f"retest_job:{job_id}",
+        )
+        if presence is not False:
+            continue
+        changed = await conn.fetchval(
+            """
+            UPDATE finding_verifications
+            SET status='failed', result_status='error', verdict='error',
+                verdict_reason='Research dispatch queue handoff was not durable; job was never enqueued.',
+                error_message='Research dispatch queue handoff missing', completed_at=NOW(), updated_at=NOW()
+            WHERE id=$1 AND status='queued'
+            RETURNING id
+            """,
+            row["id"],
+        )
+        if changed:
+            await conn.execute(
+                """
+                UPDATE findings f
+                SET last_verification_status='error', last_verification_verdict='error',
+                    last_verified_at=NOW(), updated_at=NOW()
+                WHERE f.id=$1
+                  AND NOT EXISTS (
+                      SELECT 1 FROM finding_verifications active
+                      WHERE active.finding_id=f.id AND active.status IN ('queued','running')
+                  )
+                  AND (
+                      SELECT latest.id FROM finding_verifications latest
+                      WHERE latest.finding_id=f.id ORDER BY latest.created_at DESC LIMIT 1
+                  )=$2
+                """,
+                row["finding_id"], row["id"],
+            )
+            await _record_research_event(
+                conn,
+                row["episode_id"],
+                event_type="orphaned_queue_work_failed",
+                status="failed",
+                summary="Marked a finding retest failed because its durable queue handoff was missing",
+                details={"kind": "finding_retest", "retest_id": str(row["id"]), "job_id": job_id},
+            )
+            repaired += 1
+    return repaired
+
+
 async def research_autopilot_runner(pool) -> None:
     """Durably advance opted-in episodes independent of any browser session.
 
     A Postgres lease makes the controller safe across API replicas. Episodes with a linked active
-    scan are left alone until that work settles, then receive a fresh observation before planning.
+    scan or finding retest are left alone until that work settles, then receive exactly one fresh
+    result-bearing observation before planning.
     """
     owner = f"api-autopilot:{os.getpid()}:{uuid.uuid4()}"
+    last_queue_reconcile_monotonic = 0.0
     while True:
         episode_id: str | None = None
         try:
             async with pool.acquire() as conn:
+                async with conn.transaction():
+                    await _reconcile_stale_research_dispatches(conn)
+                    now_monotonic = time.monotonic()
+                    if now_monotonic - last_queue_reconcile_monotonic >= 30.0:
+                        await _reconcile_unconfirmed_asm_queue_handoffs(conn)
+                        await _reconcile_research_orphaned_queue_work(conn)
+                        last_queue_reconcile_monotonic = now_monotonic
                 row = await conn.fetchrow(
                     """
                     WITH candidate AS (
                         SELECT re.id
                         FROM research_episodes re
                         WHERE re.autopilot_enabled=true
-                          AND re.status='awaiting_planner'
+                          AND re.status IN ('awaiting_planner','awaiting_observation')
                           AND re.cancel_requested=false
                           AND (re.lease_expires_at IS NULL OR re.lease_expires_at < NOW())
                           AND NOT EXISTS (
@@ -25601,6 +28203,13 @@ async def research_autopilot_runner(pool) -> None:
                               JOIN command_results cr ON cr.id=rd.command_result_id
                               JOIN scans s ON s.id=cr.scan_id
                               WHERE rd.episode_id=re.id AND s.status IN ('pending','queued','running')
+                          )
+                          AND NOT EXISTS (
+                              SELECT 1
+                              FROM research_decisions rd
+                              JOIN command_results cr ON cr.id=rd.command_result_id
+                              JOIN finding_verifications fv ON fv.id::text=cr.result_json->>'retest_id'
+                              WHERE rd.episode_id=re.id AND fv.status IN ('queued','running')
                           )
                         ORDER BY re.updated_at ASC
                         FOR UPDATE SKIP LOCKED
@@ -25616,10 +28225,31 @@ async def research_autopilot_runner(pool) -> None:
                 )
                 if row:
                     episode_id = str(row["id"])
-                    if int(row["step_count"] or 0) > 0:
-                        await _build_research_observation(conn, row, next_status="awaiting_planner")
+                    should_plan = str(row["status"]) == "awaiting_planner"
+                    if str(row["status"]) == "awaiting_observation":
+                        async with conn.transaction():
+                            locked = await conn.fetchrow(
+                                "SELECT * FROM research_episodes WHERE id=$1 FOR UPDATE",
+                                row["id"],
+                            )
+                            if (
+                                not locked
+                                or str(locked["status"]) != "awaiting_observation"
+                                or bool(locked["cancel_requested"])
+                                or str(locked["lease_owner"] or "") != owner
+                            ):
+                                should_plan = False
+                            elif await _research_async_work(conn, row["id"], active_only=True):
+                                # Work became active after the candidate query; keep waiting.
+                                should_plan = False
+                            else:
+                                settlement = await _settle_research_awaiting_observation(conn, locked)
+                                should_plan = settlement.get("next_status") == "awaiting_planner"
             if not episode_id:
                 await asyncio.sleep(1.0)
+                continue
+            if not should_plan:
+                await _release_research_autopilot_lease(pool, episode_id, owner)
                 continue
             try:
                 result = await _plan_research_episode_step(
@@ -25634,9 +28264,12 @@ async def research_autopilot_runner(pool) -> None:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                detail = exc.detail if isinstance(exc, HTTPException) else str(exc)
-                error = json.dumps(detail, default=str) if isinstance(detail, (dict, list)) else str(detail)
-                await _release_research_autopilot_lease(pool, episode_id, owner, error=error or type(exc).__name__)
+                if _research_autopilot_expected_control_race(exc):
+                    await _release_research_autopilot_lease(pool, episode_id, owner)
+                else:
+                    detail = exc.detail if isinstance(exc, HTTPException) else str(exc)
+                    error = json.dumps(detail, default=str) if isinstance(detail, (dict, list)) else str(detail)
+                    await _release_research_autopilot_lease(pool, episode_id, owner, error=error or type(exc).__name__)
             else:
                 result_episode = result.get("episode") if isinstance(result, dict) else {}
                 if isinstance(result, dict) and result.get("accepted") is False and not (result_episode or {}).get("terminal"):
@@ -25710,32 +28343,44 @@ async def plan_research_episode_step(episode_id: str, req: ResearchPlannerStepRe
 async def set_research_episode_autopilot(episode_id: str, req: ResearchAutopilotRequest):
     episode_uuid = _uuid_or_400(episode_id, "episode id")
     async with db_pool.acquire() as conn:
-        row = await conn.fetchrow("SELECT * FROM research_episodes WHERE id=$1", episode_uuid)
-        if not row:
-            raise HTTPException(status_code=404, detail="Research episode not found")
-        if req.enabled and (str(row["status"]) != "awaiting_planner" or str(row["status"]) in TERMINAL_EPISODE_STATUSES):
-            raise HTTPException(status_code=409, detail="Only an episode awaiting the planner can resume autopilot")
-        updated = await conn.fetchrow(
-            """
-            UPDATE research_episodes
-            SET autopilot_enabled=$2, autopilot_error=CASE WHEN $2 THEN NULL ELSE autopilot_error END,
-                autopilot_consecutive_failures=CASE WHEN $2 THEN 0 ELSE autopilot_consecutive_failures END,
-                lease_expires_at=CASE WHEN $2 THEN NULL ELSE lease_expires_at END,
-                updated_at=NOW()
-            WHERE id=$1
-            RETURNING *
-            """,
-            episode_uuid, req.enabled,
-        )
-        await _record_research_event(
-            conn,
-            episode_uuid,
-            event_type="autopilot_resumed" if req.enabled else "autopilot_paused",
-            status="awaiting_planner" if req.enabled else "paused",
-            summary="Server autopilot resumed" if req.enabled else "Server autopilot paused by operator",
-            details={"created_by": req.created_by},
-        )
-        return await _research_episode_detail(conn, str(updated["id"]))
+        async with conn.transaction():
+            row = await conn.fetchrow("SELECT * FROM research_episodes WHERE id=$1 FOR UPDATE", episode_uuid)
+            if not row:
+                raise HTTPException(status_code=404, detail="Research episode not found")
+            if req.enabled and str(row["status"]) not in {"awaiting_planner", "awaiting_observation"}:
+                raise HTTPException(status_code=409, detail="Only a planning/waiting episode can resume autopilot")
+            if req.enabled and row.get("lease_owner") and row.get("lease_expires_at"):
+                lease_active = await conn.fetchval("SELECT $1::timestamptz > NOW()", row["lease_expires_at"])
+                if lease_active:
+                    raise HTTPException(status_code=409, detail="Episode planner is already active")
+            updated = await conn.fetchrow(
+                """
+                UPDATE research_episodes
+                SET autopilot_enabled=$2, autopilot_error=CASE WHEN $2 THEN NULL ELSE autopilot_error END,
+                    autopilot_consecutive_failures=CASE WHEN $2 THEN 0 ELSE autopilot_consecutive_failures END,
+                    lease_owner=CASE
+                        WHEN $2 AND (lease_expires_at IS NULL OR lease_expires_at < NOW()) THEN NULL
+                        ELSE lease_owner
+                    END,
+                    lease_expires_at=CASE
+                        WHEN $2 AND (lease_expires_at IS NULL OR lease_expires_at < NOW()) THEN NULL
+                        ELSE lease_expires_at
+                    END,
+                    updated_at=NOW()
+                WHERE id=$1
+                RETURNING *
+                """,
+                episode_uuid, req.enabled,
+            )
+            await _record_research_event(
+                conn,
+                episode_uuid,
+                event_type="autopilot_resumed" if req.enabled else "autopilot_paused",
+                status=str(updated["status"]) if req.enabled else "paused",
+                summary="Server autopilot resumed" if req.enabled else "Server autopilot paused by operator",
+                details={"created_by": req.created_by},
+            )
+            return await _research_episode_detail(conn, str(updated["id"]))
 
 
 class AsmTestRequest(BaseModel):
@@ -26489,6 +29134,125 @@ def _build_asm_campaign_timeline(
     return events[: max(1, int(limit or 12))]
 
 
+_QUEUE_HANDOFF_CONFIRMATION_KEY = "queue_handoff_confirmed"
+_RESEARCH_DISPATCH_CORRELATION_KEY = "research_dispatch_correlation"
+
+
+def _current_research_dispatch_correlation() -> str | None:
+    """Return the server-created research decision correlation, never caller text."""
+    value = str(_ARSENAL_CREATED_BY_CONTEXT.get() or "").strip()
+    if re.fullmatch(
+        r"research_episode:[0-9a-fA-F-]{36}:decision:[0-9a-fA-F-]{36}",
+        value,
+    ):
+        return value
+    return None
+
+
+async def _fail_asm_queue_handoff(
+    conn,
+    scan_id: str,
+    campaign_id: str,
+    enqueue_error: Exception,
+) -> None:
+    """Fail closed when the Redis/DB queue handoff cannot be durably confirmed."""
+    error_message = (
+        "ASM queue handoff could not be durably confirmed "
+        f"({type(enqueue_error).__name__})."
+    )
+    try:
+        scan_result = await conn.execute(
+            """
+            UPDATE scans
+            SET status='failed', progress=100, current_phase='queue_failed',
+                error_message=$2, completed_at=NOW()
+            WHERE id=$1 AND status='pending'
+            """,
+            uuid.UUID(str(scan_id)),
+            error_message,
+        )
+        if not str(scan_result).endswith("0"):
+            await conn.execute(
+                """
+                UPDATE scan_campaigns campaign
+                SET status='failed', completed_at=COALESCE(completed_at, NOW()), updated_at=NOW()
+                WHERE campaign.id=$1 AND campaign.status='active'
+                  AND EXISTS (
+                      SELECT 1 FROM scans owner
+                      WHERE owner.id=$2 AND owner.campaign_id=campaign.id
+                        AND owner.status='failed'
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1 FROM scans other
+                      WHERE other.campaign_id=campaign.id AND other.id<>$2
+                  )
+                """,
+                uuid.UUID(str(campaign_id)),
+                uuid.UUID(str(scan_id)),
+            )
+    except Exception:
+        # Preserve the Redis exception as the caller-visible failure while making
+        # the secondary database failure explicit in service logs.
+        logger.exception("Failed to mark ASM scan %s after queue handoff failure", scan_id)
+
+
+async def _asm_queue_handoff_readback_confirmed(
+    scan_id: str,
+    job_id: str,
+    campaign_id: str,
+) -> bool:
+    """Resolve an ambiguous DB acknowledgement from an independent connection."""
+    try:
+        async with db_pool.acquire() as read_conn:
+            row = await read_conn.fetchrow(
+                """
+                SELECT status, job_id, campaign_id, options
+                FROM scans
+                WHERE id=$1
+                """,
+                uuid.UUID(str(scan_id)),
+            )
+    except Exception:
+        return False
+    if not row:
+        return False
+    options = _decode_json_value(row.get("options")) or {}
+    return bool(
+        str(row.get("job_id") or "") == str(job_id)
+        and str(row.get("campaign_id") or "") == str(campaign_id)
+        and isinstance(options, dict)
+        and options.get(_QUEUE_HANDOFF_CONFIRMATION_KEY) is True
+    )
+
+
+async def _confirm_asm_queue_handoff(
+    conn,
+    *,
+    scan_id: str,
+    job_id: str,
+    campaign_id: str,
+) -> None:
+    try:
+        confirmation = await conn.execute(
+            """
+            UPDATE scans
+            SET status='queued',
+                options=jsonb_set(COALESCE(options, '{}'::jsonb),
+                                  '{queue_handoff_confirmed}', 'true'::jsonb, true)
+            WHERE id=$1 AND status='pending'
+              AND options->>'queue_handoff_confirmed'='false'
+            """,
+            uuid.UUID(scan_id),
+        )
+        if str(confirmation).endswith("0"):
+            raise RuntimeError("ASM queue handoff confirmation was not persisted")
+    except Exception as confirmation_error:
+        if await _asm_queue_handoff_readback_confirmed(scan_id, job_id, campaign_id):
+            return
+        await _fail_asm_queue_handoff(conn, scan_id, campaign_id, confirmation_error)
+        raise
+
+
 async def _enqueue_asm_exploit_batch(
     conn, r, target_id: str, target_url: str, base_opts: dict,
     *, batch_size: int, stale_days: int, exploit_depth: bool,
@@ -26508,6 +29272,13 @@ async def _enqueue_asm_exploit_batch(
     _enforce_asm_family_preconditions(family, opts, exploit_depth=exploit_depth)
     if endpoint_filter:
         opts["asm_endpoint_filter"] = endpoint_filter
+    persisted_opts = {**opts, _QUEUE_HANDOFF_CONFIRMATION_KEY: False}
+    research_correlation = _current_research_dispatch_correlation()
+    if research_correlation:
+        # This is committed with the scan row before Redis handoff. It lets crash
+        # recovery and operator cancellation find work even if the API process
+        # dies before the later command_result receipt is written.
+        persisted_opts[_RESEARCH_DISPATCH_CORRELATION_KEY] = research_correlation
     campaign_id = await asm_inventory.create_campaign(
         conn,
         target_id,
@@ -26518,16 +29289,23 @@ async def _enqueue_asm_exploit_batch(
         deep_budget={"exploit_depth": exploit_depth},
         check_families=[family] if family else ["all"],
         auth_states=[],
-        metadata_json={"scan_role": asm_inventory.ASM_BATCH_ROLE, "endpoint_filter": endpoint_filter},
+        metadata_json={
+            "scan_role": asm_inventory.ASM_BATCH_ROLE,
+            "endpoint_filter": endpoint_filter,
+            **(
+                {_RESEARCH_DISPATCH_CORRELATION_KEY: research_correlation}
+                if research_correlation else {}
+            ),
+        },
     )
     await conn.execute(
         """INSERT INTO scans (id, target_id, target_url, job_id, status, options, scan_type, scan_role, campaign_id)
            VALUES ($1, $2, $3, $4, 'pending', $5, $6, $7, $8)""",
         uuid.UUID(scan_id), uuid.UUID(target_id), target_url, job_id,
-        json.dumps(opts), (opts.get("scan_type") or "smart"),
+        json.dumps(persisted_opts), (opts.get("scan_type") or "smart"),
         asm_inventory.ASM_BATCH_ROLE, uuid.UUID(campaign_id),
     )
-    r.rpush(QUEUE_NAME, json.dumps({
+    job_payload = {
         "type": asm_inventory.EXPLOIT_BATCH_JOB_TYPE,
         "job_id": job_id, "scan_id": scan_id,
         "target_id": target_id, "target": target_url,
@@ -26537,9 +29315,29 @@ async def _enqueue_asm_exploit_batch(
         "endpoint_filter": endpoint_filter,
         "domain_rate_reserved": max(0, int(domain_rate_reserved or 0)),
         "options": opts, "triggered_by": triggered_by,
+        **(
+            {_RESEARCH_DISPATCH_CORRELATION_KEY: research_correlation}
+            if research_correlation else {}
+        ),
         "submitted_at": utc_now_iso(),
-    }))
-    r.hset(f"job:{job_id}", mapping={"status": "queued", "target": target_url})
+    }
+    try:
+        r.rpush(QUEUE_NAME, json.dumps(job_payload))
+    except Exception as enqueue_error:
+        await _fail_asm_queue_handoff(conn, scan_id, campaign_id, enqueue_error)
+        raise
+    await _confirm_asm_queue_handoff(
+        conn,
+        scan_id=scan_id,
+        job_id=job_id,
+        campaign_id=campaign_id,
+    )
+    try:
+        r.hset(f"job:{job_id}", mapping={"status": "queued", "target": target_url})
+    except Exception:
+        # The durable queue entry is authoritative. A metadata-cache failure must
+        # not make the caller believe an already-enqueued job was rejected.
+        logger.warning("Failed to cache queued ASM job metadata for %s", job_id, exc_info=True)
     return {"scan_id": scan_id, "job_id": job_id, "campaign_id": campaign_id}
 
 
@@ -26556,6 +29354,10 @@ async def _enqueue_asm_recon(
     cb = dict(opts.get("custom_budget") or {})
     cb.update(parallel_scan.RECON_DISCOVERY_BUDGET)  # lean enumeration, active off
     opts["custom_budget"] = cb
+    persisted_opts = {**opts, _QUEUE_HANDOFF_CONFIRMATION_KEY: False}
+    research_correlation = _current_research_dispatch_correlation()
+    if research_correlation:
+        persisted_opts[_RESEARCH_DISPATCH_CORRELATION_KEY] = research_correlation
     scan_id = str(uuid.uuid4())
     job_id = str(uuid.uuid4())
     campaign_id = await asm_inventory.create_campaign(
@@ -26566,21 +29368,47 @@ async def _enqueue_asm_recon(
         budget_profile=opts.get("budget_profile"),
         wide_budget=cb,
         check_families=["recon"],
-        metadata_json={"scan_role": asm_inventory.ASM_RECON_ROLE},
+        metadata_json={
+            "scan_role": asm_inventory.ASM_RECON_ROLE,
+            **(
+                {_RESEARCH_DISPATCH_CORRELATION_KEY: research_correlation}
+                if research_correlation else {}
+            ),
+        },
     )
     await conn.execute(
         """INSERT INTO scans (id, target_id, target_url, job_id, status, options, scan_type, scan_role, campaign_id)
            VALUES ($1, $2, $3, $4, 'pending', $5, 'smart', $6, $7)""",
         uuid.UUID(scan_id), uuid.UUID(target_id), target_url, job_id,
-        json.dumps(opts), asm_inventory.ASM_RECON_ROLE, uuid.UUID(campaign_id),
+        json.dumps(persisted_opts), asm_inventory.ASM_RECON_ROLE, uuid.UUID(campaign_id),
     )
-    r.rpush(QUEUE_NAME, json.dumps({
+    job_payload = {
         "job_id": job_id, "scan_id": scan_id, "target": target_url,
         "options": opts, "triggered_by": triggered_by, "asm_recon": True,
         "campaign_id": campaign_id,
+        **(
+            {_RESEARCH_DISPATCH_CORRELATION_KEY: research_correlation}
+            if research_correlation else {}
+        ),
         "submitted_at": utc_now_iso(),
-    }))
-    r.hset(f"job:{job_id}", mapping={"status": "queued", "target": target_url})
+    }
+    try:
+        r.rpush(QUEUE_NAME, json.dumps(job_payload))
+    except Exception as enqueue_error:
+        await _fail_asm_queue_handoff(conn, scan_id, campaign_id, enqueue_error)
+        raise
+    await _confirm_asm_queue_handoff(
+        conn,
+        scan_id=scan_id,
+        job_id=job_id,
+        campaign_id=campaign_id,
+    )
+    try:
+        r.hset(f"job:{job_id}", mapping={"status": "queued", "target": target_url})
+    except Exception:
+        # The durable queue entry is authoritative. A metadata-cache failure must
+        # not make the caller believe an already-enqueued job was rejected.
+        logger.warning("Failed to cache queued ASM job metadata for %s", job_id, exc_info=True)
     return {"scan_id": scan_id, "job_id": job_id, "campaign_id": campaign_id}
 
 
@@ -27539,7 +30367,51 @@ async def enqueue_finding_retest(
     requested_by: str = "api",
     auth_context: dict[str, str] | None = None,
 ):
-    """Create a queued finding retest record and return (retest_id, job_id)."""
+    """Create at most one active retest per finding across API replicas."""
+    lock_key = f"finding-retest:{finding['id']}"
+    await conn.fetchval("SELECT pg_advisory_lock(hashtextextended($1, 0))", lock_key)
+    try:
+        active = await conn.fetchrow(
+            """
+            SELECT id, status FROM finding_verifications
+            WHERE finding_id=$1 AND status IN ('queued','running')
+            ORDER BY created_at DESC LIMIT 1
+            """,
+            finding["id"],
+        )
+        if active:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "finding_retest_already_active",
+                    "retest_id": str(active["id"]),
+                    "status": str(active["status"]),
+                },
+            )
+        return await _enqueue_finding_retest_unlocked(
+            conn,
+            finding,
+            inputs,
+            requested_by=requested_by,
+            auth_context=auth_context,
+        )
+    finally:
+        try:
+            await conn.fetchval("SELECT pg_advisory_unlock(hashtextextended($1, 0))", lock_key)
+        except Exception:
+            # PostgreSQL releases session locks when a broken connection closes. Never mask the
+            # original queue/validation failure with an unlock error.
+            pass
+
+
+async def _enqueue_finding_retest_unlocked(
+    conn,
+    finding: dict[str, Any],
+    inputs: dict[str, Any],
+    requested_by: str = "api",
+    auth_context: dict[str, str] | None = None,
+):
+    """Insert a queued retest while the per-finding advisory lock is held."""
     retest_id = uuid.uuid4()
     job_id = str(uuid.uuid4())
     replay_commands = build_replay_commands(inputs)
@@ -29479,12 +32351,23 @@ async def bulk_retest_findings(request: FindingsBulkRetestRequest):
                 })
                 continue
 
-            retest_id, job_id = await enqueue_finding_retest(
-                conn,
-                finding_data,
-                retest_inputs,
-                requested_by=request.requested_by or "api",
-            )
+            try:
+                retest_id, job_id = await enqueue_finding_retest(
+                    conn,
+                    finding_data,
+                    retest_inputs,
+                    requested_by=request.requested_by or "api",
+                )
+            except HTTPException as exc:
+                detail = exc.detail if isinstance(exc.detail, dict) else {}
+                if exc.status_code != 409 or detail.get("error") != "finding_retest_already_active":
+                    raise
+                skipped.append({
+                    "finding_id": str(finding_data["id"]),
+                    "reason": "retest_already_active",
+                    "retest_id": detail.get("retest_id"),
+                })
+                continue
 
             job_data = build_retest_job_payload(
                 job_id=job_id,

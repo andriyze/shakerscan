@@ -1648,6 +1648,9 @@ def test_enqueue_finding_retest_creates_campaign(monkeypatch):
         async def fetchrow(self, *args, **kwargs):
             return None
 
+        async def fetchval(self, *args, **kwargs):
+            return True
+
         async def execute(self, query, *args):
             self.executions.append((query, args))
             return "INSERT 0 1"
@@ -1683,6 +1686,63 @@ def test_enqueue_finding_retest_creates_campaign(monkeypatch):
     assert calls["campaign"]["mode"] == api_module.asm_inventory.CAMPAIGN_FINDING_RETEST
     insert = next(args for query, args in conn.executions if "INSERT INTO finding_verifications" in query)
     assert insert[-1] == campaign_id
+
+
+def test_enqueue_finding_retest_advisory_lock_rejects_active_and_unlocks():
+    active_id = uuid.uuid4()
+
+    class FakeConn:
+        def __init__(self):
+            self.lock_calls = []
+
+        async def fetchval(self, query, *args):
+            self.lock_calls.append((query, args))
+            return True
+
+        async def fetchrow(self, query, *args):
+            if "FROM finding_verifications" in query:
+                return {"id": active_id, "status": "running"}
+            return None
+
+    conn = FakeConn()
+    with pytest.raises(api_module.HTTPException) as exc_info:
+        asyncio.run(api_module.enqueue_finding_retest(
+            conn,
+            {"id": uuid.uuid4(), "target_id": uuid.uuid4(), "scan_id": None},
+            {"finding_type": "sqli", "target_url": "https://app.test"},
+        ))
+
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail["error"] == "finding_retest_already_active"
+    assert "pg_advisory_lock" in conn.lock_calls[0][0]
+    assert "pg_advisory_unlock" in conn.lock_calls[-1][0]
+
+
+def test_enqueue_finding_retest_advisory_lock_unlocks_when_insert_fails(monkeypatch):
+    class FakeConn:
+        def __init__(self):
+            self.lock_calls = []
+
+        async def fetchval(self, query, *args):
+            self.lock_calls.append((query, args))
+            return True
+
+        async def fetchrow(self, *args, **kwargs):
+            return None
+
+    async def fail_insert(*args, **kwargs):
+        raise RuntimeError("insert failed")
+
+    monkeypatch.setattr(api_module, "_enqueue_finding_retest_unlocked", fail_insert)
+    conn = FakeConn()
+    with pytest.raises(RuntimeError, match="insert failed"):
+        asyncio.run(api_module.enqueue_finding_retest(
+            conn,
+            {"id": uuid.uuid4(), "target_id": uuid.uuid4(), "scan_id": None},
+            {"finding_type": "sqli", "target_url": "https://app.test"},
+        ))
+
+    assert "pg_advisory_unlock" in conn.lock_calls[-1][0]
 
 
 def test_deployment_decision_escalates_missing_ai_judging():

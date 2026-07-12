@@ -111,6 +111,10 @@ Scope:
 - before/mutation/after workflow checkpoints;
 - bounded cleanup/rollback steps where supported.
 
+Autonomous research projections and decision validation expose only `GET`, `HEAD`, `OPTIONS`, and
+`POST` HTTP steps for both `experiment.http_diff` and `experiment.workflow`. Manual typed experiment
+execution retains `PUT`, `PATCH`, and `DELETE` for explicitly controlled workflows with cleanup.
+
 Acceptance:
 
 - two-profile same-account input is rejected before BOLA comparison;
@@ -236,7 +240,7 @@ Acceptance:
 
 ### Wave 8: Research Agent UI
 
-**Status: durable autonomous investigation implemented; execution remains server-gated.** `/settings/research-agent` is now the primary product surface: choose a target and objective, select Analyze / Autonomous Hunt / Relentless intensity, explicitly confirm target authorization for active modes, and optionally let server-side autopilot keep requesting LLM decisions until input, a gate, completion, or budget exhaustion. A Postgres lease permits only one controller to plan an episode at a time, linked scans are allowed to settle before the next decision, transient planner failures back off and pause after three consecutive failures, and the run continues when the browser closes or the API is restarted. Active profiles create a target-scoped approval receipt and expose the backend ceilings (up to 25 steps, 500 requests, and 10 active actions); decisions, evidence refresh, status, budgets, pause/resume/stop, errors, and prior runs are visible in one mission view. The supporting lead backlog retains its onboarding path, ranked worklist, above-the-fold product-specific action, decision rules, and proof checklist.
+**Status: durable autonomous investigation implemented; execution remains server-gated.** `/settings/research-agent` is now the primary product surface: choose a target and objective, select Analyze / Autonomous Hunt / Relentless intensity, explicitly confirm target authorization for active modes, and optionally let server-side autopilot keep requesting LLM decisions until input, a gate, an evidence-backed stop, or budget exhaustion. Subject-bound launch profiles support target hunts, exact-finding verification, and ASM-gap closure. Finding Detail exposes the exact-finding flow as a one-click **Investigate autonomously** action, ASM exposes **Close gaps autonomously**, and registered web assets in Exposure expose a target-hunt action; each stays distinct from its one-shot scan/retest counterpart. A Postgres lease permits only one controller to plan an episode at a time. Linked scans **and finding retests** settle before the next decision, each settlement creates one result-bearing observation, no-progress A-B-A repeats are rejected until a state-changing action occurs, and launch profiles reserve a final synthesis turn rather than treating action-budget exhaustion as success. Transient planner failures meter their actual/estimated model usage, refresh the observation, back off, and pause after three consecutive failures; the run continues when the browser closes or the API restarts. Active profiles create expiring target-scoped approval receipts and expose conservative execution reservations (up to 25 steps, 500 **request units**, and 10 active actions; request units are not claimed as exact HTTP counts). The UI shows requested and actual model routes, fallback index, provider schema mode, harness repairs, usage/latency, linked work, finding outcome, decisions, immutable evidence refreshes, budgets, pause/resume/stop, errors, and prior runs. The supporting lead backlog retains its onboarding path, ranked worklist, product-specific action, decision rules, and proof checklist.
 
 Scope:
 

@@ -2,6 +2,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
@@ -19,6 +21,15 @@ def test_safe_agent_env_strips_provider_and_secret_variables(monkeypatch):
     assert "CODEX_HOME" not in env
     assert env["SAFE_VISIBLE"] == "yes"
     assert count >= 2
+
+
+def test_planner_error_excerpt_drops_prompt_preview():
+    stderr = "session banner\nINPUT: sensitive target observation\nERROR: schema is invalid\ncaused by: allOf unsupported"
+
+    excerpt = adapter._planner_error_excerpt(stderr)
+
+    assert excerpt == "ERROR: schema is invalid caused by: allOf unsupported"
+    assert "sensitive target" not in excerpt
 
 
 def test_build_prompt_redacts_secret_shaped_context():
@@ -67,6 +78,41 @@ def test_run_codex_is_bounded_and_disables_execution_features(monkeypatch, tmp_p
     assert metadata["planner_execution_enabled"] is False
     assert metadata["retry_count"] == 0
     assert metadata["fingerprint"]
+
+
+def test_operation_plan_schema_uses_closed_responses_compatible_envelopes():
+    schema = adapter.operation_plan_schema()
+
+    assert schema["additionalProperties"] is False
+    assert set(schema["properties"]) == set(schema["required"])
+    for key in ("planner", "target_scope", "budget", "constraints"):
+        assert schema["properties"][key]["type"] == "string"
+    action = schema["properties"]["actions"]["items"]
+    assert action["additionalProperties"] is False
+    assert set(action["properties"]) == set(action["required"])
+    assert action["properties"]["parameters"]["type"] == "string"
+
+
+def test_operation_plan_envelopes_decode_before_api_validation():
+    plan = {
+        "planner": '{"kind":"local_agent","agent":"codex"}',
+        "target_scope": '{"target_id":"target-1"}',
+        "budget": '{"requests":10}',
+        "constraints": '{"blocked_by":[]}',
+        "actions": [{"parameters": '{"check_family":"xss"}'}],
+    }
+
+    adapter._decode_local_operation_plan_envelopes(plan)
+
+    assert plan["planner"]["agent"] == "codex"
+    assert plan["target_scope"] == {"target_id": "target-1"}
+    assert plan["budget"] == {"requests": 10}
+    assert plan["actions"][0]["parameters"] == {"check_family": "xss"}
+
+
+def test_operation_plan_envelopes_reject_non_object_json():
+    with pytest.raises(adapter.AdapterError, match="budget must encode a JSON object"):
+        adapter._decode_local_operation_plan_envelopes({"budget": "[]"})
 
 
 def test_current_scorecard_requires_fixture_and_planner_fingerprints(tmp_path):
@@ -167,7 +213,17 @@ def test_research_prompt_filters_blocked_commands_and_redacts_target_data():
 
 
 def test_research_decision_schema_has_no_execution_or_receipt_fields():
-    schema = adapter.research_decision_schema()
+    schema = adapter.research_decision_schema({
+        "id": "obs-1",
+        "context_hash": "a" * 64,
+        "observation_pack": {
+            "proposable_commands": [
+                {"name": "finding.get", "proposable": True},
+                {"name": "finding.retest", "proposable": False},
+                {"name": "asm.gaps", "proposable": True},
+            ],
+        },
+    })
     properties = schema["properties"]
 
     assert schema["additionalProperties"] is False
@@ -175,6 +231,109 @@ def test_research_decision_schema_has_no_execution_or_receipt_fields():
     assert "approval_receipt_id" not in properties
     assert "scope_receipt_id" not in properties
     assert properties["decision"]["enum"] == ["execute_action", "request_input", "stop"]
+    assert properties["observation_id"] == {"type": "string", "const": "obs-1"}
+    assert properties["context_hash"] == {"type": "string", "const": "a" * 64}
+    assert properties["action"]["properties"]["command"]["enum"] == ["", "asm.gaps", "finding.get"]
+    assert properties["action"]["properties"]["parameters"]["type"] == "string"
+    assert "allOf" not in schema
+    assert properties["expected_signal"]["type"] == ["string", "null"]
+    assert properties["falsifier"]["type"] == ["string", "null"]
+
+
+def test_research_decision_schema_without_commands_allows_only_terminal_decisions():
+    schema = adapter.research_decision_schema({
+        "id": "obs-empty",
+        "context_hash": "b" * 64,
+        "observation_pack": {"proposable_commands": []},
+    })
+
+    assert schema["properties"]["decision"]["enum"] == ["request_input", "stop"]
+    assert schema["properties"]["action"]["properties"]["command"]["enum"] == [""]
+
+
+def test_local_research_parameter_envelope_decodes_nested_json_object():
+    decision = {"action": {"command": "scan.focused_family", "parameters": '{"check_family":"xss","options":{"depth":2}}'}}
+
+    adapter._decode_local_research_parameters(decision)
+
+    assert decision["action"]["parameters"] == {
+        "check_family": "xss",
+        "options": {"depth": 2},
+    }
+
+
+def test_local_research_parameter_envelope_rejects_non_object_json():
+    decision = {"action": {"command": "asm.gaps", "parameters": "[]"}}
+
+    with pytest.raises(adapter.AdapterError, match="JSON object"):
+        adapter._decode_local_research_parameters(decision)
+
+
+def test_run_codex_research_rejects_execute_action_without_signal(monkeypatch):
+    observation = {
+        "id": "obs-1",
+        "context_hash": "a" * 64,
+        "observation_pack": {
+            "proposable_commands": [{"name": "asm.gaps", "proposable": True}],
+        },
+    }
+    candidate = {
+        "decision_version": adapter.RESEARCH_DECISION_VERSION,
+        "decision": "execute_action",
+        "observation_id": "obs-1",
+        "context_hash": "a" * 64,
+        "hypothesis_id": None,
+        "action": {"command": "asm.gaps", "parameters": "{}"},
+        "expected_signal": "",
+        "falsifier": "no gap remains",
+        "reason": "inspect",
+        "confidence": 0.8,
+        "requested_input": None,
+        "stop_reason": None,
+    }
+    monkeypatch.setattr(adapter, "_run_codex_structured", lambda *args, **kwargs: (
+        json.dumps(candidate),
+        {"prompt_bytes": 100, "output_bytes": 100},
+    ))
+
+    try:
+        adapter.run_codex_research_decision(observation, timeout_seconds=30)
+    except adapter.AdapterError as exc:
+        assert "expected_signal" in str(exc)
+    else:
+        raise AssertionError("an execute action without an expected signal must fail locally")
+
+
+@pytest.mark.parametrize(
+    ("decision_type", "requested_input", "stop_reason", "error"),
+    [
+        ("request_input", "", None, "missing requested_input"),
+        ("request_input", "Provide a second authenticated principal.", "also stop", "must not include stop_reason"),
+        ("stop", None, "too short", "missing stop_reason"),
+        ("stop", "provide credentials", "No useful bounded action remains for this target.", "must not include requested_input"),
+    ],
+)
+def test_local_research_terminal_decisions_require_their_semantic_fields(
+    decision_type, requested_input, stop_reason, error,
+):
+    observation = {
+        "id": "obs-1",
+        "context_hash": "a" * 64,
+        "observation_pack": {"proposable_commands": []},
+    }
+    decision = {
+        "decision": decision_type,
+        "observation_id": "obs-1",
+        "context_hash": "a" * 64,
+        "action": {"command": "", "parameters": {}},
+        "expected_signal": None,
+        "falsifier": None,
+        "requested_input": requested_input,
+        "stop_reason": stop_reason,
+    }
+
+    with pytest.raises(adapter.AdapterError, match=error):
+        adapter._validate_local_research_decision(decision, observation)
 
 
 def test_research_episode_runner_submits_one_decision_at_a_time(monkeypatch):
@@ -228,3 +387,272 @@ def test_research_episode_runner_submits_one_decision_at_a_time(monkeypatch):
     assert writes[0][2]["execute"] is True
     assert writes[0][2]["model_tokens_used"] == 100
     assert result["decision_count"] == 1
+
+
+def test_research_episode_runner_rejects_server_autopilot_before_planning(monkeypatch):
+    calls = []
+
+    monkeypatch.setattr(adapter, "codex_identity", lambda binary=None: {
+        "agent": "codex", "version": "1", "fingerprint": "fp",
+        "binary_path": "/codex", "adapter_version": adapter.ADAPTER_VERSION,
+    })
+
+    def fail_if_planned(*_args, **_kwargs):
+        raise AssertionError("local Codex must not plan while server autopilot is enabled")
+
+    def fake_api(base_url, path, *, method="GET", payload=None):
+        calls.append((method, path, payload))
+        return {
+            "episode": {
+                "id": "episode-1",
+                "status": "awaiting_planner",
+                "terminal": False,
+                "autopilot_enabled": True,
+            },
+            "current_observation": {
+                "id": "obs-1",
+                "context_hash": "a" * 64,
+                "observation_pack": {},
+            },
+        }
+
+    monkeypatch.setattr(adapter, "run_codex_research_decision", fail_if_planned)
+    monkeypatch.setattr(adapter, "api_json", fake_api)
+
+    with pytest.raises(adapter.AdapterError, match="server autopilot is enabled"):
+        adapter.run_research_episode(
+            "http://api", "episode-1", max_decisions=5, timeout_seconds=30
+        )
+
+    assert calls == [("GET", "/research/episodes/episode-1", None)]
+
+
+def test_research_episode_runner_returns_dispatched_scan_without_polling(monkeypatch):
+    calls = []
+    observation = {
+        "id": "obs-1",
+        "context_hash": "a" * 64,
+        "observation_pack": {
+            "proposable_commands": [{"name": "scan.focused_family", "proposable": True}],
+        },
+    }
+    decision = {
+        "decision_version": adapter.RESEARCH_DECISION_VERSION,
+        "decision": "execute_action",
+        "observation_id": "obs-1",
+        "context_hash": "a" * 64,
+        "hypothesis_id": None,
+        "action": {"command": "scan.focused_family", "parameters": {"check_family": "xss"}},
+        "expected_signal": "The focused scan records a repeatable XSS signal.",
+        "falsifier": "The focused scan completes without a repeatable XSS signal.",
+        "reason": "Test the highest-priority family.",
+        "confidence": 0.8,
+        "requested_input": None,
+        "stop_reason": None,
+    }
+    monkeypatch.setattr(adapter, "codex_identity", lambda binary=None: {
+        "agent": "codex", "version": "1", "fingerprint": "fp",
+        "binary_path": "/codex", "adapter_version": adapter.ADAPTER_VERSION,
+    })
+    monkeypatch.setattr(adapter, "run_codex_research_decision", lambda *args, **kwargs: (
+        decision,
+        {
+            "estimated_model_tokens": 100, "sandbox": "read-only", "tools_disabled": [],
+            "workdir_isolated": True, "provider_api_keys_stripped": True,
+            "model_tokens_metering": "estimated",
+        },
+    ))
+
+    def fake_api(base_url, path, *, method="GET", payload=None):
+        calls.append((method, path, payload))
+        if method == "GET":
+            return {
+                "episode": {"id": "episode-1", "status": "awaiting_planner", "terminal": False},
+                "current_observation": observation,
+            }
+        return {
+            "accepted": True,
+            "dispatched": True,
+            "decision_id": "decision-1",
+            "episode": {"id": "episode-1", "status": "awaiting_planner", "terminal": False},
+            "current_observation": {"id": "obs-2", "observation_pack": {}},
+            "decisions": [{
+                "id": "decision-1",
+                "policy_result": {
+                    "observation_summary": {
+                        "result": {"scan_id": "scan-1", "job_id": "job-1", "status": "queued"},
+                        "operation_id": "command-result-1",
+                        "command_result": {
+                            "id": "command-result-1", "scan_id": "scan-1", "status": "queued",
+                            "next_action": "/scans/scan-1",
+                        },
+                    },
+                },
+            }],
+        }
+
+    monkeypatch.setattr(adapter, "api_json", fake_api)
+    result = adapter.run_research_episode("http://api", "episode-1", max_decisions=5, timeout_seconds=30)
+
+    assert [(method, path) for method, path, _ in calls] == [
+        ("GET", "/research/episodes/episode-1"),
+        ("POST", "/research/episodes/episode-1/decisions"),
+    ]
+    assert result["awaiting_linked_work"] is True
+    assert result["linked_work"] == {
+        "kind": "scan",
+        "command": "scan.focused_family",
+        "status": "queued",
+        "scan_id": "scan-1",
+        "retest_id": None,
+        "finding_id": None,
+        "job_id": "job-1",
+        "command_result_id": "command-result-1",
+        "ui_path": "/scans/scan-1",
+    }
+
+
+def test_research_episode_runner_returns_dispatched_retest_from_observation(monkeypatch):
+    calls = []
+    observation = {
+        "id": "obs-1",
+        "context_hash": "a" * 64,
+        "observation_pack": {
+            "proposable_commands": [{"name": "finding.retest", "proposable": True}],
+        },
+    }
+    decision = {
+        "decision_version": adapter.RESEARCH_DECISION_VERSION,
+        "decision": "execute_action",
+        "observation_id": "obs-1",
+        "context_hash": "a" * 64,
+        "hypothesis_id": None,
+        "action": {"command": "finding.retest", "parameters": {"finding_id": "finding-1"}},
+        "expected_signal": "The replay reproduces the recorded anomaly.",
+        "falsifier": "The replay behaves like the control request.",
+        "reason": "Refresh finding proof.",
+        "confidence": 0.8,
+        "requested_input": None,
+        "stop_reason": None,
+    }
+    monkeypatch.setattr(adapter, "codex_identity", lambda binary=None: {
+        "agent": "codex", "version": "1", "fingerprint": "fp",
+        "binary_path": "/codex", "adapter_version": adapter.ADAPTER_VERSION,
+    })
+    monkeypatch.setattr(adapter, "run_codex_research_decision", lambda *args, **kwargs: (
+        decision,
+        {
+            "estimated_model_tokens": 100, "sandbox": "read-only", "tools_disabled": [],
+            "workdir_isolated": True, "provider_api_keys_stripped": True,
+            "model_tokens_metering": "estimated",
+        },
+    ))
+
+    def fake_api(base_url, path, *, method="GET", payload=None):
+        calls.append((method, path, payload))
+        if method == "GET":
+            return {
+                "episode": {"id": "episode-1", "status": "awaiting_planner", "terminal": False},
+                "current_observation": observation,
+            }
+        return {
+            "accepted": True,
+            "dispatched": True,
+            "decision_id": "decision-1",
+            "episode": {"id": "episode-1", "status": "awaiting_planner", "terminal": False},
+            "current_observation": {
+                "id": "obs-2",
+                "observation_pack": {
+                    "previous_observation": {
+                        "result": {
+                            "retest_id": "retest-1", "job_id": "job-1",
+                            "finding_id": "finding-1", "status": "queued",
+                        },
+                        "operation_id": "command-result-1",
+                    },
+                },
+            },
+            "decisions": [],
+        }
+
+    monkeypatch.setattr(adapter, "api_json", fake_api)
+    result = adapter.run_research_episode("http://api", "episode-1", max_decisions=5, timeout_seconds=30)
+
+    assert len(calls) == 2
+    assert result["linked_work"]["kind"] == "finding_retest"
+    assert result["linked_work"]["retest_id"] == "retest-1"
+    assert result["linked_work"]["finding_id"] == "finding-1"
+    assert result["linked_work"]["ui_path"] == "/findings/finding-1"
+
+
+def test_research_episode_runner_settles_async_work_before_planning(monkeypatch):
+    calls = []
+    monkeypatch.setattr(adapter, "codex_identity", lambda binary=None: {
+        "agent": "codex", "version": "1", "fingerprint": "fp",
+        "binary_path": "/codex", "adapter_version": adapter.ADAPTER_VERSION,
+    })
+    monkeypatch.setattr(
+        adapter,
+        "run_codex_research_decision",
+        lambda *args, **kwargs: pytest.fail("planner must not run while linked work is unsettled"),
+    )
+
+    def fake_api(base_url, path, *, method="GET", payload=None):
+        calls.append((method, path))
+        if method == "GET":
+            return {
+                "episode": {
+                    "id": "episode-1", "status": "awaiting_observation",
+                    "terminal": False, "autopilot_enabled": False,
+                }
+            }
+        assert path == "/research/episodes/episode-1/settle"
+        return {
+            "settled": False,
+            "episode": {"id": "episode-1", "status": "awaiting_observation", "terminal": False},
+            "waiting_on": [{
+                "kind": "scan", "id": "scan-1", "status": "running",
+                "ui_path": "/scans/scan-1",
+            }],
+        }
+
+    monkeypatch.setattr(adapter, "api_json", fake_api)
+    result = adapter.run_research_episode(
+        "http://api", "episode-1", max_decisions=3, timeout_seconds=30,
+    )
+
+    assert calls == [
+        ("GET", "/research/episodes/episode-1"),
+        ("POST", "/research/episodes/episode-1/settle"),
+    ]
+    assert result["decision_count"] == 0
+    assert result["awaiting_linked_work"] is True
+    assert result["linked_work"]["id"] == "scan-1"
+
+
+def test_research_cli_projection_omits_full_observation_pack():
+    projected = adapter._research_cli_projection({
+        "ok": True,
+        "episode_id": "episode-1",
+        "decision_count": 1,
+        "decisions": [{"command": "asm.gaps"}],
+        "awaiting_linked_work": False,
+        "linked_work": None,
+        "episode": {
+            "status": "awaiting_planner", "terminal": False,
+            "remaining_budget": {"steps": 3},
+        },
+        "current_observation": {
+            "id": "obs-2", "sequence": 2, "context_hash": "a" * 64,
+            "observation_pack": {
+                "current_surface": {"huge": "x" * 100_000},
+                "previous_observation": {"command": "asm.gaps", "dispatched": True},
+            },
+        },
+        "planner": {"agent": "codex"},
+    })
+
+    assert projected["ui_path"] == "/settings/research-agent?episode_id=episode-1"
+    assert projected["current_observation"]["previous_result"]["command"] == "asm.gaps"
+    assert "observation_pack" not in json.dumps(projected)
+    assert len(json.dumps(projected)) < 5000
