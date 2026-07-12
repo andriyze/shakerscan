@@ -13990,6 +13990,169 @@ async def create_target_principal(target_id: str, request: TargetPrincipalCreate
     }
 
 
+# --- Opt-in self-registration of test principals (Deep Hunt enabler, roadmap item #1) ----
+# For an authorized open-signup target, mint managed principals through the app's OWN signup flow
+# (a real registration -- never forged auth) so two-principal BOLA hunts and application-graph
+# residue can run without a human hand-provisioning credentials. Strictly opt-in per target; the
+# secrets are stored encrypted via the normal credential-profile path and never returned to a model.
+_MAX_AUTO_PROVISION_PRINCIPALS = 4
+
+
+def _auto_provisioning_config(target_row: Any) -> dict[str, Any]:
+    row = target_row if isinstance(target_row, dict) else {}
+    meta = _decode_json_value(row.get("metadata_json")) or {}
+    config = meta.get("auto_provisioning") if isinstance(meta, dict) else None
+    return config if isinstance(config, dict) else {}
+
+
+def _render_provision_template(node: Any, variables: dict[str, str]) -> Any:
+    if isinstance(node, str):
+        rendered = node
+        for key, value in variables.items():
+            rendered = rendered.replace("{{" + key + "}}", value)
+        return rendered
+    if isinstance(node, dict):
+        return {key: _render_provision_template(value, variables) for key, value in node.items()}
+    if isinstance(node, list):
+        return [_render_provision_template(item, variables) for item in node]
+    return node
+
+
+def _provision_json_path(payload: Any, path: str) -> Any:
+    node = payload
+    for part in str(path or "").replace("$", "").strip(".").split("."):
+        if not part:
+            continue
+        if isinstance(node, dict):
+            node = node.get(part)
+        elif isinstance(node, list) and part.isdigit() and int(part) < len(node):
+            node = node[int(part)]
+        else:
+            return None
+    return node
+
+
+def _provision_same_origin_url(target_url: str, path: Any) -> str:
+    text = str(path or "")
+    if not text.startswith("/") or text.startswith("//"):
+        raise HTTPException(status_code=400, detail="auto_provisioning path must be an absolute same-origin path starting with /")
+    joined = urllib.parse.urljoin(target_url, text)
+    if urllib.parse.urlsplit(joined)[:2] != urllib.parse.urlsplit(target_url)[:2]:
+        raise HTTPException(status_code=400, detail="auto_provisioning path escapes the target origin")
+    return joined
+
+
+async def _auto_provision_principals(conn, target_uuid, target_url: str, config: dict[str, Any]) -> list[dict[str, Any]]:
+    import httpx  # container-local; api.py has no top-level httpx dependency
+
+    if not config.get("enabled"):
+        raise HTTPException(status_code=400, detail="auto_provisioning is not enabled for this target")
+    signup = config.get("signup") if isinstance(config.get("signup"), dict) else None
+    login = config.get("login") if isinstance(config.get("login"), dict) else None
+    if not signup or not login:
+        raise HTTPException(status_code=400, detail="auto_provisioning requires both a signup and a login recipe")
+    specs = config.get("principals")
+    if not isinstance(specs, list) or not specs:
+        specs = [{"label": "user1", "auth_state": "user1"}, {"label": "user2", "auth_state": "user2"}]
+    specs = [s for s in specs if isinstance(s, dict)][:_MAX_AUTO_PROVISION_PRINCIPALS]
+    token_path = str(login.get("token_path") or "$.token")
+    auth_kind = str(login.get("auth_kind") or "authorization_header").strip().lower()
+    header_format = str(login.get("header_format") or "Bearer {{token}}")
+    provisioned: list[dict[str, Any]] = []
+    async with httpx.AsyncClient(timeout=httpx.Timeout(15), follow_redirects=False, trust_env=False) as client:
+        for spec in specs:
+            label = _normalize_target_principal_label(spec.get("label") or "user1")
+            auth_state = _normalize_target_auth_state(spec.get("auth_state") or "user1")
+            token_hex = uuid.uuid4().hex
+            # Keep the email short + unique: some apps cap identity-derived columns (e.g. crAPI
+            # stores its JWT, whose sub is the email, in a varchar(500)); a long email overflows it.
+            variables = {
+                "email": f"sk{token_hex[:10]}@shaker.test",
+                "password": f"ShakerHunt!{token_hex[:10]}Aa1",
+                "number": str(uuid.uuid4().int % 10_000_000_000).zfill(10),
+                "name": f"Shaker {label}",
+                "label": label,
+            }
+            # 1) Register through the app's own signup flow (real account, same origin only).
+            signup_url = _provision_same_origin_url(target_url, signup.get("path"))
+            signup_body = _render_provision_template(signup.get("json") or {}, variables)
+            signup_resp = await client.request(
+                str(signup.get("method") or "POST").upper(), signup_url,
+                json=signup_body or None, headers={"Content-Type": "application/json"},
+            )
+            if signup_resp.status_code >= 500:
+                raise HTTPException(status_code=502, detail=f"signup upstream error for {label}: {signup_resp.status_code}")
+            # 2) Log in to capture the managed token.
+            login_url = _provision_same_origin_url(target_url, login.get("path"))
+            login_body = _render_provision_template(login.get("json") or {}, variables)
+            login_resp = await client.request(
+                str(login.get("method") or "POST").upper(), login_url,
+                json=login_body or None, headers={"Content-Type": "application/json"},
+            )
+            token = None
+            try:
+                token = _provision_json_path(login_resp.json(), token_path)
+            except (ValueError, TypeError):
+                token = None
+            if not token:
+                raise HTTPException(status_code=502, detail=f"login returned no token for {label} (status {login_resp.status_code})")
+            secret = _render_provision_template(header_format, {"token": str(token)})
+            profile_name = f"auto-{label}"
+            values = _target_credential_profile_values(
+                name=profile_name, auth_kind=auth_kind, secret=secret, expires_at=None,
+                metadata_json={"auto_provisioned": True, "source": "self_registration"},
+            )
+            await conn.execute(
+                """
+                INSERT INTO target_credential_profiles (
+                    target_id, name, auth_kind, secret_value, secret_preview, expires_at, metadata_json, rotated_at
+                ) VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,NOW())
+                ON CONFLICT (target_id, lower(name)) DO UPDATE SET
+                    auth_kind=EXCLUDED.auth_kind, secret_value=EXCLUDED.secret_value,
+                    secret_preview=EXCLUDED.secret_preview, is_active=true,
+                    metadata_json=target_credential_profiles.metadata_json || EXCLUDED.metadata_json,
+                    rotated_at=NOW(), updated_at=NOW()
+                """,
+                target_uuid, values["name"], values["auth_kind"], values["secret_value"],
+                values["secret_preview"], values["expires_at"], json.dumps(values["metadata_json"]),
+            )
+            await conn.execute(
+                """
+                INSERT INTO target_principals (
+                    target_id, label, role, tenant_id, auth_state, credential_profile, is_active, metadata_json
+                ) VALUES ($1,$2,'user',NULL,$3,$4,true,$5::jsonb)
+                ON CONFLICT (target_id, lower(label), COALESCE(tenant_id, ''), COALESCE(auth_state, ''))
+                DO UPDATE SET credential_profile=EXCLUDED.credential_profile, is_active=true,
+                    metadata_json=target_principals.metadata_json || EXCLUDED.metadata_json, updated_at=NOW()
+                """,
+                target_uuid, label, auth_state, profile_name, json.dumps({"auto_provisioned": True}),
+            )
+            provisioned.append({"label": label, "auth_state": auth_state, "credential_profile": profile_name})
+    return provisioned
+
+
+@app.post("/targets/{target_id}/principals/auto-provision")
+async def auto_provision_target_principals(target_id: str):
+    """Self-register managed test principals via the target's OWN signup flow (opt-in).
+
+    A real registration through the app's public signup -- never forged auth. Requires the target's
+    metadata_json.auto_provisioning.enabled = true (explicit operator authorization). Secrets are
+    stored encrypted through the normal credential-profile path and are never returned.
+    """
+    target_uuid = _uuid_or_400(target_id, "target id")
+    async with db_pool.acquire() as conn:
+        target = await conn.fetchrow("SELECT id, url, is_active, metadata_json FROM targets WHERE id=$1", target_uuid)
+        if not target or not target["is_active"]:
+            raise HTTPException(status_code=404, detail="Active target not found")
+        provisioned = await _auto_provision_principals(conn, target_uuid, str(target["url"]), _auto_provisioning_config(dict(target)))
+    return {
+        "target_id": target_id,
+        "provisioned": provisioned,
+        "count": len(provisioned),
+        "note": "Managed test accounts registered via the app's own signup; credentials stored encrypted.",
+    }
+
+
 @app.patch("/targets/{target_id}/principals/{principal_id}")
 async def update_target_principal(target_id: str, principal_id: str, request: TargetPrincipalUpdate):
     """Update target principal metadata without returning or accepting raw secrets."""
@@ -26765,6 +26928,23 @@ async def launch_research_episode(req: ResearchLaunchRequest):
     if finding:
         family = _research_finding_family(finding)
         allowed_families = [family] if family else []
+
+    if req.mission_profile == "target_hunt" and req.intensity == "deep_hunt":
+        # Deep Hunt may self-provision two managed principals via the app's own signup so
+        # two-principal BOLA workflows are reachable without hand-configured credentials. Opt-in
+        # (target metadata_json.auto_provisioning.enabled); best-effort; never blocks a launch.
+        try:
+            async with db_pool.acquire() as conn:
+                target_row = await conn.fetchrow("SELECT url, metadata_json FROM targets WHERE id=$1", target_id)
+                config = _auto_provisioning_config(dict(target_row)) if target_row else {}
+                if config.get("enabled"):
+                    active_principals = await conn.fetchval(
+                        "SELECT COUNT(*) FROM target_principals WHERE target_id=$1 AND is_active", target_id)
+                    if int(active_principals or 0) < 2:
+                        provisioned = await _auto_provision_principals(conn, target_id, str(target_row["url"]), config)
+                        logger.info("deep_hunt self-provisioned %d principals for target %s", len(provisioned), target_id)
+        except Exception:
+            logger.warning("deep_hunt auto-provisioning failed for target %s", target_id, exc_info=True)
 
     if req.mission_profile == "target_hunt":
         # Seed the hunt with DAST-residue / application-graph leads (auth-boundary edges and
