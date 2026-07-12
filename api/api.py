@@ -3788,6 +3788,7 @@ class EvidenceInstanceRequest(BaseModel):
     hash: Optional[str] = None
     retention_policy: str = Field(default="standard", pattern="^(standard|short|audit|legal_hold|sensitive)$")
     proof_state: str = Field(default="unverified", pattern="^(verified|suspected|unverified|refuted|inconclusive)$")
+    evidence_strength: Optional[str] = Field(default=None, pattern="^(claimed|signal|reproduced|cross_principal_verified)$")
     metadata_json: dict[str, Any] = Field(default_factory=dict)
     created_by: Optional[str] = None
 
@@ -17895,6 +17896,7 @@ def _canonical_evidence_instance(req: EvidenceInstanceRequest) -> dict[str, Any]
         "hash": instance_hash.lower(),
         "retention_policy": payload.get("retention_policy") or "standard",
         "proof_state": payload.get("proof_state") or "unverified",
+        "evidence_strength": str(payload.get("evidence_strength") or "").strip() or None,
         "metadata_json": metadata,
         "created_by": str(payload.get("created_by") or "").strip() or None,
     }
@@ -17918,13 +17920,13 @@ async def _record_evidence_instance(conn, req: EvidenceInstanceRequest) -> dict[
             object_id, payload_variant, request_response_refs, principal_pair,
             proof_observation, campaign_action_id, tool_receipt_id,
             redaction_profile, hash, retention_policy, proof_state,
-            metadata_json, created_by
+            evidence_strength, metadata_json, created_by
         ) VALUES (
             $1,$2,$3,$4,$5,
             $6,$7,$8::jsonb,$9::jsonb,
             $10::jsonb,$11,$12,
             $13,$14,$15,$16,
-            $17::jsonb,$18
+            $17,$18::jsonb,$19
         )
         RETURNING *
         """,
@@ -17944,6 +17946,7 @@ async def _record_evidence_instance(conn, req: EvidenceInstanceRequest) -> dict[
         payload["hash"],
         payload["retention_policy"],
         payload["proof_state"],
+        payload.get("evidence_strength"),
         json.dumps(payload.get("metadata_json") or {}),
         payload.get("created_by"),
     )
@@ -23115,6 +23118,7 @@ async def arsenal_family_proof_evaluate(req: FamilyProofHandoffRequest):
                 principal_pair=req.principals if isinstance(req.principals, dict) else {},
                 tool_receipt_id=(req.tool_receipt_ids[0] if req.tool_receipt_ids else None),
                 proof_state=proof_state,
+                evidence_strength=strength,
                 proof_observation={
                     "family": verdict["family"],
                     "cwe": verdict["cwe"],

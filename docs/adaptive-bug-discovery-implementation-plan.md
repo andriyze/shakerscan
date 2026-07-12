@@ -285,7 +285,7 @@ One pure module (no db/httpx/engine imports) holds the promotion and refutation 
 
 ### 4.2 Evidence-strength ladder and re-execute-at-promotion
 
-The ladder `claimed < signal < reproduced < cross_principal_verified` ships in `api/adjudicate.py`. Target state: promotion requires the top rung **and** a *fresh* re-execution of the family proof contract at handoff — generalising the authz-replay differential-at-promotion check to every Wave 5 family; a stored `reproduced: true` is a claim, a contract that fires live at promotion time is proof. The `evidence_instances` strength column and the generalised promotion gate are the next increment.
+The ladder `claimed < signal < reproduced < cross_principal_verified` ships in `api/adjudicate.py` and is now a durable, migrated `evidence_instances.evidence_strength` column, written by the family-proof handoff (which stamps `cross_principal_verified` on a `verified` result — live-verified). `family_proof.promotion_gate` is the deterministic gate every finding-creation path must consult: it passes only a `verified`, re-executed proof and fails closed otherwise. Remaining: wire auto-finding-creation for every family to invoke the per-family live actuator re-run at promotion (authz-replay already does this for BOLA).
 
 ### 4.3 Re-derivable acceptance
 

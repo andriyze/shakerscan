@@ -136,6 +136,27 @@ def supported_families() -> list[str]:
     return sorted(FAMILY_CONTRACTS)
 
 
+PROMOTION_MIN_STRENGTH = "cross_principal_verified"
+
+
+def promotion_gate(result: dict[str, Any] | None) -> tuple[bool, str | None]:
+    """The deterministic gate every finding-creation path must consult (Wave 5).
+
+    Only a `verified`, live-re-executed family proof may promote to a finding — a stored outcome is a
+    claim, `verified` already requires ``reexecuted_at_handoff`` and carries the top evidence-strength
+    rung. Returns ``(ok, reason)``; fail-closed on anything less.
+    """
+    r = result or {}
+    verdict = str(r.get("verdict") or "")
+    if verdict != "verified":
+        return False, f"not_verified:{verdict or 'none'}"
+    if not r.get("reexecuted_at_handoff"):
+        return False, "not_reexecuted_at_handoff"
+    if not r.get("promotable"):
+        return False, "not_promotable"
+    return True, None
+
+
 def _self_test() -> None:
     bola_full = {
         "distinct_identity": True, "ownership_established": True,

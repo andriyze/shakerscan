@@ -2240,11 +2240,14 @@ async def run_schema_migrations(pool) -> None:
                     hash TEXT NOT NULL,
                     retention_policy TEXT NOT NULL DEFAULT 'standard',
                     proof_state TEXT NOT NULL DEFAULT 'unverified',
+                    evidence_strength TEXT,
                     metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
                     created_by TEXT,
                     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                     CONSTRAINT evidence_instances_proof_state_check
                         CHECK (proof_state IN ('verified','suspected','unverified','refuted','inconclusive')),
+                    CONSTRAINT evidence_instances_strength_check
+                        CHECK (evidence_strength IS NULL OR evidence_strength IN ('claimed','signal','reproduced','cross_principal_verified')),
                     CONSTRAINT evidence_instances_retention_check
                         CHECK (retention_policy IN ('standard','short','audit','legal_hold','sensitive'))
                 )
@@ -2252,6 +2255,14 @@ async def run_schema_migrations(pool) -> None:
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_evidence_instances_finding ON evidence_instances(finding_id, created_at DESC) WHERE finding_id IS NOT NULL")
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_evidence_instances_tool_receipt ON evidence_instances(tool_receipt_id) WHERE tool_receipt_id IS NOT NULL")
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_evidence_instances_hash ON evidence_instances(hash)")
+            # Wave 5: evidence-strength ladder column (claimed<signal<reproduced<cross_principal_verified).
+            await conn.execute("ALTER TABLE evidence_instances ADD COLUMN IF NOT EXISTS evidence_strength TEXT")
+            await conn.execute("ALTER TABLE evidence_instances DROP CONSTRAINT IF EXISTS evidence_instances_strength_check")
+            await conn.execute("""
+                ALTER TABLE evidence_instances
+                ADD CONSTRAINT evidence_instances_strength_check
+                CHECK (evidence_strength IS NULL OR evidence_strength IN ('claimed','signal','reproduced','cross_principal_verified'))
+            """)
             # First-class application graph (routes, objects, producer/consumer,
             # auth boundaries) persisted from the BOLA resource_map + discovery.
             await conn.execute("""

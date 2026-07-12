@@ -75,3 +75,18 @@ def test_no_evidence_is_inconclusive():
 def test_all_verdicts_are_known():
     for fam in list(fp.FAMILY_CONTRACTS) + ["unknown"]:
         assert fp.evaluate_family_proof(fam, {})["verdict"] in fp.VERDICTS
+
+
+def test_promotion_gate_only_passes_verified_reexecuted():
+    verified = fp.evaluate_family_proof("bola", _full("bola"))
+    assert fp.promotion_gate(verified) == (True, None)
+
+    supported = fp.evaluate_family_proof("bola", {"distinct_identity": True, "reexecuted_at_handoff": True})
+    ok, reason = fp.promotion_gate(supported)
+    assert not ok and reason.startswith("not_verified")
+
+    # A crafted "verified" without the re-execution flag is still refused.
+    assert fp.promotion_gate({"verdict": "verified", "promotable": True, "reexecuted_at_handoff": False}) == (
+        False, "not_reexecuted_at_handoff",
+    )
+    assert fp.promotion_gate({}) == (False, "not_verified:none")
