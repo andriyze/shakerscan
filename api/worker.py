@@ -7054,6 +7054,22 @@ async def process_scan_plan_job(job_data: dict):
     target_id = str(row['target_id']) if row and row['target_id'] else None
     target_url = (row['target_url'] if row else None) or target
 
+    # Count the plan/discovery stage as a running job. This stage runs the discover-once
+    # recon (coverage) and the fan-out planning before any shard exists; without marking
+    # the job running here, queue "running" shows 0 during a parent's discovery phase and
+    # only starts counting once shards spawn. Marked completed after fan-out (below), or
+    # re-enqueued as a standalone scan in the not-worth-parallelizing branch.
+    r.hset(
+        f"job:{parent_job_id}",
+        mapping={
+            'status': 'running',
+            'started_at': now.isoformat(),
+            'heartbeat': now.isoformat(),
+            'current_phase': 'planning',
+        },
+    )
+    r.expire(f"job:{parent_job_id}", 86400)
+
     requested_strategy = parallel_scan.resolve_auto_strategy(
         options,
         scan_type,
@@ -7094,6 +7110,17 @@ async def process_scan_plan_job(job_data: dict):
         # heavy discovery knobs inherited from the parent/coverage payload).
         parallel_scan._merge_custom_budget(recon_opts, dict(parallel_scan.RECON_DISCOVERY_BUDGET))
         print(f"[{parent_id[:8]}] coverage: running discover-once recon", flush=True)
+        # The discover-once recon can run for minutes; keep the plan job's heartbeat
+        # fresh (run_scan does not heartbeat on its own) so the queue heartbeat check
+        # does not reap the now-running plan job mid-discovery.
+        _recon_hb_stop = threading.Event()
+        _recon_hb = threading.Thread(
+            target=send_heartbeats,
+            args=(parent_job_id, _recon_hb_stop),
+            name=f"plan-recon-hb-{parent_job_id[:8]}",
+            daemon=True,
+        )
+        _recon_hb.start()
         try:
             # Use the DB-normalized target_url (scheme-full), not the raw queued
             # target which can be scheme-less when the user submitted without a
@@ -7103,6 +7130,9 @@ async def process_scan_plan_job(job_data: dict):
         except Exception as e:
             recon_result = {}
             print(f"[{parent_id[:8]}] coverage recon error: {e}", flush=True)
+        finally:
+            _recon_hb_stop.set()
+            _recon_hb.join(timeout=max(1.0, HEARTBEAT_INTERVAL_SECONDS / 2))
         try:
             harvest_limit = int(
                 ((options.get('custom_budget') or {}).get('active_worklist_max'))
@@ -7405,6 +7435,13 @@ async def process_scan_plan_job(job_data: dict):
         f"(allocation={_allocation}, dynamic_pull_workers={_dyn_shards}, static_slices={_static_shards})",
         flush=True,
     )
+    # Planning is done and the shards are enqueued: free the plan job so it no longer
+    # counts as running while the shards (and later the merge job) do the work.
+    r.hset(
+        f"job:{parent_job_id}",
+        mapping={'status': 'completed', 'progress': '100', 'current_phase': 'fanned_out'},
+    )
+    r.expire(f"job:{parent_job_id}", 86400)
 
 
 async def process_scan_shard_job(job_data: dict):
