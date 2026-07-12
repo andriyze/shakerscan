@@ -2416,6 +2416,117 @@ export async function getHypotheses(limit: number = 20): Promise<{ hypotheses: H
   return res.json()
 }
 
+// --- Adaptive workbench (Waves 4-6): scheduling + lifecycle transitions ---
+
+export interface ScheduledLead {
+  hypothesis_id: string
+  priority: number | null
+  excluded: boolean
+  exclude_reason: string | null
+  breakdown: Record<string, number>
+  request_cost?: number
+  deferred_reason?: string
+  hypothesis?: Hypothesis
+}
+
+export interface HypothesisScheduleResponse {
+  version: string
+  scheduled: ScheduledLead[]
+  deferred: ScheduledLead[]
+  excluded: ScheduledLead[]
+  counts: { scheduled: number; deferred: number; excluded: number }
+  execution_enabled: boolean
+}
+
+export async function scheduleHypotheses(params?: {
+  targetId?: string
+  authAvailable?: boolean
+  remainingRequests?: number
+  limit?: number
+}): Promise<HypothesisScheduleResponse> {
+  const q = new URLSearchParams()
+  if (params?.targetId) q.set('target_id', params.targetId)
+  if (params?.authAvailable) q.set('auth_available', 'true')
+  if (params?.remainingRequests != null) q.set('remaining_requests', String(params.remainingRequests))
+  if (params?.limit != null) q.set('limit', String(params.limit))
+  const res = await fetch(`${API_URL}/arsenal/hypotheses/schedule${q.toString() ? `?${q.toString()}` : ''}`)
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to schedule hypotheses'))
+  return res.json()
+}
+
+export async function transitionHypothesis(
+  hypothesisId: string,
+  payload: {
+    to: string
+    expected_version: number
+    reason?: string
+    refuted_by?: Record<string, unknown>
+    blockers?: string[]
+    created_by?: string
+  }
+): Promise<{ hypothesis: Hypothesis; transitioned: boolean; from: string; to: string; execution_enabled: boolean }> {
+  const res = await fetch(`${API_URL}/arsenal/hypotheses/${encodeURIComponent(hypothesisId)}/transition`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Transition rejected'))
+  return res.json()
+}
+
+// --- Family proof handoffs (Wave 5) ---
+
+export interface FamilyProofContract {
+  cwe: string
+  requires: string[]
+  refute_if?: string[]
+}
+
+export interface FamilyProofContracts {
+  version: string
+  families: string[]
+  contracts: Record<string, FamilyProofContract>
+  aliases: Record<string, string>
+  verdicts: string[]
+}
+
+export async function getFamilyProofContracts(): Promise<FamilyProofContracts> {
+  const res = await fetch(`${API_URL}/arsenal/family-proof/contracts`)
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load family proof contracts'))
+  return res.json()
+}
+
+export interface FamilyProofVerdict {
+  family: string
+  cwe: string | null
+  verdict: string
+  reason: string
+  requirements: string[]
+  met: string[]
+  missing: string[]
+  refuted_by?: string[]
+  promotable: boolean
+  proof_state: string
+  evidence_strength: string
+  evidence_instance_id: string | null
+}
+
+export async function evaluateFamilyProof(payload: {
+  family: string
+  evidence: Record<string, boolean>
+  target_id?: string
+  concrete_url?: string
+  created_by?: string
+}): Promise<FamilyProofVerdict> {
+  const res = await fetch(`${API_URL}/arsenal/family-proof/evaluate`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Family proof evaluation failed'))
+  return res.json()
+}
+
 export async function reconcileHypothesisProof(
   hypothesisId: string,
   payload: {

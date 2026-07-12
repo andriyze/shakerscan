@@ -58,6 +58,11 @@ const navItems = [
     icon: <FileArchive className="w-5 h-5" />,
   },
   {
+    href: '/settings/research-agent/leads',
+    label: 'Adaptive Leads',
+    icon: <Bot className="w-5 h-5" />,
+  },
+  {
     href: '/exposure',
     label: 'Exposure',
     icon: <Network className="w-5 h-5" />,
