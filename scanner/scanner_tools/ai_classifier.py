@@ -554,8 +554,15 @@ def _provider_kind_from_url(ai_url: str) -> str:
 
 
 def _supports_structured_outputs(model: str) -> bool:
-    model_base = model.split("/")[-1].lower()
-    return any(m in model_base for m in STRUCTURED_OUTPUT_MODELS)
+    # Attempt strict json_schema structured outputs for any chat-completions model. The per-mode
+    # fallback (json_schema -> json_object -> none) in the request loop degrades gracefully for
+    # providers that reject the schema (e.g. OpenAI's stricter validation). The prior gpt-4o-era
+    # STRUCTURED_OUTPUT_MODELS allowlist was stale and silently disabled structured outputs for
+    # modern models (grok-4.5, claude-sonnet-5, deepseek, gpt-5.x), so they returned free-form
+    # prose that the research planner parsed to an empty command -> unknown_command -> autopilot
+    # failure. model_base is unused now but kept for callers that may want the bare id.
+    _ = model.split("/")[-1].lower()
+    return True
 
 
 def _build_response_format_candidates(
