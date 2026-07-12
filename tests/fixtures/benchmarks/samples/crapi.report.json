@@ -1,0 +1,2973 @@
+{
+ "active_checks": {
+  "custom_sqli": [],
+  "custom_xss": [],
+  "dalfox": [],
+  "dom_xss": {
+   "files_analyzed": 1,
+   "findings": [
+    {
+     "confidence": 0.7,
+     "description": "Potential DOM XSS: Function constructor sink with location\\.href source",
+     "evidence": [
+      "Sink: Function constructor at line 2",
+      "Source: location\\.href found nearby",
+      "Code: (()=>{var e={6:e=>{var t=\"\\\\ud800-\\\\udfff\",n=\"\\\\u2700-\\\\u27bf\",r=\"a-z\\\\xdf-\\\\xf6\\\\xf8-\\\\xff\",o=\"A-Z\\\\xc0-\\\\xd6\\\\xd8-\\\\xde\",i=\"\\\\xac\\\\xb1\\\\xd7\\\\xf7\\\\x00-\\\\x2f\\\\x3a-\\\\x40\\\\x5b-\\\\x60\\\\x7b-\\\\xbf\\\\u2000-\\\\"
+     ],
+     "file": "http://crapi-web/static/js/main.8c78208c.js",
+     "line": 2,
+     "severity": "critical",
+     "sink_type": "Function constructor",
+     "snippet": "(()=>{var e={6:e=>{var t=\"\\\\ud800-\\\\udfff\",n=\"\\\\u2700-\\\\u27bf\",r=\"a-z\\\\xdf-\\\\xf6\\\\xf8-\\\\xff\",o=\"A-Z\\\\xc0-\\\\xd6\\\\xd8-\\\\xde\",i=\"\\\\xac\\\\xb1\\\\xd7\\\\xf7\\\\x00-\\\\x2f\\\\x3a-\\\\x40\\\\x5b-\\\\x60\\\\x7b-\\\\xbf\\\\u2000-\\\\",
+     "source_nearby": true,
+     "source_pattern": "location\\.href",
+     "type": "DOM_XSS"
+    },
+    {
+     "confidence": 0.7,
+     "description": "Potential DOM XSS: setTimeout with string sink with location\\.href source",
+     "evidence": [
+      "Sink: setTimeout with string at line 2",
+      "Source: location\\.href found nearby",
+      "Code: (()=>{var e={6:e=>{var t=\"\\\\ud800-\\\\udfff\",n=\"\\\\u2700-\\\\u27bf\",r=\"a-z\\\\xdf-\\\\xf6\\\\xf8-\\\\xff\",o=\"A-Z\\\\xc0-\\\\xd6\\\\xd8-\\\\xde\",i=\"\\\\xac\\\\xb1\\\\xd7\\\\xf7\\\\x00-\\\\x2f\\\\x3a-\\\\x40\\\\x5b-\\\\x60\\\\x7b-\\\\xbf\\\\u2000-\\\\"
+     ],
+     "file": "http://crapi-web/static/js/main.8c78208c.js",
+     "line": 2,
+     "severity": "critical",
+     "sink_type": "setTimeout with string",
+     "snippet": "(()=>{var e={6:e=>{var t=\"\\\\ud800-\\\\udfff\",n=\"\\\\u2700-\\\\u27bf\",r=\"a-z\\\\xdf-\\\\xf6\\\\xf8-\\\\xff\",o=\"A-Z\\\\xc0-\\\\xd6\\\\xd8-\\\\xde\",i=\"\\\\xac\\\\xb1\\\\xd7\\\\xf7\\\\x00-\\\\x2f\\\\x3a-\\\\x40\\\\x5b-\\\\x60\\\\x7b-\\\\xbf\\\\u2000-\\\\",
+     "source_nearby": true,
+     "source_pattern": "location\\.href",
+     "type": "DOM_XSS"
+    },
+    {
+     "confidence": 0.7,
+     "description": "Potential DOM XSS: setInterval with string sink with location\\.href source",
+     "evidence": [
+      "Sink: setInterval with string at line 2",
+      "Source: location\\.href found nearby",
+      "Code: (()=>{var e={6:e=>{var t=\"\\\\ud800-\\\\udfff\",n=\"\\\\u2700-\\\\u27bf\",r=\"a-z\\\\xdf-\\\\xf6\\\\xf8-\\\\xff\",o=\"A-Z\\\\xc0-\\\\xd6\\\\xd8-\\\\xde\",i=\"\\\\xac\\\\xb1\\\\xd7\\\\xf7\\\\x00-\\\\x2f\\\\x3a-\\\\x40\\\\x5b-\\\\x60\\\\x7b-\\\\xbf\\\\u2000-\\\\"
+     ],
+     "file": "http://crapi-web/static/js/main.8c78208c.js",
+     "line": 2,
+     "severity": "critical",
+     "sink_type": "setInterval with string",
+     "snippet": "(()=>{var e={6:e=>{var t=\"\\\\ud800-\\\\udfff\",n=\"\\\\u2700-\\\\u27bf\",r=\"a-z\\\\xdf-\\\\xf6\\\\xf8-\\\\xff\",o=\"A-Z\\\\xc0-\\\\xd6\\\\xd8-\\\\xde\",i=\"\\\\xac\\\\xb1\\\\xd7\\\\xf7\\\\x00-\\\\x2f\\\\x3a-\\\\x40\\\\x5b-\\\\x60\\\\x7b-\\\\xbf\\\\u2000-\\\\",
+     "source_nearby": true,
+     "source_pattern": "location\\.href",
+     "type": "DOM_XSS"
+    },
+    {
+     "confidence": 0.7,
+     "description": "Potential DOM XSS: new Function sink with location\\.href source",
+     "evidence": [
+      "Sink: new Function at line 2",
+      "Source: location\\.href found nearby",
+      "Code: (()=>{var e={6:e=>{var t=\"\\\\ud800-\\\\udfff\",n=\"\\\\u2700-\\\\u27bf\",r=\"a-z\\\\xdf-\\\\xf6\\\\xf8-\\\\xff\",o=\"A-Z\\\\xc0-\\\\xd6\\\\xd8-\\\\xde\",i=\"\\\\xac\\\\xb1\\\\xd7\\\\xf7\\\\x00-\\\\x2f\\\\x3a-\\\\x40\\\\x5b-\\\\x60\\\\x7b-\\\\xbf\\\\u2000-\\\\"
+     ],
+     "file": "http://crapi-web/static/js/main.8c78208c.js",
+     "line": 2,
+     "severity": "critical",
+     "sink_type": "new Function",
+     "snippet": "(()=>{var e={6:e=>{var t=\"\\\\ud800-\\\\udfff\",n=\"\\\\u2700-\\\\u27bf\",r=\"a-z\\\\xdf-\\\\xf6\\\\xf8-\\\\xff\",o=\"A-Z\\\\xc0-\\\\xd6\\\\xd8-\\\\xde\",i=\"\\\\xac\\\\xb1\\\\xd7\\\\xf7\\\\x00-\\\\x2f\\\\x3a-\\\\x40\\\\x5b-\\\\x60\\\\x7b-\\\\xbf\\\\u2000-\\\\",
+     "source_nearby": true,
+     "source_pattern": "location\\.href",
+     "type": "DOM_XSS"
+    },
+    {
+     "confidence": 0.7,
+     "description": "Potential DOM XSS: innerHTML assignment sink with location\\.href source",
+     "evidence": [
+      "Sink: innerHTML assignment at line 2",
+      "Source: location\\.href found nearby",
+      "Code: (()=>{var e={6:e=>{var t=\"\\\\ud800-\\\\udfff\",n=\"\\\\u2700-\\\\u27bf\",r=\"a-z\\\\xdf-\\\\xf6\\\\xf8-\\\\xff\",o=\"A-Z\\\\xc0-\\\\xd6\\\\xd8-\\\\xde\",i=\"\\\\xac\\\\xb1\\\\xd7\\\\xf7\\\\x00-\\\\x2f\\\\x3a-\\\\x40\\\\x5b-\\\\x60\\\\x7b-\\\\xbf\\\\u2000-\\\\"
+     ],
+     "file": "http://crapi-web/static/js/main.8c78208c.js",
+     "line": 2,
+     "severity": "high",
+     "sink_type": "innerHTML assignment",
+     "snippet": "(()=>{var e={6:e=>{var t=\"\\\\ud800-\\\\udfff\",n=\"\\\\u2700-\\\\u27bf\",r=\"a-z\\\\xdf-\\\\xf6\\\\xf8-\\\\xff\",o=\"A-Z\\\\xc0-\\\\xd6\\\\xd8-\\\\xde\",i=\"\\\\xac\\\\xb1\\\\xd7\\\\xf7\\\\x00-\\\\x2f\\\\x3a-\\\\x40\\\\x5b-\\\\x60\\\\x7b-\\\\xbf\\\\u2000-\\\\",
+     "source_nearby": true,
+     "source_pattern": "location\\.href",
+     "type": "DOM_XSS"
+    },
+    {
+     "confidence": 0.7,
+     "description": "Potential DOM XSS: location.assign sink with location\\.href source",
+     "evidence": [
+      "Sink: location.assign at line 2",
+      "Source: location\\.href found nearby",
+      "Code: (()=>{var e={6:e=>{var t=\"\\\\ud800-\\\\udfff\",n=\"\\\\u2700-\\\\u27bf\",r=\"a-z\\\\xdf-\\\\xf6\\\\xf8-\\\\xff\",o=\"A-Z\\\\xc0-\\\\xd6\\\\xd8-\\\\xde\",i=\"\\\\xac\\\\xb1\\\\xd7\\\\xf7\\\\x00-\\\\x2f\\\\x3a-\\\\x40\\\\x5b-\\\\x60\\\\x7b-\\\\xbf\\\\u2000-\\\\"
+     ],
+     "file": "http://crapi-web/static/js/main.8c78208c.js",
+     "line": 2,
+     "severity": "high",
+     "sink_type": "location.assign",
+     "snippet": "(()=>{var e={6:e=>{var t=\"\\\\ud800-\\\\udfff\",n=\"\\\\u2700-\\\\u27bf\",r=\"a-z\\\\xdf-\\\\xf6\\\\xf8-\\\\xff\",o=\"A-Z\\\\xc0-\\\\xd6\\\\xd8-\\\\xde\",i=\"\\\\xac\\\\xb1\\\\xd7\\\\xf7\\\\x00-\\\\x2f\\\\x3a-\\\\x40\\\\x5b-\\\\x60\\\\x7b-\\\\xbf\\\\u2000-\\\\",
+     "source_nearby": true,
+     "source_pattern": "location\\.href",
+     "type": "DOM_XSS"
+    },
+    {
+     "confidence": 0.7,
+     "description": "Potential DOM XSS: window.open sink with location\\.href source",
+     "evidence": [
+      "Sink: window.open at line 2",
+      "Source: location\\.href found nearby",
+      "Code: (()=>{var e={6:e=>{var t=\"\\\\ud800-\\\\udfff\",n=\"\\\\u2700-\\\\u27bf\",r=\"a-z\\\\xdf-\\\\xf6\\\\xf8-\\\\xff\",o=\"A-Z\\\\xc0-\\\\xd6\\\\xd8-\\\\xde\",i=\"\\\\xac\\\\xb1\\\\xd7\\\\xf7\\\\x00-\\\\x2f\\\\x3a-\\\\x40\\\\x5b-\\\\x60\\\\x7b-\\\\xbf\\\\u2000-\\\\"
+     ],
+     "file": "http://crapi-web/static/js/main.8c78208c.js",
+     "line": 2,
+     "severity": "medium",
+     "sink_type": "window.open",
+     "snippet": "(()=>{var e={6:e=>{var t=\"\\\\ud800-\\\\udfff\",n=\"\\\\u2700-\\\\u27bf\",r=\"a-z\\\\xdf-\\\\xf6\\\\xf8-\\\\xff\",o=\"A-Z\\\\xc0-\\\\xd6\\\\xd8-\\\\xde\",i=\"\\\\xac\\\\xb1\\\\xd7\\\\xf7\\\\x00-\\\\x2f\\\\x3a-\\\\x40\\\\x5b-\\\\x60\\\\x7b-\\\\xbf\\\\u2000-\\\\",
+     "source_nearby": true,
+     "source_pattern": "location\\.href",
+     "type": "DOM_XSS"
+    },
+    {
+     "confidence": 0.7,
+     "description": "Potential DOM XSS: setAttribute event handler sink with location\\.href source",
+     "evidence": [
+      "Sink: setAttribute event handler at line 2",
+      "Source: location\\.href found nearby",
+      "Code: (()=>{var e={6:e=>{var t=\"\\\\ud800-\\\\udfff\",n=\"\\\\u2700-\\\\u27bf\",r=\"a-z\\\\xdf-\\\\xf6\\\\xf8-\\\\xff\",o=\"A-Z\\\\xc0-\\\\xd6\\\\xd8-\\\\xde\",i=\"\\\\xac\\\\xb1\\\\xd7\\\\xf7\\\\x00-\\\\x2f\\\\x3a-\\\\x40\\\\x5b-\\\\x60\\\\x7b-\\\\xbf\\\\u2000-\\\\"
+     ],
+     "file": "http://crapi-web/static/js/main.8c78208c.js",
+     "line": 2,
+     "severity": "high",
+     "sink_type": "setAttribute event handler",
+     "snippet": "(()=>{var e={6:e=>{var t=\"\\\\ud800-\\\\udfff\",n=\"\\\\u2700-\\\\u27bf\",r=\"a-z\\\\xdf-\\\\xf6\\\\xf8-\\\\xff\",o=\"A-Z\\\\xc0-\\\\xd6\\\\xd8-\\\\xde\",i=\"\\\\xac\\\\xb1\\\\xd7\\\\xf7\\\\x00-\\\\x2f\\\\x3a-\\\\x40\\\\x5b-\\\\x60\\\\x7b-\\\\xbf\\\\u2000-\\\\",
+     "source_nearby": true,
+     "source_pattern": "location\\.href",
+     "type": "DOM_XSS"
+    },
+    {
+     "confidence": 0.7,
+     "description": "Potential DOM XSS: src assignment sink with location\\.href source",
+     "evidence": [
+      "Sink: src assignment at line 2",
+      "Source: location\\.href found nearby",
+      "Code: (()=>{var e={6:e=>{var t=\"\\\\ud800-\\\\udfff\",n=\"\\\\u2700-\\\\u27bf\",r=\"a-z\\\\xdf-\\\\xf6\\\\xf8-\\\\xff\",o=\"A-Z\\\\xc0-\\\\xd6\\\\xd8-\\\\xde\",i=\"\\\\xac\\\\xb1\\\\xd7\\\\xf7\\\\x00-\\\\x2f\\\\x3a-\\\\x40\\\\x5b-\\\\x60\\\\x7b-\\\\xbf\\\\u2000-\\\\"
+     ],
+     "file": "http://crapi-web/static/js/main.8c78208c.js",
+     "line": 2,
+     "severity": "medium",
+     "sink_type": "src assignment",
+     "snippet": "(()=>{var e={6:e=>{var t=\"\\\\ud800-\\\\udfff\",n=\"\\\\u2700-\\\\u27bf\",r=\"a-z\\\\xdf-\\\\xf6\\\\xf8-\\\\xff\",o=\"A-Z\\\\xc0-\\\\xd6\\\\xd8-\\\\xde\",i=\"\\\\xac\\\\xb1\\\\xd7\\\\xf7\\\\x00-\\\\x2f\\\\x3a-\\\\x40\\\\x5b-\\\\x60\\\\x7b-\\\\xbf\\\\u2000-\\\\",
+     "source_nearby": true,
+     "source_pattern": "location\\.href",
+     "type": "DOM_XSS"
+    },
+    {
+     "confidence": 0.7,
+     "description": "Potential DOM XSS: createElement script sink with location\\.href source",
+     "evidence": [
+      "Sink: createElement script at line 2",
+      "Source: location\\.href found nearby",
+      "Code: (()=>{var e={6:e=>{var t=\"\\\\ud800-\\\\udfff\",n=\"\\\\u2700-\\\\u27bf\",r=\"a-z\\\\xdf-\\\\xf6\\\\xf8-\\\\xff\",o=\"A-Z\\\\xc0-\\\\xd6\\\\xd8-\\\\xde\",i=\"\\\\xac\\\\xb1\\\\xd7\\\\xf7\\\\x00-\\\\x2f\\\\x3a-\\\\x40\\\\x5b-\\\\x60\\\\x7b-\\\\xbf\\\\u2000-\\\\"
+     ],
+     "file": "http://crapi-web/static/js/main.8c78208c.js",
+     "line": 2,
+     "severity": "high",
+     "sink_type": "createElement script",
+     "snippet": "(()=>{var e={6:e=>{var t=\"\\\\ud800-\\\\udfff\",n=\"\\\\u2700-\\\\u27bf\",r=\"a-z\\\\xdf-\\\\xf6\\\\xf8-\\\\xff\",o=\"A-Z\\\\xc0-\\\\xd6\\\\xd8-\\\\xde\",i=\"\\\\xac\\\\xb1\\\\xd7\\\\xf7\\\\x00-\\\\x2f\\\\x3a-\\\\x40\\\\x5b-\\\\x60\\\\x7b-\\\\xbf\\\\u2000-\\\\",
+     "source_nearby": true,
+     "source_pattern": "location\\.href",
+     "type": "DOM_XSS"
+    },
+    {
+     "confidence": 0.7,
+     "description": "Potential DOM XSS: React dangerouslySetInnerHTML sink with location\\.href source",
+     "evidence": [
+      "Sink: React dangerouslySetInnerHTML at line 2",
+      "Source: location\\.href found nearby",
+      "Code: (()=>{var e={6:e=>{var t=\"\\\\ud800-\\\\udfff\",n=\"\\\\u2700-\\\\u27bf\",r=\"a-z\\\\xdf-\\\\xf6\\\\xf8-\\\\xff\",o=\"A-Z\\\\xc0-\\\\xd6\\\\xd8-\\\\xde\",i=\"\\\\xac\\\\xb1\\\\xd7\\\\xf7\\\\x00-\\\\x2f\\\\x3a-\\\\x40\\\\x5b-\\\\x60\\\\x7b-\\\\xbf\\\\u2000-\\\\"
+     ],
+     "file": "http://crapi-web/static/js/main.8c78208c.js",
+     "line": 2,
+     "severity": "high",
+     "sink_type": "React dangerouslySetInnerHTML",
+     "snippet": "(()=>{var e={6:e=>{var t=\"\\\\ud800-\\\\udfff\",n=\"\\\\u2700-\\\\u27bf\",r=\"a-z\\\\xdf-\\\\xf6\\\\xf8-\\\\xff\",o=\"A-Z\\\\xc0-\\\\xd6\\\\xd8-\\\\xde\",i=\"\\\\xac\\\\xb1\\\\xd7\\\\xf7\\\\x00-\\\\x2f\\\\x3a-\\\\x40\\\\x5b-\\\\x60\\\\x7b-\\\\xbf\\\\u2000-\\\\",
+     "source_nearby": true,
+     "source_pattern": "location\\.href",
+     "type": "DOM_XSS"
+    }
+   ],
+   "potential_vulns": 11,
+   "sinks_found": 0,
+   "sources_found": 11
+  },
+  "filters": {
+   "sqli": true,
+   "xss": true
+  },
+  "get_endpoints_tested": 50,
+  "nosql_injection": [],
+  "post_endpoints_tested": 50,
+  "smart_bola": {
+   "access_violations": 0,
+   "cross_user_violations": 0,
+   "endpoints_analyzed": 30,
+   "findings": [],
+   "id_patterns_found": 150,
+   "method_variations_tested": 0,
+   "synthesized_query_urls_tested": 95,
+   "synthesized_urls_tested": 60,
+   "vulnerable": false
+  },
+  "smart_reflections_found": 1,
+  "smart_sqli": [],
+  "smart_total_endpoints_tested": 200,
+  "smart_xss": [],
+  "sqlmap": [
+   {
+    "error": null,
+    "method": "POST",
+    "param": "username",
+    "raw": "-based blind - ORDER BY, GROUP BY clause (DBMS_LOCK.SLEEP)'\n[18:24:24] [INFO] testing 'Oracle time-based blind - ORDER BY, GROUP BY clause (DBMS_PIPE.RECEIVE_MESSAGE)'\n[18:24:24] [INFO] testing 'Generic UNION query (NULL) - 1 to 10 columns'\n[18:24:24] [INFO] testing 'Generic UNION query (random number) - 1 to 10 columns'\n[18:24:24] [INFO] testing 'MySQL UNION query (NULL) - 1 to 10 columns'\n[18:24:25] [INFO] testing 'MySQL UNION query (random number) - 1 to 10 columns'\n[18:24:25] [WARNING] (custom) POST parameter 'JSON username' does not seem to be injectable\n[18:24:25] [ERROR] all tested parameters do not appear to be injectable. Try to increase values for '--level'/'--risk' options if you wish to perform more tests. If you suspect that there is some kind of protection mechanism involved (e.g. WAF) maybe you could try to use option '--tamper' (e.g. '--tamper=space2comment'), skipping to the next target\n[18:24:25] [WARNING] HTTP error codes detected during run:\n400 (Bad Request) - 1376 times\n[18:24:25] [INFO] you can find results of scanning in multiple targets mode inside the CSV file '/tmp/.local/share/sqlmap/output/results-02212026_0624pm.csv'\n\n[*] ending @ 18:24:25 /2026-02-21/",
+    "reason": "post_coverage",
+    "replay": false,
+    "scan_completed": true,
+    "summary": "no clear evidence",
+    "tamper_scripts_used": [],
+    "url": "http://crapi-web/identity/api/auth/signup",
+    "vulnerable": false,
+    "waf_bypass_applied": false
+   },
+   {
+    "error": null,
+    "method": "POST",
+    "param": "username",
+    "raw": "qlmap.org\n\n[!] legal disclaimer: Usage of sqlmap for attacking targets without prior mutual consent is illegal. It is the end user's responsibility to obey all applicable local, state and federal laws. Developers assume no liability and are not responsible for any misuse or damage caused by this program\n\n[*] starting @ 18:24:19 /2026-02-21/\n\n[18:24:19] [INFO] fetched random HTTP User-Agent header value 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/99.0.4844.51 Safari/537.36 Edg/99.0.1150.36' from file '/usr/local/lib/python3.12/dist-packages/sqlmap/data/txt/user-agents.txt'\n[18:24:19] [INFO] testing URL 'http://crapi-web/api/auth/verify'\n[18:24:19] [INFO] using '/tmp/.local/share/sqlmap/output/results-02212026_0624pm.csv' as the CSV results file in multiple targets mode\n[18:24:19] [INFO] testing connection to the target URL\n[18:24:19] [CRITICAL] page not found (404)\n[18:24:19] [WARNING] HTTP error codes detected during run:\n404 (Not Found) - 1 times\n[18:24:19] [INFO] you can find results of scanning in multiple targets mode inside the CSV file '/tmp/.local/share/sqlmap/output/results-02212026_0624pm.csv'\n\n[*] ending @ 18:24:19 /2026-02-21/",
+    "reason": "post_coverage",
+    "replay": false,
+    "scan_completed": true,
+    "summary": "no clear evidence",
+    "tamper_scripts_used": [],
+    "url": "http://crapi-web/api/auth/verify",
+    "vulnerable": false,
+    "waf_bypass_applied": false
+   }
+  ],
+  "stored_xss": {
+   "evidence": [],
+   "findings": [],
+   "forms_tested": 18,
+   "payloads_sent": 18,
+   "vulnerable": false
+  },
+  "targets": [
+   "http://crapi-web/search/?q=test",
+   "http://crapi-web/search/?q=1",
+   "http://crapi-web/search/?query=test",
+   "http://crapi-web/search?q=test",
+   "http://crapi-web/search?q=1",
+   "http://crapi-web/search?query=test",
+   "http://crapi-web/identity/api/auth/login?login=test",
+   "http://crapi-web/login/?id=1",
+   "http://crapi-web/login/?username=test",
+   "http://crapi-web/login/?email=test@test.com",
+   "http://crapi-web/api/v2/user/reset-password?id=1",
+   "http://crapi-web/api/v2/user/reset-password?username=test",
+   "http://crapi-web/api/v2/user/reset-password?email=test@test.com",
+   "http://crapi-web/identity/api/auth/signup?id=test",
+   "http://crapi-web/api/v2/user/videos/<videoId>?id=1",
+   "http://crapi-web/api/v2/user/videos/<videoId>?username=test",
+   "http://crapi-web/api/v2/user/videos/<videoId>?email=test@test.com",
+   "http://crapi-web/auth?id=1",
+   "http://crapi-web/auth?username=test",
+   "http://crapi-web/auth?email=test@test.com",
+   "http://crapi-web/identity/api/auth/login?id=1",
+   "http://crapi-web/identity/api/auth/login?username=test",
+   "http://crapi-web/identity/api/auth/login?email=test@test.com",
+   "http://crapi-web/identity/api/auth/signup?type=test",
+   "http://crapi-web/api/v2/user/change-email?id=1",
+   "http://crapi-web/api/v2/user/change-email?username=test",
+   "http://crapi-web/api/v2/user/change-email?email=test@test.com",
+   "http://crapi-web/api/auth/?id=1",
+   "http://crapi-web/api/auth/?username=test",
+   "http://crapi-web/api/auth/?email=test@test.com",
+   "http://crapi-web/api/auth/v4.0/user/login-with-token?id=1",
+   "http://crapi-web/api/auth/v4.0/user/login-with-token?username=test",
+   "http://crapi-web/api/auth/v4.0/user/login-with-token?email=test@test.com",
+   "http://crapi-web/api/v2/user/dashboard?id=1",
+   "http://crapi-web/api/v2/user/dashboard?username=test",
+   "http://crapi-web/api/v2/user/dashboard?email=test@test.com",
+   "http://crapi-web/workshop/api/shop/products?token=test",
+   "http://crapi-web/identity/api/shop/products?id=1",
+   "http://crapi-web/identity/api/shop/products?id=test",
+   "http://crapi-web/workshop/api/shop/products?q=test",
+   "http://crapi-web/items/totaal?id=1",
+   "http://crapi-web/items/totaal?id=test",
+   "http://crapi-web/orders?order_id=",
+   "http://crapi-web/api/shop/orders/<orderId>?id=1",
+   "http://crapi-web/api/shop/orders/<orderId>?id=test",
+   "http://crapi-web/order/?id=1",
+   "http://crapi-web/order/?id=test",
+   "http://crapi-web/api/shop/products?id=1",
+   "http://crapi-web/api/shop/products?id=test",
+   "http://crapi-web/items/?id=1"
+  ],
+  "xss_get_endpoints_tested": 50,
+  "xss_post_endpoints_tested": 50
+ },
+ "coverage": {
+  "grade_reliable": true,
+  "issues": [],
+  "modules": {
+   "active_checks": {
+    "completed": true,
+    "details": {
+     "dalfox_errors": 0,
+     "dalfox_results": 0,
+     "smart_get_endpoints_tested": 50,
+     "smart_post_endpoints_tested": 50,
+     "smart_reflections_found": 1,
+     "smart_total_endpoints_tested": 200,
+     "smart_xss_get_endpoints_tested": 50,
+     "smart_xss_post_endpoints_tested": 50,
+     "sqlmap_errors": 0,
+     "sqlmap_results": 2
+    },
+    "expected": true,
+    "required": false
+   },
+   "dns": {
+    "completed": true,
+    "details": {
+     "a_records": 1,
+     "aaaa_records": 0,
+     "has_dmarc": false,
+     "has_spf": false
+    },
+    "required": true
+   },
+   "http": {
+    "completed": true,
+    "details": {
+     "source": "browser",
+     "status": "HTTP/1.1 200"
+    },
+    "required": true
+   },
+   "js_dependencies": {
+    "completed": true,
+    "details": {
+     "libraries_scanned": 1,
+     "total_js_files": 1,
+     "vulnerabilities": 0
+    },
+    "expected": true,
+    "required": false
+   },
+   "js_secrets": {
+    "completed": true,
+    "details": {
+     "files_scanned": 1
+    },
+    "expected": true,
+    "required": false
+   },
+   "nuclei": {
+    "completed": true,
+    "details": {
+     "findings_count": 0,
+     "scan_completed": true
+    },
+    "expected": true,
+    "required": false
+   },
+   "tls": {
+    "completed": true,
+    "details": {
+     "cipher_suites": false,
+     "nmap_ciphers": true,
+     "sslyze": true,
+     "testssl": true
+    },
+    "required": true
+   }
+  },
+  "optional_completed": "4/4",
+  "required_completed": "3/3",
+  "status": "complete"
+ },
+ "discovery": {
+  "api_security": {
+   "api_type": "unknown",
+   "authentication": {
+    "methods": [],
+    "required": false
+   },
+   "endpoints_discovered": [],
+   "vulnerabilities": []
+  },
+  "browser_api_endpoints": [
+   {
+    "content_type": "application/json",
+    "has_auth": true,
+    "method": "GET",
+    "path": "/chatbot/genai/state",
+    "status": 200,
+    "url": "http://crapi-web/chatbot/genai/state"
+   }
+  ],
+  "browser_crawl": {
+   "depth_reached": 0,
+   "pages_visited": 1,
+   "sample_pages": [
+    "http://crapi-web"
+   ]
+  },
+  "cloud_services": {
+   "cdn": null,
+   "misconfigurations": [],
+   "provider": null,
+   "services": []
+  },
+  "cors": {
+   "issues": [],
+   "vulnerable": false
+  },
+  "exposed_files": {
+   "exposed_files": [
+    {
+     "confidence": "high",
+     "content_length": 200,
+     "content_type": "application/octet-stream",
+     "has_html": false,
+     "markers": [
+      "dotenv_format",
+      "credential_like"
+     ],
+     "path": ".env",
+     "preview_first_line": "DB_NAME=crapi",
+     "preview_hash16": "0bfdf08f588a0934",
+     "status": "200",
+     "url": "http://crapi-web/.env"
+    },
+    {
+     "confidence": "low",
+     "content_length": 66,
+     "content_type": "text/plain",
+     "has_html": false,
+     "markers": [],
+     "path": "robots.txt",
+     "preview_first_line": "# https://www.robotstxt.org/robotstxt.html",
+     "preview_hash16": "b2d23c2388e6dacf",
+     "status": "200",
+     "url": "http://crapi-web/robots.txt"
+    }
+   ]
+  },
+  "grpc_reflection": {
+   "available": true,
+   "errors": [
+    "no grpc port candidates"
+   ],
+   "methods": [],
+   "reflection_supported": false,
+   "services": [],
+   "targets": []
+  },
+  "har_discovery": {
+   "auth_patterns": {
+    "auth_header_count": 1,
+    "auth_types": [
+     "bearer"
+    ]
+   },
+   "endpoints": [
+    {
+     "body_params": {},
+     "content_type": "",
+     "has_auth": false,
+     "is_api": false,
+     "method": "GET",
+     "path": "/",
+     "query_params": {},
+     "response_status": 200,
+     "url": "http://crapi-web/"
+    },
+    {
+     "body_params": {},
+     "content_type": "",
+     "has_auth": false,
+     "is_api": false,
+     "method": "GET",
+     "path": "/static/js/main.8c78208c.js",
+     "query_params": {},
+     "response_status": 200,
+     "url": "http://crapi-web/static/js/main.8c78208c.js"
+    },
+    {
+     "body_params": {},
+     "content_type": "application/json",
+     "has_auth": true,
+     "is_api": true,
+     "method": "GET",
+     "path": "/chatbot/genai/state",
+     "query_params": {},
+     "response_status": 200,
+     "url": "http://crapi-web/chatbot/genai/state"
+    }
+   ],
+   "parameters": [],
+   "stats": {
+    "api_requests": 1,
+    "total_requests": 3,
+    "unique_endpoints": 3,
+    "unique_params": 0
+   },
+   "websocket_endpoints": []
+  },
+  "httpx": [
+   {
+    "status_code": 200,
+    "tech": [],
+    "url": "https://crapi-web"
+   },
+   {
+    "status_code": 200,
+    "tech": [],
+    "url": "http://crapi-web"
+   }
+  ],
+  "js_bundle_analysis": {
+   "analyzed_count": 1,
+   "api_endpoints": [
+    "mobile",
+    "events",
+    "health",
+    "secure",
+    "api/v2/vehicle/resend_email",
+    "/signup",
+    "/mechanic-service?id=",
+    "api/v2/user/videos/<videoId>",
+    "/vehicle-service-dashboard?VIN=",
+    "api/v2/user/reset-password",
+    "api/mechanic/download_report",
+    "/post?post_id=",
+    "api/mechanic",
+    "api/v2/community/posts/recent",
+    "api/v2/user/change-phone-number",
+    "api/mechanic/service_requests",
+    "/reset-password",
+    "api/v2/user/dashboard",
+    "register",
+    "download",
+    "method",
+    "redirect",
+    "/service-report?id=${e.id}",
+    "/contact-mechanic?VIN=",
+    "api/shop/apply_coupon",
+    "user",
+    "analytics",
+    "resource",
+    "api/v2/coupon/validate-coupon",
+    "api/mechanic/service_request/<serviceId>/comment",
+    "/service-report?id=",
+    "token",
+    "email",
+    "api/v2/community/posts/<postId>",
+    "settings",
+    "search",
+    "callbacks",
+    "auth",
+    "api/shop/products",
+    "status",
+    "internal",
+    "items/totaal",
+    "api/auth/login",
+    "api/auth/verify",
+    "options",
+    "query",
+    "dispatch",
+    "file",
+    "api/v2/community/posts",
+    "order",
+    "objects",
+    "api/auth/signup",
+    "/orders",
+    "me",
+    "api/merchant/service_requests/<vehicleVIN>",
+    "api/shop/orders/<orderId>",
+    "api/v2/vehicle/add_vehicle",
+    "sync",
+    "dashboard",
+    "services",
+    "message",
+    "api/mechanic/receive_report",
+    "config",
+    "api/v2/user/change-email",
+    "/login",
+    "report",
+    "api/shop/orders/return_order",
+    "api/mechanic/mechanic_report",
+    "api/v2/user/videos/convert_video",
+    "push",
+    "callback",
+    "messages",
+    "management",
+    "api/auth/v4.0/user/login-with-token",
+    "api/auth/unlock",
+    "/forgot-password",
+    "api/v2/community/posts/<postId>/comment",
+    "api/v2/vehicle/vehicles",
+    "chat",
+    "api/merchant/contact_mechanic",
+    "/orders?order_id=",
+    "api/auth/v3/check-otp",
+    "test",
+    "call",
+    "app",
+    "api/v2/user/videos",
+    "items",
+    "logout",
+    "api/v2/user/pictures",
+    "api/v2/vehicle/<carId>/location",
+    "data",
+    "upload",
+    "api/shop/orders/all",
+    "info",
+    "api/mechanic/service_request/<serviceId>",
+    "/mechanic-service?id=${e.id}",
+    "api/auth/forget-password",
+    "media",
+    "storage",
+    "alert",
+    "api/v2/user/verify-email-token",
+    "/dashboard",
+    "dev",
+    "api/v2/user/verify-phone-otp",
+    "action",
+    "android",
+    "profile",
+    "api/shop/orders"
+   ],
+   "discovered_api_bases": [],
+   "graphql_ops": [],
+   "internal_urls": [],
+   "routes": [
+    "/vehicle-service-dashboard?VIN=${e}",
+    "/post",
+    "/signup",
+    "/verify-vehicle",
+    "/mechanic-dashboard",
+    "/contact-mechanic?VIN=${e}",
+    "/unlock",
+    "/mechanic-service?id=${e.id}",
+    "/vehicle-service-dashboard",
+    "/orders",
+    "/forgot-password",
+    "/post?post_id=${n}",
+    "/my-profile",
+    "/orders?order_id=${n.id}",
+    "/shop",
+    "/forum",
+    "/mechanic-service",
+    "/reset-password",
+    "/new-post",
+    "/change-email",
+    "/dashboard",
+    "/past-orders",
+    "/service-report?id=${e.id}",
+    "/change-phone-number",
+    "/service-report",
+    "/login",
+    "#/${e.join(",
+    "/contact-mechanic"
+   ],
+   "websocket_urls": []
+  },
+  "json_link_following": {
+   "depth_reached": 0,
+   "links": [],
+   "seed_count": 80,
+   "visited": 80
+  },
+  "katana_sample": [
+   "http://crapi-web/push",
+   "http://crapi-web/service-report/",
+   "http://crapi-web/token",
+   "http://crapi-web/logout",
+   "http://crapi-web/identity/api/auth/login?login=test",
+   "http://crapi-web/callback/",
+   "http://crapi-web/login/",
+   "http://crapi-web/service-report?id=",
+   "http://crapi-web/search/",
+   "http://crapi-web/api/merchant/",
+   "http://crapi-web/objects/",
+   "http://crapi-web/redirect/",
+   "http://crapi-web/workshop/api/",
+   "http://crapi-web/profile",
+   "http://crapi-web/action/",
+   "http://crapi-web/download",
+   "http://crapi-web/email/",
+   "http://crapi-web/call/",
+   "http://crapi-web/reset-password",
+   "http://crapi-web/#/${e.join(",
+   "http://crapi-web/api/v2/user/reset-password",
+   "http://crapi-web/status",
+   "http://crapi-web/workshop/api/shop/products?token=test",
+   "http://crapi-web/identity/api/auth/signup?id=test",
+   "http://crapi-web/api/v2/community/posts/recent",
+   "http://crapi-web/identity/api/shop/products",
+   "http://crapi-web/api/v2/user/videos/<videoId>",
+   "http://crapi-web/events/",
+   "http://crapi-web/media/",
+   "http://crapi-web/api/mechanic/receive_report",
+   "http://crapi-web/auth",
+   "http://crapi-web/file/",
+   "http://crapi-web/workshop/api/shop/products?q=test",
+   "http://crapi-web/service-report?id=${e.id}",
+   "http://crapi-web/config",
+   "http://crapi-web/dev/",
+   "http://crapi-web/identity/api/",
+   "http://crapi-web/.env/",
+   "http://crapi-web/workshop/api/shop/apply_coupon?format=test",
+   "http://crapi-web/contact-mechanic?VIN=",
+   "http://crapi-web/callbacks/",
+   "http://crapi-web/alert",
+   "http://crapi-web/api/v2/vehicle/resend_email",
+   "http://crapi-web/forgot-password",
+   "http://crapi-web/test",
+   "http://crapi-web/forgot-password/",
+   "http://crapi-web/query/",
+   "http://crapi-web/options",
+   "http://crapi-web/api/mechanic/service_request/<serviceId>/comment",
+   "http://crapi-web/android",
+   "http://crapi-web/reset-password/",
+   "http://crapi-web/search",
+   "http://crapi-web/identity/api/auth/login",
+   "http://crapi-web/me",
+   "http://crapi-web/signup",
+   "http://crapi-web/identity/api/community/post",
+   "http://crapi-web/api/mechanic/download_report",
+   "http://crapi-web/dispatch",
+   "http://crapi-web/items/totaal",
+   "http://crapi-web/mobile/",
+   "http://crapi-web/orders?order_id=",
+   "http://crapi-web/dispatch/",
+   "http://crapi-web/resource/",
+   "http://crapi-web/api/v2/community/posts",
+   "http://crapi-web/report/",
+   "http://crapi-web/identity/api/auth/signup?type=test",
+   "http://crapi-web/events",
+   "http://crapi-web/contact-mechanic/",
+   "http://crapi-web/media",
+   "http://crapi-web/api/v2/user/change-email",
+   "http://crapi-web/upload/",
+   "http://crapi-web/api/shop/orders/<orderId>",
+   "http://crapi-web/api/auth/",
+   "http://crapi-web/mechanic-service?id=${e.id}",
+   "http://crapi-web/resource",
+   "http://crapi-web/internal",
+   "http://crapi-web/order/",
+   "http://crapi-web/upload",
+   "http://crapi-web/status/",
+   "http://crapi-web/push/",
+   "http://crapi-web/secure/",
+   "http://crapi-web/api/v2/community/posts/<postId>",
+   "http://crapi-web/api/mechanic",
+   "http://crapi-web/identity/api/shop/apply-coupon",
+   "http://crapi-web/api/shop/products",
+   "http://crapi-web/items/",
+   "http://crapi-web/api/v2/vehicle/vehicles",
+   "http://crapi-web/management",
+   "http://crapi-web/method",
+   "http://crapi-web/workshop/api/shop/products?format=test",
+   "http://crapi-web/mechanic-service?id=",
+   "http://crapi-web/api/auth/v4.0/user/login-with-token",
+   "http://crapi-web/identity/api/validate-coupon",
+   "http://crapi-web/test/",
+   "http://crapi-web/api/v2/community/posts/<postId>/comment",
+   "http://crapi-web/api/shop/orders",
+   "http://crapi-web/health/",
+   "http://crapi-web/identity/api/coupon/validate",
+   "http://crapi-web/me/",
+   "http://crapi-web/data"
+  ],
+  "network_scan": {
+   "open_ports": [
+    {
+     "port": 80,
+     "protocol": "tcp",
+     "service": "http",
+     "state": "open"
+    },
+    {
+     "port": 443,
+     "protocol": "tcp",
+     "service": "http",
+     "state": "open"
+    }
+   ],
+   "os_detection": {},
+   "scan_completed": true,
+   "services": [
+    {
+     "extrainfo": "",
+     "name": "http",
+     "port": 80,
+     "product": "OpenResty web app server",
+     "version": "1.27.1.2"
+    },
+    {
+     "extrainfo": "",
+     "name": "http",
+     "port": 443,
+     "product": "OpenResty web app server",
+     "version": "1.27.1.2"
+    }
+   ],
+   "vulnerabilities": []
+  },
+  "nuclei": {
+   "early_stop_reason": "",
+   "early_stopped": false,
+   "info": [],
+   "scan_completed": true,
+   "scan_type": "staged_nuclei",
+   "signals": {
+    "auth_issues": false,
+    "critical_count": 0,
+    "file_inclusion": false,
+    "high_count": 0,
+    "sql_errors": false,
+    "xss_reflection": false
+   },
+   "tech_detected": [],
+   "templates_executed": 0,
+   "templates_matched": 0,
+   "total_duration_seconds": 144,
+   "vulnerabilities": [],
+   "wave_stats": [
+    {
+     "budget_max": 60,
+     "duration": 60,
+     "findings": 0,
+     "tags": [
+      "takeover",
+      "default-login",
+      "critical",
+      "rce",
+      "cve"
+     ],
+     "wave": 1,
+     "yield_per_min": 0.0
+    },
+    {
+     "budget_max": 84,
+     "duration": 84,
+     "findings": 0,
+     "tags": [
+      "exposure",
+      "auth",
+      "misconfig"
+     ],
+     "wave": 2,
+     "yield_per_min": 0.0
+    }
+   ],
+   "waves_completed": 2,
+   "yield_metrics": [
+    {
+     "duration_seconds": 60,
+     "findings_count": 0,
+     "findings_per_minute": 0.0,
+     "wave": 1
+    },
+    {
+     "duration_seconds": 84,
+     "findings_count": 0,
+     "findings_per_minute": 0.0,
+     "wave": 2
+    }
+   ]
+  },
+  "nuclei_signals": {
+   "api_exposure": {
+    "active": false,
+    "confidence": 0.0,
+    "evidence": [],
+    "source": ""
+   },
+   "auth_issues": {
+    "active": false,
+    "confidence": 0.0,
+    "evidence": [],
+    "source": ""
+   },
+   "critical_count": 0,
+   "default_creds": {
+    "active": false,
+    "confidence": 0.0,
+    "evidence": [],
+    "source": ""
+   },
+   "file_inclusion": {
+    "active": false,
+    "confidence": 0.0,
+    "evidence": [],
+    "source": ""
+   },
+   "high_count": 0,
+   "high_value_targets": [],
+   "information_disclosure": {
+    "active": false,
+    "confidence": 0.0,
+    "evidence": [],
+    "source": ""
+   },
+   "misconfig": {
+    "active": false,
+    "confidence": 0.0,
+    "evidence": [],
+    "source": ""
+   },
+   "rce_potential": {
+    "active": false,
+    "confidence": 0.0,
+    "evidence": [],
+    "source": ""
+   },
+   "signal_confidence": {
+    "api_exposure": 0.0,
+    "auth_issues": 0.0,
+    "default_creds": 0.0,
+    "file_inclusion": 0.0,
+    "information_disclosure": 0.0,
+    "misconfig": 0.0,
+    "rce_potential": 0.0,
+    "sql_errors": 0.0,
+    "ssrf_potential": 0.0,
+    "xss_reflection": 0.0
+   },
+   "sql_errors": {
+    "active": false,
+    "confidence": 0.0,
+    "evidence": [],
+    "source": ""
+   },
+   "ssrf_potential": {
+    "active": false,
+    "confidence": 0.0,
+    "evidence": [],
+    "source": ""
+   },
+   "tech_specific": {},
+   "xss_reflection": {
+    "active": false,
+    "confidence": 0.0,
+    "evidence": [],
+    "source": ""
+   }
+  },
+  "options_methods": {
+   "methods_by_url": {
+    "http://crapi-web/chatbot/genai/state": [
+     "GET",
+     "HEAD",
+     "OPTIONS"
+    ],
+    "http://crapi-web/identity/api/auth/login": [
+     "POST",
+     "OPTIONS"
+    ],
+    "http://crapi-web/identity/api/auth/signup": [
+     "POST",
+     "OPTIONS"
+    ],
+    "http://crapi-web/workshop/api/shop/apply_coupon": [
+     "POST",
+     "OPTIONS"
+    ],
+    "http://crapi-web/workshop/api/shop/products": [
+     "GET",
+     "POST",
+     "HEAD",
+     "OPTIONS"
+    ]
+   },
+   "tested": 203
+  },
+  "scope": {
+   "avoid_rule_count": 0,
+   "discovered_urls_dropped": 0,
+   "focus_rule_count": 0,
+   "manual_endpoints_dropped": 0
+  },
+  "server_versions": {
+   "additional": [],
+   "cdn": null,
+   "platform": null,
+   "runtime": null,
+   "server": {
+    "confidence": "low",
+    "name": "openresty",
+    "version": null
+   }
+  },
+  "smart_discovery": {
+   "all_urls_sample": [
+    "http://crapi-web/push",
+    "http://crapi-web/service-report/",
+    "http://crapi-web/token",
+    "http://crapi-web/logout",
+    "http://crapi-web/identity/api/auth/login?<redacted>",
+    "http://crapi-web/callback/",
+    "http://crapi-web/login/",
+    "http://crapi-web/service-report?<redacted>",
+    "http://crapi-web/search/",
+    "http://crapi-web/api/merchant/",
+    "http://crapi-web/objects/",
+    "http://crapi-web/redirect/",
+    "http://crapi-web/workshop/api/",
+    "http://crapi-web/profile",
+    "http://crapi-web/action/",
+    "http://crapi-web/download",
+    "http://crapi-web/email/",
+    "http://crapi-web/call/",
+    "http://crapi-web/reset-password",
+    "http://crapi-web/#/${e.join(",
+    "http://crapi-web/api/v2/user/reset-password",
+    "http://crapi-web/status",
+    "http://crapi-web/workshop/api/shop/products?<redacted>",
+    "http://crapi-web/identity/api/auth/signup?<redacted>",
+    "http://crapi-web/api/v2/community/posts/recent",
+    "http://crapi-web/identity/api/shop/products",
+    "http://crapi-web/api/v2/user/videos/<videoId>",
+    "http://crapi-web/events/",
+    "http://crapi-web/media/",
+    "http://crapi-web/api/mechanic/receive_report",
+    "http://crapi-web/auth",
+    "http://crapi-web/file/",
+    "http://crapi-web/workshop/api/shop/products?<redacted>",
+    "http://crapi-web/service-report?<redacted>",
+    "http://crapi-web/config",
+    "http://crapi-web/dev/",
+    "http://crapi-web/identity/api/",
+    "http://crapi-web/.env/",
+    "http://crapi-web/workshop/api/shop/apply_coupon?<redacted>",
+    "http://crapi-web/contact-mechanic?<redacted>",
+    "http://crapi-web/callbacks/",
+    "http://crapi-web/alert",
+    "http://crapi-web/api/v2/vehicle/resend_email",
+    "http://crapi-web/forgot-password",
+    "http://crapi-web/test",
+    "http://crapi-web/forgot-password/",
+    "http://crapi-web/query/",
+    "http://crapi-web/options",
+    "http://crapi-web/api/mechanic/service_request/<serviceId>/comment",
+    "http://crapi-web/android",
+    "http://crapi-web/reset-password/",
+    "http://crapi-web/search",
+    "http://crapi-web/identity/api/auth/login",
+    "http://crapi-web/me",
+    "http://crapi-web/signup",
+    "http://crapi-web/identity/api/community/post",
+    "http://crapi-web/api/mechanic/download_report",
+    "http://crapi-web/dispatch",
+    "http://crapi-web/items/totaal",
+    "http://crapi-web/mobile/",
+    "http://crapi-web/orders?<redacted>",
+    "http://crapi-web/dispatch/",
+    "http://crapi-web/resource/",
+    "http://crapi-web/api/v2/community/posts",
+    "http://crapi-web/report/",
+    "http://crapi-web/identity/api/auth/signup?<redacted>",
+    "http://crapi-web/events",
+    "http://crapi-web/contact-mechanic/",
+    "http://crapi-web/media",
+    "http://crapi-web/api/v2/user/change-email",
+    "http://crapi-web/upload/",
+    "http://crapi-web/api/shop/orders/<orderId>",
+    "http://crapi-web/api/auth/",
+    "http://crapi-web/mechanic-service?<redacted>",
+    "http://crapi-web/resource",
+    "http://crapi-web/internal",
+    "http://crapi-web/order/",
+    "http://crapi-web/upload",
+    "http://crapi-web/status/",
+    "http://crapi-web/push/",
+    "http://crapi-web/secure/",
+    "http://crapi-web/api/v2/community/posts/<postId>",
+    "http://crapi-web/api/mechanic",
+    "http://crapi-web/identity/api/shop/apply-coupon",
+    "http://crapi-web/api/shop/products",
+    "http://crapi-web/items/",
+    "http://crapi-web/api/v2/vehicle/vehicles",
+    "http://crapi-web/management",
+    "http://crapi-web/method",
+    "http://crapi-web/workshop/api/shop/products?<redacted>",
+    "http://crapi-web/mechanic-service?<redacted>",
+    "http://crapi-web/api/auth/v4.0/user/login-with-token",
+    "http://crapi-web/identity/api/validate-coupon",
+    "http://crapi-web/test/",
+    "http://crapi-web/api/v2/community/posts/<postId>/comment",
+    "http://crapi-web/api/shop/orders",
+    "http://crapi-web/health/",
+    "http://crapi-web/identity/api/coupon/validate",
+    "http://crapi-web/me/",
+    "http://crapi-web/data",
+    "http://crapi-web/identity/api/shop/orders",
+    "http://crapi-web/vehicle-service-dashboard?<redacted>",
+    "http://crapi-web/workshop/api/shop/apply_coupon",
+    "http://crapi-web/dashboard",
+    "http://crapi-web/android/",
+    "http://crapi-web/dev",
+    "http://crapi-web/api/v2/user/dashboard",
+    "http://crapi-web/workshop/api/SfczzzVH",
+    "http://crapi-web/identity/api/validate_coupon",
+    "http://crapi-web/mobile",
+    "http://crapi-web/workshop/api/shop/products",
+    "http://crapi-web/identity/api/community/comment",
+    "http://crapi-web/redirect",
+    "http://crapi-web/app/",
+    "http://crapi-web/objects",
+    "http://crapi-web/orders",
+    "http://crapi-web/internal/",
+    "http://crapi-web/dashboard/",
+    "http://crapi-web/api/shop/orders/all",
+    "http://crapi-web/identity/api/shop/product",
+    "http://crapi-web/register/",
+    "http://crapi-web/items/totaal/",
+    "http://crapi-web/api/auth/login",
+    "http://crapi-web/identity/api/auth/signup",
+    "http://crapi-web/alert/",
+    "http://crapi-web/storage",
+    "http://crapi-web/call",
+    "http://crapi-web/messages",
+    "http://crapi-web/app",
+    "http://crapi-web/identity/api/community/posts",
+    "http://crapi-web/api/auth/verify",
+    "http://crapi-web/report",
+    "http://crapi-web/token/",
+    "http://crapi-web/api/v2/user/videos/convert_video",
+    "http://crapi-web/logout/",
+    "http://crapi-web/info",
+    "http://crapi-web/api/auth/forget-password",
+    "http://crapi-web/api/auth/signup",
+    "http://crapi-web/.env",
+    "http://crapi-web/identity/api",
+    "http://crapi-web/chat",
+    "http://crapi-web/api/shop/orders/return_order",
+    "http://crapi-web/auth/",
+    "http://crapi-web/management/",
+    "http://crapi-web/register",
+    "http://crapi-web/api/v2/coupon/validate-coupon",
+    "http://crapi-web/chat/",
+    "http://crapi-web/identity/api/apply_coupon",
+    "http://crapi-web/info/",
+    "http://crapi-web/settings",
+    "http://crapi-web/api/v2/user/pictures",
+    "http://crapi-web/callbacks",
+    "http://crapi-web/user",
+    "http://crapi-web/api/v2/user/videos",
+    "http://crapi-web/api/mechanic/service_requests",
+    "http://crapi-web/identity/api/coupons/validate",
+    "http://crapi-web/static/js/main.8c78208c.js",
+    "http://crapi-web/analytics",
+    "http://crapi-web/settings/",
+    "http://crapi-web/sync",
+    "http://crapi-web/mechanic-service/",
+    "http://crapi-web/signup/",
+    "http://crapi-web/identity/api/community/comments",
+    "http://crapi-web/api/v2/user/verify-phone-otp",
+    "http://crapi-web/api/v2/vehicle/add_vehicle",
+    "http://crapi-web/login",
+    "http://crapi-web/api/v2/vehicle/<carId>/location",
+    "http://crapi-web/sync/",
+    "http://crapi-web/callback",
+    "http://crapi-web/api/auth/unlock",
+    "http://crapi-web/orders/",
+    "http://crapi-web/api/mechanic/service_request/<serviceId>",
+    "http://crapi-web/download/",
+    "http://crapi-web/message/",
+    "http://crapi-web/query",
+    "http://crapi-web/config/",
+    "http://crapi-web/storage/",
+    "http://crapi-web/api/mechanic/mechanic_report",
+    "http://crapi-web/action",
+    "http://crapi-web/profile/",
+    "http://crapi-web/services/",
+    "http://crapi-web/user/",
+    "http://crapi-web/vehicle-service-dashboard/",
+    "http://crapi-web/message",
+    "http://crapi-web/identity/api/shop",
+    "http://crapi-web/services",
+    "http://crapi-web/api/shop/",
+    "http://crapi-web/post?<redacted>",
+    "http://crapi-web/order",
+    "http://crapi-web/file",
+    "http://crapi-web/method/",
+    "http://crapi-web/health",
+    "http://crapi-web/api/auth/v3/check-otp",
+    "http://crapi-web/identity/api/auth/login?<redacted>",
+    "http://crapi-web/api/v2/",
+    "http://crapi-web/api/shop/apply_coupon",
+    "http://crapi-web/identity/api/community",
+    "http://crapi-web/post/",
+    "http://crapi-web/api/merchant/contact_mechanic",
+    "http://crapi-web/options/"
+   ],
+   "api_endpoints_sample": [
+    "http://crapi-web/token",
+    "http://crapi-web/push",
+    "http://crapi-web/logout",
+    "http://crapi-web/identity/api/auth/login?<redacted>",
+    "http://crapi-web/service-report?<redacted>",
+    "http://crapi-web/api/merchant/",
+    "http://crapi-web/workshop/api/",
+    "http://crapi-web/profile",
+    "http://crapi-web/download",
+    "http://crapi-web/reset-password",
+    "http://crapi-web/api/v2/user/reset-password",
+    "http://crapi-web/status",
+    "http://crapi-web/workshop/api/shop/products?<redacted>",
+    "http://crapi-web/identity/api/auth/signup?<redacted>",
+    "http://crapi-web/api/v2/community/posts/recent",
+    "http://crapi-web/identity/api/shop/products",
+    "http://crapi-web/api/v2/user/videos/<videoId>",
+    "http://crapi-web/api/mechanic/receive_report",
+    "http://crapi-web/auth",
+    "http://crapi-web/workshop/api/shop/products?<redacted>",
+    "http://crapi-web/service-report?<redacted>",
+    "http://crapi-web/config",
+    "http://crapi-web/identity/api/",
+    "http://crapi-web/workshop/api/shop/apply_coupon?<redacted>",
+    "http://crapi-web/contact-mechanic?<redacted>",
+    "http://crapi-web/api/v2/vehicle/resend_email",
+    "http://crapi-web/forgot-password",
+    "http://crapi-web/alert",
+    "http://crapi-web/test",
+    "http://crapi-web/options",
+    "http://crapi-web/api/mechanic/service_request/<serviceId>/comment",
+    "http://crapi-web/android",
+    "http://crapi-web/search",
+    "http://crapi-web/identity/api/auth/login",
+    "http://crapi-web/signup",
+    "http://crapi-web/me",
+    "http://crapi-web/identity/api/community/post",
+    "http://crapi-web/api/mechanic/download_report",
+    "http://crapi-web/items/totaal",
+    "http://crapi-web/dispatch",
+    "http://crapi-web/orders?<redacted>",
+    "http://crapi-web/api/v2/community/posts",
+    "http://crapi-web/identity/api/auth/signup?<redacted>",
+    "http://crapi-web/events",
+    "http://crapi-web/media",
+    "http://crapi-web/api/v2/user/change-email",
+    "http://crapi-web/api/shop/orders/<orderId>",
+    "http://crapi-web/api/auth/",
+    "http://crapi-web/resource",
+    "http://crapi-web/mechanic-service?<redacted>",
+    "http://crapi-web/internal",
+    "http://crapi-web/upload",
+    "http://crapi-web/api/v2/community/posts/<postId>",
+    "http://crapi-web/api/mechanic",
+    "http://crapi-web/identity/api/shop/apply-coupon",
+    "http://crapi-web/api/shop/products",
+    "http://crapi-web/api/v2/vehicle/vehicles",
+    "http://crapi-web/management",
+    "http://crapi-web/method",
+    "http://crapi-web/workshop/api/shop/products?<redacted>",
+    "http://crapi-web/mechanic-service?<redacted>",
+    "http://crapi-web/identity/api/validate-coupon",
+    "http://crapi-web/api/auth/v4.0/user/login-with-token",
+    "http://crapi-web/api/v2/community/posts/<postId>/comment",
+    "http://crapi-web/api/shop/orders",
+    "http://crapi-web/identity/api/coupon/validate",
+    "http://crapi-web/data",
+    "http://crapi-web/workshop/api/shop/apply_coupon",
+    "http://crapi-web/identity/api/shop/orders",
+    "http://crapi-web/vehicle-service-dashboard?<redacted>",
+    "http://crapi-web/dashboard",
+    "http://crapi-web/dev",
+    "http://crapi-web/api/v2/user/dashboard",
+    "http://crapi-web/workshop/api/SfczzzVH",
+    "http://crapi-web/identity/api/validate_coupon",
+    "http://crapi-web/mobile",
+    "http://crapi-web/workshop/api/shop/products",
+    "http://crapi-web/identity/api/community/comment",
+    "http://crapi-web/redirect",
+    "http://crapi-web/objects",
+    "http://crapi-web/orders",
+    "http://crapi-web/identity/api/shop/product",
+    "http://crapi-web/api/shop/orders/all",
+    "http://crapi-web/api/auth/login",
+    "http://crapi-web/identity/api/auth/signup",
+    "http://crapi-web/storage",
+    "http://crapi-web/call",
+    "http://crapi-web/messages",
+    "http://crapi-web/app",
+    "http://crapi-web/identity/api/community/posts",
+    "http://crapi-web/api/auth/verify",
+    "http://crapi-web/report",
+    "http://crapi-web/api/v2/user/videos/convert_video",
+    "http://crapi-web/info",
+    "http://crapi-web/.env",
+    "http://crapi-web/api/auth/signup",
+    "http://crapi-web/api/auth/forget-password",
+    "http://crapi-web/identity/api",
+    "http://crapi-web/chat",
+    "http://crapi-web/register"
+   ],
+   "probed_endpoints_sample": [],
+   "recursive_paths_sample": [
+    "http://crapi-web/.env/",
+    "http://crapi-web/action/",
+    "http://crapi-web/alert/",
+    "http://crapi-web/analytics/",
+    "http://crapi-web/android/",
+    "http://crapi-web/api/auth/",
+    "http://crapi-web/api/mechanic/",
+    "http://crapi-web/api/merchant/",
+    "http://crapi-web/api/shop/",
+    "http://crapi-web/api/v2/",
+    "http://crapi-web/app/",
+    "http://crapi-web/auth/",
+    "http://crapi-web/call/",
+    "http://crapi-web/callback/",
+    "http://crapi-web/callbacks/",
+    "http://crapi-web/chat/",
+    "http://crapi-web/config/",
+    "http://crapi-web/contact-mechanic/",
+    "http://crapi-web/dashboard/",
+    "http://crapi-web/data/",
+    "http://crapi-web/dev/",
+    "http://crapi-web/dispatch/",
+    "http://crapi-web/download/",
+    "http://crapi-web/email/",
+    "http://crapi-web/events/",
+    "http://crapi-web/file/",
+    "http://crapi-web/forgot-password/",
+    "http://crapi-web/health/",
+    "http://crapi-web/identity/api/",
+    "http://crapi-web/info/",
+    "http://crapi-web/internal/",
+    "http://crapi-web/items/",
+    "http://crapi-web/items/totaal/",
+    "http://crapi-web/login/",
+    "http://crapi-web/logout/",
+    "http://crapi-web/management/",
+    "http://crapi-web/me/",
+    "http://crapi-web/mechanic-service/",
+    "http://crapi-web/media/",
+    "http://crapi-web/message/",
+    "http://crapi-web/messages/",
+    "http://crapi-web/method/",
+    "http://crapi-web/mobile/",
+    "http://crapi-web/objects/",
+    "http://crapi-web/options/",
+    "http://crapi-web/order/",
+    "http://crapi-web/orders/",
+    "http://crapi-web/post/",
+    "http://crapi-web/profile/",
+    "http://crapi-web/push/",
+    "http://crapi-web/query/",
+    "http://crapi-web/redirect/",
+    "http://crapi-web/register/",
+    "http://crapi-web/report/",
+    "http://crapi-web/reset-password/",
+    "http://crapi-web/resource/",
+    "http://crapi-web/search/",
+    "http://crapi-web/secure/",
+    "http://crapi-web/service-report/",
+    "http://crapi-web/services/",
+    "http://crapi-web/settings/",
+    "http://crapi-web/signup/",
+    "http://crapi-web/status/",
+    "http://crapi-web/storage/",
+    "http://crapi-web/sync/",
+    "http://crapi-web/test/",
+    "http://crapi-web/token/",
+    "http://crapi-web/upload/",
+    "http://crapi-web/user/",
+    "http://crapi-web/vehicle-service-dashboard/",
+    "http://crapi-web/workshop/api/",
+    "http://crapi-web/workshop/api/SfczzzVH"
+   ],
+   "stats": {
+    "adaptive_refinement": {
+     "adaptive_depth": 3,
+     "added_urls": 0,
+     "paths_per_level": 15
+    },
+    "depth_reached": 1,
+    "paths_per_level": [
+     {
+      "depth": 1,
+      "directories_fuzzed": 15,
+      "paths_found": 0
+     }
+    ],
+    "total_fuzz_calls": 15
+   },
+   "total_api_endpoints": 147,
+   "total_endpoints_with_params": 116,
+   "total_probed_endpoints": 0,
+   "total_recursive_paths": 72,
+   "total_urls_discovered": 216
+  },
+  "subdomain_takeover": {
+   "cname": null,
+   "issues": [],
+   "vulnerable": false
+  },
+  "subdomain_takeover_advanced": {
+   "dangling_cnames": [],
+   "evidence": [],
+   "vulnerable": false,
+   "vulnerable_services": []
+  },
+  "summary": {
+   "browser_endpoints": 1,
+   "manual_endpoints": 0,
+   "methods_used": [
+    "url_crawl",
+    "browser_api_capture",
+    "api_wordlist_probe",
+    "options_method_discovery"
+   ],
+   "options_methods": 5,
+   "total_urls": 216,
+   "warnings": []
+  },
+  "tech": {
+   "by_category": {
+    "JavaScript frameworks": [
+     "Gatsby",
+     "React"
+    ],
+    "Programming languages": [
+     "Node.js"
+    ],
+    "Web servers": [
+     "nginx",
+     "OpenResty"
+    ],
+    "server": [
+     "openresty"
+    ]
+   },
+   "items": [
+    {
+     "category": "",
+     "confidence": 90,
+     "confidence_label": "confirmed",
+     "cves": [],
+     "evidence": [],
+     "implied_by": "OpenResty",
+     "name": "Lua",
+     "version": null
+    },
+    {
+     "category": "Web servers",
+     "confidence": 90,
+     "confidence_label": "confirmed",
+     "cves": [],
+     "evidence": [],
+     "implied_by": "OpenResty",
+     "name": "nginx",
+     "version": null
+    },
+    {
+     "category": "Web servers",
+     "confidence": 85,
+     "confidence_label": "likely",
+     "cves": [],
+     "evidence": [
+      {
+       "matched": "openresty/1.27.1.2",
+       "pattern": "server",
+       "source": "headers",
+       "version_extracted": "1.27.1.2"
+      }
+     ],
+     "implied_by": null,
+     "name": "OpenResty",
+     "version": "1.27.1.2"
+    },
+    {
+     "category": "server",
+     "confidence": 85,
+     "confidence_label": "likely",
+     "cves": [],
+     "evidence": [
+      {
+       "matched": "openresty",
+       "pattern": "server",
+       "source": "headers",
+       "version_extracted": null
+      }
+     ],
+     "implied_by": null,
+     "name": "openresty",
+     "version": null
+    },
+    {
+     "category": "JavaScript frameworks",
+     "confidence": 50,
+     "confidence_label": "possible",
+     "cves": [],
+     "evidence": [
+      {
+       "matched": "/static/",
+       "pattern": "/static/",
+       "source": "html",
+       "version_extracted": null
+      }
+     ],
+     "implied_by": null,
+     "name": "Gatsby",
+     "version": null
+    },
+    {
+     "category": "Programming languages",
+     "confidence": 50,
+     "confidence_label": "possible",
+     "cves": [],
+     "evidence": [],
+     "implied_by": "Gatsby",
+     "name": "Node.js",
+     "version": null
+    },
+    {
+     "category": "JavaScript frameworks",
+     "confidence": 50,
+     "confidence_label": "possible",
+     "cves": [],
+     "evidence": [],
+     "implied_by": "Gatsby",
+     "name": "React",
+     "version": null
+    }
+   ],
+   "total": 7
+  },
+  "tech_fingerprint": {
+   "cve_candidates": [],
+   "fingerprint": "88eb673950b47bcca93976a4774bd4fc",
+   "technologies": [
+    {
+     "name": "OpenResty",
+     "version": "1.27.1.2"
+    }
+   ]
+  },
+  "tech_stack_guess": [
+   "Gatsby",
+   "Lua",
+   "Node.js",
+   "OpenResty",
+   "React",
+   "nginx",
+   "openresty"
+  ],
+  "virtual_hosts": {
+   "baseline": {
+    "hash": "025ade34c9d7",
+    "length": 1206,
+    "status": 200,
+    "wildcard": true,
+    "wildcard_hash": "025ade34c9d7",
+    "wildcard_status": 200
+   },
+   "hosts_tested": 50,
+   "potential_vhosts": [],
+   "technique": "host_header_fuzzing"
+  },
+  "waf_detection": {
+   "blocked_details": [
+    {
+     "block_reason": "Response contains 'security'",
+     "payload": "<script>alert(1)</script>",
+     "payload_type": "XSS",
+     "status_code": "200",
+     "test_url": "http://crapi-web?test=%3Cscript%3Ealert%281%29%3C/script%3E"
+    },
+    {
+     "block_reason": "Response contains 'security'",
+     "payload": "' OR '1'='1",
+     "payload_type": "SQLi",
+     "status_code": "200",
+     "test_url": "http://crapi-web?test=%27%20OR%20%271%27%3D%271"
+    },
+    {
+     "block_reason": "Response contains 'security'",
+     "payload": "../../../etc/passwd",
+     "payload_type": "Path Traversal",
+     "status_code": "200",
+     "test_url": "http://crapi-web?test=../../../etc/passwd"
+    },
+    {
+     "block_reason": "Response contains 'security'",
+     "payload": "<?php system('id'); ?>",
+     "payload_type": "RCE",
+     "status_code": "200",
+     "test_url": "http://crapi-web?test=%3C%3Fphp%20system%28%27id%27%29%3B%20%3F%3E"
+    }
+   ],
+   "blocked_payloads": 4,
+   "bypass_techniques": [],
+   "confidence": "medium",
+   "input_validation_detected": true,
+   "waf_detected": false,
+   "waf_products": []
+  },
+  "websocket_endpoints": [],
+  "websocket_security": {
+   "endpoints": [],
+   "endpoints_tested": 0,
+   "vulnerabilities": []
+  },
+  "xxe_injection": {
+   "evidence": [],
+   "payloads_tested": [
+    "<?xml version=\"1.0\"?>\n<!DOCTYPE data [\n<!ENTITY xxe SYSTEM \"file:///etc/passwd\">\n]>\n<data>&xxe;</dat...",
+    "<?xml version=\"1.0\"?>\n<!DOCTYPE data [\n<!ENTITY % file SYSTEM \"file:///etc/passwd\">\n<!ENTITY % eval ...",
+    "<?xml version=\"1.0\"?>\n<!DOCTYPE data [\n<!ENTITY % xxe SYSTEM \"file:///etc/passwd\">\n%xxe;\n]>...",
+    "<?xml version=\"1.0\"?>\n<!DOCTYPE data [\n<!ENTITY xxe SYSTEM \"http://169.254.169.254/latest/meta-data/...",
+    "<svg xmlns=\"http://www.w3.org/2000/svg\" xmlns:xlink=\"http://www.w3.org/1999/xlink\">\n<image xlink:hre..."
+   ],
+   "vulnerable": false
+  }
+ },
+ "findings": [
+  {
+   "confidence": 0.85,
+   "confidence_tier": "high",
+   "content_type": "application/octet-stream",
+   "cvss_score": 7.5,
+   "cwe": "CWE-200",
+   "cwe_name": "Exposure of Sensitive Information to an Unauthorized Actor",
+   "cwe_url": "https://cwe.mitre.org/data/definitions/200.html",
+   "evidence": {
+    "also_found_by": [
+     "forced_browsing"
+    ],
+    "confidence": "high",
+    "content_type": "application/octet-stream",
+    "has_html": false,
+    "markers": [
+     "dotenv_format",
+     "credential_like"
+    ],
+    "path": ".env",
+    "preview_first_line": "DB_NAME=crapi",
+    "preview_hash16": "0bfdf08f588a0934",
+    "remediation": [
+     "Move secrets to environment/secret manager; remove .env from web root.",
+     "Rotate any exposed API keys/passwords.",
+     "Add deny rules for .env files."
+    ],
+    "size": 200,
+    "subentries": null,
+    "url": "http://crapi-web/.env",
+    "verify_commands": [
+     "curl -sI http://crapi-web/.env",
+     "curl -sL http://crapi-web/.env | sed -n '1,40p'"
+    ]
+   },
+   "first_seen": "2026-02-21T18:22:28.219894+00:00",
+   "id": "exposed_files:d07c07ae2cf2b190",
+   "owasp": null,
+   "severity": "high",
+   "soc2": [
+    "CC6.6"
+   ],
+   "title": "Exposed file: .env (confidence: high)",
+   "tool": "exposed_files",
+   "url": "http://crapi-web/.env",
+   "validation": {
+    "confidence": 0.85,
+    "downgrade_to": null,
+    "evidence": "Validated from detector metadata (body redacted)",
+    "reason": "High-confidence exposed file with sensitive markers",
+    "verified": true
+   }
+  },
+  {
+   "confidence": 0.4,
+   "confidence_tier": "low",
+   "content_type": "text/plain",
+   "cvss_score": 0.0,
+   "cwe": "CWE-200",
+   "cwe_name": "Exposure of Sensitive Information to an Unauthorized Actor",
+   "cwe_url": "https://cwe.mitre.org/data/definitions/200.html",
+   "evidence": {
+    "confidence": "low",
+    "content_type": "text/plain",
+    "has_html": false,
+    "markers": [],
+    "path": "robots.txt",
+    "preview_first_line": "# https://www.robotstxt.org/robotstxt.html",
+    "preview_hash16": "b2d23c2388e6dacf",
+    "remediation": [],
+    "size": 66,
+    "subentries": null,
+    "url": "http://crapi-web/robots.txt",
+    "verify_commands": [
+     "curl -sI http://crapi-web/robots.txt",
+     "curl -sL http://crapi-web/robots.txt | sed -n '1,40p'"
+    ]
+   },
+   "first_seen": "2026-02-21T18:22:28.221150+00:00",
+   "id": "exposed_files:c4042ac4548fe6f4",
+   "noise_reduction": {
+    "downgraded": true,
+    "original_severity": "low",
+    "reason": "Informational finding (matched: robots.txt)"
+   },
+   "owasp": null,
+   "severity": "info",
+   "soc2": [
+    "CC6.6"
+   ],
+   "title": "Exposed file: robots.txt (confidence: low)",
+   "tool": "exposed_files",
+   "url": "http://crapi-web/robots.txt",
+   "validation": {
+    "confidence": 0.4,
+    "downgrade_to": null,
+    "evidence": null,
+    "reason": "No response body to verify",
+    "verified": false
+   }
+  },
+  {
+   "confidence": 0.6,
+   "confidence_tier": "low",
+   "cvss_score": 0.0,
+   "cwe": "CWE-16",
+   "cwe_name": "",
+   "cwe_url": "https://cwe.mitre.org/data/definitions/16.html",
+   "evidence": {
+    "reproduction": "curl -sL http://crapi-web/.well-known/security.txt",
+    "url": "http://crapi-web/.well-known/security.txt"
+   },
+   "first_seen": "2026-02-21T18:29:28.749983+00:00",
+   "id": "security_txt:5f6eff14f4c1d961",
+   "owasp": null,
+   "severity": "info",
+   "soc2": [],
+   "title": "security.txt missing",
+   "tool": "security_txt",
+   "url": "http://crapi-web/.well-known/security.txt",
+   "validation": {
+    "confidence": 0.6,
+    "downgrade_to": null,
+    "evidence": null,
+    "reason": "No specific validation available for this finding type",
+    "verified": true
+   }
+  },
+  {
+   "confidence": 0.6,
+   "confidence_tier": "low",
+   "cvss_score": 0.0,
+   "cwe": "CWE-20",
+   "cwe_name": "",
+   "cwe_url": "https://cwe.mitre.org/data/definitions/20.html",
+   "evidence": {
+    "blocked_details": [
+     {
+      "block_reason": "Response contains 'security'",
+      "payload": "<script>alert(1)</script>",
+      "payload_type": "XSS",
+      "status_code": "200",
+      "test_url": "http://crapi-web?test=%3Cscript%3Ealert%281%29%3C/script%3E"
+     },
+     {
+      "block_reason": "Response contains 'security'",
+      "payload": "' OR '1'='1",
+      "payload_type": "SQLi",
+      "status_code": "200",
+      "test_url": "http://crapi-web?test=%27%20OR%20%271%27%3D%271"
+     },
+     {
+      "block_reason": "Response contains 'security'",
+      "payload": "../../../etc/passwd",
+      "payload_type": "Path Traversal",
+      "status_code": "200",
+      "test_url": "http://crapi-web?test=../../../etc/passwd"
+     },
+     {
+      "block_reason": "Response contains 'security'",
+      "payload": "<?php system('id'); ?>",
+      "payload_type": "RCE",
+      "status_code": "200",
+      "test_url": "http://crapi-web?test=%3C%3Fphp%20system%28%27id%27%29%3B%20%3F%3E"
+     }
+    ],
+    "blocked_payloads": 4,
+    "confidence": "medium",
+    "note": "Standard input validation detected, no specific WAF identified"
+   },
+   "first_seen": "2026-02-21T18:22:28.221241+00:00",
+   "id": "input_validation:39badc70b6131c82",
+   "owasp": null,
+   "severity": "info",
+   "soc2": [
+    "CC6.7"
+   ],
+   "title": "Input validation detected (attack payloads blocked)",
+   "tool": "input_validation",
+   "validation": {
+    "confidence": 0.6,
+    "downgrade_to": null,
+    "evidence": null,
+    "reason": "No specific validation available for this finding type",
+    "verified": true
+   }
+  },
+  {
+   "confidence": 0.7,
+   "confidence_tier": "medium",
+   "cvss_score": 6.1,
+   "cwe": "CWE-79",
+   "cwe_name": "Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')",
+   "cwe_url": "https://cwe.mitre.org/data/definitions/79.html",
+   "evidence": {
+    "confidence": 0.7,
+    "evidence": [
+     "Sink: Function constructor at line 2",
+     "Source: location\\.href found nearby",
+     "Code: (()=>{var e={6:e=>{var t=\"\\\\ud800-\\\\udfff\",n=\"\\\\u2700-\\\\u27bf\",r=\"a-z\\\\xdf-\\\\xf6\\\\xf8-\\\\xff\",o=\"A-Z\\\\xc0-\\\\xd6\\\\xd8-\\\\xde\",i=\"\\\\xac\\\\xb1\\\\xd7\\\\xf7\\\\x00-\\\\x2f\\\\x3a-\\\\x40\\\\x5b-\\\\x60\\\\x7b-\\\\xbf\\\\u2000-\\\\"
+    ],
+    "file": "http://crapi-web/static/js/main.8c78208c.js",
+    "line": 2,
+    "sink_type": "Function constructor",
+    "snippet": "(()=>{var e={6:e=>{var t=\"\\\\ud800-\\\\udfff\",n=\"\\\\u2700-\\\\u27bf\",r=\"a-z\\\\xdf-\\\\xf6\\\\xf8-\\\\xff\",o=\"A-Z\\\\xc0-\\\\xd6\\\\xd8-\\\\xde\",i=\"\\\\xac\\\\xb1\\\\xd7\\\\xf7\\\\x00-\\\\x2f\\\\x3a-\\\\x40\\\\x5b-\\\\x60\\\\x7b-\\\\xbf\\\\u2000-\\\\",
+    "source_nearby": true,
+    "source_pattern": "location\\.href"
+   },
+   "first_seen": "2026-02-21T18:24:28.565702+00:00",
+   "id": "dom_xss:19f506b0ed69ba46",
+   "owasp": "A03:2021 - Injection",
+   "severity": "medium",
+   "soc2": [
+    "CC6.7"
+   ],
+   "title": "DOM-Based XSS (Function constructor)",
+   "tool": "dom_xss",
+   "type": "XSS",
+   "validation": {
+    "confidence": 0.7,
+    "downgrade_to": null,
+    "evidence": "Function constructor",
+    "reason": "DOM XSS static analysis (source-to-sink)",
+    "verified": false
+   },
+   "verification_attempted": false,
+   "verification_reason": "missing url/param/payload for XSS verification",
+   "verification_skipped": true
+  },
+  {
+   "confidence": 0.7,
+   "confidence_tier": "medium",
+   "cvss_score": 6.1,
+   "cwe": "CWE-79",
+   "cwe_name": "Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')",
+   "cwe_url": "https://cwe.mitre.org/data/definitions/79.html",
+   "evidence": {
+    "confidence": 0.7,
+    "evidence": [
+     "Sink: setTimeout with string at line 2",
+     "Source: location\\.href found nearby",
+     "Code: (()=>{var e={6:e=>{var t=\"\\\\ud800-\\\\udfff\",n=\"\\\\u2700-\\\\u27bf\",r=\"a-z\\\\xdf-\\\\xf6\\\\xf8-\\\\xff\",o=\"A-Z\\\\xc0-\\\\xd6\\\\xd8-\\\\xde\",i=\"\\\\xac\\\\xb1\\\\xd7\\\\xf7\\\\x00-\\\\x2f\\\\x3a-\\\\x40\\\\x5b-\\\\x60\\\\x7b-\\\\xbf\\\\u2000-\\\\"
+    ],
+    "file": "http://crapi-web/static/js/main.8c78208c.js",
+    "line": 2,
+    "sink_type": "setTimeout with string",
+    "snippet": "(()=>{var e={6:e=>{var t=\"\\\\ud800-\\\\udfff\",n=\"\\\\u2700-\\\\u27bf\",r=\"a-z\\\\xdf-\\\\xf6\\\\xf8-\\\\xff\",o=\"A-Z\\\\xc0-\\\\xd6\\\\xd8-\\\\xde\",i=\"\\\\xac\\\\xb1\\\\xd7\\\\xf7\\\\x00-\\\\x2f\\\\x3a-\\\\x40\\\\x5b-\\\\x60\\\\x7b-\\\\xbf\\\\u2000-\\\\",
+    "source_nearby": true,
+    "source_pattern": "location\\.href"
+   },
+   "first_seen": "2026-02-21T18:24:28.565879+00:00",
+   "id": "dom_xss:ecb63d0e209bfe5d",
+   "owasp": "A03:2021 - Injection",
+   "severity": "medium",
+   "soc2": [
+    "CC6.7"
+   ],
+   "title": "DOM-Based XSS (setTimeout with string)",
+   "tool": "dom_xss",
+   "type": "XSS",
+   "validation": {
+    "confidence": 0.7,
+    "downgrade_to": null,
+    "evidence": "setTimeout with string",
+    "reason": "DOM XSS static analysis (source-to-sink)",
+    "verified": false
+   },
+   "verification_attempted": false,
+   "verification_reason": "missing url/param/payload for XSS verification",
+   "verification_skipped": true
+  },
+  {
+   "confidence": 0.7,
+   "confidence_tier": "medium",
+   "cvss_score": 6.1,
+   "cwe": "CWE-79",
+   "cwe_name": "Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')",
+   "cwe_url": "https://cwe.mitre.org/data/definitions/79.html",
+   "evidence": {
+    "confidence": 0.7,
+    "evidence": [
+     "Sink: setInterval with string at line 2",
+     "Source: location\\.href found nearby",
+     "Code: (()=>{var e={6:e=>{var t=\"\\\\ud800-\\\\udfff\",n=\"\\\\u2700-\\\\u27bf\",r=\"a-z\\\\xdf-\\\\xf6\\\\xf8-\\\\xff\",o=\"A-Z\\\\xc0-\\\\xd6\\\\xd8-\\\\xde\",i=\"\\\\xac\\\\xb1\\\\xd7\\\\xf7\\\\x00-\\\\x2f\\\\x3a-\\\\x40\\\\x5b-\\\\x60\\\\x7b-\\\\xbf\\\\u2000-\\\\"
+    ],
+    "file": "http://crapi-web/static/js/main.8c78208c.js",
+    "line": 2,
+    "sink_type": "setInterval with string",
+    "snippet": "(()=>{var e={6:e=>{var t=\"\\\\ud800-\\\\udfff\",n=\"\\\\u2700-\\\\u27bf\",r=\"a-z\\\\xdf-\\\\xf6\\\\xf8-\\\\xff\",o=\"A-Z\\\\xc0-\\\\xd6\\\\xd8-\\\\xde\",i=\"\\\\xac\\\\xb1\\\\xd7\\\\xf7\\\\x00-\\\\x2f\\\\x3a-\\\\x40\\\\x5b-\\\\x60\\\\x7b-\\\\xbf\\\\u2000-\\\\",
+    "source_nearby": true,
+    "source_pattern": "location\\.href"
+   },
+   "first_seen": "2026-02-21T18:24:28.565992+00:00",
+   "id": "dom_xss:0503cdbfd68e6559",
+   "owasp": "A03:2021 - Injection",
+   "severity": "medium",
+   "soc2": [
+    "CC6.7"
+   ],
+   "title": "DOM-Based XSS (setInterval with string)",
+   "tool": "dom_xss",
+   "type": "XSS",
+   "validation": {
+    "confidence": 0.7,
+    "downgrade_to": null,
+    "evidence": "setInterval with string",
+    "reason": "DOM XSS static analysis (source-to-sink)",
+    "verified": false
+   },
+   "verification_attempted": false,
+   "verification_reason": "missing url/param/payload for XSS verification",
+   "verification_skipped": true
+  },
+  {
+   "confidence": 0.7,
+   "confidence_tier": "medium",
+   "cvss_score": 6.1,
+   "cwe": "CWE-79",
+   "cwe_name": "Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')",
+   "cwe_url": "https://cwe.mitre.org/data/definitions/79.html",
+   "evidence": {
+    "confidence": 0.7,
+    "evidence": [
+     "Sink: new Function at line 2",
+     "Source: location\\.href found nearby",
+     "Code: (()=>{var e={6:e=>{var t=\"\\\\ud800-\\\\udfff\",n=\"\\\\u2700-\\\\u27bf\",r=\"a-z\\\\xdf-\\\\xf6\\\\xf8-\\\\xff\",o=\"A-Z\\\\xc0-\\\\xd6\\\\xd8-\\\\xde\",i=\"\\\\xac\\\\xb1\\\\xd7\\\\xf7\\\\x00-\\\\x2f\\\\x3a-\\\\x40\\\\x5b-\\\\x60\\\\x7b-\\\\xbf\\\\u2000-\\\\"
+    ],
+    "file": "http://crapi-web/static/js/main.8c78208c.js",
+    "line": 2,
+    "sink_type": "new Function",
+    "snippet": "(()=>{var e={6:e=>{var t=\"\\\\ud800-\\\\udfff\",n=\"\\\\u2700-\\\\u27bf\",r=\"a-z\\\\xdf-\\\\xf6\\\\xf8-\\\\xff\",o=\"A-Z\\\\xc0-\\\\xd6\\\\xd8-\\\\xde\",i=\"\\\\xac\\\\xb1\\\\xd7\\\\xf7\\\\x00-\\\\x2f\\\\x3a-\\\\x40\\\\x5b-\\\\x60\\\\x7b-\\\\xbf\\\\u2000-\\\\",
+    "source_nearby": true,
+    "source_pattern": "location\\.href"
+   },
+   "first_seen": "2026-02-21T18:24:28.566100+00:00",
+   "id": "dom_xss:b6c02994c29748dc",
+   "owasp": "A03:2021 - Injection",
+   "severity": "medium",
+   "soc2": [
+    "CC6.7"
+   ],
+   "title": "DOM-Based XSS (new Function)",
+   "tool": "dom_xss",
+   "type": "XSS",
+   "validation": {
+    "confidence": 0.7,
+    "downgrade_to": null,
+    "evidence": "new Function",
+    "reason": "DOM XSS static analysis (source-to-sink)",
+    "verified": false
+   },
+   "verification_attempted": false,
+   "verification_reason": "missing url/param/payload for XSS verification",
+   "verification_skipped": true
+  },
+  {
+   "confidence": 0.7,
+   "confidence_tier": "medium",
+   "cvss_score": 6.1,
+   "cwe": "CWE-79",
+   "cwe_name": "Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')",
+   "cwe_url": "https://cwe.mitre.org/data/definitions/79.html",
+   "evidence": {
+    "confidence": 0.7,
+    "evidence": [
+     "Sink: innerHTML assignment at line 2",
+     "Source: location\\.href found nearby",
+     "Code: (()=>{var e={6:e=>{var t=\"\\\\ud800-\\\\udfff\",n=\"\\\\u2700-\\\\u27bf\",r=\"a-z\\\\xdf-\\\\xf6\\\\xf8-\\\\xff\",o=\"A-Z\\\\xc0-\\\\xd6\\\\xd8-\\\\xde\",i=\"\\\\xac\\\\xb1\\\\xd7\\\\xf7\\\\x00-\\\\x2f\\\\x3a-\\\\x40\\\\x5b-\\\\x60\\\\x7b-\\\\xbf\\\\u2000-\\\\"
+    ],
+    "file": "http://crapi-web/static/js/main.8c78208c.js",
+    "line": 2,
+    "sink_type": "innerHTML assignment",
+    "snippet": "(()=>{var e={6:e=>{var t=\"\\\\ud800-\\\\udfff\",n=\"\\\\u2700-\\\\u27bf\",r=\"a-z\\\\xdf-\\\\xf6\\\\xf8-\\\\xff\",o=\"A-Z\\\\xc0-\\\\xd6\\\\xd8-\\\\xde\",i=\"\\\\xac\\\\xb1\\\\xd7\\\\xf7\\\\x00-\\\\x2f\\\\x3a-\\\\x40\\\\x5b-\\\\x60\\\\x7b-\\\\xbf\\\\u2000-\\\\",
+    "source_nearby": true,
+    "source_pattern": "location\\.href"
+   },
+   "first_seen": "2026-02-21T18:24:28.566211+00:00",
+   "id": "dom_xss:b9204975e4a3a4b5",
+   "owasp": "A03:2021 - Injection",
+   "severity": "medium",
+   "soc2": [
+    "CC6.7"
+   ],
+   "title": "DOM-Based XSS (innerHTML assignment)",
+   "tool": "dom_xss",
+   "type": "XSS",
+   "validation": {
+    "confidence": 0.7,
+    "downgrade_to": null,
+    "evidence": "innerHTML assignment",
+    "reason": "DOM XSS static analysis (source-to-sink)",
+    "verified": false
+   },
+   "verification_attempted": false,
+   "verification_reason": "missing url/param/payload for XSS verification",
+   "verification_skipped": true
+  },
+  {
+   "confidence": 0.7,
+   "confidence_tier": "medium",
+   "cvss_score": 6.1,
+   "cwe": "CWE-79",
+   "cwe_name": "Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')",
+   "cwe_url": "https://cwe.mitre.org/data/definitions/79.html",
+   "evidence": {
+    "confidence": 0.7,
+    "evidence": [
+     "Sink: location.assign at line 2",
+     "Source: location\\.href found nearby",
+     "Code: (()=>{var e={6:e=>{var t=\"\\\\ud800-\\\\udfff\",n=\"\\\\u2700-\\\\u27bf\",r=\"a-z\\\\xdf-\\\\xf6\\\\xf8-\\\\xff\",o=\"A-Z\\\\xc0-\\\\xd6\\\\xd8-\\\\xde\",i=\"\\\\xac\\\\xb1\\\\xd7\\\\xf7\\\\x00-\\\\x2f\\\\x3a-\\\\x40\\\\x5b-\\\\x60\\\\x7b-\\\\xbf\\\\u2000-\\\\"
+    ],
+    "file": "http://crapi-web/static/js/main.8c78208c.js",
+    "line": 2,
+    "sink_type": "location.assign",
+    "snippet": "(()=>{var e={6:e=>{var t=\"\\\\ud800-\\\\udfff\",n=\"\\\\u2700-\\\\u27bf\",r=\"a-z\\\\xdf-\\\\xf6\\\\xf8-\\\\xff\",o=\"A-Z\\\\xc0-\\\\xd6\\\\xd8-\\\\xde\",i=\"\\\\xac\\\\xb1\\\\xd7\\\\xf7\\\\x00-\\\\x2f\\\\x3a-\\\\x40\\\\x5b-\\\\x60\\\\x7b-\\\\xbf\\\\u2000-\\\\",
+    "source_nearby": true,
+    "source_pattern": "location\\.href"
+   },
+   "first_seen": "2026-02-21T18:24:28.566336+00:00",
+   "id": "dom_xss:ae255c26bfdaeec1",
+   "owasp": "A03:2021 - Injection",
+   "severity": "medium",
+   "soc2": [
+    "CC6.7"
+   ],
+   "title": "DOM-Based XSS (location.assign)",
+   "tool": "dom_xss",
+   "type": "XSS",
+   "validation": {
+    "confidence": 0.7,
+    "downgrade_to": null,
+    "evidence": "location.assign",
+    "reason": "DOM XSS static analysis (source-to-sink)",
+    "verified": false
+   },
+   "verification_attempted": false,
+   "verification_reason": "missing url/param/payload for XSS verification",
+   "verification_skipped": true
+  },
+  {
+   "confidence": 0.7,
+   "confidence_tier": "medium",
+   "cvss_score": 6.1,
+   "cwe": "CWE-79",
+   "cwe_name": "Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')",
+   "cwe_url": "https://cwe.mitre.org/data/definitions/79.html",
+   "evidence": {
+    "confidence": 0.7,
+    "evidence": [
+     "Sink: window.open at line 2",
+     "Source: location\\.href found nearby",
+     "Code: (()=>{var e={6:e=>{var t=\"\\\\ud800-\\\\udfff\",n=\"\\\\u2700-\\\\u27bf\",r=\"a-z\\\\xdf-\\\\xf6\\\\xf8-\\\\xff\",o=\"A-Z\\\\xc0-\\\\xd6\\\\xd8-\\\\xde\",i=\"\\\\xac\\\\xb1\\\\xd7\\\\xf7\\\\x00-\\\\x2f\\\\x3a-\\\\x40\\\\x5b-\\\\x60\\\\x7b-\\\\xbf\\\\u2000-\\\\"
+    ],
+    "file": "http://crapi-web/static/js/main.8c78208c.js",
+    "line": 2,
+    "sink_type": "window.open",
+    "snippet": "(()=>{var e={6:e=>{var t=\"\\\\ud800-\\\\udfff\",n=\"\\\\u2700-\\\\u27bf\",r=\"a-z\\\\xdf-\\\\xf6\\\\xf8-\\\\xff\",o=\"A-Z\\\\xc0-\\\\xd6\\\\xd8-\\\\xde\",i=\"\\\\xac\\\\xb1\\\\xd7\\\\xf7\\\\x00-\\\\x2f\\\\x3a-\\\\x40\\\\x5b-\\\\x60\\\\x7b-\\\\xbf\\\\u2000-\\\\",
+    "source_nearby": true,
+    "source_pattern": "location\\.href"
+   },
+   "first_seen": "2026-02-21T18:24:28.566539+00:00",
+   "id": "dom_xss:ca7828eceb98942a",
+   "owasp": "A03:2021 - Injection",
+   "severity": "medium",
+   "soc2": [
+    "CC6.7"
+   ],
+   "title": "DOM-Based XSS (window.open)",
+   "tool": "dom_xss",
+   "type": "XSS",
+   "validation": {
+    "confidence": 0.7,
+    "downgrade_to": null,
+    "evidence": "window.open",
+    "reason": "DOM XSS static analysis (source-to-sink)",
+    "verified": false
+   },
+   "verification_attempted": false,
+   "verification_reason": "missing url/param/payload for XSS verification",
+   "verification_skipped": true
+  },
+  {
+   "confidence": 0.7,
+   "confidence_tier": "medium",
+   "cvss_score": 6.1,
+   "cwe": "CWE-79",
+   "cwe_name": "Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')",
+   "cwe_url": "https://cwe.mitre.org/data/definitions/79.html",
+   "evidence": {
+    "confidence": 0.7,
+    "evidence": [
+     "Sink: setAttribute event handler at line 2",
+     "Source: location\\.href found nearby",
+     "Code: (()=>{var e={6:e=>{var t=\"\\\\ud800-\\\\udfff\",n=\"\\\\u2700-\\\\u27bf\",r=\"a-z\\\\xdf-\\\\xf6\\\\xf8-\\\\xff\",o=\"A-Z\\\\xc0-\\\\xd6\\\\xd8-\\\\xde\",i=\"\\\\xac\\\\xb1\\\\xd7\\\\xf7\\\\x00-\\\\x2f\\\\x3a-\\\\x40\\\\x5b-\\\\x60\\\\x7b-\\\\xbf\\\\u2000-\\\\"
+    ],
+    "file": "http://crapi-web/static/js/main.8c78208c.js",
+    "line": 2,
+    "sink_type": "setAttribute event handler",
+    "snippet": "(()=>{var e={6:e=>{var t=\"\\\\ud800-\\\\udfff\",n=\"\\\\u2700-\\\\u27bf\",r=\"a-z\\\\xdf-\\\\xf6\\\\xf8-\\\\xff\",o=\"A-Z\\\\xc0-\\\\xd6\\\\xd8-\\\\xde\",i=\"\\\\xac\\\\xb1\\\\xd7\\\\xf7\\\\x00-\\\\x2f\\\\x3a-\\\\x40\\\\x5b-\\\\x60\\\\x7b-\\\\xbf\\\\u2000-\\\\",
+    "source_nearby": true,
+    "source_pattern": "location\\.href"
+   },
+   "first_seen": "2026-02-21T18:24:28.566683+00:00",
+   "id": "dom_xss:e95d2273a45eed19",
+   "owasp": "A03:2021 - Injection",
+   "severity": "medium",
+   "soc2": [
+    "CC6.7"
+   ],
+   "title": "DOM-Based XSS (setAttribute event handler)",
+   "tool": "dom_xss",
+   "type": "XSS",
+   "validation": {
+    "confidence": 0.7,
+    "downgrade_to": null,
+    "evidence": "setAttribute event handler",
+    "reason": "DOM XSS static analysis (source-to-sink)",
+    "verified": false
+   },
+   "verification_attempted": false,
+   "verification_reason": "missing url/param/payload for XSS verification",
+   "verification_skipped": true
+  },
+  {
+   "confidence": 0.7,
+   "confidence_tier": "medium",
+   "cvss_score": 6.1,
+   "cwe": "CWE-79",
+   "cwe_name": "Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')",
+   "cwe_url": "https://cwe.mitre.org/data/definitions/79.html",
+   "evidence": {
+    "confidence": 0.7,
+    "evidence": [
+     "Sink: src assignment at line 2",
+     "Source: location\\.href found nearby",
+     "Code: (()=>{var e={6:e=>{var t=\"\\\\ud800-\\\\udfff\",n=\"\\\\u2700-\\\\u27bf\",r=\"a-z\\\\xdf-\\\\xf6\\\\xf8-\\\\xff\",o=\"A-Z\\\\xc0-\\\\xd6\\\\xd8-\\\\xde\",i=\"\\\\xac\\\\xb1\\\\xd7\\\\xf7\\\\x00-\\\\x2f\\\\x3a-\\\\x40\\\\x5b-\\\\x60\\\\x7b-\\\\xbf\\\\u2000-\\\\"
+    ],
+    "file": "http://crapi-web/static/js/main.8c78208c.js",
+    "line": 2,
+    "sink_type": "src assignment",
+    "snippet": "(()=>{var e={6:e=>{var t=\"\\\\ud800-\\\\udfff\",n=\"\\\\u2700-\\\\u27bf\",r=\"a-z\\\\xdf-\\\\xf6\\\\xf8-\\\\xff\",o=\"A-Z\\\\xc0-\\\\xd6\\\\xd8-\\\\xde\",i=\"\\\\xac\\\\xb1\\\\xd7\\\\xf7\\\\x00-\\\\x2f\\\\x3a-\\\\x40\\\\x5b-\\\\x60\\\\x7b-\\\\xbf\\\\u2000-\\\\",
+    "source_nearby": true,
+    "source_pattern": "location\\.href"
+   },
+   "first_seen": "2026-02-21T18:24:28.566817+00:00",
+   "id": "dom_xss:d92c029c21efcbe9",
+   "owasp": "A03:2021 - Injection",
+   "severity": "medium",
+   "soc2": [
+    "CC6.7"
+   ],
+   "title": "DOM-Based XSS (src assignment)",
+   "tool": "dom_xss",
+   "type": "XSS",
+   "validation": {
+    "confidence": 0.7,
+    "downgrade_to": null,
+    "evidence": "src assignment",
+    "reason": "DOM XSS static analysis (source-to-sink)",
+    "verified": false
+   },
+   "verification_attempted": false,
+   "verification_reason": "missing url/param/payload for XSS verification",
+   "verification_skipped": true
+  },
+  {
+   "confidence": 0.7,
+   "confidence_tier": "medium",
+   "cvss_score": 6.1,
+   "cwe": "CWE-79",
+   "cwe_name": "Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')",
+   "cwe_url": "https://cwe.mitre.org/data/definitions/79.html",
+   "evidence": {
+    "confidence": 0.7,
+    "evidence": [
+     "Sink: createElement script at line 2",
+     "Source: location\\.href found nearby",
+     "Code: (()=>{var e={6:e=>{var t=\"\\\\ud800-\\\\udfff\",n=\"\\\\u2700-\\\\u27bf\",r=\"a-z\\\\xdf-\\\\xf6\\\\xf8-\\\\xff\",o=\"A-Z\\\\xc0-\\\\xd6\\\\xd8-\\\\xde\",i=\"\\\\xac\\\\xb1\\\\xd7\\\\xf7\\\\x00-\\\\x2f\\\\x3a-\\\\x40\\\\x5b-\\\\x60\\\\x7b-\\\\xbf\\\\u2000-\\\\"
+    ],
+    "file": "http://crapi-web/static/js/main.8c78208c.js",
+    "line": 2,
+    "sink_type": "createElement script",
+    "snippet": "(()=>{var e={6:e=>{var t=\"\\\\ud800-\\\\udfff\",n=\"\\\\u2700-\\\\u27bf\",r=\"a-z\\\\xdf-\\\\xf6\\\\xf8-\\\\xff\",o=\"A-Z\\\\xc0-\\\\xd6\\\\xd8-\\\\xde\",i=\"\\\\xac\\\\xb1\\\\xd7\\\\xf7\\\\x00-\\\\x2f\\\\x3a-\\\\x40\\\\x5b-\\\\x60\\\\x7b-\\\\xbf\\\\u2000-\\\\",
+    "source_nearby": true,
+    "source_pattern": "location\\.href"
+   },
+   "first_seen": "2026-02-21T18:24:28.566961+00:00",
+   "id": "dom_xss:e638753272e8a91d",
+   "owasp": "A03:2021 - Injection",
+   "severity": "medium",
+   "soc2": [
+    "CC6.7"
+   ],
+   "title": "DOM-Based XSS (createElement script)",
+   "tool": "dom_xss",
+   "type": "XSS",
+   "validation": {
+    "confidence": 0.7,
+    "downgrade_to": null,
+    "evidence": "createElement script",
+    "reason": "DOM XSS static analysis (source-to-sink)",
+    "verified": false
+   },
+   "verification_attempted": false,
+   "verification_reason": "missing url/param/payload for XSS verification",
+   "verification_skipped": true
+  },
+  {
+   "confidence": 0.7,
+   "confidence_tier": "medium",
+   "cvss_score": 6.1,
+   "cwe": "CWE-79",
+   "cwe_name": "Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')",
+   "cwe_url": "https://cwe.mitre.org/data/definitions/79.html",
+   "evidence": {
+    "confidence": 0.7,
+    "evidence": [
+     "Sink: React dangerouslySetInnerHTML at line 2",
+     "Source: location\\.href found nearby",
+     "Code: (()=>{var e={6:e=>{var t=\"\\\\ud800-\\\\udfff\",n=\"\\\\u2700-\\\\u27bf\",r=\"a-z\\\\xdf-\\\\xf6\\\\xf8-\\\\xff\",o=\"A-Z\\\\xc0-\\\\xd6\\\\xd8-\\\\xde\",i=\"\\\\xac\\\\xb1\\\\xd7\\\\xf7\\\\x00-\\\\x2f\\\\x3a-\\\\x40\\\\x5b-\\\\x60\\\\x7b-\\\\xbf\\\\u2000-\\\\"
+    ],
+    "file": "http://crapi-web/static/js/main.8c78208c.js",
+    "line": 2,
+    "sink_type": "React dangerouslySetInnerHTML",
+    "snippet": "(()=>{var e={6:e=>{var t=\"\\\\ud800-\\\\udfff\",n=\"\\\\u2700-\\\\u27bf\",r=\"a-z\\\\xdf-\\\\xf6\\\\xf8-\\\\xff\",o=\"A-Z\\\\xc0-\\\\xd6\\\\xd8-\\\\xde\",i=\"\\\\xac\\\\xb1\\\\xd7\\\\xf7\\\\x00-\\\\x2f\\\\x3a-\\\\x40\\\\x5b-\\\\x60\\\\x7b-\\\\xbf\\\\u2000-\\\\",
+    "source_nearby": true,
+    "source_pattern": "location\\.href"
+   },
+   "first_seen": "2026-02-21T18:24:28.567095+00:00",
+   "id": "dom_xss:258cf322c13dada8",
+   "owasp": "A03:2021 - Injection",
+   "severity": "medium",
+   "soc2": [
+    "CC6.7"
+   ],
+   "title": "DOM-Based XSS (React dangerouslySetInnerHTML)",
+   "tool": "dom_xss",
+   "type": "XSS",
+   "validation": {
+    "confidence": 0.7,
+    "downgrade_to": null,
+    "evidence": "React dangerouslySetInnerHTML",
+    "reason": "DOM XSS static analysis (source-to-sink)",
+    "verified": false
+   },
+   "verification_attempted": false,
+   "verification_reason": "missing url/param/payload for XSS verification",
+   "verification_skipped": true
+  },
+  {
+   "confidence": 0.6,
+   "confidence_tier": "low",
+   "cvss_score": 4.0,
+   "cwe": "CWE-693",
+   "cwe_name": "Protection Mechanism Failure",
+   "cwe_url": "https://cwe.mitre.org/data/definitions/693.html",
+   "evidence": {
+    "header": "strict-transport-security",
+    "missing": true,
+    "reproduction": "curl -sIL http://crapi-web/"
+   },
+   "first_seen": "2026-02-21T18:29:28.748238+00:00",
+   "id": "http_headers:8401aebe0889a0c4",
+   "owasp": null,
+   "severity": "medium",
+   "soc2": [
+    "CC6.3"
+   ],
+   "title": "HSTS header missing",
+   "tool": "http_headers",
+   "validation": {
+    "confidence": 0.6,
+    "downgrade_to": null,
+    "evidence": null,
+    "reason": "No specific validation available for this finding type",
+    "verified": true
+   }
+  },
+  {
+   "confidence": 0.6,
+   "confidence_tier": "low",
+   "cvss_score": 3.0,
+   "cwe": "CWE-693",
+   "cwe_name": "Protection Mechanism Failure",
+   "cwe_url": "https://cwe.mitre.org/data/definitions/693.html",
+   "evidence": {
+    "header": "x-frame-options",
+    "missing": true,
+    "reproduction": "curl -sIL http://crapi-web/"
+   },
+   "first_seen": "2026-02-21T18:29:28.748446+00:00",
+   "id": "http_headers:3d3abc1288cdde2d",
+   "owasp": null,
+   "severity": "low",
+   "soc2": [],
+   "title": "X-Frame-Options missing",
+   "tool": "http_headers",
+   "validation": {
+    "confidence": 0.6,
+    "downgrade_to": null,
+    "evidence": null,
+    "reason": "No specific validation available for this finding type",
+    "verified": true
+   }
+  },
+  {
+   "confidence": 0.6,
+   "confidence_tier": "low",
+   "cvss_score": 3.0,
+   "cwe": "CWE-16",
+   "cwe_name": "",
+   "cwe_url": "https://cwe.mitre.org/data/definitions/16.html",
+   "evidence": {
+    "current_value": null,
+    "header": "x-content-type-options",
+    "reproduction": "curl -sIL http://crapi-web/"
+   },
+   "first_seen": "2026-02-21T18:29:28.748562+00:00",
+   "id": "http_headers:4a0cfa39c59fa3bd",
+   "owasp": null,
+   "severity": "low",
+   "soc2": [],
+   "title": "X-Content-Type-Options not 'nosniff'",
+   "tool": "http_headers",
+   "validation": {
+    "confidence": 0.6,
+    "downgrade_to": null,
+    "evidence": null,
+    "reason": "No specific validation available for this finding type",
+    "verified": true
+   }
+  },
+  {
+   "confidence": 0.6,
+   "confidence_tier": "low",
+   "cvss_score": 3.0,
+   "cwe": "CWE-200",
+   "cwe_name": "Exposure of Sensitive Information to an Unauthorized Actor",
+   "cwe_url": "https://cwe.mitre.org/data/definitions/200.html",
+   "evidence": {
+    "header": "referrer-policy",
+    "missing": true,
+    "reproduction": "curl -sIL http://crapi-web/"
+   },
+   "first_seen": "2026-02-21T18:29:28.748673+00:00",
+   "id": "http_headers:2832684f4d8edbe8",
+   "owasp": null,
+   "severity": "low",
+   "soc2": [],
+   "title": "Referrer-Policy missing",
+   "tool": "http_headers",
+   "validation": {
+    "confidence": 0.6,
+    "downgrade_to": null,
+    "evidence": null,
+    "reason": "No specific validation available for this finding type",
+    "verified": true
+   }
+  },
+  {
+   "confidence": 0.6,
+   "confidence_tier": "low",
+   "cvss_score": 3.0,
+   "cwe": "CWE-693",
+   "cwe_name": "Protection Mechanism Failure",
+   "cwe_url": "https://cwe.mitre.org/data/definitions/693.html",
+   "evidence": {
+    "header": "permissions-policy",
+    "missing": true,
+    "reproduction": "curl -sIL http://crapi-web/"
+   },
+   "first_seen": "2026-02-21T18:29:28.748776+00:00",
+   "id": "http_headers:59c887f2e96b1470",
+   "owasp": null,
+   "severity": "low",
+   "soc2": [],
+   "title": "Permissions-Policy missing",
+   "tool": "http_headers",
+   "validation": {
+    "confidence": 0.6,
+    "downgrade_to": null,
+    "evidence": null,
+    "reason": "No specific validation available for this finding type",
+    "verified": true
+   }
+  },
+  {
+   "confidence": 0.6,
+   "confidence_tier": "low",
+   "cvss_score": 4.0,
+   "cwe": "CWE-693",
+   "cwe_name": "Protection Mechanism Failure",
+   "cwe_url": "https://cwe.mitre.org/data/definitions/693.html",
+   "evidence": {
+    "present": false,
+    "reproduction": "curl -sIL http://crapi-web/"
+   },
+   "first_seen": "2026-02-21T18:29:28.748879+00:00",
+   "id": "csp_evaluator:f655bf6ebc38f8ce",
+   "owasp": null,
+   "severity": "medium",
+   "soc2": [],
+   "title": "CSP header missing",
+   "tool": "csp_evaluator",
+   "validation": {
+    "confidence": 0.6,
+    "downgrade_to": null,
+    "evidence": null,
+    "reason": "No specific validation available for this finding type",
+    "verified": true
+   }
+  },
+  {
+   "confidence": 0.6,
+   "confidence_tier": "low",
+   "cvss_score": 5.0,
+   "cwe": "CWE-319",
+   "cwe_name": "Cleartext Transmission of Sensitive Information",
+   "cwe_url": "https://cwe.mitre.org/data/definitions/319.html",
+   "evidence": {
+    "detail": "HTTP did not redirect to HTTPS",
+    "reproduction": "curl -sI http://crapi-web"
+   },
+   "first_seen": "2026-02-21T18:29:28.748980+00:00",
+   "id": "redirect_check:7f7207bbd28b8675",
+   "owasp": null,
+   "severity": "medium",
+   "soc2": [],
+   "title": "Does not redirect HTTP to HTTPS",
+   "tool": "redirect_check",
+   "validation": {
+    "confidence": 0.6,
+    "downgrade_to": null,
+    "evidence": null,
+    "reason": "No specific validation available for this finding type",
+    "verified": true
+   }
+  },
+  {
+   "confidence": 0.6,
+   "confidence_tier": "low",
+   "cvss_score": 4.0,
+   "cwe": "CWE-310",
+   "cwe_name": "Cryptographic Issues",
+   "cwe_url": "https://cwe.mitre.org/data/definitions/310.html",
+   "evidence": {
+    "detail": "No stapled OCSP response",
+    "reproduction": "openssl s_client -connect crapi-web:443 -servername crapi-web -status | sed -n '1,120p'"
+   },
+   "first_seen": "2026-02-21T18:29:28.749249+00:00",
+   "id": "tls_config:36d3f0dca877d112",
+   "owasp": null,
+   "severity": "medium",
+   "soc2": [
+    "CC6.3"
+   ],
+   "title": "OCSP stapling not detected",
+   "tool": "tls_config",
+   "validation": {
+    "confidence": 0.6,
+    "downgrade_to": null,
+    "evidence": null,
+    "reason": "No specific validation available for this finding type",
+    "verified": true
+   }
+  },
+  {
+   "confidence": 0.6,
+   "confidence_tier": "low",
+   "cvss_score": 0.0,
+   "cwe": "CWE-16",
+   "cwe_name": "",
+   "cwe_url": "https://cwe.mitre.org/data/definitions/16.html",
+   "evidence": {
+    "record": null,
+    "reproduction": "dig +short crapi-web TXT"
+   },
+   "first_seen": "2026-02-21T18:29:28.749500+00:00",
+   "id": "dns_policy:623a3bd25bfbcba8",
+   "owasp": null,
+   "severity": "info",
+   "soc2": [],
+   "title": "SPF missing (no MX records - informational)",
+   "tool": "dns_policy",
+   "validation": {
+    "confidence": 0.6,
+    "downgrade_to": null,
+    "evidence": null,
+    "reason": "No specific validation available for this finding type",
+    "verified": true
+   }
+  },
+  {
+   "confidence": 0.6,
+   "confidence_tier": "low",
+   "cvss_score": 0.0,
+   "cwe": "CWE-16",
+   "cwe_name": "",
+   "cwe_url": "https://cwe.mitre.org/data/definitions/16.html",
+   "evidence": {
+    "record": null,
+    "reproduction": "dig +short _dmarc.crapi-web TXT"
+   },
+   "first_seen": "2026-02-21T18:29:28.749610+00:00",
+   "id": "dns_policy:1f26837fc35e4953",
+   "owasp": null,
+   "severity": "info",
+   "soc2": [],
+   "title": "DMARC missing (no MX records - informational)",
+   "tool": "dns_policy",
+   "validation": {
+    "confidence": 0.6,
+    "downgrade_to": null,
+    "evidence": null,
+    "reason": "No specific validation available for this finding type",
+    "verified": true
+   }
+  },
+  {
+   "confidence": 0.6,
+   "confidence_tier": "low",
+   "cvss_score": 0.0,
+   "cwe": "CWE-16",
+   "cwe_name": "",
+   "cwe_url": "https://cwe.mitre.org/data/definitions/16.html",
+   "evidence": {
+    "reproduction": "delv @1.1.1.1 crapi-web A",
+    "status": "insecure"
+   },
+   "first_seen": "2026-02-21T18:29:28.749668+00:00",
+   "id": "dns_policy:d158110449ec992b",
+   "owasp": null,
+   "severity": "info",
+   "soc2": [],
+   "title": "DNSSEC not validated",
+   "tool": "dns_policy",
+   "validation": {
+    "confidence": 0.6,
+    "downgrade_to": null,
+    "evidence": null,
+    "reason": "No specific validation available for this finding type",
+    "verified": true
+   }
+  },
+  {
+   "confidence": 0.6,
+   "confidence_tier": "medium",
+   "cvss_score": 3.0,
+   "cwe": "CWE-16",
+   "cwe_name": "",
+   "cwe_url": "https://cwe.mitre.org/data/definitions/16.html",
+   "evidence": {
+    "record": null,
+    "reproduction": "dig +short crapi-web CAA"
+   },
+   "first_seen": "2026-02-21T18:29:28.749732+00:00",
+   "id": "dns_policy:9aa11dd80c2dd26f",
+   "owasp": null,
+   "severity": "low",
+   "soc2": [],
+   "title": "CAA record missing",
+   "tool": "dns_policy",
+   "validation": {
+    "confidence": 0.6,
+    "downgrade_to": null,
+    "evidence": null,
+    "reason": "No specific validation available for this finding type",
+    "verified": true
+   }
+  },
+  {
+   "confidence": 0.6,
+   "confidence_tier": "low",
+   "cvss_score": 0.0,
+   "cwe": "CWE-16",
+   "cwe_name": "",
+   "cwe_url": "https://cwe.mitre.org/data/definitions/16.html",
+   "evidence": {
+    "reproduction": "dig +short _mta-sts.crapi-web TXT"
+   },
+   "first_seen": "2026-02-21T18:29:28.749875+00:00",
+   "id": "dns_policy:6c78b56f6072b21d",
+   "owasp": null,
+   "severity": "info",
+   "soc2": [],
+   "title": "MTA-STS not configured (no MX records - informational)",
+   "tool": "dns_policy",
+   "validation": {
+    "confidence": 0.6,
+    "downgrade_to": null,
+    "evidence": null,
+    "reason": "No specific validation available for this finding type",
+    "verified": true
+   }
+  },
+  {
+   "confidence": 0.6,
+   "confidence_tier": "low",
+   "cvss_score": 0.0,
+   "cwe": "CWE-16",
+   "cwe_name": "",
+   "cwe_url": "https://cwe.mitre.org/data/definitions/16.html",
+   "evidence": {
+    "reproduction": "dig +short _smtp._tls.crapi-web TXT"
+   },
+   "first_seen": "2026-02-21T18:29:28.749918+00:00",
+   "id": "dns_policy:21ab52ffb2db2f9c",
+   "owasp": null,
+   "severity": "info",
+   "soc2": [
+    "CC6.3"
+   ],
+   "title": "TLS-RPT not configured (no MX records - informational)",
+   "tool": "dns_policy",
+   "validation": {
+    "confidence": 0.6,
+    "downgrade_to": null,
+    "evidence": null,
+    "reason": "No specific validation available for this finding type",
+    "verified": true
+   }
+  }
+ ],
+ "http": {
+  "browser_fetch_error": null,
+  "cookies": {
+   "count": 0,
+   "details": [],
+   "issues": []
+  },
+  "csp_evaluation": {
+   "grade": "F",
+   "issues": [
+    "CSP header missing."
+   ],
+   "present": false,
+   "score": 0
+  },
+  "evidence": {
+   "page_title": "crAPI",
+   "screenshot": "/tmp/crapi_web.png"
+  },
+  "final_url": "http://crapi-web/",
+  "headers": {
+   "accept-ranges": [
+    "bytes"
+   ],
+   "connection": [
+    "keep-alive"
+   ],
+   "content-length": [
+    "1207"
+   ],
+   "content-type": [
+    "text/html"
+   ],
+   "date": [
+    "Sat, 21 Feb 2026 18:18:27 GMT"
+   ],
+   "etag": [
+    "\"68d18fd5-4b7\""
+   ],
+   "last-modified": [
+    "Mon, 22 Sep 2025 18:05:09 GMT"
+   ],
+   "server": [
+    "openresty/1.27.1.2"
+   ]
+  },
+  "http2": false,
+  "http3": null,
+  "http3_advertised": false,
+  "scheme_redirect": "none",
+  "security_headers": {
+   "coep": null,
+   "coop": null,
+   "corp": null,
+   "csp": null,
+   "hsts": null,
+   "permissions_policy": null,
+   "referrer_policy": null,
+   "server": "openresty/1.27.1.2",
+   "x_content_type_options": null,
+   "x_frame_options": null,
+   "x_xss_protection": null
+  },
+  "security_txt": {
+   "present": false,
+   "sample": null,
+   "url": "http://crapi-web/.well-known/security.txt"
+  },
+  "source": "browser",
+  "status": "HTTP/1.1 200"
+ },
+ "result": {
+  "compliance": {
+   "cwe_ids": [
+    "CWE-16",
+    "CWE-20",
+    "CWE-200",
+    "CWE-310",
+    "CWE-319",
+    "CWE-693",
+    "CWE-79"
+   ],
+   "owasp_top10": [
+    "A03:2021 - Injection"
+   ],
+   "soc2_criteria": [
+    "CC6.3",
+    "CC6.6",
+    "CC6.7"
+   ]
+  },
+  "cvss_metrics": {
+   "average": 5.1,
+   "maximum": 7.5,
+   "scores": [
+    7.5,
+    6.1,
+    6.1,
+    6.1,
+    6.1,
+    6.1,
+    6.1,
+    6.1,
+    6.1,
+    6.1
+   ]
+  },
+  "grade": "F",
+  "grade_reliable": true,
+  "notes": [
+   "Modern TLS (1.2/1.3) not detected.",
+   "OCSP stapling not detected.",
+   "HSTS missing.",
+   "X-Frame-Options missing.",
+   "X-Content-Type-Options not 'nosniff'.",
+   "Referrer-Policy missing.",
+   "CSP missing.",
+   "SPF missing (informational - no MX records detected).",
+   "DMARC missing (informational - no MX records detected).",
+   "DNSSEC not validated (informational).",
+   "Does not redirect to HTTPS.",
+   "No HTTP/2 detected (HTTP/3 unknown).",
+   "1 high severity issue(s) found (penalty: -10).",
+   "15 medium severity issue(s) found (penalty: -20)."
+  ],
+  "remediation": [
+   "HIGH PRIORITY: Fix high severity issues.",
+   "Enable OCSP stapling in your web server configuration.",
+   "Add Strict-Transport-Security header with max-age=31536000; includeSubDomains; preload",
+   "Improve CSP by removing 'unsafe-inline' and using nonces/hashes for scripts.",
+   "Add SPF record: v=spf1 include:YOUR_EMAIL_PROVIDER ~all",
+   "Add DMARC record: v=DMARC1; p=quarantine; rua=mailto:dmarc@yourdomain.com"
+  ],
+  "score": 0,
+  "summary": "Security Grade: F (0/100) - 29 issue(s) found"
+ },
+ "scan_metadata": {
+  "browser_fetch_error": null,
+  "checks_skipped": [],
+  "completed_at": "2026-02-21T18:29:28.770500+00:00",
+  "coverage_status": "complete",
+  "options": {
+   "active_checks_requested": true,
+   "ai_scan_classification_enabled": false,
+   "ai_validation_enabled": false,
+   "ai_verify_min_severity": "medium",
+   "auth_scenario": false,
+   "avoid_rules": 0,
+   "focus_rules": 0,
+   "include_partial_attack_chains": false,
+   "public_only": false,
+   "verified_findings_only": false
+  },
+  "pre_scan_warnings": null,
+  "scan_id": "a40b9e42-1255-4a6b-aa0f-b8ea7d257b48",
+  "scan_mode": "smart",
+  "scanner_stderr": "i-web/api/v2/user/reset-password with params: ['email', 'token', 'password']\n[sqli] Testing POST endpoint: http://crapi-web/api/v2/user/verify-email-token with params: ['code', 'token', 'otp']\n[sqli] Testing POST endpoint: http://crapi-web/api/v2/user/verify-phone-otp with params: ['code', 'token', 'otp']\n[sqli] Testing POST endpoint: http://crapi-web/auth with params: ['email', 'username', 'password', 'token']\n[sqli] Testing POST endpoint: http://crapi-web/contact-mechanic with params: ['email', 'message', 'name', 'subject']\n[sqli] Testing POST endpoint: http://crapi-web/forgot-password with params: ['email']\n[sqli] Testing POST endpoint: http://crapi-web/identity/api/apply-coupon with params: ['code', 'id', 'value', 'coupon_code', 'coupon']\n[sqli] Testing POST endpoint: http://crapi-web/identity/api/apply_coupon with params: ['code', 'id', 'value', 'coupon_code', 'coupon']\n[sqli] Testing POST endpoint: http://crapi-web/identity/api/community/comment with params: ['content', 'text', 'message', 'post_id']\n[sqli] Testing POST endpoint: http://crapi-web/identity/api/community/comments with params: ['content', 'text', 'message', 'post_id']\n[sqli] Testing POST endpoint: http://crapi-web/identity/api/coupon/validate with params: ['code', 'token', 'value', 'coupon_code', 'coupon']\n[sqli] Testing POST endpoint: http://crapi-web/identity/api/coupons/validate with params: ['code', 'token', 'value']\n[sqli] Testing POST endpoint: http://crapi-web/identity/api/shop/apply-coupon with params: ['code', 'id', 'value', 'coupon_code', 'coupon']\n[sqli] Testing POST endpoint: http://crapi-web/identity/api/shop/apply_coupon with params: ['code', 'id', 'value', 'coupon_code', 'coupon']\n[sqli] Testing POST endpoint: http://crapi-web/identity/api/shop/order with params: ['product_id', 'quantity', 'id']\n[sqli] Testing POST endpoint: http://crapi-web/identity/api/shop/orders with params: ['product_id', 'quantity', 'id']\n[sqli] Testing POST endpoint: http://crapi-web/identity/api/validate-coupon with params: ['code', 'token', 'value', 'coupon_code', 'coupon']\n[sqli] Testing POST endpoint: http://crapi-web/identity/api/validate_coupon with params: ['code', 'token', 'value', 'coupon_code', 'coupon']\n[sqli] Testing POST endpoint: http://crapi-web/login with params: ['email', 'username', 'password']\n[sqli] Testing POST endpoint: http://crapi-web/order with params: ['product_id', 'quantity', 'id']\n[sqli] Testing POST endpoint: http://crapi-web/orders with params: ['product_id', 'quantity', 'id']\n[DEBUG SQLMAP] indexed 1 captured requests for replay\n[DEBUG SQLMAP] candidates=2\n[DEBUG SQLMAP]   0: POST http://crapi-web/identity/api/auth/signup param=None reason=post_coverage\n[DEBUG SQLMAP]   1: POST http://crapi-web/api/auth/verify param=None reason=post_coverage\n[DEBUG NoSQL] Total POST endpoints: 54\n[DEBUG NoSQL]   0: http://crapi-web/api/auth/login body_params=['email', 'username', 'password', 'token'] content_type=application/json\n[DEBUG NoSQL]   1: http://crapi-web/api/login body_params=['email', 'username', 'password'] content_type=application/json\n[DEBUG NoSQL]   2: http://crapi-web/api/products body_params=['id', 'category'] content_type=application/json\n[DEBUG NoSQL]   3: http://crapi-web/api/search body_params=['query', 'q', 'term'] content_type=application/json\n[DEBUG NoSQL]   4: http://crapi-web/api/user body_params=['id'] content_type=application/json\n[DEBUG NoSQL] NoSQL candidates after filter: 54\n[DEBUG NoSQL]   candidate 0: http://crapi-web/api/auth/login params=['email', 'username', 'password', 'token']\n[DEBUG NoSQL]   candidate 1: http://crapi-web/api/login params=['email', 'username', 'password']\n[DEBUG NoSQL]   candidate 2: http://crapi-web/api/products params=['id', 'category']\n[DEBUG NoSQL]   candidate 3: http://crapi-web/api/search params=['query', 'q', 'term']\n[DEBUG NoSQL]   candidate 4: http://crapi-web/api/user params=['id']\n[DEBUG NoSQL Test] url=http://crapi-web/api/auth/login method=POST params=['email', 'username', 'password', 'token']\n[DEBUG NoSQL Test] base_body={'email': 'test@example.com', 'username': 'testuser', 'password': 'TestPass123!', 'token': 'test_token_abc123'}\n[DEBUG NoSQL Test] param=email baseline_body={\"email\": \"test_baseline_value_12345\", \"username\": \"testuser\", \"password\": \"TestPass123!\", \"token\": \"test_token_abc123\"}\n[DEBUG NoSQL Test] baseline_out=<html>\r\n<head><title>404 Not Found</title></head>\r\n<body>\r\n<center><h1>404 Not Found</h1></center>\r\n<hr><center>openresty/1.27.1.2</center>\r\n</body>\r\n</html>\r\n...\n[DEBUG NoSQL Test] baseline_len=159\n[DEBUG NoSQL Test] First payload test_body={\"email\": {\"$ne\": \"\"}, \"username\": \"testuser\", \"password\": \"TestPass123!\", \"token\": \"test_token_abc123\"}\n[DEBUG NoSQL Test] First payload test_out=<html>\r\n<head><title>404 Not Found</title></head>\r\n<body>\r\n<center><h1>404 Not Found</h1></center>\r\n<hr><center>openresty/1.27.1.2</center>\r\n</body>\r\n</html>\r\n...\n[DEBUG NoSQL Test] First payload test_len=159\n[DEBUG NoSQL Test] param=username baseline_body={\"email\": \"test@example.com\", \"username\": \"test_baseline_value_12345\", \"password\": \"TestPass123!\", \"token\": \"test_token_abc123\"}\n[DEBUG NoSQL Test] baseline_out=<html>\r\n<head><title>404 Not Found</title></head>\r\n<body>\r\n<center><h1>404 Not Found</h1></center>\r\n<hr><center>openresty/1.27.1.2</center>\r\n</body>\r\n</html>\r\n...\n[DEBUG NoSQL Test] baseline_len=159\n[DEBUG NoSQL Test] First payload test_body={\"email\": \"test@example.com\", \"username\": {\"$ne\": \"\"}, \"password\": \"TestPass123!\", \"token\": \"test_token_abc123\"}\n[DEBUG NoSQL Test] First payload test_out=<html>\r\n<head><title>404 Not Found</title></head>\r\n<body>\r\n<center><h1>404 Not Found</h1></center>\r\n<hr><center>openresty/1.27.1.2</center>\r\n</body>\r\n</html>\r\n...\n[DEBUG NoSQL Test] First payload test_len=159\n[DEBUG NoSQL Test] param=password baseline_body={\"email\": \"test@example.com\", \"username\": \"testuser\", \"password\": \"test_baseline_value_12345\", \"token\": \"test_token_abc123\"}\n[DEBUG NoSQL Test] baseline_out=<html>\r\n<head><title>404 Not Found</title></head>\r\n<body>\r\n<center><h1>404 Not Found</h1></center>\r\n<hr><center>openresty/1.27.1.2</center>\r\n</body>\r\n</html>\r\n...\n[DEBUG NoSQL Test] baseline_len=159\n[DEBUG NoSQL Test] First payload test_body={\"email\": \"test@example.com\", \"username\": \"testuser\", \"password\": {\"$ne\": \"\"}, \"token\": \"test_token_abc123\"}\n[DEBUG NoSQL Test] First payload test_out=<html>\r\n<head><title>404 Not Found</title></head>\r\n<body>\r\n<center><h1>404 Not Found</h1></center>\r\n<hr><center>openresty/1.27.1.2</center>\r\n</body>\r\n</html>\r\n...\n[DEBUG NoSQL Test] First payload test_len=159\n[DEBUG NoSQL Test] param=token baseline_body={\"email\": \"test@example.com\", \"username\": \"testuser\", \"password\": \"TestPass123!\", \"token\": \"test_baseline_value_12345\"}\n[DEBUG NoSQL Test] baseline_out=<html>\r\n<head><title>404 Not Found</title></head>\r\n<body>\r\n<center><h1>404 Not Found</h1></center>\r\n<hr><center>openresty/1.27.1.2</center>\r\n</body>\r\n</html>\r\n...\n[DEBUG NoSQL Test] baseline_len=159\n[DEBUG NoSQL Test] First payload test_body={\"email\": \"test@example.com\", \"username\": \"testuser\", \"password\": \"TestPass123!\", \"token\": {\"$ne\": \"\"}}\n[DEBUG NoSQL Test] First payload test_out=<html>\r\n<head><title>404 Not Found</title></head>\r\n<body>\r\n<center><h1>404 Not Found</h1></center>\r\n<hr><center>openresty/1.27.1.2</center>\r\n</body>\r\n</html>\r\n...\n[DEBUG NoSQL Test] First payload test_len=159\n[DEBUG NoSQL Test] url=http://crapi-web/api/login method=POST params=['email', 'username', 'password']\n[DEBUG NoSQL Test] base_body={'email': 'test@example.com', 'username': 'testuser', 'password': 'TestPass123!'}\n[DEBUG NoSQL Test] param=email baseline_body={\"email\": \"test_baseline_value_12345\", \"username\": \"testuser\", \"password\": \"TestPass123!\"}\n[DEBUG NoSQL Test] baseline_out=<html>\r\n<head><title>404 Not Found</title></head>\r\n<body>\r\n<center><h1>404 Not Found</h1></center>\r\n<hr><center>openresty/1.27.1.2</center>\r\n</body>\r\n</html>\r\n...\n[DEBUG NoSQL Test] baseline_len=159\n[DEBUG NoSQL Test] First payload test_body={\"email\": {\"$ne\": \"\"}, \"username\": \"testuser\", \"password\": \"TestPass123!\"}\n[DEBUG NoSQL Test] First payload test_out=<html>\r\n<head><title>404 Not Found</title></head>\r\n<body>\r\n<center><h1>404 Not Found</h1></center>\r\n<hr><center>openresty/1.27.1.2</center>\r\n</body>\r\n</html>\r\n...\n[DEBUG NoSQL Test] First payload test_len=159\n[DEBUG NoSQL Test] param=username baseline_body={\"email\": \"test@example.com\", \"username\": \"test_baseline_value_12345\", \"password\": \"TestPass123!\"}\n[DEBUG NoSQL Test] baseline_out=<html>\r\n<head><title>404 Not Found</title></head>\r\n<body>\r\n<center><h1>404 Not Found</h1></center>\r\n<hr><center>openresty/1.27.1.2</center>\r\n</body>\r\n</html>\r\n...\n[DEBUG NoSQL Test] baseline_len=159\n[DEBUG NoSQL Test] First payload test_body={\"email\": \"test@example.com\", \"username\": {\"$ne\": \"\"}, \"password\": \"TestPass123!\"}\n[DEBUG NoSQL Test] First payload test_out=<html>\r\n<head><title>404 Not Found</title></head>\r\n<body>\r\n<center><h1>404 Not Found</h1></center>\r\n<hr><center>openresty/1.27.1.2</center>\r\n</body>\r\n</html>\r\n...\n[DEBUG NoSQL Test] First payload test_len=159\n[DEBUG NoSQL Test] param=password baseline_body={\"email\": \"test@example.com\", \"username\": \"testuser\", \"password\": \"test_baseline_value_12345\"}\n[DEBUG NoSQL Test] baseline_out=<html>\r\n<head><title>404 Not Found</title></head>\r\n<body>\r\n<center><h1>404 Not Found</h1></center>\r\n<hr><center>openresty/1.27.1.2</center>\r\n</body>\r\n</html>\r\n...\n[DEBUG NoSQL Test] baseline_len=159\n[DEBUG NoSQL Test] First payload test_body={\"email\": \"test@example.com\", \"username\": \"testuser\", \"password\": {\"$ne\": \"\"}}\n[DEBUG NoSQL Test] First payload test_out=<html>\r\n<head><title>404 Not Found</title></head>\r\n<body>\r\n<center><h1>404 Not Found</h1></center>\r\n<hr><center>openresty/1.27.1.2</center>\r\n</body>\r\n</html>\r\n...\n[DEBUG NoSQL Test] First payload test_len=159\n[DEBUG NoSQL Test] url=http://crapi-web/api/products method=POST params=['id', 'category']\n[DEBUG NoSQL Test] base_body={'id': 1, 'category': 'test'}\n[DEBUG NoSQL Test] param=id baseline_body={\"id\": \"test_baseline_value_12345\", \"category\": \"test\"}\n[DEBUG NoSQL Test] baseline_out=<html>\r\n<head><title>404 Not Found</title></head>\r\n<body>\r\n<center><h1>404 Not Found</h1></center>\r\n<hr><center>openresty/1.27.1.2</center>\r\n</body>\r\n</html>\r\n...\n[DEBUG NoSQL Test] baseline_len=159\n[DEBUG NoSQL Test] First payload test_body={\"id\": {\"$ne\": \"\"}, \"category\": \"test\"}\n[DEBUG NoSQL Test] First payload test_out=<html>\r\n<head><title>404 Not Found</title></head>\r\n<body>\r\n<center><h1>404 Not Found</h1></center>\r\n<hr><center>openresty/1.27.1.2</center>\r\n</body>\r\n</html>\r\n...\n[DEBUG NoSQL Test] First payload test_len=159\n[DEBUG NoSQL Test] param=category baseline_body={\"id\": 1, \"category\": \"test_baseline_value_12345\"}\n[DEBUG NoSQL Test] baseline_out=<html>\r\n<head><title>404 Not Found</title></head>\r\n<body>\r\n<center><h1>404 Not Found</h1></center>\r\n<hr><center>openresty/1.27.1.2</center>\r\n</body>\r\n</html>\r\n...\n[DEBUG NoSQL Test] baseline_len=159\n[DEBUG NoSQL Test] First payload test_body={\"id\": 1, \"category\": {\"$ne\": \"\"}}\n[DEBUG NoSQL Test] First payload test_out=<html>\r\n<head><title>404 Not Found</title></head>\r\n<body>\r\n<center><h1>404 Not Found</h1></center>\r\n<hr><center>openresty/1.27.1.2</center>\r\n</body>\r\n</html>\r\n...\n[DEBUG NoSQL Test] First payload test_len=159\n[DEBUG NoSQL Test] url=http://crapi-web/api/search method=POST params=['query', 'q', 'term']\n[DEBUG NoSQL Test] base_body={'query': 'test', 'q': 'test', 'term': 'test'}\n[DEBUG NoSQL Test] param=query baseline_body={\"query\": \"test_baseline_value_12345\", \"q\": \"test\", \"term\": \"test\"}\n[DEBUG NoSQL Test] baseline_out=<html>\r\n<head><title>404 Not Found</title></head>\r\n<body>\r\n<center><h1>404 Not Found</h1></center>\r\n<hr><center>openresty/1.27.1.2</center>\r\n</body>\r\n</html>\r\n...\n[DEBUG NoSQL Test] baseline_len=159\n[DEBUG NoSQL Test] First payload test_body={\"query\": {\"$ne\": \"\"}, \"q\": \"test\", \"term\": \"test\"}\n[DEBUG NoSQL Test] First payload test_out=<html>\r\n<head><title>404 Not Found</title></head>\r\n<body>\r\n<center><h1>404 Not Found</h1></center>\r\n<hr><center>openresty/1.27.1.2</center>\r\n</body>\r\n</html>\r\n...\n[DEBUG NoSQL Test] First payload test_len=159\n[DEBUG NoSQL Test] param=q baseline_body={\"query\": \"test\", \"q\": \"test_baseline_value_12345\", \"term\": \"test\"}\n[DEBUG NoSQL Test] baseline_out=<html>\r\n<head><title>404 Not Found</title></head>\r\n<body>\r\n<center><h1>404 Not Found</h1></center>\r\n<hr><center>openresty/1.27.1.2</center>\r\n</body>\r\n</html>\r\n...\n[DEBUG NoSQL Test] baseline_len=159\n[DEBUG NoSQL Test] First payload test_body={\"query\": \"test\", \"q\": {\"$ne\": \"\"}, \"term\": \"test\"}\n[DEBUG NoSQL Test] First payload test_out=<html>\r\n<head><title>404 Not Found</title></head>\r\n<body>\r\n<center><h1>404 Not Found</h1></center>\r\n<hr><center>openresty/1.27.1.2</center>\r\n</body>\r\n</html>\r\n...\n[DEBUG NoSQL Test] First payload test_len=159\n[DEBUG NoSQL Test] param=term baseline_body={\"query\": \"test\", \"q\": \"test\", \"term\": \"test_baseline_value_12345\"}\n[DEBUG NoSQL Test] baseline_out=<html>\r\n<head><title>404 Not Found</title></head>\r\n<body>\r\n<center><h1>404 Not Found</h1></center>\r\n<hr><center>openresty/1.27.1.2</center>\r\n</body>\r\n</html>\r\n...\n[DEBUG NoSQL Test] baseline_len=159\n[DEBUG NoSQL Test] First payload test_body={\"query\": \"test\", \"q\": \"test\", \"term\": {\"$ne\": \"\"}}\n[DEBUG NoSQL Test] First payload test_out=<html>\r\n<head><title>404 Not Found</title></head>\r\n<body>\r\n<center><h1>404 Not Found</h1></center>\r\n<hr><center>openresty/1.27.1.2</center>\r\n</body>\r\n</html>\r\n...\n[DEBUG NoSQL Test] First payload test_len=159\n[DEBUG NoSQL Test] url=http://crapi-web/api/user method=POST params=['id']\n[DEBUG NoSQL Test] base_body={'id': 1}\n[DEBUG NoSQL Test] param=id baseline_body={\"id\": \"test_baseline_value_12345\"}\n[DEBUG NoSQL Test] baseline_out=<html>\r\n<head><title>404 Not Found</title></head>\r\n<body>\r\n<center><h1>404 Not Found</h1></center>\r\n<hr><center>openresty/1.27.1.2</center>\r\n</body>\r\n</html>\r\n...\n[DEBUG NoSQL Test] baseline_len=159\n[DEBUG NoSQL Test] First payload test_body={\"id\": {\"$ne\": \"\"}}\n[DEBUG NoSQL Test] First payload test_out=<html>\r\n<head><title>404 Not Found</title></head>\r\n<body>\r\n<center><h1>404 Not Found</h1></center>\r\n<hr><center>openresty/1.27.1.2</center>\r\n</body>\r\n</html>\r\n...\n[DEBUG NoSQL Test] First payload test_len=159\n[DEBUG NoSQL Test] url=http://crapi-web/api/users method=POST params=['id']\n[DEBUG NoSQL Test] base_body={'id': 1}\n[DEBUG NoSQL Test] param=id baseline_body={\"id\": \"test_baseline_value_12345\"}\n[DEBUG NoSQL Test] baseline_out=<html>\r\n<head><title>404 Not Found</title></head>\r\n<body>\r\n<center><h1>404 Not Found</h1></center>\r\n<hr><center>openresty/1.27.1.2</center>\r\n</body>\r\n</html>\r\n...\n[DEBUG NoSQL Test] baseline_len=159\n[DEBUG NoSQL Test] First payload test_body={\"id\": {\"$ne\": \"\"}}\n[DEBUG NoSQL Test] First payload test_out=<html>\r\n<head><title>404 Not Found</title></head>\r\n<body>\r\n<center><h1>404 Not Found</h1></center>\r\n<hr><center>openresty/1.27.1.2</center>\r\n</body>\r\n</html>\r\n...\n[DEBUG NoSQL Test] First payload test_len=159\n[DEBUG NoSQL Test] url=http://crapi-web/api/v1/login method=POST params=['email', 'username', 'password']\n[DEBUG NoSQL Test] base_body={'email': 'test@example.com', 'username': 'testuser', 'password': 'TestPass123!'}\n[DEBUG NoSQL Test] param=email baseline_body={\"email\": \"test_baseline_value_12345\", \"username\": \"testuser\", \"password\": \"TestPass123!\"}\n[DEBUG NoSQL Test] baseline_out=<html>\r\n<head><title>404 Not Found</title></head>\r\n<body>\r\n<center><h1>404 Not Found</h1></center>\r\n<hr><center>openresty/1.27.1.2</center>\r\n</body>\r\n</html>\r\n...\n[DEBUG NoSQL Test] baseline_len=159\n[DEBUG NoSQL Test] First payload test_body={\"email\": {\"$ne\": \"\"}, \"username\": \"testuser\", \"password\": \"TestPass123!\"}\n[DEBUG NoSQL Test] First payload test_out=<html>\r\n<head><title>404 Not Found</title></head>\r\n<body>\r\n<center><h1>404 Not Found</h1></center>\r\n<hr><center>openresty/1.27.1.2</center>\r\n</body>\r\n</html>\r\n...\n[DEBUG NoSQL Test] First payload test_len=159\n[DEBUG NoSQL Test] param=username baseline_body={\"email\": \"test@example.com\", \"username\": \"test_baseline_value_12345\", \"password\": \"TestPass123!\"}\n[DEBUG NoSQL Test] baseline_out=<html>\r\n<head><title>404 Not Found</title></head>\r\n<body>\r\n<center><h1>404 Not Found</h1></center>\r\n<hr><center>openresty/1.27.1.2</center>\r\n</body>\r\n</html>\r\n...\n[DEBUG NoSQL Test] baseline_len=159\n[DEBUG NoSQL Test] First payload test_body={\"email\": \"test@example.com\", \"username\": {\"$ne\": \"\"}, \"password\": \"TestPass123!\"}\n[DEBUG NoSQL Test] First payload test_out=<html>\r\n<head><title>404 Not Found</title></head>\r\n<body>\r\n<center><h1>404 Not Found</h1></center>\r\n<hr><center>openresty/1.27.1.2</center>\r\n</body>\r\n</html>\r\n...\n[DEBUG NoSQL Test] First payload test_len=159\n[DEBUG NoSQL Test] param=password baseline_body={\"email\": \"test@example.com\", \"username\": \"testuser\", \"password\": \"test_baseline_value_12345\"}\n[DEBUG NoSQL Test] baseline_out=<html>\r\n<head><title>404 Not Found</title></head>\r\n<body>\r\n<center><h1>404 Not Found</h1></center>\r\n<hr><center>openresty/1.27.1.2</center>\r\n</body>\r\n</html>\r\n...\n[DEBUG NoSQL Test] baseline_len=159\n[DEBUG NoSQL Test] First payload test_body={\"email\": \"test@example.com\", \"username\": \"testuser\", \"password\": {\"$ne\": \"\"}}\n[DEBUG NoSQL Test] First payload test_out=<html>\r\n<head><title>404 Not Found</title></head>\r\n<body>\r\n<center><h1>404 Not Found</h1></center>\r\n<hr><center>openresty/1.27.1.2</center>\r\n</body>\r\n</html>\r\n...\n[DEBUG NoSQL Test] First payload test_len=159\n[DEBUG NoSQL Test] url=http://crapi-web/api/v2/user/login method=POST params=['email', 'password']\n[DEBUG NoSQL Test] base_body={'email': 'test@example.com', 'password': 'TestPass123!'}\n[DEBUG NoSQL Test] param=email baseline_body={\"email\": \"test_baseline_value_12345\", \"password\": \"TestPass123!\"}\n[DEBUG NoSQL Test] baseline_out=<html>\r\n<head><title>404 Not Found</title></head>\r\n<body>\r\n<center><h1>404 Not Found</h1></center>\r\n<hr><center>openresty/1.27.1.2</center>\r\n</body>\r\n</html>\r\n...\n[DEBUG NoSQL Test] baseline_len=159\n[DEBUG NoSQL Test] First payload test_body={\"email\": {\"$ne\": \"\"}, \"password\": \"TestPass123!\"}\n[DEBUG NoSQL Test] First payload test_out=<html>\r\n<head><title>404 Not Found</title></head>\r\n<body>\r\n<center><h1>404 Not Found</h1></center>\r\n<hr><center>openresty/1.27.1.2</center>\r\n</body>\r\n</html>\r\n...\n[DEBUG NoSQL Test] First payload test_len=159\n[DEBUG NoSQL Test] param=password baseline_body={\"email\": \"test@example.com\", \"password\": \"test_baseline_value_12345\"}\n[DEBUG NoSQL Test] baseline_out=<html>\r\n<head><title>404 Not Found</title></head>\r\n<body>\r\n<center><h1>404 Not Found</h1></center>\r\n<hr><center>openresty/1.27.1.2</center>\r\n</body>\r\n</html>\r\n...\n[DEBUG NoSQL Test] baseline_len=159\n[DEBUG NoSQL Test] First payload test_body={\"email\": \"test@example.com\", \"password\": {\"$ne\": \"\"}}\n[DEBUG NoSQL Test] First payload test_out=<html>\r\n<head><title>404 Not Found</title></head>\r\n<body>\r\n<center><h1>404 Not Found</h1></center>\r\n<hr><center>openresty/1.27.1.2</center>\r\n</body>\r\n</html>\r\n...\n[DEBUG NoSQL Test] First payload test_len=159\n[scanner] Smart mode: Running DOM XSS analysis on 1 JS files (max: 20)\n[scanner] DOM XSS analysis: found 11 potential vulnerabilities\n[scanner] Smart mode: Running BOLA/IDOR testing on 216 discovered URLs\n[scanner] Single-user BOLA: no user2_session - unauthenticated access testing only\n[bola] Synthesized 60 resource URLs from collection endpoints\n[bola] Synthesized 95 query URLs from parameter hints\n[bola] Found 30 unique endpoint templates with ID patterns\nWARNING:scanner_tools.proof_of_exploit:PoE request limit reached for crapi-web (budget=bola) in scan a40b9e42-1255-4a6b-aa0f-b8ea7d257b48 (limit=400; further warnings suppressed)\n[scanner] Smart BOLA: no vulnerabilities found (tested 30 endpoints)\n[progress] phase=validation pct=92 message=finding validation complete\n[verification] Verifying 16 findings (min severity: medium)...\n[progress] phase=attack_chains pct=95 message=attack chain analysis complete\n[progress] phase=finalizing pct=97 message=grading report",
+  "scanner_version": "b460883",
+  "schema_version": "2026-01-28",
+  "target": {
+   "body_template": null,
+   "content_type": "",
+   "has_auth": false,
+   "method": "GET",
+   "param_values": {
+    "body": {},
+    "query": {}
+   },
+   "params": {
+    "body": [],
+    "query": []
+   },
+   "score": 0,
+   "url": "http://crapi-web/static/js/main.8c78208c.js"
+  }
+ },
+ "smart_coverage": {
+  "auth_states_tested": [
+   "anonymous"
+  ],
+  "discovery_sources": [
+   "har_network_capture",
+   "url_crawl",
+   "browser_api_capture",
+   "js_bundle_analysis",
+   "options_method_discovery"
+  ],
+  "endpoints": {
+   "by_method": {
+    "GET": 220
+   },
+   "coverage": 0.909,
+   "discovered": 220,
+   "tested": 200
+  },
+  "nuclei_templates": {
+   "by_category": {},
+   "hit_rate": 0.0,
+   "matched": 0,
+   "run": 0
+  },
+  "parameters": {
+   "by_location": {},
+   "coverage": 0.0,
+   "discovered": 0,
+   "tested": 740
+  }
+ },
+ "triage": {
+  "ai_false_positive": {
+   "count": 0,
+   "sample": []
+  },
+  "confirmed": {
+   "count": 0,
+   "sample": []
+  },
+  "needs_review": {
+   "count": 16,
+   "sample": [
+    {
+     "id": "exposed_files:c4042ac4548fe6f4",
+     "severity": "info",
+     "title": "Exposed file: robots.txt (confidence: low)",
+     "tool": "exposed_files",
+     "url": "http://crapi-web/robots.txt"
+    },
+    {
+     "id": "security_txt:5f6eff14f4c1d961",
+     "severity": "info",
+     "title": "security.txt missing",
+     "tool": "security_txt",
+     "url": "http://crapi-web/.well-known/security.txt"
+    },
+    {
+     "id": "input_validation:39badc70b6131c82",
+     "severity": "info",
+     "title": "Input validation detected (attack payloads blocked)",
+     "tool": "input_validation",
+     "url": null
+    },
+    {
+     "id": "http_headers:8401aebe0889a0c4",
+     "severity": "medium",
+     "title": "HSTS header missing",
+     "tool": "http_headers",
+     "url": null
+    },
+    {
+     "id": "http_headers:3d3abc1288cdde2d",
+     "severity": "low",
+     "title": "X-Frame-Options missing",
+     "tool": "http_headers",
+     "url": null
+    }
+   ]
+  },
+  "suspected_high": {
+   "count": 1,
+   "sample": [
+    {
+     "id": "exposed_files:d07c07ae2cf2b190",
+     "severity": "high",
+     "title": "Exposed file: .env (confidence: high)",
+     "tool": "exposed_files",
+     "url": "http://crapi-web/.env"
+    }
+   ]
+  },
+  "verification_skipped": {
+   "count": 11,
+   "sample": [
+    {
+     "id": "dom_xss:19f506b0ed69ba46",
+     "severity": "medium",
+     "title": "DOM-Based XSS (Function constructor)",
+     "tool": "dom_xss",
+     "url": null
+    },
+    {
+     "id": "dom_xss:ecb63d0e209bfe5d",
+     "severity": "medium",
+     "title": "DOM-Based XSS (setTimeout with string)",
+     "tool": "dom_xss",
+     "url": null
+    },
+    {
+     "id": "dom_xss:0503cdbfd68e6559",
+     "severity": "medium",
+     "title": "DOM-Based XSS (setInterval with string)",
+     "tool": "dom_xss",
+     "url": null
+    },
+    {
+     "id": "dom_xss:b6c02994c29748dc",
+     "severity": "medium",
+     "title": "DOM-Based XSS (new Function)",
+     "tool": "dom_xss",
+     "url": null
+    },
+    {
+     "id": "dom_xss:b9204975e4a3a4b5",
+     "severity": "medium",
+     "title": "DOM-Based XSS (innerHTML assignment)",
+     "tool": "dom_xss",
+     "url": null
+    }
+   ]
+  }
+ }
+}

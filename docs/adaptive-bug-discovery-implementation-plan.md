@@ -201,6 +201,8 @@ Acceptance:
 
 ### Wave 7: Recall measurement
 
+**Status: re-derivable acceptance + anti-fitting guard implemented (host-tested). `scripts/verify_acceptance.py` recomputes each app's scorecard from the committed raw artifact via the shared `benchmark_targets` predicate (never trusts a stored score) and fails on drift against a committed `acceptance.json` oracle; `tests/test_no_fitting.py` is a build-failing guard rejecting benchmark nouns in detector/planner string literals (comments/docstrings are allowed rationale). The broader metric surface + evaluation-set automation remain as below.**
+
 Metrics:
 
 - verified vulnerabilities rediscovered;
