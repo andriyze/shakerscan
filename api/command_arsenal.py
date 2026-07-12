@@ -15,7 +15,7 @@ from typing import Any
 import uuid
 
 
-ARSENAL_SCHEMA_VERSION = "2026-07-05.v1"
+ARSENAL_SCHEMA_VERSION = "2026-07-12.v2"
 
 COMMAND_STATUSES = (
     "contract",
@@ -62,6 +62,7 @@ class ArsenalCommand:
     evidence_contract: tuple[str, ...] = ()
     redaction_contract: tuple[str, ...] = ()
     timeout_seconds: int = 30
+    request_cost: int = 0
 
 
 @dataclass(frozen=True)
@@ -396,6 +397,29 @@ COMMANDS: tuple[ArsenalCommand, ...] = (
         evidence_contract=("retest_id", "proof", "artifacts"),
         redaction_contract=("auth_header", "cookies", "request", "response"),
         timeout_seconds=30,
+    ),
+    ArsenalCommand(
+        name="experiment.http_diff",
+        family="research",
+        description="Run a bounded same-origin control/mutation HTTP experiment and record unverified differential evidence.",
+        status="gated",
+        risk_tier="active",
+        method="POST",
+        path="/arsenal/execute",
+        scope_fields=("target_id",),
+        parameters_schema={
+            "target_id": {"type": "string", "format": "uuid"},
+            "objective": {"type": "string", "maxLength": 1000},
+            "expected_signal": {"type": "string", "maxLength": 1000},
+            "falsifier": {"type": "string", "maxLength": 1000},
+            "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 15},
+            "steps": {"type": "array", "minItems": 2, "maxItems": 4},
+        },
+        required_confirmations=("confirm_authorized",),
+        evidence_contract=("observations", "comparisons", "evidence_instance_id", "tool_receipt_id"),
+        redaction_contract=("authorization", "cookie", "x-api-key", "response.body_sample"),
+        timeout_seconds=75,
+        request_cost=4,
     ),
     ArsenalCommand(
         name="ai_target.list",
@@ -1552,6 +1576,7 @@ def _command_to_dict(command: ArsenalCommand) -> dict[str, Any]:
         "evidence_contract": list(command.evidence_contract),
         "redaction_contract": list(command.redaction_contract),
         "timeout_seconds": command.timeout_seconds,
+        "request_cost": command.request_cost,
     }
 
 

@@ -31,6 +31,12 @@ def test_local_compose_mounts_live_source_as_directories():
     assert "ln -s" not in entrypoint, "entrypoint must copy live source, not symlink it"
 
 
+def test_local_compose_passes_the_documented_gated_execution_flag_to_api():
+    compose = (ROOT / "docker-compose.yml").read_text()
+
+    assert "AI_OPS_ROUTER_EXECUTE_ENABLED=${AI_OPS_ROUTER_EXECUTE_ENABLED:-false}" in compose
+
+
 def test_dockerfile_copies_all_scanner_modules_without_drift():
     # The prebuilt image must contain every top-level scanner module the runtime
     # imports — not just a hand-maintained subset that silently drifts (this is

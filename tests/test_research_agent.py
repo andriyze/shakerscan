@@ -128,3 +128,12 @@ def test_only_explicit_command_sets_can_be_research_actuators():
     assert "asm.test" in agent.GATED_RESEARCH_COMMANDS
     assert "authz.promote_replay_finding" not in agent.GATED_RESEARCH_COMMANDS
     assert "target.principal_matrix.record" not in agent.GATED_RESEARCH_COMMANDS
+
+
+def test_http_experiment_reserves_worst_case_request_budget():
+    command = _command("experiment.http_diff", risk="active", status="gated")
+    command["request_cost"] = 4
+
+    assert agent.action_cost(command)["requests"] == 4
+    assert "experiment.http_diff" in agent.GATED_RESEARCH_COMMANDS
+    assert "experiment.http_diff" in agent.TARGET_BOUND_COMMANDS

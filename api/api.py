@@ -139,6 +139,7 @@ from retest_contract import (
 )
 import parallel_scan
 import asm_inventory
+from http_experiment import ExperimentContractError, execute_experiment
 from research_agent import (
     GATED_RESEARCH_COMMANDS,
     READ_ONLY_RESEARCH_COMMANDS,
@@ -21727,6 +21728,115 @@ async def _arsenal_dispatch_authz_promote_replay_finding(p: dict[str, Any], appr
         )
 
 
+async def _arsenal_dispatch_http_diff(p: dict[str, Any], approval_receipt_id: str | None) -> dict[str, Any]:
+    target_id = str(p.get("target_id") or "").strip()
+    target_uuid = _uuid_or_400(target_id, "target id")
+    async with db_pool.acquire() as conn:
+        target = await conn.fetchrow(
+            "SELECT id, url, is_active, discovery_source FROM targets WHERE id=$1",
+            target_uuid,
+        )
+    if not target or not target["is_active"]:
+        raise HTTPException(status_code=404, detail="Active target not found")
+    if str(target["discovery_source"] or "") == "model-intake":
+        raise HTTPException(status_code=400, detail="Model Intake artifacts are not HTTP experiment targets")
+    experiment_payload = {
+        key: value for key, value in p.items()
+        if key in {"objective", "expected_signal", "falsifier", "timeout_seconds", "steps"}
+    }
+    started_at = datetime.now(timezone.utc)
+    try:
+        executed = await execute_experiment(str(target["url"]), experiment_payload)
+    except ExperimentContractError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"error": "invalid_http_experiment", "violation": str(exc)},
+        ) from exc
+    finished_at = datetime.now(timezone.utc)
+    safe_result = _redact_agent_payload(executed)
+    failed_count = sum(1 for item in safe_result.get("observations", []) if item.get("error"))
+    result_status = "partial" if failed_count else "completed"
+    async with db_pool.acquire() as conn:
+        async with conn.transaction():
+            receipt_result = await _record_tool_receipt(conn, ToolReceiptRequest(
+                tool_name="experiment.http_diff",
+                adapter_version="2026-07-12.v1",
+                redacted_argv=["experiment.http_diff", str(target_uuid), f"steps:{safe_result.get('request_count', 0)}"],
+                target_scope={"target_id": str(target_uuid), "target_url": str(target["url"]), "same_origin_only": True},
+                approval_receipt_id=approval_receipt_id,
+                status="failed" if failed_count == safe_result.get("request_count") else "success",
+                parser_status="parsed",
+                started_at=started_at.isoformat(),
+                finished_at=finished_at.isoformat(),
+                redaction_summary="Credential headers forbidden; response samples bounded and redacted.",
+                metadata_json={
+                    "version": safe_result.get("version"),
+                    "request_count": safe_result.get("request_count"),
+                    "failed_count": failed_count,
+                    "comparisons": safe_result.get("comparisons") or [],
+                    "finding_created": False,
+                    "proof_state": "unverified_experiment_signal",
+                },
+                created_by="research_http_experiment",
+            ))
+            receipt = receipt_result.get("tool_receipt") or {}
+            evidence_result = await _record_evidence_instance(conn, EvidenceInstanceRequest(
+                target_id=str(target_uuid),
+                concrete_url=str(target["url"]),
+                request_response_refs=[
+                    f"{item.get('request', {}).get('method')} {item.get('request', {}).get('path')}"
+                    for item in safe_result.get("observations", [])
+                ],
+                proof_observation={
+                    "objective": safe_result.get("objective"),
+                    "expected_signal": safe_result.get("expected_signal"),
+                    "falsifier": safe_result.get("falsifier"),
+                    "observations": safe_result.get("observations") or [],
+                    "comparisons": safe_result.get("comparisons") or [],
+                },
+                tool_receipt_id=str(receipt.get("id")) if receipt.get("id") else None,
+                proof_state="unverified",
+                metadata_json={
+                    "experiment_version": safe_result.get("version"),
+                    "finding_created": False,
+                    "promotion_allowed": False,
+                },
+                created_by="research_http_experiment",
+            ))
+            evidence = evidence_result.get("evidence_instance") or {}
+            command_result = await _record_command_result(
+                conn,
+                command="experiment.http_diff",
+                status=result_status,
+                risk_tier="active",
+                approval_receipt_id=approval_receipt_id,
+                tool_receipt_ids=[str(receipt.get("id"))] if receipt.get("id") else [],
+                operator_message=(
+                    "Completed bounded HTTP differential experiment; signal remains unverified."
+                    if not failed_count else
+                    "HTTP differential experiment completed with request errors; signal remains unverified."
+                ),
+                result_json={
+                    "experiment": safe_result,
+                    "evidence_instance_id": str(evidence.get("id")) if evidence.get("id") else None,
+                    "tool_receipt_id": str(receipt.get("id")) if receipt.get("id") else None,
+                    "findings_created": 0,
+                    "verified_findings_created": 0,
+                },
+                created_by="research_http_experiment",
+            )
+    return {
+        "status": result_status,
+        "operation_id": command_result["id"],
+        "experiment": safe_result,
+        "evidence_instance_id": str(evidence.get("id")) if evidence.get("id") else None,
+        "tool_receipt_id": str(receipt.get("id")) if receipt.get("id") else None,
+        "findings_created": 0,
+        "verified_findings_created": 0,
+        "proof_state": "unverified_experiment_signal",
+    }
+
+
 def _arsenal_readonly_adapters() -> dict[str, Any]:
     return {
         "campaign.list": _arsenal_dispatch_campaign_list,
@@ -21806,6 +21916,7 @@ def _arsenal_gated_adapters() -> dict[str, Any]:
         "authz.promote_replay_finding": _arsenal_dispatch_authz_promote_replay_finding,
         "target.principal_matrix.record": _arsenal_dispatch_target_principal_matrix_record,
         "hypothesis.reconcile_proof": _arsenal_dispatch_hypothesis_reconcile_proof,
+        "experiment.http_diff": _arsenal_dispatch_http_diff,
     }
 
 

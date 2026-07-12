@@ -55,6 +55,7 @@ GATED_RESEARCH_COMMANDS = {
     "asm.recon",
     "asm.test",
     "finding.retest",
+    "experiment.http_diff",
     "scan.focused_family",
 }
 
@@ -65,6 +66,7 @@ TARGET_BOUND_COMMANDS = {
     "asm.recon",
     "asm.test",
     "deployment.decision",
+    "experiment.http_diff",
     "finding.list",
     "hypothesis.list",
     "hypothesis.situation_report",
@@ -144,7 +146,7 @@ def action_cost(command: dict[str, Any]) -> dict[str, int]:
         "steps": 1,
         "actions": 1,
         "active_actions": active,
-        "requests": 1 if active else 0,
+        "requests": max(1, int(command.get("request_cost") or 1)) if active else 0,
         "seconds": timeout,
         "model_tokens": 0,
     }

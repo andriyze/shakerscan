@@ -9224,3 +9224,12 @@ def test_research_planner_recovers_only_unique_proposable_command_shape():
 
     assert bound["action"]["command"] == "hypothesis.situation_report"
     assert ambiguous["action"]["command"] == ""
+
+
+def test_http_experiment_has_wired_gated_dispatch_adapter():
+    command = api_module._research_command_catalog()["experiment.http_diff"]
+
+    assert command["status"] == "gated"
+    assert command["risk_tier"] == "active"
+    assert command["request_cost"] == 4
+    assert api_module._arsenal_gated_adapters()["experiment.http_diff"] is api_module._arsenal_dispatch_http_diff

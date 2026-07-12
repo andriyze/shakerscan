@@ -779,12 +779,19 @@ the current observation ID/hash, cannot carry receipts or credentials, must decl
 signal and falsifier, and consume bounded step/action/time/request/model-token budgets. Shadow mode
 records decisions without dispatch. Read-only mode dispatches only the target-scoped inspection
 allowlist. Gated mode can additionally dispatch `asm.improve`, `asm.recon`, `asm.test`,
-`finding.retest`, and `scan.focused_family` through the existing Arsenal gateway when a matching
+`finding.retest`, `scan.focused_family`, and `experiment.http_diff` through the existing Arsenal gateway when a matching
 scope/approval receipt and the global execution flag are present. Target IDs/URLs and receipts are
 injected by the server. The configured AI provider can plan one step from the UI/API; the host-side
 `./scanner.sh research <episode-id> [max-decisions]` runner uses an isolated ephemeral Codex process.
 Neither planner path can mint proof or findings. Cancellation terminates the episode and best-effort
 cancels linked pending/running scans.
+
+`experiment.http_diff` is the first typed adaptive experiment actuator. It accepts two to four
+anonymous control/mutation requests using relative same-origin paths, forbids model-supplied
+credential/host headers and redirects, caps request and response sizes and timeouts, and records
+status/body/JSON-shape comparisons in a tool receipt plus an `unverified` evidence instance. The
+research budget reserves four requests before dispatch. Experiment signals cannot directly create
+or verify findings; a family-specific deterministic verifier must establish proof.
 
 **Read-only MCP**: `./scanner.sh mcp` starts a stdio MCP adapter over `POST /arsenal/execute`.
 It exposes targets, ASM gaps, findings, content-free evidence manifests, the mission timeline,
@@ -1011,7 +1018,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | Public REST operations | 201 | `api/api.py` FastAPI decorators |
 | Unique REST paths | 160 | `api/api.py` |
 | Check families | 13 | `api/check_registry.py` |
-| Command Arsenal commands | 73 | `api/command_arsenal.py` |
+| Command Arsenal commands | 74 | `api/command_arsenal.py` |
 | Tool adapters | 13 | `api/command_arsenal.py` |
 | Local-agent adapters | 4 | `api/command_arsenal.py` |
 | Scanner CLI flags | 158 | `scanner/scanner.py` |
@@ -1284,6 +1291,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | `evidence.retention_sweep` | evidence | gated | active | POST | `/evidence/retention/sweep` | Preview or execute bounded evidence-object retention cleanup. dry_run=true is a safe preview; dry_run=false deletes rows/files and is gated (state-changing). legal_hold is never selected and active-finding evidence is never deleted. |
 | `evidence_instance.list` | evidence | read_only | read_only | GET | `/evidence/instances` | Read concrete evidence instances split from canonical findings. |
 | `evidence_instance.record` | evidence | dry_run | read_only | POST | `/evidence/instances` | Record a concrete evidence instance without updating finding proof state. |
+| `experiment.http_diff` | research | gated | active | POST | `/arsenal/execute` | Run a bounded same-origin control/mutation HTTP experiment and record unverified differential evidence. |
 | `exposure.graph.get` | inventory | read_only | read_only | GET | `/exposure/graph` | Read the exposure graph built from existing targets, scans, AI targets, model artifacts, and findings. |
 | `finding.get` | findings | read_only | read_only | GET | `/findings/{finding_id}` | Read one finding by id or fingerprint. |
 | `finding.list` | findings | read_only | read_only | GET | `/findings` | List findings with filters and proof-state fields. |

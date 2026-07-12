@@ -31,6 +31,8 @@ Use ShakerScan's research episode controller for adaptive investigation. The age
 - Do not claim a vulnerability is verified. Only ShakerScan proof contracts can promote findings.
 - Do not bypass a rejected decision. Read its validation errors and choose a new bounded step.
 - Active work requires a `gated` episode, receipts, the execution feature flag, and existing command-specific checks.
+- `experiment.http_diff` may use only relative same-origin paths and anonymous headers. Use two to four steps with the first as the control; never place credentials or receipt data in a step.
+- Treat HTTP experiment differences as leads. Route them to a deterministic family verifier before describing a vulnerability as proven.
 
 ## API Skeleton
 
@@ -48,4 +50,3 @@ curl -X POST "$API_BASE/research/episodes/EPISODE_UUID/plan-step" \
   -H 'Content-Type: application/json' \
   -d '{"execute":true,"timeout_seconds":90,"max_tokens":3000}'
 ```
-

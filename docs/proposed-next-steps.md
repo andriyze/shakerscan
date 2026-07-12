@@ -1,11 +1,13 @@
 # Proposed Next Steps - Current Status and Hardening Roadmap
 
-**Status (2026-07-11):** the bounded local/owned-target product is implemented, but it is not
+**Status (2026-07-12):** the bounded local/owned-target product is implemented, but it is not
 release-complete. Detector acceptance, strict registry authority, engine-wide cancellation,
 metering-quality contracts, and Wave 6 live parity/soak remain open. The bounded Research Agent now
 ships shadow and read-only one-step loops plus receipt-gated selection of a narrow existing-action
-allowlist. Typed custom HTTP experiments, unattended production autonomy, and multi-node execution
-remain gated.
+allowlist. The first typed custom HTTP experiment actuator now supports anonymous same-origin
+control/mutation comparisons with strict request/body/time limits, durable unverified evidence, and
+no direct finding promotion. Authenticated/stateful experiments, unattended production autonomy,
+and multi-node execution remain gated.
 
 This is the single live DAST/ASM status and dependency document. Historical implementation detail is
 preserved in the [archive](archive/README.md), including the completed deferred-wave plan and the
