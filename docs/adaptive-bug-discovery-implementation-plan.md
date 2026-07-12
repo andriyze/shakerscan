@@ -296,12 +296,16 @@ Wave and family acceptance are executable predicates over committed artifacts, n
 1. `feat(research): add bounded HTTP differential experiments` — complete (`e786806`).
 2. `feat(research): add chained experiment values and rich comparisons` — complete (`332ae2b`), hardened (`5f0482e`). *(Shipped under commit titles "Enhance HTTP experiment diffing…" / "Harden HTTP experiment normalization…".)*
 3. `feat(research): add principal-bound stateful workflows` — core runtime complete (`75680a7`).
-4. `feat(research): add adaptive hypothesis lifecycle`.
-5. `feat(research): add deterministic experiment proof handoffs`.
-6. `feat(research): add impact-aware hypothesis scheduling`.
-7. `feat(metrics): add adaptive discovery recall scorecards`.
-8. `feat(ui): add adaptive experiment workbench`.
-9. `docs: reconcile adaptive discovery implementation status`.
+4. `feat(research): Wave 4 hypothesis lifecycle` — complete (`a608b59`): blocked/exhausted states + gated transitions.
+5. `feat(research): Wave 5 deterministic family proof handoffs` — complete (`3642b4b`): registry + evaluation.
+6. `feat(research): Wave 6 deterministic hypothesis scheduling` — complete (`ebf2fca`).
+7. `feat(metrics): Wave 7 re-derivable acceptance + anti-fitting guard` — complete (`725397a`).
+8. `feat(ui): Wave 8 adaptive workbench` — complete (`d1762aa`).
+9. `docs(research): Wave 9 status reconcile` — complete (`984d96d`); provider integration pre-existing.
+
+The shared verification-and-proof architecture (§4) landed first in `f32ef38`
+(pure `api/adjudicate.py` + the symmetric negative gate). Remaining depth per
+wave is noted inline in each wave's Status line above.
 
 Each feature commit requires focused tests. Each runtime wave requires a full suite and rebuild before live validation. The execution gate must be restored to disabled after temporary local E2E use.
 
