@@ -26710,20 +26710,38 @@ async def research_episode_benchmark(
             episode_row["target_id"],
             episode_row["created_at"],
         )
+        # Any fingerprint produced by a NON-autonomous source on this target (the baseline scan,
+        # any other DAST/scanner/manual finding, or a scan that ran during the episode window) is
+        # not autonomy's to claim as net-new. Exclude all of them, not just the baseline scan.
+        prior_source_rows = await conn.fetch(
+            "SELECT DISTINCT fingerprint FROM findings "
+            "WHERE target_id=$1 AND COALESCE(tool,'') <> 'autonomous_workflow' AND fingerprint IS NOT NULL",
+            episode_row["target_id"],
+        )
     baseline_fingerprints = {str(row["fingerprint"] or "") for row in baseline_rows}
-    net_new = [row_to_dict(row) for row in autonomous_rows if str(row["fingerprint"] or "") not in baseline_fingerprints]
+    prior_fingerprints = baseline_fingerprints | {str(row["fingerprint"] or "") for row in prior_source_rows}
+    net_new = [row_to_dict(row) for row in autonomous_rows if str(row["fingerprint"] or "") not in prior_fingerprints]
+    episode_actual_requests = int((episode.get("budget_used") or {}).get("requests") or 0)
     return {
         "episode_id": str(episode_row["id"]),
         "baseline_scan_id": str(baseline_uuid),
-        "baseline_request_budget": baseline_budget,
-        "autonomous_request_budget": episode_budget,
-        "equal_budget": equal_budget,
+        "baseline_request_budget_configured": baseline_budget,
+        "autonomous_request_budget_configured": episode_budget,
+        "autonomous_requests_actual": episode_actual_requests,
+        "equal_configured_budget": equal_budget,
         "gate_passed": bool(equal_budget and net_new),
         "net_new_verified_findings": net_new,
         "net_new_verified_count": len(net_new),
         "autonomous_verified_count": len(autonomous_rows),
         "baseline_finding_count": len(baseline_rows),
-        "metric": "net_new_verified_findings_not_independently_produced_by_equal_budget_smart_scan",
+        "caveats": [
+            "Budgets compared are CONFIGURED caps; the baseline's actual HTTP request count is not instrumented here.",
+            "No application state snapshot/reset between runs; results can depend on shared mutable state.",
+            "Worker build-fingerprint uniformity across the baseline and episode is not enforced here.",
+            "gate_passed means: at least one VERIFIED autonomous finding whose fingerprint no non-autonomous "
+            "source on this target produced, at equal configured budget -- not a fully controlled superiority proof.",
+        ],
+        "metric": "net_new_verified_findings_not_produced_by_any_non_autonomous_source_on_target",
     }
 
 
