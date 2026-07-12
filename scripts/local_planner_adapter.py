@@ -514,7 +514,11 @@ def build_research_prompt(observation_row: dict[str, Any]) -> str:
         "For request_input or stop, set action.command to an empty string and action.parameters to the string \"{}\". "
         "Use request_input when a required precondition is missing. Use stop when the objective is "
         "satisfied or no useful bounded action remains. Do not claim that a vulnerability is verified; only "
-        "ShakerScan proof contracts can do that. Copy observation_id and context_hash exactly. Set "
+        "ShakerScan proof contracts can do that. Use scans or ASM only for a concrete uncovered or stale gap. "
+        "For bug hunting, prefer the highest-ranked unexplained hypothesis and design an app-specific control/test "
+        "experiment across routes, objects, principals, or state transitions. Reference its hypothesis_id. Optimize "
+        "for net-new invariant violations that commodity DAST would miss. Learn from experiment comparisons and "
+        "receipts, including negative results, and never repeat an identical recent action. Copy observation_id and context_hash exactly. Set "
         f"decision_version={RESEARCH_DECISION_VERSION}.\nINPUT:\n{canonical_json(payload)}"
     )
     if len(prompt.encode()) > MAX_PROMPT_BYTES:

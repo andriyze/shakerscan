@@ -3668,6 +3668,7 @@ class ArsenalExecuteRequest(BaseModel):
     created_by: Optional[str] = None
     campaign_id: Optional[str] = None
     campaign_action_id: Optional[str] = None
+    research_hypothesis_id: Optional[str] = None
 
 
 class AuthzReplayExecuteRequest(BaseModel):
@@ -3900,7 +3901,7 @@ class ResearchLaunchRequest(BaseModel):
     subject_type: str = Field(pattern="^(target|finding|asm)$")
     subject_id: str = Field(min_length=1, max_length=200)
     mission_profile: str = Field(pattern="^(target_hunt|verify_finding|close_asm_gaps)$")
-    intensity: str = Field(default="hunt", pattern="^(analyze|hunt|relentless)$")
+    intensity: str = Field(default="hunt", pattern="^(analyze|hunt|relentless|deep_hunt)$")
     approval_receipt_id: Optional[str] = None
     autopilot: bool = True
     force_new: bool = False
@@ -14437,6 +14438,14 @@ RESEARCH_LAUNCH_PROFILES: dict[str, dict[str, Any]] = {
             "seconds": 3600, "model_tokens": 250000,
         },
     },
+    "deep_hunt": {
+        "execution_mode": "gated", "max_risk_tier": "credential",
+        "max_steps": 25,
+        "budget_limits": {
+            "steps": 25, "actions": 24, "active_actions": 12, "requests": 500,
+            "seconds": 3600, "model_tokens": 250000,
+        },
+    },
 }
 
 
@@ -15371,12 +15380,17 @@ async def _build_agent_context_pack_from_target(conn, req: AgentContextPackFromT
             findings_summary.append(finding)
 
     hypotheses_summary: list[dict[str, Any]] = []
+    ranked_hypotheses: list[dict[str, Any]] = []
+    attack_graph: dict[str, Any] = {"nodes": [], "edges": [], "truncated": False}
     try:
         hypothesis_rows = await conn.fetch(
             """
-            SELECT id, source, family, cwe, title, severity_guess, confidence,
+            SELECT id, target_id, source, family, cwe, title, description,
+                   severity_guess, confidence,
                    dedupe_key, status, version, claim_owner, claim_lease_expires_at,
-                   smoke_score, evidence_object_ids, tool_receipt_ids, updated_at
+                   smoke_score, evidence_object_ids, tool_receipt_ids,
+                   next_test_action, metadata_json, endorsements, refutations,
+                   updated_at
             FROM hypotheses
             WHERE target_id = $1 AND status IN ('open','claimed','testing','supported')
             ORDER BY confidence DESC, updated_at DESC
@@ -15385,8 +15399,57 @@ async def _build_agent_context_pack_from_target(conn, req: AgentContextPackFromT
             target_uuid,
         )
         hypotheses_summary = [_public_hypothesis_row(row) for row in hypothesis_rows]
+        completed_dimensions = [
+            str(item.get("dedupe_key"))
+            for item in hypotheses_summary
+            if str(item.get("effective_status") or item.get("status"))
+            in {"refuted", "promoted", "dead", "exhausted"}
+            and item.get("dedupe_key")
+        ]
+        schedule = hypothesis_scheduler.rank_hypotheses(
+            hypotheses_summary,
+            context={
+                "completed_dimensions": completed_dimensions,
+                "auth_available": any(
+                    bool(item.get("credential_configured"))
+                    for item in principal_summary.get("principals", [])
+                ),
+            },
+        )
+        by_id = {str(item.get("id")): item for item in hypotheses_summary}
+        ranked_hypotheses = [
+            {**entry, "hypothesis": by_id.get(str(entry.get("hypothesis_id")))}
+            for entry in list(schedule.get("scheduled") or [])[:10]
+        ]
+        graph_nodes = await conn.fetch(
+            """
+            SELECT node_type, node_key, label
+            FROM application_graph_nodes
+            WHERE target_id=$1
+            ORDER BY node_type, node_key
+            LIMIT 30
+            """,
+            target_uuid,
+        )
+        graph_edges = await conn.fetch(
+            """
+            SELECT src_key, edge_type, dst_key
+            FROM application_graph_edges
+            WHERE target_id=$1
+            ORDER BY edge_type, src_key, dst_key
+            LIMIT 40
+            """,
+            target_uuid,
+        )
+        attack_graph = {
+            "nodes": [_json_safe_row(row) for row in graph_nodes],
+            "edges": [_json_safe_row(row) for row in graph_edges],
+            "truncated": len(graph_nodes) == 30 or len(graph_edges) == 40,
+        }
     except Exception:
         hypotheses_summary = []
+        ranked_hypotheses = []
+        attack_graph = {"nodes": [], "edges": [], "truncated": False}
 
     current_gaps: list[dict[str, Any]] = []
     if req.include_gaps:
@@ -15429,6 +15492,8 @@ async def _build_agent_context_pack_from_target(conn, req: AgentContextPackFromT
         "endpoint_counts": [_json_safe_row(row) for row in endpoint_counts],
         "sample_endpoints": sample_endpoints,
         "principal_matrix": principal_summary,
+        "ranked_hypotheses": ranked_hypotheses,
+        "attack_graph": attack_graph,
     }
     credential_preconditions = _target_credential_precondition_signals(
         principal_summary.get("principals", []),
@@ -22100,6 +22165,7 @@ async def _arsenal_dispatch_authz_promote_replay_finding(p: dict[str, Any], appr
 
 async def _arsenal_dispatch_http_diff(p: dict[str, Any], approval_receipt_id: str | None) -> dict[str, Any]:
     target_id = str(p.get("target_id") or "").strip()
+    hypothesis_id = str(p.get("_research_hypothesis_id") or "").strip() or None
     target_uuid = _uuid_or_400(target_id, "target id")
     async with db_pool.acquire() as conn:
         target = await conn.fetchrow(
@@ -22146,6 +22212,7 @@ async def _arsenal_dispatch_http_diff(p: dict[str, Any], approval_receipt_id: st
                     "comparisons": safe_result.get("comparisons") or [],
                     "finding_created": False,
                     "proof_state": "unverified_experiment_signal",
+                    "hypothesis_id": hypothesis_id,
                 },
                 created_by="research_http_experiment",
             ))
@@ -22170,6 +22237,7 @@ async def _arsenal_dispatch_http_diff(p: dict[str, Any], approval_receipt_id: st
                     "experiment_version": safe_result.get("version"),
                     "finding_created": False,
                     "promotion_allowed": False,
+                    "hypothesis_id": hypothesis_id,
                 },
                 created_by="research_http_experiment",
             ))
@@ -22188,6 +22256,7 @@ async def _arsenal_dispatch_http_diff(p: dict[str, Any], approval_receipt_id: st
                 ),
                 result_json={
                     "experiment": safe_result,
+                    "hypothesis_id": hypothesis_id,
                     "evidence_instance_id": str(evidence.get("id")) if evidence.get("id") else None,
                     "tool_receipt_id": str(receipt.get("id")) if receipt.get("id") else None,
                     "findings_created": 0,
@@ -22387,6 +22456,7 @@ async def _execute_workflow_runtime(
 
 async def _arsenal_dispatch_workflow(p: dict[str, Any], approval_receipt_id: str | None) -> dict[str, Any]:
     target_uuid = _uuid_or_400(str(p.get("target_id") or ""), "target id")
+    hypothesis_id = str(p.get("_research_hypothesis_id") or "").strip() or None
     workflow_uuid = _uuid_or_400(str(p.get("workflow_id") or ""), "workflow id")
     workflow_id = str(workflow_uuid)
     if workflow_id in _active_workflow_cancellations:
@@ -22454,6 +22524,7 @@ async def _arsenal_dispatch_workflow(p: dict[str, Any], approval_receipt_id: str
                     "cancelled": safe_result.get("cancelled"),
                     "finding_created": False,
                     "proof_state": "unverified_workflow_signal",
+                    "hypothesis_id": hypothesis_id,
                 },
                 created_by="research_principal_workflow",
             ))
@@ -22476,7 +22547,7 @@ async def _arsenal_dispatch_workflow(p: dict[str, Any], approval_receipt_id: str
                 },
                 tool_receipt_id=str(receipt.get("id")) if receipt.get("id") else None,
                 proof_state="unverified",
-                metadata_json={"workflow_version": safe_result.get("version"), "finding_created": False, "promotion_allowed": False},
+                metadata_json={"workflow_version": safe_result.get("version"), "finding_created": False, "promotion_allowed": False, "hypothesis_id": hypothesis_id},
                 created_by="research_principal_workflow",
             ))
             evidence = evidence_result.get("evidence_instance") or {}
@@ -22490,6 +22561,7 @@ async def _arsenal_dispatch_workflow(p: dict[str, Any], approval_receipt_id: str
                 operator_message="Principal-bound workflow completed; all signals remain unverified.",
                 result_json={
                     "workflow": safe_result,
+                    "hypothesis_id": hypothesis_id,
                     "evidence_instance_id": str(evidence.get("id")) if evidence.get("id") else None,
                     "tool_receipt_id": str(receipt.get("id")) if receipt.get("id") else None,
                     "findings_created": 0,
@@ -23030,7 +23102,10 @@ async def _arsenal_execute(conn, req: ArsenalExecuteRequest) -> dict[str, Any]:
     # The dispatched handler records its own command_result audit row.
     context_token = _ARSENAL_CREATED_BY_CONTEXT.set(req.created_by)
     try:
-        result = await adapter(req.parameters, req.approval_receipt_id)
+        adapter_parameters = dict(req.parameters)
+        if req.research_hypothesis_id:
+            adapter_parameters["_research_hypothesis_id"] = req.research_hypothesis_id
+        result = await adapter(adapter_parameters, req.approval_receipt_id)
     finally:
         _ARSENAL_CREATED_BY_CONTEXT.reset(context_token)
     operation_id = result.get("operation_id") if isinstance(result, dict) else None
@@ -24920,6 +24995,51 @@ async def _research_focus_snapshot(conn, episode: dict[str, Any]) -> dict[str, A
 RESEARCH_OBSERVATION_MAX_BYTES = 48 * 1024
 
 
+def _research_experiment_projection(source: Any) -> dict[str, Any]:
+    """Keep experiment conclusions and receipts, never response bodies or credentials."""
+    payload = source if isinstance(source, dict) else {}
+    experiment = payload.get("experiment") if isinstance(payload.get("experiment"), dict) else {}
+    if not experiment and isinstance(payload.get("workflow"), dict):
+        experiment = payload["workflow"]
+    observations: list[dict[str, Any]] = []
+    for item in list(experiment.get("observations") or [])[:16]:
+        if not isinstance(item, dict):
+            continue
+        request = item.get("request") if isinstance(item.get("request"), dict) else {}
+        response = item.get("response") if isinstance(item.get("response"), dict) else {}
+        projected = {
+            key: item.get(key)
+            for key in ("label", "kind", "principal", "checkpoint", "success", "error")
+            if item.get(key) not in (None, "", [], {})
+        }
+        for key, value in {
+            "method": request.get("method"),
+            "path": request.get("path"),
+            "status": response.get("status") or item.get("status"),
+        }.items():
+            if value not in (None, ""):
+                projected[key] = value
+        if projected:
+            observations.append(projected)
+    projection = {
+        key: experiment.get(key)
+        for key in (
+            "version", "objective", "expected_signal", "falsifier", "step_count",
+            "request_count", "cancelled", "principal_receipts", "comparisons",
+        )
+        if experiment.get(key) not in (None, "", [], {})
+    }
+    if observations:
+        projection["observations"] = observations
+    for key in (
+        "workflow_id", "evidence_instance_id", "tool_receipt_id", "proof_state",
+        "findings_created", "verified_findings_created",
+    ):
+        if payload.get(key) not in (None, "", [], {}):
+            projection[key] = payload.get(key)
+    return _bounded_research_payload(projection)
+
+
 def _research_previous_result_digest(value: Any) -> dict[str, Any]:
     result = value if isinstance(value, dict) else {}
     raw_error = result.get("error")
@@ -24976,6 +25096,14 @@ def _research_previous_result_digest(value: Any) -> dict[str, Any]:
     }
     if typed_result_json:
         digest["command_result"]["result_json"] = typed_result_json
+    command_name = str(result.get("command") or command_result.get("command") or "")
+    experiment_source = nested
+    if command_name == "experiment.http_diff" and not experiment_source.get("experiment"):
+        experiment_source = result_json
+    if command_name == "experiment.workflow" and not experiment_source.get("workflow"):
+        experiment_source = result_json
+    if command_name in {"experiment.http_diff", "experiment.workflow"}:
+        digest["experiment_result"] = _research_experiment_projection(experiment_source)
     # _research_latest_action_result is already a digest; retain its useful typed links.
     if isinstance(result.get("decision"), dict):
         digest["decision"] = result["decision"]
@@ -25272,6 +25400,42 @@ def _compact_research_observation_pack(pack: dict[str, Any]) -> dict[str, Any]:
             endpoint_samples.append(projected)
     if endpoint_samples:
         surface["sample_endpoints"] = endpoint_samples
+    ranked = []
+    for entry in list(surface_source.get("ranked_hypotheses") or [])[:6]:
+        hypothesis = entry.get("hypothesis") if isinstance(entry, dict) and isinstance(entry.get("hypothesis"), dict) else {}
+        projected = _scalars(
+            entry,
+            ("hypothesis_id", "priority", "decision", "reason", "request_cost"),
+            text_limit=320,
+        )
+        projected["hypothesis"] = _scalars(
+            hypothesis,
+            ("id", "title", "family", "severity_guess", "confidence", "status", "dedupe_key"),
+            text_limit=320,
+        )
+        next_test = hypothesis.get("next_test_action")
+        if isinstance(next_test, dict):
+            projected["hypothesis"]["next_test_action"] = _bound_once(next_test, 1)
+        if projected:
+            ranked.append(projected)
+    if ranked:
+        surface["ranked_hypotheses"] = ranked
+    graph_source = surface_source.get("attack_graph") if isinstance(surface_source.get("attack_graph"), dict) else {}
+    graph = {
+        "nodes": [
+            _scalars(item, ("node_type", "node_key", "label"), text_limit=240)
+            for item in list(graph_source.get("nodes") or [])[:20]
+            if isinstance(item, dict)
+        ],
+        "edges": [
+            _scalars(item, ("src_key", "edge_type", "dst_key"), text_limit=240)
+            for item in list(graph_source.get("edges") or [])[:25]
+            if isinstance(item, dict)
+        ],
+        "truncated": bool(graph_source.get("truncated")),
+    }
+    if graph["nodes"] or graph["edges"]:
+        surface["attack_graph"] = graph
     _add_if_fits("current_surface", surface)
 
     hypotheses = []
@@ -25280,10 +25444,13 @@ def _compact_research_observation_pack(pack: dict[str, Any]) -> dict[str, Any]:
             hypothesis,
             (
                 "id", "claim", "title", "family", "status", "route", "path", "priority",
-                "evidence_strength", "next_action", "blocked_by",
+                "severity_guess", "confidence", "dedupe_key", "evidence_strength",
+                "next_action", "blocked_by",
             ),
             text_limit=320,
         )
+        if isinstance(hypothesis.get("next_test_action"), dict):
+            projected["next_test_action"] = _bound_once(hypothesis["next_test_action"], 1)
         if projected:
             hypotheses.append(projected)
     _add_if_fits("hypotheses_summary", hypotheses)
@@ -26792,6 +26959,7 @@ async def submit_research_decision(episode_id: str, req: ResearchDecisionRequest
                     scope_receipt_id=str(episode.get("scope_receipt_id") or "") or None,
                     created_by=f"research_episode:{episode_id}:decision:{decision_id}",
                     campaign_id=str(episode.get("campaign_id") or "") or None,
+                    research_hypothesis_id=str(normalized.get("hypothesis_id") or "") or None,
                 )
 
     if dispatch_request is None:
@@ -27132,7 +27300,12 @@ def _research_planner_messages(observation: dict[str, Any]) -> list[dict[str, st
                 "For actions, provide a concrete expected_signal and falsifier. Never claim a vulnerability is "
                 "verified; deterministic ShakerScan proof contracts alone control findings. Do not stop merely "
                 "because the initial observation is large: inspect at least one useful read-only source when one "
-                "is proposable. A stop decision must include a concrete stop_reason summarizing the evidence, "
+                "is proposable. Use ordinary scans or ASM only for a concrete uncovered or stale coverage gap. "
+                "For bug hunting, prefer the highest-ranked unexplained hypothesis and design an app-specific "
+                "control/test experiment across routes, objects, principals, or state transitions. Reference its "
+                "hypothesis_id. Optimize for net-new invariant violations that commodity DAST would miss, not "
+                "re-running generic checks. After an experiment, use its comparisons and receipts to refine or "
+                "falsify the hypothesis; do not discard a negative result. A stop decision must include a concrete stop_reason summarizing the evidence, "
                 "remaining uncertainty, and best next recommendation. Return only the "
                 "requested JSON object and copy observation_id/context_hash exactly. Never repeat an identical "
                 "command with identical parameters when it appears in recent_actions; use the completed result "

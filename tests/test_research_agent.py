@@ -102,6 +102,37 @@ def test_risk_escalation_and_active_budget_exhaustion_fail_closed():
     assert "budget_exhausted:active_actions" in errors
 
 
+def test_experiment_must_be_bound_to_a_persisted_hypothesis():
+    command = _command("experiment.http_diff", risk="active", status="gated")
+    candidate = _decision("experiment.http_diff")
+    _, errors, _, _ = agent.validate_decision(
+        candidate,
+        episode=_episode(
+            max_risk_tier="active",
+            budget_limits=agent.normalize_budget_limits(
+                {"active_actions": 2, "requests": 20}, max_steps=5
+            ),
+        ),
+        observation=_observation("experiment.http_diff"),
+        command_catalog={"experiment.http_diff": command},
+    )
+    assert "hypothesis_id_required_for_experiment" in errors
+
+    candidate["hypothesis_id"] = "11111111-1111-4111-8111-111111111111"
+    _, errors, _, _ = agent.validate_decision(
+        candidate,
+        episode=_episode(
+            max_risk_tier="active",
+            budget_limits=agent.normalize_budget_limits(
+                {"active_actions": 2, "requests": 20}, max_steps=5
+            ),
+        ),
+        observation=_observation("experiment.http_diff"),
+        command_catalog={"experiment.http_diff": command},
+    )
+    assert "hypothesis_id_required_for_experiment" not in errors
+
+
 def test_gated_command_projection_explains_missing_authority():
     projected = agent.command_projection(
         _command("asm.test", risk="active", status="gated"),

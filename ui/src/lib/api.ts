@@ -410,7 +410,7 @@ export interface ResearchEpisodeLaunchRequest {
   subject_type: 'target' | 'finding' | 'asm'
   subject_id: string
   mission_profile: 'target_hunt' | 'verify_finding' | 'close_asm_gaps'
-  intensity: 'analyze' | 'hunt' | 'relentless'
+  intensity: 'analyze' | 'hunt' | 'relentless' | 'deep_hunt'
   approval_receipt_id?: string
   autopilot?: boolean
   force_new?: boolean
@@ -5118,7 +5118,7 @@ export async function deactivateTargetPrincipal(targetId: string, principalId: s
   return res.json()
 }
 
-export async function createTargetPolicyApproval(targetId: string, targetUrl: string, ttlMinutes: number = 120): Promise<string> {
+export async function createTargetPolicyApproval(targetId: string, targetUrl: string, ttlMinutes: number = 120, riskTier: 'active' | 'credential' = 'active'): Promise<string> {
   const parsed = new URL(targetUrl)
   const scope = await previewScopeReceipt({
     url: targetUrl,
@@ -5133,7 +5133,7 @@ export async function createTargetPolicyApproval(targetId: string, targetUrl: st
   if (scope.scope_receipt.verdict === 'needs_approval') confirmations.push('confirm_scope_reviewed')
   const approval = await createApprovalReceipt({
     scope_receipt_id: scope.scope_receipt.receipt_id,
-    risk_tier: 'active',
+    risk_tier: riskTier,
     confirmations,
     approved_by: 'interactive-ui',
     expires_at: new Date(Date.now() + Math.max(5, Math.min(ttlMinutes, 24 * 60)) * 60_000).toISOString(),

@@ -274,6 +274,8 @@ def validate_decision(
             errors.append("expected_signal_required")
         if not decision["falsifier"]:
             errors.append("falsifier_required")
+        if command_name in {"experiment.http_diff", "experiment.workflow"} and not decision.get("hypothesis_id"):
+            errors.append("hypothesis_id_required_for_experiment")
     elif decision["decision"] == "request_input" and not decision["requested_input"]:
         errors.append("requested_input_required")
     elif decision["decision"] == "stop" and not decision["stop_reason"]:

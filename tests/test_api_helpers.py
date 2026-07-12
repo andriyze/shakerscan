@@ -9712,6 +9712,37 @@ def test_research_previous_result_digest_keeps_typed_outcome_without_raw_blob():
     assert api_module._json_size_bytes(digest) < 10_000
 
 
+def test_research_previous_result_digest_preserves_experiment_evidence_without_bodies():
+    digest = api_module._research_previous_result_digest({
+        "command": "experiment.http_diff",
+        "dispatched": True,
+        "result": {
+            "proof_state": "unverified_experiment_signal",
+            "evidence_instance_id": "evidence-1",
+            "tool_receipt_id": "receipt-1",
+            "experiment": {
+                "objective": "Check ownership invariant",
+                "expected_signal": "candidate changes owner",
+                "falsifier": "owner remains unchanged",
+                "request_count": 2,
+                "observations": [{
+                    "label": "candidate",
+                    "request": {"method": "POST", "path": "/api/profile", "headers": {"Authorization": "secret"}},
+                    "response": {"status": 200, "body_sample": "private response"},
+                }],
+                "comparisons": [{"control": "control", "candidate": "candidate", "status_changed": True}],
+            },
+        },
+    })
+
+    result = digest["experiment_result"]
+    assert result["evidence_instance_id"] == "evidence-1"
+    assert result["comparisons"][0]["status_changed"] is True
+    assert result["observations"] == [{"label": "candidate", "method": "POST", "path": "/api/profile", "status": 200}]
+    assert "private response" not in str(digest)
+    assert "Authorization" not in str(digest)
+
+
 def test_compact_research_observation_hard_caps_adversarial_nested_pack():
     huge = "💥" * 1200
     commands = []

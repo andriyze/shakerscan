@@ -25,7 +25,7 @@ import {
 } from '@/lib/api'
 import { Badge, Button, Card, EmptyState, ErrorState, Skeleton, buttonClasses } from '@/components/ui'
 
-type Intensity = 'analyze' | 'hunt' | 'relentless'
+type Intensity = 'analyze' | 'hunt' | 'relentless' | 'deep_hunt'
 
 const PROFILES: Record<Intensity, {
   name: string
@@ -33,7 +33,7 @@ const PROFILES: Record<Intensity, {
   description: string
   mode: 'read_only' | 'gated'
   maxSteps: number
-  risk: 'read_only' | 'active'
+  risk: 'read_only' | 'active' | 'credential'
   budget: ResearchBudget
   tone: string
 }> = {
@@ -57,6 +57,13 @@ const PROFILES: Record<Intensity, {
     mode: 'gated', maxSteps: 25, risk: 'active',
     budget: { steps: 25, actions: 24, active_actions: 10, requests: 500, seconds: 3600, model_tokens: 250000 },
     tone: 'border-orange-500/40 bg-orange-500/[0.06]',
+  },
+  deep_hunt: {
+    name: 'Deep hunt', eyebrow: 'Principal-aware workflows',
+    description: 'Let the LLM design app-specific, multi-user control/test workflows using managed target principals. Credentials never enter the model context.',
+    mode: 'gated', maxSteps: 25, risk: 'credential',
+    budget: { steps: 25, actions: 24, active_actions: 12, requests: 500, seconds: 3600, model_tokens: 250000 },
+    tone: 'border-fuchsia-500/50 bg-fuchsia-500/[0.08]',
   },
 }
 
@@ -334,7 +341,7 @@ export default function ResearchAgentPage() {
     setBusy(true); setError(null)
     try {
       let approvalReceiptId: string | undefined
-      if (profile.mode === 'gated') approvalReceiptId = await createTargetPolicyApproval(activeTarget.id, activeTarget.url)
+      if (profile.mode === 'gated') approvalReceiptId = await createTargetPolicyApproval(activeTarget.id, activeTarget.url, 120, profile.risk === 'credential' ? 'credential' : 'active')
       const detail = await createResearchEpisode({
         target_id: activeTarget.id,
         objective: objective.trim(),
@@ -420,7 +427,7 @@ export default function ResearchAgentPage() {
                 </div>
               </div>
 
-              <section><h3 className="text-xs font-medium text-gray-400">Investigation intensity</h3><div className="mt-2 grid gap-3 md:grid-cols-3">{(['analyze', 'hunt', 'relentless'] as Intensity[]).map((value) => <IntensityCard key={value} value={value} selected={intensity === value} onSelect={() => { setIntensity(value); if (value === 'analyze') setAuthorized(false) }} />)}</div></section>
+              <section><h3 className="text-xs font-medium text-gray-400">Investigation intensity</h3><div className="mt-2 grid gap-3 md:grid-cols-2 xl:grid-cols-4">{(['analyze', 'hunt', 'relentless', 'deep_hunt'] as Intensity[]).map((value) => <IntensityCard key={value} value={value} selected={intensity === value} onSelect={() => { setIntensity(value); if (value === 'analyze') setAuthorized(false) }} />)}</div></section>
 
               <details className="rounded-lg border border-gray-800 bg-gray-950/30"><summary className="flex cursor-pointer list-none items-center justify-between px-3 py-2.5 text-xs font-medium text-gray-500 hover:text-gray-300"><span>Advanced family focus</span><ChevronDown className="h-4 w-4" /></summary><div className="flex flex-wrap gap-2 border-t border-gray-800 p-3">{ACTIVE_FAMILIES.map((family) => <label key={family} className="flex items-center gap-2 rounded-lg border border-gray-800 px-3 py-2 text-xs text-gray-300"><input type="checkbox" checked={families.includes(family)} onChange={() => setFamilies((current) => current.includes(family) ? current.filter((item) => item !== family) : [...current, family])} />{family.toUpperCase()}</label>)}</div></details>
             </div>
