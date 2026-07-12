@@ -14313,7 +14313,13 @@ def _bounded_research_payload(value: Any, *, depth: int = 0) -> Any:
         return [_bounded_research_payload(item, depth=depth + 1) for item in redacted[:100]]
     if isinstance(redacted, str):
         return redacted[:4000]
-    return redacted
+    if isinstance(redacted, (int, float)) or redacted is None:  # note: bool is an int subclass
+        return redacted
+    # Coerce non-JSON-serializable scalars (UUID, datetime, Decimal, bytes, ...) to a bounded string
+    # so the observation pack + planner payloads json.dumps cleanly. A prior command result carrying
+    # raw UUIDs made _build_research_observation's json.dumps(pack) raise "Object of type UUID is not
+    # JSON serializable", stranding the autopilot episode in 'dispatching'.
+    return str(redacted)[:4000]
 
 
 def _public_research_episode_row(row: Any) -> dict[str, Any]:
