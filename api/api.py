@@ -140,6 +140,7 @@ from retest_contract import (
 import parallel_scan
 import asm_inventory
 import adjudicate
+import hypothesis_lifecycle
 from http_experiment import ExperimentContractError, execute_experiment
 from workflow_experiment import (
     WorkflowContractError,
@@ -14399,11 +14400,11 @@ def _public_hypothesis_row(row: Any) -> dict[str, Any]:
         "effective_status": effective_status,
     }
     payload["effective_status"] = effective_status
-    payload["claimable"] = effective_status not in {"refuted", "promoted", "dead"} and not claim_active
+    payload["claimable"] = hypothesis_lifecycle.is_actionable(effective_status) and not claim_active
     payload["can_promote_finding"] = False
     payload["can_reconcile_proof"] = bool(
         payload.get("campaign_action_id")
-        and effective_status not in {"refuted", "promoted", "dead"}
+        and hypothesis_lifecycle.is_actionable(effective_status)
     )
     payload["execution_enabled"] = False
     return payload
@@ -23212,6 +23213,115 @@ async def arsenal_claim_hypothesis(hypothesis_id: str, req: HypothesisClaimReque
             "claim_lease_expires_at": current["claim_lease_expires_at"],
         },
     )
+
+
+class HypothesisTransitionRequest(BaseModel):
+    to: str = Field(pattern="^(open|claimed|testing|supported|refuted|blocked|exhausted|promoted|dead)$")
+    expected_version: int = Field(ge=1)
+    reason: Optional[str] = Field(default=None, max_length=1000)
+    refuted_by: dict[str, Any] = Field(default_factory=dict)
+    blockers: list[str] = Field(default_factory=list)
+    created_by: Optional[str] = Field(default=None, max_length=120)
+
+
+@app.post("/arsenal/hypotheses/{hypothesis_id}/transition")
+async def arsenal_transition_hypothesis(hypothesis_id: str, req: HypothesisTransitionRequest):
+    """Gated hypothesis lifecycle transition (Wave 4).
+
+    Enforces legal edges (`hypothesis_lifecycle`), requires a falsifier + expected signal before
+    `testing`, and requires a deterministic `refuted_by` for a `refuted` transition (the negative
+    gate of §4.1). Optimistic version guard; no finding is created or promoted here.
+    """
+    try:
+        hypothesis_uuid = uuid.UUID(str(hypothesis_id))
+    except ValueError:
+        raise HTTPException(status_code=400, detail="hypothesis_id must be a UUID")
+    to_state = str(req.to or "").strip().lower()
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT * FROM hypotheses WHERE id=$1", hypothesis_uuid)
+        if not row:
+            raise HTTPException(status_code=404, detail="Hypothesis not found")
+        hyp = _public_hypothesis_row(row)
+        from_state = hyp.get("effective_status") or hyp.get("status")
+        ok, reason = hypothesis_lifecycle.evaluate_transition(
+            from_state,
+            to_state,
+            next_test_action=hyp.get("next_test_action"),
+            metadata=hyp.get("metadata_json"),
+        )
+        if not ok:
+            raise HTTPException(
+                status_code=409,
+                detail={"error": "illegal_transition", "reason": reason, "from": from_state, "to": to_state},
+            )
+        refuted_by = req.refuted_by if isinstance(req.refuted_by, dict) else {}
+        if to_state in hypothesis_lifecycle.REFUTING_TARGETS:
+            gate_ok, gate_reason = adjudicate.require_deterministic_refutation({
+                "verdict_basis": refuted_by.get("basis") or refuted_by.get("verdict_basis"),
+                "refuted_by": refuted_by,
+            })
+            if not gate_ok:
+                raise HTTPException(
+                    status_code=422,
+                    detail={"error": "refutation_not_deterministic", "reason": gate_reason},
+                )
+        meta_patch: dict[str, Any] = {
+            "last_transition": {
+                "from": from_state,
+                "to": to_state,
+                "reason": req.reason or None,
+                "by": req.created_by,
+                "at": datetime.now(timezone.utc).isoformat(),
+            }
+        }
+        if to_state in hypothesis_lifecycle.REFUTING_TARGETS:
+            meta_patch["refuted_by"] = {
+                key: refuted_by.get(key)
+                for key in ("verification_id", "experiment_signal_id", "basis", "ref")
+                if refuted_by.get(key)
+            }
+        if req.blockers:
+            meta_patch["blockers"] = _clean_string_list(req.blockers, max_items=20)
+        terminal_reason = (req.reason or f"transition:{to_state}")[:500]
+        updated = await conn.fetchrow(
+            """
+            UPDATE hypotheses
+            SET status = $3,
+                terminal_reason = CASE WHEN $3 IN ('refuted','promoted','dead','exhausted','blocked')
+                    THEN $4 ELSE terminal_reason END,
+                claim_owner = CASE WHEN $3 IN ('refuted','promoted','dead','exhausted')
+                    THEN NULL ELSE claim_owner END,
+                claim_lease_expires_at = CASE WHEN $3 IN ('refuted','promoted','dead','exhausted')
+                    THEN NULL ELSE claim_lease_expires_at END,
+                metadata_json = metadata_json || $5::jsonb,
+                version = version + 1,
+                updated_at = NOW()
+            WHERE id = $1 AND version = $2
+            RETURNING *
+            """,
+            hypothesis_uuid,
+            req.expected_version,
+            to_state,
+            terminal_reason,
+            json.dumps(meta_patch),
+        )
+        if not updated:
+            current = await conn.fetchrow("SELECT status, version FROM hypotheses WHERE id=$1", hypothesis_uuid)
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "version_conflict",
+                    "status": current["status"] if current else None,
+                    "version": current["version"] if current else None,
+                },
+            )
+    return {
+        "hypothesis": _public_hypothesis_row(updated),
+        "transitioned": True,
+        "from": from_state,
+        "to": to_state,
+        "execution_enabled": False,
+    }
 
 
 @app.post("/arsenal/hypotheses/{hypothesis_id}/signals")

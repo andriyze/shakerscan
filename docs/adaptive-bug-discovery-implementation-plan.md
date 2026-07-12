@@ -121,6 +121,8 @@ Acceptance:
 
 ### Wave 4: Adaptive hypothesis engine
 
+**Status: lifecycle implemented & live-verified. `blocked`/`exhausted` states added (idempotent schema migration); pure `api/hypothesis_lifecycle.py` state machine (host-tested) enforces legal edges, requires a falsifier + expected signal before `testing`, and applies the deterministic negative gate on `refuted`; gated `POST /arsenal/hypotheses/{id}/transition` endpoint. Signal-source ingestion + canonical dedupe pre-date this and remain as below.**
+
 Signal sources:
 
 - JavaScript routes, client bases, request bodies, and object keys;

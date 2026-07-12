@@ -1584,7 +1584,7 @@ async def run_schema_migrations(pool) -> None:
                     CONSTRAINT hypotheses_source_check
                         CHECK (source IN ('app_graph','source_ingest','ai_planner','scanner_signal','ai_gate','model_intake','benchmark','manual')),
                     CONSTRAINT hypotheses_status_check
-                        CHECK (status IN ('open','claimed','testing','supported','refuted','promoted','dead')),
+                        CHECK (status IN ('open','claimed','testing','supported','refuted','blocked','exhausted','promoted','dead')),
                     CONSTRAINT hypotheses_severity_check
                         CHECK (severity_guess IS NULL OR severity_guess IN ('critical','high','medium','low','info')),
                     CONSTRAINT hypotheses_confidence_check
@@ -1599,6 +1599,14 @@ async def run_schema_migrations(pool) -> None:
                 ALTER TABLE hypotheses
                 ADD CONSTRAINT hypotheses_source_check
                 CHECK (source IN ('app_graph','source_ingest','ai_planner','scanner_signal','ai_gate','model_intake','benchmark','manual'))
+            """)
+            # Wave 4: widen the lifecycle to include blocked/exhausted (see hypothesis_lifecycle.py).
+            # Widening a CHECK is safe — every existing row already satisfies the superset.
+            await conn.execute("ALTER TABLE hypotheses DROP CONSTRAINT IF EXISTS hypotheses_status_check")
+            await conn.execute("""
+                ALTER TABLE hypotheses
+                ADD CONSTRAINT hypotheses_status_check
+                CHECK (status IN ('open','claimed','testing','supported','refuted','blocked','exhausted','promoted','dead'))
             """)
             # Dedupe key must match the application find-or-create key, which is
             # (target, family, dedupe_key) WITHOUT source — a new source endorses
