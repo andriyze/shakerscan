@@ -28014,6 +28014,82 @@ def _research_decision_json_schema(
     }
 
 
+# Concrete, contract-valid workflow proof templates per promotable family. The planner copies the
+# matching template and fills in real routes/objects/principals from the observation; keeping the
+# checkpoints, assertion types, and predicates verbatim is what makes the proof both structurally
+# valid (normalize_workflow) and server-corroborable. Every template is asserted valid in tests.
+_EXPERIMENT_WORKFLOW_TEMPLATES: dict[str, dict[str, Any]] = {
+    "bola": {
+        "proof_family": "bola",
+        "objective": "User2 reads User1's object via an object-id route",
+        "expected_signal": "attacker principal receives the owner's object",
+        "falsifier": "attacker is denied or receives different data",
+        "steps": [
+            {"label": "baseline", "kind": "http", "principal": "user1", "checkpoint": "before", "method": "GET", "path": "/api/<objects>"},
+            {"label": "create", "kind": "http", "principal": "user1", "checkpoint": "mutation", "method": "POST", "path": "/api/<objects>", "json_body": {"<field>": "<value>"}, "extract": [{"name": "object_id", "source": "json", "path": "$.id"}]},
+            {"label": "owner_read", "kind": "http", "principal": "user1", "checkpoint": "action", "method": "GET", "path": "/api/<objects>/${object_id}"},
+            {"label": "attacker_read", "kind": "http", "principal": "user2", "checkpoint": "action", "method": "GET", "path": "/api/<objects>/${object_id}", "compare_to": "owner_read"},
+            {"label": "anon_denied", "kind": "http", "principal": "anonymous", "checkpoint": "action", "method": "GET", "path": "/api/<objects>/${object_id}"},
+            {"label": "cleanup", "kind": "http", "principal": "user1", "checkpoint": "cleanup", "method": "DELETE", "path": "/api/<objects>/${object_id}"},
+            {"label": "restored", "kind": "http", "principal": "user1", "checkpoint": "after", "method": "GET", "path": "/api/<objects>", "compare_to": "baseline"},
+        ],
+        "assertions": [
+            {"type": "distinct_principals", "steps": ["owner_read", "attacker_read"], "predicate": "distinct_identity"},
+            {"type": "comparison_equivalent", "control": "owner_read", "candidate": "attacker_read", "predicate": "ownership_established"},
+            {"type": "comparison_equivalent", "control": "owner_read", "candidate": "attacker_read", "predicate": "cross_principal_access"},
+            {"type": "status_not_in", "step": "anon_denied", "values": [200, 201, 202, 203, 204], "predicate": "denial_control"},
+            {"type": "restored", "control": "baseline", "candidate": "restored", "predicate": "before_after_state"},
+        ],
+    },
+    "data_exposure": {
+        "proof_family": "data_exposure",
+        "objective": "A sensitive value is exposed to an unauthorized principal",
+        "expected_signal": "an unauthorized read returns a sensitive value",
+        "falsifier": "no sensitive value is present",
+        "steps": [
+            {"label": "owner", "kind": "http", "principal": "user1", "checkpoint": "before", "method": "GET", "path": "/api/<resource>"},
+            {"label": "exposed", "kind": "http", "principal": "anonymous", "checkpoint": "action", "method": "GET", "path": "/api/<resource>"},
+        ],
+        "assertions": [
+            {"type": "status_in", "step": "exposed", "values": [200], "predicate": "sensitive_value_present"},
+        ],
+    },
+    "auth_bypass": {
+        "proof_family": "auth_bypass",
+        "objective": "An anonymous request reaches a protected resource",
+        "expected_signal": "the anonymous request succeeds where auth is required",
+        "falsifier": "the anonymous request is denied",
+        "steps": [
+            {"label": "authed", "kind": "http", "principal": "user1", "checkpoint": "action", "method": "GET", "path": "/api/<protected>"},
+            {"label": "anon", "kind": "http", "principal": "anonymous", "checkpoint": "action", "method": "GET", "path": "/api/<protected>"},
+        ],
+        "assertions": [
+            {"type": "status_in", "step": "authed", "values": [200], "predicate": "protected_resource_accessed"},
+            {"type": "status_not_in", "step": "anon", "values": [401, 403], "predicate": "unauthenticated_control"},
+        ],
+    },
+    "mass_assignment": {
+        "proof_family": "mass_assignment",
+        "objective": "A forbidden field is accepted on a write",
+        "expected_signal": "the forbidden field persists; a control without it is rejected",
+        "falsifier": "the forbidden field is rejected",
+        "steps": [
+            {"label": "before", "kind": "http", "principal": "user1", "checkpoint": "before", "method": "GET", "path": "/api/<resource>"},
+            {"label": "mutate", "kind": "http", "principal": "user1", "checkpoint": "mutation", "method": "PATCH", "path": "/api/<resource>", "json_body": {"<forbidden_field>": "<value>"}, "compare_to": "before"},
+            {"label": "control", "kind": "http", "principal": "user1", "checkpoint": "action", "method": "PATCH", "path": "/api/<resource>", "json_body": {"<allowed_field>": "<value>"}},
+            {"label": "cleanup", "kind": "http", "principal": "user1", "checkpoint": "cleanup", "method": "PATCH", "path": "/api/<resource>", "json_body": {"<forbidden_field>": "<original_value>"}},
+            {"label": "after", "kind": "http", "principal": "user1", "checkpoint": "after", "method": "GET", "path": "/api/<resource>", "compare_to": "before"},
+        ],
+        "assertions": [
+            {"type": "status_in", "step": "mutate", "values": [200], "predicate": "forbidden_field_accepted"},
+            {"type": "comparison_changed", "control": "before", "candidate": "mutate", "predicate": "observable_state_change"},
+            {"type": "status_not_in", "step": "control", "values": [200, 201, 204], "predicate": "control_rejected"},
+            {"type": "restored", "control": "before", "candidate": "after", "predicate": "before_after_state"},
+        ],
+    },
+}
+
+
 def _research_planner_messages(observation: dict[str, Any]) -> list[dict[str, str]]:
     pack = observation.get("observation_pack") if isinstance(observation.get("observation_pack"), dict) else {}
     # Packs are already redacted, hard-capped, hashed, and persisted by the server. Applying the
@@ -28028,6 +28104,7 @@ def _research_planner_messages(observation: dict[str, Any]) -> list[dict[str, st
         "observation_id": str(observation.get("id") or ""),
         "context_hash": str(observation.get("context_hash") or ""),
         "observation_pack": bounded,
+        "experiment_templates": _EXPERIMENT_WORKFLOW_TEMPLATES,
     }
     return [
         {
@@ -28042,7 +28119,11 @@ def _research_planner_messages(observation: dict[str, Any]) -> list[dict[str, st
                 "is proposable. Use ordinary scans or ASM only for a concrete uncovered or stale coverage gap. "
                 "For bug hunting, prefer the highest-ranked unexplained hypothesis and design an app-specific "
                 "control/test experiment across routes, objects, principals, or state transitions. Reference its "
-                "hypothesis_id. Optimize for net-new invariant violations that commodity DAST would miss, not "
+                "hypothesis_id. When you design an experiment.workflow, copy the matching family template from "
+                "experiment_templates and replace the <placeholders> with real routes, object fields, and "
+                "principals from the observation; keep every checkpoint, assertion type, and predicate exactly so "
+                "the proof stays valid and server-corroborable. "
+                "Optimize for net-new invariant violations that commodity DAST would miss, not "
                 "re-running generic checks. After an experiment, use its comparisons and receipts to refine or "
                 "falsify the hypothesis; do not discard a negative result. A stop decision must include a concrete stop_reason summarizing the evidence, "
                 "remaining uncertainty, and best next recommendation. Return only the "

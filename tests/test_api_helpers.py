@@ -10554,6 +10554,20 @@ def test_endpoint_inventory_hypotheses_are_residue_backed_leads():
     assert not any((r.dedupe_dimensions.get("route") or "").endswith("/health") for r in reqs)
 
 
+def test_experiment_workflow_templates_are_contract_valid():
+    # The planner-facing proof templates must pass normalize_workflow, or they would teach the model
+    # to author workflows that get rejected. A mutating template must carry its own restoration.
+    import workflow_experiment
+    templates = api_module._EXPERIMENT_WORKFLOW_TEMPLATES
+    assert {"bola", "data_exposure", "auth_bypass", "mass_assignment"} <= set(templates)
+    for family, template in templates.items():
+        assert template["proof_family"] == family
+        normalized = workflow_experiment.normalize_workflow("https://example.test", template)
+        assert 2 <= len(normalized["steps"]) <= 12
+        if normalized["mutating"]:
+            assert any(a["type"] == "restored" for a in normalized["assertions"])
+
+
 def test_research_provider_probe_exercises_server_bound_action_contract(monkeypatch):
     captured = {}
 
