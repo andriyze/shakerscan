@@ -27174,7 +27174,16 @@ async def launch_research_episode(req: ResearchLaunchRequest):
                 created_by=f"hunt_launch:{req.created_by or 'operator'}",
             )
         except Exception:
-            logger.warning("Hunt residue seeding failed for target %s", target_id, exc_info=True)
+            logger.warning("Hunt graph residue seeding failed for target %s", target_id, exc_info=True)
+        try:
+            # The graph is often empty until a two-user resource-map scan runs; the endpoint
+            # inventory always has surface, so seed BOLA/mass-assignment leads from it too.
+            await generate_endpoint_inventory_hypotheses(
+                str(target_id),
+                created_by=f"hunt_launch:{req.created_by or 'operator'}",
+            )
+        except Exception:
+            logger.warning("Hunt inventory residue seeding failed for target %s", target_id, exc_info=True)
 
     create_request = ResearchEpisodeRequest(
         target_id=str(target_id),
@@ -30419,6 +30428,116 @@ async def generate_application_graph_hypotheses(
         "candidate_count": len(requests),
         "created": sum(1 for item in records if item.get("created")),
         "endorsed": sum(1 for item in records if not item.get("created")),
+        "hypotheses": [item["hypothesis"] for item in records],
+        "execution_enabled": False,
+        "findings_created": 0,
+    }
+
+
+_ID_PATH_SEGMENT = re.compile(
+    r"/(?:\d+|[0-9a-fA-F]{8}-[0-9a-fA-F-]{27,36}|\{[^/{}]+\}|:[A-Za-z_][A-Za-z0-9_]*)(?=/|$)"
+)
+
+
+def _endpoint_inventory_hypothesis_requests(
+    target_id: str, endpoints: list[dict[str, Any]], *, created_by: str | None = None,
+) -> list[HypothesisRequest]:
+    """Turn discovered-but-unproven surface into residue-backed hunt leads.
+
+    The application graph is often empty (its auth_boundary edges need a two-user resource-map
+    scan), which starves a residue-only hunt board. The endpoint inventory always has surface: an
+    object-id path parameter is a BOLA/IDOR lead; a write endpoint with a body is a mass-assignment
+    lead. These are leads only -- never findings -- and carry unexplained_residue so the scheduler
+    ranks them alongside graph leads.
+    """
+    requests: list[HypothesisRequest] = []
+    seen: set[str] = set()
+    for endpoint in endpoints:
+        method = str(endpoint.get("method") or "GET").strip().upper()
+        path = str(endpoint.get("path") or "").strip()
+        if not path:
+            continue
+        route = _canonical_vulnerability_route(path) or path
+        auth_state = str(endpoint.get("auth_state") or "")
+        param_location = str(endpoint.get("param_location") or "").lower()
+        if _ID_PATH_SEGMENT.search(path):
+            key = f"asm_residue|bola|{method}|{route}"
+            if key not in seen:
+                seen.add(key)
+                requests.append(HypothesisRequest(
+                    target_id=target_id, source="app_graph", family="bola", cwe="CWE-639",
+                    title=f"Object-reference lead: {method} {route}",
+                    description=(
+                        "An object-id path parameter the scanner discovered but did not prove for "
+                        "cross-principal access. Test with two principals before treating it as a finding."
+                    ),
+                    severity_guess="high", confidence=0.6, dedupe_key=key,
+                    dedupe_dimensions={"method": method, "route": route, "proof_surface": "runtime_authz_replay"},
+                    next_test_action={
+                        "command": "asm.improve",
+                        "parameters": {"target_id": target_id, "check_family": "bola", "exploit_depth": True},
+                        "requires": ["primary_auth", "second_user_auth"],
+                    },
+                    metadata_json={"unexplained_residue": True, "residue_source": "endpoint_inventory", "route": route},
+                    endorsement={"source": "endpoint_inventory", "method": method, "route": route, "auth_state": auth_state},
+                    created_by=created_by,
+                ))
+        if method in {"POST", "PUT", "PATCH"} and any(hint in param_location for hint in ("body", "json", "form")):
+            key = f"asm_residue|mass_assignment|{method}|{route}"
+            if key not in seen:
+                seen.add(key)
+                requests.append(HypothesisRequest(
+                    target_id=target_id, source="app_graph", family="mass_assignment", cwe="CWE-915",
+                    title=f"Mass-assignment lead: {method} {route}",
+                    description=(
+                        "A write endpoint with a request body the scanner discovered but did not probe for "
+                        "forbidden-field acceptance. Test a mutation + a rejected control before treating it as a finding."
+                    ),
+                    severity_guess="medium", confidence=0.5, dedupe_key=key,
+                    dedupe_dimensions={"method": method, "route": route, "proof_surface": "mutation_differential"},
+                    next_test_action={
+                        "command": "asm.improve",
+                        "parameters": {"target_id": target_id, "check_family": "all"},
+                        "requires": ["primary_auth"],
+                    },
+                    metadata_json={"unexplained_residue": True, "residue_source": "endpoint_inventory", "route": route},
+                    endorsement={"source": "endpoint_inventory", "method": method, "route": route},
+                    created_by=created_by,
+                ))
+    return requests[:100]
+
+
+@app.post("/targets/{target_id}/inventory/hypotheses")
+async def generate_endpoint_inventory_hypotheses(
+    target_id: str,
+    created_by: Optional[str] = Query("asm_inventory", description="Audit label for generated leads."),
+) -> dict[str, Any]:
+    """Record residue-backed BOLA / mass-assignment leads from the persisted endpoint inventory."""
+    try:
+        tgt = uuid.UUID(target_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="target_id must be a UUID")
+    async with db_pool.acquire() as conn:
+        if not await conn.fetchrow("SELECT 1 FROM targets WHERE id=$1", tgt):
+            raise HTTPException(status_code=404, detail="Target not found")
+        rows = await conn.fetch(
+            """
+            SELECT method, path, param_location, auth_state
+            FROM target_endpoints
+            WHERE target_id=$1 AND COALESCE(test_status,'') <> 'gone'
+            ORDER BY priority_score DESC NULLS LAST, last_seen_at DESC
+            LIMIT 300
+            """,
+            tgt,
+        )
+        requests = _endpoint_inventory_hypothesis_requests(
+            target_id, [row_to_dict(r) for r in rows], created_by=created_by,
+        )
+        records = [await _upsert_hypothesis(conn, req) for req in requests]
+    return {
+        "target_id": target_id,
+        "candidate_count": len(requests),
+        "created": sum(1 for item in records if item.get("created")),
         "hypotheses": [item["hypothesis"] for item in records],
         "execution_enabled": False,
         "findings_created": 0,

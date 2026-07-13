@@ -10532,6 +10532,28 @@ def test_research_autonomous_workflow_allows_cleanup_safe_writes_at_credential_t
     assert not any(e.startswith("autonomous_experiment_destructive_method_forbidden") for e in errors)
 
 
+def test_endpoint_inventory_hypotheses_are_residue_backed_leads():
+    # The app graph is often empty; the endpoint inventory must still yield residue leads so a
+    # require_residue hunt board is not starved. An object-id path -> BOLA lead; a write with a body
+    # -> mass_assignment lead; a plain public GET is not turned into a lead.
+    reqs = api_module._endpoint_inventory_hypothesis_requests(
+        "11111111-1111-4111-8111-111111111111",
+        [
+            {"method": "GET", "path": "/api/items/42", "param_location": "path", "auth_state": "user1"},
+            {"method": "POST", "path": "/api/items", "param_location": "body", "auth_state": "user1"},
+            {"method": "GET", "path": "/api/health", "param_location": "", "auth_state": "anonymous"},
+        ],
+        created_by="test",
+    )
+    families = {r.family for r in reqs}
+    assert "bola" in families
+    assert "mass_assignment" in families
+    # Every lead is residue-backed so hypothesis_scheduler ranks it (require_residue passes).
+    assert reqs and all(r.metadata_json.get("unexplained_residue") for r in reqs)
+    # A plain public GET with no id segment and no body is not a lead.
+    assert not any((r.dedupe_dimensions.get("route") or "").endswith("/health") for r in reqs)
+
+
 def test_research_provider_probe_exercises_server_bound_action_contract(monkeypatch):
     captured = {}
 
