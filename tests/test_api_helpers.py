@@ -10478,6 +10478,60 @@ def test_research_autonomous_workflow_rejects_delete_but_allows_browser_and_form
     assert normalized["steps"][1]["method"] == "POST"
 
 
+def test_research_autonomous_workflow_allows_cleanup_safe_writes_at_credential_tier():
+    # To EXPLOIT state-changing bugs a credential-tier deep hunt must be able to mutate. The write is
+    # safe: normalize_workflow forces a cleanup/rollback + restored assertion after any mutation.
+    command = api_module._research_command_catalog()["experiment.workflow"]
+
+    def method_values(value):
+        found = set()
+        if isinstance(value, dict):
+            enum = value.get("enum")
+            if isinstance(enum, list):
+                found.update(str(item) for item in enum if str(item) in {"PUT", "PATCH", "DELETE"})
+            for nested in value.values():
+                found.update(method_values(nested))
+        elif isinstance(value, list):
+            for nested in value:
+                found.update(method_values(nested))
+        return found
+
+    # Schema projection retains PUT/PATCH/DELETE when cleanup-safe writes are permitted.
+    projected = api_module._research_autonomous_parameter_schema(
+        "experiment.workflow", command["parameters_schema"], allow_cleanup_safe_writes=True,
+    )
+    assert {"PUT", "PATCH", "DELETE"} <= method_values(projected)
+
+    class Conn:
+        pass
+
+    episode = {
+        "target_id": "11111111-1111-4111-8111-111111111111",
+        "max_risk_tier": "credential",
+        "planner": {"mission": {"profile": "target_hunt", "subject": {"type": "target"}}},
+        "allowed_families": [],
+    }
+    _params, errors = asyncio.run(api_module._research_prepare_action(
+        Conn(),
+        episode,
+        {"action": {"parameters": {
+            "workflow_id": "22222222-2222-4222-8222-222222222222",
+            "objective": "Mutate then restore a forbidden field",
+            "expected_signal": "The forbidden field persists",
+            "falsifier": "The forbidden field is rejected",
+            "steps": [
+                {"label": "before", "kind": "http", "principal": "user1",
+                 "checkpoint": "before", "method": "GET", "path": "/api/items/1"},
+                {"label": "mutate", "kind": "http", "principal": "user1",
+                 "checkpoint": "mutation", "method": "PATCH", "path": "/api/items/1",
+                 "json_body": {"role": "admin"}, "compare_to": "before"},
+            ],
+        }}},
+        command,
+    ))
+    assert not any(e.startswith("autonomous_experiment_destructive_method_forbidden") for e in errors)
+
+
 def test_research_provider_probe_exercises_server_bound_action_contract(monkeypatch):
     captured = {}
 

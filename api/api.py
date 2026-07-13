@@ -26534,7 +26534,16 @@ async def _research_prepare_action(
             if isinstance(step, dict)
             and str(step.get("method") or "GET").strip().upper() in {"PUT", "PATCH", "DELETE"}
         })
-        if destructive_methods:
+        # Cleanup-safe writes are permitted only for a credential-tier experiment.workflow: to
+        # actually EXPLOIT state-changing bugs (mass_assignment, write-BOLA, workflow abuse) the loop
+        # must be able to mutate. normalize_workflow already forces a cleanup/rollback step and a
+        # `restored` assertion after any mutation, so the write is gated by proven restoration.
+        # http_diff has no restoration contract and stays read-only.
+        writes_allowed = (
+            command.get("name") == "experiment.workflow"
+            and str(episode.get("max_risk_tier") or "") == "credential"
+        )
+        if destructive_methods and not writes_allowed:
             errors.append(
                 "autonomous_experiment_destructive_method_forbidden:"
                 + ",".join(destructive_methods)
