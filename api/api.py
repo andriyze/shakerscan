@@ -19,6 +19,7 @@ import math
 import os
 import random
 import re
+import secrets
 import time
 import urllib.error
 import urllib.parse
@@ -14112,7 +14113,6 @@ async def _auto_provision_principals(conn, target_uuid, target_url: str, config:
                 payload = None
         return response.status_code, payload
 
-    key_material = str(os.environ.get("AI_CREDENTIAL_ENC_KEY") or "")
     async with httpx.AsyncClient(timeout=httpx.Timeout(15), follow_redirects=False, trust_env=False) as client:
         for spec in normalized_specs:
             label = spec["label"]
@@ -14135,7 +14135,10 @@ async def _auto_provision_principals(conn, target_uuid, target_url: str, config:
                     "credential_profile": str(existing["credential_profile"]), "reused": True,
                 })
                 continue
-            seed = hashlib.sha256(f"{key_material}:{target_uuid}:{label}:{auth_state}".encode()).hexdigest()
+            # Random, unpredictable per-account material. The account is created once and only its
+            # captured token is persisted, so the signup password never needs to be re-derivable; a
+            # deterministic seed made provisioned passwords guessable from public target/label ids.
+            seed = secrets.token_hex(32)
             # Keep the email short + unique: some apps cap identity-derived columns (e.g. crAPI
             # stores its JWT, whose sub is the email, in a varchar(500)); a long email overflows it.
             variables = {
@@ -22802,10 +22805,24 @@ async def _promote_trusted_workflow_finding(
         if isinstance(hypothesis_metadata.get("dedupe_dimensions"), dict)
         else {}
     )
-    canonical_vulnerability_key = _canonical_vulnerability_key(
-        family=family,
-        route=dedupe_dimensions.get("route") or hypothesis_metadata.get("route"),
+    # Bind the finding to the route the experiment actually PROVED (the non-cleanup request paths in
+    # the live result), not whatever route the hypothesis happens to store -- proof of route A must
+    # not promote a finding on route B. If the hypothesis names a route, the experiment must have
+    # tested it.
+    proven_routes = {
+        _canonical_vulnerability_route((observation.get("request") or {}).get("path"))
+        for observation in (first.get("observations") or [])
+        if isinstance(observation, dict) and isinstance(observation.get("request"), dict)
+        and observation.get("checkpoint") not in {"cleanup", "rollback"}
+    }
+    proven_routes.discard(None)
+    hypothesis_route = _canonical_vulnerability_route(
+        dedupe_dimensions.get("route") or hypothesis_metadata.get("route")
     )
+    if hypothesis_route and hypothesis_route not in proven_routes:
+        return None
+    finding_route = hypothesis_route or (sorted(proven_routes)[0] if proven_routes else None)
+    canonical_vulnerability_key = _canonical_vulnerability_key(family=family, route=finding_route)
     if not canonical_vulnerability_key:
         return None
     fingerprint = hashlib.sha256(
@@ -27490,6 +27507,11 @@ async def submit_research_decision(episode_id: str, req: ResearchDecisionRequest
             observation = _public_research_observation_row(observation_row)
             observation_pack = observation.get("observation_pack") or {}
             raw = req.model_dump(mode="json", exclude={"planner", "model_tokens_used", "execute", "idempotency_key"})
+            # Freelance experiments: the planner often reasons up a hypothesis from the discovered
+            # surface and designs a valid experiment for it, but omits hypothesis_id (the lead is not
+            # on the seeded board). Bind a matching ranked lead, or create a tracked planner-derived
+            # hypothesis, so valid experiments are not rejected for provenance alone.
+            await _research_autobind_hypothesis(conn, episode, raw, observation_pack)
             catalog = _research_command_catalog()
             normalized, errors, warnings, cost = _research_validate_decision(
                 raw,
@@ -28012,6 +28034,70 @@ def _research_decision_json_schema(
         "schema": schema,
         "strict": True,
     }
+
+
+async def _research_autobind_hypothesis(
+    conn, episode: dict[str, Any], raw: dict[str, Any], observation_pack: dict[str, Any],
+) -> None:
+    """Bind an experiment decision to a tracked hypothesis, mutating ``raw`` in place.
+
+    An ``experiment.*`` decision must carry a hypothesis_id (for provenance + promotion), but the
+    planner frequently reasons a hypothesis up from the surface and omits it. Bind an existing ranked
+    lead of the same family+route when one exists, else create a planner-derived hypothesis from the
+    workflow's proof_family + first route -- so the loop can freely test what it reasons up while
+    every experiment stays tracked and promotable.
+    """
+    action = raw.get("action") if isinstance(raw.get("action"), dict) else {}
+    command = str(action.get("command") or "")
+    if command not in {"experiment.workflow", "experiment.http_diff"}:
+        return
+    if str(raw.get("hypothesis_id") or "").strip():
+        return
+    params = action.get("parameters") if isinstance(action.get("parameters"), dict) else {}
+    family = family_proof.canonical_family(params.get("proof_family") or "workflow")
+    route = None
+    for step in (params.get("steps") or []):
+        if isinstance(step, dict) and step.get("path"):
+            route = _canonical_vulnerability_route(step.get("path"))
+            if route:
+                break
+    target_id = str(episode.get("target_id") or "")
+    if not target_id or not route:
+        return
+    # 1) Prefer an existing ranked lead of the same family + route.
+    ranked = (observation_pack.get("current_surface") or {}).get("ranked_hypotheses") or []
+    for entry in ranked:
+        hypothesis = entry.get("hypothesis") if isinstance(entry, dict) else None
+        if not isinstance(hypothesis, dict) or not hypothesis.get("id"):
+            continue
+        if family_proof.canonical_family(hypothesis.get("family")) != family:
+            continue
+        candidate_route = _canonical_vulnerability_route(
+            hypothesis.get("route")
+            or ((hypothesis.get("next_test_action") or {}).get("parameters") or {}).get("route")
+            or ((hypothesis.get("dedupe_dimensions") or {}).get("route"))
+        )
+        if candidate_route == route:
+            raw["hypothesis_id"] = str(hypothesis["id"])
+            return
+    # 2) Otherwise create a tracked planner-derived hypothesis for the freelance experiment.
+    try:
+        record = await _upsert_hypothesis(conn, HypothesisRequest(
+            target_id=target_id, source="ai_planner", family=family,
+            title=f"Planner experiment lead: {family} {route}"[:500],
+            description="A hypothesis the planner reasoned up from the discovered surface to test with a bounded experiment.",
+            severity_guess="medium", confidence=0.5,
+            dedupe_key=f"planner_experiment|{family}|{route}",
+            dedupe_dimensions={"route": route, "proof_surface": "planner_experiment"},
+            metadata_json={"unexplained_residue": True, "residue_source": "planner_reasoning", "route": route},
+            next_test_action={"command": "experiment.workflow", "parameters": {"proof_family": family}},
+            created_by="research_autobind",
+        ))
+        hypothesis_id = str((record.get("hypothesis") or {}).get("id") or "")
+        if hypothesis_id:
+            raw["hypothesis_id"] = hypothesis_id
+    except Exception:  # noqa: BLE001 - autobind is best-effort; never break the planner turn
+        logger.warning("autobind hypothesis failed for episode %s", episode.get("id"), exc_info=True)
 
 
 # Concrete, contract-valid workflow proof templates per promotable family. The planner copies the
@@ -30577,8 +30663,10 @@ def _endpoint_inventory_hypothesis_requests(
                     severity_guess="medium", confidence=0.5, dedupe_key=key,
                     dedupe_dimensions={"method": method, "route": route, "proof_surface": "mutation_differential"},
                     next_test_action={
-                        "command": "asm.improve",
-                        "parameters": {"target_id": target_id, "check_family": "all"},
+                        # No ASM mass-assignment actuator + gated hunts reject check_family='all';
+                        # the loop proves this with a bounded mutation workflow instead.
+                        "command": "experiment.workflow",
+                        "parameters": {"proof_family": "mass_assignment"},
                         "requires": ["primary_auth"],
                     },
                     metadata_json={"unexplained_residue": True, "residue_source": "endpoint_inventory", "route": route},
@@ -30605,7 +30693,9 @@ async def generate_endpoint_inventory_hypotheses(
             """
             SELECT method, path, param_location, auth_state
             FROM target_endpoints
-            WHERE target_id=$1 AND COALESCE(test_status,'') <> 'gone'
+            -- Exclude retired ('gone') and already actively tested endpoints so leads point at
+            -- genuinely unexplained surface, not a re-verification of existing DAST coverage.
+            WHERE target_id=$1 AND COALESCE(test_status,'') NOT IN ('gone', 'tested')
             ORDER BY priority_score DESC NULLS LAST, last_seen_at DESC
             LIMIT 300
             """,
