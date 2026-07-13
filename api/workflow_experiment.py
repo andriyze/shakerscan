@@ -305,39 +305,61 @@ def _server_confirms_predicate(
             if isinstance(obs.get("request"), dict)
         )
 
-    # --- data_exposure: an actual server-classified sensitive VALUE was returned, never HTTP status.
+    # --- data_exposure: an UNAUTHORIZED observer received a real sensitive VALUE. An anonymous
+    # request returning a classified secret is exposure; a principal reading its OWN data (its own
+    # JWT) is not, so the observer must be anonymous.
     if predicate == "sensitive_value_present":
-        return bool((step or candidate).get("sensitive_value_categories"))
+        target = step or candidate
+        return (
+            str(target.get("principal") or "anonymous").lower() == "anonymous"
+            and bool(target.get("sensitive_value_categories"))
+        )
     if predicate == "name_only_classification":  # refute: sensitive-looking keys, no values
         target = step or candidate
         response = target.get("response") if isinstance(target.get("response"), dict) else {}
         keys = response.get("json_keys") or []
         return (not target.get("sensitive_value_categories")) and any(_sensitive_name(str(k)) for k in keys)
 
-    # --- auth_bypass: an unauthenticated request reached a genuinely protected resource. The
-    # family-critical predicate requires an AUTHENTICATED access (so the resource is real + normally
-    # behind auth), which a public endpoint cannot provide; the anonymous reach is the bypass.
+    # --- auth_bypass: an AUTHENTICATED principal reaches the resource (it is real + used behind auth)
+    # AND an anonymous request SUCCEEDS returning actual sensitive DATA -> it reached protected
+    # content, not a public route. A denied (non-2xx) anonymous request is not a bypass.
     if predicate == "protected_resource_accessed":
         return _obs_authenticated(step or candidate) and _obs_success(step or candidate)
     if predicate == "unauthenticated_control":
         target = step or candidate
-        return str(target.get("principal") or "anonymous").lower() == "anonymous" and (_obs_success(target) or changed)
+        return (
+            str(target.get("principal") or "anonymous").lower() == "anonymous"
+            and _obs_success(target)
+            and bool(target.get("sensitive_value_categories"))
+        )
     if predicate == "access_denied_unauthenticated":  # refute
         target = step or candidate
         return str(target.get("principal") or "anonymous").lower() == "anonymous" and not _obs_success(target)
 
-    # --- mass_assignment: a forbidden field was accepted on a real state-changing MUTATION (not a
-    # plain read), with an observable state change and a rejected control.
+    # --- mass_assignment: a MUTATION submitted a body field AND the server echoed it back (accepted /
+    # persisted it), with an observable state change and a rejected control.
     if predicate == "forbidden_field_accepted":
-        return str((step or candidate).get("checkpoint") or "") == "mutation" and _obs_success(step or candidate)
+        target = step or candidate
+        if str(target.get("checkpoint") or "") != "mutation" or not _obs_success(target):
+            return False
+        submitted = {str(name) for name in (target.get("submitted_fields") or [])}
+        response = target.get("response") if isinstance(target.get("response"), dict) else {}
+        echoed = {str(key) for key in (response.get("json_keys") or [])}
+        return bool(submitted) and bool(submitted & echoed)
     if predicate == "observable_state_change":
         return changed
     if predicate in {"control_rejected", "forbidden_field_rejected"}:  # rejected control / refute
         return (not _obs_success(step or candidate)) or changed
 
-    # --- workflow: a state-transition invariant was broken across before/after (or held, refute).
+    # --- workflow: a real state transition -- the change is between a BEFORE and an AFTER checkpoint
+    # and the workflow contains a mutation (an action caused it), not two reads of a changing clock.
     if predicate in {"transition_invariant_broken", "before_after_state"}:
-        return changed
+        has_mutation = any(o.get("checkpoint") == "mutation" for o in by_label.values())
+        return (
+            changed and has_mutation
+            and control.get("checkpoint") == "before"
+            and candidate.get("checkpoint") in {"after", "mutation"}
+        )
     if predicate in {"invariant_held", "control_equivalent"}:  # refute
         return equivalent
 
@@ -592,6 +614,21 @@ def normalize_workflow(target_url: str, raw: Any) -> dict[str, Any]:
         last_mutation = max(normalized.index(step) for step in (write_steps or mutation_steps))
         if any(normalized.index(step) <= last_mutation for step in restoration_steps):
             raise WorkflowContractError("cleanup_or_rollback_must_follow_mutation")
+    # DELETE is destructive and cannot be reliably restored, so it is permitted ONLY as cleanup of an
+    # object THIS workflow created: it must sit at a cleanup/rollback checkpoint and target a variable
+    # extracted from a mutation (create) step. That keeps the BOLA create->cleanup pattern working
+    # while forbidding deletion of pre-existing/arbitrary resources.
+    created_variables = {
+        spec["name"]
+        for step in normalized if step.get("checkpoint") == "mutation"
+        for spec in (step.get("extract") or [])
+    }
+    for step in normalized:
+        if step.get("kind") == "http" and step.get("method") == "DELETE":
+            if step.get("checkpoint") not in {"cleanup", "rollback"}:
+                raise WorkflowContractError("delete_only_allowed_as_cleanup_of_created_object")
+            if not (_variable_references(step.get("path") or "") & created_variables):
+                raise WorkflowContractError("delete_must_target_a_workflow_created_object")
     timeout_seconds = max(1, min(int(payload.get("timeout_seconds") or 30), MAX_WORKFLOW_SECONDS))
     return {
         "version": WORKFLOW_VERSION,
@@ -645,6 +682,33 @@ BrowserAction = Callable[[str, str, dict[str, Any]], Awaitable[dict[str, Any]]]
 CancelCheck = Callable[[], bool]
 
 
+def _restoration_verified(
+    workflow: dict[str, Any],
+    observations: list[dict[str, Any]],
+    assertion_results: list[dict[str, Any]],
+) -> bool:
+    """A mutating workflow is restored only if every cleanup/rollback step actually SUCCEEDED (2xx --
+    an HTTP 4xx/5xx cleanup is a FAILED restore, not merely "no error"), AND a `restored` assertion
+    passed comparing a post-mutation AFTER state to the pre-mutation BEFORE state (not two
+    pre-mutation reads). Otherwise the target may remain modified while claiming restoration.
+    """
+    if not workflow.get("mutating"):
+        return True
+    by_label = {str(o.get("label")): o for o in observations if isinstance(o, dict)}
+    cleanup = [o for o in observations if isinstance(o, dict) and o.get("checkpoint") in {"cleanup", "rollback"}]
+    if not cleanup or not all(_obs_success(o) for o in cleanup):
+        return False
+    restored = [a for a in assertion_results if isinstance(a, dict) and a.get("type") == "restored"]
+    if not restored or not all(a.get("passed") for a in restored):
+        return False
+    for assertion in restored:
+        control = by_label.get(str(assertion.get("control") or ""), {})
+        candidate = by_label.get(str(assertion.get("candidate") or ""), {})
+        if control.get("checkpoint") != "before" or candidate.get("checkpoint") != "after":
+            return False
+    return True
+
+
 async def execute_workflow(
     target_url: str,
     raw: Any,
@@ -675,6 +739,7 @@ async def execute_workflow(
                 break
             extracted: dict[str, str] = {}
             sensitive_value_categories: list[str] = []
+            submitted_fields: list[str] = []
             response: dict[str, Any] | None = None
             request_view: dict[str, Any] = {"kind": step["kind"], "principal": step["principal"]}
             error: str | None = None
@@ -695,6 +760,10 @@ async def execute_workflow(
                     headers = _render_variables(step["headers"], variables)
                     json_body = _render_variables(step["json_body"], variables)
                     form_body = _render_variables(step["form_body"], variables)
+                    submitted_fields = sorted(
+                        json_body.keys() if isinstance(json_body, dict)
+                        else form_body.keys() if isinstance(form_body, dict) else []
+                    )
                     if len(str(path).encode()) > 4000:
                         raise WorkflowContractError("rendered_path_exceeds_size_limit")
                     if _contains_control_character(path):
@@ -795,6 +864,7 @@ async def execute_workflow(
                 "checkpoint": step["checkpoint"], "compare_to": step["compare_to"],
                 "request": request_view, "response": response,
                 "sensitive_value_categories": sensitive_value_categories if not error else [],
+                "submitted_fields": submitted_fields if not error else [],
                 "extracted_names": sorted(extracted) if not error else [],
                 "extracted": {name: {"sha256": hashlib.sha256(value.encode()).hexdigest(), "length": len(value)} for name, value in extracted.items()} if not error else {},
                 "error": error,
@@ -829,10 +899,7 @@ async def execute_workflow(
         "proof_family": workflow["proof_family"],
         "assertion_results": assertion_results,
         "assertions_passed": bool(assertion_results) and all(item.get("passed") for item in assertion_results),
-        "restoration_verified": (not workflow["mutating"]) or (
-            bool(restoration_results) and all(item.get("passed") for item in restoration_results)
-            and bool(cleanup_observations) and all(not item.get("error") for item in cleanup_observations)
-        ),
+        "restoration_verified": _restoration_verified(workflow, observations, assertion_results),
         "mutating": workflow["mutating"],
         "cancelled": any(item.get("error") == "workflow_cancelled_or_timed_out" for item in observations),
         "finding_created": False,

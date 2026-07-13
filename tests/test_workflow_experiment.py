@@ -266,11 +266,12 @@ def test_public_success_and_generic_mutation_never_become_family_proof():
 
 def test_reenabled_families_corroborate_on_real_signals():
     # auth_bypass: an authenticated access establishes a real protected resource; an anonymous
-    # request reaches it without being denied -> both family predicates corroborate.
+    # request SUCCEEDS returning actual sensitive DATA -> it reached protected content (a bypass).
     auth = {
         "observations": [
             {"label": "authed", "principal": "user1", "response": {"status": 200}},
-            {"label": "anon", "principal": "anonymous", "response": {"status": 200}},
+            {"label": "anon", "principal": "anonymous", "response": {"status": 200},
+             "sensitive_value_categories": ["jwt"]},
         ],
         "comparisons": [],
         "assertion_results": [
@@ -282,11 +283,13 @@ def test_reenabled_families_corroborate_on_real_signals():
     }
     assert {"protected_resource_accessed", "unauthenticated_control"} <= workflow.server_corroborated_predicates(auth)
 
-    # mass_assignment: a mutation step accepted a forbidden field with an observable state change.
+    # mass_assignment: a mutation SUBMITTED a field and the server ECHOED it back (accepted it), with
+    # an observable state change.
     mass = {
         "observations": [
             {"label": "before", "principal": "user1", "checkpoint": "before", "response": {"status": 200}},
-            {"label": "mutate", "principal": "user1", "checkpoint": "mutation", "response": {"status": 200}},
+            {"label": "mutate", "principal": "user1", "checkpoint": "mutation",
+             "submitted_fields": ["role"], "response": {"status": 200, "json_keys": ["role", "id"]}},
         ],
         "comparisons": [{"control": "before", "candidate": "mutate", "comparable": True, "body_changed": True}],
         "assertion_results": [
@@ -297,6 +300,40 @@ def test_reenabled_families_corroborate_on_real_signals():
         ],
     }
     assert {"forbidden_field_accepted", "observable_state_change"} <= workflow.server_corroborated_predicates(mass)
+
+
+def test_strengthened_family_proofs_reject_benign_behavior():
+    # data_exposure: a principal reading its OWN authenticated data (its own JWT) is not exposure.
+    own = {
+        "observations": [{"label": "self", "principal": "user1", "response": {"status": 200},
+                          "sensitive_value_categories": ["jwt"]}],
+        "comparisons": [],
+        "assertion_results": [{"id": "a", "type": "status_in", "step": "self", "values": [200],
+                               "predicate": "sensitive_value_present", "passed": True}],
+    }
+    assert "sensitive_value_present" not in workflow.server_corroborated_predicates(own)
+
+    # auth_bypass: an anonymous 200 on a public endpoint (no sensitive data) is not a bypass.
+    public = {
+        "observations": [{"label": "anon", "principal": "anonymous",
+                          "response": {"status": 200, "json_keys": ["status"]}, "sensitive_value_categories": []}],
+        "comparisons": [],
+        "assertion_results": [{"id": "u", "type": "status_not_in", "step": "anon", "values": [401, 403],
+                               "predicate": "unauthenticated_control", "passed": True}],
+    }
+    assert "unauthenticated_control" not in workflow.server_corroborated_predicates(public)
+
+    # workflow: two reads of a changing endpoint with NO mutation is not a transition-invariant break.
+    clock = {
+        "observations": [
+            {"label": "t1", "principal": "anonymous", "checkpoint": "before", "response": {"status": 200}},
+            {"label": "t2", "principal": "anonymous", "checkpoint": "after", "response": {"status": 200}},
+        ],
+        "comparisons": [{"control": "t1", "candidate": "t2", "comparable": True, "body_changed": True}],
+        "assertion_results": [{"id": "w", "type": "comparison_changed", "control": "t1", "candidate": "t2",
+                               "predicate": "transition_invariant_broken", "passed": True}],
+    }
+    assert "transition_invariant_broken" not in workflow.server_corroborated_predicates(clock)
 
 
 def test_bola_predicates_require_created_object_identity_and_denial_control():
