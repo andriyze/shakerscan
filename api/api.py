@@ -28051,9 +28051,18 @@ async def _research_autobind_hypothesis(
     command = str(action.get("command") or "")
     if command not in {"experiment.workflow", "experiment.http_diff"}:
         return
+    params = action.get("parameters") if isinstance(action.get("parameters"), dict) else {}
+    # The workflow runtime requires a UUID workflow_id; the planner routinely omits it or invents a
+    # non-UUID (the templates don't show it), which the arsenal rejects as "Invalid workflow id".
+    # Supply a valid one so the experiment is dispatched instead of blocked.
+    if command == "experiment.workflow":
+        try:
+            uuid.UUID(str(params.get("workflow_id") or "").strip())
+        except ValueError:
+            params["workflow_id"] = str(uuid.uuid4())
+            action["parameters"] = params
     if str(raw.get("hypothesis_id") or "").strip():
         return
-    params = action.get("parameters") if isinstance(action.get("parameters"), dict) else {}
     family = family_proof.canonical_family(params.get("proof_family") or "workflow")
     route = None
     for step in (params.get("steps") or []):
