@@ -11282,7 +11282,65 @@ def test_trusted_workflow_bola_proof_requires_full_server_bound_receipt():
     proof = api_module._trusted_workflow_family_proof(execution, execution)
     assert proof["verdict"] == "verified"
     assert proof["promotable"] is True
-    assert proof["proof_routes"] == ["/objects/42"]
+    # Bindings are canonicalized (Finding 1), so the proven route is the object-id template, not the
+    # one concrete id that happened to be used.
+    assert proof["proof_routes"] == ["/objects/{id}"]
+    assert proof["proof_methods"] == ["GET"]
+
+
+def _bola_object_execution(object_id):
+    path = f"/objects/{object_id}"
+    return {
+        "proof_family": "bola",
+        "restoration_verified": True,
+        "principal_receipts": [
+            {"slot": "user1", "identity_fingerprint": "owner-id"},
+            {"slot": "user2", "identity_fingerprint": "attacker-id"},
+        ],
+        "observations": [
+            {"label": "create", "principal": "user1", "checkpoint": "mutation",
+             "request": {"method": "POST", "path": "/objects"}, "response": {"status": 201},
+             "extracted_names": ["object_id"], "error": None},
+            {"label": "owner", "principal": "user1", "request": {
+                "method": "GET", "path": path, "variable_references": ["object_id"],
+             }, "response": {"status": 200}, "error": None},
+            {"label": "attacker", "principal": "user2",
+             "request": {"method": "GET", "path": path},
+             "response": {"status": 200}, "error": None},
+            {"label": "anonymous", "principal": "anonymous",
+             "request": {"method": "GET", "path": path},
+             "response": {"status": 403}, "error": None},
+        ],
+        "comparisons": [{
+            "control": "owner", "candidate": "attacker", "comparable": True,
+            "body_changed": False, "status_changed": False,
+        }],
+        "assertion_results": [
+            {"id": "ids", "type": "distinct_principals", "steps": ["owner", "attacker"],
+             "predicate": "distinct_identity", "passed": True},
+            {"id": "own", "type": "comparison_equivalent", "control": "owner", "candidate": "attacker",
+             "predicate": "ownership_established", "passed": True},
+            {"id": "cross", "type": "comparison_equivalent", "control": "owner", "candidate": "attacker",
+             "predicate": "cross_principal_access", "passed": True},
+            {"id": "deny", "type": "status_not_in", "step": "anonymous",
+             "predicate": "denial_control", "passed": True},
+        ],
+    }
+
+
+def test_trusted_workflow_bola_proof_matches_across_distinct_object_ids():
+    # Finding 1 regression: the execute run and the independent replay of an object-id workflow
+    # legitimately create/read a DIFFERENT concrete id each time. With raw rendered-path bindings
+    # (/objects/42 vs /objects/43) the two runs never matched, stable_bindings emptied, proof_routes
+    # collapsed to [], and _promote_trusted_workflow_finding bailed at len(proven_routes)!=1 --
+    # silently disabling every object-id BOLA/IDOR promotion. Canonicalizing to /objects/{id} before
+    # the cross-run comparison keeps them aligned so a genuinely verified BOLA promotes.
+    first = _bola_object_execution(42)
+    replay = _bola_object_execution(43)
+    proof = api_module._trusted_workflow_family_proof(first, replay)
+    assert proof["verdict"] == "verified"
+    assert proof["promotable"] is True
+    assert proof["proof_routes"] == ["/objects/{id}"]
     assert proof["proof_methods"] == ["GET"]
 
 

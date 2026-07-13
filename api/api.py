@@ -22834,12 +22834,32 @@ def _trusted_workflow_family_proof(
     first_predicates = passed_predicates(first)
     replay_predicates = passed_predicates(replay)
     stable_predicates = first_predicates & replay_predicates
-    first_bindings = server_corroborated_predicate_bindings(first)
-    replay_bindings = server_corroborated_predicate_bindings(replay)
+    # Canonicalize the bound route BEFORE comparing the two runs. An object-id workflow legitimately
+    # touches a different concrete id each run (owner_read /objects/42 on the first run, /objects/43 on
+    # the replay), so raw rendered-path bindings would never match, stable_bindings would empty, and
+    # proof_routes would collapse to [] -- silently blocking every object-id BOLA/IDOR promotion even
+    # though the family proof is verified. Canonicalizing to /objects/{id} keeps the resource identity
+    # while ignoring the concrete id value; static-route families canonicalize to themselves.
+    def _canonical_binding(binding: tuple[str, str] | None) -> tuple[str, str] | None:
+        if not binding:
+            return None
+        method, path = binding
+        route = _canonical_vulnerability_route(path)
+        return (method, route) if route else None
+
+    first_bindings = {
+        predicate: _canonical_binding(binding)
+        for predicate, binding in server_corroborated_predicate_bindings(first).items()
+    }
+    replay_bindings = {
+        predicate: _canonical_binding(binding)
+        for predicate, binding in server_corroborated_predicate_bindings(replay).items()
+    }
     stable_bindings = {
         predicate: first_bindings[predicate]
         for predicate in stable_predicates
-        if predicate in first_bindings and first_bindings.get(predicate) == replay_bindings.get(predicate)
+        if first_bindings.get(predicate) is not None
+        and first_bindings.get(predicate) == replay_bindings.get(predicate)
     }
     first_shape = [
         (item.get("id"), item.get("type"), bool(item.get("passed")))
@@ -25620,10 +25640,17 @@ async def _research_recent_actions(
         item["action"] = _decode_json_value(item.get("action")) or {}
         item["validation_errors"] = _decode_json_value(item.get("validation_errors")) or []
         result_json = _decode_json_value(item.get("result_json")) or {}
+        rj = result_json if isinstance(result_json, dict) else {}
         item["result"] = {
             "status": item.pop("command_status", None),
             "scan_id": item.pop("scan_id", None),
-            "retest_id": result_json.get("retest_id") if isinstance(result_json, dict) else None,
+            "retest_id": rj.get("retest_id"),
+            # D3: surface WHY an experiment did not verify (e.g. a create/mutation precondition failure)
+            # so the planner can adapt -- chain a producer or pick a different object -- instead of
+            # blindly re-running the same unsatisfiable workflow and burning budget.
+            "proof_state": rj.get("proof_state"),
+            "outcome": rj.get("outcome"),
+            "operator_message": (str(rj.get("operator_message"))[:300] if rj.get("operator_message") else None),
         }
         item.pop("result_json", None)
         actions.append(_bounded_research_payload(item))
@@ -26047,6 +26074,32 @@ def _compact_research_observation_pack(pack: dict[str, Any]) -> dict[str, Any]:
         if _json_size_bytes(compacted) > payload_limit:
             compacted.pop(key, None)
 
+    # D1: preserve the explicit exclusion list even in the oversized-observation fallback so the
+    # planner is still steered away from repeating already-tried actions.
+    excluded_digest: list[dict[str, Any]] = []
+    for raw_excluded in list(bounded.get("excluded_actions") or [])[:8]:
+        if not isinstance(raw_excluded, dict):
+            continue
+        entry = _scalars(raw_excluded, ("command",), text_limit=120)
+        parameters = raw_excluded.get("parameters") if isinstance(raw_excluded.get("parameters"), dict) else {}
+        parameter_digest = _scalars(
+            parameters,
+            (
+                "check_family", "finding_id", "endpoint_filter", "batch_size", "stale_days",
+                "exploit_depth", "mode", "scan_type", "route", "workflow_id", "proof_family",
+            ),
+            text_limit=160,
+        )
+        if parameter_digest:
+            entry["parameters"] = parameter_digest
+        if entry:
+            excluded_digest.append(entry)
+    _add_if_fits("excluded_actions", excluded_digest)
+    _add_if_fits(
+        "planner_guidance",
+        _string_list(bounded.get("planner_guidance"), count=6, item_limit=400),
+    )
+
     target_summary = _scalars(
         bounded.get("target_summary"),
         ("target_id", "url", "root_domain", "name", "environment", "status"),
@@ -26275,6 +26328,28 @@ async def _build_research_observation(
                 "finding_retest_already_active",
             ]))
     recent_actions = await _research_recent_actions(conn, episode["id"], episode.get("campaign_id"))
+    # D1 (steer, don't pause): surface the concrete {command, parameters} already tried this campaign
+    # (executed, or rejected as a no-state-change repeat) as an explicit exclusion list, so the planner
+    # picks a DIFFERENT actionable lead instead of re-proposing the same action until the 3-strike
+    # autopilot breaker trips. Campaign-scoped via recent_actions, so it persists across episodes.
+    excluded_actions: list[dict[str, Any]] = []
+    _seen_excluded: set[str] = set()
+    for _item in recent_actions:
+        _action = _item.get("action") if isinstance(_item.get("action"), dict) else {}
+        _command_name = str(_action.get("command") or "").strip()
+        if not _command_name:
+            continue
+        _tried = str(_item.get("status") or "") in {"accepted", "dispatching", "completed"} or (
+            "repeated_action_without_state_change" in (_item.get("validation_errors") or [])
+        )
+        if not _tried:
+            continue
+        _parameters = _action.get("parameters") if isinstance(_action.get("parameters"), dict) else {}
+        _signature = _research_canonical_hash({"command": _command_name, "parameters": _parameters})
+        if _signature in _seen_excluded:
+            continue
+        _seen_excluded.add(_signature)
+        excluded_actions.append({"command": _command_name, "parameters": _parameters})
     sequence = int(await conn.fetchval(
         "SELECT COALESCE(MAX(sequence), -1) + 1 FROM research_observations WHERE episode_id=$1",
         episode["id"],
@@ -26304,6 +26379,19 @@ async def _build_research_observation(
         },
         "proposable_commands": commands,
         "recent_actions": recent_actions,
+        "excluded_actions": excluded_actions,
+        # D3: universal steering (no app-specific facts) toward token efficiency + prerequisite
+        # adaptation. Addresses the observed failures where the planner re-ran inventory queries and
+        # retried a create that its target's precondition (e.g. a required captcha token) rejected.
+        "planner_guidance": [
+            "The discovered surface, endpoints, current_gaps, and hypotheses in this observation are "
+            "already current -- do NOT spend an action re-running discovery/inventory you already have; "
+            "prefer a concrete test. Anything in excluded_actions was already tried, so choose something new.",
+            "If a create/mutation step failed with a client error (4xx) or an experiment stayed "
+            "unverified because an object could not be created, do NOT retry the same create. Either "
+            "first call an endpoint that produces the missing input (producer->consumer chaining), or "
+            "target a different existing object/endpoint.",
+        ],
         "previous_observation": _research_previous_result_digest(previous_result or {}),
         "planner_contract": {
             "select_exactly_one": True,
@@ -26314,6 +26402,7 @@ async def _build_research_observation(
             "verified_finding_claims_forbidden": True,
             "expected_signal_and_falsifier_required_for_actions": True,
             "identical_consecutive_actions_forbidden": True,
+            "excluded_actions_must_not_be_repeated": True,
         },
     }
     pack = _compact_research_observation_pack(pack)
@@ -27491,6 +27580,31 @@ async def launch_research_campaign(req: ResearchCampaignLaunchRequest):
             objective_override=req.objective,
             allowed_families_override=req.allowed_families,
         ))
+    except asyncpg.UniqueViolationError:
+        # Finding 2: the campaign supervisor's 30s tick raced this launch and already started episode #1
+        # (the partial unique index on the active-campaign episode fired). That is the desired outcome,
+        # not a failure -- adopt the running episode instead of pausing the campaign and returning 500.
+        async with db_pool.acquire() as conn:
+            existing = await conn.fetchrow(
+                "SELECT id FROM research_episodes WHERE campaign_id=$1 ORDER BY created_at ASC LIMIT 1",
+                campaign["id"],
+            )
+            updated = await conn.fetchrow(
+                """
+                UPDATE campaigns SET
+                    metadata_json=jsonb_set(metadata_json, '{autonomous_research,episodes_started}', '1'::jsonb, true),
+                    updated_at=NOW() WHERE id=$1 RETURNING *
+                """,
+                campaign["id"],
+            )
+            detail = await _research_episode_detail(conn, str(existing["id"])) if existing else {}
+        episode = detail.get("episode") if isinstance(detail, dict) else None
+        return {
+            "campaign": _public_campaign_row(updated),
+            "episode": episode,
+            "ui_path": (episode or {}).get("ui_path") or (f"/research/episodes/{existing['id']}" if existing else None),
+            "note": "campaign_supervisor_started_first_episode",
+        }
     except Exception as exc:
         async with db_pool.acquire() as conn:
             await conn.execute(
@@ -27514,6 +27628,46 @@ async def launch_research_campaign(req: ResearchCampaignLaunchRequest):
     return {"campaign": _public_campaign_row(updated), "episode": episode, "ui_path": episode.get("ui_path")}
 
 
+_CAMPAIGN_MAX_CONSECUTIVE_BLOCKED = 3
+
+
+async def _record_campaign_blocker(
+    conn,
+    campaign_id: Any,
+    *,
+    kind: str,
+    episode_id: str | None = None,
+    detail: str | None = None,
+) -> None:
+    """Append a durable, bounded blocker to a campaign (escalate-don't-block).
+
+    Blockers are advisory context surfaced in the campaign report so an operator can see why the loop
+    had to skip or terminate work -- without the campaign having to stop and wait for an answer.
+    """
+    row = await conn.fetchrow("SELECT metadata_json FROM campaigns WHERE id=$1", campaign_id)
+    if not row:
+        return
+    metadata = _decode_json_value(row["metadata_json"]) or {}
+    config = metadata.get("autonomous_research") if isinstance(metadata.get("autonomous_research"), dict) else {}
+    existing = config.get("blockers") if isinstance(config.get("blockers"), list) else []
+    blocker = {
+        "kind": str(kind)[:80],
+        "episode_id": str(episode_id) if episode_id else None,
+        "detail": str(detail)[:300] if detail else None,
+        "at": datetime.now(timezone.utc).isoformat(),
+    }
+    blockers = [*existing, blocker][-20:]
+    await conn.execute(
+        """
+        UPDATE campaigns
+        SET metadata_json=jsonb_set(metadata_json, '{autonomous_research,blockers}', $2::jsonb, true),
+            updated_at=NOW()
+        WHERE id=$1
+        """,
+        campaign_id, json.dumps(blockers),
+    )
+
+
 def _research_campaign_terminal_needs_review(
     config: dict[str, Any], latest_episode_id: Any, latest_status: Any,
 ) -> bool:
@@ -27528,6 +27682,33 @@ def _research_campaign_terminal_needs_review(
 
 async def _continue_autonomous_research_campaigns() -> int:
     """Start the next episode for active campaigns with no non-terminal episode."""
+    # D2: reap stuck non-terminal episodes so their campaign becomes visible to the chaining/completion
+    # logic below. An episode waiting on operator input, or left in a planning state after the autopilot
+    # breaker disabled it (3 consecutive failures) with an expired lease, would otherwise count as
+    # "active" forever -- freezing the whole campaign (it never even reaches the deadline/ceiling check).
+    # Force it terminal ('blocked'); the terminal-review branch then records a blocker and chains a fresh
+    # episode (escalate-don't-block). The lease/autopilot guards avoid racing an actively-planning runner.
+    async with db_pool.acquire() as conn:
+        await conn.execute(
+            """
+            UPDATE research_episodes e SET
+                status='blocked',
+                stop_reason=COALESCE(e.stop_reason, CASE WHEN e.status='awaiting_input'
+                    THEN 'operator_input_requested' ELSE 'autopilot_disabled_after_failures' END),
+                autopilot_error=COALESCE(e.autopilot_error, 'reaped_by_campaign_supervisor'),
+                updated_at=NOW()
+            FROM campaigns c
+            WHERE e.campaign_id=c.id
+              AND c.campaign_type='autonomous_research' AND c.status='active'
+              AND e.status NOT IN ('completed','cancelled','failed','budget_exhausted','blocked')
+              AND (
+                  e.status='awaiting_input'
+                  OR (e.status IN ('awaiting_planner','awaiting_observation')
+                      AND e.autopilot_enabled=false
+                      AND (e.lease_expires_at IS NULL OR e.lease_expires_at < NOW()))
+              )
+            """
+        )
     async with db_pool.acquire() as conn:
         rows = await conn.fetch(
             """
@@ -27569,24 +27750,42 @@ async def _continue_autonomous_research_campaigns() -> int:
             continue
         latest_episode_id = str(payload.get("latest_episode_id") or "")
         latest_status = str(payload.get("latest_episode_status") or "")
-        # A blocked or failed bounded episode represents new operator input/recovery work, not an
-        # invitation to burn the remaining campaign ceiling repeating the same failure. Pause once
-        # for that terminal episode. An explicit resume acknowledges it and permits one fresh try.
+        # Escalate-don't-block: a blocked/failed/cancelled episode is recorded as a durable blocker and
+        # the campaign keeps moving (a fresh episode is chained) so it stays autonomous. Only after
+        # several consecutive unrecovered episodes do we pause for real operator review -- a genuine
+        # systemic failure, not a single dead end.
+        from_review = False
         if _research_campaign_terminal_needs_review(config, latest_episode_id, latest_status):
-            message = f"Latest research episode ended {latest_status}; operator review is required"
+            consecutive_blocked = int(config.get("consecutive_blocked") or 0) + 1
             async with db_pool.acquire() as conn:
+                await _record_campaign_blocker(
+                    conn, row["id"], kind=f"episode_{latest_status}", episode_id=latest_episode_id,
+                )
+                if consecutive_blocked >= _CAMPAIGN_MAX_CONSECUTIVE_BLOCKED:
+                    await conn.execute(
+                        """
+                        UPDATE campaigns SET status='paused',
+                            metadata_json=jsonb_set(jsonb_set(jsonb_set(metadata_json,
+                                '{autonomous_research,last_paused_episode_id}', to_jsonb($2::text), true),
+                                '{autonomous_research,consecutive_blocked}', to_jsonb($3::int), true),
+                                '{autonomous_research,last_error}', to_jsonb($4::text), true),
+                            updated_at=NOW() WHERE id=$1
+                        """,
+                        row["id"], latest_episode_id, consecutive_blocked,
+                        f"Paused after {consecutive_blocked} consecutive unrecovered episodes (last ended {latest_status})",
+                    )
+                    continue
                 await conn.execute(
                     """
-                    UPDATE campaigns SET status='paused',
-                        metadata_json=jsonb_set(
-                            jsonb_set(metadata_json, '{autonomous_research,last_paused_episode_id}', to_jsonb($2::text), true),
-                            '{autonomous_research,last_error}', to_jsonb($3::text), true
-                        ),
+                    UPDATE campaigns SET
+                        metadata_json=jsonb_set(jsonb_set(metadata_json,
+                            '{autonomous_research,last_paused_episode_id}', to_jsonb($2::text), true),
+                            '{autonomous_research,consecutive_blocked}', to_jsonb($3::int), true),
                         updated_at=NOW() WHERE id=$1
                     """,
-                    row["id"], latest_episode_id, message,
+                    row["id"], latest_episode_id, consecutive_blocked,
                 )
-            continue
+            from_review = True
         try:
             await launch_research_episode(ResearchLaunchRequest(
                 subject_type="target", subject_id=str(row["target_id"]), mission_profile="target_hunt",
@@ -27610,13 +27809,18 @@ async def _continue_autonomous_research_campaigns() -> int:
                 )
             continue
         async with db_pool.acquire() as conn:
+            # Reset the consecutive-blocked counter when chaining after a clean (non-review) episode;
+            # keep the just-incremented value when retrying after a recorded blocker.
             await conn.execute(
                 """
                 UPDATE campaigns SET
-                    metadata_json=jsonb_set(metadata_json, '{autonomous_research,episodes_started}', to_jsonb($2::int), true),
+                    metadata_json=jsonb_set(
+                        CASE WHEN $3 THEN metadata_json
+                             ELSE jsonb_set(metadata_json, '{autonomous_research,consecutive_blocked}', '0'::jsonb, true) END,
+                        '{autonomous_research,episodes_started}', to_jsonb($2::int), true),
                     updated_at=NOW() WHERE id=$1
                 """,
-                row["id"], count + 1,
+                row["id"], count + 1, from_review,
             )
         started += 1
     return started
