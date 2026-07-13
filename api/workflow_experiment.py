@@ -272,16 +272,15 @@ def _server_confirms_predicate(
             and str(control_request.get("path") or "")
             == str(candidate_request.get("path") or "")
         )
-        owner_refs = set(str(item) for item in control_request.get("variable_references") or [])
-        owner_creation = any(
-            str(obs.get("principal") or "").lower() == control_principal
-            and str(obs.get("checkpoint") or "") == "mutation"
-            and _obs_success(obs)
-            and bool(owner_refs & set(str(item) for item in obs.get("extracted_names") or []))
-            for obs in by_label.values()
-        )
+        # Ownership: the owner principal authenticated-reads the object successfully. The object is
+        # proven owner-scoped (not public) by the anonymous denial_control the contract also requires,
+        # and cross-principal access is proven by the attacker getting the owner's EXACT data
+        # (equivalent) under a DISTINCT verified identity. This holds for both a created object and a
+        # pre-existing one (e.g. a basket id from the owner's own session), without a fragile
+        # create/list step that captcha- or anti-tamper-gated apps reject.
+        owner_established = _obs_authenticated(control) and _obs_success(control)
         base = bool(distinct and same_request and equivalent and _obs_success(control) and _obs_success(candidate))
-        return base and (owner_creation if predicate == "ownership_established" else True)
+        return base and (owner_established if predicate == "ownership_established" else True)
     if predicate == "distinct_identity":
         identities = [principal_identities.get(slot) for slot in step_principals]
         return len(identities) >= 2 and all(identities) and len(set(identities)) == len(identities)

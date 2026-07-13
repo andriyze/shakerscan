@@ -14162,6 +14162,22 @@ async def _auto_provision_principals(conn, target_uuid, target_url: str, config:
             if not token:
                 raise HTTPException(status_code=502, detail=f"login returned no token for {label} (status {login_status})")
             secret = _render_provision_template(header_format, {"token": str(token)})
+            # Seed an owned object per principal (best-effort) so read-existing BOLA has a target --
+            # fresh accounts otherwise have no objects. Uses the just-captured auth on this principal.
+            seed_header = {"Authorization": secret} if auth_kind == "authorization_header" else {"Cookie": secret}
+            for seed in (config.get("seed_requests") or [])[:4]:
+                if not isinstance(seed, dict):
+                    continue
+                try:
+                    seed_url = _provision_same_origin_url(target_url, seed.get("path"))
+                    seed_body = _render_provision_template(seed.get("json") or {}, variables)
+                    await client.request(
+                        str(seed.get("method") or "POST").upper(), seed_url,
+                        json=seed_body or None,
+                        headers={"Content-Type": "application/json", **seed_header},
+                    )
+                except Exception:  # noqa: BLE001 - seeding is best-effort; never fail provisioning
+                    logger.warning("seed request failed for %s on target %s", label, target_uuid, exc_info=True)
             profile_name = f"auto-{label}"
             values = _target_credential_profile_values(
                 name=profile_name, auth_kind=auth_kind, secret=secret, expires_at=None,
@@ -28123,25 +28139,25 @@ async def _research_autobind_hypothesis(
 # valid (normalize_workflow) and server-corroborable. Every template is asserted valid in tests.
 _EXPERIMENT_WORKFLOW_TEMPLATES: dict[str, dict[str, Any]] = {
     "bola": {
+        # Read-existing BOLA: no object creation (avoids captcha/required-field-gated writes). The
+        # owner lists ITS OWN objects, extracts an id (which proves ownership), then the attacker
+        # cross-reads that id and the anonymous request is denied. Prefer an endpoint where the owner
+        # already has objects (e.g. a seeded address/card/basket).
         "proof_family": "bola",
-        "objective": "User2 reads User1's object via an object-id route",
-        "expected_signal": "attacker principal receives the owner's object",
-        "falsifier": "attacker is denied or receives different data",
+        "objective": "User2 reads User1's object via an object-id route (no object creation needed)",
+        "expected_signal": "the attacker principal receives the owner's object; anonymous is denied",
+        "falsifier": "the attacker is denied or receives different data, or anonymous is allowed",
         "steps": [
-            {"label": "baseline", "kind": "http", "principal": "user1", "checkpoint": "before", "method": "GET", "path": "/api/<objects>"},
-            {"label": "create", "kind": "http", "principal": "user1", "checkpoint": "mutation", "method": "POST", "path": "/api/<objects>", "json_body": {"<field>": "<value>"}, "extract": [{"name": "object_id", "source": "json", "path": "$.id"}]},
+            {"label": "list", "kind": "http", "principal": "user1", "checkpoint": "action", "method": "GET", "path": "/api/<objects>", "extract": [{"name": "object_id", "source": "json", "path": "$.data[0].id"}]},
             {"label": "owner_read", "kind": "http", "principal": "user1", "checkpoint": "action", "method": "GET", "path": "/api/<objects>/${object_id}"},
             {"label": "attacker_read", "kind": "http", "principal": "user2", "checkpoint": "action", "method": "GET", "path": "/api/<objects>/${object_id}", "compare_to": "owner_read"},
             {"label": "anon_denied", "kind": "http", "principal": "anonymous", "checkpoint": "action", "method": "GET", "path": "/api/<objects>/${object_id}"},
-            {"label": "cleanup", "kind": "http", "principal": "user1", "checkpoint": "cleanup", "method": "DELETE", "path": "/api/<objects>/${object_id}"},
-            {"label": "restored", "kind": "http", "principal": "user1", "checkpoint": "after", "method": "GET", "path": "/api/<objects>", "compare_to": "baseline"},
         ],
         "assertions": [
             {"type": "distinct_principals", "steps": ["owner_read", "attacker_read"], "predicate": "distinct_identity"},
             {"type": "comparison_equivalent", "control": "owner_read", "candidate": "attacker_read", "predicate": "ownership_established"},
             {"type": "comparison_equivalent", "control": "owner_read", "candidate": "attacker_read", "predicate": "cross_principal_access"},
             {"type": "status_not_in", "step": "anon_denied", "values": [200, 201, 202, 203, 204], "predicate": "denial_control"},
-            {"type": "restored", "control": "baseline", "candidate": "restored", "predicate": "before_after_state"},
         ],
     },
     "data_exposure": {

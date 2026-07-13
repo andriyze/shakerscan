@@ -373,8 +373,20 @@ def test_bola_predicates_require_created_object_identity_and_denial_control():
         "distinct_identity", "ownership_established", "cross_principal_access", "denial_control",
     }
 
-    missing_creation = {**result, "observations": result["observations"][1:]}
-    assert "ownership_established" not in workflow.server_corroborated_predicates(missing_creation)
+    # Read-existing BOLA (no create step): ownership is established by the owner's AUTHENTICATED read
+    # of a pre-existing object, so a captcha-/create-gated app can still be proven.
+    read_existing = {**result, "observations": result["observations"][1:]}
+    assert "ownership_established" in workflow.server_corroborated_predicates(read_existing)
+
+    # But an UNAUTHENTICATED "owner" does not establish ownership (distinct authenticated identities
+    # are required), so the benign case stays unproven.
+    anon_owner = {**read_existing, "observations": [
+        ({**o, "principal": "anonymous"} if o["label"] == "owner" else o)
+        for o in read_existing["observations"]
+    ]}
+    corroborated = workflow.server_corroborated_predicates(anon_owner)
+    assert "ownership_established" not in corroborated
+    assert "cross_principal_access" not in corroborated
 
 
 def test_injection_predicates_are_never_workflow_corroborated():
