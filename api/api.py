@@ -15556,7 +15556,7 @@ async def _build_agent_context_pack_from_target(conn, req: AgentContextPackFromT
     if req.include_endpoints and req.endpoint_limit > 0:
         endpoint_rows = await conn.fetch(
             """
-            SELECT method, path, param_location, auth_state, test_status,
+            SELECT method, path, param_shape, replay_spec, param_location, auth_state, test_status,
                    last_attempt_status, last_verdict, priority_score, last_seen_at, last_tested_at
             FROM target_endpoints
             WHERE target_id = $1
@@ -15566,7 +15566,14 @@ async def _build_agent_context_pack_from_target(conn, req: AgentContextPackFromT
             target_uuid,
             req.endpoint_limit,
         )
-        sample_endpoints = [_json_safe_row(row) for row in endpoint_rows]
+        # param_shape (field names) + replay_spec (an example request incl. a valid body) let the
+        # planner author a WORKING create/mutation step instead of an empty body the app 500s on.
+        sample_endpoints = []
+        for row in endpoint_rows:
+            item = _json_safe_row(row)
+            if item.get("replay_spec") is not None:
+                item["replay_spec"] = str(item["replay_spec"])[:300]
+            sample_endpoints.append(item)
 
     principal_summary: dict[str, Any] = {"principals": [], "expectations": [], "role_counts": {}, "tenant_counts": {}}
     try:
@@ -25930,7 +25937,8 @@ def _compact_research_observation_pack(pack: dict[str, Any]) -> dict[str, Any]:
     for endpoint in list(surface_source.get("sample_endpoints") or [])[:8]:
         projected = _scalars(
             endpoint,
-            ("method", "path", "url", "route", "status", "source", "content_type"),
+            ("method", "path", "url", "route", "status", "source", "content_type",
+             "param_shape", "replay_spec", "auth_state"),
             text_limit=300,
         )
         if projected:
@@ -28217,7 +28225,10 @@ def _research_planner_messages(observation: dict[str, Any]) -> list[dict[str, st
                 "hypothesis_id. When you design an experiment.workflow, copy the matching family template from "
                 "experiment_templates and replace the <placeholders> with real routes, object fields, and "
                 "principals from the observation; keep every checkpoint, assertion type, and predicate exactly so "
-                "the proof stays valid and server-corroborable. "
+                "the proof stays valid and server-corroborable. Fill create/mutation request bodies from the "
+                "endpoint's request schema (param_shape / replay_spec on the observation's endpoints, or "
+                "request_fields / request_example on the ranked hypothesis) -- an empty body is usually rejected, "
+                "which leaves the proof inconclusive. "
                 "Optimize for net-new invariant violations that commodity DAST would miss, not "
                 "re-running generic checks. After an experiment, use its comparisons and receipts to refine or "
                 "falsify the hypothesis; do not discard a negative result. A stop decision must include a concrete stop_reason summarizing the evidence, "
@@ -30636,6 +30647,10 @@ def _endpoint_inventory_hypothesis_requests(
         route = _canonical_vulnerability_route(path) or path
         auth_state = str(endpoint.get("auth_state") or "")
         param_location = str(endpoint.get("param_location") or "").lower()
+        # The endpoint's request schema so the planner can author a WORKING create/mutation body
+        # instead of an empty one the app rejects (the cause of inconclusive BOLA/mass-assignment).
+        request_fields = str(endpoint.get("param_shape") or "").strip() or None
+        request_example = str(endpoint.get("replay_spec") or "").strip()[:300] or None
         if _ID_PATH_SEGMENT.search(path):
             key = f"asm_residue|bola|{method}|{route}"
             if key not in seen:
@@ -30654,11 +30669,22 @@ def _endpoint_inventory_hypothesis_requests(
                         "parameters": {"target_id": target_id, "check_family": "bola", "exploit_depth": True},
                         "requires": ["primary_auth", "second_user_auth"],
                     },
-                    metadata_json={"unexplained_residue": True, "residue_source": "endpoint_inventory", "route": route},
+                    metadata_json={"unexplained_residue": True, "residue_source": "endpoint_inventory",
+                                   "route": route, "request_fields": request_fields, "request_example": request_example},
                     endorsement={"source": "endpoint_inventory", "method": method, "route": route, "auth_state": auth_state},
                     created_by=created_by,
                 ))
-        if method in {"POST", "PUT", "PATCH"} and any(hint in param_location for hint in ("body", "json", "form")):
+        # Auth-session endpoints (login/token/reset/...) are not object-mutation targets; excluding
+        # them keeps the board from drowning in mass-assignment noise that stalls the planner.
+        auth_session_noise = any(
+            segment in path.lower()
+            for segment in ("/login", "/logout", "/token", "/refresh", "/reset", "/forgot", "/verify", "/otp")
+        )
+        if (
+            method in {"POST", "PUT", "PATCH"}
+            and any(hint in param_location for hint in ("body", "json", "form"))
+            and not auth_session_noise
+        ):
             key = f"asm_residue|mass_assignment|{method}|{route}"
             if key not in seen:
                 seen.add(key)
@@ -30678,7 +30704,8 @@ def _endpoint_inventory_hypothesis_requests(
                         "parameters": {"proof_family": "mass_assignment"},
                         "requires": ["primary_auth"],
                     },
-                    metadata_json={"unexplained_residue": True, "residue_source": "endpoint_inventory", "route": route},
+                    metadata_json={"unexplained_residue": True, "residue_source": "endpoint_inventory",
+                                   "route": route, "request_fields": request_fields, "request_example": request_example},
                     endorsement={"source": "endpoint_inventory", "method": method, "route": route},
                     created_by=created_by,
                 ))
@@ -30700,7 +30727,7 @@ async def generate_endpoint_inventory_hypotheses(
             raise HTTPException(status_code=404, detail="Target not found")
         rows = await conn.fetch(
             """
-            SELECT method, path, param_location, auth_state
+            SELECT method, path, param_shape, replay_spec, param_location, auth_state
             FROM target_endpoints
             -- Exclude retired ('gone') and already actively tested endpoints so leads point at
             -- genuinely unexplained surface, not a re-verification of existing DAST coverage.
