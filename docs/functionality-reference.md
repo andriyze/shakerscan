@@ -1050,8 +1050,8 @@ it is the exhaustive backstop behind the human-readable product map above.
 
 | Surface | Count | Source |
 |---|---|---|
-| Public REST operations | 212 | `api/api.py` FastAPI decorators |
-| Unique REST paths | 171 | `api/api.py` |
+| Public REST operations | 213 | `api/api.py` FastAPI decorators |
+| Unique REST paths | 172 | `api/api.py` |
 | Check families | 13 | `api/check_registry.py` |
 | Command Arsenal commands | 75 | `api/command_arsenal.py` |
 | Tool adapters | 13 | `api/command_arsenal.py` |
@@ -1278,6 +1278,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | `DELETE` | `/targets/{target_id}/principal-matrix/{expectation_id}` | `delete_target_principal_expectation` |
 | `GET` | `/targets/{target_id}/principals` | `list_target_principals` |
 | `POST` | `/targets/{target_id}/principals` | `create_target_principal` |
+| `POST` | `/targets/{target_id}/principals/auto-provision` | `auto_provision_target_principals` |
 | `DELETE` | `/targets/{target_id}/principals/{principal_id}` | `delete_target_principal` |
 | `PATCH` | `/targets/{target_id}/principals/{principal_id}` | `update_target_principal` |
 | `POST` | `/targets/{target_id}/scan` | `scan_target` |
@@ -1594,7 +1595,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `AI_CLASSIFY_MAX_FINDINGS_PER_BATCH` | `scanner/scanner_tools/ai_classifier.py` |
 | `AI_CLASSIFY_MAX_PROMPT_CHARS` | `scanner/scanner_tools/ai_classifier.py` |
 | `AI_CLASSIFY_MIN_SEVERITY` | `api/api.py`, `api/worker.py`, `docker-compose.release.yml`, `docker-compose.yml`, `scanner/scanner.py` |
-| `AI_CREDENTIAL_ENC_KEY` | `api/secret_store.py` |
+| `AI_CREDENTIAL_ENC_KEY` | `api/api.py`, `api/secret_store.py` |
 | `AI_DEMO_HONEY_PUBLIC_URL` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `AI_DEMO_HONEY_SCANNER_URL` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `AI_DEMO_MODE_ENABLED` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |

@@ -177,7 +177,7 @@ def test_generic_200_cannot_be_labelled_a_sensitive_value_finding():
     assert workflow.server_corroborated_predicates(result) == set()
 
 
-def test_real_sensitive_value_corroborates_data_exposure():
+def test_real_sensitive_value_remains_signal_without_exposure_context():
     result = {
         "observations": [
             {"label": "read", "principal": "anonymous",
@@ -190,7 +190,7 @@ def test_real_sensitive_value_corroborates_data_exposure():
              "predicate": "sensitive_value_present", "passed": True},
         ],
     }
-    assert "sensitive_value_present" in workflow.server_corroborated_predicates(result)
+    assert "sensitive_value_present" not in workflow.server_corroborated_predicates(result)
 
 
 def test_sensitive_value_classifier_matches_values_not_names():
@@ -203,6 +203,10 @@ def test_sensitive_value_classifier_matches_values_not_names():
 
 def test_cross_principal_access_requires_distinct_authenticated_principals_and_equivalence():
     shared = {
+        "principal_receipts": [
+            {"slot": "user1", "identity_fingerprint": "owner-id"},
+            {"slot": "user2", "identity_fingerprint": "attacker-id"},
+        ],
         "observations": [
             {"label": "owner", "principal": "user1", "response": {"status": 200}},
             {"label": "attacker", "principal": "user2", "response": {"status": 200}},
@@ -225,6 +229,72 @@ def test_cross_principal_access_requires_distinct_authenticated_principals_and_e
                                "candidate": "b", "predicate": "cross_principal_access", "passed": True}],
     }
     assert "cross_principal_access" not in workflow.server_corroborated_predicates(anon)
+
+
+def test_public_success_and_generic_mutation_never_become_family_proof():
+    public = {
+        "observations": [
+            {"label": "public", "principal": "anonymous", "response": {"status": 200}},
+            {"label": "variant", "principal": "anonymous", "response": {"status": 200}},
+        ],
+        "comparisons": [
+            {"control": "public", "candidate": "variant", "comparable": True, "body_changed": True},
+        ],
+        "assertion_results": [
+            {"id": "p", "type": "status_in", "step": "public", "values": [200],
+             "predicate": "protected_resource_accessed", "passed": True},
+            {"id": "u", "type": "comparison_changed", "control": "public", "candidate": "variant",
+             "predicate": "unauthenticated_control", "passed": True},
+            {"id": "f", "type": "status_in", "step": "public", "values": [200],
+             "predicate": "forbidden_field_accepted", "passed": True},
+            {"id": "s", "type": "comparison_changed", "control": "public", "candidate": "variant",
+             "predicate": "observable_state_change", "passed": True},
+            {"id": "c", "type": "comparison_changed", "control": "public", "candidate": "variant",
+             "predicate": "control_rejected", "passed": True},
+        ],
+    }
+    assert workflow.server_corroborated_predicates(public) == set()
+
+
+def test_bola_predicates_require_created_object_identity_and_denial_control():
+    result = {
+        "principal_receipts": [
+            {"slot": "user1", "identity_fingerprint": "owner-id"},
+            {"slot": "user2", "identity_fingerprint": "attacker-id"},
+        ],
+        "observations": [
+            {"label": "create", "principal": "user1", "checkpoint": "mutation",
+             "request": {"method": "POST", "path": "/objects"}, "response": {"status": 201},
+             "extracted_names": ["object_id"]},
+            {"label": "owner", "principal": "user1", "request": {
+                "method": "GET", "path": "/objects/42", "variable_references": ["object_id"],
+             }, "response": {"status": 200}},
+            {"label": "attacker", "principal": "user2",
+             "request": {"method": "GET", "path": "/objects/42"}, "response": {"status": 200}},
+            {"label": "anonymous", "principal": "anonymous",
+             "request": {"method": "GET", "path": "/objects/42"}, "response": {"status": 403}},
+        ],
+        "comparisons": [{
+            "control": "owner", "candidate": "attacker", "comparable": True,
+            "body_changed": False, "status_changed": False,
+        }],
+        "assertion_results": [
+            {"id": "ids", "type": "distinct_principals", "steps": ["owner", "attacker"],
+             "predicate": "distinct_identity", "passed": True},
+            {"id": "own", "type": "comparison_equivalent", "control": "owner", "candidate": "attacker",
+             "predicate": "ownership_established", "passed": True},
+            {"id": "cross", "type": "comparison_equivalent", "control": "owner", "candidate": "attacker",
+             "predicate": "cross_principal_access", "passed": True},
+            {"id": "deny", "type": "status_not_in", "step": "anonymous", "values": [200, 201, 204],
+             "predicate": "denial_control", "passed": True},
+        ],
+    }
+    assert workflow.server_corroborated_predicates(result) == {
+        "distinct_identity", "ownership_established", "cross_principal_access", "denial_control",
+    }
+
+    missing_creation = {**result, "observations": result["observations"][1:]}
+    assert "ownership_established" not in workflow.server_corroborated_predicates(missing_creation)
 
 
 def test_injection_predicates_are_never_workflow_corroborated():

@@ -3328,6 +3328,13 @@ class TargetUpdate(BaseModel):
     metadata_json: Optional[dict] = None
 
 
+class TargetPrincipalAutoProvisionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    approval_receipt_id: str
+    created_by: Optional[str] = Field(default="target_principal_auto_provision", max_length=120)
+
+
 class TargetCredentialProfileCreate(BaseModel):
     name: str
     auth_kind: str = Field(pattern="^(authorization_header|cookie)$")
@@ -13996,6 +14003,8 @@ async def create_target_principal(target_id: str, request: TargetPrincipalCreate
 # residue can run without a human hand-provisioning credentials. Strictly opt-in per target; the
 # secrets are stored encrypted via the normal credential-profile path and never returned to a model.
 _MAX_AUTO_PROVISION_PRINCIPALS = 4
+_MAX_AUTO_PROVISION_RESPONSE_BYTES = 64 * 1024
+_AUTO_PROVISION_SEMAPHORE = asyncio.Semaphore(2)
 
 
 def _auto_provisioning_config(target_row: Any) -> dict[str, Any]:
@@ -14047,6 +14056,11 @@ async def _auto_provision_principals(conn, target_uuid, target_url: str, config:
 
     if not config.get("enabled"):
         raise HTTPException(status_code=400, detail="auto_provisioning is not enabled for this target")
+    if not encryption_enabled():
+        raise HTTPException(
+            status_code=409,
+            detail="auto_provisioning requires AI_CREDENTIAL_ENC_KEY so managed credentials are encrypted at rest",
+        )
     signup = config.get("signup") if isinstance(config.get("signup"), dict) else None
     login = config.get("login") if isinstance(config.get("login"), dict) else None
     if not signup or not login:
@@ -14055,52 +14069,103 @@ async def _auto_provision_principals(conn, target_uuid, target_url: str, config:
     if not isinstance(specs, list) or not specs:
         specs = [{"label": "user1", "auth_state": "user1"}, {"label": "user2", "auth_state": "user2"}]
     specs = [s for s in specs if isinstance(s, dict)][:_MAX_AUTO_PROVISION_PRINCIPALS]
+    if not specs:
+        raise HTTPException(status_code=400, detail="auto_provisioning has no valid principal specs")
+    normalized_specs: list[dict[str, str]] = []
+    seen_labels: set[str] = set()
+    seen_states: set[str] = set()
+    for spec in specs:
+        label = _normalize_target_principal_label(spec.get("label") or "user1")
+        auth_state = _normalize_target_auth_state(spec.get("auth_state") or "user1")
+        if label.lower() in seen_labels or auth_state in seen_states:
+            raise HTTPException(status_code=400, detail="auto_provisioning principal labels and auth_state values must be unique")
+        seen_labels.add(label.lower())
+        seen_states.add(auth_state)
+        normalized_specs.append({"label": label, "auth_state": auth_state})
     token_path = str(login.get("token_path") or "$.token")
     auth_kind = str(login.get("auth_kind") or "authorization_header").strip().lower()
     header_format = str(login.get("header_format") or "Bearer {{token}}")
     provisioned: list[dict[str, Any]] = []
+    for recipe_name, recipe in (("signup", signup), ("login", login)):
+        method = str(recipe.get("method") or "POST").strip().upper()
+        if method != "POST":
+            raise HTTPException(status_code=400, detail=f"auto_provisioning {recipe_name} method must be POST")
+
+    async def bounded_request(client, url: str, body: Any) -> tuple[int, Any]:
+        request = client.build_request("POST", url, json=body or None, headers={"Content-Type": "application/json"})
+        response = await client.send(request, stream=True)
+        chunks: list[bytes] = []
+        received = 0
+        try:
+            async for chunk in response.aiter_bytes():
+                received += len(chunk)
+                if received > _MAX_AUTO_PROVISION_RESPONSE_BYTES:
+                    raise HTTPException(status_code=502, detail="auto_provisioning upstream response exceeded 64 KiB")
+                chunks.append(chunk)
+        finally:
+            await response.aclose()
+        payload: Any = None
+        if chunks:
+            try:
+                payload = json.loads(b"".join(chunks).decode(response.encoding or "utf-8", errors="replace"))
+            except (ValueError, TypeError):
+                payload = None
+        return response.status_code, payload
+
+    key_material = str(os.environ.get("AI_CREDENTIAL_ENC_KEY") or "")
     async with httpx.AsyncClient(timeout=httpx.Timeout(15), follow_redirects=False, trust_env=False) as client:
-        for spec in specs:
-            label = _normalize_target_principal_label(spec.get("label") or "user1")
-            auth_state = _normalize_target_auth_state(spec.get("auth_state") or "user1")
-            token_hex = uuid.uuid4().hex
+        for spec in normalized_specs:
+            label = spec["label"]
+            auth_state = spec["auth_state"]
+            existing = await conn.fetchrow(
+                """
+                SELECT p.label, p.auth_state, p.credential_profile
+                FROM target_principals p
+                JOIN target_credential_profiles cp
+                  ON cp.target_id=p.target_id AND lower(cp.name)=lower(p.credential_profile)
+                WHERE p.target_id=$1 AND p.auth_state=$2 AND p.is_active=true
+                  AND cp.is_active=true AND (cp.expires_at IS NULL OR cp.expires_at > NOW())
+                ORDER BY p.updated_at DESC LIMIT 1
+                """,
+                target_uuid, auth_state,
+            )
+            if existing:
+                provisioned.append({
+                    "label": str(existing["label"]), "auth_state": str(existing["auth_state"]),
+                    "credential_profile": str(existing["credential_profile"]), "reused": True,
+                })
+                continue
+            seed = hashlib.sha256(f"{key_material}:{target_uuid}:{label}:{auth_state}".encode()).hexdigest()
             # Keep the email short + unique: some apps cap identity-derived columns (e.g. crAPI
             # stores its JWT, whose sub is the email, in a varchar(500)); a long email overflows it.
             variables = {
-                "email": f"sk{token_hex[:10]}@shaker.test",
-                "password": f"ShakerHunt!{token_hex[:10]}Aa1",
-                "number": str(uuid.uuid4().int % 10_000_000_000).zfill(10),
+                "email": f"sk{seed[:10]}@shaker.test",
+                "password": f"ShakerHunt!{seed[10:26]}Aa1",
+                "number": str(int(seed[26:42], 16) % 10_000_000_000).zfill(10),
                 "name": f"Shaker {label}",
                 "label": label,
             }
             # 1) Register through the app's own signup flow (real account, same origin only).
             signup_url = _provision_same_origin_url(target_url, signup.get("path"))
             signup_body = _render_provision_template(signup.get("json") or {}, variables)
-            signup_resp = await client.request(
-                str(signup.get("method") or "POST").upper(), signup_url,
-                json=signup_body or None, headers={"Content-Type": "application/json"},
-            )
-            if signup_resp.status_code >= 500:
-                raise HTTPException(status_code=502, detail=f"signup upstream error for {label}: {signup_resp.status_code}")
+            signup_status, _signup_payload = await bounded_request(client, signup_url, signup_body)
+            if not (200 <= signup_status < 300 or signup_status == 409):
+                raise HTTPException(status_code=502, detail=f"signup failed for {label}: {signup_status}")
             # 2) Log in to capture the managed token.
             login_url = _provision_same_origin_url(target_url, login.get("path"))
             login_body = _render_provision_template(login.get("json") or {}, variables)
-            login_resp = await client.request(
-                str(login.get("method") or "POST").upper(), login_url,
-                json=login_body or None, headers={"Content-Type": "application/json"},
-            )
-            token = None
-            try:
-                token = _provision_json_path(login_resp.json(), token_path)
-            except (ValueError, TypeError):
-                token = None
+            login_status, login_payload = await bounded_request(client, login_url, login_body)
+            token = _provision_json_path(login_payload, token_path) if 200 <= login_status < 300 else None
             if not token:
-                raise HTTPException(status_code=502, detail=f"login returned no token for {label} (status {login_resp.status_code})")
+                raise HTTPException(status_code=502, detail=f"login returned no token for {label} (status {login_status})")
             secret = _render_provision_template(header_format, {"token": str(token)})
             profile_name = f"auto-{label}"
             values = _target_credential_profile_values(
                 name=profile_name, auth_kind=auth_kind, secret=secret, expires_at=None,
-                metadata_json={"auto_provisioned": True, "source": "self_registration"},
+                metadata_json={
+                    "auto_provisioned": True, "source": "self_registration",
+                    "principal_identity": variables["email"],
+                },
             )
             await conn.execute(
                 """
@@ -14125,30 +14190,56 @@ async def _auto_provision_principals(conn, target_uuid, target_url: str, config:
                 DO UPDATE SET credential_profile=EXCLUDED.credential_profile, is_active=true,
                     metadata_json=target_principals.metadata_json || EXCLUDED.metadata_json, updated_at=NOW()
                 """,
-                target_uuid, label, auth_state, profile_name, json.dumps({"auto_provisioned": True}),
+                target_uuid, label, auth_state, profile_name,
+                json.dumps({"auto_provisioned": True, "principal_identity": variables["email"]}),
             )
-            provisioned.append({"label": label, "auth_state": auth_state, "credential_profile": profile_name})
+            provisioned.append({"label": label, "auth_state": auth_state, "credential_profile": profile_name, "reused": False})
     return provisioned
 
 
 @app.post("/targets/{target_id}/principals/auto-provision")
-async def auto_provision_target_principals(target_id: str):
+async def auto_provision_target_principals(target_id: str, request: TargetPrincipalAutoProvisionRequest):
     """Self-register managed test principals via the target's OWN signup flow (opt-in).
 
     A real registration through the app's public signup -- never forged auth. Requires the target's
-    metadata_json.auto_provisioning.enabled = true (explicit operator authorization). Secrets are
-    stored encrypted through the normal credential-profile path and are never returned.
+    metadata_json.auto_provisioning.enabled = true plus a current target-scoped credential-tier
+    approval receipt. Secrets are encrypted through the normal credential-profile path and are
+    never returned.
     """
     target_uuid = _uuid_or_400(target_id, "target id")
-    async with db_pool.acquire() as conn:
-        target = await conn.fetchrow("SELECT id, url, is_active, metadata_json FROM targets WHERE id=$1", target_uuid)
-        if not target or not target["is_active"]:
-            raise HTTPException(status_code=404, detail="Active target not found")
-        provisioned = await _auto_provision_principals(conn, target_uuid, str(target["url"]), _auto_provisioning_config(dict(target)))
+    async with _AUTO_PROVISION_SEMAPHORE:
+        async with db_pool.acquire() as conn:
+            target = await conn.fetchrow("SELECT id, url, is_active, metadata_json FROM targets WHERE id=$1", target_uuid)
+            if not target or not target["is_active"]:
+                raise HTTPException(status_code=404, detail="Active target not found")
+            approval = await _validate_approval_receipt_for_action(
+                conn,
+                request.approval_receipt_id,
+                target_url=str(target["url"]),
+                target_id=target_uuid,
+                action_name="target.principals.auto_provision",
+                command="target.principals.auto_provision",
+                risk_tier="credential",
+                created_by=request.created_by,
+                always_require_receipt=True,
+            )
+            provisioned = await _auto_provision_principals(conn, target_uuid, str(target["url"]), _auto_provisioning_config(dict(target)))
+            command_result = await _record_command_result(
+                conn,
+                command="target.principals.auto_provision",
+                status="completed",
+                risk_tier="credential",
+                operator_message=f"Provisioned or reused {len(provisioned)} managed test principals",
+                scope_receipt_id=str((approval or {}).get("scope_receipt_id") or "") or None,
+                approval_receipt_id=request.approval_receipt_id,
+                result_json={"target_id": target_id, "principals": provisioned},
+                created_by=request.created_by,
+            )
     return {
         "target_id": target_id,
         "provisioned": provisioned,
         "count": len(provisioned),
+        "command_result_id": command_result.get("id"),
         "note": "Managed test accounts registered via the app's own signup; credentials stored encrypted.",
     }
 
@@ -22701,6 +22792,22 @@ async def _promote_trusted_workflow_finding(
         return None
     hypothesis = _public_hypothesis_row(hypothesis_row)
     family = str(proof.get("family") or "workflow")
+    if family_proof.canonical_family(hypothesis.get("family")) != family_proof.canonical_family(family):
+        return None
+    hypothesis_metadata = (
+        hypothesis.get("metadata_json") if isinstance(hypothesis.get("metadata_json"), dict) else {}
+    )
+    dedupe_dimensions = (
+        hypothesis_metadata.get("dedupe_dimensions")
+        if isinstance(hypothesis_metadata.get("dedupe_dimensions"), dict)
+        else {}
+    )
+    canonical_vulnerability_key = _canonical_vulnerability_key(
+        family=family,
+        route=dedupe_dimensions.get("route") or hypothesis_metadata.get("route"),
+    )
+    if not canonical_vulnerability_key:
+        return None
     fingerprint = hashlib.sha256(
         f"{target_uuid}:autonomous_workflow:{hypothesis_id}:{family}".encode()
     ).hexdigest()[:32]
@@ -22710,6 +22817,8 @@ async def _promote_trusted_workflow_finding(
         severity = "high"
     evidence = _redact_finding_evidence({
         "proof": "Independent live workflow replay satisfied the deterministic family-proof contract.",
+        "canonical_vulnerability_key": canonical_vulnerability_key,
+        "dedupe_dimensions": dedupe_dimensions,
         "family_proof": proof,
         "autonomous_workflow": {
             "workflow_id": workflow_id,
@@ -26670,6 +26779,41 @@ async def research_readiness():
     }
 
 
+def _canonical_vulnerability_route(value: Any) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    parsed = urllib.parse.urlsplit(text if "://" in text else f"https://placeholder.invalid{text if text.startswith('/') else '/' + text}")
+    path = parsed.path or "/"
+    path = re.sub(r"(?i)/[0-9a-f]{8}-[0-9a-f-]{27,36}(?=/|$)", "/{id}", path)
+    path = re.sub(r"/[0-9]+(?=/|$)", "/{id}", path)
+    path = re.sub(r"(?i)/[0-9a-f]{16,}(?=/|$)", "/{id}", path)
+    path = re.sub(r"\{[^/{}]+\}|:[A-Za-z_][A-Za-z0-9_]*", "{id}", path)
+    return re.sub(r"/+", "/", path)[:1000]
+
+
+def _canonical_vulnerability_key(*, family: Any, route: Any) -> str | None:
+    canonical_family = family_proof.canonical_family(family)
+    canonical_route = _canonical_vulnerability_route(route)
+    if not canonical_family or not canonical_route:
+        return None
+    return hashlib.sha256(f"vulnerability:v1|{canonical_family}|{canonical_route}".encode()).hexdigest()
+
+
+def _finding_vulnerability_key(value: Any) -> str | None:
+    finding = row_to_dict(value) if value is not None and not isinstance(value, dict) else dict(value or {})
+    evidence = _decode_json_value(finding.get("evidence")) or {}
+    explicit = str(evidence.get("canonical_vulnerability_key") or "").strip().lower()
+    if re.fullmatch(r"[a-f0-9]{64}", explicit):
+        return explicit
+    family = _research_finding_family(finding)
+    route = finding.get("url")
+    if isinstance(evidence, dict):
+        dimensions = evidence.get("dedupe_dimensions") if isinstance(evidence.get("dedupe_dimensions"), dict) else {}
+        route = dimensions.get("route") or evidence.get("route") or evidence.get("path") or route
+    return _canonical_vulnerability_key(family=family, route=route)
+
+
 @app.get("/research/episodes/{episode_id}/benchmark")
 async def research_episode_benchmark(
     episode_id: str,
@@ -26695,12 +26839,13 @@ async def research_episode_benchmark(
             raise HTTPException(status_code=400, detail="Baseline lacks options.benchmark_request_budget")
         equal_budget = baseline_budget == episode_budget
         baseline_rows = await conn.fetch(
-            "SELECT id, fingerprint FROM findings WHERE scan_id=$1",
+            "SELECT id, fingerprint, title, tool, cwe, url, evidence FROM findings WHERE scan_id=$1",
             baseline_uuid,
         )
         autonomous_rows = await conn.fetch(
             """
-            SELECT id, fingerprint, title, severity, last_verification_verdict
+            SELECT id, fingerprint, title, severity, tool, cwe, url, evidence,
+                   last_verification_verdict
             FROM findings
             WHERE target_id=$1 AND tool='autonomous_workflow'
               AND created_at >= $2
@@ -26714,13 +26859,23 @@ async def research_episode_benchmark(
         # any other DAST/scanner/manual finding, or a scan that ran during the episode window) is
         # not autonomy's to claim as net-new. Exclude all of them, not just the baseline scan.
         prior_source_rows = await conn.fetch(
-            "SELECT DISTINCT fingerprint FROM findings "
-            "WHERE target_id=$1 AND COALESCE(tool,'') <> 'autonomous_workflow' AND fingerprint IS NOT NULL",
+            "SELECT id, fingerprint, title, tool, cwe, url, evidence FROM findings "
+            "WHERE target_id=$1 AND COALESCE(tool,'') <> 'autonomous_workflow'",
             episode_row["target_id"],
         )
-    baseline_fingerprints = {str(row["fingerprint"] or "") for row in baseline_rows}
-    prior_fingerprints = baseline_fingerprints | {str(row["fingerprint"] or "") for row in prior_source_rows}
-    net_new = [row_to_dict(row) for row in autonomous_rows if str(row["fingerprint"] or "") not in prior_fingerprints]
+    prior_keys = {
+        key for key in (_finding_vulnerability_key(row) for row in [*baseline_rows, *prior_source_rows])
+        if key
+    }
+    autonomous_with_keys = [(row, _finding_vulnerability_key(row)) for row in autonomous_rows]
+    net_new = [
+        {
+            field: row.get(field)
+            for field in ("id", "fingerprint", "title", "severity", "last_verification_verdict")
+        }
+        for row, key in autonomous_with_keys if key and key not in prior_keys
+    ]
+    unattributable = [str(row["id"]) for row, key in autonomous_with_keys if not key]
     episode_actual_requests = int((episode.get("budget_used") or {}).get("requests") or 0)
     return {
         "episode_id": str(episode_row["id"]),
@@ -26732,16 +26887,17 @@ async def research_episode_benchmark(
         "gate_passed": bool(equal_budget and net_new),
         "net_new_verified_findings": net_new,
         "net_new_verified_count": len(net_new),
+        "unattributable_autonomous_finding_ids": unattributable,
         "autonomous_verified_count": len(autonomous_rows),
         "baseline_finding_count": len(baseline_rows),
         "caveats": [
             "Budgets compared are CONFIGURED caps; the baseline's actual HTTP request count is not instrumented here.",
             "No application state snapshot/reset between runs; results can depend on shared mutable state.",
             "Worker build-fingerprint uniformity across the baseline and episode is not enforced here.",
-            "gate_passed means: at least one VERIFIED autonomous finding whose fingerprint no non-autonomous "
-            "source on this target produced, at equal configured budget -- not a fully controlled superiority proof.",
+            "gate_passed means: at least one VERIFIED autonomous finding whose canonical family+route identity "
+            "no non-autonomous source on this target produced, at equal configured budget -- not a fully controlled superiority proof.",
         ],
-        "metric": "net_new_verified_findings_not_produced_by_any_non_autonomous_source_on_target",
+        "metric": "net_new_verified_canonical_vulnerabilities_not_produced_by_any_non_autonomous_source_on_target",
     }
 
 
@@ -26951,18 +27107,50 @@ async def launch_research_episode(req: ResearchLaunchRequest):
         # Deep Hunt may self-provision two managed principals via the app's own signup so
         # two-principal BOLA workflows are reachable without hand-configured credentials. Opt-in
         # (target metadata_json.auto_provisioning.enabled); best-effort; never blocks a launch.
-        try:
+        async with _AUTO_PROVISION_SEMAPHORE:
             async with db_pool.acquire() as conn:
                 target_row = await conn.fetchrow("SELECT url, metadata_json FROM targets WHERE id=$1", target_id)
                 config = _auto_provisioning_config(dict(target_row)) if target_row else {}
-                if config.get("enabled"):
-                    active_principals = await conn.fetchval(
-                        "SELECT COUNT(*) FROM target_principals WHERE target_id=$1 AND is_active", target_id)
-                    if int(active_principals or 0) < 2:
-                        provisioned = await _auto_provision_principals(conn, target_id, str(target_row["url"]), config)
-                        logger.info("deep_hunt self-provisioned %d principals for target %s", len(provisioned), target_id)
-        except Exception:
-            logger.warning("deep_hunt auto-provisioning failed for target %s", target_id, exc_info=True)
+                active_principals = await conn.fetchval(
+                    "SELECT COUNT(*) FROM target_principals WHERE target_id=$1 AND is_active", target_id)
+                if not (config.get("enabled") and int(active_principals or 0) < 2):
+                    target_row = None
+            if target_row is not None:
+                async with db_pool.acquire() as conn:
+                    # Validate the receipt before the first outbound signup request.
+                    # create_research_episode validates it again when binding the episode, but that
+                    # later check cannot authorize an external side effect retroactively.
+                    approval = await _validate_approval_receipt_for_action(
+                        conn,
+                        req.approval_receipt_id,
+                        target_url=str(target_row["url"]),
+                        target_id=target_id,
+                        action_name="target.principals.auto_provision",
+                        command="target.principals.auto_provision",
+                        risk_tier="credential",
+                        created_by=req.created_by,
+                        always_require_receipt=True,
+                    )
+                    try:
+                        provisioned = await _auto_provision_principals(
+                            conn, target_id, str(target_row["url"]), config
+                        )
+                        await _record_command_result(
+                            conn,
+                            command="target.principals.auto_provision",
+                            status="completed",
+                            risk_tier="credential",
+                            operator_message=f"Provisioned or reused {len(provisioned)} managed test principals",
+                            scope_receipt_id=str((approval or {}).get("scope_receipt_id") or "") or None,
+                            approval_receipt_id=req.approval_receipt_id,
+                            result_json={"target_id": str(target_id), "principals": provisioned},
+                            created_by=req.created_by,
+                        )
+                        logger.info("deep_hunt self-provisioned or reused %d principals for target %s", len(provisioned), target_id)
+                    except Exception:
+                        # A valid approval permits provisioning but does not make target-specific
+                        # signup failures fatal; the observation exposes missing principals.
+                        logger.warning("deep_hunt auto-provisioning failed for target %s", target_id, exc_info=True)
 
     if req.mission_profile == "target_hunt":
         # Seed the hunt with DAST-residue / application-graph leads (auth-boundary edges and

@@ -235,6 +235,7 @@ def _server_confirms_predicate(
     assertion: dict[str, Any],
     by_label: dict[str, dict[str, Any]],
     by_pair: dict[tuple[str, str], dict[str, Any]],
+    principal_identities: dict[str, str],
 ) -> bool:
     step = by_label.get(str(assertion.get("step") or ""), {})
     control = by_label.get(str(assertion.get("control") or ""), {})
@@ -248,60 +249,60 @@ def _server_confirms_predicate(
     ]
     step_principals = [p for p in step_principals if p]
 
-    # data_exposure: require an actual server-classified sensitive VALUE, never HTTP status.
-    if predicate == "sensitive_value_present":
-        return bool((step or candidate).get("sensitive_value_categories"))
-    if predicate == "name_only_classification":  # refute: sensitive-looking keys, no values
-        target = step or candidate
-        response = target.get("response") if isinstance(target.get("response"), dict) else {}
-        keys = response.get("json_keys") or []
-        return (not target.get("sensitive_value_categories")) and any(_sensitive_name(str(k)) for k in keys)
-
-    # bola: a distinct AUTHENTICATED principal genuinely received the owner's object.
+    # BOLA is the sole workflow-promotable family. Require an owner-created object reference,
+    # exact owner/attacker request equivalence, verified distinct account identities, and an
+    # anonymous denial control for the same concrete object path. Every other family remains an
+    # unverified workflow signal until a dedicated family actuator can establish its semantics.
     if predicate in {"ownership_established", "cross_principal_access"}:
+        control_request = control.get("request") if isinstance(control.get("request"), dict) else {}
+        candidate_request = candidate.get("request") if isinstance(candidate.get("request"), dict) else {}
+        control_principal = str(control.get("principal") or "").lower()
+        candidate_principal = str(candidate.get("principal") or "").lower()
         distinct = (
             _obs_authenticated(control) and _obs_authenticated(candidate)
-            and str(control.get("principal") or "").lower() != str(candidate.get("principal") or "").lower()
+            and control_principal != candidate_principal
+            and principal_identities.get(control_principal)
+            and principal_identities.get(candidate_principal)
+            and principal_identities.get(control_principal) != principal_identities.get(candidate_principal)
         )
-        return distinct and equivalent and _obs_success(candidate)
+        same_request = (
+            str(control_request.get("method") or "").upper()
+            == str(candidate_request.get("method") or "").upper()
+            and str(control_request.get("path") or "")
+            == str(candidate_request.get("path") or "")
+        )
+        owner_refs = set(str(item) for item in control_request.get("variable_references") or [])
+        owner_creation = any(
+            str(obs.get("principal") or "").lower() == control_principal
+            and str(obs.get("checkpoint") or "") == "mutation"
+            and _obs_success(obs)
+            and bool(owner_refs & set(str(item) for item in obs.get("extracted_names") or []))
+            for obs in by_label.values()
+        )
+        base = bool(distinct and same_request and equivalent and _obs_success(control) and _obs_success(candidate))
+        return base and (owner_creation if predicate == "ownership_established" else True)
     if predicate == "distinct_identity":
-        return (
-            len(step_principals) >= 2
-            and len(set(step_principals)) == len(step_principals)
-            and all(p != "anonymous" for p in step_principals)
-        )
+        identities = [principal_identities.get(slot) for slot in step_principals]
+        return len(identities) >= 2 and all(identities) and len(set(identities)) == len(identities)
     if predicate == "same_account":  # refute
-        return len(step_principals) >= 2 and len(set(step_principals)) < len(step_principals)
+        identities = [principal_identities.get(slot) for slot in step_principals]
+        return len(identities) >= 2 and all(identities) and len(set(identities)) < len(identities)
     if predicate == "cross_principal_denied":  # refute: the cross principal was actually denied
         return not _obs_success(candidate or step)
-
-    # auth_bypass: an unauthenticated request reached a resource a control shows needs auth.
-    if predicate == "protected_resource_accessed":
-        return _obs_success(step or candidate)
-    if predicate == "unauthenticated_control":
+    if predicate == "denial_control":
         target = step or candidate
-        return str(target.get("principal") or "anonymous").lower() == "anonymous" and (_obs_success(target) or changed)
-    if predicate == "access_denied_unauthenticated":  # refute
-        target = step or candidate
-        return str(target.get("principal") or "anonymous").lower() == "anonymous" and not _obs_success(target)
-
-    # mass_assignment: a forbidden field was accepted with an observable change; control rejected.
-    if predicate == "forbidden_field_accepted":
-        return _obs_success(step or candidate)
-    if predicate == "observable_state_change":
-        return changed
-    if predicate in {"control_rejected", "forbidden_field_rejected"}:
-        return (not _obs_success(step or candidate)) or changed
-
-    # workflow: a state-transition invariant was broken (or held, for the refuter).
-    if predicate in {"transition_invariant_broken", "before_after_state"}:
-        return changed
-    if predicate in {"invariant_held", "control_equivalent"}:  # refute
-        return equivalent
-
-    # injection is never proven by a generic workflow; hand off to deterministic verifiers.
-    if predicate in {"payload_control_differential", "deterministic_family_proof"}:
-        return False
+        target_request = target.get("request") if isinstance(target.get("request"), dict) else {}
+        if str(target.get("principal") or "anonymous").lower() != "anonymous" or _obs_success(target):
+            return False
+        return any(
+            _obs_success(obs)
+            and str((obs.get("request") or {}).get("method") or "").upper()
+            == str(target_request.get("method") or "").upper()
+            and str((obs.get("request") or {}).get("path") or "")
+            == str(target_request.get("path") or "")
+            for obs in by_label.values()
+            if isinstance(obs.get("request"), dict)
+        )
 
     return False  # unknown / uncorroborated predicate -> fail closed
 
@@ -318,12 +319,19 @@ def server_corroborated_predicates(result: dict[str, Any]) -> set[str]:
         (str(c.get("control")), str(c.get("candidate"))): c
         for c in (result.get("comparisons") or []) if isinstance(c, dict)
     }
+    principal_identities = {
+        str(item.get("slot") or "").strip().lower(): str(item.get("identity_fingerprint") or "")
+        for item in (result.get("principal_receipts") or [])
+        if isinstance(item, dict) and item.get("slot") and item.get("identity_fingerprint")
+    }
     granted: set[str] = set()
     for assertion in result.get("assertion_results") or []:
         if not isinstance(assertion, dict) or assertion.get("passed") is not True:
             continue
         predicate = str(assertion.get("predicate") or "").strip().lower()
-        if predicate and _server_confirms_predicate(predicate, assertion, by_label, by_pair):
+        if predicate and _server_confirms_predicate(
+            predicate, assertion, by_label, by_pair, principal_identities
+        ):
             granted.add(predicate)
     return granted
 
@@ -633,6 +641,13 @@ async def execute_workflow(
             error: str | None = None
             try:
                 if step["kind"] == "http":
+                    variable_references = sorted(set().union(*(
+                        _variable_references(value)
+                        for value in (
+                            step["path"], step["query"], step["headers"],
+                            step["json_body"], step["form_body"],
+                        )
+                    )))
                     path = _render_variables(step["path"], variables)
                     url = urljoin(target_url, path)
                     if not str(path).startswith("/") or str(path).startswith("//") or _origin(url) != _origin(target_url):
@@ -667,7 +682,12 @@ async def execute_workflow(
                     auth_headers = context.get("headers") if isinstance(context.get("headers"), dict) else {}
                     cookies = context.get("cookies") if isinstance(context.get("cookies"), dict) else {}
                     headers = {**headers, **auth_headers}
-                    request_view.update({"method": step["method"], "path": path, "query_keys": sorted(query), "body_kind": "json" if json_body is not None else "form" if form_body is not None else None})
+                    request_view.update({
+                        "method": step["method"], "path": path,
+                        "query_keys": sorted(query),
+                        "body_kind": "json" if json_body is not None else "form" if form_body is not None else None,
+                        "variable_references": variable_references,
+                    })
                     request = client.build_request(step["method"], url, params=query, headers=headers, cookies=cookies, json=json_body, data=form_body)
                     request_count += 1
                     request_started = time.perf_counter()
@@ -736,6 +756,7 @@ async def execute_workflow(
                 "checkpoint": step["checkpoint"], "compare_to": step["compare_to"],
                 "request": request_view, "response": response,
                 "sensitive_value_categories": sensitive_value_categories if not error else [],
+                "extracted_names": sorted(extracted) if not error else [],
                 "extracted": {name: {"sha256": hashlib.sha256(value.encode()).hexdigest(), "length": len(value)} for name, value in extracted.items()} if not error else {},
                 "error": error,
             })

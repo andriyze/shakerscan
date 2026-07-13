@@ -8504,6 +8504,106 @@ def test_target_principal_auth_state_is_limited_to_executable_identity_slots():
     assert "use role" in str(exc.value.detail)
 
 
+def test_auto_provision_endpoint_validates_approval_before_external_signup(monkeypatch):
+    target_id = str(uuid.uuid4())
+    approval_id = str(uuid.uuid4())
+    calls = []
+
+    class FakeConn:
+        async def fetchrow(self, query, *args):
+            if "SELECT id, url, is_active, metadata_json FROM targets" in str(query):
+                return {
+                    "id": uuid.UUID(target_id), "url": "https://app.example.test",
+                    "is_active": True, "metadata_json": {"auto_provisioning": {"enabled": True}},
+                }
+            raise AssertionError(str(query))
+
+    class FakePool:
+        def acquire(self):
+            return self
+        async def __aenter__(self):
+            return FakeConn()
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    async def rejected(*args, **kwargs):
+        calls.append("approval")
+        raise api_module.HTTPException(status_code=400, detail="invalid approval")
+
+    async def must_not_provision(*args, **kwargs):
+        calls.append("provision")
+        raise AssertionError("external signup ran before approval")
+
+    monkeypatch.setattr(api_module, "db_pool", FakePool())
+    monkeypatch.setattr(api_module, "_validate_approval_receipt_for_action", rejected)
+    monkeypatch.setattr(api_module, "_auto_provision_principals", must_not_provision)
+
+    with pytest.raises(api_module.HTTPException, match="invalid approval"):
+        asyncio.run(api_module.auto_provision_target_principals(
+            target_id,
+            api_module.TargetPrincipalAutoProvisionRequest(approval_receipt_id=approval_id),
+        ))
+    assert calls == ["approval"]
+
+
+def test_auto_provision_reuses_existing_principal_without_signup(monkeypatch):
+    target_id = uuid.uuid4()
+
+    class FakeConn:
+        async def fetchrow(self, query, *args):
+            if "FROM target_principals p" in str(query):
+                return {"label": args[1], "auth_state": args[1], "credential_profile": f"existing-{args[1]}"}
+            raise AssertionError(str(query))
+        async def execute(self, query, *args):
+            raise AssertionError("idempotent reuse must not write")
+
+    monkeypatch.setattr(api_module, "encryption_enabled", lambda: True)
+    result = asyncio.run(api_module._auto_provision_principals(
+        FakeConn(),
+        target_id,
+        "https://app.example.test",
+        {
+            "enabled": True,
+            "signup": {"method": "POST", "path": "/signup", "json": {}},
+            "login": {"method": "POST", "path": "/login", "json": {}},
+        },
+    ))
+    assert [item["auth_state"] for item in result] == ["user1", "user2"]
+    assert all(item["reused"] is True for item in result)
+
+
+def test_auto_provision_requires_encrypted_secret_storage(monkeypatch):
+    monkeypatch.setattr(api_module, "encryption_enabled", lambda: False)
+    with pytest.raises(api_module.HTTPException) as exc:
+        asyncio.run(api_module._auto_provision_principals(
+            object(), uuid.uuid4(), "https://app.example.test", {"enabled": True},
+        ))
+    assert exc.value.status_code == 409
+    assert "AI_CREDENTIAL_ENC_KEY" in str(exc.value.detail)
+
+
+def test_benchmark_identity_uses_family_and_templated_route_not_source_fingerprint():
+    canonical = api_module._canonical_vulnerability_key(family="bola", route="/api/orders/{order_id}")
+    dast = {
+        "fingerprint": "scanner-specific-fingerprint",
+        "title": "BOLA on order API",
+        "tool": "smart_bola",
+        "cwe": "CWE-639",
+        "url": "https://app.example.test/api/orders/42",
+        "evidence": {},
+    }
+    autonomous = {
+        "fingerprint": "different-autonomous-fingerprint",
+        "title": "Graph authz lead",
+        "tool": "autonomous_workflow",
+        "cwe": "CWE-639",
+        "url": "https://app.example.test",
+        "evidence": {"canonical_vulnerability_key": canonical},
+    }
+    assert api_module._finding_vulnerability_key(dast) == canonical
+    assert api_module._finding_vulnerability_key(autonomous) == canonical
+
+
 def test_update_target_principal_returns_409_for_active_slot_collision(monkeypatch):
     class UniqueViolationError(Exception):
         pass
@@ -11032,14 +11132,56 @@ def test_trusted_workflow_proof_requires_stable_replay_and_restoration():
         ],
     }
     proof = api_module._trusted_workflow_family_proof(execution, execution)
-    assert proof["verdict"] == "verified"
-    assert proof["promotable"] is True
+    assert proof["verdict"] == "inconclusive"
+    assert proof["promotable"] is False
     assert proof["reproduction_count"] == 2
 
     failed_replay = {**execution, "restoration_verified": False}
     proof = api_module._trusted_workflow_family_proof(execution, failed_replay)
     assert proof["promotable"] is False
     assert proof["reexecuted_at_handoff"] is False
+
+
+def test_trusted_workflow_bola_proof_requires_full_server_bound_receipt():
+    execution = {
+        "proof_family": "bola",
+        "restoration_verified": True,
+        "principal_receipts": [
+            {"slot": "user1", "identity_fingerprint": "owner-id"},
+            {"slot": "user2", "identity_fingerprint": "attacker-id"},
+        ],
+        "observations": [
+            {"label": "create", "principal": "user1", "checkpoint": "mutation",
+             "request": {"method": "POST", "path": "/objects"}, "response": {"status": 201},
+             "extracted_names": ["object_id"], "error": None},
+            {"label": "owner", "principal": "user1", "request": {
+                "method": "GET", "path": "/objects/42", "variable_references": ["object_id"],
+             }, "response": {"status": 200}, "error": None},
+            {"label": "attacker", "principal": "user2",
+             "request": {"method": "GET", "path": "/objects/42"},
+             "response": {"status": 200}, "error": None},
+            {"label": "anonymous", "principal": "anonymous",
+             "request": {"method": "GET", "path": "/objects/42"},
+             "response": {"status": 403}, "error": None},
+        ],
+        "comparisons": [{
+            "control": "owner", "candidate": "attacker", "comparable": True,
+            "body_changed": False, "status_changed": False,
+        }],
+        "assertion_results": [
+            {"id": "ids", "type": "distinct_principals", "steps": ["owner", "attacker"],
+             "predicate": "distinct_identity", "passed": True},
+            {"id": "own", "type": "comparison_equivalent", "control": "owner", "candidate": "attacker",
+             "predicate": "ownership_established", "passed": True},
+            {"id": "cross", "type": "comparison_equivalent", "control": "owner", "candidate": "attacker",
+             "predicate": "cross_principal_access", "passed": True},
+            {"id": "deny", "type": "status_not_in", "step": "anonymous",
+             "predicate": "denial_control", "passed": True},
+        ],
+    }
+    proof = api_module._trusted_workflow_family_proof(execution, execution)
+    assert proof["verdict"] == "verified"
+    assert proof["promotable"] is True
 
 
 def test_workflow_identity_fingerprint_uses_metadata_without_exposing_identity():

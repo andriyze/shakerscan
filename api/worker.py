@@ -3512,15 +3512,25 @@ async def persist_product_signal_hypotheses(
                 params = action["parameters"]
                 fid = str(params.get("finding_id") or "").strip()
                 if fid:
-                    try:
-                        uuid.UUID(fid)
-                    except ValueError:
-                        row = await conn.fetchrow(
-                            "SELECT id FROM findings WHERE target_id=$1 AND fingerprint=$2 "
-                            "ORDER BY last_seen_at DESC NULLS LAST LIMIT 1",
-                            target_uuid, fid,
-                        )
-                        params["finding_id"] = str(row["id"]) if row else None
+                    # A scanner fingerprint may itself be UUID-shaped without being findings.id.
+                    # Resolve the canonical row by fingerprint first; only accept a UUID as a DB id
+                    # when a target-bound row with that exact id exists.
+                    row = await conn.fetchrow(
+                        "SELECT id FROM findings WHERE target_id=$1 AND fingerprint=$2 "
+                        "ORDER BY last_seen_at DESC NULLS LAST LIMIT 1",
+                        target_uuid, fid,
+                    )
+                    if not row:
+                        try:
+                            finding_uuid = uuid.UUID(fid)
+                        except ValueError:
+                            finding_uuid = None
+                        if finding_uuid:
+                            row = await conn.fetchrow(
+                                "SELECT id FROM findings WHERE target_id=$1 AND id=$2",
+                                target_uuid, finding_uuid,
+                            )
+                    params["finding_id"] = str(row["id"]) if row else None
             endorsement = {
                 **(payload.get("endorsement") or {}),
                 "recorded_at": utc_now_iso(),

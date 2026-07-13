@@ -678,6 +678,48 @@ def test_product_signal_hypotheses_are_persisted(monkeypatch):
     assert args[12] == "worker"
 
 
+def test_uuid_shaped_scanner_fingerprint_resolves_to_canonical_finding_id(monkeypatch):
+    scanner_fingerprint = str(uuid.uuid4())
+    canonical_finding_id = uuid.uuid4()
+
+    class Conn:
+        def __init__(self):
+            self.insert_args = None
+
+        async def fetchrow(self, query, *args):
+            if "fingerprint=$2" in query:
+                assert str(args[1]) == scanner_fingerprint
+                return {"id": canonical_finding_id}
+            if "INSERT INTO hypotheses" in query:
+                self.insert_args = args
+                return {"id": uuid.uuid4()}
+            raise AssertionError(query)
+
+    conn = Conn()
+    monkeypatch.setattr(worker, "db_pool", _HypothesisPersistPool(conn))
+    count = asyncio.run(worker.persist_product_signal_hypotheses(
+        str(uuid.uuid4()),
+        str(uuid.uuid4()),
+        None,
+        "https://app.example.test",
+        {
+            "findings": [{
+                "id": scanner_fingerprint,
+                "title": "Possible authorization bypass",
+                "severity": "high",
+                "tool": "authz",
+                "type": "auth",
+                "cwe": "CWE-287",
+                "proof_state": "suspected",
+            }],
+        },
+        {"scan_type": "smart"},
+    ))
+    assert count == 1
+    next_action = json.loads(conn.insert_args[9])
+    assert next_action["parameters"]["finding_id"] == str(canonical_finding_id)
+
+
 class _FakeProcess:
     def __init__(self, stdout_payload: bytes, stderr_payload: bytes = b""):
         self.stdout = asyncio.StreamReader()
