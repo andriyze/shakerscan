@@ -16,6 +16,7 @@ On by default, backward compatible:
 from __future__ import annotations
 
 import os
+import secrets
 from typing import Any
 
 _PREFIX = "enc:fernet:"
@@ -31,8 +32,25 @@ def _key_file_path() -> str:
     return os.path.join(results_dir, ".credential_enc.key")
 
 
+def _fsync_dir(path: str) -> None:
+    try:
+        fd = os.open(path, os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    except OSError:
+        pass
+
+
 def _load_key_material() -> str:
-    """Return the Fernet key: the env var if set, else a persisted auto-generated key."""
+    """Return the Fernet key: the env var if set, else a persisted auto-generated key.
+
+    The persisted key is published atomically: written in full to a temp file, fsync'd, then
+    hard-linked into place (``os.link`` fails if the key already exists). So a concurrent api/worker
+    start can never read a half-written or empty key file, and cannot split-brain the key -- whoever
+    wins the link keeps its key and every loser reads the winner's key back.
+    """
     env_key = str(os.environ.get("AI_CREDENTIAL_ENC_KEY", "") or "").strip()
     if env_key:
         return env_key
@@ -46,19 +64,35 @@ def _load_key_material() -> str:
         from cryptography.fernet import Fernet
         os.makedirs(os.path.dirname(key_path) or ".", exist_ok=True)
         generated = Fernet.generate_key().decode()
-        # Create-exclusively so a concurrent api/worker start cannot split-brain the key: whoever
-        # wins the create keeps its key; every loser reads the winner's key back.
+        tmp_path = f"{key_path}.tmp.{os.getpid()}.{secrets.token_hex(4)}"
+        published = False
         try:
-            fd = os.open(key_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with open(tmp_path, "w", encoding="utf-8") as handle:
+                handle.write(generated)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.chmod(tmp_path, 0o600)
             try:
-                os.write(fd, generated.encode())
-            finally:
-                os.close(fd)
+                os.link(tmp_path, key_path)  # atomic publish of the fully-written key
+                published = True
+                _fsync_dir(os.path.dirname(key_path) or ".")
+            except FileExistsError:
+                published = False  # a concurrent process already published; use theirs
+            except OSError:
+                # Filesystem without hardlink support: atomic rename + read-back convergence.
+                os.replace(tmp_path, key_path)
+                _fsync_dir(os.path.dirname(key_path) or ".")
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+        if published:
             return generated
-        except FileExistsError:
-            with open(key_path, "r", encoding="utf-8") as handle:
-                return handle.read().strip()
-    except Exception:  # noqa: BLE001 - never let key persistence crash the app; degrade to plaintext
+        with open(key_path, "r", encoding="utf-8") as handle:
+            return handle.read().strip()
+    except Exception as exc:  # noqa: BLE001 - degrade to plaintext rather than crash, but say so
+        print(f"[secret_store] encryption disabled (key load/persist failed: {type(exc).__name__}: {exc})", flush=True)
         return ""
 
 
