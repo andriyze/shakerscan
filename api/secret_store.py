@@ -1,15 +1,16 @@
 """Encryption-at-rest for AI and DAST target credential secrets (R2b).
 
-Opt-in and backward compatible:
+On by default, backward compatible:
 
-- Encryption is enabled only when ``AI_CREDENTIAL_ENC_KEY`` (a Fernet key) is set.
-  With no key, ``encrypt_secret`` returns plaintext and ``decrypt_secret`` is a
-  no-op, so existing installs are unchanged.
-- Encrypted values are tagged with the ``enc:fernet:`` prefix, so ``decrypt_secret``
-  transparently handles a mix of legacy plaintext and encrypted rows during a
-  rollout, and ``encrypt_secret`` never double-encrypts.
-
-Generate a key with:  python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+- The Fernet key is ``AI_CREDENTIAL_ENC_KEY`` when the operator sets it; otherwise it is
+  auto-generated once and persisted to a durable, shared path (``RESULTS_DIR``, host-mounted and
+  shared by api + worker) so encryption-at-rest works with zero configuration. A STABLE key is
+  essential -- a changed key would orphan every previously-encrypted secret -- so the persisted key
+  is reused across restarts and created race-safely across concurrent api/worker starts.
+- Encrypted values are tagged with the ``enc:fernet:`` prefix, so ``decrypt_secret`` transparently
+  handles a mix of legacy plaintext and encrypted rows, and ``encrypt_secret`` never double-encrypts.
+- If the key cannot be loaded or persisted (e.g. cryptography missing), it degrades to plaintext
+  rather than crashing.
 """
 
 from __future__ import annotations
@@ -22,12 +23,51 @@ _fernet: Any = None
 _loaded = False
 
 
+def _key_file_path() -> str:
+    override = str(os.environ.get("AI_CREDENTIAL_ENC_KEY_FILE", "") or "").strip()
+    if override:
+        return override
+    results_dir = str(os.environ.get("RESULTS_DIR", "") or "").strip() or "/results"
+    return os.path.join(results_dir, ".credential_enc.key")
+
+
+def _load_key_material() -> str:
+    """Return the Fernet key: the env var if set, else a persisted auto-generated key."""
+    env_key = str(os.environ.get("AI_CREDENTIAL_ENC_KEY", "") or "").strip()
+    if env_key:
+        return env_key
+    key_path = _key_file_path()
+    try:
+        if os.path.exists(key_path):
+            with open(key_path, "r", encoding="utf-8") as handle:
+                existing = handle.read().strip()
+            if existing:
+                return existing
+        from cryptography.fernet import Fernet
+        os.makedirs(os.path.dirname(key_path) or ".", exist_ok=True)
+        generated = Fernet.generate_key().decode()
+        # Create-exclusively so a concurrent api/worker start cannot split-brain the key: whoever
+        # wins the create keeps its key; every loser reads the winner's key back.
+        try:
+            fd = os.open(key_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            try:
+                os.write(fd, generated.encode())
+            finally:
+                os.close(fd)
+            return generated
+        except FileExistsError:
+            with open(key_path, "r", encoding="utf-8") as handle:
+                return handle.read().strip()
+    except Exception:  # noqa: BLE001 - never let key persistence crash the app; degrade to plaintext
+        return ""
+
+
 def _get_fernet() -> Any:
     global _fernet, _loaded
     if _loaded:
         return _fernet
     _loaded = True
-    key = str(os.environ.get("AI_CREDENTIAL_ENC_KEY", "") or "").strip()
+    key = _load_key_material()
     if not key:
         return None
     try:
