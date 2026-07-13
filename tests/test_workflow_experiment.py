@@ -177,7 +177,10 @@ def test_generic_200_cannot_be_labelled_a_sensitive_value_finding():
     assert workflow.server_corroborated_predicates(result) == set()
 
 
-def test_real_sensitive_value_remains_signal_without_exposure_context():
+def test_real_sensitive_value_corroborates_data_exposure():
+    # A response carrying an actual server-classified sensitive VALUE corroborates data_exposure.
+    # The P0 fix keeps this grounded in a real value (the /health case above stays fail-closed),
+    # while data_exposure remains a promotable family (not narrowed to BOLA-only).
     result = {
         "observations": [
             {"label": "read", "principal": "anonymous",
@@ -190,7 +193,7 @@ def test_real_sensitive_value_remains_signal_without_exposure_context():
              "predicate": "sensitive_value_present", "passed": True},
         ],
     }
-    assert "sensitive_value_present" not in workflow.server_corroborated_predicates(result)
+    assert "sensitive_value_present" in workflow.server_corroborated_predicates(result)
 
 
 def test_sensitive_value_classifier_matches_values_not_names():
@@ -253,7 +256,47 @@ def test_public_success_and_generic_mutation_never_become_family_proof():
              "predicate": "control_rejected", "passed": True},
         ],
     }
-    assert workflow.server_corroborated_predicates(public) == set()
+    corroborated = workflow.server_corroborated_predicates(public)
+    # The re-enabled families are promotable, but a generic public read + body diff still cannot
+    # COMPLETE one: auth_bypass needs a real authenticated access and mass_assignment needs a real
+    # state-changing mutation -- neither of which a public read provides.
+    assert "protected_resource_accessed" not in corroborated
+    assert "forbidden_field_accepted" not in corroborated
+
+
+def test_reenabled_families_corroborate_on_real_signals():
+    # auth_bypass: an authenticated access establishes a real protected resource; an anonymous
+    # request reaches it without being denied -> both family predicates corroborate.
+    auth = {
+        "observations": [
+            {"label": "authed", "principal": "user1", "response": {"status": 200}},
+            {"label": "anon", "principal": "anonymous", "response": {"status": 200}},
+        ],
+        "comparisons": [],
+        "assertion_results": [
+            {"id": "p", "type": "status_in", "step": "authed", "values": [200],
+             "predicate": "protected_resource_accessed", "passed": True},
+            {"id": "u", "type": "status_not_in", "step": "anon", "values": [401, 403],
+             "predicate": "unauthenticated_control", "passed": True},
+        ],
+    }
+    assert {"protected_resource_accessed", "unauthenticated_control"} <= workflow.server_corroborated_predicates(auth)
+
+    # mass_assignment: a mutation step accepted a forbidden field with an observable state change.
+    mass = {
+        "observations": [
+            {"label": "before", "principal": "user1", "checkpoint": "before", "response": {"status": 200}},
+            {"label": "mutate", "principal": "user1", "checkpoint": "mutation", "response": {"status": 200}},
+        ],
+        "comparisons": [{"control": "before", "candidate": "mutate", "comparable": True, "body_changed": True}],
+        "assertion_results": [
+            {"id": "f", "type": "status_in", "step": "mutate", "values": [200],
+             "predicate": "forbidden_field_accepted", "passed": True},
+            {"id": "s", "type": "comparison_changed", "control": "before", "candidate": "mutate",
+             "predicate": "observable_state_change", "passed": True},
+        ],
+    }
+    assert {"forbidden_field_accepted", "observable_state_change"} <= workflow.server_corroborated_predicates(mass)
 
 
 def test_bola_predicates_require_created_object_identity_and_denial_control():

@@ -249,10 +249,11 @@ def _server_confirms_predicate(
     ]
     step_principals = [p for p in step_principals if p]
 
-    # BOLA is the sole workflow-promotable family. Require an owner-created object reference,
-    # exact owner/attacker request equivalence, verified distinct account identities, and an
-    # anonymous denial control for the same concrete object path. Every other family remains an
-    # unverified workflow signal until a dedicated family actuator can establish its semantics.
+    # Every predicate's SECURITY MEANING is derived here from real observation signals, never from
+    # the model's label (the P0 guarantee). BOLA carries the strongest proof (owner-created object,
+    # exact owner/attacker request equivalence, distinct verified identities, anonymous denial
+    # control); the other families are corroborated from real server-classified values, live status,
+    # and state differentials. Injection is never workflow-proven -> deterministic SQLi/XSS/SSTI.
     if predicate in {"ownership_established", "cross_principal_access"}:
         control_request = control.get("request") if isinstance(control.get("request"), dict) else {}
         candidate_request = candidate.get("request") if isinstance(candidate.get("request"), dict) else {}
@@ -304,7 +305,45 @@ def _server_confirms_predicate(
             if isinstance(obs.get("request"), dict)
         )
 
-    return False  # unknown / uncorroborated predicate -> fail closed
+    # --- data_exposure: an actual server-classified sensitive VALUE was returned, never HTTP status.
+    if predicate == "sensitive_value_present":
+        return bool((step or candidate).get("sensitive_value_categories"))
+    if predicate == "name_only_classification":  # refute: sensitive-looking keys, no values
+        target = step or candidate
+        response = target.get("response") if isinstance(target.get("response"), dict) else {}
+        keys = response.get("json_keys") or []
+        return (not target.get("sensitive_value_categories")) and any(_sensitive_name(str(k)) for k in keys)
+
+    # --- auth_bypass: an unauthenticated request reached a genuinely protected resource. The
+    # family-critical predicate requires an AUTHENTICATED access (so the resource is real + normally
+    # behind auth), which a public endpoint cannot provide; the anonymous reach is the bypass.
+    if predicate == "protected_resource_accessed":
+        return _obs_authenticated(step or candidate) and _obs_success(step or candidate)
+    if predicate == "unauthenticated_control":
+        target = step or candidate
+        return str(target.get("principal") or "anonymous").lower() == "anonymous" and (_obs_success(target) or changed)
+    if predicate == "access_denied_unauthenticated":  # refute
+        target = step or candidate
+        return str(target.get("principal") or "anonymous").lower() == "anonymous" and not _obs_success(target)
+
+    # --- mass_assignment: a forbidden field was accepted on a real state-changing MUTATION (not a
+    # plain read), with an observable state change and a rejected control.
+    if predicate == "forbidden_field_accepted":
+        return str((step or candidate).get("checkpoint") or "") == "mutation" and _obs_success(step or candidate)
+    if predicate == "observable_state_change":
+        return changed
+    if predicate in {"control_rejected", "forbidden_field_rejected"}:  # rejected control / refute
+        return (not _obs_success(step or candidate)) or changed
+
+    # --- workflow: a state-transition invariant was broken across before/after (or held, refute).
+    if predicate in {"transition_invariant_broken", "before_after_state"}:
+        return changed
+    if predicate in {"invariant_held", "control_equivalent"}:  # refute
+        return equivalent
+
+    # injection ({payload_control_differential, deterministic_family_proof}) and anything else is
+    # never workflow-proven -> hands off to the deterministic verifiers.
+    return False
 
 
 def server_corroborated_predicates(result: dict[str, Any]) -> set[str]:
