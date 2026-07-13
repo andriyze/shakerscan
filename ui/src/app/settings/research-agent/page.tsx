@@ -16,6 +16,8 @@ import {
   getResearchReadiness,
   getTarget,
   getTargets,
+  launchResearchCampaign,
+  controlResearchCampaign,
   refreshResearchObservation,
   setResearchEpisodeAutopilot,
   type ResearchBudget,
@@ -291,6 +293,9 @@ export default function ResearchAgentPage() {
   const [intensity, setIntensity] = useState<Intensity>('hunt')
   const [families, setFamilies] = useState<string[]>(ACTIVE_FAMILIES)
   const [autopilot, setAutopilot] = useState(true)
+  const [campaignMode, setCampaignMode] = useState(true)
+  const [campaignHours, setCampaignHours] = useState(24)
+  const [campaignEpisodes, setCampaignEpisodes] = useState(12)
   const [authorized, setAuthorized] = useState(false)
   const [aiReady, setAiReady] = useState<boolean | null>(null)
   const [executionReady, setExecutionReady] = useState<boolean | null>(null)
@@ -340,10 +345,20 @@ export default function ResearchAgentPage() {
   }, [])
 
   useEffect(() => {
-    if (!selected?.episode.id || selected.episode.terminal) return
-    const timer = window.setInterval(() => getResearchEpisode(selected.episode.id).then(setSelected).catch(() => undefined), 2000)
+    if (!selected?.episode.id) return
+    const timer = window.setInterval(async () => {
+      if (!selected.episode.terminal) {
+        getResearchEpisode(selected.episode.id).then(setSelected).catch(() => undefined)
+        return
+      }
+      if (selected.episode.campaign_id) {
+        const rows = await getResearchEpisodes({ campaign_id: selected.episode.campaign_id, limit: 30 }).catch(() => ({ episodes: [] as ResearchEpisode[], count: 0 }))
+        const next = rows.episodes.find((episode) => episode.campaign_id === selected.episode.campaign_id && !episode.terminal)
+        if (next) setSelected(await getResearchEpisode(next.id))
+      }
+    }, selected.episode.terminal ? 5000 : 2000)
     return () => window.clearInterval(timer)
-  }, [selected?.episode.id, selected?.episode.terminal])
+  }, [selected?.episode.id, selected?.episode.terminal, selected?.episode.campaign_id])
 
   const openEpisode = async (id: string) => {
     setBusy(true); setError(null)
@@ -362,19 +377,35 @@ export default function ResearchAgentPage() {
     setBusy(true); setError(null)
     try {
       let approvalReceiptId: string | undefined
-      if (profile.mode === 'gated') approvalReceiptId = await createTargetPolicyApproval(activeTarget.id, activeTarget.url, 120, profile.risk === 'credential' ? 'credential' : 'active')
-      const detail = await createResearchEpisode({
-        target_id: activeTarget.id,
-        objective: objective.trim(),
-        execution_mode: profile.mode,
-        max_risk_tier: profile.risk,
-        allowed_families: profile.mode === 'gated' ? families : [],
-        max_steps: profile.maxSteps,
-        budget_limits: profile.budget,
-        approval_receipt_id: approvalReceiptId,
-        autopilot,
-        created_by: 'autonomous_investigation_ui',
-      })
+      if (profile.mode === 'gated') approvalReceiptId = await createTargetPolicyApproval(
+        activeTarget.id,
+        activeTarget.url,
+        campaignMode && autopilot ? campaignHours * 60 : 120,
+        profile.risk === 'credential' ? 'credential' : 'active',
+      )
+      const detail = campaignMode && autopilot
+        ? (await launchResearchCampaign({
+            target_id: activeTarget.id,
+            intensity,
+            approval_receipt_id: approvalReceiptId,
+            duration_hours: campaignHours,
+            max_episodes: campaignEpisodes,
+            objective: objective.trim(),
+            allowed_families: profile.mode === 'gated' ? families : [],
+            created_by: 'autonomous_investigation_ui',
+          })).episode
+        : await createResearchEpisode({
+            target_id: activeTarget.id,
+            objective: objective.trim(),
+            execution_mode: profile.mode,
+            max_risk_tier: profile.risk,
+            allowed_families: profile.mode === 'gated' ? families : [],
+            max_steps: profile.maxSteps,
+            budget_limits: profile.budget,
+            approval_receipt_id: approvalReceiptId,
+            autopilot,
+            created_by: 'autonomous_investigation_ui',
+          })
       setSelected(detail)
       router.replace(`/settings/research-agent?episode_id=${encodeURIComponent(detail.episode.id)}`)
       await loadEpisodes()
@@ -385,7 +416,15 @@ export default function ResearchAgentPage() {
   const continueInvestigation = async () => {
     if (!selected) return
     setBusy(true); setError(null)
-    try { setSelected(await setResearchEpisodeAutopilot(selected.episode.id, true)); await loadEpisodes() }
+    try {
+      if (selected.episode.campaign_id) {
+        await controlResearchCampaign(selected.episode.campaign_id, 'resume')
+        if (!selected.episode.terminal) setSelected(await setResearchEpisodeAutopilot(selected.episode.id, true))
+      } else {
+        setSelected(await setResearchEpisodeAutopilot(selected.episode.id, true))
+      }
+      await loadEpisodes()
+    }
     catch (err) { setError(err instanceof Error ? err.message : 'Failed to resume autonomous investigation') }
     finally { setBusy(false) }
   }
@@ -393,7 +432,10 @@ export default function ResearchAgentPage() {
   const pauseAutopilot = async () => {
     if (!selected) return
     setBusy(true); setError(null)
-    try { setSelected(await setResearchEpisodeAutopilot(selected.episode.id, false)); await loadEpisodes() }
+    try {
+      if (selected.episode.campaign_id) await controlResearchCampaign(selected.episode.campaign_id, 'pause')
+      setSelected(await setResearchEpisodeAutopilot(selected.episode.id, false)); await loadEpisodes()
+    }
     catch (err) { setError(err instanceof Error ? err.message : 'Failed to pause autonomous investigation') }
     finally { setBusy(false) }
   }
@@ -409,7 +451,15 @@ export default function ResearchAgentPage() {
   const cancelEpisode = async () => {
     if (!selected) return
     setBusy(true); setError(null)
-    try { setSelected(await cancelResearchEpisode(selected.episode.id)); await loadEpisodes() }
+    try {
+      if (selected.episode.campaign_id) {
+        await controlResearchCampaign(selected.episode.campaign_id, 'cancel')
+        setSelected(await getResearchEpisode(selected.episode.id))
+      } else {
+        setSelected(await cancelResearchEpisode(selected.episode.id))
+      }
+      await loadEpisodes()
+    }
     catch (err) { setError(err instanceof Error ? err.message : 'Cancellation failed') }
     finally { setBusy(false) }
   }
@@ -443,6 +493,8 @@ export default function ResearchAgentPage() {
                     {profile.mode === 'gated' && executionReady === false ? <div className="rounded-md border border-red-500/25 bg-red-500/[0.06] px-3 py-2 text-xs text-red-200">Active autonomous execution is disabled in server policy. Analyze mode remains available.</div> : null}
                     {profile.mode === 'gated' ? <label className="flex cursor-pointer items-start gap-3"><input type="checkbox" checked={authorized} onChange={(event) => setAuthorized(event.target.checked)} className="mt-1" /><span><span className="text-sm font-medium text-orange-200">I own this target or have explicit permission to test it.</span><span className="mt-0.5 block text-xs text-gray-500">Creates a target-scoped approval for active testing.</span></span></label> : null}
                     <label className="flex cursor-pointer items-start gap-3"><input type="checkbox" checked={autopilot} onChange={(event) => setAutopilot(event.target.checked)} className="mt-1" /><span><span className="block text-sm font-medium text-gray-200">Continue automatically</span><span className="mt-0.5 block text-xs text-gray-500">Runs on the server and continues if you close this page.</span></span></label>
+                    <label className="flex cursor-pointer items-start gap-3"><input type="checkbox" checked={campaignMode} onChange={(event) => setCampaignMode(event.target.checked)} disabled={!autopilot} className="mt-1" /><span><span className="block text-sm font-medium text-gray-200">Keep launching fresh episodes</span><span className="mt-0.5 block text-xs text-gray-500">Shares memory across bounded episodes and continues unattended until the campaign ceiling.</span></span></label>
+                    {campaignMode && autopilot ? <div className="grid grid-cols-2 gap-3 pl-6"><label className="text-xs text-gray-500">Hours<input type="number" min={1} max={24} value={campaignHours} onChange={(event) => setCampaignHours(Math.max(1, Math.min(24, Number(event.target.value) || 1)))} className="mt-1 w-full rounded-md border border-gray-700 bg-gray-950 px-2 py-1.5 text-gray-200" /></label><label className="text-xs text-gray-500">Episodes<input type="number" min={1} max={100} value={campaignEpisodes} onChange={(event) => setCampaignEpisodes(Math.max(1, Math.min(100, Number(event.target.value) || 1)))} className="mt-1 w-full rounded-md border border-gray-700 bg-gray-950 px-2 py-1.5 text-gray-200" /></label></div> : null}
                   </div>
                   <Button onClick={startInvestigation} disabled={busy || autoRunning || !targetId || !objective.trim() || !aiReady || (profile.mode === 'gated' && (!authorized || !executionReady))} className="min-w-56"><Rocket className="h-4 w-4" />{busy ? 'Starting…' : `Start ${profile.name.toLowerCase()}`}</Button>
                 </div>

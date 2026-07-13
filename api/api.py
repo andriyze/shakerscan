@@ -150,6 +150,7 @@ from workflow_experiment import (
     WorkflowContractError,
     execute_workflow,
     normalize_workflow,
+    server_corroborated_predicate_bindings,
     server_corroborated_predicates,
     validate_principal_contexts,
 )
@@ -3915,6 +3916,28 @@ class ResearchLaunchRequest(BaseModel):
     autopilot: bool = True
     force_new: bool = False
     created_by: Optional[str] = Field(default="research_launch_api", max_length=120)
+    campaign_id: Optional[str] = None
+    objective_override: Optional[str] = Field(default=None, min_length=1, max_length=2000)
+    allowed_families_override: list[str] = Field(default_factory=list, max_length=25)
+
+
+class ResearchCampaignLaunchRequest(BaseModel):
+    """Minimal-input durable campaign: target + standing approval + time/episode ceilings."""
+
+    model_config = ConfigDict(extra="forbid")
+    target_id: str
+    intensity: str = Field(default="deep_hunt", pattern="^(analyze|hunt|relentless|deep_hunt)$")
+    approval_receipt_id: Optional[str] = None
+    duration_hours: int = Field(default=24, ge=1, le=168)
+    max_episodes: int = Field(default=12, ge=1, le=100)
+    objective: Optional[str] = Field(default=None, min_length=1, max_length=2000)
+    allowed_families: list[str] = Field(default_factory=list, max_length=25)
+    created_by: Optional[str] = Field(default="research_campaign_api", max_length=120)
+
+
+class ResearchCampaignControlRequest(BaseModel):
+    action: str = Field(pattern="^(pause|resume|cancel)$")
+    created_by: Optional[str] = Field(default="research_campaign_operator", max_length=120)
 
 
 class FindingsBulkRetestRequest(BaseModel):
@@ -14092,8 +14115,13 @@ async def _auto_provision_principals(conn, target_uuid, target_url: str, config:
         if method != "POST":
             raise HTTPException(status_code=400, detail=f"auto_provisioning {recipe_name} method must be POST")
 
-    async def bounded_request(client, url: str, body: Any) -> tuple[int, Any]:
-        request = client.build_request("POST", url, json=body or None, headers={"Content-Type": "application/json"})
+    async def bounded_request(
+        client, url: str, body: Any, *, method: str = "POST", headers: dict[str, str] | None = None,
+    ) -> tuple[int, Any]:
+        request = client.build_request(
+            method, url, json=body or None,
+            headers={"Content-Type": "application/json", **(headers or {})},
+        )
         response = await client.send(request, stream=True)
         chunks: list[bytes] = []
         received = 0
@@ -14135,19 +14163,41 @@ async def _auto_provision_principals(conn, target_uuid, target_url: str, config:
                     "credential_profile": str(existing["credential_profile"]), "reused": True,
                 })
                 continue
-            # Random, unpredictable per-account material. The account is created once and only its
-            # captured token is persisted, so the signup password never needs to be re-derivable; a
-            # deterministic seed made provisioned passwords guessable from public target/label ids.
+            # Persist random account material BEFORE the first external request.  A retry after a
+            # successful signup but failed login/DB write must reuse the same identity and password.
             seed = secrets.token_hex(32)
-            # Keep the email short + unique: some apps cap identity-derived columns (e.g. crAPI
-            # stores its JWT, whose sub is the email, in a varchar(500)); a long email overflows it.
-            variables = {
+            generated_variables = {
                 "email": f"sk{seed[:10]}@shaker.test",
                 "password": f"ShakerHunt!{seed[10:26]}Aa1",
                 "number": str(int(seed[26:42], 16) % 10_000_000_000).zfill(10),
                 "name": f"Shaker {label}",
                 "label": label,
             }
+            encrypted_variables = encrypt_secret(json.dumps(generated_variables, sort_keys=True))
+            if not str(encrypted_variables or "").startswith("enc:fernet:"):
+                raise HTTPException(status_code=409, detail="auto_provisioning could not encrypt retry material")
+            await conn.execute(
+                """
+                INSERT INTO target_principal_provisioning_attempts (
+                    target_id, principal_label, auth_state, encrypted_variables, status, attempt_count
+                ) VALUES ($1,$2,$3,$4,'pending',1)
+                ON CONFLICT (target_id, auth_state) DO UPDATE SET
+                    attempt_count=target_principal_provisioning_attempts.attempt_count+1,
+                    updated_at=NOW()
+                """,
+                target_uuid, label, auth_state, encrypted_variables,
+            )
+            attempt = await conn.fetchrow(
+                """
+                SELECT encrypted_variables FROM target_principal_provisioning_attempts
+                WHERE target_id=$1 AND auth_state=$2
+                """,
+                target_uuid, auth_state,
+            )
+            try:
+                variables = json.loads(str(decrypt_secret(attempt["encrypted_variables"])))
+            except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                raise HTTPException(status_code=500, detail="stored provisioning retry material is unavailable") from exc
             # 1) Register through the app's own signup flow (real account, same origin only).
             signup_url = _provision_same_origin_url(target_url, signup.get("path"))
             signup_body = _render_provision_template(signup.get("json") or {}, variables)
@@ -14162,22 +14212,14 @@ async def _auto_provision_principals(conn, target_uuid, target_url: str, config:
             if not token:
                 raise HTTPException(status_code=502, detail=f"login returned no token for {label} (status {login_status})")
             secret = _render_provision_template(header_format, {"token": str(token)})
-            # Seed an owned object per principal (best-effort) so read-existing BOLA has a target --
-            # fresh accounts otherwise have no objects. Uses the just-captured auth on this principal.
-            seed_header = {"Authorization": secret} if auth_kind == "authorization_header" else {"Cookie": secret}
-            for seed in (config.get("seed_requests") or [])[:4]:
-                if not isinstance(seed, dict):
-                    continue
-                try:
-                    seed_url = _provision_same_origin_url(target_url, seed.get("path"))
-                    seed_body = _render_provision_template(seed.get("json") or {}, variables)
-                    await client.request(
-                        str(seed.get("method") or "POST").upper(), seed_url,
-                        json=seed_body or None,
-                        headers={"Content-Type": "application/json", **seed_header},
-                    )
-                except Exception:  # noqa: BLE001 - seeding is best-effort; never fail provisioning
-                    logger.warning("seed request failed for %s on target %s", label, target_uuid, exc_info=True)
+            # Capture stable object refs from the login response (e.g. a basket id) so a read-existing
+            # BOLA can target an object the owner already holds when there is no list endpoint.
+            captured: dict[str, str] = {}
+            capture_config = login.get("capture") if isinstance(login.get("capture"), dict) else {}
+            for cap_name, cap_path in capture_config.items():
+                cap_value = _provision_json_path(login_payload, str(cap_path))
+                if cap_value is not None:
+                    captured[str(cap_name)[:60]] = str(cap_value)[:120]
             profile_name = f"auto-{label}"
             values = _target_credential_profile_values(
                 name=profile_name, auth_kind=auth_kind, secret=secret, expires_at=None,
@@ -14210,8 +14252,36 @@ async def _auto_provision_principals(conn, target_uuid, target_url: str, config:
                     metadata_json=target_principals.metadata_json || EXCLUDED.metadata_json, updated_at=NOW()
                 """,
                 target_uuid, label, auth_state, profile_name,
-                json.dumps({"auto_provisioned": True, "principal_identity": variables["email"]}),
+                json.dumps({"auto_provisioned": True, "principal_identity": variables["email"], "captured_refs": captured}),
             )
+            await conn.execute(
+                """
+                UPDATE target_principal_provisioning_attempts
+                SET status='completed', last_error=NULL, updated_at=NOW()
+                WHERE target_id=$1 AND auth_state=$2
+                """,
+                target_uuid, auth_state,
+            )
+            # Optional object creation is POST-only, same-origin and response-capped.  It runs after
+            # the principal is durable, so retries cannot duplicate seeds after a partial failure.
+            seed_header = {"Authorization": secret} if auth_kind == "authorization_header" else {"Cookie": secret}
+            for seed_request in (config.get("seed_requests") or [])[:4]:
+                if not isinstance(seed_request, dict):
+                    continue
+                method = str(seed_request.get("method") or "POST").upper()
+                if method != "POST":
+                    logger.warning("ignored non-POST seed request for %s on target %s", label, target_uuid)
+                    continue
+                try:
+                    seed_url = _provision_same_origin_url(target_url, seed_request.get("path"))
+                    seed_body = _render_provision_template(seed_request.get("json") or {}, variables)
+                    seed_status, _ = await bounded_request(
+                        client, seed_url, seed_body, method="POST", headers=seed_header,
+                    )
+                    if not 200 <= seed_status < 300:
+                        logger.warning("seed request returned %s for %s on target %s", seed_status, label, target_uuid)
+                except Exception:  # noqa: BLE001 - seeding is optional and must not revoke valid auth
+                    logger.warning("seed request failed for %s on target %s", label, target_uuid, exc_info=True)
             provisioned.append({"label": label, "auth_state": auth_state, "credential_profile": profile_name, "reused": False})
     return provisioned
 
@@ -22764,6 +22834,13 @@ def _trusted_workflow_family_proof(
     first_predicates = passed_predicates(first)
     replay_predicates = passed_predicates(replay)
     stable_predicates = first_predicates & replay_predicates
+    first_bindings = server_corroborated_predicate_bindings(first)
+    replay_bindings = server_corroborated_predicate_bindings(replay)
+    stable_bindings = {
+        predicate: first_bindings[predicate]
+        for predicate in stable_predicates
+        if predicate in first_bindings and first_bindings.get(predicate) == replay_bindings.get(predicate)
+    }
     first_shape = [
         (item.get("id"), item.get("type"), bool(item.get("passed")))
         for item in first.get("assertion_results") or [] if isinstance(item, dict)
@@ -22783,12 +22860,23 @@ def _trusted_workflow_family_proof(
     evidence = {predicate: True for predicate in stable_predicates}
     evidence["reexecuted_at_handoff"] = bool(stable and restoration_verified and no_errors)
     proof = family_proof.evaluate_family_proof(family, evidence)
+    proof_paths = {binding[1] for binding in stable_bindings.values()}
+    proof_methods = {
+        binding[0] for binding in stable_bindings.values()
+        if binding[0] in {"POST", "PUT", "PATCH", "DELETE"}
+    } or {binding[0] for binding in stable_bindings.values()}
     proof.update({
         "stable_assertions": stable,
         "stable_predicates": sorted(stable_predicates),
         "restoration_verified": restoration_verified,
         "execution_errors_absent": no_errors,
         "reproduction_count": 2,
+        "proof_routes": sorted(proof_paths) if len(proof_paths) == 1 else [],
+        "proof_methods": sorted(proof_methods),
+        "predicate_bindings": {
+            predicate: {"method": binding[0], "path": binding[1]}
+            for predicate, binding in sorted(stable_bindings.items())
+        },
     })
     return proof
 
@@ -22828,21 +22916,22 @@ async def _promote_trusted_workflow_finding(
         if isinstance(hypothesis_metadata.get("dedupe_dimensions"), dict)
         else {}
     )
-    # Bind the finding to the route the experiment actually PROVED (the non-cleanup request paths in
-    # the live result), not whatever route the hypothesis happens to store -- proof of route A must
-    # not promote a finding on route B. If the hypothesis names a route, the experiment must have
-    # tested it.
+    # Bind promotion to routes that the stable family predicates themselves proved. Merely touching
+    # a hypothesis route elsewhere in the workflow is not causal evidence for that route.
     proven_routes = {
-        _canonical_vulnerability_route((observation.get("request") or {}).get("path"))
-        for observation in (first.get("observations") or [])
-        if isinstance(observation, dict) and isinstance(observation.get("request"), dict)
-        and observation.get("checkpoint") not in {"cleanup", "rollback"}
+        _canonical_vulnerability_route(route) for route in (proof.get("proof_routes") or [])
     }
     proven_routes.discard(None)
+    if len(proven_routes) != 1:
+        return None
     hypothesis_route = _canonical_vulnerability_route(
         dedupe_dimensions.get("route") or hypothesis_metadata.get("route")
     )
     if hypothesis_route and hypothesis_route not in proven_routes:
+        return None
+    hypothesis_method = str(dedupe_dimensions.get("method") or hypothesis_metadata.get("method") or "").upper()
+    proof_methods = {str(method).upper() for method in (proof.get("proof_methods") or []) if str(method).strip()}
+    if hypothesis_method and hypothesis_method not in proof_methods:
         return None
     finding_route = hypothesis_route or (sorted(proven_routes)[0] if proven_routes else None)
     canonical_vulnerability_key = _canonical_vulnerability_key(family=family, route=finding_route)
@@ -22963,6 +23052,29 @@ async def _arsenal_dispatch_workflow(p: dict[str, Any], approval_receipt_id: str
             validate_principal_contexts(principal_contexts, used_slots)
         except WorkflowContractError as exc:
             raise HTTPException(status_code=422, detail={"error": "invalid_workflow", "violation": str(exc)}) from exc
+        protected_endpoint_rows = await conn.fetch(
+            """
+            SELECT method, path, auth_state FROM target_endpoints
+            WHERE target_id=$1 AND COALESCE(auth_state,'') NOT IN ('', 'anonymous', 'public', 'unknown')
+            """,
+            target_uuid,
+        )
+
+    def annotate_trusted_route_expectations(result: dict[str, Any]) -> None:
+        protected = {
+            (str(row["method"] or "").upper(), _canonical_vulnerability_route(row["path"]))
+            for row in protected_endpoint_rows
+        }
+        result["trusted_protected_routes"] = [
+            {"method": str(request.get("method") or "").upper(), "path": str(request.get("path") or "")}
+            for observation in (result.get("observations") or [])
+            if isinstance(observation, dict)
+            and isinstance((request := observation.get("request")), dict)
+            and (
+                str(request.get("method") or "").upper(),
+                _canonical_vulnerability_route(request.get("path")),
+            ) in protected
+        ]
 
     cancel_event = asyncio.Event()
     _active_workflow_cancellations[workflow_id] = cancel_event
@@ -22975,6 +23087,7 @@ async def _arsenal_dispatch_workflow(p: dict[str, Any], approval_receipt_id: str
             principal_contexts,
             cancel_event,
         )
+        annotate_trusted_route_expectations(executed)
         if executed.get("restoration_verified") is not True:
             replayed = {
                 "proof_family": executed.get("proof_family"),
@@ -22990,6 +23103,7 @@ async def _arsenal_dispatch_workflow(p: dict[str, Any], approval_receipt_id: str
                 principal_contexts,
                 cancel_event,
             )
+            annotate_trusted_route_expectations(replayed)
     except WorkflowContractError as exc:
         raise HTTPException(status_code=422, detail={"error": "workflow_execution_failed", "violation": str(exc)}) from exc
     finally:
@@ -25481,7 +25595,9 @@ def _research_command_views(episode: dict[str, Any]) -> list[dict[str, Any]]:
     return sorted(views, key=lambda item: (not item.get("proposable"), item.get("name") or ""))
 
 
-async def _research_recent_actions(conn, episode_id: str | uuid.UUID) -> list[dict[str, Any]]:
+async def _research_recent_actions(
+    conn, episode_id: str | uuid.UUID, campaign_id: str | uuid.UUID | None = None,
+) -> list[dict[str, Any]]:
     rows = await conn.fetch(
         """
         SELECT rd.sequence, rd.decision_type, rd.status, rd.action, rd.reason,
@@ -25490,11 +25606,13 @@ async def _research_recent_actions(conn, episode_id: str | uuid.UUID) -> list[di
                cr.result_json
         FROM research_decisions rd
         LEFT JOIN command_results cr ON cr.id=rd.command_result_id
-        WHERE rd.episode_id=$1
-        ORDER BY rd.sequence DESC
+        JOIN research_episodes re ON re.id=rd.episode_id
+        WHERE rd.episode_id=$1 OR ($2::uuid IS NOT NULL AND re.campaign_id=$2)
+        ORDER BY rd.created_at DESC
         LIMIT 8
         """,
         _optional_uuid(episode_id),
+        _optional_uuid(campaign_id),
     )
     actions: list[dict[str, Any]] = []
     for row in rows:
@@ -26140,7 +26258,9 @@ async def _build_research_observation(
             created_by=f"research_episode:{episode['id']}",
         ),
     )
-    context = context_req.model_dump(mode="json")
+    # Research prompts consume the same canonical redaction path as persisted agent context packs;
+    # replay examples may originate from harvested traffic and must not carry tokens or credentials.
+    context = _canonical_agent_context_pack(context_req)
     commands = _research_command_views(episode)
     mission = _research_mission(episode)
     focus = await _research_focus_snapshot(conn, episode)
@@ -26154,7 +26274,7 @@ async def _build_research_observation(
                 *(projected.get("blocked_by") or []),
                 "finding_retest_already_active",
             ]))
-    recent_actions = await _research_recent_actions(conn, episode["id"])
+    recent_actions = await _research_recent_actions(conn, episode["id"], episode.get("campaign_id"))
     sequence = int(await conn.fetchval(
         "SELECT COALESCE(MAX(sequence), -1) + 1 FROM research_observations WHERE episode_id=$1",
         episode["id"],
@@ -26610,11 +26730,18 @@ async def _research_is_consecutive_duplicate_action(
 ) -> bool:
     previous_rows = await conn.fetch(
         """
-        SELECT action, status, policy_result, command_result_id
-        FROM research_decisions
-        WHERE episode_id=$1 AND decision_type='execute_action'
-          AND status IN ('accepted','dispatching','completed','blocked')
-        ORDER BY sequence DESC
+        SELECT rd.action, rd.status, rd.policy_result, rd.command_result_id
+        FROM research_decisions rd
+        JOIN research_episodes re ON re.id=rd.episode_id
+        WHERE rd.decision_type='execute_action'
+          AND rd.status IN ('accepted','dispatching','completed','blocked')
+          AND (
+              rd.episode_id=$1 OR (
+                  re.campaign_id IS NOT NULL
+                  AND re.campaign_id=(SELECT campaign_id FROM research_episodes WHERE id=$1)
+              )
+          )
+        ORDER BY rd.created_at DESC
         LIMIT 20
         """,
         _optional_uuid(episode_id),
@@ -26769,8 +26896,12 @@ async def create_research_episode(req: ResearchEpisodeRequest):
         campaign_id = _optional_uuid(req.campaign_id)
         if operation_plan_id and not await conn.fetchval("SELECT 1 FROM operation_plans WHERE id=$1", operation_plan_id):
             raise HTTPException(status_code=404, detail="Operation plan not found")
-        if campaign_id and not await conn.fetchval("SELECT 1 FROM campaigns WHERE id=$1", campaign_id):
-            raise HTTPException(status_code=404, detail="Campaign not found")
+        if campaign_id:
+            campaign_target = await conn.fetchval("SELECT target_id FROM campaigns WHERE id=$1", campaign_id)
+            if campaign_target is None:
+                raise HTTPException(status_code=404, detail="Campaign not found")
+            if campaign_target != target_uuid:
+                raise HTTPException(status_code=400, detail="Campaign target does not match research target")
         async with conn.transaction():
             row = await conn.fetchrow(
                 """
@@ -26838,7 +26969,7 @@ def _canonical_vulnerability_route(value: Any) -> str | None:
     path = re.sub(r"(?i)/[0-9a-f]{8}-[0-9a-f-]{27,36}(?=/|$)", "/{id}", path)
     path = re.sub(r"/[0-9]+(?=/|$)", "/{id}", path)
     path = re.sub(r"(?i)/[0-9a-f]{16,}(?=/|$)", "/{id}", path)
-    path = re.sub(r"\{[^/{}]+\}|:[A-Za-z_][A-Za-z0-9_]*", "{id}", path)
+    path = re.sub(r"\$?\{[^/{}]+\}|:[A-Za-z_][A-Za-z0-9_]*", "{id}", path)
     return re.sub(r"/+", "/", path)[:1000]
 
 
@@ -27145,10 +27276,14 @@ async def launch_research_episode(req: ResearchLaunchRequest):
             "each completed action, never repeat an identical no-progress action, and stop when "
             "the budget is exhausted or no valuable bounded action remains."
         )
+    if req.objective_override:
+        objective = req.objective_override.strip()
 
     allowed_families = []
     if launch_profile["execution_mode"] == "gated":
         allowed_families = ["sqli", "xss", "auth", "bola"]
+    if req.allowed_families_override:
+        allowed_families = [str(item).strip() for item in req.allowed_families_override if str(item).strip()]
     if finding:
         family = _research_finding_family(finding)
         allowed_families = [family] if family else []
@@ -27234,6 +27369,9 @@ async def launch_research_episode(req: ResearchLaunchRequest):
             "created_by": req.created_by,
             "launch_intensity": req.intensity,
             "dedupe_launch": not req.force_new,
+            # Server-authored marker used by the campaign-only active-slot uniqueness index. It
+            # intentionally does not constrain legacy/manual mission campaigns.
+            "campaign_autopilot": bool(req.campaign_id),
         },
         execution_mode=launch_profile["execution_mode"],
         max_risk_tier=launch_profile["max_risk_tier"],
@@ -27241,6 +27379,7 @@ async def launch_research_episode(req: ResearchLaunchRequest):
         max_steps=max_steps,
         budget_limits=budget_limits,
         approval_receipt_id=req.approval_receipt_id,
+        campaign_id=req.campaign_id,
         subject_type=req.subject_type,
         subject_id=str(subject_uuid),
         mission_profile=req.mission_profile,
@@ -27290,9 +27429,257 @@ async def launch_research_episode(req: ResearchLaunchRequest):
     return detail
 
 
+@app.post("/research/campaigns/launch")
+async def launch_research_campaign(req: ResearchCampaignLaunchRequest):
+    """Launch a durable sequence of autonomous episodes from minimal operator input."""
+    target_uuid = _uuid_or_400(req.target_id, "target id")
+    unsupported_families = sorted({
+        str(item).strip().lower() for item in req.allowed_families if str(item).strip()
+    } - {"sqli", "xss", "auth", "bola"})
+    if unsupported_families:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported autonomous research families: {', '.join(unsupported_families)}",
+        )
+    deadline = datetime.now(timezone.utc) + timedelta(hours=req.duration_hours)
+    metadata = {
+        "autonomous_research": {
+            "intensity": req.intensity,
+            "deadline_at": deadline.isoformat(),
+            "max_episodes": req.max_episodes,
+            "approval_receipt_id": req.approval_receipt_id,
+            "objective": req.objective,
+            "allowed_families": req.allowed_families,
+            "episodes_started": 0,
+            "last_paused_episode_id": None,
+            "last_error": None,
+        }
+    }
+    async with db_pool.acquire() as conn:
+        target = await conn.fetchrow("SELECT id, url FROM targets WHERE id=$1 AND is_active=true", target_uuid)
+        if not target:
+            raise HTTPException(status_code=404, detail="Active target not found")
+        campaign = await conn.fetchrow(
+            """
+            INSERT INTO campaigns (
+                name, objective, campaign_type, target_id, target_scope, risk_tier,
+                planner, status, metadata_json, created_by
+            ) VALUES ($1,$2,'autonomous_research',$3,$4::jsonb,$5,$6::jsonb,'active',$7::jsonb,$8)
+            RETURNING *
+            """,
+            f"Autonomous research: {urllib.parse.urlparse(str(target['url'])).hostname}"[:200],
+            req.objective or "Continuously find and verify net-new security weaknesses until the campaign ceiling is reached.",
+            target_uuid,
+            json.dumps({"target_id": str(target_uuid), "url": str(target["url"])}),
+            RESEARCH_LAUNCH_PROFILES[req.intensity]["max_risk_tier"],
+            json.dumps({"kind": "configured_ai", "mode": "durable_campaign"}),
+            json.dumps(metadata),
+            req.created_by,
+        )
+    campaign_id = str(campaign["id"])
+    try:
+        episode = await launch_research_episode(ResearchLaunchRequest(
+            subject_type="target",
+            subject_id=str(target_uuid),
+            mission_profile="target_hunt",
+            intensity=req.intensity,
+            approval_receipt_id=req.approval_receipt_id,
+            autopilot=True,
+            force_new=True,
+            created_by=req.created_by,
+            campaign_id=campaign_id,
+            objective_override=req.objective,
+            allowed_families_override=req.allowed_families,
+        ))
+    except Exception as exc:
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                """
+                UPDATE campaigns SET status='paused',
+                    metadata_json=jsonb_set(metadata_json, '{autonomous_research,last_error}', to_jsonb($2::text), true),
+                    updated_at=NOW() WHERE id=$1
+                """,
+                campaign["id"], str(exc)[:500],
+            )
+        raise
+    async with db_pool.acquire() as conn:
+        updated = await conn.fetchrow(
+            """
+            UPDATE campaigns SET
+                metadata_json=jsonb_set(metadata_json, '{autonomous_research,episodes_started}', '1'::jsonb, true),
+                updated_at=NOW() WHERE id=$1 RETURNING *
+            """,
+            campaign["id"],
+        )
+    return {"campaign": _public_campaign_row(updated), "episode": episode, "ui_path": episode.get("ui_path")}
+
+
+def _research_campaign_terminal_needs_review(
+    config: dict[str, Any], latest_episode_id: Any, latest_status: Any,
+) -> bool:
+    """Return true once per failed/blocked/cancelled terminal episode until operator resume."""
+    episode_id = str(latest_episode_id or "")
+    return bool(
+        episode_id
+        and str(latest_status or "") in {"blocked", "failed", "cancelled"}
+        and str(config.get("last_paused_episode_id") or "") != episode_id
+    )
+
+
+async def _continue_autonomous_research_campaigns() -> int:
+    """Start the next episode for active campaigns with no non-terminal episode."""
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT c.*, COUNT(re.id)::int AS episode_count,
+                   (ARRAY_AGG(re.id ORDER BY re.created_at DESC)
+                       FILTER (WHERE re.id IS NOT NULL))[1] AS latest_episode_id,
+                   (ARRAY_AGG(re.status ORDER BY re.created_at DESC)
+                       FILTER (WHERE re.id IS NOT NULL))[1] AS latest_episode_status
+            FROM campaigns c
+            LEFT JOIN research_episodes re ON re.campaign_id=c.id
+            WHERE c.campaign_type='autonomous_research' AND c.status='active'
+              AND NOT EXISTS (
+                  SELECT 1 FROM research_episodes active
+                  WHERE active.campaign_id=c.id
+                    AND active.status NOT IN ('completed','cancelled','failed','budget_exhausted','blocked')
+              )
+            GROUP BY c.id ORDER BY c.updated_at ASC LIMIT 5
+            """
+        )
+    started = 0
+    for row in rows:
+        payload = row_to_dict(row)
+        metadata = _decode_json_value(payload.get("metadata_json")) or {}
+        config = metadata.get("autonomous_research") if isinstance(metadata.get("autonomous_research"), dict) else {}
+        try:
+            deadline = datetime.fromisoformat(str(config.get("deadline_at") or "").replace("Z", "+00:00"))
+            if deadline.tzinfo is None:
+                deadline = deadline.replace(tzinfo=timezone.utc)
+        except (TypeError, ValueError):
+            deadline = datetime.now(timezone.utc)
+        count = int(payload.get("episode_count") or 0)
+        try:
+            maximum = max(1, min(100, int(config.get("max_episodes") or 1)))
+        except (TypeError, ValueError):
+            maximum = 1
+        if deadline <= datetime.now(timezone.utc) or count >= maximum:
+            async with db_pool.acquire() as conn:
+                await conn.execute("UPDATE campaigns SET status='completed', updated_at=NOW() WHERE id=$1", row["id"])
+            continue
+        latest_episode_id = str(payload.get("latest_episode_id") or "")
+        latest_status = str(payload.get("latest_episode_status") or "")
+        # A blocked or failed bounded episode represents new operator input/recovery work, not an
+        # invitation to burn the remaining campaign ceiling repeating the same failure. Pause once
+        # for that terminal episode. An explicit resume acknowledges it and permits one fresh try.
+        if _research_campaign_terminal_needs_review(config, latest_episode_id, latest_status):
+            message = f"Latest research episode ended {latest_status}; operator review is required"
+            async with db_pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    UPDATE campaigns SET status='paused',
+                        metadata_json=jsonb_set(
+                            jsonb_set(metadata_json, '{autonomous_research,last_paused_episode_id}', to_jsonb($2::text), true),
+                            '{autonomous_research,last_error}', to_jsonb($3::text), true
+                        ),
+                        updated_at=NOW() WHERE id=$1
+                    """,
+                    row["id"], latest_episode_id, message,
+                )
+            continue
+        try:
+            await launch_research_episode(ResearchLaunchRequest(
+                subject_type="target", subject_id=str(row["target_id"]), mission_profile="target_hunt",
+                intensity=str(config.get("intensity") or "deep_hunt"),
+                approval_receipt_id=config.get("approval_receipt_id"), autopilot=True, force_new=True,
+                created_by="research_campaign_supervisor", campaign_id=str(row["id"]),
+                objective_override=config.get("objective"),
+                allowed_families_override=config.get("allowed_families") or [],
+            ))
+        except asyncpg.UniqueViolationError:
+            continue
+        except Exception as exc:
+            async with db_pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    UPDATE campaigns SET status='paused',
+                        metadata_json=jsonb_set(metadata_json, '{autonomous_research,last_error}', to_jsonb($2::text), true),
+                        updated_at=NOW() WHERE id=$1
+                    """,
+                    row["id"], str(exc)[:500],
+                )
+            continue
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                """
+                UPDATE campaigns SET
+                    metadata_json=jsonb_set(metadata_json, '{autonomous_research,episodes_started}', to_jsonb($2::int), true),
+                    updated_at=NOW() WHERE id=$1
+                """,
+                row["id"], count + 1,
+            )
+        started += 1
+    return started
+
+
+@app.post("/research/campaigns/{campaign_id}/control")
+async def control_research_campaign(campaign_id: str, req: ResearchCampaignControlRequest):
+    campaign_uuid = _uuid_or_400(campaign_id, "campaign id")
+    async with db_pool.acquire() as conn:
+        campaign = await conn.fetchrow(
+            "SELECT * FROM campaigns WHERE id=$1 AND campaign_type='autonomous_research'",
+            campaign_uuid,
+        )
+        if not campaign:
+            raise HTTPException(status_code=404, detail="Autonomous research campaign not found")
+        current_status = str(campaign.get("status") or "")
+        if req.action == "resume" and current_status in {"completed", "cancelled"}:
+            raise HTTPException(
+                status_code=409,
+                detail=f"A {current_status} research campaign cannot be resumed; launch a new campaign",
+            )
+        active_rows = await conn.fetch(
+            """
+            SELECT id FROM research_episodes WHERE campaign_id=$1
+              AND status NOT IN ('completed','cancelled','failed','budget_exhausted','blocked')
+            """,
+            campaign_uuid,
+        )
+        status = {"pause": "paused", "resume": "active", "cancel": "cancelled"}[req.action]
+        updated = await conn.fetchrow(
+            "UPDATE campaigns SET status=$2, updated_at=NOW() WHERE id=$1 RETURNING *",
+            campaign_uuid, status,
+        )
+        if req.action in {"pause", "resume"} and active_rows:
+            await conn.execute(
+                """
+                UPDATE research_episodes SET autopilot_enabled=$2,
+                    autopilot_error=CASE WHEN $2 THEN NULL ELSE autopilot_error END,
+                    updated_at=NOW() WHERE id=ANY($1::uuid[])
+                """,
+                [row["id"] for row in active_rows], req.action == "resume",
+            )
+    cancelled: list[str] = []
+    if req.action == "cancel":
+        for row in active_rows:
+            try:
+                await cancel_research_episode(str(row["id"]))
+                cancelled.append(str(row["id"]))
+            except HTTPException as exc:
+                if exc.status_code not in {404, 409}:
+                    raise
+    return {
+        "campaign": _public_campaign_row(updated),
+        "action": req.action,
+        "affected_episode_ids": [str(row["id"]) for row in active_rows],
+        "cancelled_episode_ids": cancelled,
+    }
+
+
 @app.get("/research/episodes")
 async def list_research_episodes(
     target_id: Optional[str] = Query(None),
+    campaign_id: Optional[str] = Query(None),
     status: Optional[str] = Query(None),
     limit: int = Query(20, ge=1, le=100),
 ):
@@ -27301,6 +27688,9 @@ async def list_research_episodes(
     if target_id:
         params.append(_uuid_or_400(target_id, "target id"))
         clauses.append(f"target_id=${len(params)}")
+    if campaign_id:
+        params.append(_uuid_or_400(campaign_id, "campaign id"))
+        clauses.append(f"campaign_id=${len(params)}")
     if status:
         params.append(status)
         clauses.append(f"status=${len(params)}")
@@ -28089,7 +28479,21 @@ async def _research_autobind_hypothesis(
         return
     family = family_proof.canonical_family(params.get("proof_family") or "workflow")
     route = None
-    for step in (params.get("steps") or []):
+    steps = [step for step in (params.get("steps") or []) if isinstance(step, dict)]
+    preferred_labels: set[str] = set()
+    preferred_predicates = {
+        "bola": {"cross_principal_access"},
+        "auth_bypass": {"unauthenticated_control"},
+        "data_exposure": {"sensitive_value_present"},
+        "mass_assignment": {"forbidden_field_accepted"},
+    }.get(family, set())
+    for assertion in (params.get("assertions") or []):
+        if isinstance(assertion, dict) and assertion.get("predicate") in preferred_predicates:
+            preferred_labels.update(str(assertion.get(key) or "") for key in ("step", "candidate") if assertion.get(key))
+    ordered_steps = [step for step in steps if str(step.get("label") or "") in preferred_labels] + [
+        step for step in steps if str(step.get("label") or "") not in preferred_labels
+    ]
+    for step in ordered_steps:
         if isinstance(step, dict) and step.get("path"):
             route = _canonical_vulnerability_route(step.get("path"))
             if route:
@@ -28139,25 +28543,25 @@ async def _research_autobind_hypothesis(
 # valid (normalize_workflow) and server-corroborable. Every template is asserted valid in tests.
 _EXPERIMENT_WORKFLOW_TEMPLATES: dict[str, dict[str, Any]] = {
     "bola": {
-        # Read-existing BOLA: no object creation (avoids captcha/required-field-gated writes). The
-        # owner lists ITS OWN objects, extracts an id (which proves ownership), then the attacker
-        # cross-reads that id and the anonymous request is denied. Prefer an endpoint where the owner
-        # already has objects (e.g. a seeded address/card/basket).
         "proof_family": "bola",
-        "objective": "User2 reads User1's object via an object-id route (no object creation needed)",
+        "objective": "User2 reads an object created by User1 via an object-id route",
         "expected_signal": "the attacker principal receives the owner's object; anonymous is denied",
-        "falsifier": "the attacker is denied or receives different data, or anonymous is allowed",
+        "falsifier": "creation fails, the attacker is denied or receives different data, or anonymous is allowed",
         "steps": [
-            {"label": "list", "kind": "http", "principal": "user1", "checkpoint": "action", "method": "GET", "path": "/api/<objects>", "extract": [{"name": "object_id", "source": "json", "path": "$.data[0].id"}]},
+            {"label": "before", "kind": "http", "principal": "user1", "checkpoint": "before", "method": "GET", "path": "/api/<objects>"},
+            {"label": "create", "kind": "http", "principal": "user1", "checkpoint": "mutation", "method": "POST", "path": "/api/<objects>", "json_body": {"<field>": "<value>"}, "extract": [{"name": "object_id", "source": "json", "path": "$.id"}]},
             {"label": "owner_read", "kind": "http", "principal": "user1", "checkpoint": "action", "method": "GET", "path": "/api/<objects>/${object_id}"},
             {"label": "attacker_read", "kind": "http", "principal": "user2", "checkpoint": "action", "method": "GET", "path": "/api/<objects>/${object_id}", "compare_to": "owner_read"},
             {"label": "anon_denied", "kind": "http", "principal": "anonymous", "checkpoint": "action", "method": "GET", "path": "/api/<objects>/${object_id}"},
+            {"label": "cleanup", "kind": "http", "principal": "user1", "checkpoint": "cleanup", "method": "DELETE", "path": "/api/<objects>/${object_id}"},
+            {"label": "after", "kind": "http", "principal": "user1", "checkpoint": "after", "method": "GET", "path": "/api/<objects>", "compare_to": "before"},
         ],
         "assertions": [
             {"type": "distinct_principals", "steps": ["owner_read", "attacker_read"], "predicate": "distinct_identity"},
             {"type": "comparison_equivalent", "control": "owner_read", "candidate": "attacker_read", "predicate": "ownership_established"},
             {"type": "comparison_equivalent", "control": "owner_read", "candidate": "attacker_read", "predicate": "cross_principal_access"},
             {"type": "status_not_in", "step": "anon_denied", "values": [200, 201, 202, 203, 204], "predicate": "denial_control"},
+            {"type": "restored", "control": "before", "candidate": "after", "predicate": "before_after_state"},
         ],
     },
     "data_exposure": {
@@ -28195,13 +28599,14 @@ _EXPERIMENT_WORKFLOW_TEMPLATES: dict[str, dict[str, Any]] = {
         "steps": [
             {"label": "before", "kind": "http", "principal": "user1", "checkpoint": "before", "method": "GET", "path": "/api/<resource>"},
             {"label": "mutate", "kind": "http", "principal": "user1", "checkpoint": "mutation", "method": "PATCH", "path": "/api/<resource>", "json_body": {"<forbidden_field>": "<value>"}, "compare_to": "before"},
-            {"label": "control", "kind": "http", "principal": "user1", "checkpoint": "action", "method": "PATCH", "path": "/api/<resource>", "json_body": {"<allowed_field>": "<value>"}},
+            {"label": "control", "kind": "http", "principal": "user1", "checkpoint": "mutation", "method": "PATCH", "path": "/api/<resource>", "json_body": {"<allowed_field>": "<value>"}},
+            {"label": "verify", "kind": "http", "principal": "user1", "checkpoint": "after", "method": "GET", "path": "/api/<resource>", "compare_to": "before"},
             {"label": "cleanup", "kind": "http", "principal": "user1", "checkpoint": "cleanup", "method": "PATCH", "path": "/api/<resource>", "json_body": {"<forbidden_field>": "<original_value>"}},
             {"label": "after", "kind": "http", "principal": "user1", "checkpoint": "after", "method": "GET", "path": "/api/<resource>", "compare_to": "before"},
         ],
         "assertions": [
             {"type": "status_in", "step": "mutate", "values": [200], "predicate": "forbidden_field_accepted"},
-            {"type": "comparison_changed", "control": "before", "candidate": "mutate", "predicate": "observable_state_change"},
+            {"type": "comparison_changed", "control": "before", "candidate": "verify", "predicate": "observable_state_change"},
             {"type": "status_not_in", "step": "control", "values": [200, 201, 204], "predicate": "control_rejected"},
             {"type": "restored", "control": "before", "candidate": "after", "predicate": "before_after_state"},
         ],
@@ -29292,9 +29697,14 @@ async def research_autopilot_runner(pool) -> None:
     """
     owner = f"api-autopilot:{os.getpid()}:{uuid.uuid4()}"
     last_queue_reconcile_monotonic = 0.0
+    last_campaign_reconcile_monotonic = 0.0
     while True:
         episode_id: str | None = None
         try:
+            now_monotonic = time.monotonic()
+            if now_monotonic - last_campaign_reconcile_monotonic >= 30.0:
+                await _continue_autonomous_research_campaigns()
+                last_campaign_reconcile_monotonic = now_monotonic
             async with pool.acquire() as conn:
                 async with conn.transaction():
                     await _reconcile_stale_research_dispatches(conn)
@@ -30692,10 +31102,10 @@ def _endpoint_inventory_hypothesis_requests(
                 ))
         # Auth-session endpoints (login/token/reset/...) are not object-mutation targets; excluding
         # them keeps the board from drowning in mass-assignment noise that stalls the planner.
-        auth_session_noise = any(
-            segment in path.lower()
-            for segment in ("/login", "/logout", "/token", "/refresh", "/reset", "/forgot", "/verify", "/otp")
-        )
+        path_segments = {segment for segment in path.lower().split("/") if segment}
+        auth_session_noise = bool(path_segments & {
+            "login", "logout", "token", "refresh", "reset", "forgot", "verify", "otp",
+        })
         if (
             method in {"POST", "PUT", "PATCH"}
             and any(hint in param_location for hint in ("body", "json", "form"))
@@ -30743,12 +31153,15 @@ async def generate_endpoint_inventory_hypotheses(
             raise HTTPException(status_code=404, detail="Target not found")
         rows = await conn.fetch(
             """
-            SELECT method, path, param_shape, replay_spec, param_location, auth_state
+            SELECT method, path, param_shape, replay_spec, param_location, auth_state,
+                   test_status, last_verdict, last_tested_at
             FROM target_endpoints
-            -- Exclude retired ('gone') and already actively tested endpoints so leads point at
-            -- genuinely unexplained surface, not a re-verification of existing DAST coverage.
-            WHERE target_id=$1 AND COALESCE(test_status,'') NOT IN ('gone', 'tested')
-            ORDER BY priority_score DESC NULLS LAST, last_seen_at DESC
+            -- DAST/ASM "tested" means a generic check ran, not that authorization or workflow
+            -- semantics were exhausted. Reuse that map for deeper autonomous experiments.
+            WHERE target_id=$1 AND COALESCE(test_status,'') <> 'gone'
+            ORDER BY
+                CASE COALESCE(test_status,'') WHEN 'untested' THEN 0 WHEN 'stale' THEN 1 ELSE 2 END,
+                priority_score DESC NULLS LAST, last_seen_at DESC
             LIMIT 300
             """,
             tgt,

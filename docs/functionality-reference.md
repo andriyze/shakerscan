@@ -1050,8 +1050,8 @@ it is the exhaustive backstop behind the human-readable product map above.
 
 | Surface | Count | Source |
 |---|---|---|
-| Public REST operations | 213 | `api/api.py` FastAPI decorators |
-| Unique REST paths | 172 | `api/api.py` |
+| Public REST operations | 216 | `api/api.py` FastAPI decorators |
+| Unique REST paths | 175 | `api/api.py` |
 | Check families | 13 | `api/check_registry.py` |
 | Command Arsenal commands | 75 | `api/command_arsenal.py` |
 | Tool adapters | 13 | `api/command_arsenal.py` |
@@ -1060,13 +1060,13 @@ it is the exhaustive backstop behind the human-readable product map above.
 | Scanner wrapper commands | 23 | `scanner.sh` |
 | Make targets | 7 | `Makefile` |
 | Release gates | 10 | `scripts/release_gates.py` |
-| Runtime environment keys | 190 | Python sources + Compose manifests |
+| Runtime environment keys | 191 | Python sources + Compose manifests |
 | Scanner modules | 83 | `scanner/scanner_tools/` |
 | UI pages | 26 | `ui/src/app/` |
 | Skills | 5 | `skills/` |
 | Slash commands | 14 | `.claude/commands/` |
 | Specialized subagents | 3 | `.claude/agents/` |
-| Durable tables | 42 | `db/init.sql` + migrations |
+| Durable tables | 43 | `db/init.sql` + migrations |
 
 ### Public REST Operations
 
@@ -1201,6 +1201,8 @@ it is the exhaustive backstop behind the human-readable product map above.
 | `PATCH` | `/policy-profiles/{profile_id}` | `update_policy_profile` |
 | `DELETE` | `/queue/clear` | `clear_queue` |
 | `GET` | `/queue/stats` | `queue_stats` |
+| `POST` | `/research/campaigns/launch` | `launch_research_campaign` |
+| `POST` | `/research/campaigns/{campaign_id}/control` | `control_research_campaign` |
 | `GET` | `/research/episodes` | `list_research_episodes` |
 | `POST` | `/research/episodes` | `create_research_episode` |
 | `GET` | `/research/episodes/{episode_id}` | `get_research_episode` |
@@ -1273,6 +1275,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | `POST` | `/targets/{target_id}/credential-profiles/{profile_id}/rotate` | `rotate_target_credential_profile` |
 | `GET` | `/targets/{target_id}/graph` | `get_application_graph` |
 | `POST` | `/targets/{target_id}/graph/hypotheses` | `generate_application_graph_hypotheses` |
+| `POST` | `/targets/{target_id}/inventory/hypotheses` | `generate_endpoint_inventory_hypotheses` |
 | `GET` | `/targets/{target_id}/principal-matrix` | `list_target_principal_matrix` |
 | `POST` | `/targets/{target_id}/principal-matrix` | `upsert_target_principal_matrix` |
 | `DELETE` | `/targets/{target_id}/principal-matrix/{expectation_id}` | `delete_target_principal_expectation` |
@@ -1595,7 +1598,8 @@ Only key names and declaring sources are documented; secret values are never rea
 | `AI_CLASSIFY_MAX_FINDINGS_PER_BATCH` | `scanner/scanner_tools/ai_classifier.py` |
 | `AI_CLASSIFY_MAX_PROMPT_CHARS` | `scanner/scanner_tools/ai_classifier.py` |
 | `AI_CLASSIFY_MIN_SEVERITY` | `api/api.py`, `api/worker.py`, `docker-compose.release.yml`, `docker-compose.yml`, `scanner/scanner.py` |
-| `AI_CREDENTIAL_ENC_KEY` | `api/api.py`, `api/secret_store.py` |
+| `AI_CREDENTIAL_ENC_KEY` | `api/secret_store.py` |
+| `AI_CREDENTIAL_ENC_KEY_FILE` | `api/secret_store.py` |
 | `AI_DEMO_HONEY_PUBLIC_URL` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `AI_DEMO_HONEY_SCANNER_URL` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `AI_DEMO_MODE_ENABLED` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
@@ -1685,7 +1689,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `PROOF_REQUIRED_FOR_SMART` | `api/api.py`, `api/retest_contract.py`, `api/worker.py`, `scanner/scanner.py` |
 | `REDIS_PORT` | `docker-compose.yml` |
 | `REDIS_URL` | `api/api.py`, `api/gungnir_worker.py`, `api/worker.py`, `scanner/gungnir_worker.py` |
-| `RESULTS_DIR` | `api/api.py`, `api/worker.py` |
+| `RESULTS_DIR` | `api/api.py`, `api/secret_store.py`, `api/worker.py` |
 | `RETEST_AI_BUDGET_SECONDS` | `api/worker.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `RETEST_AI_CIRCUIT_COOLDOWN_SECONDS` | `api/worker.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `RETEST_AI_CIRCUIT_ERROR_THRESHOLD` | `api/worker.py`, `docker-compose.release.yml`, `docker-compose.yml` |
@@ -1888,6 +1892,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `target_credential_profiles` | `api/retest_contract.py` |
 | `target_endpoint_expectations` | `api/retest_contract.py` |
 | `target_endpoints` | `db/init.sql` |
+| `target_principal_provisioning_attempts` | `api/retest_contract.py` |
 | `target_principals` | `api/retest_contract.py` |
 | `targets` | `db/init.sql` |
 | `tool_receipts` | `api/retest_contract.py` |

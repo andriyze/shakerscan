@@ -254,6 +254,7 @@ export interface OperationPlan {
   validation_warnings: string[]
   scope_receipt_id?: string | null
   approval_receipt_id?: string | null
+  campaign_id?: string | null
   plan_json: Record<string, unknown>
   created_by?: string | null
   created_at?: string
@@ -279,6 +280,7 @@ export interface ResearchBudget {
 export interface ResearchEpisode {
   id: string
   target_id: string
+  campaign_id?: string | null
   objective: string
   episode_version: string
   planner: Record<string, unknown>
@@ -420,6 +422,23 @@ export interface ResearchEpisodeLaunchRequest {
 export interface ResearchEpisodeLaunchResponse extends ResearchEpisodeDetail {
   ui_path?: string
   reused: boolean
+}
+
+export interface ResearchCampaignLaunchRequest {
+  target_id: string
+  intensity?: 'analyze' | 'hunt' | 'relentless' | 'deep_hunt'
+  approval_receipt_id?: string
+  duration_hours?: number
+  max_episodes?: number
+  objective?: string
+  allowed_families?: string[]
+  created_by?: string
+}
+
+export interface ResearchCampaignLaunchResponse {
+  campaign: Campaign
+  episode: ResearchEpisodeLaunchResponse
+  ui_path?: string
 }
 
 export interface ResearchReadiness {
@@ -2862,11 +2881,13 @@ export async function getAgentDecisionTraces(limit: number = 20): Promise<{ deci
 
 export async function getResearchEpisodes(params?: {
   target_id?: string
+  campaign_id?: string
   status?: string
   limit?: number
 }): Promise<{ episodes: ResearchEpisode[]; count: number }> {
   const search = new URLSearchParams()
   if (params?.target_id) search.set('target_id', params.target_id)
+  if (params?.campaign_id) search.set('campaign_id', params.campaign_id)
   if (params?.status) search.set('status', params.status)
   search.set('limit', String(params?.limit || 50))
   const res = await fetch(`${API_URL}/research/episodes?${search}`)
@@ -2897,6 +2918,26 @@ export async function launchResearchEpisode(payload: ResearchEpisodeLaunchReques
     body: JSON.stringify(payload),
   })
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to launch autonomous investigation'))
+  return res.json()
+}
+
+export async function launchResearchCampaign(payload: ResearchCampaignLaunchRequest): Promise<ResearchCampaignLaunchResponse> {
+  const res = await fetch(`${API_URL}/research/campaigns/launch`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to launch autonomous research campaign'))
+  return res.json()
+}
+
+export async function controlResearchCampaign(campaignId: string, action: 'pause' | 'resume' | 'cancel'): Promise<{ campaign: Campaign; affected_episode_ids: string[]; cancelled_episode_ids: string[] }> {
+  const res = await fetch(`${API_URL}/research/campaigns/${encodeURIComponent(campaignId)}/control`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action, created_by: 'research_agent_ui' }),
+  })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, `Failed to ${action} research campaign`))
   return res.json()
 }
 

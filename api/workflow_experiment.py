@@ -52,7 +52,7 @@ PREDICATE_ASSERTION_TYPES = {
     "same_account": {"distinct_principals"},
     "forbidden_field_accepted": {"status_in"},
     "observable_state_change": {"comparison_changed"},
-    "control_rejected": {"status_not_in", "comparison_changed"},
+    "control_rejected": {"status_not_in"},
     "forbidden_field_rejected": {"status_not_in"},
     "payload_control_differential": {"comparison_changed"},
     "deterministic_family_proof": {"comparison_changed", "status_in"},
@@ -66,6 +66,15 @@ PREDICATE_ASSERTION_TYPES = {
     "sensitive_value_present": {"comparison_changed", "status_in"},
     "name_only_classification": {"comparison_equivalent"},
 }
+
+# These fields carry an authorization/security meaning independent of planner prose.  Ordinary
+# application fields must never become "forbidden" merely because a model labels them that way.
+SECURITY_SENSITIVE_MUTATION_FIELDS = frozenset({
+    "admin", "is_admin", "isadmin", "role", "roles", "permission", "permissions",
+    "tenant", "tenant_id", "tenantid", "owner", "owner_id", "ownerid", "user_id",
+    "userid", "account_id", "accountid", "verified", "is_verified", "isverified",
+    "balance", "credit", "price", "total", "status",
+})
 
 
 def _normalize_assertions(raw: Any, labels: set[str]) -> list[dict[str, Any]]:
@@ -230,6 +239,23 @@ def _comparison_changed(comparison: dict[str, Any]) -> bool:
     ))
 
 
+def _request_signature(observation: dict[str, Any]) -> tuple[str, str] | None:
+    request = observation.get("request") if isinstance(observation.get("request"), dict) else {}
+    method = str(request.get("method") or "").upper()
+    path = str(request.get("path") or "")
+    return (method, path) if method and path else None
+
+
+def _same_resource(left: dict[str, Any], right: dict[str, Any], *, same_method: bool = True) -> bool:
+    left_signature = _request_signature(left)
+    right_signature = _request_signature(right)
+    if not left_signature or not right_signature:
+        return False
+    if same_method:
+        return left_signature == right_signature
+    return left_signature[1] == right_signature[1]
+
+
 def _server_confirms_predicate(
     predicate: str,
     assertion: dict[str, Any],
@@ -272,13 +298,18 @@ def _server_confirms_predicate(
             and str(control_request.get("path") or "")
             == str(candidate_request.get("path") or "")
         )
-        # Ownership: the owner principal authenticated-reads the object successfully. The object is
-        # proven owner-scoped (not public) by the anonymous denial_control the contract also requires,
-        # and cross-principal access is proven by the attacker getting the owner's EXACT data
-        # (equivalent) under a DISTINCT verified identity. This holds for both a created object and a
-        # pre-existing one (e.g. a basket id from the owner's own session), without a fragile
-        # create/list step that captcha- or anti-tamper-gated apps reject.
-        owner_established = _obs_authenticated(control) and _obs_success(control)
+        # Ownership needs provenance stronger than "an authenticated user could read it".  The
+        # object identifier used by the owner read must come from a successful mutation performed by
+        # that same principal in this workflow.  Anonymous denial only proves authentication, not
+        # ownership, and therefore cannot replace this provenance check.
+        referenced = set(control_request.get("variable_references") or [])
+        owner_established = any(
+            obs.get("checkpoint") == "mutation"
+            and str(obs.get("principal") or "").lower() == control_principal
+            and _obs_success(obs)
+            and bool(referenced & set(obs.get("extracted_names") or []))
+            for obs in by_label.values()
+        )
         base = bool(distinct and same_request and equivalent and _obs_success(control) and _obs_success(candidate))
         return base and (owner_established if predicate == "ownership_established" else True)
     if predicate == "distinct_identity":
@@ -309,9 +340,10 @@ def _server_confirms_predicate(
     # JWT) is not, so the observer must be anonymous.
     if predicate == "sensitive_value_present":
         target = step or candidate
+        categories = set(target.get("sensitive_value_categories") or [])
         return (
             str(target.get("principal") or "anonymous").lower() == "anonymous"
-            and bool(target.get("sensitive_value_categories"))
+            and bool(categories - {"jwt", "bearer_token"})
         )
     if predicate == "name_only_classification":  # refute: sensitive-looking keys, no values
         target = step or candidate
@@ -344,21 +376,19 @@ def _server_confirms_predicate(
         submitted = {str(name) for name in (target.get("submitted_fields") or [])}
         response = target.get("response") if isinstance(target.get("response"), dict) else {}
         echoed = {str(key) for key in (response.get("json_keys") or [])}
-        return bool(submitted) and bool(submitted & echoed)
+        forbidden = {name.lower() for name in submitted} & SECURITY_SENSITIVE_MUTATION_FIELDS
+        return bool(forbidden) and bool(forbidden & {name.lower() for name in echoed})
     if predicate == "observable_state_change":
         return changed
     if predicate in {"control_rejected", "forbidden_field_rejected"}:  # rejected control / refute
-        return (not _obs_success(step or candidate)) or changed
+        return not _obs_success(step or candidate)
 
     # --- workflow: a real state transition -- the change is between a BEFORE and an AFTER checkpoint
     # and the workflow contains a mutation (an action caused it), not two reads of a changing clock.
     if predicate in {"transition_invariant_broken", "before_after_state"}:
-        has_mutation = any(o.get("checkpoint") == "mutation" for o in by_label.values())
-        return (
-            changed and has_mutation
-            and control.get("checkpoint") == "before"
-            and candidate.get("checkpoint") in {"after", "mutation"}
-        )
+        # A state change is not itself an invariant violation.  Until a target policy supplies a
+        # server-trusted transition invariant, workflow-family signals remain unverified.
+        return False
     if predicate in {"invariant_held", "control_equivalent"}:  # refute
         return equivalent
 
@@ -367,7 +397,9 @@ def _server_confirms_predicate(
     return False
 
 
-def server_corroborated_predicates(result: dict[str, Any]) -> set[str]:
+def _server_corroborated_evidence(
+    result: dict[str, Any],
+) -> tuple[set[str], dict[str, tuple[str, str]]]:
     """Server-confirmed family predicates for a single workflow execution.
 
     Reads only server-computed signals from the observations/comparisons; the model's
@@ -385,6 +417,7 @@ def server_corroborated_predicates(result: dict[str, Any]) -> set[str]:
         if isinstance(item, dict) and item.get("slot") and item.get("identity_fingerprint")
     }
     granted: set[str] = set()
+    assertions_by_predicate: dict[str, list[dict[str, Any]]] = {}
     for assertion in result.get("assertion_results") or []:
         if not isinstance(assertion, dict) or assertion.get("passed") is not True:
             continue
@@ -393,7 +426,65 @@ def server_corroborated_predicates(result: dict[str, Any]) -> set[str]:
             predicate, assertion, by_label, by_pair, principal_identities
         ):
             granted.add(predicate)
-    return granted
+            assertions_by_predicate.setdefault(predicate, []).append(assertion)
+
+    # Family predicates must describe the same live security surface.  This prevents a successful
+    # authenticated request on route A and an anonymous sample-token response on route B from being
+    # combined into an auth-bypass proof.
+    auth_protected = assertions_by_predicate.get("protected_resource_accessed") or []
+    auth_anon = assertions_by_predicate.get("unauthenticated_control") or []
+    if auth_protected and auth_anon:
+        protected = by_label.get(str(auth_protected[0].get("step") or ""), {})
+        anonymous = by_label.get(str(auth_anon[0].get("step") or ""), {})
+        trusted_protected = {
+            (str(item.get("method") or "").upper(), str(item.get("path") or ""))
+            for item in (result.get("trusted_protected_routes") or []) if isinstance(item, dict)
+        }
+        if not _same_resource(protected, anonymous) or _request_signature(protected) not in trusted_protected:
+            granted -= {"protected_resource_accessed", "unauthenticated_control"}
+
+    mass_accept = assertions_by_predicate.get("forbidden_field_accepted") or []
+    mass_change = assertions_by_predicate.get("observable_state_change") or []
+    mass_control = assertions_by_predicate.get("control_rejected") or []
+    if mass_accept and mass_change and mass_control:
+        mutation = by_label.get(str(mass_accept[0].get("step") or ""), {})
+        changed_assertion = mass_change[0]
+        after = by_label.get(str(changed_assertion.get("candidate") or ""), {})
+        rejected = by_label.get(str(mass_control[0].get("step") or ""), {})
+        submitted = {str(name).lower() for name in mutation.get("submitted_fields") or []}
+        response = after.get("response") if isinstance(after.get("response"), dict) else {}
+        persisted = submitted & {str(name).lower() for name in response.get("json_keys") or []}
+        if not (
+            after.get("checkpoint") == "after"
+            and _same_resource(mutation, after, same_method=False)
+            and _same_resource(mutation, rejected)
+            and bool(persisted & SECURITY_SENSITIVE_MUTATION_FIELDS)
+        ):
+            granted -= {"forbidden_field_accepted", "observable_state_change", "control_rejected"}
+
+    bindings: dict[str, tuple[str, str]] = {}
+    for predicate in granted:
+        assertions = assertions_by_predicate.get(predicate) or []
+        if not assertions:
+            continue
+        assertion = assertions[0]
+        observation = by_label.get(str(
+            assertion.get("step") or assertion.get("candidate") or assertion.get("control") or ""
+        ), {})
+        signature = _request_signature(observation)
+        if signature:
+            bindings[predicate] = signature
+    return granted, bindings
+
+
+def server_corroborated_predicates(result: dict[str, Any]) -> set[str]:
+    """Return security predicates corroborated by server-derived, route-bound evidence."""
+    return _server_corroborated_evidence(result)[0]
+
+
+def server_corroborated_predicate_bindings(result: dict[str, Any]) -> dict[str, tuple[str, str]]:
+    """Return the live method/path bound to every corroborated predicate."""
+    return _server_corroborated_evidence(result)[1]
 
 
 class WorkflowContractError(ExperimentContractError):
@@ -593,7 +684,7 @@ def normalize_workflow(target_url: str, raw: Any) -> dict[str, Any]:
                 raise WorkflowContractError(f"assertion_{index}_must_match_candidate_compare_to")
     write_steps = [
         step for step in normalized
-        if step.get("kind") == "http" and step.get("method") in {"PUT", "PATCH", "DELETE"}
+        if step.get("kind") == "http" and step.get("method") in {"POST", "PUT", "PATCH", "DELETE"}
         and step.get("checkpoint") not in {"cleanup", "rollback"}
     ]
     mutation_steps = [
@@ -605,14 +696,29 @@ def normalize_workflow(target_url: str, raw: Any) -> dict[str, Any]:
     ]
     restoration_steps = [step for step in normalized if step.get("checkpoint") in {"cleanup", "rollback"}]
     restoration_assertions = [item for item in assertions if item.get("type") == "restored"]
-    if write_steps or mutation_steps:
+    for step in write_steps:
+        if step.get("checkpoint") != "mutation":
+            raise WorkflowContractError("state_changing_request_requires_mutation_checkpoint")
+    mutating_steps = list({id(step): step for step in [*write_steps, *mutation_steps]}.values())
+    if mutating_steps:
         if not restoration_steps:
             raise WorkflowContractError("mutating_workflow_requires_cleanup_or_rollback_step")
         if not restoration_assertions:
             raise WorkflowContractError("mutating_workflow_requires_restoration_assertion")
-        last_mutation = max(normalized.index(step) for step in (write_steps or mutation_steps))
+        last_mutation = max(normalized.index(step) for step in mutating_steps)
         if any(normalized.index(step) <= last_mutation for step in restoration_steps):
             raise WorkflowContractError("cleanup_or_rollback_must_follow_mutation")
+        last_cleanup = max(normalized.index(step) for step in restoration_steps)
+        for index, assertion in enumerate(restoration_assertions):
+            control_step = steps_by_label.get(str(assertion.get("control") or ""), {})
+            candidate_step = steps_by_label.get(str(assertion.get("candidate") or ""), {})
+            if (
+                control_step.get("checkpoint") != "before"
+                or candidate_step.get("checkpoint") != "after"
+                or normalized.index(control_step) >= min(normalized.index(step) for step in mutating_steps)
+                or normalized.index(candidate_step) <= last_cleanup
+            ):
+                raise WorkflowContractError(f"assertion_{index}_restoration_order_invalid")
     # DELETE is destructive and cannot be reliably restored, so it is permitted ONLY as cleanup of an
     # object THIS workflow created: it must sit at a cleanup/rollback checkpoint and target a variable
     # extracted from a mutation (create) step. That keeps the BOLA create->cleanup pattern working
@@ -639,7 +745,7 @@ def normalize_workflow(target_url: str, raw: Any) -> dict[str, Any]:
         "steps": normalized,
         "proof_family": str(payload.get("proof_family") or "workflow").strip().lower()[:80],
         "assertions": assertions,
-        "mutating": bool(write_steps or mutation_steps),
+        "mutating": bool(mutating_steps),
     }
 
 
@@ -694,6 +800,10 @@ def _restoration_verified(
     if not workflow.get("mutating"):
         return True
     by_label = {str(o.get("label")): o for o in observations if isinstance(o, dict)}
+    observation_index = {
+        str(observation.get("label")): index for index, observation in enumerate(observations)
+        if isinstance(observation, dict)
+    }
     cleanup = [o for o in observations if isinstance(o, dict) and o.get("checkpoint") in {"cleanup", "rollback"}]
     if not cleanup or not all(_obs_success(o) for o in cleanup):
         return False
@@ -704,6 +814,21 @@ def _restoration_verified(
         control = by_label.get(str(assertion.get("control") or ""), {})
         candidate = by_label.get(str(assertion.get("candidate") or ""), {})
         if control.get("checkpoint") != "before" or candidate.get("checkpoint") != "after":
+            return False
+        control_index = observation_index.get(str(assertion.get("control") or ""), -1)
+        candidate_index = observation_index.get(str(assertion.get("candidate") or ""), -1)
+        cleanup_indexes = [
+            observation_index.get(str(item.get("label") or ""), -1) for item in cleanup
+        ]
+        mutation_indexes = [
+            observation_index.get(str(item.get("label") or ""), -1)
+            for item in observations if isinstance(item, dict) and item.get("checkpoint") == "mutation"
+        ]
+        if (
+            control_index < 0 or candidate_index < 0 or not mutation_indexes
+            or control_index >= min(mutation_indexes)
+            or candidate_index <= max([*mutation_indexes, *cleanup_indexes])
+        ):
             return False
     return True
 
@@ -868,6 +993,8 @@ async def execute_workflow(
                 "extracted": {name: {"sha256": hashlib.sha256(value.encode()).hexdigest(), "length": len(value)} for name, value in extracted.items()} if not error else {},
                 "error": error,
             })
+            # A server may commit a mutation before returning an error status, so once a mutation
+            # request completed without a transport/contract error we must still attempt cleanup.
             if step.get("checkpoint") == "mutation" and not error:
                 mutation_succeeded = True
     by_label = {item["label"]: item for item in observations}

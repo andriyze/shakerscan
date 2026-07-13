@@ -185,7 +185,7 @@ def test_real_sensitive_value_corroborates_data_exposure():
         "observations": [
             {"label": "read", "principal": "anonymous",
              "response": {"status": 200, "json_keys": ["token"]},
-             "sensitive_value_categories": ["jwt"]},
+             "sensitive_value_categories": ["private_key"]},
         ],
         "comparisons": [],
         "assertion_results": [
@@ -268,9 +268,12 @@ def test_reenabled_families_corroborate_on_real_signals():
     # auth_bypass: an authenticated access establishes a real protected resource; an anonymous
     # request SUCCEEDS returning actual sensitive DATA -> it reached protected content (a bypass).
     auth = {
+        "trusted_protected_routes": [{"method": "GET", "path": "/private"}],
         "observations": [
-            {"label": "authed", "principal": "user1", "response": {"status": 200}},
-            {"label": "anon", "principal": "anonymous", "response": {"status": 200},
+            {"label": "authed", "principal": "user1", "request": {"method": "GET", "path": "/private"},
+             "response": {"status": 200}},
+            {"label": "anon", "principal": "anonymous", "request": {"method": "GET", "path": "/private"},
+             "response": {"status": 200},
              "sensitive_value_categories": ["jwt"]},
         ],
         "comparisons": [],
@@ -336,6 +339,64 @@ def test_strengthened_family_proofs_reject_benign_behavior():
     assert "transition_invariant_broken" not in workflow.server_corroborated_predicates(clock)
 
 
+def test_family_proofs_do_not_combine_unrelated_routes_or_allowed_fields():
+    auth = {
+        "observations": [
+            {"label": "authed", "principal": "user1", "request": {"method": "GET", "path": "/private"},
+             "response": {"status": 200}},
+            {"label": "anon", "principal": "anonymous", "request": {"method": "GET", "path": "/docs/sample"},
+             "response": {"status": 200}, "sensitive_value_categories": ["jwt"]},
+        ],
+        "comparisons": [],
+        "assertion_results": [
+            {"passed": True, "predicate": "protected_resource_accessed", "step": "authed"},
+            {"passed": True, "predicate": "unauthenticated_control", "step": "anon"},
+        ],
+    }
+    assert workflow.server_corroborated_predicates(auth).isdisjoint({
+        "protected_resource_accessed", "unauthenticated_control",
+    })
+
+    mass = {
+        "observations": [
+            {"label": "before", "principal": "user1", "checkpoint": "before",
+             "request": {"method": "GET", "path": "/profile"}, "response": {"status": 200}},
+            {"label": "mutate", "principal": "user1", "checkpoint": "mutation",
+             "request": {"method": "PATCH", "path": "/profile"}, "submitted_fields": ["display_name"],
+             "response": {"status": 200, "json_keys": ["display_name"]}},
+            {"label": "verify", "principal": "user1", "checkpoint": "after",
+             "request": {"method": "GET", "path": "/profile"},
+             "response": {"status": 200, "json_keys": ["display_name"]}},
+            {"label": "control", "principal": "user1", "checkpoint": "mutation",
+             "request": {"method": "PATCH", "path": "/profile"}, "response": {"status": 400}},
+        ],
+        "comparisons": [{"control": "before", "candidate": "verify", "comparable": True, "body_changed": True}],
+        "assertion_results": [
+            {"passed": True, "predicate": "forbidden_field_accepted", "step": "mutate"},
+            {"passed": True, "predicate": "observable_state_change", "control": "before", "candidate": "verify"},
+            {"passed": True, "predicate": "control_rejected", "step": "control"},
+        ],
+    }
+    corroborated = workflow.server_corroborated_predicates(mass)
+    assert "forbidden_field_accepted" not in corroborated
+    assert not {"forbidden_field_accepted", "observable_state_change", "control_rejected"} <= corroborated
+
+
+def test_restoration_read_must_follow_cleanup():
+    payload = {
+        "proof_family": "workflow",
+        "steps": [
+            {"label": "before", "checkpoint": "before", "method": "GET", "path": "/object"},
+            {"label": "after", "checkpoint": "after", "method": "GET", "path": "/object", "compare_to": "before"},
+            {"label": "mutate", "checkpoint": "mutation", "method": "POST", "path": "/object", "json_body": {"v": 1}},
+            {"label": "cleanup", "checkpoint": "cleanup", "method": "PUT", "path": "/object", "json_body": {"v": 0}},
+        ],
+        "assertions": [{"type": "restored", "control": "before", "candidate": "after", "predicate": "before_after_state"}],
+    }
+    with pytest.raises(workflow.WorkflowContractError, match="restoration_order_invalid"):
+        workflow.normalize_workflow("https://example.test", payload)
+
+
 def test_bola_predicates_require_created_object_identity_and_denial_control():
     result = {
         "principal_receipts": [
@@ -373,10 +434,9 @@ def test_bola_predicates_require_created_object_identity_and_denial_control():
         "distinct_identity", "ownership_established", "cross_principal_access", "denial_control",
     }
 
-    # Read-existing BOLA (no create step): ownership is established by the owner's AUTHENTICATED read
-    # of a pre-existing object, so a captcha-/create-gated app can still be proven.
+    # Authentication plus anonymous denial does not establish ownership of a pre-existing object.
     read_existing = {**result, "observations": result["observations"][1:]}
-    assert "ownership_established" in workflow.server_corroborated_predicates(read_existing)
+    assert "ownership_established" not in workflow.server_corroborated_predicates(read_existing)
 
     # But an UNAUTHENTICATED "owner" does not establish ownership (distinct authenticated identities
     # are required), so the benign case stays unproven.

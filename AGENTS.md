@@ -72,6 +72,7 @@ flags, skills, agents, adapters, modules, and durable tables) plus architecture/
 - **Exceptions (`/settings/exceptions`)**: exception queue, owner/approver/control repair, expiry visibility, and lifecycle sweep.
 - **Command Arsenal (`/settings/arsenal`)**: command contracts, plans, scope/approval receipts, action ledger, hypotheses, refuters, tools, local agents, context packs, and decision traces.
 - **Autonomous Hunt (`/settings/research-agent`)**: create target-bound analysis or gated active episodes and optionally run them with durable server-side autopilot. Subject-bound launch profiles cover target hunts, exact-finding verification, and ASM gap closure. The controller leases one episode at a time, waits for linked scans and finding retests, rejects duplicate no-progress actions, reserves a final conclusion turn, meters failed provider attempts, and continues if the browser closes. Inspect the actual model, immutable observations, linked work, finding outcome, request-unit budgets, decisions, errors, and events; pause/resume or cancel the episode plus linked work. The lead backlog remains at `/settings/research-agent/leads`.
+- **Long-running research campaigns**: the Research Agent can wrap bounded episodes in a durable campaign. A campaign shares recent-action memory across episodes, starts a fresh episode after a bounded one concludes, and continues until its time/episode ceiling, operator pause/cancel, missing input, or expired approval. The default UI path needs only a target, authorization confirmation, and optional ceilings.
 - **Settings (`/settings`)**: AI providers, scan execution policy, automation defaults, and approval-receipt enforcement.
 - **Application Graph (`/targets/{id}/graph`)**: inspect persisted route/object/principal nodes, producer/consumer/auth-boundary edges, node/edge filters, search, and selected-node connections.
 
@@ -466,6 +467,24 @@ curl http://localhost:8080/research/episodes/{episode_id}
 curl -X PUT http://localhost:8080/research/episodes/{episode_id}/autopilot \
   -H "Content-Type: application/json" -d '{"enabled":false}'
 curl -X POST http://localhost:8080/research/episodes/{episode_id}/cancel
+```
+
+For maximum unattended output, launch a durable campaign. `deep_hunt` requires a current
+target-scoped credential-tier approval receipt; the campaign never expands that authority:
+
+```bash
+curl -X POST http://localhost:8080/research/campaigns/launch \
+  -H "Content-Type: application/json" \
+  -d '{
+    "target_id": "target-uuid",
+    "intensity": "deep_hunt",
+    "approval_receipt_id": "approval-uuid",
+    "duration_hours": 24,
+    "max_episodes": 12
+  }'
+
+curl -X POST http://localhost:8080/research/campaigns/{campaign_id}/control \
+  -H "Content-Type: application/json" -d '{"action":"pause"}'
 ```
 
 Modes are `shadow`, `read_only`, and `gated`. Gated episodes require a target-matching scope receipt,

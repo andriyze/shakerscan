@@ -1,8 +1,4 @@
-"""R2b: encryption-at-rest for AI target credential secrets.
-
-Opt-in via AI_CREDENTIAL_ENC_KEY; backward compatible (plaintext passthrough when
-disabled, prefix-tagged so legacy rows and encrypted rows coexist).
-"""
+"""Encryption-at-rest for target credential secrets."""
 
 import importlib
 import os
@@ -22,7 +18,8 @@ def test_disabled_by_default_is_plaintext(monkeypatch):
     monkeypatch.delenv("AI_CREDENTIAL_ENC_KEY", raising=False)
     ss = _reload_secret_store()
     assert ss.encryption_enabled() is False
-    assert ss.encrypt_secret("hunter2") == "hunter2"   # no-op when disabled
+    with pytest.raises(ss.SecretStoreUnavailable):
+        ss.encrypt_secret("hunter2")
     assert ss.decrypt_secret("hunter2") == "hunter2"
     assert ss.encrypt_secret(None) is None
     assert ss.encrypt_secret("") == ""
@@ -48,9 +45,24 @@ def test_bad_key_disables_rather_than_crashes(monkeypatch):
     monkeypatch.setenv("AI_CREDENTIAL_ENC_KEY", "not-a-valid-fernet-key")
     ss = _reload_secret_store()
     assert ss.encryption_enabled() is False
-    assert ss.encrypt_secret("hunter2") == "hunter2"
+    with pytest.raises(ss.SecretStoreUnavailable):
+        ss.encrypt_secret("hunter2")
+
+
+def test_auto_generated_key_is_stable_and_file_is_private(monkeypatch, tmp_path):
+    pytest.importorskip("cryptography")
+    monkeypatch.delenv("AI_CREDENTIAL_ENC_KEY", raising=False)
+    monkeypatch.setenv("AI_CREDENTIAL_ENC_KEY_FILE", str(tmp_path / "credential.key"))
+    first = _reload_secret_store()
+    ciphertext = first.encrypt_secret("hunter2")
+    key_contents = (tmp_path / "credential.key").read_text()
+    assert (tmp_path / "credential.key").stat().st_mode & 0o777 == 0o600
+    second = _reload_secret_store()
+    assert (tmp_path / "credential.key").read_text() == key_contents
+    assert second.decrypt_secret(ciphertext) == "hunter2"
 
 
 def teardown_module(module):
     os.environ.pop("AI_CREDENTIAL_ENC_KEY", None)
+    os.environ.pop("AI_CREDENTIAL_ENC_KEY_FILE", None)
     _reload_secret_store()

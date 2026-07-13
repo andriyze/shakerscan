@@ -8584,6 +8584,7 @@ def test_auto_provision_requires_encrypted_secret_storage(monkeypatch):
 
 def test_benchmark_identity_uses_family_and_templated_route_not_source_fingerprint():
     canonical = api_module._canonical_vulnerability_key(family="bola", route="/api/orders/{order_id}")
+    assert api_module._canonical_vulnerability_route("/api/orders/${object_id}") == "/api/orders/{id}"
     dast = {
         "fingerprint": "scanner-specific-fingerprint",
         "title": "BOLA on order API",
@@ -10473,9 +10474,8 @@ def test_research_autonomous_workflow_rejects_delete_but_allows_browser_and_form
         command,
     ))
     assert safe_errors == []
-    normalized = api_module.normalize_workflow("https://example.test", safe_params)
-    assert normalized["steps"][0]["kind"] == "browser"
-    assert normalized["steps"][1]["method"] == "POST"
+    with pytest.raises(api_module.WorkflowContractError, match="state_changing_request_requires_mutation_checkpoint"):
+        api_module.normalize_workflow("https://example.test", safe_params)
 
 
 def test_research_autonomous_workflow_allows_cleanup_safe_writes_at_credential_tier():
@@ -10620,6 +10620,16 @@ def test_research_autopilot_operator_control_races_are_not_planner_errors():
         api_module.HTTPException(status_code=409, detail="Research episode is not awaiting a planner decision")
     ) is False
     assert api_module._research_autopilot_expected_control_race(RuntimeError("provider failed")) is False
+
+
+def test_research_campaign_pauses_once_for_terminal_failures_until_operator_resume():
+    assert api_module._research_campaign_terminal_needs_review({}, "episode-1", "blocked") is True
+    assert api_module._research_campaign_terminal_needs_review({}, "episode-1", "failed") is True
+    assert api_module._research_campaign_terminal_needs_review({}, "episode-1", "cancelled") is True
+    assert api_module._research_campaign_terminal_needs_review({}, "episode-1", "completed") is False
+    assert api_module._research_campaign_terminal_needs_review(
+        {"last_paused_episode_id": "episode-1"}, "episode-1", "blocked"
+    ) is False
 
 
 def test_research_command_views_hide_actions_that_exceed_remaining_budget(monkeypatch):
@@ -11272,6 +11282,8 @@ def test_trusted_workflow_bola_proof_requires_full_server_bound_receipt():
     proof = api_module._trusted_workflow_family_proof(execution, execution)
     assert proof["verdict"] == "verified"
     assert proof["promotable"] is True
+    assert proof["proof_routes"] == ["/objects/42"]
+    assert proof["proof_methods"] == ["GET"]
 
 
 def test_workflow_identity_fingerprint_uses_metadata_without_exposing_identity():

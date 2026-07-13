@@ -1007,6 +1007,24 @@ async def run_schema_migrations(pool) -> None:
                 ON target_credential_profiles(target_id, is_active, expires_at)
             """)
             await conn.execute("""
+                CREATE TABLE IF NOT EXISTS target_principal_provisioning_attempts (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    target_id UUID NOT NULL REFERENCES targets(id) ON DELETE CASCADE,
+                    principal_label TEXT NOT NULL,
+                    auth_state TEXT NOT NULL,
+                    encrypted_variables TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    attempt_count INTEGER NOT NULL DEFAULT 0,
+                    last_error TEXT,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    CONSTRAINT target_principal_provisioning_attempts_status_check
+                        CHECK (status IN ('pending','completed','failed')),
+                    CONSTRAINT target_principal_provisioning_attempts_unique
+                        UNIQUE (target_id, auth_state)
+                )
+            """)
+            await conn.execute("""
                 CREATE TABLE IF NOT EXISTS target_principals (
                     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                     target_id UUID NOT NULL REFERENCES targets(id) ON DELETE CASCADE,
@@ -1527,7 +1545,7 @@ async def run_schema_migrations(pool) -> None:
                     CONSTRAINT campaigns_type_check CHECK (campaign_type IN (
                         'continuous_asm','authenticated_dast','api_authz','ai_red_team',
                         'model_intake','benchmark','incident_retest','source_informed_dast',
-                        'finding_retest','focused_family'
+                        'finding_retest','focused_family','autonomous_research'
                     )),
                     CONSTRAINT campaigns_status_check CHECK (status IN (
                         'planned','active','paused','completed','cancelled'
@@ -1544,6 +1562,16 @@ async def run_schema_migrations(pool) -> None:
             await conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_campaigns_target
                 ON campaigns(target_id, created_at DESC) WHERE target_id IS NOT NULL
+            """)
+            await conn.execute("""
+                ALTER TABLE campaigns DROP CONSTRAINT IF EXISTS campaigns_type_check
+            """)
+            await conn.execute("""
+                ALTER TABLE campaigns ADD CONSTRAINT campaigns_type_check CHECK (campaign_type IN (
+                    'continuous_asm','authenticated_dast','api_authz','ai_red_team','model_intake',
+                    'benchmark','incident_retest','source_informed_dast','finding_retest',
+                    'focused_family','autonomous_research'
+                ))
             """)
             # Link campaign_actions to a mission campaign (the existing campaign_id
             # column points at scan_campaigns for parallel-scan context).
@@ -1832,6 +1860,16 @@ async def run_schema_migrations(pool) -> None:
             await conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_research_episodes_status
                 ON research_episodes(status, updated_at DESC)
+            """)
+            await conn.execute("""
+                DROP INDEX IF EXISTS idx_research_episodes_active_campaign
+            """)
+            await conn.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_research_episodes_active_campaign
+                ON research_episodes(campaign_id)
+                WHERE campaign_id IS NOT NULL
+                  AND planner->>'campaign_autopilot' = 'true'
+                  AND status NOT IN ('completed','cancelled','failed','budget_exhausted','blocked')
             """)
             await conn.execute("""
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_research_episodes_active_launch
