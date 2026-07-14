@@ -14614,7 +14614,10 @@ def _invariant_hypothesis_request(
         source="invariant",
         family=family,
         cwe="CWE-639" if family == "bola" else None,
-        title=f"Invariant lead: {contract.get('title') or kind}",
+        # Use a synthetic, typed label -- never the operator's free-text title -- so untyped
+        # prose cannot re-enter the planner via the hypothesis summary. planner_projection
+        # deliberately strips the contract title for the same reason.
+        title=f"Invariant lead: {kind} on {route or contract.get('resource') or 'target'}",
         description=(
             "An operator-approved typed invariant identifies a security property to test. "
             "It is planning evidence only; a supported deterministic live verifier and independent "
