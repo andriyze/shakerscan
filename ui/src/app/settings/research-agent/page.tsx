@@ -90,7 +90,8 @@ function ResearchAgentPage() {
   }, [loadRuns])
 
   const gated = profile.mode === 'gated'
-  const canStart = Boolean(targetId) && aiReady === true && (!gated || (authorized && executionReady !== false)) && !busy
+  const canStart = Boolean(targetId) && aiReady === true
+    && (!gated || (authorized && families.length > 0 && executionReady !== false)) && !busy
 
   const startHunt = async () => {
     if (!activeTarget || !canStart) return
@@ -100,7 +101,7 @@ function ResearchAgentPage() {
       let approvalReceiptId: string | undefined
       if (gated) {
         approvalReceiptId = await createTargetPolicyApproval(
-          activeTarget.id, activeTarget.url, hours * 60,
+          activeTarget.id, activeTarget.url, hours * 60 + 10,
           profile.risk === 'credential' ? 'credential' : 'active',
         )
       }

@@ -437,13 +437,16 @@ export interface ResearchCampaignLaunchRequest {
 
 export interface ResearchCampaignLaunchResponse {
   campaign: Campaign
-  episode: ResearchEpisodeLaunchResponse
+  episode: ResearchEpisodeLaunchResponse | null
+  readiness?: Record<string, unknown>
+  preflight?: { action?: string; scan_id?: string | null; status?: string }
   ui_path?: string
 }
 
 export interface ResearchReadiness {
   planner_ready: boolean
   execution_enabled: boolean
+  campaign_readiness_policy?: Record<string, unknown>
   model?: string | null
   fallback_models: string[]
 }
@@ -579,6 +582,23 @@ export interface CampaignDetailResponse {
   total_action_count: number
   status_rollup: Record<string, number>
   deployment_impact: CampaignDeploymentImpact
+  research_yield?: {
+    episodes: number
+    decisions: number
+    model_units: number
+    experiments: number
+    falsified_experiments: number
+    semantic_dimensions_tested: number
+    exhausted_dimensions: number
+    recon_actions: number
+    novelty_suppressions: number
+    verified_autonomous_findings: number
+    finding_yield_per_experiment: number
+    model_units_per_verified_finding?: number | null
+    surface?: Record<string, number>
+    stop_recommended: boolean
+    stop_reason?: string | null
+  } | null
   execution_enabled: boolean
 }
 
@@ -5280,7 +5300,9 @@ export async function createTargetPolicyApproval(targetId: string, targetUrl: st
     risk_tier: riskTier,
     confirmations,
     approved_by: 'interactive-ui',
-    expires_at: new Date(Date.now() + Math.max(5, Math.min(ttlMinutes, 24 * 60)) * 60_000).toISOString(),
+    // Durable hunts may run for seven days. Keep the receipt bounded to that ceiling plus a
+    // small launch/supervisor handoff buffer so the final episode does not outlive approval.
+    expires_at: new Date(Date.now() + Math.max(5, Math.min(ttlMinutes, 7 * 24 * 60 + 15)) * 60_000).toISOString(),
   })
   return approval.approval_receipt.id
 }

@@ -12,6 +12,7 @@ import {
   getResearchEpisodes,
   setResearchEpisodeAutopilot,
   type Campaign,
+  type CampaignDetailResponse,
   type ResearchEpisode,
   type ResearchEpisodeDetail,
 } from '@/lib/api'
@@ -46,6 +47,7 @@ export default function RunDetailPage() {
   const [campaign, setCampaign] = useState<Campaign | null>(null)
   const [detail, setDetail] = useState<ResearchEpisodeDetail | null>(null)
   const [episodeCount, setEpisodeCount] = useState(0)
+  const [yieldMetrics, setYieldMetrics] = useState<NonNullable<CampaignDetailResponse['research_yield']> | null>(null)
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -64,6 +66,7 @@ export default function RunDetailPage() {
     try {
       const detailResp = await getCampaign(id)
       camp = detailResp.campaign
+      setYieldMetrics(detailResp.research_yield || null)
       campaignIdRef.current = camp.id
       const list = await getResearchEpisodes({ campaign_id: camp.id, limit: 50 })
       episodes = list.episodes || []
@@ -74,6 +77,7 @@ export default function RunDetailPage() {
     setCampaign(camp)
     const watch = activeEpisode(episodes)
     if (watch) return getResearchEpisode(watch.id)
+    if (camp) return null
     // Fallback: the id was an episode, not a campaign.
     return getResearchEpisode(id)
   }, [id])
@@ -98,8 +102,23 @@ export default function RunDetailPage() {
   useEffect(() => {
     const timer = window.setInterval(async () => {
       const current = detailRef.current
-      if (!current) return
       try {
+        if (!current) {
+          const campId = campaignIdRef.current
+          if (!campId) return
+          const [summary, list] = await Promise.all([
+            getCampaign(campId).catch(() => null),
+            getResearchEpisodes({ campaign_id: campId, limit: 50 }),
+          ])
+          if (summary) {
+            setCampaign(summary.campaign)
+            setYieldMetrics(summary.research_yield || null)
+          }
+          setEpisodeCount(list.episodes?.length || 0)
+          const next = (list.episodes || []).find((e) => !e.terminal)
+          if (next) setDetail(await getResearchEpisode(next.id))
+          return
+        }
         if (!current.episode.terminal) {
           setDetail(await getResearchEpisode(current.episode.id))
           return
@@ -107,10 +126,13 @@ export default function RunDetailPage() {
         const campId = campaignIdRef.current
         if (!campId) return
         const [summary, list] = await Promise.all([
-          getCampaign(campId).then((r) => r.campaign).catch(() => null),
+          getCampaign(campId).catch(() => null),
           getResearchEpisodes({ campaign_id: campId, limit: 50 }),
         ])
-        if (summary) setCampaign(summary)
+        if (summary) {
+          setCampaign(summary.campaign)
+          setYieldMetrics(summary.research_yield || null)
+        }
         setEpisodeCount(list.episodes?.length || 0)
         const next = (list.episodes || []).find((e) => !e.terminal)
         if (next && next.id !== current.episode.id) setDetail(await getResearchEpisode(next.id))
@@ -151,6 +173,9 @@ export default function RunDetailPage() {
   const canPause = state === 'running'
   const canResume = state === 'paused'
   const canStop = state === 'running' || state === 'paused'
+  const preflightState = metaField<string>(campaign, 'preflight_state')
+  const preflightScanId = metaField<string>(campaign, 'preflight_scan_id')
+  const readiness = metaField<Record<string, unknown>>(campaign, 'readiness')
 
   return (
     <div className="mx-auto max-w-4xl px-4 py-6">
@@ -190,6 +215,29 @@ export default function RunDetailPage() {
         </Link>
       ) : null}
 
+      {preflightState && preflightState !== 'completed' && preflightState !== 'not_required' ? (
+        <Card className="mt-4 p-4">
+          <div className="text-sm font-medium text-blue-200">Authenticated coverage preflight: {preflightState}</div>
+          <p className="mt-1 text-xs text-gray-500">
+            Hunting starts only after the route inventory contains authenticated surface
+            {Array.isArray(readiness?.blockers) ? ` · ${readiness.blockers.join(', ')}` : ''}.
+          </p>
+          {preflightScanId ? <Link className="mt-2 inline-block text-xs text-blue-300 hover:text-blue-200" href={`/scans/${preflightScanId}`}>View preflight scan →</Link> : null}
+        </Card>
+      ) : null}
+
+      {yieldMetrics ? (
+        <Card className="mt-4 p-4">
+          <div className="grid grid-cols-2 gap-3 text-xs sm:grid-cols-4">
+            <Metric label="Experiments" value={yieldMetrics.experiments} />
+            <Metric label="Falsified" value={yieldMetrics.falsified_experiments} />
+            <Metric label="Recon actions" value={yieldMetrics.recon_actions} />
+            <Metric label="Model units" value={yieldMetrics.model_units.toLocaleString()} />
+          </div>
+          {yieldMetrics.stop_reason ? <p className="mt-3 text-xs text-amber-300">Stopped by yield guard: {yieldMetrics.stop_reason}</p> : null}
+        </Card>
+      ) : null}
+
       {/* The live trace */}
       <div className="mt-5">
         {detail ? <LiveActivity detail={detail} now={now} /> : (
@@ -198,6 +246,10 @@ export default function RunDetailPage() {
       </div>
     </div>
   )
+}
+
+function Metric({ label, value }: { label: string; value: string | number }) {
+  return <div><div className="text-gray-600">{label}</div><div className="mt-0.5 font-medium tabular-nums text-gray-300">{value}</div></div>
 }
 
 function Stat({ label, value, hint, tone = 'default' }: { label: string; value: string; hint?: string; tone?: 'default' | 'good' | 'muted' }) {
