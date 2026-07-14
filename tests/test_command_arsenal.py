@@ -29,6 +29,7 @@ def test_command_catalog_contains_required_initial_commands():
         "target.get",
         "target.principals",
         "target.principal_matrix",
+        "target.invariants",
         "asm.gaps",
         "asm.activity",
         "scan.result",
@@ -57,6 +58,16 @@ def test_command_catalog_contains_required_initial_commands():
         assert name in commands
         assert commands[name]["status"] == "read_only"
         assert commands[name]["risk_tier"] == "read_only"
+
+
+def test_invariant_commands_separate_draft_approval_and_promotion_authority():
+    commands = {item["name"]: item for item in arsenal.describe_commands()["commands"]}
+
+    assert commands["target.invariant_contract.record"]["status"] == "gated"
+    assert commands["target.invariant_contract.approve"]["status"] == "gated"
+    assert commands["target.invariant_contract.retire"]["status"] == "gated"
+    assert "no_promotion_authority" in commands["target.invariant_contract.approve"]["evidence_contract"]
+    assert "confirm_authorized" in commands["target.invariant_contract.approve"]["required_confirmations"]
 
 
 def test_server_parameter_validator_enforces_bounds_and_uuid_formats():

@@ -1050,10 +1050,10 @@ it is the exhaustive backstop behind the human-readable product map above.
 
 | Surface | Count | Source |
 |---|---|---|
-| Public REST operations | 216 | `api/api.py` FastAPI decorators |
-| Unique REST paths | 175 | `api/api.py` |
+| Public REST operations | 220 | `api/api.py` FastAPI decorators |
+| Unique REST paths | 178 | `api/api.py` |
 | Check families | 13 | `api/check_registry.py` |
-| Command Arsenal commands | 75 | `api/command_arsenal.py` |
+| Command Arsenal commands | 79 | `api/command_arsenal.py` |
 | Tool adapters | 13 | `api/command_arsenal.py` |
 | Local-agent adapters | 4 | `api/command_arsenal.py` |
 | Scanner CLI flags | 158 | `scanner/scanner.py` |
@@ -1066,7 +1066,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | Skills | 5 | `skills/` |
 | Slash commands | 14 | `.claude/commands/` |
 | Specialized subagents | 3 | `.claude/agents/` |
-| Durable tables | 43 | `db/init.sql` + migrations |
+| Durable tables | 44 | `db/init.sql` + migrations |
 
 ### Public REST Operations
 
@@ -1275,6 +1275,10 @@ it is the exhaustive backstop behind the human-readable product map above.
 | `POST` | `/targets/{target_id}/credential-profiles/{profile_id}/rotate` | `rotate_target_credential_profile` |
 | `GET` | `/targets/{target_id}/graph` | `get_application_graph` |
 | `POST` | `/targets/{target_id}/graph/hypotheses` | `generate_application_graph_hypotheses` |
+| `GET` | `/targets/{target_id}/invariants` | `list_target_invariant_contracts` |
+| `POST` | `/targets/{target_id}/invariants` | `create_target_invariant_contract` |
+| `POST` | `/targets/{target_id}/invariants/{contract_id}/approve` | `approve_target_invariant_contract` |
+| `POST` | `/targets/{target_id}/invariants/{contract_id}/retire` | `retire_target_invariant_contract` |
 | `POST` | `/targets/{target_id}/inventory/hypotheses` | `generate_endpoint_inventory_hypotheses` |
 | `GET` | `/targets/{target_id}/principal-matrix` | `list_target_principal_matrix` |
 | `POST` | `/targets/{target_id}/principal-matrix` | `upsert_target_principal_matrix` |
@@ -1379,6 +1383,10 @@ it is the exhaustive backstop behind the human-readable product map above.
 | `scan.result` | scans | read_only | read_only | GET | `/scans/{scan_id}/result` | Read scan status and stored result JSON. |
 | `scope.preview` | governance | dry_run | read_only | POST | `/arsenal/scope/preview` | Validate and persist a fail-closed scope receipt preview without executing work. |
 | `target.get` | inventory | read_only | read_only | GET | `/targets/{target_id}` | Get one target and recent scan metadata. |
+| `target.invariant_contract.approve` | authorization_policy | gated | active | POST | `/targets/{target_id}/invariants/{contract_id}/approve` | Approve a validated typed invariant for planning, never direct finding promotion. |
+| `target.invariant_contract.record` | authorization_policy | gated | active | POST | `/targets/{target_id}/invariants` | Record a typed target invariant as a non-authoritative draft. |
+| `target.invariant_contract.retire` | authorization_policy | gated | active | POST | `/targets/{target_id}/invariants/{contract_id}/retire` | Retire a target invariant so it no longer guides autonomous planning. |
+| `target.invariants` | authorization_policy | read_only | read_only | GET | `/targets/{target_id}/invariants` | Read typed target invariants; only approved rows can guide autonomous planning. |
 | `target.list` | inventory | read_only | read_only | GET | `/targets` | List configured targets. |
 | `target.principal_matrix` | inventory | read_only | read_only | GET | `/targets/{target_id}/principal-matrix` | Read endpoint x principal/role expectations for authorization planning without queueing tests. |
 | `target.principal_matrix.record` | authorization_policy | gated | active | POST | `/targets/{target_id}/principal-matrix` | Record a non-executing endpoint principal expectation for future authz campaigns. |
@@ -1892,6 +1900,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `target_credential_profiles` | `api/retest_contract.py` |
 | `target_endpoint_expectations` | `api/retest_contract.py` |
 | `target_endpoints` | `db/init.sql` |
+| `target_invariant_contracts` | `api/retest_contract.py` |
 | `target_principal_provisioning_attempts` | `api/retest_contract.py` |
 | `target_principals` | `api/retest_contract.py` |
 | `targets` | `db/init.sql` |

@@ -1100,6 +1100,54 @@ async def run_schema_migrations(pool) -> None:
                 CREATE INDEX IF NOT EXISTS idx_target_endpoint_expectations_target
                 ON target_endpoint_expectations(target_id, path, expected_access)
             """)
+            # Operator-authored business/security rules. Free text remains draft intake; only a typed,
+            # explicitly approved contract enters autonomous planner context. These records are planning
+            # facts and cannot directly create findings or mark proof verified.
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS target_invariant_contracts (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    target_id UUID NOT NULL REFERENCES targets(id) ON DELETE CASCADE,
+                    contract_version TEXT NOT NULL,
+                    contract_kind TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    source_text TEXT,
+                    subject_role TEXT,
+                    action TEXT,
+                    resource TEXT,
+                    method TEXT,
+                    path TEXT,
+                    field_name TEXT,
+                    operator TEXT,
+                    expected_value JSONB,
+                    expected_access TEXT,
+                    conditions JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    status TEXT NOT NULL DEFAULT 'draft',
+                    source TEXT NOT NULL DEFAULT 'manual',
+                    approved_at TIMESTAMPTZ,
+                    approved_by TEXT,
+                    retired_at TIMESTAMPTZ,
+                    metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    created_by TEXT,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    CONSTRAINT target_invariant_contracts_kind_check CHECK (
+                        contract_kind IN ('access_control','field_constraint','workflow_transition','ownership')
+                    ),
+                    CONSTRAINT target_invariant_contracts_status_check CHECK (
+                        status IN ('draft','approved','retired')
+                    ),
+                    CONSTRAINT target_invariant_contracts_access_check CHECK (
+                        expected_access IS NULL OR expected_access IN ('allow','deny','requires_role')
+                    ),
+                    CONSTRAINT target_invariant_contracts_operator_check CHECK (
+                        operator IS NULL OR operator IN ('eq','ne','lt','lte','gt','gte','in','not_in')
+                    )
+                )
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_target_invariant_contracts_target_status
+                ON target_invariant_contracts(target_id, status, updated_at DESC)
+            """)
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS asm_endpoint_attempts (
                     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

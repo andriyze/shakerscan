@@ -145,6 +145,7 @@ import adjudicate
 import hypothesis_lifecycle
 import hypothesis_scheduler
 import family_proof
+import invariant_contracts
 from http_experiment import ExperimentContractError, execute_experiment
 from workflow_experiment import (
     WorkflowContractError,
@@ -3395,6 +3396,45 @@ class TargetEndpointExpectationRequest(BaseModel):
     expectation_source: str = "manual"
     metadata_json: dict[str, Any] = Field(default_factory=dict)
     approval_receipt_id: Optional[str] = None
+
+
+class TargetInvariantContractCreate(BaseModel):
+    """Draft a typed rule; free text is retained as context but never becomes proof authority."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    contract_kind: str = Field(pattern="^(access_control|field_constraint|workflow_transition|ownership)$")
+    title: str = Field(min_length=1, max_length=300)
+    source_text: Optional[str] = Field(default=None, max_length=4000)
+    subject_role: Optional[str] = Field(default=None, max_length=80)
+    action: Optional[str] = Field(default=None, max_length=120)
+    resource: Optional[str] = Field(default=None, max_length=160)
+    method: Optional[str] = Field(default=None, max_length=12)
+    path: Optional[str] = Field(default=None, max_length=1000)
+    field_name: Optional[str] = Field(default=None, max_length=160)
+    operator: Optional[str] = Field(default=None, pattern="^(eq|ne|lt|lte|gt|gte|in|not_in)$")
+    expected_value: Any = None
+    expected_access: Optional[str] = Field(default=None, pattern="^(allow|deny|requires_role)$")
+    conditions: dict[str, Any] = Field(default_factory=dict)
+    source: str = Field(default="manual", pattern="^(manual|compiled|imported)$")
+    metadata_json: dict[str, Any] = Field(default_factory=dict)
+    created_by: Optional[str] = Field(default="target_invariant_api", max_length=120)
+    approval_receipt_id: str
+
+
+class TargetInvariantContractApproval(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    approval_receipt_id: str
+    approved_by: str = Field(min_length=1, max_length=120)
+    confirm_authoritative: bool
+
+
+class TargetInvariantContractRetire(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    approval_receipt_id: str
+    retired_by: str = Field(min_length=1, max_length=120)
 
 
 class FindingUpdate(BaseModel):
@@ -13598,6 +13638,20 @@ def _public_target_endpoint_expectation_row(row: Any) -> dict[str, Any]:
     return payload
 
 
+def _public_target_invariant_contract_row(row: Any) -> dict[str, Any]:
+    payload = row_to_dict(row)
+    payload["expected_value"] = _decode_json_value(payload.get("expected_value"))
+    payload["conditions"] = _decode_json_value(payload.get("conditions")) or {}
+    payload["metadata_json"] = _redact_agent_payload(_decode_json_value(payload.get("metadata_json")) or {})
+    projection = invariant_contracts.planner_projection(payload)
+    return {
+        **payload,
+        **projection,
+        "execution_enabled": False,
+        "finding_created": False,
+    }
+
+
 def _target_credential_precondition_signals(
     principals: list[dict[str, Any]],
     metadata: dict[str, Any] | None = None,
@@ -14419,6 +14473,263 @@ async def delete_target_principal(target_id: str, principal_id: str):
         "target_id": target_id,
         "principal_id": principal_id,
         "execution_enabled": False,
+    }
+
+
+@app.get("/targets/{target_id}/invariants")
+async def list_target_invariant_contracts(target_id: str, include_drafts: bool = True):
+    """List typed rules-of-the-game. Only approved rows are supplied to autonomous planners."""
+    target_uuid = _uuid_or_400(target_id, "target id")
+    async with db_pool.acquire() as conn:
+        if not await conn.fetchrow("SELECT 1 FROM targets WHERE id=$1", target_uuid):
+            raise HTTPException(status_code=404, detail="Target not found")
+        rows = await conn.fetch(
+            """
+            SELECT * FROM target_invariant_contracts
+            WHERE target_id=$1 AND status <> 'retired' AND ($2::boolean OR status='approved')
+            ORDER BY CASE status WHEN 'approved' THEN 0 ELSE 1 END, updated_at DESC
+            LIMIT 200
+            """,
+            target_uuid,
+            include_drafts,
+        )
+    contracts = [_public_target_invariant_contract_row(row) for row in rows]
+    return {
+        "target_id": target_id,
+        "contracts": contracts,
+        "count": len(contracts),
+        "approved_count": sum(1 for item in contracts if item.get("status") == "approved"),
+        "draft_count": sum(1 for item in contracts if item.get("status") == "draft"),
+        "execution_enabled": False,
+        "findings_created": 0,
+    }
+
+
+@app.post("/targets/{target_id}/invariants")
+async def create_target_invariant_contract(target_id: str, request: TargetInvariantContractCreate):
+    """Create a draft typed invariant. Drafts never enter planner context or proof decisions."""
+    target_uuid = _uuid_or_400(target_id, "target id")
+    if _json_size_bytes(request.expected_value) > 8_192:
+        raise HTTPException(status_code=413, detail="expected_value exceeds 8192 bytes")
+    if _json_size_bytes(request.conditions) > 16_384:
+        raise HTTPException(status_code=413, detail="conditions exceeds 16384 bytes")
+    if _json_size_bytes(request.metadata_json) > 16_384:
+        raise HTTPException(status_code=413, detail="metadata_json exceeds 16384 bytes")
+    try:
+        contract = invariant_contracts.canonical_contract(request.model_dump(mode="python"))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    # Requirements text and expected values can be pasted from tickets or API examples. Apply the
+    # same secret scrubber used by agent context packs before either value reaches durable storage.
+    contract["title"] = _redact_agent_text(contract["title"])
+    contract["source_text"] = _redact_agent_text(contract["source_text"])
+    contract["expected_value"] = _redact_agent_payload(contract["expected_value"])
+    metadata = _redact_agent_payload(request.metadata_json or {})
+    async with db_pool.acquire() as conn:
+        target = await conn.fetchrow("SELECT url FROM targets WHERE id=$1", target_uuid)
+        if not target:
+            raise HTTPException(status_code=404, detail="Target not found")
+        approval = await _validate_approval_receipt_for_action(
+            conn,
+            request.approval_receipt_id,
+            target_url=str(target["url"] or ""),
+            target_id=target_uuid,
+            action_name="target.invariant_contract.record",
+            command="target.invariant_contract.record",
+            risk_tier="active",
+            created_by=request.created_by,
+            always_require_receipt=True,
+        )
+        row = await conn.fetchrow(
+            """
+            INSERT INTO target_invariant_contracts (
+                target_id, contract_version, contract_kind, title, source_text,
+                subject_role, action, resource, method, path, field_name, operator,
+                expected_value, expected_access, conditions, status, source,
+                metadata_json, created_by
+            ) VALUES (
+                $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::jsonb,$14,$15::jsonb,
+                'draft',$16,$17::jsonb,$18
+            ) RETURNING *
+            """,
+            target_uuid,
+            contract["version"],
+            contract["contract_kind"],
+            contract["title"],
+            contract["source_text"],
+            contract["subject_role"],
+            contract["action"],
+            contract["resource"],
+            contract["method"],
+            contract["path"],
+            contract["field_name"],
+            contract["operator"],
+            json.dumps(contract["expected_value"]),
+            contract["expected_access"],
+            json.dumps(contract["conditions"]),
+            request.source,
+            json.dumps(metadata),
+            request.created_by,
+        )
+        command_result = await _record_command_result(
+            conn,
+            command="target.invariant_contract.record",
+            status="completed",
+            risk_tier="active",
+            scope_receipt_id=(approval or {}).get("scope_receipt_id"),
+            approval_receipt_id=request.approval_receipt_id,
+            operator_message="Recorded typed target invariant as a non-authoritative draft",
+            result_json={
+                "target_id": target_id,
+                "contract_id": str(row["id"]),
+                "planning_authority": False,
+                "promotion_authority": False,
+            },
+            created_by=request.created_by,
+        )
+    return {
+        "contract": _public_target_invariant_contract_row(row),
+        "operation_id": command_result["id"],
+        "approval_required": True,
+        "planning_authority": False,
+        "promotion_authority": False,
+        "findings_created": 0,
+    }
+
+
+@app.post("/targets/{target_id}/invariants/{contract_id}/approve")
+async def approve_target_invariant_contract(
+    target_id: str,
+    contract_id: str,
+    request: TargetInvariantContractApproval,
+):
+    """Approve one typed policy oracle for planning; approval still grants no finding authority."""
+    if not request.confirm_authoritative:
+        raise HTTPException(status_code=400, detail="confirm_authoritative must be true")
+    target_uuid = _uuid_or_400(target_id, "target id")
+    contract_uuid = _uuid_or_400(contract_id, "invariant contract id")
+    async with db_pool.acquire() as conn:
+        target = await conn.fetchrow("SELECT url FROM targets WHERE id=$1", target_uuid)
+        if not target:
+            raise HTTPException(status_code=404, detail="Target not found")
+        row = await conn.fetchrow(
+            "SELECT * FROM target_invariant_contracts WHERE id=$1 AND target_id=$2",
+            contract_uuid,
+            target_uuid,
+        )
+        if not row:
+            raise HTTPException(status_code=404, detail="Invariant contract not found")
+        contract = _public_target_invariant_contract_row(row)
+        errors = invariant_contracts.approval_errors(contract)
+        if errors:
+            raise HTTPException(
+                status_code=422,
+                detail={"error": "invariant_contract_not_approvable", "violations": errors},
+            )
+        approval = await _validate_approval_receipt_for_action(
+            conn,
+            request.approval_receipt_id,
+            target_url=str(target["url"] or ""),
+            target_id=target_uuid,
+            action_name="target.invariant_contract.approve",
+            command="target.invariant_contract.approve",
+            risk_tier="active",
+            created_by=request.approved_by,
+            always_require_receipt=True,
+        )
+        updated = await conn.fetchrow(
+            """
+            UPDATE target_invariant_contracts
+            SET status='approved', approved_at=NOW(), approved_by=$3,
+                retired_at=NULL, updated_at=NOW()
+            WHERE id=$1 AND target_id=$2 AND status <> 'retired'
+            RETURNING *
+            """,
+            contract_uuid,
+            target_uuid,
+            request.approved_by,
+        )
+        if not updated:
+            raise HTTPException(status_code=409, detail="Retired invariant contracts cannot be approved")
+        command_result = await _record_command_result(
+            conn,
+            command="target.invariant_contract.approve",
+            status="completed",
+            risk_tier="active",
+            scope_receipt_id=(approval or {}).get("scope_receipt_id"),
+            approval_receipt_id=request.approval_receipt_id,
+            operator_message="Approved typed target invariant for autonomous planning",
+            result_json={
+                "target_id": target_id,
+                "contract_id": contract_id,
+                "planning_authority": True,
+                "promotion_authority": False,
+            },
+            created_by=request.approved_by,
+        )
+    return {
+        "contract": _public_target_invariant_contract_row(updated),
+        "operation_id": command_result["id"],
+        "planning_authority": True,
+        "promotion_authority": False,
+        "verification_required": True,
+        "findings_created": 0,
+    }
+
+
+@app.post("/targets/{target_id}/invariants/{contract_id}/retire")
+async def retire_target_invariant_contract(
+    target_id: str,
+    contract_id: str,
+    request: TargetInvariantContractRetire,
+):
+    """Retire an approved or draft invariant so it can no longer guide new plans."""
+    target_uuid = _uuid_or_400(target_id, "target id")
+    contract_uuid = _uuid_or_400(contract_id, "invariant contract id")
+    async with db_pool.acquire() as conn:
+        target = await conn.fetchrow("SELECT url FROM targets WHERE id=$1", target_uuid)
+        if not target:
+            raise HTTPException(status_code=404, detail="Target not found")
+        approval = await _validate_approval_receipt_for_action(
+            conn,
+            request.approval_receipt_id,
+            target_url=str(target["url"] or ""),
+            target_id=target_uuid,
+            action_name="target.invariant_contract.retire",
+            command="target.invariant_contract.retire",
+            risk_tier="active",
+            created_by=request.retired_by,
+            always_require_receipt=True,
+        )
+        updated = await conn.fetchrow(
+            """
+            UPDATE target_invariant_contracts
+            SET status='retired', retired_at=NOW(), updated_at=NOW()
+            WHERE id=$1 AND target_id=$2 AND status <> 'retired'
+            RETURNING *
+            """,
+            contract_uuid,
+            target_uuid,
+        )
+        if not updated:
+            raise HTTPException(status_code=404, detail="Active invariant contract not found")
+        command_result = await _record_command_result(
+            conn,
+            command="target.invariant_contract.retire",
+            status="completed",
+            risk_tier="active",
+            scope_receipt_id=(approval or {}).get("scope_receipt_id"),
+            approval_receipt_id=request.approval_receipt_id,
+            operator_message="Retired typed target invariant",
+            result_json={"target_id": target_id, "contract_id": contract_id},
+            created_by=request.retired_by,
+        )
+    return {
+        "contract": _public_target_invariant_contract_row(updated),
+        "operation_id": command_result["id"],
+        "planning_authority": False,
+        "promotion_authority": False,
+        "findings_created": 0,
     }
 
 
@@ -15706,6 +16017,26 @@ async def _build_agent_context_pack_from_target(conn, req: AgentContextPackFromT
     except Exception:
         principal_summary = {"principals": [], "expectations": [], "role_counts": {}, "tenant_counts": {}}
 
+    approved_invariant_contracts: list[dict[str, Any]] = []
+    try:
+        invariant_rows = await conn.fetch(
+            """
+            SELECT * FROM target_invariant_contracts
+            WHERE target_id=$1 AND status='approved'
+            ORDER BY updated_at DESC
+            LIMIT 25
+            """,
+            target_uuid,
+        )
+        approved_invariant_contracts = [
+            invariant_contracts.planner_projection(_public_target_invariant_contract_row(row))
+            for row in invariant_rows
+        ]
+    except Exception:
+        # Upgraded instances build schema before serving requests, but fail closed during a rolling
+        # migration: no invariant is safer than treating an unavailable/draft rule as authoritative.
+        approved_invariant_contracts = []
+
     findings_summary: list[dict[str, Any]] = []
     if req.include_findings and req.finding_limit > 0:
         finding_rows = await conn.fetch(
@@ -15852,6 +16183,7 @@ async def _build_agent_context_pack_from_target(conn, req: AgentContextPackFromT
         "endpoint_counts": [_json_safe_row(row) for row in endpoint_counts],
         "sample_endpoints": sample_endpoints,
         "principal_matrix": principal_summary,
+        "approved_invariant_contracts": approved_invariant_contracts,
         "ranked_hypotheses": ranked_hypotheses,
         "attack_graph": attack_graph,
     }
@@ -21987,6 +22319,16 @@ async def _arsenal_dispatch_target_principal_matrix(p: dict[str, Any]) -> dict[s
     return await list_target_principal_matrix(target_id, limit=_int_or_none(p.get("limit")) or 200)
 
 
+async def _arsenal_dispatch_target_invariants(p: dict[str, Any]) -> dict[str, Any]:
+    target_id = str(p.get("target_id") or "").strip()
+    if not target_id:
+        raise HTTPException(status_code=400, detail="target.invariants requires a target_id parameter")
+    return await list_target_invariant_contracts(
+        target_id,
+        include_drafts=bool(p.get("include_drafts", True)),
+    )
+
+
 async def _arsenal_dispatch_target_principal_matrix_record(
     p: dict[str, Any], approval_receipt_id: str | None,
 ) -> dict[str, Any]:
@@ -21996,6 +22338,55 @@ async def _arsenal_dispatch_target_principal_matrix_record(
     fields = {k: v for k, v in p.items() if k in _arsenal_model_fields(TargetEndpointExpectationRequest) and v is not None}
     fields["approval_receipt_id"] = approval_receipt_id or p.get("approval_receipt_id")
     return await upsert_target_principal_matrix(target_id, TargetEndpointExpectationRequest(**fields))
+
+
+async def _arsenal_dispatch_target_invariant_record(
+    p: dict[str, Any], approval_receipt_id: str | None,
+) -> dict[str, Any]:
+    target_id = str(p.get("target_id") or "").strip()
+    if not target_id:
+        raise HTTPException(status_code=400, detail="target.invariant_contract.record requires a target_id parameter")
+    fields = {k: v for k, v in p.items() if k in _arsenal_model_fields(TargetInvariantContractCreate) and v is not None}
+    fields["approval_receipt_id"] = approval_receipt_id or p.get("approval_receipt_id")
+    return await create_target_invariant_contract(target_id, TargetInvariantContractCreate(**fields))
+
+
+async def _arsenal_dispatch_target_invariant_approve(
+    p: dict[str, Any], approval_receipt_id: str | None,
+) -> dict[str, Any]:
+    target_id = str(p.get("target_id") or "").strip()
+    contract_id = str(p.get("contract_id") or "").strip()
+    if not target_id or not contract_id:
+        raise HTTPException(
+            status_code=400,
+            detail="target.invariant_contract.approve requires target_id and contract_id parameters",
+        )
+    fields = {k: v for k, v in p.items() if k in _arsenal_model_fields(TargetInvariantContractApproval) and v is not None}
+    fields["approval_receipt_id"] = approval_receipt_id or p.get("approval_receipt_id")
+    return await approve_target_invariant_contract(
+        target_id,
+        contract_id,
+        TargetInvariantContractApproval(**fields),
+    )
+
+
+async def _arsenal_dispatch_target_invariant_retire(
+    p: dict[str, Any], approval_receipt_id: str | None,
+) -> dict[str, Any]:
+    target_id = str(p.get("target_id") or "").strip()
+    contract_id = str(p.get("contract_id") or "").strip()
+    if not target_id or not contract_id:
+        raise HTTPException(
+            status_code=400,
+            detail="target.invariant_contract.retire requires target_id and contract_id parameters",
+        )
+    fields = {k: v for k, v in p.items() if k in _arsenal_model_fields(TargetInvariantContractRetire) and v is not None}
+    fields["approval_receipt_id"] = approval_receipt_id or p.get("approval_receipt_id")
+    return await retire_target_invariant_contract(
+        target_id,
+        contract_id,
+        TargetInvariantContractRetire(**fields),
+    )
 
 
 async def _arsenal_dispatch_exposure_graph_get(p: dict[str, Any]) -> dict[str, Any]:
@@ -23277,6 +23668,7 @@ def _arsenal_readonly_adapters() -> dict[str, Any]:
         "target.get": _arsenal_dispatch_target_get,
         "target.principals": _arsenal_dispatch_target_principals,
         "target.principal_matrix": _arsenal_dispatch_target_principal_matrix,
+        "target.invariants": _arsenal_dispatch_target_invariants,
         "exposure.graph.get": _arsenal_dispatch_exposure_graph_get,
         "asm.gaps": _arsenal_dispatch_asm_gaps,
         "asm.activity": _arsenal_dispatch_asm_activity,
@@ -23340,6 +23732,9 @@ def _arsenal_gated_adapters() -> dict[str, Any]:
         "authz.replay_plan": _arsenal_dispatch_authz_replay_plan,
         "authz.promote_replay_finding": _arsenal_dispatch_authz_promote_replay_finding,
         "target.principal_matrix.record": _arsenal_dispatch_target_principal_matrix_record,
+        "target.invariant_contract.record": _arsenal_dispatch_target_invariant_record,
+        "target.invariant_contract.approve": _arsenal_dispatch_target_invariant_approve,
+        "target.invariant_contract.retire": _arsenal_dispatch_target_invariant_retire,
         "hypothesis.reconcile_proof": _arsenal_dispatch_hypothesis_reconcile_proof,
         "experiment.http_diff": _arsenal_dispatch_http_diff,
         "experiment.workflow": _arsenal_dispatch_workflow,
@@ -25650,7 +26045,12 @@ async def _research_recent_actions(
         # sees the ROOT cause -- e.g. "POST /Feedbacks 500, captchaId missing" -- not just "restoration not
         # verified". This is the concrete detail a producer->consumer recovery needs.
         failure_detail = None
-        for _obs in (workflow_result.get("observations") or replay.get("observations") or []):
+        # Inspect both executions. The first run normally has observations even when it is clean, so
+        # ``first or replay`` silently hid failures that occurred only during the independent replay.
+        for _obs in [
+            *(workflow_result.get("observations") or []),
+            *(replay.get("observations") or []),
+        ]:
             if not isinstance(_obs, dict):
                 continue
             _resp = _obs.get("response") if isinstance(_obs.get("response"), dict) else {}
@@ -26142,6 +26542,26 @@ def _compact_research_observation_pack(pack: dict[str, Any]) -> dict[str, Any]:
         _string_list(bounded.get("planner_guidance"), count=6, item_limit=400),
     )
 
+    invariant_digest: list[dict[str, Any]] = []
+    for raw_contract in list(bounded.get("approved_invariant_contracts") or [])[:12]:
+        if not isinstance(raw_contract, dict):
+            continue
+        contract = _scalars(
+            raw_contract,
+            (
+                "id", "version", "contract_kind", "title", "subject_role", "action", "resource",
+                "method", "path", "field_name", "operator", "expected_access", "status",
+                "planning_authority", "promotion_authority", "verification_required",
+            ),
+            text_limit=300,
+        )
+        for key in ("expected_value", "conditions"):
+            if raw_contract.get(key) not in (None, "", [], {}):
+                contract[key] = _bound_once(raw_contract[key], 2)
+        if contract:
+            invariant_digest.append(contract)
+    _add_if_fits("approved_invariant_contracts", invariant_digest)
+
     target_summary = _scalars(
         bounded.get("target_summary"),
         ("target_id", "url", "root_domain", "name", "environment", "status"),
@@ -26356,6 +26776,11 @@ async def _build_research_observation(
     # Research prompts consume the same canonical redaction path as persisted agent context packs;
     # replay examples may originate from harvested traffic and must not carry tokens or credentials.
     context = _canonical_agent_context_pack(context_req)
+    surface_context = context.get("current_surface") if isinstance(context.get("current_surface"), dict) else {}
+    approved_invariant_contracts = [
+        item for item in (surface_context.get("approved_invariant_contracts") or [])
+        if isinstance(item, dict) and item.get("status") == "approved"
+    ][:25]
     commands = _research_command_views(episode)
     mission = _research_mission(episode)
     focus = await _research_focus_snapshot(conn, episode)
@@ -26413,6 +26838,9 @@ async def _build_research_observation(
         "hypotheses_summary": context.get("hypotheses_summary") or [],
         "findings_summary": context.get("findings_summary") or [],
         "known_preconditions": context.get("known_preconditions") or {},
+        # Operator-approved policy statements are high-value hypothesis oracles, but they remain
+        # planning-only until a family-specific deterministic verifier binds live evidence to them.
+        "approved_invariant_contracts": approved_invariant_contracts,
         # Avoid the generic secret redactor treating the word "tokens" as credential material.
         # This is a numeric planning budget, not a token value.
         "remaining_budget": {
@@ -26433,6 +26861,9 @@ async def _build_research_observation(
             "unverified because an object could not be created, do NOT retry the same create. Either "
             "first call an endpoint that produces the missing input (producer->consumer chaining), or "
             "target a different existing object/endpoint.",
+            "Approved invariant contracts are operator policy oracles for choosing hypotheses and "
+            "experiments. They do not themselves prove a finding: promotion still requires a supported "
+            "deterministic family verifier and independent live reproduction.",
         ],
         "previous_observation": _research_previous_result_digest(previous_result or {}),
         "planner_contract": {
@@ -26445,6 +26876,8 @@ async def _build_research_observation(
             "expected_signal_and_falsifier_required_for_actions": True,
             "identical_consecutive_actions_forbidden": True,
             "excluded_actions_must_not_be_repeated": True,
+            "invariant_contracts_are_planning_only": True,
+            "invariant_contracts_cannot_directly_promote_findings": True,
         },
     }
     pack = _compact_research_observation_pack(pack)
@@ -26904,7 +27337,10 @@ async def _research_is_consecutive_duplicate_action(
         # must NOT reset the duplicate guard -- otherwise the "failed A -> partial B -> failed A" loop the
         # audit flagged repeats forever. Widened window (200) also reduces short-window rollover; fully
         # durable enforcement across thousands of decisions (a persisted fingerprint set) stays Phase 1.
-        produced_finding = bool(row.get("cr_finding_ids"))
+        # asyncpg returns JSONB as encoded text unless a custom codec is installed. ``bool("[]")`` is
+        # true, so testing the raw column would treat every empty finding list as progress and reopen
+        # the failed-A -> partial-B -> failed-A loop. Decode before deciding whether B made progress.
+        produced_finding = bool(_decode_json_value(row.get("cr_finding_ids")) or [])
         if previous_comparable["command"] in GATED_RESEARCH_COMMANDS and produced_finding:
             intervening_state_change = True
     return False

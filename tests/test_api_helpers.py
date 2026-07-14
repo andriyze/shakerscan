@@ -10731,8 +10731,9 @@ def test_research_command_views_hide_read_only_actions_when_step_budget_is_spent
 
 
 class _ResearchPreviousActionConn:
-    def __init__(self, actions):
+    def __init__(self, actions, *, jsonb_text=False):
         self.actions = actions if isinstance(actions, list) else [actions]
+        self.jsonb_text = jsonb_text
 
     async def fetch(self, _query, *_args):
         return [
@@ -10747,7 +10748,11 @@ class _ResearchPreviousActionConn:
                 ),
                 # A gated command counts as an intervening state change only if it actually produced a
                 # finding, not merely because it dispatched.
-                "cr_finding_ids": ["finding-1"] if action.get("_produced_finding") else None,
+                "cr_finding_ids": (
+                    json.dumps(["finding-1"] if action.get("_produced_finding") else [])
+                    if self.jsonb_text
+                    else (["finding-1"] if action.get("_produced_finding") else None)
+                ),
             }
             for action in self.actions
             if action is not None
@@ -10800,6 +10805,201 @@ def test_research_duplicate_guard_resets_only_on_a_finding_producing_command():
     assert blocked_churn is True
     assert blocked_dispatch is True
     assert allowed_after_finding is False
+
+
+def test_research_duplicate_guard_decodes_asyncpg_jsonb_text_before_progress_check():
+    repeated = {"command": "asm.gaps", "parameters": {"target_id": "target-1"}}
+    gated = {"command": "asm.improve", "parameters": {"target_id": "target-1", "check_family": "xss"}}
+
+    blocked_after_empty_json_array = asyncio.run(api_module._research_is_consecutive_duplicate_action(
+        _ResearchPreviousActionConn([gated, repeated], jsonb_text=True),
+        "11111111-1111-4111-8111-111111111111", repeated,
+    ))
+    allowed_after_json_finding_array = asyncio.run(api_module._research_is_consecutive_duplicate_action(
+        _ResearchPreviousActionConn([{**gated, "_produced_finding": True}, repeated], jsonb_text=True),
+        "11111111-1111-4111-8111-111111111111", repeated,
+    ))
+
+    assert blocked_after_empty_json_array is True
+    assert allowed_after_json_finding_array is False
+
+
+class _ResearchRecentActionsConn:
+    async def fetch(self, _query, *_args):
+        return [{
+            "sequence": 2,
+            "decision_type": "execute_action",
+            "status": "completed",
+            "action": json.dumps({"command": "experiment.workflow", "parameters": {}}),
+            "reason": "test a workflow invariant",
+            "expected_signal": "replay succeeds",
+            "falsifier": "replay fails",
+            "validation_errors": "[]",
+            "command_result_id": uuid.uuid4(),
+            "command_status": "completed",
+            "scan_id": None,
+            "result_json": json.dumps({
+                "workflow": {
+                    "observations": [{
+                        "label": "initial",
+                        "request": {"method": "POST", "path": "/orders"},
+                        "response": {"status": 201, "body_sample": "created"},
+                    }],
+                },
+                "replay": {
+                    "proof_state": "unverified_workflow_signal",
+                    "replay_blocked_reason": "independent_replay_failed",
+                    "observations": [{
+                        "label": "replay",
+                        "request": {"method": "POST", "path": "/orders"},
+                        "response": {"status": 409, "body_sample": "state transition rejected"},
+                    }],
+                },
+                "family_proof": {"verdict": "not_proven", "reason": "replay did not reproduce"},
+            }),
+            "operator_message": "Workflow did not verify",
+        }]
+
+
+def test_research_recent_actions_surfaces_replay_only_failure_and_authoritative_proof():
+    actions = asyncio.run(api_module._research_recent_actions(
+        _ResearchRecentActionsConn(),
+        "11111111-1111-4111-8111-111111111111",
+    ))
+
+    result = actions[0]["result"]
+    assert result["proof_state"] == "not_proven"
+    assert result["failure_reason"] == "independent_replay_failed"
+    assert result["failure_detail"] == {
+        "step": "replay",
+        "method": "POST",
+        "path": "/orders",
+        "status": 409,
+        "error": None,
+        "body_sample": "state transition rejected",
+    }
+
+
+class _InvariantLifecycleConn:
+    def __init__(self, *, existing=None):
+        self.existing = existing
+        self.executions = []
+        self.insert_args = None
+
+    async def fetchrow(self, query, *args):
+        if "SELECT url FROM targets" in query:
+            return {"url": "https://example.test"}
+        if "SELECT * FROM target_invariant_contracts" in query:
+            return self.existing
+        if "INSERT INTO target_invariant_contracts" in query:
+            self.insert_args = args
+            return {
+                "id": uuid.uuid4(),
+                "target_id": args[0],
+                "contract_version": args[1],
+                "contract_kind": args[2],
+                "title": args[3],
+                "source_text": args[4],
+                "subject_role": args[5],
+                "action": args[6],
+                "resource": args[7],
+                "method": args[8],
+                "path": args[9],
+                "field_name": args[10],
+                "operator": args[11],
+                "expected_value": args[12],
+                "expected_access": args[13],
+                "conditions": args[14],
+                "status": "draft",
+                "source": args[15],
+                "metadata_json": args[16],
+                "created_by": args[17],
+            }
+        if "UPDATE target_invariant_contracts" in query and "status='approved'" in query:
+            return {**self.existing, "status": "approved", "approved_by": args[2]}
+        raise AssertionError(query)
+
+
+def test_invariant_create_is_draft_only_and_requires_scoped_approval(monkeypatch):
+    conn = _InvariantLifecycleConn()
+    monkeypatch.setattr(api_module, "db_pool", _pool_for(conn))
+    approval_calls = []
+    command_calls = []
+
+    async def fake_validate(_conn, receipt_id, **kwargs):
+        approval_calls.append((receipt_id, kwargs))
+        return {"scope_receipt_id": "scope-1"}
+
+    async def fake_record(_conn, **kwargs):
+        command_calls.append(kwargs)
+        return {"id": "operation-1"}
+
+    monkeypatch.setattr(api_module, "_validate_approval_receipt_for_action", fake_validate)
+    monkeypatch.setattr(api_module, "_record_command_result", fake_record)
+    result = asyncio.run(api_module.create_target_invariant_contract(
+        "11111111-1111-4111-8111-111111111111",
+        api_module.TargetInvariantContractCreate(
+            contract_kind="access_control",
+            title="Only managers issue refunds",
+            source_text="Authorization: Bearer secret-token-123",
+            subject_role="manager",
+            action="issue",
+            resource="refund",
+            expected_access="allow",
+            approval_receipt_id="22222222-2222-4222-8222-222222222222",
+        ),
+    ))
+
+    assert result["contract"]["status"] == "draft"
+    assert result["planning_authority"] is False
+    assert result["promotion_authority"] is False
+    assert result["operation_id"] == "operation-1"
+    assert approval_calls[0][1]["always_require_receipt"] is True
+    assert approval_calls[0][1]["command"] == "target.invariant_contract.record"
+    assert command_calls[0]["result_json"]["promotion_authority"] is False
+    assert "secret-token-123" not in str(conn.insert_args)
+
+
+def test_invariant_approval_grants_planning_but_never_promotion(monkeypatch):
+    existing = {
+        "id": uuid.UUID("33333333-3333-4333-8333-333333333333"),
+        "target_id": uuid.UUID("11111111-1111-4111-8111-111111111111"),
+        "contract_kind": "ownership",
+        "title": "Users cannot edit another user's profile",
+        "subject_role": "user",
+        "action": "edit",
+        "resource": "profile",
+        "expected_access": "deny",
+        "conditions": json.dumps({"resource_owner": "other"}),
+        "expected_value": "null",
+        "status": "draft",
+        "source": "manual",
+        "metadata_json": "{}",
+    }
+    conn = _InvariantLifecycleConn(existing=existing)
+    monkeypatch.setattr(api_module, "db_pool", _pool_for(conn))
+
+    async def fake_validate(_conn, _receipt_id, **_kwargs):
+        return {"scope_receipt_id": "scope-1"}
+
+    async def fake_record(_conn, **_kwargs):
+        return {"id": "operation-2"}
+
+    monkeypatch.setattr(api_module, "_validate_approval_receipt_for_action", fake_validate)
+    monkeypatch.setattr(api_module, "_record_command_result", fake_record)
+    result = asyncio.run(api_module.approve_target_invariant_contract(
+        "11111111-1111-4111-8111-111111111111",
+        "33333333-3333-4333-8333-333333333333",
+        api_module.TargetInvariantContractApproval(
+            approval_receipt_id="22222222-2222-4222-8222-222222222222",
+            approved_by="operator",
+            confirm_authoritative=True,
+        ),
+    ))
+
+    assert result["planning_authority"] is True
+    assert result["promotion_authority"] is False
+    assert result["verification_required"] is True
 
 
 class _StaleResearchDispatchConn:
