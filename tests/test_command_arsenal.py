@@ -30,6 +30,7 @@ def test_command_catalog_contains_required_initial_commands():
         "target.principals",
         "target.principal_matrix",
         "target.invariants",
+        "target.invariant.verification_plan",
         "asm.gaps",
         "asm.activity",
         "scan.result",
@@ -68,6 +69,9 @@ def test_invariant_commands_separate_draft_approval_and_promotion_authority():
     assert commands["target.invariant_contract.retire"]["status"] == "gated"
     assert "no_promotion_authority" in commands["target.invariant_contract.approve"]["evidence_contract"]
     assert "confirm_authorized" in commands["target.invariant_contract.approve"]["required_confirmations"]
+    assert commands["target.invariant.compile"]["status"] == "dry_run"
+    assert commands["target.invariant.generate_hypotheses"]["status"] == "dry_run"
+    assert commands["target.invariant.compile"]["risk_tier"] == "read_only"
 
 
 def test_server_parameter_validator_enforces_bounds_and_uuid_formats():

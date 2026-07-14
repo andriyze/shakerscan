@@ -11002,6 +11002,73 @@ def test_invariant_approval_grants_planning_but_never_promotion(monkeypatch):
     assert result["verification_required"] is True
 
 
+class _InvariantCompileConn:
+    async def fetchrow(self, query, *_args):
+        if "SELECT 1 FROM targets" in query:
+            return {"exists": 1}
+        raise AssertionError(query)
+
+
+def test_invariant_compile_preview_is_target_bound_and_non_authoritative(monkeypatch):
+    monkeypatch.setattr(api_module, "db_pool", _pool_for(_InvariantCompileConn()))
+
+    result = asyncio.run(api_module.compile_target_invariant_rule(
+        "11111111-1111-4111-8111-111111111111",
+        api_module.TargetInvariantCompileRequest(
+            rule_text="Only managers can issue refunds at /api/refunds POST",
+        ),
+    ))
+
+    assert result["candidate_count"] == 1
+    assert result["candidates"][0]["contract_kind"] == "access_control"
+    assert result["persisted_count"] == 0
+    assert result["planning_authority"] is False
+    assert result["promotion_authority"] is False
+
+
+def test_invariant_hypothesis_uses_supported_verifier_only_for_bound_kind():
+    ownership = api_module._invariant_hypothesis_request(
+        "11111111-1111-4111-8111-111111111111",
+        {
+            "id": "33333333-3333-4333-8333-333333333333",
+            "status": "approved",
+            "contract_kind": "ownership",
+            "title": "Cross-owner edit denied",
+            "subject_role": "user",
+            "action": "edit",
+            "resource": "profile",
+            "path": "/api/users/{id}",
+            "expected_access": "deny",
+            "conditions": {"resource_owner": "other"},
+        },
+        created_by="test",
+    )
+    field_constraint = api_module._invariant_hypothesis_request(
+        "11111111-1111-4111-8111-111111111111",
+        {
+            "id": "44444444-4444-4444-8444-444444444444",
+            "status": "approved",
+            "contract_kind": "field_constraint",
+            "title": "Discount cap",
+            "action": "update",
+            "resource": "discount",
+            "field_name": "percent",
+            "operator": "lte",
+            "expected_value": 30,
+            "path": "/api/discount",
+            "conditions": {},
+        },
+        created_by="test",
+    )
+
+    assert ownership.source == "invariant"
+    assert ownership.next_test_action["command"] == "experiment.workflow"
+    assert ownership.next_test_action["parameters"]["proof_family"] == "bola"
+    assert field_constraint.next_test_action["command"] == "experiment.http_diff"
+    assert "proof_family" not in field_constraint.next_test_action["parameters"]
+    assert field_constraint.metadata_json["promotion_authority"] is False
+
+
 class _StaleResearchDispatchConn:
     def __init__(self, row):
         self.row = row

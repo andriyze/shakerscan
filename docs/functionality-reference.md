@@ -1050,10 +1050,10 @@ it is the exhaustive backstop behind the human-readable product map above.
 
 | Surface | Count | Source |
 |---|---|---|
-| Public REST operations | 220 | `api/api.py` FastAPI decorators |
-| Unique REST paths | 178 | `api/api.py` |
+| Public REST operations | 223 | `api/api.py` FastAPI decorators |
+| Unique REST paths | 181 | `api/api.py` |
 | Check families | 13 | `api/check_registry.py` |
-| Command Arsenal commands | 79 | `api/command_arsenal.py` |
+| Command Arsenal commands | 82 | `api/command_arsenal.py` |
 | Tool adapters | 13 | `api/command_arsenal.py` |
 | Local-agent adapters | 4 | `api/command_arsenal.py` |
 | Scanner CLI flags | 158 | `scanner/scanner.py` |
@@ -1277,8 +1277,11 @@ it is the exhaustive backstop behind the human-readable product map above.
 | `POST` | `/targets/{target_id}/graph/hypotheses` | `generate_application_graph_hypotheses` |
 | `GET` | `/targets/{target_id}/invariants` | `list_target_invariant_contracts` |
 | `POST` | `/targets/{target_id}/invariants` | `create_target_invariant_contract` |
+| `POST` | `/targets/{target_id}/invariants/compile` | `compile_target_invariant_rule` |
+| `POST` | `/targets/{target_id}/invariants/hypotheses` | `generate_target_invariant_hypotheses` |
 | `POST` | `/targets/{target_id}/invariants/{contract_id}/approve` | `approve_target_invariant_contract` |
 | `POST` | `/targets/{target_id}/invariants/{contract_id}/retire` | `retire_target_invariant_contract` |
+| `GET` | `/targets/{target_id}/invariants/{contract_id}/verification-plan` | `get_target_invariant_verification_plan` |
 | `POST` | `/targets/{target_id}/inventory/hypotheses` | `generate_endpoint_inventory_hypotheses` |
 | `GET` | `/targets/{target_id}/principal-matrix` | `list_target_principal_matrix` |
 | `POST` | `/targets/{target_id}/principal-matrix` | `upsert_target_principal_matrix` |
@@ -1383,6 +1386,9 @@ it is the exhaustive backstop behind the human-readable product map above.
 | `scan.result` | scans | read_only | read_only | GET | `/scans/{scan_id}/result` | Read scan status and stored result JSON. |
 | `scope.preview` | governance | dry_run | read_only | POST | `/arsenal/scope/preview` | Validate and persist a fail-closed scope receipt preview without executing work. |
 | `target.get` | inventory | read_only | read_only | GET | `/targets/{target_id}` | Get one target and recent scan metadata. |
+| `target.invariant.compile` | authorization_policy | dry_run | read_only | POST | `/targets/{target_id}/invariants/compile` | Compile one short business/security rule into non-authoritative typed draft candidates. |
+| `target.invariant.generate_hypotheses` | authorization_policy | dry_run | read_only | POST | `/targets/{target_id}/invariants/hypotheses` | Convert approved typed invariants into deduplicated worklist leads without executing tests. |
+| `target.invariant.verification_plan` | authorization_policy | read_only | read_only | GET | `/targets/{target_id}/invariants/{contract_id}/verification-plan` | Read the deterministic proof family and missing runtime bindings for one target invariant. |
 | `target.invariant_contract.approve` | authorization_policy | gated | active | POST | `/targets/{target_id}/invariants/{contract_id}/approve` | Approve a validated typed invariant for planning, never direct finding promotion. |
 | `target.invariant_contract.record` | authorization_policy | gated | active | POST | `/targets/{target_id}/invariants` | Record a typed target invariant as a non-authoritative draft. |
 | `target.invariant_contract.retire` | authorization_policy | gated | active | POST | `/targets/{target_id}/invariants/{contract_id}/retire` | Retire a target invariant so it no longer guides autonomous planning. |

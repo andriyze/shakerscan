@@ -105,3 +105,78 @@ def test_draft_projection_has_no_planning_authority():
 
     assert projection["planning_authority"] is False
     assert projection["promotion_authority"] is False
+
+
+def test_low_input_compiler_emits_reviewable_candidates_without_authority():
+    compiled = contracts.compile_rule_text("Only managers can issue refunds at /api/refunds POST")
+
+    candidate = compiled["candidates"][0]
+    assert candidate["contract_kind"] == "access_control"
+    assert candidate["subject_role"] == "managers"
+    assert candidate["method"] == "POST"
+    assert candidate["path"] == "/api/refunds"
+    assert candidate["ready_for_approval"] is True
+    assert candidate["planning_authority"] is False
+    assert candidate["promotion_authority"] is False
+
+
+def test_low_input_compiler_recognizes_ownership_and_fails_closed_on_ambiguity():
+    ownership = contracts.compile_rule_text(
+        "Users cannot edit another users profile at /api/users/{id}"
+    )
+    ambiguous = contracts.compile_rule_text("Keep customer data secure")
+
+    assert ownership["candidates"][0]["contract_kind"] == "ownership"
+    assert ownership["candidates"][0]["conditions"] == {"resource_owner": "other"}
+    assert ambiguous["matched"] is False
+    assert ambiguous["candidates"] == []
+
+
+def test_low_input_compiler_rejects_invalid_method_and_nonfinite_number():
+    try:
+        contracts.compile_rule_text("Only managers can issue refunds", method="BAD!")
+    except ValueError as exc:
+        assert str(exc) == "invariant method is invalid"
+    else:
+        raise AssertionError("invalid method was accepted")
+
+    huge = "9" * 400
+    try:
+        contracts.compile_rule_text(f"discount must be <= {huge}")
+    except ValueError as exc:
+        assert str(exc) == "invariant numeric value must be finite"
+    else:
+        raise AssertionError("non-finite numeric value was accepted")
+
+
+def test_verification_plan_reuses_only_semantically_bound_existing_verifier():
+    ownership = contracts.verification_plan({
+        "status": "approved",
+        "contract_kind": "ownership",
+        "title": "Cross-owner edit denied",
+        "subject_role": "user",
+        "action": "edit",
+        "resource": "profile",
+        "path": "/api/users/{id}",
+        "expected_access": "deny",
+        "conditions": {"resource_owner": "other"},
+    })
+    field_constraint = contracts.verification_plan({
+        "status": "approved",
+        "contract_kind": "field_constraint",
+        "title": "Discount cap",
+        "action": "update",
+        "resource": "discount",
+        "field_name": "percent",
+        "operator": "lte",
+        "expected_value": 30,
+        "path": "/api/discount",
+    })
+
+    assert ownership["proof_family"] == "bola"
+    assert ownership["deterministic_family_supported"] is True
+    assert ownership["ready_to_execute"] is False
+    assert "object_producer" in ownership["missing_inputs"]
+    assert field_constraint["deterministic_family_supported"] is False
+    assert "deterministic_contract_binder" in field_constraint["missing_inputs"]
+    assert field_constraint["promotion_gate"] is None

@@ -8,6 +8,7 @@ deterministic verifier consumes them.
 
 from __future__ import annotations
 
+import math
 import re
 from typing import Any
 
@@ -18,6 +19,218 @@ CONTRACT_STATUSES = frozenset({"draft", "approved", "retired"})
 EXPECTED_ACCESS = frozenset({"allow", "deny", "requires_role"})
 VALUE_OPERATORS = frozenset({"eq", "ne", "lt", "lte", "gt", "gte", "in", "not_in"})
 CONDITION_KEYS = frozenset({"from_state", "to_state", "prerequisite_state", "tenant_relation", "resource_owner"})
+COMPILER_VERSION = "target-invariant-compiler-2026-07-14.v1"
+
+
+def _clean_phrase(value: Any, *, limit: int = 160) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip(" .,:;!?\t\r\n")
+    return text[:limit]
+
+
+def _resource_phrase(value: Any) -> str:
+    text = re.sub(r"\s+(?:at|on)\s+/\S+.*$", "", _clean_phrase(value), flags=re.IGNORECASE)
+    text = re.sub(r"^(?:a|an|the)\s+", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"^(?:another|other)\s+(?:users?'?\s+)?", "", text, flags=re.IGNORECASE)
+    return text
+
+
+def _number(value: str) -> int | float:
+    parsed = float(value)
+    if not math.isfinite(parsed):
+        raise ValueError("invariant numeric value must be finite")
+    return int(parsed) if parsed.is_integer() else parsed
+
+
+def compile_rule_text(
+    rule_text: str,
+    *,
+    method: str | None = None,
+    path: str | None = None,
+) -> dict[str, Any]:
+    """Compile a deliberately small rule grammar into non-authoritative typed candidates.
+
+    This is not an LLM parser and never guesses through ambiguity. Unsupported prose returns no
+    candidate; partial candidates expose their approval errors for operator correction.
+    """
+    text = _clean_phrase(rule_text, limit=4000)
+    inferred_path = path or next(iter(re.findall(r"/[A-Za-z0-9_./{}:*-]+", text)), None)
+    inferred_method = method
+    if not inferred_method:
+        method_match = re.search(r"\b(GET|POST|PUT|PATCH|DELETE)\b", text, re.IGNORECASE)
+        inferred_method = method_match.group(1) if method_match else None
+    candidates: list[dict[str, Any]] = []
+
+    workflow = re.search(
+        r"^(?P<resource>[a-z][a-z0-9 _-]{0,80}?)\s+(?:can|may|must)\s+(?:only\s+)?"
+        r"(?:move|transition|go|change)\s+from\s+(?P<from>[a-z0-9_.:-]+)\s+to\s+(?P<to>[a-z0-9_.:-]+)",
+        text,
+        re.IGNORECASE,
+    )
+    cap = re.search(
+        r"^(?P<field>[a-z][a-z0-9 _.-]{0,80}?)\s+(?:must|should)\s+(?:be\s+)?"
+        r"(?P<operator><=|>=|<|>)\s*(?P<value>-?\d+(?:\.\d+)?)",
+        text,
+        re.IGNORECASE,
+    ) or re.search(
+        r"^(?P<field>[a-z][a-z0-9 _.-]{0,80}?)\s+(?:must\s+)?never\s+"
+        r"(?P<verb>exceed|exceeds|fall below)\s+(?P<value>-?\d+(?:\.\d+)?)",
+        text,
+        re.IGNORECASE,
+    )
+    ownership = re.search(
+        r"^(?P<role>[a-z][a-z0-9 _-]{0,50}?)\s+(?:cannot|can't|must not|may not)\s+"
+        r"(?P<action>[a-z][a-z0-9_-]{0,40})\s+(?P<resource>.*?\b(?:other|another)\b.+)$",
+        text,
+        re.IGNORECASE,
+    )
+    only_role = re.search(
+        r"^only\s+(?P<role>[a-z][a-z0-9 _-]{0,50}?)\s+(?:can|may)\s+"
+        r"(?P<action>[a-z][a-z0-9_-]{0,40})\s+(?P<resource>.+)$",
+        text,
+        re.IGNORECASE,
+    )
+    denied_role = re.search(
+        r"^(?P<role>[a-z][a-z0-9 _-]{0,50}?)\s+(?:cannot|can't|must not|may not)\s+"
+        r"(?P<action>[a-z][a-z0-9_-]{0,40})\s+(?P<resource>.+)$",
+        text,
+        re.IGNORECASE,
+    )
+
+    base = {"method": inferred_method, "path": inferred_path, "source_text": text}
+    if workflow:
+        resource = _resource_phrase(workflow.group("resource"))
+        candidates.append({
+            **base,
+            "contract_kind": "workflow_transition",
+            "title": f"{resource} transition {workflow.group('from')} to {workflow.group('to')}",
+            "action": "transition",
+            "resource": resource,
+            "conditions": {"from_state": workflow.group("from"), "to_state": workflow.group("to")},
+        })
+    elif cap:
+        field = _clean_phrase(cap.group("field"))
+        symbol = cap.groupdict().get("operator")
+        verb = str(cap.groupdict().get("verb") or "").lower()
+        operator = {"<": "lt", "<=": "lte", ">": "gt", ">=": "gte"}.get(symbol)
+        if not operator:
+            operator = "gte" if "fall below" in verb else "lte"
+        candidates.append({
+            **base,
+            "contract_kind": "field_constraint",
+            "title": f"{field} constraint",
+            "action": "update",
+            "resource": _resource_phrase(field),
+            "field_name": field,
+            "operator": operator,
+            "expected_value": _number(cap.group("value")),
+        })
+    elif ownership:
+        role = _clean_phrase(ownership.group("role"))
+        resource = _resource_phrase(ownership.group("resource"))
+        candidates.append({
+            **base,
+            "contract_kind": "ownership",
+            "title": f"{role} cannot {ownership.group('action')} another owner's {resource}",
+            "subject_role": role,
+            "action": ownership.group("action"),
+            "resource": resource,
+            "expected_access": "deny",
+            "conditions": {"resource_owner": "other"},
+        })
+    elif only_role:
+        role = _clean_phrase(only_role.group("role"))
+        resource = _resource_phrase(only_role.group("resource"))
+        candidates.append({
+            **base,
+            "contract_kind": "access_control",
+            "title": f"{role} role required to {only_role.group('action')} {resource}",
+            "subject_role": role,
+            "action": only_role.group("action"),
+            "resource": resource,
+            "expected_access": "requires_role",
+            "conditions": {},
+        })
+    elif denied_role:
+        role = _clean_phrase(denied_role.group("role"))
+        resource = _resource_phrase(denied_role.group("resource"))
+        candidates.append({
+            **base,
+            "contract_kind": "access_control",
+            "title": f"{role} denied from {denied_role.group('action')} {resource}",
+            "subject_role": role,
+            "action": denied_role.group("action"),
+            "resource": resource,
+            "expected_access": "deny",
+            "conditions": {},
+        })
+
+    compiled: list[dict[str, Any]] = []
+    for candidate in candidates:
+        canonical = canonical_contract(candidate)
+        errors = approval_errors(canonical)
+        compiled.append({
+            **canonical,
+            "compiler_version": COMPILER_VERSION,
+            "ready_for_approval": not errors,
+            "approval_errors": errors,
+            "planning_authority": False,
+            "promotion_authority": False,
+        })
+    return {
+        "compiler_version": COMPILER_VERSION,
+        "candidates": compiled,
+        "candidate_count": len(compiled),
+        "matched": bool(compiled),
+        "warnings": ([] if compiled else ["unsupported_or_ambiguous_rule; provide typed fields manually"]),
+        "execution_enabled": False,
+        "findings_created": 0,
+    }
+
+
+def verification_plan(value: dict[str, Any]) -> dict[str, Any]:
+    """Map an approved typed rule to the existing deterministic workflow proof boundary."""
+    contract = canonical_contract(value)
+    kind = contract["contract_kind"]
+    family = {
+        "ownership": "bola",
+        "access_control": "authorization_policy",
+        "workflow_transition": "workflow_invariant",
+        "field_constraint": "field_constraint",
+    }[kind]
+    supported = kind == "ownership"
+    required_inputs = ["approved_contract", "concrete_route", "independent_live_replay"]
+    if kind == "ownership":
+        required_inputs += ["primary_credentials", "second_user_credentials", "object_producer", "cleanup_step"]
+    elif kind == "access_control":
+        required_inputs += ["authorized_control", "unauthorized_principal"]
+    elif kind == "workflow_transition":
+        required_inputs += ["before_checkpoint", "forbidden_transition", "restoration_step"]
+    else:
+        required_inputs += ["baseline_read", "bounded_mutation", "restoration_step"]
+    missing = []
+    if str(value.get("status") or "") != "approved":
+        missing.append("approved_contract")
+    if not contract.get("path"):
+        missing.append("concrete_route")
+    if not supported:
+        # The current workflow predicates do not bind arbitrary roles, transition states, or typed
+        # value comparisons back to this exact contract. Calling those generic differentials a
+        # deterministic invariant verifier would manufacture proof, so these kinds fail closed.
+        missing.append("deterministic_contract_binder")
+    # These are runtime bindings, intentionally never inferred from prose or stored as fake proof.
+    missing += [item for item in required_inputs if item not in {"approved_contract", "concrete_route"}]
+    return {
+        "verifier": "experiment.workflow",
+        "proof_family": family,
+        "deterministic_family_supported": supported,
+        "required_inputs": list(dict.fromkeys(required_inputs)),
+        "missing_inputs": list(dict.fromkeys(missing)),
+        "ready_to_execute": not missing,
+        "requires_two_live_executions": True,
+        "requires_restoration": kind in {"ownership", "workflow_transition", "field_constraint"},
+        "promotion_authority": False,
+        "promotion_gate": "trusted_workflow_family_proof" if supported else None,
+    }
 
 
 def normalize_identifier(value: Any, *, default: str = "", limit: int = 120) -> str:
@@ -175,4 +388,5 @@ def planner_projection(row: dict[str, Any]) -> dict[str, Any]:
         "planning_authority": str(row.get("status") or "") == "approved",
         "promotion_authority": False,
         "verification_required": True,
+        "verification_plan": verification_plan(row),
     }

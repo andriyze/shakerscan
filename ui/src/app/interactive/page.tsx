@@ -4,7 +4,9 @@ import Link from 'next/link'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { KeyRound, RefreshCw, ShieldCheck, XCircle } from 'lucide-react'
 import {
+  approveTargetInvariant,
   captureInteractiveScreenshot,
+  compileTargetInvariant,
   createTargetCredentialProfile,
   createTargetPrincipal,
   createInteractiveSessionFinding,
@@ -15,8 +17,10 @@ import {
   endInteractiveSession,
   getInteractiveSession,
   getTargetCredentialProfiles,
+  getTargetInvariants,
   getTargetPrincipalMatrix,
   listInteractiveSessions,
+  generateTargetInvariantHypotheses,
   runInteractiveAction,
   rotateTargetCredentialProfile,
   startInteractiveSession,
@@ -28,6 +32,8 @@ import {
   type InteractiveSessionSummary,
   type TargetPrincipalMatrixResponse,
   type TargetCredentialProfile,
+  type TargetInvariantCompileResponse,
+  type TargetInvariantListResponse,
 } from '@/lib/api'
 import { SEVERITY_LEVELS } from '@/lib/constants'
 import { Badge, Button, Card, ErrorState, useToast } from '@/components/ui'
@@ -129,6 +135,11 @@ export default function InteractiveSessionPage() {
   })
   const [expectationDraft, setExpectationDraft] = useState<PrincipalExpectationDraft>(emptyPrincipalExpectationDraft)
   const [expectationBusy, setExpectationBusy] = useState<string | null>(null)
+  const [invariants, setInvariants] = useState<TargetInvariantListResponse | null>(null)
+  const [invariantsError, setInvariantsError] = useState<string | null>(null)
+  const [invariantRule, setInvariantRule] = useState('')
+  const [invariantPreview, setInvariantPreview] = useState<TargetInvariantCompileResponse | null>(null)
+  const [invariantBusy, setInvariantBusy] = useState<string | null>(null)
 
   const loadPrincipalMatrix = useCallback(async (id: string) => {
     if (!id) return
@@ -154,6 +165,17 @@ export default function InteractiveSessionPage() {
     }
   }, [])
 
+  const loadInvariants = useCallback(async (id: string) => {
+    if (!id) return
+    try {
+      setInvariants(await getTargetInvariants(id))
+      setInvariantsError(null)
+    } catch (err) {
+      setInvariants(null)
+      setInvariantsError(err instanceof Error ? err.message : 'Failed to load target invariants')
+    }
+  }, [])
+
   useEffect(() => {
     const requestedTarget = new URLSearchParams(window.location.search).get('target')
     const requestedTargetId = new URLSearchParams(window.location.search).get('target_id')
@@ -164,9 +186,11 @@ export default function InteractiveSessionPage() {
   useEffect(() => {
     if (!targetId) return
     setPrincipalDrafts({ user1: emptyPrincipalProfileDraft(), user2: emptyPrincipalProfileDraft() })
+    setInvariantPreview(null)
     void loadPrincipalMatrix(targetId)
     void loadCredentialProfiles(targetId)
-  }, [loadCredentialProfiles, loadPrincipalMatrix, targetId])
+    void loadInvariants(targetId)
+  }, [loadCredentialProfiles, loadInvariants, loadPrincipalMatrix, targetId])
 
   const [endpoint, setEndpoint] = useState('')
   const [method, setMethod] = useState('GET')
@@ -428,6 +452,67 @@ export default function InteractiveSessionPage() {
       toast.error(err instanceof Error ? err.message : 'Failed to delete principal expectation')
     } finally {
       setExpectationBusy(null)
+    }
+  }
+
+  async function handleCompileInvariant(persistDraft: boolean) {
+    if (!targetId || !target || !invariantRule.trim()) {
+      toast.error('Select a target and enter a short business rule')
+      return
+    }
+    setInvariantBusy(persistDraft ? 'persist' : 'preview')
+    try {
+      let approvalReceiptId: string | undefined
+      if (persistDraft) {
+        if (!window.confirm('Save the compiled rule as a non-authoritative draft for operator review?')) return
+        approvalReceiptId = await createTargetPolicyApproval(targetId, target)
+      }
+      const result = await compileTargetInvariant(targetId, {
+        rule_text: invariantRule.trim(),
+        persist_drafts: persistDraft,
+        approval_receipt_id: approvalReceiptId,
+      })
+      setInvariantPreview(result)
+      if (persistDraft) {
+        await loadInvariants(targetId)
+        toast.success(`${result.persisted_count} invariant draft${result.persisted_count === 1 ? '' : 's'} saved`)
+      } else if (!result.matched) {
+        toast.error(result.warnings[0] || 'Rule is ambiguous; use typed fields')
+      }
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to compile invariant')
+    } finally {
+      setInvariantBusy(null)
+    }
+  }
+
+  async function handleApproveInvariant(contractId: string) {
+    if (!targetId || !target || !window.confirm(
+      'Approve this typed rule as planning guidance? It will still require deterministic live proof before any finding.',
+    )) return
+    setInvariantBusy(contractId)
+    try {
+      const approvalReceiptId = await createTargetPolicyApproval(targetId, target)
+      await approveTargetInvariant(targetId, contractId, approvalReceiptId)
+      await loadInvariants(targetId)
+      toast.success('Invariant approved for planning; finding promotion remains disabled without live proof')
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to approve invariant')
+    } finally {
+      setInvariantBusy(null)
+    }
+  }
+
+  async function handleGenerateInvariantHypotheses() {
+    if (!targetId) return
+    setInvariantBusy('hypotheses')
+    try {
+      const result = await generateTargetInvariantHypotheses(targetId)
+      toast.success(`${result.created} new invariant lead${result.created === 1 ? '' : 's'} added to the research backlog`)
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to generate invariant hypotheses')
+    } finally {
+      setInvariantBusy(null)
     }
   }
 
@@ -1103,6 +1188,101 @@ export default function InteractiveSessionPage() {
                 </div>
               )}
             </>
+          )}
+        </Card>
+      )}
+
+      {targetId && (
+        <Card className="p-5 space-y-4">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h2 className="text-lg font-semibold text-white">Business Rules for Autonomous Hunts</h2>
+              <p className="mt-1 text-xs text-gray-500">
+                One short rule becomes a typed draft. Approval guides planning only; live deterministic replay is still required.
+              </p>
+            </div>
+            <div className="flex items-center gap-2">
+              {invariants && <Badge className="bg-gray-800 text-gray-300">{invariants.approved_count} approved · {invariants.draft_count} drafts</Badge>}
+              <Button
+                size="sm"
+                variant="ghost"
+                disabled={!invariants?.approved_count || invariantBusy === 'hypotheses'}
+                onClick={() => void handleGenerateInvariantHypotheses()}
+              >
+                {invariantBusy === 'hypotheses' ? 'Generating...' : 'Generate research leads'}
+              </Button>
+            </div>
+          </div>
+          {invariantsError && <ErrorState message={invariantsError} />}
+          <div className="grid gap-2 lg:grid-cols-[minmax(18rem,1fr)_auto_auto]">
+            <textarea
+              value={invariantRule}
+              onChange={(event) => setInvariantRule(event.target.value)}
+              rows={2}
+              placeholder="Only managers can issue refunds at /api/refunds POST"
+              className="w-full resize-y rounded-md border border-gray-800 bg-gray-950 px-3 py-2 text-sm text-white placeholder-gray-600 focus:border-blue-500 focus:outline-none"
+            />
+            <Button
+              variant="ghost"
+              disabled={!invariantRule.trim() || Boolean(invariantBusy)}
+              onClick={() => void handleCompileInvariant(false)}
+            >
+              {invariantBusy === 'preview' ? 'Compiling...' : 'Preview typed rule'}
+            </Button>
+            <Button
+              disabled={!invariantRule.trim() || Boolean(invariantBusy)}
+              onClick={() => void handleCompileInvariant(true)}
+            >
+              {invariantBusy === 'persist' ? 'Saving...' : 'Compile & save draft'}
+            </Button>
+          </div>
+          {invariantPreview && (
+            <div className="rounded-md border border-gray-800 bg-gray-950 p-3 text-xs">
+              {invariantPreview.candidates.length === 0 ? (
+                <p className="text-amber-300">{invariantPreview.warnings.join('; ')}</p>
+              ) : invariantPreview.candidates.map((candidate, index) => (
+                <div key={`${candidate.contract_kind}-${index}`} className="flex flex-wrap items-center gap-2 text-gray-300">
+                  <Badge className="bg-blue-500/15 text-blue-300">{candidate.contract_kind}</Badge>
+                  <span>{candidate.title}</span>
+                  {candidate.method && <span className="font-mono text-gray-500">{candidate.method}</span>}
+                  {candidate.path && <span className="font-mono text-gray-400">{candidate.path}</span>}
+                  <Badge className={candidate.ready_for_approval ? 'bg-green-500/15 text-green-300' : 'bg-amber-500/15 text-amber-300'}>
+                    {candidate.ready_for_approval ? 'ready for review' : candidate.approval_errors?.join(', ') || 'needs fields'}
+                  </Badge>
+                  <span className="text-gray-600">no execution · no finding authority</span>
+                </div>
+              ))}
+            </div>
+          )}
+          {invariants && invariants.contracts.length > 0 && (
+            <div className="divide-y divide-gray-800 border-y border-gray-800">
+              {invariants.contracts.slice(0, 12).map((contract) => (
+                <div key={contract.id || contract.title} className="flex flex-wrap items-center gap-2 py-3 text-xs">
+                  <Badge className={contract.status === 'approved' ? 'bg-green-500/15 text-green-300' : 'bg-gray-800 text-gray-300'}>
+                    {contract.status}
+                  </Badge>
+                  <Badge className="bg-blue-500/15 text-blue-300">{contract.contract_kind}</Badge>
+                  <span className="min-w-0 flex-1 text-sm text-gray-200">{contract.title}</span>
+                  {contract.verification_plan && (
+                    <span className={contract.verification_plan.deterministic_family_supported ? 'text-green-300' : 'text-amber-300'}>
+                      {contract.verification_plan.deterministic_family_supported
+                        ? `${contract.verification_plan.proof_family} verifier available`
+                        : 'deterministic contract binder pending'}
+                    </span>
+                  )}
+                  {contract.status === 'draft' && contract.id && (
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      disabled={invariantBusy === contract.id}
+                      onClick={() => void handleApproveInvariant(contract.id!)}
+                    >
+                      {invariantBusy === contract.id ? 'Approving...' : 'Approve for planning'}
+                    </Button>
+                  )}
+                </div>
+              ))}
+            </div>
           )}
         </Card>
       )}

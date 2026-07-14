@@ -5003,6 +5003,62 @@ export interface TargetPrincipalMatrixResponse {
   findings_created: number
 }
 
+export interface TargetInvariantVerificationPlan {
+  verifier: string
+  proof_family: string
+  deterministic_family_supported: boolean
+  required_inputs: string[]
+  missing_inputs: string[]
+  ready_to_execute: boolean
+  requires_two_live_executions: boolean
+  requires_restoration: boolean
+  promotion_authority: boolean
+  promotion_gate?: string | null
+}
+
+export interface TargetInvariantContract {
+  id?: string | null
+  contract_kind: 'access_control' | 'field_constraint' | 'workflow_transition' | 'ownership'
+  title?: string
+  source_text?: string | null
+  subject_role?: string | null
+  action?: string | null
+  resource?: string | null
+  method?: string | null
+  path?: string | null
+  field_name?: string | null
+  operator?: string | null
+  expected_value?: unknown
+  expected_access?: 'allow' | 'deny' | 'requires_role' | null
+  conditions: Record<string, unknown>
+  status?: 'draft' | 'approved' | 'retired'
+  ready_for_approval?: boolean
+  approval_errors?: string[]
+  planning_authority: boolean
+  promotion_authority: boolean
+  verification_plan?: TargetInvariantVerificationPlan
+}
+
+export interface TargetInvariantListResponse {
+  target_id: string
+  contracts: TargetInvariantContract[]
+  count: number
+  approved_count: number
+  draft_count: number
+}
+
+export interface TargetInvariantCompileResponse {
+  target_id: string
+  candidates: TargetInvariantContract[]
+  candidate_count: number
+  matched: boolean
+  warnings: string[]
+  persisted_drafts: TargetInvariantContract[]
+  persisted_count: number
+  planning_authority: boolean
+  promotion_authority: boolean
+}
+
 export interface TargetPrincipalPayload {
   label: string
   role: string
@@ -5098,6 +5154,53 @@ export async function listInteractiveSessions(): Promise<InteractiveSessionsList
 export async function getTargetPrincipalMatrix(targetId: string, limit: number = 200): Promise<TargetPrincipalMatrixResponse> {
   const res = await fetch(`${API_URL}/targets/${encodeURIComponent(targetId)}/principal-matrix?limit=${limit}`)
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load target principal matrix'))
+  return res.json()
+}
+
+export async function getTargetInvariants(targetId: string): Promise<TargetInvariantListResponse> {
+  const res = await fetch(`${API_URL}/targets/${encodeURIComponent(targetId)}/invariants?include_drafts=true`)
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load target invariants'))
+  return res.json()
+}
+
+export async function compileTargetInvariant(
+  targetId: string,
+  payload: { rule_text: string; method?: string; path?: string; persist_drafts?: boolean; approval_receipt_id?: string },
+): Promise<TargetInvariantCompileResponse> {
+  const res = await fetch(`${API_URL}/targets/${encodeURIComponent(targetId)}/invariants/compile`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to compile target invariant'))
+  return res.json()
+}
+
+export async function approveTargetInvariant(
+  targetId: string,
+  contractId: string,
+  approvalReceiptId: string,
+): Promise<{ contract: TargetInvariantContract; planning_authority: boolean; promotion_authority: boolean }> {
+  const res = await fetch(`${API_URL}/targets/${encodeURIComponent(targetId)}/invariants/${encodeURIComponent(contractId)}/approve`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      approval_receipt_id: approvalReceiptId,
+      approved_by: 'interactive-ui',
+      confirm_authoritative: true,
+    }),
+  })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to approve target invariant'))
+  return res.json()
+}
+
+export async function generateTargetInvariantHypotheses(targetId: string): Promise<{ created: number; hypotheses: Array<Record<string, unknown>> }> {
+  const res = await fetch(`${API_URL}/targets/${encodeURIComponent(targetId)}/invariants/hypotheses`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ created_by: 'interactive-ui' }),
+  })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to generate invariant hypotheses'))
   return res.json()
 }
 

@@ -3422,6 +3422,23 @@ class TargetInvariantContractCreate(BaseModel):
     approval_receipt_id: str
 
 
+class TargetInvariantCompileRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    rule_text: str = Field(min_length=3, max_length=4000)
+    method: Optional[str] = Field(default=None, max_length=12)
+    path: Optional[str] = Field(default=None, max_length=1000)
+    persist_drafts: bool = False
+    approval_receipt_id: Optional[str] = None
+    created_by: Optional[str] = Field(default="target_invariant_compiler", max_length=120)
+
+
+class TargetInvariantHypothesisRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    created_by: Optional[str] = Field(default="target_invariant_hypotheses", max_length=120)
+
+
 class TargetInvariantContractApproval(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -3582,7 +3599,7 @@ class LocalAgentTestRequest(BaseModel):
 
 
 class HypothesisRequest(BaseModel):
-    source: str = Field(pattern="^(app_graph|source_ingest|ai_planner|scanner_signal|ai_gate|model_intake|benchmark|manual)$")
+    source: str = Field(pattern="^(app_graph|source_ingest|ai_planner|scanner_signal|ai_gate|model_intake|benchmark|invariant|manual)$")
     family: str = Field(min_length=1, max_length=80)
     dedupe_key: str = Field(min_length=1, max_length=500)
     dedupe_dimensions: dict[str, Any] = Field(default_factory=dict)
@@ -14505,6 +14522,169 @@ async def list_target_invariant_contracts(target_id: str, include_drafts: bool =
     }
 
 
+@app.post("/targets/{target_id}/invariants/compile")
+async def compile_target_invariant_rule(target_id: str, request: TargetInvariantCompileRequest):
+    """Compile one short rule into reviewable drafts; never approve, execute, or create findings."""
+    target_uuid = _uuid_or_400(target_id, "target id")
+    async with db_pool.acquire() as conn:
+        if not await conn.fetchrow("SELECT 1 FROM targets WHERE id=$1", target_uuid):
+            raise HTTPException(status_code=404, detail="Target not found")
+    try:
+        compiled = invariant_contracts.compile_rule_text(
+            _redact_agent_text(request.rule_text),
+            method=request.method,
+            path=request.path,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    persisted: list[dict[str, Any]] = []
+    if request.persist_drafts:
+        if not request.approval_receipt_id:
+            raise HTTPException(status_code=400, detail="approval_receipt_id is required to persist drafts")
+        for candidate in compiled["candidates"]:
+            fields = {
+                key: value
+                for key, value in candidate.items()
+                if key in TargetInvariantContractCreate.model_fields
+            }
+            created = await create_target_invariant_contract(
+                target_id,
+                TargetInvariantContractCreate(
+                    **fields,
+                    source="compiled",
+                    created_by=request.created_by,
+                    approval_receipt_id=request.approval_receipt_id,
+                ),
+            )
+            persisted.append(created["contract"])
+    return {
+        "target_id": target_id,
+        **compiled,
+        "persisted_drafts": persisted,
+        "persisted_count": len(persisted),
+        "approval_required": True,
+        "planning_authority": False,
+        "promotion_authority": False,
+    }
+
+
+@app.get("/targets/{target_id}/invariants/{contract_id}/verification-plan")
+async def get_target_invariant_verification_plan(target_id: str, contract_id: str):
+    """Explain the deterministic proof boundary and missing runtime bindings for one contract."""
+    target_uuid = _uuid_or_400(target_id, "target id")
+    contract_uuid = _uuid_or_400(contract_id, "invariant contract id")
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT * FROM target_invariant_contracts WHERE id=$1 AND target_id=$2",
+            contract_uuid,
+            target_uuid,
+        )
+    if not row:
+        raise HTTPException(status_code=404, detail="Invariant contract not found")
+    contract = _public_target_invariant_contract_row(row)
+    return {
+        "target_id": target_id,
+        "contract_id": contract_id,
+        "contract_status": contract.get("status"),
+        "verification_plan": invariant_contracts.verification_plan(contract),
+        "execution_enabled": False,
+        "findings_created": 0,
+    }
+
+
+def _invariant_hypothesis_request(
+    target_id: str,
+    contract: dict[str, Any],
+    *,
+    created_by: str | None,
+) -> HypothesisRequest:
+    plan = invariant_contracts.verification_plan(contract)
+    contract_id = str(contract.get("id") or "")
+    kind = str(contract.get("contract_kind") or "invariant")
+    family = str(plan.get("proof_family") or f"invariant_{kind}")
+    route = contract.get("path")
+    method = contract.get("method") or "GET"
+    supported = bool(plan.get("deterministic_family_supported")) and contract.get("status") == "approved"
+    next_command = "experiment.workflow" if supported else "experiment.http_diff"
+    parameters: dict[str, Any] = {"route": route, "method": method}
+    if supported:
+        parameters["proof_family"] = family
+    return HypothesisRequest(
+        target_id=target_id,
+        source="invariant",
+        family=family,
+        cwe="CWE-639" if family == "bola" else None,
+        title=f"Invariant lead: {contract.get('title') or kind}",
+        description=(
+            "An operator-approved typed invariant identifies a security property to test. "
+            "It is planning evidence only; a supported deterministic live verifier and independent "
+            "replay are required before finding promotion."
+        ),
+        severity_guess="high" if family == "bola" else "medium",
+        confidence=0.7,
+        dedupe_key=f"target_invariant|{contract_id}|{contract.get('version') or contract.get('contract_version')}",
+        dedupe_dimensions={
+            "invariant_contract_id": contract_id,
+            "contract_kind": kind,
+            "method": method,
+            "route": route,
+            "proof_surface": "approved_target_invariant",
+        },
+        next_test_action={
+            "command": next_command,
+            "parameters": parameters,
+            "requires": plan.get("required_inputs") or [],
+        },
+        endorsement={"source": "approved_target_invariant", "contract_id": contract_id},
+        metadata_json={
+            "invariant_contract_id": contract_id,
+            "contract_kind": kind,
+            "verification_plan": plan,
+            "operator_policy_only": True,
+            "promotion_authority": False,
+        },
+        created_by=created_by,
+    )
+
+
+@app.post("/targets/{target_id}/invariants/hypotheses")
+async def generate_target_invariant_hypotheses(
+    target_id: str,
+    request: TargetInvariantHypothesisRequest = None,
+):
+    """Turn approved invariants into deduped worklist leads without queueing or executing tests."""
+    request = request or TargetInvariantHypothesisRequest()
+    target_uuid = _uuid_or_400(target_id, "target id")
+    async with db_pool.acquire() as conn:
+        if not await conn.fetchrow("SELECT 1 FROM targets WHERE id=$1", target_uuid):
+            raise HTTPException(status_code=404, detail="Target not found")
+        rows = await conn.fetch(
+            """
+            SELECT * FROM target_invariant_contracts
+            WHERE target_id=$1 AND status='approved'
+            ORDER BY updated_at DESC
+            LIMIT 200
+            """,
+            target_uuid,
+        )
+        records = []
+        for row in rows:
+            contract = _public_target_invariant_contract_row(row)
+            records.append(await _upsert_hypothesis(
+                conn,
+                _invariant_hypothesis_request(target_id, contract, created_by=request.created_by),
+            ))
+    return {
+        "target_id": target_id,
+        "approved_contract_count": len(rows),
+        "created": sum(1 for item in records if item.get("created")),
+        "hypotheses": [item["hypothesis"] for item in records],
+        "execution_enabled": False,
+        "findings_created": 0,
+        "runtime_proof_required": True,
+    }
+
+
 @app.post("/targets/{target_id}/invariants")
 async def create_target_invariant_contract(target_id: str, request: TargetInvariantContractCreate):
     """Create a draft typed invariant. Drafts never enter planner context or proof decisions."""
@@ -22329,6 +22509,40 @@ async def _arsenal_dispatch_target_invariants(p: dict[str, Any]) -> dict[str, An
     )
 
 
+async def _arsenal_dispatch_target_invariant_compile(p: dict[str, Any]) -> dict[str, Any]:
+    target_id = str(p.get("target_id") or "").strip()
+    if not target_id:
+        raise HTTPException(status_code=400, detail="target.invariant.compile requires a target_id parameter")
+    fields = {k: v for k, v in p.items() if k in TargetInvariantCompileRequest.model_fields and v is not None}
+    fields["persist_drafts"] = False
+    fields.pop("approval_receipt_id", None)
+    return await compile_target_invariant_rule(target_id, TargetInvariantCompileRequest(**fields))
+
+
+async def _arsenal_dispatch_target_invariant_verification_plan(p: dict[str, Any]) -> dict[str, Any]:
+    target_id = str(p.get("target_id") or "").strip()
+    contract_id = str(p.get("contract_id") or "").strip()
+    if not target_id or not contract_id:
+        raise HTTPException(
+            status_code=400,
+            detail="target.invariant.verification_plan requires target_id and contract_id parameters",
+        )
+    return await get_target_invariant_verification_plan(target_id, contract_id)
+
+
+async def _arsenal_dispatch_target_invariant_hypotheses(p: dict[str, Any]) -> dict[str, Any]:
+    target_id = str(p.get("target_id") or "").strip()
+    if not target_id:
+        raise HTTPException(
+            status_code=400,
+            detail="target.invariant.generate_hypotheses requires a target_id parameter",
+        )
+    return await generate_target_invariant_hypotheses(
+        target_id,
+        TargetInvariantHypothesisRequest(created_by=p.get("created_by") or "arsenal.execute"),
+    )
+
+
 async def _arsenal_dispatch_target_principal_matrix_record(
     p: dict[str, Any], approval_receipt_id: str | None,
 ) -> dict[str, Any]:
@@ -23669,6 +23883,9 @@ def _arsenal_readonly_adapters() -> dict[str, Any]:
         "target.principals": _arsenal_dispatch_target_principals,
         "target.principal_matrix": _arsenal_dispatch_target_principal_matrix,
         "target.invariants": _arsenal_dispatch_target_invariants,
+        "target.invariant.compile": _arsenal_dispatch_target_invariant_compile,
+        "target.invariant.verification_plan": _arsenal_dispatch_target_invariant_verification_plan,
+        "target.invariant.generate_hypotheses": _arsenal_dispatch_target_invariant_hypotheses,
         "exposure.graph.get": _arsenal_dispatch_exposure_graph_get,
         "asm.gaps": _arsenal_dispatch_asm_gaps,
         "asm.activity": _arsenal_dispatch_asm_activity,
@@ -26558,6 +26775,21 @@ def _compact_research_observation_pack(pack: dict[str, Any]) -> dict[str, Any]:
         for key in ("expected_value", "conditions"):
             if raw_contract.get(key) not in (None, "", [], {}):
                 contract[key] = _bound_once(raw_contract[key], 2)
+        raw_plan = raw_contract.get("verification_plan")
+        if isinstance(raw_plan, dict):
+            contract["verification_plan"] = {
+                **_scalars(
+                    raw_plan,
+                    (
+                        "verifier", "proof_family", "deterministic_family_supported",
+                        "ready_to_execute", "requires_two_live_executions",
+                        "requires_restoration", "promotion_authority", "promotion_gate",
+                    ),
+                    text_limit=160,
+                ),
+                "required_inputs": _string_list(raw_plan.get("required_inputs"), count=12, item_limit=100),
+                "missing_inputs": _string_list(raw_plan.get("missing_inputs"), count=12, item_limit=100),
+            }
         if contract:
             invariant_digest.append(contract)
     _add_if_fits("approved_invariant_contracts", invariant_digest)
