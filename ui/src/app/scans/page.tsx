@@ -6,6 +6,7 @@ import { getScans, cancelScan, getDomains, getGradeColor, formatDate, formatDura
 import { useUrlFilters } from '@/lib/useUrlFilters'
 import { SCAN_STATUSES, SCAN_TYPES, type ScanType } from '@/lib/constants'
 import { Card, ConfirmDialog, ErrorState, LastUpdated, ScanStatusBadge, TableSkeleton, useToast } from '@/components/ui'
+import { ActiveHunts } from '@/components/hunt'
 
 const PAGE_SIZE = 50
 const SEARCH_DEBOUNCE_MS = 300
@@ -321,6 +322,8 @@ function ScansContent() {
           </Link>
         </div>
       </div>
+
+      <ActiveHunts />
 
       {/* Filters */}
       <div className="flex gap-4 flex-wrap">
