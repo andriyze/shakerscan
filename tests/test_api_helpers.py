@@ -10745,6 +10745,9 @@ class _ResearchPreviousActionConn:
                 "command_result_id": (
                     "result-1" if action.get("command") in api_module.GATED_RESEARCH_COMMANDS else None
                 ),
+                # A gated command counts as an intervening state change only if it actually produced a
+                # finding, not merely because it dispatched.
+                "cr_finding_ids": ["finding-1"] if action.get("_produced_finding") else None,
             }
             for action in self.actions
             if action is not None
@@ -10771,33 +10774,32 @@ def test_research_duplicate_guard_compares_normalized_command_and_parameters():
     assert different is False
 
 
-def test_research_duplicate_guard_ignores_read_only_churn_but_allows_after_state_change():
-    repeated = {
-        "command": "asm.gaps",
-        "parameters": {"target_id": "target-1"},
-    }
-    read_only_churn = {
-        "command": "arsenal.situation_report",
-        "parameters": {"target_id": "target-1"},
-    }
-    state_change = {
-        "command": "asm.improve",
-        "parameters": {"target_id": "target-1", "check_family": "xss"},
-    }
+def test_research_duplicate_guard_resets_only_on_a_finding_producing_command():
+    repeated = {"command": "asm.gaps", "parameters": {"target_id": "target-1"}}
+    read_only_churn = {"command": "arsenal.situation_report", "parameters": {"target_id": "target-1"}}
+    dispatched_no_finding = {"command": "asm.improve", "parameters": {"target_id": "target-1", "check_family": "xss"}}
+    produced_finding = {**dispatched_no_finding, "_produced_finding": True}
 
-    blocked = asyncio.run(api_module._research_is_consecutive_duplicate_action(
+    # Read-only churn between two identical actions is not a state change -> still a duplicate.
+    blocked_churn = asyncio.run(api_module._research_is_consecutive_duplicate_action(
         _ResearchPreviousActionConn([read_only_churn, repeated]),
-        "11111111-1111-4111-8111-111111111111",
-        repeated,
+        "11111111-1111-4111-8111-111111111111", repeated,
     ))
-    allowed = asyncio.run(api_module._research_is_consecutive_duplicate_action(
-        _ResearchPreviousActionConn([state_change, repeated]),
-        "11111111-1111-4111-8111-111111111111",
-        repeated,
+    # A gated command that merely DISPATCHED (partial/failed, no finding) must NOT reset the guard --
+    # otherwise "failed A -> partial B -> failed A" loops forever.
+    blocked_dispatch = asyncio.run(api_module._research_is_consecutive_duplicate_action(
+        _ResearchPreviousActionConn([dispatched_no_finding, repeated]),
+        "11111111-1111-4111-8111-111111111111", repeated,
+    ))
+    # A gated command that actually PRODUCED A FINDING is a real state change -> the repeat is allowed.
+    allowed_after_finding = asyncio.run(api_module._research_is_consecutive_duplicate_action(
+        _ResearchPreviousActionConn([produced_finding, repeated]),
+        "11111111-1111-4111-8111-111111111111", repeated,
     ))
 
-    assert blocked is True
-    assert allowed is False
+    assert blocked_churn is True
+    assert blocked_dispatch is True
+    assert allowed_after_finding is False
 
 
 class _StaleResearchDispatchConn:

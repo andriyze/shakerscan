@@ -25644,22 +25644,49 @@ async def _research_recent_actions(
         replay = rj.get("replay") if isinstance(rj.get("replay"), dict) else {}
         family_proof = rj.get("family_proof") if isinstance(rj.get("family_proof"), dict) else {}
         promotion = rj.get("promotion") if isinstance(rj.get("promotion"), dict) else {}
+        workflow_result = rj.get("workflow") if isinstance(rj.get("workflow"), dict) else {}
         operator_message = item.pop("operator_message", None)
+        # Surface the first FAILING observation (method/path/status + scrubbed body_sample) so the planner
+        # sees the ROOT cause -- e.g. "POST /Feedbacks 500, captchaId missing" -- not just "restoration not
+        # verified". This is the concrete detail a producer->consumer recovery needs.
+        failure_detail = None
+        for _obs in (workflow_result.get("observations") or replay.get("observations") or []):
+            if not isinstance(_obs, dict):
+                continue
+            _resp = _obs.get("response") if isinstance(_obs.get("response"), dict) else {}
+            _status = _resp.get("status")
+            if _obs.get("error") or (isinstance(_status, int) and _status >= 400):
+                _req = _obs.get("request") if isinstance(_obs.get("request"), dict) else {}
+                failure_detail = {
+                    "step": _obs.get("label"),
+                    "method": _req.get("method"),
+                    "path": _req.get("path"),
+                    "status": _status,
+                    "error": _obs.get("error"),
+                    "body_sample": (str(_resp.get("body_sample"))[:200] if _resp.get("body_sample") else None),
+                }
+                break
         item["result"] = {
             "status": item.pop("command_status", None),
             "scan_id": item.pop("scan_id", None),
             "retest_id": rj.get("retest_id"),
-            # D3 (Finding 2 fix): the proof state is nested under `replay`; the failure reason under
-            # replay.replay_blocked_reason / promotion.reason / family_proof.reason; and the human summary
-            # is the operator_message COLUMN -- none of these are top-level result_json. Surface all three
-            # so the planner can see WHY an experiment did not verify and adapt (chain a producer / pick
-            # another object) instead of re-running the same unsatisfiable workflow and burning budget.
-            "proof_state": replay.get("proof_state") or rj.get("proof_state") or family_proof.get("verdict"),
+            # The AUTHORITATIVE proof state is family_proof.verdict / the promotion outcome -- NOT
+            # replay.proof_state, which is always the pre-promotion placeholder "unverified_workflow_signal"
+            # (would otherwise tell the planner "unverified" even for a promoted, verified finding).
+            "proof_state": (
+                family_proof.get("verdict")
+                or promotion.get("proof_state")
+                or replay.get("proof_state")
+                or rj.get("proof_state")
+            ),
+            # Why it did not verify (nested under replay/promotion/family_proof); operator_message is a
+            # COLUMN; failure_detail carries the concrete failing request for producer->consumer recovery.
             "failure_reason": (
                 replay.get("replay_blocked_reason")
                 or promotion.get("reason")
                 or family_proof.get("reason")
             ),
+            "failure_detail": failure_detail,
             "operator_message": (str(operator_message)[:300] if operator_message else None),
         }
         item.pop("result_json", None)
@@ -26020,7 +26047,8 @@ def _compact_research_observation_pack(pack: dict[str, Any]) -> dict[str, Any]:
         result = raw_action.get("result") if isinstance(raw_action.get("result"), dict) else {}
         result_digest = _scalars(
             result,
-            ("status", "scan_id", "retest_id", "proof_state", "failure_reason", "operator_message"),
+            ("status", "scan_id", "retest_id", "proof_state", "failure_reason",
+             "failure_detail", "operator_message"),
             text_limit=200,
         )
         if result_digest:
@@ -26833,9 +26861,11 @@ async def _research_is_consecutive_duplicate_action(
 ) -> bool:
     previous_rows = await conn.fetch(
         """
-        SELECT rd.action, rd.status, rd.policy_result, rd.command_result_id
+        SELECT rd.action, rd.status, rd.policy_result, rd.command_result_id,
+               cr.finding_ids AS cr_finding_ids
         FROM research_decisions rd
         JOIN research_episodes re ON re.id=rd.episode_id
+        LEFT JOIN command_results cr ON cr.id=rd.command_result_id
         WHERE rd.decision_type='execute_action'
           AND rd.status IN ('accepted','dispatching','completed','blocked')
           AND (
@@ -26845,7 +26875,7 @@ async def _research_is_consecutive_duplicate_action(
               )
           )
         ORDER BY rd.created_at DESC
-        LIMIT 50
+        LIMIT 200
         """,
         _optional_uuid(episode_id),
     )
@@ -26869,12 +26899,13 @@ async def _research_is_consecutive_duplicate_action(
         }
         if _research_canonical_hash(previous_comparable) == fingerprint:
             return not intervening_state_change
-        policy_result = _decode_json_value(row.get("policy_result")) or {}
-        changed_state = bool(policy_result.get("dispatched")) or bool(
-            row.get("command_result_id")
-            and str(row.get("status") or "") in {"dispatching", "completed"}
-        )
-        if previous_comparable["command"] in GATED_RESEARCH_COMMANDS and changed_state:
+        # A truly intervening state change requires the gated command to have actually PRODUCED a result
+        # (a finding), not merely to have been dispatched. A failed/partial command that changed nothing
+        # must NOT reset the duplicate guard -- otherwise the "failed A -> partial B -> failed A" loop the
+        # audit flagged repeats forever. Widened window (200) also reduces short-window rollover; fully
+        # durable enforcement across thousands of decisions (a persisted fingerprint set) stays Phase 1.
+        produced_finding = bool(row.get("cr_finding_ids"))
+        if previous_comparable["command"] in GATED_RESEARCH_COMMANDS and produced_finding:
             intervening_state_change = True
     return False
 
