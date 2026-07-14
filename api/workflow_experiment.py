@@ -256,34 +256,6 @@ def _same_resource(left: dict[str, Any], right: dict[str, Any], *, same_method: 
     return left_signature[1] == right_signature[1]
 
 
-def _json_scalar_values(parsed: Any, *, max_values: int = 400, max_depth: int = 8) -> set[str]:
-    """Collect lowercased scalar leaf values from a parsed JSON body (bounded).
-
-    Used to test whether a principal's own identity value appears in an object it read (read-existing
-    ownership). Bounded so an adversarial response cannot blow up CPU/memory.
-    """
-    values: set[str] = set()
-
-    def _walk(node: Any, depth: int) -> None:
-        if len(values) >= max_values or depth > max_depth:
-            return
-        if isinstance(node, dict):
-            for item in node.values():
-                _walk(item, depth + 1)
-        elif isinstance(node, (list, tuple)):
-            for item in node:
-                _walk(item, depth + 1)
-        elif isinstance(node, bool):
-            return
-        elif isinstance(node, (str, int, float)):
-            text = str(node).strip().lower()
-            if text:
-                values.add(text[:200])
-
-    _walk(parsed, 0)
-    return values
-
-
 def _server_confirms_predicate(
     predicate: str,
     assertion: dict[str, Any],
@@ -331,24 +303,13 @@ def _server_confirms_predicate(
         # that same principal in this workflow.  Anonymous denial only proves authentication, not
         # ownership, and therefore cannot replace this provenance check.
         referenced = set(control_request.get("variable_references") or [])
-        owner_provenance = any(
+        owner_established = any(
             obs.get("checkpoint") == "mutation"
             and str(obs.get("principal") or "").lower() == control_principal
             and _obs_success(obs)
             and bool(referenced & set(obs.get("extracted_names") or []))
             for obs in by_label.values()
         )
-        # Read-existing ownership (no create needed): the owner's OWN identity value is present in the
-        # object it read, and the attacker's identity is ABSENT from the equivalent object it read ->
-        # the attacker accessed an object owned by someone else. Both booleans are server-computed from
-        # raw response bodies during execution (never model-supplied). A shared resource carries no owner
-        # identity so the control side is false; an attacker reading its own object makes the candidate
-        # side true; either way this cannot fire on benign access.
-        owner_by_identity = (
-            bool((control.get("owner_binding") or {}).get("requester_identity_present"))
-            and not bool((candidate.get("owner_binding") or {}).get("requester_identity_present"))
-        )
-        owner_established = owner_provenance or owner_by_identity
         base = bool(distinct and same_request and equivalent and _obs_success(control) and _obs_success(candidate))
         return base and (owner_established if predicate == "ownership_established" else True)
     if predicate == "distinct_identity":
@@ -903,7 +864,6 @@ async def execute_workflow(
             extracted: dict[str, str] = {}
             sensitive_value_categories: list[str] = []
             submitted_fields: list[str] = []
-            owner_binding: dict[str, Any] = {"requester_identity_present": False, "identity_bearing": False}
             response: dict[str, Any] | None = None
             request_view: dict[str, Any] = {"kind": step["kind"], "principal": step["principal"]}
             error: str | None = None
@@ -986,20 +946,6 @@ async def execute_workflow(
                         parsed = json.loads(body_text)
                     except (TypeError, ValueError):
                         pass
-                    # Sound read-existing ownership signal: does the REQUESTER's own identity value appear
-                    # in the object it read? Computed from the raw body + raw principal identity; only the
-                    # boolean leaves this scope (raw identity/body never persisted). ownership_established
-                    # later holds when the owner's identity IS present and the attacker's is ABSENT.
-                    requester_identity_values = {
-                        str(value).strip().lower()
-                        for value in (context.get("identity_values") or [])
-                        if len(str(value).strip()) >= 3
-                    }
-                    object_scalars = _json_scalar_values(parsed)
-                    owner_binding = {
-                        "requester_identity_present": bool(requester_identity_values & object_scalars),
-                        "identity_bearing": bool(object_scalars),
-                    }
                     for spec in step["extract"]:
                         value = _json_path_get(parsed, spec["selector"]) if spec["source"] == "json" else http_response.headers.get(spec["selector"])
                         if value is None:
@@ -1043,7 +989,6 @@ async def execute_workflow(
                 "request": request_view, "response": response,
                 "sensitive_value_categories": sensitive_value_categories if not error else [],
                 "submitted_fields": submitted_fields if not error else [],
-                "owner_binding": owner_binding if not error else {"requester_identity_present": False, "identity_bearing": False},
                 "extracted_names": sorted(extracted) if not error else [],
                 "extracted": {name: {"sha256": hashlib.sha256(value.encode()).hexdigest(), "length": len(value)} for name, value in extracted.items()} if not error else {},
                 "error": error,
