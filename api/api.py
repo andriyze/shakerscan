@@ -22669,6 +22669,35 @@ def _workflow_identity_fingerprint(principal_metadata: Any, profile_metadata: An
     return hashlib.sha256(identity.encode()).hexdigest() if identity else None
 
 
+def _workflow_identity_values(principal_metadata: Any, profile_metadata: Any, secret: str, auth_kind: str) -> list[str]:
+    """Raw (lowercased) identity values for a principal -- the same sources the identity fingerprint is
+    built from, but UNHASHED so the executor can test whether they appear in an object the principal read
+    (read-existing ownership). Values stay server-side (context only); only a boolean is ever persisted."""
+    values: set[str] = set()
+    for source in (_decode_json_value(principal_metadata) or {}, _decode_json_value(profile_metadata) or {}):
+        if isinstance(source, dict):
+            for key in ("principal_identity", "account_id", "subject_id", "user_id", "email", "username"):
+                value = str(source.get(key) or "").strip().lower()
+                if value:
+                    values.add(value)
+    if auth_kind == "authorization_header" and secret:
+        token = secret.split(None, 1)[1] if secret.lower().startswith("bearer ") and " " in secret else secret
+        parts = token.split(".")
+        if len(parts) == 3:
+            try:
+                payload = json.loads(base64.urlsafe_b64decode(parts[1] + "=" * (-len(parts[1]) % 4)))
+            except (ValueError, TypeError, json.JSONDecodeError):
+                payload = {}
+            if isinstance(payload, dict):
+                for key in ("account_id", "user_id", "email", "sub", "username", "id"):
+                    value = str(payload.get(key) or "").strip().lower()
+                    if value and not (key == "sub" and value in {"user", "customer", "generic"}):
+                        values.add(value)
+    # Drop values too short to be a reliable identity (e.g. "1"), which would false-match a common
+    # scalar in an unrelated object.
+    return sorted(value for value in values if len(value) >= 3)
+
+
 def _workflow_cookie_map(secret: str) -> dict[str, str]:
     cookies: dict[str, str] = {}
     for item in secret.split(";"):
@@ -22732,6 +22761,9 @@ async def _resolve_workflow_principal_contexts(
             "principal_id": str(row.get("principal_id")),
             "profile_id": str(row.get("profile_id")),
             "identity_fingerprint": _workflow_identity_fingerprint(
+                row.get("principal_metadata"), row.get("profile_metadata"), secret, auth_kind
+            ),
+            "identity_values": _workflow_identity_values(
                 row.get("principal_metadata"), row.get("profile_metadata"), secret, auth_kind
             ),
             "role": row.get("role"),

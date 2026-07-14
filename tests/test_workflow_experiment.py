@@ -449,6 +449,53 @@ def test_bola_predicates_require_created_object_identity_and_denial_control():
     assert "cross_principal_access" not in corroborated
 
 
+def test_bola_read_existing_ownership_by_identity_binding():
+    # A read-existing BOLA (crAPI's actual class: read another user's pre-owned object) proves WITHOUT a
+    # create step when the object provably carries the OWNER's identity (present in what user1 read) but
+    # NOT the attacker's (absent from the equivalent object user2 read). owner_binding is server-computed
+    # from raw bodies during execution, never model-supplied.
+    def result_with(owner_present, attacker_present):
+        return {
+            "principal_receipts": [
+                {"slot": "user1", "identity_fingerprint": "owner-id"},
+                {"slot": "user2", "identity_fingerprint": "attacker-id"},
+            ],
+            "observations": [
+                {"label": "owner", "principal": "user1",
+                 "request": {"method": "GET", "path": "/vehicle/9"}, "response": {"status": 200},
+                 "owner_binding": {"requester_identity_present": owner_present, "identity_bearing": True}},
+                {"label": "attacker", "principal": "user2",
+                 "request": {"method": "GET", "path": "/vehicle/9"}, "response": {"status": 200},
+                 "owner_binding": {"requester_identity_present": attacker_present, "identity_bearing": True}},
+                {"label": "anonymous", "principal": "anonymous",
+                 "request": {"method": "GET", "path": "/vehicle/9"}, "response": {"status": 401}},
+            ],
+            "comparisons": [{
+                "control": "owner", "candidate": "attacker", "comparable": True,
+                "body_changed": False, "status_changed": False,
+            }],
+            "assertion_results": [
+                {"id": "ids", "type": "distinct_principals", "steps": ["owner", "attacker"],
+                 "predicate": "distinct_identity", "passed": True},
+                {"id": "own", "type": "comparison_equivalent", "control": "owner", "candidate": "attacker",
+                 "predicate": "ownership_established", "passed": True},
+                {"id": "cross", "type": "comparison_equivalent", "control": "owner", "candidate": "attacker",
+                 "predicate": "cross_principal_access", "passed": True},
+                {"id": "deny", "type": "status_not_in", "step": "anonymous", "values": [200, 201, 204],
+                 "predicate": "denial_control", "passed": True},
+            ],
+        }
+
+    # Owner's identity present in the object, attacker's absent -> full BOLA proof, no create needed.
+    assert workflow.server_corroborated_predicates(result_with(True, False)) == {
+        "distinct_identity", "ownership_established", "cross_principal_access", "denial_control",
+    }
+    # A shared resource with no owner identity in the object -> ownership NOT established.
+    assert "ownership_established" not in workflow.server_corroborated_predicates(result_with(False, False))
+    # The attacker reading its OWN object (its identity present) is not a BOLA.
+    assert "ownership_established" not in workflow.server_corroborated_predicates(result_with(True, True))
+
+
 def test_injection_predicates_are_never_workflow_corroborated():
     result = {
         "observations": [{"label": "p", "principal": "anonymous", "response": {"status": 200}}],
