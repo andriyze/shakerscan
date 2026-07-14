@@ -25623,7 +25623,7 @@ async def _research_recent_actions(
         SELECT rd.sequence, rd.decision_type, rd.status, rd.action, rd.reason,
                rd.expected_signal, rd.falsifier, rd.validation_errors,
                rd.command_result_id, cr.status AS command_status, cr.scan_id,
-               cr.result_json
+               cr.result_json, cr.operator_message
         FROM research_decisions rd
         LEFT JOIN command_results cr ON cr.id=rd.command_result_id
         JOIN research_episodes re ON re.id=rd.episode_id
@@ -25641,16 +25641,26 @@ async def _research_recent_actions(
         item["validation_errors"] = _decode_json_value(item.get("validation_errors")) or []
         result_json = _decode_json_value(item.get("result_json")) or {}
         rj = result_json if isinstance(result_json, dict) else {}
+        replay = rj.get("replay") if isinstance(rj.get("replay"), dict) else {}
+        family_proof = rj.get("family_proof") if isinstance(rj.get("family_proof"), dict) else {}
+        promotion = rj.get("promotion") if isinstance(rj.get("promotion"), dict) else {}
+        operator_message = item.pop("operator_message", None)
         item["result"] = {
             "status": item.pop("command_status", None),
             "scan_id": item.pop("scan_id", None),
             "retest_id": rj.get("retest_id"),
-            # D3: surface WHY an experiment did not verify (e.g. a create/mutation precondition failure)
-            # so the planner can adapt -- chain a producer or pick a different object -- instead of
-            # blindly re-running the same unsatisfiable workflow and burning budget.
-            "proof_state": rj.get("proof_state"),
-            "outcome": rj.get("outcome"),
-            "operator_message": (str(rj.get("operator_message"))[:300] if rj.get("operator_message") else None),
+            # D3 (Finding 2 fix): the proof state is nested under `replay`; the failure reason under
+            # replay.replay_blocked_reason / promotion.reason / family_proof.reason; and the human summary
+            # is the operator_message COLUMN -- none of these are top-level result_json. Surface all three
+            # so the planner can see WHY an experiment did not verify and adapt (chain a producer / pick
+            # another object) instead of re-running the same unsatisfiable workflow and burning budget.
+            "proof_state": replay.get("proof_state") or rj.get("proof_state") or family_proof.get("verdict"),
+            "failure_reason": (
+                replay.get("replay_blocked_reason")
+                or promotion.get("reason")
+                or family_proof.get("reason")
+            ),
+            "operator_message": (str(operator_message)[:300] if operator_message else None),
         }
         item.pop("result_json", None)
         actions.append(_bounded_research_payload(item))
@@ -26008,7 +26018,11 @@ def _compact_research_observation_pack(pack: dict[str, Any]) -> dict[str, Any]:
         if action_digest:
             digest["action"] = action_digest
         result = raw_action.get("result") if isinstance(raw_action.get("result"), dict) else {}
-        result_digest = _scalars(result, ("status", "scan_id", "retest_id"), text_limit=160)
+        result_digest = _scalars(
+            result,
+            ("status", "scan_id", "retest_id", "proof_state", "failure_reason", "operator_message"),
+            text_limit=200,
+        )
         if result_digest:
             digest["result"] = result_digest
         actions.append(digest)
@@ -26831,7 +26845,7 @@ async def _research_is_consecutive_duplicate_action(
               )
           )
         ORDER BY rd.created_at DESC
-        LIMIT 20
+        LIMIT 50
         """,
         _optional_uuid(episode_id),
     )
@@ -27675,7 +27689,7 @@ def _research_campaign_terminal_needs_review(
     episode_id = str(latest_episode_id or "")
     return bool(
         episode_id
-        and str(latest_status or "") in {"blocked", "failed", "cancelled"}
+        and str(latest_status or "") in {"blocked", "failed"}
         and str(config.get("last_paused_episode_id") or "") != episode_id
     )
 
@@ -27750,10 +27764,25 @@ async def _continue_autonomous_research_campaigns() -> int:
             continue
         latest_episode_id = str(payload.get("latest_episode_id") or "")
         latest_status = str(payload.get("latest_episode_status") or "")
-        # Escalate-don't-block: a blocked/failed/cancelled episode is recorded as a durable blocker and
-        # the campaign keeps moving (a fresh episode is chained) so it stays autonomous. Only after
-        # several consecutive unrecovered episodes do we pause for real operator review -- a genuine
-        # systemic failure, not a single dead end.
+        # An operator cancelling THIS episode is an explicit stop, not a recoverable planner failure --
+        # do NOT relaunch active testing ~30s later. Pause the campaign; an explicit resume restarts it.
+        if latest_status == "cancelled" and str(config.get("last_paused_episode_id") or "") != latest_episode_id:
+            async with db_pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    UPDATE campaigns SET status='paused',
+                        metadata_json=jsonb_set(
+                            jsonb_set(metadata_json, '{autonomous_research,last_paused_episode_id}', to_jsonb($2::text), true),
+                            '{autonomous_research,last_error}', to_jsonb($3::text), true),
+                        updated_at=NOW() WHERE id=$1
+                    """,
+                    row["id"], latest_episode_id,
+                    "Latest research episode was cancelled by an operator; campaign paused (resume to continue)",
+                )
+            continue
+        # Escalate-don't-block: a blocked/failed episode is recorded as a durable blocker and the campaign
+        # keeps moving (a fresh episode is chained) so it stays autonomous. Only after several consecutive
+        # unrecovered episodes do we pause for real operator review -- a systemic failure, not a dead end.
         from_review = False
         if _research_campaign_terminal_needs_review(config, latest_episode_id, latest_status):
             consecutive_blocked = int(config.get("consecutive_blocked") or 0) + 1

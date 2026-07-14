@@ -10625,7 +10625,10 @@ def test_research_autopilot_operator_control_races_are_not_planner_errors():
 def test_research_campaign_pauses_once_for_terminal_failures_until_operator_resume():
     assert api_module._research_campaign_terminal_needs_review({}, "episode-1", "blocked") is True
     assert api_module._research_campaign_terminal_needs_review({}, "episode-1", "failed") is True
-    assert api_module._research_campaign_terminal_needs_review({}, "episode-1", "cancelled") is True
+    # An operator-cancelled episode is an explicit stop handled by a dedicated pause path, NOT a
+    # recoverable failure -- so the escalate-don't-block review must NOT claim it (Finding 3), otherwise
+    # cancelling a misbehaving episode would auto-relaunch active testing ~30s later.
+    assert api_module._research_campaign_terminal_needs_review({}, "episode-1", "cancelled") is False
     assert api_module._research_campaign_terminal_needs_review({}, "episode-1", "completed") is False
     assert api_module._research_campaign_terminal_needs_review(
         {"last_paused_episode_id": "episode-1"}, "episode-1", "blocked"
