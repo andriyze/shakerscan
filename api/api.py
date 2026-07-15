@@ -24987,6 +24987,7 @@ async def _arsenal_execute_detached(req: ArsenalExecuteRequest) -> dict[str, Any
 
     if req.command in readonly and status in {"read_only", "dry_run"}:
         result = await readonly[req.command](req.parameters)
+        durable_result = _bounded_research_payload(result)
         async with db_pool.acquire() as conn:
             cr = await _record_command_result(
                 conn,
@@ -24994,7 +24995,11 @@ async def _arsenal_execute_detached(req: ArsenalExecuteRequest) -> dict[str, Any
                 status="completed",
                 risk_tier=risk_tier,
                 operator_message=f"Executed {req.command} via arsenal execution gateway",
-                result_json={"dispatched": True, "via": "arsenal.execute"},
+                result_json={
+                    "dispatched": True,
+                    "via": "arsenal.execute",
+                    "result": durable_result,
+                },
                 created_by=req.created_by,
             )
             await _link_command_result_to_campaign(conn, req.campaign_id, cr["id"])
@@ -26981,6 +26986,28 @@ def _research_experiment_projection(source: Any) -> dict[str, Any]:
     return _bounded_research_payload(projection)
 
 
+def _research_read_result_projection(source: Any, *, depth: int = 0) -> Any:
+    """Keep enough durable read evidence for a later planner turn to reason from.
+
+    Read adapters can return large scans, graphs, or finding collections. Persist the
+    redacted result once, then give observations a smaller deterministic projection so
+    a useful sample survives the global observation byte cap.
+    """
+    if depth > 5:
+        return "[truncated]"
+    bounded = _bounded_research_payload(source)
+    if isinstance(bounded, dict):
+        return {
+            str(key)[:120]: _research_read_result_projection(value, depth=depth + 1)
+            for key, value in list(bounded.items())[:40]
+        }
+    if isinstance(bounded, list):
+        return [_research_read_result_projection(item, depth=depth + 1) for item in bounded[:25]]
+    if isinstance(bounded, str):
+        return bounded[:1200]
+    return bounded
+
+
 def _research_previous_result_digest(value: Any) -> dict[str, Any]:
     result = value if isinstance(value, dict) else {}
     raw_error = result.get("error")
@@ -27038,6 +27065,10 @@ def _research_previous_result_digest(value: Any) -> dict[str, Any]:
     if typed_result_json:
         digest["command_result"]["result_json"] = typed_result_json
     command_name = str(result.get("command") or command_result.get("command") or "")
+    durable_read_result = result_json.get("result")
+    read_source = nested or durable_read_result
+    if command_name in READ_ONLY_RESEARCH_COMMANDS and read_source not in (None, "", [], {}):
+        digest["read_result"] = _research_read_result_projection(read_source)
     experiment_source = nested
     if command_name == "experiment.http_diff" and not experiment_source.get("experiment"):
         experiment_source = result_json

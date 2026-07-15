@@ -6659,6 +6659,58 @@ def test_arsenal_execute_detached_dispatches_without_holding_outer_db_conn(monke
     assert captured_parameters["_research_hypothesis_id"] == "22222222-2222-4222-8222-222222222222"
 
 
+def test_arsenal_execute_detached_persists_bounded_read_result(monkeypatch):
+    class _Pool:
+        def __init__(self):
+            self.conn = _BlockedRecordingConn()
+
+        def acquire(self):
+            conn = self.conn
+
+            class _Acquire:
+                async def __aenter__(self):
+                    return conn
+
+                async def __aexit__(self, *exc):
+                    return False
+
+            return _Acquire()
+
+    pool = _Pool()
+
+    async def fake_validate(*args, **kwargs):
+        return ({"name": "asm.gaps"}, "read_only", "read_only")
+
+    async def fake_adapter(parameters):
+        return {
+            "target_id": parameters["target_id"],
+            "family_coverage": {"bola": {"completed": 0, "attempts": 1}},
+            "recommended_campaigns": [{"family": "bola", "reason": "no owner/attacker proof"}],
+            "authorization": "Bearer should-not-survive",
+            "oversized": "x" * 10_000,
+        }
+
+    monkeypatch.setattr(api_module, "db_pool", pool)
+    monkeypatch.setattr(api_module, "_validate_arsenal_execute_request", fake_validate)
+    monkeypatch.setattr(api_module, "_validate_campaign_action_for_execution", lambda *args: asyncio.sleep(0))
+    monkeypatch.setattr(api_module, "_arsenal_readonly_adapters", lambda: {"asm.gaps": fake_adapter})
+    monkeypatch.setattr(api_module, "_arsenal_gated_adapters", lambda: {})
+
+    result = asyncio.run(api_module._arsenal_execute_detached(
+        api_module.ArsenalExecuteRequest(
+            command="asm.gaps",
+            parameters={"target_id": "11111111-1111-4111-8111-111111111111"},
+            execute=True,
+        )
+    ))
+
+    stored = json.loads(pool.conn.recorded[0]["result_json"])["result"]
+    assert stored["family_coverage"]["bola"]["attempts"] == 1
+    assert stored["authorization"] == "***"
+    assert len(stored["oversized"]) == 4000
+    assert result["command_result"]["result_json"]["result"] == stored
+
+
 # ----- §7 mission campaigns ----------------------------------------------------
 
 class _CampaignConn:
@@ -9907,6 +9959,29 @@ def test_research_previous_result_digest_preserves_experiment_evidence_without_b
     assert result["observations"] == [{"label": "candidate", "method": "POST", "path": "/api/profile", "status": 200}]
     assert "private response" not in str(digest)
     assert "Authorization" not in str(digest)
+
+
+def test_research_previous_result_digest_preserves_durable_read_evidence():
+    digest = api_module._research_previous_result_digest({
+        "command": "finding.get",
+        "command_result": {
+            "command": "finding.get",
+            "result_json": {
+                "result": {
+                    "id": "finding-1",
+                    "family": "bola",
+                    "method": "GET",
+                    "url": "https://app.example.test/api/orders/123",
+                    "evidence": {"owner_status": 200, "attacker_status": 200},
+                    "authorization": "Bearer should-not-survive",
+                }
+            },
+        },
+    })
+
+    assert digest["read_result"]["id"] == "finding-1"
+    assert digest["read_result"]["evidence"]["attacker_status"] == 200
+    assert digest["read_result"]["authorization"] == "***"
 
 
 def test_compact_research_observation_hard_caps_adversarial_nested_pack():
