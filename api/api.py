@@ -30648,7 +30648,7 @@ async def _research_campaign_yield_metrics(conn: Any, campaign: Any) -> dict[str
           AND last_verification_verdict='exploited'
         """,
         target_id,
-        campaign_id,
+        str(campaign_id),
     ) or 0)
     metadata = _decode_json_value(payload.get("metadata_json")) or {}
     config = metadata.get("autonomous_research") if isinstance(metadata.get("autonomous_research"), dict) else {}

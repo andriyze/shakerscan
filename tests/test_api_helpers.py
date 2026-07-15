@@ -13605,7 +13605,10 @@ def test_campaign_yield_counts_only_findings_with_campaign_provenance():
     assert "research_provenance_history" in query
     assert "campaign_id" in query
     assert "created_at >=" not in query
-    assert args == (target_id, campaign_id)
+    # The provenance comparison casts the bind parameter to PostgreSQL text.
+    # Keep the Python value text as well; asyncpg does not coerce UUID objects
+    # for parameters whose declared SQL type is text.
+    assert args == (target_id, str(campaign_id))
 
 
 def test_research_graph_preserves_history_and_attributes_parallel_children():
