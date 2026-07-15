@@ -29291,7 +29291,9 @@ def _validate_research_intensity_families(intensity: Any, families: list[str]) -
 
 def _research_hypothesis_route(hypothesis: dict[str, Any]) -> str | None:
     metadata = hypothesis.get("metadata_json") if isinstance(hypothesis.get("metadata_json"), dict) else {}
-    dimensions = hypothesis.get("dedupe_dimensions") if isinstance(hypothesis.get("dedupe_dimensions"), dict) else {}
+    metadata_dimensions = metadata.get("dedupe_dimensions") if isinstance(metadata.get("dedupe_dimensions"), dict) else {}
+    direct_dimensions = hypothesis.get("dedupe_dimensions") if isinstance(hypothesis.get("dedupe_dimensions"), dict) else {}
+    dimensions = {**metadata_dimensions, **direct_dimensions}
     next_action = hypothesis.get("next_test_action") if isinstance(hypothesis.get("next_test_action"), dict) else {}
     parameters = next_action.get("parameters") if isinstance(next_action.get("parameters"), dict) else {}
     return _canonical_vulnerability_route(
@@ -29303,8 +29305,10 @@ def _research_hypothesis_route(hypothesis: dict[str, Any]) -> str | None:
 
 
 def _research_hypothesis_vulnerability_key(hypothesis: dict[str, Any]) -> str | None:
-    dimensions = hypothesis.get("dedupe_dimensions") if isinstance(hypothesis.get("dedupe_dimensions"), dict) else {}
     metadata = hypothesis.get("metadata_json") if isinstance(hypothesis.get("metadata_json"), dict) else {}
+    metadata_dimensions = metadata.get("dedupe_dimensions") if isinstance(metadata.get("dedupe_dimensions"), dict) else {}
+    direct_dimensions = hypothesis.get("dedupe_dimensions") if isinstance(hypothesis.get("dedupe_dimensions"), dict) else {}
+    dimensions = {**metadata_dimensions, **direct_dimensions}
     return _canonical_vulnerability_key(
         family=hypothesis.get("family"),
         route=_research_hypothesis_route(hypothesis),
@@ -32067,6 +32071,7 @@ async def _research_autobind_hypothesis(
         return
     family = family_proof.canonical_family(params.get("proof_family") or "workflow")
     route = None
+    selected_step: dict[str, Any] = {}
     steps = [step for step in (params.get("steps") or []) if isinstance(step, dict)]
     preferred_labels: set[str] = set()
     preferred_predicates = {
@@ -32088,11 +32093,34 @@ async def _research_autobind_hypothesis(
         if isinstance(step, dict) and step.get("path"):
             route = _canonical_vulnerability_route(step.get("path"))
             if route:
+                selected_step = step
                 break
+    if not route:
+        route = _canonical_vulnerability_route(params.get("route") or params.get("url"))
+    method = str(selected_step.get("method") or params.get("method") or "GET").upper()
     target_id = str(episode.get("target_id") or "")
     if not target_id or not route:
         return
-    # 1) Prefer an existing ranked lead of the same family + route.
+    assertion_predicates = [
+        str(assertion.get("predicate"))
+        for assertion in (params.get("assertions") or [])
+        if isinstance(assertion, dict) and assertion.get("predicate")
+    ]
+    vulnerability_dimensions = _research_vulnerability_dimensions(
+        params.get("proof_family") or family,
+        params,
+        selected_step,
+        {"predicates": assertion_predicates},
+    )
+    candidate_key = _canonical_vulnerability_key(
+        family=family,
+        route=route,
+        method=method,
+        dimensions=vulnerability_dimensions,
+    )
+    if not candidate_key:
+        return
+    # 1) Prefer an existing ranked lead only when its complete vulnerability identity matches.
     ranked = (observation_pack.get("current_surface") or {}).get("ranked_hypotheses") or []
     for entry in ranked:
         hypothesis = entry.get("hypothesis") if isinstance(entry, dict) else None
@@ -32100,12 +32128,7 @@ async def _research_autobind_hypothesis(
             continue
         if family_proof.canonical_family(hypothesis.get("family")) != family:
             continue
-        candidate_route = _canonical_vulnerability_route(
-            hypothesis.get("route")
-            or ((hypothesis.get("next_test_action") or {}).get("parameters") or {}).get("route")
-            or ((hypothesis.get("dedupe_dimensions") or {}).get("route"))
-        )
-        if candidate_route == route:
+        if _research_hypothesis_vulnerability_key(hypothesis) == candidate_key:
             raw["hypothesis_id"] = str(hypothesis["id"])
             return
     # 2) Otherwise create a tracked planner-derived hypothesis for the freelance experiment.
@@ -32115,10 +32138,22 @@ async def _research_autobind_hypothesis(
             title=f"Planner experiment lead: {family} {route}"[:500],
             description="A hypothesis the planner reasoned up from the discovered surface to test with a bounded experiment.",
             severity_guess="medium", confidence=0.5,
-            dedupe_key=f"planner_experiment|{family}|{route}",
-            dedupe_dimensions={"route": route, "proof_surface": "planner_experiment"},
-            metadata_json={"unexplained_residue": True, "residue_source": "planner_reasoning", "route": route},
-            next_test_action={"command": "experiment.workflow", "parameters": {"proof_family": family}},
+            dedupe_key=f"planner_experiment|{candidate_key}",
+            dedupe_dimensions={
+                "route": route,
+                "method": method,
+                "proof_surface": "planner_experiment",
+                **vulnerability_dimensions,
+            },
+            metadata_json={
+                "unexplained_residue": True,
+                "residue_source": "planner_reasoning",
+                "route": route,
+                "method": method,
+                "canonical_vulnerability_key": candidate_key,
+                "canonical_vulnerability_dimensions": vulnerability_dimensions,
+            },
+            next_test_action={"command": command, "parameters": params},
             created_by="research_autobind",
         ))
         hypothesis_id = str((record.get("hypothesis") or {}).get("id") or "")

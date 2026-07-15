@@ -13281,3 +13281,89 @@ def test_autonomous_workflow_finding_uses_canonical_retest_inputs_and_source_fil
     assert "f.source = 'autonomous'" in api_module._source_type_filter_sql("autonomous")
     assert "autonomous_workflow" in api_module._source_type_filter_sql("autonomous")
     assert "autonomous_workflow" in api_module._source_type_filter_sql("dast")
+
+
+def test_research_autobind_requires_complete_operation_identity(monkeypatch):
+    target_id = uuid.uuid4()
+    wrong_hypothesis_id = uuid.uuid4()
+    created_hypothesis_id = uuid.uuid4()
+    captured = []
+
+    async def fake_upsert(_conn, request):
+        captured.append(request)
+        return {"hypothesis": {"id": created_hypothesis_id}, "created": True}
+
+    monkeypatch.setattr(api_module, "_upsert_hypothesis", fake_upsert)
+    raw = {
+        "action": {
+            "command": "experiment.workflow",
+            "parameters": {
+                "proof_family": "mass_assignment",
+                "steps": [{
+                    "label": "mutate",
+                    "method": "PATCH",
+                    "path": "/users/51",
+                    "json_body": {"isAdmin": True},
+                }],
+                "assertions": [{
+                    "type": "status_in",
+                    "step": "mutate",
+                    "predicate": "forbidden_field_accepted",
+                }],
+            },
+        },
+    }
+    observation = {
+        "current_surface": {
+            "ranked_hypotheses": [{
+                "hypothesis": {
+                    "id": wrong_hypothesis_id,
+                    "family": "mass_assignment",
+                    "metadata_json": {
+                        "dedupe_dimensions": {
+                            "route": "/users/{id}",
+                            "method": "POST",
+                            "fields": ["role"],
+                        },
+                    },
+                },
+            }],
+        },
+    }
+
+    asyncio.run(api_module._research_autobind_hypothesis(
+        object(), {"target_id": target_id}, raw, observation,
+    ))
+
+    assert raw["hypothesis_id"] == str(created_hypothesis_id)
+    assert len(captured) == 1
+    assert captured[0].dedupe_dimensions["method"] == "PATCH"
+    assert captured[0].dedupe_dimensions["route"] == "/users/{id}"
+    assert captured[0].dedupe_dimensions["fields"] == ["isadmin"]
+
+    exact_hypothesis_id = uuid.uuid4()
+    exact_raw = {"action": json.loads(json.dumps(raw["action"]))}
+    exact_observation = {
+        "current_surface": {
+            "ranked_hypotheses": [{
+                "hypothesis": {
+                    "id": exact_hypothesis_id,
+                    "family": "mass_assignment",
+                    "metadata_json": {
+                        "dedupe_dimensions": {
+                            "route": "/users/{id}",
+                            "method": "PATCH",
+                            "fields": ["isAdmin"],
+                        },
+                    },
+                },
+            }],
+        },
+    }
+
+    asyncio.run(api_module._research_autobind_hypothesis(
+        object(), {"target_id": target_id}, exact_raw, exact_observation,
+    ))
+
+    assert exact_raw["hypothesis_id"] == str(exact_hypothesis_id)
+    assert len(captured) == 1
