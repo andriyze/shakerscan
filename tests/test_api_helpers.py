@@ -13208,6 +13208,12 @@ def test_verified_workflow_promotes_bound_novel_hypothesis():
                     "severity_guess": "high",
                     "metadata_json": {"dedupe_dimensions": {"route": "/objects/{id}", "method": "GET"}},
                 }
+            if "FROM research_decisions" in query:
+                return {
+                    "decision_id": uuid.uuid4(),
+                    "episode_id": uuid.uuid4(),
+                    "campaign_id": uuid.uuid4(),
+                }
             if "FROM findings" in query:
                 return None
             raise AssertionError(query)
@@ -13241,3 +13247,37 @@ def test_verified_workflow_promotes_bound_novel_hypothesis():
     assert promoted["status"] == "created"
     assert len(promoted["fingerprint"]) == 32
     assert any("status='promoted'" in query for query, _ in updates)
+
+
+def test_autonomous_workflow_finding_uses_canonical_retest_inputs_and_source_filter():
+    finding = {
+        "url": "https://example.test/objects/51",
+        "target_url": "https://example.test",
+        "tool": "autonomous_workflow",
+        "evidence": {
+            "type": "bola",
+            "method": "GET",
+            "canonical_vulnerability_dimensions": {"object_parameters": ["object_id"]},
+            "autonomous_workflow": {
+                "family": "bola",
+                "route": "/objects/{id}",
+                "method": "GET",
+                "url": "https://example.test/objects/51",
+            },
+        },
+    }
+
+    inputs = api_module.extract_retest_inputs(finding)
+
+    assert inputs == {
+        "finding_type": "bola",
+        "target_url": "https://example.test/objects/51",
+        "original_url": "https://example.test/objects/51",
+        "param": "object_id",
+        "payload": None,
+        "method": "GET",
+        "request_body": None,
+    }
+    assert "f.source = 'autonomous'" in api_module._source_type_filter_sql("autonomous")
+    assert "autonomous_workflow" in api_module._source_type_filter_sql("autonomous")
+    assert "autonomous_workflow" in api_module._source_type_filter_sql("dast")

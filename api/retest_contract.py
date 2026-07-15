@@ -293,6 +293,9 @@ RETEST_TOOL_TYPE_MAP: dict[str, str] = {
     # unverified. Evidence.type also carries this now; the tool map is the
     # more reliable identifier so both routes agree.
     "exposed_file": "exposed_file",
+    # Autonomous workflow findings carry the exact family in evidence. This
+    # generic fallback keeps legacy records retestable when that field is absent.
+    "autonomous_workflow": "generic_http",
 }
 
 DEFAULT_REPLAY_PAYLOADS: dict[str, str] = {

@@ -51,6 +51,9 @@ function getFindingSourceType(finding: Finding): FindingSourceType {
   if (finding.source === 'ai_session') {
     return 'AI Session'
   }
+  if (finding.source === 'autonomous' || finding.tool === 'autonomous_workflow') {
+    return 'Autonomous'
+  }
   if (finding.source === 'asm') {
     return 'ASM'
   }
@@ -67,7 +70,7 @@ function isAiReplayFinding(finding: Finding): boolean {
 
 function autonomousWebTargetUrl(finding: Finding): string | null {
   const sourceType = getFindingSourceType(finding)
-  if (!finding.target_id || !(['DAST', 'ASM', 'Manual'] as FindingSourceType[]).includes(sourceType)) return null
+  if (!finding.target_id || !(['DAST', 'Autonomous', 'ASM', 'Manual'] as FindingSourceType[]).includes(sourceType)) return null
   const candidate = finding.target_url || finding.url
   if (!candidate) return null
   try {

@@ -3643,7 +3643,7 @@ export async function scanTarget(targetId: string, options: Record<string, unkno
 export async function getFindings(params?: {
   severity?: string
   status?: string
-  source_type?: 'dast' | 'ai' | 'ai_gate' | 'ai_session' | 'model_intake' | 'asm' | 'manual'
+  source_type?: 'dast' | 'ai' | 'ai_gate' | 'ai_session' | 'autonomous' | 'model_intake' | 'asm' | 'manual'
   limit?: number
   offset?: number
   root_domain?: string

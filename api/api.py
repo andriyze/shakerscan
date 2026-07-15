@@ -657,16 +657,18 @@ def _public_target_row(row: Any) -> dict[str, Any]:
 def _source_type_filter_sql(source_type: Optional[str]) -> str:
     """SQL fragment for the findings `source_type` filter (first-class taxonomy).
 
-    Values: dast / ai / ai_gate / ai_session / model_intake / asm / manual.
+    Values: dast / ai / ai_gate / ai_session / autonomous / model_intake / asm / manual.
     model_intake, ASM, manual, and the AI sources filter separately from DAST;
     the UI exposes this same product taxonomy.
     """
     if source_type == "ai":
-        return " AND (f.source IN ('ai_gate', 'ai_session') OR f.ai_target_id IS NOT NULL)"
+        return " AND (f.source IN ('ai_gate', 'ai_session', 'autonomous') OR f.ai_target_id IS NOT NULL)"
     if source_type == "ai_gate":
         return " AND f.source = 'ai_gate'"
     if source_type == "ai_session":
         return " AND f.source = 'ai_session'"
+    if source_type == "autonomous":
+        return " AND (f.source = 'autonomous' OR f.tool = 'autonomous_workflow')"
     if source_type == "model_intake":
         return " AND (f.source = 'model_intake' OR f.tool = 'model_intake')"
     if source_type == "asm":
@@ -675,8 +677,9 @@ def _source_type_filter_sql(source_type: Optional[str]) -> str:
         return " AND f.source = 'manual'"
     if source_type == "dast":
         return (
-            " AND COALESCE(f.source, 'scan') NOT IN ('ai_gate', 'ai_session', 'model_intake')"
-            " AND f.ai_target_id IS NULL AND COALESCE(f.tool, '') <> 'model_intake'"
+            " AND COALESCE(f.source, 'scan') NOT IN ('ai_gate', 'ai_session', 'autonomous', 'model_intake')"
+            " AND f.ai_target_id IS NULL"
+            " AND COALESCE(f.tool, '') NOT IN ('model_intake', 'autonomous_workflow')"
         )
     return ""
 
@@ -1732,9 +1735,22 @@ def infer_retest_type(finding: dict[str, Any], evidence: dict[str, Any], overrid
     if normalized:
         return normalized
 
-    evidence_type = normalize_retest_type(evidence.get("type"))
-    if evidence_type:
-        return evidence_type
+    autonomous = evidence.get("autonomous_workflow") if isinstance(evidence.get("autonomous_workflow"), dict) else {}
+    family_proof_evidence = evidence.get("family_proof") if isinstance(evidence.get("family_proof"), dict) else {}
+    for candidate in (
+        evidence.get("type"), evidence.get("retest_type"),
+        autonomous.get("retest_type"), family_proof_evidence.get("family"),
+    ):
+        evidence_type = normalize_retest_type(candidate)
+        if evidence_type:
+            return evidence_type
+    autonomous_family = family_proof.canonical_family(
+        autonomous.get("family") or family_proof_evidence.get("family")
+    )
+    if autonomous_family == "bola":
+        return "bola"
+    if autonomous_family:
+        return "generic_http"
 
     # Shared title/tool inference from retest_contract so API, worker, and
     # auto-retest policy always agree on whether a finding is retestable.
@@ -1753,15 +1769,38 @@ def extract_retest_inputs(
 ) -> dict[str, Any]:
     evidence = parse_json_field(finding.get("evidence"))
     finding_type = infer_retest_type(finding, evidence, override_type=override_type)
-
-    target_url = override_target or finding.get("target_url") or finding.get("url") or evidence.get("target") or ""
-    original_url = override_original_url or finding.get("url") or evidence.get("url") or target_url
-    param = override_param or finding.get("param") or evidence.get("param") or evidence.get("parameter") or ""
+    autonomous = evidence.get("autonomous_workflow") if isinstance(evidence.get("autonomous_workflow"), dict) else {}
+    dimensions = (
+        evidence.get("canonical_vulnerability_dimensions")
+        if isinstance(evidence.get("canonical_vulnerability_dimensions"), dict)
+        else {}
+    )
+    dedupe_dimensions = evidence.get("dedupe_dimensions") if isinstance(evidence.get("dedupe_dimensions"), dict) else {}
+    autonomous_url = autonomous.get("url") if autonomous else None
+    target_url = (
+        override_target or autonomous_url or finding.get("target_url")
+        or finding.get("url") or evidence.get("target") or ""
+    )
+    original_url = override_original_url or finding.get("url") or autonomous.get("url") or evidence.get("url") or target_url
+    dimension_params = dimensions.get("parameters") or dimensions.get("object_parameters") or dimensions.get("fields") or []
+    if not isinstance(dimension_params, list):
+        dimension_params = [dimension_params]
+    param = (
+        override_param or finding.get("param") or evidence.get("param") or evidence.get("parameter")
+        or dedupe_dimensions.get("parameter") or dedupe_dimensions.get("object_key")
+        or (dimension_params[0] if dimension_params else "")
+    )
     payload = override_payload or finding.get("payload") or evidence.get("payload") or ""
     if not payload and isinstance(evidence.get("detail"), dict):
         payload = evidence.get("detail", {}).get("payload") or ""
-    method = (override_method or finding.get("method") or evidence.get("method") or "GET").upper()
-    request_body = override_request_body or finding.get("body") or evidence.get("body") or ""
+    method = (
+        override_method or finding.get("method") or evidence.get("method")
+        or autonomous.get("method") or dedupe_dimensions.get("method") or "GET"
+    ).upper()
+    request_body = (
+        override_request_body or finding.get("body") or evidence.get("body")
+        or autonomous.get("request_body") or ""
+    )
 
     return {
         "finding_type": finding_type,
@@ -24078,6 +24117,43 @@ def _trusted_workflow_family_proof(
     return proof
 
 
+def _trusted_workflow_proven_operation(
+    execution: dict[str, Any], *, method: str, route: str,
+) -> dict[str, Any]:
+    """Return the concrete request whose operation satisfied the family proof."""
+    for observation in execution.get("observations") or []:
+        if not isinstance(observation, dict):
+            continue
+        request = observation.get("request") if isinstance(observation.get("request"), dict) else {}
+        request_method = str(request.get("method") or "GET").upper()
+        request_path = str(request.get("path") or request.get("url") or "").strip()
+        if request_method == method and _canonical_vulnerability_route(request_path) == route:
+            return request
+    return {}
+
+
+async def _research_promotion_provenance(conn: Any, hypothesis_id: uuid.UUID) -> dict[str, str | None]:
+    row = await conn.fetchrow(
+        """
+        SELECT rd.id AS decision_id, rd.episode_id, re.campaign_id
+        FROM research_decisions rd
+        JOIN research_episodes re ON re.id=rd.episode_id
+        WHERE rd.hypothesis_id=$1
+          AND rd.action->>'command'='experiment.workflow'
+        ORDER BY rd.created_at DESC
+        LIMIT 1
+        """,
+        hypothesis_id,
+    )
+    if not row:
+        return {"decision_id": None, "episode_id": None, "campaign_id": None}
+    return {
+        "decision_id": str(row.get("decision_id")) if row.get("decision_id") else None,
+        "episode_id": str(row.get("episode_id")) if row.get("episode_id") else None,
+        "campaign_id": str(row.get("campaign_id")) if row.get("campaign_id") else None,
+    }
+
+
 async def _promote_trusted_workflow_finding(
     conn: Any,
     *,
@@ -24146,17 +24222,15 @@ async def _promote_trusted_workflow_finding(
     )
     if not canonical_vulnerability_key:
         return None
-    # Suppress only the same operation. Historic methodless smart BOLA/authz findings are recovered
-    # by _finding_vulnerability_key's deterministic GET inference; genuinely unknown methods remain
-    # wildcard-only and cannot erase every method-specific research candidate.
+    # Suppress only the same operation. Include earlier autonomous promotions so the same
+    # vulnerability is refreshed, rather than cloned once per planner hypothesis.
     candidate_vulnerability_keys = {canonical_vulnerability_key}
     known_rows = await conn.fetch(
         """
-        SELECT id, tool, cwe, title, url, evidence, request
+        SELECT id, status, tool, cwe, title, url, evidence, request
         FROM findings
         WHERE target_id=$1
           AND status IN ('active','resolved','accepted_risk')
-          AND COALESCE(tool, '') <> 'autonomous_workflow'
         ORDER BY last_seen_at DESC
         LIMIT 2000
         """,
@@ -24169,7 +24243,7 @@ async def _promote_trusted_workflow_finding(
         ),
         None,
     )
-    if known_match:
+    if known_match and str(known_match.get("tool") or "") != "autonomous_workflow":
         proof["novelty_gate"] = "known_vulnerability_already_covered"
         proof["known_finding_id"] = str(known_match["id"])
         await conn.execute(
@@ -24183,20 +24257,43 @@ async def _promote_trusted_workflow_finding(
         )
         return None
     fingerprint = hashlib.sha256(
-        f"{target_uuid}:autonomous_workflow:{hypothesis_id}:{family}".encode()
+        f"{target_uuid}:autonomous_workflow:{canonical_vulnerability_key}".encode()
     ).hexdigest()[:32]
     title = str(hypothesis.get("title") or f"Verified {family.replace('_', ' ')} invariant violation")[:500]
     severity = str(hypothesis.get("severity_guess") or "high").lower()
     if severity not in {"critical", "high", "medium", "low", "info"}:
         severity = "high"
+    proven_operation = _trusted_workflow_proven_operation(
+        first, method=proven_method, route=str(finding_route),
+    )
+    concrete_path = str(proven_operation.get("path") or finding_route or "/")
+    finding_url = urllib.parse.urljoin(target_url.rstrip("/") + "/", concrete_path.lstrip("/"))
+    raw_request_body = proven_operation.get("json_body") or proven_operation.get("form_body")
+    request_body = (
+        json.dumps(raw_request_body, sort_keys=True, separators=(",", ":"))
+        if isinstance(raw_request_body, (dict, list))
+        else str(raw_request_body or "")
+    )
+    retest_type = "bola" if family_proof.canonical_family(family) == "bola" else "generic_http"
+    provenance = await _research_promotion_provenance(conn, uuid.UUID(hypothesis_id))
     evidence = _redact_finding_evidence({
         "proof": "Independent live workflow replay satisfied the deterministic family-proof contract.",
+        "type": retest_type,
+        "retest_type": retest_type,
+        "route": finding_route,
+        "method": proven_method,
+        "url": finding_url,
         "canonical_vulnerability_key": canonical_vulnerability_key,
         "canonical_vulnerability_key_version": "v3",
         "canonical_vulnerability_dimensions": vulnerability_dimensions,
         "dedupe_dimensions": dedupe_dimensions,
         "family_proof": proof,
         "autonomous_workflow": {
+            "family": family,
+            "route": finding_route,
+            "method": proven_method,
+            "url": finding_url,
+            "request_body": request_body or None,
             "workflow_id": workflow_id,
             "hypothesis_id": hypothesis_id,
             "reproduction_count": 2,
@@ -24206,8 +24303,9 @@ async def _promote_trusted_workflow_finding(
             "evidence_instance_id": evidence_instance_id,
             "tool_receipt_id": tool_receipt_id,
         },
+        "research_provenance": provenance,
     })
-    existing = await conn.fetchrow(
+    existing = known_match if known_match else await conn.fetchrow(
         "SELECT id, status FROM findings WHERE target_id=$1 AND fingerprint=$2",
         target_uuid,
         fingerprint,
@@ -24221,10 +24319,13 @@ async def _promote_trusted_workflow_finding(
                 last_verification_status='still_vulnerable',
                 last_verification_verdict='exploited',
                 last_verification_confidence=1.0, last_verified_at=NOW(),
-                evidence=$2::jsonb, updated_at=NOW()
+                fingerprint=$2, url=$3, source='autonomous',
+                evidence=$4::jsonb, updated_at=NOW()
             WHERE id=$1
             """,
             finding_id,
+            fingerprint,
+            finding_url,
             json.dumps(evidence),
         )
     else:
@@ -24237,7 +24338,7 @@ async def _promote_trusted_workflow_finding(
                 last_verification_confidence, last_verified_at
             ) VALUES (
                 $1,$2,$3,$4,$5,$6,'autonomous_workflow',$7,$8,$9::jsonb,
-                $10,'ai_session','active','still_vulnerable','exploited',1.0,NOW()
+                $10,'autonomous','active','still_vulnerable','exploited',1.0,NOW()
             ) RETURNING id
             """,
             target_uuid,
@@ -24247,7 +24348,7 @@ async def _promote_trusted_workflow_finding(
             severity,
             {"critical": 9.1, "high": 8.1, "medium": 5.3, "low": 3.1, "info": 0.0}[severity],
             proof.get("cwe"),
-            target_url,
+            finding_url,
             json.dumps(evidence),
             "Created only after trusted live replay passed family proof and promotion gates.",
         )
@@ -29523,7 +29624,6 @@ async def _research_known_vulnerability_keys(conn: Any, target_id: Any) -> set[s
         FROM findings
         WHERE target_id=$1
           AND status IN ('active','resolved','accepted_risk')
-          AND COALESCE(tool, '') <> 'autonomous_workflow'
         ORDER BY last_seen_at DESC
         LIMIT 2000
         """,

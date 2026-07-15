@@ -58,12 +58,14 @@ const SOURCE_TYPE_OPTIONS = [
   { value: '', label: 'All' },
   { value: 'dast', label: 'DAST' },
   { value: 'ai_gate', label: 'AI Gate' },
+  { value: 'ai_session', label: 'AI Session' },
+  { value: 'autonomous', label: 'Autonomous' },
   { value: 'model_intake', label: 'Model Intake' },
   { value: 'asm', label: 'ASM' },
   { value: 'manual', label: 'Manual' },
 ] as const
 
-type FindingSourceTypeFilter = 'dast' | 'ai' | 'ai_gate' | 'ai_session' | 'model_intake' | 'asm' | 'manual'
+type FindingSourceTypeFilter = 'dast' | 'ai' | 'ai_gate' | 'ai_session' | 'autonomous' | 'model_intake' | 'asm' | 'manual'
 
 function getFindingSourceType(finding: Finding): FindingSourceType {
   if (finding.source === 'model_intake' || finding.tool === 'model_intake') {
@@ -74,6 +76,9 @@ function getFindingSourceType(finding: Finding): FindingSourceType {
   }
   if (finding.source === 'ai_session') {
     return 'AI Session'
+  }
+  if (finding.source === 'autonomous' || finding.tool === 'autonomous_workflow') {
+    return 'Autonomous'
   }
   if (finding.source === 'asm') {
     return 'ASM'
