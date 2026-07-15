@@ -32171,7 +32171,19 @@ async def research_autopilot_runner(pool) -> None:
                 )
             except asyncio.CancelledError:
                 heartbeat_stop.set()
-                await heartbeat_task
+                # Graceful shutdown cancels this task and awaits it BEFORE closing the pool (see
+                # lifespan), so release the lease we hold here. Otherwise a restarted controller must
+                # wait out the ~4-minute lease TTL before it can resume this episode -- the observed
+                # multi-minute dead window after an API restart. Shield so the cleanup completes
+                # despite the cancellation propagating.
+                try:
+                    await asyncio.shield(heartbeat_task)
+                except Exception:
+                    pass
+                try:
+                    await asyncio.shield(_release_research_autopilot_lease(pool, episode_id, owner))
+                except Exception:
+                    pass
                 raise
             except Exception as exc:
                 heartbeat_stop.set()
