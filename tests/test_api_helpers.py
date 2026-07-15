@@ -7792,6 +7792,26 @@ def test_generated_agent_context_pack_from_target_uses_stored_facts(monkeypatch)
                     "last_seen_at": None,
                     "last_tested_at": None,
                 }]
+            if "FROM scans" in query:
+                return [{
+                    "id": uuid.uuid4(),
+                    "parent_scan_id": None,
+                    "scan_role": "asm_batch",
+                    "scan_type": "smart",
+                    "run_kind": "web_dast",
+                    "status": "completed",
+                    "current_phase": "done",
+                    "findings_count": 2,
+                    "score": 80,
+                    "grade": "B",
+                    "options": {"kind": "asm_test", "check_family": "bola"},
+                    "result": {
+                        "verification_summary": {"verified": 1, "suspected": 1},
+                        "discovery": {"url_count": 17},
+                    },
+                    "created_at": "2026-07-10T00:00:00Z",
+                    "updated_at": "2026-07-10T00:10:00Z",
+                }]
             if "FROM findings" in query:
                 assert " category" not in query
                 assert " proof_state" not in query
@@ -7829,6 +7849,9 @@ def test_generated_agent_context_pack_from_target_uses_stored_facts(monkeypatch)
     assert generated.current_surface["sample_endpoints"][0]["path"] == "/api/orders/{id}"
     assert generated.current_surface["principal_matrix"]["role_counts"]["admin"] == 1
     assert generated.current_surface["principal_matrix"]["expectations"][0]["expected_access"] == "deny"
+    assert generated.current_surface["recent_scans"][0]["scan_role"] == "asm_batch"
+    assert generated.current_surface["recent_scans"][0]["result_summary"]["verified"] == 1
+    assert generated.current_surface["recent_scans"][0]["result_summary"]["discovered_url_count"] == 17
     assert generated.known_preconditions["primary_credentials"] == "configured"
     assert generated.known_preconditions["second_user_credentials"] == "unknown"
     assert generated.findings_summary[0]["category"] == "bola"
@@ -13399,3 +13422,34 @@ def test_campaign_yield_counts_only_findings_with_campaign_provenance():
     assert "campaign_id" in query
     assert "created_at >=" not in query
     assert args == (target_id, campaign_id)
+
+
+def test_research_graph_preserves_history_and_attributes_parallel_children():
+    parent = str(uuid.uuid4())
+    child = str(uuid.uuid4())
+    historical = str(uuid.uuid4())
+    graph = {
+        "nodes": [
+            {"node_key": "current", "scan_id": child},
+            {"node_key": "historical", "scan_id": historical},
+        ],
+        "edges": [
+            {"src_key": "a", "dst_key": "b", "scan_id": child},
+            {"src_key": "old-a", "dst_key": "old-b", "scan_id": historical},
+        ],
+        "truncated": False,
+    }
+
+    annotated = api_module._research_graph_with_preflight_provenance(
+        graph,
+        preflight_scan_id=parent,
+        provenance_scan_ids={parent, child},
+    )
+
+    assert annotated["nodes"] == graph["nodes"]
+    assert annotated["edges"] == graph["edges"]
+    assert annotated["preflight_provenance"] == {
+        "scan_ids": sorted([parent, child]),
+        "node_count": 1,
+        "edge_count": 1,
+    }

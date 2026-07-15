@@ -16446,8 +16446,11 @@ async def _build_agent_context_pack_from_target(conn, req: AgentContextPackFromT
                    last_seen_at AS last_seen,
                    first_seen_at AS first_seen
             FROM findings
-            WHERE target_id = $1 AND status = 'active'
+            WHERE target_id = $1
+              AND status IN ('active','resolved','accepted_risk','false_positive')
             ORDER BY
+              CASE status WHEN 'active' THEN 0 WHEN 'accepted_risk' THEN 1
+                          WHEN 'resolved' THEN 2 ELSE 3 END,
               CASE severity WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 WHEN 'low' THEN 3 ELSE 4 END,
               last_seen_at DESC NULLS LAST
             LIMIT $2
@@ -16464,6 +16467,7 @@ async def _build_agent_context_pack_from_target(conn, req: AgentContextPackFromT
     hypotheses_summary: list[dict[str, Any]] = []
     ranked_hypotheses: list[dict[str, Any]] = []
     attack_graph: dict[str, Any] = {"nodes": [], "edges": [], "truncated": False}
+    recent_scans: list[dict[str, Any]] = []
     try:
         hypothesis_rows = await conn.fetch(
             """
@@ -16547,6 +16551,54 @@ async def _build_agent_context_pack_from_target(conn, req: AgentContextPackFromT
         ranked_hypotheses = []
         attack_graph = {"nodes": [], "edges": [], "truncated": False}
 
+    try:
+        scan_rows = await conn.fetch(
+            """
+            SELECT id, parent_scan_id, scan_role, scan_type, run_kind, status,
+                   current_phase, findings_count, score, grade, options, result,
+                   created_at, updated_at
+            FROM scans
+            WHERE target_id=$1
+              AND status IN ('completed','failed','cancelled')
+              AND (scan_role IS NULL OR scan_role <> 'shard')
+            ORDER BY created_at DESC
+            LIMIT 12
+            """,
+            target_uuid,
+        )
+        for row in scan_rows:
+            scan = _json_safe_row(row)
+            options = _sanitize_scan_options(scan.pop("options", None)) or {}
+            result = _decode_json_value(scan.pop("result", None)) or {}
+            discovery = result.get("discovery") if isinstance(result.get("discovery"), dict) else {}
+            verification = (
+                result.get("verification_summary")
+                if isinstance(result.get("verification_summary"), dict)
+                else {}
+            )
+            scan["intent"] = {
+                key: options.get(key)
+                for key in (
+                    "check_family", "asm_check_family", "auth_state", "kind",
+                    "budget_profile", "exploit_depth", "parallel", "shard_strategy",
+                )
+                if options.get(key) not in (None, "", [], {})
+            }
+            scan["result_summary"] = {
+                "verified": verification.get("verified"),
+                "suspected": verification.get("suspected"),
+                "unproven_critical_high": verification.get("unproven_critical_high"),
+                "discovered_url_count": (
+                    discovery.get("url_count") or discovery.get("total_urls")
+                    or len(discovery.get("urls") or [])
+                ),
+                "partial": bool((result.get("scan_metadata") or {}).get("partial"))
+                if isinstance(result.get("scan_metadata"), dict) else False,
+            }
+            recent_scans.append(scan)
+    except Exception:
+        recent_scans = []
+
     current_gaps: list[dict[str, Any]] = []
     if req.include_gaps:
         current_gaps.append({
@@ -16592,6 +16644,9 @@ async def _build_agent_context_pack_from_target(conn, req: AgentContextPackFromT
         "ranked_hypotheses": ranked_hypotheses,
         "known_vulnerability_count": len(known_vulnerability_keys) if 'known_vulnerability_keys' in locals() else 0,
         "attack_graph": attack_graph,
+        # Bounded history includes normal DAST parents and internal ASM activities. Findings,
+        # endpoint inventory, and graph remain the detailed canonical surfaces above.
+        "recent_scans": recent_scans,
     }
     credential_preconditions = _target_credential_precondition_signals(
         principal_summary.get("principals", []),
@@ -27822,8 +27877,41 @@ def _compact_research_observation_pack(pack: dict[str, Any]) -> dict[str, Any]:
         "truncated": bool(graph_source.get("truncated")),
         "provenance_scan_id": str(graph_source.get("provenance_scan_id") or "")[:80] or None,
     }
+    provenance_source = (
+        graph_source.get("preflight_provenance")
+        if isinstance(graph_source.get("preflight_provenance"), dict)
+        else {}
+    )
+    if provenance_source:
+        graph["preflight_provenance"] = {
+            "scan_ids": _string_list(provenance_source.get("scan_ids"), count=30, item_limit=80),
+            **_scalars(provenance_source, ("node_count", "edge_count"), text_limit=80),
+        }
     if graph["nodes"] or graph["edges"]:
         surface["attack_graph"] = graph
+    recent_scans = []
+    for scan in list(surface_source.get("recent_scans") or [])[:12]:
+        if not isinstance(scan, dict):
+            continue
+        projected = _scalars(
+            scan,
+            (
+                "id", "parent_scan_id", "scan_role", "scan_type", "run_kind", "status",
+                "current_phase", "findings_count", "score", "grade", "created_at", "updated_at",
+            ),
+            text_limit=180,
+        )
+        if isinstance(scan.get("intent"), dict):
+            projected["intent"] = _scalars(
+                scan["intent"], tuple(scan["intent"].keys()), text_limit=120,
+            )
+        if isinstance(scan.get("result_summary"), dict):
+            projected["result_summary"] = _scalars(
+                scan["result_summary"], tuple(scan["result_summary"].keys()), text_limit=120,
+            )
+        recent_scans.append(projected)
+    if recent_scans:
+        surface["recent_scans"] = recent_scans
     _add_if_fits("current_surface", surface)
 
     hypotheses = []
@@ -27945,6 +28033,29 @@ def _compact_research_observation_pack(pack: dict[str, Any]) -> dict[str, Any]:
     return compacted
 
 
+def _research_graph_with_preflight_provenance(
+    graph: dict[str, Any], *, preflight_scan_id: str, provenance_scan_ids: set[str],
+) -> dict[str, Any]:
+    """Annotate a graph without discarding historical or parallel-shard intelligence."""
+    nodes = [item for item in graph.get("nodes") or [] if isinstance(item, dict)]
+    edges = [item for item in graph.get("edges") or [] if isinstance(item, dict)]
+    return {
+        **graph,
+        # Provenance is an annotation, not a destructive filter; parallel parents commonly persist
+        # graph records under child shard scan ids, while older scans remain useful hypothesis input.
+        "provenance_scan_id": preflight_scan_id,
+        "preflight_provenance": {
+            "scan_ids": sorted(provenance_scan_ids),
+            "node_count": sum(
+                1 for item in nodes if str(item.get("scan_id") or "") in provenance_scan_ids
+            ),
+            "edge_count": sum(
+                1 for item in edges if str(item.get("scan_id") or "") in provenance_scan_ids
+            ),
+        },
+    }
+
+
 async def _build_research_observation(
     conn,
     episode_row: Any,
@@ -27989,18 +28100,30 @@ async def _build_research_observation(
             campaign_preflight_scan_id = ""
     if campaign_preflight_scan_id:
         graph = surface_context.get("attack_graph") if isinstance(surface_context.get("attack_graph"), dict) else {}
-        surface_context["attack_graph"] = {
-            **graph,
-            "nodes": [
-                item for item in graph.get("nodes") or []
-                if isinstance(item, dict) and str(item.get("scan_id") or "") == campaign_preflight_scan_id
-            ],
-            "edges": [
-                item for item in graph.get("edges") or []
-                if isinstance(item, dict) and str(item.get("scan_id") or "") == campaign_preflight_scan_id
-            ],
-            "provenance_scan_id": campaign_preflight_scan_id,
-        }
+        provenance_scan_ids = [campaign_preflight_scan_id]
+        try:
+            provenance_rows = await conn.fetch(
+                """
+                SELECT id FROM scans
+                WHERE id=COALESCE(
+                    (SELECT parent_scan_id FROM scans WHERE id=$1), $1
+                )
+                   OR parent_scan_id=COALESCE(
+                    (SELECT parent_scan_id FROM scans WHERE id=$1), $1
+                )
+                ORDER BY id
+                """,
+                _optional_uuid(campaign_preflight_scan_id),
+            )
+            provenance_scan_ids = [str(row["id"]) for row in provenance_rows] or provenance_scan_ids
+        except Exception:
+            provenance_scan_ids = [campaign_preflight_scan_id]
+        provenance_set = set(provenance_scan_ids)
+        surface_context["attack_graph"] = _research_graph_with_preflight_provenance(
+            graph,
+            preflight_scan_id=campaign_preflight_scan_id,
+            provenance_scan_ids=provenance_set,
+        )
     allowed_families = {
         str(item).strip().lower()
         for item in episode.get("allowed_families") or []
@@ -29820,7 +29943,11 @@ async def _research_campaign_readiness(conn: Any, campaign: Any) -> dict[str, An
                      WHERE COALESCE(param_shape, '') <> '' OR COALESCE(replay_spec, '') <> ''
                    )::int AS fresh_parameterized_routes
         FROM target_endpoints
-        WHERE target_id=$1 AND last_seen_scan_id=$2::uuid
+        WHERE target_id=$1 AND last_seen_scan_id IN (
+            SELECT id FROM scans
+            WHERE id=COALESCE((SELECT parent_scan_id FROM scans WHERE id=$2::uuid), $2::uuid)
+               OR parent_scan_id=COALESCE((SELECT parent_scan_id FROM scans WHERE id=$2::uuid), $2::uuid)
+        )
         """,
         target_id,
         preflight_scan_id,
@@ -29829,14 +29956,26 @@ async def _research_campaign_readiness(conn: Any, campaign: Any) -> dict[str, An
         """
         SELECT COUNT(*) FILTER (WHERE node_type='route')::int AS route_nodes,
                COUNT(*) FILTER (
-                   WHERE node_type='route' AND scan_id=$2::uuid
+                   WHERE node_type='route' AND scan_id IN (
+                       SELECT id FROM scans
+                       WHERE id=COALESCE((SELECT parent_scan_id FROM scans WHERE id=$2::uuid), $2::uuid)
+                          OR parent_scan_id=COALESCE((SELECT parent_scan_id FROM scans WHERE id=$2::uuid), $2::uuid)
+                   )
                )::int AS fresh_route_nodes,
                MAX(last_seen_at) AS latest_graph_seen_at,
                (SELECT COUNT(*)::int FROM application_graph_edges WHERE target_id=$1) AS edge_count,
                (SELECT COUNT(*)::int FROM application_graph_edges
-                  WHERE target_id=$1 AND scan_id=$2::uuid) AS fresh_edge_count,
+                  WHERE target_id=$1 AND scan_id IN (
+                      SELECT id FROM scans
+                      WHERE id=COALESCE((SELECT parent_scan_id FROM scans WHERE id=$2::uuid), $2::uuid)
+                         OR parent_scan_id=COALESCE((SELECT parent_scan_id FROM scans WHERE id=$2::uuid), $2::uuid)
+                  )) AS fresh_edge_count,
                (SELECT COUNT(*)::int FROM application_graph_edges
-                  WHERE target_id=$1 AND scan_id=$2::uuid
+                  WHERE target_id=$1 AND scan_id IN (
+                      SELECT id FROM scans
+                      WHERE id=COALESCE((SELECT parent_scan_id FROM scans WHERE id=$2::uuid), $2::uuid)
+                         OR parent_scan_id=COALESCE((SELECT parent_scan_id FROM scans WHERE id=$2::uuid), $2::uuid)
+                  )
                     AND edge_type='auth_boundary'
                     AND COALESCE(attributes->>'source_principal','') <> ''
                     AND COALESCE(attributes->>'excluded_principal','') <> ''
