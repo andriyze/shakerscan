@@ -27355,12 +27355,12 @@ async def _build_research_observation(
         )
         if not _tried:
             continue
-        _parameters = _action.get("parameters") if isinstance(_action.get("parameters"), dict) else {}
-        _signature = _research_canonical_hash({"command": _command_name, "parameters": _parameters})
+        _comparable = _research_action_dedupe_comparable(_action)
+        _signature = _research_canonical_hash(_comparable)
         if _signature in _seen_excluded:
             continue
         _seen_excluded.add(_signature)
-        excluded_actions.append({"command": _command_name, "parameters": _parameters})
+        excluded_actions.append(_comparable)
     current_gaps = _reconcile_research_gap_recommendations(
         context.get("current_gaps") or [],
         excluded_actions,
@@ -27921,6 +27921,54 @@ async def _research_prepare_action(
     return params, list(dict.fromkeys(errors))
 
 
+# Experiments the planner re-stamps with a fresh workflow_id / re-worded prose on every
+# attempt. Only these get collapsed to a mechanical identity for dedupe.
+_RESEARCH_EXPERIMENT_DEDUPE_COMMANDS = {"experiment.workflow"}
+
+
+def _research_action_dedupe_comparable(action: Any) -> dict[str, Any]:
+    """Reduce a planner action to its STABLE dedupe identity.
+
+    For a bounded workflow experiment the planner (and _research_autobind_hypothesis) stamps a
+    fresh workflow_id and re-words objective/falsifier on every attempt, so hashing the raw
+    parameters lets a mechanically identical test slip past the duplicate guard forever -- the
+    observed "same auth_bypass ~43x against one route" spin that burned a 2M-token marathon to 0
+    findings. Collapse an experiment to (family, canonical step routes+methods+principals,
+    assertion predicates); everything ephemeral or merely descriptive is dropped so a genuine
+    re-run of the same test matches. Non-experiment commands keep raw {command, parameters}.
+    """
+    payload = action if isinstance(action, dict) else {}
+    command = str(payload.get("command") or "").strip()
+    params = payload.get("parameters") if isinstance(payload.get("parameters"), dict) else {}
+    if command not in _RESEARCH_EXPERIMENT_DEDUPE_COMMANDS:
+        return {"command": command, "parameters": params}
+    steps = params.get("steps") if isinstance(params.get("steps"), list) else []
+    canonical_steps = [
+        {
+            "method": str(step.get("method") or "GET").strip().upper(),
+            "route": _canonical_vulnerability_route(step.get("path") or step.get("route")),
+            "principal": str(step.get("principal") or "").strip().lower(),
+        }
+        for step in steps
+        if isinstance(step, dict)
+    ]
+    assertions = params.get("assertions") if isinstance(params.get("assertions"), list) else []
+    canonical_assertions = sorted(
+        f"{str(a.get('step') or '').strip()}|{str(a.get('type') or '').strip()}|{str(a.get('predicate') or '').strip()}"
+        for a in assertions
+        if isinstance(a, dict)
+    )
+    return {
+        "command": command,
+        "parameters": {
+            "proof_family": family_proof.canonical_family(params.get("proof_family") or params.get("family")),
+            "route": _canonical_vulnerability_route(params.get("route") or params.get("path")),
+            "steps": canonical_steps,
+            "assertions": canonical_assertions,
+        },
+    }
+
+
 async def _research_is_consecutive_duplicate_action(
     conn,
     episode_id: str | uuid.UUID,
@@ -27948,22 +27996,12 @@ async def _research_is_consecutive_duplicate_action(
     )
     if not previous_rows:
         return False
-    comparable = {
-        "command": str(action.get("command") or "").strip(),
-        "parameters": action.get("parameters") if isinstance(action.get("parameters"), dict) else {},
-    }
+    comparable = _research_action_dedupe_comparable(action)
     fingerprint = _research_canonical_hash(comparable)
     intervening_state_change = False
     for row in previous_rows:
         previous_action = _decode_json_value(row["action"]) or {}
-        previous_comparable = {
-            "command": str(previous_action.get("command") or "").strip(),
-            "parameters": (
-                previous_action.get("parameters")
-                if isinstance(previous_action.get("parameters"), dict)
-                else {}
-            ),
-        }
+        previous_comparable = _research_action_dedupe_comparable(previous_action)
         if _research_canonical_hash(previous_comparable) == fingerprint:
             return not intervening_state_change
         # A truly intervening state change requires the gated command to have actually PRODUCED a result

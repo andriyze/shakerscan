@@ -10974,6 +10974,57 @@ def test_research_duplicate_guard_resets_only_on_a_finding_producing_command():
     assert allowed_after_finding is False
 
 
+def test_research_duplicate_guard_ignores_ephemeral_workflow_id_for_experiments():
+    # The observed 2M-token / 0-finding spin: the planner re-ran the SAME auth_bypass workflow ~43x,
+    # each with a fresh workflow_id, re-worded objective, and a different object id in the path --
+    # slipping past the raw-parameter fingerprint every time.
+    def workflow(workflow_id, objective, object_id):
+        return {
+            "command": "experiment.workflow",
+            "parameters": {
+                "workflow_id": workflow_id,
+                "proof_family": "auth_bypass",
+                "objective": objective,
+                "steps": [
+                    {"kind": "http", "path": f"/workshop/api/shop/orders/{object_id}", "method": "GET",
+                     "principal": "user1", "label": "authed"},
+                    {"kind": "http", "path": f"/workshop/api/shop/orders/{object_id}", "method": "GET",
+                     "principal": "anonymous", "label": "anon"},
+                ],
+                "assertions": [
+                    {"step": "authed", "type": "status_in", "predicate": "protected_resource_accessed"},
+                    {"step": "anon", "type": "status_not_in", "predicate": "unauthenticated_control"},
+                ],
+            },
+        }
+
+    prior = workflow("11111111-1111-4111-8111-111111111111", "An anonymous request reaches a protected resource", 11)
+    # Same mechanical test: fresh workflow_id, different prose, different concrete object id (42 vs 11).
+    repeat = workflow("22222222-2222-4222-8222-222222222222", "Anonymous access to a protected order", 42)
+    detected = asyncio.run(api_module._research_is_consecutive_duplicate_action(
+        _ResearchPreviousActionConn([prior]),
+        "11111111-1111-4111-8111-111111111111", repeat,
+    ))
+    assert detected is True
+
+    # A genuinely different test (different family / route / assertions) is NOT a duplicate.
+    other = {
+        "command": "experiment.workflow",
+        "parameters": {
+            "workflow_id": "33333333-3333-4333-8333-333333333333",
+            "proof_family": "bola",
+            "steps": [{"kind": "http", "path": "/workshop/api/mechanic/receive_report", "method": "POST",
+                       "principal": "user2", "label": "cross"}],
+            "assertions": [{"step": "cross", "type": "status_in", "predicate": "cross_principal_access"}],
+        },
+    }
+    distinct = asyncio.run(api_module._research_is_consecutive_duplicate_action(
+        _ResearchPreviousActionConn([prior]),
+        "11111111-1111-4111-8111-111111111111", other,
+    ))
+    assert distinct is False
+
+
 def test_research_duplicate_guard_decodes_asyncpg_jsonb_text_before_progress_check():
     repeated = {"command": "asm.gaps", "parameters": {"target_id": "target-1"}}
     gated = {"command": "asm.improve", "parameters": {"target_id": "target-1", "check_family": "xss"}}
