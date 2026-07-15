@@ -16,7 +16,7 @@ import {
 } from '@/lib/api'
 import { Button, Card, EmptyState, ErrorState, Skeleton } from '@/components/ui'
 import {
-  ACTIVE_FAMILIES, DURATIONS, PROFILES, RunStatusBadge, type DurationKey, type Intensity,
+  DURATIONS, PROFILES, RunStatusBadge, familiesForIntensity, type DurationKey, type Intensity,
   findingCount, hostFromUrl, relativeTime, runState, targetLabel,
 } from '@/components/hunt'
 
@@ -47,7 +47,7 @@ function ResearchAgentPage() {
   const [duration, setDuration] = useState<DurationKey>('standard')
   const [authorized, setAuthorized] = useState(false)
   const [objective, setObjective] = useState(DEFAULT_OBJECTIVE)
-  const [families, setFamilies] = useState<string[]>(ACTIVE_FAMILIES)
+  const [families, setFamilies] = useState<string[]>(familiesForIntensity('hunt'))
   const [aiReady, setAiReady] = useState<boolean | null>(null)
   const [executionReady, setExecutionReady] = useState<boolean | null>(null)
   const [loading, setLoading] = useState(true)
@@ -55,6 +55,7 @@ function ResearchAgentPage() {
   const [error, setError] = useState<string | null>(null)
 
   const profile = PROFILES[intensity]
+  const availableFamilies = familiesForIntensity(intensity)
   const activeTarget = useMemo(() => targets.find((t) => t.id === targetId), [targetId, targets])
 
   // Backend deep-links land here as ?episode_id=… — resolve to the run it belongs to.
@@ -162,7 +163,11 @@ function ResearchAgentPage() {
                   <button
                     key={value}
                     type="button"
-                    onClick={() => { setIntensity(value); if (value === 'analyze') setAuthorized(false) }}
+                    onClick={() => {
+                      setIntensity(value)
+                      setFamilies(familiesForIntensity(value))
+                      if (value === 'analyze') setAuthorized(false)
+                    }}
                     className={`rounded-xl border p-3.5 text-left transition-colors ${on ? p.selected : 'border-gray-800 bg-gray-950/50 hover:border-gray-700'}`}
                   >
                     <div className="flex items-center justify-between">
@@ -218,7 +223,7 @@ function ResearchAgentPage() {
                 <div>
                   <div className="text-xs font-medium text-gray-400">Vulnerability families</div>
                   <div className="mt-1.5 flex flex-wrap gap-2">
-                    {ACTIVE_FAMILIES.map((f) => (
+                    {availableFamilies.map((f) => (
                       <label key={f} className="flex items-center gap-2 rounded-lg border border-gray-800 px-3 py-1.5 text-xs text-gray-300">
                         <input type="checkbox" checked={families.includes(f)} onChange={() => setFamilies((cur) => cur.includes(f) ? cur.filter((x) => x !== f) : [...cur, f])} />
                         {f.toUpperCase()}

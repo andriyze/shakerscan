@@ -28757,6 +28757,33 @@ RESEARCH_DEFAULT_CAMPAIGN_FAMILIES = (
 )
 
 
+def _research_intensity_campaign_families(intensity: Any) -> tuple[str, ...]:
+    """Families with a real executable proof path at an intensity's risk ceiling."""
+    profile = RESEARCH_LAUNCH_PROFILES.get(str(intensity or ""), {})
+    if str(profile.get("max_risk_tier") or "") == "credential":
+        return RESEARCH_DEFAULT_CAMPAIGN_FAMILIES
+    if str(profile.get("execution_mode") or "") == "gated":
+        return tuple(sorted(RESEARCH_ASM_FAMILIES))
+    return ()
+
+
+def _validate_research_intensity_families(intensity: Any, families: list[str]) -> list[str]:
+    normalized = list(dict.fromkeys(
+        str(item).strip().lower() for item in families if str(item).strip()
+    ))
+    supported = set(_research_intensity_campaign_families(intensity))
+    unavailable = sorted(set(normalized) - supported)
+    if unavailable:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Families require a higher research intensity: {', '.join(unavailable)}. "
+                "Use deep_hunt for credential-bound workflow proof."
+            ),
+        )
+    return normalized
+
+
 def _research_hypothesis_route(hypothesis: dict[str, Any]) -> str | None:
     metadata = hypothesis.get("metadata_json") if isinstance(hypothesis.get("metadata_json"), dict) else {}
     dimensions = hypothesis.get("dedupe_dimensions") if isinstance(hypothesis.get("dedupe_dimensions"), dict) else {}
@@ -29997,9 +30024,11 @@ async def launch_research_episode(req: ResearchLaunchRequest):
 
     allowed_families = []
     if launch_profile["execution_mode"] == "gated":
-        allowed_families = list(RESEARCH_DEFAULT_CAMPAIGN_FAMILIES)
+        allowed_families = list(_research_intensity_campaign_families(req.intensity))
     if req.allowed_families_override:
         allowed_families = [str(item).strip() for item in req.allowed_families_override if str(item).strip()]
+    if req.mission_profile == "target_hunt" and allowed_families:
+        allowed_families = _validate_research_intensity_families(req.intensity, allowed_families)
     if finding:
         family = _research_finding_family(finding)
         allowed_families = [family] if family else []
@@ -30167,7 +30196,9 @@ async def launch_research_campaign(req: ResearchCampaignLaunchRequest):
             detail="At least one vulnerability family is required for a gated research campaign",
         )
     if gated_campaign and "allowed_families" not in req.model_fields_set:
-        requested_families = list(RESEARCH_DEFAULT_CAMPAIGN_FAMILIES)
+        requested_families = list(_research_intensity_campaign_families(req.intensity))
+    if gated_campaign:
+        requested_families = _validate_research_intensity_families(req.intensity, requested_families)
     deadline = datetime.now(timezone.utc) + timedelta(hours=req.duration_hours)
     metadata = {
         "autonomous_research": {

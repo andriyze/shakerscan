@@ -76,6 +76,13 @@ export const ACTIVE_FAMILIES = [
   'mass_assignment', 'workflow', 'data_exposure', 'access_control', 'field_constraint',
 ]
 
+export const ACTIVE_SCAN_FAMILIES = ['sqli', 'xss', 'auth', 'bola']
+
+export function familiesForIntensity(intensity: Intensity): string[] {
+  if (intensity === 'analyze') return []
+  return intensity === 'deep_hunt' ? [...ACTIVE_FAMILIES] : [...ACTIVE_SCAN_FAMILIES]
+}
+
 export function targetLabel(target: { name?: string | null; url: string }): string {
   const known: Record<string, string> = {
     'http://host.docker.internal:3001': 'OWASP Juice Shop',

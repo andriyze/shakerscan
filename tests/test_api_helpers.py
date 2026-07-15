@@ -11693,6 +11693,23 @@ def test_gated_research_campaign_rejects_explicit_empty_family_scope():
     assert "At least one vulnerability family" in str(exc.value.detail)
 
 
+def test_active_research_intensities_reject_credential_only_families_before_db_access():
+    request = api_module.ResearchCampaignLaunchRequest(
+        target_id="11111111-1111-4111-8111-111111111111",
+        intensity="hunt",
+        approval_receipt_id="22222222-2222-4222-8222-222222222222",
+        allowed_families=["sqli", "access_control"],
+    )
+
+    with pytest.raises(api_module.HTTPException) as exc:
+        asyncio.run(api_module.launch_research_campaign(request))
+
+    assert exc.value.status_code == 400
+    assert "access_control" in str(exc.value.detail)
+    assert api_module._research_intensity_campaign_families("hunt") == ("auth", "bola", "sqli", "xss")
+    assert "access_control" in api_module._research_intensity_campaign_families("deep_hunt")
+
+
 class _StaleResearchDispatchConn:
     def __init__(self, row):
         self.row = row
