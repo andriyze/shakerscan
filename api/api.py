@@ -23172,6 +23172,19 @@ async def _arsenal_dispatch_scan_focused_family(p: dict[str, Any], approval_rece
     for key, value in p.items():
         if key in allowed and value is not None:
             option_payload[key] = value
+    if option_payload.get("custom_endpoints"):
+        # Execute a planner-selected operation through the deterministic DAST worker without
+        # rediscovery or unrelated global checks diluting the hypothesis test.
+        option_payload.update({
+            "focused_endpoints_only": True,
+            "zero_rediscovery": True,
+            "skip_global_checks": True,
+            "no_early_stop": True,
+            "thorough": True,
+            "budget_profile": "thorough",
+            "parallel": False,
+            "require_current_workers": True,
+        })
     option_payload["check_family"] = check_family
     option_payload["approval_receipt_id"] = approval_receipt_id or p.get("approval_receipt_id")
     option_payload.setdefault("scan_type", "smart")
@@ -28184,6 +28197,46 @@ def _research_forbidden_control_paths(value: Any, path: str = "$") -> list[str]:
     return hits
 
 
+_RESEARCH_FOCUSED_ENDPOINT_METHODS = frozenset({
+    "GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS",
+})
+
+
+def _research_normalize_focused_endpoint(value: Any) -> str | None:
+    text = str(value or "").strip()
+    if not text or len(text) > 1000 or any(ord(ch) < 32 or ord(ch) == 127 for ch in text):
+        return None
+    parts = text.split(None, 2)
+    if parts and parts[0].upper() in _RESEARCH_FOCUSED_ENDPOINT_METHODS:
+        if len(parts) < 2:
+            return None
+        method, path = parts[0].upper(), parts[1]
+        suffix = f" {parts[2]}" if len(parts) > 2 else ""
+    else:
+        method, path = "GET", parts[0] if parts else ""
+        suffix = f" {parts[1]}" if len(parts) > 1 else ""
+    if not path.startswith("/") or path.startswith("//") or "://" in path:
+        return None
+    return f"{method} {path}{suffix}"[:1000]
+
+
+def _research_normalize_injection_payloads(value: Any) -> tuple[list[str], bool]:
+    if value is None:
+        return [], True
+    if not isinstance(value, list) or len(value) > 16:
+        return [], False
+    normalized: list[str] = []
+    for item in value:
+        if not isinstance(item, str):
+            return [], False
+        text = item.strip()
+        if not text or len(text) > 500 or any(ch in text for ch in ("\r", "\n", "\x00")):
+            return [], False
+        if text not in normalized:
+            normalized.append(text)
+    return normalized, True
+
+
 async def _research_prepare_action(
     conn,
     episode: dict[str, Any],
@@ -28212,6 +28265,28 @@ async def _research_prepare_action(
             if supplied_target and supplied_target != str(target_url):
                 errors.append("action_target_url_mismatch")
             params["target"] = str(target_url)
+        raw_endpoints = params.get("custom_endpoints")
+        if raw_endpoints is not None:
+            if not isinstance(raw_endpoints, list) or not 1 <= len(raw_endpoints) <= 20:
+                errors.append("focused_scan_custom_endpoints_invalid")
+            else:
+                endpoints = [_research_normalize_focused_endpoint(item) for item in raw_endpoints]
+                if any(item is None for item in endpoints):
+                    errors.append("focused_scan_custom_endpoint_outside_target")
+                else:
+                    params["custom_endpoints"] = list(dict.fromkeys(str(item) for item in endpoints))
+        family = str(params.get("check_family") or "").strip().lower()
+        for field, allowed_family in (
+            ("custom_sqli_payloads", "sqli"),
+            ("custom_xss_payloads", "xss"),
+        ):
+            payloads, valid_payloads = _research_normalize_injection_payloads(params.get(field))
+            if not valid_payloads:
+                errors.append(f"{field}_invalid")
+            elif payloads and family != allowed_family:
+                errors.append(f"{field}_requires_{allowed_family}_family")
+            elif field in params:
+                params[field] = payloads
     if command.get("name") in {"finding.get", "finding.retest"}:
         focused_finding_id = (
             str(subject.get("id") or "").strip()
@@ -28481,7 +28556,16 @@ def _research_parameterized_action_cost(
     cost = {key: max(0, int(value or 0)) for key, value in (base_cost or {}).items()}
     name = str(command.get("name") or "")
     if name == "scan.focused_family":
-        cost["requests"] = max(cost.get("requests", 0), 100)
+        endpoint_count = max(1, len(parameters.get("custom_endpoints") or []))
+        payload_count = max(
+            10,
+            len(parameters.get("custom_sqli_payloads") or []),
+            len(parameters.get("custom_xss_payloads") or []),
+        )
+        cost["requests"] = max(
+            cost.get("requests", 0),
+            min(500, endpoint_count * payload_count),
+        )
         cost["seconds"] = max(cost.get("seconds", 0), 600)
     elif name in {"asm.test", "asm.improve"}:
         try:

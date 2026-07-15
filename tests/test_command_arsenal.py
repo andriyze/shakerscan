@@ -515,6 +515,15 @@ def test_gated_commands_advertise_approval_receipts():
         assert "approval_receipt_id" in commands[name]["parameters_schema"]
 
 
+def test_focused_family_scan_exposes_bounded_model_selected_operations_and_payloads():
+    commands = {item["name"]: item for item in arsenal.describe_commands()["commands"]}
+    schema = commands["scan.focused_family"]["parameters_schema"]
+
+    assert schema["custom_endpoints"]["maxItems"] == 20
+    assert schema["custom_sqli_payloads"]["maxItems"] == 16
+    assert schema["custom_xss_payloads"]["items"]["maxLength"] == 500
+
+
 def test_command_result_list_is_read_only_command():
     payload = arsenal.describe_commands()
     commands = {item["name"]: item for item in payload["commands"]}

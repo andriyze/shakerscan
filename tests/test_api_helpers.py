@@ -6346,7 +6346,12 @@ def test_arsenal_execute_gated_scan_focused_family_dispatches_when_allowed(monke
         _BlockedRecordingConn(),
         api_module.ArsenalExecuteRequest(
             command="scan.focused_family",
-            parameters={"target": "https://app.example.com", "check_family": "sqli", "budget_profile": "fast"},
+            parameters={
+                "target": "https://app.example.com",
+                "check_family": "sqli",
+                "custom_endpoints": ["POST /api/search q"],
+                "custom_sqli_payloads": ["' OR '1'='1"],
+            },
             execute=True,
             confirmations=["confirm_authorized"],
             approval_receipt_id="r",
@@ -6360,6 +6365,13 @@ def test_arsenal_execute_gated_scan_focused_family_dispatches_when_allowed(monke
     assert body.options.check_family == "sqli"
     assert body.options.scan_type == "smart"
     assert body.options.approval_receipt_id == "r"
+    assert body.options.custom_endpoints == ["POST /api/search q"]
+    assert body.options.custom_sqli_payloads == ["' OR '1'='1"]
+    assert body.options.focused_endpoints_only is True
+    assert body.options.zero_rediscovery is True
+    assert body.options.skip_global_checks is True
+    assert body.options.parallel is False
+    assert body.options.require_current_workers is True
 
 
 def test_arsenal_execute_gated_model_intake_scan_dispatches_when_allowed(monkeypatch):
@@ -10490,6 +10502,46 @@ def test_research_autonomous_http_experiment_hides_and_rejects_destructive_metho
 
     assert params["target_id"] == "11111111-1111-4111-8111-111111111111"
     assert "autonomous_experiment_destructive_method_forbidden:DELETE" in errors
+
+
+def test_research_focused_scan_accepts_exact_operations_and_family_payloads():
+    command = api_module._research_command_catalog()["scan.focused_family"]
+
+    class Conn:
+        async def fetchval(self, _query, *_args):
+            return "https://example.test"
+
+    episode = {
+        "target_id": "11111111-1111-4111-8111-111111111111",
+        "planner": {"mission": {"profile": "target_hunt", "subject": {"type": "target"}}},
+        "allowed_families": ["sqli"],
+    }
+    params, errors = asyncio.run(api_module._research_prepare_action(
+        Conn(), episode,
+        {"action": {"parameters": {
+            "check_family": "sqli",
+            "custom_endpoints": ["POST /api/search q", "POST /api/search q"],
+            "custom_sqli_payloads": ["' OR '1'='1", "' OR '1'='1"],
+        }}},
+        command,
+    ))
+
+    assert errors == []
+    assert params["target"] == "https://example.test"
+    assert params["custom_endpoints"] == ["POST /api/search q"]
+    assert params["custom_sqli_payloads"] == ["' OR '1'='1"]
+
+    _params, rejected = asyncio.run(api_module._research_prepare_action(
+        Conn(), episode,
+        {"action": {"parameters": {
+            "check_family": "sqli",
+            "custom_endpoints": ["https://other.test/api/search"],
+            "custom_xss_payloads": ["<svg/onload=alert(1)>"],
+        }}},
+        command,
+    ))
+    assert "focused_scan_custom_endpoint_outside_target" in rejected
+    assert "custom_xss_payloads_requires_xss_family" in rejected
 
 
 def test_research_autonomous_workflow_rejects_delete_but_allows_browser_and_form_post():

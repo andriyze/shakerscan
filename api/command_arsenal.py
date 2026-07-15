@@ -808,6 +808,19 @@ COMMANDS: tuple[ArsenalCommand, ...] = (
             "target": {"type": "string"},
             "target_id": {"type": "string", "format": "uuid"},
             "check_family": {"type": "string", "enum": ["sqli", "xss", "auth", "bola"]},
+            "custom_endpoints": {
+                "type": "array", "minItems": 1, "maxItems": 20,
+                "items": {"type": "string", "minLength": 1, "maxLength": 1000},
+                "description": "Optional model-selected same-target operations, for example GET /api/items?q=probe.",
+            },
+            "custom_sqli_payloads": {
+                "type": "array", "maxItems": 16,
+                "items": {"type": "string", "minLength": 1, "maxLength": 500},
+            },
+            "custom_xss_payloads": {
+                "type": "array", "maxItems": 16,
+                "items": {"type": "string", "minLength": 1, "maxLength": 500},
+            },
             "approval_receipt_id": {"type": "string", "format": "uuid"},
         },
         required_confirmations=("confirm_authorized",),
