@@ -12365,6 +12365,97 @@ def test_research_preflight_claim_loser_does_not_queue_duplicate(monkeypatch):
     assert result["action"] == "preflight_claim_lost"
 
 
+def test_research_preflight_terminal_running_marker_can_claim_successor(monkeypatch):
+    campaign_id = uuid.uuid4()
+    target_id = uuid.uuid4()
+    completed_preflight_id = uuid.uuid4()
+    next_preflight_id = uuid.uuid4()
+    campaign = {
+        "id": campaign_id,
+        "target_id": target_id,
+        "status": "active",
+        "campaign_type": "autonomous_research",
+        "metadata_json": {
+            "autonomous_research": {
+                "intensity": "deep_hunt",
+                "allowed_families": ["auth"],
+                "approval_receipt_id": str(uuid.uuid4()),
+                "preflight_state": "running",
+                "preflight_scan_id": str(completed_preflight_id),
+                "preflight_attempts": 1,
+                "preflight_budget_used": {},
+            },
+        },
+    }
+
+    class Conn:
+        def __init__(self):
+            self.campaign = campaign
+            self.claim_query = ""
+
+        async def fetchrow(self, query, *args):
+            if "SELECT * FROM campaigns" in query:
+                return self.campaign
+            if "UPDATE campaigns SET metadata_json" in query:
+                self.claim_query = query
+                assert "linked_preflight.status IN ('completed','failed','cancelled')" in query
+                self.campaign = {
+                    **self.campaign,
+                    "metadata_json": json.loads(args[1]),
+                }
+                return self.campaign
+            if "SELECT id, url FROM targets" in query:
+                return {"id": target_id, "url": "https://app.example.test"}
+            if "UPDATE campaigns SET status='active'" in query:
+                self.campaign = {
+                    **self.campaign,
+                    "status": "active",
+                    "metadata_json": json.loads(args[1]),
+                }
+                return self.campaign
+            raise AssertionError(query)
+
+        async def fetch(self, query, *args):
+            if "FROM target_endpoints" in query:
+                return [{"method": "GET", "path": "/api/account"}]
+            raise AssertionError(query)
+
+    async def fake_readiness(_conn, _campaign):
+        return {
+            "ready": False,
+            "state": "repairable",
+            "blockers": ["authenticated_preflight_no_material_gain"],
+            "required": {"primary_credentials": True},
+            "surface": {},
+            "preflight_scan": {"id": completed_preflight_id, "status": "completed"},
+        }
+
+    async def fake_budget(_conn, _campaign):
+        limits = {key: 10_000 for key in api_module.RESEARCH_BUDGET_KEYS}
+        used = {key: 0 for key in api_module.RESEARCH_BUDGET_KEYS}
+        return {"limits": limits, "used": used, "remaining": limits}
+
+    submitted = []
+
+    async def fake_submit(request):
+        submitted.append(request)
+        return {"scan_id": str(next_preflight_id), "job_id": "job-next"}
+
+    conn = Conn()
+    monkeypatch.setattr(api_module, "db_pool", _FakePool(conn))
+    monkeypatch.setattr(api_module, "_research_campaign_readiness", fake_readiness)
+    monkeypatch.setattr(api_module, "_research_campaign_budget_snapshot", fake_budget)
+    monkeypatch.setattr(api_module, "submit_scan", fake_submit)
+
+    result = asyncio.run(api_module._research_campaign_self_repair(campaign_id))
+
+    assert result["action"] == "queued_authenticated_graph_preflight"
+    assert result["scan_id"] == str(next_preflight_id)
+    assert len(submitted) == 1
+    assert conn.campaign["metadata_json"]["autonomous_research"]["preflight_state"] == "running"
+    assert conn.campaign["metadata_json"]["autonomous_research"]["preflight_attempts"] == 2
+
+
 def test_campaign_cancel_propagates_to_preflight_scan(monkeypatch):
     campaign_id = uuid.uuid4()
     preflight_scan_id = str(uuid.uuid4())

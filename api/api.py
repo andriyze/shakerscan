@@ -30419,8 +30419,19 @@ async def _research_campaign_self_repair(campaign_id: Any) -> dict[str, Any]:
             """
             UPDATE campaigns SET metadata_json=$2::jsonb, updated_at=NOW()
             WHERE id=$1 AND status <> 'cancelled'
-              AND COALESCE(metadata_json #>> '{autonomous_research,preflight_state}', '')
-                  NOT IN ('queueing','running')
+              AND (
+                COALESCE(metadata_json #>> '{autonomous_research,preflight_state}', '')
+                    NOT IN ('queueing','running')
+                OR (
+                  metadata_json #>> '{autonomous_research,preflight_state}' = 'running'
+                  AND EXISTS (
+                    SELECT 1 FROM scans linked_preflight
+                    WHERE linked_preflight.id::text =
+                          metadata_json #>> '{autonomous_research,preflight_scan_id}'
+                      AND linked_preflight.status IN ('completed','failed','cancelled')
+                  )
+                )
+              )
             RETURNING *
             """,
             campaign_uuid,
