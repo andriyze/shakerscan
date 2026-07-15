@@ -6598,7 +6598,8 @@ async def process_scan_job(job_data: dict):
                     async with db_pool.acquire() as conn:
                         auth_state = asm_inventory.auth_state_from_options(options)
                         n = await asm_inventory.upsert_endpoints(
-                            conn, target_id, worklist, source='scan', auth_state=auth_state
+                            conn, target_id, worklist, source='scan', auth_state=auth_state,
+                            scan_id=scan_id,
                         )
                     print(f"[{job_id[:8]}] ASM inventory: upserted {n} endpoints", flush=True)
             except Exception as e:
@@ -7390,6 +7391,7 @@ async def process_scan_plan_job(job_data: dict):
                             source='coverage_recon' if coverage_allocation == 'dynamic' else 'recon',
                             auth_state=auth_state,
                             campaign_id=precreated_campaign_id if coverage_allocation == 'dynamic' else None,
+                            scan_id=parent_id,
                         )
                 print(
                     f"[{parent_id[:8]}] ASM inventory: upserted {n} endpoint/auth rows from recon",
@@ -8175,7 +8177,8 @@ async def process_scan_merge_job(job_data: dict):
                 total = 0
                 for auth_state, worklist in shard_worklists_by_auth.items():
                     total += await asm_inventory.upsert_endpoints(
-                        conn, target_id, worklist, source='scan', auth_state=auth_state
+                        conn, target_id, worklist, source='scan', auth_state=auth_state,
+                        scan_id=parent_id,
                     )
             print(f"[merge {parent_id[:8]}] ASM inventory: upserted {total} endpoints from {len(children)} shards", flush=True)
         except Exception as e:
@@ -9095,7 +9098,10 @@ async def process_exploit_batch_job(job_data: dict):
                         await asm_inventory.finish_campaign(conn, campaign_id, status='completed')
                     wl = (result.get('active_checks') or {}).get('active_worklist')
                     if wl:  # keep inventory fresh with anything new this run surfaced
-                        await asm_inventory.upsert_endpoints(conn, target_id, wl, source='asm', auth_state=auth_state)
+                        await asm_inventory.upsert_endpoints(
+                            conn, target_id, wl, source='asm', auth_state=auth_state,
+                            scan_id=scan_id,
+                        )
             except Exception as e:
                 print(f"[asm {job_id[:8]}] inventory stamp error: {e}", flush=True)
         else:

@@ -105,6 +105,9 @@ def compile_rule_text(
             "title": f"{resource} transition {workflow.group('from')} to {workflow.group('to')}",
             "action": "transition",
             "resource": resource,
+            # Draft hint only; the operator can correct it before approval. Requiring an exact
+            # state field prevents an unrelated changing timestamp from becoming workflow proof.
+            "field_name": "status",
             "conditions": {"from_state": workflow.group("from"), "to_state": workflow.group("to")},
         })
     elif cap:
@@ -193,18 +196,23 @@ def verification_plan(value: dict[str, Any]) -> dict[str, Any]:
     kind = contract["contract_kind"]
     family = {
         "ownership": "bola",
-        "access_control": "authorization_policy",
-        "workflow_transition": "workflow_invariant",
+        "access_control": "access_control",
+        "workflow_transition": "workflow",
         "field_constraint": "field_constraint",
     }[kind]
-    supported = kind == "ownership"
-    required_inputs = ["approved_contract", "concrete_route", "independent_live_replay"]
+    # A positive "allow" rule cannot establish a vulnerability when it succeeds; only a denied or
+    # role-restricted operation has a deterministic forbidden-principal counterexample. Keep that
+    # shape planning-only until a separate omission-of-access verifier exists.
+    supported = not (kind == "access_control" and contract.get("expected_access") == "allow")
+    required_inputs = [
+        "approved_contract", "concrete_route", "concrete_method", "independent_live_replay",
+    ]
     if kind == "ownership":
         required_inputs += ["primary_credentials", "second_user_credentials", "object_producer", "cleanup_step"]
     elif kind == "access_control":
         required_inputs += ["authorized_control", "unauthorized_principal"]
     elif kind == "workflow_transition":
-        required_inputs += ["before_checkpoint", "forbidden_transition", "restoration_step"]
+        required_inputs += ["state_field", "before_checkpoint", "forbidden_transition", "restoration_step"]
     else:
         required_inputs += ["baseline_read", "bounded_mutation", "restoration_step"]
     missing = []
@@ -212,13 +220,15 @@ def verification_plan(value: dict[str, Any]) -> dict[str, Any]:
         missing.append("approved_contract")
     if not contract.get("path"):
         missing.append("concrete_route")
-    if not supported:
-        # The current workflow predicates do not bind arbitrary roles, transition states, or typed
-        # value comparisons back to this exact contract. Calling those generic differentials a
-        # deterministic invariant verifier would manufacture proof, so these kinds fail closed.
-        missing.append("deterministic_contract_binder")
+    if not contract.get("method"):
+        missing.append("concrete_method")
     # These are runtime bindings, intentionally never inferred from prose or stored as fake proof.
-    missing += [item for item in required_inputs if item not in {"approved_contract", "concrete_route"}]
+    missing += [
+        item for item in required_inputs
+        if item not in {"approved_contract", "concrete_route", "concrete_method"}
+    ]
+    if not supported:
+        missing.append("deterministic_contract_binder")
     return {
         "verifier": "experiment.workflow",
         "proof_family": family,
@@ -348,6 +358,8 @@ def approval_errors(value: dict[str, Any]) -> list[str]:
         ):
             errors.append("ordered_operator_expected_value_must_be_number")
     elif kind == "workflow_transition":
+        if not contract["field_name"]:
+            errors.append("state_field_name_required")
         if not contract["conditions"].get("from_state"):
             errors.append("transition_from_state_required")
         if not contract["conditions"].get("to_state"):

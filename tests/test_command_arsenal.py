@@ -323,7 +323,7 @@ def test_workflow_catalog_exposes_discriminated_http_and_browser_step_contracts(
     assert item["required"] == ["label", "kind", "principal", "checkpoint"]
     assert set(properties) == {
         "label", "kind", "principal", "checkpoint", "compare_to", "method", "path",
-        "query", "headers", "json_body", "form_body", "action", "data", "extract",
+        "query", "headers", "json_body", "form_body", "select_json", "action", "data", "extract",
     }
     assert set(properties["kind"]["enum"]) == workflow_experiment.ALLOWED_STEP_KINDS
     assert set(properties["method"]["enum"]) == workflow_experiment.ALLOWED_METHODS

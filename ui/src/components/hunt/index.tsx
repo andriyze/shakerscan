@@ -56,7 +56,7 @@ export const PROFILES: Record<Intensity, {
   deep_hunt: {
     name: 'Deep',
     summary: 'Multi-user workflows',
-    detail: 'Designs app-specific control/test workflows across two logins to prove BOLA and auth flaws. Credentials never enter the model.',
+    detail: 'Designs app-specific control/test workflows across two logins to prove access-control, field, and business-logic flaws. Credentials never enter the model.',
     mode: 'gated', maxSteps: 25, risk: 'credential',
     budget: { steps: 25, actions: 24, active_actions: 12, requests: 500, seconds: 3600, model_tokens: 250000 },
     accent: 'text-fuchsia-300', selected: 'border-fuchsia-500/60 bg-fuchsia-500/[0.09]',
@@ -71,7 +71,10 @@ export const DURATIONS: Record<DurationKey, { name: string; detail: string; hour
   marathon: { name: 'Marathon', detail: '~7 days', hours: 168, episodes: 100 },
 }
 
-export const ACTIVE_FAMILIES = ['sqli', 'xss', 'auth', 'bola']
+export const ACTIVE_FAMILIES = [
+  'sqli', 'xss', 'auth', 'bola',
+  'mass_assignment', 'workflow', 'data_exposure', 'access_control', 'field_constraint',
+]
 
 export function targetLabel(target: { name?: string | null; url: string }): string {
   const known: Record<string, string> = {

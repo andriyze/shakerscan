@@ -42,6 +42,16 @@ FAMILY_CONTRACTS: dict[str, dict[str, Any]] = {
         "requires": ["protected_resource_accessed", "unauthenticated_control"],
         "refute_if": ["access_denied_unauthenticated"],
     },
+    "access_control": {
+        "cwe": "CWE-285",
+        "requires": ["authorized_role_control", "forbidden_role_access", "distinct_identity"],
+        "refute_if": ["forbidden_role_denied", "same_account"],
+    },
+    "field_constraint": {
+        "cwe": "CWE-840",
+        "requires": ["constraint_baseline_observed", "constraint_violation_persisted", "before_after_state"],
+        "refute_if": ["constraint_enforced"],
+    },
     "workflow": {
         "cwe": "CWE-841",
         "requires": ["transition_invariant_broken", "before_after_state"],

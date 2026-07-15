@@ -25,6 +25,7 @@ def test_workflow_contract_requires_from_and_to_states():
         "title": "Only submitted orders can ship",
         "action": "ship",
         "resource": "order",
+        "field_name": "status",
         "conditions": {"from_state": "submitted"},
     })
 
@@ -157,6 +158,7 @@ def test_verification_plan_reuses_only_semantically_bound_existing_verifier():
         "subject_role": "user",
         "action": "edit",
         "resource": "profile",
+        "method": "GET",
         "path": "/api/users/{id}",
         "expected_access": "deny",
         "conditions": {"resource_owner": "other"},
@@ -170,6 +172,7 @@ def test_verification_plan_reuses_only_semantically_bound_existing_verifier():
         "field_name": "percent",
         "operator": "lte",
         "expected_value": 30,
+        "method": "PATCH",
         "path": "/api/discount",
     })
 
@@ -177,6 +180,21 @@ def test_verification_plan_reuses_only_semantically_bound_existing_verifier():
     assert ownership["deterministic_family_supported"] is True
     assert ownership["ready_to_execute"] is False
     assert "object_producer" in ownership["missing_inputs"]
-    assert field_constraint["deterministic_family_supported"] is False
-    assert "deterministic_contract_binder" in field_constraint["missing_inputs"]
-    assert field_constraint["promotion_gate"] is None
+    assert field_constraint["deterministic_family_supported"] is True
+    assert "baseline_read" in field_constraint["missing_inputs"]
+    assert field_constraint["promotion_gate"] == "trusted_workflow_family_proof"
+
+    unsupported_allow = contracts.verification_plan({
+        "status": "approved",
+        "contract_kind": "access_control",
+        "title": "Users may read their own profile",
+        "subject_role": "user",
+        "action": "read",
+        "resource": "profile",
+        "method": "GET",
+        "path": "/api/profile",
+        "expected_access": "allow",
+    })
+    assert unsupported_allow["deterministic_family_supported"] is False
+    assert "deterministic_contract_binder" in unsupported_allow["missing_inputs"]
+    assert unsupported_allow["promotion_gate"] is None

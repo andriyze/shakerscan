@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+from pathlib import Path
 # logical name, source-checkout relative path, container-runtime relative path
 FINGERPRINT_SOURCE_FILES: tuple[tuple[str, str, str], ...] = (
     ("scanner.py", "scanner/scanner.py", "scanner.py"),
@@ -32,6 +33,32 @@ FINGERPRINT_SOURCE_FILES: tuple[tuple[str, str, str], ...] = (
 
 
 def source_file_map(workspace_root: str = "/workspace") -> dict[str, str]:
+    """Map every Python source copied into the API/worker image to its /app identity.
+
+    Keeping a hand-picked detector list made freshness blind to Research Agent, migrations, and
+    orchestration edits. Mirror the Dockerfile's COPY layout instead: scanner top-level modules are
+    copied first, API top-level modules overwrite same-named files, and both package trees retain
+    their relative paths. New runtime modules are then covered without another manifest edit.
+    """
+    root = Path(workspace_root)
+    files: dict[str, str] = {}
+    scanner_root = root / "scanner"
+    api_root = root / "api"
+    if scanner_root.is_dir():
+        for path in sorted(scanner_root.glob("*.py")):
+            files[path.name] = str(path)
+    if api_root.is_dir():
+        for path in sorted(api_root.glob("*.py")):
+            files[path.name] = str(path)
+    for package_root, logical_root in (
+        (scanner_root / "scanner_tools", "scanner_tools"),
+        (api_root / "ai_gate", "ai_gate"),
+    ):
+        if package_root.is_dir():
+            for path in sorted(package_root.rglob("*.py")):
+                files[f"{logical_root}/{path.relative_to(package_root).as_posix()}"] = str(path)
+    if files:
+        return files
     return {
         name: os.path.join(workspace_root, source_relative)
         for name, source_relative, _ in FINGERPRINT_SOURCE_FILES
@@ -39,6 +66,19 @@ def source_file_map(workspace_root: str = "/workspace") -> dict[str, str]:
 
 
 def runtime_file_map(runtime_root: str = "/app") -> dict[str, str]:
+    """Map the actual Python runtime layout using the same logical keys as source_file_map."""
+    root = Path(runtime_root)
+    files: dict[str, str] = {}
+    if root.is_dir():
+        for path in sorted(root.glob("*.py")):
+            files[path.name] = str(path)
+        for logical_root in ("scanner_tools", "ai_gate"):
+            package_root = root / logical_root
+            if package_root.is_dir():
+                for path in sorted(package_root.rglob("*.py")):
+                    files[f"{logical_root}/{path.relative_to(package_root).as_posix()}"] = str(path)
+    if files:
+        return files
     return {
         name: os.path.join(runtime_root, runtime_relative)
         for name, _, runtime_relative in FINGERPRINT_SOURCE_FILES

@@ -60,6 +60,12 @@ PREDICATE_ASSERTION_TYPES = {
     "protected_resource_accessed": {"status_in"},
     "unauthenticated_control": {"status_not_in", "comparison_changed"},
     "access_denied_unauthenticated": {"status_not_in"},
+    "authorized_role_control": {"status_in"},
+    "forbidden_role_access": {"status_in"},
+    "forbidden_role_denied": {"status_not_in"},
+    "constraint_baseline_observed": {"status_in"},
+    "constraint_violation_persisted": {"comparison_changed"},
+    "constraint_enforced": {"status_not_in"},
     "transition_invariant_broken": {"comparison_changed"},
     "before_after_state": {"comparison_changed", "restored"},
     "invariant_held": {"comparison_equivalent"},
@@ -605,6 +611,14 @@ def normalize_workflow(target_url: str, raw: Any) -> dict[str, Any]:
             _bounded_json_size(query)
             _bounded_json_size(json_body)
             _bounded_json_size(form_body)
+            select_json: list[str] = []
+            for selected in (item.get("select_json") or [])[:20]:
+                selected_path = str(selected).strip()[:300]
+                if not selected_path.startswith("$."):
+                    raise WorkflowContractError(f"step_{index}_selected_json_path_invalid")
+                if _sensitive_name(selected_path):
+                    raise WorkflowContractError(f"step_{index}_selected_json_sensitive_value_forbidden")
+                select_json.append(selected_path)
             extracts = _normalize_extracts(index, item.get("extract"), browser=False)
             normalized_step.update({
                 "method": method,
@@ -613,6 +627,7 @@ def normalize_workflow(target_url: str, raw: Any) -> dict[str, Any]:
                 "headers": headers,
                 "json_body": json_body,
                 "form_body": form_body,
+                "select_json": select_json,
                 "extract": extracts,
             })
             reference_values.extend([path, query, headers, json_body, form_body])
@@ -938,7 +953,12 @@ async def execute_workflow(
                     finally:
                         await http_response.aclose()
                     body = b"".join(chunks)
-                    response = response_summary(http_response, body, elapsed_ms=round((time.perf_counter() - request_started) * 1000))
+                    response = response_summary(
+                        http_response,
+                        body,
+                        selected_json_paths=step.get("select_json") or [],
+                        elapsed_ms=round((time.perf_counter() - request_started) * 1000),
+                    )
                     body_text = body[:MAX_BODY_BYTES].decode(http_response.encoding or "utf-8", errors="replace")
                     sensitive_value_categories = _classify_sensitive_values(body_text)
                     parsed: Any = None

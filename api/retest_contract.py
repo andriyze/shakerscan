@@ -938,6 +938,7 @@ async def run_schema_migrations(pool) -> None:
                     attempt_count INTEGER NOT NULL DEFAULT 0,
                     first_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                     last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    last_seen_scan_id UUID REFERENCES scans(id) ON DELETE SET NULL,
                     last_tested_at TIMESTAMPTZ,
                     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -956,7 +957,8 @@ async def run_schema_migrations(pool) -> None:
                 ADD COLUMN IF NOT EXISTS attempt_count INTEGER NOT NULL DEFAULT 0,
                 ADD COLUMN IF NOT EXISTS last_http_status INTEGER,
                 ADD COLUMN IF NOT EXISTS unreachable_streak INTEGER NOT NULL DEFAULT 0,
-                ADD COLUMN IF NOT EXISTS last_reachability_at TIMESTAMPTZ
+                ADD COLUMN IF NOT EXISTS last_reachability_at TIMESTAMPTZ,
+                ADD COLUMN IF NOT EXISTS last_seen_scan_id UUID REFERENCES scans(id) ON DELETE SET NULL
             """)
             async with conn.transaction():
                 await _backfill_target_endpoint_fingerprints(conn)
@@ -979,6 +981,11 @@ async def run_schema_migrations(pool) -> None:
             await conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_target_endpoints_campaign
                 ON target_endpoints(campaign_id) WHERE campaign_id IS NOT NULL
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_target_endpoints_seen_scan_auth
+                ON target_endpoints(target_id, last_seen_scan_id, auth_state)
+                WHERE last_seen_scan_id IS NOT NULL
             """)
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS target_credential_profiles (

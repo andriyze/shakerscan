@@ -25,4 +25,14 @@ def test_source_manifest_is_complete_and_hashable_from_checkout():
     files = source_file_map(str(root))
 
     assert all(Path(path).is_file() for path in files.values())
+    assert {
+        "api.py",
+        "asm_inventory.py",
+        "command_arsenal.py",
+        "family_proof.py",
+        "invariant_contracts.py",
+        "retest_contract.py",
+        "workflow_experiment.py",
+        "scanner_tools/access_control_checks.py",
+    } <= set(files)
     assert hash_source_files(files, require_all=True)

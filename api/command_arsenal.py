@@ -336,6 +336,12 @@ def _workflow_step_schema() -> dict[str, Any]:
             "description": "A JSON value of at most 16 KiB. Credential-like keys are rejected."
         },
         "form_body": _scalar_mapping_schema(max_properties=50),
+        "select_json": {
+            "type": "array",
+            "maxItems": 20,
+            "items": {"type": "string", "pattern": "^\\$\\.", "maxLength": 300},
+            "description": "Non-secret JSON scalar paths retained for deterministic invariant comparison.",
+        },
         "action": {"type": "string", "enum": list(_WORKFLOW_BROWSER_ACTIONS)},
         "data": {
             "oneOf": [
@@ -351,7 +357,7 @@ def _workflow_step_schema() -> dict[str, Any]:
             },
         },
     }
-    http_only = ["method", "path", "query", "headers", "json_body", "form_body"]
+    http_only = ["method", "path", "query", "headers", "json_body", "form_body", "select_json"]
     browser_only = ["action", "data"]
     conditions: list[dict[str, Any]] = [
         {

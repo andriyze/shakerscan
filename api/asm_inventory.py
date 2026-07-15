@@ -1059,6 +1059,7 @@ async def upsert_endpoints(
     source: str = "recon",
     auth_state: str = "anonymous",
     campaign_id: str | None = None,
+    scan_id: str | None = None,
     limit: int = 20000,
 ) -> int:
     """Upsert a discovered worklist into target_endpoints. New rows start
@@ -1071,6 +1072,7 @@ async def upsert_endpoints(
         return 0
     tid = _uuid.UUID(str(target_id))
     cid = _uuid.UUID(str(campaign_id)) if campaign_id else None
+    sid = _uuid.UUID(str(scan_id)) if scan_id else None
     count = 0
     for parsed in rows:
         fp = endpoint_fingerprint(
@@ -1086,10 +1088,11 @@ async def upsert_endpoints(
             INSERT INTO target_endpoints
                 (target_id, method, path, param_shape, fingerprint, source,
                  auth_state, param_location, replay_spec, content_type, priority_score,
-                 campaign_id, first_seen_at, last_seen_at, test_status)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW(), NOW(), 'untested')
+                 campaign_id, last_seen_scan_id, first_seen_at, last_seen_at, test_status)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NOW(), NOW(), 'untested')
             ON CONFLICT (target_id, fingerprint) DO UPDATE SET
                 last_seen_at = NOW(),
+                last_seen_scan_id = COALESCE(EXCLUDED.last_seen_scan_id, target_endpoints.last_seen_scan_id),
                 source = EXCLUDED.source,
                 auth_state = EXCLUDED.auth_state,
                 param_location = EXCLUDED.param_location,
@@ -1103,7 +1106,7 @@ async def upsert_endpoints(
                 updated_at = NOW()
             """,
             tid, parsed.method, parsed.path, parsed.param_shape, fp, source, auth_state,
-            parsed.param_location, parsed.replay_spec, parsed.content_type, prio, cid,
+            parsed.param_location, parsed.replay_spec, parsed.content_type, prio, cid, sid,
         )
         count += 1
     return count

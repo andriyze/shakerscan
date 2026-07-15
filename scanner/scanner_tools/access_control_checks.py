@@ -3223,6 +3223,7 @@ async def authz_resource_replay_test(
                     similarity = response_similarity(owner_body, attacker_body)
                     evidence = {
                         "family": "authz",
+                        "method": "GET",
                         "producer_endpoint": producer_endpoint,
                         "consumer_endpoint": candidate["custom_endpoint"],
                         "url": candidate["url"],
@@ -3683,6 +3684,7 @@ async def smart_bola_test(
                                     "owasp": "API1:2023 - Broken Object Level Authorization",
                                     "evidence": {
                                         "url": test_url,
+                                        "method": "GET",
                                         "test_id": test_id,
                                         "pattern_type": pattern_type,
                                         "user1_status": user1_status,
@@ -3773,6 +3775,7 @@ async def smart_bola_test(
                     "severity": "critical",
                     "evidence": {
                         "url": sample.get("url"),
+                        "method": "GET",
                         "pattern_type": pattern_type,
                         "successful_ids": successful_ids[:10],
                         "successful_count": len(successful_ids),

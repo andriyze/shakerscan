@@ -8586,8 +8586,10 @@ def test_auto_provision_requires_encrypted_secret_storage(monkeypatch):
     assert "AI_CREDENTIAL_ENC_KEY" in str(exc.value.detail)
 
 
-def test_benchmark_identity_uses_family_and_templated_route_not_source_fingerprint():
-    canonical = api_module._canonical_vulnerability_key(family="bola", route="/api/orders/{order_id}")
+def test_benchmark_identity_uses_family_method_and_templated_route_not_source_fingerprint():
+    canonical = api_module._canonical_vulnerability_key(
+        family="bola", route="/api/orders/{order_id}", method="GET",
+    )
     assert api_module._canonical_vulnerability_route("/api/orders/${object_id}") == "/api/orders/{id}"
     dast = {
         "fingerprint": "scanner-specific-fingerprint",
@@ -8603,7 +8605,11 @@ def test_benchmark_identity_uses_family_and_templated_route_not_source_fingerpri
         "tool": "autonomous_workflow",
         "cwe": "CWE-639",
         "url": "https://app.example.test",
-        "evidence": {"canonical_vulnerability_key": canonical},
+        "evidence": {
+            "canonical_vulnerability_key": canonical,
+            "canonical_vulnerability_key_version": "v2",
+            "dedupe_dimensions": {"route": "/api/orders/{id}", "method": "GET"},
+        },
     }
     assert api_module._finding_vulnerability_key(dast) == canonical
     assert api_module._finding_vulnerability_key(autonomous) == canonical
@@ -10726,7 +10732,10 @@ def test_experiment_workflow_templates_are_contract_valid():
     # to author workflows that get rejected. A mutating template must carry its own restoration.
     import workflow_experiment
     templates = api_module._EXPERIMENT_WORKFLOW_TEMPLATES
-    assert {"bola", "data_exposure", "auth_bypass", "mass_assignment"} <= set(templates)
+    assert {
+        "bola", "data_exposure", "auth_bypass", "mass_assignment",
+        "access_control", "field_constraint", "workflow",
+    } <= set(templates)
     for family, template in templates.items():
         assert template["proof_family"] == family
         normalized = workflow_experiment.normalize_workflow("https://example.test", template)
@@ -11027,25 +11036,45 @@ def test_research_duplicate_guard_ignores_ephemeral_workflow_id_for_experiments(
 
 def test_research_duplicate_guard_distinguishes_payloads_and_ignores_labels():
     def mass_assign(workflow_id, label, body):
+        before = f"{label}_before"
+        verify = f"{label}_verify"
+        cleanup = f"{label}_cleanup"
+        after = f"{label}_after"
         return {
             "command": "experiment.workflow",
             "parameters": {
                 "workflow_id": workflow_id,
                 "proof_family": "mass_assignment",
                 "steps": [
-                    {"kind": "http", "path": "/api/v2/user/dashboard", "method": "POST",
-                     "principal": "user1", "label": label, "body": body},
                     {"kind": "http", "path": "/api/v2/user/dashboard", "method": "GET",
-                     "principal": "user1", "label": f"{label}_read"},
+                     "principal": "user1", "checkpoint": "before", "label": before},
+                    {"kind": "http", "path": "/api/v2/user/dashboard", "method": "PATCH",
+                     "principal": "user1", "checkpoint": "mutation", "label": label,
+                     "json_body": body},
+                    {"kind": "http", "path": "/api/v2/user/dashboard", "method": "GET",
+                     "principal": "user1", "checkpoint": "action", "label": verify,
+                     "compare_to": before},
+                    {"kind": "http", "path": "/api/v2/user/dashboard", "method": "PATCH",
+                     "principal": "user1", "checkpoint": "cleanup", "label": cleanup,
+                     "json_body": {next(iter(body)): "<original>"}},
+                    {"kind": "http", "path": "/api/v2/user/dashboard", "method": "GET",
+                     "principal": "user1", "checkpoint": "after", "label": after,
+                     "compare_to": before},
                 ],
                 "assertions": [
-                    {"step": f"{label}_read", "type": "status_in", "values": [200],
-                     "predicate": "sensitive_value_present"},
+                    {"step": label, "type": "status_in", "values": [200],
+                     "predicate": "forbidden_field_accepted"},
+                    {"control": before, "candidate": verify, "type": "comparison_changed",
+                     "predicate": "observable_state_change"},
+                    {"control": before, "candidate": after, "type": "restored",
+                     "predicate": "before_after_state"},
                 ],
             },
         }
 
     set_role = mass_assign("aaaaaaaa-1111-4111-8111-111111111111", "write", {"role": "admin"})
+    import workflow_experiment
+    workflow_experiment.normalize_workflow("https://example.test", set_role["parameters"])
     # A DIFFERENT mass-assignment vector (isAdmin) on the same route must NOT collapse to a duplicate
     # -- the earlier key dropped bodies, so distinct payloads wrongly deduped and blocked exploration.
     set_admin = mass_assign("bbbbbbbb-2222-4222-8222-222222222222", "write", {"isAdmin": True})
@@ -11063,6 +11092,13 @@ def test_research_duplicate_guard_distinguishes_payloads_and_ignores_labels():
         "11111111-1111-4111-8111-111111111111", relabeled,
     ))
     assert dup is True
+
+    # Checkpoints are execution semantics. Moving the same request from action to cleanup must not
+    # collapse, even though every route, method, principal, payload, and label is otherwise equal.
+    moved_checkpoint = json.loads(json.dumps(set_role))
+    moved_checkpoint["parameters"]["workflow_id"] = "dddddddd-4444-4444-8444-444444444444"
+    moved_checkpoint["parameters"]["steps"][2]["checkpoint"] = "after"
+    assert api_module._research_action_dedupe_comparable(set_role) != api_module._research_action_dedupe_comparable(moved_checkpoint)
 
 
 def test_vulnerability_key_is_method_aware_and_gate_targets_only_asserted_steps():
@@ -11090,6 +11126,32 @@ def test_vulnerability_key_is_method_aware_and_gate_targets_only_asserted_steps(
     keys = api_module._research_action_vulnerability_keys(action)
     assert api_module._canonical_vulnerability_key(family="bola", route="/orders/{id}", method="GET") in keys
     assert api_module._canonical_vulnerability_key(family="bola", route="/known/vuln/route", method="POST") not in keys
+
+
+def test_legacy_methodless_smart_bola_suppresses_get_but_not_delete():
+    historic = {
+        "tool": "smart_bola",
+        "cwe": "CWE-639",
+        "title": "BOLA: Cross-user data access at /orders/42",
+        "url": "https://app.example.test/orders/42",
+        "evidence": {"proof_type": "cross_principal_replay"},
+    }
+    assert api_module._finding_vulnerability_key(historic) == api_module._canonical_vulnerability_key(
+        family="bola", route="/orders/{id}", method="GET",
+    )
+    assert api_module._finding_vulnerability_key(historic) != api_module._canonical_vulnerability_key(
+        family="bola", route="/orders/{id}", method="DELETE",
+    )
+
+    delete_action = {
+        "command": "experiment.workflow",
+        "parameters": {
+            "proof_family": "bola",
+            "steps": [{"label": "delete", "method": "DELETE", "path": "/orders/99"}],
+            "assertions": [{"step": "delete", "type": "status_in", "values": [200]}],
+        },
+    }
+    assert api_module._finding_vulnerability_key(historic) not in api_module._research_action_vulnerability_keys(delete_action)
 
 
 def test_research_duplicate_guard_decodes_asyncpg_jsonb_text_before_progress_check():
@@ -11322,6 +11384,7 @@ def test_invariant_hypothesis_routes_through_executable_verification_planning():
             "subject_role": "user",
             "action": "edit",
             "resource": "profile",
+            "method": "GET",
             "path": "/api/users/{id}",
             "expected_access": "deny",
             "conditions": {"resource_owner": "other"},
@@ -11340,6 +11403,7 @@ def test_invariant_hypothesis_routes_through_executable_verification_planning():
             "field_name": "percent",
             "operator": "lte",
             "expected_value": 30,
+            "method": "PATCH",
             "path": "/api/discount",
             "conditions": {},
         },
@@ -11353,9 +11417,207 @@ def test_invariant_hypothesis_routes_through_executable_verification_planning():
     assert ownership.next_test_action["recommended_proof_family"] == "bola"
     assert ownership.next_test_action["execution_ready"] is False
     assert field_constraint.next_test_action["command"] == "target.invariant.verification_plan"
-    assert field_constraint.next_test_action["recommended_verifier"] is None
-    assert field_constraint.next_test_action["recommended_proof_family"] is None
+    assert field_constraint.next_test_action["recommended_verifier"] == "experiment.workflow"
+    assert field_constraint.next_test_action["recommended_proof_family"] == "field_constraint"
     assert field_constraint.metadata_json["promotion_authority"] is False
+
+
+def test_approved_field_constraint_binds_to_two_live_restored_executions():
+    import workflow_experiment
+
+    contract = {
+        "id": "44444444-4444-4444-8444-444444444444",
+        "status": "approved",
+        "contract_kind": "field_constraint",
+        "title": "Discount cap",
+        "action": "update",
+        "resource": "discount",
+        "field_name": "percent",
+        "operator": "lte",
+        "expected_value": 30,
+        "method": "PATCH",
+        "path": "/api/discount",
+        "conditions": {},
+    }
+    payload = {
+        "proof_family": "field_constraint",
+        "steps": [
+            {"label": "before", "principal": "user1", "checkpoint": "before", "method": "GET", "path": "/api/discount", "select_json": ["$.percent"]},
+            {"label": "mutate", "principal": "user1", "checkpoint": "mutation", "method": "PATCH", "path": "/api/discount", "json_body": {"percent": 99}},
+            {"label": "verify", "principal": "user1", "checkpoint": "action", "method": "GET", "path": "/api/discount", "select_json": ["$.percent"], "compare_to": "before"},
+            {"label": "cleanup", "principal": "user1", "checkpoint": "cleanup", "method": "PATCH", "path": "/api/discount", "json_body": {"percent": 20}},
+            {"label": "after", "principal": "user1", "checkpoint": "after", "method": "GET", "path": "/api/discount", "select_json": ["$.percent"], "compare_to": "before"},
+        ],
+        "assertions": [
+            {"type": "comparison_changed", "control": "before", "candidate": "verify", "predicate": "constraint_violation_persisted"},
+            {"type": "restored", "control": "before", "candidate": "after", "predicate": "before_after_state"},
+        ],
+    }
+    normalized = workflow_experiment.normalize_workflow("https://example.test", payload)
+
+    def observation(label, checkpoint, method, selected=None):
+        return {
+            "label": label,
+            "kind": "http",
+            "principal": "user1",
+            "checkpoint": checkpoint,
+            "request": {"method": method, "path": "/api/discount"},
+            "response": {"status": 200, "selected_json": selected or {}},
+            "error": None,
+        }
+
+    execution = {
+        "proof_family": "field_constraint",
+        "restoration_verified": True,
+        "observations": [
+            observation("before", "before", "GET", {"$.percent": 20}),
+            observation("mutate", "mutation", "PATCH"),
+            observation("verify", "action", "GET", {"$.percent": 99}),
+            observation("cleanup", "cleanup", "PATCH"),
+            observation("after", "after", "GET", {"$.percent": 20}),
+        ],
+    }
+    proof = api_module._trusted_workflow_family_proof(
+        execution, json.loads(json.dumps(execution)),
+        invariant_contract=contract, normalized=normalized,
+    )
+
+    assert proof["verdict"] == "verified"
+    assert proof["promotable"] is True
+    assert proof["stable_predicates"] == [
+        "before_after_state", "constraint_baseline_observed", "constraint_violation_persisted",
+    ]
+    assert proof["proof_routes"] == ["/api/discount"]
+    assert proof["proof_methods"] == ["PATCH"]
+
+    no_persistence = json.loads(json.dumps(execution))
+    no_persistence["observations"][2]["response"]["selected_json"]["$.percent"] = 20
+    false_positive_moat = api_module._trusted_workflow_family_proof(
+        execution, no_persistence,
+        invariant_contract=contract, normalized=normalized,
+    )
+    assert false_positive_moat["promotable"] is False
+
+
+def test_approved_access_control_requires_exact_role_and_distinct_live_identity():
+    import workflow_experiment
+
+    contract = {
+        "id": "55555555-5555-4555-8555-555555555555",
+        "status": "approved",
+        "contract_kind": "access_control",
+        "title": "Only admins may export",
+        "subject_role": "admin",
+        "action": "export",
+        "resource": "report",
+        "expected_access": "requires_role",
+        "method": "GET",
+        "path": "/api/report/export",
+        "conditions": {},
+    }
+    payload = {
+        "proof_family": "access_control",
+        "steps": [
+            {"label": "authorized", "principal": "admin", "checkpoint": "action", "method": "GET", "path": "/api/report/export"},
+            {"label": "forbidden", "principal": "user1", "checkpoint": "action", "method": "GET", "path": "/api/report/export"},
+        ],
+        "assertions": [
+            {"type": "status_in", "step": "authorized", "values": [200], "predicate": "authorized_role_control"},
+            {"type": "status_in", "step": "forbidden", "values": [200], "predicate": "forbidden_role_access"},
+            {"type": "distinct_principals", "steps": ["authorized", "forbidden"], "predicate": "distinct_identity"},
+        ],
+    }
+    normalized = workflow_experiment.normalize_workflow("https://example.test", payload)
+    execution = {
+        "proof_family": "access_control",
+        "restoration_verified": True,
+        "principal_receipts": [
+            {"slot": "admin", "role": "admin", "identity_fingerprint": "admin-fp"},
+            {"slot": "user1", "role": "user", "identity_fingerprint": "user-fp"},
+        ],
+        "observations": [
+            {"label": "authorized", "kind": "http", "principal": "admin", "checkpoint": "action", "request": {"method": "GET", "path": "/api/report/export"}, "response": {"status": 200}, "error": None},
+            {"label": "forbidden", "kind": "http", "principal": "user1", "checkpoint": "action", "request": {"method": "GET", "path": "/api/report/export"}, "response": {"status": 200}, "error": None},
+        ],
+    }
+    proof = api_module._trusted_workflow_family_proof(
+        execution, json.loads(json.dumps(execution)),
+        invariant_contract=contract, normalized=normalized,
+    )
+    assert proof["verdict"] == "verified"
+    assert proof["promotable"] is True
+
+    same_account = json.loads(json.dumps(execution))
+    same_account["principal_receipts"][1]["identity_fingerprint"] = "admin-fp"
+    moat = api_module._trusted_workflow_family_proof(
+        execution, same_account,
+        invariant_contract=contract, normalized=normalized,
+    )
+    assert moat["promotable"] is False
+
+
+def test_approved_workflow_transition_distinguishes_forbidden_from_allowed_change():
+    import workflow_experiment
+
+    contract = {
+        "id": "66666666-6666-4666-8666-666666666666",
+        "status": "approved",
+        "contract_kind": "workflow_transition",
+        "title": "Pending may transition only to paid",
+        "action": "transition",
+        "resource": "order",
+        "field_name": "status",
+        "method": "PATCH",
+        "path": "/api/order/42",
+        "conditions": {"from_state": "pending", "to_state": "paid"},
+    }
+    payload = {
+        "proof_family": "workflow",
+        "steps": [
+            {"label": "before", "principal": "user1", "checkpoint": "before", "method": "GET", "path": "/api/order/42", "select_json": ["$.status"]},
+            {"label": "transition", "principal": "user1", "checkpoint": "mutation", "method": "PATCH", "path": "/api/order/42", "json_body": {"status": "cancelled"}},
+            {"label": "verify", "principal": "user1", "checkpoint": "action", "method": "GET", "path": "/api/order/42", "select_json": ["$.status"], "compare_to": "before"},
+            {"label": "cleanup", "principal": "user1", "checkpoint": "cleanup", "method": "PATCH", "path": "/api/order/42", "json_body": {"status": "pending"}},
+            {"label": "after", "principal": "user1", "checkpoint": "after", "method": "GET", "path": "/api/order/42", "select_json": ["$.status"], "compare_to": "before"},
+        ],
+        "assertions": [
+            {"type": "comparison_changed", "control": "before", "candidate": "verify", "predicate": "transition_invariant_broken"},
+            {"type": "restored", "control": "before", "candidate": "after", "predicate": "before_after_state"},
+        ],
+    }
+    normalized = workflow_experiment.normalize_workflow("https://example.test", payload)
+
+    def execution(next_state):
+        def observation(label, checkpoint, method, selected=None):
+            return {"label": label, "kind": "http", "principal": "user1", "checkpoint": checkpoint,
+                    "request": {"method": method, "path": "/api/order/42"},
+                    "response": {"status": 200, "selected_json": selected or {}}, "error": None}
+        return {
+            "proof_family": "workflow", "restoration_verified": True,
+            "observations": [
+                observation("before", "before", "GET", {"$.status": "pending"}),
+                observation("transition", "mutation", "PATCH"),
+                observation("verify", "action", "GET", {"$.status": next_state}),
+                observation("cleanup", "cleanup", "PATCH"),
+                observation("after", "after", "GET", {"$.status": "pending"}),
+            ],
+        }
+
+    forbidden = execution("cancelled")
+    proof = api_module._trusted_workflow_family_proof(
+        forbidden, json.loads(json.dumps(forbidden)),
+        invariant_contract=contract, normalized=normalized,
+    )
+    assert proof["verdict"] == "verified"
+    assert proof["promotable"] is True
+
+    allowed = execution("paid")
+    held = api_module._trusted_workflow_family_proof(
+        allowed, json.loads(json.dumps(allowed)),
+        invariant_contract=contract, normalized=normalized,
+    )
+    assert held["verdict"] == "refuted"
+    assert held["promotable"] is False
 
 
 def test_research_gap_recommendations_do_not_conflict_with_excluded_actions():
@@ -12069,6 +12331,12 @@ def test_research_campaign_readiness_requires_completed_two_user_surface():
             ]
 
         async def fetchrow(self, query, *args):
+            if "FROM target_endpoints" in query and "last_seen_scan_id" in query:
+                return {
+                    "fresh_authenticated_routes": 30, "fresh_second_user_routes": 12,
+                    "fresh_executable_routes": 25, "fresh_object_routes": 8,
+                    "fresh_mutation_routes": 6, "fresh_parameterized_routes": 14,
+                }
             if "FROM target_endpoints" in query:
                 return {
                     "inventory_rows": 80,
@@ -12101,6 +12369,56 @@ def test_research_campaign_readiness_requires_completed_two_user_surface():
     assert readiness["surface"]["executable_families"] == ["auth", "bola"]
 
 
+def test_research_campaign_readiness_accepts_same_count_routes_refreshed_by_this_preflight():
+    target_id = uuid.uuid4()
+    scan_id = uuid.uuid4()
+    campaign = {
+        "id": uuid.uuid4(),
+        "target_id": target_id,
+        "metadata_json": {"autonomous_research": {
+            "intensity": "deep_hunt",
+            "approval_receipt_id": str(uuid.uuid4()),
+            "allowed_families": ["auth"],
+            "preflight_scan_id": str(scan_id),
+            # Cardinality did not grow, but the current scan re-observed authenticated surface.
+            "surface_before_preflight": {"unique_routes": 40, "authenticated_routes": 30},
+        }},
+    }
+
+    class Conn:
+        async def fetch(self, query, *args):
+            assert "target_principals" in query
+            return [{"auth_state": "user1", "credential_profile": "owner", "credential_configured": True}]
+
+        async def fetchrow(self, query, *args):
+            if "FROM target_endpoints" in query and "last_seen_scan_id" in query:
+                assert args[1] == scan_id
+                return {
+                    "fresh_authenticated_routes": 30,
+                    "fresh_second_user_routes": 0,
+                    "fresh_executable_routes": 25,
+                }
+            if "FROM target_endpoints" in query:
+                return {
+                    "inventory_rows": 80, "unique_routes": 40, "authenticated_routes": 30,
+                    "second_user_routes": 0, "executable_routes": 25, "object_routes": 8,
+                    "mutation_routes": 6, "parameterized_routes": 14,
+                }
+            if "FROM application_graph_nodes" in query:
+                return {"route_nodes": 4, "edge_count": 3, "fresh_route_nodes": 0,
+                        "fresh_edge_count": 0, "fresh_auth_boundary_edges": 0}
+            if "FROM scans" in query:
+                return {"id": scan_id, "status": "completed", "current_phase": "done"}
+            raise AssertionError(query)
+
+    readiness = asyncio.run(api_module._research_campaign_readiness(Conn(), campaign))
+
+    assert readiness["ready"] is True
+    assert readiness["surface"]["fresh_authenticated_routes"] == 30
+    assert readiness["surface"]["meaningful_preflight_gain"] is True
+    assert "authenticated_preflight_no_material_gain" not in readiness["blockers"]
+
+
 def test_research_campaign_readiness_rejects_stale_or_empty_bola_graph():
     target_id = uuid.uuid4()
     scan_id = uuid.uuid4()
@@ -12124,6 +12442,12 @@ def test_research_campaign_readiness_rejects_stale_or_empty_bola_graph():
             ]
 
         async def fetchrow(self, query, *args):
+            if "FROM target_endpoints" in query and "last_seen_scan_id" in query:
+                return {
+                    "fresh_authenticated_routes": 0, "fresh_second_user_routes": 0,
+                    "fresh_executable_routes": 0, "fresh_object_routes": 0,
+                    "fresh_mutation_routes": 0, "fresh_parameterized_routes": 0,
+                }
             if "FROM target_endpoints" in query:
                 return {
                     "inventory_rows": 80, "unique_routes": 40, "authenticated_routes": 30,
@@ -12169,6 +12493,12 @@ def test_research_campaign_readiness_rejects_edges_without_a_fresh_auth_boundary
             ]
 
         async def fetchrow(self, query, *args):
+            if "FROM target_endpoints" in query and "last_seen_scan_id" in query:
+                return {
+                    "fresh_authenticated_routes": 30, "fresh_second_user_routes": 12,
+                    "fresh_executable_routes": 25, "fresh_object_routes": 8,
+                    "fresh_mutation_routes": 6, "fresh_parameterized_routes": 14,
+                }
             if "FROM target_endpoints" in query:
                 return {
                     "inventory_rows": 80, "unique_routes": 40, "authenticated_routes": 30,

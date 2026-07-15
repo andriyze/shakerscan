@@ -14616,7 +14616,12 @@ def _invariant_hypothesis_request(
         target_id=target_id,
         source="invariant",
         family=family,
-        cwe="CWE-639" if family == "bola" else None,
+        cwe={
+            "bola": "CWE-639",
+            "access_control": "CWE-285",
+            "field_constraint": "CWE-840",
+            "workflow": "CWE-841",
+        }.get(family),
         # Use a synthetic, typed label -- never the operator's free-text title -- so untyped
         # prose cannot re-enter the planner via the hypothesis summary. planner_projection
         # deliberately strips the contract title for the same reason.
@@ -14653,6 +14658,7 @@ def _invariant_hypothesis_request(
             "invariant_contract_id": contract_id,
             "contract_kind": kind,
             "verification_plan": plan,
+            "invariant_contract": invariant_contracts.planner_projection(contract),
             "unexplained_residue": True,
             "residue_source": "approved_target_invariant",
             "requires_auth": kind in {"ownership", "access_control"},
@@ -23508,12 +23514,337 @@ async def _execute_workflow_runtime(
             await manager.close_session(session.session_id)
 
 
+def _invariant_value_allowed(value: Any, operator: str, expected: Any) -> bool:
+    """Evaluate one typed invariant value without coercing ambiguous application data."""
+    if operator in {"lt", "lte", "gt", "gte"}:
+        if isinstance(value, bool) or isinstance(expected, bool):
+            return False
+        try:
+            actual_number = float(value)
+            expected_number = float(expected)
+        except (TypeError, ValueError):
+            return False
+        if not math.isfinite(actual_number) or not math.isfinite(expected_number):
+            return False
+        return {
+            "lt": actual_number < expected_number,
+            "lte": actual_number <= expected_number,
+            "gt": actual_number > expected_number,
+            "gte": actual_number >= expected_number,
+        }[operator]
+    if operator in {"in", "not_in"}:
+        if not isinstance(expected, list):
+            return False
+        member = value in expected
+        return member if operator == "in" else not member
+    if operator == "eq":
+        return value == expected
+    if operator == "ne":
+        return value != expected
+    return False
+
+
+def _invariant_mapping_value(value: Any, dotted_name: str) -> Any:
+    current = value
+    for part in str(dotted_name or "").split("."):
+        if not part or not isinstance(current, dict) or part not in current:
+            return None
+        current = current[part]
+    return current
+
+
+def _trusted_invariant_execution_evidence(
+    contract_value: dict[str, Any],
+    normalized: dict[str, Any],
+    result: dict[str, Any],
+) -> dict[str, Any]:
+    """Bind an approved typed invariant to server-observed live workflow evidence.
+
+    The model may choose requests, but it cannot supply any predicate below. Exact contract route,
+    method, role/value/state, successful response, restoration, and selected response values are
+    recomputed from the normalized workflow plus raw runtime observations.
+    """
+    if str(contract_value.get("status") or "") != "approved":
+        return {"family": "", "predicates": set(), "bindings": {}}
+    try:
+        contract = invariant_contracts.canonical_contract(contract_value)
+    except (TypeError, ValueError):
+        return {"family": "", "predicates": set(), "bindings": {}}
+    kind = contract["contract_kind"]
+    family = invariant_contracts.verification_plan({**contract, "status": "approved"}).get("proof_family") or ""
+    route = _canonical_vulnerability_route(contract.get("path"))
+    method = str(contract.get("method") or "").upper()
+    if not route or not method:
+        return {"family": family, "predicates": set(), "bindings": {}}
+
+    observations = [item for item in result.get("observations") or [] if isinstance(item, dict)]
+    by_label = {str(item.get("label") or ""): item for item in observations}
+    normalized_steps = [item for item in normalized.get("steps") or [] if isinstance(item, dict)]
+    step_index = {str(item.get("label") or ""): index for index, item in enumerate(normalized_steps)}
+    receipts = {
+        str(item.get("slot") or "").lower(): item
+        for item in result.get("principal_receipts") or [] if isinstance(item, dict)
+    }
+
+    def success(observation: dict[str, Any]) -> bool:
+        response = observation.get("response") if isinstance(observation.get("response"), dict) else {}
+        status = response.get("status")
+        return not observation.get("error") and isinstance(status, int) and 200 <= status < 300
+
+    def signature(observation: dict[str, Any]) -> tuple[str, str] | None:
+        request = observation.get("request") if isinstance(observation.get("request"), dict) else {}
+        observed_method = str(request.get("method") or "").upper()
+        observed_route = _canonical_vulnerability_route(request.get("path"))
+        return (observed_method, observed_route) if observed_method and observed_route else None
+
+    def selected(observation: dict[str, Any]) -> dict[str, Any]:
+        response = observation.get("response") if isinstance(observation.get("response"), dict) else {}
+        values = response.get("selected_json")
+        return values if isinstance(values, dict) else {}
+
+    exact = [item for item in observations if signature(item) == (method, route)]
+    predicates: set[str] = set()
+    bindings: dict[str, tuple[str, str]] = {}
+
+    if kind == "access_control" and contract.get("expected_access") in {"deny", "requires_role"}:
+        required_role = str(contract.get("subject_role") or "").lower()
+
+        def role(item: dict[str, Any]) -> str:
+            slot = str(item.get("principal") or "anonymous").lower()
+            return "anonymous" if slot == "anonymous" else str((receipts.get(slot) or {}).get("role") or "").lower()
+
+        if contract.get("expected_access") == "requires_role":
+            controls = [item for item in exact if role(item) == required_role]
+            candidates = [item for item in exact if role(item) != required_role]
+        else:
+            controls = [item for item in exact if role(item) != required_role]
+            candidates = [item for item in exact if role(item) == required_role]
+        control = next((item for item in controls if success(item)), None)
+        candidate = candidates[0] if candidates else None
+        if control:
+            predicates.add("authorized_role_control")
+            bindings["authorized_role_control"] = (method, route)
+        if control and candidate:
+            control_slot = str(control.get("principal") or "anonymous").lower()
+            candidate_slot = str(candidate.get("principal") or "anonymous").lower()
+            control_identity = (
+                "anonymous" if control_slot == "anonymous" else
+                str((receipts.get(control_slot) or {}).get("identity_fingerprint") or "")
+            )
+            candidate_identity = (
+                "anonymous" if candidate_slot == "anonymous" else
+                str((receipts.get(candidate_slot) or {}).get("identity_fingerprint") or "")
+            )
+            if (
+                control_slot != candidate_slot
+                and control_identity
+                and candidate_identity
+                and control_identity != candidate_identity
+            ):
+                predicates.add("distinct_identity")
+                bindings["distinct_identity"] = (method, route)
+            if success(candidate):
+                predicates.add("forbidden_role_access")
+                bindings["forbidden_role_access"] = (method, route)
+            else:
+                predicates.add("forbidden_role_denied")
+                bindings["forbidden_role_denied"] = (method, route)
+
+    elif kind == "field_constraint":
+        field_name = str(contract.get("field_name") or "")
+        selected_path = f"$.{field_name}"
+        mutation_steps = [
+            step for step in normalized_steps
+            if step.get("checkpoint") == "mutation"
+            and str(step.get("method") or "").upper() == method
+            and _canonical_vulnerability_route(step.get("path")) == route
+        ]
+        mutation_step = next((step for step in mutation_steps if _invariant_mapping_value(
+            step.get("json_body") if isinstance(step.get("json_body"), dict) else step.get("form_body"),
+            field_name,
+        ) is not None), None)
+        if mutation_step:
+            probe_value = _invariant_mapping_value(
+                mutation_step.get("json_body") if isinstance(mutation_step.get("json_body"), dict) else mutation_step.get("form_body"),
+                field_name,
+            )
+            violates = not _invariant_value_allowed(probe_value, str(contract.get("operator") or ""), contract.get("expected_value"))
+            mutation_observation = by_label.get(str(mutation_step.get("label") or ""), {})
+            mutation_position = step_index.get(str(mutation_step.get("label") or ""), -1)
+            before = next((
+                item for item in observations
+                if item.get("checkpoint") == "before"
+                and success(item)
+                and selected_path in selected(item)
+                and _invariant_value_allowed(selected(item)[selected_path], str(contract.get("operator") or ""), contract.get("expected_value"))
+            ), None)
+            after = next((
+                item for item in observations
+                if step_index.get(str(item.get("label") or ""), -1) > mutation_position
+                and item.get("checkpoint") in {"action", "after"}
+                and selected(item).get(selected_path) == probe_value
+                and before is not None
+                and signature(item) is not None
+                and signature(item) == signature(before)
+                and signature(item)[1] == route
+            ), None)
+            if before:
+                predicates.add("constraint_baseline_observed")
+                bindings["constraint_baseline_observed"] = (method, route)
+            if violates and success(mutation_observation) and after and success(after):
+                predicates.add("constraint_violation_persisted")
+                bindings["constraint_violation_persisted"] = (method, route)
+            elif violates and mutation_observation and not success(mutation_observation):
+                predicates.add("constraint_enforced")
+                bindings["constraint_enforced"] = (method, route)
+            if result.get("restoration_verified") is True:
+                predicates.add("before_after_state")
+                bindings["before_after_state"] = (method, route)
+
+    elif kind == "workflow_transition":
+        from_state = str((contract.get("conditions") or {}).get("from_state") or "").lower()
+        to_state = str((contract.get("conditions") or {}).get("to_state") or "").lower()
+        selected_path = f"$.{str(contract.get('field_name') or '')}"
+        mutation_step = next((
+            step for step in normalized_steps
+            if step.get("checkpoint") == "mutation"
+            and str(step.get("method") or "").upper() == method
+            and _canonical_vulnerability_route(step.get("path")) == route
+        ), None)
+        if mutation_step:
+            mutation_observation = by_label.get(str(mutation_step.get("label") or ""), {})
+            mutation_position = step_index.get(str(mutation_step.get("label") or ""), -1)
+            before_items = [item for item in observations if item.get("checkpoint") == "before"]
+            after_items = [
+                item for item in observations
+                if step_index.get(str(item.get("label") or ""), -1) > mutation_position
+                and item.get("checkpoint") in {"action", "after"}
+            ]
+            transition: tuple[Any, Any] | None = None
+            for before_item in before_items:
+                for after_item in after_items:
+                    if (
+                        not success(before_item)
+                        or not success(after_item)
+                        or
+                        signature(before_item) is None
+                        or signature(after_item) != signature(before_item)
+                        or signature(before_item)[1] != route
+                    ):
+                        continue
+                    prior = str(selected(before_item).get(selected_path) or "").lower()
+                    current = str(selected(after_item).get(selected_path) or "").lower()
+                    if prior and current and prior != current:
+                        transition = (prior, current)
+                    if transition:
+                        break
+                if transition:
+                    break
+            if transition and success(mutation_observation):
+                prior, current = transition
+                broken = not (prior == from_state and current == to_state)
+                if broken:
+                    predicates.add("transition_invariant_broken")
+                    bindings["transition_invariant_broken"] = (method, route)
+                elif prior == from_state and current == to_state:
+                    predicates.add("invariant_held")
+                    bindings["invariant_held"] = (method, route)
+            if result.get("restoration_verified") is True:
+                predicates.add("before_after_state")
+                bindings["before_after_state"] = (method, route)
+
+    return {"family": family, "predicates": predicates, "bindings": bindings}
+
+
 def _trusted_workflow_family_proof(
     first: dict[str, Any],
     replay: dict[str, Any],
+    *,
+    invariant_contract: dict[str, Any] | None = None,
+    normalized: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Derive family predicates only from matching, server-evaluated live assertions."""
     family = family_proof.canonical_family(first.get("proof_family"))
+    # Ownership already has a stronger object-producer/second-principal binder below. The typed
+    # binder here adds the three invariant families that previously had no promotion path.
+    if (
+        invariant_contract
+        and normalized
+        and str(invariant_contract.get("contract_kind") or "") != "ownership"
+    ):
+        first_evidence = _trusted_invariant_execution_evidence(invariant_contract, normalized, first)
+        replay_evidence = _trusted_invariant_execution_evidence(invariant_contract, normalized, replay)
+        expected_family = family_proof.canonical_family(first_evidence.get("family"))
+        same_family = bool(expected_family and family == expected_family)
+        allowed_contract = family_proof.FAMILY_CONTRACTS.get(expected_family) or {}
+        allowed_predicates = (
+            set(allowed_contract.get("requires") or [])
+            | set(allowed_contract.get("refute_if") or [])
+        )
+        first_predicates = set(first_evidence.get("predicates") or []) & allowed_predicates
+        replay_predicates = set(replay_evidence.get("predicates") or []) & allowed_predicates
+        stable_predicates = first_predicates & replay_predicates
+        first_bindings = first_evidence.get("bindings") if isinstance(first_evidence.get("bindings"), dict) else {}
+        replay_bindings = replay_evidence.get("bindings") if isinstance(replay_evidence.get("bindings"), dict) else {}
+        stable_bindings = {
+            predicate: first_bindings[predicate]
+            for predicate in stable_predicates
+            if first_bindings.get(predicate) is not None
+            and first_bindings.get(predicate) == replay_bindings.get(predicate)
+        }
+
+        def observation_shape(result: dict[str, Any]) -> list[tuple[Any, ...]]:
+            shape: list[tuple[Any, ...]] = []
+            for item in result.get("observations") or []:
+                if not isinstance(item, dict):
+                    continue
+                request = item.get("request") if isinstance(item.get("request"), dict) else {}
+                shape.append((
+                    item.get("label"), item.get("kind"), item.get("principal"), item.get("checkpoint"),
+                    str(request.get("method") or "").upper(),
+                    _canonical_vulnerability_route(request.get("path")),
+                    bool(item.get("error")),
+                ))
+            return shape
+
+        first_shape = observation_shape(first)
+        replay_shape = observation_shape(replay)
+        stable = bool(first_shape) and first_shape == replay_shape
+        restoration_verified = bool(
+            first.get("restoration_verified") and replay.get("restoration_verified")
+        )
+        no_errors = not any(
+            item.get("error")
+            for result in (first, replay)
+            for item in result.get("observations") or []
+            if isinstance(item, dict)
+        )
+        evidence = {predicate: True for predicate in stable_predicates}
+        evidence["reexecuted_at_handoff"] = bool(
+            same_family and stable and restoration_verified and no_errors
+        )
+        proof = family_proof.evaluate_family_proof(expected_family or family, evidence)
+        proof_paths = {binding[1] for binding in stable_bindings.values()}
+        proof_methods = {binding[0] for binding in stable_bindings.values()}
+        proof.update({
+            "stable_assertions": stable,
+            "stable_predicates": sorted(stable_predicates),
+            "restoration_verified": restoration_verified,
+            "execution_errors_absent": no_errors,
+            "reproduction_count": 2,
+            "proof_routes": sorted(proof_paths) if len(proof_paths) == 1 else [],
+            "proof_methods": sorted(proof_methods) if len(proof_methods) == 1 else [],
+            "predicate_bindings": {
+                predicate: {"method": binding[0], "path": binding[1]}
+                for predicate, binding in sorted(stable_bindings.items())
+            },
+            "invariant_contract_id": str(invariant_contract.get("id") or "") or None,
+            "invariant_contract_kind": invariant_contract.get("contract_kind"),
+            "invariant_family_match": same_family,
+            "proof_source": "approved_invariant_live_binder",
+        })
+        return proof
+
     contract = family_proof.FAMILY_CONTRACTS.get(family) or {}
     allowed = set(contract.get("requires") or []) | set(contract.get("refute_if") or [])
 
@@ -23647,23 +23978,20 @@ async def _promote_trusted_workflow_finding(
     proof_methods = {str(method).upper() for method in (proof.get("proof_methods") or []) if str(method).strip()}
     if hypothesis_method and hypothesis_method not in proof_methods:
         return None
+    proven_method = hypothesis_method or (next(iter(proof_methods)) if len(proof_methods) == 1 else "")
     finding_route = hypothesis_route or (sorted(proven_routes)[0] if proven_routes else None)
     canonical_vulnerability_key = _canonical_vulnerability_key(
-        family=family, route=finding_route, method=hypothesis_method or None,
+        family=family, route=finding_route, method=proven_method or None,
     )
     if not canonical_vulnerability_key:
         return None
-    # Suppress against a known scanner finding on the SAME method, or one whose method is unknown
-    # ('*', e.g. a scanner finding that didn't record it) so an already-flagged route still
-    # suppresses -- but never a known DIFFERENT method (GET vs DELETE are distinct vulnerabilities).
-    candidate_vulnerability_keys = {
-        canonical_vulnerability_key,
-        _canonical_vulnerability_key(family=family, route=finding_route, method=None),
-    }
-    candidate_vulnerability_keys.discard(None)
+    # Suppress only the same operation. Historic methodless smart BOLA/authz findings are recovered
+    # by _finding_vulnerability_key's deterministic GET inference; genuinely unknown methods remain
+    # wildcard-only and cannot erase every method-specific research candidate.
+    candidate_vulnerability_keys = {canonical_vulnerability_key}
     known_rows = await conn.fetch(
         """
-        SELECT id, tool, cwe, title, url, evidence
+        SELECT id, tool, cwe, title, url, evidence, request
         FROM findings
         WHERE target_id=$1
           AND status IN ('active','resolved','accepted_risk')
@@ -23703,6 +24031,7 @@ async def _promote_trusted_workflow_finding(
     evidence = _redact_finding_evidence({
         "proof": "Independent live workflow replay satisfied the deterministic family-proof contract.",
         "canonical_vulnerability_key": canonical_vulnerability_key,
+        "canonical_vulnerability_key_version": "v2",
         "dedupe_dimensions": dedupe_dimensions,
         "family_proof": proof,
         "autonomous_workflow": {
@@ -23788,6 +24117,7 @@ async def _arsenal_dispatch_workflow(p: dict[str, Any], approval_receipt_id: str
     workflow_id = str(workflow_uuid)
     if workflow_id in _active_workflow_cancellations:
         raise HTTPException(status_code=409, detail="Workflow is already active")
+    invariant_contract: dict[str, Any] | None = None
     async with db_pool.acquire() as conn:
         target = await conn.fetchrow(
             "SELECT id, url, is_active, discovery_source FROM targets WHERE id=$1",
@@ -23808,6 +24138,36 @@ async def _arsenal_dispatch_workflow(p: dict[str, Any], approval_receipt_id: str
             validate_principal_contexts(principal_contexts, used_slots)
         except WorkflowContractError as exc:
             raise HTTPException(status_code=422, detail={"error": "invalid_workflow", "violation": str(exc)}) from exc
+        if hypothesis_id:
+            hypothesis_uuid = _optional_uuid(hypothesis_id)
+            if not hypothesis_uuid:
+                raise HTTPException(status_code=422, detail="Research hypothesis id is invalid")
+            hypothesis_row = await conn.fetchrow(
+                "SELECT id, target_id, source, family, metadata_json FROM hypotheses WHERE id=$1 AND target_id=$2",
+                hypothesis_uuid,
+                target_uuid,
+            )
+            if hypothesis_row and str(hypothesis_row.get("source") or "") == "invariant":
+                hypothesis_metadata = _decode_json_value(hypothesis_row.get("metadata_json")) or {}
+                invariant_id = _optional_uuid(hypothesis_metadata.get("invariant_contract_id"))
+                if not invariant_id:
+                    raise HTTPException(status_code=422, detail="Invariant hypothesis is missing its approved contract binding")
+                invariant_row = await conn.fetchrow(
+                    "SELECT * FROM target_invariant_contracts WHERE id=$1 AND target_id=$2 AND status='approved'",
+                    invariant_id,
+                    target_uuid,
+                )
+                if not invariant_row:
+                    raise HTTPException(status_code=422, detail="Invariant contract is absent, retired, or not approved")
+                invariant_contract = _public_target_invariant_contract_row(invariant_row)
+                invariant_plan = invariant_contracts.verification_plan(invariant_contract)
+                if not invariant_plan.get("deterministic_family_supported"):
+                    raise HTTPException(status_code=422, detail="Invariant contract has no deterministic live binder")
+                expected_family = family_proof.canonical_family(invariant_plan.get("proof_family"))
+                if family_proof.canonical_family(normalized.get("proof_family")) != expected_family:
+                    raise HTTPException(status_code=422, detail="Workflow proof family does not match the approved invariant contract")
+                if not invariant_contract.get("method") or not invariant_contract.get("path"):
+                    raise HTTPException(status_code=422, detail="Invariant contract requires an exact method and route before execution")
         protected_endpoint_rows = await conn.fetch(
             """
             SELECT method, path, auth_state FROM target_endpoints
@@ -23871,7 +24231,12 @@ async def _arsenal_dispatch_workflow(p: dict[str, Any], approval_receipt_id: str
     # Derive the proof from the RAW results so the server-computed sensitive-value categories
     # (and full status/principal/comparison signals) survive redaction. The proof object itself
     # carries only predicate labels + booleans, never raw response values.
-    trusted_proof = _trusted_workflow_family_proof(executed, replayed)
+    trusted_proof = _trusted_workflow_family_proof(
+        executed,
+        replayed,
+        invariant_contract=invariant_contract,
+        normalized=normalized,
+    )
     failed_count = sum(1 for item in safe_result.get("observations", []) if item.get("error"))
     result_status = "partial" if failed_count or safe_result.get("cancelled") else "completed"
     async with db_pool.acquire() as conn:
@@ -23899,6 +24264,9 @@ async def _arsenal_dispatch_workflow(p: dict[str, Any], approval_receipt_id: str
                     "proof_state": "verified" if trusted_proof.get("promotable") else "unverified_workflow_signal",
                     "family_proof": trusted_proof,
                     "hypothesis_id": hypothesis_id,
+                    "invariant_contract_id": (
+                        str(invariant_contract.get("id")) if invariant_contract else None
+                    ),
                 },
                 created_by="research_principal_workflow",
             ))
@@ -23924,7 +24292,7 @@ async def _arsenal_dispatch_workflow(p: dict[str, Any], approval_receipt_id: str
                 },
                 tool_receipt_id=str(receipt.get("id")) if receipt.get("id") else None,
                 proof_state="verified" if trusted_proof.get("promotable") else "unverified",
-                metadata_json={"workflow_version": safe_result.get("version"), "finding_created": False, "promotion_allowed": bool(trusted_proof.get("promotable")), "hypothesis_id": hypothesis_id, "reproduction_count": 2},
+                metadata_json={"workflow_version": safe_result.get("version"), "finding_created": False, "promotion_allowed": bool(trusted_proof.get("promotable")), "hypothesis_id": hypothesis_id, "invariant_contract_id": str(invariant_contract.get("id")) if invariant_contract else None, "reproduction_count": 2},
                 created_by="research_principal_workflow",
             ))
             evidence = evidence_result.get("evidence_instance") or {}
@@ -26659,6 +27027,7 @@ def _research_hypothesis_experiment_contract(hypothesis: Any) -> dict[str, Any]:
     method = str(dedupe.get("method") or metadata.get("method") or "").strip().upper()
     request_fields = metadata.get("request_fields")
     request_example = metadata.get("request_example")
+    invariant_contract = metadata.get("invariant_contract") if isinstance(metadata.get("invariant_contract"), dict) else None
     required_principals = list(next_test.get("requires") or []) if isinstance(next_test.get("requires"), list) else []
     if family_proof.canonical_family(family) == "bola":
         required_principals = list(dict.fromkeys([*required_principals, "primary_auth", "second_user_auth"]))
@@ -26677,6 +27046,7 @@ def _research_hypothesis_experiment_contract(hypothesis: Any) -> dict[str, Any]:
         "attempt_count": int(metadata.get("attempt_count") or 0),
         "prior_failures": int(metadata.get("prior_failures") or 0),
         "last_outcome": metadata.get("last_outcome"),
+        "invariant_contract": invariant_contract,
     }
     return {key: value for key, value in contract.items() if value not in (None, "", [], {})}
 
@@ -27879,14 +28249,15 @@ async def _research_prepare_action(
     if (
         command.get("name") in {"asm.improve", "asm.test"}
         and not check_family
-        and 0 < len(allowed_families) < 4
+        and allowed_families
     ):
-        if len(allowed_families) == 1:
-            check_family = next(iter(allowed_families))
+        asm_families = allowed_families & RESEARCH_ASM_FAMILIES
+        if len(asm_families) == 1:
+            check_family = next(iter(asm_families))
             params["check_family"] = check_family
-        else:
+        elif asm_families != RESEARCH_ASM_FAMILIES:
             errors.append("check_family_required_for_scoped_episode")
-    if allowed_families and check_family and check_family not in allowed_families:
+    if allowed_families and check_family and not _research_family_is_allowed(check_family, allowed_families):
         errors.append("action_family_not_allowed")
     if (
         allowed_families
@@ -27953,22 +28324,37 @@ def _research_action_dedupe_comparable(action: Any) -> dict[str, Any]:
     if command not in _RESEARCH_EXPERIMENT_DEDUPE_COMMANDS:
         return {"command": command, "parameters": params}
     steps = params.get("steps") if isinstance(params.get("steps"), list) else []
-    # Canonical step identity = every semantic field of the step (method, route, principal, request
-    # body/query/form, browser action/selector/value, extract keys) with the id-bearing route
-    # collapsed and only the MUTABLE label/id/checkpoint dropped. This keeps two experiments that
-    # differ only in payload (e.g. distinct mass-assignment bodies) distinct -- fixing the earlier
-    # over-collapse -- while relabeling the same step leaves its identity unchanged. Assertions then
-    # reference steps by this content identity, not by the mutable label (fixing the relabel bypass).
-    step_identity: dict[str, str] = {}
-    canonical_steps: list[str] = []
+    # Canonical step identity = every semantic field of the step (including checkpoint) with mutable
+    # labels removed and every label reference resolved to the referenced step's content identity.
+    # ``checkpoint`` is execution semantics, not presentation: before/mutation/cleanup/action changes
+    # both what the runtime permits and what proof/restoration means. ``compare_to`` is a label
+    # reference, so retaining its raw text would let a mechanically identical workflow bypass dedupe
+    # merely by renaming its steps.
+    step_base_identity: dict[str, str] = {}
+    base_steps: list[tuple[dict[str, Any], dict[str, Any], str]] = []
     for step in steps:
         if not isinstance(step, dict):
             continue
-        identity = {key: value for key, value in step.items() if key not in {"label", "id", "checkpoint"}}
+        identity = {key: value for key, value in step.items() if key not in {"label", "id", "compare_to"}}
         identity["route"] = _canonical_vulnerability_route(step.get("path") or step.get("route"))
         identity.pop("path", None)
-        identity_hash = _research_canonical_hash(identity)
+        base_hash = _research_canonical_hash(identity)
         label = str(step.get("label") or step.get("id") or "").strip()
+        if label:
+            step_base_identity[label] = base_hash
+        base_steps.append((step, identity, label))
+
+    def _resolve_base_step(ref: Any) -> str | None:
+        text = str(ref or "").strip()
+        if not text:
+            return None
+        return step_base_identity.get(text, f"unbound:{text}")
+
+    step_identity: dict[str, str] = {}
+    canonical_steps: list[str] = []
+    for step, identity, label in base_steps:
+        identity = {**identity, "compare_to": _resolve_base_step(step.get("compare_to"))}
+        identity_hash = _research_canonical_hash(identity)
         if label:
             step_identity[label] = identity_hash
         canonical_steps.append(identity_hash)
@@ -28276,9 +28662,6 @@ def _canonical_vulnerability_key(*, family: Any, route: Any, method: Any = None)
 def _finding_vulnerability_key(value: Any) -> str | None:
     finding = row_to_dict(value) if value is not None and not isinstance(value, dict) else dict(value or {})
     evidence = _decode_json_value(finding.get("evidence")) or {}
-    explicit = str(evidence.get("canonical_vulnerability_key") or "").strip().lower()
-    if re.fullmatch(r"[a-f0-9]{64}", explicit):
-        return explicit
     family = _research_finding_family(finding)
     route = finding.get("url")
     method = finding.get("method")
@@ -28286,7 +28669,40 @@ def _finding_vulnerability_key(value: Any) -> str | None:
         dimensions = evidence.get("dedupe_dimensions") if isinstance(evidence.get("dedupe_dimensions"), dict) else {}
         route = dimensions.get("route") or evidence.get("route") or evidence.get("path") or route
         method = dimensions.get("method") or evidence.get("method") or method
-    return _canonical_vulnerability_key(family=family, route=route, method=method)
+        if not method:
+            consumer = str(evidence.get("consumer_endpoint") or "").strip()
+            consumer_match = re.match(r"^(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\s+", consumer, re.IGNORECASE)
+            if consumer_match:
+                method = consumer_match.group(1)
+    request = _decode_json_value(finding.get("request"))
+    if not method and isinstance(request, dict):
+        method = request.get("method")
+    if not method and isinstance(request, str):
+        request_match = re.match(r"^\s*(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\s+", request, re.IGNORECASE)
+        if request_match:
+            method = request_match.group(1)
+    if not method:
+        title_match = re.search(
+            r"\b(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\b",
+            str(finding.get("title") or ""),
+            re.IGNORECASE,
+        )
+        if title_match:
+            method = title_match.group(1)
+    if not method and str(finding.get("tool") or "").lower() in {"smart_bola", "smart_authz"}:
+        # Backward compatibility for findings written before those deterministic GET replays stamped
+        # their method into evidence. Write replays have always carried PATCH; the remaining historic
+        # cross-principal/unauthenticated smart BOLA findings are GET probes by construction.
+        proof_type = str((evidence or {}).get("proof_type") or "").lower()
+        if "write" not in proof_type:
+            method = "GET"
+    computed = _canonical_vulnerability_key(family=family, route=route, method=method)
+    if computed:
+        return computed
+    # Keep opaque legacy/manual evidence attributable only when structured family/route data is absent.
+    # Recompute whenever possible so v1 explicit hashes cannot silently bypass the v2 method-aware key.
+    explicit = str((evidence or {}).get("canonical_vulnerability_key") or "").strip().lower()
+    return explicit if re.fullmatch(r"[a-f0-9]{64}", explicit) else None
 
 
 RESEARCH_SURFACE_MIN_UNIQUE_ROUTES = 20
@@ -28297,6 +28713,19 @@ RESEARCH_SEMANTIC_FALSIFICATION_LIMIT = 3
 RESEARCH_RECON_ACTION_CAP = 6
 RESEARCH_AUTOPILOT_LEASE_SECONDS = 30
 RESEARCH_AUTOPILOT_HEARTBEAT_SECONDS = 10
+RESEARCH_ASM_FAMILIES = frozenset({"sqli", "xss", "auth", "bola"})
+RESEARCH_CAMPAIGN_FAMILIES = frozenset({
+    *RESEARCH_ASM_FAMILIES,
+    "mass_assignment",
+    "workflow",
+    "data_exposure",
+    "access_control",
+    "field_constraint",
+})
+RESEARCH_DEFAULT_CAMPAIGN_FAMILIES = (
+    "sqli", "xss", "auth", "bola", "mass_assignment", "workflow",
+    "data_exposure", "access_control", "field_constraint",
+)
 
 
 def _research_hypothesis_route(hypothesis: dict[str, Any]) -> str | None:
@@ -28375,14 +28804,11 @@ def _research_action_vulnerability_keys(action: dict[str, Any]) -> set[str]:
     keys: set[str] = set()
 
     def _add(route: Any, method: Any) -> None:
-        # Emit the method-specific key AND a method-wildcard key. The wildcard only matches a known
-        # finding whose method is unknown (scanner didn't record it) -- so an already-flagged route
-        # still suppresses re-hunting -- while two KNOWN different methods (GET vs DELETE) never
-        # cross-suppress, since a specific-method key never matches a different specific method.
-        for candidate_method in (method, None):
-            key = _canonical_vulnerability_key(family=family, route=route, method=candidate_method)
-            if key:
-                keys.add(key)
+        # A concrete candidate matches only the same concrete method. Unknown-method candidates use
+        # the wildcard key, but a methodless historic finding must never suppress every known method.
+        key = _canonical_vulnerability_key(family=family, route=route, method=method)
+        if key:
+            keys.add(key)
 
     for label in target_labels:
         step = steps_by_label.get(label)
@@ -28607,7 +29033,7 @@ async def _research_semantic_policy_violations(
 async def _research_known_vulnerability_keys(conn: Any, target_id: Any) -> set[str]:
     rows = await conn.fetch(
         """
-        SELECT tool, cwe, title, url, evidence
+        SELECT tool, cwe, title, url, evidence, request
         FROM findings
         WHERE target_id=$1
           AND status IN ('active','resolved','accepted_risk')
@@ -28713,7 +29139,7 @@ async def _research_campaign_readiness(conn: Any, campaign: Any) -> dict[str, An
               AND EXISTS (
                 SELECT 1 FROM target_endpoints e
                 WHERE e.target_id=$1 AND e.auth_state='user2'
-                  AND e.last_seen_at >= s.created_at
+                  AND e.last_seen_scan_id=s.id
               )
             ORDER BY s.completed_at DESC
             LIMIT 1
@@ -28723,6 +29149,42 @@ async def _research_campaign_readiness(conn: Any, campaign: Any) -> dict[str, An
         if preflight:
             preflight_scan_id = _optional_uuid(preflight.get("id"))
             reused_preflight = True
+    fresh_surface = await conn.fetchrow(
+        """
+        SELECT COUNT(DISTINCT upper(method) || ' ' || path)
+                   FILTER (WHERE auth_state IN ('user1','user2'))::int AS fresh_authenticated_routes,
+               COUNT(DISTINCT upper(method) || ' ' || path)
+                   FILTER (WHERE auth_state='user2')::int AS fresh_second_user_routes,
+               COUNT(DISTINCT upper(method) || ' ' || path)
+                   FILTER (
+                     WHERE auth_state IN ('user1','user2')
+                       AND (
+                         upper(method)='GET'
+                         OR COALESCE(param_shape, '') <> ''
+                         OR COALESCE(replay_spec, '') <> ''
+                       )
+                   )::int AS fresh_executable_routes,
+               COUNT(DISTINCT upper(method) || ' ' || path)
+                   FILTER (
+                     WHERE auth_state IN ('user1','user2')
+                       AND path ~ '/(\\{[^/{}]+\\}|:[A-Za-z_][A-Za-z0-9_]*|[0-9]+)(/|$)'
+                   )::int AS fresh_object_routes,
+               COUNT(DISTINCT upper(method) || ' ' || path)
+                   FILTER (
+                     WHERE auth_state IN ('user1','user2')
+                       AND upper(method) IN ('POST','PUT','PATCH')
+                       AND (COALESCE(param_shape, '') <> '' OR COALESCE(replay_spec, '') <> '')
+                   )::int AS fresh_mutation_routes,
+               COUNT(DISTINCT upper(method) || ' ' || path)
+                   FILTER (
+                     WHERE COALESCE(param_shape, '') <> '' OR COALESCE(replay_spec, '') <> ''
+                   )::int AS fresh_parameterized_routes
+        FROM target_endpoints
+        WHERE target_id=$1 AND last_seen_scan_id=$2::uuid
+        """,
+        target_id,
+        preflight_scan_id,
+    )
     graph = await conn.fetchrow(
         """
         SELECT COUNT(*) FILTER (WHERE node_type='route')::int AS route_nodes,
@@ -28747,11 +29209,13 @@ async def _research_campaign_readiness(conn: Any, campaign: Any) -> dict[str, An
     )
     surface_payload = {
         **(row_to_dict(surface) if surface else {}),
+        **(row_to_dict(fresh_surface) if fresh_surface else {}),
         **(row_to_dict(graph) if graph else {}),
     }
     before = config.get("surface_before_preflight") if isinstance(config.get("surface_before_preflight"), dict) else {}
     executable_routes = int(surface_payload.get("executable_routes") or 0)
     object_routes = int(surface_payload.get("object_routes") or 0)
+    mutation_routes = int(surface_payload.get("mutation_routes") or 0)
     parameterized_routes = int(surface_payload.get("parameterized_routes") or 0)
     fresh_route_nodes = int(surface_payload.get("fresh_route_nodes") or 0)
     fresh_edge_count = int(surface_payload.get("fresh_edge_count") or 0)
@@ -28760,27 +29224,52 @@ async def _research_campaign_readiness(conn: Any, campaign: Any) -> dict[str, An
     # boundary must not open the gate. Counting any edge_type let readiness pass with no real
     # two-principal surface (the reported fail-open).
     fresh_auth_boundary_edges = int(surface_payload.get("fresh_auth_boundary_edges") or 0)
+    family_executable_routes = (
+        int(surface_payload.get("fresh_executable_routes") or 0) if gated else executable_routes
+    )
+    family_object_routes = (
+        int(surface_payload.get("fresh_object_routes") or 0) if gated else object_routes
+    )
+    family_second_user_routes = (
+        int(surface_payload.get("fresh_second_user_routes") or 0)
+        if gated else int(surface_payload.get("second_user_routes") or 0)
+    )
+    family_mutation_routes = (
+        int(surface_payload.get("fresh_mutation_routes") or 0) if gated else mutation_routes
+    )
+    family_parameterized_routes = (
+        int(surface_payload.get("fresh_parameterized_routes") or 0) if gated else parameterized_routes
+    )
     executable_families: list[str] = []
-    if "auth" in families and executable_routes > 0:
+    if "auth" in families and family_executable_routes > 0:
         executable_families.append("auth")
     if (
         "bola" in families
-        and object_routes > 0
-        and int(surface_payload.get("second_user_routes") or 0) > 0
+        and family_object_routes > 0
+        and family_second_user_routes > 0
         and fresh_auth_boundary_edges > 0
     ):
         executable_families.append("bola")
     for injection_family in ("sqli", "xss"):
-        if injection_family in families and parameterized_routes > 0:
+        if injection_family in families and family_parameterized_routes > 0:
             executable_families.append(injection_family)
-    authenticated_route_gain = (
-        int(surface_payload.get("authenticated_routes") or 0) > int(before.get("authenticated_routes") or 0)
-    )
+    if "mass_assignment" in families and family_mutation_routes > 0:
+        executable_families.append("mass_assignment")
+    if "field_constraint" in families and family_mutation_routes > 0:
+        executable_families.append("field_constraint")
+    if "workflow" in families and family_mutation_routes > 0:
+        executable_families.append("workflow")
+    if "data_exposure" in families and family_executable_routes > 0:
+        executable_families.append("data_exposure")
+    if "access_control" in families and family_executable_routes > 0:
+        executable_families.append("access_control")
+    fresh_authenticated_routes = int(surface_payload.get("fresh_authenticated_routes") or 0)
     if gated:
-        # For an authenticated hunt, "gain" must be authenticated: new user1/user2 routes or a fresh
-        # cross-principal boundary. A new PUBLIC route node is not material progress and must not
-        # satisfy the preflight (the reported fail-open: unchanged auth coverage + one public node).
-        meaningful_preflight_gain = bool(fresh_auth_boundary_edges > 0 or authenticated_route_gain)
+        # Count authenticated coverage stamped by THIS preflight, not only net-new cardinality. A
+        # successful refresh of 30 existing authenticated routes is useful and fresh; an unrelated
+        # concurrent/public route is not. The scan-id provenance closes both the old fail-open and the
+        # same-count false-negative that repeatedly exhausted otherwise healthy auth preflights.
+        meaningful_preflight_gain = bool(fresh_auth_boundary_edges > 0 or fresh_authenticated_routes > 0)
     else:
         meaningful_preflight_gain = bool(
             fresh_route_nodes > 0
@@ -28813,7 +29302,7 @@ async def _research_campaign_readiness(conn: Any, campaign: Any) -> dict[str, An
         )
     if gated and int(surface_payload.get("authenticated_routes") or 0) < RESEARCH_SURFACE_MIN_AUTHENTICATED_ROUTES:
         blockers.append("insufficient_authenticated_route_coverage")
-    if gated and executable_routes < RESEARCH_SURFACE_MIN_EXECUTABLE_ROUTES:
+    if gated and family_executable_routes < RESEARCH_SURFACE_MIN_EXECUTABLE_ROUTES:
         blockers.append("no_executable_authenticated_routes")
     if gated and "bola" in families and int(surface_payload.get("second_user_routes") or 0) <= 0:
         blockers.append("second_user_surface_not_observed")
@@ -29218,12 +29707,12 @@ async def research_episode_benchmark(
             raise HTTPException(status_code=400, detail="Baseline lacks options.benchmark_request_budget")
         equal_budget = baseline_budget == episode_budget
         baseline_rows = await conn.fetch(
-            "SELECT id, fingerprint, title, tool, cwe, url, evidence FROM findings WHERE scan_id=$1",
+            "SELECT id, fingerprint, title, tool, cwe, url, evidence, request FROM findings WHERE scan_id=$1",
             baseline_uuid,
         )
         autonomous_rows = await conn.fetch(
             """
-            SELECT id, fingerprint, title, severity, tool, cwe, url, evidence,
+            SELECT id, fingerprint, title, severity, tool, cwe, url, evidence, request,
                    last_verification_verdict
             FROM findings
             WHERE target_id=$1 AND tool='autonomous_workflow'
@@ -29238,7 +29727,7 @@ async def research_episode_benchmark(
         # any other DAST/scanner/manual finding, or a scan that ran during the episode window) is
         # not autonomy's to claim as net-new. Exclude all of them, not just the baseline scan.
         prior_source_rows = await conn.fetch(
-            "SELECT id, fingerprint, title, tool, cwe, url, evidence FROM findings "
+            "SELECT id, fingerprint, title, tool, cwe, url, evidence, request FROM findings "
             "WHERE target_id=$1 AND COALESCE(tool,'') <> 'autonomous_workflow'",
             episode_row["target_id"],
         )
@@ -29479,7 +29968,7 @@ async def launch_research_episode(req: ResearchLaunchRequest):
 
     allowed_families = []
     if launch_profile["execution_mode"] == "gated":
-        allowed_families = ["sqli", "xss", "auth", "bola"]
+        allowed_families = list(RESEARCH_DEFAULT_CAMPAIGN_FAMILIES)
     if req.allowed_families_override:
         allowed_families = [str(item).strip() for item in req.allowed_families_override if str(item).strip()]
     if finding:
@@ -29633,7 +30122,7 @@ async def launch_research_campaign(req: ResearchCampaignLaunchRequest):
     target_uuid = _uuid_or_400(req.target_id, "target id")
     unsupported_families = sorted({
         str(item).strip().lower() for item in req.allowed_families if str(item).strip()
-    } - {"sqli", "xss", "auth", "bola"})
+    } - RESEARCH_CAMPAIGN_FAMILIES)
     if unsupported_families:
         raise HTTPException(
             status_code=400,
@@ -29649,7 +30138,7 @@ async def launch_research_campaign(req: ResearchCampaignLaunchRequest):
             detail="At least one vulnerability family is required for a gated research campaign",
         )
     if gated_campaign and "allowed_families" not in req.model_fields_set:
-        requested_families = ["sqli", "xss", "auth", "bola"]
+        requested_families = list(RESEARCH_DEFAULT_CAMPAIGN_FAMILIES)
     deadline = datetime.now(timezone.utc) + timedelta(hours=req.duration_hours)
     metadata = {
         "autonomous_research": {
@@ -30934,6 +31423,9 @@ async def _research_autobind_hypothesis(
         "auth_bypass": {"unauthenticated_control"},
         "data_exposure": {"sensitive_value_present"},
         "mass_assignment": {"forbidden_field_accepted"},
+        "access_control": {"forbidden_role_access"},
+        "field_constraint": {"constraint_violation_persisted"},
+        "workflow": {"transition_invariant_broken"},
     }.get(family, set())
     for assertion in (params.get("assertions") or []):
         if isinstance(assertion, dict) and assertion.get("predicate") in preferred_predicates:
@@ -31037,6 +31529,56 @@ _EXPERIMENT_WORKFLOW_TEMPLATES: dict[str, dict[str, Any]] = {
         "assertions": [
             {"type": "status_in", "step": "authed", "values": [200], "predicate": "protected_resource_accessed"},
             {"type": "status_not_in", "step": "anon", "values": [401, 403], "predicate": "unauthenticated_control"},
+        ],
+    },
+    "access_control": {
+        "proof_family": "access_control",
+        "objective": "Test an approved deny/requires-role invariant with an authorized control and a distinct forbidden principal",
+        "expected_signal": "the forbidden principal succeeds on the exact approved method and route",
+        "falsifier": "the authorized control fails or the forbidden principal is denied",
+        "steps": [
+            {"label": "authorized", "kind": "http", "principal": "admin", "checkpoint": "action", "method": "GET", "path": "/api/<approved-route>"},
+            {"label": "forbidden", "kind": "http", "principal": "user1", "checkpoint": "action", "method": "GET", "path": "/api/<approved-route>"},
+        ],
+        "assertions": [
+            {"type": "status_in", "step": "authorized", "values": [200, 201, 202, 204], "predicate": "authorized_role_control"},
+            {"type": "status_in", "step": "forbidden", "values": [200, 201, 202, 204], "predicate": "forbidden_role_access"},
+            {"type": "distinct_principals", "steps": ["authorized", "forbidden"], "predicate": "distinct_identity"},
+        ],
+    },
+    "field_constraint": {
+        "proof_family": "field_constraint",
+        "objective": "Test an approved field constraint with a bounded violating value and restore the original state",
+        "expected_signal": "the out-of-policy value is accepted and persists in a live state read",
+        "falsifier": "the mutation is rejected or the violating value does not persist",
+        "steps": [
+            {"label": "before", "kind": "http", "principal": "user1", "checkpoint": "before", "method": "GET", "path": "/api/<approved-route>", "select_json": ["$.<field>"]},
+            {"label": "mutate", "kind": "http", "principal": "user1", "checkpoint": "mutation", "method": "PATCH", "path": "/api/<approved-route>", "json_body": {"<field>": "<violating-value>"}},
+            {"label": "verify", "kind": "http", "principal": "user1", "checkpoint": "action", "method": "GET", "path": "/api/<approved-route>", "select_json": ["$.<field>"], "compare_to": "before"},
+            {"label": "cleanup", "kind": "http", "principal": "user1", "checkpoint": "cleanup", "method": "PATCH", "path": "/api/<approved-route>", "json_body": {"<field>": "<original-value>"}},
+            {"label": "after", "kind": "http", "principal": "user1", "checkpoint": "after", "method": "GET", "path": "/api/<approved-route>", "select_json": ["$.<field>"], "compare_to": "before"},
+        ],
+        "assertions": [
+            {"type": "status_in", "step": "before", "values": [200], "predicate": "constraint_baseline_observed"},
+            {"type": "comparison_changed", "control": "before", "candidate": "verify", "predicate": "constraint_violation_persisted"},
+            {"type": "restored", "control": "before", "candidate": "after", "predicate": "before_after_state"},
+        ],
+    },
+    "workflow": {
+        "proof_family": "workflow",
+        "objective": "Test an approved state-transition invariant and restore the original state",
+        "expected_signal": "the forbidden transition succeeds and the state changes outside the approved transition",
+        "falsifier": "the transition is rejected or only the approved state change occurs",
+        "steps": [
+            {"label": "before", "kind": "http", "principal": "user1", "checkpoint": "before", "method": "GET", "path": "/api/<approved-route>", "select_json": ["$.status"]},
+            {"label": "transition", "kind": "http", "principal": "user1", "checkpoint": "mutation", "method": "PATCH", "path": "/api/<approved-route>", "json_body": {"status": "<forbidden-state>"}},
+            {"label": "verify", "kind": "http", "principal": "user1", "checkpoint": "action", "method": "GET", "path": "/api/<approved-route>", "select_json": ["$.status"], "compare_to": "before"},
+            {"label": "cleanup", "kind": "http", "principal": "user1", "checkpoint": "cleanup", "method": "PATCH", "path": "/api/<approved-route>", "json_body": {"status": "<original-state>"}},
+            {"label": "after", "kind": "http", "principal": "user1", "checkpoint": "after", "method": "GET", "path": "/api/<approved-route>", "select_json": ["$.status"], "compare_to": "before"},
+        ],
+        "assertions": [
+            {"type": "comparison_changed", "control": "before", "candidate": "verify", "predicate": "transition_invariant_broken"},
+            {"type": "restored", "control": "before", "candidate": "after", "predicate": "before_after_state"},
         ],
     },
     "mass_assignment": {
