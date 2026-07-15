@@ -30,11 +30,12 @@ from http_experiment import (
 )
 
 
-WORKFLOW_VERSION = "principal-workflow-2026-07-12.v1"
+WORKFLOW_VERSION = "principal-workflow-2026-07-14.v2"
 MAX_WORKFLOW_STEPS = 12
 MAX_WORKFLOW_VARIABLES = 40
 MAX_WORKFLOW_SECONDS = 180
 MAX_WORKFLOW_ASSERTIONS = 16
+MAX_PRINCIPAL_VARIABLES = 8
 ALLOWED_STEP_KINDS = {"http", "browser"}
 ALLOWED_CHECKPOINTS = {"before", "mutation", "after", "action", "cleanup", "rollback"}
 ALLOWED_BROWSER_ACTIONS = {"navigate", "click", "fill", "submit", "wait", "extract"}
@@ -268,6 +269,7 @@ def _server_confirms_predicate(
     by_label: dict[str, dict[str, Any]],
     by_pair: dict[tuple[str, str], dict[str, Any]],
     principal_identities: dict[str, str],
+    principal_variable_receipts: list[dict[str, Any]],
 ) -> bool:
     step = by_label.get(str(assertion.get("step") or ""), {})
     control = by_label.get(str(assertion.get("control") or ""), {})
@@ -309,13 +311,21 @@ def _server_confirms_predicate(
         # that same principal in this workflow.  Anonymous denial only proves authentication, not
         # ownership, and therefore cannot replace this provenance check.
         referenced = set(control_request.get("variable_references") or [])
-        owner_established = any(
+        owner_established_by_mutation = any(
             obs.get("checkpoint") == "mutation"
             and str(obs.get("principal") or "").lower() == control_principal
             and _obs_success(obs)
             and bool(referenced & set(obs.get("extracted_names") or []))
             for obs in by_label.values()
         )
+        owner_established_by_captured_ref = any(
+            str(receipt.get("principal") or "").lower() == control_principal
+            and str(receipt.get("name") or "") in referenced
+            and bool(receipt.get("sha256"))
+            for receipt in principal_variable_receipts
+            if isinstance(receipt, dict)
+        )
+        owner_established = owner_established_by_mutation or owner_established_by_captured_ref
         base = bool(distinct and same_request and equivalent and _obs_success(control) and _obs_success(candidate))
         return base and (owner_established if predicate == "ownership_established" else True)
     if predicate == "distinct_identity":
@@ -422,6 +432,10 @@ def _server_corroborated_evidence(
         for item in (result.get("principal_receipts") or [])
         if isinstance(item, dict) and item.get("slot") and item.get("identity_fingerprint")
     }
+    principal_variable_receipts = [
+        item for item in (result.get("principal_variable_receipts") or [])
+        if isinstance(item, dict)
+    ]
     granted: set[str] = set()
     assertions_by_predicate: dict[str, list[dict[str, Any]]] = {}
     for assertion in result.get("assertion_results") or []:
@@ -429,7 +443,8 @@ def _server_corroborated_evidence(
             continue
         predicate = str(assertion.get("predicate") or "").strip().lower()
         if predicate and _server_confirms_predicate(
-            predicate, assertion, by_label, by_pair, principal_identities
+            predicate, assertion, by_label, by_pair, principal_identities,
+            principal_variable_receipts,
         ):
             granted.add(predicate)
             assertions_by_predicate.setdefault(predicate, []).append(assertion)
@@ -548,6 +563,36 @@ def _normalize_mapping(index: int, field: str, raw: Any, *, max_items: int) -> d
     return result
 
 
+def _normalize_principal_variables(raw: Any) -> list[dict[str, str]]:
+    items = raw if isinstance(raw, list) else []
+    if len(items) > MAX_PRINCIPAL_VARIABLES:
+        raise WorkflowContractError("principal_variable_limit_exceeded")
+    normalized: list[dict[str, str]] = []
+    names: set[str] = set()
+    for index, item in enumerate(items):
+        if not isinstance(item, dict):
+            raise WorkflowContractError(f"principal_variable_{index}_must_be_object")
+        name = str(item.get("name") or "").strip()
+        principal = str(item.get("principal") or "").strip().lower()
+        ref = str(item.get("ref") or "").strip()
+        if (
+            not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,63}", name)
+            or _sensitive_name(name)
+            or name in names
+        ):
+            raise WorkflowContractError(f"principal_variable_{index}_name_invalid")
+        if principal == "anonymous" or not PRINCIPAL_SLOT_PATTERN.fullmatch(principal):
+            raise WorkflowContractError(f"principal_variable_{index}_principal_invalid")
+        if (
+            not re.fullmatch(r"[A-Za-z][A-Za-z0-9_.-]{0,79}", ref)
+            or _sensitive_name(ref)
+        ):
+            raise WorkflowContractError(f"principal_variable_{index}_ref_invalid")
+        names.add(name)
+        normalized.append({"name": name, "principal": principal, "ref": ref})
+    return normalized
+
+
 def normalize_workflow(target_url: str, raw: Any) -> dict[str, Any]:
     payload = raw if isinstance(raw, dict) else {}
     steps = payload.get("steps") if isinstance(payload.get("steps"), list) else []
@@ -555,7 +600,9 @@ def normalize_workflow(target_url: str, raw: Any) -> dict[str, Any]:
         raise WorkflowContractError("workflow_requires_2_to_12_steps")
     target_origin = _origin(target_url)
     labels: set[str] = set()
-    declared: set[str] = set()
+    principal_variables = _normalize_principal_variables(payload.get("principal_variables"))
+    declared: set[str] = {item["name"] for item in principal_variables}
+    referenced_variables: set[str] = set()
     normalized: list[dict[str, Any]] = []
     for index, item in enumerate(steps):
         if not isinstance(item, dict):
@@ -687,8 +734,17 @@ def normalize_workflow(target_url: str, raw: Any) -> dict[str, Any]:
         missing = sorted(references - declared)
         if missing:
             raise WorkflowContractError(f"step_{index}_variable_not_declared:{missing[0]}")
+        referenced_variables.update(references)
         declared.update(extract_names)
         normalized.append(normalized_step)
+
+    unused_principal_variables = sorted(
+        {item["name"] for item in principal_variables} - referenced_variables
+    )
+    if unused_principal_variables:
+        raise WorkflowContractError(
+            f"principal_variable_not_referenced:{unused_principal_variables[0]}"
+        )
 
     assertions = _normalize_assertions(payload.get("assertions"), labels)
     steps_by_label = {step["label"]: step for step in normalized}
@@ -759,6 +815,7 @@ def normalize_workflow(target_url: str, raw: Any) -> dict[str, Any]:
         "timeout_seconds": timeout_seconds,
         "steps": normalized,
         "proof_family": str(payload.get("proof_family") or "workflow").strip().lower()[:80],
+        "principal_variables": principal_variables,
         "assertions": assertions,
         "mutating": bool(mutating_steps),
     }
@@ -858,9 +915,34 @@ async def execute_workflow(
     transport: httpx.AsyncBaseTransport | None = None,
 ) -> dict[str, Any]:
     workflow = normalize_workflow(target_url, raw)
-    used_slots = {step["principal"] for step in workflow["steps"]}
+    used_slots = {
+        *{step["principal"] for step in workflow["steps"]},
+        *{item["principal"] for item in workflow.get("principal_variables") or []},
+    }
     receipts = validate_principal_contexts(principal_contexts, used_slots)
     variables: dict[str, str] = {}
+    principal_variable_receipts: list[dict[str, Any]] = []
+    for binding in workflow.get("principal_variables") or []:
+        context = principal_contexts.get(binding["principal"]) or {}
+        captured_refs = context.get("captured_refs") if isinstance(context.get("captured_refs"), dict) else {}
+        value = captured_refs.get(binding["ref"])
+        if value in (None, ""):
+            raise WorkflowContractError(
+                f"principal_captured_ref_missing:{binding['principal']}:{binding['ref']}"
+            )
+        rendered_value = str(value)[:1000]
+        if _contains_control_character(rendered_value):
+            raise WorkflowContractError(
+                f"principal_captured_ref_contains_control_character:{binding['ref']}"
+            )
+        variables[binding["name"]] = rendered_value
+        principal_variable_receipts.append({
+            "name": binding["name"],
+            "principal": binding["principal"],
+            "ref": binding["ref"],
+            "sha256": hashlib.sha256(rendered_value.encode()).hexdigest(),
+            "length": len(rendered_value),
+        })
     observations: list[dict[str, Any]] = []
     request_count = 0
     mutation_succeeded = False
@@ -1039,6 +1121,7 @@ async def execute_workflow(
         "request_count": request_count,
         "step_count": len(observations),
         "principal_receipts": receipts,
+        "principal_variable_receipts": principal_variable_receipts,
         "variable_names": sorted(variables),
         "observations": observations,
         "comparisons": comparisons,

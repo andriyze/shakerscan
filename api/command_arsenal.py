@@ -922,6 +922,24 @@ COMMANDS: tuple[ArsenalCommand, ...] = (
                     "data_exposure", "access_control", "field_constraint",
                 ],
             },
+            "principal_variables": {
+                "type": "array",
+                "maxItems": 8,
+                "description": (
+                    "Server-bound variables sourced from captured_refs on a managed principal. "
+                    "The model names the reference but never supplies its value."
+                ),
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["name", "principal", "ref"],
+                    "properties": {
+                        "name": {"type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_]{0,63}$"},
+                        "principal": _workflow_principal_schema(),
+                        "ref": {"type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,79}$"},
+                    },
+                },
+            },
             "assertions": {
                 "type": "array", "minItems": 1, "maxItems": 16,
                 "items": {

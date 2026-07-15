@@ -12319,6 +12319,9 @@ def test_principal_workflow_has_wired_gated_dispatch_adapter():
     assert command["risk_tier"] == "credential"
     assert command["request_cost"] == 12
     assert "workflow_id" in command["parameters_schema"]
+    principal_variables = command["parameters_schema"]["principal_variables"]
+    assert principal_variables["items"]["additionalProperties"] is False
+    assert principal_variables["items"]["required"] == ["name", "principal", "ref"]
     assert api_module._arsenal_gated_adapters()["experiment.workflow"] is api_module._arsenal_dispatch_workflow
 
 

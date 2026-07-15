@@ -14324,6 +14324,9 @@ async def _auto_provision_principals(conn, target_uuid, target_url: str, config:
             captured: dict[str, str] = {}
             capture_config = login.get("capture") if isinstance(login.get("capture"), dict) else {}
             for cap_name, cap_path in capture_config.items():
+                if is_sensitive_key(str(cap_name)):
+                    logger.warning("ignored sensitive captured ref name %s for %s", cap_name, label)
+                    continue
                 cap_value = _provision_json_path(login_payload, str(cap_path))
                 if cap_value is not None:
                     captured[str(cap_name)[:60]] = str(cap_value)[:120]
@@ -23551,6 +23554,13 @@ async def _resolve_workflow_principal_contexts(
         cookies = _workflow_cookie_map(secret) if auth_kind == "cookie" else {}
         if not headers and not cookies:
             raise WorkflowContractError(f"principal_profile_auth_kind_invalid:{slot}")
+        principal_metadata = _decode_json_value(row.get("principal_metadata")) or {}
+        captured_refs = (
+            principal_metadata.get("captured_refs")
+            if isinstance(principal_metadata, dict)
+            and isinstance(principal_metadata.get("captured_refs"), dict)
+            else {}
+        )
         contexts[slot] = {
             "principal_id": str(row.get("principal_id")),
             "profile_id": str(row.get("profile_id")),
@@ -23559,6 +23569,11 @@ async def _resolve_workflow_principal_contexts(
             ),
             "role": row.get("role"),
             "tenant_id": row.get("tenant_id"),
+            "captured_refs": {
+                str(key): str(value)
+                for key, value in captured_refs.items()
+                if not is_sensitive_key(str(key)) and value not in (None, "")
+            },
             "headers": headers,
             "cookies": cookies,
         }
@@ -24252,11 +24267,17 @@ async def _arsenal_dispatch_workflow(p: dict[str, Any], approval_receipt_id: str
             raise HTTPException(status_code=400, detail="Model Intake artifacts are not workflow targets")
         workflow_payload = {
             key: value for key, value in p.items()
-            if key in {"objective", "expected_signal", "falsifier", "proof_family", "assertions", "timeout_seconds", "steps"}
+            if key in {
+                "objective", "expected_signal", "falsifier", "proof_family",
+                "principal_variables", "assertions", "timeout_seconds", "steps",
+            }
         }
         try:
             normalized = normalize_workflow(str(target["url"]), workflow_payload)
-            used_slots = {step["principal"] for step in normalized["steps"]}
+            used_slots = {
+                *{step["principal"] for step in normalized["steps"]},
+                *{item["principal"] for item in normalized.get("principal_variables") or []},
+            }
             principal_contexts = await _resolve_workflow_principal_contexts(conn, target_uuid, used_slots)
             validate_principal_contexts(principal_contexts, used_slots)
         except WorkflowContractError as exc:
@@ -27052,7 +27073,8 @@ def _research_experiment_projection(source: Any) -> dict[str, Any]:
         key: experiment.get(key)
         for key in (
             "version", "objective", "expected_signal", "falsifier", "step_count",
-            "request_count", "cancelled", "principal_receipts", "comparisons",
+            "request_count", "cancelled", "principal_receipts",
+            "principal_variable_receipts", "comparisons",
         )
         if experiment.get(key) not in (None, "", [], {})
     }
@@ -31826,24 +31848,22 @@ async def _research_autobind_hypothesis(
 _EXPERIMENT_WORKFLOW_TEMPLATES: dict[str, dict[str, Any]] = {
     "bola": {
         "proof_family": "bola",
-        "objective": "User2 reads an object created by User1 via an object-id route",
-        "expected_signal": "the attacker principal receives the owner's object; anonymous is denied",
-        "falsifier": "creation fails, the attacker is denied or receives different data, or anonymous is allowed",
+        "objective": "User2 reads a User1-owned object referenced by User1's managed login context",
+        "expected_signal": "the attacker principal receives the owner's object while anonymous is denied",
+        "falsifier": "the owner reference is absent, the attacker is denied or receives different data, or anonymous is allowed",
+        "principal_variables": [
+            {"name": "object_id", "principal": "user1", "ref": "object_id"},
+        ],
         "steps": [
-            {"label": "before", "kind": "http", "principal": "user1", "checkpoint": "before", "method": "GET", "path": "/api/<objects>"},
-            {"label": "create", "kind": "http", "principal": "user1", "checkpoint": "mutation", "method": "POST", "path": "/api/<objects>", "json_body": {"<field>": "<value>"}, "extract": [{"name": "object_id", "source": "json", "path": "$.id"}]},
             {"label": "owner_read", "kind": "http", "principal": "user1", "checkpoint": "action", "method": "GET", "path": "/api/<objects>/${object_id}"},
             {"label": "attacker_read", "kind": "http", "principal": "user2", "checkpoint": "action", "method": "GET", "path": "/api/<objects>/${object_id}", "compare_to": "owner_read"},
             {"label": "anon_denied", "kind": "http", "principal": "anonymous", "checkpoint": "action", "method": "GET", "path": "/api/<objects>/${object_id}"},
-            {"label": "cleanup", "kind": "http", "principal": "user1", "checkpoint": "cleanup", "method": "DELETE", "path": "/api/<objects>/${object_id}"},
-            {"label": "after", "kind": "http", "principal": "user1", "checkpoint": "after", "method": "GET", "path": "/api/<objects>", "compare_to": "before"},
         ],
         "assertions": [
             {"type": "distinct_principals", "steps": ["owner_read", "attacker_read"], "predicate": "distinct_identity"},
             {"type": "comparison_equivalent", "control": "owner_read", "candidate": "attacker_read", "predicate": "ownership_established"},
             {"type": "comparison_equivalent", "control": "owner_read", "candidate": "attacker_read", "predicate": "cross_principal_access"},
             {"type": "status_not_in", "step": "anon_denied", "values": [200, 201, 202, 203, 204], "predicate": "denial_control"},
-            {"type": "restored", "control": "before", "candidate": "after", "predicate": "before_after_state"},
         ],
     },
     "data_exposure": {
@@ -31981,7 +32001,10 @@ def _research_planner_messages(observation: dict[str, Any]) -> list[dict[str, st
                 "the proof stays valid and server-corroborable. Fill create/mutation request bodies from the "
                 "endpoint's request schema (param_shape / replay_spec on the observation's endpoints, or "
                 "request_fields / request_example on the ranked hypothesis) -- an empty body is usually rejected, "
-                "which leaves the proof inconclusive. "
+                "which leaves the proof inconclusive. For a read-existing BOLA, use principal_variables and set its "
+                "ref to an actual captured_refs key exposed by target.principals; the server resolves that value from "
+                "the managed User1 context. Never copy an object-id value into the workflow yourself. If no captured "
+                "owner reference exists, use an owner create/read/attacker-read/cleanup workflow instead. "
                 "Optimize for net-new invariant violations that commodity DAST would miss, not "
                 "re-running generic checks. After an experiment, use its comparisons and receipts to refine or "
                 "falsify the hypothesis; do not discard a negative result. A stop decision must include a concrete stop_reason summarizing the evidence, "

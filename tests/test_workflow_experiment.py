@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import sys
 from pathlib import Path
 
@@ -438,6 +439,20 @@ def test_bola_predicates_require_created_object_identity_and_denial_control():
     read_existing = {**result, "observations": result["observations"][1:]}
     assert "ownership_established" not in workflow.server_corroborated_predicates(read_existing)
 
+    # A server-resolved object reference captured from User1's managed login context is also
+    # ownership provenance. The planner names the ref but never supplies its value.
+    captured_owner = {
+        **read_existing,
+        "principal_variable_receipts": [{
+            "name": "object_id",
+            "principal": "user1",
+            "ref": "basket_id",
+            "sha256": "a" * 64,
+            "length": 2,
+        }],
+    }
+    assert "ownership_established" in workflow.server_corroborated_predicates(captured_owner)
+
     # But an UNAUTHENTICATED "owner" does not establish ownership (distinct authenticated identities
     # are required), so the benign case stays unproven.
     anon_owner = {**read_existing, "observations": [
@@ -447,6 +462,65 @@ def test_bola_predicates_require_created_object_identity_and_denial_control():
     corroborated = workflow.server_corroborated_predicates(anon_owner)
     assert "ownership_established" not in corroborated
     assert "cross_principal_access" not in corroborated
+
+
+def test_read_existing_bola_resolves_owner_ref_without_exposing_value():
+    requested_paths = []
+
+    def handler(request):
+        requested_paths.append(request.url.path)
+        if request.headers.get("authorization"):
+            return httpx.Response(200, json={"id": 42, "owner": "user1"})
+        return httpx.Response(403, json={"error": "denied"})
+
+    contexts = _contexts()
+    contexts["user1"]["captured_refs"] = {"basket_id": "42"}
+    payload = {
+        "proof_family": "bola",
+        "principal_variables": [
+            {"name": "object_id", "principal": "user1", "ref": "basket_id"},
+        ],
+        "steps": [
+            {"label": "owner", "kind": "http", "principal": "user1", "checkpoint": "action",
+             "method": "GET", "path": "/objects/${object_id}"},
+            {"label": "attacker", "kind": "http", "principal": "user2", "checkpoint": "action",
+             "method": "GET", "path": "/objects/${object_id}", "compare_to": "owner"},
+            {"label": "anonymous", "kind": "http", "principal": "anonymous", "checkpoint": "action",
+             "method": "GET", "path": "/objects/${object_id}"},
+        ],
+        "assertions": [
+            {"type": "distinct_principals", "steps": ["owner", "attacker"],
+             "predicate": "distinct_identity"},
+            {"type": "comparison_equivalent", "control": "owner", "candidate": "attacker",
+             "predicate": "ownership_established"},
+            {"type": "comparison_equivalent", "control": "owner", "candidate": "attacker",
+             "predicate": "cross_principal_access"},
+            {"type": "status_not_in", "step": "anonymous", "values": [200, 201, 202, 203, 204],
+             "predicate": "denial_control"},
+        ],
+    }
+
+    result = asyncio.run(workflow.execute_workflow(
+        "https://example.test",
+        payload,
+        principal_contexts=contexts,
+        transport=httpx.MockTransport(handler),
+    ))
+
+    assert requested_paths == ["/objects/42", "/objects/42", "/objects/42"]
+    assert result["mutating"] is False
+    assert result["restoration_verified"] is True
+    assert result["principal_variable_receipts"] == [{
+        "name": "object_id",
+        "principal": "user1",
+        "ref": "basket_id",
+        "sha256": hashlib.sha256(b"42").hexdigest(),
+        "length": 2,
+    }]
+    assert "42" not in str(result["principal_variable_receipts"])
+    assert workflow.server_corroborated_predicates(result) >= {
+        "distinct_identity", "ownership_established", "cross_principal_access", "denial_control",
+    }
 
 
 def test_injection_predicates_are_never_workflow_corroborated():
