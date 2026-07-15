@@ -29993,10 +29993,14 @@ async def _research_campaign_readiness(conn: Any, campaign: Any) -> dict[str, An
             SELECT s.id, s.status, s.current_phase, s.error_message, s.created_at, s.completed_at
             FROM scans s
             WHERE s.target_id=$1 AND s.status='completed'
+              AND (s.scan_role IS NULL OR s.scan_role <> 'shard')
               AND s.completed_at >= NOW() - INTERVAL '24 hours'
               AND EXISTS (
                 SELECT 1 FROM target_endpoints e
-                WHERE e.target_id=$1 AND e.last_seen_scan_id=s.id
+                WHERE e.target_id=$1 AND e.last_seen_scan_id IN (
+                    SELECT family.id FROM scans family
+                    WHERE family.id=s.id OR family.parent_scan_id=s.id
+                )
                   AND (
                     $2::boolean=false
                     OR e.auth_state IN ('user1','user2')
@@ -30010,7 +30014,10 @@ async def _research_campaign_readiness(conn: Any, campaign: Any) -> dict[str, An
                 $3::boolean=false
                 OR EXISTS (
                   SELECT 1 FROM application_graph_edges edge
-                  WHERE edge.target_id=$1 AND edge.scan_id=s.id
+                  WHERE edge.target_id=$1 AND edge.scan_id IN (
+                      SELECT family.id FROM scans family
+                      WHERE family.id=s.id OR family.parent_scan_id=s.id
+                  )
                     AND edge.edge_type='auth_boundary'
                     AND COALESCE(edge.attributes->>'source_principal','') <> ''
                     AND COALESCE(edge.attributes->>'excluded_principal','') <> ''
