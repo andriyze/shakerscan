@@ -605,7 +605,9 @@ export interface CampaignDetailResponse {
     ready: boolean
     state: string
     blockers?: string[]
-    surface?: Record<string, number>
+    // surface mixes route counts (number), inventory/graph timestamps (string),
+    // meaningful_preflight_gain (boolean), and executable_families (string[]).
+    surface?: Record<string, unknown>
     preflight_scan?: Record<string, unknown> | null
   } | null
   execution_enabled: boolean

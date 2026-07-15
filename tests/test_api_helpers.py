@@ -11025,6 +11025,46 @@ def test_research_duplicate_guard_ignores_ephemeral_workflow_id_for_experiments(
     assert distinct is False
 
 
+def test_research_duplicate_guard_distinguishes_payloads_and_ignores_labels():
+    def mass_assign(workflow_id, label, body):
+        return {
+            "command": "experiment.workflow",
+            "parameters": {
+                "workflow_id": workflow_id,
+                "proof_family": "mass_assignment",
+                "steps": [
+                    {"kind": "http", "path": "/api/v2/user/dashboard", "method": "POST",
+                     "principal": "user1", "label": label, "body": body},
+                    {"kind": "http", "path": "/api/v2/user/dashboard", "method": "GET",
+                     "principal": "user1", "label": f"{label}_read"},
+                ],
+                "assertions": [
+                    {"step": f"{label}_read", "type": "status_in", "values": [200],
+                     "predicate": "sensitive_value_present"},
+                ],
+            },
+        }
+
+    set_role = mass_assign("aaaaaaaa-1111-4111-8111-111111111111", "write", {"role": "admin"})
+    # A DIFFERENT mass-assignment vector (isAdmin) on the same route must NOT collapse to a duplicate
+    # -- the earlier key dropped bodies, so distinct payloads wrongly deduped and blocked exploration.
+    set_admin = mass_assign("bbbbbbbb-2222-4222-8222-222222222222", "write", {"isAdmin": True})
+    not_dup = asyncio.run(api_module._research_is_consecutive_duplicate_action(
+        _ResearchPreviousActionConn([set_role]),
+        "11111111-1111-4111-8111-111111111111", set_admin,
+    ))
+    assert not_dup is False
+
+    # The SAME test with RENAMED step labels IS a duplicate -- labels are not identity; the earlier
+    # key kept the mutable assertion step label, so a relabel bypassed dedupe and re-enabled the spin.
+    relabeled = mass_assign("cccccccc-3333-4333-8333-333333333333", "attempt2", {"role": "admin"})
+    dup = asyncio.run(api_module._research_is_consecutive_duplicate_action(
+        _ResearchPreviousActionConn([set_role]),
+        "11111111-1111-4111-8111-111111111111", relabeled,
+    ))
+    assert dup is True
+
+
 def test_research_duplicate_guard_decodes_asyncpg_jsonb_text_before_progress_check():
     repeated = {"command": "asm.gaps", "parameters": {"target_id": "target-1"}}
     gated = {"command": "asm.improve", "parameters": {"target_id": "target-1", "check_family": "xss"}}

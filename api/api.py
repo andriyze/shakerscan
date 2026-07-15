@@ -27943,18 +27943,44 @@ def _research_action_dedupe_comparable(action: Any) -> dict[str, Any]:
     if command not in _RESEARCH_EXPERIMENT_DEDUPE_COMMANDS:
         return {"command": command, "parameters": params}
     steps = params.get("steps") if isinstance(params.get("steps"), list) else []
-    canonical_steps = [
-        {
-            "method": str(step.get("method") or "GET").strip().upper(),
-            "route": _canonical_vulnerability_route(step.get("path") or step.get("route")),
-            "principal": str(step.get("principal") or "").strip().lower(),
-        }
-        for step in steps
-        if isinstance(step, dict)
-    ]
+    # Canonical step identity = every semantic field of the step (method, route, principal, request
+    # body/query/form, browser action/selector/value, extract keys) with the id-bearing route
+    # collapsed and only the MUTABLE label/id/checkpoint dropped. This keeps two experiments that
+    # differ only in payload (e.g. distinct mass-assignment bodies) distinct -- fixing the earlier
+    # over-collapse -- while relabeling the same step leaves its identity unchanged. Assertions then
+    # reference steps by this content identity, not by the mutable label (fixing the relabel bypass).
+    step_identity: dict[str, str] = {}
+    canonical_steps: list[str] = []
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        identity = {key: value for key, value in step.items() if key not in {"label", "id", "checkpoint"}}
+        identity["route"] = _canonical_vulnerability_route(step.get("path") or step.get("route"))
+        identity.pop("path", None)
+        identity_hash = _research_canonical_hash(identity)
+        label = str(step.get("label") or step.get("id") or "").strip()
+        if label:
+            step_identity[label] = identity_hash
+        canonical_steps.append(identity_hash)
+
+    def _resolve_step(ref: Any) -> str | None:
+        text = str(ref or "").strip()
+        if not text:
+            return None
+        return step_identity.get(text, f"unbound:{text}")
+
     assertions = params.get("assertions") if isinstance(params.get("assertions"), list) else []
     canonical_assertions = sorted(
-        f"{str(a.get('step') or '').strip()}|{str(a.get('type') or '').strip()}|{str(a.get('predicate') or '').strip()}"
+        _research_canonical_hash({
+            "type": str(a.get("type") or "").strip(),
+            "predicate": str(a.get("predicate") or "").strip().lower(),
+            "values": sorted(a.get("values")) if isinstance(a.get("values"), list) else a.get("values"),
+            "step": _resolve_step(a.get("step")),
+            "control": _resolve_step(a.get("control")),
+            "candidate": _resolve_step(a.get("candidate")),
+            "steps": sorted(x for x in (_resolve_step(s) for s in a.get("steps")) if x)
+            if isinstance(a.get("steps"), list) else None,
+        })
         for a in assertions
         if isinstance(a, dict)
     )
@@ -27962,7 +27988,6 @@ def _research_action_dedupe_comparable(action: Any) -> dict[str, Any]:
         "command": command,
         "parameters": {
             "proof_family": family_proof.canonical_family(params.get("proof_family") or params.get("family")),
-            "route": _canonical_vulnerability_route(params.get("route") or params.get("path")),
             "steps": canonical_steps,
             "assertions": canonical_assertions,
         },
@@ -28863,8 +28888,10 @@ async def _research_campaign_self_repair(campaign_id: Any) -> dict[str, Any]:
         # outside it. Prior form raised InvalidColumnReferenceError and 500'd every gated launch.
         endpoint_rows = await conn.fetch(
             """
-            SELECT method, path, param_shape FROM (
-                SELECT DISTINCT method, path, param_shape
+            SELECT method, path FROM (
+                -- Dedupe by (method, path) only: the worklist below uses just "METHOD path",
+                -- so keeping param_shape in DISTINCT spent LIMIT slots on duplicate method/path pairs.
+                SELECT DISTINCT method, path
                 FROM target_endpoints
                 WHERE target_id=$1 AND COALESCE(test_status, '') <> 'gone'
                   AND COALESCE(auth_state, '') IN ('user1','user2')
