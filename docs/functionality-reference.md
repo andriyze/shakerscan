@@ -1348,7 +1348,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | `evidence.retention_sweep` | evidence | gated | active | POST | `/evidence/retention/sweep` | Preview or execute bounded evidence-object retention cleanup. dry_run=true is a safe preview; dry_run=false deletes rows/files and is gated (state-changing). legal_hold is never selected and active-finding evidence is never deleted. |
 | `evidence_instance.list` | evidence | read_only | read_only | GET | `/evidence/instances` | Read concrete evidence instances split from canonical findings. |
 | `evidence_instance.record` | evidence | dry_run | read_only | POST | `/evidence/instances` | Record a concrete evidence instance without updating finding proof state. |
-| `experiment.http_diff` | research | gated | active | POST | `/arsenal/execute` | Run a bounded same-origin control/mutation HTTP experiment and record unverified differential evidence. |
+| `experiment.http_diff` | research | gated | active | POST | `/arsenal/execute` | Run a bounded same-origin read-only HTTP differential and record unverified evidence. |
 | `experiment.workflow` | research | gated | credential | POST | `/arsenal/execute` | Run a bounded principal-bound HTTP/browser workflow and record unverified state-transition evidence. |
 | `exposure.graph.get` | inventory | read_only | read_only | GET | `/exposure/graph` | Read the exposure graph built from existing targets, scans, AI targets, model artifacts, and findings. |
 | `finding.get` | findings | read_only | read_only | GET | `/findings/{finding_id}` | Read one finding by id or fingerprint. |
