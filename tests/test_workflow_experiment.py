@@ -257,6 +257,83 @@ def test_sensitive_value_classifier_matches_values_not_names():
     assert "jwt" in workflow._classify_sensitive_values(
         'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.abcdefghij')
     assert "ssn" in workflow._classify_sensitive_values('{"ssn":"123-45-6789"}')
+    assert "password_hash" in workflow._classify_sensitive_values(
+        '{"password":"$2b$12$abcdefghijklmnopqrstuuABCDEFGHIJKLMNOPQRSTUVWXYZ01234"}'
+    )
+    assert "credentialed_database_uri" in workflow._classify_sensitive_values(
+        '{"database_url":"postgres://service:correct-horse@db.internal/app"}'
+    )
+
+
+def test_data_exposure_accepts_policy_bound_tokens_and_denied_authenticated_roles():
+    protected_jwt = {
+        "observations": [{
+            "label": "anon",
+            "principal": "anonymous",
+            "trusted_protected_resource": True,
+            "response": {"status": 200},
+            "sensitive_value_categories": ["jwt"],
+        }],
+        "assertion_results": [{
+            "passed": True,
+            "predicate": "sensitive_value_present",
+            "type": "status_in",
+            "step": "anon",
+        }],
+    }
+    denied_customer = {
+        "observations": [{
+            "label": "billing",
+            "principal": "user2",
+            "trusted_denied_access": True,
+            "response": {"status": 200},
+            "sensitive_value_categories": ["credit_card"],
+        }],
+        "assertion_results": [{
+            "passed": True,
+            "predicate": "sensitive_value_present",
+            "type": "status_in",
+            "step": "billing",
+        }],
+    }
+    public_jwt = {
+        **protected_jwt,
+        "observations": [{
+            **protected_jwt["observations"][0],
+            "trusted_protected_resource": False,
+        }],
+    }
+
+    assert "sensitive_value_present" in workflow.server_corroborated_predicates(protected_jwt)
+    assert "sensitive_value_present" in workflow.server_corroborated_predicates(denied_customer)
+    assert "sensitive_value_present" not in workflow.server_corroborated_predicates(public_jwt)
+
+
+def test_auth_bypass_uses_protected_route_policy_not_secret_content():
+    result = {
+        "trusted_protected_routes": [{"method": "GET", "path": "/admin/stats"}],
+        "observations": [
+            {
+                "label": "authed", "principal": "admin",
+                "request": {"method": "GET", "path": "/admin/stats"},
+                "response": {"status": 200},
+            },
+            {
+                "label": "anon", "principal": "anonymous",
+                "request": {"method": "GET", "path": "/admin/stats"},
+                "response": {"status": 200, "json_keys": ["active_users"]},
+                "sensitive_value_categories": [],
+            },
+        ],
+        "assertion_results": [
+            {"passed": True, "predicate": "protected_resource_accessed", "type": "status_in", "step": "authed"},
+            {"passed": True, "predicate": "unauthenticated_control", "type": "status_not_in", "step": "anon"},
+        ],
+    }
+
+    assert workflow.server_corroborated_predicates(result) >= {
+        "protected_resource_accessed", "unauthenticated_control",
+    }
 
 
 def test_cross_principal_access_requires_distinct_authenticated_principals_and_equivalence():

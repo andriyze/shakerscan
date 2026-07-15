@@ -30,7 +30,7 @@ from http_experiment import (
 )
 
 
-WORKFLOW_VERSION = "principal-workflow-2026-07-14.v2"
+WORKFLOW_VERSION = "principal-workflow-2026-07-14.v3"
 MAX_WORKFLOW_STEPS = 12
 MAX_WORKFLOW_VARIABLES = 40
 MAX_WORKFLOW_SECONDS = 180
@@ -177,6 +177,13 @@ _SENSITIVE_VALUE_PATTERNS: tuple[tuple[str, "re.Pattern[str]"], ...] = (
     ("google_api_key", re.compile(r"\bAIza[0-9A-Za-z_-]{35}\b")),
     ("slack_token", re.compile(r"\bxox[baprs]-[0-9A-Za-z-]{10,}")),
     ("stripe_key", re.compile(r"\bsk_live_[0-9A-Za-z]{16,}\b")),
+    ("github_token", re.compile(r"\bgh[pousr]_[A-Za-z0-9]{30,255}\b")),
+    ("npm_token", re.compile(r"\bnpm_[A-Za-z0-9]{30,255}\b")),
+    ("sendgrid_key", re.compile(r"\bSG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}\b")),
+    ("password_hash", re.compile(r"\$(?:2[aby]\$\d{2}\$[./A-Za-z0-9]{53}|argon2(?:id|i|d)\$[^\s\"']{20,})")),
+    ("credentialed_database_uri", re.compile(
+        r"(?i)\b(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis)://[^\s:/?#]+:[^\s@/?#]+@[^\s]+"
+    )),
     ("ssn", re.compile(r"\b\d{3}-\d{2}-\d{4}\b")),
     ("bearer_token", re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._-]{24,}")),
 )
@@ -361,25 +368,30 @@ def _server_confirms_predicate(
             if isinstance(obs.get("request"), dict)
         )
 
-    # --- data_exposure: an UNAUTHORIZED observer received a real sensitive VALUE. An anonymous
-    # request returning a classified secret is exposure; a principal reading its OWN data (its own
-    # JWT) is not, so the observer must be anonymous.
+    # --- data_exposure: an UNAUTHORIZED observer received a real sensitive VALUE. High-precision
+    # secret/PII classes are exposure to anonymous. Bearer/JWT material additionally needs a
+    # server-owned protected-route signal (token issuers may legitimately be public), and an
+    # authenticated observer needs an explicit deny expectation for its role/tenant.
     if predicate == "sensitive_value_present":
         target = step or candidate
         categories = set(target.get("sensitive_value_categories") or [])
-        return (
-            str(target.get("principal") or "anonymous").lower() == "anonymous"
-            and bool(categories - {"jwt", "bearer_token"})
-        )
+        principal = str(target.get("principal") or "anonymous").lower()
+        if not categories:
+            return False
+        if principal == "anonymous":
+            return bool(categories - {"jwt", "bearer_token"}) or bool(
+                target.get("trusted_protected_resource")
+            )
+        return bool(target.get("trusted_denied_access"))
     if predicate == "name_only_classification":  # refute: sensitive-looking keys, no values
         target = step or candidate
         response = target.get("response") if isinstance(target.get("response"), dict) else {}
         keys = response.get("json_keys") or []
         return (not target.get("sensitive_value_categories")) and any(_sensitive_name(str(k)) for k in keys)
 
-    # --- auth_bypass: an AUTHENTICATED principal reaches the resource (it is real + used behind auth)
-    # AND an anonymous request SUCCEEDS returning actual sensitive DATA -> it reached protected
-    # content, not a public route. A denied (non-2xx) anonymous request is not a bypass.
+    # --- auth_bypass: cross-predicate correlation requires the exact same method/path, an
+    # authenticated success, and a server-owned protected-route receipt. With that policy proof,
+    # an anonymous success is a bypass even when the protected response is not secret data.
     if predicate == "protected_resource_accessed":
         return _obs_authenticated(step or candidate) and _obs_success(step or candidate)
     if predicate == "unauthenticated_control":
@@ -387,7 +399,6 @@ def _server_confirms_predicate(
         return (
             str(target.get("principal") or "anonymous").lower() == "anonymous"
             and _obs_success(target)
-            and bool(target.get("sensitive_value_categories"))
         )
     if predicate == "access_denied_unauthenticated":  # refute
         target = step or candidate
@@ -470,7 +481,9 @@ def _server_corroborated_evidence(
     # combined into an auth-bypass proof.
     auth_protected = assertions_by_predicate.get("protected_resource_accessed") or []
     auth_anon = assertions_by_predicate.get("unauthenticated_control") or []
-    if auth_protected and auth_anon:
+    if auth_anon and not auth_protected:
+        granted.discard("unauthenticated_control")
+    elif auth_protected and auth_anon:
         protected = by_label.get(str(auth_protected[0].get("step") or ""), {})
         anonymous = by_label.get(str(auth_anon[0].get("step") or ""), {})
         trusted_protected = {

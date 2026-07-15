@@ -24620,22 +24620,43 @@ async def _arsenal_dispatch_workflow(p: dict[str, Any], approval_receipt_id: str
             """,
             target_uuid,
         )
+        denied_expectation_rows = await conn.fetch(
+            """
+            SELECT method, path, principal_role, tenant_id
+            FROM target_endpoint_expectations
+            WHERE target_id=$1 AND expected_access='deny'
+            """,
+            target_uuid,
+        )
 
     def annotate_trusted_route_expectations(result: dict[str, Any]) -> None:
         protected = {
             (str(row["method"] or "").upper(), _canonical_vulnerability_route(row["path"]))
             for row in protected_endpoint_rows
         }
-        result["trusted_protected_routes"] = [
-            {"method": str(request.get("method") or "").upper(), "path": str(request.get("path") or "")}
-            for observation in (result.get("observations") or [])
-            if isinstance(observation, dict)
-            and isinstance((request := observation.get("request")), dict)
-            and (
-                str(request.get("method") or "").upper(),
-                _canonical_vulnerability_route(request.get("path")),
-            ) in protected
-        ]
+        trusted_protected_routes = []
+        for observation in (result.get("observations") or []):
+            if not isinstance(observation, dict):
+                continue
+            request = observation.get("request") if isinstance(observation.get("request"), dict) else {}
+            method = str(request.get("method") or "").upper()
+            path = str(request.get("path") or "")
+            route = _canonical_vulnerability_route(path)
+            if (method, route) in protected:
+                observation["trusted_protected_resource"] = True
+                trusted_protected_routes.append({"method": method, "path": path})
+            principal = str(observation.get("principal") or "anonymous").lower()
+            context = principal_contexts.get(principal) if isinstance(principal_contexts.get(principal), dict) else {}
+            role = str(context.get("role") or "").lower()
+            tenant = str(context.get("tenant_id") or "").lower()
+            observation["trusted_denied_access"] = any(
+                method == str(row.get("method") or "").upper()
+                and route == _canonical_vulnerability_route(row.get("path"))
+                and (not row.get("principal_role") or role == str(row.get("principal_role") or "").lower())
+                and (not row.get("tenant_id") or tenant == str(row.get("tenant_id") or "").lower())
+                for row in denied_expectation_rows
+            )
+        result["trusted_protected_routes"] = trusted_protected_routes
 
     cancel_event = asyncio.Event()
     _active_workflow_cancellations[workflow_id] = cancel_event

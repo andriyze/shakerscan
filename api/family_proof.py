@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from typing import Any
 
-FAMILY_PROOF_VERSION = "family-proof-2026-07-14.v2"
+FAMILY_PROOF_VERSION = "family-proof-2026-07-14.v3"
 
 VERDICTS = frozenset({"verified", "supported_unverified", "refuted", "inconclusive", "blocked"})
 
