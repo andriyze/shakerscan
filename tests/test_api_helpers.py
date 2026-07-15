@@ -12059,6 +12059,8 @@ def test_research_campaign_readiness_requires_completed_two_user_surface():
                     "edge_count": 3,
                     "fresh_route_nodes": 4,
                     "fresh_edge_count": 3,
+                    # A fresh cross-principal auth_boundary edge is what makes BOLA executable.
+                    "fresh_auth_boundary_edges": 2,
                 }
             if "FROM scans" in query:
                 return {"id": scan_id, "status": "completed", "current_phase": "done", "error_message": None}
@@ -12068,7 +12070,7 @@ def test_research_campaign_readiness_requires_completed_two_user_surface():
 
     assert readiness["ready"] is True
     assert readiness["surface"]["authenticated_routes"] == 30
-    assert readiness["surface"]["fresh_edge_count"] == 3
+    assert readiness["surface"]["fresh_auth_boundary_edges"] == 2
     assert readiness["surface"]["executable_families"] == ["auth", "bola"]
 
 
@@ -12112,6 +12114,53 @@ def test_research_campaign_readiness_rejects_stale_or_empty_bola_graph():
     assert readiness["ready"] is False
     assert "two_principal_graph_not_materialized" in readiness["blockers"]
     assert "authenticated_preflight_no_material_gain" in readiness["blockers"]
+
+
+def test_research_campaign_readiness_rejects_edges_without_a_fresh_auth_boundary():
+    # Reported fail-open: fresh edges that are NOT cross-principal auth_boundary edges (e.g. a lone
+    # producer/produces edge) satisfied the old "any fresh edge" check and opened the BOLA gate with
+    # no real two-principal surface. Now only a fresh distinct-principal auth_boundary counts.
+    target_id = uuid.uuid4()
+    scan_id = uuid.uuid4()
+    campaign = {
+        "id": uuid.uuid4(),
+        "target_id": target_id,
+        "metadata_json": {"autonomous_research": {
+            "intensity": "deep_hunt",
+            "approval_receipt_id": str(uuid.uuid4()),
+            "allowed_families": ["bola"],
+            "preflight_scan_id": str(scan_id),
+            "surface_before_preflight": {"unique_routes": 40, "authenticated_routes": 30},
+        }},
+    }
+
+    class Conn:
+        async def fetch(self, query, *args):
+            return [
+                {"auth_state": "user1", "credential_profile": "owner", "credential_configured": True},
+                {"auth_state": "user2", "credential_profile": "attacker", "credential_configured": True},
+            ]
+
+        async def fetchrow(self, query, *args):
+            if "FROM target_endpoints" in query:
+                return {
+                    "inventory_rows": 80, "unique_routes": 40, "authenticated_routes": 30,
+                    "second_user_routes": 12, "executable_routes": 25, "object_routes": 8,
+                    "mutation_routes": 6, "parameterized_routes": 14,
+                }
+            if "FROM application_graph_nodes" in query:
+                # 5 fresh edges, but NONE is a cross-principal auth_boundary.
+                return {"route_nodes": 4, "edge_count": 5, "fresh_route_nodes": 4,
+                        "fresh_edge_count": 5, "fresh_auth_boundary_edges": 0}
+            if "FROM scans" in query:
+                return {"id": scan_id, "status": "completed", "current_phase": "done"}
+            raise AssertionError(query)
+
+    readiness = asyncio.run(api_module._research_campaign_readiness(Conn(), campaign))
+
+    assert readiness["ready"] is False
+    assert "two_principal_graph_not_materialized" in readiness["blockers"]
+    assert "bola" not in readiness["surface"]["executable_families"]
 
 
 def test_research_preflight_is_one_principal_coherent_focused_scan():

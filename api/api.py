@@ -28683,7 +28683,14 @@ async def _research_campaign_readiness(conn: Any, campaign: Any) -> dict[str, An
                MAX(last_seen_at) AS latest_graph_seen_at,
                (SELECT COUNT(*)::int FROM application_graph_edges WHERE target_id=$1) AS edge_count,
                (SELECT COUNT(*)::int FROM application_graph_edges
-                  WHERE target_id=$1 AND scan_id=$2::uuid) AS fresh_edge_count
+                  WHERE target_id=$1 AND scan_id=$2::uuid) AS fresh_edge_count,
+               (SELECT COUNT(*)::int FROM application_graph_edges
+                  WHERE target_id=$1 AND scan_id=$2::uuid
+                    AND edge_type='auth_boundary'
+                    AND COALESCE(attributes->>'source_principal','') <> ''
+                    AND COALESCE(attributes->>'excluded_principal','') <> ''
+                    AND attributes->>'source_principal' <> attributes->>'excluded_principal'
+               ) AS fresh_auth_boundary_edges
         FROM application_graph_nodes WHERE target_id=$1
         """,
         target_id,
@@ -28699,21 +28706,38 @@ async def _research_campaign_readiness(conn: Any, campaign: Any) -> dict[str, An
     parameterized_routes = int(surface_payload.get("parameterized_routes") or 0)
     fresh_route_nodes = int(surface_payload.get("fresh_route_nodes") or 0)
     fresh_edge_count = int(surface_payload.get("fresh_edge_count") or 0)
+    # A BOLA-usable graph needs a FRESH cross-principal auth_boundary edge (source_principal !=
+    # excluded_principal), not merely any new edge -- a lone producer/produces edge or a stale
+    # boundary must not open the gate. Counting any edge_type let readiness pass with no real
+    # two-principal surface (the reported fail-open).
+    fresh_auth_boundary_edges = int(surface_payload.get("fresh_auth_boundary_edges") or 0)
     executable_families: list[str] = []
     if "auth" in families and executable_routes > 0:
         executable_families.append("auth")
-    if "bola" in families and object_routes > 0 and int(surface_payload.get("second_user_routes") or 0) > 0 and fresh_edge_count > 0:
+    if (
+        "bola" in families
+        and object_routes > 0
+        and int(surface_payload.get("second_user_routes") or 0) > 0
+        and fresh_auth_boundary_edges > 0
+    ):
         executable_families.append("bola")
     for injection_family in ("sqli", "xss"):
         if injection_family in families and parameterized_routes > 0:
             executable_families.append(injection_family)
-    meaningful_preflight_gain = bool(
-        fresh_route_nodes > 0
-        or fresh_edge_count > 0
-        or int(surface_payload.get("unique_routes") or 0) > int(before.get("unique_routes") or 0)
-        or int(surface_payload.get("authenticated_routes") or 0) > int(before.get("authenticated_routes") or 0)
-        or not before
+    authenticated_route_gain = (
+        int(surface_payload.get("authenticated_routes") or 0) > int(before.get("authenticated_routes") or 0)
     )
+    if gated:
+        # For an authenticated hunt, "gain" must be authenticated: new user1/user2 routes or a fresh
+        # cross-principal boundary. A new PUBLIC route node is not material progress and must not
+        # satisfy the preflight (the reported fail-open: unchanged auth coverage + one public node).
+        meaningful_preflight_gain = bool(fresh_auth_boundary_edges > 0 or authenticated_route_gain)
+    else:
+        meaningful_preflight_gain = bool(
+            fresh_route_nodes > 0
+            or int(surface_payload.get("unique_routes") or 0) > int(before.get("unique_routes") or 0)
+            or not before
+        )
     surface_payload.update({
         "executable_families": sorted(set(executable_families)),
         "meaningful_preflight_gain": meaningful_preflight_gain,
@@ -28744,7 +28768,7 @@ async def _research_campaign_readiness(conn: Any, campaign: Any) -> dict[str, An
         blockers.append("no_executable_authenticated_routes")
     if gated and "bola" in families and int(surface_payload.get("second_user_routes") or 0) <= 0:
         blockers.append("second_user_surface_not_observed")
-    if gated and "bola" in families and object_routes > 0 and fresh_edge_count <= 0:
+    if gated and "bola" in families and object_routes > 0 and fresh_auth_boundary_edges <= 0:
         blockers.append("two_principal_graph_not_materialized")
     if gated and preflight_status == "completed" and not meaningful_preflight_gain:
         blockers.append("authenticated_preflight_no_material_gain")
