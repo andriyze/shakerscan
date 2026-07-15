@@ -28858,12 +28858,17 @@ async def _research_campaign_self_repair(campaign_id: Any) -> dict[str, Any]:
         target = await conn.fetchrow("SELECT id, url FROM targets WHERE id=$1 AND is_active=true", campaign["target_id"])
         if not target:
             raise HTTPException(status_code=404, detail="Active target not found")
+        # DISTINCT then order: Postgres forbids an ORDER BY expression (the object-route-first
+        # priority CASE) that is not in a SELECT DISTINCT list, so dedupe in a subquery and rank
+        # outside it. Prior form raised InvalidColumnReferenceError and 500'd every gated launch.
         endpoint_rows = await conn.fetch(
             """
-            SELECT DISTINCT method, path, param_shape
-            FROM target_endpoints
-            WHERE target_id=$1 AND COALESCE(test_status, '') <> 'gone'
-              AND COALESCE(auth_state, '') IN ('user1','user2')
+            SELECT method, path, param_shape FROM (
+                SELECT DISTINCT method, path, param_shape
+                FROM target_endpoints
+                WHERE target_id=$1 AND COALESCE(test_status, '') <> 'gone'
+                  AND COALESCE(auth_state, '') IN ('user1','user2')
+            ) e
             ORDER BY
               CASE
                 WHEN path ~ '/(\\{[^/{}]+\\}|:[A-Za-z_][A-Za-z0-9_]*|[0-9]+)(/|$)' THEN 0
