@@ -16420,6 +16420,33 @@ async def _persist_agent_context_pack(conn, req: AgentContextPackRequest) -> dic
     }
 
 
+@asynccontextmanager
+async def _optional_database_savepoint(conn: Any):
+    """Keep best-effort context reads from poisoning an enclosing transaction.
+
+    ``create_research_episode`` builds its first observation atomically. Optional
+    rolling-migration reads are allowed to fall back, but PostgreSQL leaves the
+    whole transaction aborted after a caught statement error unless that read ran
+    in a nested savepoint. Test doubles without transaction support remain usable.
+    """
+    transaction = getattr(conn, "transaction", None)
+    if callable(transaction):
+        async with transaction():
+            yield
+        return
+    yield
+
+
+async def _savepoint_fetch(conn: Any, query: str, *args: Any):
+    async with _optional_database_savepoint(conn):
+        return await conn.fetch(query, *args)
+
+
+async def _savepoint_fetchrow(conn: Any, query: str, *args: Any):
+    async with _optional_database_savepoint(conn):
+        return await conn.fetchrow(query, *args)
+
+
 async def _build_agent_context_pack_from_target(conn, req: AgentContextPackFromTargetRequest) -> AgentContextPackRequest:
     target_uuid = _uuid_or_400(req.target_id, "target id")
     target = await conn.fetchrow(
@@ -16475,64 +16502,66 @@ async def _build_agent_context_pack_from_target(conn, req: AgentContextPackFromT
 
     principal_summary: dict[str, Any] = {"principals": [], "expectations": [], "role_counts": {}, "tenant_counts": {}}
     try:
-        principal_rows = await conn.fetch(
-            """
-            SELECT p.id, p.label, p.role, p.tenant_id, p.auth_state,
-                   p.credential_profile, p.is_active, p.metadata_json,
-                   EXISTS (
-                     SELECT 1 FROM target_credential_profiles cp
-                     WHERE cp.target_id = p.target_id
-                       AND lower(cp.name) = lower(p.credential_profile)
-                       AND cp.is_active = true
-                       AND (cp.expires_at IS NULL OR cp.expires_at > NOW())
-                   ) AS credential_configured
-            FROM target_principals p
-            WHERE p.target_id = $1 AND p.is_active = true
-            ORDER BY p.role, p.label
-            LIMIT 20
-            """,
-            target_uuid,
-        )
-        principals = [_public_target_principal_row(row) for row in principal_rows]
-        expectation_rows = await conn.fetch(
-            """
-            SELECT e.id, e.method, e.path, e.param_shape, e.param_location,
-                   e.principal_role, e.tenant_id, e.expected_access, e.expected_http_status,
-                   e.expectation_source, p.label AS principal_label, p.auth_state AS principal_auth_state
-            FROM target_endpoint_expectations e
-            LEFT JOIN target_principals p ON p.id = e.principal_id
-            WHERE e.target_id = $1
-            ORDER BY e.updated_at DESC
-            LIMIT 25
-            """,
-            target_uuid,
-        )
-        role_counts = Counter(str(item.get("role") or "unknown") for item in principals)
-        tenant_counts = Counter(str(item.get("tenant_id") or "none") for item in principals)
-        principal_summary = {
-            "principals": principals,
-            "expectations": [_public_target_endpoint_expectation_row(row) for row in expectation_rows],
-            "role_counts": dict(role_counts),
-            "tenant_counts": dict(tenant_counts),
-        }
+        async with _optional_database_savepoint(conn):
+            principal_rows = await conn.fetch(
+                """
+                SELECT p.id, p.label, p.role, p.tenant_id, p.auth_state,
+                       p.credential_profile, p.is_active, p.metadata_json,
+                       EXISTS (
+                         SELECT 1 FROM target_credential_profiles cp
+                         WHERE cp.target_id = p.target_id
+                           AND lower(cp.name) = lower(p.credential_profile)
+                           AND cp.is_active = true
+                           AND (cp.expires_at IS NULL OR cp.expires_at > NOW())
+                       ) AS credential_configured
+                FROM target_principals p
+                WHERE p.target_id = $1 AND p.is_active = true
+                ORDER BY p.role, p.label
+                LIMIT 20
+                """,
+                target_uuid,
+            )
+            principals = [_public_target_principal_row(row) for row in principal_rows]
+            expectation_rows = await conn.fetch(
+                """
+                SELECT e.id, e.method, e.path, e.param_shape, e.param_location,
+                       e.principal_role, e.tenant_id, e.expected_access, e.expected_http_status,
+                       e.expectation_source, p.label AS principal_label, p.auth_state AS principal_auth_state
+                FROM target_endpoint_expectations e
+                LEFT JOIN target_principals p ON p.id = e.principal_id
+                WHERE e.target_id = $1
+                ORDER BY e.updated_at DESC
+                LIMIT 25
+                """,
+                target_uuid,
+            )
+            role_counts = Counter(str(item.get("role") or "unknown") for item in principals)
+            tenant_counts = Counter(str(item.get("tenant_id") or "none") for item in principals)
+            principal_summary = {
+                "principals": principals,
+                "expectations": [_public_target_endpoint_expectation_row(row) for row in expectation_rows],
+                "role_counts": dict(role_counts),
+                "tenant_counts": dict(tenant_counts),
+            }
     except Exception:
         principal_summary = {"principals": [], "expectations": [], "role_counts": {}, "tenant_counts": {}}
 
     approved_invariant_contracts: list[dict[str, Any]] = []
     try:
-        invariant_rows = await conn.fetch(
-            """
-            SELECT * FROM target_invariant_contracts
-            WHERE target_id=$1 AND status='approved'
-            ORDER BY updated_at DESC
-            LIMIT 25
-            """,
-            target_uuid,
-        )
-        approved_invariant_contracts = [
-            invariant_contracts.planner_projection(_public_target_invariant_contract_row(row))
-            for row in invariant_rows
-        ]
+        async with _optional_database_savepoint(conn):
+            invariant_rows = await conn.fetch(
+                """
+                SELECT * FROM target_invariant_contracts
+                WHERE target_id=$1 AND status='approved'
+                ORDER BY updated_at DESC
+                LIMIT 25
+                """,
+                target_uuid,
+            )
+            approved_invariant_contracts = [
+                invariant_contracts.planner_projection(_public_target_invariant_contract_row(row))
+                for row in invariant_rows
+            ]
     except Exception:
         # Upgraded instances build schema before serving requests, but fail closed during a rolling
         # migration: no invariant is safer than treating an unavailable/draft rule as authoritative.
@@ -16570,7 +16599,8 @@ async def _build_agent_context_pack_from_target(conn, req: AgentContextPackFromT
     attack_graph: dict[str, Any] = {"nodes": [], "edges": [], "truncated": False}
     recent_scans: list[dict[str, Any]] = []
     try:
-        hypothesis_rows = await conn.fetch(
+        hypothesis_rows = await _savepoint_fetch(
+            conn,
             """
             SELECT id, target_id, source, family, cwe, title, description,
                    severity_guess, confidence,
@@ -16597,7 +16627,8 @@ async def _build_agent_context_pack_from_target(conn, req: AgentContextPackFromT
         # Novelty memory: the candidate pool holds only actionable (open/claimed/testing/supported)
         # rows, so completed dimensions must be read from the terminal rows directly -- otherwise
         # every dimension looks novel forever and the scheduler keeps re-proposing dead leads.
-        completed_rows = await conn.fetch(
+        completed_rows = await _savepoint_fetch(
+            conn,
             """
             SELECT dedupe_key FROM hypotheses
             WHERE target_id = $1
@@ -16609,7 +16640,8 @@ async def _build_agent_context_pack_from_target(conn, req: AgentContextPackFromT
             target_uuid,
         )
         completed_dimensions = [str(row["dedupe_key"]) for row in completed_rows if row["dedupe_key"]]
-        known_vulnerability_keys = await _research_known_vulnerability_keys(conn, target_uuid)
+        async with _optional_database_savepoint(conn):
+            known_vulnerability_keys = await _research_known_vulnerability_keys(conn, target_uuid)
         # Planner context should lead with the same residue-backed candidates selected by the
         # deterministic scheduler. Fill any spare slots with the original ordering for useful
         # context, but never let high-confidence generic noise crowd all scheduled residue out.
@@ -16622,7 +16654,8 @@ async def _build_agent_context_pack_from_target(conn, req: AgentContextPackFromT
             ),
             known_vulnerability_keys=known_vulnerability_keys,
         )
-        graph_nodes = await conn.fetch(
+        graph_nodes = await _savepoint_fetch(
+            conn,
             """
             SELECT node_type, node_key, label, scan_id, last_seen_at
             FROM application_graph_nodes
@@ -16632,7 +16665,8 @@ async def _build_agent_context_pack_from_target(conn, req: AgentContextPackFromT
             """,
             target_uuid,
         )
-        graph_edges = await conn.fetch(
+        graph_edges = await _savepoint_fetch(
+            conn,
             """
             SELECT src_key, edge_type, dst_key, scan_id, last_seen_at
             FROM application_graph_edges
@@ -16653,50 +16687,52 @@ async def _build_agent_context_pack_from_target(conn, req: AgentContextPackFromT
         attack_graph = {"nodes": [], "edges": [], "truncated": False}
 
     try:
-        scan_rows = await conn.fetch(
-            """
-            SELECT id, parent_scan_id, scan_role, scan_type, run_kind, status,
-                   current_phase, findings_count, score, grade, options, result,
-                   created_at, updated_at
-            FROM scans
-            WHERE target_id=$1
-              AND status IN ('completed','failed','cancelled')
-              AND (scan_role IS NULL OR scan_role <> 'shard')
-            ORDER BY created_at DESC
-            LIMIT 12
-            """,
-            target_uuid,
-        )
-        for row in scan_rows:
-            scan = _json_safe_row(row)
-            options = _sanitize_scan_options(scan.pop("options", None)) or {}
-            result = _decode_json_value(scan.pop("result", None)) or {}
-            discovery = result.get("discovery") if isinstance(result.get("discovery"), dict) else {}
-            verification = (
-                result.get("verification_summary")
-                if isinstance(result.get("verification_summary"), dict)
-                else {}
+        async with _optional_database_savepoint(conn):
+            scan_rows = await conn.fetch(
+                """
+                SELECT id, parent_scan_id, scan_role, scan_type, run_kind, status,
+                       current_phase, findings_count, score, grade, options, result,
+                       created_at,
+                       COALESCE(completed_at, started_at, created_at) AS updated_at
+                FROM scans
+                WHERE target_id=$1
+                  AND status IN ('completed','failed','cancelled')
+                  AND (scan_role IS NULL OR scan_role <> 'shard')
+                ORDER BY created_at DESC
+                LIMIT 12
+                """,
+                target_uuid,
             )
-            scan["intent"] = {
-                key: options.get(key)
-                for key in (
-                    "check_family", "asm_check_family", "auth_state", "kind",
-                    "budget_profile", "exploit_depth", "parallel", "shard_strategy",
+            for row in scan_rows:
+                scan = _json_safe_row(row)
+                options = _sanitize_scan_options(scan.pop("options", None)) or {}
+                result = _decode_json_value(scan.pop("result", None)) or {}
+                discovery = result.get("discovery") if isinstance(result.get("discovery"), dict) else {}
+                verification = (
+                    result.get("verification_summary")
+                    if isinstance(result.get("verification_summary"), dict)
+                    else {}
                 )
-                if options.get(key) not in (None, "", [], {})
-            }
-            scan["result_summary"] = {
-                "verified": verification.get("verified"),
-                "suspected": verification.get("suspected"),
-                "unproven_critical_high": verification.get("unproven_critical_high"),
-                "discovered_url_count": (
-                    discovery.get("url_count") or discovery.get("total_urls")
-                    or len(discovery.get("urls") or [])
-                ),
-                "partial": bool((result.get("scan_metadata") or {}).get("partial"))
-                if isinstance(result.get("scan_metadata"), dict) else False,
-            }
-            recent_scans.append(scan)
+                scan["intent"] = {
+                    key: options.get(key)
+                    for key in (
+                        "check_family", "asm_check_family", "auth_state", "kind",
+                        "budget_profile", "exploit_depth", "parallel", "shard_strategy",
+                    )
+                    if options.get(key) not in (None, "", [], {})
+                }
+                scan["result_summary"] = {
+                    "verified": verification.get("verified"),
+                    "suspected": verification.get("suspected"),
+                    "unproven_critical_high": verification.get("unproven_critical_high"),
+                    "discovered_url_count": (
+                        discovery.get("url_count") or discovery.get("total_urls")
+                        or len(discovery.get("urls") or [])
+                    ),
+                    "partial": bool((result.get("scan_metadata") or {}).get("partial"))
+                    if isinstance(result.get("scan_metadata"), dict) else False,
+                }
+                recent_scans.append(scan)
     except Exception:
         recent_scans = []
 
@@ -27580,6 +27616,23 @@ def _research_selected_hypothesis_contracts(
     return contracts
 
 
+def _research_decision_action_is_excluded(item: Any) -> bool:
+    """Return whether a prior decision is deterministic no-progress campaign memory."""
+    decision = item if isinstance(item, dict) else {}
+    if str(decision.get("status") or "") in {"accepted", "dispatching", "completed"}:
+        return True
+    validation_errors = {
+        str(error).strip()
+        for error in (decision.get("validation_errors") or [])
+        if str(error).strip()
+    }
+    return bool(validation_errors & {
+        "known_vulnerability_already_covered",
+        "repeated_action_without_state_change",
+        "campaign_recon_cap_reached",
+    }) or any(error.startswith("semantic_dimension_exhausted:") for error in validation_errors)
+
+
 def _compact_research_observation_pack(pack: dict[str, Any]) -> dict[str, Any]:
     # Redact once, then bound the already-redacted tree. Calling
     # _bounded_research_payload recursively re-runs whole-subtree redaction at every
@@ -28207,7 +28260,8 @@ async def _build_research_observation(
     campaign_preflight_scan_id = ""
     if episode.get("campaign_id"):
         try:
-            campaign_row = await conn.fetchrow(
+            campaign_row = await _savepoint_fetchrow(
+                conn,
                 "SELECT metadata_json FROM campaigns WHERE id=$1",
                 _optional_uuid(episode.get("campaign_id")),
             )
@@ -28224,7 +28278,8 @@ async def _build_research_observation(
         graph = surface_context.get("attack_graph") if isinstance(surface_context.get("attack_graph"), dict) else {}
         provenance_scan_ids = [campaign_preflight_scan_id]
         try:
-            provenance_rows = await conn.fetch(
+            provenance_rows = await _savepoint_fetch(
+                conn,
                 """
                 SELECT id FROM scans
                 WHERE id=COALESCE(
@@ -28302,10 +28357,7 @@ async def _build_research_observation(
         _command_name = str(_action.get("command") or "").strip()
         if not _command_name:
             continue
-        _tried = str(_item.get("status") or "") in {"accepted", "dispatching", "completed"} or (
-            "repeated_action_without_state_change" in (_item.get("validation_errors") or [])
-        )
-        if not _tried:
+        if not _research_decision_action_is_excluded(_item):
             continue
         _comparable = _research_action_dedupe_comparable(_action)
         _signature = _research_canonical_hash(_comparable)
@@ -28386,6 +28438,7 @@ async def _build_research_observation(
             "invariant_contracts_are_planning_only": True,
             "invariant_contracts_cannot_directly_promote_findings": True,
             "selected_hypothesis_contract_is_authoritative": True,
+            "hypothesis_id_is_top_level_decision_provenance": True,
         },
     }
     pack = _compact_research_observation_pack(pack)
@@ -31631,9 +31684,11 @@ async def _continue_autonomous_research_campaigns() -> int:
                 """
                 UPDATE campaigns SET
                     metadata_json=jsonb_set(
-                        CASE WHEN $3 THEN metadata_json
-                             ELSE jsonb_set(metadata_json, '{autonomous_research,consecutive_blocked}', '0'::jsonb, true) END,
-                        '{autonomous_research,episodes_started}', to_jsonb($2::int), true),
+                        jsonb_set(
+                            CASE WHEN $3 THEN metadata_json
+                                 ELSE jsonb_set(metadata_json, '{autonomous_research,consecutive_blocked}', '0'::jsonb, true) END,
+                            '{autonomous_research,episodes_started}', to_jsonb($2::int), true),
+                        '{autonomous_research,last_error}', 'null'::jsonb, true),
                     updated_at=NOW() WHERE id=$1
                 """,
                 row["id"], count + 1, from_review,
@@ -31673,10 +31728,77 @@ async def control_research_campaign(campaign_id: str, req: ResearchCampaignContr
             campaign_uuid,
         )
         status = {"pause": "paused", "resume": "active", "cancel": "cancelled"}[req.action]
-        updated = await conn.fetchrow(
-            "UPDATE campaigns SET status=$2, updated_at=NOW() WHERE id=$1 RETURNING *",
-            campaign_uuid, status,
+        reset_exhausted_preflight = bool(
+            req.action == "resume"
+            and current_status == "paused"
+            and research_config.get("last_error") == "authenticated_coverage_readiness_exhausted"
         )
+        if reset_exhausted_preflight:
+            history = (
+                list(research_config.get("preflight_history") or [])
+                if isinstance(research_config.get("preflight_history"), list)
+                else []
+            )
+            history.append({
+                "scan_id": preflight_scan_id,
+                "attempts": int(research_config.get("preflight_attempts") or 0),
+                "state": research_config.get("preflight_state"),
+                "reason": research_config.get("last_error"),
+                "reset_at": datetime.now(timezone.utc).isoformat(),
+                "reset_by": req.created_by,
+            })
+            research_config.update({
+                "preflight_state": "pending",
+                "preflight_scan_id": None,
+                "preflight_job_id": None,
+                "preflight_claim_id": None,
+                "preflight_started_at": None,
+                "preflight_attempts": 0,
+                "preflight_resume_resets": int(research_config.get("preflight_resume_resets") or 0) + 1,
+                "preflight_history": history[-10:],
+                "readiness": {},
+                "last_error": None,
+            })
+            campaign_metadata["autonomous_research"] = research_config
+            updated = await conn.fetchrow(
+                """
+                UPDATE campaigns SET status=$2, metadata_json=$3::jsonb,
+                    updated_at=NOW() WHERE id=$1 RETURNING *
+                """,
+                campaign_uuid,
+                status,
+                json.dumps(campaign_metadata, default=str),
+            )
+        elif req.action == "resume" and current_status == "paused" and research_config.get("last_error"):
+            resume_history = (
+                list(research_config.get("resume_history") or [])
+                if isinstance(research_config.get("resume_history"), list)
+                else []
+            )
+            resume_history.append({
+                "reason": str(research_config.get("last_error"))[:500],
+                "resumed_at": datetime.now(timezone.utc).isoformat(),
+                "resumed_by": req.created_by,
+            })
+            research_config.update({
+                "last_error": None,
+                "resume_history": resume_history[-20:],
+            })
+            campaign_metadata["autonomous_research"] = research_config
+            updated = await conn.fetchrow(
+                """
+                UPDATE campaigns SET status=$2, metadata_json=$3::jsonb,
+                    updated_at=NOW() WHERE id=$1 RETURNING *
+                """,
+                campaign_uuid,
+                status,
+                json.dumps(campaign_metadata, default=str),
+            )
+        else:
+            updated = await conn.fetchrow(
+                "UPDATE campaigns SET status=$2, updated_at=NOW() WHERE id=$1 RETURNING *",
+                campaign_uuid, status,
+            )
         if req.action in {"pause", "resume"} and active_rows:
             await conn.execute(
                 """
@@ -31988,6 +32110,7 @@ async def submit_research_decision(episode_id: str, req: ResearchDecisionRequest
             observation = _public_research_observation_row(observation_row)
             observation_pack = observation.get("observation_pack") or {}
             raw = req.model_dump(mode="json", exclude={"planner", "model_tokens_used", "execute", "idempotency_key"})
+            binding_errors = _research_canonicalize_hypothesis_binding(raw)
             # Freelance experiments: the planner often reasons up a hypothesis from the discovered
             # surface and designs a valid experiment for it, but omits hypothesis_id (the lead is not
             # on the seeded board). Bind a matching ranked lead, or create a tracked planner-derived
@@ -32004,6 +32127,7 @@ async def submit_research_decision(episode_id: str, req: ResearchDecisionRequest
                 },
                 command_catalog=catalog,
             )
+            errors.extend(binding_errors)
             if _contains_forbidden_context_key(req.planner):
                 errors.append("planner_metadata_contains_secret_field")
             model_limit = int((episode.get("budget_limits") or {}).get("model_tokens") or 0)
@@ -32574,6 +32698,30 @@ def _research_decision_json_schema(
     }
 
 
+def _research_canonicalize_hypothesis_binding(raw: dict[str, Any]) -> list[str]:
+    """Move a misplaced experiment hypothesis binding into decision provenance.
+
+    The structured response schema exposes ``hypothesis_id`` at decision level, while
+    command parameter schemas intentionally do not. Some providers still duplicate it
+    inside ``action.parameters``. Canonicalize the unambiguous case without weakening
+    the command contract, and reject conflicting bindings instead of guessing.
+    """
+    action = raw.get("action") if isinstance(raw.get("action"), dict) else {}
+    parameters = action.get("parameters") if isinstance(action.get("parameters"), dict) else {}
+    if "hypothesis_id" not in parameters:
+        return []
+    nested = str(parameters.pop("hypothesis_id") or "").strip()
+    action["parameters"] = parameters
+    raw["action"] = action
+    if not nested:
+        return []
+    top_level = str(raw.get("hypothesis_id") or "").strip()
+    if top_level and top_level != nested:
+        return ["hypothesis_id_conflict"]
+    raw["hypothesis_id"] = nested
+    return []
+
+
 async def _research_autobind_hypothesis(
     conn, episode: dict[str, Any], raw: dict[str, Any], observation_pack: dict[str, Any],
 ) -> None:
@@ -32849,7 +32997,8 @@ def _research_planner_messages(observation: dict[str, Any]) -> list[dict[str, st
                 "is proposable. Use ordinary scans or ASM only for a concrete uncovered or stale coverage gap. "
                 "For bug hunting, prefer the highest-ranked unexplained hypothesis and design an app-specific "
                 "control/test experiment across routes, objects, principals, or state transitions. Reference its "
-                "hypothesis_id. When you design an experiment.workflow, copy the matching family template from "
+                "hypothesis_id only in the top-level decision hypothesis_id field; never put hypothesis_id inside "
+                "action.parameters. When you design an experiment.workflow, copy the matching family template from "
                 "experiment_templates and replace the <placeholders> with real routes, object fields, and "
                 "principals from the observation; keep every checkpoint, assertion type, and predicate exactly so "
                 "the proof stays valid and server-corroborable. Fill create/mutation request bodies from the "

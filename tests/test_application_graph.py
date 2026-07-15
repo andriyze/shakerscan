@@ -57,3 +57,81 @@ def test_build_graph_empty_without_signal():
     nodes, edges = worker.build_application_graph(
         {"discovery": {"browser_api_endpoints": ["GET /a", "GET /b"]}})
     assert set(nodes) == {"route:GET /a", "route:GET /b"} and edges == {}
+
+
+def test_authenticated_attempts_populate_inventory_and_two_principal_graph():
+    result = {
+        "active_checks": {
+            "endpoint_attempt_schema_version": "active_endpoint_attempt_v1",
+            "endpoint_attempts": [
+                {
+                    "custom_endpoint": "GET /workshop/api/shop/orders/1?id=1",
+                    "family": "authz",
+                    "status": "completed",
+                    "attempted_params_count": 2,
+                    "completed_params_count": 2,
+                    "source_principal": "user1",
+                    "attacker_principal": "user2",
+                    "producer_endpoint": "GET /workshop/api/shop/orders/1?id=1",
+                    "consumer_endpoint": "GET /workshop/api/shop/orders/1?id=1",
+                    "object_id_location": "producer_response",
+                    "proof_type": "resource_producer_discovery",
+                    "owner_status": 200,
+                    "attacker_listing_status": 200,
+                    "resource_ids_found": 3,
+                },
+                {
+                    "custom_endpoint": "GET /guessed/phantom",
+                    "family": "authz",
+                    "status": "partial",
+                    "attempted_params_count": 2,
+                    "completed_params_count": 2,
+                    "source_principal": "user1",
+                    "attacker_principal": "user2",
+                    "producer_endpoint": "GET /guessed/phantom",
+                    "consumer_endpoint": "GET /guessed/phantom",
+                    "owner_status": 404,
+                    "attacker_listing_status": 404,
+                },
+            ],
+        },
+    }
+
+    worklists = worker._authenticated_endpoint_worklists_from_report(result)
+    assert worklists == {
+        "user1": ["GET /workshop/api/shop/orders/1?id=1"],
+        "user2": ["GET /workshop/api/shop/orders/1?id=1"],
+    }
+
+    nodes, edges = worker.build_application_graph(result)
+    route = "route:GET /workshop/api/shop/orders/1?id=1"
+    boundary = (route, route, "auth_boundary")
+    assert route in nodes
+    assert "route:GET /guessed/phantom" not in nodes
+    assert boundary in edges
+    assert edges[boundary]["source_principal"] == "user1"
+    assert edges[boundary]["excluded_principal"] == "user2"
+    assert edges[boundary]["observation"] == "two_principal_route_comparison"
+    object_keys = [key for key in nodes if key.startswith("object:resource_id@")]
+    assert len(object_keys) == 1
+    assert (route, object_keys[0], "produces") in edges
+
+
+def test_authenticated_attempt_persistence_rejects_unknown_schema():
+    report = {
+        "active_checks": {
+            "endpoint_attempts": [{
+                "custom_endpoint": "GET /api/orders/1",
+                "status": "completed",
+                "source_principal": "user1",
+                "attacker_principal": "user2",
+                "owner_status": 200,
+                "attacker_status": 200,
+                "producer_endpoint": "GET /api/orders/1",
+                "consumer_endpoint": "GET /api/orders/1",
+            }],
+        },
+    }
+
+    assert worker._authenticated_endpoint_worklists_from_report(report) == {}
+    assert worker.build_application_graph(report) == ({}, {})

@@ -2731,6 +2731,78 @@ def build_application_graph(result: dict) -> tuple[dict, dict]:
                 "sensitive_fields": sensitive,
             }
 
+    # Focused authenticated preflights also emit a versioned endpoint-attempt
+    # ledger. A producer may have no consumer candidates (for example both
+    # principals can list the same collection), but a successful response from
+    # two distinct principals is still an observed auth boundary. Keep this
+    # separate from vulnerability proof: graph edges are context/leads, never
+    # findings. Unknown telemetry schemas are rejected by the normalizer.
+    for attempt in _active_endpoint_attempts_from_report(result):
+        source_principal = str(attempt.get("source_principal") or "").strip()
+        attacker_principal = str(attempt.get("attacker_principal") or "").strip()
+        if not source_principal or not attacker_principal or source_principal == attacker_principal:
+            continue
+        try:
+            owner_status = int(attempt.get("owner_status") or 0)
+        except (TypeError, ValueError):
+            owner_status = 0
+        attacker_status_raw = (
+            attempt.get("attacker_status")
+            if attempt.get("attacker_status") is not None
+            else attempt.get("attacker_listing_status")
+        )
+        try:
+            attacker_status = int(attacker_status_raw or 0)
+        except (TypeError, ValueError):
+            attacker_status = 0
+        # Do not turn guessed/404 producer paths into graph structure.  The owner
+        # route must have produced a real response and the second-principal request
+        # must have completed, regardless of whether it was allowed or denied.
+        if not (200 <= owner_status < 400) or attacker_status <= 0:
+            continue
+        producer_label = str(attempt.get("producer_endpoint") or "").strip()
+        consumer_label = str(attempt.get("consumer_endpoint") or "").strip()
+        producer = add_route(producer_label, {"role": "producer", "observed": True})
+        consumer = add_route(consumer_label, {"role": "consumer", "observed": True})
+        if not producer or not consumer:
+            continue
+        sensitive = attempt.get("property_names_tested") or attempt.get("sensitive_fields") or []
+        if not isinstance(sensitive, list):
+            sensitive = []
+        object_id_key = str(attempt.get("object_id_key") or "").strip()
+        try:
+            resource_ids_found = max(0, int(attempt.get("resource_ids_found") or 0))
+        except (TypeError, ValueError):
+            resource_ids_found = 0
+        # Producer discovery does not always know the response field name.  Use a
+        # route-scoped key only when resource identifiers were actually parsed so
+        # unrelated collections are not collapsed into one generic object node.
+        if not object_id_key and resource_ids_found:
+            object_id_key = f"resource_id@{producer_label}"
+        if object_id_key:
+            obj = add_object(object_id_key, {
+                "location": attempt.get("object_id_location"),
+                "resource_ids_found": resource_ids_found,
+                "sensitive_fields": sensitive,
+            })
+            edges[(producer, obj, "produces")] = {
+                "source_principal": source_principal,
+                "observation": "authenticated_endpoint_attempt",
+            }
+            edges[(obj, consumer, "consumed_by")] = {
+                "observation": "authenticated_endpoint_attempt",
+            }
+        edges[(producer, consumer, "auth_boundary")] = {
+            "object_id_key": object_id_key,
+            "source_principal": source_principal,
+            "excluded_principal": attacker_principal,
+            "sensitive_fields": sensitive,
+            "owner_status": owner_status,
+            "attacker_status": attacker_status,
+            "proof_type": attempt.get("proof_type"),
+            "observation": "two_principal_route_comparison",
+        }
+
     disc = result.get("discovery") if isinstance(result.get("discovery"), dict) else {}
     for ep in (disc.get("browser_api_endpoints") or [])[:500]:
         url = ep.get("url") if isinstance(ep, dict) else ep
@@ -6602,6 +6674,29 @@ async def process_scan_job(job_data: dict):
                             scan_id=scan_id,
                         )
                     print(f"[{job_id[:8]}] ASM inventory: upserted {n} endpoints", flush=True)
+
+                # Focused BOLA/auth preflights can intentionally skip discovery and
+                # therefore have no active_worklist.  Persist their versioned,
+                # response-backed endpoint attempts under each principal actually
+                # observed so campaign readiness and later ASM work can reuse them.
+                telemetry_worklists = _authenticated_endpoint_worklists_from_report(result)
+                if telemetry_worklists:
+                    counts: dict[str, int] = {}
+                    async with db_pool.acquire() as conn:
+                        for auth_state, endpoints in telemetry_worklists.items():
+                            counts[auth_state] = await asm_inventory.upsert_endpoints(
+                                conn,
+                                target_id,
+                                endpoints,
+                                source='scan_telemetry',
+                                auth_state=auth_state,
+                                scan_id=scan_id,
+                            )
+                    print(
+                        f"[{job_id[:8]}] ASM authenticated telemetry inventory: "
+                        + ", ".join(f"{state}={count}" for state, count in sorted(counts.items())),
+                        flush=True,
+                    )
             except Exception as e:
                 print(f"[{job_id[:8]}] ASM inventory error: {e}", flush=True)
 
@@ -6821,6 +6916,59 @@ def _active_endpoint_attempts_from_report(report: dict | None) -> list[dict[str,
         if normalized:
             out.append(normalized)
     return out
+
+
+def _authenticated_endpoint_worklists_from_report(
+    report: dict | None,
+) -> dict[str, list[str]]:
+    """Return response-backed endpoint worklists for explicitly observed principals.
+
+    This is deliberately conservative: only declared endpoint-attempt telemetry,
+    distinct source/attacker principals, and a successful response for that exact
+    principal are accepted.  A completed 404/405 guess must never become durable
+    authenticated coverage.
+    """
+    grouped: dict[str, list[str]] = {}
+    seen: dict[str, set[str]] = {}
+
+    def add(state_value: Any, status_value: Any, endpoint: str) -> None:
+        state = asm_inventory.normalize_auth_state(state_value)
+        if state == "anonymous":
+            return
+        try:
+            status_code = int(status_value or 0)
+        except (TypeError, ValueError):
+            return
+        if not 200 <= status_code < 400:
+            return
+        state_seen = seen.setdefault(state, set())
+        if endpoint in state_seen:
+            return
+        state_seen.add(endpoint)
+        grouped.setdefault(state, []).append(endpoint)
+
+    for attempt in _active_endpoint_attempts_from_report(report):
+        if str(attempt.get("status") or "").lower() not in {"completed", "partial"}:
+            continue
+        endpoint = str(attempt.get("custom_endpoint") or "").strip()
+        source_principal = str(attempt.get("source_principal") or "").strip()
+        attacker_principal = str(attempt.get("attacker_principal") or "").strip()
+        if (
+            not endpoint
+            or not source_principal
+            or not attacker_principal
+            or source_principal == attacker_principal
+        ):
+            continue
+        add(source_principal, attempt.get("owner_status"), endpoint)
+        add(
+            attacker_principal,
+            attempt.get("attacker_status")
+            if attempt.get("attacker_status") is not None
+            else attempt.get("attacker_listing_status"),
+            endpoint,
+        )
+    return grouped
 
 
 def _active_endpoint_telemetry_present(report: dict | None) -> bool:

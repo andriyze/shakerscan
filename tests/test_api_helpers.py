@@ -7793,6 +7793,7 @@ def test_generated_agent_context_pack_from_target_uses_stored_facts(monkeypatch)
                     "last_tested_at": None,
                 }]
             if "FROM scans" in query:
+                assert "COALESCE(completed_at, started_at, created_at) AS updated_at" in query
                 return [{
                     "id": uuid.uuid4(),
                     "parent_scan_id": None,
@@ -12501,6 +12502,111 @@ def test_campaign_cancel_propagates_to_preflight_scan(monkeypatch):
     assert result["cancelled_preflight_scan_ids"] == [preflight_scan_id]
 
 
+def test_campaign_resume_restarts_exhausted_preflight_without_refunding_budget(monkeypatch):
+    campaign_id = uuid.uuid4()
+    preflight_scan_id = str(uuid.uuid4())
+    budget_used = {"requests": 800, "active_actions": 2}
+    campaign = {
+        "id": campaign_id,
+        "campaign_type": "autonomous_research",
+        "status": "paused",
+        "metadata_json": {
+            "autonomous_research": {
+                "preflight_scan_id": preflight_scan_id,
+                "preflight_job_id": "old-job",
+                "preflight_claim_id": "old-claim",
+                "preflight_state": "completed",
+                "preflight_attempts": api_module.RESEARCH_PREFLIGHT_MAX_ATTEMPTS,
+                "preflight_budget_used": budget_used,
+                "last_error": "authenticated_coverage_readiness_exhausted",
+                "readiness": {"state": "repairable", "blockers": ["no_executable_authenticated_routes"]},
+            },
+        },
+    }
+
+    class Conn:
+        async def fetchrow(self, query, *args):
+            if "SELECT * FROM campaigns" in query:
+                return campaign
+            if "metadata_json=$3::jsonb" in query:
+                metadata = json.loads(args[2])
+                return {**campaign, "status": "active", "metadata_json": metadata}
+            raise AssertionError(query)
+
+        async def fetch(self, query, *args):
+            if "FROM research_episodes" in query:
+                return []
+            raise AssertionError(query)
+
+        async def execute(self, query, *args):
+            return "UPDATE 0"
+
+    monkeypatch.setattr(api_module, "db_pool", _FakePool(Conn()))
+
+    result = asyncio.run(api_module.control_research_campaign(
+        str(campaign_id),
+        api_module.ResearchCampaignControlRequest(action="resume", created_by="e2e-test"),
+    ))
+
+    config = result["campaign"]["metadata_json"]["autonomous_research"]
+    assert result["campaign"]["status"] == "active"
+    assert config["preflight_state"] == "pending"
+    assert config["preflight_scan_id"] is None
+    assert config["preflight_job_id"] is None
+    assert config["preflight_claim_id"] is None
+    assert config["preflight_attempts"] == 0
+    assert config["last_error"] is None
+    assert config["preflight_budget_used"] == budget_used
+    assert config["preflight_history"][-1]["scan_id"] == preflight_scan_id
+    assert config["preflight_history"][-1]["reset_by"] == "e2e-test"
+
+
+def test_campaign_resume_archives_and_clears_transient_error(monkeypatch):
+    campaign_id = uuid.uuid4()
+    campaign = {
+        "id": campaign_id,
+        "campaign_type": "autonomous_research",
+        "status": "paused",
+        "metadata_json": {
+            "autonomous_research": {
+                "preflight_state": "completed",
+                "preflight_attempts": 1,
+                "last_error": "current transaction is aborted",
+            },
+        },
+    }
+
+    class Conn:
+        async def fetchrow(self, query, *args):
+            if "SELECT * FROM campaigns" in query:
+                return campaign
+            if "metadata_json=$3::jsonb" in query:
+                return {**campaign, "status": "active", "metadata_json": json.loads(args[2])}
+            raise AssertionError(query)
+
+        async def fetch(self, query, *args):
+            if "FROM research_episodes" in query:
+                return []
+            raise AssertionError(query)
+
+        async def execute(self, query, *args):
+            return "UPDATE 0"
+
+    monkeypatch.setattr(api_module, "db_pool", _FakePool(Conn()))
+
+    result = asyncio.run(api_module.control_research_campaign(
+        str(campaign_id),
+        api_module.ResearchCampaignControlRequest(action="resume", created_by="operator-test"),
+    ))
+
+    config = result["campaign"]["metadata_json"]["autonomous_research"]
+    assert config["preflight_state"] == "completed"
+    assert config["preflight_attempts"] == 1
+    assert config["last_error"] is None
+    assert config["resume_history"][-1]["reason"] == "current transaction is aborted"
+    assert config["resume_history"][-1]["resumed_by"] == "operator-test"
+
+
 def test_campaign_budget_is_aggregate_and_each_episode_is_trimmed_to_remaining():
     per_episode = api_module.RESEARCH_LAUNCH_PROFILES["deep_hunt"]["budget_limits"]
     limits = api_module._research_campaign_budget_limits(
@@ -13665,6 +13771,66 @@ def test_research_autobind_requires_complete_operation_identity(monkeypatch):
 
     assert exact_raw["hypothesis_id"] == str(exact_hypothesis_id)
     assert len(captured) == 1
+
+
+def test_research_canonicalizes_nested_hypothesis_binding_without_weakening_parameters():
+    hypothesis_id = str(uuid.uuid4())
+    raw = {
+        "hypothesis_id": None,
+        "action": {
+            "command": "experiment.workflow",
+            "parameters": {"hypothesis_id": hypothesis_id, "proof_family": "bola"},
+        },
+    }
+
+    errors = api_module._research_canonicalize_hypothesis_binding(raw)
+
+    assert errors == []
+    assert raw["hypothesis_id"] == hypothesis_id
+    assert raw["action"]["parameters"] == {"proof_family": "bola"}
+
+
+def test_research_rejects_conflicting_hypothesis_bindings():
+    top_level = str(uuid.uuid4())
+    raw = {
+        "hypothesis_id": top_level,
+        "action": {
+            "command": "experiment.workflow",
+            "parameters": {"hypothesis_id": str(uuid.uuid4()), "proof_family": "bola"},
+        },
+    }
+
+    errors = api_module._research_canonicalize_hypothesis_binding(raw)
+
+    assert errors == ["hypothesis_id_conflict"]
+    assert raw["hypothesis_id"] == top_level
+    assert "hypothesis_id" not in raw["action"]["parameters"]
+
+
+def test_known_covered_rejection_becomes_campaign_exclusion():
+    action = {"command": "experiment.workflow", "parameters": {"proof_family": "bola"}}
+
+    assert api_module._research_decision_action_is_excluded({
+        "status": "rejected",
+        "action": action,
+        "validation_errors": ["known_vulnerability_already_covered"],
+    }) is True
+    assert api_module._research_decision_action_is_excluded({
+        "status": "rejected",
+        "action": action,
+        "validation_errors": ["action_parameter_not_declared:hypothesis_id"],
+    }) is False
+
+
+def test_research_planner_prompt_places_hypothesis_provenance_at_decision_level():
+    messages = api_module._research_planner_messages({
+        "id": str(uuid.uuid4()),
+        "context_hash": "a" * 64,
+        "observation_pack": {"proposable_commands": []},
+    })
+
+    assert "top-level decision hypothesis_id field" in messages[0]["content"]
+    assert "never put hypothesis_id inside action.parameters" in messages[0]["content"]
 
 
 def test_campaign_yield_counts_only_findings_with_campaign_provenance():
