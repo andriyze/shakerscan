@@ -15682,6 +15682,18 @@ def _public_campaign_action_row(row: Any) -> dict[str, Any]:
     return payload
 
 
+def _campaign_action_effective_status(status: Any, linked_scan_status: Any) -> str:
+    """Overlay terminal linked-scan truth onto a stale asynchronous ledger state."""
+    stored = str(status or "unknown").strip().lower() or "unknown"
+    linked = str(linked_scan_status or "").strip().lower()
+    if (
+        stored in {"planned", "approved", "queued", "running", "retest_scheduled"}
+        and linked in {"completed", "failed", "cancelled", "partial"}
+    ):
+        return linked
+    return stored
+
+
 def _public_campaign_row(row: Any) -> dict[str, Any]:
     payload = row_to_dict(row)
     for key in ("target_scope", "planner", "deployment_impact", "metadata_json"):
@@ -22788,22 +22800,41 @@ async def arsenal_campaign_detail(campaign_id: str, action_limit: int = Query(50
         ) or 0)
         action_rows = await conn.fetch(
             """
-            SELECT * FROM campaign_actions
-            WHERE mission_campaign_id = $1
-            ORDER BY created_at DESC
+            SELECT ca.*, s.status AS linked_scan_status
+            FROM campaign_actions ca
+            LEFT JOIN scans s ON s.id = ca.scan_id
+            WHERE ca.mission_campaign_id = $1
+            ORDER BY ca.created_at DESC
             LIMIT $2
             """,
             campaign_uuid,
             action_limit,
         )
-        actions = [_public_campaign_action_row(a) for a in action_rows]
+        actions = []
+        for action_row in action_rows:
+            action_data = row_to_dict(action_row)
+            linked_scan_status = action_data.pop("linked_scan_status", None)
+            action = _public_campaign_action_row(action_data)
+            action["status"] = _campaign_action_effective_status(
+                action.get("status"), linked_scan_status,
+            )
+            actions.append(action)
         impact_by_campaign = await _campaign_live_finding_impact(conn, [campaign_uuid])
         status_rows = await conn.fetch(
             """
-            SELECT COALESCE(status, 'unknown') AS status, COUNT(*) AS count
-            FROM campaign_actions
-            WHERE mission_campaign_id = $1
-            GROUP BY COALESCE(status, 'unknown')
+            SELECT effective_status AS status, COUNT(*) AS count
+            FROM (
+                SELECT CASE
+                    WHEN ca.status IN ('planned','approved','queued','running','retest_scheduled')
+                     AND s.status IN ('completed','failed','cancelled','partial')
+                    THEN s.status
+                    ELSE COALESCE(ca.status, 'unknown')
+                END AS effective_status
+                FROM campaign_actions ca
+                LEFT JOIN scans s ON s.id = ca.scan_id
+                WHERE ca.mission_campaign_id = $1
+            ) AS effective_actions
+            GROUP BY effective_status
             """,
             campaign_uuid,
         )
@@ -27251,6 +27282,7 @@ async def _research_recent_actions(
     rows = await conn.fetch(
         """
         SELECT rd.sequence, rd.decision_type, rd.status, rd.action, rd.reason,
+               rd.hypothesis_id,
                rd.expected_signal, rd.falsifier, rd.validation_errors,
                rd.command_result_id, cr.status AS command_status, cr.scan_id,
                cr.result_json, cr.finding_ids, cr.operator_message
@@ -27566,7 +27598,25 @@ def _research_hypothesis_experiment_contract(hypothesis: Any) -> dict[str, Any]:
     route = str(dedupe.get("route") or metadata.get("route") or item.get("route") or item.get("path") or "").strip()
     method = str(dedupe.get("method") or metadata.get("method") or "").strip().upper()
     request_fields = metadata.get("request_fields")
+    if isinstance(request_fields, str):
+        request_fields = ",".join(
+            field.strip()
+            for field in request_fields.split(",")
+            if field.strip().lower() not in FORBIDDEN_AGENT_CONTEXT_KEYS
+        ) or None
+    elif isinstance(request_fields, list):
+        request_fields = [
+            field for field in request_fields
+            if str(field).strip().lower() not in FORBIDDEN_AGENT_CONTEXT_KEYS
+        ] or None
     request_example = metadata.get("request_example")
+    if isinstance(request_example, str) and re.search(
+        r"(?i)(?:authorization|authorization_header|auth_header|bearer_token|cookie|cookies|"
+        r"private_key|raw_private_key|raw_request|raw_response|raw_transcript|raw_transcripts|"
+        r"secret|token)[\"']?\s*[:=]",
+        request_example,
+    ):
+        request_example = None
     invariant_contract = metadata.get("invariant_contract") if isinstance(metadata.get("invariant_contract"), dict) else None
     required_principals = list(next_test.get("requires") or []) if isinstance(next_test.get("requires"), list) else []
     if family_proof.canonical_family(family) == "bola":
@@ -27631,6 +27681,46 @@ def _research_decision_action_is_excluded(item: Any) -> bool:
         "repeated_action_without_state_change",
         "campaign_recon_cap_reached",
     }) or any(error.startswith("semantic_dimension_exhausted:") for error in validation_errors)
+
+
+def _research_decision_hypothesis_is_excluded(item: Any) -> bool:
+    """Return whether a rejected decision makes its exact hypothesis non-actionable.
+
+    A mechanically repeated action can still leave room for another experiment on the
+    same hypothesis. A known vulnerability or an exhausted semantic dimension cannot:
+    keeping that lead on the ranked board makes the planner spend turns proposing work
+    the deterministic novelty gate must reject.
+    """
+    decision = item if isinstance(item, dict) else {}
+    if not decision.get("hypothesis_id"):
+        return False
+    validation_errors = {
+        str(error).strip()
+        for error in (decision.get("validation_errors") or [])
+        if str(error).strip()
+    }
+    return "known_vulnerability_already_covered" in validation_errors or any(
+        error.startswith("semantic_dimension_exhausted:") for error in validation_errors
+    )
+
+
+def _research_rejection_is_policy_steering(errors: Any) -> bool:
+    """Distinguish safe no-progress steering from planner/runtime failure.
+
+    These errors prove the deterministic policy worked. They should create a new
+    observation and exclude the rejected action, but must not consume the same
+    three-strike breaker reserved for malformed output and controller failures.
+    Model-token budgets still bound a planner that ignores repeated steering.
+    """
+    normalized = {str(error).strip() for error in errors or [] if str(error).strip()}
+    if not normalized:
+        return False
+    fixed = {
+        "known_vulnerability_already_covered",
+        "repeated_action_without_state_change",
+        "campaign_recon_cap_reached",
+    }
+    return all(error in fixed or error.startswith("semantic_dimension_exhausted:") for error in normalized)
 
 
 def _compact_research_observation_pack(pack: dict[str, Any]) -> dict[str, Any]:
@@ -27805,24 +27895,18 @@ def _compact_research_observation_pack(pack: dict[str, Any]) -> dict[str, Any]:
             continue
         digest = _scalars(
             raw_action,
-            ("sequence", "decision_type", "status", "command_result_id"),
+            ("sequence", "decision_type", "status", "command_result_id", "hypothesis_id"),
             text_limit=160,
         )
         action = raw_action.get("action") if isinstance(raw_action.get("action"), dict) else {}
-        action_digest = _scalars(action, ("command",), text_limit=120)
-        parameters = action.get("parameters") if isinstance(action.get("parameters"), dict) else {}
-        parameter_digest = _scalars(
-            parameters,
-            (
-                "check_family", "finding_id", "endpoint_filter", "batch_size", "stale_days",
-                "exploit_depth", "mode", "scan_type", "proof_family", "route", "workflow_id",
-            ),
-            text_limit=160,
-        )
-        if parameter_digest:
-            action_digest["parameters"] = parameter_digest
+        action_digest = _bound_once(_research_action_planner_projection(action), 1)
         if action_digest:
             digest["action"] = action_digest
+        validation_errors = _string_list(
+            raw_action.get("validation_errors"), count=12, item_limit=200,
+        )
+        if validation_errors:
+            digest["validation_errors"] = validation_errors
         result = raw_action.get("result") if isinstance(raw_action.get("result"), dict) else {}
         result_digest = _scalars(
             result,
@@ -27923,24 +28007,21 @@ def _compact_research_observation_pack(pack: dict[str, Any]) -> dict[str, Any]:
     # D1: preserve the explicit exclusion list even in the oversized-observation fallback so the
     # planner is still steered away from repeating already-tried actions.
     excluded_digest: list[dict[str, Any]] = []
-    for raw_excluded in list(bounded.get("excluded_actions") or [])[:50]:
+    for raw_excluded in list(bounded.get("excluded_actions") or [])[:30]:
         if not isinstance(raw_excluded, dict):
             continue
-        entry = _scalars(raw_excluded, ("command",), text_limit=120)
-        parameters = raw_excluded.get("parameters") if isinstance(raw_excluded.get("parameters"), dict) else {}
-        parameter_digest = _scalars(
-            parameters,
-            (
-                "check_family", "finding_id", "endpoint_filter", "batch_size", "stale_days",
-                "exploit_depth", "mode", "scan_type", "route", "workflow_id", "proof_family",
-            ),
-            text_limit=160,
-        )
-        if parameter_digest:
-            entry["parameters"] = parameter_digest
+        entry = _bound_once(raw_excluded, 1)
         if entry:
             excluded_digest.append(entry)
-    _add_if_fits("excluded_actions", excluded_digest)
+    if excluded_digest:
+        compacted["excluded_actions"] = []
+        for entry in excluded_digest:
+            compacted["excluded_actions"].append(entry)
+            if _json_size_bytes(compacted) > payload_limit:
+                compacted["excluded_actions"].pop()
+                break
+        if not compacted["excluded_actions"]:
+            compacted.pop("excluded_actions", None)
     _add_if_fits(
         "campaign_exhaustion",
         _bound_once(bounded.get("campaign_exhaustion") or {}, 3),
@@ -28306,18 +28387,26 @@ async def _build_research_observation(
         for item in episode.get("allowed_families") or []
         if str(item).strip()
     }
+    recent_actions = await _research_recent_actions(conn, episode["id"], episode.get("campaign_id"))
+    excluded_hypothesis_ids = {
+        str(item.get("hypothesis_id"))
+        for item in recent_actions
+        if _research_decision_hypothesis_is_excluded(item)
+    }
     ranked_hypotheses = [
         entry
         for entry in (surface_context.get("ranked_hypotheses") or [])
         if isinstance(entry, dict)
         and isinstance(entry.get("hypothesis"), dict)
         and _research_family_is_allowed(entry["hypothesis"].get("family"), allowed_families)
+        and str(entry["hypothesis"].get("id") or "") not in excluded_hypothesis_ids
     ]
     surface_context["ranked_hypotheses"] = ranked_hypotheses
     hypothesis_summaries = [
         item
         for item in (context.get("hypotheses_summary") or [])
         if isinstance(item, dict) and _research_family_is_allowed(item.get("family"), allowed_families)
+        and str(item.get("id") or "") not in excluded_hypothesis_ids
     ]
     selected_hypothesis_contracts = _research_selected_hypothesis_contracts(
         ranked_hypotheses,
@@ -28340,7 +28429,6 @@ async def _build_research_observation(
                 *(projected.get("blocked_by") or []),
                 "finding_retest_already_active",
             ]))
-    recent_actions = await _research_recent_actions(conn, episode["id"], episode.get("campaign_id"))
     exhaustion = await _research_campaign_exhaustion_snapshot(
         conn,
         episode["id"],
@@ -28364,7 +28452,17 @@ async def _build_research_observation(
         if _signature in _seen_excluded:
             continue
         _seen_excluded.add(_signature)
-        excluded_actions.append(_comparable)
+        planner_projection = _research_action_planner_projection(_action)
+        if _item.get("hypothesis_id"):
+            planner_projection["hypothesis_id"] = str(_item["hypothesis_id"])
+        validation_errors = [
+            str(error)[:200]
+            for error in (_item.get("validation_errors") or [])[:12]
+            if str(error).strip()
+        ]
+        if validation_errors:
+            planner_projection["validation_errors"] = validation_errors
+        excluded_actions.append(planner_projection)
     current_gaps = _reconcile_research_gap_recommendations(
         context.get("current_gaps") or [],
         excluded_actions,
@@ -28574,6 +28672,26 @@ async def _research_latest_action_result(conn, episode_id: str | uuid.UUID) -> d
     })
 
 
+def _research_linked_work_outcome(linked_work: Any) -> str | None:
+    """Collapse terminal linked work into the operator-visible action outcome."""
+    statuses = [
+        str(item.get("status") or "").strip().lower()
+        for item in linked_work or []
+        if isinstance(item, dict) and str(item.get("status") or "").strip()
+    ]
+    if not statuses:
+        return None
+    if any(status in {"failed", "error"} for status in statuses):
+        return "failed"
+    if any(status == "cancelled" for status in statuses):
+        return "cancelled"
+    if any(status in {"partial", "degraded"} for status in statuses):
+        return "partial"
+    if all(status == "completed" for status in statuses):
+        return "completed"
+    return None
+
+
 async def _settle_research_awaiting_observation(conn, episode_row: Any) -> dict[str, Any]:
     episode = _public_research_episode_row(episode_row)
     if str(episode.get("status") or "") != "awaiting_observation" or episode.get("cancel_requested"):
@@ -28599,7 +28717,8 @@ async def _settle_research_awaiting_observation(conn, episode_row: Any) -> dict[
         if isinstance(result_context.get("decision"), dict)
         else {}
     )
-    observed_decision_status = str(decision_context.get("status") or "completed")
+    linked_work = result_context.get("linked_work") or []
+    observed_decision_status = _research_linked_work_outcome(linked_work) or "completed"
     command_result_id = command_result.get("id")
     await conn.execute(
         """
@@ -28609,6 +28728,27 @@ async def _settle_research_awaiting_observation(conn, episode_row: Any) -> dict[
         """,
         episode_row["id"], _optional_uuid(command_result_id),
     )
+    if command_result_id:
+        await conn.execute(
+            """
+            UPDATE campaign_actions
+            SET status=$2,
+                result_json=COALESCE(result_json, '{}'::jsonb) || $3::jsonb,
+                updated_at=NOW()
+            WHERE command_result_id=$1
+              AND status IN ('planned','approved','queued','running','retest_scheduled')
+            """,
+            _optional_uuid(command_result_id),
+            observed_decision_status,
+            json.dumps({
+                "linked_work_status": observed_decision_status,
+                "linked_work": [
+                    {key: item.get(key) for key in ("kind", "id", "status") if item.get(key) is not None}
+                    for item in linked_work[:20]
+                    if isinstance(item, dict)
+                ],
+            }),
+        )
     await _record_research_hypothesis_outcome(
         conn,
         decision_id=decision_context.get("id"),
@@ -28625,7 +28765,7 @@ async def _settle_research_awaiting_observation(conn, episode_row: Any) -> dict[
             else f"Observed asynchronous action outcome: {observed_decision_status}"
         ),
         command_result_id=command_result_id,
-        details={"linked_work": result_context.get("linked_work") or []},
+        details={"linked_work": linked_work},
     )
     await _build_research_observation(
         conn,
@@ -28996,6 +29136,83 @@ async def _research_prepare_action(
 # Experiments the planner re-stamps with fresh identifiers / re-worded prose on every
 # attempt. Only these get collapsed to a mechanical identity for dedupe.
 _RESEARCH_EXPERIMENT_DEDUPE_COMMANDS = {"experiment.http_diff", "experiment.workflow"}
+
+
+def _research_action_planner_projection(action: Any) -> dict[str, Any]:
+    """Project an action into readable, value-free campaign memory.
+
+    Mechanical dedupe deliberately hashes workflow structure, but those hashes are
+    useless to a planner. Preserve the exact operation shape, assertion contract, and
+    server-bound variable names while omitting request values and volatile workflow IDs.
+    """
+    payload = action if isinstance(action, dict) else {}
+    command = str(payload.get("command") or "").strip()
+    params = payload.get("parameters") if isinstance(payload.get("parameters"), dict) else {}
+    if command not in _RESEARCH_EXPERIMENT_DEDUPE_COMMANDS:
+        projected_params = {
+            key: params.get(key)
+            for key in (
+                "check_family", "finding_id", "endpoint_filter", "batch_size", "stale_days",
+                "exploit_depth", "mode", "scan_type", "route", "method",
+            )
+            if params.get(key) not in (None, "", [], {})
+        }
+        return {"command": command, "parameters": projected_params}
+
+    operations: list[dict[str, Any]] = []
+    for step in params.get("steps") or []:
+        if not isinstance(step, dict):
+            continue
+        operation = {
+            "label": str(step.get("label") or step.get("id") or "")[:80] or None,
+            "method": str(step.get("method") or "GET").upper()[:12],
+            "route": _canonical_vulnerability_route(step.get("path") or step.get("route")),
+            "principal": str(step.get("principal") or step.get("role") or "")[:80] or None,
+            "checkpoint": str(step.get("checkpoint") or "")[:40] or None,
+            "query_keys": sorted(str(key)[:80] for key in (step.get("query") or {}).keys())
+            if isinstance(step.get("query"), dict) else [],
+            "body_fields": sorted({
+                str(key)[:80]
+                for body_key in ("json_body", "form_body")
+                for key in ((step.get(body_key) or {}).keys() if isinstance(step.get(body_key), dict) else [])
+            }),
+        }
+        operations.append({key: value for key, value in operation.items() if value not in (None, "", [], {})})
+
+    assertions = []
+    for assertion in params.get("assertions") or []:
+        if not isinstance(assertion, dict):
+            continue
+        projected = {
+            key: assertion.get(key)
+            for key in ("type", "predicate", "step", "control", "candidate", "steps")
+            if assertion.get(key) not in (None, "", [], {})
+        }
+        if projected:
+            assertions.append(projected)
+
+    principal_variables = [
+        {
+            key: item.get(key)
+            for key in ("name", "principal", "ref")
+            if item.get(key) not in (None, "")
+        }
+        for item in params.get("principal_variables") or []
+        if isinstance(item, dict)
+    ]
+    projected_params: dict[str, Any] = {
+        "proof_family": str(params.get("proof_family") or params.get("family") or "").strip().lower(),
+        "steps": operations[:8],
+        "assertions": assertions[:16],
+        "principal_variables": principal_variables[:8],
+    }
+    return {
+        "command": command,
+        "parameters": {
+            key: value for key, value in projected_params.items()
+            if value not in (None, "", [], {})
+        },
+    }
 
 
 def _research_action_dedupe_comparable(action: Any) -> dict[str, Any]:
@@ -32110,7 +32327,7 @@ async def submit_research_decision(episode_id: str, req: ResearchDecisionRequest
             observation = _public_research_observation_row(observation_row)
             observation_pack = observation.get("observation_pack") or {}
             raw = req.model_dump(mode="json", exclude={"planner", "model_tokens_used", "execute", "idempotency_key"})
-            binding_errors = _research_canonicalize_hypothesis_binding(raw)
+            binding_errors = _research_canonicalize_action_shape(raw)
             # Freelance experiments: the planner often reasons up a hypothesis from the discovered
             # surface and designs a valid experiment for it, but omits hypothesis_id (the lead is not
             # on the seeded board). Bind a matching ranked lead, or create a tracked planner-derived
@@ -32720,6 +32937,109 @@ def _research_canonicalize_hypothesis_binding(raw: dict[str, Any]) -> list[str]:
         return ["hypothesis_id_conflict"]
     raw["hypothesis_id"] = nested
     return []
+
+
+def _research_canonicalize_workflow_wrapper(raw: dict[str, Any]) -> list[str]:
+    """Unwrap a provider-added ``workflow`` envelope without weakening policy.
+
+    Some structured-output providers copy the named experiment template under
+    ``action.parameters.workflow`` while keeping server-routing fields beside it.
+    The envelope has no authority of its own, so an unambiguous object can be
+    flattened safely. Conflicting duplicate fields remain a hard rejection.
+    """
+    action = raw.get("action") if isinstance(raw.get("action"), dict) else {}
+    if str(action.get("command") or "") != "experiment.workflow":
+        return []
+    parameters = action.get("parameters") if isinstance(action.get("parameters"), dict) else {}
+    if "workflow" not in parameters:
+        return []
+    nested = parameters.pop("workflow")
+    if isinstance(nested, str):
+        text = nested.strip()
+        try:
+            decoded = json.loads(text)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            decoded = None
+        if isinstance(decoded, (dict, list)):
+            nested = decoded
+        else:
+            # A few providers use ``workflow`` as a redundant workflow-id alias.
+            # Preserve the UUID under the declared field and let the normal command
+            # schema reject any genuinely missing steps/assertions.
+            try:
+                nested_workflow_id = str(uuid.UUID(text))
+            except (TypeError, ValueError):
+                action["parameters"] = parameters
+                raw["action"] = action
+                return ["workflow_wrapper_must_be_object"]
+            existing_workflow_id = str(parameters.get("workflow_id") or "").strip()
+            if existing_workflow_id and existing_workflow_id != nested_workflow_id:
+                action["parameters"] = parameters
+                raw["action"] = action
+                return ["workflow_parameter_conflict:workflow_id"]
+            parameters["workflow_id"] = nested_workflow_id
+            action["parameters"] = parameters
+            raw["action"] = action
+            return []
+    if isinstance(nested, list):
+        if not nested or not all(isinstance(step, dict) for step in nested):
+            action["parameters"] = parameters
+            raw["action"] = action
+            return ["workflow_wrapper_must_be_object"]
+        nested = {"steps": nested}
+    if not isinstance(nested, dict):
+        action["parameters"] = parameters
+        raw["action"] = action
+        return ["workflow_wrapper_must_be_object"]
+    errors: list[str] = []
+    for key, value in nested.items():
+        if key in parameters and parameters[key] not in (None, "", [], {}):
+            if parameters[key] != value:
+                errors.append(f"workflow_parameter_conflict:{str(key)[:80]}")
+            continue
+        parameters[key] = value
+    action["parameters"] = parameters
+    raw["action"] = action
+    return errors
+
+
+def _research_canonicalize_experiment_steps_alias(raw: dict[str, Any]) -> list[str]:
+    """Map the readable ``operations`` alias back to the declared ``steps`` field.
+
+    Campaign memory used this label to describe prior work. Providers sometimes copy
+    it literally into the next experiment. The alias carries no extra authority and
+    every resulting step still passes the normal command schema, scope, method, body,
+    restoration, and secret-field checks.
+    """
+    action = raw.get("action") if isinstance(raw.get("action"), dict) else {}
+    if str(action.get("command") or "") not in _RESEARCH_EXPERIMENT_DEDUPE_COMMANDS:
+        return []
+    parameters = action.get("parameters") if isinstance(action.get("parameters"), dict) else {}
+    if "operations" not in parameters:
+        return []
+    operations = parameters.pop("operations")
+    if not isinstance(operations, list) or not operations or not all(
+        isinstance(step, dict) for step in operations
+    ):
+        action["parameters"] = parameters
+        raw["action"] = action
+        return ["experiment_operations_must_be_step_list"]
+    existing_steps = parameters.get("steps")
+    if existing_steps not in (None, [], {}) and existing_steps != operations:
+        action["parameters"] = parameters
+        raw["action"] = action
+        return ["experiment_steps_conflict"]
+    parameters["steps"] = operations
+    action["parameters"] = parameters
+    raw["action"] = action
+    return []
+
+
+def _research_canonicalize_action_shape(raw: dict[str, Any]) -> list[str]:
+    errors = _research_canonicalize_workflow_wrapper(raw)
+    errors.extend(_research_canonicalize_experiment_steps_alias(raw))
+    errors.extend(_research_canonicalize_hypothesis_binding(raw))
+    return list(dict.fromkeys(errors))
 
 
 async def _research_autobind_hypothesis(
@@ -34218,6 +34538,7 @@ async def research_autopilot_runner(pool) -> None:
                     decisions = result.get("decisions") if isinstance(result.get("decisions"), list) else []
                     if decisions and isinstance(decisions[0], dict):
                         errors = decisions[0].get("validation_errors") or []
+                    policy_steering = _research_rejection_is_policy_steering(errors)
                     async with pool.acquire() as conn:
                         episode_row = await conn.fetchrow(
                             "SELECT * FROM research_episodes WHERE id=$1 AND lease_owner=$2",
@@ -34230,17 +34551,34 @@ async def research_autopilot_runner(pool) -> None:
                                 previous_result={
                                     "planner_rejection": {
                                         "validation_errors": [str(item)[:300] for item in errors[:20]],
-                                        "instruction": "Choose a named proposable command or provide a valid stop/input decision.",
+                                        "instruction": (
+                                            "The deterministic policy excluded this exact action/hypothesis. "
+                                            "Choose a different planner-visible hypothesis or semantic dimension."
+                                            if policy_steering else
+                                            "Choose a named proposable command or provide a valid stop/input decision."
+                                        ),
                                     }
                                 },
                                 next_status="awaiting_planner",
                             )
-                    await _release_research_autopilot_lease(
-                        pool,
-                        episode_id,
-                        owner,
-                        error=f"planner_decision_rejected:{','.join(str(item) for item in errors)[:800]}",
-                    )
+                            if policy_steering:
+                                await _record_research_event(
+                                    conn,
+                                    episode_row["id"],
+                                    event_type="planner_steered",
+                                    status="retrying",
+                                    summary="Deterministic policy steered the planner to different work",
+                                    details={"validation_errors": [str(item)[:300] for item in errors[:20]]},
+                                )
+                    if policy_steering:
+                        await _release_research_autopilot_lease(pool, episode_id, owner)
+                    else:
+                        await _release_research_autopilot_lease(
+                            pool,
+                            episode_id,
+                            owner,
+                            error=f"planner_decision_rejected:{','.join(str(item) for item in errors)[:800]}",
+                        )
                 else:
                     await _release_research_autopilot_lease(pool, episode_id, owner)
         except asyncio.CancelledError:

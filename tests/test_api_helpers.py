@@ -2245,6 +2245,13 @@ def test_public_campaign_action_row_decodes_json_fields():
     assert public["result_json"] == {"next": "add_credentials"}
 
 
+def test_campaign_action_effective_status_uses_terminal_linked_scan_truth():
+    assert api_module._campaign_action_effective_status("queued", "completed") == "completed"
+    assert api_module._campaign_action_effective_status("running", "failed") == "failed"
+    assert api_module._campaign_action_effective_status("completed", "failed") == "completed"
+    assert api_module._campaign_action_effective_status("queued", "running") == "queued"
+
+
 def test_public_target_principal_and_expectation_rows_are_non_executing_and_redacted():
     principal = api_module._public_target_principal_row({
         "id": uuid.uuid4(),
@@ -10150,6 +10157,89 @@ def test_compact_research_observation_hard_caps_adversarial_nested_pack():
     assert compacted["proposable_commands"][0]["reserved_cost"]["requests"] == 100
 
 
+def test_research_action_planner_projection_keeps_exact_shape_without_request_values():
+    action = {
+        "command": "experiment.workflow",
+        "parameters": {
+            "workflow_id": "volatile-provider-id",
+            "proof_family": "mass_assignment",
+            "steps": [{
+                "label": "mutate-profile",
+                "method": "PATCH",
+                "path": "/api/users/42",
+                "principal": "primary_auth",
+                "query": {"include": "private-value"},
+                "json_body": {"isAdmin": True, "token": "secret-value"},
+            }],
+            "assertions": [{
+                "type": "json_equal",
+                "control": "before",
+                "candidate": "mutate-profile",
+            }],
+            "principal_variables": [{
+                "name": "owner_id",
+                "principal": "primary_auth",
+                "ref": "$.user.id",
+            }],
+        },
+    }
+
+    projected = api_module._research_action_planner_projection(action)
+
+    params = projected["parameters"]
+    assert params["proof_family"] == "mass_assignment"
+    assert params["steps"] == [{
+        "label": "mutate-profile",
+        "method": "PATCH",
+        "route": "/api/users/{id}",
+        "principal": "primary_auth",
+        "query_keys": ["include"],
+        "body_fields": ["isAdmin", "token"],
+    }]
+    assert params["assertions"][0]["candidate"] == "mutate-profile"
+    assert params["principal_variables"][0]["name"] == "owner_id"
+    assert "volatile-provider-id" not in json.dumps(projected)
+    assert "secret-value" not in json.dumps(projected)
+    assert "private-value" not in json.dumps(projected)
+
+
+def test_oversized_compaction_preserves_readable_exact_exclusion_memory():
+    hypothesis_id = str(uuid.uuid4())
+    pack = {
+        "observation_version": "2026-07-12.v1",
+        "episode_id": str(uuid.uuid4()),
+        "objective": "Test a new bounded semantic dimension",
+        "adversarial_noise": ["x" * 1_000 for _ in range(60)],
+        "mission": {"profile": "target_hunt", "subject": {"type": "target", "id": "target-1"}},
+        "remaining_budget": {"steps": 4, "requests": 50},
+        "proposable_commands": [{"name": "experiment.workflow", "proposable": True}],
+        "recent_actions": [],
+        "excluded_actions": [{
+            "command": "experiment.workflow",
+            "hypothesis_id": hypothesis_id,
+            "validation_errors": ["known_vulnerability_already_covered"],
+            "parameters": {
+                "proof_family": "bola",
+                "operations": [{
+                    "label": "read-order",
+                    "method": "GET",
+                    "route": "/workshop/api/shop/orders/{id}",
+                    "principal": "second_user_auth",
+                }],
+            },
+        }],
+    }
+
+    compacted = api_module._compact_research_observation_pack(pack)
+
+    excluded = compacted["excluded_actions"][0]
+    assert compacted["observation_compaction"]["applied"] is True
+    assert excluded["hypothesis_id"] == hypothesis_id
+    assert excluded["validation_errors"] == ["known_vulnerability_already_covered"]
+    assert excluded["parameters"]["operations"][0]["route"] == "/workshop/api/shop/orders/{id}"
+    assert api_module._json_size_bytes(compacted) <= api_module.RESEARCH_OBSERVATION_MAX_BYTES - 96
+
+
 def test_compacted_real_experiment_schema_survives_into_provider_prompt():
     catalog_command = api_module._research_command_catalog()["experiment.http_diff"]
     projected = api_module._research_command_projection(
@@ -10252,6 +10342,27 @@ def test_selected_hypothesis_request_contract_survives_oversized_compaction():
         "Please provide a fresh bearer token",
         compacted,
     ) is False
+
+
+def test_research_hypothesis_contract_omits_secret_named_request_fields_and_example():
+    hypothesis_id = str(uuid.uuid4())
+    contract = api_module._research_hypothesis_experiment_contract({
+        "id": hypothesis_id,
+        "family": "mass_assignment",
+        "title": "Mutation lead",
+        "metadata_json": {
+            "dedupe_dimensions": {"method": "POST", "route": "/api/orders"},
+            "request_fields": "product_id, quantity, token, authorization, order_id",
+            "request_example": '{"product_id":7,"token":"redacted","order_id":42}',
+        },
+        "next_test_action": {"command": "experiment.workflow", "requires": ["primary_auth"]},
+    })
+
+    assert contract["hypothesis_id"] == hypothesis_id
+    assert contract["request_fields"] == "product_id,quantity,order_id"
+    assert "request_example" not in contract
+    assert "token" not in json.dumps(contract).lower()
+    assert "authorization" not in json.dumps(contract).lower()
 
 
 def test_research_planner_binds_provider_decision_to_current_observation():
@@ -13790,6 +13901,132 @@ def test_research_canonicalizes_nested_hypothesis_binding_without_weakening_para
     assert raw["action"]["parameters"] == {"proof_family": "bola"}
 
 
+def test_research_canonicalizes_provider_workflow_wrapper_without_losing_route_fields():
+    hypothesis_id = str(uuid.uuid4())
+    raw = {
+        "hypothesis_id": None,
+        "action": {
+            "command": "experiment.workflow",
+            "parameters": {
+                "target_id": "server-bound-target",
+                "workflow_id": "planner-workflow",
+                "workflow": {
+                    "hypothesis_id": hypothesis_id,
+                    "proof_family": "mass_assignment",
+                    "steps": [{"label": "mutate", "method": "PATCH", "path": "/api/users/42"}],
+                    "assertions": [{"type": "status_equal", "step": "mutate"}],
+                },
+            },
+        },
+    }
+
+    errors = api_module._research_canonicalize_action_shape(raw)
+
+    assert errors == []
+    assert raw["hypothesis_id"] == hypothesis_id
+    assert "workflow" not in raw["action"]["parameters"]
+    assert raw["action"]["parameters"]["target_id"] == "server-bound-target"
+    assert raw["action"]["parameters"]["proof_family"] == "mass_assignment"
+    assert raw["action"]["parameters"]["steps"][0]["method"] == "PATCH"
+
+
+@pytest.mark.parametrize("wrapped_steps", [
+    [{"label": "read", "method": "GET", "path": "/api/orders/42"}],
+    json.dumps([{"label": "read", "method": "GET", "path": "/api/orders/42"}]),
+])
+def test_research_canonicalizes_provider_workflow_step_list_alias(wrapped_steps):
+    raw = {
+        "action": {
+            "command": "experiment.workflow",
+            "parameters": {
+                "proof_family": "bola",
+                "workflow": wrapped_steps,
+                "assertions": [{"type": "status_in", "step": "read", "values": [200]}],
+            },
+        },
+    }
+
+    assert api_module._research_canonicalize_action_shape(raw) == []
+    assert raw["action"]["parameters"]["steps"] == [
+        {"label": "read", "method": "GET", "path": "/api/orders/42"},
+    ]
+    assert "workflow" not in raw["action"]["parameters"]
+
+
+def test_research_canonicalizes_redundant_workflow_uuid_alias():
+    workflow_id = str(uuid.uuid4())
+    raw = {
+        "action": {
+            "command": "experiment.workflow",
+            "parameters": {"workflow": workflow_id, "steps": []},
+        },
+    }
+
+    assert api_module._research_canonicalize_action_shape(raw) == []
+    assert raw["action"]["parameters"]["workflow_id"] == workflow_id
+
+
+def test_research_canonicalizes_readable_operations_alias_to_declared_steps():
+    operations = [{
+        "label": "owner-read",
+        "method": "GET",
+        "path": "/api/orders/42",
+        "principal": "user1",
+    }]
+    raw = {
+        "action": {
+            "command": "experiment.workflow",
+            "parameters": {"proof_family": "bola", "operations": operations},
+        },
+    }
+
+    assert api_module._research_canonicalize_action_shape(raw) == []
+    assert raw["action"]["parameters"]["steps"] == operations
+    assert "operations" not in raw["action"]["parameters"]
+
+
+def test_research_rejects_conflicting_operations_and_steps_aliases():
+    raw = {
+        "action": {
+            "command": "experiment.workflow",
+            "parameters": {
+                "operations": [{"label": "one", "method": "GET", "path": "/one"}],
+                "steps": [{"label": "two", "method": "GET", "path": "/two"}],
+            },
+        },
+    }
+
+    assert api_module._research_canonicalize_action_shape(raw) == ["experiment_steps_conflict"]
+    assert raw["action"]["parameters"]["steps"][0]["label"] == "two"
+
+
+def test_research_rejects_conflicting_or_invalid_workflow_wrappers():
+    conflicting = {
+        "action": {
+            "command": "experiment.workflow",
+            "parameters": {
+                "proof_family": "bola",
+                "workflow": {"proof_family": "mass_assignment", "steps": []},
+            },
+        },
+    }
+    invalid = {
+        "action": {
+            "command": "experiment.workflow",
+            "parameters": {"workflow": "not-an-object"},
+        },
+    }
+
+    assert api_module._research_canonicalize_action_shape(conflicting) == [
+        "workflow_parameter_conflict:proof_family",
+    ]
+    assert conflicting["action"]["parameters"]["proof_family"] == "bola"
+    assert "workflow" not in conflicting["action"]["parameters"]
+    assert api_module._research_canonicalize_action_shape(invalid) == [
+        "workflow_wrapper_must_be_object",
+    ]
+
+
 def test_research_rejects_conflicting_hypothesis_bindings():
     top_level = str(uuid.uuid4())
     raw = {
@@ -13820,6 +14057,38 @@ def test_known_covered_rejection_becomes_campaign_exclusion():
         "action": action,
         "validation_errors": ["action_parameter_not_declared:hypothesis_id"],
     }) is False
+
+
+def test_hard_policy_exclusions_remove_exact_hypothesis_and_do_not_trip_breaker():
+    rejected = {
+        "status": "rejected",
+        "hypothesis_id": str(uuid.uuid4()),
+        "validation_errors": ["known_vulnerability_already_covered"],
+    }
+
+    assert api_module._research_decision_hypothesis_is_excluded(rejected) is True
+    assert api_module._research_rejection_is_policy_steering(rejected["validation_errors"]) is True
+    assert api_module._research_rejection_is_policy_steering([
+        "semantic_dimension_exhausted:bola|GET|/api/orders/{id}",
+    ]) is True
+    assert api_module._research_rejection_is_policy_steering([
+        "action_parameter_not_declared:workflow",
+    ]) is False
+
+
+@pytest.mark.parametrize(
+    ("linked_work", "expected"),
+    [
+        ([{"status": "completed"}], "completed"),
+        ([{"status": "completed"}, {"status": "failed"}], "failed"),
+        ([{"status": "cancelled"}], "cancelled"),
+        ([{"status": "partial"}], "partial"),
+        ([{"status": "running"}], None),
+        ([], None),
+    ],
+)
+def test_research_linked_work_outcome(linked_work, expected):
+    assert api_module._research_linked_work_outcome(linked_work) == expected
 
 
 def test_research_planner_prompt_places_hypothesis_provenance_at_decision_level():
