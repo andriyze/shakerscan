@@ -11837,6 +11837,67 @@ def test_active_research_intensities_reject_credential_only_families_before_db_a
     assert "access_control" in api_module._research_intensity_campaign_families("deep_hunt")
 
 
+def test_deep_campaign_bootstraps_principals_before_readiness_repair(monkeypatch):
+    target_id = uuid.uuid4()
+    campaign_id = uuid.uuid4()
+    calls = []
+    campaign = {
+        "id": campaign_id,
+        "target_id": target_id,
+        "campaign_type": "autonomous_research",
+        "status": "active",
+        "metadata_json": {"autonomous_research": {}},
+    }
+
+    class Conn:
+        async def fetchrow(self, query, *args):
+            if "SELECT id, url FROM targets" in query:
+                return {"id": target_id, "url": "https://app.example.test"}
+            if "INSERT INTO campaigns" in query or "UPDATE campaigns SET status='active'" in query:
+                return campaign
+            if "episodes_started" in query:
+                return campaign
+            raise AssertionError(query)
+
+    class Pool:
+        def acquire(self):
+            class Acquire:
+                async def __aenter__(self):
+                    return Conn()
+
+                async def __aexit__(self, *exc):
+                    return False
+
+            return Acquire()
+
+    async def fake_bootstrap(*args, **kwargs):
+        calls.append((args, kwargs))
+        return {"action": "provisioned"}
+
+    async def fake_repair(_campaign_id):
+        assert calls, "principal bootstrap must run before readiness repair"
+        return {"readiness": {"ready": True}}
+
+    async def fake_launch(_request):
+        return {"episode": {"id": "episode-1"}, "ui_path": "/settings/research-agent?episode_id=episode-1"}
+
+    monkeypatch.setattr(api_module, "db_pool", Pool())
+    monkeypatch.setattr(api_module, "_research_maybe_auto_provision_principals", fake_bootstrap)
+    monkeypatch.setattr(api_module, "_research_campaign_self_repair", fake_repair)
+    monkeypatch.setattr(api_module, "_materialize_research_invariant_hypotheses", lambda *args: asyncio.sleep(0, result=0))
+    monkeypatch.setattr(api_module, "launch_research_episode", fake_launch)
+
+    asyncio.run(api_module.launch_research_campaign(api_module.ResearchCampaignLaunchRequest(
+        target_id=str(target_id),
+        intensity="deep_hunt",
+        approval_receipt_id=str(uuid.uuid4()),
+        allowed_families=["auth"],
+    )))
+
+    assert calls[0][0] == (target_id,)
+    assert calls[0][1]["require_second_user"] is False
+
+
 class _StaleResearchDispatchConn:
     def __init__(self, row):
         self.row = row
@@ -12554,6 +12615,70 @@ def test_research_campaign_readiness_requires_completed_two_user_surface():
     assert readiness["surface"]["authenticated_routes"] == 30
     assert readiness["surface"]["fresh_auth_boundary_edges"] == 2
     assert readiness["surface"]["executable_families"] == ["auth", "bola"]
+
+
+def test_research_campaign_readiness_allows_narrow_public_injection_without_credentials():
+    target_id = uuid.uuid4()
+    scan_id = uuid.uuid4()
+    campaign = {
+        "id": uuid.uuid4(),
+        "target_id": target_id,
+        "metadata_json": {"autonomous_research": {
+            "intensity": "deep_hunt",
+            "approval_receipt_id": str(uuid.uuid4()),
+            "allowed_families": ["sqli"],
+            "preflight_scan_id": str(scan_id),
+        }},
+    }
+
+    class Conn:
+        async def fetch(self, query, *args):
+            assert "target_principals" in query
+            return []
+
+        async def fetchrow(self, query, *args):
+            if "FROM target_endpoints" in query and "last_seen_scan_id" in query:
+                return {
+                    "fresh_unique_routes": 1,
+                    "fresh_authenticated_routes": 0,
+                    "fresh_second_user_routes": 0,
+                    "fresh_executable_routes": 0,
+                    "fresh_all_executable_routes": 1,
+                    "fresh_object_routes": 0,
+                    "fresh_mutation_routes": 0,
+                    "fresh_parameterized_routes": 1,
+                }
+            if "FROM target_endpoints" in query:
+                return {
+                    "inventory_rows": 1,
+                    "unique_routes": 1,
+                    "authenticated_routes": 0,
+                    "second_user_routes": 0,
+                    "executable_routes": 0,
+                    "all_executable_routes": 1,
+                    "object_routes": 0,
+                    "mutation_routes": 0,
+                    "parameterized_routes": 1,
+                }
+            if "FROM application_graph_nodes" in query:
+                return {
+                    "route_nodes": 0,
+                    "fresh_route_nodes": 0,
+                    "edge_count": 0,
+                    "fresh_edge_count": 0,
+                    "fresh_auth_boundary_edges": 0,
+                }
+            if "FROM scans" in query:
+                return {"id": scan_id, "status": "completed", "current_phase": "done"}
+            raise AssertionError(query)
+
+    readiness = asyncio.run(api_module._research_campaign_readiness(Conn(), campaign))
+
+    assert readiness["ready"] is True
+    assert readiness["required"]["primary_credentials"] is False
+    assert readiness["required"]["unique_routes"] == 1
+    assert readiness["surface"]["executable_families"] == ["sqli"]
+    assert "primary_credentials_required" not in readiness["blockers"]
 
 
 def test_research_campaign_readiness_accepts_same_count_routes_refreshed_by_this_preflight():

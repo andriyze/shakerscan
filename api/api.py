@@ -14393,6 +14393,87 @@ async def _auto_provision_principals(conn, target_uuid, target_url: str, config:
     return provisioned
 
 
+async def _research_maybe_auto_provision_principals(
+    target_id: Any,
+    *,
+    approval_receipt_id: Any,
+    created_by: str | None,
+    require_second_user: bool,
+) -> dict[str, Any]:
+    """Best-effort managed-principal bootstrap shared by episode and campaign launches."""
+    target_uuid = _optional_uuid(target_id)
+    async with _AUTO_PROVISION_SEMAPHORE:
+        async with db_pool.acquire() as conn:
+            target = await conn.fetchrow(
+                "SELECT id, url, is_active, metadata_json FROM targets WHERE id=$1",
+                target_uuid,
+            )
+            if not target or not target.get("is_active"):
+                return {"action": "skipped", "reason": "target_inactive"}
+            config = _auto_provisioning_config(dict(target))
+            if not config.get("enabled"):
+                return {"action": "skipped", "reason": "auto_provisioning_disabled"}
+            principal_rows = await conn.fetch(
+                """
+                SELECT p.auth_state, p.credential_profile, p.is_active,
+                       EXISTS (
+                         SELECT 1 FROM target_credential_profiles cp
+                         WHERE cp.target_id=p.target_id
+                           AND lower(cp.name)=lower(p.credential_profile)
+                           AND cp.is_active=true
+                           AND (cp.expires_at IS NULL OR cp.expires_at > NOW())
+                       ) AS credential_configured
+                FROM target_principals p
+                WHERE p.target_id=$1 AND p.is_active=true
+                """,
+                target_uuid,
+            )
+            signals = _target_credential_precondition_signals(
+                [row_to_dict(row) for row in principal_rows]
+            )
+            ready = signals.get("primary_credentials") == "configured" and (
+                not require_second_user
+                or signals.get("second_user_credentials") == "configured"
+            )
+            if ready:
+                return {"action": "reused", "credential_signals": signals}
+            # Validate before the first outbound signup request. Episode creation validates
+            # again later, but that cannot authorize an already-performed side effect.
+            approval = await _validate_approval_receipt_for_action(
+                conn,
+                approval_receipt_id,
+                target_url=str(target["url"]),
+                target_id=target_uuid,
+                action_name="target.principals.auto_provision",
+                command="target.principals.auto_provision",
+                risk_tier="credential",
+                created_by=created_by,
+                always_require_receipt=True,
+            )
+            provisioned = await _auto_provision_principals(
+                conn,
+                target_uuid,
+                str(target["url"]),
+                config,
+            )
+            command_result = await _record_command_result(
+                conn,
+                command="target.principals.auto_provision",
+                status="completed",
+                risk_tier="credential",
+                operator_message=f"Provisioned or reused {len(provisioned)} managed test principals",
+                scope_receipt_id=str((approval or {}).get("scope_receipt_id") or "") or None,
+                approval_receipt_id=approval_receipt_id,
+                result_json={"target_id": str(target_uuid), "principals": provisioned},
+                created_by=created_by,
+            )
+            return {
+                "action": "provisioned",
+                "principals": provisioned,
+                "command_result_id": command_result.get("id"),
+            }
+
+
 @app.post("/targets/{target_id}/principals/auto-provision")
 async def auto_provision_target_principals(target_id: str, request: TargetPrincipalAutoProvisionRequest):
     """Self-register managed test principals via the target's OWN signup flow (opt-in).
@@ -28759,8 +28840,10 @@ async def research_readiness():
         "planner_ready": planner_ready,
         "execution_enabled": _ai_ops_execute_enabled(),
         "campaign_readiness_policy": {
-            "authenticated_preflight_required_for_gated_campaigns": True,
+            "focused_preflight_required_for_gated_campaigns": True,
+            "authenticated_preflight_families": sorted(RESEARCH_PRIMARY_CREDENTIAL_FAMILIES),
             "minimum_unique_routes": RESEARCH_SURFACE_MIN_UNIQUE_ROUTES,
+            "minimum_narrow_public_routes": RESEARCH_SURFACE_MIN_EXECUTABLE_ROUTES,
             "minimum_authenticated_routes": RESEARCH_SURFACE_MIN_AUTHENTICATED_ROUTES,
             "distinct_second_user_required_for_bola": True,
             "preflight_max_attempts": RESEARCH_PREFLIGHT_MAX_ATTEMPTS,
@@ -28870,6 +28953,29 @@ RESEARCH_DEFAULT_CAMPAIGN_FAMILIES = (
     "sqli", "xss", "auth", "bola", "mass_assignment", "workflow",
     "data_exposure", "access_control", "field_constraint",
 )
+RESEARCH_PRIMARY_CREDENTIAL_FAMILIES = frozenset({
+    "auth", "bola", "mass_assignment", "workflow", "access_control", "field_constraint",
+})
+RESEARCH_SECOND_USER_FAMILIES = frozenset({"bola"})
+
+
+def _research_family_readiness_requirements(families: set[str], *, gated: bool) -> dict[str, Any]:
+    """Derive launch prerequisites from the selected families, not the campaign tier."""
+    primary = bool(gated and families.intersection(RESEARCH_PRIMARY_CREDENTIAL_FAMILIES))
+    second_user = bool(gated and families.intersection(RESEARCH_SECOND_USER_FAMILIES))
+    minimum_routes = (
+        RESEARCH_SURFACE_MIN_UNIQUE_ROUTES if second_user
+        else RESEARCH_SURFACE_MIN_AUTHENTICATED_ROUTES if primary
+        else RESEARCH_SURFACE_MIN_EXECUTABLE_ROUTES
+    )
+    return {
+        "primary_credentials": primary,
+        "second_user": second_user,
+        "authenticated_preflight": primary,
+        "unique_routes": minimum_routes,
+        "authenticated_routes": RESEARCH_SURFACE_MIN_AUTHENTICATED_ROUTES if primary else 0,
+        "executable_routes": RESEARCH_SURFACE_MIN_EXECUTABLE_ROUTES if gated else 0,
+    }
 
 
 def _research_intensity_campaign_families(intensity: Any) -> tuple[str, ...]:
@@ -29230,6 +29336,7 @@ async def _research_campaign_readiness(conn: Any, campaign: Any) -> dict[str, An
     intensity = str(config.get("intensity") or "deep_hunt")
     gated = RESEARCH_LAUNCH_PROFILES.get(intensity, {}).get("execution_mode") == "gated"
     families = {str(item).strip().lower() for item in config.get("allowed_families") or [] if str(item).strip()}
+    requirements = _research_family_readiness_requirements(families, gated=gated)
     principal_rows = await conn.fetch(
         """
         SELECT p.auth_state, p.credential_profile, p.is_active,
@@ -29266,6 +29373,12 @@ async def _research_campaign_readiness(conn: Any, campaign: Any) -> dict[str, An
                    )::int AS executable_routes,
                COUNT(DISTINCT upper(method) || ' ' || path)
                    FILTER (
+                     WHERE upper(method)='GET'
+                        OR COALESCE(param_shape, '') <> ''
+                        OR COALESCE(replay_spec, '') <> ''
+                   )::int AS all_executable_routes,
+               COUNT(DISTINCT upper(method) || ' ' || path)
+                   FILTER (
                      WHERE auth_state IN ('user1','user2')
                        AND path ~ '/(\\{[^/{}]+\\}|:[A-Za-z_][A-Za-z0-9_]*|[0-9]+)(/|$)'
                    )::int AS object_routes,
@@ -29294,9 +29407,9 @@ async def _research_campaign_readiness(conn: Any, campaign: Any) -> dict[str, An
             target_id,
         )
     elif gated:
-        # Reuse a recent, target-bound authenticated family pass when it has
-        # durable graph provenance.  This avoids paying for a duplicate broad
-        # preflight while never accepting inventory counts alone.
+        # Reuse recent target-bound work only when its durable provenance meets
+        # the selected families' needs. Public injection/data campaigns do not
+        # require a two-principal graph; BOLA still does.
         preflight = await conn.fetchrow(
             """
             SELECT s.id, s.status, s.current_phase, s.error_message, s.created_at, s.completed_at
@@ -29304,25 +29417,42 @@ async def _research_campaign_readiness(conn: Any, campaign: Any) -> dict[str, An
             WHERE s.target_id=$1 AND s.status='completed'
               AND s.completed_at >= NOW() - INTERVAL '24 hours'
               AND EXISTS (
-                SELECT 1 FROM application_graph_nodes n
-                WHERE n.target_id=$1 AND n.scan_id=s.id
-              )
-              AND EXISTS (
                 SELECT 1 FROM target_endpoints e
-                WHERE e.target_id=$1 AND e.auth_state='user2'
-                  AND e.last_seen_scan_id=s.id
+                WHERE e.target_id=$1 AND e.last_seen_scan_id=s.id
+                  AND (
+                    $2::boolean=false
+                    OR e.auth_state IN ('user1','user2')
+                  )
+                  AND (
+                    $3::boolean=false
+                    OR e.auth_state='user2'
+                  )
+              )
+              AND (
+                $3::boolean=false
+                OR EXISTS (
+                  SELECT 1 FROM application_graph_edges edge
+                  WHERE edge.target_id=$1 AND edge.scan_id=s.id
+                    AND edge.edge_type='auth_boundary'
+                    AND COALESCE(edge.attributes->>'source_principal','') <> ''
+                    AND COALESCE(edge.attributes->>'excluded_principal','') <> ''
+                    AND edge.attributes->>'source_principal' <> edge.attributes->>'excluded_principal'
+                )
               )
             ORDER BY s.completed_at DESC
             LIMIT 1
             """,
             target_id,
+            bool(requirements["primary_credentials"]),
+            bool(requirements["second_user"]),
         )
         if preflight:
             preflight_scan_id = _optional_uuid(preflight.get("id"))
             reused_preflight = True
     fresh_surface = await conn.fetchrow(
         """
-        SELECT COUNT(DISTINCT upper(method) || ' ' || path)
+        SELECT COUNT(DISTINCT upper(method) || ' ' || path)::int AS fresh_unique_routes,
+               COUNT(DISTINCT upper(method) || ' ' || path)
                    FILTER (WHERE auth_state IN ('user1','user2'))::int AS fresh_authenticated_routes,
                COUNT(DISTINCT upper(method) || ' ' || path)
                    FILTER (WHERE auth_state='user2')::int AS fresh_second_user_routes,
@@ -29335,6 +29465,12 @@ async def _research_campaign_readiness(conn: Any, campaign: Any) -> dict[str, An
                          OR COALESCE(replay_spec, '') <> ''
                        )
                    )::int AS fresh_executable_routes,
+               COUNT(DISTINCT upper(method) || ' ' || path)
+                   FILTER (
+                     WHERE upper(method)='GET'
+                        OR COALESCE(param_shape, '') <> ''
+                        OR COALESCE(replay_spec, '') <> ''
+                   )::int AS fresh_all_executable_routes,
                COUNT(DISTINCT upper(method) || ' ' || path)
                    FILTER (
                      WHERE auth_state IN ('user1','user2')
@@ -29385,6 +29521,7 @@ async def _research_campaign_readiness(conn: Any, campaign: Any) -> dict[str, An
     }
     before = config.get("surface_before_preflight") if isinstance(config.get("surface_before_preflight"), dict) else {}
     executable_routes = int(surface_payload.get("executable_routes") or 0)
+    all_executable_routes = int(surface_payload.get("all_executable_routes") or 0)
     object_routes = int(surface_payload.get("object_routes") or 0)
     mutation_routes = int(surface_payload.get("mutation_routes") or 0)
     parameterized_routes = int(surface_payload.get("parameterized_routes") or 0)
@@ -29397,6 +29534,9 @@ async def _research_campaign_readiness(conn: Any, campaign: Any) -> dict[str, An
     fresh_auth_boundary_edges = int(surface_payload.get("fresh_auth_boundary_edges") or 0)
     family_executable_routes = (
         int(surface_payload.get("fresh_executable_routes") or 0) if gated else executable_routes
+    )
+    family_all_executable_routes = (
+        int(surface_payload.get("fresh_all_executable_routes") or 0) if gated else all_executable_routes
     )
     family_object_routes = (
         int(surface_payload.get("fresh_object_routes") or 0) if gated else object_routes
@@ -29430,17 +29570,25 @@ async def _research_campaign_readiness(conn: Any, campaign: Any) -> dict[str, An
         executable_families.append("field_constraint")
     if "workflow" in families and family_mutation_routes > 0:
         executable_families.append("workflow")
-    if "data_exposure" in families and family_executable_routes > 0:
+    if "data_exposure" in families and family_all_executable_routes > 0:
         executable_families.append("data_exposure")
     if "access_control" in families and family_executable_routes > 0:
         executable_families.append("access_control")
     fresh_authenticated_routes = int(surface_payload.get("fresh_authenticated_routes") or 0)
-    if gated:
+    if gated and requirements["authenticated_preflight"]:
         # Count authenticated coverage stamped by THIS preflight, not only net-new cardinality. A
         # successful refresh of 30 existing authenticated routes is useful and fresh; an unrelated
         # concurrent/public route is not. The scan-id provenance closes both the old fail-open and the
         # same-count false-negative that repeatedly exhausted otherwise healthy auth preflights.
         meaningful_preflight_gain = bool(fresh_auth_boundary_edges > 0 or fresh_authenticated_routes > 0)
+    elif gated:
+        meaningful_preflight_gain = bool(
+            int(surface_payload.get("fresh_unique_routes") or 0) > 0
+            and (
+                family_all_executable_routes > 0
+                or family_parameterized_routes > 0
+            )
+        )
     else:
         meaningful_preflight_gain = bool(
             fresh_route_nodes > 0
@@ -29452,35 +29600,55 @@ async def _research_campaign_readiness(conn: Any, campaign: Any) -> dict[str, An
         "meaningful_preflight_gain": meaningful_preflight_gain,
     })
     blockers: list[str] = []
-    if gated and signals.get("primary_credentials") != "configured":
+    if requirements["primary_credentials"] and signals.get("primary_credentials") != "configured":
         blockers.append("primary_credentials_required")
     if gated and not config.get("approval_receipt_id"):
         blockers.append("approval_receipt_required")
-    if gated and "bola" in families and signals.get("second_user_credentials") != "configured":
+    if requirements["second_user"] and signals.get("second_user_credentials") != "configured":
         blockers.append("distinct_second_user_credentials_required")
     preflight_status = str(preflight.get("status") or "missing") if preflight else "missing"
     if gated and preflight_status != "completed":
         blockers.append(
-            "authenticated_preflight_in_progress"
+            (
+                "authenticated_preflight_in_progress"
+                if requirements["authenticated_preflight"] else
+                "focused_preflight_in_progress"
+            )
             if preflight_status in {"pending", "queued", "running"}
-            else "authenticated_preflight_required"
+            else (
+                "authenticated_preflight_required"
+                if requirements["authenticated_preflight"] else
+                "focused_preflight_required"
+            )
         )
-    if int(surface_payload.get("unique_routes") or 0) < RESEARCH_SURFACE_MIN_UNIQUE_ROUTES:
+    if int(surface_payload.get("unique_routes") or 0) < int(requirements["unique_routes"]):
         blockers.append(
             "insufficient_unique_route_coverage"
             if gated else
             "read_only_campaign_requires_existing_coverage"
         )
-    if gated and int(surface_payload.get("authenticated_routes") or 0) < RESEARCH_SURFACE_MIN_AUTHENTICATED_ROUTES:
+    if requirements["authenticated_routes"] and int(surface_payload.get("authenticated_routes") or 0) < int(requirements["authenticated_routes"]):
         blockers.append("insufficient_authenticated_route_coverage")
-    if gated and family_executable_routes < RESEARCH_SURFACE_MIN_EXECUTABLE_ROUTES:
-        blockers.append("no_executable_authenticated_routes")
-    if gated and "bola" in families and int(surface_payload.get("second_user_routes") or 0) <= 0:
+    required_executable_count = (
+        family_executable_routes if requirements["primary_credentials"]
+        else family_all_executable_routes
+    )
+    if gated and required_executable_count < RESEARCH_SURFACE_MIN_EXECUTABLE_ROUTES:
+        blockers.append(
+            "no_executable_authenticated_routes"
+            if requirements["primary_credentials"] else
+            "no_executable_routes"
+        )
+    if requirements["second_user"] and int(surface_payload.get("second_user_routes") or 0) <= 0:
         blockers.append("second_user_surface_not_observed")
-    if gated and "bola" in families and object_routes > 0 and fresh_auth_boundary_edges <= 0:
+    if requirements["second_user"] and object_routes > 0 and fresh_auth_boundary_edges <= 0:
         blockers.append("two_principal_graph_not_materialized")
     if gated and preflight_status == "completed" and not meaningful_preflight_gain:
-        blockers.append("authenticated_preflight_no_material_gain")
+        blockers.append(
+            "authenticated_preflight_no_material_gain"
+            if requirements["authenticated_preflight"] else
+            "focused_preflight_no_material_gain"
+        )
     if gated and families and not executable_families:
         blockers.append("no_allowed_family_has_executable_surface")
     hard_blockers = {
@@ -29493,7 +29661,9 @@ async def _research_campaign_readiness(conn: Any, campaign: Any) -> dict[str, An
         "ready": not blockers,
         "state": "ready" if not blockers else (
             "blocked" if hard_blockers.intersection(blockers) else
-            "waiting" if "authenticated_preflight_in_progress" in blockers else
+            "waiting" if {
+                "authenticated_preflight_in_progress", "focused_preflight_in_progress",
+            }.intersection(blockers) else
             "repairable"
         ),
         "blockers": blockers,
@@ -29502,11 +29672,8 @@ async def _research_campaign_readiness(conn: Any, campaign: Any) -> dict[str, An
         "preflight_scan": row_to_dict(preflight) if preflight else None,
         "reused_preflight": reused_preflight,
         "required": {
-            "unique_routes": RESEARCH_SURFACE_MIN_UNIQUE_ROUTES,
-            "authenticated_routes": RESEARCH_SURFACE_MIN_AUTHENTICATED_ROUTES if gated else 0,
-            "executable_routes": RESEARCH_SURFACE_MIN_EXECUTABLE_ROUTES if gated else 0,
-            "second_user": bool(gated and "bola" in families),
-            "fresh_two_principal_graph": bool(gated and "bola" in families and object_routes > 0),
+            **requirements,
+            "fresh_two_principal_graph": bool(requirements["second_user"] and object_routes > 0),
         },
     }
 
@@ -29627,7 +29794,10 @@ async def _research_campaign_self_repair(campaign_id: Any) -> dict[str, Any]:
                 SELECT DISTINCT method, path
                 FROM target_endpoints
                 WHERE target_id=$1 AND COALESCE(test_status, '') <> 'gone'
-                  AND COALESCE(auth_state, '') IN ('user1','user2')
+                  AND (
+                    $2::boolean=false
+                    OR COALESCE(auth_state, '') IN ('user1','user2')
+                  )
             ) e
             ORDER BY
               CASE
@@ -29639,6 +29809,7 @@ async def _research_campaign_self_repair(campaign_id: Any) -> dict[str, Any]:
             LIMIT 150
             """,
             campaign["target_id"],
+            bool((readiness.get("required") or {}).get("primary_credentials")),
         )
 
     families = {
@@ -29648,7 +29819,7 @@ async def _research_campaign_self_repair(campaign_id: Any) -> dict[str, Any]:
     }
     focus_family = next(
         (family for family in ("bola", "auth", "sqli", "xss") if family in families),
-        "auth",
+        "auth" if (readiness.get("required") or {}).get("primary_credentials") else "all",
     )
     custom_endpoints = []
     for row in endpoint_rows:
@@ -30152,50 +30323,22 @@ async def launch_research_episode(req: ResearchLaunchRequest):
         # Deep Hunt may self-provision two managed principals via the app's own signup so
         # two-principal BOLA workflows are reachable without hand-configured credentials. Opt-in
         # (target metadata_json.auto_provisioning.enabled); best-effort; never blocks a launch.
-        async with _AUTO_PROVISION_SEMAPHORE:
-            async with db_pool.acquire() as conn:
-                target_row = await conn.fetchrow("SELECT url, metadata_json FROM targets WHERE id=$1", target_id)
-                config = _auto_provisioning_config(dict(target_row)) if target_row else {}
-                active_principals = await conn.fetchval(
-                    "SELECT COUNT(*) FROM target_principals WHERE target_id=$1 AND is_active", target_id)
-                if not (config.get("enabled") and int(active_principals or 0) < 2):
-                    target_row = None
-            if target_row is not None:
-                async with db_pool.acquire() as conn:
-                    # Validate the receipt before the first outbound signup request.
-                    # create_research_episode validates it again when binding the episode, but that
-                    # later check cannot authorize an external side effect retroactively.
-                    approval = await _validate_approval_receipt_for_action(
-                        conn,
-                        req.approval_receipt_id,
-                        target_url=str(target_row["url"]),
-                        target_id=target_id,
-                        action_name="target.principals.auto_provision",
-                        command="target.principals.auto_provision",
-                        risk_tier="credential",
-                        created_by=req.created_by,
-                        always_require_receipt=True,
-                    )
-                    try:
-                        provisioned = await _auto_provision_principals(
-                            conn, target_id, str(target_row["url"]), config
-                        )
-                        await _record_command_result(
-                            conn,
-                            command="target.principals.auto_provision",
-                            status="completed",
-                            risk_tier="credential",
-                            operator_message=f"Provisioned or reused {len(provisioned)} managed test principals",
-                            scope_receipt_id=str((approval or {}).get("scope_receipt_id") or "") or None,
-                            approval_receipt_id=req.approval_receipt_id,
-                            result_json={"target_id": str(target_id), "principals": provisioned},
-                            created_by=req.created_by,
-                        )
-                        logger.info("deep_hunt self-provisioned or reused %d principals for target %s", len(provisioned), target_id)
-                    except Exception:
-                        # A valid approval permits provisioning but does not make target-specific
-                        # signup failures fatal; the observation exposes missing principals.
-                        logger.warning("deep_hunt auto-provisioning failed for target %s", target_id, exc_info=True)
+        try:
+            provisioning = await _research_maybe_auto_provision_principals(
+                target_id,
+                approval_receipt_id=req.approval_receipt_id,
+                created_by=req.created_by,
+                require_second_user="bola" in allowed_families,
+            )
+            logger.info(
+                "deep_hunt principal bootstrap for target %s: %s",
+                target_id,
+                provisioning.get("action"),
+            )
+        except Exception:
+            # A valid approval permits provisioning but does not make target-specific
+            # signup failures fatal; the observation exposes missing principals.
+            logger.warning("deep_hunt auto-provisioning failed for target %s", target_id, exc_info=True)
 
     if req.mission_profile == "target_hunt":
         # Seed the hunt with DAST-residue / application-graph leads (auth-boundary edges and
@@ -30353,6 +30496,30 @@ async def launch_research_campaign(req: ResearchCampaignLaunchRequest):
             req.created_by,
         )
     campaign_id = str(campaign["id"])
+    campaign_requirements = _research_family_readiness_requirements(
+        set(requested_families),
+        gated=gated_campaign,
+    )
+    if req.intensity == "deep_hunt" and campaign_requirements["primary_credentials"]:
+        try:
+            provisioning = await _research_maybe_auto_provision_principals(
+                target_uuid,
+                approval_receipt_id=req.approval_receipt_id,
+                created_by=req.created_by,
+                require_second_user=bool(campaign_requirements["second_user"]),
+            )
+            logger.info(
+                "deep_hunt campaign principal bootstrap for target %s: %s",
+                target_uuid,
+                provisioning.get("action"),
+            )
+        except Exception:
+            # Readiness remains fail-closed and will surface the precise credential blocker.
+            logger.warning(
+                "deep_hunt campaign auto-provisioning failed for target %s",
+                target_uuid,
+                exc_info=True,
+            )
     repair = await _research_campaign_self_repair(campaign_id)
     readiness = repair.get("readiness") if isinstance(repair.get("readiness"), dict) else {}
     if not readiness.get("ready"):
