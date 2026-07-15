@@ -11065,6 +11065,33 @@ def test_research_duplicate_guard_distinguishes_payloads_and_ignores_labels():
     assert dup is True
 
 
+def test_vulnerability_key_is_method_aware_and_gate_targets_only_asserted_steps():
+    # GET vs DELETE BOLA on the same object route are distinct vulnerabilities -> distinct keys
+    # (the old family+path key collapsed them and over-suppressed).
+    get_key = api_module._canonical_vulnerability_key(family="bola", route="/orders/{id}", method="GET")
+    delete_key = api_module._canonical_vulnerability_key(family="bola", route="/orders/{id}", method="DELETE")
+    assert get_key and delete_key and get_key != delete_key
+
+    # The action gate keys ONLY on the assertion-targeted step (the vuln under test); a setup/producer
+    # step that merely touches a known-finding route must not make the whole workflow "already covered".
+    action = {
+        "command": "experiment.workflow",
+        "parameters": {
+            "proof_family": "bola",
+            "steps": [
+                {"label": "setup", "method": "POST", "path": "/known/vuln/route", "principal": "user1"},
+                {"label": "attack", "method": "GET", "path": "/orders/{id}", "principal": "user2"},
+            ],
+            "assertions": [
+                {"step": "attack", "type": "status_in", "values": [200], "predicate": "cross_principal_access"},
+            ],
+        },
+    }
+    keys = api_module._research_action_vulnerability_keys(action)
+    assert api_module._canonical_vulnerability_key(family="bola", route="/orders/{id}", method="GET") in keys
+    assert api_module._canonical_vulnerability_key(family="bola", route="/known/vuln/route", method="POST") not in keys
+
+
 def test_research_duplicate_guard_decodes_asyncpg_jsonb_text_before_progress_check():
     repeated = {"command": "asm.gaps", "parameters": {"target_id": "target-1"}}
     gated = {"command": "asm.improve", "parameters": {"target_id": "target-1", "check_family": "xss"}}

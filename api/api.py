@@ -23648,9 +23648,19 @@ async def _promote_trusted_workflow_finding(
     if hypothesis_method and hypothesis_method not in proof_methods:
         return None
     finding_route = hypothesis_route or (sorted(proven_routes)[0] if proven_routes else None)
-    canonical_vulnerability_key = _canonical_vulnerability_key(family=family, route=finding_route)
+    canonical_vulnerability_key = _canonical_vulnerability_key(
+        family=family, route=finding_route, method=hypothesis_method or None,
+    )
     if not canonical_vulnerability_key:
         return None
+    # Suppress against a known scanner finding on the SAME method, or one whose method is unknown
+    # ('*', e.g. a scanner finding that didn't record it) so an already-flagged route still
+    # suppresses -- but never a known DIFFERENT method (GET vs DELETE are distinct vulnerabilities).
+    candidate_vulnerability_keys = {
+        canonical_vulnerability_key,
+        _canonical_vulnerability_key(family=family, route=finding_route, method=None),
+    }
+    candidate_vulnerability_keys.discard(None)
     known_rows = await conn.fetch(
         """
         SELECT id, tool, cwe, title, url, evidence
@@ -23666,7 +23676,7 @@ async def _promote_trusted_workflow_finding(
     known_match = next(
         (
             row for row in known_rows
-            if _finding_vulnerability_key(row) == canonical_vulnerability_key
+            if _finding_vulnerability_key(row) in candidate_vulnerability_keys
         ),
         None,
     )
@@ -28249,12 +28259,18 @@ def _canonical_vulnerability_route(value: Any) -> str | None:
     return re.sub(r"/+", "/", path)[:1000]
 
 
-def _canonical_vulnerability_key(*, family: Any, route: Any) -> str | None:
+def _canonical_vulnerability_key(*, family: Any, route: Any, method: Any = None) -> str | None:
     canonical_family = family_proof.canonical_family(family)
     canonical_route = _canonical_vulnerability_route(route)
     if not canonical_family or not canonical_route:
         return None
-    return hashlib.sha256(f"vulnerability:v1|{canonical_family}|{canonical_route}".encode()).hexdigest()
+    # Method is part of the vulnerability identity: GET vs DELETE on the same object route are
+    # distinct operations and must not collapse to one novelty key. '*' when the caller has no
+    # method, and '*' only matches '*' (conservative -- an unknown method never suppresses a known one).
+    canonical_method = str(method or "").strip().upper() or "*"
+    return hashlib.sha256(
+        f"vulnerability:v2|{canonical_family}|{canonical_method}|{canonical_route}".encode()
+    ).hexdigest()
 
 
 def _finding_vulnerability_key(value: Any) -> str | None:
@@ -28265,10 +28281,12 @@ def _finding_vulnerability_key(value: Any) -> str | None:
         return explicit
     family = _research_finding_family(finding)
     route = finding.get("url")
+    method = finding.get("method")
     if isinstance(evidence, dict):
         dimensions = evidence.get("dedupe_dimensions") if isinstance(evidence.get("dedupe_dimensions"), dict) else {}
         route = dimensions.get("route") or evidence.get("route") or evidence.get("path") or route
-    return _canonical_vulnerability_key(family=family, route=route)
+        method = dimensions.get("method") or evidence.get("method") or method
+    return _canonical_vulnerability_key(family=family, route=route, method=method)
 
 
 RESEARCH_SURFACE_MIN_UNIQUE_ROUTES = 20
@@ -28295,9 +28313,12 @@ def _research_hypothesis_route(hypothesis: dict[str, Any]) -> str | None:
 
 
 def _research_hypothesis_vulnerability_key(hypothesis: dict[str, Any]) -> str | None:
+    dimensions = hypothesis.get("dedupe_dimensions") if isinstance(hypothesis.get("dedupe_dimensions"), dict) else {}
+    metadata = hypothesis.get("metadata_json") if isinstance(hypothesis.get("metadata_json"), dict) else {}
     return _canonical_vulnerability_key(
         family=hypothesis.get("family"),
         route=_research_hypothesis_route(hypothesis),
+        method=dimensions.get("method") or metadata.get("method"),
     )
 
 
@@ -28330,16 +28351,44 @@ def _research_action_vulnerability_keys(action: dict[str, Any]) -> set[str]:
     if command not in {"experiment.workflow", "experiment.http_diff"}:
         return set()
     family = family_proof.canonical_family(parameters.get("proof_family") or command)
-    keys: set[str] = set()
+    steps_by_label: dict[str, dict[str, Any]] = {}
     for step in parameters.get("steps") or []:
-        if not isinstance(step, dict):
+        if isinstance(step, dict):
+            label = str(step.get("label") or step.get("id") or "").strip()
+            if label:
+                steps_by_label[label] = step
+    # Only the step(s) an assertion actually targets are the vulnerability under test. Setup, auth,
+    # producer and cleanup steps must not make an entire workflow look 'already covered' just because
+    # they touch a route that carries a known finding (the reported over-block).
+    target_labels: set[str] = set()
+    for assertion in parameters.get("assertions") or []:
+        if not isinstance(assertion, dict):
             continue
-        key = _canonical_vulnerability_key(family=family, route=step.get("path") or step.get("route"))
-        if key:
-            keys.add(key)
-    direct = _canonical_vulnerability_key(family=family, route=parameters.get("route"))
-    if direct:
-        keys.add(direct)
+        for ref_key in ("step", "candidate"):
+            ref = str(assertion.get(ref_key) or "").strip()
+            if ref:
+                target_labels.add(ref)
+        for ref in assertion.get("steps") or []:
+            text = str(ref or "").strip()
+            if text:
+                target_labels.add(text)
+    keys: set[str] = set()
+
+    def _add(route: Any, method: Any) -> None:
+        # Emit the method-specific key AND a method-wildcard key. The wildcard only matches a known
+        # finding whose method is unknown (scanner didn't record it) -- so an already-flagged route
+        # still suppresses re-hunting -- while two KNOWN different methods (GET vs DELETE) never
+        # cross-suppress, since a specific-method key never matches a different specific method.
+        for candidate_method in (method, None):
+            key = _canonical_vulnerability_key(family=family, route=route, method=candidate_method)
+            if key:
+                keys.add(key)
+
+    for label in target_labels:
+        step = steps_by_label.get(label)
+        if step:
+            _add(step.get("path") or step.get("route"), step.get("method"))
+    _add(parameters.get("route"), parameters.get("method"))
     return keys
 
 
