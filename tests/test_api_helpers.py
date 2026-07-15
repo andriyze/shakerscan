@@ -12227,6 +12227,7 @@ def test_research_cancel_reaches_scan_correlated_before_command_receipt(monkeypa
     episode_id = uuid.uuid4()
     decision_id = uuid.uuid4()
     scan_id = uuid.uuid4()
+    workflow_id = str(uuid.uuid4())
 
     class Transaction:
         async def __aenter__(self):
@@ -12264,6 +12265,8 @@ def test_research_cancel_reaches_scan_correlated_before_command_receipt(monkeypa
             if "SELECT DISTINCT s.id AS scan_id" in query:
                 assert "research_dispatch_correlation" in query
                 return [{"scan_id": scan_id}]
+            if "AS workflow_id" in query:
+                return [{"workflow_id": workflow_id}]
             if "SELECT DISTINCT fv.id" in query:
                 assert "fv.requested_by" in query
                 return []
@@ -12275,6 +12278,8 @@ def test_research_cancel_reaches_scan_correlated_before_command_receipt(monkeypa
 
     conn = Conn()
     cancelled = []
+    workflow_event = asyncio.Event()
+    api_module._active_workflow_cancellations[workflow_id] = workflow_event
 
     async def fake_cancel(scan_ref):
         cancelled.append(scan_ref)
@@ -12291,10 +12296,106 @@ def test_research_cancel_reaches_scan_correlated_before_command_receipt(monkeypa
     monkeypatch.setattr(api_module, "_record_research_event", fake_event)
     monkeypatch.setattr(api_module, "_research_episode_detail", fake_detail)
 
-    result = asyncio.run(api_module.cancel_research_episode(str(episode_id)))
+    try:
+        result = asyncio.run(api_module.cancel_research_episode(str(episode_id)))
+    finally:
+        api_module._active_workflow_cancellations.pop(workflow_id, None)
 
     assert cancelled == [str(scan_id)]
     assert result["cancelled_scan_ids"] == [str(scan_id)]
+    assert result["cancelled_workflow_ids"] == [workflow_id]
+    assert workflow_event.is_set() is True
+
+
+def test_research_preflight_claim_loser_does_not_queue_duplicate(monkeypatch):
+    campaign_id = uuid.uuid4()
+    target_id = uuid.uuid4()
+    campaign = {
+        "id": campaign_id,
+        "target_id": target_id,
+        "status": "paused",
+        "campaign_type": "autonomous_research",
+        "metadata_json": {
+            "autonomous_research": {
+                "intensity": "deep_hunt",
+                "allowed_families": ["auth"],
+                "preflight_state": "pending",
+                "preflight_attempts": 0,
+            },
+        },
+    }
+
+    class Conn:
+        async def fetchrow(self, query, *args):
+            if "SELECT * FROM campaigns" in query:
+                return campaign
+            if "NOT IN ('queueing','running')" in query:
+                return None
+            raise AssertionError(query)
+
+    async def fake_readiness(_conn, _campaign):
+        return {
+            "ready": False,
+            "state": "repairable",
+            "blockers": ["focused_preflight_required"],
+            "required": {"primary_credentials": False},
+        }
+
+    async def forbidden_submit(_request):
+        raise AssertionError("claim loser must not queue a second preflight")
+
+    monkeypatch.setattr(api_module, "db_pool", _FakePool(Conn()))
+    monkeypatch.setattr(api_module, "_research_campaign_readiness", fake_readiness)
+    monkeypatch.setattr(api_module, "submit_scan", forbidden_submit)
+
+    result = asyncio.run(api_module._research_campaign_self_repair(campaign_id))
+
+    assert result["action"] == "preflight_claim_lost"
+
+
+def test_campaign_cancel_propagates_to_preflight_scan(monkeypatch):
+    campaign_id = uuid.uuid4()
+    preflight_scan_id = str(uuid.uuid4())
+    campaign = {
+        "id": campaign_id,
+        "campaign_type": "autonomous_research",
+        "status": "active",
+        "metadata_json": {
+            "autonomous_research": {"preflight_scan_id": preflight_scan_id},
+        },
+    }
+
+    class Conn:
+        async def fetchrow(self, query, *args):
+            if "SELECT * FROM campaigns" in query:
+                return campaign
+            if "UPDATE campaigns SET status" in query:
+                return {**campaign, "status": "cancelled"}
+            raise AssertionError(query)
+
+        async def fetch(self, query, *args):
+            if "FROM research_episodes" in query:
+                return []
+            raise AssertionError(query)
+
+        async def execute(self, query, *args):
+            return "UPDATE 0"
+
+    cancelled = []
+
+    async def fake_cancel(scan_id):
+        cancelled.append(scan_id)
+        return {}
+
+    monkeypatch.setattr(api_module, "db_pool", _FakePool(Conn()))
+    monkeypatch.setattr(api_module, "cancel_scan", fake_cancel)
+
+    result = asyncio.run(api_module.control_research_campaign(
+        str(campaign_id), api_module.ResearchCampaignControlRequest(action="cancel"),
+    ))
+
+    assert cancelled == [preflight_scan_id]
+    assert result["cancelled_preflight_scan_ids"] == [preflight_scan_id]
 
 
 def test_research_planner_recovers_unique_read_only_command_from_registered_description():

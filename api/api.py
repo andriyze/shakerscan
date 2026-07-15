@@ -30240,18 +30240,33 @@ async def _research_campaign_self_repair(campaign_id: Any) -> dict[str, Any]:
                 json.dumps(metadata, default=str),
             )
             return {"action": "exhausted", "readiness": readiness, "campaign": _public_campaign_row(updated)}
+        preflight_claim_id = str(uuid.uuid4())
         config.update({
             "preflight_state": "queueing",
+            "preflight_claim_id": preflight_claim_id,
             "preflight_attempts": attempts + 1,
             "preflight_started_at": datetime.now(timezone.utc).isoformat(),
             "readiness": readiness,
         })
         metadata["autonomous_research"] = config
         claimed = await conn.fetchrow(
-            "UPDATE campaigns SET metadata_json=$2::jsonb, updated_at=NOW() WHERE id=$1 RETURNING *",
+            """
+            UPDATE campaigns SET metadata_json=$2::jsonb, updated_at=NOW()
+            WHERE id=$1 AND status <> 'cancelled'
+              AND COALESCE(metadata_json #>> '{autonomous_research,preflight_state}', '')
+                  NOT IN ('queueing','running')
+            RETURNING *
+            """,
             campaign_uuid,
             json.dumps(metadata, default=str),
         )
+        if not claimed:
+            current = await conn.fetchrow("SELECT * FROM campaigns WHERE id=$1", campaign_uuid)
+            return {
+                "action": "preflight_claim_lost",
+                "readiness": readiness,
+                "campaign": _public_campaign_row(current),
+            }
         target = await conn.fetchrow("SELECT id, url FROM targets WHERE id=$1 AND is_active=true", campaign["target_id"])
         if not target:
             raise HTTPException(status_code=404, detail="Active target not found")
@@ -30312,17 +30327,32 @@ async def _research_campaign_self_repair(campaign_id: Any) -> dict[str, Any]:
     except Exception as exc:
         async with db_pool.acquire() as conn:
             campaign = await conn.fetchrow("SELECT * FROM campaigns WHERE id=$1", campaign_uuid)
+            if str(campaign.get("status") or "") == "cancelled":
+                return {
+                    "action": "cancelled_during_preflight_queue",
+                    "readiness": readiness,
+                    "campaign": _public_campaign_row(campaign),
+                }
             payload = row_to_dict(campaign)
             metadata = _decode_json_value(payload.get("metadata_json")) or {}
             config = metadata.get("autonomous_research") if isinstance(metadata.get("autonomous_research"), dict) else {}
             config.update({"preflight_state": "failed", "last_error": str(exc)[:500]})
             metadata["autonomous_research"] = config
             updated = await conn.fetchrow(
-                "UPDATE campaigns SET status='paused', metadata_json=$2::jsonb, updated_at=NOW() WHERE id=$1 RETURNING *",
+                """
+                UPDATE campaigns SET status='paused', metadata_json=$2::jsonb, updated_at=NOW()
+                WHERE id=$1
+                  AND metadata_json #>> '{autonomous_research,preflight_claim_id}'=$3
+                RETURNING *
+                """,
                 campaign_uuid,
                 json.dumps(metadata, default=str),
+                preflight_claim_id,
             )
-        return {"action": "failed", "error": str(exc)[:500], "readiness": readiness, "campaign": _public_campaign_row(updated)}
+        return {
+            "action": "failed", "error": str(exc)[:500], "readiness": readiness,
+            "campaign": _public_campaign_row(updated or campaign),
+        }
 
     async with db_pool.acquire() as conn:
         campaign = await conn.fetchrow("SELECT * FROM campaigns WHERE id=$1", campaign_uuid)
@@ -30341,10 +30371,33 @@ async def _research_campaign_self_repair(campaign_id: Any) -> dict[str, Any]:
         })
         metadata["autonomous_research"] = config
         updated = await conn.fetchrow(
-            "UPDATE campaigns SET status='active', metadata_json=$2::jsonb, updated_at=NOW() WHERE id=$1 RETURNING *",
+            """
+            UPDATE campaigns SET status='active', metadata_json=$2::jsonb, updated_at=NOW()
+            WHERE id=$1 AND status <> 'cancelled'
+              AND metadata_json #>> '{autonomous_research,preflight_claim_id}'=$3
+            RETURNING *
+            """,
             campaign_uuid,
             json.dumps(metadata, default=str),
+            preflight_claim_id,
         )
+        current = updated or campaign
+    if not updated:
+        try:
+            await cancel_scan(str(queued.get("scan_id")))
+        except Exception:
+            logger.warning(
+                "Could not cancel preflight %s after campaign control raced queue completion",
+                queued.get("scan_id"),
+                exc_info=True,
+            )
+        return {
+            "action": "cancelled_during_preflight_queue",
+            "scan_id": queued.get("scan_id"),
+            "job_id": queued.get("job_id"),
+            "readiness": readiness,
+            "campaign": _public_campaign_row(current),
+        }
     return {
         "action": "queued_authenticated_graph_preflight",
         "scan_id": queued.get("scan_id"),
@@ -31361,6 +31414,13 @@ async def control_research_campaign(campaign_id: str, req: ResearchCampaignContr
                 status_code=409,
                 detail=f"A {current_status} research campaign cannot be resumed; launch a new campaign",
             )
+        campaign_metadata = _decode_json_value(campaign.get("metadata_json")) or {}
+        research_config = (
+            campaign_metadata.get("autonomous_research")
+            if isinstance(campaign_metadata.get("autonomous_research"), dict)
+            else {}
+        )
+        preflight_scan_id = str(research_config.get("preflight_scan_id") or "") or None
         active_rows = await conn.fetch(
             """
             SELECT id FROM research_episodes WHERE campaign_id=$1
@@ -31383,6 +31443,8 @@ async def control_research_campaign(campaign_id: str, req: ResearchCampaignContr
                 [row["id"] for row in active_rows], req.action == "resume",
             )
     cancelled: list[str] = []
+    cancelled_preflight_scan_ids: list[str] = []
+    failed_preflight_scan_ids: list[str] = []
     if req.action == "cancel":
         for row in active_rows:
             try:
@@ -31391,11 +31453,23 @@ async def control_research_campaign(campaign_id: str, req: ResearchCampaignContr
             except HTTPException as exc:
                 if exc.status_code not in {404, 409}:
                     raise
+        if preflight_scan_id:
+            try:
+                await cancel_scan(preflight_scan_id)
+                cancelled_preflight_scan_ids.append(preflight_scan_id)
+            except HTTPException as exc:
+                # A terminal scan is already safely stopped; only surface genuine cancellation failures.
+                if exc.status_code not in {404, 409}:
+                    failed_preflight_scan_ids.append(preflight_scan_id)
+            except Exception:
+                failed_preflight_scan_ids.append(preflight_scan_id)
     return {
         "campaign": _public_campaign_row(updated),
         "action": req.action,
         "affected_episode_ids": [str(row["id"]) for row in active_rows],
         "cancelled_episode_ids": cancelled,
+        "cancelled_preflight_scan_ids": cancelled_preflight_scan_ids,
+        "failed_preflight_scan_ids": failed_preflight_scan_ids,
     }
 
 
@@ -31472,6 +31546,7 @@ async def refresh_research_observation(episode_id: str, req: ResearchObservation
 @app.post("/research/episodes/{episode_id}/cancel")
 async def cancel_research_episode(episode_id: str):
     scan_ids: list[str] = []
+    workflow_ids: list[str] = []
     cancelled_retest_ids: list[str] = []
     continuing_retest_ids: list[str] = []
     async with db_pool.acquire() as conn:
@@ -31496,6 +31571,18 @@ async def cancel_research_episode(episode_id: str):
                 row["id"],
             )
             scan_ids = [str(item["scan_id"]) for item in scan_rows if item["scan_id"]]
+            workflow_rows = await conn.fetch(
+                """
+                SELECT DISTINCT rd.action->'parameters'->>'workflow_id' AS workflow_id
+                FROM research_decisions rd
+                WHERE rd.episode_id=$1 AND rd.status='dispatching'
+                  AND rd.action->>'command'='experiment.workflow'
+                """,
+                row["id"],
+            )
+            workflow_ids = [
+                str(item["workflow_id"]) for item in workflow_rows if item.get("workflow_id")
+            ]
             retest_rows = await conn.fetch(
                 """
                 SELECT DISTINCT fv.id, fv.status, fv.finding_id
@@ -31566,11 +31653,21 @@ async def cancel_research_episode(episode_id: str):
                 summary="Research episode cancelled by operator",
                 details={
                     "linked_scan_ids": scan_ids,
+                    "linked_workflow_ids": workflow_ids,
                     "cancelled_retest_ids": cancelled_retest_ids,
                     "continuing_retest_ids": continuing_retest_ids,
                 },
             )
     cancelled_scans: list[str] = []
+    cancelled_workflow_ids: list[str] = []
+    completed_workflow_ids: list[str] = []
+    for workflow_id in workflow_ids:
+        event = _active_workflow_cancellations.get(workflow_id)
+        if event:
+            event.set()
+            cancelled_workflow_ids.append(workflow_id)
+        else:
+            completed_workflow_ids.append(workflow_id)
     cancel_failed_scan_ids: list[str] = []
     for scan_id in scan_ids:
         try:
@@ -31591,6 +31688,8 @@ async def cancel_research_episode(episode_id: str):
             )
         detail = await _research_episode_detail(conn, episode_id)
     detail["cancelled_scan_ids"] = cancelled_scans
+    detail["cancelled_workflow_ids"] = cancelled_workflow_ids
+    detail["completed_workflow_ids"] = completed_workflow_ids
     detail["cancel_failed_scan_ids"] = cancel_failed_scan_ids
     detail["cancelled_retest_ids"] = cancelled_retest_ids
     detail["continuing_retest_ids"] = continuing_retest_ids
