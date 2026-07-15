@@ -7869,6 +7869,49 @@ def test_target_credential_profile_resolution_maps_primary_and_second_user(monke
     assert "primary-token" not in json.dumps(options)
 
 
+def test_focused_scan_defers_auth_preconditions_until_managed_profiles_resolve():
+    """Target-managed auth must satisfy POST /scans focused-family policy.
+
+    The target id is not available while the initial public payload is built, so
+    BOLA preconditions must run after the server attaches target-bound profile
+    references. This is also the submission path used by research preflights.
+    """
+    class FakeConn:
+        async def fetch(self, *_args):
+            return [
+                {
+                    "auth_state": "user1",
+                    "profile_id": uuid.uuid4(),
+                    "auth_kind": "authorization_header",
+                },
+                {
+                    "auth_state": "user2",
+                    "profile_id": uuid.uuid4(),
+                    "auth_kind": "authorization_header",
+                },
+            ]
+
+    model = api_module.ScanOptions(
+        scan_type="smart",
+        check_family="bola",
+        exploit_depth=True,
+    )
+    payload = api_module._build_scan_options_payload(
+        model,
+        "smart",
+        defer_family_preconditions=True,
+    )
+    payload = asyncio.run(api_module._resolve_target_credential_profiles(
+        FakeConn(),
+        uuid.uuid4(),
+        payload,
+    ))
+    payload, family = api_module._apply_scan_check_family_policy(payload)
+
+    assert family == "bola"
+    assert [ref["auth_state"] for ref in payload["managed_credential_profiles"]] == ["user1", "user2"]
+
+
 def test_target_credential_profile_resolution_preserves_explicit_auth():
     class FakeConn:
         async def fetch(self, *_args):

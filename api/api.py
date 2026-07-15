@@ -1228,7 +1228,12 @@ def _resolve_auto_parallel_strategy(
     return "family"
 
 
-def _build_scan_options_payload(options: Any, scan_type: str) -> dict[str, Any]:
+def _build_scan_options_payload(
+    options: Any,
+    scan_type: str,
+    *,
+    defer_family_preconditions: bool = False,
+) -> dict[str, Any]:
     options_payload = options.model_dump() if hasattr(options, "model_dump") else options.dict()
     effective_budget_profile = options_payload.get("budget_profile")
     if options_payload.get("thorough_params") and not effective_budget_profile and not options_payload.get("custom_budget"):
@@ -1243,7 +1248,10 @@ def _build_scan_options_payload(options: Any, scan_type: str) -> dict[str, Any]:
     resolved_budget["budget_source"] = "submission"
     options_payload["budget_profile"] = resolved_budget["budget_profile"]
     options_payload["resolved_budget"] = resolved_budget
-    options_payload, _family = _apply_scan_check_family_policy(options_payload)
+    options_payload, _family = _apply_scan_check_family_policy(
+        options_payload,
+        enforce_preconditions=not defer_family_preconditions,
+    )
     return options_payload
 
 
@@ -1372,18 +1380,23 @@ def _scan_check_family_value(options_payload: dict[str, Any]) -> Any:
     )
 
 
-def _apply_scan_check_family_policy(options_payload: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
+def _apply_scan_check_family_policy(
+    options_payload: dict[str, Any],
+    *,
+    enforce_preconditions: bool = True,
+) -> tuple[dict[str, Any], str | None]:
     """Apply the shared DAST family policy to a public POST /scans payload."""
     try:
         opts, family = check_registry.apply_scan_focus(
             options_payload,
             _scan_check_family_value(options_payload),
         )
-        check_registry.enforce_family_preconditions(
-            family,
-            opts,
-            exploit_depth=bool(opts.get("exploit_depth")),
-        )
+        if enforce_preconditions:
+            check_registry.enforce_family_preconditions(
+                family,
+                opts,
+                exploit_depth=bool(opts.get("exploit_depth")),
+            )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     return opts, family
@@ -2575,8 +2588,16 @@ async def run_due_schedules(pool: asyncpg.Pool):
                     UPDATE schedules SET next_run_at = $1, updated_at = NOW() WHERE id = $2
                 """, next_run, schedule_id)
                 continue
-            scan_options = _build_scan_options_payload(scan_options_model, scan_type)
+            # Managed credential refs are target-bound and are resolved below. Defer
+            # focused-family auth preconditions until those refs are present; otherwise
+            # scheduled auth/BOLA scans fail even though the target has valid profiles.
+            scan_options = _build_scan_options_payload(
+                scan_options_model,
+                scan_type,
+                defer_family_preconditions=True,
+            )
             scan_options = await _resolve_target_credential_profiles(conn, target_id, scan_options)
+            scan_options, _family = _apply_scan_check_family_policy(scan_options)
             parallel_enabled, parallel_worker_count = _apply_auto_sharding_policy(
                 scan_options_model,
                 scan_options,
@@ -11988,7 +12009,14 @@ async def submit_scan(request: ScanRequest):
             }
         )
 
-    options_payload = _build_scan_options_payload(request.options, scan_type)
+    # Managed credentials are resolved only after the canonical target row is
+    # known. Apply registry narrowing now, but defer credential preconditions
+    # until the target-bound managed-profile refs have been attached below.
+    options_payload = _build_scan_options_payload(
+        request.options,
+        scan_type,
+        defer_family_preconditions=True,
+    )
 
     # §2 Operational freshness: record which build the fleet was on at submit, and
     # optionally refuse active scans on a stale fleet (opt-in, fail-open).
@@ -12058,6 +12086,7 @@ async def submit_scan(request: ScanRequest):
             options_payload.update(approval_context)
 
         options_payload = await _resolve_target_credential_profiles(conn, target_id, options_payload)
+        options_payload, _family = _apply_scan_check_family_policy(options_payload)
         parallel_enabled, parallel_worker_count = _apply_auto_sharding_policy(
             request.options,
             options_payload,
