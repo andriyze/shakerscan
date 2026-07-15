@@ -11958,10 +11958,17 @@ def test_deep_campaign_bootstraps_principals_before_readiness_repair(monkeypatch
         async def fetchrow(self, query, *args):
             if "SELECT id, url FROM targets" in query:
                 return {"id": target_id, "url": "https://app.example.test"}
-            if "INSERT INTO campaigns" in query or "UPDATE campaigns SET status='active'" in query:
+            if "INSERT INTO campaigns" in query or "UPDATE campaigns SET status" in query:
+                return campaign
+            if "SELECT * FROM campaigns" in query:
                 return campaign
             if "episodes_started" in query:
                 return campaign
+            raise AssertionError(query)
+
+        async def fetch(self, query, *args):
+            if "FROM research_episodes" in query:
+                return []
             raise AssertionError(query)
 
     class Pool:
@@ -12333,6 +12340,11 @@ def test_research_preflight_claim_loser_does_not_queue_duplicate(monkeypatch):
                 return None
             raise AssertionError(query)
 
+        async def fetch(self, query, *args):
+            if "FROM research_episodes" in query:
+                return []
+            raise AssertionError(query)
+
     async def fake_readiness(_conn, _campaign):
         return {
             "ready": False,
@@ -12396,6 +12408,77 @@ def test_campaign_cancel_propagates_to_preflight_scan(monkeypatch):
 
     assert cancelled == [preflight_scan_id]
     assert result["cancelled_preflight_scan_ids"] == [preflight_scan_id]
+
+
+def test_campaign_budget_is_aggregate_and_each_episode_is_trimmed_to_remaining():
+    per_episode = api_module.RESEARCH_LAUNCH_PROFILES["deep_hunt"]["budget_limits"]
+    limits = api_module._research_campaign_budget_limits(
+        "deep_hunt",
+        2,
+        {"requests": 700, "model_tokens": 400000, "actions": 30},
+    )
+
+    assert limits["requests"] == 700
+    assert limits["model_tokens"] == 400000
+    assert limits["actions"] == 30
+    assert limits["steps"] == per_episode["steps"] * 2
+    assert limits["active_actions"] == (
+        per_episode["active_actions"] * 2
+        + api_module.RESEARCH_PREFLIGHT_RESERVED_COST["active_actions"]
+        * api_module.RESEARCH_PREFLIGHT_MAX_ATTEMPTS
+    )
+
+    remaining = api_module._research_campaign_budget_remaining(limits, {
+        "steps": 23,
+        "actions": 22,
+        "active_actions": 11,
+        "requests": 650,
+        "seconds": 7000,
+        "model_tokens": 350000,
+    })
+    episode_limits = api_module._research_campaign_episode_budget_limits("deep_hunt", remaining)
+
+    assert episode_limits["steps"] == 25
+    assert episode_limits["actions"] == 8
+    assert episode_limits["requests"] == 50
+    assert episode_limits["model_tokens"] == 50000
+    assert api_module._research_campaign_budget_violations(
+        limits,
+        {"requests": 650},
+        {"requests": 51},
+    ) == ["campaign_budget_exhausted:requests"]
+
+
+def test_campaign_budget_snapshot_sums_preflight_and_all_episode_usage():
+    campaign_id = uuid.uuid4()
+    limits = api_module._research_campaign_budget_limits("hunt", 2)
+    campaign = {
+        "id": campaign_id,
+        "metadata_json": {
+            "autonomous_research": {
+                "intensity": "hunt",
+                "max_episodes": 2,
+                "budget_limits": limits,
+                "preflight_budget_used": {"requests": 100, "active_actions": 1},
+            },
+        },
+    }
+
+    class Conn:
+        async def fetch(self, query, *args):
+            assert "SELECT budget_used FROM research_episodes" in query
+            return [
+                {"budget_used": {"requests": 120, "model_tokens": 5000, "steps": 3}},
+                {"budget_used": json.dumps({"requests": 80, "model_tokens": 7000, "steps": 2})},
+            ]
+
+    snapshot = asyncio.run(api_module._research_campaign_budget_snapshot(Conn(), campaign))
+
+    assert snapshot["used"]["requests"] == 300
+    assert snapshot["used"]["active_actions"] == 1
+    assert snapshot["used"]["model_tokens"] == 12000
+    assert snapshot["used"]["steps"] == 5
+    assert snapshot["remaining"]["requests"] == limits["requests"] - 300
 
 
 def test_research_planner_recovers_unique_read_only_command_from_registered_description():

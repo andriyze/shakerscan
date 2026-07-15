@@ -4043,6 +4043,7 @@ class ResearchLaunchRequest(BaseModel):
     campaign_id: Optional[str] = None
     objective_override: Optional[str] = Field(default=None, min_length=1, max_length=2000)
     allowed_families_override: list[str] = Field(default_factory=list, max_length=25)
+    budget_limits_override: dict[str, Any] = Field(default_factory=dict)
 
 
 class ResearchCampaignLaunchRequest(BaseModel):
@@ -4054,6 +4055,10 @@ class ResearchCampaignLaunchRequest(BaseModel):
     approval_receipt_id: Optional[str] = None
     duration_hours: int = Field(default=24, ge=1, le=168)
     max_episodes: int = Field(default=12, ge=1, le=100)
+    budget_limits: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Optional aggregate ceilings; values may only reduce the derived campaign cap.",
+    )
     objective: Optional[str] = Field(default=None, min_length=1, max_length=2000)
     allowed_families: list[str] = Field(default_factory=list, max_length=25)
     created_by: Optional[str] = Field(default="research_campaign_api", max_length=120)
@@ -15457,6 +15462,102 @@ RESEARCH_LAUNCH_PROFILES: dict[str, dict[str, Any]] = {
         },
     },
 }
+
+RESEARCH_BUDGET_KEYS = ("steps", "actions", "active_actions", "requests", "seconds", "model_tokens")
+RESEARCH_PREFLIGHT_RESERVED_COST = {
+    "steps": 0,
+    "actions": 1,
+    "active_actions": 1,
+    "requests": 500,
+    "seconds": 3600,
+    "model_tokens": 0,
+}
+
+
+def _research_campaign_budget_limits(
+    intensity: str, max_episodes: int, overrides: Any = None,
+) -> dict[str, int]:
+    profile = RESEARCH_LAUNCH_PROFILES.get(intensity) or RESEARCH_LAUNCH_PROFILES["deep_hunt"]
+    episodes = max(1, min(100, int(max_episodes or 1)))
+    per_episode = profile["budget_limits"]
+    # Readiness scans are campaign work too. Reserve room for the bounded maximum attempts so the
+    # default aggregate cap does not make a one-episode campaign consume its entire action budget
+    # before the actual research episode starts.
+    limits = {
+        key: int(per_episode.get(key) or 0) * episodes
+        + int(RESEARCH_PREFLIGHT_RESERVED_COST.get(key) or 0) * RESEARCH_PREFLIGHT_MAX_ATTEMPTS
+        for key in RESEARCH_BUDGET_KEYS
+    }
+    raw = overrides if isinstance(overrides, dict) else {}
+    for key in RESEARCH_BUDGET_KEYS:
+        if key not in raw:
+            continue
+        try:
+            limits[key] = max(0, min(limits[key], int(raw[key])))
+        except (TypeError, ValueError):
+            continue
+    return limits
+
+
+def _research_campaign_budget_remaining(limits: Any, used: Any) -> dict[str, int]:
+    limit_map = limits if isinstance(limits, dict) else {}
+    used_map = _research_normalize_budget_used(used)
+    return {
+        key: max(0, int(limit_map.get(key) or 0) - int(used_map.get(key) or 0))
+        for key in RESEARCH_BUDGET_KEYS
+    }
+
+
+def _research_campaign_budget_violations(limits: Any, used: Any, cost: Any) -> list[str]:
+    limit_map = limits if isinstance(limits, dict) else {}
+    used_map = _research_normalize_budget_used(used)
+    cost_map = _research_normalize_budget_used(cost)
+    return [
+        f"campaign_budget_exhausted:{key}"
+        for key in RESEARCH_BUDGET_KEYS
+        if int(used_map.get(key) or 0) + int(cost_map.get(key) or 0)
+        > int(limit_map.get(key) or 0)
+    ]
+
+
+def _research_campaign_episode_budget_limits(intensity: str, remaining: Any) -> dict[str, int]:
+    profile = RESEARCH_LAUNCH_PROFILES.get(intensity) or RESEARCH_LAUNCH_PROFILES["deep_hunt"]
+    available = remaining if isinstance(remaining, dict) else {}
+    return {
+        key: min(int(profile["budget_limits"].get(key) or 0), int(available.get(key) or 0))
+        for key in RESEARCH_BUDGET_KEYS
+    }
+
+
+async def _research_campaign_budget_snapshot(conn: Any, campaign: Any) -> dict[str, Any]:
+    payload = row_to_dict(campaign)
+    metadata = _decode_json_value(payload.get("metadata_json")) or {}
+    config = metadata.get("autonomous_research") if isinstance(metadata.get("autonomous_research"), dict) else {}
+    limits = config.get("budget_limits") if isinstance(config.get("budget_limits"), dict) else {}
+    if not limits:
+        limits = _research_campaign_budget_limits(
+            str(config.get("intensity") or "deep_hunt"),
+            int(config.get("max_episodes") or 1),
+        )
+    used = _research_normalize_budget_used(config.get("preflight_budget_used") or {})
+    rows = await conn.fetch(
+        "SELECT budget_used FROM research_episodes WHERE campaign_id=$1",
+        _optional_uuid(payload.get("id")),
+    )
+    for row in rows:
+        episode_used = _research_normalize_budget_used(_decode_json_value(row.get("budget_used")) or {})
+        used = {key: int(used.get(key) or 0) + int(episode_used.get(key) or 0) for key in RESEARCH_BUDGET_KEYS}
+    remaining = _research_campaign_budget_remaining(limits, used)
+    return {"limits": limits, "used": used, "remaining": remaining}
+
+
+def _research_campaign_episode_budget_available(value: Any) -> bool:
+    limits = value if isinstance(value, dict) else {}
+    return bool(
+        int(limits.get("steps") or 0) >= 2
+        and int(limits.get("actions") or 0) >= 1
+        and int(limits.get("model_tokens") or 0) > 0
+    )
 
 
 def _research_mission(episode: dict[str, Any]) -> dict[str, Any]:
@@ -30240,6 +30341,37 @@ async def _research_campaign_self_repair(campaign_id: Any) -> dict[str, Any]:
                 json.dumps(metadata, default=str),
             )
             return {"action": "exhausted", "readiness": readiness, "campaign": _public_campaign_row(updated)}
+        budget = await _research_campaign_budget_snapshot(conn, campaign)
+        preflight_budget_used = _research_apply_cost(
+            config.get("preflight_budget_used") or {},
+            RESEARCH_PREFLIGHT_RESERVED_COST,
+        )
+        aggregate_after_claim = {
+            key: int(budget["used"].get(key) or 0) + int(RESEARCH_PREFLIGHT_RESERVED_COST.get(key) or 0)
+            for key in RESEARCH_BUDGET_KEYS
+        }
+        budget_violations = [
+            key for key in RESEARCH_BUDGET_KEYS
+            if aggregate_after_claim[key] > int(budget["limits"].get(key) or 0)
+        ]
+        if budget_violations:
+            config.update({
+                "budget_limits": budget["limits"],
+                "budget_used": budget["used"],
+                "remaining_budget": budget["remaining"],
+                "last_error": "campaign_budget_exhausted:" + ",".join(budget_violations),
+            })
+            metadata["autonomous_research"] = config
+            updated = await conn.fetchrow(
+                "UPDATE campaigns SET status='paused', metadata_json=$2::jsonb, updated_at=NOW() WHERE id=$1 RETURNING *",
+                campaign_uuid,
+                json.dumps(metadata, default=str),
+            )
+            return {
+                "action": "campaign_budget_exhausted",
+                "readiness": readiness,
+                "campaign": _public_campaign_row(updated),
+            }
         preflight_claim_id = str(uuid.uuid4())
         config.update({
             "preflight_state": "queueing",
@@ -30247,6 +30379,12 @@ async def _research_campaign_self_repair(campaign_id: Any) -> dict[str, Any]:
             "preflight_attempts": attempts + 1,
             "preflight_started_at": datetime.now(timezone.utc).isoformat(),
             "readiness": readiness,
+            "budget_limits": budget["limits"],
+            "preflight_budget_used": preflight_budget_used,
+            "budget_used": aggregate_after_claim,
+            "remaining_budget": _research_campaign_budget_remaining(
+                budget["limits"], aggregate_after_claim,
+            ),
         })
         metadata["autonomous_research"] = config
         claimed = await conn.fetchrow(
@@ -30486,6 +30624,7 @@ async def _research_campaign_yield_metrics(conn: Any, campaign: Any) -> dict[str
     ) or 0)
     metadata = _decode_json_value(payload.get("metadata_json")) or {}
     config = metadata.get("autonomous_research") if isinstance(metadata.get("autonomous_research"), dict) else {}
+    aggregate_budget = await _research_campaign_budget_snapshot(conn, campaign)
     before = config.get("surface_before_preflight") if isinstance(config.get("surface_before_preflight"), dict) else {}
     after = config.get("surface_after_preflight") if isinstance(config.get("surface_after_preflight"), dict) else {}
     return {
@@ -30503,6 +30642,7 @@ async def _research_campaign_yield_metrics(conn: Any, campaign: Any) -> dict[str
         "verified_autonomous_findings": verified_findings,
         "finding_yield_per_experiment": round(verified_findings / experiments, 4) if experiments else 0.0,
         "model_units_per_verified_finding": (model_units // verified_findings) if verified_findings else None,
+        "aggregate_budget": aggregate_budget,
         "surface": {
             "unique_routes_before": int(before.get("unique_routes") or 0),
             "unique_routes_after": int(after.get("unique_routes") or 0),
@@ -30844,6 +30984,18 @@ async def launch_research_episode(req: ResearchLaunchRequest):
         )
     if req.objective_override:
         objective = req.objective_override.strip()
+    if req.budget_limits_override:
+        for key in RESEARCH_BUDGET_KEYS:
+            if key not in req.budget_limits_override:
+                continue
+            try:
+                budget_limits[key] = min(
+                    int(budget_limits.get(key) or 0),
+                    max(0, int(req.budget_limits_override[key])),
+                )
+            except (TypeError, ValueError):
+                continue
+        max_steps = min(max_steps, max(1, int(budget_limits.get("steps") or 1)))
 
     allowed_families = []
     if launch_profile["execution_mode"] == "gated":
@@ -31000,6 +31152,14 @@ async def launch_research_campaign(req: ResearchCampaignLaunchRequest):
             "intensity": req.intensity,
             "deadline_at": deadline.isoformat(),
             "max_episodes": req.max_episodes,
+            "budget_limits": _research_campaign_budget_limits(
+                req.intensity, req.max_episodes, req.budget_limits,
+            ),
+            "preflight_budget_used": _research_normalize_budget_used({}),
+            "budget_used": _research_normalize_budget_used({}),
+            "remaining_budget": _research_campaign_budget_limits(
+                req.intensity, req.max_episodes, req.budget_limits,
+            ),
             "approval_receipt_id": req.approval_receipt_id,
             "objective": req.objective,
             "allowed_families": requested_families,
@@ -31077,10 +31237,36 @@ async def launch_research_campaign(req: ResearchCampaignLaunchRequest):
         }
     async with db_pool.acquire() as conn:
         await _materialize_research_invariant_hypotheses(conn, campaign["target_id"])
-        campaign = await conn.fetchrow(
-            "UPDATE campaigns SET status='active', updated_at=NOW() WHERE id=$1 RETURNING *",
-            campaign["id"],
+        current_campaign = await conn.fetchrow("SELECT * FROM campaigns WHERE id=$1", campaign["id"])
+        budget = await _research_campaign_budget_snapshot(conn, current_campaign)
+        episode_budget_limits = _research_campaign_episode_budget_limits(req.intensity, budget["remaining"])
+        current_payload = row_to_dict(current_campaign)
+        current_metadata = _decode_json_value(current_payload.get("metadata_json")) or {}
+        current_config = (
+            current_metadata.get("autonomous_research")
+            if isinstance(current_metadata.get("autonomous_research"), dict)
+            else {}
         )
+        current_config.update({
+            "budget_limits": budget["limits"],
+            "budget_used": budget["used"],
+            "remaining_budget": budget["remaining"],
+        })
+        current_metadata["autonomous_research"] = current_config
+        campaign = await conn.fetchrow(
+            "UPDATE campaigns SET status=$2, metadata_json=$3::jsonb, updated_at=NOW() WHERE id=$1 RETURNING *",
+            campaign["id"],
+            "active" if _research_campaign_episode_budget_available(episode_budget_limits) else "paused",
+            json.dumps(current_metadata, default=str),
+        )
+    if not _research_campaign_episode_budget_available(episode_budget_limits):
+        return {
+            "campaign": _public_campaign_row(campaign),
+            "episode": None,
+            "readiness": readiness,
+            "stop_reason": "campaign_budget_exhausted",
+            "ui_path": "/settings/research-agent",
+        }
     try:
         episode = await launch_research_episode(ResearchLaunchRequest(
             subject_type="target",
@@ -31094,6 +31280,7 @@ async def launch_research_campaign(req: ResearchCampaignLaunchRequest):
             campaign_id=campaign_id,
             objective_override=req.objective,
             allowed_families_override=requested_families,
+            budget_limits_override=episode_budget_limits,
         ))
     except asyncpg.UniqueViolationError:
         # Finding 2: the campaign supervisor's 30s tick raced this launch and already started episode #1
@@ -31274,6 +31461,11 @@ async def _continue_autonomous_research_campaigns() -> int:
                 conn,
                 row["target_id"],
             )
+            budget = await _research_campaign_budget_snapshot(conn, current_campaign)
+            episode_budget_limits = _research_campaign_episode_budget_limits(
+                str(config.get("intensity") or "deep_hunt"),
+                budget["remaining"],
+            )
             latest_metadata = _decode_json_value(current_campaign.get("metadata_json")) or {}
             latest_config = (
                 latest_metadata.get("autonomous_research")
@@ -31286,8 +31478,20 @@ async def _continue_autonomous_research_campaigns() -> int:
                 "readiness": readiness,
                 "surface_after_preflight": readiness.get("surface") or {},
                 "invariant_hypotheses_materialized": invariant_hypotheses,
+                "budget_limits": budget["limits"],
+                "budget_used": budget["used"],
+                "remaining_budget": budget["remaining"],
             })
             latest_metadata["autonomous_research"] = latest_config
+            if not _research_campaign_episode_budget_available(episode_budget_limits):
+                latest_config["last_error"] = "campaign_budget_exhausted"
+                latest_metadata["autonomous_research"] = latest_config
+                await conn.execute(
+                    "UPDATE campaigns SET status='completed', metadata_json=$2::jsonb, updated_at=NOW() WHERE id=$1",
+                    row["id"],
+                    json.dumps(latest_metadata, default=str),
+                )
+                continue
             await conn.execute(
                 "UPDATE campaigns SET metadata_json=$2::jsonb, updated_at=NOW() WHERE id=$1",
                 row["id"],
@@ -31366,6 +31570,7 @@ async def _continue_autonomous_research_campaigns() -> int:
                 created_by="research_campaign_supervisor", campaign_id=str(row["id"]),
                 objective_override=config.get("objective"),
                 allowed_families_override=config.get("allowed_families") or [],
+                budget_limits_override=episode_budget_limits,
             ))
         except asyncpg.UniqueViolationError:
             continue
@@ -31766,6 +31971,14 @@ async def submit_research_decision(episode_id: str, req: ResearchDecisionRequest
             model_used = int((episode.get("budget_used") or {}).get("model_tokens") or 0)
             if model_used + req.model_tokens_used > model_limit:
                 errors.append("budget_exhausted:model_tokens")
+            campaign_budget = None
+            if episode.get("campaign_id"):
+                campaign_row = await conn.fetchrow(
+                    "SELECT * FROM campaigns WHERE id=$1",
+                    _optional_uuid(episode.get("campaign_id")),
+                )
+                if campaign_row:
+                    campaign_budget = await _research_campaign_budget_snapshot(conn, campaign_row)
             command = catalog.get(normalized.get("action", {}).get("command") or "")
             if normalized.get("decision") == "execute_action" and command:
                 launch_intensity = str((episode.get("planner") or {}).get("launch_intensity") or "")
@@ -31778,6 +31991,11 @@ async def submit_research_decision(episode_id: str, req: ResearchDecisionRequest
                 errors.extend(_research_budget_violations(
                     episode.get("budget_limits"), episode.get("budget_used"), cost
                 ))
+                if campaign_budget:
+                    aggregate_cost = {**(cost or {}), "model_tokens": req.model_tokens_used}
+                    errors.extend(_research_campaign_budget_violations(
+                        campaign_budget["limits"], campaign_budget["used"], aggregate_cost,
+                    ))
                 if await _research_is_consecutive_duplicate_action(
                     conn,
                     episode_row["id"],
@@ -31797,6 +32015,11 @@ async def submit_research_decision(episode_id: str, req: ResearchDecisionRequest
                         errors.append("episode_approval_missing")
                     if not _ai_ops_execute_enabled():
                         errors.append("execution_feature_disabled")
+            elif campaign_budget:
+                errors.extend(_research_campaign_budget_violations(
+                    campaign_budget["limits"], campaign_budget["used"],
+                    {"model_tokens": req.model_tokens_used},
+                ))
             if normalized.get("decision") == "request_input":
                 inferable_request = _research_requested_input_is_in_observation(
                     normalized.get("requested_input"),
