@@ -10549,8 +10549,8 @@ def test_research_autonomous_http_experiment_hides_and_rejects_destructive_metho
         return found
 
     method_values = {str(item) for enum in enums(projected) for item in enum}
-    assert "POST" in method_values
-    assert not {"PUT", "PATCH", "DELETE"} & method_values
+    assert {"GET", "HEAD", "OPTIONS"} <= method_values
+    assert not {"POST", "PUT", "PATCH", "DELETE"} & method_values
 
     class Conn:
         pass
@@ -10567,7 +10567,7 @@ def test_research_autonomous_http_experiment_hides_and_rejects_destructive_metho
                 "parameters": {
                     "steps": [
                         {"role": "control", "method": "GET", "path": "/api/items"},
-                        {"role": "mutation", "method": "DELETE", "path": "/api/items/1"},
+                        {"role": "mutation", "method": "POST", "path": "/api/items/1"},
                     ]
                 }
             }
@@ -10576,7 +10576,7 @@ def test_research_autonomous_http_experiment_hides_and_rejects_destructive_metho
     ))
 
     assert params["target_id"] == "11111111-1111-4111-8111-111111111111"
-    assert "autonomous_experiment_destructive_method_forbidden:DELETE" in errors
+    assert "autonomous_experiment_destructive_method_forbidden:POST" in errors
 
 
 def test_research_focused_scan_accepts_exact_operations_and_family_payloads():
@@ -11202,6 +11202,43 @@ def test_research_duplicate_guard_ignores_ephemeral_workflow_id_for_experiments(
         "11111111-1111-4111-8111-111111111111", other,
     ))
     assert distinct is False
+
+
+def test_research_duplicate_guard_canonicalizes_reworded_http_diffs():
+    def experiment(object_id, objective):
+        return {
+            "command": "experiment.http_diff",
+            "parameters": {
+                "proof_family": "data_exposure",
+                "objective": objective,
+                "expected_signal": "The response changes",
+                "falsifier": "The response stays stable",
+                "steps": [
+                    {"label": "baseline", "role": "control", "method": "GET",
+                     "path": f"/orders/{object_id}", "query": {"view": "summary"}},
+                    {"label": "candidate", "role": "mutation", "method": "GET",
+                     "path": f"/orders/{object_id}", "query": {"view": "internal"},
+                     "compare_to": "baseline"},
+                ],
+            },
+        }
+
+    prior = experiment(11, "Compare public order projections")
+    repeat = experiment(42, "Look for internal fields in a second order")
+
+    assert asyncio.run(api_module._research_is_consecutive_duplicate_action(
+        _ResearchPreviousActionConn([prior]),
+        "11111111-1111-4111-8111-111111111111",
+        repeat,
+    )) is True
+
+    different_query = experiment(42, "Try another projection")
+    different_query["parameters"]["steps"][1]["query"] = {"view": "billing"}
+    assert asyncio.run(api_module._research_is_consecutive_duplicate_action(
+        _ResearchPreviousActionConn([prior]),
+        "11111111-1111-4111-8111-111111111111",
+        different_query,
+    )) is False
 
 
 def test_research_duplicate_guard_distinguishes_payloads_and_ignores_labels():

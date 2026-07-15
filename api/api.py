@@ -23366,6 +23366,20 @@ async def _arsenal_dispatch_http_diff(p: dict[str, Any], approval_receipt_id: st
         key: value for key, value in p.items()
         if key in {"objective", "expected_signal", "falsifier", "timeout_seconds", "steps"}
     }
+    unsafe_methods = sorted({
+        str(step.get("method") or "GET").strip().upper()
+        for step in experiment_payload.get("steps") or []
+        if isinstance(step, dict)
+        and str(step.get("method") or "GET").strip().upper() not in {"GET", "HEAD", "OPTIONS"}
+    })
+    if unsafe_methods:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "invalid_http_experiment",
+                "violation": "http_diff_state_changing_method_forbidden:" + ",".join(unsafe_methods),
+            },
+        )
     started_at = datetime.now(timezone.utc)
     try:
         executed = await execute_experiment(str(target["url"]), experiment_payload)
@@ -26766,10 +26780,12 @@ def _research_autonomous_parameter_schema(
                 str(item).upper() in {"GET", "HEAD", "OPTIONS", "POST", "PUT", "PATCH", "DELETE"}
                 for item in enum
             ):
-                value["enum"] = [
-                    item for item in enum
-                    if str(item).upper() not in {"PUT", "PATCH", "DELETE"}
-                ]
+                forbidden = (
+                    {"POST", "PUT", "PATCH", "DELETE"}
+                    if name == "experiment.http_diff" else
+                    {"PUT", "PATCH", "DELETE"}
+                )
+                value["enum"] = [item for item in enum if str(item).upper() not in forbidden]
             for nested in value.values():
                 constrain_methods(nested)
         elif isinstance(value, list):
@@ -26842,7 +26858,11 @@ def _research_command_views(episode: dict[str, Any]) -> list[dict[str, Any]]:
             view["autonomous_constraints"] = ([
                 "PUT, PATCH, and DELETE require Deep Hunt, a cleanup/rollback step after mutation, a typed restoration assertion, and successful independent replay.",
             ] if name == "experiment.workflow" and str(episode.get("max_risk_tier") or "") == "credential" else [
-                "DELETE, PUT, and PATCH are unavailable at this tier; use Deep Hunt with typed cleanup and restoration assertions.",
+                (
+                    "POST, PUT, PATCH, and DELETE are unavailable in HTTP diff because it has no restoration contract; use a typed workflow or focused family scan."
+                    if name == "experiment.http_diff" else
+                    "DELETE, PUT, and PATCH are unavailable at this tier; use Deep Hunt with typed cleanup and restoration assertions."
+                ),
             ])
         view["server_supplied_parameters"] = sorted(set(server_supplied))
         blocked = list(view.get("blocked_by") or [])
@@ -28510,7 +28530,11 @@ async def _research_prepare_action(
             str(step.get("method") or "GET").strip().upper()
             for step in steps
             if isinstance(step, dict)
-            and str(step.get("method") or "GET").strip().upper() in {"PUT", "PATCH", "DELETE"}
+            and str(step.get("method") or "GET").strip().upper() in (
+                {"POST", "PUT", "PATCH", "DELETE"}
+                if command.get("name") == "experiment.http_diff" else
+                {"PUT", "PATCH", "DELETE"}
+            )
         })
         # Cleanup-safe writes are permitted only for a credential-tier experiment.workflow: to
         # actually EXPLOIT state-changing bugs (mass_assignment, write-BOLA, workflow abuse) the loop
@@ -28540,9 +28564,9 @@ async def _research_prepare_action(
     return params, list(dict.fromkeys(errors))
 
 
-# Experiments the planner re-stamps with a fresh workflow_id / re-worded prose on every
+# Experiments the planner re-stamps with fresh identifiers / re-worded prose on every
 # attempt. Only these get collapsed to a mechanical identity for dedupe.
-_RESEARCH_EXPERIMENT_DEDUPE_COMMANDS = {"experiment.workflow"}
+_RESEARCH_EXPERIMENT_DEDUPE_COMMANDS = {"experiment.http_diff", "experiment.workflow"}
 
 
 def _research_action_dedupe_comparable(action: Any) -> dict[str, Any]:

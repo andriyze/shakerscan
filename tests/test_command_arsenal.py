@@ -284,7 +284,8 @@ def test_http_experiment_catalog_exposes_the_bounded_runtime_step_contract():
         "label", "method", "path", "query", "headers", "json_body", "form_body",
         "extract", "select_json", "select_headers", "role", "compare_to",
     }
-    assert set(properties["method"]["enum"]) == http_experiment.ALLOWED_METHODS
+    assert set(properties["method"]["enum"]) == {"GET", "HEAD", "OPTIONS"}
+    assert not {"POST", "PUT", "PATCH", "DELETE"}.intersection(properties["method"]["enum"])
     assert properties["path"]["pattern"] == "^/(?!/)"
     assert properties["query"]["maxProperties"] == 30
     assert properties["headers"]["maxProperties"] == 20

@@ -101,6 +101,7 @@ class LocalAgentSpec:
 
 
 _EXPERIMENT_HTTP_METHODS = ("GET", "HEAD", "OPTIONS", "POST", "PUT", "PATCH", "DELETE")
+_HTTP_DIFF_SAFE_METHODS = ("GET", "HEAD", "OPTIONS")
 _EXPERIMENT_STEP_ROLES = ("control", "mutation", "verify")
 _WORKFLOW_STEP_KINDS = ("http", "browser")
 _WORKFLOW_CHECKPOINTS = ("before", "mutation", "after", "action", "cleanup", "rollback")
@@ -185,7 +186,7 @@ def _http_experiment_step_schema() -> dict[str, Any]:
         "required": ["label", "method", "path", "role"],
         "properties": {
             "label": {"type": "string", "minLength": 1, "maxLength": 80},
-            "method": {"type": "string", "enum": list(_EXPERIMENT_HTTP_METHODS)},
+            "method": {"type": "string", "enum": list(_HTTP_DIFF_SAFE_METHODS)},
             "path": {
                 "type": "string",
                 "pattern": "^/(?!/)",
@@ -875,7 +876,7 @@ COMMANDS: tuple[ArsenalCommand, ...] = (
     ArsenalCommand(
         name="experiment.http_diff",
         family="research",
-        description="Run a bounded same-origin control/mutation HTTP experiment and record unverified differential evidence.",
+        description="Run a bounded same-origin read-only HTTP differential and record unverified evidence.",
         status="gated",
         risk_tier="active",
         method="POST",
