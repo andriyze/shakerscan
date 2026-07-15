@@ -13367,3 +13367,35 @@ def test_research_autobind_requires_complete_operation_identity(monkeypatch):
 
     assert exact_raw["hypothesis_id"] == str(exact_hypothesis_id)
     assert len(captured) == 1
+
+
+def test_campaign_yield_counts_only_findings_with_campaign_provenance():
+    campaign_id = uuid.uuid4()
+    target_id = uuid.uuid4()
+    episode_id = uuid.uuid4()
+    finding_queries = []
+
+    class Conn:
+        async def fetch(self, query, *args):
+            if "FROM research_episodes" in query:
+                return [{"id": episode_id, "status": "completed", "budget_used": {}}]
+            if "FROM research_decisions" in query:
+                return []
+            raise AssertionError(query)
+
+        async def fetchval(self, query, *args):
+            finding_queries.append((query, args))
+            return 1
+
+    metrics = asyncio.run(api_module._research_campaign_yield_metrics(Conn(), {
+        "id": campaign_id,
+        "target_id": target_id,
+        "metadata_json": {},
+    }))
+
+    assert metrics["verified_autonomous_findings"] == 1
+    query, args = finding_queries[0]
+    assert "research_provenance_history" in query
+    assert "campaign_id" in query
+    assert "created_at >=" not in query
+    assert args == (target_id, campaign_id)

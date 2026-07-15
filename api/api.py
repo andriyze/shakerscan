@@ -24276,6 +24276,25 @@ async def _promote_trusted_workflow_finding(
     )
     retest_type = "bola" if family_proof.canonical_family(family) == "bola" else "generic_http"
     provenance = await _research_promotion_provenance(conn, uuid.UUID(hypothesis_id))
+    prior_evidence = _decode_json_value(known_match.get("evidence")) if known_match else {}
+    prior_evidence = prior_evidence if isinstance(prior_evidence, dict) else {}
+    provenance_history = [
+        item for item in (prior_evidence.get("research_provenance_history") or [])
+        if isinstance(item, dict)
+    ]
+    prior_provenance = prior_evidence.get("research_provenance")
+    if isinstance(prior_provenance, dict):
+        provenance_history.append(prior_provenance)
+    provenance_history.append(provenance)
+    unique_provenance: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for item in provenance_history:
+        key = (
+            str(item.get("campaign_id") or ""),
+            str(item.get("episode_id") or ""),
+            str(item.get("decision_id") or ""),
+        )
+        if any(key):
+            unique_provenance[key] = item
     evidence = _redact_finding_evidence({
         "proof": "Independent live workflow replay satisfied the deterministic family-proof contract.",
         "type": retest_type,
@@ -24304,6 +24323,7 @@ async def _promote_trusted_workflow_finding(
             "tool_receipt_id": tool_receipt_id,
         },
         "research_provenance": provenance,
+        "research_provenance_history": list(unique_provenance.values()),
     })
     existing = known_match if known_match else await conn.fetchrow(
         "SELECT id, status FROM findings WHERE target_id=$1 AND fingerprint=$2",
@@ -30260,7 +30280,13 @@ async def _research_campaign_yield_metrics(conn: Any, campaign: Any) -> dict[str
         """
         SELECT COUNT(*) FROM findings
         WHERE target_id=$1 AND tool='autonomous_workflow'
-          AND created_at >= (SELECT created_at FROM campaigns WHERE id=$2)
+          AND EXISTS (
+              SELECT 1
+              FROM jsonb_array_elements(
+                  COALESCE(evidence->'research_provenance_history', '[]'::jsonb)
+              ) AS provenance
+              WHERE provenance->>'campaign_id'=$2::text
+          )
           AND last_verification_verdict='exploited'
         """,
         target_id,
@@ -30371,12 +30397,18 @@ async def research_episode_benchmark(
                    last_verification_verdict
             FROM findings
             WHERE target_id=$1 AND tool='autonomous_workflow'
-              AND created_at >= $2
+              AND EXISTS (
+                  SELECT 1
+                  FROM jsonb_array_elements(
+                      COALESCE(evidence->'research_provenance_history', '[]'::jsonb)
+                  ) AS provenance
+                  WHERE provenance->>'episode_id'=$2::text
+              )
               AND last_verification_verdict='exploited'
             ORDER BY created_at
             """,
             episode_row["target_id"],
-            episode_row["created_at"],
+            episode_row["id"],
         )
         # Any fingerprint produced by a NON-autonomous source on this target (the baseline scan,
         # any other DAST/scanner/manual finding, or a scan that ran during the episode window) is
