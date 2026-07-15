@@ -253,8 +253,8 @@ def test_public_success_and_generic_mutation_never_become_family_proof():
              "predicate": "forbidden_field_accepted", "passed": True},
             {"id": "s", "type": "comparison_changed", "control": "public", "candidate": "variant",
              "predicate": "observable_state_change", "passed": True},
-            {"id": "c", "type": "comparison_changed", "control": "public", "candidate": "variant",
-             "predicate": "control_rejected", "passed": True},
+            {"id": "c", "type": "status_in", "step": "public", "values": [200],
+             "predicate": "benign_control_accepted", "passed": True},
         ],
     }
     corroborated = workflow.server_corroborated_predicates(public)
@@ -287,23 +287,53 @@ def test_reenabled_families_corroborate_on_real_signals():
     }
     assert {"protected_resource_accessed", "unauthenticated_control"} <= workflow.server_corroborated_predicates(auth)
 
-    # mass_assignment: a mutation SUBMITTED a field and the server ECHOED it back (accepted it), with
-    # an observable state change.
+    # mass_assignment: the endpoint accepts a benign control, then an overposted security field's
+    # exact submitted value persists in a separate read.
     mass = {
         "observations": [
-            {"label": "before", "principal": "user1", "checkpoint": "before", "response": {"status": 200}},
+            {"label": "before", "principal": "user1", "checkpoint": "before",
+             "request": {"method": "GET", "path": "/profile"},
+             "response": {"status": 200, "selected_json": {"$.role": "user"}}},
+            {"label": "control", "principal": "user1", "checkpoint": "mutation",
+             "request": {"method": "PATCH", "path": "/profile"},
+             "submitted_fields": ["display_name"],
+             "submitted_field_hashes": {"display_name": workflow._value_fingerprint("research")},
+             "response": {"status": 200}},
             {"label": "mutate", "principal": "user1", "checkpoint": "mutation",
-             "submitted_fields": ["role"], "response": {"status": 200, "json_keys": ["role", "id"]}},
+             "request": {"method": "PATCH", "path": "/profile"},
+             "submitted_fields": ["role"],
+             "submitted_field_hashes": {"role": workflow._value_fingerprint("admin")},
+             "response": {"status": 200, "json_keys": ["role", "id"]}},
+            {"label": "verify", "principal": "user1", "checkpoint": "action",
+             "request": {"method": "GET", "path": "/profile"},
+             "response": {"status": 200, "selected_json": {"$.role": "admin"}}},
         ],
-        "comparisons": [{"control": "before", "candidate": "mutate", "comparable": True, "body_changed": True}],
+        "comparisons": [{"control": "before", "candidate": "verify", "comparable": True,
+                         "selected_json_changed": {"$.role": ["user", "admin"]}}],
         "assertion_results": [
+            {"id": "c", "type": "status_in", "step": "control", "values": [200],
+             "predicate": "benign_control_accepted", "passed": True},
             {"id": "f", "type": "status_in", "step": "mutate", "values": [200],
              "predicate": "forbidden_field_accepted", "passed": True},
-            {"id": "s", "type": "comparison_changed", "control": "before", "candidate": "mutate",
+            {"id": "s", "type": "comparison_changed", "control": "before", "candidate": "verify",
              "predicate": "observable_state_change", "passed": True},
         ],
     }
-    assert {"forbidden_field_accepted", "observable_state_change"} <= workflow.server_corroborated_predicates(mass)
+    assert {
+        "forbidden_field_accepted", "observable_state_change", "benign_control_accepted",
+    } <= workflow.server_corroborated_predicates(mass)
+
+    mismatched = {
+        **mass,
+        "observations": [
+            {**item, "response": {**item.get("response", {}), "selected_json": {"$.role": "user"}}}
+            if item["label"] == "verify" else item
+            for item in mass["observations"]
+        ],
+    }
+    assert workflow.server_corroborated_predicates(mismatched).isdisjoint({
+        "forbidden_field_accepted", "observable_state_change", "benign_control_accepted",
+    })
 
 
 def test_strengthened_family_proofs_reject_benign_behavior():
@@ -375,12 +405,12 @@ def test_family_proofs_do_not_combine_unrelated_routes_or_allowed_fields():
         "assertion_results": [
             {"passed": True, "predicate": "forbidden_field_accepted", "step": "mutate"},
             {"passed": True, "predicate": "observable_state_change", "control": "before", "candidate": "verify"},
-            {"passed": True, "predicate": "control_rejected", "step": "control"},
+            {"passed": True, "predicate": "benign_control_accepted", "step": "control"},
         ],
     }
     corroborated = workflow.server_corroborated_predicates(mass)
     assert "forbidden_field_accepted" not in corroborated
-    assert not {"forbidden_field_accepted", "observable_state_change", "control_rejected"} <= corroborated
+    assert not {"forbidden_field_accepted", "observable_state_change", "benign_control_accepted"} <= corroborated
 
 
 def test_restoration_read_must_follow_cleanup():

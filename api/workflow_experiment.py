@@ -53,7 +53,7 @@ PREDICATE_ASSERTION_TYPES = {
     "same_account": {"distinct_principals"},
     "forbidden_field_accepted": {"status_in"},
     "observable_state_change": {"comparison_changed"},
-    "control_rejected": {"status_not_in"},
+    "benign_control_accepted": {"status_in"},
     "forbidden_field_rejected": {"status_not_in"},
     "payload_control_differential": {"comparison_changed"},
     "deterministic_family_proof": {"comparison_changed", "status_in"},
@@ -215,6 +215,11 @@ def _classify_sensitive_values(text: str) -> list[str]:
             categories.add("credit_card")
             break
     return sorted(categories)
+
+
+def _value_fingerprint(value: Any) -> str:
+    encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), default=str).encode()
+    return hashlib.sha256(encoded).hexdigest()
 
 
 # --- Server-corroborated family predicates ----------------------------------------------
@@ -383,20 +388,26 @@ def _server_confirms_predicate(
         target = step or candidate
         return str(target.get("principal") or "anonymous").lower() == "anonymous" and not _obs_success(target)
 
-    # --- mass_assignment: a MUTATION submitted a body field AND the server echoed it back (accepted /
-    # persisted it), with an observable state change and a rejected control.
+    # --- mass_assignment: a successful mutation submitted a security-sensitive field. Exact
+    # persistence and the accepted benign control are correlated across observations below.
     if predicate == "forbidden_field_accepted":
         target = step or candidate
         if str(target.get("checkpoint") or "") != "mutation" or not _obs_success(target):
             return False
-        submitted = {str(name) for name in (target.get("submitted_fields") or [])}
-        response = target.get("response") if isinstance(target.get("response"), dict) else {}
-        echoed = {str(key) for key in (response.get("json_keys") or [])}
-        forbidden = {name.lower() for name in submitted} & SECURITY_SENSITIVE_MUTATION_FIELDS
-        return bool(forbidden) and bool(forbidden & {name.lower() for name in echoed})
+        submitted_hashes = target.get("submitted_field_hashes") if isinstance(target.get("submitted_field_hashes"), dict) else {}
+        return bool(set(submitted_hashes).intersection(SECURITY_SENSITIVE_MUTATION_FIELDS))
     if predicate == "observable_state_change":
         return changed
-    if predicate in {"control_rejected", "forbidden_field_rejected"}:  # rejected control / refute
+    if predicate == "benign_control_accepted":
+        target = step or candidate
+        submitted = {str(name).lower() for name in target.get("submitted_fields") or []}
+        return (
+            str(target.get("checkpoint") or "") == "mutation"
+            and _obs_success(target)
+            and bool(submitted)
+            and not submitted.intersection(SECURITY_SENSITIVE_MUTATION_FIELDS)
+        )
+    if predicate == "forbidden_field_rejected":  # deterministic refutation
         return not _obs_success(step or candidate)
 
     # --- workflow: a real state transition -- the change is between a BEFORE and an AFTER checkpoint
@@ -466,22 +477,28 @@ def _server_corroborated_evidence(
 
     mass_accept = assertions_by_predicate.get("forbidden_field_accepted") or []
     mass_change = assertions_by_predicate.get("observable_state_change") or []
-    mass_control = assertions_by_predicate.get("control_rejected") or []
+    mass_control = assertions_by_predicate.get("benign_control_accepted") or []
     if mass_accept and mass_change and mass_control:
         mutation = by_label.get(str(mass_accept[0].get("step") or ""), {})
         changed_assertion = mass_change[0]
         after = by_label.get(str(changed_assertion.get("candidate") or ""), {})
-        rejected = by_label.get(str(mass_control[0].get("step") or ""), {})
-        submitted = {str(name).lower() for name in mutation.get("submitted_fields") or []}
+        benign_control = by_label.get(str(mass_control[0].get("step") or ""), {})
+        submitted_hashes = mutation.get("submitted_field_hashes") if isinstance(mutation.get("submitted_field_hashes"), dict) else {}
+        sensitive_submitted = set(submitted_hashes).intersection(SECURITY_SENSITIVE_MUTATION_FIELDS)
         response = after.get("response") if isinstance(after.get("response"), dict) else {}
-        persisted = submitted & {str(name).lower() for name in response.get("json_keys") or []}
+        selected_json = response.get("selected_json") if isinstance(response.get("selected_json"), dict) else {}
+        persisted: set[str] = set()
+        for path, value in selected_json.items():
+            leaf = str(path).rsplit(".", 1)[-1].strip("[]").lower()
+            if leaf in sensitive_submitted and _value_fingerprint(value) == submitted_hashes.get(leaf):
+                persisted.add(leaf)
         if not (
-            after.get("checkpoint") == "after"
+            after.get("checkpoint") in {"action", "after"}
             and _same_resource(mutation, after, same_method=False)
-            and _same_resource(mutation, rejected)
-            and bool(persisted & SECURITY_SENSITIVE_MUTATION_FIELDS)
+            and _same_resource(mutation, benign_control)
+            and bool(persisted)
         ):
-            granted -= {"forbidden_field_accepted", "observable_state_change", "control_rejected"}
+            granted -= {"forbidden_field_accepted", "observable_state_change", "benign_control_accepted"}
 
     bindings: dict[str, tuple[str, str]] = {}
     for predicate in granted:
@@ -961,6 +978,7 @@ async def execute_workflow(
             extracted: dict[str, str] = {}
             sensitive_value_categories: list[str] = []
             submitted_fields: list[str] = []
+            submitted_field_hashes: dict[str, str] = {}
             response: dict[str, Any] | None = None
             request_view: dict[str, Any] = {"kind": step["kind"], "principal": step["principal"]}
             error: str | None = None
@@ -985,6 +1003,15 @@ async def execute_workflow(
                         json_body.keys() if isinstance(json_body, dict)
                         else form_body.keys() if isinstance(form_body, dict) else []
                     )
+                    submitted_values = (
+                        json_body if isinstance(json_body, dict)
+                        else form_body if isinstance(form_body, dict) else {}
+                    )
+                    submitted_field_hashes = {
+                        str(name).lower(): _value_fingerprint(value)
+                        for name, value in submitted_values.items()
+                        if not isinstance(value, (dict, list))
+                    }
                     if len(str(path).encode()) > 4000:
                         raise WorkflowContractError("rendered_path_exceeds_size_limit")
                     if _contains_control_character(path):
@@ -1091,6 +1118,7 @@ async def execute_workflow(
                 "request": request_view, "response": response,
                 "sensitive_value_categories": sensitive_value_categories if not error else [],
                 "submitted_fields": submitted_fields if not error else [],
+                "submitted_field_hashes": submitted_field_hashes if not error else {},
                 "extracted_names": sorted(extracted) if not error else [],
                 "extracted": {name: {"sha256": hashlib.sha256(value.encode()).hexdigest(), "length": len(value)} for name, value in extracted.items()} if not error else {},
                 "error": error,

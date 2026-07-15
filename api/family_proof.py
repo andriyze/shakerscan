@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from typing import Any
 
-FAMILY_PROOF_VERSION = "family-proof-2026-07-12.v1"
+FAMILY_PROOF_VERSION = "family-proof-2026-07-14.v2"
 
 VERDICTS = frozenset({"verified", "supported_unverified", "refuted", "inconclusive", "blocked"})
 
@@ -29,7 +29,7 @@ FAMILY_CONTRACTS: dict[str, dict[str, Any]] = {
     },
     "mass_assignment": {
         "cwe": "CWE-915",
-        "requires": ["forbidden_field_accepted", "observable_state_change", "control_rejected"],
+        "requires": ["forbidden_field_accepted", "observable_state_change", "benign_control_accepted"],
         "refute_if": ["forbidden_field_rejected"],
     },
     "injection": {
