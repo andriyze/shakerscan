@@ -588,6 +588,8 @@ export interface CampaignDetailResponse {
     model_units: number
     experiments: number
     falsified_experiments: number
+    experiment_outcomes?: Record<string, number>
+    non_scientific_experiments?: number
     semantic_dimensions_tested: number
     exhausted_dimensions: number
     recon_actions: number
@@ -598,6 +600,13 @@ export interface CampaignDetailResponse {
     surface?: Record<string, number>
     stop_recommended: boolean
     stop_reason?: string | null
+  } | null
+  research_readiness?: {
+    ready: boolean
+    state: string
+    blockers?: string[]
+    surface?: Record<string, number>
+    preflight_scan?: Record<string, unknown> | null
   } | null
   execution_enabled: boolean
 }

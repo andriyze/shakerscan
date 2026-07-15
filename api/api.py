@@ -2940,6 +2940,13 @@ class ScanOptions(BaseModel):
     grpc_discovery: bool = False
     json_link_following: bool = False
     options_method_discovery: bool = False
+    # Internal/focused execution controls are also explicit model fields so
+    # server-authored research preflights survive Pydantic serialization.
+    # They remain safe for public callers: they only narrow work and never
+    # expand scope beyond the submitted target/custom endpoints.
+    skip_global_checks: bool = False
+    focused_endpoints_only: bool = False
+    zero_rediscovery: bool = False
 
     # AI options
     ai_url: Optional[str] = None
@@ -16354,20 +16361,20 @@ async def _build_agent_context_pack_from_target(conn, req: AgentContextPackFromT
         )
         graph_nodes = await conn.fetch(
             """
-            SELECT node_type, node_key, label
+            SELECT node_type, node_key, label, scan_id, last_seen_at
             FROM application_graph_nodes
-            WHERE target_id=$1
-            ORDER BY node_type, node_key
+            WHERE target_id=$1 AND last_seen_at >= NOW() - INTERVAL '30 days'
+            ORDER BY last_seen_at DESC, node_type, node_key
             LIMIT 30
             """,
             target_uuid,
         )
         graph_edges = await conn.fetch(
             """
-            SELECT src_key, edge_type, dst_key
+            SELECT src_key, edge_type, dst_key, scan_id, last_seen_at
             FROM application_graph_edges
-            WHERE target_id=$1
-            ORDER BY edge_type, src_key, dst_key
+            WHERE target_id=$1 AND last_seen_at >= NOW() - INTERVAL '30 days'
+            ORDER BY last_seen_at DESC, edge_type, src_key, dst_key
             LIMIT 40
             """,
             target_uuid,
@@ -22455,10 +22462,24 @@ async def arsenal_campaign_detail(campaign_id: str, action_limit: int = Query(50
             if str(row.get("campaign_type") or "") == "autonomous_research"
             else None
         )
+        research_readiness = (
+            await _research_campaign_readiness(conn, row)
+            if str(row.get("campaign_type") or "") == "autonomous_research"
+            else None
+        )
     status_rollup = {str(item["status"]): int(item["count"]) for item in status_rows}
     deployment_impact = impact_by_campaign.get(campaign_uuid, _campaign_deployment_impact([]))
     campaign = _public_campaign_row(row)
     campaign["deployment_impact"] = deployment_impact
+    if research_readiness is not None:
+        # Readiness stored in campaign metadata is an audit snapshot from the
+        # last supervisor pass.  Overlay the current read-only calculation in
+        # the response so paused runs never advertise stale pre-fix coverage.
+        metadata = dict(campaign.get("metadata_json") or {})
+        research_metadata = dict(metadata.get("autonomous_research") or {})
+        research_metadata["readiness"] = research_readiness
+        metadata["autonomous_research"] = research_metadata
+        campaign["metadata_json"] = metadata
     return {
         "campaign": campaign,
         "actions": actions,
@@ -22467,6 +22488,7 @@ async def arsenal_campaign_detail(campaign_id: str, action_limit: int = Query(50
         "status_rollup": status_rollup,
         "deployment_impact": deployment_impact,
         "research_yield": research_yield,
+        "research_readiness": research_readiness,
         "execution_enabled": False,
     }
 
@@ -24699,7 +24721,13 @@ async def _arsenal_execute_detached(req: ArsenalExecuteRequest) -> dict[str, Any
 
     context_token = _ARSENAL_CREATED_BY_CONTEXT.set(req.created_by)
     try:
-        result = await adapter(req.parameters, req.approval_receipt_id)
+        # Keep research provenance byte-for-byte equivalent to the ordinary
+        # execution gateway.  The detached path is used by autopilot so it
+        # must not drop the hypothesis id required by trusted promotion.
+        adapter_parameters = dict(req.parameters)
+        if req.research_hypothesis_id:
+            adapter_parameters["_research_hypothesis_id"] = req.research_hypothesis_id
+        result = await adapter(adapter_parameters, req.approval_receipt_id)
     finally:
         _ARSENAL_CREATED_BY_CONTEXT.reset(context_token)
     operation_id = result.get("operation_id") if isinstance(result, dict) else None
@@ -26334,7 +26362,7 @@ async def _research_recent_actions(
         SELECT rd.sequence, rd.decision_type, rd.status, rd.action, rd.reason,
                rd.expected_signal, rd.falsifier, rd.validation_errors,
                rd.command_result_id, cr.status AS command_status, cr.scan_id,
-               cr.result_json, cr.operator_message
+               cr.result_json, cr.finding_ids, cr.operator_message
         FROM research_decisions rd
         LEFT JOIN command_results cr ON cr.id=rd.command_result_id
         JOIN research_episodes re ON re.id=rd.episode_id
@@ -26382,6 +26410,14 @@ async def _research_recent_actions(
                     "body_sample": (str(_resp.get("body_sample"))[:200] if _resp.get("body_sample") else None),
                 }
                 break
+        experiment_outcome = _research_experiment_outcome(
+            item["action"],
+            {
+                "status": item.get("command_status"),
+                "result_json": rj,
+                "finding_ids": item.get("finding_ids"),
+            },
+        )
         item["result"] = {
             "status": item.pop("command_status", None),
             "scan_id": item.pop("scan_id", None),
@@ -26404,7 +26440,9 @@ async def _research_recent_actions(
             ),
             "failure_detail": failure_detail,
             "operator_message": (str(operator_message)[:300] if operator_message else None),
+            "scientific_outcome": (experiment_outcome or {}).get("outcome"),
         }
+        item.pop("finding_ids", None)
         item.pop("result_json", None)
         actions.append(_bounded_research_payload(item))
     return actions
@@ -26595,6 +26633,69 @@ def _research_previous_result_digest(value: Any) -> dict[str, Any]:
     return _bounded_research_payload(digest)
 
 
+def _research_hypothesis_experiment_contract(hypothesis: Any) -> dict[str, Any]:
+    """Project one stored lead into the minimum executable planner contract.
+
+    This is deliberately separate from the general hypothesis summary.  The
+    selected lead's route and request shape are mandatory control data, not
+    optional descriptive metadata that compaction may discard.
+    """
+    item = hypothesis if isinstance(hypothesis, dict) else {}
+    metadata = item.get("metadata_json") if isinstance(item.get("metadata_json"), dict) else {}
+    dedupe = metadata.get("dedupe_dimensions") if isinstance(metadata.get("dedupe_dimensions"), dict) else {}
+    next_test = item.get("next_test_action") if isinstance(item.get("next_test_action"), dict) else {}
+    family = str(item.get("family") or "").strip().lower()
+    route = str(dedupe.get("route") or metadata.get("route") or item.get("route") or item.get("path") or "").strip()
+    method = str(dedupe.get("method") or metadata.get("method") or "").strip().upper()
+    request_fields = metadata.get("request_fields")
+    request_example = metadata.get("request_example")
+    required_principals = list(next_test.get("requires") or []) if isinstance(next_test.get("requires"), list) else []
+    if family_proof.canonical_family(family) == "bola":
+        required_principals = list(dict.fromkeys([*required_principals, "primary_auth", "second_user_auth"]))
+    elif family in {"auth", "auth_bypass"}:
+        required_principals = list(dict.fromkeys([*required_principals, "primary_auth"]))
+    contract = {
+        "hypothesis_id": str(item.get("id") or ""),
+        "family": family,
+        "title": str(item.get("title") or "")[:300],
+        "method": method or None,
+        "route": route or None,
+        "request_fields": request_fields,
+        "request_example": request_example,
+        "required_principals": required_principals,
+        "next_test_action": next_test,
+        "attempt_count": int(metadata.get("attempt_count") or 0),
+        "prior_failures": int(metadata.get("prior_failures") or 0),
+        "last_outcome": metadata.get("last_outcome"),
+    }
+    return {key: value for key, value in contract.items() if value not in (None, "", [], {})}
+
+
+def _research_selected_hypothesis_contracts(
+    ranked_hypotheses: Any,
+    allowed_families: set[str] | list[str],
+    *,
+    limit: int = 5,
+) -> list[dict[str, Any]]:
+    contracts: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for entry in ranked_hypotheses if isinstance(ranked_hypotheses, list) else []:
+        hypothesis = entry.get("hypothesis") if isinstance(entry, dict) else None
+        if not isinstance(hypothesis, dict) or not _research_family_is_allowed(
+            hypothesis.get("family"), allowed_families
+        ):
+            continue
+        contract = _research_hypothesis_experiment_contract(hypothesis)
+        hypothesis_id = str(contract.get("hypothesis_id") or "")
+        if not hypothesis_id or hypothesis_id in seen:
+            continue
+        seen.add(hypothesis_id)
+        contracts.append(contract)
+        if len(contracts) >= max(1, min(int(limit or 5), 10)):
+            break
+    return contracts
+
+
 def _compact_research_observation_pack(pack: dict[str, Any]) -> dict[str, Any]:
     # Redact once, then bound the already-redacted tree. Calling
     # _bounded_research_payload recursively re-runs whole-subtree redaction at every
@@ -26777,7 +26878,7 @@ def _compact_research_observation_pack(pack: dict[str, Any]) -> dict[str, Any]:
             parameters,
             (
                 "check_family", "finding_id", "endpoint_filter", "batch_size", "stale_days",
-                "exploit_depth", "mode", "scan_type",
+                "exploit_depth", "mode", "scan_type", "proof_family", "route", "workflow_id",
             ),
             text_limit=160,
         )
@@ -26788,8 +26889,8 @@ def _compact_research_observation_pack(pack: dict[str, Any]) -> dict[str, Any]:
         result = raw_action.get("result") if isinstance(raw_action.get("result"), dict) else {}
         result_digest = _scalars(
             result,
-            ("status", "scan_id", "retest_id", "proof_state", "failure_reason",
-             "failure_detail", "operator_message"),
+            ("status", "scan_id", "retest_id", "proof_state", "scientific_outcome",
+             "failure_reason", "failure_detail", "operator_message"),
             text_limit=200,
         )
         if result_digest:
@@ -26836,6 +26937,28 @@ def _compact_research_observation_pack(pack: dict[str, Any]) -> dict[str, Any]:
         ),
         text_limit=800,
     )
+    contract_digest: list[dict[str, Any]] = []
+    for raw_contract in list(bounded.get("selected_hypothesis_contracts") or [])[:5]:
+        if not isinstance(raw_contract, dict):
+            continue
+        projected = _scalars(
+            raw_contract,
+            (
+                "hypothesis_id", "family", "title", "method", "route", "request_fields",
+                "request_example", "attempt_count", "prior_failures", "last_outcome",
+            ),
+            text_limit=1200,
+        )
+        required_principals = _string_list(
+            raw_contract.get("required_principals"), count=8, item_limit=100
+        )
+        if required_principals:
+            projected["required_principals"] = required_principals
+        if isinstance(raw_contract.get("next_test_action"), dict):
+            projected["next_test_action"] = _bound_once(raw_contract["next_test_action"], 1)
+        if projected:
+            contract_digest.append(projected)
+
     compacted.update({
         "allowed_families": _string_list(bounded.get("allowed_families"), count=20, item_limit=80),
         "mission": mission,
@@ -26843,6 +26966,9 @@ def _compact_research_observation_pack(pack: dict[str, Any]) -> dict[str, Any]:
         "remaining_budget": remaining_budget,
         "recent_actions": actions,
         "proposable_commands": commands,
+        # Mandatory: a selected hypothesis without its concrete request shape
+        # is not executable and must never be presented as actionable.
+        "selected_hypothesis_contracts": contract_digest,
         "observation_compaction": {
             "applied": True,
             "max_bytes": RESEARCH_OBSERVATION_MAX_BYTES,
@@ -26977,16 +27103,17 @@ def _compact_research_observation_pack(pack: dict[str, Any]) -> dict[str, Any]:
     graph_source = surface_source.get("attack_graph") if isinstance(surface_source.get("attack_graph"), dict) else {}
     graph = {
         "nodes": [
-            _scalars(item, ("node_type", "node_key", "label"), text_limit=240)
+            _scalars(item, ("node_type", "node_key", "label", "scan_id", "last_seen_at"), text_limit=240)
             for item in list(graph_source.get("nodes") or [])[:20]
             if isinstance(item, dict)
         ],
         "edges": [
-            _scalars(item, ("src_key", "edge_type", "dst_key"), text_limit=240)
+            _scalars(item, ("src_key", "edge_type", "dst_key", "scan_id", "last_seen_at"), text_limit=240)
             for item in list(graph_source.get("edges") or [])[:25]
             if isinstance(item, dict)
         ],
         "truncated": bool(graph_source.get("truncated")),
+        "provenance_scan_id": str(graph_source.get("provenance_scan_id") or "")[:80] or None,
     }
     if graph["nodes"] or graph["edges"]:
         surface["attack_graph"] = graph
@@ -27136,7 +27263,59 @@ async def _build_research_observation(
     # Research prompts consume the same canonical redaction path as persisted agent context packs;
     # replay examples may originate from harvested traffic and must not carry tokens or credentials.
     context = _canonical_agent_context_pack(context_req)
-    surface_context = context.get("current_surface") if isinstance(context.get("current_surface"), dict) else {}
+    surface_context = dict(context.get("current_surface")) if isinstance(context.get("current_surface"), dict) else {}
+    campaign_preflight_scan_id = ""
+    if episode.get("campaign_id"):
+        try:
+            campaign_row = await conn.fetchrow(
+                "SELECT metadata_json FROM campaigns WHERE id=$1",
+                _optional_uuid(episode.get("campaign_id")),
+            )
+            campaign_metadata = _decode_json_value((campaign_row or {}).get("metadata_json")) or {}
+            campaign_config = (
+                campaign_metadata.get("autonomous_research")
+                if isinstance(campaign_metadata.get("autonomous_research"), dict)
+                else {}
+            )
+            campaign_preflight_scan_id = str(campaign_config.get("preflight_scan_id") or "")
+        except Exception:
+            campaign_preflight_scan_id = ""
+    if campaign_preflight_scan_id:
+        graph = surface_context.get("attack_graph") if isinstance(surface_context.get("attack_graph"), dict) else {}
+        surface_context["attack_graph"] = {
+            **graph,
+            "nodes": [
+                item for item in graph.get("nodes") or []
+                if isinstance(item, dict) and str(item.get("scan_id") or "") == campaign_preflight_scan_id
+            ],
+            "edges": [
+                item for item in graph.get("edges") or []
+                if isinstance(item, dict) and str(item.get("scan_id") or "") == campaign_preflight_scan_id
+            ],
+            "provenance_scan_id": campaign_preflight_scan_id,
+        }
+    allowed_families = {
+        str(item).strip().lower()
+        for item in episode.get("allowed_families") or []
+        if str(item).strip()
+    }
+    ranked_hypotheses = [
+        entry
+        for entry in (surface_context.get("ranked_hypotheses") or [])
+        if isinstance(entry, dict)
+        and isinstance(entry.get("hypothesis"), dict)
+        and _research_family_is_allowed(entry["hypothesis"].get("family"), allowed_families)
+    ]
+    surface_context["ranked_hypotheses"] = ranked_hypotheses
+    hypothesis_summaries = [
+        item
+        for item in (context.get("hypotheses_summary") or [])
+        if isinstance(item, dict) and _research_family_is_allowed(item.get("family"), allowed_families)
+    ]
+    selected_hypothesis_contracts = _research_selected_hypothesis_contracts(
+        ranked_hypotheses,
+        allowed_families,
+    )
     approved_invariant_contracts = [
         item for item in (surface_context.get("approved_invariant_contracts") or [])
         if isinstance(item, dict) and item.get("status") == "approved"
@@ -27202,9 +27381,10 @@ async def _build_research_observation(
         "mission": mission,
         "focus": focus,
         "target_summary": context.get("target_summary") or {},
-        "current_surface": context.get("current_surface") or {},
+        "current_surface": surface_context,
         "current_gaps": current_gaps,
-        "hypotheses_summary": context.get("hypotheses_summary") or [],
+        "hypotheses_summary": hypothesis_summaries,
+        "selected_hypothesis_contracts": selected_hypothesis_contracts,
         "findings_summary": context.get("findings_summary") or [],
         "known_preconditions": context.get("known_preconditions") or {},
         # Operator-approved policy statements are high-value hypothesis oracles, but they remain
@@ -27237,6 +27417,8 @@ async def _build_research_observation(
             "Do not test a semantic dimension listed in campaign_exhaustion.exhausted_dimensions. "
             "Three independent falsifications retire that family+route dimension for the campaign; "
             "when no non-exhausted hypothesis remains, stop with the evidence instead of restarting recon.",
+            "For a ranked lead, use selected_hypothesis_contracts as the authoritative route/request "
+            "shape. Do not ask the operator for request fields or examples already present there.",
         ],
         "previous_observation": _research_previous_result_digest(previous_result or {}),
         "planner_contract": {
@@ -27251,6 +27433,7 @@ async def _build_research_observation(
             "excluded_actions_must_not_be_repeated": True,
             "invariant_contracts_are_planning_only": True,
             "invariant_contracts_cannot_directly_promote_findings": True,
+            "selected_hypothesis_contract_is_authoritative": True,
         },
     }
     pack = _compact_research_observation_pack(pack)
@@ -27421,6 +27604,11 @@ async def _settle_research_awaiting_observation(conn, episode_row: Any) -> dict[
         """,
         episode_row["id"], _optional_uuid(command_result_id),
     )
+    await _record_research_hypothesis_outcome(
+        conn,
+        decision_id=decision_context.get("id"),
+        command_result=command_result,
+    )
     await _record_research_event(
         conn,
         episode_row["id"],
@@ -27505,6 +27693,67 @@ async def _research_episode_detail(conn, episode_id: str) -> dict[str, Any]:
         "events": [_public_research_event_row(row) for row in events],
         "waiting_on": waiting_on,
     }
+
+
+def _research_family_scope_keys(family: Any) -> set[str]:
+    """Return campaign-scope names equivalent to a proof/hypothesis family.
+
+    Campaign launch intentionally exposes the four public DAST families while
+    deterministic workflow proof uses canonical names such as ``auth_bypass``
+    and ``injection``.  Keep that translation in one fail-closed predicate so
+    context selection and execution policy cannot drift apart.
+    """
+    raw = str(family or "").strip().lower().replace("-", "_").replace(" ", "_")
+    canonical = family_proof.canonical_family(raw)
+    keys = {raw, canonical}
+    if canonical == "auth_bypass" or raw == "auth":
+        keys.add("auth")
+    if canonical == "injection":
+        keys.update({"sqli", "xss"})
+    if canonical == "bola":
+        keys.update({"bola", "idor"})
+    return {key for key in keys if key}
+
+
+def _research_family_is_allowed(family: Any, allowed_families: set[str] | list[str]) -> bool:
+    allowed = {
+        str(item).strip().lower().replace("-", "_").replace(" ", "_")
+        for item in allowed_families or []
+        if str(item).strip()
+    }
+    return not allowed or bool(_research_family_scope_keys(family) & allowed)
+
+
+def _research_requested_input_is_in_observation(requested_input: Any, observation_pack: Any) -> bool:
+    """Recognize operator requests already answerable from server-owned context.
+
+    Credentials/authorization and genuinely absent business inputs still pause.
+    Request schemas, routes, methods, examples, and payload fields are recoverable
+    when the selected-hypothesis contract already contains them.
+    """
+    requested = str(requested_input or "").strip().lower()
+    pack = observation_pack if isinstance(observation_pack, dict) else {}
+    contracts = [
+        item for item in pack.get("selected_hypothesis_contracts") or []
+        if isinstance(item, dict)
+    ]
+    if not requested or not contracts:
+        return False
+    if any(term in requested for term in ("credential", "password", "token", "authorization", "permission")):
+        return False
+    schema_terms = {
+        "schema", "request body", "request field", "fields", "payload", "example",
+        "endpoint", "route", "path", "method", "parameter", "param",
+    }
+    if not any(term in requested for term in schema_terms):
+        return False
+    return any(
+        any(
+            contract.get(key) not in (None, "", [], {})
+            for key in ("request_fields", "request_example", "route", "method", "next_test_action")
+        )
+        for contract in contracts
+    )
 
 
 def _research_forbidden_control_paths(value: Any, path: str = "$") -> list[str]:
@@ -27608,8 +27857,13 @@ async def _research_prepare_action(
                 scan_target = await conn.fetchval("SELECT target_id FROM scans WHERE id=$1", scan_uuid)
                 if str(scan_target or "") != target_id:
                     errors.append("scan_outside_episode_target")
-    allowed_families = {str(item) for item in episode.get("allowed_families") or []}
+    allowed_families = {
+        str(item).strip().lower()
+        for item in episode.get("allowed_families") or []
+        if str(item).strip()
+    }
     check_family = str(params.get("check_family") or "").strip()
+    proof_family = str(params.get("proof_family") or "").strip()
     if command.get("name") == "scan.focused_family" and not check_family:
         errors.append("check_family_required")
     if (
@@ -27623,6 +27877,13 @@ async def _research_prepare_action(
         else:
             errors.append("check_family_required_for_scoped_episode")
     if allowed_families and check_family and check_family not in allowed_families:
+        errors.append("action_family_not_allowed")
+    if (
+        allowed_families
+        and command.get("name") in {"experiment.http_diff", "experiment.workflow"}
+        and proof_family
+        and not _research_family_is_allowed(proof_family, allowed_families)
+    ):
         errors.append("action_family_not_allowed")
     if command.get("name") in {"experiment.http_diff", "experiment.workflow"}:
         steps = params.get("steps") if isinstance(params.get("steps"), list) else []
@@ -27949,6 +28210,7 @@ def _finding_vulnerability_key(value: Any) -> str | None:
 
 RESEARCH_SURFACE_MIN_UNIQUE_ROUTES = 20
 RESEARCH_SURFACE_MIN_AUTHENTICATED_ROUTES = 5
+RESEARCH_SURFACE_MIN_EXECUTABLE_ROUTES = 1
 RESEARCH_PREFLIGHT_MAX_ATTEMPTS = 2
 RESEARCH_SEMANTIC_FALSIFICATION_LIMIT = 3
 RESEARCH_RECON_ACTION_CAP = 6
@@ -28029,6 +28291,135 @@ RESEARCH_RECON_COMMANDS = frozenset({
 })
 
 
+RESEARCH_EXPERIMENT_OUTCOMES = frozenset({
+    "verified", "refuted", "supported_unverified", "inconclusive", "blocked",
+})
+
+
+def _research_experiment_outcome(action: Any, command_result: Any) -> dict[str, Any] | None:
+    """Normalize a completed experiment into a scientific outcome.
+
+    Absence of a finding is not refutation.  Only a deterministic family-proof
+    ``refuted`` verdict counts as falsification; transport/runtime failures and
+    missing proof stay visible as blocked/inconclusive.
+    """
+    action_payload = action if isinstance(action, dict) else _decode_json_value(action) or {}
+    command = str(action_payload.get("command") or "")
+    if command not in {"experiment.http_diff", "experiment.workflow"}:
+        return None
+    result = command_result if isinstance(command_result, dict) else row_to_dict(command_result)
+    result_json = _decode_json_value(result.get("result_json")) or {}
+    proof = result_json.get("family_proof") if isinstance(result_json.get("family_proof"), dict) else {}
+    if not proof:
+        nested = result_json.get("workflow") if isinstance(result_json.get("workflow"), dict) else {}
+        proof = nested.get("family_proof") if isinstance(nested.get("family_proof"), dict) else {}
+    verdict = str(proof.get("verdict") or "").strip().lower()
+    finding_ids = _decode_json_value(result.get("finding_ids")) or []
+    if finding_ids or verdict == "verified":
+        outcome = "verified"
+    elif verdict in RESEARCH_EXPERIMENT_OUTCOMES:
+        outcome = verdict
+    else:
+        status = str(result.get("command_status") or result.get("status") or "").strip().lower()
+        proof_state = str(
+            result_json.get("proof_state")
+            or (result_json.get("experiment") or {}).get("proof_state")
+            or ""
+        ).strip().lower()
+        if status in {"blocked", "approval_required", "failed", "cancelled", "error", "partial"}:
+            outcome = "blocked"
+        elif proof_state in {"supported", "supported_unverified", "likely_vulnerable"}:
+            outcome = "supported_unverified"
+        else:
+            outcome = "inconclusive"
+    return {
+        "outcome": outcome,
+        "reason": str(
+            proof.get("reason")
+            or result_json.get("failure_reason")
+            or result.get("command_status")
+            or result.get("status")
+            or ""
+        )[:500],
+        "family": str(proof.get("family") or (action_payload.get("parameters") or {}).get("proof_family") or "")[:80],
+        "deterministic_refutation": outcome == "refuted" and bool(proof.get("refuted_by")),
+    }
+
+
+async def _record_research_hypothesis_outcome(
+    conn: Any,
+    *,
+    decision_id: Any,
+    command_result: Any,
+) -> dict[str, Any] | None:
+    """Persist experiment learning on the bound hypothesis exactly once."""
+    decision = await conn.fetchrow(
+        "SELECT id, hypothesis_id, action FROM research_decisions WHERE id=$1",
+        _optional_uuid(decision_id),
+    )
+    if not decision or not decision.get("hypothesis_id"):
+        return None
+    outcome = _research_experiment_outcome(decision.get("action"), command_result)
+    if not outcome:
+        return None
+    hypothesis = await conn.fetchrow(
+        "SELECT id, status, metadata_json FROM hypotheses WHERE id=$1 FOR UPDATE",
+        decision["hypothesis_id"],
+    )
+    if not hypothesis:
+        return None
+    metadata = _decode_json_value(hypothesis.get("metadata_json")) or {}
+    history = metadata.get("research_outcomes") if isinstance(metadata.get("research_outcomes"), list) else []
+    decision_key = str(decision["id"])
+    if any(str(item.get("decision_id") or "") == decision_key for item in history if isinstance(item, dict)):
+        return outcome
+    attempts = int(metadata.get("attempt_count") or 0) + 1
+    failures = int(metadata.get("prior_failures") or 0)
+    if outcome["outcome"] in {"inconclusive", "blocked"}:
+        failures += 1
+    metadata.update({
+        "attempt_count": attempts,
+        "prior_failures": failures,
+        "last_outcome": outcome["outcome"],
+        "last_outcome_reason": outcome.get("reason"),
+        "research_outcomes": [
+            *history,
+            {
+                **outcome,
+                "decision_id": decision_key,
+                "recorded_at": datetime.now(timezone.utc).isoformat(),
+            },
+        ][-20:],
+    })
+    current_status = str(hypothesis.get("status") or "open")
+    next_status = current_status
+    terminal_reason = None
+    if current_status not in {"promoted", "dead", "exhausted"}:
+        if outcome["outcome"] == "refuted" and outcome.get("deterministic_refutation"):
+            next_status = "refuted"
+            terminal_reason = "deterministic_experiment_refutation"
+        elif outcome["outcome"] in {"verified", "supported_unverified"}:
+            # Verified promotion normally sets promoted in the workflow
+            # transaction.  Preserve that terminal status if it already did.
+            next_status = "supported"
+        elif outcome["outcome"] in {"inconclusive", "blocked"}:
+            next_status = "open"
+    await conn.execute(
+        """
+        UPDATE hypotheses
+        SET status=$2, metadata_json=$3::jsonb,
+            terminal_reason=COALESCE($4, terminal_reason),
+            version=version+1, updated_at=NOW()
+        WHERE id=$1
+        """,
+        hypothesis["id"],
+        next_status,
+        json.dumps(metadata),
+        terminal_reason,
+    )
+    return outcome
+
+
 async def _research_campaign_exhaustion_snapshot(
     conn: Any,
     episode_id: Any,
@@ -28036,7 +28427,8 @@ async def _research_campaign_exhaustion_snapshot(
 ) -> dict[str, Any]:
     rows = await conn.fetch(
         """
-        SELECT rd.action, rd.status, cr.id AS command_result_id, cr.finding_ids
+        SELECT rd.action, rd.status, cr.id AS command_result_id, cr.status AS command_status,
+               cr.finding_ids, cr.result_json
         FROM research_decisions rd
         JOIN research_episodes re ON re.id=rd.episode_id
         LEFT JOIN command_results cr ON cr.id=rd.command_result_id
@@ -28061,7 +28453,8 @@ async def _research_campaign_exhaustion_snapshot(
         if not dimension or not row.get("command_result_id") or str(row.get("status") or "") != "completed":
             continue
         experiments += 1
-        if not (_decode_json_value(row.get("finding_ids")) or []):
+        outcome = _research_experiment_outcome(action, row)
+        if outcome and outcome.get("deterministic_refutation"):
             falsifications[dimension] = falsifications.get(dimension, 0) + 1
     return {
         "experiments": experiments,
@@ -28152,31 +28545,116 @@ async def _research_campaign_readiness(conn: Any, campaign: Any) -> dict[str, An
                COUNT(DISTINCT upper(method) || ' ' || path)
                    FILTER (WHERE auth_state IN ('user1','user2'))::int AS authenticated_routes,
                COUNT(DISTINCT upper(method) || ' ' || path)
-                   FILTER (WHERE auth_state='user2')::int AS second_user_routes
+                   FILTER (WHERE auth_state='user2')::int AS second_user_routes,
+               COUNT(DISTINCT upper(method) || ' ' || path)
+                   FILTER (
+                     WHERE auth_state IN ('user1','user2')
+                       AND (
+                         upper(method)='GET'
+                         OR COALESCE(param_shape, '') <> ''
+                         OR COALESCE(replay_spec, '') <> ''
+                       )
+                   )::int AS executable_routes,
+               COUNT(DISTINCT upper(method) || ' ' || path)
+                   FILTER (
+                     WHERE auth_state IN ('user1','user2')
+                       AND path ~ '/(\\{[^/{}]+\\}|:[A-Za-z_][A-Za-z0-9_]*|[0-9]+)(/|$)'
+                   )::int AS object_routes,
+               COUNT(DISTINCT upper(method) || ' ' || path)
+                   FILTER (
+                     WHERE auth_state IN ('user1','user2')
+                       AND upper(method) IN ('POST','PUT','PATCH')
+                       AND (COALESCE(param_shape, '') <> '' OR COALESCE(replay_spec, '') <> '')
+                   )::int AS mutation_routes,
+               COUNT(DISTINCT upper(method) || ' ' || path)
+                   FILTER (
+                     WHERE COALESCE(param_shape, '') <> '' OR COALESCE(replay_spec, '') <> ''
+                   )::int AS parameterized_routes,
+               MAX(last_seen_at) AS latest_inventory_seen_at
         FROM target_endpoints WHERE target_id=$1
-        """,
-        target_id,
-    )
-    graph = await conn.fetchrow(
-        """
-        SELECT COUNT(*) FILTER (WHERE node_type='route')::int AS route_nodes,
-               (SELECT COUNT(*)::int FROM application_graph_edges WHERE target_id=$1) AS edge_count
-        FROM application_graph_nodes WHERE target_id=$1
         """,
         target_id,
     )
     preflight_scan_id = _optional_uuid(config.get("preflight_scan_id"))
     preflight = None
+    reused_preflight = False
     if preflight_scan_id:
         preflight = await conn.fetchrow(
             "SELECT id, status, current_phase, error_message, created_at, completed_at FROM scans WHERE id=$1 AND target_id=$2",
             preflight_scan_id,
             target_id,
         )
+    elif gated:
+        # Reuse a recent, target-bound authenticated family pass when it has
+        # durable graph provenance.  This avoids paying for a duplicate broad
+        # preflight while never accepting inventory counts alone.
+        preflight = await conn.fetchrow(
+            """
+            SELECT s.id, s.status, s.current_phase, s.error_message, s.created_at, s.completed_at
+            FROM scans s
+            WHERE s.target_id=$1 AND s.status='completed'
+              AND s.completed_at >= NOW() - INTERVAL '24 hours'
+              AND EXISTS (
+                SELECT 1 FROM application_graph_nodes n
+                WHERE n.target_id=$1 AND n.scan_id=s.id
+              )
+              AND EXISTS (
+                SELECT 1 FROM target_endpoints e
+                WHERE e.target_id=$1 AND e.auth_state='user2'
+                  AND e.last_seen_at >= s.created_at
+              )
+            ORDER BY s.completed_at DESC
+            LIMIT 1
+            """,
+            target_id,
+        )
+        if preflight:
+            preflight_scan_id = _optional_uuid(preflight.get("id"))
+            reused_preflight = True
+    graph = await conn.fetchrow(
+        """
+        SELECT COUNT(*) FILTER (WHERE node_type='route')::int AS route_nodes,
+               COUNT(*) FILTER (
+                   WHERE node_type='route' AND scan_id=$2::uuid
+               )::int AS fresh_route_nodes,
+               MAX(last_seen_at) AS latest_graph_seen_at,
+               (SELECT COUNT(*)::int FROM application_graph_edges WHERE target_id=$1) AS edge_count,
+               (SELECT COUNT(*)::int FROM application_graph_edges
+                  WHERE target_id=$1 AND scan_id=$2::uuid) AS fresh_edge_count
+        FROM application_graph_nodes WHERE target_id=$1
+        """,
+        target_id,
+        preflight_scan_id,
+    )
     surface_payload = {
         **(row_to_dict(surface) if surface else {}),
         **(row_to_dict(graph) if graph else {}),
     }
+    before = config.get("surface_before_preflight") if isinstance(config.get("surface_before_preflight"), dict) else {}
+    executable_routes = int(surface_payload.get("executable_routes") or 0)
+    object_routes = int(surface_payload.get("object_routes") or 0)
+    parameterized_routes = int(surface_payload.get("parameterized_routes") or 0)
+    fresh_route_nodes = int(surface_payload.get("fresh_route_nodes") or 0)
+    fresh_edge_count = int(surface_payload.get("fresh_edge_count") or 0)
+    executable_families: list[str] = []
+    if "auth" in families and executable_routes > 0:
+        executable_families.append("auth")
+    if "bola" in families and object_routes > 0 and int(surface_payload.get("second_user_routes") or 0) > 0 and fresh_edge_count > 0:
+        executable_families.append("bola")
+    for injection_family in ("sqli", "xss"):
+        if injection_family in families and parameterized_routes > 0:
+            executable_families.append(injection_family)
+    meaningful_preflight_gain = bool(
+        fresh_route_nodes > 0
+        or fresh_edge_count > 0
+        or int(surface_payload.get("unique_routes") or 0) > int(before.get("unique_routes") or 0)
+        or int(surface_payload.get("authenticated_routes") or 0) > int(before.get("authenticated_routes") or 0)
+        or not before
+    )
+    surface_payload.update({
+        "executable_families": sorted(set(executable_families)),
+        "meaningful_preflight_gain": meaningful_preflight_gain,
+    })
     blockers: list[str] = []
     if gated and signals.get("primary_credentials") != "configured":
         blockers.append("primary_credentials_required")
@@ -28199,8 +28677,16 @@ async def _research_campaign_readiness(conn: Any, campaign: Any) -> dict[str, An
         )
     if gated and int(surface_payload.get("authenticated_routes") or 0) < RESEARCH_SURFACE_MIN_AUTHENTICATED_ROUTES:
         blockers.append("insufficient_authenticated_route_coverage")
+    if gated and executable_routes < RESEARCH_SURFACE_MIN_EXECUTABLE_ROUTES:
+        blockers.append("no_executable_authenticated_routes")
     if gated and "bola" in families and int(surface_payload.get("second_user_routes") or 0) <= 0:
         blockers.append("second_user_surface_not_observed")
+    if gated and "bola" in families and object_routes > 0 and fresh_edge_count <= 0:
+        blockers.append("two_principal_graph_not_materialized")
+    if gated and preflight_status == "completed" and not meaningful_preflight_gain:
+        blockers.append("authenticated_preflight_no_material_gain")
+    if gated and families and not executable_families:
+        blockers.append("no_allowed_family_has_executable_surface")
     hard_blockers = {
         "primary_credentials_required",
         "distinct_second_user_credentials_required",
@@ -28218,16 +28704,57 @@ async def _research_campaign_readiness(conn: Any, campaign: Any) -> dict[str, An
         "credential_signals": signals,
         "surface": surface_payload,
         "preflight_scan": row_to_dict(preflight) if preflight else None,
+        "reused_preflight": reused_preflight,
         "required": {
             "unique_routes": RESEARCH_SURFACE_MIN_UNIQUE_ROUTES,
             "authenticated_routes": RESEARCH_SURFACE_MIN_AUTHENTICATED_ROUTES if gated else 0,
+            "executable_routes": RESEARCH_SURFACE_MIN_EXECUTABLE_ROUTES if gated else 0,
             "second_user": bool(gated and "bola" in families),
+            "fresh_two_principal_graph": bool(gated and "bola" in families and object_routes > 0),
         },
     }
 
 
+def _research_preflight_scan_options(
+    *,
+    focus_family: str,
+    custom_endpoints: list[str],
+    approval_receipt_id: str | None,
+) -> ScanOptions:
+    endpoint_count = len(custom_endpoints)
+    return ScanOptions(
+        scan_type="smart",
+        thorough=True,
+        active=True,
+        no_early_stop=True,
+        budget_profile="thorough",
+        parallel=False,
+        auth_state_shards=False,
+        check_family=focus_family,
+        custom_endpoints=custom_endpoints or None,
+        focused_endpoints_only=bool(custom_endpoints),
+        zero_rediscovery=bool(custom_endpoints),
+        skip_global_checks=True,
+        exploit_depth=focus_family == "bola",
+        custom_budget={
+            "max_urls": max(50, endpoint_count),
+            "active_max_endpoints": max(20, endpoint_count),
+            "active_max_seconds": max(900, min(3600, endpoint_count * 20)),
+            "phase4_max_seconds": max(600, min(2400, endpoint_count * 12)),
+            "max_duration_minutes": 75,
+        },
+        require_current_workers=True,
+        approval_receipt_id=approval_receipt_id,
+    )
+
+
 async def _research_campaign_self_repair(campaign_id: Any) -> dict[str, Any]:
-    """Queue at most one approval-bound authenticated coverage scan at a time."""
+    """Queue one focused, principal-coherent readiness scan at a time.
+
+    BOLA resource mapping requires user1 and user2 in the same execution.  Do
+    not use auth-state shards here: they are useful for breadth accounting but
+    structurally incapable of producing cross-principal graph edges.
+    """
     campaign_uuid = _optional_uuid(campaign_id)
     async with db_pool.acquire() as conn:
         campaign = await conn.fetchrow("SELECT * FROM campaigns WHERE id=$1", campaign_uuid)
@@ -28238,6 +28765,24 @@ async def _research_campaign_self_repair(campaign_id: Any) -> dict[str, Any]:
         metadata = _decode_json_value(payload.get("metadata_json")) or {}
         config = metadata.get("autonomous_research") if isinstance(metadata.get("autonomous_research"), dict) else {}
         if readiness["ready"] or readiness["state"] == "waiting":
+            if readiness["ready"] and not config.get("preflight_scan_id") and readiness.get("preflight_scan"):
+                config.update({
+                    "preflight_state": "completed",
+                    "preflight_scan_id": str(readiness["preflight_scan"].get("id") or "") or None,
+                    "preflight_kind": "reused_recent_authenticated_graph",
+                    "readiness": readiness,
+                })
+                metadata["autonomous_research"] = config
+                campaign = await conn.fetchrow(
+                    "UPDATE campaigns SET metadata_json=$2::jsonb, updated_at=NOW() WHERE id=$1 RETURNING *",
+                    campaign_uuid,
+                    json.dumps(metadata, default=str),
+                )
+                return {
+                    "action": "reused_authenticated_graph_preflight",
+                    "readiness": readiness,
+                    "campaign": _public_campaign_row(campaign),
+                }
             return {"action": "none", "readiness": readiness, "campaign": _public_campaign_row(campaign)}
         if readiness["state"] == "blocked":
             config["readiness"] = readiness
@@ -28275,22 +28820,46 @@ async def _research_campaign_self_repair(campaign_id: Any) -> dict[str, Any]:
         target = await conn.fetchrow("SELECT id, url FROM targets WHERE id=$1 AND is_active=true", campaign["target_id"])
         if not target:
             raise HTTPException(status_code=404, detail="Active target not found")
+        endpoint_rows = await conn.fetch(
+            """
+            SELECT DISTINCT method, path, param_shape
+            FROM target_endpoints
+            WHERE target_id=$1 AND COALESCE(test_status, '') <> 'gone'
+              AND COALESCE(auth_state, '') IN ('user1','user2')
+            ORDER BY
+              CASE
+                WHEN path ~ '/(\\{[^/{}]+\\}|:[A-Za-z_][A-Za-z0-9_]*|[0-9]+)(/|$)' THEN 0
+                WHEN upper(method)='GET' THEN 1
+                ELSE 2
+              END,
+              path, method
+            LIMIT 150
+            """,
+            campaign["target_id"],
+        )
+
+    families = {
+        str(item).strip().lower()
+        for item in config.get("allowed_families") or []
+        if str(item).strip()
+    }
+    focus_family = next(
+        (family for family in ("bola", "auth", "sqli", "xss") if family in families),
+        "auth",
+    )
+    custom_endpoints = []
+    for row in endpoint_rows:
+        method = str(row.get("method") or "GET").strip().upper()
+        path = str(row.get("path") or "").strip()
+        if path:
+            custom_endpoints.append(f"{method} {path}")
 
     try:
         queued = await submit_scan(ScanRequest(
             target=str(target["url"]),
-            options=ScanOptions(
-                scan_type="smart",
-                thorough=True,
-                active=True,
-                no_early_stop=True,
-                budget_profile="thorough",
-                parallel=True,
-                shard_strategy="coverage",
-                auth_state_shards=True,
-                coverage_max_shards=8,
-                exploit_depth=True,
-                require_current_workers=True,
+            options=_research_preflight_scan_options(
+                focus_family=focus_family,
+                custom_endpoints=custom_endpoints,
                 approval_receipt_id=config.get("approval_receipt_id"),
             ),
         ))
@@ -28319,6 +28888,9 @@ async def _research_campaign_self_repair(campaign_id: Any) -> dict[str, Any]:
             "preflight_scan_id": queued.get("scan_id"),
             "preflight_job_id": queued.get("job_id"),
             "surface_before_preflight": readiness.get("surface") or {},
+            "preflight_kind": "focused_two_principal_graph" if focus_family == "bola" else "focused_authenticated_family",
+            "preflight_family": focus_family,
+            "preflight_endpoint_count": len(custom_endpoints),
             "last_error": None,
         })
         metadata["autonomous_research"] = config
@@ -28328,7 +28900,7 @@ async def _research_campaign_self_repair(campaign_id: Any) -> dict[str, Any]:
             json.dumps(metadata, default=str),
         )
     return {
-        "action": "queued_authenticated_coverage",
+        "action": "queued_authenticated_graph_preflight",
         "scan_id": queued.get("scan_id"),
         "job_id": queued.get("job_id"),
         "readiness": readiness,
@@ -28349,7 +28921,9 @@ async def _research_campaign_yield_metrics(conn: Any, campaign: Any) -> dict[str
     if episode_ids:
         decisions = await conn.fetch(
             """
-            SELECT rd.action, rd.status, rd.validation_errors, cr.id AS command_result_id, cr.finding_ids
+            SELECT rd.action, rd.status, rd.validation_errors,
+                   cr.id AS command_result_id, cr.status AS command_status,
+                   cr.finding_ids, cr.result_json
             FROM research_decisions rd
             LEFT JOIN command_results cr ON cr.id=rd.command_result_id
             WHERE rd.episode_id=ANY($1::uuid[])
@@ -28367,6 +28941,7 @@ async def _research_campaign_yield_metrics(conn: Any, campaign: Any) -> dict[str
     semantic_dimensions: set[str] = set()
     exhausted_dimensions: set[str] = set()
     falsification_counts: dict[str, int] = {}
+    outcome_counts: dict[str, int] = {key: 0 for key in sorted(RESEARCH_EXPERIMENT_OUTCOMES)}
     novelty_blocks = 0
     for row in decisions:
         action = _decode_json_value(row.get("action")) or {}
@@ -28383,7 +28958,11 @@ async def _research_campaign_yield_metrics(conn: Any, campaign: Any) -> dict[str
         semantic_dimensions.add(dimension)
         if row.get("command_result_id") and str(row.get("status") or "") == "completed":
             experiments += 1
-            if not (_decode_json_value(row.get("finding_ids")) or []):
+            outcome = _research_experiment_outcome(action, row)
+            if outcome:
+                outcome_name = str(outcome.get("outcome") or "inconclusive")
+                outcome_counts[outcome_name] = outcome_counts.get(outcome_name, 0) + 1
+            if outcome and outcome.get("deterministic_refutation"):
                 falsified += 1
                 falsification_counts[dimension] = falsification_counts.get(dimension, 0) + 1
     exhausted_dimensions.update(
@@ -28394,10 +28973,11 @@ async def _research_campaign_yield_metrics(conn: Any, campaign: Any) -> dict[str
         """
         SELECT COUNT(*) FROM findings
         WHERE target_id=$1 AND tool='autonomous_workflow'
-          AND created_at >= $2 AND last_verification_verdict='exploited'
+          AND created_at >= (SELECT created_at FROM campaigns WHERE id=$2)
+          AND last_verification_verdict='exploited'
         """,
         target_id,
-        payload.get("created_at"),
+        campaign_id,
     ) or 0)
     metadata = _decode_json_value(payload.get("metadata_json")) or {}
     config = metadata.get("autonomous_research") if isinstance(metadata.get("autonomous_research"), dict) else {}
@@ -28409,6 +28989,8 @@ async def _research_campaign_yield_metrics(conn: Any, campaign: Any) -> dict[str
         "model_units": model_units,
         "experiments": experiments,
         "falsified_experiments": falsified,
+        "experiment_outcomes": outcome_counts,
+        "non_scientific_experiments": outcome_counts.get("inconclusive", 0) + outcome_counts.get("blocked", 0),
         "semantic_dimensions_tested": len(semantic_dimensions),
         "exhausted_dimensions": len(exhausted_dimensions),
         "recon_actions": recon_actions,
@@ -28423,13 +29005,26 @@ async def _research_campaign_yield_metrics(conn: Any, campaign: Any) -> dict[str
             "authenticated_routes_after": int(after.get("authenticated_routes") or 0),
         },
         "stop_recommended": bool(
-            experiments >= 12
-            and verified_findings == 0
-            and falsified >= max(9, int(experiments * 0.75))
+            verified_findings == 0
+            and (
+                (
+                    experiments >= 12
+                    and falsified >= max(9, int(experiments * 0.75))
+                )
+                or (
+                    experiments >= 8
+                    and outcome_counts.get("inconclusive", 0) + outcome_counts.get("blocked", 0)
+                    >= max(6, int(experiments * 0.75))
+                )
+            )
         ),
         "stop_reason": (
             "zero_yield_falsification_ceiling"
             if experiments >= 12 and verified_findings == 0 and falsified >= max(9, int(experiments * 0.75))
+            else "experiment_harness_failure_ceiling"
+            if experiments >= 8 and verified_findings == 0
+            and outcome_counts.get("inconclusive", 0) + outcome_counts.get("blocked", 0)
+            >= max(6, int(experiments * 0.75))
             else None
         ),
     }
@@ -29176,6 +29771,7 @@ async def _continue_autonomous_research_campaigns() -> int:
             )
             latest_config.update({
                 "preflight_state": "completed",
+                "preflight_scan_id": str((readiness.get("preflight_scan") or {}).get("id") or latest_config.get("preflight_scan_id") or "") or None,
                 "readiness": readiness,
                 "surface_after_preflight": readiness.get("surface") or {},
                 "invariant_hypotheses_materialized": invariant_hypotheses,
@@ -29566,6 +30162,7 @@ async def submit_research_decision(episode_id: str, req: ResearchDecisionRequest
     normalized: dict[str, Any] = {}
     mode = "shadow"
     idempotency_key = ""
+    inferable_request = False
 
     async with db_pool.acquire() as conn:
         async with conn.transaction():
@@ -29643,6 +30240,13 @@ async def submit_research_decision(episode_id: str, req: ResearchDecisionRequest
                         errors.append("episode_approval_missing")
                     if not _ai_ops_execute_enabled():
                         errors.append("execution_feature_disabled")
+            if normalized.get("decision") == "request_input":
+                inferable_request = _research_requested_input_is_in_observation(
+                    normalized.get("requested_input"),
+                    observation_pack,
+                )
+                if inferable_request:
+                    errors.append("operator_input_unnecessary:use_selected_hypothesis_contract")
             errors = list(dict.fromkeys(errors))
             warnings = list(dict.fromkeys(warnings))
             key_material = {
@@ -29725,6 +30329,28 @@ async def submit_research_decision(episode_id: str, req: ResearchDecisionRequest
                     summary="Planner decision rejected by deterministic policy", observation_id=observation_row["id"],
                     decision_id=decision_id, details={"validation_errors": errors},
                 )
+                if inferable_request and next_status == "awaiting_planner":
+                    # Keep the same episode and turn the rejected request into a
+                    # durable tool-style observation.  The next planner turn sees
+                    # both the concrete contract and why operator escalation was
+                    # unnecessary; the campaign supervisor never gets an
+                    # ``awaiting_input`` episode to reap/restart.
+                    refreshed = await conn.fetchrow(
+                        "SELECT * FROM research_episodes WHERE id=$1",
+                        episode_row["id"],
+                    )
+                    await _build_research_observation(
+                        conn,
+                        refreshed,
+                        previous_result={
+                            "execution_blocked_reason": "operator_input_resolved_from_observation",
+                            "result": {
+                                "status": "context_available",
+                                "reason": "Use selected_hypothesis_contracts; no operator input is required.",
+                            },
+                        },
+                        next_status="awaiting_planner",
+                    )
                 return {
                     "accepted": False,
                     "decision": _public_research_decision_row(decision_row),
@@ -29984,6 +30610,11 @@ async def submit_research_decision(episode_id: str, req: ResearchDecisionRequest
                     WHERE id=$1
                     """,
                     episode_row["id"], next_step, json.dumps(used), stop_reason,
+                )
+                await _record_research_hypothesis_outcome(
+                    conn,
+                    decision_id=decision_id,
+                    command_result=command_result,
                 )
                 if async_ref:
                     await _record_research_event(
@@ -30508,6 +31139,10 @@ def _research_provider_contract_error(
         return ",".join(errors) or None
     if decision == "request_input" and not str(bound.get("requested_input") or "").strip():
         return "requested_input_required"
+    if decision == "request_input":
+        pack = observation.get("observation_pack") if isinstance(observation.get("observation_pack"), dict) else {}
+        if _research_requested_input_is_in_observation(bound.get("requested_input"), pack):
+            return "requested_input_already_available_in_selected_hypothesis_contract"
     if decision == "stop":
         stop_reason = str(bound.get("stop_reason") or "").strip()
         if not stop_reason:

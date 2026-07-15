@@ -215,12 +215,14 @@ export default function RunDetailPage() {
         </Link>
       ) : null}
 
-      {preflightState && preflightState !== 'completed' && preflightState !== 'not_required' ? (
+      {(preflightState && preflightState !== 'completed' && preflightState !== 'not_required') || readiness?.ready === false ? (
         <Card className="mt-4 p-4">
-          <div className="text-sm font-medium text-blue-200">Authenticated coverage preflight: {preflightState}</div>
+          <div className={`text-sm font-medium ${readiness?.ready === false ? 'text-amber-300' : 'text-blue-200'}`}>
+            Authenticated coverage {readiness?.ready === false ? 'blocked' : `preflight: ${preflightState}`}
+          </div>
           <p className="mt-1 text-xs text-gray-500">
-            Hunting starts only after the route inventory contains authenticated surface
-            {Array.isArray(readiness?.blockers) ? ` · ${readiness.blockers.join(', ')}` : ''}.
+            Hunting starts only after the route inventory contains executable authenticated surface
+            {Array.isArray(readiness?.blockers) && readiness.blockers.length > 0 ? ` · ${readiness.blockers.join(', ')}` : ''}.
           </p>
           {preflightScanId ? <Link className="mt-2 inline-block text-xs text-blue-300 hover:text-blue-200" href={`/scans/${preflightScanId}`}>View preflight scan →</Link> : null}
         </Card>
@@ -230,9 +232,13 @@ export default function RunDetailPage() {
         <Card className="mt-4 p-4">
           <div className="grid grid-cols-2 gap-3 text-xs sm:grid-cols-4">
             <Metric label="Experiments" value={yieldMetrics.experiments} />
-            <Metric label="Falsified" value={yieldMetrics.falsified_experiments} />
+            <Metric label="Refuted" value={yieldMetrics.falsified_experiments} />
+            <Metric label="Supported" value={yieldMetrics.experiment_outcomes?.supported_unverified || 0} />
+            <Metric label="Inconclusive / blocked" value={yieldMetrics.non_scientific_experiments || 0} />
             <Metric label="Recon actions" value={yieldMetrics.recon_actions} />
+            <Metric label="Known-vuln skips" value={yieldMetrics.novelty_suppressions} />
             <Metric label="Model units" value={yieldMetrics.model_units.toLocaleString()} />
+            <Metric label="Verified findings" value={yieldMetrics.verified_autonomous_findings} />
           </div>
           {yieldMetrics.stop_reason ? <p className="mt-3 text-xs text-amber-300">Stopped by yield guard: {yieldMetrics.stop_reason}</p> : null}
         </Card>
