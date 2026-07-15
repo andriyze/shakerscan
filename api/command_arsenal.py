@@ -904,7 +904,10 @@ COMMANDS: tuple[ArsenalCommand, ...] = (
             "falsifier": {"type": "string", "maxLength": 1000},
             "proof_family": {
                 "type": "string",
-                "enum": ["bola", "mass_assignment", "injection", "auth_bypass", "workflow", "data_exposure"],
+                "enum": [
+                    "bola", "mass_assignment", "injection", "auth_bypass", "workflow",
+                    "data_exposure", "access_control", "field_constraint",
+                ],
             },
             "assertions": {
                 "type": "array", "minItems": 1, "maxItems": 16,

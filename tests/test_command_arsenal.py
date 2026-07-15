@@ -329,6 +329,10 @@ def test_workflow_catalog_exposes_discriminated_http_and_browser_step_contracts(
     assert set(properties["method"]["enum"]) == workflow_experiment.ALLOWED_METHODS
     assert set(properties["checkpoint"]["enum"]) == workflow_experiment.ALLOWED_CHECKPOINTS
     assert set(properties["action"]["enum"]) == workflow_experiment.ALLOWED_BROWSER_ACTIONS
+    assert set(schema["proof_family"]["enum"]) == {
+        "bola", "mass_assignment", "injection", "auth_bypass", "workflow",
+        "data_exposure", "access_control", "field_constraint",
+    }
 
     principal_variants = properties["principal"]["oneOf"]
     assert set(principal_variants[0]["enum"]) == {"anonymous", "user1", "user2", "admin"}
