@@ -236,8 +236,13 @@ def _obs_status(obs: dict[str, Any]) -> int | None:
 
 
 def _obs_success(obs: dict[str, Any]) -> bool:
+    if obs.get("error"):
+        return False
+    if str(obs.get("kind") or "").lower() == "browser":
+        response = obs.get("response") if isinstance(obs.get("response"), dict) else {}
+        return response.get("success") is True
     status = _obs_status(obs)
-    return status is not None and 200 <= status < 300 and not obs.get("error")
+    return status is not None and 200 <= status < 300
 
 
 def _obs_authenticated(obs: dict[str, Any]) -> bool:
@@ -1097,7 +1102,17 @@ async def execute_workflow(
                     if step["action"] == "fill" and _sensitive_name(data.get("selector")):
                         raise WorkflowContractError("rendered_browser_sensitive_fill_forbidden")
                     result = await browser_action(step["principal"], step["action"], data)
-                    response = {"success": bool(result.get("success")), "url": result.get("url"), "value_present": result.get("value") is not None}
+                    browser_value = result.get("value")
+                    response = {
+                        "success": bool(result.get("success")),
+                        "url": result.get("url"),
+                        "value_present": browser_value is not None,
+                        "value_sha256": (
+                            _value_fingerprint(browser_value)
+                            if browser_value is not None and not isinstance(browser_value, (dict, list))
+                            else None
+                        ),
+                    }
                     request_view.update({"action": step["action"], "selector": data.get("selector")})
                     if not result.get("success"):
                         raise WorkflowContractError(str(result.get("error") or "browser_action_failed"))

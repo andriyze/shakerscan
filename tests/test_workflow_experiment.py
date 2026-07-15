@@ -158,6 +158,60 @@ def test_mutating_workflow_requires_and_verifies_restoration():
         workflow.normalize_workflow("https://example.test", unsafe)
 
 
+def test_browser_mutation_success_and_restoration_use_hashed_extracted_state():
+    state = {"value": "off"}
+
+    async def browser_action(_principal, action, data):
+        if action == "click" and data["selector"] == "#enable":
+            state["value"] = "on"
+        elif action == "click" and data["selector"] == "#disable":
+            state["value"] = "off"
+        if action == "extract":
+            return {"success": True, "value": state["value"], "url": "https://example.test/settings"}
+        return {"success": True, "url": "https://example.test/settings"}
+
+    payload = {
+        "proof_family": "workflow",
+        "steps": [
+            {"label": "before", "kind": "browser", "principal": "anonymous", "checkpoint": "before",
+             "action": "extract", "data": {"selector": "#state", "attribute": "text"},
+             "extract": [{"name": "state_before", "source": "browser", "selector": "#state"}]},
+            {"label": "mutate", "kind": "browser", "principal": "anonymous", "checkpoint": "mutation",
+             "action": "click", "data": {"selector": "#enable"}},
+            {"label": "changed", "kind": "browser", "principal": "anonymous", "checkpoint": "action",
+             "action": "extract", "data": {"selector": "#state", "attribute": "text"},
+             "extract": [{"name": "state_changed", "source": "browser", "selector": "#state"}],
+             "compare_to": "before"},
+            {"label": "cleanup", "kind": "browser", "principal": "anonymous", "checkpoint": "cleanup",
+             "action": "click", "data": {"selector": "#disable"}},
+            {"label": "after", "kind": "browser", "principal": "anonymous", "checkpoint": "after",
+             "action": "extract", "data": {"selector": "#state", "attribute": "text"},
+             "extract": [{"name": "state_after", "source": "browser", "selector": "#state"}],
+             "compare_to": "before"},
+        ],
+        "assertions": [
+            {"type": "comparison_changed", "control": "before", "candidate": "changed"},
+            {"type": "restored", "control": "before", "candidate": "after",
+             "predicate": "before_after_state"},
+        ],
+    }
+
+    result = asyncio.run(workflow.execute_workflow(
+        "https://example.test",
+        payload,
+        principal_contexts={},
+        browser_action=browser_action,
+    ))
+
+    assert result["assertions_passed"] is True
+    assert result["restoration_verified"] is True
+    assert result["observations"][3]["response"]["success"] is True
+    assert result["observations"][0]["response"]["value_sha256"] == workflow._value_fingerprint("off")
+    assert result["observations"][2]["response"]["value_sha256"] == workflow._value_fingerprint("on")
+    assert "off" not in str(result["observations"][0]["response"])
+    assert "on" not in str(result["observations"][2]["response"])
+
+
 # --- P0: promotion predicates must be server-corroborated, never trusted from the model label ---
 
 def test_generic_200_cannot_be_labelled_a_sensitive_value_finding():
