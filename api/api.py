@@ -24132,8 +24132,17 @@ async def _promote_trusted_workflow_finding(
         return None
     proven_method = hypothesis_method or (next(iter(proof_methods)) if len(proof_methods) == 1 else "")
     finding_route = hypothesis_route or (sorted(proven_routes)[0] if proven_routes else None)
+    vulnerability_dimensions = _research_vulnerability_dimensions(
+        hypothesis.get("family") or family,
+        dedupe_dimensions,
+        hypothesis_metadata,
+        {"predicates": proof.get("stable_predicates") or []},
+    )
     canonical_vulnerability_key = _canonical_vulnerability_key(
-        family=family, route=finding_route, method=proven_method or None,
+        family=family,
+        route=finding_route,
+        method=proven_method or None,
+        dimensions=vulnerability_dimensions,
     )
     if not canonical_vulnerability_key:
         return None
@@ -24183,7 +24192,8 @@ async def _promote_trusted_workflow_finding(
     evidence = _redact_finding_evidence({
         "proof": "Independent live workflow replay satisfied the deterministic family-proof contract.",
         "canonical_vulnerability_key": canonical_vulnerability_key,
-        "canonical_vulnerability_key_version": "v2",
+        "canonical_vulnerability_key_version": "v3",
+        "canonical_vulnerability_dimensions": vulnerability_dimensions,
         "dedupe_dimensions": dedupe_dimensions,
         "family_proof": proof,
         "autonomous_workflow": {
@@ -28642,12 +28652,21 @@ def _research_action_dedupe_comparable(action: Any) -> dict[str, Any]:
         for a in assertions
         if isinstance(a, dict)
     )
+    principal_variables = sorted(
+        _research_canonical_hash({
+            "principal": str(item.get("principal") or "").strip().lower(),
+            "ref": str(item.get("ref") or "").strip().lower(),
+        })
+        for item in params.get("principal_variables") or []
+        if isinstance(item, dict)
+    )
     return {
         "command": command,
         "parameters": {
-            "proof_family": family_proof.canonical_family(params.get("proof_family") or params.get("family")),
+            "proof_family": str(params.get("proof_family") or params.get("family") or "").strip().lower(),
             "steps": canonical_steps,
             "assertions": canonical_assertions,
+            "principal_variables": principal_variables,
         },
     }
 
@@ -28673,7 +28692,7 @@ async def _research_is_consecutive_duplicate_action(
               )
           )
         ORDER BY rd.created_at DESC
-        LIMIT 200
+        LIMIT 2000
         """,
         _optional_uuid(episode_id),
     )
@@ -28690,8 +28709,8 @@ async def _research_is_consecutive_duplicate_action(
         # A truly intervening state change requires the gated command to have actually PRODUCED a result
         # (a finding), not merely to have been dispatched. A failed/partial command that changed nothing
         # must NOT reset the duplicate guard -- otherwise the "failed A -> partial B -> failed A" loop the
-        # audit flagged repeats forever. Widened window (200) also reduces short-window rollover; fully
-        # durable enforcement across thousands of decisions (a persisted fingerprint set) stays Phase 1.
+        # audit flagged repeats forever. The 2,000-row window covers the maximum bounded campaign
+        # decision volume and matches the campaign exhaustion ledger, preventing short-window rollover.
         # asyncpg returns JSONB as encoded text unless a custom codec is installed. ``bool("[]")`` is
         # true, so testing the raw column would treat every empty finding list as progress and reopen
         # the failed-A -> partial-B -> failed-A loop. Decode before deciding whether B made progress.
@@ -28918,7 +28937,107 @@ def _canonical_vulnerability_route(value: Any) -> str | None:
     return re.sub(r"/+", "/", path)[:1000]
 
 
-def _canonical_vulnerability_key(*, family: Any, route: Any, method: Any = None) -> str | None:
+def _research_vulnerability_dimensions(family: Any, *sources: Any) -> dict[str, Any]:
+    """Extract stable identity dimensions that distinguish bugs on one operation."""
+    raw_family = str(family or "").strip().lower().replace("-", "_").replace(" ", "_")
+    canonical_family = family_proof.canonical_family(raw_family)
+    parameters: set[str] = set()
+    fields: set[str] = set()
+    invariants: set[str] = set()
+    predicates: set[str] = set()
+    roles: set[str] = set()
+    tenants: set[str] = set()
+    locations: set[str] = set()
+    variants: set[str] = set()
+
+    def _add(target: set[str], value: Any) -> None:
+        values: list[Any]
+        if isinstance(value, dict):
+            values = list(value.keys())
+        elif isinstance(value, (list, tuple, set)):
+            values = list(value)
+        else:
+            values = [value]
+        for item in values:
+            text = str(item or "").strip().lower()
+            if text:
+                target.add(text[:160])
+
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        nested_sources = [source]
+        for key in (
+            "dedupe_dimensions", "canonical_vulnerability_dimensions",
+            "metadata_json", "endpoint_hint",
+        ):
+            if isinstance(source.get(key), dict):
+                nested_sources.append(source[key])
+        for item in nested_sources:
+            for key in ("parameter", "param", "parameter_name", "object_key", "object_id_key"):
+                _add(parameters, item.get(key))
+            for key in ("object_parameters", "query_keys"):
+                _add(parameters, item.get(key))
+            if not isinstance(item.get("parameters"), dict):
+                _add(parameters, item.get("parameters"))
+            for key in ("field", "field_name", "fields", "submitted_fields", "request_fields"):
+                _add(fields, item.get(key))
+            for key in ("json_body", "form_body"):
+                _add(fields, item.get(key))
+            if isinstance(item.get("query"), dict):
+                _add(parameters, item["query"])
+            for key in ("invariant_contract_id", "invariant_id", "invariants", "contract_kind", "operator"):
+                _add(invariants, item.get(key))
+            for key in ("predicate", "predicates", "assertion_predicates"):
+                _add(predicates, item.get(key))
+            for key in ("role", "roles", "subject_role", "required_role"):
+                _add(roles, item.get(key))
+            for key in ("tenant", "tenants", "tenant_id"):
+                _add(tenants, item.get(key))
+            for key in ("location", "locations", "injection_point", "parameter_location"):
+                _add(locations, item.get(key))
+            _add(variants, item.get("variant"))
+
+    dimensions: dict[str, Any] = {}
+    if canonical_family == "injection":
+        if raw_family and raw_family != "injection":
+            dimensions["variant"] = raw_family
+        elif variants:
+            dimensions["variant"] = sorted(variants)[0]
+        if parameters:
+            dimensions["parameters"] = sorted(parameters)
+        if locations:
+            dimensions["locations"] = sorted(locations)
+    elif canonical_family == "bola":
+        if parameters:
+            dimensions["object_parameters"] = sorted(parameters)
+        if tenants:
+            dimensions["tenants"] = sorted(tenants)
+    elif canonical_family == "mass_assignment":
+        if fields:
+            dimensions["fields"] = sorted(fields)
+    elif canonical_family in {"field_constraint", "workflow"}:
+        if fields:
+            dimensions["fields"] = sorted(fields)
+        if invariants:
+            dimensions["invariants"] = sorted(invariants)
+        if predicates:
+            dimensions["predicates"] = sorted(predicates)
+    elif canonical_family == "access_control":
+        if invariants:
+            dimensions["invariants"] = sorted(invariants)
+        if predicates:
+            dimensions["predicates"] = sorted(predicates)
+        if roles:
+            dimensions["roles"] = sorted(roles)
+        if tenants:
+            dimensions["tenants"] = sorted(tenants)
+    return dimensions
+
+
+def _canonical_vulnerability_key(
+    *, family: Any, route: Any, method: Any = None, dimensions: Any = None,
+) -> str | None:
     canonical_family = family_proof.canonical_family(family)
     canonical_route = _canonical_vulnerability_route(route)
     if not canonical_family or not canonical_route:
@@ -28927,8 +29046,15 @@ def _canonical_vulnerability_key(*, family: Any, route: Any, method: Any = None)
     # distinct operations and must not collapse to one novelty key. '*' when the caller has no
     # method, and '*' only matches '*' (conservative -- an unknown method never suppresses a known one).
     canonical_method = str(method or "").strip().upper() or "*"
+    canonical_dimensions = _research_vulnerability_dimensions(
+        family,
+        dimensions if isinstance(dimensions, dict) else {},
+    )
     return hashlib.sha256(
-        f"vulnerability:v2|{canonical_family}|{canonical_method}|{canonical_route}".encode()
+        (
+            f"vulnerability:v3|{canonical_family}|{canonical_method}|{canonical_route}|"
+            + json.dumps(canonical_dimensions, sort_keys=True, separators=(",", ":"))
+        ).encode()
     ).hexdigest()
 
 
@@ -28969,11 +29095,22 @@ def _finding_vulnerability_key(value: Any) -> str | None:
         proof_type = str((evidence or {}).get("proof_type") or "").lower()
         if "write" not in proof_type:
             method = "GET"
-    computed = _canonical_vulnerability_key(family=family, route=route, method=method)
+    computed = _canonical_vulnerability_key(
+        family=family,
+        route=route,
+        method=method,
+        dimensions=_research_vulnerability_dimensions(
+            family,
+            dimensions if isinstance(evidence, dict) else {},
+            evidence,
+            finding,
+            request if isinstance(request, dict) else {},
+        ),
+    )
     if computed:
         return computed
     # Keep opaque legacy/manual evidence attributable only when structured family/route data is absent.
-    # Recompute whenever possible so v1 explicit hashes cannot silently bypass the v2 method-aware key.
+    # Recompute whenever possible so legacy explicit hashes cannot bypass the v3 dimensional key.
     explicit = str((evidence or {}).get("canonical_vulnerability_key") or "").strip().lower()
     return explicit if re.fullmatch(r"[a-f0-9]{64}", explicit) else None
 
@@ -29071,16 +29208,21 @@ def _research_hypothesis_vulnerability_key(hypothesis: dict[str, Any]) -> str | 
         family=hypothesis.get("family"),
         route=_research_hypothesis_route(hypothesis),
         method=dimensions.get("method") or metadata.get("method"),
+        dimensions=_research_vulnerability_dimensions(
+            hypothesis.get("family"),
+            dimensions,
+            metadata,
+            hypothesis.get("next_test_action") if isinstance(hypothesis.get("next_test_action"), dict) else {},
+        ),
     )
 
 
 def _research_action_semantic_dimension(action: dict[str, Any]) -> str | None:
-    """Collapse volatile workflow ids/object ids into a family+route test dimension."""
+    """Collapse volatile ids/prose while retaining method, payload, principal, and assertions."""
     command = str(action.get("command") or "").strip()
     parameters = action.get("parameters") if isinstance(action.get("parameters"), dict) else {}
     if command not in {"experiment.workflow", "experiment.http_diff"}:
         return None
-    family = family_proof.canonical_family(parameters.get("proof_family") or command)
     routes: set[str] = set()
     for step in parameters.get("steps") or []:
         if not isinstance(step, dict):
@@ -29091,10 +29233,15 @@ def _research_action_semantic_dimension(action: dict[str, Any]) -> str | None:
     direct_route = _canonical_vulnerability_route(parameters.get("route"))
     if direct_route:
         routes.add(direct_route)
-    if not family or not routes:
+    if not routes:
         return None
-    material = f"semantic-experiment:v1|{family}|{'|'.join(sorted(routes))}"
-    return hashlib.sha256(material.encode()).hexdigest()
+    comparable = _research_action_dedupe_comparable(action)
+    material = {
+        "version": "semantic-experiment-v2",
+        "routes": sorted(routes),
+        "experiment": comparable,
+    }
+    return _research_canonical_hash(material)
 
 
 def _research_action_vulnerability_keys(action: dict[str, Any]) -> set[str]:
@@ -29126,18 +29273,34 @@ def _research_action_vulnerability_keys(action: dict[str, Any]) -> set[str]:
                 target_labels.add(text)
     keys: set[str] = set()
 
-    def _add(route: Any, method: Any) -> None:
+    assertion_predicates = sorted({
+        str(assertion.get("predicate") or "").strip().lower()
+        for assertion in parameters.get("assertions") or []
+        if isinstance(assertion, dict) and assertion.get("predicate")
+    })
+
+    def _add(route: Any, method: Any, step: dict[str, Any] | None = None) -> None:
         # A concrete candidate matches only the same concrete method. Unknown-method candidates use
         # the wildcard key, but a methodless historic finding must never suppress every known method.
-        key = _canonical_vulnerability_key(family=family, route=route, method=method)
+        key = _canonical_vulnerability_key(
+            family=parameters.get("proof_family") or family,
+            route=route,
+            method=method,
+            dimensions=_research_vulnerability_dimensions(
+                parameters.get("proof_family") or family,
+                parameters,
+                step or {},
+                {"assertion_predicates": assertion_predicates},
+            ),
+        )
         if key:
             keys.add(key)
 
     for label in target_labels:
         step = steps_by_label.get(label)
         if step:
-            _add(step.get("path") or step.get("route"), step.get("method"))
-    _add(parameters.get("route"), parameters.get("method"))
+            _add(step.get("path") or step.get("route"), step.get("method"), step)
+    _add(parameters.get("route"), parameters.get("method"), parameters)
     return keys
 
 

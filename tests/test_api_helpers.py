@@ -10178,7 +10178,8 @@ def test_compacted_real_experiment_schema_survives_into_provider_prompt():
         return result
 
     method_values = {str(item) for item in collect_enums(http_schema)}
-    assert {"GET", "POST"}.issubset(method_values)
+    assert {"GET", "HEAD", "OPTIONS"}.issubset(method_values)
+    assert "POST" not in method_values
     assert "DELETE" not in method_values
     step_schema = http_schema["steps"]["items"]
     assert step_schema["allOf"][0]["if"]["properties"]["method"]["enum"] == [
@@ -11333,6 +11334,50 @@ def test_vulnerability_key_is_method_aware_and_gate_targets_only_asserted_steps(
     keys = api_module._research_action_vulnerability_keys(action)
     assert api_module._canonical_vulnerability_key(family="bola", route="/orders/{id}", method="GET") in keys
     assert api_module._canonical_vulnerability_key(family="bola", route="/known/vuln/route", method="POST") not in keys
+
+
+def test_vulnerability_identity_distinguishes_family_parameter_field_and_invariant():
+    sqli_q = api_module._canonical_vulnerability_key(
+        family="sqli", route="/search", method="GET",
+        dimensions={"parameter": "q", "location": "query"},
+    )
+    sqli_id = api_module._canonical_vulnerability_key(
+        family="sqli", route="/search", method="GET",
+        dimensions={"parameter": "id", "location": "query"},
+    )
+    xss_q = api_module._canonical_vulnerability_key(
+        family="xss", route="/search", method="GET",
+        dimensions={"parameter": "q", "location": "query"},
+    )
+    role = api_module._canonical_vulnerability_key(
+        family="mass_assignment", route="/profile", method="PATCH",
+        dimensions={"field": "role"},
+    )
+    is_admin = api_module._canonical_vulnerability_key(
+        family="mass_assignment", route="/profile", method="PATCH",
+        dimensions={"field": "isAdmin"},
+    )
+    invariant_one = api_module._canonical_vulnerability_key(
+        family="workflow", route="/orders/{id}", method="PATCH",
+        dimensions={"invariant_contract_id": "contract-1", "predicate": "transition_invariant_broken"},
+    )
+    invariant_two = api_module._canonical_vulnerability_key(
+        family="workflow", route="/orders/42", method="PATCH",
+        dimensions={"invariant_contract_id": "contract-2", "predicate": "transition_invariant_broken"},
+    )
+
+    assert len({sqli_q, sqli_id, xss_q}) == 3
+    assert role != is_admin
+    assert invariant_one != invariant_two
+    assert api_module._finding_vulnerability_key({
+        "tool": "smart_sqli",
+        "cwe": "CWE-89",
+        "title": "SQL injection in q",
+        "url": "https://example.test/search",
+        "evidence": {"dedupe_dimensions": {
+            "route": "/search", "method": "GET", "parameter": "q", "location": "query",
+        }},
+    }) == sqli_q
 
 
 def test_legacy_methodless_smart_bola_suppresses_get_but_not_delete():
@@ -12556,6 +12601,36 @@ def test_research_semantic_dimension_ignores_workflow_and_concrete_object_ids():
     }
 
     assert api_module._research_action_semantic_dimension(first) == api_module._research_action_semantic_dimension(second)
+
+
+def test_research_semantic_dimension_retains_method_field_and_assertion():
+    base = {
+        "command": "experiment.workflow",
+        "parameters": {
+            "proof_family": "mass_assignment",
+            "steps": [
+                {"label": "mutate", "method": "PATCH", "path": "/profile/42",
+                 "principal": "user1", "checkpoint": "mutation", "json_body": {"role": "admin"}},
+            ],
+            "assertions": [
+                {"step": "mutate", "type": "status_in", "values": [200],
+                 "predicate": "forbidden_field_accepted"},
+            ],
+        },
+    }
+    different_method = json.loads(json.dumps(base))
+    different_method["parameters"]["steps"][0]["method"] = "POST"
+    different_field = json.loads(json.dumps(base))
+    different_field["parameters"]["steps"][0]["json_body"] = {"isAdmin": True}
+    different_assertion = json.loads(json.dumps(base))
+    different_assertion["parameters"]["assertions"][0]["predicate"] = "benign_control_accepted"
+
+    dimensions = {
+        api_module._research_action_semantic_dimension(item)
+        for item in (base, different_method, different_field, different_assertion)
+    }
+    assert None not in dimensions
+    assert len(dimensions) == 4
 
 
 def test_research_hypothesis_context_suppresses_known_deterministic_finding():
