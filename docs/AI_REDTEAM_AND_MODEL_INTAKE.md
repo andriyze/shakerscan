@@ -54,8 +54,8 @@ Core files:
 | AI learning/export/report artifacts | `api/ai_redteam_artifacts.py` |
 | Scenario templates | `api/ai_demo_scenarios.py` |
 | Model Intake engine | `scanner/scanner_tools/model_intake.py` |
-| AI Gate UI | `ui/src/app/settings/ai-gate/page.tsx` |
-| Model Intake UI | `ui/src/app/settings/model-intake/page.tsx` |
+| AI Gate UI | `ui/src/app/ai-gate/page.tsx` |
+| Model Intake UI | `ui/src/app/model-intake/page.tsx` |
 | Shared report UI | `ui/src/components/ReportView.tsx` |
 | AI settings UI | `ui/src/components/AISettingsPanel.tsx` |
 
@@ -67,7 +67,7 @@ This section is the feature inventory. If a user asks "what AI functionality doe
 
 ### Feature 1: Create AI Gate targets and inventory candidates
 
-Users can save AI targets from `/settings/ai-gate` or through `POST /ai/targets`.
+Users can save AI targets from `/ai-gate` or through `POST /ai/targets`.
 
 Supported target types:
 
@@ -81,7 +81,7 @@ Supported target types:
 
 Example user flow:
 
-1. Open `/settings/ai-gate`.
+1. Open `/ai-gate`.
 2. Add a target named `Support RAG`.
 3. Set target type to `rag`.
 4. Set endpoint URL to `https://staging.example.com/api/rag/answer`.
@@ -431,7 +431,7 @@ Implemented artifact checks include:
 
 Example user flow:
 
-1. Open `/settings/model-intake`.
+1. Open `/model-intake`.
 2. Submit a `.safetensors` artifact URL.
 3. Provide expected SHA256 and metadata.
 4. Queue the scan.
@@ -998,8 +998,8 @@ Primary pages:
 | Page | Purpose |
 |---|---|
 | `/settings` | AI provider settings and Calibration Lab settings |
-| `/settings/ai-gate` | Create AI targets, apply templates, queue AI Gate scans |
-| `/settings/model-intake` | Resolve references, manage saved trust anchors, preview trust, and queue intake scans |
+| `/ai-gate` | Create AI targets, apply templates, queue AI Gate scans |
+| `/model-intake` | Resolve references, manage saved trust anchors, preview trust, and queue intake scans |
 | `/scans/{scan_id}` | Review AI Gate or Model Intake result |
 | `/findings` | Filter and triage findings |
 | `/exposure` | Explore attack-surface graph including AI entities |

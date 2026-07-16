@@ -230,7 +230,7 @@ curl -X POST http://localhost:8080/workers -d '{"count": 10}'     # Scale to 10
 
 ### AI Gate
 
-AI Gate tests AI application surfaces for prompt injection, sensitive disclosure, unsafe tool use, RAG leakage, and MCP/tool boundary failures. UI: `/settings/ai-gate`. Claude Code and other AI coding agents can use ShakerScan as a local AI-safety testing tool.
+AI Gate tests AI application surfaces for prompt injection, sensitive disclosure, unsafe tool use, RAG leakage, and MCP/tool boundary failures. UI: `/ai-gate`. Claude Code and other AI coding agents can use ShakerScan as a local AI-safety testing tool.
 
 AI Gate evaluates probes with deterministic/regex detectors first. When an AI provider is configured in AI settings, it also runs semantic AI judging on probe transcripts, populates `ai_verdict`, `ai_confidence`, `ai_rationale`, and `ai_recommendations`, and can downgrade high-confidence false positives before the AI Gate score and deploy decision are computed.
 
@@ -305,7 +305,7 @@ After submitting an AI Gate scan, report the scan ID and UI link (`/scans/{scan_
 
 ### Model Intake
 
-Model Intake checks model artifacts before deployment without importing or executing model code. UI: `/settings/model-intake`. Covers provenance, unsafe serialization, checksum/signature, model card, license review, SBOM/dependency evidence, malware scan evidence, security evals, deployment restrictions, monitoring plan, and deployment approval checks.
+Model Intake checks model artifacts before deployment without importing or executing model code. UI: `/model-intake`. Covers provenance, unsafe serialization, checksum/signature, model card, license review, SBOM/dependency evidence, malware scan evidence, security evals, deployment restrictions, monitoring plan, and deployment approval checks.
 
 Model Intake findings use `tool/source=model_intake`, filter with `source_type=model_intake`, and are
 excluded from `source_type=dast`.

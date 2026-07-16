@@ -1373,7 +1373,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | `mission.timeline` | governance | read_only | read_only | GET | `/timeline` | Read the cross-product mission timeline: command results, campaign actions, recent scans, evidence bindings, export events, refuter reviews, and upcoming schedules. |
 | `model_intake.evidence_export` | model_intake | read_only | read_only | GET | `/model-intake/scans/{scan_id}/evidence-export` | Read a content-free Model Intake evidence export with trust, AIBOM, policy, and replay hashes. |
 | `model_intake.scan` | model_intake | gated | passive | POST | `/model-intake/scan` | Queue a Model Intake artifact check through existing policy and artifact-fetch gates. |
-| `model_intake.trust_preview` | model_intake | read_only | read_only | CLIENT | `/settings/model-intake` | Preview Model Intake trust mode and policy readiness in the UI before queueing a scan. |
+| `model_intake.trust_preview` | model_intake | read_only | read_only | CLIENT | `/model-intake` | Preview Model Intake trust mode and policy readiness in the UI before queueing a scan. |
 | `operation_plan.list` | governance | read_only | read_only | GET | `/arsenal/plans` | Read recent dry-run OperationPlan records. |
 | `operation_plan.preview` | governance | dry_run | read_only | POST | `/arsenal/plans` | Validate and persist a dry-run OperationPlan without executing any action. |
 | `refuter_review.derive_verdict` | governance | gated | read_only | POST | `/arsenal/refuter-reviews/{refuter_review_id}/derive-verdict` | Record a refuter signal or deterministic proof-backed verdict from a completed finding verification row without changing product truth. |
@@ -1799,24 +1799,24 @@ Only key names and declaring sources are documented; secret values are never rea
 
 | Route | Source |
 |---|---|
+| `/ai-gate` | `ui/src/app/ai-gate/page.tsx` |
 | `/asm` | `ui/src/app/asm/page.tsx` |
 | `/campaigns/{id}` | `ui/src/app/campaigns/[id]/page.tsx` |
 | `/campaigns` | `ui/src/app/campaigns/page.tsx` |
 | `/evidence` | `ui/src/app/evidence/page.tsx` |
+| `/exceptions` | `ui/src/app/exceptions/page.tsx` |
 | `/exposure` | `ui/src/app/exposure/page.tsx` |
 | `/findings/{id}` | `ui/src/app/findings/[id]/page.tsx` |
 | `/findings` | `ui/src/app/findings/page.tsx` |
 | `/interactive` | `ui/src/app/interactive/page.tsx` |
+| `/model-intake` | `ui/src/app/model-intake/page.tsx` |
 | `/` | `ui/src/app/page.tsx` |
 | `/scan/new` | `ui/src/app/scan/new/page.tsx` |
 | `/scans/{id}` | `ui/src/app/scans/[id]/page.tsx` |
 | `/scans` | `ui/src/app/scans/page.tsx` |
 | `/schedules` | `ui/src/app/schedules/page.tsx` |
-| `/settings/ai-gate` | `ui/src/app/settings/ai-gate/page.tsx` |
 | `/settings/ai-ops-router` | `ui/src/app/settings/ai-ops-router/page.tsx` |
 | `/settings/arsenal` | `ui/src/app/settings/arsenal/page.tsx` |
-| `/settings/exceptions` | `ui/src/app/settings/exceptions/page.tsx` |
-| `/settings/model-intake` | `ui/src/app/settings/model-intake/page.tsx` |
 | `/settings` | `ui/src/app/settings/page.tsx` |
 | `/settings/policy-profiles` | `ui/src/app/settings/policy-profiles/page.tsx` |
 | `/settings/research-agent/experiment` | `ui/src/app/settings/research-agent/experiment/page.tsx` |

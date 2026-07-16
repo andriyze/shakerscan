@@ -65,11 +65,11 @@ flags, skills, agents, adapters, modules, and durable tables) plus architecture/
 - **Schedules (`/schedules`)**: create/toggle/delete recurring daily/weekly actions. Supports normal scans, typed ASM coverage waves (`asm_improve`), and approval-gated evidence-retention sweeps (`evidence_retention_sweep`).
 - **Findings (`/findings`)**: filter by DAST, AI Gate, Model Intake, ASM, or Manual source plus severity/status/last-seen/domain/search; sort by severity/first-seen/last-seen/CVSS; bulk cleanup with dry-run preview.
 - **Finding Detail (`/findings/{id}`)**: status triage buttons (active/resolved/false_positive/accepted_risk), **delete finding** with confirmation, source badge, analyst notes, CVSS, CWE link, evidence summary (URLs, payloads, parameters, status codes, response anomalies), remediation steps, AI analysis (verdict/confidence/rationale/recommendations), raw HTTP request/response, copy buttons for URLs/payloads/IDs, external links to vulnerable URLs, one-shot proof replay, and a separate **Investigate autonomously** action for target-linked DAST/ASM/manual web findings. The autonomous exact-finding mission may run at most one bounded proof replay, waits for it, and returns to a visible outcome.
-- **AI Gate (`/settings/ai-gate`)**: create and manage AI targets, use Secure RAG + Agent presets, choose auth, target type, probe pack, profile, and environment, then queue AI safety scans for chat APIs, RAG APIs, agent traces, and MCP endpoints.
-- **Model Intake (`/settings/model-intake`)**: use model-intake presets and queue artifact checks with artifact URL, metadata URL/JSON, checksum, detached signature URL/value, public key URL/PEM, trusted key PEM/fingerprints, policy profile, model card, approval flags, timeout, and download cap.
+- **AI Gate (`/ai-gate`)**: create and manage AI targets, use Secure RAG + Agent presets, choose auth, target type, probe pack, profile, and environment, then queue AI safety scans for chat APIs, RAG APIs, agent traces, and MCP endpoints.
+- **Model Intake (`/model-intake`)**: use model-intake presets and queue artifact checks with artifact URL, metadata URL/JSON, checksum, detached signature URL/value, public key URL/PEM, trusted key PEM/fingerprints, policy profile, model card, approval flags, timeout, and download cap.
 - **Policy Profiles (`/settings/policy-profiles`)**: create, edit, activate/deactivate, and delete deployment gate profiles for AI Gate, Model Intake, and DAST decisions. Model Intake can select saved active profiles.
 - **Interactive (`/interactive`)**: browser sessions, managed credential profiles, target principals, authz expectations, endpoint replay, screenshots, and explicit manual finding creation.
-- **Exceptions (`/settings/exceptions`)**: exception queue, owner/approver/control repair, expiry visibility, and lifecycle sweep.
+- **Exceptions (`/exceptions`)**: exception queue, owner/approver/control repair, expiry visibility, and lifecycle sweep.
 - **Command Arsenal (`/settings/arsenal`)**: command contracts, plans, scope/approval receipts, action ledger, hypotheses, refuters, tools, local agents, context packs, and decision traces.
 - **Autonomous Hunt (`/settings/research-agent`)**: create target-bound analysis or gated active episodes and optionally run them with durable server-side autopilot. Subject-bound launch profiles cover target hunts, exact-finding verification, and ASM gap closure. The controller leases one episode at a time, waits for linked scans and finding retests, rejects duplicate no-progress actions, reserves a final conclusion turn, meters failed provider attempts, and continues if the browser closes. Inspect the actual model, immutable observations, linked work, finding outcome, request-unit budgets, decisions, errors, and events; pause/resume or cancel the episode plus linked work. The lead backlog remains at `/settings/research-agent/leads`.
 - **Long-running research campaigns**: the Research Agent can wrap bounded episodes in a durable campaign. A campaign shares recent-action memory across episodes, starts a fresh episode after a bounded one concludes, and continues until its time/episode ceiling, operator pause/cancel, missing input, or expired approval. The default UI path needs only a target, authorization confirmation, and optional ceilings.
@@ -617,7 +617,7 @@ Notes:
 
 ### AI Gate
 
-AI Gate tests AI application surfaces for prompt injection, sensitive disclosure, unsafe tool use, RAG leakage, and MCP/tool boundary failures. It is managed in the UI at `/settings/ai-gate` and through REST APIs, so Claude, Codex, OpenCode, or any agent that can call HTTP can use it as a ShakerScan tool.
+AI Gate tests AI application surfaces for prompt injection, sensitive disclosure, unsafe tool use, RAG leakage, and MCP/tool boundary failures. It is managed in the UI at `/ai-gate` and through REST APIs, so Claude, Codex, OpenCode, or any agent that can call HTTP can use it as a ShakerScan tool.
 
 AI Gate evaluates probes with deterministic/regex detectors first. When an AI provider is configured in AI settings, it also runs semantic AI judging on probe transcripts, populates `ai_verdict`, `ai_confidence`, `ai_rationale`, and `ai_recommendations`, and can downgrade high-confidence false positives before the AI Gate score and deploy decision are computed.
 
@@ -707,7 +707,7 @@ After submitting an AI Gate scan, report the scan ID and UI link (`/scans/{scan_
 
 ### Model Intake
 
-Model Intake checks model artifacts before deployment without importing or executing model code. It is available in the UI at `/settings/model-intake` and through REST APIs. It is for provenance, unsafe serialization, checksum/signature, model card, license review, SBOM/dependency evidence, malware scan evidence, security evals, deployment restrictions, monitoring plan, and deployment approval checks.
+Model Intake checks model artifacts before deployment without importing or executing model code. It is available in the UI at `/model-intake` and through REST APIs. It is for provenance, unsafe serialization, checksum/signature, model card, license review, SBOM/dependency evidence, malware scan evidence, security evals, deployment restrictions, monitoring plan, and deployment approval checks.
 
 Model Intake findings use `tool/source=model_intake`, filter with `source_type=model_intake`, and are
 excluded from `source_type=dast`.

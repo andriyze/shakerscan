@@ -64,7 +64,7 @@ The catalog includes:
 
 ## Secure RAG + Agent
 
-Use `/settings/ai-gate` and the `Secure RAG + Agent` scenario panel.
+Use `/ai-gate` and the `Secure RAG + Agent` scenario panel.
 
 Canonical Honey endpoints:
 - `GET /api/secure-demo/rag-agent/threat-model`
@@ -89,7 +89,7 @@ Recommended scans:
 
 ## Model Intake Pipeline
 
-Use `/settings/model-intake` and the `Model Intake Pipeline` scenario panel.
+Use `/model-intake` and the `Model Intake Pipeline` scenario panel.
 
 The page can resolve supported registry references, preview trust requirements, and manage saved
 public-key/fingerprint trust anchors. Strict trust policies can require selected saved anchors; a

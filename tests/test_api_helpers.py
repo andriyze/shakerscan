@@ -559,14 +559,14 @@ def test_dashboard_action_center_prioritizes_server_derived_items():
     assert by_id["worker-build-freshness"]["count"] == 2
     assert by_id["worker-build-freshness"]["actions"][0]["label"] == "Adjust workers"
     assert by_id["policy-exception-hygiene"]["count"] == 6
-    assert by_id["policy-exception-hygiene"]["href"] == "/settings/exceptions"
-    assert by_id["policy-exception-hygiene"]["actions"][0]["href"] == "/settings/exceptions?queue_filter=expired"
+    assert by_id["policy-exception-hygiene"]["href"] == "/exceptions"
+    assert by_id["policy-exception-hygiene"]["actions"][0]["href"] == "/exceptions?queue_filter=expired"
     assert by_id["asm-coverage-gaps"]["href"] == "/asm?target_id=11111111-1111-4111-8111-111111111111"
     assert by_id["asm-coverage-gaps"]["actions"][0]["label"] == "Improve coverage"
     assert by_id["next-asm-schedule"]["priority"] == "info"
     assert by_id["recent-failed-scans"]["actions"][1]["label"] == "Latest failed scan"
     assert by_id["model-intake-untrusted-signatures"]["samples"][0]["detail"] == "signature status: untrusted_root"
-    assert by_id["model-intake-untrusted-signatures"]["actions"][0]["href"] == "/settings/model-intake?remediate=trust"
+    assert by_id["model-intake-untrusted-signatures"]["actions"][0]["href"] == "/model-intake?remediate=trust"
     assert by_id["model-intake-untrusted-signatures"]["actions"][1]["label"] == "Latest scan"
     # No refuter data in the base fake -> the best-effort refuter block adds nothing.
     assert "refuter-review-backlog" not in by_id
@@ -817,10 +817,10 @@ def test_dashboard_action_center_surfaces_ai_control_baseline_gaps():
     ai_item = next(item for item in items if item["id"] == "ai-control-baseline-gaps")
 
     assert ai_item["count"] == 1
-    assert ai_item["href"] == "/settings/ai-gate?remediate=controls"
-    assert ai_item["actions"][0]["href"] == "/settings/ai-gate?remediate=controls"
+    assert ai_item["href"] == "/ai-gate?remediate=controls"
+    assert ai_item["actions"][0]["href"] == "/ai-gate?remediate=controls"
     assert ai_item["actions"][1]["href"] == "/findings?source_type=ai&status=active"
-    assert ai_item["samples"][0]["href"] == "/settings/ai-gate?remediate=controls"
+    assert ai_item["samples"][0]["href"] == "/ai-gate?remediate=controls"
     assert "AI asset owner" in ai_item["samples"][0]["detail"]
 
 
@@ -901,15 +901,15 @@ def test_dashboard_product_status_summarizes_cross_product_state():
     assert by_id["asm"]["actions"][1]["href"] == "/schedules?create=true&target_id=11111111-1111-4111-8111-111111111111"
     assert by_id["ai_gate"]["status"] == "warning"
     assert by_id["ai_gate"]["secondary_label"] == "control gaps"
-    assert by_id["ai_gate"]["href"] == "/settings/ai-gate?remediate=controls"
-    assert by_id["ai_gate"]["actions"][0]["href"] == "/settings/ai-gate?remediate=controls"
+    assert by_id["ai_gate"]["href"] == "/ai-gate?remediate=controls"
+    assert by_id["ai_gate"]["actions"][0]["href"] == "/ai-gate?remediate=controls"
     assert by_id["ai_gate"]["actions"][1]["href"] == "/findings?source_type=ai&status=active"
     assert by_id["model_intake"]["status"] == "critical"
-    assert by_id["model_intake"]["href"] == "/settings/model-intake?remediate=trust"
+    assert by_id["model_intake"]["href"] == "/model-intake?remediate=trust"
     assert by_id["model_intake"]["actions"][0]["label"] == "Fix trust"
     assert by_id["model_intake"]["actions"][1]["href"] == "/findings?source_type=model_intake&status=active"
-    assert by_id["exceptions"]["href"] == "/settings/exceptions?queue_filter=expired"
-    assert by_id["exceptions"]["actions"][1]["href"] == "/settings/exceptions?queue_filter=expiring"
+    assert by_id["exceptions"]["href"] == "/exceptions?queue_filter=expired"
+    assert by_id["exceptions"]["actions"][1]["href"] == "/exceptions?queue_filter=expiring"
     assert by_id["deployment"]["primary_count"] == 1
     assert by_id["workers"]["status"] == "critical"
     assert by_id["workers"]["metadata"]["total"] == 5
@@ -924,7 +924,7 @@ def test_dashboard_product_status_links_missing_exception_controls():
     by_id = {item["id"]: item for item in items}
 
     assert by_id["exceptions"]["status"] == "warning"
-    assert by_id["exceptions"]["actions"][0]["href"] == "/settings/exceptions?queue_filter=missing_controls"
+    assert by_id["exceptions"]["actions"][0]["href"] == "/exceptions?queue_filter=missing_controls"
 
 
 # ----- run_due_schedules --------------------------------------------------

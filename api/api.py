@@ -5438,7 +5438,7 @@ def _build_exposure_graph(
                 "model_supply_chain",
                 "Model supply chain",
                 subtitle="External model artifacts",
-                href="/settings/model-intake",
+                href="/model-intake",
             ))
             edges.append(_graph_edge(model_supply_chain_id, node_id, "contains_artifact", label="supply chain artifact"))
         else:
@@ -5459,7 +5459,7 @@ def _build_exposure_graph(
             ai_target.get("name") or _short_url_label(ai_target.get("endpoint_url")),
             subtitle=f"{ai_target.get('target_type') or 'ai'} surface",
             status="production" if ai_target.get("production_mode") else "non-production",
-            href="/settings/ai-gate",
+            href="/ai-gate",
             meta={
                 "endpoint_url": ai_target.get("endpoint_url"),
                 "root_domain": root_domain,
@@ -9904,12 +9904,12 @@ async def _build_dashboard_product_status(conn, *, worker_snapshot: dict[str, An
         ai_actions = [
             {
                 "label": "AI findings" if active_findings else "Control gaps",
-                "href": "/findings?source_type=ai&status=active" if active_findings else "/settings/ai-gate?remediate=controls",
+                "href": "/findings?source_type=ai&status=active" if active_findings else "/ai-gate?remediate=controls",
                 "variant": "primary",
             },
             {
                 "label": "Control gaps" if active_findings else "AI findings",
-                "href": "/settings/ai-gate?remediate=controls" if active_findings else "/findings?source_type=ai&status=active",
+                "href": "/ai-gate?remediate=controls" if active_findings else "/findings?source_type=ai&status=active",
                 "variant": "secondary",
             },
         ]
@@ -9918,7 +9918,7 @@ async def _build_dashboard_product_status(conn, *, worker_snapshot: dict[str, An
             label="AI Gate",
             status=status,
             summary=summary,
-            href="/settings/ai-gate?remediate=controls" if missing_controls and not active_findings else "/settings/ai-gate",
+            href="/ai-gate?remediate=controls" if missing_controls and not active_findings else "/ai-gate",
             primary_count=active_findings,
             primary_label="findings",
             secondary_count=missing_controls,
@@ -9932,7 +9932,7 @@ async def _build_dashboard_product_status(conn, *, worker_snapshot: dict[str, An
             label="AI Gate",
             status="info",
             summary="AI Gate status unavailable.",
-            href="/settings/ai-gate",
+            href="/ai-gate",
         ))
 
     try:
@@ -9972,13 +9972,13 @@ async def _build_dashboard_product_status(conn, *, worker_snapshot: dict[str, An
             label="Model Intake",
             status=status,
             summary=summary,
-            href="/settings/model-intake?remediate=trust" if active_findings or untrusted else "/settings/model-intake",
+            href="/model-intake?remediate=trust" if active_findings or untrusted else "/model-intake",
             primary_count=active_findings,
             primary_label="findings",
             secondary_count=untrusted,
             secondary_label="untrusted",
             actions=[
-                {"label": "Fix trust", "href": "/settings/model-intake?remediate=trust", "variant": "primary"},
+                {"label": "Fix trust", "href": "/model-intake?remediate=trust", "variant": "primary"},
                 {"label": "Model findings", "href": "/findings?source_type=model_intake&status=active", "variant": "secondary"},
             ],
         ))
@@ -9988,7 +9988,7 @@ async def _build_dashboard_product_status(conn, *, worker_snapshot: dict[str, An
             label="Model Intake",
             status="info",
             summary="Model Intake status unavailable.",
-            href="/settings/model-intake",
+            href="/model-intake",
         ))
 
     try:
@@ -10018,30 +10018,30 @@ async def _build_dashboard_product_status(conn, *, worker_snapshot: dict[str, An
         if expired:
             status = "critical"
             summary = f"{expired} policy exception(s) are expired."
-            href = "/settings/exceptions?queue_filter=expired"
+            href = "/exceptions?queue_filter=expired"
         elif expiring or weak:
             status = "warning"
             summary = f"{expiring} expiring soon; {weak} missing owner, approver, or controls."
-            href = "/settings/exceptions"
+            href = "/exceptions"
         else:
             status = "ok"
             summary = "No exception hygiene blockers detected."
-            href = "/settings/exceptions"
+            href = "/exceptions"
         exception_actions = []
         if expired:
-            exception_actions.append({"label": "Expired", "href": "/settings/exceptions?queue_filter=expired", "variant": "primary"})
+            exception_actions.append({"label": "Expired", "href": "/exceptions?queue_filter=expired", "variant": "primary"})
         elif weak:
-            exception_actions.append({"label": "Missing controls", "href": "/settings/exceptions?queue_filter=missing_controls", "variant": "primary"})
+            exception_actions.append({"label": "Missing controls", "href": "/exceptions?queue_filter=missing_controls", "variant": "primary"})
         elif expiring:
-            exception_actions.append({"label": "Expiring soon", "href": "/settings/exceptions?queue_filter=expiring", "variant": "primary"})
+            exception_actions.append({"label": "Expiring soon", "href": "/exceptions?queue_filter=expiring", "variant": "primary"})
         else:
-            exception_actions.append({"label": "All exceptions", "href": "/settings/exceptions", "variant": "primary"})
-        if expiring and exception_actions[0]["href"] != "/settings/exceptions?queue_filter=expiring":
-            exception_actions.append({"label": "Expiring soon", "href": "/settings/exceptions?queue_filter=expiring", "variant": "secondary"})
-        elif weak and exception_actions[0]["href"] != "/settings/exceptions?queue_filter=missing_controls":
-            exception_actions.append({"label": "Missing controls", "href": "/settings/exceptions?queue_filter=missing_controls", "variant": "secondary"})
+            exception_actions.append({"label": "All exceptions", "href": "/exceptions", "variant": "primary"})
+        if expiring and exception_actions[0]["href"] != "/exceptions?queue_filter=expiring":
+            exception_actions.append({"label": "Expiring soon", "href": "/exceptions?queue_filter=expiring", "variant": "secondary"})
+        elif weak and exception_actions[0]["href"] != "/exceptions?queue_filter=missing_controls":
+            exception_actions.append({"label": "Missing controls", "href": "/exceptions?queue_filter=missing_controls", "variant": "secondary"})
         else:
-            exception_actions.append({"label": "All exceptions", "href": "/settings/exceptions", "variant": "secondary"})
+            exception_actions.append({"label": "All exceptions", "href": "/exceptions", "variant": "secondary"})
         items.append(_dashboard_product_status_item(
             item_id="exceptions",
             label="Exceptions",
@@ -10060,7 +10060,7 @@ async def _build_dashboard_product_status(conn, *, worker_snapshot: dict[str, An
             label="Exceptions",
             status="info",
             summary="Exception status unavailable.",
-            href="/settings/exceptions",
+            href="/exceptions",
         ))
 
     try:
@@ -10367,12 +10367,12 @@ async def _build_dashboard_action_center(conn, *, worker_snapshot: dict[str, Any
                     f"{expired} expired, {expiring} expiring within 7 days, "
                     f"{weak_records} missing owner/approver or compensating controls."
                 ),
-                href="/settings/exceptions",
+                href="/exceptions",
                 action_label="Review exceptions",
                 actions=[
-                    {"label": "Expired", "href": "/settings/exceptions?queue_filter=expired", "variant": "primary"},
-                    {"label": "Expiring", "href": "/settings/exceptions?queue_filter=expiring", "variant": "secondary"},
-                    {"label": "Missing controls", "href": "/settings/exceptions?queue_filter=missing_controls", "variant": "secondary"},
+                    {"label": "Expired", "href": "/exceptions?queue_filter=expired", "variant": "primary"},
+                    {"label": "Expiring", "href": "/exceptions?queue_filter=expiring", "variant": "secondary"},
+                    {"label": "Missing controls", "href": "/exceptions?queue_filter=missing_controls", "variant": "secondary"},
                 ],
                 count=expired + expiring + weak_records,
             ))
@@ -10609,11 +10609,11 @@ async def _build_dashboard_action_center(conn, *, worker_snapshot: dict[str, Any
                 category="Model Intake",
                 title="Model artifacts lack trusted signatures",
                 detail="Latest model-intake scans include artifacts that are not verified against an operator trust root.",
-                href="/settings/model-intake",
+                href="/model-intake",
                 action_label="Review intake",
                 actions=[
-                    {"label": "Fix model trust", "href": "/settings/model-intake?remediate=trust", "variant": "primary"},
-                    {"label": "Latest scan", "href": samples[0]["href"] if samples else "/settings/model-intake", "variant": "secondary"},
+                    {"label": "Fix model trust", "href": "/model-intake?remediate=trust", "variant": "primary"},
+                    {"label": "Latest scan", "href": samples[0]["href"] if samples else "/model-intake", "variant": "secondary"},
                 ],
                 count=len(model_rows),
                 samples=samples,
@@ -10652,7 +10652,7 @@ async def _build_dashboard_action_center(conn, *, worker_snapshot: dict[str, Any
                 samples.append({
                     "label": target.get("name") or target.get("endpoint_url") or target.get("id"),
                     "detail": ", ".join(item["missing"][:3]),
-                    "href": "/settings/ai-gate?remediate=controls",
+                    "href": "/ai-gate?remediate=controls",
                 })
             items.append(_action_center_item(
                 item_id="ai-control-baseline-gaps",
@@ -10660,10 +10660,10 @@ async def _build_dashboard_action_center(conn, *, worker_snapshot: dict[str, Any
                 category="AI Gate",
                 title="AI targets are missing control evidence",
                 detail="Production, high-risk, or baseline-enforced AI targets are missing required governance/control metadata.",
-                href="/settings/ai-gate?remediate=controls",
+                href="/ai-gate?remediate=controls",
                 action_label="Review AI targets",
                 actions=[
-                    {"label": "Control gaps", "href": "/settings/ai-gate?remediate=controls", "variant": "primary"},
+                    {"label": "Control gaps", "href": "/ai-gate?remediate=controls", "variant": "primary"},
                     {"label": "AI findings", "href": "/findings?source_type=ai&status=active", "variant": "secondary"},
                 ],
                 count=len(missing_targets),
@@ -12765,7 +12765,7 @@ async def _finding_exception_lifecycle_sweep(
                 risk_tier="active",
                 approval_receipt_id=req.approval_receipt_id,
                 operator_message=f"Expired {len(expired_ids)} elapsed finding exception(s)",
-                next_action="/settings/exceptions?queue_filter=expired",
+                next_action="/exceptions?queue_filter=expired",
                 result_json={
                     "target_id": str(target_uuid) if target_uuid else None,
                     "candidate_count": len(candidate_ids),
@@ -23397,7 +23397,7 @@ async def _arsenal_dispatch_model_intake_trust_preview(p: dict[str, Any]) -> dic
         "trust_preview": {
             "policy_profile": profile,
             "trust_mode": trust_mode,
-            "ui_path": f"/settings/model-intake?remediate=trust&policy_profile={urllib.parse.quote(profile)}&trust_mode={urllib.parse.quote(trust_mode)}",
+            "ui_path": f"/model-intake?remediate=trust&policy_profile={urllib.parse.quote(profile)}&trust_mode={urllib.parse.quote(trust_mode)}",
         },
         "execution_enabled": False,
     }

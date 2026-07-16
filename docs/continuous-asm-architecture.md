@@ -44,7 +44,7 @@ for the bounded roadmap: ASM activity includes hypotheses and timeline events ca
 improve, schedule, auth setup, and active-scan review. Model Intake now
 has guided trust modes, a pass/fail/advisory pre-submit preview, saved operator trust anchors, strict
 policy-profile required anchors, a dashboard trust-remediation route
-(`/settings/model-intake?remediate=trust`), and deployment decisions that explain policy-required
+(`/model-intake?remediate=trust`), and deployment decisions that explain policy-required
 anchor gaps plus exception expiry/hygiene. AI Gate scan detail now surfaces a
 campaign review panel from the stored coverage matrix/evidence manifest and can queue scan-level
 reruns for skipped probes, errored families, selected families, selected transcript probes, or all

@@ -34,7 +34,7 @@ scan detail also compares recent same-context runs, and the AI Gate target page 
 target-level longitudinal campaign history. Model Intake strict trust mode now supports saved
 operator trust anchors by ID, strict policy profiles can require saved anchors, and deployment
 decisions explain policy-required anchor gaps plus exception expiry/hygiene. Dashboard Model Intake
-trust blockers now open `/settings/model-intake?remediate=trust` to focus strict trusted-anchor
+trust blockers now open `/model-intake?remediate=trust` to focus strict trusted-anchor
 remediation;
 remaining trust UX work is remediation flow polish.
 

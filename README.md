@@ -495,10 +495,10 @@ claude    # Claude reads CLAUDE.md and understands the project
 - **Findings (`/findings`)**: filter by DAST, AI Gate, Model Intake, ASM, or Manual source; severity/status/date/domain; bulk cleanup and CVSS sorting
 - **Finding Detail (`/findings/{id}`)**: triage buttons, analyst notes, evidence, AI analysis, remediation
 - **Interactive (`/interactive`)**: browser sessions, managed credentials, principals, authz expectations, endpoint replay, screenshots, and manual findings
-- **AI Gate (`/settings/ai-gate`)**: review inventory/candidates, add AI targets, test connectivity, run MCP readiness checks, choose auth, select probe packs/profiles, and run AI safety checks for chat, RAG, agent, and MCP surfaces
-- **Model Intake (`/settings/model-intake`)**: resolve references, manage trust anchors, preview trust policy, and submit artifact checks
+- **AI Gate (`/ai-gate`)**: review inventory/candidates, add AI targets, test connectivity, run MCP readiness checks, choose auth, select probe packs/profiles, and run AI safety checks for chat, RAG, agent, and MCP surfaces
+- **Model Intake (`/model-intake`)**: resolve references, manage trust anchors, preview trust policy, and submit artifact checks
 - **Policy Profiles (`/settings/policy-profiles`)**: deployment-gate policy lifecycle for DAST, AI Gate, and Model Intake
-- **Exceptions (`/settings/exceptions`)**: finding-exception queue, metadata repair, expiry, and lifecycle sweep
+- **Exceptions (`/exceptions`)**: finding-exception queue, metadata repair, expiry, and lifecycle sweep
 - **Command Arsenal (`/settings/arsenal`)**: commands, tools, receipts, plans, campaigns, hypotheses, refuters, local agents, context packs, and traces
 - **Settings (`/settings`)**: AI providers, scan execution, and automation policy
 - **New Scan (`/scan/new`)**: scan type picker, coverage budget selector, and advanced toggles

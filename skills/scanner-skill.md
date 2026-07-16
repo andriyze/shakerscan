@@ -349,11 +349,11 @@ curl "http://localhost:8080/retests/{retest_id}"
 
 Status options: `active`, `resolved`, `false_positive`, `accepted_risk`
 
-**Query Parameters:** `status`, `severity`, `source_type` (`dast` or `ai`), `seen_within_days` (7/30/60/90), `root_domain`, `target_id`, `scan_id`, `verification_verdict`, `verification_mode`, `verified_only`, `search`, `sort_by` (severity/first_seen/last_seen/cvss), `sort_order`, `limit`, `offset`
+**Query Parameters:** `status`, `severity`, `source_type` (`dast`, `ai`, `ai_gate`, `ai_session`, `model_intake`, `asm`, `manual`), `seen_within_days` (7/30/60/90), `root_domain`, `target_id`, `scan_id`, `verification_verdict`, `verification_mode`, `verified_only`, `search`, `sort_by` (severity/first_seen/last_seen/cvss), `sort_order`, `limit`, `offset`
 
 ### AI Gate
 
-Use AI Gate when the user wants to test an AI app, chatbot, RAG endpoint, agent/tool workflow, or MCP endpoint. The local UI is at `http://localhost:3000/settings/ai-gate`; on a remote VPS, use the UI base printed by `./scanner.sh status`. The API is fully usable by agents.
+Use AI Gate when the user wants to test an AI app, chatbot, RAG endpoint, agent/tool workflow, or MCP endpoint. The local UI is at `http://localhost:3000/ai-gate`; on a remote VPS, use the UI base printed by `./scanner.sh status`. The API is fully usable by agents.
 
 AI Gate uses deterministic/regex detectors first. If AI settings have a configured provider, semantic AI judging also reviews probe transcripts, fills the standard AI analysis fields on findings, and can downgrade high-confidence false positives before scoring.
 
@@ -411,9 +411,9 @@ After submitting an AI Gate scan, report the scan ID and UI link, then stop. Do 
 
 ### Model Intake
 
-Use Model Intake when the user wants to check a model artifact before deployment. The local UI is at `http://localhost:3000/settings/model-intake`; on a remote VPS, use the UI base printed by `./scanner.sh status`. The scanner reads artifact bytes and metadata without importing or executing model code, including provenance, serialization, signing/checksum, license, SBOM, malware scan, eval, deployment restriction, monitoring, and approval evidence.
+Use Model Intake when the user wants to check a model artifact before deployment. The local UI is at `http://localhost:3000/model-intake`; on a remote VPS, use the UI base printed by `./scanner.sh status`. The scanner reads artifact bytes and metadata without importing or executing model code, including provenance, serialization, signing/checksum, license, SBOM, malware scan, eval, deployment restriction, monitoring, and approval evidence.
 
-Model Intake findings are stored as non-AI findings with `tool=model_intake`; `source_type=dast` includes them until the product adds a separate model-intake source filter.
+Model Intake findings use `tool/source=model_intake`, are filtered with `source_type=model_intake`, and are excluded from `source_type=dast`.
 
 For the model-intake pipeline workflow, use `/ai/test-scenarios` and the `model-intake-pipeline` presets for safe signed artifacts, unsafe pickle/PyTorch artifacts, embedded executable bundles, tampered checksums, and missing approval cases. The catalog also lists the Honey submit/status/scan/approve/deploy lifecycle endpoints.
 
