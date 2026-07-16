@@ -8734,6 +8734,13 @@ def test_benchmark_identity_uses_family_method_and_templated_route_not_source_fi
         family="bola", route="/api/orders/{order_id}", method="GET",
     )
     assert api_module._canonical_vulnerability_route("/api/orders/${object_id}") == "/api/orders/{id}"
+    # A query-string object id (crAPI's /orders/all?id=<uuid>) is the same object operation as a path
+    # id: both collapse to a trailing /{id}, so a query-string BOLA lead binds a query- or path-shaped
+    # experiment instead of degrading to the bare collection route.
+    assert (api_module._canonical_vulnerability_route("/workshop/api/shop/orders/all?id=08af4258-f15d-40e9-86af-8a1b5b2c7f53")
+            == "/workshop/api/shop/orders/all/{id}")
+    assert (api_module._canonical_vulnerability_route("/workshop/api/shop/orders/all?id=${owner_object_id}")
+            == api_module._canonical_vulnerability_route("/workshop/api/shop/orders/all/${owner_object_id}"))
     dast = {
         "fingerprint": "scanner-specific-fingerprint",
         "title": "BOLA on order API",

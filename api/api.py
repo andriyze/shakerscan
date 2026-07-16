@@ -29676,7 +29676,16 @@ def _canonical_vulnerability_route(value: Any) -> str | None:
     path = re.sub(r"/[0-9]+(?=/|$)", "/{id}", path)
     path = re.sub(r"(?i)/[0-9a-f]{16,}(?=/|$)", "/{id}", path)
     path = re.sub(r"\$?\{[^/{}]+\}|:[A-Za-z_][A-Za-z0-9_]*", "{id}", path)
-    return re.sub(r"/+", "/", path)[:1000]
+    path = re.sub(r"/+", "/", path)
+    # An object identifier addressed via a query parameter (e.g. crAPI's /orders/all?id=<uuid>) is
+    # the SAME object operation as a path-segment id. Collapse such a query id into a trailing /{id}
+    # so a query-string object access matches a path-style one and does not degrade to the bare
+    # collection route -- otherwise the autobind can never match a query-string BOLA lead.
+    if parsed.query and "{id}" not in path and re.search(
+        r"(?:^|&)(?:id|[a-z0-9_]+_id)=[^&]+", parsed.query, re.IGNORECASE
+    ):
+        path = path.rstrip("/") + "/{id}"
+    return path[:1000]
 
 
 def _research_vulnerability_dimensions(family: Any, *sources: Any) -> dict[str, Any]:
@@ -33620,7 +33629,12 @@ def _research_planner_messages(observation: dict[str, Any]) -> list[dict[str, st
                 "hypothesis_id only in the top-level decision hypothesis_id field; never put hypothesis_id inside "
                 "action.parameters. When you design an experiment.workflow, copy the matching family template from "
                 "experiment_templates and replace the <placeholders> with real routes, object fields, and "
-                "principals from the observation; keep every checkpoint, assertion type, and predicate exactly so "
+                "principals from the observation. Take each route VERBATIM from the ranked lead in "
+                "selected_hypothesis_contracts (or the observation's endpoints), substituting ONLY the object-id "
+                "value with its principal variable and keeping the id in the SAME location the endpoint uses: if the "
+                "endpoint addresses the object with a query parameter (for example GET /orders/all?id=), keep the "
+                "variable in the query string (.../orders/all?id=${owner_object_id}) and never move a query-string "
+                "id into a path segment. Keep every checkpoint, assertion type, and predicate exactly so "
                 "the proof stays valid and server-corroborable. Fill create/mutation request bodies from the "
                 "endpoint's request schema (param_shape / replay_spec on the observation's endpoints, or "
                 "request_fields / request_example on the ranked hypothesis) -- an empty body is usually rejected, "
