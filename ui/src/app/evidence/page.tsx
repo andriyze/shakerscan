@@ -64,7 +64,7 @@ function EvidenceContent() {
         <div>
           <h1 className="text-2xl font-bold text-white">Evidence</h1>
           <p className="mt-1 text-gray-400">
-            Content-addressed evidence instances split from findings, plus content-free export manifests, bundles, and retention sweeps.
+            The durable proof captured for findings — the underlying evidence objects, plus their exports and retention controls.
           </p>
         </div>
         <LastUpdated updatedAt={lastUpdated} onRefresh={load} />

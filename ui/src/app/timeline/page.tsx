@@ -143,9 +143,9 @@ function TimelineContent() {
     <div className="space-y-6">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <h1 className="text-2xl font-bold text-white">Mission Timeline</h1>
+          <h1 className="text-2xl font-bold text-white">Timeline</h1>
           <p className="mt-1 text-gray-400">
-            Cross-product feed of command results, scans, schedules, evidence bindings, refuters, and exports.
+            A live feed of what ShakerScan runs across the product — scans, scheduled jobs, campaign actions, retests, and exports — as it happens.
           </p>
         </div>
         <LastUpdated updatedAt={lastUpdated} onRefresh={load} />

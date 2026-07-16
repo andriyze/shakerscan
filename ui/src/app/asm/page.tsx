@@ -1666,7 +1666,7 @@ function AsmContent() {
         <div>
           <h1 className="text-2xl font-bold text-white">Coverage</h1>
           <p className="text-sm text-gray-500">
-            Persistent per-target endpoint inventory and test coverage over time (Continuous ASM).
+            How much of each target’s discovered endpoints have been security-tested — tracked over time (Continuous ASM).
           </p>
         </div>
       </div>

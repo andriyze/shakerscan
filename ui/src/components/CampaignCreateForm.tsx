@@ -67,7 +67,7 @@ export default function CampaignCreateForm({
         className="w-full max-w-lg rounded-lg border border-gray-800 bg-gray-900 p-6 shadow-xl"
         onClick={(e) => e.stopPropagation()}
       >
-        <h2 className="text-lg font-semibold text-white">New mission campaign</h2>
+        <h2 className="text-lg font-semibold text-white">New campaign</h2>
         <p className="mt-1 text-sm text-gray-400">
           Records a campaign for bookkeeping and deployment-impact rollup. Creating a campaign queues no scan work.
         </p>

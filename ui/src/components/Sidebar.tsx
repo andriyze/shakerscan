@@ -94,8 +94,8 @@ const navGroups: { heading: string | null; items: { href: string; label: string;
   {
     heading: 'Governance',
     items: [
-      { href: '/settings/policy-profiles', label: 'Policy', icon: <ShieldCheck className="w-5 h-5" /> },
-      { href: '/settings/exceptions', label: 'Exceptions', icon: <ShieldAlert className="w-5 h-5" /> },
+      { href: '/settings/policy-profiles', label: 'Policy Profiles', icon: <ShieldCheck className="w-5 h-5" /> },
+      { href: '/settings/exceptions', label: 'Exceptions Queue', icon: <ShieldAlert className="w-5 h-5" /> },
     ],
   },
 ]
