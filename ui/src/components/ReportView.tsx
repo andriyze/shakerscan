@@ -772,7 +772,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
   })()
 
   return (
-    <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+    <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
       {/* Scan Summary */}
       <div className="bg-gray-800/50 backdrop-blur-lg rounded-lg p-6 mb-8">
         <div className="mb-4 flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
@@ -3622,6 +3622,6 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
           )}
         </div>
       )}
-    </main>
+    </div>
   )
 }

@@ -221,7 +221,7 @@ export default function ExperimentBuilderPage() {
       </header>
 
       <div className="mt-5 grid gap-5 xl:grid-cols-[minmax(0,1fr)_360px]">
-        <main className="grid gap-5">
+        <div className="grid gap-5">
           <Card className="p-5">
             <div className="mb-4 flex items-center gap-3"><div className="flex h-8 w-8 items-center justify-center rounded-full bg-blue-500/15 text-sm font-semibold text-blue-300">1</div><div><h2 className="font-semibold text-white">Target and decision rule</h2><p className="text-xs text-gray-500">Be explicit about what this experiment can prove or disprove.</p></div></div>
             <div className="grid gap-4">
@@ -257,7 +257,7 @@ export default function ExperimentBuilderPage() {
             <div className="grid gap-3">{steps.map((step, index) => <StepEditor key={`${index}-${step.role}`} step={step} index={index} steps={steps} update={(patch) => updateStep(index, patch)} remove={() => setSteps((current) => current.filter((_, i) => i !== index))} />)}</div>
             {steps.length < 4 ? <Button variant="secondary" className="mt-3" onClick={() => setSteps((current) => [...current, blankStep(current.length, current.at(-1)?.path || '/')])}><Plus className="h-4 w-4" />Add confirmation step</Button> : null}
           </section>
-        </main>
+        </div>
 
         <aside className="grid content-start gap-4 xl:sticky xl:top-5">
           <Card className="p-5">

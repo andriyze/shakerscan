@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState, type ReactNode } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { usePathname } from 'next/navigation'
 import Link from 'next/link'
 import { Activity, Bot, Crosshair, FileArchive, Flag, Lightbulb, Menu, Network, PackageCheck, Radar, ShieldAlert, ShieldCheck, X } from 'lucide-react'
@@ -222,11 +222,50 @@ function NavContent({ pathname }: { pathname: string }) {
 export default function Sidebar() {
   const pathname = usePathname()
   const [mobileOpen, setMobileOpen] = useState(false)
+  const openerRef = useRef<HTMLButtonElement>(null)
+  const drawerRef = useRef<HTMLElement>(null)
 
   // Close the mobile drawer whenever navigation happens.
   useEffect(() => {
     setMobileOpen(false)
   }, [pathname])
+
+  // Accessible modal-drawer behavior: move focus in on open, trap Tab within the
+  // drawer, close on Escape, and restore focus to the opener on close.
+  useEffect(() => {
+    if (!mobileOpen) return
+    const opener = openerRef.current
+    const focusables = () =>
+      Array.from(
+        drawerRef.current?.querySelectorAll<HTMLElement>(
+          'a[href], button:not([disabled]), input, select, textarea, [tabindex]:not([tabindex="-1"])',
+        ) ?? [],
+      ).filter((el) => el.offsetParent !== null)
+    focusables()[0]?.focus()
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setMobileOpen(false)
+        return
+      }
+      if (event.key !== 'Tab') return
+      const items = focusables()
+      if (items.length === 0) return
+      const first = items[0]
+      const last = items[items.length - 1]
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault()
+        last.focus()
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault()
+        first.focus()
+      }
+    }
+    document.addEventListener('keydown', onKeyDown)
+    return () => {
+      document.removeEventListener('keydown', onKeyDown)
+      opener?.focus()
+    }
+  }, [mobileOpen])
 
   return (
     <>
@@ -237,6 +276,7 @@ export default function Sidebar() {
           ShakerScan
         </Link>
         <button
+          ref={openerRef}
           type="button"
           onClick={() => setMobileOpen(true)}
           aria-label="Open navigation"
@@ -249,13 +289,20 @@ export default function Sidebar() {
 
       {mobileOpen && (
         <div className="fixed inset-0 z-50 md:hidden" role="dialog" aria-modal="true" aria-label="Navigation">
+          {/* Backdrop is a mouse affordance only — hidden from the a11y tree and the tab
+              order so it doesn't duplicate the labeled Close button; keyboard users use
+              Escape or that button. */}
           <button
             type="button"
+            aria-hidden="true"
+            tabIndex={-1}
             className="absolute inset-0 bg-black/60"
-            aria-label="Close navigation"
             onClick={() => setMobileOpen(false)}
           />
-          <aside className="absolute left-0 top-0 flex h-full w-72 max-w-[85vw] flex-col overflow-y-auto border-r border-gray-800 bg-gray-900 p-4">
+          <aside
+            ref={drawerRef}
+            className="absolute left-0 top-0 flex h-full w-72 max-w-[85vw] flex-col overflow-y-auto border-r border-gray-800 bg-gray-900 p-4"
+          >
             <div className="mb-2 flex justify-end">
               <button
                 type="button"
