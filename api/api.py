@@ -33425,6 +33425,26 @@ async def _research_autobind_hypothesis(
                 return ["experiment_hypothesis_not_on_ranked_live_surface"]
             raw["hypothesis_id"] = supplied_hypothesis_id
             return []
+        # Size-compaction can drop ranked_hypotheses from the persisted pack while KEEPING the derived
+        # selected_hypothesis_contracts (the authoritative leads the planner is explicitly told to use,
+        # and which the compactor preserves as mandatory control data). Bind an explicit id against
+        # those too, so a visibly-selected live lead stays executable even when the ranked board was
+        # compacted away -- otherwise the gate rejects every experiment against an empty board, the
+        # exact experiment_hypothesis_not_on_ranked_live_surface spin observed on crAPI.
+        for contract in (observation_pack.get("selected_hypothesis_contracts") or []):
+            if not isinstance(contract, dict) or str(contract.get("hypothesis_id") or "") != supplied_hypothesis_id:
+                continue
+            contract_route = _canonical_vulnerability_route(contract.get("route"))
+            contract_method = str(contract.get("method") or "").upper()
+            if (
+                family_proof.canonical_family(contract.get("family")) != family
+                or not contract_route
+                or contract_route != route
+                or (contract_method and contract_method != method)
+            ):
+                return ["experiment_hypothesis_not_on_ranked_live_surface"]
+            raw["hypothesis_id"] = supplied_hypothesis_id
+            return []
         return ["experiment_hypothesis_not_on_ranked_live_surface"]
 
     # When the planner omitted the id, autobinding stays deliberately stricter: only an exact

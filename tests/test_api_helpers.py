@@ -14055,6 +14055,51 @@ def test_research_autobind_requires_ranked_live_operation_identity():
     assert exact_raw["hypothesis_id"] == str(exact_hypothesis_id)
 
 
+def test_research_autobind_binds_selected_contract_when_ranked_compacted_away():
+    # Size-compaction can empty current_surface.ranked_hypotheses in the persisted pack while KEEPING
+    # the derived selected_hypothesis_contracts. An explicit hypothesis_id matching a surviving
+    # contract must still bind, instead of rejecting every experiment against an empty ranked board
+    # (the experiment_hypothesis_not_on_ranked_live_surface spin observed on crAPI).
+    target_id = uuid.uuid4()
+    hid = uuid.uuid4()
+    action = {
+        "command": "experiment.workflow",
+        "parameters": {
+            "proof_family": "bola",
+            "steps": [{"label": "attack", "method": "GET",
+                       "path": "/workshop/api/shop/orders/42", "principal": "user2"}],
+            "assertions": [{"type": "status_in", "step": "attack", "predicate": "cross_principal_access"}],
+        },
+    }
+    raw = {"hypothesis_id": str(hid), "action": json.loads(json.dumps(action))}
+    observation = {
+        "current_surface": {"ranked_hypotheses": []},  # compacted away
+        "selected_hypothesis_contracts": [{
+            "hypothesis_id": str(hid), "family": "bola",
+            "route": "/workshop/api/shop/orders/{id}", "method": "GET",
+        }],
+    }
+    errors = asyncio.run(api_module._research_autobind_hypothesis(
+        object(), {"target_id": target_id}, raw, observation,
+    ))
+    assert errors == []
+    assert raw["hypothesis_id"] == str(hid)
+
+    # A selected contract on a DIFFERENT route must still reject (fail-closed preserved).
+    bad = {"hypothesis_id": str(hid), "action": json.loads(json.dumps(action))}
+    bad_obs = {
+        "current_surface": {"ranked_hypotheses": []},
+        "selected_hypothesis_contracts": [{
+            "hypothesis_id": str(hid), "family": "bola",
+            "route": "/some/other/route/{id}", "method": "GET",
+        }],
+    }
+    errors2 = asyncio.run(api_module._research_autobind_hypothesis(
+        object(), {"target_id": target_id}, bad, bad_obs,
+    ))
+    assert errors2 == ["experiment_hypothesis_not_on_ranked_live_surface"]
+
+
 def test_research_autobind_accepts_explicit_ranked_id_when_typed_workflow_refines_dimensions():
     target_id = uuid.uuid4()
     hypothesis_id = uuid.uuid4()
