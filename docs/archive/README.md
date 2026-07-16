@@ -29,3 +29,4 @@ is a current roadmap or reference.** For the live state, use:
 | `architecture-review-2026-07-11.md` | Point-in-time reconciled review; findings were migrated into the single live roadmap |
 | `deferred-work-implementation-plan-2026-07-11.md` | Completed/partial wave ledger; all remaining dependencies are represented in `proposed-next-steps.md` |
 | `owasp-injection-integrity-implementation-plan-2026-06.md` | Completed injection/integrity implementation record removed from the live coverage matrix |
+| `ui-ux-audit-2026-07-16.md` | Point-in-time deep UI/UX audit snapshot; actionable findings are being triaged and fixed on the live branch |
