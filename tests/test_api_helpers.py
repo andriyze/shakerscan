@@ -14055,6 +14055,107 @@ def test_research_autobind_requires_ranked_live_operation_identity():
     assert exact_raw["hypothesis_id"] == str(exact_hypothesis_id)
 
 
+def test_research_autobind_accepts_explicit_ranked_id_when_typed_workflow_refines_dimensions():
+    target_id = uuid.uuid4()
+    hypothesis_id = uuid.uuid4()
+    raw = {
+        "hypothesis_id": str(hypothesis_id),
+        "action": {
+            "command": "experiment.workflow",
+            "parameters": {
+                "proof_family": "bola",
+                "principal_variables": [
+                    {"name": "owner_object_id", "principal": "user1", "ref": "transaction_id"},
+                    {"name": "attacker_object_id", "principal": "user2", "ref": "transaction_id"},
+                ],
+                "steps": [
+                    {
+                        "label": "owner_read",
+                        "method": "GET",
+                        "path": "/workshop/api/shop/orders/all?id=${owner_object_id}",
+                        "principal": "user1",
+                    },
+                    {
+                        "label": "attacker_read",
+                        "method": "GET",
+                        "path": "/workshop/api/shop/orders/all?id=${owner_object_id}",
+                        "principal": "user2",
+                    },
+                ],
+                "assertions": [{
+                    "type": "comparison_equivalent",
+                    "control": "owner_read",
+                    "candidate": "attacker_read",
+                    "predicate": "cross_principal_access",
+                }],
+            },
+        },
+    }
+    observation = {
+        "current_surface": {
+            "ranked_hypotheses": [{
+                "hypothesis": {
+                    "id": hypothesis_id,
+                    "family": "bola",
+                    "metadata_json": {
+                        "dedupe_dimensions": {
+                            "route": "/workshop/api/shop/orders/all?id=1234",
+                            "method": "GET",
+                            "object_key": "transaction_id",
+                        },
+                    },
+                },
+            }],
+        },
+    }
+
+    errors = asyncio.run(api_module._research_autobind_hypothesis(
+        object(), {"target_id": target_id}, raw, observation,
+    ))
+
+    assert errors == []
+    assert raw["hypothesis_id"] == str(hypothesis_id)
+
+
+def test_research_autobind_rejects_explicit_ranked_id_for_different_operation():
+    target_id = uuid.uuid4()
+    hypothesis_id = uuid.uuid4()
+    raw = {
+        "hypothesis_id": str(hypothesis_id),
+        "action": {
+            "command": "experiment.workflow",
+            "parameters": {
+                "proof_family": "bola",
+                "steps": [{"label": "attacker_read", "method": "GET", "path": "/orders/other/42"}],
+                "assertions": [{
+                    "type": "comparison_equivalent",
+                    "candidate": "attacker_read",
+                    "predicate": "cross_principal_access",
+                }],
+            },
+        },
+    }
+    observation = {
+        "current_surface": {
+            "ranked_hypotheses": [{
+                "hypothesis": {
+                    "id": hypothesis_id,
+                    "family": "bola",
+                    "metadata_json": {
+                        "dedupe_dimensions": {"route": "/orders/{id}", "method": "GET"},
+                    },
+                },
+            }],
+        },
+    }
+
+    errors = asyncio.run(api_module._research_autobind_hypothesis(
+        object(), {"target_id": target_id}, raw, observation,
+    ))
+
+    assert errors == ["experiment_hypothesis_not_on_ranked_live_surface"]
+
+
 def test_research_canonicalizes_nested_hypothesis_binding_without_weakening_parameters():
     hypothesis_id = str(uuid.uuid4())
     raw = {

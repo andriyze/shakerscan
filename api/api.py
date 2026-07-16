@@ -33396,6 +33396,39 @@ async def _research_autobind_hypothesis(
     # Bind only an existing ranked lead whose complete vulnerability identity matches.
     ranked = (observation_pack.get("current_surface") or {}).get("ranked_hypotheses") or []
     supplied_hypothesis_id = str(raw.get("hypothesis_id") or "").strip()
+    if supplied_hypothesis_id:
+        # An explicit hypothesis id is already the strongest provenance binding the planner can
+        # provide.  The ranked board was filtered against the current live endpoint inventory, so
+        # accept that exact row when the experiment still targets its canonical family + operation.
+        # Do not require the action's derived dimensional hash to equal the stored lead's hash:
+        # assertions and server-bound variable names legitimately refine those dimensions when the
+        # planner turns a graph lead into a typed workflow (for example, a BOLA lead with
+        # ``object_key=transaction_id`` becomes a four-step principal-variable workflow).  Requiring
+        # complete hash equality made a visibly ranked lead impossible to execute and caused the
+        # autopilot rejection loop seen in campaign 96f94c01-41dc-4917-a48c-6aa93ee5e0c2.
+        for entry in ranked:
+            hypothesis = entry.get("hypothesis") if isinstance(entry, dict) else None
+            if not isinstance(hypothesis, dict) or str(hypothesis.get("id") or "") != supplied_hypothesis_id:
+                continue
+            contract = _research_hypothesis_experiment_contract(hypothesis)
+            contract_family = family_proof.canonical_family(
+                contract.get("family") or hypothesis.get("family")
+            )
+            contract_route = _canonical_vulnerability_route(contract.get("route"))
+            contract_method = str(contract.get("method") or "").upper()
+            if (
+                contract_family != family
+                or not contract_route
+                or contract_route != route
+                or (contract_method and contract_method != method)
+            ):
+                return ["experiment_hypothesis_not_on_ranked_live_surface"]
+            raw["hypothesis_id"] = supplied_hypothesis_id
+            return []
+        return ["experiment_hypothesis_not_on_ranked_live_surface"]
+
+    # When the planner omitted the id, autobinding stays deliberately stricter: only an exact
+    # complete vulnerability identity can select a hypothesis on its behalf.
     for entry in ranked:
         hypothesis = entry.get("hypothesis") if isinstance(entry, dict) else None
         if not isinstance(hypothesis, dict) or not hypothesis.get("id"):
@@ -33403,8 +33436,6 @@ async def _research_autobind_hypothesis(
         if family_proof.canonical_family(hypothesis.get("family")) != family:
             continue
         if _research_hypothesis_vulnerability_key(hypothesis) == candidate_key:
-            if supplied_hypothesis_id and supplied_hypothesis_id != str(hypothesis["id"]):
-                return ["experiment_hypothesis_not_on_ranked_live_surface"]
             raw["hypothesis_id"] = str(hypothesis["id"])
             return []
     return ["experiment_hypothesis_not_on_ranked_live_surface"]
