@@ -3,6 +3,8 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { Boxes, CheckCircle2, RefreshCw, ShieldCheck, TerminalSquare, XCircle } from 'lucide-react'
+import { ErrorBoundary } from '@/components/ErrorBoundary'
+import { asArray } from '@/lib/safe'
 import {
   createAgentContextPack,
   createAgentDecisionTrace,
@@ -1303,6 +1305,9 @@ export default function ArsenalSettingsPage() {
     if (probeVersions) setProbing(true)
     else setLoading(true)
     try {
+      // Load each source independently: one failed or version-skewed endpoint
+      // degrades its own panel instead of rejecting the whole load. Array fields
+      // are normalized with asArray so a missing/non-array shape can't crash a map.
       const [
         commandData,
         contractData,
@@ -1319,35 +1324,45 @@ export default function ArsenalSettingsPage() {
         sessionData,
         refuterReviewData,
       ] = await Promise.all([
-        getArsenalCommands(),
-        getArsenalContracts(),
-        getArsenalTools({ probeVersions }),
-        getLocalAgents({ probeVersions }),
-        getOperationPlans(5),
-        getCommandResults(5),
-        getCampaignActions(20),
-        getHypothesisSituationReport(5, approvalActor || 'operator'),
-        getHypotheses(5),
-        getRefuterWorkSummary(5, 200),
-        getAgentContextPacks(5),
-        getAgentDecisionTraces(5),
-        listInteractiveSessions(),
-        getRefuterReviews(10),
+        getArsenalCommands().catch(() => null),
+        getArsenalContracts().catch(() => null),
+        getArsenalTools({ probeVersions }).catch(() => null),
+        getLocalAgents({ probeVersions }).catch(() => null),
+        getOperationPlans(5).catch(() => null),
+        getCommandResults(5).catch(() => null),
+        getCampaignActions(20).catch(() => null),
+        getHypothesisSituationReport(5, approvalActor || 'operator').catch(() => null),
+        getHypotheses(5).catch(() => null),
+        getRefuterWorkSummary(5, 200).catch(() => null),
+        getAgentContextPacks(5).catch(() => null),
+        getAgentDecisionTraces(5).catch(() => null),
+        listInteractiveSessions().catch(() => null),
+        getRefuterReviews(10).catch(() => null),
       ])
       setCommands(commandData)
       setContracts(contractData)
       setTools(toolData)
       setLocalAgents(localAgentData)
-      setRecentPlans(planData.operation_plans)
-      setRecentCommandResults(commandResultData.command_results)
-      setRecentCampaignActions(campaignActionData.campaign_actions)
+      setRecentPlans(asArray(planData?.operation_plans))
+      setRecentCommandResults(asArray(commandResultData?.command_results))
+      setRecentCampaignActions(asArray(campaignActionData?.campaign_actions))
       setHypothesisSituation(hypothesisSituationData)
-      setRecentHypotheses(hypothesisData.hypotheses)
+      setRecentHypotheses(asArray(hypothesisData?.hypotheses))
       setRefuterSummary(refuterSummaryData)
-      setRecentContextPacks(contextData.context_packs)
-      setRecentDecisionTraces(traceData.decision_traces)
-      setInteractiveSessions(sessionData.sessions || [])
-      setRecentRefuterReviews(refuterReviewData.refuter_reviews || [])
+      setRecentContextPacks(asArray(contextData?.context_packs))
+      setRecentDecisionTraces(asArray(traceData?.decision_traces))
+      setInteractiveSessions(asArray(sessionData?.sessions))
+      setRecentRefuterReviews(asArray(refuterReviewData?.refuter_reviews))
+      if (
+        [
+          commandData, contractData, toolData, localAgentData, planData,
+          commandResultData, campaignActionData, hypothesisSituationData,
+          hypothesisData, refuterSummaryData, contextData, traceData,
+          sessionData, refuterReviewData,
+        ].every((entry) => entry === null)
+      ) {
+        setError('Failed to load Command Arsenal status')
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load Command Arsenal status')
     } finally {
@@ -1798,6 +1813,7 @@ export default function ArsenalSettingsPage() {
         </div>
       )}
 
+      <ErrorBoundary>
       <Card className="p-4">
         <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-2">
@@ -1847,7 +1863,9 @@ export default function ArsenalSettingsPage() {
           </div>
         )}
       </Card>
+      </ErrorBoundary>
 
+      <ErrorBoundary>
       <Card className="p-4">
         <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-2">
@@ -1928,7 +1946,9 @@ export default function ArsenalSettingsPage() {
           </div>
         )}
       </Card>
+      </ErrorBoundary>
 
+      <ErrorBoundary>
       <Card className="p-4">
         <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-2">
@@ -2056,7 +2076,9 @@ export default function ArsenalSettingsPage() {
           </div>
         )}
       </Card>
+      </ErrorBoundary>
 
+      <ErrorBoundary>
       <Card className="p-4">
         <div className="mb-3 flex items-center gap-2">
           <Boxes className="h-4 w-4 text-violet-300" aria-hidden="true" />
@@ -2113,7 +2135,9 @@ export default function ArsenalSettingsPage() {
         {generatorError && <p role="alert" className="mt-3 text-xs text-red-300">{generatorError}</p>}
         {generatorMessage && <p role="status" className="mt-3 text-xs text-gray-300">{generatorMessage}</p>}
       </Card>
+      </ErrorBoundary>
 
+      <ErrorBoundary>
       <Card className="p-4">
         <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-2">
@@ -2183,7 +2207,9 @@ export default function ArsenalSettingsPage() {
           </div>
         )}
       </Card>
+      </ErrorBoundary>
 
+      <ErrorBoundary>
       <Card className="p-4">
         <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-2">
@@ -2228,7 +2254,9 @@ export default function ArsenalSettingsPage() {
           </div>
         )}
       </Card>
+      </ErrorBoundary>
 
+      <ErrorBoundary>
       <Card className="p-4">
         <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-2">
@@ -2262,7 +2290,9 @@ export default function ArsenalSettingsPage() {
           </div>
         )}
       </Card>
+      </ErrorBoundary>
 
+      <ErrorBoundary>
       <Card className="p-4">
         <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-2">
@@ -2410,7 +2440,9 @@ export default function ArsenalSettingsPage() {
           </div>
         </div>
       </Card>
+      </ErrorBoundary>
 
+      <ErrorBoundary>
       <Card className="p-4">
         <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-2">
@@ -2437,7 +2469,9 @@ export default function ArsenalSettingsPage() {
           </div>
         )}
       </Card>
+      </ErrorBoundary>
 
+      <ErrorBoundary>
       <Card className="p-4">
         <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-2">
@@ -2561,7 +2595,9 @@ export default function ArsenalSettingsPage() {
           </div>
         )}
       </Card>
+      </ErrorBoundary>
 
+      <ErrorBoundary>
       <Card className="p-4">
         <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-2">
@@ -2717,7 +2753,9 @@ export default function ArsenalSettingsPage() {
           </div>
         )}
       </Card>
+      </ErrorBoundary>
 
+      <ErrorBoundary>
       <Card className="p-4">
         <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-2">
@@ -2741,7 +2779,9 @@ export default function ArsenalSettingsPage() {
           </div>
         )}
       </Card>
+      </ErrorBoundary>
 
+      <ErrorBoundary>
       <Card className="p-4">
         <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-2">
@@ -2771,6 +2811,7 @@ export default function ArsenalSettingsPage() {
           </div>
         )}
       </Card>
+      </ErrorBoundary>
     </div>
   )
 }
