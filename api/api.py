@@ -15720,6 +15720,7 @@ def _public_hypothesis_row(row: Any) -> dict[str, Any]:
     for key in (
         "evidence_object_ids",
         "tool_receipt_ids",
+        "promoted_finding_ids",
         "next_test_action",
         "endorsements",
         "refutations",
@@ -37266,7 +37267,7 @@ async def list_findings(
     request: Request,
     severity: Optional[str] = None,
     status: Optional[str] = None,
-    source_type: Optional[str] = Query(None, regex="^(dast|ai|ai_gate|ai_session|model_intake|asm|manual)$"),
+    source_type: Optional[str] = Query(None, regex="^(dast|ai|ai_gate|ai_session|autonomous|model_intake|asm|manual)$"),
     target_id: Optional[str] = None,
     ai_target_id: Optional[str] = None,
     scan_id: Optional[str] = None,
