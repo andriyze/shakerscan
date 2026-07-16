@@ -80,11 +80,16 @@ function EvidenceContent() {
   const load = useCallback(async () => {
     try {
       const [instRes, objRes] = await Promise.all([
-        getEvidenceInstances({
-          finding_id: findingFilter || undefined,
-          tool_receipt_id: toolReceiptFilter || undefined,
-          limit: 200,
-        }),
+        // /evidence/instances only accepts UUID finding_ids (it 400s on fingerprint
+        // ids like "t:abc…"), and instances never carry a finding_id anyway. In finding
+        // mode we show objects (below), so skip the instances call; its own catch keeps
+        // a browse-mode failure from discarding everything.
+        findingFilter
+          ? Promise.resolve({ evidence_instances: [] as EvidenceInstance[] })
+          : getEvidenceInstances({
+              tool_receipt_id: toolReceiptFilter || undefined,
+              limit: 200,
+            }).catch(() => ({ evidence_instances: [] as EvidenceInstance[] })),
         // A finding's durable proof is stored as evidence OBJECTS, not instances,
         // so a finding deep-link must load objects or it looks empty. See getFindingEvidence.
         findingFilter
