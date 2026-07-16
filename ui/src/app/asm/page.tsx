@@ -1664,7 +1664,7 @@ function AsmContent() {
       <div className="flex items-center gap-3">
         <Crosshair className="h-6 w-6 text-blue-500" />
         <div>
-          <h1 className="text-2xl font-bold text-white">Attack Surface</h1>
+          <h1 className="text-2xl font-bold text-white">Coverage</h1>
           <p className="text-sm text-gray-500">
             Persistent per-target endpoint inventory and test coverage over time (Continuous ASM).
           </p>

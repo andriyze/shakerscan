@@ -1,111 +1,102 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
 import { usePathname } from 'next/navigation'
 import Link from 'next/link'
-import { Activity, Bot, Crosshair, FileArchive, Flag, Menu, Network, PackageCheck, ShieldAlert, ShieldCheck, X } from 'lucide-react'
+import { Activity, Bot, Crosshair, FileArchive, Flag, Lightbulb, Menu, Network, PackageCheck, Radar, ShieldAlert, ShieldCheck, X } from 'lucide-react'
 import { buttonClasses } from '@/components/ui'
 
-const navItems = [
+const navGroups: { heading: string | null; items: { href: string; label: string; icon: ReactNode }[] }[] = [
   {
-    href: '/',
-    label: 'Dashboard',
-    icon: (
-      <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z" />
-      </svg>
-    ),
+    heading: null,
+    items: [
+      {
+        href: '/',
+        label: 'Dashboard',
+        icon: (
+          <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z" />
+          </svg>
+        ),
+      },
+    ],
   },
   {
-    href: '/scans',
-    label: 'Scans',
-    icon: (
-      <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
-      </svg>
-    ),
+    heading: 'Testing',
+    items: [
+      {
+        href: '/targets',
+        label: 'Targets',
+        icon: (
+          <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9m-9 9a9 9 0 019-9" />
+          </svg>
+        ),
+      },
+      {
+        href: '/scans',
+        label: 'Scans',
+        icon: (
+          <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
+          </svg>
+        ),
+      },
+      {
+        href: '/findings',
+        label: 'Findings',
+        icon: (
+          <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+          </svg>
+        ),
+      },
+      {
+        href: '/schedules',
+        label: 'Schedules',
+        icon: (
+          <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+          </svg>
+        ),
+      },
+    ],
   },
   {
-    href: '/schedules',
-    label: 'Schedules',
-    icon: (
-      <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
-      </svg>
-    ),
+    heading: 'Attack surface',
+    items: [
+      { href: '/exposure', label: 'Exposure', icon: <Network className="w-5 h-5" /> },
+      { href: '/asm', label: 'Coverage', icon: <Radar className="w-5 h-5" /> },
+    ],
   },
   {
-    href: '/targets',
-    label: 'Targets',
-    icon: (
-      <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9m-9 9a9 9 0 019-9" />
-      </svg>
-    ),
+    heading: 'AI Investigator',
+    items: [
+      { href: '/settings/research-agent', label: 'Autonomous Hunt', icon: <Crosshair className="w-5 h-5" /> },
+      { href: '/settings/research-agent/leads', label: 'Leads', icon: <Lightbulb className="w-5 h-5" /> },
+    ],
   },
   {
-    href: '/findings',
-    label: 'Findings',
-    icon: (
-      <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
-      </svg>
-    ),
+    heading: 'Records',
+    items: [
+      { href: '/evidence', label: 'Evidence', icon: <FileArchive className="w-5 h-5" /> },
+      { href: '/timeline', label: 'Timeline', icon: <Activity className="w-5 h-5" /> },
+      { href: '/campaigns', label: 'Campaigns', icon: <Flag className="w-5 h-5" /> },
+    ],
   },
   {
-    href: '/evidence',
-    label: 'Evidence',
-    icon: <FileArchive className="w-5 h-5" />,
+    heading: 'AI security',
+    items: [
+      { href: '/settings/ai-gate', label: 'AI Gate', icon: <Bot className="w-5 h-5" /> },
+      { href: '/settings/model-intake', label: 'Model Intake', icon: <PackageCheck className="w-5 h-5" /> },
+    ],
   },
   {
-    href: '/settings/research-agent',
-    label: 'Autonomous Hunt',
-    icon: <Bot className="w-5 h-5" />,
-  },
-  {
-    href: '/settings/research-agent/leads',
-    label: 'Investigations',
-    icon: <Crosshair className="w-5 h-5" />,
-  },
-  {
-    href: '/exposure',
-    label: 'Exposure',
-    icon: <Network className="w-5 h-5" />,
-  },
-  {
-    href: '/asm',
-    label: 'Attack Surface',
-    icon: <Crosshair className="w-5 h-5" />,
-  },
-  {
-    href: '/timeline',
-    label: 'Timeline',
-    icon: <Activity className="w-5 h-5" />,
-  },
-  {
-    href: '/campaigns',
-    label: 'Campaigns',
-    icon: <Flag className="w-5 h-5" />,
-  },
-  {
-    href: '/settings/ai-gate',
-    label: 'AI Gate',
-    icon: <Bot className="w-5 h-5" />,
-  },
-  {
-    href: '/settings/model-intake',
-    label: 'Model Intake',
-    icon: <PackageCheck className="w-5 h-5" />,
-  },
-  {
-    href: '/settings/policy-profiles',
-    label: 'Policy',
-    icon: <ShieldCheck className="w-5 h-5" />,
-  },
-  {
-    href: '/settings/exceptions',
-    label: 'Exceptions',
-    icon: <ShieldAlert className="w-5 h-5" />,
+    heading: 'Governance',
+    items: [
+      { href: '/settings/policy-profiles', label: 'Policy', icon: <ShieldCheck className="w-5 h-5" /> },
+      { href: '/settings/exceptions', label: 'Exceptions', icon: <ShieldAlert className="w-5 h-5" /> },
+    ],
   },
 ]
 
@@ -126,7 +117,8 @@ function NavContent({ pathname }: { pathname: string }) {
       return pathname === '/'
     }
     if (href === '/settings/research-agent') {
-      return pathname === href
+      // Keep the hub highlighted on its own run-detail pages, but not on /leads.
+      return pathname === href || pathname.startsWith('/settings/research-agent/runs')
     }
     return pathname.startsWith(href)
   }
@@ -144,28 +136,37 @@ function NavContent({ pathname }: { pathname: string }) {
         )}
       </div>
 
-      <nav className="flex-1 space-y-1">
-        {navItems.map((item) => {
-          const active = isActive(item.href)
-          return (
-            <Link
-              key={item.href}
-              href={item.href}
-              aria-current={active ? 'page' : undefined}
-              className={`flex items-center gap-3 px-3 py-2 text-sm rounded-lg transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${
-                active
-                  ? 'bg-blue-600/20 text-blue-400 border-l-2 border-blue-500 -ml-[2px] pl-[14px]'
-                  : 'hover:bg-gray-800 text-gray-300'
-              }`}
-            >
-              {item.icon}
-              {item.label}
-            </Link>
-          )
-        })}
+      <nav className="flex-1">
+        {navGroups.map((group, groupIndex) => (
+          <div key={group.heading ?? 'overview'} className={`space-y-1 ${groupIndex === 0 ? '' : 'mt-4'}`}>
+            {group.heading ? (
+              <div className="px-3 pb-0.5 text-[10px] font-semibold uppercase tracking-wider text-gray-600">
+                {group.heading}
+              </div>
+            ) : null}
+            {group.items.map((item) => {
+              const active = isActive(item.href)
+              return (
+                <Link
+                  key={item.href}
+                  href={item.href}
+                  aria-current={active ? 'page' : undefined}
+                  className={`flex items-center gap-3 px-3 py-2 text-sm rounded-lg transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${
+                    active
+                      ? 'bg-blue-600/20 text-blue-400 border-l-2 border-blue-500 -ml-[2px] pl-[14px]'
+                      : 'hover:bg-gray-800 text-gray-300'
+                  }`}
+                >
+                  {item.icon}
+                  {item.label}
+                </Link>
+              )
+            })}
+          </div>
+        ))}
       </nav>
 
-      <div className="pt-4 border-t border-gray-800">
+      <div className="pt-4 mt-4 border-t border-gray-800">
         <Link
           href="/scan/new"
           className={`${buttonClasses('primary', 'md')} w-full`}

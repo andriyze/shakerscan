@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import Link from 'next/link'
 import {
-  AlertCircle, ArrowLeft, ArrowRight, Braces, Check, ChevronDown, Clock3,
+  AlertCircle, ArrowRight, Braces, Check, ChevronDown, Clock3,
   FileCheck2, FlaskConical, Info, Plus, Route, ShieldCheck, Sparkles, Target, Trash2,
 } from 'lucide-react'
 import { executeArsenalCommand, getTargets, type ArsenalExecuteResult } from '@/lib/api'
@@ -209,7 +209,11 @@ export default function ExperimentBuilderPage() {
     <div className="mx-auto max-w-7xl px-4 py-6">
       <header className="flex flex-col gap-4 border-b border-gray-800 pb-5 sm:flex-row sm:items-end sm:justify-between">
         <div>
-          <Link href="/settings/research-agent/leads" className="inline-flex items-center gap-1 text-sm text-gray-500 hover:text-gray-300"><ArrowLeft className="h-4 w-4" />Investigation workspace</Link>
+          <nav className="mb-2 inline-flex rounded-lg border border-gray-800 bg-gray-950 p-1 text-sm">
+            <Link href="/settings/research-agent" className="px-3 py-1.5 text-gray-400 hover:text-white">Autonomous Hunt</Link>
+            <Link href="/settings/research-agent/leads" className="px-3 py-1.5 text-gray-400 hover:text-white">Leads</Link>
+            <span className="rounded-md bg-gray-800 px-3 py-1.5 text-white">Manual test</span>
+          </nav>
           <h1 className="mt-2 text-3xl font-bold tracking-tight text-white">Prepare a bounded experiment</h1>
           <p className="mt-2 max-w-2xl text-sm leading-6 text-gray-400">Define a baseline, change one thing, and compare the result. Validation checks the plan and records intent—it does not send requests.</p>
         </div>

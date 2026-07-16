@@ -898,7 +898,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
                 etc.) is intentionally <span className="text-gray-100">off</span> here — it runs as
                 separate <span className="text-gray-100">ASM test batches</span>, so a small finding
                 count is expected. See coverage on the{' '}
-                <a href="/asm" className="text-blue-300 hover:text-blue-200">Attack Surface</a> page.
+                <a href="/asm" className="text-blue-300 hover:text-blue-200">Coverage</a> page.
               </p>
             </div>
           </div>

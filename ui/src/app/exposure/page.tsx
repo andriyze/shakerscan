@@ -914,9 +914,9 @@ function ExposureView() {
         <div>
           <div className="flex items-center gap-2.5">
             <span className={styles.liveDot} aria-hidden="true" />
-            <span className={styles.kicker}>Attack surface · live</span>
+            <span className={styles.kicker}>Exposure · live</span>
           </div>
-          <h1 className={`${styles.displayTitle} mt-1.5 text-2xl font-bold text-white`}>Attack Surface</h1>
+          <h1 className={`${styles.displayTitle} mt-1.5 text-2xl font-bold text-white`}>Exposure</h1>
           <p className="mt-1 text-sm text-gray-400">
             {lens === 'triage' && 'Risk-ranked inventory of every asset — scan, triage, and drill in.'}
             {lens === 'map' && 'Connected view — click a node to explore its blast radius.'}

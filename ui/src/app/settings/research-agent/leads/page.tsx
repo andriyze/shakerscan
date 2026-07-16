@@ -95,7 +95,7 @@ function nextAction(lead: ScheduledLead): { href: string; label: string; descrip
     return { href: '/settings/model-intake', label: 'Open Model Intake', description: 'Continue with the artifact trust and verification workflow.' }
   }
   if (command.startsWith('asm.')) {
-    return { href: '/asm', label: 'Open attack-surface work', description: 'Continue with the target’s coverage and endpoint workflow.' }
+    return { href: '/asm', label: 'Open coverage work', description: 'Continue with the target’s coverage and endpoint workflow.' }
   }
   return { href: experimentHref(lead), label: 'Prepare bounded test', description: 'Prepare a control and test sequence. No requests are sent during plan validation.' }
 }
@@ -283,14 +283,14 @@ export default function InvestigationWorkspacePage() {
     <div className="mx-auto max-w-7xl px-4 py-6">
       <header className="flex flex-col gap-4 border-b border-gray-800 pb-5 sm:flex-row sm:items-end sm:justify-between">
         <div>
-          <div className="flex items-center gap-2 text-sm text-blue-300"><Bot className="h-4 w-4" /> Research Agent</div>
-          <h1 className="mt-1 text-3xl font-bold tracking-tight text-white">Investigation workspace</h1>
+          <div className="flex items-center gap-2 text-sm text-blue-300"><Bot className="h-4 w-4" /> AI Investigator</div>
+          <h1 className="mt-1 text-3xl font-bold tracking-tight text-white">Leads</h1>
           <p className="mt-2 max-w-2xl text-sm leading-6 text-gray-400">Choose one security lead, review what would prove or disprove it, then open its recommended verification workflow.</p>
         </div>
         <nav className="flex rounded-lg border border-gray-800 bg-gray-950 p-1 text-sm">
-          <span className="rounded-md bg-gray-800 px-3 py-1.5 text-white">Choose lead</span>
-          <Link href="/settings/research-agent/experiment" className="px-3 py-1.5 text-gray-400 hover:text-white">Build test</Link>
-          <Link href="/settings/research-agent" className="px-3 py-1.5 text-gray-400 hover:text-white">Agent runs</Link>
+          <Link href="/settings/research-agent" className="px-3 py-1.5 text-gray-400 hover:text-white">Autonomous Hunt</Link>
+          <span className="rounded-md bg-gray-800 px-3 py-1.5 text-white">Leads</span>
+          <Link href="/settings/research-agent/experiment" className="px-3 py-1.5 text-gray-400 hover:text-white">Manual test</Link>
         </nav>
       </header>
 
