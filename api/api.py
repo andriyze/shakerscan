@@ -16384,6 +16384,24 @@ def _select_research_hypothesis_context(
     return summaries[:bounded_limit], ranked
 
 
+def _research_hypothesis_matches_live_surface(
+    hypothesis: Any,
+    live_surface: set[tuple[str, str]],
+) -> bool:
+    """Reject route-bound leads whose route is absent from the current non-gone inventory."""
+    item = hypothesis if isinstance(hypothesis, dict) else {}
+    if str(item.get("source") or "").strip().lower() == "invariant":
+        return True
+    contract = _research_hypothesis_experiment_contract(item)
+    route = _canonical_vulnerability_route(contract.get("route"))
+    if not route:
+        return True
+    method = str(contract.get("method") or "").upper()
+    if method:
+        return (method, route) in live_surface
+    return any(candidate_route == route for _, candidate_route in live_surface)
+
+
 def _json_safe_row(row: Any) -> dict[str, Any]:
     payload = row_to_dict(row)
     return _decode_json_value(payload) if isinstance(payload, dict) else payload
@@ -16482,7 +16500,7 @@ async def _build_agent_context_pack_from_target(conn, req: AgentContextPackFromT
                COALESCE(test_status, 'unknown') AS test_status,
                COUNT(*) AS count
         FROM target_endpoints
-        WHERE target_id = $1
+        WHERE target_id = $1 AND COALESCE(test_status, '') <> 'gone'
         GROUP BY COALESCE(auth_state, 'unknown'), COALESCE(test_status, 'unknown')
         ORDER BY count DESC
         LIMIT 20
@@ -16497,6 +16515,9 @@ async def _build_agent_context_pack_from_target(conn, req: AgentContextPackFromT
                    last_attempt_status, last_verdict, priority_score, last_seen_at, last_tested_at
             FROM target_endpoints
             WHERE target_id = $1
+              AND COALESCE(test_status, '') <> 'gone'
+              AND COALESCE(last_http_status, 0) NOT IN (404, 410)
+              AND COALESCE(unreachable_streak, 0) < 2
             ORDER BY priority_score DESC, last_seen_at DESC
             LIMIT $2
             """,
@@ -16636,6 +16657,31 @@ async def _build_agent_context_pack_from_target(conn, req: AgentContextPackFromT
             target_uuid,
         )
         hypothesis_candidates = [_public_hypothesis_row(row) for row in hypothesis_rows]
+        live_endpoint_rows = await _savepoint_fetch(
+            conn,
+            """
+            SELECT method, path
+            FROM target_endpoints
+            WHERE target_id=$1
+              AND COALESCE(test_status, '') <> 'gone'
+              AND COALESCE(last_http_status, 0) NOT IN (404, 410)
+              AND COALESCE(unreachable_streak, 0) < 2
+            LIMIT 2000
+            """,
+            target_uuid,
+        )
+        live_surface = {
+            (
+                str(row.get("method") or "GET").upper(),
+                _canonical_vulnerability_route(row.get("path")) or str(row.get("path") or ""),
+            )
+            for row in live_endpoint_rows
+            if row.get("path")
+        }
+        hypothesis_candidates = [
+            item for item in hypothesis_candidates
+            if _research_hypothesis_matches_live_surface(item, live_surface)
+        ]
         # Novelty memory: the candidate pool holds only actionable (open/claimed/testing/supported)
         # rows, so completed dimensions must be read from the terminal rows directly -- otherwise
         # every dimension looks novel forever and the scheduler keeps re-proposing dead leads.
@@ -19875,6 +19921,66 @@ def _application_graph_hypothesis_requests(
             },
             created_by=created_by or "app_graph",
         ))
+        # Sensitive field names on a cross-principal boundary are a lead producer, never proof.
+        # The live data-exposure workflow still has to observe a high-precision sensitive VALUE on
+        # a server-trusted protected/denied route before family promotion can occur.
+        if sensitive and (excluded_principal or principal_context.get("matching_expectations")):
+            exposure_key = "|".join([
+                "app_graph_data_exposure",
+                consumer_key,
+                principal_part,
+                ",".join(sorted(str(field).lower() for field in sensitive[:25])),
+            ])
+            if exposure_key not in seen:
+                seen.add(exposure_key)
+                candidates.append(HypothesisRequest(
+                    target_id=target_id,
+                    source="app_graph",
+                    family="data_exposure",
+                    cwe="CWE-200",
+                    title=f"Sensitive-value exposure lead: {consumer_label}",
+                    description=(
+                        f"The application graph associated sensitive fields with {consumer_label} "
+                        "across an authorization boundary. Re-read it as the excluded principal and "
+                        "require a live server-classified sensitive value before promotion."
+                    ),
+                    severity_guess="high",
+                    confidence=min(confidence, 0.82),
+                    dedupe_key=exposure_key,
+                    dedupe_dimensions={
+                        "method": method,
+                        "route": route,
+                        "principal_actor": source_principal,
+                        "principal_other": excluded_principal,
+                        "proof_surface": "sensitive_value_boundary",
+                    },
+                    next_test_action={
+                        "command": "experiment.workflow",
+                        "parameters": {"proof_family": "data_exposure"},
+                        "requires": ["primary_auth"] if source_principal else [],
+                        "principal_matrix": principal_context,
+                    },
+                    endorsement={
+                        "source": "app_graph",
+                        "consumer_route": consumer_label,
+                        "sensitive_fields": sensitive[:25],
+                        "source_principal": source_principal,
+                        "excluded_principal": excluded_principal,
+                    },
+                    metadata_json={
+                        "unexplained_residue": True,
+                        "residue_source": "app_graph_sensitive_boundary",
+                        "consumer_key": consumer_key,
+                        "edge_id": str(edge.get("id")) if edge.get("id") else None,
+                        "route": route,
+                        "method": method,
+                        "sensitive_fields": sensitive[:25],
+                        "source_principal": source_principal,
+                        "excluded_principal": excluded_principal,
+                        "principal_matrix": principal_context,
+                    },
+                    created_by=created_by or "app_graph",
+                ))
     return candidates
 
 
@@ -29755,6 +29861,8 @@ RESEARCH_SURFACE_MIN_UNIQUE_ROUTES = 20
 RESEARCH_SURFACE_MIN_AUTHENTICATED_ROUTES = 5
 RESEARCH_SURFACE_MIN_EXECUTABLE_ROUTES = 1
 RESEARCH_PREFLIGHT_MAX_ATTEMPTS = 2
+RESEARCH_PREFLIGHT_CLAIM_TTL_SECONDS = 120
+RESEARCH_PREFLIGHT_TRANSIENT_RETRY_SECONDS = 30
 RESEARCH_SEMANTIC_FALSIFICATION_LIMIT = 3
 RESEARCH_RECON_ACTION_CAP = 6
 RESEARCH_AUTOPILOT_LEASE_SECONDS = 30
@@ -29773,9 +29881,49 @@ RESEARCH_DEFAULT_CAMPAIGN_FAMILIES = (
     "data_exposure", "access_control", "field_constraint",
 )
 RESEARCH_PRIMARY_CREDENTIAL_FAMILIES = frozenset({
-    "auth", "bola", "mass_assignment", "workflow", "access_control", "field_constraint",
+    "auth", "bola", "mass_assignment", "workflow", "data_exposure",
+    "access_control", "field_constraint",
 })
 RESEARCH_SECOND_USER_FAMILIES = frozenset({"bola"})
+
+
+def _research_preflight_claim_is_stale(config: Any, *, now: datetime | None = None) -> bool:
+    payload = config if isinstance(config, dict) else {}
+    if str(payload.get("preflight_state") or "") != "queueing":
+        return False
+    raw_started = str(payload.get("preflight_started_at") or "").strip()
+    if not raw_started:
+        return True
+    try:
+        started = datetime.fromisoformat(raw_started.replace("Z", "+00:00"))
+        if started.tzinfo is None:
+            started = started.replace(tzinfo=timezone.utc)
+    except ValueError:
+        return True
+    current = now or datetime.now(timezone.utc)
+    return (current - started).total_seconds() >= RESEARCH_PREFLIGHT_CLAIM_TTL_SECONDS
+
+
+def _research_subtract_cost(used: Any, cost: Any) -> dict[str, int]:
+    used_map = _research_normalize_budget_used(used)
+    cost_map = _research_normalize_budget_used(cost)
+    return {
+        key: max(0, int(used_map.get(key) or 0) - int(cost_map.get(key) or 0))
+        for key in RESEARCH_BUDGET_KEYS
+    }
+
+
+def _research_preflight_error_is_transient(exc: Exception) -> bool:
+    detail = getattr(exc, "detail", None)
+    error = str(detail.get("error") or "") if isinstance(detail, dict) else ""
+    text = f"{error} {detail if detail is not None else exc}".lower()
+    return any(token in text for token in (
+        "workers_not_confirmed_current",
+        "worker_fleet_not_current",
+        "pending worker",
+        "stale worker",
+        "build-current",
+    ))
 
 
 def _research_family_readiness_requirements(families: set[str], *, gated: bool) -> dict[str, Any]:
@@ -30202,6 +30350,25 @@ async def _research_campaign_readiness(conn: Any, campaign: Any) -> dict[str, An
     )
     principals = [row_to_dict(row) for row in principal_rows]
     signals = _target_credential_precondition_signals(principals)
+    invariant_counts: dict[str, int] = {}
+    try:
+        invariant_row = await conn.fetchrow(
+            """
+            SELECT COUNT(*) FILTER (WHERE contract_kind='access_control')::int AS access_control,
+                   COUNT(*) FILTER (WHERE contract_kind='field_constraint')::int AS field_constraint,
+                   COUNT(*) FILTER (WHERE contract_kind='workflow_transition')::int AS workflow
+            FROM target_invariant_contracts
+            WHERE target_id=$1 AND status='approved'
+            """,
+            target_id,
+        )
+        invariant_counts = {
+            key: int((invariant_row or {}).get(key) or 0)
+            for key in ("access_control", "field_constraint", "workflow")
+        }
+    except Exception:
+        # Rolling migrations and test doubles fail closed: invariant-only families are unavailable.
+        invariant_counts = {"access_control": 0, "field_constraint": 0, "workflow": 0}
     surface = await conn.fetchrow(
         """
         SELECT COUNT(*)::int AS inventory_rows,
@@ -30241,7 +30408,8 @@ async def _research_campaign_readiness(conn: Any, campaign: Any) -> dict[str, An
                      WHERE COALESCE(param_shape, '') <> '' OR COALESCE(replay_spec, '') <> ''
                    )::int AS parameterized_routes,
                MAX(last_seen_at) AS latest_inventory_seen_at
-        FROM target_endpoints WHERE target_id=$1
+        FROM target_endpoints
+        WHERE target_id=$1 AND COALESCE(test_status, '') <> 'gone'
         """,
         target_id,
     )
@@ -30437,13 +30605,25 @@ async def _research_campaign_readiness(conn: Any, campaign: Any) -> dict[str, An
             executable_families.append(injection_family)
     if "mass_assignment" in families and family_mutation_routes > 0:
         executable_families.append("mass_assignment")
-    if "field_constraint" in families and family_mutation_routes > 0:
+    if (
+        "field_constraint" in families
+        and family_mutation_routes > 0
+        and invariant_counts.get("field_constraint", 0) > 0
+    ):
         executable_families.append("field_constraint")
-    if "workflow" in families and family_mutation_routes > 0:
+    if (
+        "workflow" in families
+        and family_mutation_routes > 0
+        and invariant_counts.get("workflow", 0) > 0
+    ):
         executable_families.append("workflow")
-    if "data_exposure" in families and family_all_executable_routes > 0:
+    if "data_exposure" in families and family_executable_routes > 0:
         executable_families.append("data_exposure")
-    if "access_control" in families and family_executable_routes > 0:
+    if (
+        "access_control" in families
+        and family_executable_routes > 0
+        and invariant_counts.get("access_control", 0) > 0
+    ):
         executable_families.append("access_control")
     fresh_authenticated_routes = int(surface_payload.get("fresh_authenticated_routes") or 0)
     if gated and requirements["authenticated_preflight"]:
@@ -30468,6 +30648,8 @@ async def _research_campaign_readiness(conn: Any, campaign: Any) -> dict[str, An
         )
     surface_payload.update({
         "executable_families": sorted(set(executable_families)),
+        "unavailable_families": sorted(families - set(executable_families)),
+        "approved_invariant_counts": invariant_counts,
         "meaningful_preflight_gain": meaningful_preflight_gain,
     })
     blockers: list[str] = []
@@ -30522,6 +30704,11 @@ async def _research_campaign_readiness(conn: Any, campaign: Any) -> dict[str, An
         )
     if gated and families and not executable_families:
         blockers.append("no_allowed_family_has_executable_surface")
+    if gated and config.get("require_all_requested_families"):
+        blockers.extend(
+            f"family_surface_unavailable:{family}"
+            for family in sorted(families - set(executable_families))
+        )
     hard_blockers = {
         "primary_credentials_required",
         "distinct_second_user_credentials_required",
@@ -30618,6 +30805,21 @@ async def _research_campaign_self_repair(campaign_id: Any) -> dict[str, Any]:
                     "campaign": _public_campaign_row(campaign),
                 }
             return {"action": "none", "readiness": readiness, "campaign": _public_campaign_row(campaign)}
+        retry_after_raw = str(config.get("preflight_retry_after") or "").strip()
+        if retry_after_raw:
+            try:
+                retry_after = datetime.fromisoformat(retry_after_raw.replace("Z", "+00:00"))
+                if retry_after.tzinfo is None:
+                    retry_after = retry_after.replace(tzinfo=timezone.utc)
+            except ValueError:
+                retry_after = datetime.min.replace(tzinfo=timezone.utc)
+            if retry_after > datetime.now(timezone.utc):
+                return {
+                    "action": "transient_retry_wait",
+                    "retry_after": retry_after.isoformat(),
+                    "readiness": readiness,
+                    "campaign": _public_campaign_row(campaign),
+                }
         if readiness["state"] == "blocked":
             config["readiness"] = readiness
             config["last_error"] = ",".join(readiness["blockers"])
@@ -30628,7 +30830,11 @@ async def _research_campaign_self_repair(campaign_id: Any) -> dict[str, Any]:
                 json.dumps(metadata, default=str),
             )
             return {"action": "blocked", "readiness": readiness, "campaign": _public_campaign_row(updated)}
-        attempts = int(config.get("preflight_attempts") or 0)
+        stale_queueing_claim = _research_preflight_claim_is_stale(config)
+        attempts = max(
+            0,
+            int(config.get("preflight_attempts") or 0) - (1 if stale_queueing_claim else 0),
+        )
         if attempts >= RESEARCH_PREFLIGHT_MAX_ATTEMPTS:
             config["readiness"] = readiness
             config["last_error"] = "authenticated_coverage_readiness_exhausted"
@@ -30640,8 +30846,21 @@ async def _research_campaign_self_repair(campaign_id: Any) -> dict[str, Any]:
             )
             return {"action": "exhausted", "readiness": readiness, "campaign": _public_campaign_row(updated)}
         budget = await _research_campaign_budget_snapshot(conn, campaign)
+        preflight_budget_before = _research_normalize_budget_used(
+            config.get("preflight_budget_used") or {}
+        )
+        if stale_queueing_claim:
+            preflight_budget_before = _research_subtract_cost(
+                preflight_budget_before, RESEARCH_PREFLIGHT_RESERVED_COST,
+            )
+            budget["used"] = _research_subtract_cost(
+                budget.get("used") or {}, RESEARCH_PREFLIGHT_RESERVED_COST,
+            )
+            budget["remaining"] = _research_campaign_budget_remaining(
+                budget["limits"], budget["used"],
+            )
         preflight_budget_used = _research_apply_cost(
-            config.get("preflight_budget_used") or {},
+            preflight_budget_before,
             RESEARCH_PREFLIGHT_RESERVED_COST,
         )
         aggregate_after_claim = {
@@ -30674,6 +30893,7 @@ async def _research_campaign_self_repair(campaign_id: Any) -> dict[str, Any]:
         config.update({
             "preflight_state": "queueing",
             "preflight_claim_id": preflight_claim_id,
+            "preflight_retry_after": None,
             "preflight_attempts": attempts + 1,
             "preflight_started_at": datetime.now(timezone.utc).isoformat(),
             "readiness": readiness,
@@ -30687,11 +30907,18 @@ async def _research_campaign_self_repair(campaign_id: Any) -> dict[str, Any]:
         metadata["autonomous_research"] = config
         claimed = await conn.fetchrow(
             """
-            UPDATE campaigns SET metadata_json=$2::jsonb, updated_at=NOW()
+            UPDATE campaigns SET metadata_json=$2::jsonb, status='active', updated_at=NOW()
             WHERE id=$1 AND status <> 'cancelled'
               AND (
                 COALESCE(metadata_json #>> '{autonomous_research,preflight_state}', '')
                     NOT IN ('queueing','running')
+                OR (
+                  metadata_json #>> '{autonomous_research,preflight_state}' = 'queueing'
+                  AND COALESCE(
+                    NULLIF(metadata_json #>> '{autonomous_research,preflight_started_at}', '')::timestamptz,
+                    '-infinity'::timestamptz
+                  ) < NOW() - INTERVAL '2 minutes'
+                )
                 OR (
                   metadata_json #>> '{autonomous_research,preflight_state}' = 'running'
                   AND EXISTS (
@@ -30772,6 +30999,7 @@ async def _research_campaign_self_repair(campaign_id: Any) -> dict[str, Any]:
             ),
         ))
     except Exception as exc:
+        transient = _research_preflight_error_is_transient(exc)
         async with db_pool.acquire() as conn:
             campaign = await conn.fetchrow("SELECT * FROM campaigns WHERE id=$1", campaign_uuid)
             if str(campaign.get("status") or "") == "cancelled":
@@ -30783,11 +31011,27 @@ async def _research_campaign_self_repair(campaign_id: Any) -> dict[str, Any]:
             payload = row_to_dict(campaign)
             metadata = _decode_json_value(payload.get("metadata_json")) or {}
             config = metadata.get("autonomous_research") if isinstance(metadata.get("autonomous_research"), dict) else {}
-            config.update({"preflight_state": "failed", "last_error": str(exc)[:500]})
+            config.update({
+                "preflight_state": "pending" if transient else "failed",
+                "preflight_attempts": attempts if transient else attempts + 1,
+                "preflight_budget_used": preflight_budget_before,
+                "budget_used": budget["used"],
+                "remaining_budget": _research_campaign_budget_remaining(
+                    budget["limits"], budget["used"],
+                ),
+                "preflight_retry_after": (
+                    datetime.now(timezone.utc)
+                    + timedelta(seconds=RESEARCH_PREFLIGHT_TRANSIENT_RETRY_SECONDS)
+                ).isoformat() if transient else None,
+                "last_error": (
+                    f"transient_preflight_queue_failure:{str(exc)[:450]}"
+                    if transient else str(exc)[:500]
+                ),
+            })
             metadata["autonomous_research"] = config
             updated = await conn.fetchrow(
                 """
-                UPDATE campaigns SET status='paused', metadata_json=$2::jsonb, updated_at=NOW()
+                UPDATE campaigns SET status=$4, metadata_json=$2::jsonb, updated_at=NOW()
                 WHERE id=$1
                   AND metadata_json #>> '{autonomous_research,preflight_claim_id}'=$3
                 RETURNING *
@@ -30795,9 +31039,11 @@ async def _research_campaign_self_repair(campaign_id: Any) -> dict[str, Any]:
                 campaign_uuid,
                 json.dumps(metadata, default=str),
                 preflight_claim_id,
+                "active" if transient else "paused",
             )
         return {
-            "action": "failed", "error": str(exc)[:500], "readiness": readiness,
+            "action": "retry_transient" if transient else "failed",
+            "error": str(exc)[:500], "readiness": readiness,
             "campaign": _public_campaign_row(updated or campaign),
         }
 
@@ -30815,6 +31061,7 @@ async def _research_campaign_self_repair(campaign_id: Any) -> dict[str, Any]:
             "preflight_family": focus_family,
             "preflight_endpoint_count": len(custom_endpoints),
             "last_error": None,
+            "preflight_retry_after": None,
         })
         metadata["autonomous_research"] = config
         updated = await conn.fetchrow(
@@ -30889,6 +31136,8 @@ async def _research_campaign_yield_metrics(conn: Any, campaign: Any) -> dict[str
     falsification_counts: dict[str, int] = {}
     outcome_counts: dict[str, int] = {key: 0 for key in sorted(RESEARCH_EXPERIMENT_OUTCOMES)}
     novelty_blocks = 0
+    rejected_decisions = 0
+    rejection_reasons: Counter[str] = Counter()
     for row in decisions:
         action = _decode_json_value(row.get("action")) or {}
         command = str(action.get("command") or "")
@@ -30898,6 +31147,9 @@ async def _research_campaign_yield_metrics(conn: Any, campaign: Any) -> dict[str
             recon_actions += 1
         validation_errors = _decode_json_value(row.get("validation_errors")) or []
         novelty_blocks += sum(1 for error in validation_errors if str(error) == "known_vulnerability_already_covered")
+        if str(row.get("status") or "") in {"rejected", "blocked", "failed"}:
+            rejected_decisions += 1
+            rejection_reasons.update(str(error) for error in validation_errors if str(error))
         dimension = _research_action_semantic_dimension(action)
         if not dimension:
             continue
@@ -30948,6 +31200,8 @@ async def _research_campaign_yield_metrics(conn: Any, campaign: Any) -> dict[str
         "exhausted_dimensions": len(exhausted_dimensions),
         "recon_actions": recon_actions,
         "novelty_suppressions": novelty_blocks,
+        "rejected_decisions": rejected_decisions,
+        "rejection_reasons": dict(rejection_reasons.most_common(20)),
         "verified_autonomous_findings": verified_findings,
         "finding_yield_per_experiment": round(verified_findings / experiments, 4) if experiments else 0.0,
         "model_units_per_verified_finding": (model_units // verified_findings) if verified_findings else None,
@@ -30970,6 +31224,10 @@ async def _research_campaign_yield_metrics(conn: Any, campaign: Any) -> dict[str
                     and outcome_counts.get("inconclusive", 0) + outcome_counts.get("blocked", 0)
                     >= max(6, int(experiments * 0.75))
                 )
+                or (
+                    rejected_decisions >= 8
+                    and rejected_decisions >= max(8, int(len(decisions) * 0.75))
+                )
             )
         ),
         "stop_reason": (
@@ -30979,6 +31237,9 @@ async def _research_campaign_yield_metrics(conn: Any, campaign: Any) -> dict[str
             if experiments >= 8 and verified_findings == 0
             and outcome_counts.get("inconclusive", 0) + outcome_counts.get("blocked", 0)
             >= max(6, int(experiments * 0.75))
+            else "planner_rejection_ceiling"
+            if rejected_decisions >= 8 and verified_findings == 0
+            and rejected_decisions >= max(8, int(len(decisions) * 0.75))
             else None
         ),
     }
@@ -31472,6 +31733,8 @@ async def launch_research_campaign(req: ResearchCampaignLaunchRequest):
             "approval_receipt_id": req.approval_receipt_id,
             "objective": req.objective,
             "allowed_families": requested_families,
+            "require_all_requested_families": "allowed_families" in req.model_fields_set,
+            "effective_families": [],
             "episodes_started": 0,
             "preflight_state": "pending" if gated_campaign else "not_required",
             "preflight_attempts": 0,
@@ -31560,6 +31823,9 @@ async def launch_research_campaign(req: ResearchCampaignLaunchRequest):
             "budget_limits": budget["limits"],
             "budget_used": budget["used"],
             "remaining_budget": budget["remaining"],
+            "effective_families": list(
+                (readiness.get("surface") or {}).get("executable_families") or []
+            ),
         })
         current_metadata["autonomous_research"] = current_config
         campaign = await conn.fetchrow(
@@ -31588,7 +31854,9 @@ async def launch_research_campaign(req: ResearchCampaignLaunchRequest):
             created_by=req.created_by,
             campaign_id=campaign_id,
             objective_override=req.objective,
-            allowed_families_override=requested_families,
+            allowed_families_override=list(
+                (readiness.get("surface") or {}).get("executable_families") or []
+            ),
             budget_limits_override=episode_budget_limits,
         ))
     except asyncpg.UniqueViolationError:
@@ -31790,6 +32058,9 @@ async def _continue_autonomous_research_campaigns() -> int:
                 "budget_limits": budget["limits"],
                 "budget_used": budget["used"],
                 "remaining_budget": budget["remaining"],
+                "effective_families": list(
+                    (readiness.get("surface") or {}).get("executable_families") or []
+                ),
             })
             latest_metadata["autonomous_research"] = latest_config
             if not _research_campaign_episode_budget_available(episode_budget_limits):
@@ -31872,13 +32143,16 @@ async def _continue_autonomous_research_campaigns() -> int:
                 )
             from_review = True
         try:
+            effective_families = list(
+                (readiness.get("surface") or {}).get("executable_families") or []
+            )
             await launch_research_episode(ResearchLaunchRequest(
                 subject_type="target", subject_id=str(row["target_id"]), mission_profile="target_hunt",
                 intensity=str(config.get("intensity") or "deep_hunt"),
                 approval_receipt_id=config.get("approval_receipt_id"), autopilot=True, force_new=True,
                 created_by="research_campaign_supervisor", campaign_id=str(row["id"]),
                 objective_override=config.get("objective"),
-                allowed_families_override=config.get("allowed_families") or [],
+                allowed_families_override=effective_families,
                 budget_limits_override=episode_budget_limits,
             ))
         except asyncpg.UniqueViolationError:
@@ -32332,7 +32606,9 @@ async def submit_research_decision(episode_id: str, req: ResearchDecisionRequest
             # surface and designs a valid experiment for it, but omits hypothesis_id (the lead is not
             # on the seeded board). Bind a matching ranked lead, or create a tracked planner-derived
             # hypothesis, so valid experiments are not rejected for provenance alone.
-            await _research_autobind_hypothesis(conn, episode, raw, observation_pack)
+            binding_errors.extend(
+                await _research_autobind_hypothesis(conn, episode, raw, observation_pack)
+            )
             catalog = _research_command_catalog()
             normalized, errors, warnings, cost = _research_validate_decision(
                 raw,
@@ -33044,19 +33320,18 @@ def _research_canonicalize_action_shape(raw: dict[str, Any]) -> list[str]:
 
 async def _research_autobind_hypothesis(
     conn, episode: dict[str, Any], raw: dict[str, Any], observation_pack: dict[str, Any],
-) -> None:
+) -> list[str]:
     """Bind an experiment decision to a tracked hypothesis, mutating ``raw`` in place.
 
     An ``experiment.*`` decision must carry a hypothesis_id (for provenance + promotion), but the
-    planner frequently reasons a hypothesis up from the surface and omits it. Bind an existing ranked
-    lead of the same family+route when one exists, else create a planner-derived hypothesis from the
-    workflow's proof_family + first route -- so the loop can freely test what it reasons up while
-    every experiment stays tracked and promotable.
+    planner frequently omits it. Bind an existing ranked live-surface lead of the same complete
+    vulnerability identity. Freelance routes fail closed: a model cannot manufacture the residue
+    that later authorizes its own active experiment.
     """
     action = raw.get("action") if isinstance(raw.get("action"), dict) else {}
     command = str(action.get("command") or "")
     if command not in {"experiment.workflow", "experiment.http_diff"}:
-        return
+        return []
     params = action.get("parameters") if isinstance(action.get("parameters"), dict) else {}
     # The workflow runtime requires a UUID workflow_id; the planner routinely omits it or invents a
     # non-UUID (the templates don't show it), which the arsenal rejects as "Invalid workflow id".
@@ -33067,8 +33342,6 @@ async def _research_autobind_hypothesis(
         except ValueError:
             params["workflow_id"] = str(uuid.uuid4())
             action["parameters"] = params
-    if str(raw.get("hypothesis_id") or "").strip():
-        return
     family = family_proof.canonical_family(params.get("proof_family") or "workflow")
     route = None
     selected_step: dict[str, Any] = {}
@@ -33100,7 +33373,7 @@ async def _research_autobind_hypothesis(
     method = str(selected_step.get("method") or params.get("method") or "GET").upper()
     target_id = str(episode.get("target_id") or "")
     if not target_id or not route:
-        return
+        return ["experiment_hypothesis_route_missing"]
     assertion_predicates = [
         str(assertion.get("predicate"))
         for assertion in (params.get("assertions") or [])
@@ -33119,9 +33392,10 @@ async def _research_autobind_hypothesis(
         dimensions=vulnerability_dimensions,
     )
     if not candidate_key:
-        return
-    # 1) Prefer an existing ranked lead only when its complete vulnerability identity matches.
+        return ["experiment_hypothesis_identity_incomplete"]
+    # Bind only an existing ranked lead whose complete vulnerability identity matches.
     ranked = (observation_pack.get("current_surface") or {}).get("ranked_hypotheses") or []
+    supplied_hypothesis_id = str(raw.get("hypothesis_id") or "").strip()
     for entry in ranked:
         hypothesis = entry.get("hypothesis") if isinstance(entry, dict) else None
         if not isinstance(hypothesis, dict) or not hypothesis.get("id"):
@@ -33129,38 +33403,11 @@ async def _research_autobind_hypothesis(
         if family_proof.canonical_family(hypothesis.get("family")) != family:
             continue
         if _research_hypothesis_vulnerability_key(hypothesis) == candidate_key:
+            if supplied_hypothesis_id and supplied_hypothesis_id != str(hypothesis["id"]):
+                return ["experiment_hypothesis_not_on_ranked_live_surface"]
             raw["hypothesis_id"] = str(hypothesis["id"])
-            return
-    # 2) Otherwise create a tracked planner-derived hypothesis for the freelance experiment.
-    try:
-        record = await _upsert_hypothesis(conn, HypothesisRequest(
-            target_id=target_id, source="ai_planner", family=family,
-            title=f"Planner experiment lead: {family} {route}"[:500],
-            description="A hypothesis the planner reasoned up from the discovered surface to test with a bounded experiment.",
-            severity_guess="medium", confidence=0.5,
-            dedupe_key=f"planner_experiment|{candidate_key}",
-            dedupe_dimensions={
-                "route": route,
-                "method": method,
-                "proof_surface": "planner_experiment",
-                **vulnerability_dimensions,
-            },
-            metadata_json={
-                "unexplained_residue": True,
-                "residue_source": "planner_reasoning",
-                "route": route,
-                "method": method,
-                "canonical_vulnerability_key": candidate_key,
-                "canonical_vulnerability_dimensions": vulnerability_dimensions,
-            },
-            next_test_action={"command": command, "parameters": params},
-            created_by="research_autobind",
-        ))
-        hypothesis_id = str((record.get("hypothesis") or {}).get("id") or "")
-        if hypothesis_id:
-            raw["hypothesis_id"] = hypothesis_id
-    except Exception:  # noqa: BLE001 - autobind is best-effort; never break the planner turn
-        logger.warning("autobind hypothesis failed for episode %s", episode.get("id"), exc_info=True)
+            return []
+    return ["experiment_hypothesis_not_on_ranked_live_surface"]
 
 
 # Concrete, contract-valid workflow proof templates per promotable family. The planner copies the
@@ -33174,12 +33421,14 @@ _EXPERIMENT_WORKFLOW_TEMPLATES: dict[str, dict[str, Any]] = {
         "expected_signal": "the attacker principal receives the owner's object while anonymous is denied",
         "falsifier": "the owner reference is absent, the attacker is denied or receives different data, or anonymous is allowed",
         "principal_variables": [
-            {"name": "object_id", "principal": "user1", "ref": "object_id"},
+            {"name": "owner_object_id", "principal": "user1", "ref": "object_id"},
+            {"name": "attacker_object_id", "principal": "user2", "ref": "object_id"},
         ],
         "steps": [
-            {"label": "owner_read", "kind": "http", "principal": "user1", "checkpoint": "action", "method": "GET", "path": "/api/<objects>/${object_id}"},
-            {"label": "attacker_read", "kind": "http", "principal": "user2", "checkpoint": "action", "method": "GET", "path": "/api/<objects>/${object_id}", "compare_to": "owner_read"},
-            {"label": "anon_denied", "kind": "http", "principal": "anonymous", "checkpoint": "action", "method": "GET", "path": "/api/<objects>/${object_id}"},
+            {"label": "owner_read", "kind": "http", "principal": "user1", "checkpoint": "action", "method": "GET", "path": "/api/<objects>/${owner_object_id}"},
+            {"label": "attacker_own_read", "kind": "http", "principal": "user2", "checkpoint": "before", "method": "GET", "path": "/api/<objects>/${attacker_object_id}"},
+            {"label": "attacker_read", "kind": "http", "principal": "user2", "checkpoint": "action", "method": "GET", "path": "/api/<objects>/${owner_object_id}", "compare_to": "owner_read"},
+            {"label": "anon_denied", "kind": "http", "principal": "anonymous", "checkpoint": "action", "method": "GET", "path": "/api/<objects>/${owner_object_id}"},
         ],
         "assertions": [
             {"type": "distinct_principals", "steps": ["owner_read", "attacker_read"], "predicate": "distinct_identity"},
@@ -33208,7 +33457,7 @@ _EXPERIMENT_WORKFLOW_TEMPLATES: dict[str, dict[str, Any]] = {
         "falsifier": "the anonymous request is denied",
         "steps": [
             {"label": "authed", "kind": "http", "principal": "user1", "checkpoint": "action", "method": "GET", "path": "/api/<protected>"},
-            {"label": "anon", "kind": "http", "principal": "anonymous", "checkpoint": "action", "method": "GET", "path": "/api/<protected>"},
+            {"label": "anon", "kind": "http", "principal": "anonymous", "checkpoint": "action", "method": "GET", "path": "/api/<protected>", "compare_to": "authed"},
         ],
         "assertions": [
             {"type": "status_in", "step": "authed", "values": [200], "predicate": "protected_resource_accessed"},

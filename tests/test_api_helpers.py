@@ -2446,8 +2446,8 @@ def test_application_graph_hypothesis_requests_build_authz_leads_not_findings():
 
     requests = api_module._application_graph_hypothesis_requests(target_id, nodes, edges, created_by="pytest")
 
-    assert len(requests) == 1
-    req = requests[0]
+    assert {request.family for request in requests} == {"bola", "data_exposure"}
+    req = next(request for request in requests if request.family == "bola")
     assert req.source == "app_graph"
     assert req.family == "bola"
     assert req.cwe == "CWE-639"
@@ -2460,6 +2460,11 @@ def test_application_graph_hypothesis_requests_build_authz_leads_not_findings():
     assert req.dedupe_dimensions["route"] == "/api/orders/{order_id}"
     assert req.dedupe_dimensions["object_key"] == "object:order_id"
     assert req.dedupe_dimensions["proof_surface"] == "runtime_authz_replay"
+    exposure = next(request for request in requests if request.family == "data_exposure")
+    assert exposure.cwe == "CWE-200"
+    assert exposure.next_test_action["command"] == "experiment.workflow"
+    assert exposure.next_test_action["parameters"]["proof_family"] == "data_exposure"
+    assert exposure.metadata_json["unexplained_residue"] is True
 
 
 def test_application_graph_hypothesis_requests_attach_principal_matrix_context():
@@ -12511,6 +12516,7 @@ def test_research_preflight_terminal_running_marker_can_claim_successor(monkeypa
             if "UPDATE campaigns SET metadata_json" in query:
                 self.claim_query = query
                 assert "linked_preflight.status IN ('completed','failed','cancelled')" in query
+                assert "INTERVAL '2 minutes'" in query
                 self.campaign = {
                     **self.campaign,
                     "metadata_json": json.loads(args[1]),
@@ -12566,6 +12572,99 @@ def test_research_preflight_terminal_running_marker_can_claim_successor(monkeypa
     assert len(submitted) == 1
     assert conn.campaign["metadata_json"]["autonomous_research"]["preflight_state"] == "running"
     assert conn.campaign["metadata_json"]["autonomous_research"]["preflight_attempts"] == 2
+
+
+def test_research_stale_queueing_claim_and_transient_worker_failure_recover(monkeypatch):
+    now = datetime.now(timezone.utc)
+    assert api_module._research_preflight_claim_is_stale({
+        "preflight_state": "queueing",
+        "preflight_started_at": (now - timedelta(minutes=3)).isoformat(),
+    }, now=now) is True
+    assert api_module._research_preflight_claim_is_stale({
+        "preflight_state": "queueing",
+        "preflight_started_at": (now - timedelta(seconds=30)).isoformat(),
+    }, now=now) is False
+
+    campaign_id = uuid.uuid4()
+    target_id = uuid.uuid4()
+    campaign = {
+        "id": campaign_id,
+        "target_id": target_id,
+        "status": "paused",
+        "campaign_type": "autonomous_research",
+        "metadata_json": {"autonomous_research": {
+            "intensity": "deep_hunt",
+            "allowed_families": ["auth"],
+            "approval_receipt_id": str(uuid.uuid4()),
+            "preflight_state": "pending",
+            "preflight_attempts": 0,
+            "preflight_budget_used": {},
+        }},
+    }
+
+    class Conn:
+        def __init__(self):
+            self.campaign = campaign
+
+        async def fetchrow(self, query, *args):
+            if "SELECT * FROM campaigns" in query:
+                return self.campaign
+            if "UPDATE campaigns SET metadata_json" in query:
+                self.campaign = {**self.campaign, "metadata_json": json.loads(args[1])}
+                return self.campaign
+            if "SELECT id, url FROM targets" in query:
+                return {"id": target_id, "url": "https://app.example.test"}
+            if "UPDATE campaigns SET status=$4" in query:
+                self.campaign = {
+                    **self.campaign,
+                    "status": args[3],
+                    "metadata_json": json.loads(args[1]),
+                }
+                return self.campaign
+            raise AssertionError(query)
+
+        async def fetch(self, query, *args):
+            if "FROM target_endpoints" in query:
+                return [{"method": "GET", "path": "/api/account"}]
+            raise AssertionError(query)
+
+    async def fake_readiness(_conn, _campaign):
+        return {
+            "ready": False,
+            "state": "repairable",
+            "blockers": ["authenticated_preflight_required"],
+            "required": {"primary_credentials": True},
+            "surface": {},
+            "preflight_scan": None,
+        }
+
+    async def fake_budget(_conn, _campaign):
+        limits = {key: 10_000 for key in api_module.RESEARCH_BUDGET_KEYS}
+        used = {key: 0 for key in api_module.RESEARCH_BUDGET_KEYS}
+        return {"limits": limits, "used": used, "remaining": limits}
+
+    async def stale_workers(_request):
+        raise api_module.HTTPException(status_code=409, detail={
+            "error": "workers_not_confirmed_current",
+            "message": "one pending worker is not build-current",
+        })
+
+    conn = Conn()
+    monkeypatch.setattr(api_module, "db_pool", _FakePool(conn))
+    monkeypatch.setattr(api_module, "_research_campaign_readiness", fake_readiness)
+    monkeypatch.setattr(api_module, "_research_campaign_budget_snapshot", fake_budget)
+    monkeypatch.setattr(api_module, "submit_scan", stale_workers)
+
+    result = asyncio.run(api_module._research_campaign_self_repair(campaign_id))
+
+    config = result["campaign"]["metadata_json"]["autonomous_research"]
+    assert result["action"] == "retry_transient"
+    assert result["campaign"]["status"] == "active"
+    assert config["preflight_state"] == "pending"
+    assert config["preflight_attempts"] == 0
+    assert config["preflight_budget_used"] == api_module._research_normalize_budget_used({})
+    assert config["budget_used"] == api_module._research_normalize_budget_used({})
+    assert config["preflight_retry_after"]
 
 
 def test_campaign_cancel_propagates_to_preflight_scan(monkeypatch):
@@ -12954,7 +13053,12 @@ def test_trusted_workflow_bola_proof_requires_full_server_bound_receipt():
         "observations": [
             {"label": "create", "principal": "user1", "checkpoint": "mutation",
              "request": {"method": "POST", "path": "/objects"}, "response": {"status": 201},
-             "extracted_names": ["object_id"], "error": None},
+             "extracted_names": ["object_id"], "extracted": {"object_id": {"sha256": "a" * 64}},
+             "error": None},
+            {"label": "create_attacker", "principal": "user2", "checkpoint": "mutation",
+             "request": {"method": "POST", "path": "/objects"}, "response": {"status": 201},
+             "extracted_names": ["object_id"], "extracted": {"object_id": {"sha256": "b" * 64}},
+             "error": None},
             {"label": "owner", "principal": "user1", "request": {
                 "method": "GET", "path": "/objects/42", "variable_references": ["object_id"],
              }, "response": {"status": 200}, "error": None},
@@ -13001,7 +13105,14 @@ def _bola_object_execution(object_id):
         "observations": [
             {"label": "create", "principal": "user1", "checkpoint": "mutation",
              "request": {"method": "POST", "path": "/objects"}, "response": {"status": 201},
-             "extracted_names": ["object_id"], "error": None},
+             "extracted_names": ["object_id"],
+             "extracted": {"object_id": {"sha256": hashlib.sha256(str(object_id).encode()).hexdigest()}},
+             "error": None},
+            {"label": "create_attacker", "principal": "user2", "checkpoint": "mutation",
+             "request": {"method": "POST", "path": "/objects"}, "response": {"status": 201},
+             "extracted_names": ["object_id"],
+             "extracted": {"object_id": {"sha256": hashlib.sha256(f"attacker-{object_id}".encode()).hexdigest()}},
+             "error": None},
             {"label": "owner", "principal": "user1", "request": {
                 "method": "GET", "path": path, "variable_references": ["object_id"],
              }, "response": {"status": 200}, "error": None},
@@ -13184,6 +13295,26 @@ def test_research_hypothesis_context_suppresses_known_deterministic_finding():
     assert [item["hypothesis_id"] for item in ranked] == ["novel-mass-assignment"]
 
 
+def test_research_hypothesis_live_surface_filter_rejects_phantom_routes():
+    live_surface = {("PATCH", "/profiles/{id}"), ("GET", "/orders/{id}")}
+    live = {
+        "source": "app_graph", "family": "mass_assignment",
+        "metadata_json": {"route": "/profiles/42", "method": "PATCH"},
+    }
+    phantom = {
+        "source": "ai_planner", "family": "mass_assignment",
+        "metadata_json": {"route": "/identity/api/coupon", "method": "PATCH"},
+    }
+    invariant = {
+        "source": "invariant", "family": "workflow",
+        "metadata_json": {"route": "/workflow/transition", "method": "POST"},
+    }
+
+    assert api_module._research_hypothesis_matches_live_surface(live, live_surface) is True
+    assert api_module._research_hypothesis_matches_live_surface(phantom, live_surface) is False
+    assert api_module._research_hypothesis_matches_live_surface(invariant, live_surface) is True
+
+
 def test_research_campaign_readiness_requires_completed_two_user_surface():
     target_id = uuid.uuid4()
     scan_id = uuid.uuid4()
@@ -13245,6 +13376,57 @@ def test_research_campaign_readiness_requires_completed_two_user_surface():
     assert readiness["surface"]["authenticated_routes"] == 30
     assert readiness["surface"]["fresh_auth_boundary_edges"] == 2
     assert readiness["surface"]["executable_families"] == ["auth", "bola"]
+
+
+def test_research_campaign_readiness_requires_invariant_for_invariant_only_family():
+    target_id = uuid.uuid4()
+    scan_id = uuid.uuid4()
+    campaign = {
+        "id": uuid.uuid4(),
+        "target_id": target_id,
+        "metadata_json": {"autonomous_research": {
+            "intensity": "deep_hunt",
+            "approval_receipt_id": str(uuid.uuid4()),
+            "allowed_families": ["field_constraint"],
+            "require_all_requested_families": True,
+            "preflight_scan_id": str(scan_id),
+        }},
+    }
+
+    class Conn:
+        async def fetch(self, query, *args):
+            if "target_principals" in query:
+                return [{"auth_state": "user1", "credential_profile": "owner", "credential_configured": True}]
+            raise AssertionError(query)
+
+        async def fetchrow(self, query, *args):
+            if "target_invariant_contracts" in query:
+                return {"access_control": 0, "field_constraint": 0, "workflow": 0}
+            if "FROM target_endpoints" in query and "last_seen_scan_id" in query:
+                return {
+                    "fresh_unique_routes": 6, "fresh_authenticated_routes": 6,
+                    "fresh_executable_routes": 6, "fresh_all_executable_routes": 6,
+                    "fresh_mutation_routes": 3, "fresh_parameterized_routes": 3,
+                }
+            if "FROM target_endpoints" in query:
+                return {
+                    "inventory_rows": 6, "unique_routes": 6, "authenticated_routes": 6,
+                    "executable_routes": 6, "all_executable_routes": 6,
+                    "mutation_routes": 3, "parameterized_routes": 3,
+                }
+            if "FROM application_graph_nodes" in query:
+                return {"route_nodes": 6, "fresh_route_nodes": 6, "edge_count": 0,
+                        "fresh_edge_count": 0, "fresh_auth_boundary_edges": 0}
+            if "FROM scans" in query:
+                return {"id": scan_id, "status": "completed", "current_phase": "done"}
+            raise AssertionError(query)
+
+    readiness = asyncio.run(api_module._research_campaign_readiness(Conn(), campaign))
+
+    assert readiness["ready"] is False
+    assert readiness["surface"]["executable_families"] == []
+    assert readiness["surface"]["approved_invariant_counts"]["field_constraint"] == 0
+    assert "family_surface_unavailable:field_constraint" in readiness["blockers"]
 
 
 def test_research_campaign_readiness_allows_narrow_public_injection_without_credentials():
@@ -13798,17 +13980,9 @@ def test_autonomous_workflow_finding_uses_canonical_retest_inputs_and_source_fil
     assert "autonomous_workflow" in api_module._source_type_filter_sql("dast")
 
 
-def test_research_autobind_requires_complete_operation_identity(monkeypatch):
+def test_research_autobind_requires_ranked_live_operation_identity():
     target_id = uuid.uuid4()
     wrong_hypothesis_id = uuid.uuid4()
-    created_hypothesis_id = uuid.uuid4()
-    captured = []
-
-    async def fake_upsert(_conn, request):
-        captured.append(request)
-        return {"hypothesis": {"id": created_hypothesis_id}, "created": True}
-
-    monkeypatch.setattr(api_module, "_upsert_hypothesis", fake_upsert)
     raw = {
         "action": {
             "command": "experiment.workflow",
@@ -13846,15 +14020,12 @@ def test_research_autobind_requires_complete_operation_identity(monkeypatch):
         },
     }
 
-    asyncio.run(api_module._research_autobind_hypothesis(
+    errors = asyncio.run(api_module._research_autobind_hypothesis(
         object(), {"target_id": target_id}, raw, observation,
     ))
 
-    assert raw["hypothesis_id"] == str(created_hypothesis_id)
-    assert len(captured) == 1
-    assert captured[0].dedupe_dimensions["method"] == "PATCH"
-    assert captured[0].dedupe_dimensions["route"] == "/users/{id}"
-    assert captured[0].dedupe_dimensions["fields"] == ["isadmin"]
+    assert errors == ["experiment_hypothesis_not_on_ranked_live_surface"]
+    assert "hypothesis_id" not in raw
 
     exact_hypothesis_id = uuid.uuid4()
     exact_raw = {"action": json.loads(json.dumps(raw["action"]))}
@@ -13876,12 +14047,12 @@ def test_research_autobind_requires_complete_operation_identity(monkeypatch):
         },
     }
 
-    asyncio.run(api_module._research_autobind_hypothesis(
+    errors = asyncio.run(api_module._research_autobind_hypothesis(
         object(), {"target_id": target_id}, exact_raw, exact_observation,
     ))
 
+    assert errors == []
     assert exact_raw["hypothesis_id"] == str(exact_hypothesis_id)
-    assert len(captured) == 1
 
 
 def test_research_canonicalizes_nested_hypothesis_binding_without_weakening_parameters():
@@ -14135,6 +14306,42 @@ def test_campaign_yield_counts_only_findings_with_campaign_provenance():
     # Keep the Python value text as well; asyncpg does not coerce UUID objects
     # for parameters whose declared SQL type is text.
     assert args == (target_id, str(campaign_id))
+
+
+def test_campaign_yield_stops_rejection_only_planner_spin():
+    campaign_id = uuid.uuid4()
+    target_id = uuid.uuid4()
+    episode_id = uuid.uuid4()
+
+    class Conn:
+        async def fetch(self, query, *args):
+            if "FROM research_episodes" in query:
+                return [{"id": episode_id, "status": "completed", "budget_used": {}}]
+            if "FROM research_decisions" in query:
+                return [{
+                    "status": "rejected",
+                    "validation_errors": ["experiment_hypothesis_not_on_ranked_live_surface"],
+                    "action": {"command": "experiment.workflow", "parameters": {
+                        "proof_family": "mass_assignment",
+                        "steps": [{"method": "PATCH", "path": f"/phantom/{index}"}],
+                    }},
+                    "command_result_id": None,
+                } for index in range(8)]
+            raise AssertionError(query)
+
+        async def fetchval(self, query, *args):
+            return 0
+
+    metrics = asyncio.run(api_module._research_campaign_yield_metrics(Conn(), {
+        "id": campaign_id,
+        "target_id": target_id,
+        "metadata_json": {},
+    }))
+
+    assert metrics["experiments"] == 0
+    assert metrics["rejected_decisions"] == 8
+    assert metrics["stop_recommended"] is True
+    assert metrics["stop_reason"] == "planner_rejection_ceiling"
 
 
 def test_research_graph_preserves_history_and_attributes_parallel_children():

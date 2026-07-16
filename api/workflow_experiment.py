@@ -30,7 +30,7 @@ from http_experiment import (
 )
 
 
-WORKFLOW_VERSION = "principal-workflow-2026-07-14.v3"
+WORKFLOW_VERSION = "principal-workflow-2026-07-16.v4"
 MAX_WORKFLOW_STEPS = 12
 MAX_WORKFLOW_VARIABLES = 40
 MAX_WORKFLOW_SECONDS = 180
@@ -74,14 +74,41 @@ PREDICATE_ASSERTION_TYPES = {
     "name_only_classification": {"comparison_equivalent"},
 }
 
-# These fields carry an authorization/security meaning independent of planner prose.  Ordinary
-# application fields must never become "forbidden" merely because a model labels them that way.
+# These fields carry an authorization/security meaning independent of planner prose. Ordinary
+# identity/tenant/value fields are intentionally absent: their names alone do not prove that a
+# client was granted more authority. They require a target-owned invariant and must fail closed in
+# this generic workflow verifier.
 SECURITY_SENSITIVE_MUTATION_FIELDS = frozenset({
     "admin", "is_admin", "isadmin", "role", "roles", "permission", "permissions",
-    "tenant", "tenant_id", "tenantid", "owner", "owner_id", "ownerid", "user_id",
-    "userid", "account_id", "accountid", "verified", "is_verified", "isverified",
-    "balance", "credit", "price", "total", "status",
+    "verified", "is_verified", "isverified",
 })
+
+_PRIVILEGED_ROLE_VALUES = frozenset({
+    "admin", "administrator", "owner", "root", "staff", "superuser", "super_admin",
+    "super-admin", "moderator",
+})
+
+
+def _submitted_value_is_privileged(field: str, value: Any) -> bool:
+    """Classify only high-confidence privilege elevation values.
+
+    Persistence of an arbitrary security-looking field is not proof. The submitted value must
+    itself carry a privilege meaning that the server can establish without trusting planner prose.
+    """
+    name = str(field).strip().lower()
+    if name in {"admin", "is_admin", "isadmin", "verified", "is_verified", "isverified"}:
+        return value is True or str(value).strip().lower() in {"true", "1", "yes"}
+    if name in {"role", "roles"}:
+        values = value if isinstance(value, list) else [value]
+        return any(str(item).strip().lower() in _PRIVILEGED_ROLE_VALUES for item in values)
+    if name in {"permission", "permissions"}:
+        values = value if isinstance(value, list) else [value]
+        return any(
+            str(item).strip().lower() in {"*", "admin", "manage", "write", "all"}
+            or str(item).strip().lower().startswith(("admin:", "manage:", "write:"))
+            for item in values
+        )
+    return False
 
 
 def _normalize_assertions(raw: Any, labels: set[str]) -> list[dict[str, Any]]:
@@ -280,6 +307,99 @@ def _same_resource(left: dict[str, Any], right: dict[str, Any], *, same_method: 
     return left_signature[1] == right_signature[1]
 
 
+def _meaningful_equivalent_response(
+    control: dict[str, Any],
+    candidate: dict[str, Any],
+    comparison: dict[str, Any],
+) -> bool:
+    """Require response-level evidence that a successful anonymous body is protected content.
+
+    Status equality alone accepts soft-denial pages and SPA shells. Exact bodies are sufficient;
+    otherwise a high-similarity response with the same non-empty JSON shape is required.
+    """
+    if not comparison.get("comparable") or comparison.get("status_changed") is True:
+        return False
+    control_response = control.get("response") if isinstance(control.get("response"), dict) else {}
+    candidate_response = candidate.get("response") if isinstance(candidate.get("response"), dict) else {}
+    control_has_content = bool(
+        int(control_response.get("content_length") or 0) > 0
+        or control_response.get("json_keys")
+        or control_response.get("selected_json")
+    )
+    candidate_has_content = bool(
+        int(candidate_response.get("content_length") or 0) > 0
+        or candidate_response.get("json_keys")
+        or candidate_response.get("selected_json")
+    )
+    if not (control_has_content and candidate_has_content):
+        return False
+    if comparison.get("body_changed") is False:
+        return True
+    similarity = comparison.get("body_similarity")
+    same_json_shape = (
+        bool(control_response.get("json_keys"))
+        and set(control_response.get("json_keys") or []) == set(candidate_response.get("json_keys") or [])
+    )
+    return isinstance(similarity, (int, float)) and similarity >= 0.9 and same_json_shape
+
+
+def _principal_has_distinct_resource_reference(
+    *,
+    owner_principal: str,
+    candidate_principal: str,
+    referenced_names: set[str],
+    by_label: dict[str, dict[str, Any]],
+    principal_variable_receipts: list[dict[str, Any]],
+) -> bool:
+    """Prove owner and candidate have different values for the same resource-reference kind."""
+    owner_refs = [
+        receipt for receipt in principal_variable_receipts
+        if isinstance(receipt, dict)
+        and str(receipt.get("principal") or "").lower() == owner_principal
+        and str(receipt.get("name") or "") in referenced_names
+        and receipt.get("sha256")
+        and receipt.get("ref")
+    ]
+    for owner_ref in owner_refs:
+        if any(
+            str(receipt.get("principal") or "").lower() == candidate_principal
+            and receipt.get("ref") == owner_ref.get("ref")
+            and receipt.get("sha256")
+            and receipt.get("sha256") != owner_ref.get("sha256")
+            for receipt in principal_variable_receipts
+            if isinstance(receipt, dict)
+        ):
+            return True
+
+    # Create-based workflows may establish the same differential by having each principal create
+    # an object and extracting the same typed reference name with a different value fingerprint.
+    owner_created: dict[str, str] = {}
+    candidate_created: dict[str, str] = {}
+    for observation in by_label.values():
+        request = observation.get("request") if isinstance(observation.get("request"), dict) else {}
+        if (
+            observation.get("checkpoint") != "mutation"
+            or str(request.get("method") or "").upper() not in {"POST", "PUT", "PATCH"}
+            or not _obs_success(observation)
+        ):
+            continue
+        extracted = observation.get("extracted") if isinstance(observation.get("extracted"), dict) else {}
+        principal = str(observation.get("principal") or "").lower()
+        destination = owner_created if principal == owner_principal else candidate_created if principal == candidate_principal else None
+        if destination is not None:
+            destination.update({
+                str(name): str(receipt.get("sha256") or "")
+                for name, receipt in extracted.items()
+                if isinstance(receipt, dict) and receipt.get("sha256")
+            })
+    return any(
+        owner_created.get(name)
+        and candidate_created.get(name)
+        and owner_created[name] != candidate_created[name]
+        for name in referenced_names
+    )
+
+
 def _server_confirms_predicate(
     predicate: str,
     assertion: dict[str, Any],
@@ -317,12 +437,7 @@ def _server_confirms_predicate(
             and principal_identities.get(candidate_principal)
             and principal_identities.get(control_principal) != principal_identities.get(candidate_principal)
         )
-        same_request = (
-            str(control_request.get("method") or "").upper()
-            == str(candidate_request.get("method") or "").upper()
-            and str(control_request.get("path") or "")
-            == str(candidate_request.get("path") or "")
-        )
+        same_request = bool(_request_signature(control)) and _same_resource(control, candidate)
         # Ownership needs provenance stronger than "an authenticated user could read it".  The
         # object identifier used by the owner read must come from a successful mutation performed by
         # that same principal in this workflow.  Anonymous denial only proves authentication, not
@@ -331,6 +446,7 @@ def _server_confirms_predicate(
         owner_established_by_mutation = any(
             obs.get("checkpoint") == "mutation"
             and str(obs.get("principal") or "").lower() == control_principal
+            and str((obs.get("request") or {}).get("method") or "").upper() in {"POST", "PUT", "PATCH"}
             and _obs_success(obs)
             and bool(referenced & set(obs.get("extracted_names") or []))
             for obs in by_label.values()
@@ -342,7 +458,16 @@ def _server_confirms_predicate(
             for receipt in principal_variable_receipts
             if isinstance(receipt, dict)
         )
-        owner_established = owner_established_by_mutation or owner_established_by_captured_ref
+        distinct_resource_reference = _principal_has_distinct_resource_reference(
+            owner_principal=control_principal,
+            candidate_principal=candidate_principal,
+            referenced_names=referenced,
+            by_label=by_label,
+            principal_variable_receipts=principal_variable_receipts,
+        )
+        owner_established = (
+            owner_established_by_mutation or owner_established_by_captured_ref
+        ) and distinct_resource_reference
         base = bool(distinct and same_request and equivalent and _obs_success(control) and _obs_success(candidate))
         return base and (owner_established if predicate == "ownership_established" else True)
     if predicate == "distinct_identity":
@@ -376,12 +501,10 @@ def _server_confirms_predicate(
         target = step or candidate
         categories = set(target.get("sensitive_value_categories") or [])
         principal = str(target.get("principal") or "anonymous").lower()
-        if not categories:
+        if not categories or not _obs_success(target):
             return False
         if principal == "anonymous":
-            return bool(categories - {"jwt", "bearer_token"}) or bool(
-                target.get("trusted_protected_resource")
-            )
+            return bool(target.get("trusted_protected_resource"))
         return bool(target.get("trusted_denied_access"))
     if predicate == "name_only_classification":  # refute: sensitive-looking keys, no values
         target = step or candidate
@@ -490,7 +613,12 @@ def _server_corroborated_evidence(
             (str(item.get("method") or "").upper(), str(item.get("path") or ""))
             for item in (result.get("trusted_protected_routes") or []) if isinstance(item, dict)
         }
-        if not _same_resource(protected, anonymous) or _request_signature(protected) not in trusted_protected:
+        auth_comparison = by_pair.get((str(auth_protected[0].get("step") or ""), str(auth_anon[0].get("step") or "")), {})
+        if (
+            not _same_resource(protected, anonymous)
+            or _request_signature(protected) not in trusted_protected
+            or not _meaningful_equivalent_response(protected, anonymous, auth_comparison)
+        ):
             granted -= {"protected_resource_accessed", "unauthenticated_control"}
 
     mass_accept = assertions_by_predicate.get("forbidden_field_accepted") or []
@@ -506,15 +634,32 @@ def _server_corroborated_evidence(
         response = after.get("response") if isinstance(after.get("response"), dict) else {}
         selected_json = response.get("selected_json") if isinstance(response.get("selected_json"), dict) else {}
         persisted: set[str] = set()
+        privileged_elevations: set[str] = set()
+        before = by_label.get(str(changed_assertion.get("control") or ""), {})
+        before_response = before.get("response") if isinstance(before.get("response"), dict) else {}
+        before_selected = before_response.get("selected_json") if isinstance(before_response.get("selected_json"), dict) else {}
         for path, value in selected_json.items():
             leaf = str(path).rsplit(".", 1)[-1].strip("[]").lower()
             if leaf in sensitive_submitted and _value_fingerprint(value) == submitted_hashes.get(leaf):
                 persisted.add(leaf)
+                baseline_values = [
+                    baseline for baseline_path, baseline in before_selected.items()
+                    if str(baseline_path).rsplit(".", 1)[-1].strip("[]").lower() == leaf
+                ]
+                if (
+                    _submitted_value_is_privileged(leaf, value)
+                    and baseline_values
+                    and all(not _submitted_value_is_privileged(leaf, baseline) for baseline in baseline_values)
+                ):
+                    privileged_elevations.add(leaf)
         if not (
             after.get("checkpoint") in {"action", "after"}
             and _same_resource(mutation, after, same_method=False)
             and _same_resource(mutation, benign_control)
+            and str(mutation.get("principal") or "") == str(after.get("principal") or "")
+            and str(mutation.get("principal") or "") == str(benign_control.get("principal") or "")
             and bool(persisted)
+            and bool(privileged_elevations)
         ):
             granted -= {"forbidden_field_accepted", "observable_state_change", "benign_control_accepted"}
 
@@ -800,6 +945,13 @@ def normalize_workflow(target_url: str, raw: Any) -> dict[str, Any]:
             or (step.get("kind") == "browser" and step.get("action") in {"click", "fill", "submit"})
         )
     ]
+    for step in normalized:
+        if (
+            step.get("kind") == "http"
+            and step.get("checkpoint") == "mutation"
+            and step.get("method") not in {"POST", "PUT", "PATCH"}
+        ):
+            raise WorkflowContractError("http_mutation_checkpoint_requires_write_method")
     restoration_steps = [step for step in normalized if step.get("checkpoint") in {"cleanup", "rollback"}]
     restoration_assertions = [item for item in assertions if item.get("type") == "restored"]
     for step in write_steps:

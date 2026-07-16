@@ -239,6 +239,7 @@ def test_real_sensitive_value_corroborates_data_exposure():
     result = {
         "observations": [
             {"label": "read", "principal": "anonymous",
+             "trusted_protected_resource": True,
              "response": {"status": 200, "json_keys": ["token"]},
              "sensitive_value_categories": ["private_key"]},
         ],
@@ -309,6 +310,31 @@ def test_data_exposure_accepts_policy_bound_tokens_and_denied_authenticated_role
     assert "sensitive_value_present" not in workflow.server_corroborated_predicates(public_jwt)
 
 
+def test_data_exposure_rejects_public_samples_and_unsuccessful_responses():
+    base = {
+        "observations": [{
+            "label": "sample", "principal": "anonymous",
+            "response": {"status": 200, "json_keys": ["ssn"]},
+            "sensitive_value_categories": ["ssn"],
+        }],
+        "assertion_results": [{
+            "passed": True, "predicate": "sensitive_value_present",
+            "type": "status_in", "step": "sample",
+        }],
+    }
+    assert "sensitive_value_present" not in workflow.server_corroborated_predicates(base)
+
+    protected_error = {
+        **base,
+        "observations": [{
+            **base["observations"][0],
+            "trusted_protected_resource": True,
+            "response": {"status": 500, "json_keys": ["ssn"]},
+        }],
+    }
+    assert "sensitive_value_present" not in workflow.server_corroborated_predicates(protected_error)
+
+
 def test_auth_bypass_uses_protected_route_policy_not_secret_content():
     result = {
         "trusted_protected_routes": [{"method": "GET", "path": "/admin/stats"}],
@@ -316,15 +342,19 @@ def test_auth_bypass_uses_protected_route_policy_not_secret_content():
             {
                 "label": "authed", "principal": "admin",
                 "request": {"method": "GET", "path": "/admin/stats"},
-                "response": {"status": 200},
+                "response": {"status": 200, "content_length": 32, "json_keys": ["active_users"]},
             },
             {
                 "label": "anon", "principal": "anonymous",
                 "request": {"method": "GET", "path": "/admin/stats"},
-                "response": {"status": 200, "json_keys": ["active_users"]},
+                "response": {"status": 200, "content_length": 32, "json_keys": ["active_users"]},
                 "sensitive_value_categories": [],
             },
         ],
+        "comparisons": [{
+            "control": "authed", "candidate": "anon", "comparable": True,
+            "status_changed": False, "body_changed": False, "body_similarity": 1.0,
+        }],
         "assertion_results": [
             {"passed": True, "predicate": "protected_resource_accessed", "type": "status_in", "step": "authed"},
             {"passed": True, "predicate": "unauthenticated_control", "type": "status_not_in", "step": "anon"},
@@ -336,6 +366,31 @@ def test_auth_bypass_uses_protected_route_policy_not_secret_content():
     }
 
 
+def test_auth_bypass_rejects_soft_200_denial_or_shell():
+    result = {
+        "trusted_protected_routes": [{"method": "GET", "path": "/admin/stats"}],
+        "observations": [
+            {"label": "authed", "principal": "admin",
+             "request": {"method": "GET", "path": "/admin/stats"},
+             "response": {"status": 200, "content_length": 120, "json_keys": ["active_users"]}},
+            {"label": "anon", "principal": "anonymous",
+             "request": {"method": "GET", "path": "/admin/stats"},
+             "response": {"status": 200, "content_length": 40, "json_keys": ["error"]}},
+        ],
+        "comparisons": [{
+            "control": "authed", "candidate": "anon", "comparable": True,
+            "status_changed": False, "body_changed": True, "body_similarity": 0.18,
+        }],
+        "assertion_results": [
+            {"passed": True, "predicate": "protected_resource_accessed", "step": "authed"},
+            {"passed": True, "predicate": "unauthenticated_control", "step": "anon"},
+        ],
+    }
+    assert workflow.server_corroborated_predicates(result).isdisjoint({
+        "protected_resource_accessed", "unauthenticated_control",
+    })
+
+
 def test_cross_principal_access_requires_distinct_authenticated_principals_and_equivalence():
     shared = {
         "principal_receipts": [
@@ -343,8 +398,10 @@ def test_cross_principal_access_requires_distinct_authenticated_principals_and_e
             {"slot": "user2", "identity_fingerprint": "attacker-id"},
         ],
         "observations": [
-            {"label": "owner", "principal": "user1", "response": {"status": 200}},
-            {"label": "attacker", "principal": "user2", "response": {"status": 200}},
+            {"label": "owner", "principal": "user1",
+             "request": {"method": "GET", "path": "/orders/42"}, "response": {"status": 200}},
+            {"label": "attacker", "principal": "user2",
+             "request": {"method": "GET", "path": "/orders/42"}, "response": {"status": 200}},
         ],
         "comparisons": [{"control": "owner", "candidate": "attacker", "comparable": True,
                          "state_changed": False, "status_changed": False, "body_changed": False}],
@@ -403,12 +460,13 @@ def test_reenabled_families_corroborate_on_real_signals():
         "trusted_protected_routes": [{"method": "GET", "path": "/private"}],
         "observations": [
             {"label": "authed", "principal": "user1", "request": {"method": "GET", "path": "/private"},
-             "response": {"status": 200}},
+             "response": {"status": 200, "content_length": 80, "json_keys": ["token"]}},
             {"label": "anon", "principal": "anonymous", "request": {"method": "GET", "path": "/private"},
-             "response": {"status": 200},
+             "response": {"status": 200, "content_length": 80, "json_keys": ["token"]},
              "sensitive_value_categories": ["jwt"]},
         ],
-        "comparisons": [],
+        "comparisons": [{"control": "authed", "candidate": "anon", "comparable": True,
+                         "status_changed": False, "body_changed": False, "body_similarity": 1.0}],
         "assertion_results": [
             {"id": "p", "type": "status_in", "step": "authed", "values": [200],
              "predicate": "protected_resource_accessed", "passed": True},
@@ -568,7 +626,10 @@ def test_bola_predicates_require_created_object_identity_and_denial_control():
         "observations": [
             {"label": "create", "principal": "user1", "checkpoint": "mutation",
              "request": {"method": "POST", "path": "/objects"}, "response": {"status": 201},
-             "extracted_names": ["object_id"]},
+             "extracted_names": ["object_id"], "extracted": {"object_id": {"sha256": "a" * 64}}},
+            {"label": "create_attacker", "principal": "user2", "checkpoint": "mutation",
+             "request": {"method": "POST", "path": "/objects"}, "response": {"status": 201},
+             "extracted_names": ["object_id"], "extracted": {"object_id": {"sha256": "b" * 64}}},
             {"label": "owner", "principal": "user1", "request": {
                 "method": "GET", "path": "/objects/42", "variable_references": ["object_id"],
              }, "response": {"status": 200}},
@@ -597,20 +658,26 @@ def test_bola_predicates_require_created_object_identity_and_denial_control():
     }
 
     # Authentication plus anonymous denial does not establish ownership of a pre-existing object.
-    read_existing = {**result, "observations": result["observations"][1:]}
+    read_existing = {**result, "observations": result["observations"][2:]}
     assert "ownership_established" not in workflow.server_corroborated_predicates(read_existing)
 
     # A server-resolved object reference captured from User1's managed login context is also
     # ownership provenance. The planner names the ref but never supplies its value.
     captured_owner = {
         **read_existing,
-        "principal_variable_receipts": [{
-            "name": "object_id",
-            "principal": "user1",
-            "ref": "basket_id",
-            "sha256": "a" * 64,
-            "length": 2,
-        }],
+        "principal_variable_receipts": [
+            {"name": "owner_object_id", "principal": "user1", "ref": "basket_id",
+             "sha256": "a" * 64, "length": 2},
+            {"name": "attacker_object_id", "principal": "user2", "ref": "basket_id",
+             "sha256": "b" * 64, "length": 2},
+        ],
+        "observations": [
+            {**item, "request": {
+                **item.get("request", {}),
+                "variable_references": ["owner_object_id"] if item["label"] == "owner" else [],
+            }}
+            for item in read_existing["observations"]
+        ],
     }
     assert "ownership_established" in workflow.server_corroborated_predicates(captured_owner)
 
@@ -625,6 +692,97 @@ def test_bola_predicates_require_created_object_identity_and_denial_control():
     assert "cross_principal_access" not in corroborated
 
 
+def test_bola_rejects_get_mislabeled_as_mutation_and_shared_owner_reference():
+    base = {
+        "principal_receipts": [
+            {"slot": "user1", "identity_fingerprint": "owner-id"},
+            {"slot": "user2", "identity_fingerprint": "attacker-id"},
+        ],
+        "observations": [
+            {"label": "fake_create", "principal": "user1", "checkpoint": "mutation",
+             "request": {"method": "GET", "path": "/objects/42"}, "response": {"status": 200},
+             "extracted_names": ["object_id"], "extracted": {"object_id": {"sha256": "a" * 64}}},
+            {"label": "owner", "principal": "user1",
+             "request": {"method": "GET", "path": "/objects/42", "variable_references": ["object_id"]},
+             "response": {"status": 200}},
+            {"label": "attacker", "principal": "user2",
+             "request": {"method": "GET", "path": "/objects/42"}, "response": {"status": 200}},
+        ],
+        "comparisons": [{"control": "owner", "candidate": "attacker", "comparable": True,
+                         "status_changed": False, "body_changed": False}],
+        "assertion_results": [{
+            "passed": True, "predicate": "ownership_established",
+            "control": "owner", "candidate": "attacker",
+        }],
+    }
+    assert "ownership_established" not in workflow.server_corroborated_predicates(base)
+
+    shared_ref = {
+        **base,
+        "observations": base["observations"][1:],
+        "principal_variable_receipts": [
+            {"name": "object_id", "principal": "user1", "ref": "basket_id", "sha256": "a" * 64},
+            {"name": "other_object_id", "principal": "user2", "ref": "basket_id", "sha256": "a" * 64},
+        ],
+    }
+    assert "ownership_established" not in workflow.server_corroborated_predicates(shared_ref)
+
+    invalid_workflow = {
+        "steps": [
+            {"label": "read", "checkpoint": "mutation", "method": "GET", "path": "/objects/42"},
+            {"label": "after", "checkpoint": "action", "method": "GET", "path": "/objects/42"},
+        ],
+        "assertions": [],
+    }
+    with pytest.raises(workflow.WorkflowContractError, match="http_mutation_checkpoint_requires_write_method"):
+        workflow.normalize_workflow("https://example.test", invalid_workflow)
+
+
+def test_mass_assignment_requires_privileged_value_elevation():
+    def result_for(field, before, submitted):
+        return {
+            "observations": [
+                {"label": "before", "principal": "user1", "checkpoint": "before",
+                 "request": {"method": "GET", "path": "/profile"},
+                 "response": {"status": 200, "selected_json": {f"$.{field}": before}}},
+                {"label": "control", "principal": "user1", "checkpoint": "mutation",
+                 "request": {"method": "PATCH", "path": "/profile"},
+                 "submitted_fields": ["display_name"],
+                 "submitted_field_hashes": {"display_name": workflow._value_fingerprint("research")},
+                 "response": {"status": 200}},
+                {"label": "mutate", "principal": "user1", "checkpoint": "mutation",
+                 "request": {"method": "PATCH", "path": "/profile"},
+                 "submitted_fields": [field],
+                 "submitted_field_hashes": {field: workflow._value_fingerprint(submitted)},
+                 "response": {"status": 200}},
+                {"label": "verify", "principal": "user1", "checkpoint": "action",
+                 "request": {"method": "GET", "path": "/profile"},
+                 "response": {"status": 200, "selected_json": {f"$.{field}": submitted}}},
+            ],
+            "comparisons": [{"control": "before", "candidate": "verify", "comparable": True,
+                             "selected_json_changed": {f"$.{field}": [before, submitted]}}],
+            "assertion_results": [
+                {"passed": True, "predicate": "benign_control_accepted", "step": "control"},
+                {"passed": True, "predicate": "forbidden_field_accepted", "step": "mutate"},
+                {"passed": True, "predicate": "observable_state_change",
+                 "control": "before", "candidate": "verify"},
+            ],
+        }
+
+    for field, before, submitted in (
+        ("price", 10, 1),
+        ("owner_id", 7, 8),
+        ("role", "member", "member"),
+    ):
+        assert not {
+            "forbidden_field_accepted", "observable_state_change", "benign_control_accepted",
+        } <= workflow.server_corroborated_predicates(result_for(field, before, submitted))
+
+    assert {
+        "forbidden_field_accepted", "observable_state_change", "benign_control_accepted",
+    } <= workflow.server_corroborated_predicates(result_for("role", "member", "admin"))
+
+
 def test_read_existing_bola_resolves_owner_ref_without_exposing_value():
     requested_paths = []
 
@@ -636,18 +794,22 @@ def test_read_existing_bola_resolves_owner_ref_without_exposing_value():
 
     contexts = _contexts()
     contexts["user1"]["captured_refs"] = {"basket_id": "42"}
+    contexts["user2"]["captured_refs"] = {"basket_id": "84"}
     payload = {
         "proof_family": "bola",
         "principal_variables": [
-            {"name": "object_id", "principal": "user1", "ref": "basket_id"},
+            {"name": "owner_object_id", "principal": "user1", "ref": "basket_id"},
+            {"name": "attacker_object_id", "principal": "user2", "ref": "basket_id"},
         ],
         "steps": [
             {"label": "owner", "kind": "http", "principal": "user1", "checkpoint": "action",
-             "method": "GET", "path": "/objects/${object_id}"},
+             "method": "GET", "path": "/objects/${owner_object_id}"},
+            {"label": "attacker_own", "kind": "http", "principal": "user2", "checkpoint": "before",
+             "method": "GET", "path": "/objects/${attacker_object_id}"},
             {"label": "attacker", "kind": "http", "principal": "user2", "checkpoint": "action",
-             "method": "GET", "path": "/objects/${object_id}", "compare_to": "owner"},
+             "method": "GET", "path": "/objects/${owner_object_id}", "compare_to": "owner"},
             {"label": "anonymous", "kind": "http", "principal": "anonymous", "checkpoint": "action",
-             "method": "GET", "path": "/objects/${object_id}"},
+             "method": "GET", "path": "/objects/${owner_object_id}"},
         ],
         "assertions": [
             {"type": "distinct_principals", "steps": ["owner", "attacker"],
@@ -668,16 +830,15 @@ def test_read_existing_bola_resolves_owner_ref_without_exposing_value():
         transport=httpx.MockTransport(handler),
     ))
 
-    assert requested_paths == ["/objects/42", "/objects/42", "/objects/42"]
+    assert requested_paths == ["/objects/42", "/objects/84", "/objects/42", "/objects/42"]
     assert result["mutating"] is False
     assert result["restoration_verified"] is True
-    assert result["principal_variable_receipts"] == [{
-        "name": "object_id",
-        "principal": "user1",
-        "ref": "basket_id",
-        "sha256": hashlib.sha256(b"42").hexdigest(),
-        "length": 2,
-    }]
+    assert result["principal_variable_receipts"] == [
+        {"name": "owner_object_id", "principal": "user1", "ref": "basket_id",
+         "sha256": hashlib.sha256(b"42").hexdigest(), "length": 2},
+        {"name": "attacker_object_id", "principal": "user2", "ref": "basket_id",
+         "sha256": hashlib.sha256(b"84").hexdigest(), "length": 2},
+    ]
     assert "42" not in str(result["principal_variable_receipts"])
     assert workflow.server_corroborated_predicates(result) >= {
         "distinct_identity", "ownership_established", "cross_principal_access", "denial_control",
