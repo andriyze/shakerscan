@@ -353,6 +353,33 @@ function FindingsContent() {
         </button>
       </div>
 
+      {/* Legend: Severity / Proof / Retest / Status render as look-alike badges on each row.
+          Spell out that they are four different questions so newcomers don't conflate them. */}
+      <details className="group rounded-lg border border-gray-800 bg-gray-900/50">
+        <summary className="flex cursor-pointer list-none items-center justify-between px-4 py-2.5 text-sm text-gray-400 hover:text-gray-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 rounded-lg">
+          <span>What do the badges mean?</span>
+          <span aria-hidden="true" className="text-gray-600 transition-transform group-open:rotate-180">▾</span>
+        </summary>
+        <div className="grid gap-3 border-t border-gray-800 p-4 sm:grid-cols-2">
+          <div className="flex items-start gap-3">
+            <SeverityBadge severity="high" />
+            <p className="text-xs leading-5 text-gray-400"><span className="font-medium text-gray-200">Severity</span> — how serious it would be if real, from Critical down to Info.</p>
+          </div>
+          <div className="flex items-start gap-3">
+            <div className="shrink-0"><ProofStateBadge proofState="verified" /></div>
+            <p className="text-xs leading-5 text-gray-400"><span className="font-medium text-gray-200">Proof</span> — how sure ShakerScan is it is real: <span className="text-gray-200">Proven</span> (evidence captured), <span className="text-gray-200">Suspected</span> (a lead, not confirmed), Refuted, or Inconclusive.</p>
+          </div>
+          <div className="flex items-start gap-3">
+            <div className="shrink-0"><RetestVerdictBadge verdict="likely_vulnerable" /></div>
+            <p className="text-xs leading-5 text-gray-400"><span className="font-medium text-gray-200">Retest</span> — what the most recent automated re-check found.</p>
+          </div>
+          <div className="flex items-start gap-3">
+            <FindingStatusBadge status="active" />
+            <p className="text-xs leading-5 text-gray-400"><span className="font-medium text-gray-200">Status</span> — your triage decision: active, resolved, false positive, or accepted risk.</p>
+          </div>
+        </div>
+      </details>
+
       {/* Cleanup Panel */}
       {showCleanup && (
         <Card className="p-4 space-y-4">
