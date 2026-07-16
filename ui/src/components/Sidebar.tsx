@@ -87,15 +87,15 @@ const navGroups: { heading: string | null; items: { href: string; label: string;
   {
     heading: 'AI security',
     items: [
-      { href: '/settings/ai-gate', label: 'AI Gate', icon: <Bot className="w-5 h-5" /> },
-      { href: '/settings/model-intake', label: 'Model Intake', icon: <PackageCheck className="w-5 h-5" /> },
+      { href: '/ai-gate', label: 'AI Gate', icon: <Bot className="w-5 h-5" /> },
+      { href: '/model-intake', label: 'Model Intake', icon: <PackageCheck className="w-5 h-5" /> },
     ],
   },
   {
     heading: 'Governance',
     items: [
       { href: '/settings/policy-profiles', label: 'Policy Profiles', icon: <ShieldCheck className="w-5 h-5" /> },
-      { href: '/settings/exceptions', label: 'Exceptions Queue', icon: <ShieldAlert className="w-5 h-5" /> },
+      { href: '/exceptions', label: 'Exceptions Queue', icon: <ShieldAlert className="w-5 h-5" /> },
     ],
   },
 ]

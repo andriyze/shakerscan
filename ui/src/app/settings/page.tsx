@@ -34,7 +34,7 @@ export default function SettingsPage() {
       </Link>
 
       <Link
-        href="/settings/exceptions"
+        href="/exceptions"
         className="flex items-center justify-between rounded-lg border border-gray-800 bg-gray-900 p-4 hover:bg-gray-800/80 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2 focus-visible:ring-offset-gray-950"
       >
         <div className="flex items-center gap-3">
@@ -50,7 +50,7 @@ export default function SettingsPage() {
       </Link>
 
       <Link
-        href="/settings/ai-gate"
+        href="/ai-gate"
         className="flex items-center justify-between rounded-lg border border-gray-800 bg-gray-900 p-4 hover:bg-gray-800/80 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2 focus-visible:ring-offset-gray-950"
       >
         <div className="flex items-center gap-3">
@@ -114,7 +114,7 @@ export default function SettingsPage() {
       </Link>
 
       <Link
-        href="/settings/model-intake"
+        href="/model-intake"
         className="flex items-center justify-between rounded-lg border border-gray-800 bg-gray-900 p-4 hover:bg-gray-800/80 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2 focus-visible:ring-offset-gray-950"
       >
         <div className="flex items-center gap-3">

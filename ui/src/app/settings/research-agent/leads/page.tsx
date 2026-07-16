@@ -89,10 +89,10 @@ function nextAction(lead: ScheduledLead): { href: string; label: string; descrip
     return { href: `/findings/${encodeURIComponent(text(parameters.finding_id))}`, label: 'Review and retest finding', description: 'Open the existing finding and use its deterministic retest workflow.' }
   }
   if (command.startsWith('ai_gate') || h?.source === 'ai_gate') {
-    return { href: '/settings/ai-gate', label: 'Open AI Gate', description: 'Continue with the AI-target probe and transcript workflow.' }
+    return { href: '/ai-gate', label: 'Open AI Gate', description: 'Continue with the AI-target probe and transcript workflow.' }
   }
   if (command.startsWith('model_intake') || h?.source === 'model_intake') {
-    return { href: '/settings/model-intake', label: 'Open Model Intake', description: 'Continue with the artifact trust and verification workflow.' }
+    return { href: '/model-intake', label: 'Open Model Intake', description: 'Continue with the artifact trust and verification workflow.' }
   }
   if (command.startsWith('asm.')) {
     return { href: '/asm', label: 'Open coverage work', description: 'Continue with the target’s coverage and endpoint workflow.' }

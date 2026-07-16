@@ -511,7 +511,7 @@ function ScansContent() {
                         </button>
                       ) : isAIScan ? (
                         <Link
-                          href="/settings/ai-gate"
+                          href="/ai-gate"
                           className="px-2 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded text-xs font-medium transition-colors"
                         >
                           AI Gate
@@ -643,7 +643,7 @@ function ScansContent() {
                       </button>
                     ) : isAIScan ? (
                       <Link
-                        href="/settings/ai-gate"
+                        href="/ai-gate"
                         className="px-2 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded text-xs font-medium transition-colors"
                       >
                         AI Gate

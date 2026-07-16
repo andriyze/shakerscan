@@ -883,9 +883,6 @@ function ModelIntakeSettingsContent() {
           </div>
           <p className="mt-1 text-gray-400">Resolve model artifacts, collect supply-chain evidence, and queue deployment checks.</p>
         </div>
-        <Link href="/settings" className="rounded-lg border border-gray-700 px-3 py-2 text-sm text-gray-300 hover:bg-gray-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500">
-          Settings
-        </Link>
       </div>
 
       {error && <div role="alert" className="rounded-lg border border-red-500/20 bg-red-500/10 p-3 text-sm text-red-400">{error}</div>}
@@ -907,7 +904,7 @@ function ModelIntakeSettingsContent() {
               <a href="#model-intake-trust-remediation" className="rounded border border-cyan-500/40 bg-cyan-500/10 px-3 py-1.5 text-xs font-medium text-cyan-100 hover:bg-cyan-500/20">
                 Trust controls
               </a>
-              <Link href="/settings/exceptions?queue_filter=expired" className="rounded border border-gray-700 px-3 py-1.5 text-xs font-medium text-gray-300 hover:bg-gray-800">
+              <Link href="/exceptions?queue_filter=expired" className="rounded border border-gray-700 px-3 py-1.5 text-xs font-medium text-gray-300 hover:bg-gray-800">
                 Exception hygiene
               </Link>
             </div>

@@ -842,9 +842,6 @@ export default function AIGateSettingsPage() {
             <Plus className="h-4 w-4" aria-hidden="true" />
             {showAddTarget ? 'Close' : 'Add Target'}
           </Button>
-          <Link href="/settings" className="rounded-lg border border-gray-700 px-3 py-2 text-sm text-gray-300 hover:bg-gray-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500">
-            Settings
-          </Link>
         </div>
       </div>
 
