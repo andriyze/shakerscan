@@ -10738,10 +10738,30 @@ async def dashboard():
     async with db_pool.acquire() as conn:
         metrics = await conn.fetchrow("SELECT * FROM dashboard_metrics")
         recent_scans = await conn.fetch("""
-            SELECT id, target_url, status, score, grade, created_at, completed_at
-            FROM scans
-            WHERE (scan_role IS NULL OR scan_role <> 'shard')
-            ORDER BY created_at DESC LIMIT 10
+            SELECT id, target_id, ai_target_id, target_url, status, score, grade,
+                   scan_type, run_kind, findings_count, created_at, completed_at
+            FROM (
+                SELECT DISTINCT ON (
+                    COALESCE(
+                        'target:' || target_id::text,
+                        'ai:' || ai_target_id::text,
+                        'url:' || target_url
+                    )
+                )
+                    id, target_id, ai_target_id, target_url, status, score, grade,
+                    scan_type, run_kind, findings_count, created_at, completed_at
+                FROM scans
+                WHERE (scan_role IS NULL OR scan_role <> 'shard')
+                ORDER BY
+                    COALESCE(
+                        'target:' || target_id::text,
+                        'ai:' || ai_target_id::text,
+                        'url:' || target_url
+                    ),
+                    created_at DESC
+            ) latest_per_target
+            ORDER BY created_at DESC
+            LIMIT 10
         """)
         recent_findings = await conn.fetch("""
             SELECT id, title, severity, status, tool, first_seen_at

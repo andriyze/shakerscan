@@ -3174,10 +3174,14 @@ export async function getExposureNodes(params?: {
 export async function getExposureAssets(params?: {
   root_domain?: string
   kind?: ExposureAssetKind
+  limit?: number
+  offset?: number
 }): Promise<ExposureAssetsResponse> {
   const searchParams = new URLSearchParams()
   if (params?.root_domain) searchParams.set('root_domain', params.root_domain)
   if (params?.kind) searchParams.set('kind', params.kind)
+  if (params?.limit) searchParams.set('limit', String(params.limit))
+  if (params?.offset) searchParams.set('offset', String(params.offset))
   const query = searchParams.toString()
   const res = await fetch(`${API_URL}/exposure/assets${query ? `?${query}` : ''}`)
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to fetch exposure assets'))
