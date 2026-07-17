@@ -16462,6 +16462,10 @@ def _select_research_hypothesis_context(
                 _research_hypothesis_coverage_key(
                     by_id.get(str(entry.get("hypothesis_id"))) or {}
                 ) in known_coverage,
+                -_research_hypothesis_provability(
+                    by_id.get(str(entry.get("hypothesis_id"))) or {}
+                )[0],
+                scheduled_position.get(id(entry), len(scheduled)),
             )
         )
 
@@ -16491,7 +16495,16 @@ def _select_research_hypothesis_context(
     balanced = family_firsts + family_rest
 
     ranked = [
-        {**entry, "hypothesis": by_id.get(str(entry.get("hypothesis_id")))}
+        {
+            **entry,
+            "provability_score": _research_hypothesis_provability(
+                by_id.get(str(entry.get("hypothesis_id"))) or {}
+            )[0],
+            "provability_blockers": _research_hypothesis_provability(
+                by_id.get(str(entry.get("hypothesis_id"))) or {}
+            )[1],
+            "hypothesis": by_id.get(str(entry.get("hypothesis_id"))),
+        }
         for entry in balanced[:bounded_limit]
     ]
     ranked_order = [
@@ -27894,7 +27907,71 @@ async def _research_focus_snapshot(conn, episode: dict[str, Any]) -> dict[str, A
     return _bounded_research_payload(snapshot)
 
 
-RESEARCH_OBSERVATION_MAX_BYTES = 48 * 1024
+def _research_inferred_planning_contracts(contracts: Any) -> list[dict[str, Any]]:
+    """Derive hypothesis oracles without granting approval or promotion authority."""
+    inferred: list[dict[str, Any]] = []
+    for contract in contracts if isinstance(contracts, list) else []:
+        if not isinstance(contract, dict) or not contract.get("route"):
+            continue
+        family = family_proof.canonical_family(contract.get("family"))
+        if family not in {"bola", "mass_assignment", "access_control"}:
+            continue
+        inferred.append({
+            "source_hypothesis_id": contract.get("hypothesis_id"),
+            "contract_kind": "ownership" if family == "bola" else "mutation_boundary",
+            "method": contract.get("method"),
+            "path": contract.get("route"),
+            "status": "inferred",
+            "planning_authority": True,
+            "execution_authority": False,
+            "promotion_authority": False,
+            "verification_required": True,
+        })
+    return inferred[:8]
+
+
+def _research_recommended_actions(
+    findings: Any,
+    commands: Any,
+    allowed_families: Any,
+) -> list[dict[str, Any]]:
+    proposable = {
+        str(item.get("name") or "")
+        for item in commands if isinstance(item, dict) and item.get("proposable")
+    }
+    recommendations: list[dict[str, Any]] = []
+    if "finding.retest" in proposable:
+        for finding in findings if isinstance(findings, list) else []:
+            if not isinstance(finding, dict):
+                continue
+            severity = str(finding.get("severity") or "").lower()
+            verdict = str(finding.get("last_verification_verdict") or "").lower()
+            if severity not in {"critical", "high"} or verdict in {"exploited", "likely_fixed", "fixed"}:
+                continue
+            finding_id = str(finding.get("id") or "")
+            if finding_id:
+                recommendations.append({
+                    "priority": "high",
+                    "reason": "unverified_high_severity_residue",
+                    "command": "finding.retest",
+                    "parameters": {"finding_id": finding_id},
+                })
+    if "scan.focused_family" in proposable:
+        for family in ("sqli", "xss"):
+            if _research_family_is_allowed(family, allowed_families):
+                recommendations.append({
+                    "priority": "high",
+                    "reason": "executable_deterministic_injection_actuator",
+                    "command": "scan.focused_family",
+                    "parameters": {"check_family": family},
+                })
+    return recommendations[:6]
+
+
+# Keep a planner turn near 8k tokens before provider framing.  The old 48 KiB
+# ceiling regularly left too little of a 250k campaign budget for 20+ useful
+# decisions, especially when experiment schemas were also attached.
+RESEARCH_OBSERVATION_MAX_BYTES = 32 * 1024
 
 
 def _research_experiment_projection(source: Any) -> dict[str, Any]:
@@ -28095,8 +28172,53 @@ def _research_hypothesis_experiment_contract(hypothesis: Any) -> dict[str, Any]:
         "prior_failures": int(metadata.get("prior_failures") or 0),
         "last_outcome": metadata.get("last_outcome"),
         "invariant_contract": invariant_contract,
+        "available_methods": metadata.get("available_methods"),
+        "readable_route": metadata.get("readable_route"),
+        "provability_score": metadata.get("provability_score"),
+        "provability_blockers": metadata.get("provability_blockers"),
     }
     return {key: value for key, value in contract.items() if value not in (None, "", [], {})}
+
+
+def _research_hypothesis_provability(item: Any) -> tuple[int, list[str]]:
+    """Score whether a lead can produce bounded, independently checkable proof."""
+    hypothesis = item if isinstance(item, dict) else {}
+    metadata = hypothesis.get("metadata_json") if isinstance(hypothesis.get("metadata_json"), dict) else {}
+    contract = _research_hypothesis_experiment_contract(hypothesis)
+    family = family_proof.canonical_family(contract.get("family"))
+    method = str(contract.get("method") or "").upper()
+    route = str(contract.get("route") or "")
+    available_methods = {
+        str(value).upper() for value in metadata.get("available_methods") or [] if str(value).strip()
+    }
+    score = 0
+    blockers: list[str] = []
+    if route:
+        score += 2
+    else:
+        blockers.append("route_missing")
+    if method:
+        score += 1
+    if contract.get("request_fields") or contract.get("request_example"):
+        score += 2
+    if _ID_PATH_SEGMENT.search(route):
+        score += 2
+    if family == "bola":
+        if set(contract.get("required_principals") or []) >= {"primary_auth", "second_user_auth"}:
+            score += 2
+        else:
+            blockers.append("two_principal_context_missing")
+    if family in {"mass_assignment", "field_constraint", "workflow"}:
+        if method in {"POST", "PUT", "PATCH"}:
+            score += 1
+        if "GET" in available_methods or metadata.get("readable_route"):
+            score += 3
+        else:
+            blockers.append("readback_route_missing")
+    if _research_auth_session_route(route):
+        score -= 8
+        blockers.append("auth_session_shape")
+    return score, blockers
 
 
 def _research_selected_hypothesis_contracts(
@@ -28138,7 +28260,10 @@ def _research_decision_action_is_excluded(item: Any) -> bool:
         "known_vulnerability_already_covered",
         "repeated_action_without_state_change",
         "campaign_recon_cap_reached",
-    }) or any(error.startswith("semantic_dimension_exhausted:") for error in validation_errors)
+    }) or any(
+        error.startswith(("semantic_dimension_exhausted:", "experiment_actuator_exhausted:"))
+        for error in validation_errors
+    )
 
 
 def _research_decision_hypothesis_is_excluded(item: Any) -> bool:
@@ -28158,7 +28283,8 @@ def _research_decision_hypothesis_is_excluded(item: Any) -> bool:
         if str(error).strip()
     }
     return "known_vulnerability_already_covered" in validation_errors or any(
-        error.startswith("semantic_dimension_exhausted:") for error in validation_errors
+        error.startswith(("semantic_dimension_exhausted:", "experiment_actuator_exhausted:"))
+        for error in validation_errors
     )
 
 
@@ -28178,7 +28304,11 @@ def _research_rejection_is_policy_steering(errors: Any) -> bool:
         "repeated_action_without_state_change",
         "campaign_recon_cap_reached",
     }
-    return all(error in fixed or error.startswith("semantic_dimension_exhausted:") for error in normalized)
+    return all(
+        error in fixed
+        or error.startswith(("semantic_dimension_exhausted:", "experiment_actuator_exhausted:"))
+        for error in normalized
+    )
 
 
 def _compact_research_observation_pack(pack: dict[str, Any]) -> dict[str, Any]:
@@ -28424,7 +28554,8 @@ def _compact_research_observation_pack(pack: dict[str, Any]) -> dict[str, Any]:
             raw_contract,
             (
                 "hypothesis_id", "family", "title", "method", "route", "request_fields",
-                "request_example", "attempt_count", "prior_failures", "last_outcome",
+                "request_example", "readable_route", "provability_score",
+                "attempt_count", "prior_failures", "last_outcome",
             ),
             text_limit=1200,
         )
@@ -28433,6 +28564,16 @@ def _compact_research_observation_pack(pack: dict[str, Any]) -> dict[str, Any]:
         )
         if required_principals:
             projected["required_principals"] = required_principals
+        available_methods = _string_list(
+            raw_contract.get("available_methods"), count=8, item_limit=16
+        )
+        provability_blockers = _string_list(
+            raw_contract.get("provability_blockers"), count=8, item_limit=100
+        )
+        if available_methods:
+            projected["available_methods"] = available_methods
+        if provability_blockers:
+            projected["provability_blockers"] = provability_blockers
         if isinstance(raw_contract.get("next_test_action"), dict):
             projected["next_test_action"] = _bound_once(raw_contract["next_test_action"], 1)
         if projected:
@@ -28486,7 +28627,15 @@ def _compact_research_observation_pack(pack: dict[str, Any]) -> dict[str, Any]:
     )
     _add_if_fits(
         "planner_guidance",
-        _string_list(bounded.get("planner_guidance"), count=6, item_limit=400),
+        _string_list(bounded.get("planner_guidance"), count=8, item_limit=400),
+    )
+    _add_if_fits(
+        "recommended_actions",
+        _bound_once(list(bounded.get("recommended_actions") or [])[:6], 3),
+    )
+    _add_if_fits(
+        "inferred_planning_contracts",
+        _bound_once(list(bounded.get("inferred_planning_contracts") or [])[:8], 3),
     )
 
     invariant_digest: list[dict[str, Any]] = []
@@ -28881,11 +29030,19 @@ async def _build_research_observation(
         ranked_hypotheses,
         allowed_families,
     )
+    inferred_planning_contracts = _research_inferred_planning_contracts(
+        selected_hypothesis_contracts,
+    )
     approved_invariant_contracts = [
         item for item in (surface_context.get("approved_invariant_contracts") or [])
         if isinstance(item, dict) and item.get("status") == "approved"
     ][:25]
     commands = _research_command_views(episode)
+    recommended_actions = _research_recommended_actions(
+        context.get("findings_summary") or [],
+        commands,
+        allowed_families,
+    )
     mission = _research_mission(episode)
     focus = await _research_focus_snapshot(conn, episode)
     if str(focus.get("latest_retest_status") or "") in {"queued", "running"}:
@@ -28961,6 +29118,7 @@ async def _build_research_observation(
         # Operator-approved policy statements are high-value hypothesis oracles, but they remain
         # planning-only until a family-specific deterministic verifier binds live evidence to them.
         "approved_invariant_contracts": approved_invariant_contracts,
+        "inferred_planning_contracts": inferred_planning_contracts,
         # Avoid the generic secret redactor treating the word "tokens" as credential material.
         # This is a numeric planning budget, not a token value.
         "remaining_budget": {
@@ -28968,6 +29126,7 @@ async def _build_research_observation(
             for key, value in (episode.get("remaining_budget") or {}).items()
         },
         "proposable_commands": commands,
+        "recommended_actions": recommended_actions,
         "recent_actions": recent_actions,
         "excluded_actions": excluded_actions,
         "campaign_exhaustion": exhaustion,
@@ -28985,8 +29144,12 @@ async def _build_research_observation(
             "Approved invariant contracts are operator policy oracles for choosing hypotheses and "
             "experiments. They do not themselves prove a finding: promotion still requires a supported "
             "deterministic family verifier and independent live reproduction.",
-            "Do not test a semantic dimension listed in campaign_exhaustion.exhausted_dimensions. "
-            "Three independent falsifications retire that family+route dimension for the campaign; "
+            "Inferred planning contracts are non-authoritative hypotheses only: they may help select a "
+            "test, but never satisfy approval, execution, or finding-promotion requirements.",
+            "Prefer a high-priority recommended_actions retest or focused SQLi/XSS actuator over a "
+            "workflow lead whose provability_blockers include a missing readback route or object reference.",
+            "Do not test a semantic dimension or actuator listed as exhausted in campaign_exhaustion. "
+            "Three independent falsifications or equivalent harness failures retire that exact actuator; "
             "when no non-exhausted hypothesis remains, stop with the evidence instead of restarting recon.",
             "Do not propose an experiment in a family listed in current_surface.exhausted_families: every "
             "lead there is already an owned finding and will be suppressed. Pivot to a family that still has "
@@ -29432,6 +29595,81 @@ def _research_normalize_injection_payloads(value: Any) -> tuple[list[str], bool]
     return normalized, True
 
 
+def _research_action_contains_secret_material(value: Any, *, in_request_body: bool = False) -> bool:
+    """Reject secret values while permitting typed, unresolved body placeholders.
+
+    A body field named ``token`` is common on legitimate login and recovery
+    schemas. The model still cannot provide its value: only a server-resolved
+    variable or visibly synthetic template marker is accepted.
+    """
+    if isinstance(value, dict):
+        for key, nested in value.items():
+            normalized = str(key).strip().lower()
+            child_in_body = in_request_body or normalized in {"json_body", "form_body"}
+            if normalized in FORBIDDEN_AGENT_CONTEXT_KEYS:
+                placeholder = (
+                    child_in_body
+                    and isinstance(nested, str)
+                    and (
+                        bool(re.fullmatch(r"\$\{[A-Za-z_][A-Za-z0-9_.-]*\}", nested.strip()))
+                        or bool(re.fullmatch(r"<[A-Za-z_][A-Za-z0-9_.-]*>", nested.strip()))
+                        or nested.strip() == "***"
+                    )
+                )
+                if not placeholder:
+                    return True
+            if _research_action_contains_secret_material(nested, in_request_body=child_in_body):
+                return True
+    elif isinstance(value, list):
+        return any(
+            _research_action_contains_secret_material(item, in_request_body=in_request_body)
+            for item in value
+        )
+    return False
+
+
+async def _research_workflow_surface_violations(
+    conn: Any,
+    target_id: str,
+    parameters: dict[str, Any],
+) -> list[str]:
+    """Fail closed when a planner invents a method/path or targets auth plumbing."""
+    http_steps = [
+        step for step in parameters.get("steps") or []
+        if isinstance(step, dict) and str(step.get("kind") or "http").lower() == "http"
+    ]
+    if not http_steps:
+        return []
+    rows = await conn.fetch(
+        """
+        SELECT upper(method) AS method, path
+        FROM target_endpoints
+        WHERE target_id=$1 AND COALESCE(test_status, '') <> 'gone'
+        """,
+        _optional_uuid(target_id),
+    )
+    live_surface = {
+        (
+            str(row.get("method") or "").upper(),
+            _canonical_vulnerability_route(row.get("path")),
+        )
+        for row in rows
+        if row.get("path")
+    }
+    errors: list[str] = []
+    family = family_proof.canonical_family(parameters.get("proof_family"))
+    for index, step in enumerate(http_steps):
+        method = str(step.get("method") or "GET").strip().upper()
+        raw_path = step.get("path") or step.get("route")
+        route = _canonical_vulnerability_route(raw_path)
+        label = str(step.get("label") or index)[:80]
+        if family == "mass_assignment" and _research_auth_session_route(raw_path):
+            errors.append(f"mass_assignment_auth_session_route_forbidden:{label}")
+        if not route or (method, route) not in live_surface:
+            errors.append(f"experiment_step_method_not_on_surface:{label}:{method}:{route or '<missing>'}")
+    return list(dict.fromkeys(errors))
+
+
 async def _research_prepare_action(
     conn,
     episode: dict[str, Any],
@@ -29591,8 +29829,13 @@ async def _research_prepare_action(
                 "autonomous_experiment_destructive_method_forbidden:"
                 + ",".join(destructive_methods)
             )
+        errors.extend(await _research_workflow_surface_violations(
+            conn,
+            target_id,
+            params,
+        ))
     errors.extend(f"model_control_field_forbidden:{path}" for path in _research_forbidden_control_paths(params))
-    if _contains_forbidden_context_key(params):
+    if _research_action_contains_secret_material(params):
         errors.append("action_parameters_contain_secret_field")
     if _find_hidden_local_agent_execution_requests(params):
         errors.append("action_parameters_contain_hidden_execution_request")
@@ -30574,6 +30817,54 @@ RESEARCH_RECON_COMMANDS = frozenset({
 RESEARCH_EXPERIMENT_OUTCOMES = frozenset({
     "verified", "refuted", "supported_unverified", "inconclusive", "blocked",
 })
+RESEARCH_INCONCLUSIVE_ACTUATOR_LIMIT = 3
+
+
+def _research_experiment_failure_detail(result_json: Any) -> tuple[str | None, list[str]]:
+    payload = result_json if isinstance(result_json, dict) else {}
+    workflow = payload.get("workflow") if isinstance(payload.get("workflow"), dict) else {}
+    replay = payload.get("replay") if isinstance(payload.get("replay"), dict) else {}
+    observations = [
+        *(workflow.get("observations") or []),
+        *(payload.get("observations") or []),
+        *(replay.get("observations") or []),
+    ]
+    failed_predicates = sorted({
+        str(assertion.get("predicate") or assertion.get("type") or "")[:120]
+        for source in (workflow, payload, replay)
+        for assertion in (source.get("assertion_results") or [])
+        if isinstance(assertion, dict) and assertion.get("passed") is False
+        and (assertion.get("predicate") or assertion.get("type"))
+    })
+    reason = " ".join(str(value or "") for value in (
+        payload.get("failure_reason"),
+        replay.get("replay_blocked_reason"),
+        (payload.get("family_proof") or {}).get("reason")
+        if isinstance(payload.get("family_proof"), dict) else "",
+    )).lower()
+    if "restor" in reason or "before_after_state" in failed_predicates:
+        return "restoration_failed", failed_predicates
+    if "baseline" in reason:
+        return "baseline_failed", failed_predicates
+    if "privileg" in reason or "elevation" in reason:
+        return "no_privilege_elevation", failed_predicates
+    for observation in observations:
+        if not isinstance(observation, dict):
+            continue
+        response = observation.get("response") if isinstance(observation.get("response"), dict) else {}
+        status = response.get("status")
+        if observation.get("error"):
+            return "transport_or_runtime_error", failed_predicates
+        if isinstance(status, int) and status >= 400:
+            checkpoint = str(observation.get("checkpoint") or "")
+            return (
+                "baseline_request_failed" if checkpoint == "before"
+                else "mutation_request_failed" if checkpoint == "mutation"
+                else "workflow_step_failed"
+            ), failed_predicates
+    if failed_predicates:
+        return "proof_predicates_failed", failed_predicates
+    return ("proof_evidence_missing" if reason else None), failed_predicates
 
 
 def _research_experiment_outcome(action: Any, command_result: Any) -> dict[str, Any] | None:
@@ -30612,6 +30903,11 @@ def _research_experiment_outcome(action: Any, command_result: Any) -> dict[str, 
             outcome = "supported_unverified"
         else:
             outcome = "inconclusive"
+    failure_class, failed_predicates = _research_experiment_failure_detail(result_json)
+    if outcome == "blocked" and not failure_class:
+        failure_class = "dispatch_or_policy_blocked"
+    elif outcome == "inconclusive" and not failure_class:
+        failure_class = "proof_evidence_missing"
     return {
         "outcome": outcome,
         "reason": str(
@@ -30623,6 +30919,8 @@ def _research_experiment_outcome(action: Any, command_result: Any) -> dict[str, 
         )[:500],
         "family": str(proof.get("family") or (action_payload.get("parameters") or {}).get("proof_family") or "")[:80],
         "deterministic_refutation": outcome == "refuted" and bool(proof.get("refuted_by")),
+        "failure_class": failure_class,
+        "failed_predicates": failed_predicates[:16],
     }
 
 
@@ -30683,7 +30981,20 @@ async def _record_research_hypothesis_outcome(
             # transaction.  Preserve that terminal status if it already did.
             next_status = "supported"
         elif outcome["outcome"] in {"inconclusive", "blocked"}:
-            next_status = "open"
+            same_failure_count = sum(
+                1
+                for item in [*history, outcome]
+                if isinstance(item, dict)
+                and item.get("outcome") in {"inconclusive", "blocked"}
+                and item.get("failure_class") == outcome.get("failure_class")
+            )
+            if same_failure_count >= RESEARCH_INCONCLUSIVE_ACTUATOR_LIMIT:
+                next_status = "exhausted"
+                terminal_reason = (
+                    f"experiment_actuator_exhausted:{outcome.get('failure_class') or 'unknown'}"
+                )
+            else:
+                next_status = "open"
     await conn.execute(
         """
         UPDATE hypotheses
@@ -30720,6 +31031,7 @@ async def _research_campaign_exhaustion_snapshot(
         _optional_uuid(campaign_id),
     )
     falsifications: dict[str, int] = {}
+    inconclusive_actuators: dict[str, int] = {}
     recon_actions = 0
     experiments = 0
     for row in rows:
@@ -30736,16 +31048,27 @@ async def _research_campaign_exhaustion_snapshot(
         outcome = _research_experiment_outcome(action, row)
         if outcome and outcome.get("deterministic_refutation"):
             falsifications[dimension] = falsifications.get(dimension, 0) + 1
+        elif outcome and outcome.get("outcome") in {"inconclusive", "blocked"}:
+            failure_class = str(outcome.get("failure_class") or "unknown")
+            actuator = f"{dimension}:{failure_class}"
+            inconclusive_actuators[actuator] = inconclusive_actuators.get(actuator, 0) + 1
     return {
         "experiments": experiments,
         "recon_actions": recon_actions,
         "falsification_counts": falsifications,
+        "inconclusive_actuator_counts": inconclusive_actuators,
+        "exhausted_inconclusive_actuators": sorted(
+            actuator
+            for actuator, count in inconclusive_actuators.items()
+            if count >= RESEARCH_INCONCLUSIVE_ACTUATOR_LIMIT
+        ),
         "exhausted_dimensions": sorted(
             dimension
             for dimension, count in falsifications.items()
             if count >= RESEARCH_SEMANTIC_FALSIFICATION_LIMIT
         ),
         "semantic_falsification_limit": RESEARCH_SEMANTIC_FALSIFICATION_LIMIT,
+        "inconclusive_actuator_limit": RESEARCH_INCONCLUSIVE_ACTUATOR_LIMIT,
         "recon_action_cap": RESEARCH_RECON_ACTION_CAP,
     }
 
@@ -30767,6 +31090,11 @@ async def _research_semantic_policy_violations(
     dimension = _research_action_semantic_dimension(action)
     if dimension and int((snapshot.get("falsification_counts") or {}).get(dimension) or 0) >= RESEARCH_SEMANTIC_FALSIFICATION_LIMIT:
         errors.append(f"semantic_dimension_exhausted:{dimension}")
+    if dimension and any(
+        str(actuator).startswith(f"{dimension}:")
+        for actuator in snapshot.get("exhausted_inconclusive_actuators") or []
+    ):
+        errors.append(f"experiment_actuator_exhausted:{dimension}")
     if _research_action_vulnerability_keys(action) & await _research_known_vulnerability_keys(conn, episode.get("target_id")):
         errors.append("known_vulnerability_already_covered")
     return errors
@@ -31749,6 +32077,36 @@ async def _research_campaign_yield_metrics(conn: Any, campaign: Any) -> dict[str
         target_id,
         str(campaign_id),
     ) or 0)
+    verified_scan_findings = int(await conn.fetchval(
+        """
+        SELECT COUNT(DISTINCT f.id)
+        FROM findings f
+        WHERE f.target_id=$1
+          AND f.last_verification_verdict='exploited'
+          AND f.scan_id IN (
+              SELECT cr.scan_id
+              FROM research_decisions rd
+              JOIN research_episodes re ON re.id=rd.episode_id
+              JOIN command_results cr ON cr.id=rd.command_result_id
+              WHERE re.campaign_id=$2 AND cr.scan_id IS NOT NULL
+          )
+        """,
+        target_id,
+        campaign_id,
+    ) or 0)
+    verified_retest_findings = int(await conn.fetchval(
+        """
+        SELECT COUNT(DISTINCT fv.finding_id)
+        FROM finding_verifications fv
+        JOIN command_results cr ON cr.result_json->>'retest_id'=fv.id::text
+        JOIN research_decisions rd ON rd.command_result_id=cr.id
+        JOIN research_episodes re ON re.id=rd.episode_id
+        WHERE re.campaign_id=$1
+          AND fv.status='completed'
+          AND fv.verdict='exploited'
+        """,
+        campaign_id,
+    ) or 0)
     metadata = _decode_json_value(payload.get("metadata_json")) or {}
     config = metadata.get("autonomous_research") if isinstance(metadata.get("autonomous_research"), dict) else {}
     aggregate_budget = await _research_campaign_budget_snapshot(conn, campaign)
@@ -31774,6 +32132,8 @@ async def _research_campaign_yield_metrics(conn: Any, campaign: Any) -> dict[str
         "rejected_decisions": rejected_decisions,
         "rejection_reasons": dict(rejection_reasons.most_common(20)),
         "verified_autonomous_findings": verified_findings,
+        "verified_campaign_scan_findings": verified_scan_findings,
+        "verified_campaign_retest_findings": verified_retest_findings,
         "net_new_verified_findings": net_new_verified,
         "finding_yield_per_experiment": round(verified_findings / experiments, 4) if experiments else 0.0,
         "model_units_per_verified_finding": (model_units // verified_findings) if verified_findings else None,
@@ -34308,6 +34668,38 @@ _EXPERIMENT_WORKFLOW_TEMPLATES: dict[str, dict[str, Any]] = {
 }
 
 
+def _research_selected_experiment_templates(pack: Any) -> dict[str, dict[str, Any]]:
+    """Attach only the family template for the most provable selected lead."""
+    payload = pack if isinstance(pack, dict) else {}
+    contracts = [
+        item for item in payload.get("selected_hypothesis_contracts") or []
+        if isinstance(item, dict)
+    ]
+    contracts.sort(
+        key=lambda item: (
+            bool(item.get("provability_blockers")),
+            -int(item.get("provability_score") or 0),
+        )
+    )
+    for contract in contracts:
+        family = family_proof.canonical_family(contract.get("family"))
+        if family in _EXPERIMENT_WORKFLOW_TEMPLATES:
+            if family == "mass_assignment":
+                method = str(contract.get("method") or "").upper()
+                methods = {str(value).upper() for value in contract.get("available_methods") or []}
+                # A POST-only create surface needs distinct create/read/delete
+                # routes. Do not teach the planner to fake readback or cleanup.
+                if method not in {"PUT", "PATCH"} or "GET" not in methods:
+                    return {}
+                template = copy.deepcopy(_EXPERIMENT_WORKFLOW_TEMPLATES[family])
+                for step in template.get("steps") or []:
+                    if str(step.get("checkpoint") or "") in {"mutation", "cleanup"}:
+                        step["method"] = method
+                return {family: template}
+            return {family: _EXPERIMENT_WORKFLOW_TEMPLATES[family]}
+    return {}
+
+
 def _research_planner_messages(observation: dict[str, Any]) -> list[dict[str, str]]:
     pack = observation.get("observation_pack") if isinstance(observation.get("observation_pack"), dict) else {}
     # Packs are already redacted, hard-capped, hashed, and persisted by the server. Applying the
@@ -34322,7 +34714,7 @@ def _research_planner_messages(observation: dict[str, Any]) -> list[dict[str, st
         "observation_id": str(observation.get("id") or ""),
         "context_hash": str(observation.get("context_hash") or ""),
         "observation_pack": bounded,
-        "experiment_templates": _EXPERIMENT_WORKFLOW_TEMPLATES,
+        "experiment_templates": _research_selected_experiment_templates(bounded),
     }
     return [
         {
@@ -34338,7 +34730,7 @@ def _research_planner_messages(observation: dict[str, Any]) -> list[dict[str, st
                 "For bug hunting, prefer the highest-ranked unexplained hypothesis and design an app-specific "
                 "control/test experiment across routes, objects, principals, or state transitions. Reference its "
                 "hypothesis_id only in the top-level decision hypothesis_id field; never put hypothesis_id inside "
-                "action.parameters. When you design an experiment.workflow, copy the matching family template from "
+                "action.parameters. When you design an experiment.workflow, copy the supplied selected-family template from "
                 "experiment_templates and replace the <placeholders> with real routes, object fields, and "
                 "principals from the observation. Take each route VERBATIM from the ranked lead in "
                 "selected_hypothesis_contracts (or the observation's endpoints), substituting ONLY the object-id "
@@ -36920,6 +37312,15 @@ _PRIVILEGED_FUNCTION_TOKENS = re.compile(
     r"privilege|superuser|backend|console|moderat|impersonat)",
     re.IGNORECASE,
 )
+_AUTH_SESSION_ROUTE_TOKENS = frozenset({
+    "login", "logout", "signin", "signout", "token", "refresh", "reset",
+    "forgot", "verify", "otp", "oauth", "callback", "session",
+})
+
+
+def _research_auth_session_route(value: Any) -> bool:
+    path = str(value or "").lower().split("?", 1)[0]
+    return bool({segment for segment in path.split("/") if segment} & _AUTH_SESSION_ROUTE_TOKENS)
 
 
 def _endpoint_inventory_hypothesis_requests(
@@ -36935,6 +37336,14 @@ def _endpoint_inventory_hypothesis_requests(
     """
     requests: list[HypothesisRequest] = []
     seen: set[str] = set()
+    methods_by_route: dict[str, set[str]] = {}
+    for endpoint in endpoints:
+        endpoint_path = str(endpoint.get("path") or "").strip()
+        endpoint_route = _canonical_vulnerability_route(endpoint_path) or endpoint_path
+        if endpoint_route:
+            methods_by_route.setdefault(endpoint_route, set()).add(
+                str(endpoint.get("method") or "GET").strip().upper()
+            )
     for endpoint in endpoints:
         method = str(endpoint.get("method") or "GET").strip().upper()
         path = str(endpoint.get("path") or "").strip()
@@ -36972,10 +37381,7 @@ def _endpoint_inventory_hypothesis_requests(
                 ))
         # Auth-session endpoints (login/token/reset/...) are not object-mutation targets; excluding
         # them keeps the board from drowning in mass-assignment noise that stalls the planner.
-        path_segments = {segment for segment in path.lower().split("/") if segment}
-        auth_session_noise = bool(path_segments & {
-            "login", "logout", "token", "refresh", "reset", "forgot", "verify", "otp",
-        })
+        auth_session_noise = _research_auth_session_route(path)
         if (
             method in {"POST", "PUT", "PATCH"}
             and any(hint in param_location for hint in ("body", "json", "form"))
@@ -37000,8 +37406,22 @@ def _endpoint_inventory_hypothesis_requests(
                         "parameters": {"proof_family": "mass_assignment"},
                         "requires": ["primary_auth"],
                     },
-                    metadata_json={"unexplained_residue": True, "residue_source": "endpoint_inventory",
-                                   "route": route, "request_fields": request_fields, "request_example": request_example},
+                    metadata_json={
+                        "unexplained_residue": True,
+                        "residue_source": "endpoint_inventory",
+                        "route": route,
+                        "request_fields": request_fields,
+                        "request_example": request_example,
+                        "available_methods": sorted(methods_by_route.get(route) or []),
+                        "readable_route": route if "GET" in methods_by_route.get(route, set()) else None,
+                        "provability_score": (
+                            6 if "GET" in methods_by_route.get(route, set()) else 2
+                        ) + (2 if request_fields or request_example else 0),
+                        "provability_blockers": (
+                            [] if "GET" in methods_by_route.get(route, set())
+                            else ["readback_route_missing"]
+                        ),
+                    },
                     endorsement={"source": "endpoint_inventory", "method": method, "route": route},
                     created_by=created_by,
                 ))

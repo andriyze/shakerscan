@@ -291,7 +291,10 @@ export default function RunDetailPage() {
             <Metric label="Recon actions" value={yieldMetrics.recon_actions} />
             <Metric label="Known-vuln skips" value={yieldMetrics.novelty_suppressions} />
             <Metric label="Model units" value={yieldMetrics.model_units.toLocaleString()} />
-            <Metric label="Verified findings" value={yieldMetrics.verified_autonomous_findings} />
+            <Metric label="Autonomous proofs" value={yieldMetrics.verified_autonomous_findings} />
+            <Metric label="Focused-scan proofs" value={yieldMetrics.verified_campaign_scan_findings || 0} />
+            <Metric label="Retest confirmations" value={yieldMetrics.verified_campaign_retest_findings || 0} />
+            <Metric label="Net-new over DAST" value={yieldMetrics.net_new_verified_findings || 0} />
           </div>
           {yieldMetrics.stop_reason ? <p className="mt-3 text-xs text-amber-300">Stopped by yield guard: {yieldMetrics.stop_reason}</p> : null}
         </Card>

@@ -608,6 +608,9 @@ export interface CampaignDetailResponse {
     recon_actions: number
     novelty_suppressions: number
     verified_autonomous_findings: number
+    verified_campaign_scan_findings?: number
+    verified_campaign_retest_findings?: number
+    net_new_verified_findings?: number
     finding_yield_per_experiment: number
     model_units_per_verified_finding?: number | null
     surface?: Record<string, number>

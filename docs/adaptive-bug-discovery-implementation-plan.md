@@ -242,6 +242,18 @@ Acceptance:
 
 **Status: full hypothesis-to-proof loop implemented; execution remains server-gated.** `/settings/research-agent` is now the primary product surface: choose a target and objective, select Analyze / Autonomous Hunt / Relentless / **Deep Hunt** intensity, explicitly confirm target authorization for active modes, and optionally let server-side autopilot keep requesting LLM decisions until input, a gate, an evidence-backed stop, or budget exhaustion. Deep Hunt is credential-tier and enables app-specific multi-principal workflows using only server-managed target principals; credentials never enter model context. Research observations include deterministically ranked residue/graph-backed hypotheses, bounded concrete graph nodes/edges, next-test actions, and typed experiment comparisons/receipts. Novel experiments must reference a persisted target hypothesis backed by DAST unexplained residue or the application graph, and provenance is copied into command results, evidence instances, and tool receipts. Principal workflows support typed invariant assertions and cleanup/rollback checkpoints. State-changing PUT/PATCH/DELETE steps are exposed only in Deep Hunt and require a later restoration step plus a deterministic restoration assertion. A trusted verifier independently re-executes the workflow, requires stable assertion outcomes and successful restoration in both runs, derives the family-proof predicates without accepting an LLM verdict, and creates or refreshes a canonical verified finding only when `family_proof.promotion_gate` passes. The resulting regression evidence links episode, decision, hypothesis, workflow, replay, receipt, evidence instance, and finding. A read-only benchmark endpoint compares net-new verified autonomous findings with an explicitly equal-request-budget completed Smart baseline. Subject-bound launch profiles support target hunts, exact-finding verification, and ASM-gap closure. Finding Detail exposes the exact-finding flow as a one-click **Investigate autonomously** action, ASM exposes **Close gaps autonomously**, and registered web assets in Exposure expose a target-hunt action. A Postgres lease permits only one controller to plan an episode at a time. Linked scans and finding retests settle before the next decision; launch profiles reserve a final synthesis turn. Transient planner failures meter provider usage, refresh the observation, back off, and pause after three consecutive failures. The UI shows model/harness diagnostics, linked work, trusted proof verdict, reproduction/restoration state, resulting finding, immutable evidence refreshes, budgets, errors, and prior runs.
 
+Deep Hunt also fails closed at the experiment harness boundary. Every HTTP workflow step must match a
+currently live endpoint method and canonical route, and mass-assignment workflows cannot target
+login/session/token plumbing. POST-only mutations are not given a read-modify-write template unless
+the inventory exposes an evidence-preserving readback path. Repeated equivalent harness failures
+retire the exact actuator without falsely refuting the vulnerability hypothesis. Planner observations
+are capped at 32 KiB, carry only the most provable selected-family workflow template, rank leads by
+readback/object/principal feasibility, and label inferred ownership/mutation contracts as
+planning-only with no execution or promotion authority. High-severity inconclusive findings and
+executable focused SQLi/XSS checks are surfaced as preferred actions. Campaign yield reports
+autonomous workflow promotions, campaign-linked scan findings, campaign-linked retest confirmations,
+and net-new-over-DAST findings separately.
+
 Scope:
 
 - dedicated experiment builder inside `/settings/research-agent`;

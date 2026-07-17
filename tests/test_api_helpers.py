@@ -11517,7 +11517,11 @@ def test_research_autonomous_http_experiment_hides_and_rejects_destructive_metho
     assert not {"POST", "PUT", "PATCH", "DELETE"} & method_values
 
     class Conn:
-        pass
+        async def fetch(self, _query, *_args):
+            return [
+                {"method": "GET", "path": "/api/items"},
+                {"method": "POST", "path": "/api/items/1"},
+            ]
 
     params, errors = asyncio.run(api_module._research_prepare_action(
         Conn(),
@@ -11611,7 +11615,12 @@ def test_research_autonomous_workflow_rejects_delete_but_allows_browser_and_form
     assert {"PUT", "PATCH", "DELETE"} <= method_values(command["parameters_schema"])
 
     class Conn:
-        pass
+        async def fetch(self, _query, *_args):
+            return [
+                {"method": "GET", "path": "/api/items/1"},
+                {"method": "DELETE", "path": "/api/items/1"},
+                {"method": "POST", "path": "/api/items"},
+            ]
 
     episode = {
         "target_id": "11111111-1111-4111-8111-111111111111",
@@ -11686,7 +11695,11 @@ def test_research_autonomous_workflow_allows_cleanup_safe_writes_at_credential_t
     assert {"PUT", "PATCH", "DELETE"} <= method_values(projected)
 
     class Conn:
-        pass
+        async def fetch(self, _query, *_args):
+            return [
+                {"method": "GET", "path": "/api/items/1"},
+                {"method": "PATCH", "path": "/api/items/1"},
+            ]
 
     episode = {
         "target_id": "11111111-1111-4111-8111-111111111111",
@@ -11741,6 +11754,45 @@ def test_research_workflow_proof_family_cannot_bypass_campaign_scope():
     assert "action_family_not_allowed" in errors
     assert api_module._research_family_is_allowed("auth_bypass", {"auth", "bola"}) is True
     assert api_module._research_family_is_allowed("mass_assignment", {"auth", "bola"}) is False
+
+
+def test_research_workflow_rejects_non_live_method_and_auth_session_mass_assignment():
+    class Conn:
+        async def fetch(self, _query, *_args):
+            return [
+                {"method": "POST", "path": "/api/users/login"},
+                {"method": "PATCH", "path": "/api/profile/{id}"},
+            ]
+
+    errors = asyncio.run(api_module._research_workflow_surface_violations(
+        Conn(),
+        "11111111-1111-4111-8111-111111111111",
+        {
+            "proof_family": "mass_assignment",
+            "steps": [
+                {"label": "login-mutate", "method": "POST", "path": "/api/users/login"},
+                {"label": "invented-read", "method": "GET", "path": "/api/profile/42"},
+            ],
+        },
+    ))
+
+    assert "mass_assignment_auth_session_route_forbidden:login-mutate" in errors
+    assert any(
+        error.startswith("experiment_step_method_not_on_surface:invented-read:GET:")
+        for error in errors
+    )
+
+
+def test_research_action_secret_policy_allows_only_unresolved_body_placeholders():
+    assert api_module._research_action_contains_secret_material({
+        "steps": [{"json_body": {"token": "${managed_reset_token}"}}],
+    }) is False
+    assert api_module._research_action_contains_secret_material({
+        "steps": [{"json_body": {"token": "real-secret-value"}}],
+    }) is True
+    assert api_module._research_action_contains_secret_material({
+        "headers": {"token": "${managed_reset_token}"},
+    }) is True
 
 
 def test_endpoint_inventory_hypotheses_are_residue_backed_leads():
@@ -11925,6 +11977,39 @@ def test_board_balances_families_so_a_rich_family_does_not_starve_others():
     )
     fams = {(e.get("hypothesis") or {}).get("family") for e in ranked}
     assert {"mass_assignment", "data_exposure", "auth_bypass"} <= fams
+
+
+def test_board_prefers_provable_lead_within_same_family():
+    post_only = {
+        "id": "post-only", "source": "app_graph", "family": "mass_assignment",
+        "status": "open", "severity_guess": "high", "confidence": 0.9,
+        "dedupe_key": "post-only",
+        "dedupe_dimensions": {"method": "POST", "route": "/api/items"},
+        "metadata_json": {
+            "unexplained_residue": True, "route": "/api/items", "method": "POST",
+            "request_fields": "name", "available_methods": ["POST"],
+        },
+    }
+    readable = {
+        "id": "readable", "source": "app_graph", "family": "mass_assignment",
+        "status": "open", "severity_guess": "medium", "confidence": 0.5,
+        "dedupe_key": "readable",
+        "dedupe_dimensions": {"method": "PATCH", "route": "/api/profiles/{id}"},
+        "metadata_json": {
+            "unexplained_residue": True, "route": "/api/profiles/{id}", "method": "PATCH",
+            "request_fields": "display_name", "available_methods": ["GET", "PATCH"],
+            "readable_route": "/api/profiles/{id}",
+        },
+    }
+
+    _summaries, ranked = api_module._select_research_hypothesis_context(
+        [post_only, readable],
+        completed_dimensions=[],
+        auth_available=True,
+    )
+
+    assert ranked[0]["hypothesis_id"] == "readable"
+    assert ranked[0]["provability_blockers"] == []
 
 
 def test_compaction_preserves_slim_ranked_board_when_oversized():
@@ -12148,6 +12233,69 @@ def test_experiment_workflow_templates_are_contract_valid():
         assert 2 <= len(normalized["steps"]) <= 12
         if normalized["mutating"]:
             assert any(a["type"] == "restored" for a in normalized["assertions"])
+
+
+def test_planner_sends_only_the_most_provable_family_template():
+    templates = api_module._research_selected_experiment_templates({
+        "selected_hypothesis_contracts": [
+            {
+                "family": "mass_assignment",
+                "method": "POST",
+                "provability_score": 2,
+                "provability_blockers": ["readback_route_missing"],
+            },
+            {
+                "family": "bola",
+                "method": "GET",
+                "provability_score": 8,
+                "provability_blockers": [],
+            },
+        ],
+    })
+    assert set(templates) == {"bola"}
+
+    patch_template = api_module._research_selected_experiment_templates({
+        "selected_hypothesis_contracts": [{
+            "family": "mass_assignment",
+            "method": "PUT",
+            "available_methods": ["GET", "PUT"],
+            "provability_score": 8,
+        }],
+    })["mass_assignment"]
+    mutation_methods = {
+        step["method"] for step in patch_template["steps"]
+        if step.get("checkpoint") in {"mutation", "cleanup"}
+    }
+    assert mutation_methods == {"PUT"}
+
+
+def test_inferred_contracts_and_recommendations_remain_planning_only():
+    inferred = api_module._research_inferred_planning_contracts([{
+        "hypothesis_id": "h1",
+        "family": "bola",
+        "method": "GET",
+        "route": "/api/orders/{id}",
+    }])
+    assert inferred[0]["status"] == "inferred"
+    assert inferred[0]["planning_authority"] is True
+    assert inferred[0]["execution_authority"] is False
+    assert inferred[0]["promotion_authority"] is False
+
+    recommendations = api_module._research_recommended_actions(
+        [{
+            "id": "f1", "severity": "critical",
+            "last_verification_verdict": "inconclusive",
+        }],
+        [
+            {"name": "finding.retest", "proposable": True},
+            {"name": "scan.focused_family", "proposable": True},
+        ],
+        {"sqli", "xss"},
+    )
+    assert recommendations[0]["command"] == "finding.retest"
+    assert {item["parameters"].get("check_family") for item in recommendations[1:]} == {
+        "sqli", "xss",
+    }
 
 
 def test_research_provider_probe_exercises_server_bound_action_contract(monkeypatch):
@@ -15055,6 +15203,48 @@ def test_research_experiment_outcomes_do_not_treat_no_finding_as_refutation():
     assert inconclusive["deterministic_refutation"] is False
     assert partial["outcome"] == "blocked"
     assert refuted["deterministic_refutation"] is True
+
+
+def test_research_repeated_inconclusive_actuator_exhausts_without_refuting():
+    experiment = {
+        "command": "experiment.workflow",
+        "parameters": {
+            "proof_family": "mass_assignment",
+            "steps": [{"label": "before", "method": "GET", "path": "/api/profile/42"}],
+        },
+    }
+    history = [{
+        "action": experiment,
+        "status": "completed",
+        "command_result_id": uuid.uuid4(),
+        "command_status": "completed",
+        "finding_ids": [],
+        "result_json": {
+            "family_proof": {"family": "mass_assignment", "verdict": "inconclusive"},
+            "failure_reason": "baseline_get_failed",
+        },
+    } for _ in range(api_module.RESEARCH_INCONCLUSIVE_ACTUATOR_LIMIT)]
+
+    class Conn:
+        async def fetch(self, query, *args):
+            if "FROM research_decisions" in query:
+                return history
+            if "FROM findings" in query:
+                return []
+            raise AssertionError(query)
+
+    snapshot = asyncio.run(api_module._research_campaign_exhaustion_snapshot(
+        Conn(), uuid.uuid4(), uuid.uuid4(),
+    ))
+    assert snapshot["exhausted_inconclusive_actuators"]
+    assert snapshot["falsification_counts"] == {}
+
+    errors = asyncio.run(api_module._research_semantic_policy_violations(
+        Conn(),
+        {"id": uuid.uuid4(), "campaign_id": uuid.uuid4(), "target_id": uuid.uuid4()},
+        experiment,
+    ))
+    assert any(error.startswith("experiment_actuator_exhausted:") for error in errors)
 
 
 def test_research_hypothesis_learning_persists_terminal_refutation():
