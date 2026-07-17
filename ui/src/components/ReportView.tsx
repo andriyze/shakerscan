@@ -3613,12 +3613,17 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
             </div>
           )}
           {scan_metadata.options && Object.keys(scan_metadata.options).length > 0 && (
-            <div className="mt-4">
-              <h3 className="text-sm font-semibold text-gray-400 mb-2">Scan Options</h3>
-              <div className="bg-gray-900 rounded-lg p-3">
-                <pre className="text-xs text-gray-400 overflow-x-auto">{JSON.stringify(scan_metadata.options, null, 2)}</pre>
+            <details className="mt-4 rounded-lg border border-gray-800 bg-gray-950/40">
+              <summary className="cursor-pointer px-3 py-2 text-sm font-medium text-gray-500 hover:text-gray-300">
+                Developer diagnostics: resolved scan configuration
+              </summary>
+              <div className="border-t border-gray-800 p-3">
+                <p className="mb-2 text-xs text-gray-600">
+                  Internal execution details for troubleshooting. These do not change the result shown above.
+                </p>
+                <pre className="max-h-96 overflow-auto text-xs text-gray-500">{JSON.stringify(scan_metadata.options, null, 2)}</pre>
               </div>
-            </div>
+            </details>
           )}
         </div>
       )}

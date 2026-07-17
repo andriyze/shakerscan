@@ -264,6 +264,7 @@ export default function Dashboard() {
           </div>
 
           <div
+            id="workers"
             className="flex h-10 items-center gap-2 rounded-lg border border-gray-800 bg-gray-900 px-2.5"
             title={workersError || `${workerCount ?? '--'} of ${maxWorkers} workers running`}
           >
@@ -637,11 +638,15 @@ function productStatusTone(status: string) {
 
 function ActionCenterRow({ item }: { item: DashboardActionItem }) {
   const tone = actionPriorityTone(item.priority)
-  const actions = item.actions?.length
+  const actions = (item.actions?.length
     ? item.actions
     : item.href
       ? [{ label: item.action_label || 'Open', href: item.href, variant: 'primary' }]
-      : []
+      : []).map((action) => (
+        item.id === 'workers' && action.href === '/'
+          ? { ...action, href: '/#workers' }
+          : action
+      ))
   const content = (
     <>
       <div className="flex min-w-0 items-start gap-3">

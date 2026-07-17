@@ -141,12 +141,11 @@ function TargetsContent() {
       setTotalRootDomains(data.total_root_domains || 0)
       setTotalTargets(data.total_targets || 0)
       setFetchError(false)
-      // Auto-expand domains with subdomains
-      const toExpand = new Set<string>()
-      data.domains?.forEach(d => {
-        if (d.subdomain_count > 0) toExpand.add(d.root_domain)
-      })
-      setExpandedDomains(toExpand)
+      // Keep large inventories scannable. Search results are expanded because
+      // the user is looking for a specific match; the normal inventory is not.
+      setExpandedDomains(searchQuery
+        ? new Set((data.domains || []).filter(d => d.subdomain_count > 0).map(d => d.root_domain))
+        : new Set())
     } catch (err) {
       console.error('Failed to fetch targets:', err)
       setFetchError(true)
@@ -558,7 +557,7 @@ function TargetsContent() {
             return (
             <Card key={domain.root_domain}>
               {/* Root Domain Header */}
-              <div className="flex items-center gap-3 p-4 hover:bg-gray-800/50 transition-colors">
+              <div className="flex flex-col gap-3 p-4 transition-colors hover:bg-gray-800/50 md:flex-row md:items-center">
                 {domain.subdomain_count > 0 ? (
                   <button
                     type="button"
@@ -589,7 +588,7 @@ function TargetsContent() {
                 {/* Root Target Stats */}
                 {domain.root_target && (
                   <>
-                    <div className="flex items-center gap-4 text-sm text-gray-500">
+                    <div className="hidden items-center gap-4 text-sm text-gray-500 lg:flex">
                       <Link
                         href={`/scans?domain=${domain.root_domain}`}
                         onClick={(e) => e.stopPropagation()}
@@ -626,7 +625,7 @@ function TargetsContent() {
                       </Link>
                     </div>
                     {domain.root_target.last_grade && (
-                      <span className={`text-xl font-bold ${getGradeColor(domain.root_target.last_grade)}`}>
+                      <span className={`hidden text-xl font-bold sm:inline ${getGradeColor(domain.root_target.last_grade)}`}>
                         {domain.root_target.last_grade}
                       </span>
                     )}
@@ -634,7 +633,7 @@ function TargetsContent() {
                     <Link
                       href={`/schedules?create=true&target_id=${domain.root_target!.id}`}
                       onClick={(e) => e.stopPropagation()}
-                      className="p-1 text-gray-500 hover:text-blue-400 transition-colors"
+                      className="hidden p-1 text-gray-500 transition-colors hover:text-blue-400 md:inline-flex"
                       title="Create schedule"
                       aria-label={`Create schedule for ${domain.root_domain}`}
                     >
@@ -750,7 +749,7 @@ function TargetsContent() {
                     handleDiscover(domain.root_domain)
                   }}
                   disabled={discoveringDomains.has(domain.root_domain)}
-                  className="flex items-center gap-1 px-3 py-1 bg-purple-600 hover:bg-purple-700 disabled:bg-purple-600/50 text-white rounded text-xs font-medium transition-colors"
+                  className="flex items-center justify-center gap-1 rounded border border-gray-700 bg-gray-800 px-3 py-1 text-xs font-medium text-gray-200 transition-colors hover:bg-gray-700 disabled:opacity-50"
                   title="Discover subdomains"
                 >
                   {discoveringDomains.has(domain.root_domain) ? (
@@ -778,7 +777,7 @@ function TargetsContent() {
                   {domain.subdomains.map((subdomain) => (
                     <div
                       key={subdomain.id}
-                      className="flex items-center gap-3 px-4 py-3 pl-12 hover:bg-gray-800/30 transition-colors border-b border-gray-800/50 last:border-b-0"
+                      className="grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 border-b border-gray-800/50 px-3 py-3 transition-colors last:border-b-0 hover:bg-gray-800/30 sm:flex sm:gap-3 sm:px-4 sm:pl-12"
                     >
                       {/* Tree connector */}
                       <span className="text-gray-700">&#x2514;</span>
@@ -796,7 +795,7 @@ function TargetsContent() {
                       </div>
 
                       {/* Subdomain Stats */}
-                      <div className="flex items-center gap-4 text-sm text-gray-500">
+                      <div className="hidden items-center gap-4 text-sm text-gray-500 lg:flex">
                         <Link
                           href={`/scans?domain=${domain.root_domain}`}
                           className="hover:text-blue-400 transition-colors"
@@ -830,7 +829,7 @@ function TargetsContent() {
                       </div>
 
                       {subdomain.last_grade && (
-                        <span className={`text-lg font-bold ${getGradeColor(subdomain.last_grade)}`}>
+                        <span className={`hidden text-lg font-bold sm:inline ${getGradeColor(subdomain.last_grade)}`}>
                           {subdomain.last_grade}
                         </span>
                       )}
@@ -838,7 +837,7 @@ function TargetsContent() {
                       {/* Schedule Button for Subdomain */}
                       <Link
                         href={`/schedules?create=true&target_id=${subdomain.id}`}
-                        className="p-1 text-gray-500 hover:text-blue-400 transition-colors"
+                        className="hidden p-1 text-gray-500 transition-colors hover:text-blue-400 md:inline-flex"
                         title="Create schedule"
                         aria-label={`Create schedule for ${subdomain.url.replace(/^https?:\/\//, '')}`}
                       >
@@ -897,10 +896,15 @@ function TargetsContent() {
 
       {/* Add Target Modal */}
       {showAddModal && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <Card className="max-w-md w-full">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+          <Card
+            className="max-w-md w-full"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="add-target-title"
+          >
             <div className="p-4 border-b border-gray-800 flex items-center justify-between">
-              <h2 className="font-medium text-white">Add Target</h2>
+              <h2 id="add-target-title" className="font-medium text-white">Add Target</h2>
               <button
                 type="button"
                 onClick={closeAddModal}

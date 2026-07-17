@@ -234,6 +234,12 @@ function asEvidenceObject(rawEvidence: string): Record<string, unknown> | null {
   }
 }
 
+function redactEvidenceForDisplay(value: string): string {
+  return value
+    .replace(/("(?:authorization|cookie|set-cookie|password|token|api[_-]?key)"\s*:\s*")[^"]*(")/gi, '$1[redacted]$2')
+    .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer [redacted]')
+}
+
 function evidenceString(evidence: Record<string, unknown> | null, key: string): string {
   const value = evidence?.[key]
   return typeof value === 'string' ? value : ''
@@ -1310,7 +1316,7 @@ function FindingDetailContent() {
             {rawEvidence && (
               <details open className="bg-gray-800/60 rounded-lg p-3">
                 <summary className="text-sm font-medium text-gray-300 cursor-pointer">Expanded raw evidence</summary>
-                <pre className="mt-3 text-xs text-gray-300 whitespace-pre-wrap break-words">{rawEvidence}</pre>
+                <pre className="mt-3 text-xs text-gray-300 whitespace-pre-wrap break-words">{redactEvidenceForDisplay(rawEvidence)}</pre>
               </details>
             )}
           </div>
@@ -1472,7 +1478,7 @@ function FindingDetailContent() {
         <Card className="p-4">
           <details>
             <summary className="text-sm font-medium text-gray-400 cursor-pointer">Raw Evidence</summary>
-            <pre className="mt-3 text-xs text-gray-300 whitespace-pre-wrap break-words">{rawEvidence}</pre>
+            <pre className="mt-3 text-xs text-gray-300 whitespace-pre-wrap break-words">{redactEvidenceForDisplay(rawEvidence)}</pre>
           </details>
         </Card>
       )}

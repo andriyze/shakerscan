@@ -75,6 +75,11 @@ export default function NewScanPage() {
   const [staleWorkers, setStaleWorkers] = useState<number>(0)
 
   useEffect(() => {
+    const requestedTarget = new URLSearchParams(window.location.search).get('target')?.trim()
+    if (requestedTarget) setTarget(requestedTarget)
+  }, [])
+
+  useEffect(() => {
     let cancelled = false
     getScanExecutionSettings()
       .then((s) => { if (!cancelled) setRunningWorkers(s.running_workers ?? null) })
@@ -388,7 +393,7 @@ export default function NewScanPage() {
         </Card>
 
         {/* Coverage Budget */}
-        <Card className="p-4">
+        <Card className={`p-4 ${showAdvanced ? '' : 'hidden'}`}>
           <label className="block text-sm font-medium text-gray-400 mb-3">
             Coverage Budget
           </label>
@@ -443,7 +448,7 @@ export default function NewScanPage() {
         </Card>
 
         {/* Execution Mode */}
-        <Card className="p-4">
+        <Card className={`p-4 ${showAdvanced ? '' : 'hidden'}`}>
           <label className="block text-sm font-medium text-gray-400 mb-3">
             Execution
           </label>
@@ -646,10 +651,15 @@ export default function NewScanPage() {
               />
               <div className="border-t border-gray-800 pt-3">
                 <div className="text-xs font-medium uppercase text-gray-500">Authentication</div>
+                <p className="mt-1 text-xs text-gray-600">
+                  These values are submitted with the scan. Use short-lived test accounts and avoid production credentials.
+                </p>
                 <div className="mt-3 grid gap-3">
                   <label className="space-y-1">
                     <span className="block text-xs text-gray-500">User 1 auth header</span>
                     <input
+                      type="password"
+                      autoComplete="off"
                       value={authInputs.auth_header}
                       onChange={(event) => setAuthInputs({ ...authInputs, auth_header: event.target.value })}
                       placeholder="Bearer eyJ..."
@@ -659,6 +669,8 @@ export default function NewScanPage() {
                   <label className="space-y-1">
                     <span className="block text-xs text-gray-500">User 1 cookies</span>
                     <input
+                      type="password"
+                      autoComplete="off"
                       value={authInputs.auth_cookies}
                       onChange={(event) => setAuthInputs({ ...authInputs, auth_cookies: event.target.value })}
                       placeholder="session=abc; csrf=..."
@@ -669,6 +681,8 @@ export default function NewScanPage() {
                     <label className="space-y-1">
                       <span className="block text-xs text-gray-500">User 2 auth header</span>
                       <input
+                        type="password"
+                        autoComplete="off"
                         value={authInputs.user2_header}
                         onChange={(event) => setAuthInputs({ ...authInputs, user2_header: event.target.value })}
                         placeholder="Bearer eyJ..."
@@ -678,6 +692,8 @@ export default function NewScanPage() {
                     <label className="space-y-1">
                       <span className="block text-xs text-gray-500">User 2 cookies</span>
                       <input
+                        type="password"
+                        autoComplete="off"
                         value={authInputs.user2_cookies}
                         onChange={(event) => setAuthInputs({ ...authInputs, user2_cookies: event.target.value })}
                         placeholder="session=def"

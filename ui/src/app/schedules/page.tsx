@@ -407,7 +407,7 @@ function SchedulesContent() {
                   disabled={legacyRetention}
                   role="switch"
                   aria-checked={schedule.is_active}
-                  aria-label={legacyRetention ? 'Legacy retention schedule is disabled' : schedule.is_active ? 'Disable schedule' : 'Enable schedule'}
+                  aria-label={legacyRetention ? 'Legacy retention schedule is disabled' : 'Schedule enabled'}
                   className={`mt-1 relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${
                     schedule.is_active ? 'bg-blue-600' : 'bg-gray-700'
                   } ${legacyRetention ? 'cursor-not-allowed opacity-50' : ''}`}
@@ -552,10 +552,15 @@ function SchedulesContent() {
 
       {/* Create Modal */}
       {showCreateModal && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <Card className="max-w-2xl w-full max-h-[90vh] overflow-y-auto">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+          <Card
+            className="max-h-[90vh] w-full max-w-2xl overflow-y-auto"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="schedule-dialog-title"
+          >
             <div className="p-4 border-b border-gray-800 flex items-center justify-between">
-              <h2 className="font-medium text-white">{editingSchedule ? 'Edit Schedule' : 'New Schedule'}</h2>
+              <h2 id="schedule-dialog-title" className="font-medium text-white">{editingSchedule ? 'Edit Schedule' : 'New Schedule'}</h2>
               <button
                 type="button"
                 onClick={() => { setShowCreateModal(false); resetForm() }}

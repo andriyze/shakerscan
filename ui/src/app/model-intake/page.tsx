@@ -871,7 +871,7 @@ function ModelIntakeSettingsContent() {
     metadata: parsedMetadata,
     modelCardUrl,
   })
-  const hasTrustFailures = trustPreview.blockingFailures.length > 0
+  const hasTrustFailures = hasIntakeInput && trustPreview.blockingFailures.length > 0
 
   return (
     <div className="min-w-0 max-w-full space-y-6">
@@ -1180,10 +1180,14 @@ function ModelIntakeSettingsContent() {
               <ShieldCheck className="h-4 w-4 text-cyan-300" />
               Trust mode
             </div>
-            <span className={`rounded px-2 py-1 text-xs ${TRUST_PREVIEW_BADGE[trustPreview.headlineStatus]}`}>
-              {trustPreview.headline}
+            <span className={`rounded px-2 py-1 text-xs ${
+              hasIntakeInput ? TRUST_PREVIEW_BADGE[trustPreview.headlineStatus] : 'bg-gray-800 text-gray-400'
+            }`}>
+              {hasIntakeInput ? trustPreview.headline : 'Add an artifact to preview requirements'}
             </span>
           </div>
+          {hasIntakeInput ? (
+          <>
           <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-5">
             {TRUST_MODE_OPTIONS.map((mode) => (
               <button
@@ -1402,9 +1406,19 @@ function ModelIntakeSettingsContent() {
               </div>
             ))}
           </div>
+          </>
+          ) : (
+            <p className="text-sm text-gray-500">
+              Enter or resolve a model artifact first. ShakerScan will then explain the trust evidence required by the selected policy.
+            </p>
+          )}
         </div>
 
-        <div className="grid gap-3 lg:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)]">
+        <details className="rounded-lg border border-gray-800 bg-gray-950/50">
+          <summary className="cursor-pointer px-4 py-3 text-sm font-medium text-gray-300 hover:text-white">
+            Advanced: evidence metadata and policy overrides
+          </summary>
+          <div className="grid gap-3 border-t border-gray-800 p-3 lg:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)]">
           <div className="min-w-0 space-y-3 rounded-lg border border-gray-800 bg-gray-950 p-3">
             <div className="flex items-center gap-2 text-sm font-medium text-gray-200">
               <FileJson className="h-4 w-4 text-cyan-300" />
@@ -1506,7 +1520,8 @@ function ModelIntakeSettingsContent() {
               />
             </label>
           </div>
-        </div>
+          </div>
+        </details>
 
         <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
           <button type="submit" disabled={submitting || scanBlockedByResolver || hasFieldErrors || hasTrustFailures} className="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-cyan-700 px-4 py-2 text-sm font-medium text-white hover:bg-cyan-600 disabled:opacity-50">
@@ -1521,7 +1536,7 @@ function ModelIntakeSettingsContent() {
         {hasFieldErrors && (
           <p role="alert" className="text-sm text-red-400">Fix the highlighted fields above to queue this scan.</p>
         )}
-        {hasTrustFailures && (
+        {hasIntakeInput && hasTrustFailures && (
           <p role="alert" className="text-sm text-red-400">Fix the failed trust preview checks before queueing this scan.</p>
         )}
       </form>

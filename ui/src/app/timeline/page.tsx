@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState, Suspense } from 'react'
 import Link from 'next/link'
-import { getMissionTimeline, formatDate, type TimelineEvent } from '@/lib/api'
+import { getMissionTimeline, getTargets, formatDate, type Target, type TimelineEvent } from '@/lib/api'
 import { useUrlFilters } from '@/lib/useUrlFilters'
 import {
   Card,
@@ -15,13 +15,13 @@ import {
   TimelineStatusBadge,
 } from '@/components/ui'
 
-const PAGE_SIZE = 100
+const PAGE_SIZE = 30
 const REFRESH_MS = 15000
 
 // Each toggle maps a UI label to the GET /timeline include_* query flag. All
 // default ON server-side; the URL only carries a flag when a category is OFF.
 const KIND_TOGGLES: Array<{ key: string; label: string }> = [
-  { key: 'include_campaign_actions', label: 'Campaign actions' },
+  { key: 'include_campaign_actions', label: 'Hunt activity' },
   { key: 'include_scans', label: 'Scans' },
   { key: 'include_schedules', label: 'Schedules' },
   { key: 'include_evidence', label: 'Evidence' },
@@ -42,15 +42,42 @@ interface TimelineFilters {
 
 function eventTitle(event: TimelineEvent): string {
   const raw = event.action_name || event.command || event.kind
+  const friendly: Record<string, string> = {
+    'Experiment.workflow': 'Autonomous test completed',
+    'Research.episode': 'Investigation update',
+    'Finding.retest': 'Finding verification',
+    'Scan.submit': 'Scan queued',
+    'Scan.result': 'Scan reviewed',
+    'Scan.runtime scope check': 'Scan blocked by scope policy',
+    'Asm.improve': 'Coverage work queued',
+    'Target.principals': 'Test accounts reviewed',
+    'Target.principal matrix': 'Access expectations reviewed',
+    'Hypothesis.generate from graph': 'Security leads generated',
+    'Hypothesis.situation report': 'Security leads reviewed',
+    'Evidence.retention sweep': 'Evidence cleanup completed',
+    evidence_bound: 'Evidence recorded',
+    evidence_instance: 'Evidence recorded',
+  }
+  if (friendly[raw]) return friendly[raw]
   return raw.replace(/_/g, ' ').replace(/^./, (c) => c.toUpperCase())
 }
 
-// Prefer an explicit next_action deep link, then a linked scan/campaign.
+function eventKindLabel(event: TimelineEvent): string {
+  const kind = event.kind.replace(/_/g, ' ')
+  if (kind.includes('command')) return 'investigation'
+  if (kind.includes('campaign')) return 'hunt'
+  if (kind.includes('refuter')) return 'verification'
+  return kind
+}
+
+// Prefer user-facing product routes over the internal campaign record UI.
 function eventHref(event: TimelineEvent): string | null {
-  if (event.next_action && event.next_action.startsWith('/')) return event.next_action
+  if (event.next_action && event.next_action.startsWith('/') && !event.next_action.startsWith('/campaigns/')) {
+    return event.next_action
+  }
   if (event.scan_id) return `/scans/${event.scan_id}`
   const campaignId = event.campaign_id || event.mission_campaign_id
-  if (campaignId) return `/campaigns/${campaignId}`
+  if (campaignId) return `/settings/research-agent/runs/${campaignId}`
   return null
 }
 
@@ -65,7 +92,7 @@ function EventRow({ event }: { event: TimelineEvent }) {
           <RiskTierBadge tier={event.risk_tier} />
           <span className="text-sm font-medium text-white">{eventTitle(event)}</span>
           <span className="rounded bg-gray-800 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-gray-400">
-            {event.kind.replace(/_/g, ' ')}
+            {eventKindLabel(event)}
           </span>
           {event.dry_run && (
             <span className="rounded bg-gray-800 px-1.5 py-0.5 text-[10px] text-gray-400">dry run</span>
@@ -108,9 +135,18 @@ function TimelineContent() {
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState(false)
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null)
-  const [targetInput, setTargetInput] = useState<string>(filters.target || '')
+  const [targets, setTargets] = useState<Target[]>([])
 
   const targetFilter = (filters.target || '').trim()
+
+  useEffect(() => {
+    getTargets()
+      .then((result) => {
+        const rows = Array.isArray(result) ? result : result.targets || []
+        setTargets(rows)
+      })
+      .catch(() => setTargets([]))
+  }, [])
 
   const load = useCallback(async () => {
     try {
@@ -145,7 +181,7 @@ function TimelineContent() {
         <div>
           <h1 className="text-2xl font-bold text-white">Timeline</h1>
           <p className="mt-1 text-gray-400">
-            A live feed of what ShakerScan runs across the product — scans, scheduled jobs, campaign actions, retests, and exports — as it happens.
+            A live feed of scans, scheduled jobs, autonomous investigations, verification, and exports.
           </p>
         </div>
         <LastUpdated updatedAt={lastUpdated} onRefresh={load} />
@@ -155,29 +191,26 @@ function TimelineContent() {
         <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
           <div className="flex-1">
             <label htmlFor="timeline-target" className="mb-1 block text-xs font-medium text-gray-400">
-              Filter by target ID
+              Target
             </label>
             <div className="flex gap-2">
-              <input
+              <select
                 id="timeline-target"
-                type="text"
-                value={targetInput}
-                onChange={(e) => setTargetInput(e.target.value)}
-                onKeyDown={(e) => { if (e.key === 'Enter') setFilter('target', targetInput.trim() || undefined) }}
-                placeholder="Target UUID (optional)"
+                value={targetFilter}
+                onChange={(e) => setFilter('target', e.target.value || undefined)}
                 className="w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white placeholder-gray-600 focus:border-blue-500 focus:outline-none"
-              />
-              <button
-                type="button"
-                onClick={() => setFilter('target', targetInput.trim() || undefined)}
-                className="rounded-lg bg-blue-600 px-3 py-2 text-sm text-white hover:bg-blue-500"
               >
-                Apply
-              </button>
+                <option value="">All targets</option>
+                {targets.map((target) => (
+                  <option key={target.id} value={target.id}>
+                    {target.name ? `${target.name} — ` : ''}{target.url}
+                  </option>
+                ))}
+              </select>
               {targetFilter && (
                 <button
                   type="button"
-                  onClick={() => { setTargetInput(''); setFilter('target', undefined) }}
+                  onClick={() => setFilter('target', undefined)}
                   className="rounded-lg border border-gray-700 px-3 py-2 text-sm text-gray-300 hover:bg-gray-800"
                 >
                   Clear

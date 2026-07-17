@@ -1,6 +1,7 @@
 'use client'
 
 import { useCallback, useEffect, useMemo, useState, Fragment, Suspense } from 'react'
+import Link from 'next/link'
 import { getEvidenceInstances, getFindingEvidence, formatDate, type EvidenceInstance, type EvidenceObject } from '@/lib/api'
 import { useUrlFilters } from '@/lib/useUrlFilters'
 import {
@@ -70,7 +71,7 @@ function EvidenceContent() {
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null)
   const [modalObjectId, setModalObjectId] = useState<string | null>(null)
   const [findingInput, setFindingInput] = useState<string>(filters.finding_id || '')
-  const [proofFilter, setProofFilter] = useState<ProofFilter>('all')
+  const [proofFilter, setProofFilter] = useState<ProofFilter>('verified')
   const [search, setSearch] = useState('')
   const [expandedId, setExpandedId] = useState<string | null>(null)
 
@@ -174,6 +175,9 @@ function EvidenceContent() {
                 )
               })}
             </div>
+            <p className="text-xs text-gray-500">
+              Proven evidence is shown first. Choose another proof state to inspect incomplete or unverified records.
+            </p>
             <input
               type="text"
               value={search}
@@ -288,7 +292,9 @@ function EvidenceContent() {
                             {objective ? (
                               <p className="mt-0.5 max-w-md truncate text-xs text-gray-500" title={objective}>{objective}</p>
                             ) : (
-                              <p className="mt-0.5 font-mono text-xs text-gray-600">{inst.id.slice(0, 12)}…</p>
+                              <p className="mt-0.5 max-w-md truncate text-xs text-gray-500">
+                                No objective recorded — open details to see what is missing.
+                              </p>
                             )}
                           </td>
                           <td className="px-3 py-2 text-gray-300">{hostOf(inst.concrete_url) || <span className="text-gray-600">—</span>}</td>
@@ -331,7 +337,14 @@ function EvidenceContent() {
         </SectionCard>
       )}
 
-      <EvidenceRetentionPanel findingId={findingFilter || undefined} />
+      <details className="rounded-lg border border-gray-800 bg-gray-950/30">
+        <summary className="cursor-pointer px-4 py-3 text-sm font-medium text-gray-400 hover:text-gray-200">
+          Advanced: export and retention administration
+        </summary>
+        <div className="border-t border-gray-800 p-4">
+          <EvidenceRetentionPanel findingId={findingFilter || undefined} />
+        </div>
+      </details>
 
       <EvidenceObjectModal objectId={modalObjectId} onClose={() => setModalObjectId(null)} />
     </div>
@@ -346,14 +359,39 @@ function EvidenceDetail({ inst, onViewObject }: { inst: EvidenceInstance; onView
   const falsifier = text(po.falsifier)
   const verdict = text(fp.verdict)
   const comparisons = Array.isArray(po.comparisons) ? po.comparisons : []
+  const hasDecisionRule = Boolean(objective && expected && falsifier)
+  const isUsableProof = inst.proof_state === 'verified' && hasDecisionRule && comparisons.length > 0
 
   return (
     <div className="grid gap-4 text-sm md:grid-cols-2">
       <div className="space-y-2">
+        <div className={`rounded-lg border p-3 ${
+          isUsableProof
+            ? 'border-emerald-500/25 bg-emerald-500/[0.06] text-emerald-100'
+            : 'border-amber-500/25 bg-amber-500/[0.06] text-amber-100'
+        }`}>
+          <div className="text-xs font-semibold uppercase tracking-wide">
+            {isUsableProof ? 'Reproducible proof' : 'Incomplete evidence'}
+          </div>
+          <p className="mt-1 text-xs opacity-80">
+            {isUsableProof
+              ? 'The decision rule and request comparison are recorded.'
+              : 'Do not treat this record as proof until its decision rule and request comparison are complete.'}
+          </p>
+        </div>
         {objective && <div><div className="text-xs font-medium text-gray-500">Objective</div><p className="text-gray-300">{objective}</p></div>}
         {expected && <div><div className="text-xs font-medium text-emerald-400">Signal that supports it</div><p className="text-gray-300">{expected}</p></div>}
         {falsifier && <div><div className="text-xs font-medium text-gray-500">What would disprove it</div><p className="text-gray-400">{falsifier}</p></div>}
-        {!objective && !expected && !falsifier && <p className="text-xs text-gray-600">No recorded decision rule for this evidence.</p>}
+        {!hasDecisionRule && (
+          <p className="text-xs text-amber-300">
+            Missing decision rule. Re-run verification with an expected signal and a condition that would disprove the claim.
+          </p>
+        )}
+        <div className="flex flex-wrap gap-3 text-xs">
+          {inst.finding_id && <Link href={`/findings/${inst.finding_id}`} className="text-blue-400 hover:text-blue-300">Open finding</Link>}
+          {inst.scan_id && <Link href={`/scans/${inst.scan_id}`} className="text-blue-400 hover:text-blue-300">Open scan</Link>}
+          {inst.target_id && <Link href={`/asm?target_id=${inst.target_id}`} className="text-blue-400 hover:text-blue-300">Open target coverage</Link>}
+        </div>
       </div>
       <div className="space-y-2">
         <div className="flex flex-wrap items-center gap-2">
@@ -366,8 +404,21 @@ function EvidenceDetail({ inst, onViewObject }: { inst: EvidenceInstance; onView
           {fp.restoration_verified === true && <Badge className="bg-blue-500/10 text-blue-300">state restored</Badge>}
           {typeof inst.tool_receipt_id === 'string' && <span className="text-xs text-gray-600">receipt {inst.tool_receipt_id.slice(0, 8)}…</span>}
         </div>
-        {comparisons.length > 0 && (
-          <div className="text-xs text-gray-500">{comparisons.length} request comparison{comparisons.length === 1 ? '' : 's'} captured</div>
+        {comparisons.length > 0 ? (
+          <details className="rounded border border-gray-800 bg-gray-950/50">
+            <summary className="cursor-pointer px-2 py-1.5 text-xs text-blue-300">
+              Read {comparisons.length} request comparison{comparisons.length === 1 ? '' : 's'}
+            </summary>
+            <div className="grid gap-2 border-t border-gray-800 p-2">
+              {comparisons.slice(0, 3).map((comparison, index) => (
+                <pre key={index} className="max-h-56 overflow-auto whitespace-pre-wrap break-words rounded bg-black/30 p-2 text-[10px] leading-4 text-gray-400">
+                  {JSON.stringify(comparison, null, 2)}
+                </pre>
+              ))}
+            </div>
+          </details>
+        ) : (
+          <p className="text-xs text-amber-300">No request/response comparison was captured.</p>
         )}
         {onViewObject && (
           <button type="button" onClick={onViewObject} className="text-xs text-blue-400 hover:text-blue-300">View raw object</button>

@@ -349,7 +349,7 @@ function FindingsContent() {
           onClick={() => { setShowCleanup(!showCleanup); setCleanupPreview(null) }}
           className="px-3 py-1.5 bg-gray-800 text-gray-400 rounded-lg text-sm hover:bg-gray-700 shrink-0"
         >
-          Cleanup old findings
+          Advanced cleanup
         </button>
       </div>
 
@@ -468,8 +468,24 @@ function FindingsContent() {
         onCancel={() => setCleanupConfirmOpen(false)}
       />
 
-      {/* Filters Row */}
-      <div className="flex flex-wrap items-center gap-4">
+      <div className="relative">
+        <input
+          type="text"
+          placeholder="Search findings by title or URL..."
+          value={searchInput}
+          onChange={(e) => setSearchInput(e.target.value)}
+          aria-label="Search findings by title or URL"
+          className="w-full rounded-lg border border-gray-800 bg-gray-900 px-4 py-2 text-sm text-white placeholder-gray-500 focus:border-blue-500 focus:outline-none"
+        />
+      </div>
+
+      {/* Secondary filters stay available without competing with the primary
+          search, severity, and lifecycle controls. */}
+      <details className="rounded-lg border border-gray-800 bg-gray-950/30">
+        <summary className="cursor-pointer px-4 py-3 text-sm font-medium text-gray-400 hover:text-gray-200">
+          More filters and sorting
+        </summary>
+        <div className="flex flex-wrap items-center gap-4 border-t border-gray-800 p-4">
         {/* Source Type Filter */}
         <div className="flex items-center gap-2">
           <label className="text-sm text-gray-400">Type:</label>
@@ -590,22 +606,8 @@ function FindingsContent() {
           verified only
         </label>
 
-        {/* Search */}
-        <div className="relative flex-1 min-w-[200px]">
-          <input
-            type="text"
-            placeholder="Search by title or URL..."
-            value={searchInput}
-            onChange={(e) => setSearchInput(e.target.value)}
-            aria-label="Search findings by title or URL"
-            className="w-full px-4 py-1.5 bg-gray-900 border border-gray-800 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-blue-500 text-sm"
-          />
-          <svg className="absolute right-3 top-2 w-4 h-4 text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-          </svg>
         </div>
-
-      </div>
+      </details>
 
       {/* Deep-link filters (arrive via links from scans/targets/exposure and
           have no visible control above) — surface each as a removable chip so

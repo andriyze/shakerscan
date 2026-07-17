@@ -287,7 +287,7 @@ export default function AISettingsPanel() {
     <div className="bg-gray-900 rounded-lg border border-gray-800 p-4 space-y-5">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <h2 className="text-sm font-medium text-gray-200">AI & Verification Settings</h2>
+          <h2 className="text-sm font-medium text-gray-200">AI provider & verification</h2>
           <p className="text-xs text-gray-500 mt-1">
             Configure scan-time triage, authoritative retest verification, and smart-scan reporting behavior.
           </p>
@@ -811,9 +811,9 @@ export default function AISettingsPanel() {
 
       <div className="pt-2 border-t border-gray-800">
         <ToggleRow
-          label="Persist changes to local .env"
-          description="When on, saved settings survive container restarts. When off, changes are runtime-only."
-          hint="Use runtime-only for temporary experiments."
+          label="Keep settings after restart"
+          description="When on, saved settings survive service and container restarts. When off, changes last only for the current runtime."
+          hint="Leave off for temporary experiments."
           checked={persistAIToEnv}
           onChange={setPersistAIToEnv}
         />

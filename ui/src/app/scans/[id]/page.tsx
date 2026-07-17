@@ -217,7 +217,7 @@ function DeploymentDecisionCard({
     <Card className="p-4 mb-6">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <h2 className="text-sm font-semibold text-gray-300">Deployment Decision</h2>
+          <h2 className="text-sm font-semibold text-gray-300">Overall release decision</h2>
           <div className="mt-2 flex flex-wrap items-center gap-2">
             <span className={`rounded px-2 py-1 text-xs font-medium ${verdictClass}`}>{verdict.replace(/_/g, ' ')}</span>
             {decision?.policy_profile && <span className="rounded bg-gray-800 px-2 py-1 text-xs text-gray-300">{String(decision.policy_profile)}</span>}
@@ -236,6 +236,9 @@ function DeploymentDecisionCard({
       {(decision?.rationale || decision?.reason) && (
         <p className="mt-3 text-sm text-gray-300">{String(decision.rationale || decision.reason)}</p>
       )}
+      <p className="mt-2 text-xs text-gray-500">
+        This decision combines the scan result with unresolved findings and policy for the target. A completed scan or high technical score does not override a blocked release decision.
+      </p>
       <div className="mt-3 flex flex-wrap gap-2 text-xs text-gray-500">
         <span>{blockingCount} blocking finding{blockingCount === 1 ? '' : 's'}</span>
         <span>{exceptionCount} exception{exceptionCount === 1 ? '' : 's'} applied</span>
@@ -1053,6 +1056,8 @@ function FailedScanPanel({ scan, hasPartialResults }: { scan: any; hasPartialRes
     scan?.error_message ||
     scan?.error ||
     'No specific error was reported.'
+  const targetUrl = String(scan?.target_url || scan?.target || '').trim()
+  const looksLikeReachabilityFailure = /dns|resolve|host|connect|timeout|unreachable/i.test(String(failureMessage))
 
   return (
     <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-5 mb-6">
@@ -1076,11 +1081,22 @@ function FailedScanPanel({ scan, hasPartialResults }: { scan: any; hasPartialRes
             )}
             <li>No final score or grade was produced, so this scan should not be used as a pass/fail verdict.</li>
           </ul>
-          <p className="text-amber-300/90 text-sm mt-3">
-            Recommended next step: retry the scan. If it keeps failing, check worker health
-            (<span className="font-mono text-amber-200/90">curl http://localhost:8080/workers</span>) and rebuild the
-            workers (<span className="font-mono text-amber-200/90">./scanner.sh rebuild</span>).
-          </p>
+          <div className="mt-4 rounded-lg border border-amber-500/20 bg-amber-500/10 p-3">
+            <p className="text-sm font-medium text-amber-200">Recommended next step</p>
+            <p className="mt-1 text-sm text-amber-100/80">
+              {looksLikeReachabilityFailure
+                ? 'Confirm the target address is correct and reachable from the scanner, then try again.'
+                : 'Review the failure above, then retry this target when the underlying problem is resolved.'}
+            </p>
+            {targetUrl && (
+              <Link
+                href={`/scan/new?target=${encodeURIComponent(targetUrl)}`}
+                className="mt-3 inline-flex rounded-lg bg-amber-500/15 px-3 py-1.5 text-sm font-medium text-amber-100 hover:bg-amber-500/25"
+              >
+                Review target and retry
+              </Link>
+            )}
+          </div>
         </div>
       </div>
     </div>

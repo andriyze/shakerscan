@@ -452,7 +452,7 @@ export default function AIGateSettingsPage() {
         return next
       })
     } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Failed to load AI Gate campaign history'
+      const msg = err instanceof Error ? err.message : 'Failed to load AI Gate run history'
       setCampaignHistoryErrors((prev) => ({ ...prev, [targetId]: msg }))
     } finally {
       setLoadingCampaignHistory(null)
@@ -1377,7 +1377,7 @@ export default function AIGateSettingsPage() {
                   <div className="mt-3 rounded-lg border border-gray-800 bg-gray-950/40 p-3">
                     <div className="flex flex-wrap items-start justify-between gap-3">
                       <div>
-                        <div className="text-sm font-medium text-gray-200">Campaign history</div>
+                        <div className="text-sm font-medium text-gray-200">Run history</div>
                         <p className="mt-1 text-xs text-gray-500">Recent AI Gate runs for this target across probe packs, profiles, and environments.</p>
                       </div>
                       <div className="flex flex-wrap gap-2">
@@ -1536,7 +1536,7 @@ export default function AIGateSettingsPage() {
                             </table>
                           </div>
                         ) : (
-                          <p className="text-xs text-gray-500">No completed AI Gate campaigns have been recorded for this target yet.</p>
+                          <p className="text-xs text-gray-500">No completed AI Gate runs have been recorded for this target yet.</p>
                         )}
                       </div>
                     )}
@@ -1547,7 +1547,14 @@ export default function AIGateSettingsPage() {
           )}
         </div>
 
-      <AISurfaceInventoryPanel />
+      <details className="rounded-lg border border-gray-800 bg-gray-950/30">
+        <summary className="cursor-pointer px-4 py-3 text-sm font-medium text-gray-400 hover:text-gray-200">
+          Advanced: browse all discovered AI surfaces
+        </summary>
+        <div className="border-t border-gray-800 p-4">
+          <AISurfaceInventoryPanel />
+        </div>
+      </details>
 
       <Card className="p-4">
         <div className="flex flex-wrap items-start justify-between gap-3">

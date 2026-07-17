@@ -26,7 +26,7 @@ function AttemptRow({ attempt }: { attempt: AISurfaceAttempt }) {
       <td className="px-3 py-1.5 text-gray-400">{attempt.status}{attempt.proof_state ? ` · ${attempt.proof_state}` : ''}</td>
       <td className="px-3 py-1.5 text-gray-300">
         {attempt.findings_count}
-        {attempt.critical_high_count > 0 && <span className="ml-1 text-red-400">({attempt.critical_high_count} c/h)</span>}
+        {attempt.critical_high_count > 0 && <span className="ml-1 text-red-400">({attempt.critical_high_count} critical/high)</span>}
       </td>
       <td className="px-3 py-1.5 text-gray-500">{attempt.completed_at ? formatDate(attempt.completed_at) : '—'}</td>
     </tr>
@@ -71,7 +71,7 @@ function SurfaceRow({ surface }: { surface: AISurface }) {
         <td className="px-3 py-2 text-sm text-gray-300">{surface.attempt_count}</td>
         <td className="px-3 py-2 text-sm text-gray-300">
           {surface.total_findings}
-          {surface.total_crit_high > 0 && <span className="ml-1 text-red-400">({surface.total_crit_high} c/h)</span>}
+          {surface.total_crit_high > 0 && <span className="ml-1 text-red-400">({surface.total_crit_high} critical/high)</span>}
         </td>
         <td className="px-3 py-2 text-xs text-gray-500">{surface.last_tested ? formatDate(surface.last_tested) : 'never'}</td>
       </tr>
@@ -148,7 +148,7 @@ export default function AISurfaceInventoryPanel() {
 
   return (
     <SectionCard
-      title="AI Surface Inventory"
+      title="Advanced surface inventory"
       actions={
         <Button size="sm" variant="secondary" onClick={handleSync} disabled={syncing}>
           <RefreshCw className={`h-3.5 w-3.5 ${syncing ? 'animate-spin' : ''}`} />

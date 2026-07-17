@@ -130,7 +130,7 @@ export default function ScanExecutionSettingsPanel() {
     <Card className="p-4">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <h2 className="text-sm font-medium text-white">Automation Defaults</h2>
+          <h2 className="text-sm font-medium text-white">Automation defaults</h2>
           <p className="mt-1 text-sm text-gray-400">
             Safe defaults for parallel scans and Continuous ASM. Per-scan Normal/Parallel and per-target ASM policy still override these defaults.
           </p>
@@ -199,86 +199,103 @@ export default function ScanExecutionSettingsPanel() {
         </div>
       </div>
 
-      <div className="mt-3 rounded-lg border border-gray-800 bg-gray-950/40 p-3">
-        <div>
-          <h3 className="text-sm font-medium text-gray-100">Default Deep Hunt planner</h3>
-          <p className="mt-1 text-xs text-gray-500">
-            Sets who chooses each bounded research action. Individual hunts can override this.
-          </p>
-        </div>
-        <div className="mt-3 grid gap-2 md:grid-cols-3">
-          {([
-            {
-              mode: 'agent' as const,
-              label: 'Current coding agent',
-              description: 'Default for clean installs; no separate provider key.',
-            },
-            {
-              mode: 'local_codex' as const,
-              label: 'Isolated local Codex',
-              description: 'Separate ephemeral codex exec planner processes.',
-            },
-            {
-              mode: 'configured_ai' as const,
-              label: 'Stored AI provider',
-              description: 'Unattended server autopilot using AI Settings.',
-            },
-          ]).map((option) => {
-            const active = research?.default_planner_mode === option.mode
-            return (
-              <button
-                key={option.mode}
-                type="button"
-                onClick={() => save(
-                  { default_research_planner_mode: option.mode },
-                  `Default Deep Hunt planner set to ${option.label}`,
-                )}
-                disabled={loading || saving || !research}
-                className={`rounded-lg border px-3 py-2 text-left transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${
-                  active
-                    ? 'border-blue-500 bg-blue-600/15 text-blue-100'
-                    : 'border-gray-800 bg-gray-950/40 text-gray-300 hover:bg-gray-800/70'
-                }`}
-              >
-                <div className="text-sm font-medium">{option.label}</div>
-                <div className="mt-1 text-xs leading-5 text-gray-500">{option.description}</div>
-              </button>
-            )
-          })}
-        </div>
-      </div>
-
-      <div className="mt-3 rounded-lg border border-gray-800 bg-gray-950/40 p-3">
-        <div className="flex items-start justify-between gap-3">
+      <details className="group mt-4 rounded-lg border border-gray-800 bg-gray-950/30">
+        <summary className="flex cursor-pointer list-none items-center justify-between gap-4 px-3 py-3 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-500 [&::-webkit-details-marker]:hidden">
           <div>
-            <h3 className="text-sm font-medium text-gray-100">Require approval receipts</h3>
+            <h3 className="text-sm font-medium text-gray-200">Advanced automation controls</h3>
             <p className="mt-1 text-xs text-gray-500">
-              Enforce scope and approval receipts before queueing scans, ASM actions, AI Gate runs, Model Intake scans, or retests.
+              Deep Hunt planner selection and approval-receipt enforcement.
             </p>
           </div>
-          <Button
-            variant={safety?.approval_receipts_required_for_state_changing_actions ? 'primary' : 'secondary'}
-            size="sm"
-            onClick={() => save(
-              {
-                approval_receipts_required_for_state_changing_actions:
-                  !safety?.approval_receipts_required_for_state_changing_actions,
-              },
-              safety?.approval_receipts_required_for_state_changing_actions
-                ? 'Approval receipt requirement disabled'
-                : 'Approval receipt requirement enabled'
-            )}
-            disabled={loading || saving || !safety}
-          >
-            {safety?.approval_receipts_required_for_state_changing_actions ? 'On' : 'Off'}
-          </Button>
+          <span className="shrink-0 text-xs font-medium text-blue-400">
+            <span className="group-open:hidden">Show</span>
+            <span className="hidden group-open:inline">Hide</span>
+          </span>
+        </summary>
+
+        <div className="space-y-3 border-t border-gray-800 p-3">
+          <div className="rounded-lg border border-gray-800 bg-gray-950/40 p-3">
+            <div>
+              <h3 className="text-sm font-medium text-gray-100">Default Deep Hunt planner</h3>
+              <p className="mt-1 text-xs text-gray-500">
+                Sets who chooses each bounded research action. Individual hunts can override this.
+              </p>
+            </div>
+            <div className="mt-3 grid gap-2 md:grid-cols-3">
+              {([
+                {
+                  mode: 'agent' as const,
+                  label: 'Current coding agent',
+                  description: 'Default for clean installs; no separate provider key.',
+                },
+                {
+                  mode: 'local_codex' as const,
+                  label: 'Isolated local Codex',
+                  description: 'Separate ephemeral codex exec planner processes.',
+                },
+                {
+                  mode: 'configured_ai' as const,
+                  label: 'Stored AI provider',
+                  description: 'Unattended server autopilot using AI Settings.',
+                },
+              ]).map((option) => {
+                const active = research?.default_planner_mode === option.mode
+                return (
+                  <button
+                    key={option.mode}
+                    type="button"
+                    onClick={() => save(
+                      { default_research_planner_mode: option.mode },
+                      `Default Deep Hunt planner set to ${option.label}`,
+                    )}
+                    disabled={loading || saving || !research}
+                    className={`rounded-lg border px-3 py-2 text-left transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${
+                      active
+                        ? 'border-blue-500 bg-blue-600/15 text-blue-100'
+                        : 'border-gray-800 bg-gray-950/40 text-gray-300 hover:bg-gray-800/70'
+                    }`}
+                  >
+                    <div className="text-sm font-medium">{option.label}</div>
+                    <div className="mt-1 text-xs leading-5 text-gray-500">{option.description}</div>
+                  </button>
+                )
+              })}
+            </div>
+          </div>
+
+          <div className="rounded-lg border border-gray-800 bg-gray-950/40 p-3">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <h3 className="text-sm font-medium text-gray-100">Require approval receipts</h3>
+                <p className="mt-1 text-xs text-gray-500">
+                  Enforce scope and approval receipts before queueing scans, ASM actions, AI Gate runs, Model Intake scans, or retests.
+                </p>
+              </div>
+              <Button
+                variant={safety?.approval_receipts_required_for_state_changing_actions ? 'primary' : 'secondary'}
+                size="sm"
+                onClick={() => save(
+                  {
+                    approval_receipts_required_for_state_changing_actions:
+                      !safety?.approval_receipts_required_for_state_changing_actions,
+                  },
+                  safety?.approval_receipts_required_for_state_changing_actions
+                    ? 'Approval receipt requirement disabled'
+                    : 'Approval receipt requirement enabled'
+                )}
+                disabled={loading || saving || !safety}
+              >
+                {safety?.approval_receipts_required_for_state_changing_actions ? 'On' : 'Off'}
+              </Button>
+            </div>
+            <div className="mt-3 flex flex-wrap gap-2 text-[11px] text-gray-500">
+              <span className="rounded border border-gray-800 px-2 py-1">Scope preview required</span>
+              <span className="rounded border border-gray-800 px-2 py-1">Approval receipt required</span>
+              <span className="rounded border border-gray-800 px-2 py-1">Legacy mode: {safety?.approval_receipts_required_for_state_changing_actions ? 'blocked' : 'allowed'}</span>
+            </div>
+          </div>
         </div>
-        <div className="mt-3 flex flex-wrap gap-2 text-[11px] text-gray-500">
-          <span className="rounded border border-gray-800 px-2 py-1">Scope preview required</span>
-          <span className="rounded border border-gray-800 px-2 py-1">Approval receipt required</span>
-          <span className="rounded border border-gray-800 px-2 py-1">Legacy mode: {safety?.approval_receipts_required_for_state_changing_actions ? 'blocked' : 'allowed'}</span>
-        </div>
-      </div>
+      </details>
 
       {asmConfig && (
         <div className="mt-4">

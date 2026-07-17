@@ -1323,22 +1323,27 @@ export default function InteractiveSessionPage() {
 
                 <div className="space-y-2">
                   <input
+                    type="password"
+                    autoComplete="off"
                     value={authForms[user].token}
                     onChange={(e) => setAuthForms(prev => ({ ...prev, [user]: { ...prev[user], token: e.target.value } }))}
                     placeholder="Bearer token (without Bearer prefix)"
                     className="w-full rounded-lg border border-gray-700 bg-gray-900 px-3 py-2 text-sm text-white placeholder-gray-500 focus:border-blue-500 focus:outline-none"
                   />
                   <input
+                    type="password"
+                    autoComplete="off"
                     value={authForms[user].authHeader}
                     onChange={(e) => setAuthForms(prev => ({ ...prev, [user]: { ...prev[user], authHeader: e.target.value } }))}
                     placeholder="Auth header (e.g., Bearer eyJ...)"
                     className="w-full rounded-lg border border-gray-700 bg-gray-900 px-3 py-2 text-sm text-white placeholder-gray-500 focus:border-blue-500 focus:outline-none"
                   />
-                  <textarea
+                  <input
+                    type="password"
+                    autoComplete="off"
                     value={authForms[user].cookies}
                     onChange={(e) => setAuthForms(prev => ({ ...prev, [user]: { ...prev[user], cookies: e.target.value } }))}
                     placeholder="Cookies (session=abc; token=xyz)"
-                    rows={2}
                     className="w-full rounded-lg border border-gray-700 bg-gray-900 px-3 py-2 text-sm text-white placeholder-gray-500 focus:border-blue-500 focus:outline-none"
                   />
                 </div>
@@ -1404,8 +1409,13 @@ export default function InteractiveSessionPage() {
                 onChange={(e) => setAllowOutOfScope(e.target.checked)}
                 className="rounded border-gray-600 bg-gray-900 text-blue-600"
               />
-              Allow out-of-scope request (cross-origin)
+              I reviewed scope and authorize this cross-origin request
             </label>
+            {allowOutOfScope && (
+              <p className="text-xs text-amber-300">
+                The request may leave the current target origin. Confirm the destination is explicitly authorized before running it.
+              </p>
+            )}
 
             <div className="flex flex-wrap gap-2">
               <Button

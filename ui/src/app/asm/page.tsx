@@ -45,6 +45,7 @@ import {
   type AsmCheckFamily,
   type AsmConfig,
   type AsmCoverage,
+  type AsmCoverageRollup,
   type AsmEndpoint,
   type AsmGaps,
   type AsmPolicy,
@@ -104,11 +105,19 @@ function pct(coverage: number): string {
   return `${(coverage * 100).toFixed(1)}%`
 }
 
-function asmCoverageDenominator(coverage: AsmCoverage | null): { value: number; label: string } {
+type CoverageSummary = AsmCoverage | AsmCoverageRollup
+
+function asmCoverageDenominator(coverage: CoverageSummary | null | undefined): { value: number; label: string } {
   if (!coverage) return { value: 0, label: 'testable' }
-  const value = coverage.denominator ?? coverage.testable ?? Math.max(coverage.total - coverage.gone, 0)
+  const value = coverage.denominator ?? coverage.testable ?? Math.max(coverage.total - ('gone' in coverage ? coverage.gone : 0), 0)
   const label = coverage.denominator_label || (coverage.denominator !== undefined || coverage.testable !== undefined ? 'testable' : 'total - gone')
   return { value, label }
+}
+
+function resolvedCoverage(coverage: CoverageSummary | null | undefined): number {
+  if (!coverage) return 0
+  const denominator = asmCoverageDenominator(coverage).value
+  return denominator > 0 ? Math.max(0, Math.min(1, coverage.tested / denominator)) : 0
 }
 
 // The ASM scheduling window is stored/evaluated in UTC; these helpers surface
@@ -188,7 +197,7 @@ function RollupView({
             if (s.asm_coverage) flat.push({ target: s, root_domain: d.root_domain })
           }
         }
-        flat.sort((a, b) => (a.target.asm_coverage!.coverage) - (b.target.asm_coverage!.coverage))
+        flat.sort((a, b) => resolvedCoverage(a.target.asm_coverage) - resolvedCoverage(b.target.asm_coverage))
         setRows(flat)
       })
       .catch(() => setError(true))
@@ -237,14 +246,17 @@ function RollupView({
               <tr className="border-b border-gray-800 text-left text-xs uppercase text-gray-500">
                 <th className="px-3 py-2 font-medium">Target</th>
                 <th className="px-3 py-2 font-medium">Coverage</th>
-                <th className="px-3 py-2 font-medium text-right">Tested / Total</th>
-                <th className="px-3 py-2 font-medium text-right">Untested</th>
+                <th className="px-3 py-2 font-medium text-right">Tested / Testable</th>
+                <th className="px-3 py-2 font-medium text-right">Remaining</th>
                 <th className="px-3 py-2" />
               </tr>
             </thead>
             <tbody>
               {visible.map(({ target }) => {
                 const cov = target.asm_coverage!
+                const denominator = asmCoverageDenominator(cov)
+                const currentCoverage = resolvedCoverage(cov)
+                const remaining = Math.max(denominator.value - cov.tested, 0)
                 return (
                   <tr key={target.id} className="border-b border-gray-800/60 hover:bg-gray-800/30">
                     <td className="px-3 py-2">
@@ -259,14 +271,14 @@ function RollupView({
                     </td>
                     <td className="px-3 py-2">
                       <div className="flex items-center gap-2">
-                        <CoverageBar coverage={cov.coverage} />
-                        <span className="w-12 shrink-0 text-right text-xs text-gray-400">{pct(cov.coverage)}</span>
+                        <CoverageBar coverage={currentCoverage} />
+                        <span className="w-12 shrink-0 text-right text-xs text-gray-400">{pct(currentCoverage)}</span>
                       </div>
                     </td>
                     <td className="px-3 py-2 text-right tabular-nums text-gray-300">
-                      {cov.tested} / {cov.total}
+                      {cov.tested} / {denominator.value}
                     </td>
-                    <td className="px-3 py-2 text-right tabular-nums text-gray-400">{cov.untested}</td>
+                    <td className="px-3 py-2 text-right tabular-nums text-gray-400">{remaining}</td>
                     <td className="px-3 py-2 text-right">
                       <Button variant="secondary" size="sm" onClick={() => onSelect(target.id)}>
                         View
@@ -777,11 +789,16 @@ function CoverageAdvisorCard({
   const next = rec?.next_action
   const icon = next === 'test' ? Play : next === 'recon' ? Search : CheckCircle2
   const Icon = icon
-  const coveragePct = coverage ? pct(coverage.coverage) : '—'
-  const coverageDenominatorText = coverage ? `${coverage.tested} / ${denominator.value} tested` : 'No coverage data'
+  const currentCoverage = resolvedCoverage(coverage)
+  const coveragePct = coverage ? pct(currentCoverage) : '—'
+  const coverageDenominatorText = coverage
+    ? `${coverage.tested} of ${denominator.value} testable endpoint${denominator.value === 1 ? '' : 's'} checked`
+    : 'No coverage data'
+  const recommendationReason = (rec?.reason || 'Load a target inventory to see the next coverage action.')
+    .replace(/^1 endpoint\(s\)/, '1 endpoint')
+    .replace(/endpoint\(s\)/g, 'endpoints')
   const selectedFamilyOption = checkFamilyOptions.find((option) => option.value === checkFamily && !option.disabled)
   const selectedRiskLabel = formatRiskLevel(selectedFamilyOption?.riskLevel)
-  const plannedFamilyOptions = checkFamilyOptions.filter((option) => option.disabled)
   const scheduler = gaps?.scheduler_state
   const decision = scheduler?.decision
   const lastDecision = scheduler?.last_decision
@@ -803,9 +820,9 @@ function CoverageAdvisorCard({
           <div>
             <div className="text-2xl font-semibold text-white">{coveragePct}</div>
             <p className="mt-1 text-sm text-gray-400">
-              {rec?.reason || 'Load a target inventory to see the next ASM action.'}
+              {recommendationReason}
             </p>
-            <div className="mt-1 text-xs text-gray-500">{coverageDenominatorText} · denominator: {denominator.label}</div>
+            <div className="mt-1 text-xs text-gray-500">{coverageDenominatorText}</div>
           </div>
           {gaps?.recommendation?.blockers?.length ? (
             <div className="space-y-1">
@@ -828,8 +845,13 @@ function CoverageAdvisorCard({
               ))}
             </div>
           ) : null}
-          {gaps && (
-            <div className="flex flex-wrap gap-2 text-xs">
+          <details className="rounded-lg border border-gray-800 bg-gray-950/40">
+            <summary className="cursor-pointer px-3 py-2 text-xs font-medium text-gray-400 hover:text-gray-200">
+              Why this recommendation?
+            </summary>
+            <div className="space-y-3 border-t border-gray-800 p-3">
+            {gaps && (
+              <div className="flex flex-wrap gap-2 text-xs">
               <Badge className="bg-gray-800 text-gray-300">{gaps.claimable} claimable</Badge>
               {Object.entries(gaps.last_attempt_status).slice(0, 4).map(([status, count]) => (
                 <Badge key={status} className="bg-gray-800 text-gray-400">
@@ -914,7 +936,7 @@ function CoverageAdvisorCard({
               </div>
             </div>
           )}
-          {!!gaps?.stuck_verification && gaps.stuck_verification > 0 && (
+            {!!gaps?.stuck_verification && gaps.stuck_verification > 0 && (
             <div className="flex flex-wrap items-center gap-2 rounded border border-amber-500/30 bg-amber-500/10 px-2 py-1.5 text-xs">
               <span className="font-medium text-amber-300">
                 ⚠ {gaps.stuck_verification} high/critical finding{gaps.stuck_verification === 1 ? '' : 's'} stuck unproven
@@ -923,76 +945,78 @@ function CoverageAdvisorCard({
                 a re-test has been wedged &gt;1h or exhausted its attempts — needs manual review
               </span>
             </div>
-          )}
+            )}
+            </div>
+          </details>
         </div>
 
         <div className="flex flex-col gap-2">
-          <label className="space-y-1 text-xs text-gray-500">
-            <span>Next batch focus</span>
-            <select
-              value={checkFamily}
-              onChange={(e) => setCheckFamily(e.target.value)}
-              className="w-full rounded border border-gray-700 bg-gray-900 px-2 py-1.5 text-sm text-gray-200"
-            >
-              {checkFamilyOptions.map((option) => (
-                <option key={option.value} value={option.value} disabled={option.disabled}>
-                  {option.label}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="space-y-1 text-xs text-gray-500">
-            <span>Endpoint filter</span>
-            <select
-              value={endpointFilter}
-              onChange={(e) => setEndpointFilter(e.target.value)}
-              className="w-full rounded border border-gray-700 bg-gray-900 px-2 py-1.5 text-sm text-gray-200"
-            >
-              <option value="">All endpoints</option>
-              <option value="api">API-like only</option>
-            </select>
-          </label>
-          {selectedFamilyOption && (
-            <div className="space-y-1 rounded border border-gray-800 bg-gray-950/50 p-2">
-              <div className="flex flex-wrap items-center gap-1.5">
-                <span className="text-xs text-gray-400">{selectedFamilyOption.description}</span>
-                {selectedRiskLabel && (
-                  <Badge className={riskBadgeClass(selectedFamilyOption.riskLevel)}>{selectedRiskLabel}</Badge>
-                )}
-              </div>
-            </div>
-          )}
-          {plannedFamilyOptions.length > 0 && (
-            <div className="rounded border border-gray-800 bg-gray-950/40 p-2">
-              <div className="mb-1 text-[11px] uppercase text-gray-500">Planned checks</div>
-              <div className="flex flex-wrap gap-1.5">
-                {plannedFamilyOptions.map((option) => (
-                  <Badge key={option.value} className={riskBadgeClass(option.riskLevel)}>
-                    {option.label}
-                  </Badge>
-                ))}
-              </div>
-            </div>
-          )}
           <Button onClick={queueImprove} disabled={!!busy || next === 'wait'}>
             <Icon className="h-4 w-4" /> {busy === 'improve' ? 'Queuing…' : 'Improve coverage'}
           </Button>
-          <Button variant="secondary" onClick={queueRecon} disabled={!!busy}>
-            <Search className="h-4 w-4" /> {busy === 'recon' ? 'Queuing…' : 'Run discovery'}
-          </Button>
-          <Button
-            variant="secondary"
-            onClick={runPrune}
-            disabled={!!busy}
-            title="Re-probe reachability and retire phantom (404/soft-404) endpoints. Reversible."
-          >
-            <Trash2 className="h-4 w-4" /> {busy === 'prune' ? 'Pruning…' : 'Prune inventory'}
-          </Button>
+          <details className="rounded-lg border border-gray-800 bg-gray-950/40">
+            <summary className="cursor-pointer px-3 py-2 text-xs font-medium text-gray-400 hover:text-gray-200">
+              Customize next batch
+            </summary>
+            <div className="space-y-2 border-t border-gray-800 p-3">
+              <label className="block space-y-1 text-xs text-gray-500">
+                <span>Security check</span>
+                <select
+                  value={checkFamily}
+                  onChange={(e) => setCheckFamily(e.target.value)}
+                  className="w-full rounded border border-gray-700 bg-gray-900 px-2 py-1.5 text-sm text-gray-200"
+                >
+                  {checkFamilyOptions.map((option) => (
+                    <option key={option.value} value={option.value} disabled={option.disabled}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="block space-y-1 text-xs text-gray-500">
+                <span>Endpoints</span>
+                <select
+                  value={endpointFilter}
+                  onChange={(e) => setEndpointFilter(e.target.value)}
+                  className="w-full rounded border border-gray-700 bg-gray-900 px-2 py-1.5 text-sm text-gray-200"
+                >
+                  <option value="">All endpoints</option>
+                  <option value="api">API-like only</option>
+                </select>
+              </label>
+              {selectedFamilyOption && (
+                <div className="flex flex-wrap items-center gap-1.5 text-xs text-gray-400">
+                  <span>{selectedFamilyOption.description}</span>
+                  {selectedRiskLabel && (
+                    <Badge className={riskBadgeClass(selectedFamilyOption.riskLevel)}>{selectedRiskLabel}</Badge>
+                  )}
+                </div>
+              )}
+            </div>
+          </details>
+          <details className="rounded-lg border border-gray-800 bg-gray-950/40">
+            <summary className="cursor-pointer px-3 py-2 text-xs font-medium text-gray-400 hover:text-gray-200">
+              Advanced coverage actions
+            </summary>
+            <div className="grid gap-2 border-t border-gray-800 p-2">
+              <Button variant="secondary" onClick={queueRecon} disabled={!!busy}>
+                <Search className="h-4 w-4" /> {busy === 'recon' ? 'Queuing…' : 'Refresh discovery'}
+              </Button>
+              <Button
+                variant="secondary"
+                onClick={runPrune}
+                disabled={!!busy}
+                title="Re-check reachability and retire phantom endpoints. This bookkeeping is reversible."
+              >
+                <Trash2 className="h-4 w-4" /> {busy === 'prune' ? 'Checking…' : 'Remove unreachable endpoints'}
+              </Button>
+            </div>
+          </details>
         </div>
       </div>
       {gaps?.recommended_campaigns && gaps.recommended_campaigns.length > 0 && (
         <div className="space-y-1.5 border-t border-gray-800 pt-3">
-          <div className="text-[11px] uppercase text-gray-500">Recommended next campaigns</div>
+          <div className="text-[11px] uppercase text-gray-500">Recommended follow-up work</div>
           <div className="grid gap-1.5 sm:grid-cols-2 xl:grid-cols-3">
             {gaps.recommended_campaigns.slice(0, 6).map((c) => (
               <div key={c.campaign} className="flex items-start gap-2 rounded border border-gray-800 bg-gray-950/40 p-2 text-xs">
@@ -1146,13 +1170,13 @@ function ActivityCard({
     <Card className="p-4 space-y-3">
       <div className="flex items-center gap-2">
         <Activity className="h-5 w-5 text-blue-400" />
-        <h2 className="text-sm font-medium text-gray-300">Target campaign timeline</h2>
+        <h2 className="text-sm font-medium text-gray-300">Recent coverage activity</h2>
       </div>
       {schedulerState && (
         <div className="rounded-lg border border-gray-800 bg-gray-950/50 p-3">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div className="min-w-0">
-              <div className="text-[11px] uppercase text-gray-500">Scheduler decision</div>
+              <div className="text-[11px] uppercase text-gray-500">Current automation status</div>
               <div className="mt-1 text-sm text-gray-200">{decisionLabel}</div>
               <div className="mt-1 text-xs text-gray-500">
                 {decision?.reason || lastDecision?.reason || 'No scheduler reason has been recorded yet.'}
@@ -1191,11 +1215,14 @@ function ActivityCard({
           {timeline.map((event) => {
             const action = event.remediation
             const actionHref = safeRemediationHref(action?.href)
+            const eventTitle = event.title
+              .replace(/^Scheduler decision:/i, 'Automation chose:')
+              .replace(/\bcampaign\b/gi, 'coverage run')
             const content = (
               <div className="flex items-start justify-between gap-3 rounded-lg border border-gray-800 bg-gray-950/50 px-3 py-2 hover:border-gray-700">
                 <div className="min-w-0">
                   <div className="flex flex-wrap items-center gap-2">
-                    <span className="text-sm text-gray-200">{event.title}</span>
+                    <span className="text-sm text-gray-200">{eventTitle}</span>
                     {event.status && (
                       <Badge className={TIMELINE_BADGE[event.kind] || STATUS_BADGE[event.status] || 'bg-gray-700/50 text-gray-300'}>
                         {event.status.replace(/_/g, ' ')}
@@ -1204,7 +1231,12 @@ function ActivityCard({
                   </div>
                   <div className="mt-1 text-xs text-gray-500">{event.detail || 'No detail recorded.'}</div>
                   {event.campaign_id && (
-                    <div className="mt-1 truncate font-mono text-[11px] text-gray-600">campaign {event.campaign_id}</div>
+                    <Link
+                      href={`/settings/research-agent/runs/${event.campaign_id}`}
+                      className="mt-1 inline-flex text-[11px] text-blue-400 hover:text-blue-300"
+                    >
+                      Open related hunt
+                    </Link>
                   )}
                 </div>
                 <div className="flex shrink-0 flex-col items-end gap-2 text-right text-xs text-gray-500">
@@ -1228,7 +1260,7 @@ function ActivityCard({
           })}
         </div>
       ) : activity.length === 0 ? (
-        <EmptyState message="No ASM timeline yet" hint="Run discovery or improve coverage to start building the target campaign history." />
+        <EmptyState message="No coverage activity yet" hint="Run discovery or improve coverage to start building this target’s activity history." />
       ) : (
         <div className="space-y-2">
           {activity.slice(0, 8).map((item) => {
@@ -1481,13 +1513,6 @@ function TargetView({ targetId }: { targetId: string }) {
           >
             <BrainCircuit className="h-4 w-4" /> Close gaps autonomously
           </button>
-          <Button
-            size="sm"
-            onClick={() => setConfirmOpen(true)}
-            disabled={!coverage || coverage.total === 0}
-          >
-            <Play className="h-4 w-4" /> Test untested
-          </Button>
         </div>
       </div>
 
@@ -1499,21 +1524,21 @@ function TargetView({ targetId }: { targetId: string }) {
             <span className="text-sm font-medium text-gray-400">Coverage</span>
             <div className="text-right">
               <div className="text-sm text-gray-300">
-                {pct(coverage.coverage)} · {coverage.tested} / {coverageDenominator.value} tested
+                {pct(resolvedCoverage(coverage))} · {coverage.tested} of {coverageDenominator.value} checked
               </div>
               <div className="text-xs text-gray-500">
-                {coverage.coverage_basis === 'attempt_ledger' ? 'From scanner attempt ledger' : 'From endpoint status'} · denominator: {coverageDenominator.label}
+                {coverage.coverage_basis === 'attempt_ledger' ? 'Based on completed scanner attempts' : 'Based on endpoint status'}
               </div>
             </div>
           </div>
-          <CoverageBar coverage={coverage.coverage} />
+          <CoverageBar coverage={resolvedCoverage(coverage)} />
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-6">
             <CoverageStat label="Testable" value={coverageDenominator.value} />
             <CoverageStat label="Tested" value={coverage.tested} accent="text-green-400" />
-            <CoverageStat label="Untested" value={coverage.untested} accent="text-gray-300" />
+            <CoverageStat label="Remaining" value={Math.max(coverageDenominator.value - coverage.tested, 0)} accent="text-gray-300" />
             <CoverageStat label="In progress" value={coverage.in_progress} accent="text-blue-400" />
             <CoverageStat label="Stale" value={coverage.stale} accent="text-yellow-400" />
-            <CoverageStat label="Gone" value={coverage.gone} accent="text-red-400" />
+            <CoverageStat label="Removed" value={coverage.gone} accent="text-red-400" />
           </div>
         </Card>
       )}
@@ -1529,14 +1554,24 @@ function TargetView({ targetId }: { targetId: string }) {
         />
       </div>
 
-      <HypothesisLeadsCard report={hypothesisSituation} targetId={targetId} />
+      <details className="rounded-xl border border-gray-800 bg-gray-900/40">
+        <summary className="cursor-pointer px-4 py-3 text-sm font-medium text-gray-300 hover:text-white">
+          Advanced: proof leads and continuous-testing policy
+        </summary>
+        <div className="space-y-4 border-t border-gray-800 p-4">
+          <HypothesisLeadsCard report={hypothesisSituation} targetId={targetId} />
+          <div className="grid gap-4 xl:grid-cols-[1.2fr_0.8fr]">
+            <ContinuousCard targetId={targetId} />
+            <NewSurfaceCard targetId={targetId} />
+          </div>
+        </div>
+      </details>
 
-      <div className="grid gap-4 xl:grid-cols-[1.2fr_0.8fr]">
-        <ContinuousCard targetId={targetId} />
-        <NewSurfaceCard targetId={targetId} />
-      </div>
-
-      <Card className="p-4 space-y-4">
+      <details className="rounded-xl border border-gray-800 bg-gray-900/40">
+        <summary className="cursor-pointer px-4 py-3 text-sm font-medium text-gray-300 hover:text-white">
+          Endpoint inventory <span className="ml-2 text-xs font-normal text-gray-500">({endpoints.length} shown)</span>
+        </summary>
+        <div className="space-y-4 border-t border-gray-800 p-4">
         <div className="flex flex-wrap items-center gap-3">
           <select
             value={filters.status ?? ''}
@@ -1602,7 +1637,8 @@ function TargetView({ targetId }: { targetId: string }) {
             </table>
           </div>
         )}
-      </Card>
+        </div>
+      </details>
 
       <ConfirmDialog
         open={autonomousConfirmOpen}
