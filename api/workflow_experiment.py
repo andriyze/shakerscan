@@ -308,6 +308,37 @@ def _same_resource(left: dict[str, Any], right: dict[str, Any], *, same_method: 
     return left_signature[1] == right_signature[1]
 
 
+def _create_object_readback(mutation: dict[str, Any], after: dict[str, Any]) -> bool:
+    """`after` reads the object that `mutation` (a POST create) just created.
+
+    Create-based mass-assignment mutates via POST /collection and reads back the created object at
+    /collection/{id}, so the mutation and read-back paths differ and _same_resource is False. Accept
+    that pairing ONLY when it is provably the SAME object: the read-back path is the create collection
+    plus exactly one id segment, and that id segment hashes to a value the CREATE step extracted from
+    its OWN response. Without the extracted-id binding a read of a pre-existing admin object could be
+    passed off as the created one -- so the binding is what keeps this from minting a false positive.
+    """
+    mut_req = mutation.get("request") if isinstance(mutation.get("request"), dict) else {}
+    aft_req = after.get("request") if isinstance(after.get("request"), dict) else {}
+    if str(mut_req.get("method") or "").upper() != "POST":
+        return False
+    if str(aft_req.get("method") or "").upper() not in {"GET", "HEAD"}:
+        return False
+    mut_path = str(mut_req.get("path") or "").rstrip("/")
+    aft_path = str(aft_req.get("path") or "")
+    if not mut_path or not aft_path.startswith(mut_path + "/"):
+        return False
+    tail = aft_path[len(mut_path) + 1:]
+    if not tail or "/" in tail:
+        return False
+    extracted = mutation.get("extracted") if isinstance(mutation.get("extracted"), dict) else {}
+    tail_hash = hashlib.sha256(tail.encode()).hexdigest()
+    return any(
+        isinstance(receipt, dict) and str(receipt.get("sha256") or "") == tail_hash
+        for receipt in extracted.values()
+    )
+
+
 def _meaningful_equivalent_response(
     control: dict[str, Any],
     candidate: dict[str, Any],
@@ -659,7 +690,10 @@ def _server_corroborated_evidence(
                     privileged_elevations.add(leaf)
         if not (
             after.get("checkpoint") in {"action", "after"}
-            and _same_resource(mutation, after, same_method=False)
+            and (
+                _same_resource(mutation, after, same_method=False)
+                or _create_object_readback(mutation, after)
+            )
             and _same_resource(mutation, benign_control)
             and str(mutation.get("principal") or "") == str(after.get("principal") or "")
             and str(mutation.get("principal") or "") == str(benign_control.get("principal") or "")

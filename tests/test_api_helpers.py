@@ -12283,6 +12283,34 @@ def test_planner_sends_only_the_most_provable_family_template():
     assert mutation_methods == {"PUT"}
 
 
+def test_create_based_mass_assignment_gets_the_create_template_and_normalizes():
+    import workflow_experiment
+    # A POST create with a paired object read-back AND delete-cleanup route gets the create template.
+    create = api_module._research_selected_experiment_templates({
+        "selected_hypothesis_contracts": [{
+            "family": "mass_assignment", "method": "POST", "available_methods": ["POST"],
+            "create_based": True, "readback_route": "/api/Users/{id}", "cleanup_route": "/api/Users/{id}",
+            "provability_score": 8,
+        }],
+    })
+    assert set(create) == {"mass_assignment"}
+    template = create["mass_assignment"]
+    assert template["steps"][0]["label"] == "list_before"  # create-shaped, not the update template
+    # It must be a valid mutating workflow with cleanup + restoration (DELETE of the created objects).
+    norm = workflow_experiment.normalize_workflow("https://example.test", template)
+    assert norm["mutating"] is True
+    assert any(a["type"] == "restored" for a in norm["assertions"])
+
+    # A POST create WITHOUT a paired read-back/cleanup gets nothing -- do not teach the planner to fake it.
+    none = api_module._research_selected_experiment_templates({
+        "selected_hypothesis_contracts": [{
+            "family": "mass_assignment", "method": "POST", "available_methods": ["POST"],
+            "provability_score": 2, "provability_blockers": ["readback_route_missing"],
+        }],
+    })
+    assert none == {}
+
+
 def test_inferred_contracts_and_recommendations_remain_planning_only():
     inferred = api_module._research_inferred_planning_contracts([{
         "hypothesis_id": "h1",

@@ -28182,6 +28182,9 @@ def _research_hypothesis_experiment_contract(hypothesis: Any) -> dict[str, Any]:
         "invariant_contract": invariant_contract,
         "available_methods": metadata.get("available_methods"),
         "readable_route": metadata.get("readable_route"),
+        "create_based": bool(metadata.get("create_based")) or None,
+        "readback_route": metadata.get("readback_route"),
+        "cleanup_route": metadata.get("cleanup_route"),
         "provability_score": metadata.get("provability_score"),
         "provability_blockers": metadata.get("provability_blockers"),
     }
@@ -28219,10 +28222,17 @@ def _research_hypothesis_provability(item: Any) -> tuple[int, list[str]]:
     if family in {"mass_assignment", "field_constraint", "workflow"}:
         if method in {"POST", "PUT", "PATCH"}:
             score += 1
-        if "GET" in available_methods or metadata.get("readable_route"):
+        # A create (POST /collection) reads back on the paired child route /collection/{id}, not its own
+        # route, so readback_route/readable_route (not just same-route GET) evidences a readback.
+        if "GET" in available_methods or metadata.get("readable_route") or metadata.get("readback_route"):
             score += 3
         else:
             blockers.append("readback_route_missing")
+        # Create-based leads restore only by DELETE-ing the object they created; without that they cannot
+        # form a moat-valid cleanup+restored workflow, so they are not provable.
+        if metadata.get("create_based") and not metadata.get("cleanup_route"):
+            score -= 3
+            blockers.append("cleanup_route_missing")
     if _research_auth_session_route(route):
         score -= 8
         blockers.append("auth_session_shape")
@@ -28565,6 +28575,7 @@ def _compact_research_observation_pack(pack: dict[str, Any]) -> dict[str, Any]:
             (
                 "hypothesis_id", "family", "title", "method", "route", "request_fields",
                 "request_example", "readable_route", "provability_score",
+                "create_based", "readback_route", "cleanup_route",
                 "attempt_count", "prior_failures", "last_outcome",
             ),
             text_limit=1200,
@@ -34739,6 +34750,35 @@ _EXPERIMENT_WORKFLOW_TEMPLATES: dict[str, dict[str, Any]] = {
 }
 
 
+# Create-based mass-assignment: POST /collection overposts a privilege field; the created object is read
+# back at /collection/${created_id} and the created objects are DELETE-cleaned. Restoration is the
+# collection list (exists before creation and after cleanup). The proof binds the read-back to the
+# created object via the extracted id (see workflow_experiment._create_object_readback).
+_MASS_ASSIGNMENT_CREATE_TEMPLATE: dict[str, Any] = {
+    "proof_family": "mass_assignment",
+    "objective": "A security-sensitive field overposted on a CREATE persists in the created object",
+    "expected_signal": "the create succeeds and the created object read-back shows the forbidden field with the submitted value, while a benign create does not",
+    "falsifier": "the create fails, the forbidden field is rejected, or the created-object read-back does not show it",
+    "forbidden_field_candidates": _EXPERIMENT_WORKFLOW_TEMPLATES["mass_assignment"]["forbidden_field_candidates"],
+    "steps": [
+        {"label": "list_before", "kind": "http", "principal": "user1", "checkpoint": "before", "method": "GET", "path": "/api/<collection>"},
+        {"label": "control", "kind": "http", "principal": "user1", "checkpoint": "mutation", "method": "POST", "path": "/api/<collection>", "json_body": {"<allowed_field>": "<benign_value>"}, "extract": [{"name": "control_id", "source": "json", "path": "$.<id_field>"}]},
+        {"label": "mutate", "kind": "http", "principal": "user1", "checkpoint": "mutation", "method": "POST", "path": "/api/<collection>", "json_body": {"<allowed_field>": "<benign_value>", "<forbidden_field>": "<forbidden_value>"}, "extract": [{"name": "created_id", "source": "json", "path": "$.<id_field>"}]},
+        {"label": "control_verify", "kind": "http", "principal": "user1", "checkpoint": "action", "method": "GET", "path": "/api/<collection>/${control_id}", "select_json": ["$.<forbidden_field>"]},
+        {"label": "verify", "kind": "http", "principal": "user1", "checkpoint": "action", "method": "GET", "path": "/api/<collection>/${created_id}", "select_json": ["$.<forbidden_field>"], "compare_to": "control_verify"},
+        {"label": "cleanup_created", "kind": "http", "principal": "user1", "checkpoint": "cleanup", "method": "DELETE", "path": "/api/<collection>/${created_id}"},
+        {"label": "cleanup_control", "kind": "http", "principal": "user1", "checkpoint": "cleanup", "method": "DELETE", "path": "/api/<collection>/${control_id}"},
+        {"label": "list_after", "kind": "http", "principal": "user1", "checkpoint": "after", "method": "GET", "path": "/api/<collection>", "compare_to": "list_before"},
+    ],
+    "assertions": [
+        {"type": "status_in", "step": "control", "values": [200, 201, 202, 204], "predicate": "benign_control_accepted"},
+        {"type": "status_in", "step": "mutate", "values": [200, 201, 202, 204], "predicate": "forbidden_field_accepted"},
+        {"type": "comparison_changed", "control": "control_verify", "candidate": "verify", "predicate": "observable_state_change"},
+        {"type": "restored", "control": "list_before", "candidate": "list_after", "predicate": "before_after_state"},
+    ],
+}
+
+
 def _research_selected_experiment_templates(pack: Any) -> dict[str, dict[str, Any]]:
     """Attach only the family template for the most provable selected lead."""
     payload = pack if isinstance(pack, dict) else {}
@@ -34758,15 +34798,23 @@ def _research_selected_experiment_templates(pack: Any) -> dict[str, dict[str, An
             if family == "mass_assignment":
                 method = str(contract.get("method") or "").upper()
                 methods = {str(value).upper() for value in contract.get("available_methods") or []}
-                # A POST-only create surface needs distinct create/read/delete
-                # routes. Do not teach the planner to fake readback or cleanup.
-                if method not in {"PUT", "PATCH"} or "GET" not in methods:
-                    return {}
-                template = copy.deepcopy(_EXPERIMENT_WORKFLOW_TEMPLATES[family])
-                for step in template.get("steps") or []:
-                    if str(step.get("checkpoint") or "") in {"mutation", "cleanup"}:
-                        step["method"] = method
-                return {family: template}
+                # Create-based: POST /collection with a paired object read-back AND delete-cleanup route
+                # gets the create template (create -> read the created object -> DELETE to restore).
+                if (
+                    contract.get("create_based")
+                    and contract.get("readback_route")
+                    and contract.get("cleanup_route")
+                ):
+                    return {family: copy.deepcopy(_MASS_ASSIGNMENT_CREATE_TEMPLATE)}
+                # Update-based: a same-route PUT/PATCH with a same-route GET read-back. A POST-only create
+                # surface with no paired read/delete gets nothing -- do not teach the planner to fake it.
+                if method in {"PUT", "PATCH"} and "GET" in methods:
+                    template = copy.deepcopy(_EXPERIMENT_WORKFLOW_TEMPLATES[family])
+                    for step in template.get("steps") or []:
+                        if str(step.get("checkpoint") or "") in {"mutation", "cleanup"}:
+                            step["method"] = method
+                    return {family: template}
+                return {}
             return {family: _EXPERIMENT_WORKFLOW_TEMPLATES[family]}
     return {}
 
@@ -37461,6 +37509,33 @@ def _endpoint_inventory_hypothesis_requests(
             key = f"asm_residue|mass_assignment|{method}|{route}"
             if key not in seen:
                 seen.add(key)
+                # Read-back pairing. An UPDATE (PUT/PATCH /obj/{id}) reads back on its own route. A CREATE
+                # (POST /collection) has no same-route object read -- the created object lives at the child
+                # route /collection/{id}; pair its GET (read-back) and DELETE (cleanup) so the create-based
+                # mass-assignment proof (create -> read the created object -> restore) is constructible.
+                same_route_methods = methods_by_route.get(route, set())
+                is_create = method == "POST" and not _ID_PATH_SEGMENT.search(route)
+                object_route = route.rstrip("/") + "/{id}"
+                object_route_methods = methods_by_route.get(object_route, set()) if is_create else set()
+                if is_create:
+                    readback_route = object_route if "GET" in object_route_methods else None
+                    cleanup_route = object_route if "DELETE" in object_route_methods else None
+                    create_based = bool(readback_route)
+                else:
+                    readback_route = route if "GET" in same_route_methods else None
+                    cleanup_route = None
+                    create_based = False
+                mass_blockers: list[str] = []
+                if not readback_route:
+                    mass_blockers.append("readback_route_missing")
+                elif create_based and not cleanup_route:
+                    mass_blockers.append("cleanup_route_missing")
+                mass_provability = (
+                    2 + (3 if readback_route else 0)
+                    + (1 if method in {"POST", "PUT", "PATCH"} else 0)
+                    + (2 if request_fields or request_example else 0)
+                    - (3 if "cleanup_route_missing" in mass_blockers else 0)
+                )
                 requests.append(HypothesisRequest(
                     target_id=target_id, source="app_graph", family="mass_assignment", cwe="CWE-915",
                     title=f"Mass-assignment lead: {method} {route}",
@@ -37483,15 +37558,15 @@ def _endpoint_inventory_hypothesis_requests(
                         "route": route,
                         "request_fields": request_fields,
                         "request_example": request_example,
-                        "available_methods": sorted(methods_by_route.get(route) or []),
-                        "readable_route": route if "GET" in methods_by_route.get(route, set()) else None,
-                        "provability_score": (
-                            6 if "GET" in methods_by_route.get(route, set()) else 2
-                        ) + (2 if request_fields or request_example else 0),
-                        "provability_blockers": (
-                            [] if "GET" in methods_by_route.get(route, set())
-                            else ["readback_route_missing"]
-                        ),
+                        "available_methods": sorted(same_route_methods),
+                        "object_route": object_route if is_create else None,
+                        "object_route_methods": sorted(object_route_methods) if is_create else [],
+                        "readable_route": readback_route,
+                        "readback_route": readback_route,
+                        "cleanup_route": cleanup_route,
+                        "create_based": create_based,
+                        "provability_score": mass_provability,
+                        "provability_blockers": mass_blockers,
                     },
                     endorsement={"source": "endpoint_inventory", "method": method, "route": route},
                     created_by=created_by,

@@ -596,6 +596,60 @@ def test_reenabled_families_corroborate_on_real_signals():
     })
 
 
+def test_mass_assignment_create_based_binds_readback_to_created_object():
+    # Create-based overposting: POST /api/Users creates the object; the forbidden privilege field is
+    # read back at /api/Users/{created_id}. Mutation and read-back paths differ, so the proof must
+    # accept the create->object-read binding -- but ONLY when the read-back id was EXTRACTED from the
+    # create's own response (hash-verified), or a read of a pre-existing admin would mint a false positive.
+    created_id, control_id = "42", "43"
+    created_hash = hashlib.sha256(created_id.encode()).hexdigest()
+    control_hash = hashlib.sha256(control_id.encode()).hexdigest()
+
+    def _result(readback_path):
+        return {
+            "observations": [
+                {"label": "control", "principal": "user1", "checkpoint": "mutation",
+                 "request": {"method": "POST", "path": "/api/Users"},
+                 "submitted_fields": ["display_name"],
+                 "submitted_field_hashes": {"display_name": workflow._value_fingerprint("research")},
+                 "extracted": {"control_id": {"sha256": control_hash}},
+                 "response": {"status": 201}},
+                {"label": "mutate", "principal": "user1", "checkpoint": "mutation",
+                 "request": {"method": "POST", "path": "/api/Users"},
+                 "submitted_fields": ["role"],
+                 "submitted_field_hashes": {"role": workflow._value_fingerprint("admin")},
+                 "extracted": {"created_id": {"sha256": created_hash}},
+                 "response": {"status": 201, "json_keys": ["role", "id"]}},
+                {"label": "control_verify", "principal": "user1", "checkpoint": "action",
+                 "request": {"method": "GET", "path": "/api/Users/" + control_id},
+                 "response": {"status": 200, "selected_json": {"$.role": "user"}}},
+                {"label": "verify", "principal": "user1", "checkpoint": "action",
+                 "request": {"method": "GET", "path": readback_path},
+                 "response": {"status": 200, "selected_json": {"$.role": "admin"}}},
+            ],
+            "comparisons": [{"control": "control_verify", "candidate": "verify", "comparable": True,
+                             "selected_json_changed": {"$.role": ["user", "admin"]}}],
+            "assertion_results": [
+                {"id": "c", "type": "status_in", "step": "control", "values": [201],
+                 "predicate": "benign_control_accepted", "passed": True},
+                {"id": "f", "type": "status_in", "step": "mutate", "values": [201],
+                 "predicate": "forbidden_field_accepted", "passed": True},
+                {"id": "s", "type": "comparison_changed", "control": "control_verify", "candidate": "verify",
+                 "predicate": "observable_state_change", "passed": True},
+            ],
+        }
+
+    bound = _result("/api/Users/" + created_id)
+    assert {
+        "forbidden_field_accepted", "observable_state_change", "benign_control_accepted",
+    } <= workflow.server_corroborated_predicates(bound)
+
+    unbound = _result("/api/Users/999")
+    assert workflow.server_corroborated_predicates(unbound).isdisjoint({
+        "forbidden_field_accepted", "observable_state_change", "benign_control_accepted",
+    })
+
+
 def test_strengthened_family_proofs_reject_benign_behavior():
     # data_exposure: a principal reading its OWN authenticated data (its own JWT) is not exposure.
     own = {
