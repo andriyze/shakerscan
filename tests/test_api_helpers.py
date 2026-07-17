@@ -15503,6 +15503,8 @@ def test_campaign_yield_counts_only_findings_with_campaign_provenance():
                 return [{"id": episode_id, "status": "completed", "budget_used": {}}]
             if "FROM research_decisions" in query:
                 return []
+            if "FROM findings" in query:
+                return []
             raise AssertionError(query)
 
         async def fetchval(self, query, *args):
@@ -15545,6 +15547,8 @@ def test_campaign_yield_stops_rejection_only_planner_spin():
                     }},
                     "command_result_id": None,
                 } for index in range(8)]
+            if "FROM findings" in query:
+                return []
             raise AssertionError(query)
 
         async def fetchval(self, query, *args):
