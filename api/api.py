@@ -24724,11 +24724,20 @@ def _trusted_workflow_family_proof(
     evidence = {predicate: True for predicate in stable_predicates}
     evidence["reexecuted_at_handoff"] = bool(stable and restoration_ok and no_errors)
     proof = family_proof.evaluate_family_proof(family, evidence)
-    proof_paths = {binding[1] for binding in stable_bindings.values()}
-    proof_methods = {
-        binding[0] for binding in stable_bindings.values()
+    # The vulnerable operation for a mutation family is the WRITE, not the read-back that verifies it.
+    # A create-based mass_assignment writes POST /collection and reads back GET /collection/{id}, so
+    # binding the proven route across BOTH would collapse proof_routes to [] (two routes) and silently
+    # block promotion. Bind the proven route to the state-changing request(s) -- exactly as proof_methods
+    # already does -- and fall back to all bindings for read-only families (BOLA), which stay unchanged.
+    write_bindings = [
+        binding for binding in stable_bindings.values()
         if binding[0] in {"POST", "PUT", "PATCH", "DELETE"}
-    } or {binding[0] for binding in stable_bindings.values()}
+    ]
+    route_bindings = write_bindings or list(stable_bindings.values())
+    proof_paths = {binding[1] for binding in route_bindings}
+    proof_methods = {binding[0] for binding in write_bindings} or {
+        binding[0] for binding in stable_bindings.values()
+    }
     proof.update({
         "stable_assertions": stable,
         "stable_predicates": sorted(stable_predicates),

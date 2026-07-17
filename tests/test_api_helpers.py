@@ -14635,6 +14635,11 @@ def test_create_based_mass_assignment_promotes_without_verified_restoration():
     assert proof["promotable"] is True
     assert set(proof["stable_predicates"]) == {
         "forbidden_field_accepted", "observable_state_change", "benign_control_accepted"}
+    # The proven route must bind to the WRITE (the create), not the read-back that verifies it --
+    # otherwise proof_routes collapses to [] (POST /collection vs GET /collection/{id}) and
+    # _promote_trusted_workflow_finding silently blocks the promotion.
+    assert proof["proof_routes"] == ["/api/Users"]
+    assert proof["proof_methods"] == ["POST"]
 
 
 def test_create_based_mass_assignment_gate_is_family_and_shape_scoped():
