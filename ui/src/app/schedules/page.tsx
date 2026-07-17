@@ -62,8 +62,6 @@ function getScheduleKind(schedule: Schedule): ScheduleKind {
   return 'normal_scan'
 }
 
-type RetentionClassFilter = 'all' | 'standard' | 'short' | 'audit' | 'sensitive'
-
 const ASM_FAMILIES: Array<{ value: AsmFamily; label: string; detail: string }> = [
   { value: 'all', label: 'All runnable checks', detail: 'Balanced SQLi/XSS/auth mix' },
   { value: 'sqli', label: 'SQLi', detail: 'Focused injection coverage' },
@@ -101,22 +99,6 @@ function asmSummary(schedule: Schedule): string {
   return bits.join(' · ')
 }
 
-function retentionSummary(schedule: Schedule): string {
-  const options = scheduleOptions(schedule)
-  const bits = [
-    boolOption(options, 'dry_run', true) ? 'dry-run preview' : 'execute sweep',
-    `${numberOption(options, 'limit', 200)} max objects`,
-  ]
-  const retentionClass = String(options.retention_class || 'all')
-  if (retentionClass !== 'all') bits.push(retentionClass)
-  if (options.older_than_days !== undefined && options.older_than_days !== null && options.older_than_days !== '') {
-    bits.push(`${numberOption(options, 'older_than_days', 0)}d minimum age`)
-  }
-  if (boolOption(options, 'delete_local_files', true)) bits.push('delete local files')
-  if (!boolOption(options, 'dry_run', true) && options.approval_receipt_id) bits.push('receipt scoped')
-  return bits.join(' · ')
-}
-
 function SchedulesContent() {
   const searchParams = useSearchParams()
   const router = useRouter()
@@ -146,12 +128,6 @@ function SchedulesContent() {
   const [formAsmEndpointFilter, setFormAsmEndpointFilter] = useState<AsmEndpointFilter>('all')
   const [formAsmFamily, setFormAsmFamily] = useState<AsmFamily>('all')
   const [formAsmExploitDepth, setFormAsmExploitDepth] = useState(false)
-  const [formRetentionDryRun, setFormRetentionDryRun] = useState(true)
-  const [formRetentionOlderDays, setFormRetentionOlderDays] = useState('')
-  const [formRetentionClass, setFormRetentionClass] = useState<RetentionClassFilter>('all')
-  const [formRetentionLimit, setFormRetentionLimit] = useState(200)
-  const [formRetentionDeleteLocalFiles, setFormRetentionDeleteLocalFiles] = useState(true)
-  const [formRetentionApprovalReceipt, setFormRetentionApprovalReceipt] = useState('')
   const [creating, setCreating] = useState(false)
   const [error, setError] = useState('')
 
@@ -221,6 +197,10 @@ function SchedulesContent() {
   async function handleCreate(e: React.FormEvent) {
     e.preventDefault()
     if (!formTargetId && !editingSchedule) return
+    if (formKind === 'evidence_retention_sweep') {
+      setError('Choose a scan or ASM schedule to migrate this retired retention schedule.')
+      return
+    }
 
     setCreating(true)
     setError('')
@@ -256,20 +236,6 @@ function SchedulesContent() {
   }
 
   function buildScheduleOptions(): Record<string, unknown> | undefined {
-    if (formKind === 'evidence_retention_sweep') {
-      const options: Record<string, unknown> = {
-        dry_run: formRetentionDryRun,
-        limit: Math.max(1, Math.min(1000, Number(formRetentionLimit) || 200)),
-        delete_local_files: formRetentionDeleteLocalFiles,
-      }
-      const olderDays = formRetentionOlderDays.trim()
-      if (olderDays !== '') options.older_than_days = Math.max(0, Math.min(3650, Number(olderDays) || 0))
-      if (formRetentionClass !== 'all') options.retention_class = formRetentionClass
-      if (!formRetentionDryRun && formRetentionApprovalReceipt.trim()) {
-        options.approval_receipt_id = formRetentionApprovalReceipt.trim()
-      }
-      return options
-    }
     if (formKind !== 'asm_improve') return {}
     return buildAsmScheduleOptions({
       batchSize: formAsmBatchSize,
@@ -296,18 +262,15 @@ function SchedulesContent() {
     setFormAsmEndpointFilter(asmOptions.endpointFilter)
     setFormAsmFamily(asmOptions.family)
     setFormAsmExploitDepth(asmOptions.exploitDepth)
-    setFormRetentionDryRun(boolOption(options, 'dry_run', true))
-    setFormRetentionOlderDays(options.older_than_days === undefined || options.older_than_days === null ? '' : String(options.older_than_days))
-    const retentionClass = String(options.retention_class || 'all')
-    setFormRetentionClass(['standard', 'short', 'audit', 'sensitive'].includes(retentionClass) ? retentionClass as RetentionClassFilter : 'all')
-    setFormRetentionLimit(numberOption(options, 'limit', 200))
-    setFormRetentionDeleteLocalFiles(boolOption(options, 'delete_local_files', true))
-    setFormRetentionApprovalReceipt(String(options.approval_receipt_id || ''))
     setError('')
     setShowCreateModal(true)
   }
 
   async function handleToggle(schedule: Schedule) {
+    if (getScheduleKind(schedule) === 'evidence_retention_sweep') {
+      toast.error('Evidence retention schedules are retired. Edit this schedule to migrate it to a scan or ASM schedule.')
+      return
+    }
     try {
       await updateSchedule(schedule.id, { is_active: !schedule.is_active })
       toast.success(schedule.is_active ? 'Schedule paused' : 'Schedule resumed')
@@ -346,12 +309,6 @@ function SchedulesContent() {
     setFormAsmEndpointFilter('all')
     setFormAsmFamily('all')
     setFormAsmExploitDepth(false)
-    setFormRetentionDryRun(true)
-    setFormRetentionOlderDays('')
-    setFormRetentionClass('all')
-    setFormRetentionLimit(200)
-    setFormRetentionDeleteLocalFiles(true)
-    setFormRetentionApprovalReceipt('')
     setEditingSchedule(null)
     setError('')
   }
@@ -430,6 +387,7 @@ function SchedulesContent() {
               ? utcTimeToLocalLabel(schedule.time_of_day.slice(0, 5))
               : null
             const scheduleKind = getScheduleKind(schedule)
+            const legacyRetention = scheduleKind === 'evidence_retention_sweep'
             const health = schedule.schedule_health
             return (
             <div
@@ -445,13 +403,14 @@ function SchedulesContent() {
                 <button
                   type="button"
                   onClick={() => handleToggle(schedule)}
+                  disabled={legacyRetention}
                   role="switch"
                   aria-checked={schedule.is_active}
-                  aria-label={schedule.is_active ? 'Disable schedule' : 'Enable schedule'}
+                  aria-label={legacyRetention ? 'Legacy retention schedule is disabled' : schedule.is_active ? 'Disable schedule' : 'Enable schedule'}
                   className={`mt-1 relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${
                     schedule.is_active ? 'bg-blue-600' : 'bg-gray-700'
-                  }`}
-                  title={schedule.is_active ? 'Disable schedule' : 'Enable schedule'}
+                  } ${legacyRetention ? 'cursor-not-allowed opacity-50' : ''}`}
+                  title={legacyRetention ? 'Legacy retention schedules cannot be enabled' : schedule.is_active ? 'Disable schedule' : 'Enable schedule'}
                 >
                   <span
                     className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out ${
@@ -478,8 +437,8 @@ function SchedulesContent() {
                         ASM coverage wave
                       </span>
                     ) : scheduleKind === 'evidence_retention_sweep' ? (
-                      <span className="px-2 py-0.5 bg-amber-500/15 text-amber-300 rounded text-xs" title="Scheduled evidence retention sweep">
-                        Evidence retention sweep
+                      <span className="px-2 py-0.5 bg-amber-500/15 text-amber-300 rounded text-xs" title="Retired evidence retention schedule">
+                        Legacy retention schedule
                       </span>
                     ) : (
                       <span className="px-2 py-0.5 bg-gray-800 rounded text-xs">
@@ -513,8 +472,8 @@ function SchedulesContent() {
                     </div>
                   )}
                   {scheduleKind === 'evidence_retention_sweep' && (
-                    <div className="mt-2 text-xs text-gray-500">
-                      {retentionSummary(schedule)}
+                    <div className="mt-2 rounded-md border border-amber-700/50 bg-amber-500/10 p-2 text-xs text-amber-100">
+                      Retention schedules are retired and cannot run. Edit this record to migrate it to a scan or ASM schedule, or delete it. Evidence cleanup now requires an interactive exact-preview approval.
                     </div>
                   )}
                   {health && ['attention', 'warning'].includes(health.status) && (
@@ -708,7 +667,7 @@ function SchedulesContent() {
                 )}
               </div>
 
-              {/* Schedule kind (§9): full scan vs ASM coverage wave vs retention sweep */}
+              {/* Schedule kind (§9): full scan vs ASM coverage wave */}
               <div>
                 <label htmlFor="schedule-kind" className="block text-sm font-medium text-gray-400 mb-1">Schedule type</label>
                 <select
@@ -719,7 +678,9 @@ function SchedulesContent() {
                 >
                   <option value="normal_scan">Full scan each run</option>
                   <option value="asm_improve">Keep this target covered (ASM coverage wave)</option>
-                  <option value="evidence_retention_sweep">Evidence retention sweep</option>
+                  {formKind === 'evidence_retention_sweep' && (
+                    <option value="evidence_retention_sweep" disabled>Legacy evidence retention (select a replacement)</option>
+                  )}
                 </select>
                 {formKind === 'asm_improve' && (
                   <p className="mt-1 text-xs text-gray-500">
@@ -728,8 +689,8 @@ function SchedulesContent() {
                   </p>
                 )}
                 {formKind === 'evidence_retention_sweep' && (
-                  <p className="mt-1 text-xs text-gray-500">
-                    Each run previews or executes bounded cleanup for expired evidence objects. Scheduled execution still requires an approval receipt in the schedule options.
+                  <p className="mt-1 text-xs text-amber-300">
+                    This legacy type cannot be saved or resumed. Choose a scan or ASM schedule to migrate it; use Evidence cleanup for retention.
                   </p>
                 )}
               </div>
@@ -803,95 +764,6 @@ function SchedulesContent() {
                 </div>
               )}
 
-              {formKind === 'evidence_retention_sweep' && (
-                <div className="grid gap-4 rounded-lg border border-gray-800 bg-gray-950/40 p-3 sm:grid-cols-2">
-                  <label className="sm:col-span-2 flex items-start gap-3 rounded-lg border border-gray-800 bg-gray-900/70 p-3">
-                    <input
-                      id="schedule-retention-dry-run"
-                      type="checkbox"
-                      aria-label="Preview only"
-                      checked={formRetentionDryRun}
-                      onChange={(e) => setFormRetentionDryRun(e.target.checked)}
-                      className="mt-1 h-4 w-4 rounded border-gray-600 bg-gray-800 text-blue-600 focus:ring-blue-500"
-                    />
-                    <span>
-                      <span className="block text-sm font-medium text-gray-200">Preview only</span>
-                      <span className="block text-xs text-gray-500">Dry-run is the safe default; scheduled deletes require an approval receipt.</span>
-                    </span>
-                  </label>
-                  <div>
-                    <label htmlFor="schedule-retention-class" className="block text-sm font-medium text-gray-400 mb-1">Retention class</label>
-                    <select
-                      id="schedule-retention-class"
-                      value={formRetentionClass}
-                      onChange={(e) => setFormRetentionClass(e.target.value as RetentionClassFilter)}
-                      className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-blue-500"
-                    >
-                      <option value="all">All eligible classes</option>
-                      <option value="short">Short</option>
-                      <option value="standard">Standard</option>
-                      <option value="audit">Audit</option>
-                      <option value="sensitive">Sensitive</option>
-                    </select>
-                  </div>
-                  <div>
-                    <label htmlFor="schedule-retention-older-days" className="block text-sm font-medium text-gray-400 mb-1">Minimum age override</label>
-                    <input
-                      id="schedule-retention-older-days"
-                      type="number"
-                      min={0}
-                      max={3650}
-                      value={formRetentionOlderDays}
-                      onChange={(e) => setFormRetentionOlderDays(e.target.value)}
-                      placeholder="Use policy"
-                      className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-blue-500"
-                    />
-                  </div>
-                  <div>
-                    <label htmlFor="schedule-retention-limit" className="block text-sm font-medium text-gray-400 mb-1">Object limit</label>
-                    <input
-                      id="schedule-retention-limit"
-                      type="number"
-                      min={1}
-                      max={1000}
-                      value={formRetentionLimit}
-                      onChange={(e) => setFormRetentionLimit(Number(e.target.value))}
-                      className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-blue-500"
-                    />
-                  </div>
-                  <label className="flex items-start gap-3 rounded-lg border border-gray-800 bg-gray-900/70 p-3">
-                    <input
-                      id="schedule-retention-delete-local-files"
-                      type="checkbox"
-                      aria-label="Delete local files"
-                      checked={formRetentionDeleteLocalFiles}
-                      onChange={(e) => setFormRetentionDeleteLocalFiles(e.target.checked)}
-                      className="mt-1 h-4 w-4 rounded border-gray-600 bg-gray-800 text-blue-600 focus:ring-blue-500"
-                    />
-                    <span>
-                      <span className="block text-sm font-medium text-gray-200">Delete local files</span>
-                      <span className="block text-xs text-gray-500">Remote evidence objects are reported as preserved.</span>
-                    </span>
-                  </label>
-                  {!formRetentionDryRun && (
-                    <div className="sm:col-span-2">
-                      <label htmlFor="schedule-retention-approval-receipt" className="block text-sm font-medium text-gray-400 mb-1">Approval receipt</label>
-                      <input
-                        id="schedule-retention-approval-receipt"
-                        type="text"
-                        value={formRetentionApprovalReceipt}
-                        onChange={(e) => setFormRetentionApprovalReceipt(e.target.value)}
-                        placeholder="Receipt UUID required for scheduled deletion"
-                        className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-blue-500"
-                      />
-                      <p className="mt-1 text-xs text-amber-300">
-                        Scheduled deletion fails closed unless this receipt is valid when the job runs.
-                      </p>
-                    </div>
-                  )}
-                </div>
-              )}
-
               {/* Scan Type */}
               {formKind === 'normal_scan' && (
               <div>
@@ -929,7 +801,7 @@ function SchedulesContent() {
                 </button>
                 <button
                   type="submit"
-                  disabled={creating || (!formTargetId && !editingSchedule) || asmNeedsLabDepth}
+                  disabled={creating || (!formTargetId && !editingSchedule) || asmNeedsLabDepth || formKind === 'evidence_retention_sweep'}
                   className="flex-1 px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:bg-blue-600/50 text-white rounded-lg text-sm font-medium transition-colors"
                 >
                   {creating ? 'Saving...' : editingSchedule ? 'Save Schedule' : 'Create Schedule'}

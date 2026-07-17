@@ -1,4 +1,5 @@
 export type ScheduleKind = 'normal_scan' | 'asm_improve' | 'evidence_retention_sweep'
+export type SchedulableScheduleKind = Exclude<ScheduleKind, 'evidence_retention_sweep'>
 export type AsmFamily = 'all' | 'sqli' | 'xss' | 'auth' | 'bola'
 export type AsmEndpointFilter = 'all' | 'api'
 
@@ -44,7 +45,7 @@ export interface ScheduleMutation {
   frequency: 'daily' | 'weekly'
   day_of_week?: number
   time_of_day: string
-  schedule_kind: ScheduleKind
+  schedule_kind: SchedulableScheduleKind
   scan_type: string
   scan_options?: Record<string, unknown>
 }
@@ -54,7 +55,7 @@ export function buildScheduleMutation(input: {
   frequency: 'daily' | 'weekly'
   dayOfWeek: number
   timeOfDay: string
-  kind: ScheduleKind
+  kind: SchedulableScheduleKind
   scanType: string
   scanOptions?: Record<string, unknown>
 }): ScheduleMutation {

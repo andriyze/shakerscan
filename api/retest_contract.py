@@ -858,6 +858,12 @@ async def run_schema_migrations(pool) -> None:
                    OR schedule_kind NOT IN ('normal_scan', 'asm_improve', 'evidence_retention_sweep')
             """)
             await conn.execute("""
+                UPDATE schedules
+                SET is_active = false, updated_at = NOW()
+                WHERE schedule_kind = 'evidence_retention_sweep'
+                  AND is_active = true
+            """)
+            await conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_schedules_kind_next_run
                 ON schedules(schedule_kind, next_run_at) WHERE is_active = true
             """)
@@ -1433,6 +1439,8 @@ async def run_schema_migrations(pool) -> None:
                     scope_receipt_id TEXT REFERENCES scope_receipts(id) ON DELETE SET NULL,
                     risk_tier TEXT NOT NULL,
                     confirmations JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    action_name TEXT,
+                    action_context JSONB NOT NULL DEFAULT '{}'::jsonb,
                     approved_by TEXT,
                     denial_reason TEXT,
                     expires_at TIMESTAMPTZ,
@@ -1442,6 +1450,11 @@ async def run_schema_migrations(pool) -> None:
                     CONSTRAINT approval_receipts_approved_or_denied_check
                         CHECK (approved_by IS NOT NULL OR denial_reason IS NOT NULL)
                 )
+            """)
+            await conn.execute("""
+                ALTER TABLE approval_receipts
+                ADD COLUMN IF NOT EXISTS action_name TEXT,
+                ADD COLUMN IF NOT EXISTS action_context JSONB NOT NULL DEFAULT '{}'::jsonb
             """)
             await conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_approval_receipts_scope
@@ -2283,12 +2296,111 @@ async def run_schema_migrations(pool) -> None:
                     redaction_profile TEXT,
                     retention_class TEXT NOT NULL DEFAULT 'standard',
                     content JSONB,
+                    retention_delete_preview_id UUID,
+                    retention_delete_pending_at TIMESTAMPTZ,
                     created_at TIMESTAMPTZ DEFAULT NOW(),
                     CONSTRAINT evidence_objects_finding_type_unique UNIQUE (finding_id, object_type)
                 )
             """)
+            await conn.execute("""
+                ALTER TABLE evidence_objects
+                ADD COLUMN IF NOT EXISTS retention_delete_preview_id UUID,
+                ADD COLUMN IF NOT EXISTS retention_delete_pending_at TIMESTAMPTZ
+            """)
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_evidence_objects_finding ON evidence_objects(finding_id)")
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_evidence_objects_scan ON evidence_objects(scan_id)")
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_evidence_objects_retention_pending
+                ON evidence_objects(retention_delete_pending_at)
+                WHERE retention_delete_pending_at IS NOT NULL
+            """)
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS evidence_retention_previews (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    target_id UUID NOT NULL REFERENCES targets(id) ON DELETE CASCADE,
+                    schema_version INTEGER NOT NULL,
+                    criteria_json JSONB NOT NULL,
+                    candidate_snapshot_json JSONB NOT NULL,
+                    preview_hash TEXT NOT NULL,
+                    policy_hash TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'ready',
+                    approval_receipt_id UUID,
+                    scope_receipt_id TEXT,
+                    operation_id UUID,
+                    result_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    expires_at TIMESTAMPTZ NOT NULL,
+                    execution_started_at TIMESTAMPTZ,
+                    consumed_at TIMESTAMPTZ,
+                    CONSTRAINT evidence_retention_previews_status_check
+                        CHECK (status IN ('ready','executing','consumed','stale'))
+                )
+            """)
+            await conn.execute("""
+                ALTER TABLE evidence_retention_previews
+                ADD COLUMN IF NOT EXISTS scope_receipt_id TEXT,
+                ADD COLUMN IF NOT EXISTS execution_started_at TIMESTAMPTZ
+            """)
+            await conn.execute("""
+                ALTER TABLE evidence_retention_previews
+                DROP CONSTRAINT IF EXISTS evidence_retention_previews_status_check
+            """)
+            await conn.execute("""
+                ALTER TABLE evidence_retention_previews
+                ADD CONSTRAINT evidence_retention_previews_status_check
+                CHECK (status IN ('ready','executing','consumed','stale'))
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_evidence_retention_previews_target
+                ON evidence_retention_previews(target_id, created_at DESC)
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_evidence_retention_previews_ready
+                ON evidence_retention_previews(expires_at) WHERE status = 'ready'
+            """)
+            await conn.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_evidence_retention_previews_approval_once
+                ON evidence_retention_previews(approval_receipt_id)
+                WHERE approval_receipt_id IS NOT NULL
+            """)
+            await conn.execute("""
+                DO $retention_preview_fk$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1
+                        FROM pg_constraint
+                        WHERE conname = 'evidence_objects_retention_delete_preview_fk'
+                          AND conrelid = 'evidence_objects'::regclass
+                    ) THEN
+                        -- NOT VALID installs the delete-side protection without
+                        -- making an upgrade fail if an older build already left an
+                        -- orphaned pending marker. PostgreSQL still enforces the FK
+                        -- for every subsequent write and referenced-row delete.
+                        ALTER TABLE evidence_objects
+                            ADD CONSTRAINT evidence_objects_retention_delete_preview_fk
+                            FOREIGN KEY (retention_delete_preview_id)
+                            REFERENCES evidence_retention_previews(id)
+                            ON DELETE RESTRICT
+                            NOT VALID;
+                    END IF;
+
+                    -- Clean upgrades get a fully validated constraint. Dirty
+                    -- installs retain the enforced NOT VALID constraint and their
+                    -- legacy orphan rows for explicit operator reconciliation.
+                    IF NOT EXISTS (
+                        SELECT 1
+                        FROM evidence_objects eo
+                        LEFT JOIN evidence_retention_previews erp
+                          ON erp.id = eo.retention_delete_preview_id
+                        WHERE eo.retention_delete_preview_id IS NOT NULL
+                          AND erp.id IS NULL
+                    ) THEN
+                        ALTER TABLE evidence_objects
+                            VALIDATE CONSTRAINT evidence_objects_retention_delete_preview_fk;
+                    END IF;
+                END
+                $retention_preview_fk$
+            """)
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS export_events (
                     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

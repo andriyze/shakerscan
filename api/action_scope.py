@@ -66,7 +66,7 @@ def _host_matches(host: str, allowed_hosts: tuple[str, ...], allowed_root_domain
 def _ip_scope_block_reason(host: str, environment: str) -> str | None:
     lowered = host.lower().strip("[]")
     if lowered in {"localhost", "localhost.localdomain"}:
-        return "loopback_or_private_range"
+        return None if environment in SAFE_LAB_ENVIRONMENTS else "loopback_or_private_range"
     try:
         ip_obj = ipaddress.ip_address(lowered)
     except ValueError:

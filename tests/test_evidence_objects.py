@@ -17,6 +17,13 @@ from evidence_storage import delete_remote_evidence_object, hydrate_evidence_con
 class _CaptureConn:
     def __init__(self):
         self.calls = []
+        self.fetchval_calls = []
+
+    async def fetchval(self, sql, *args):
+        self.fetchval_calls.append((sql, args))
+        if "SELECT retention_delete_preview_id" in sql:
+            return None
+        return True
 
     async def execute(self, sql, *args):
         self.calls.append((sql, args))
@@ -37,6 +44,8 @@ def test_evidence_object_is_hashed_redaction_profiled_and_retention_classed():
     assert args[6] == "redact_sensitive_v1"      # redaction profile
     assert args[7] == "sensitive"                # has request/response -> sensitive
     assert "1=1" in args[8]                       # content carries the evidence
+    assert any("pg_advisory_lock" in sql for sql, _ in conn.fetchval_calls)
+    assert any("pg_advisory_unlock" in sql for sql, _ in conn.fetchval_calls)
 
 
 def test_large_evidence_object_externalizes_to_local_store(monkeypatch, tmp_path):
@@ -190,6 +199,23 @@ def test_no_write_without_finding_id():
     conn = _CaptureConn()
     asyncio.run(worker._persist_evidence_object(conn, "s", None, {}, {"x": 1}))
     assert conn.calls == []
+
+
+def test_retention_pending_object_is_not_rewritten():
+    class _PendingConn(_CaptureConn):
+        async def fetchval(self, sql, *args):
+            self.fetchval_calls.append((sql, args))
+            if "SELECT retention_delete_preview_id" in sql:
+                return "preview-uuid"
+            return True
+
+    conn = _PendingConn()
+    asyncio.run(worker._persist_evidence_object(conn, "s", "f", {}, {"x": 1}))
+    assert conn.calls == []
+    lock_keys = [args[0] for sql, args in conn.fetchval_calls if "pg_advisory_lock" in sql]
+    assert lock_keys == ["evidence-row:f:finding_evidence"]
+    assert any("pg_advisory_unlock" in sql for sql, _ in conn.fetchval_calls)
+    assert not any("evidence-blob:" in str(args) for _sql, args in conn.fetchval_calls)
 
 
 def test_never_raises_on_db_error():

@@ -62,7 +62,7 @@ flags, skills, agents, adapters, modules, and durable tables) plus architecture/
 - **Continuous ASM (`/asm`)**: target coverage, family proof rollups, scheduler decisions, endpoint inventory, gaps, recommendations, and target campaign timeline. **Close gaps autonomously** launches an ASM-bound mission; ordinary improve/test actions remain available separately.
 - **New Scan (`/scan/new`)**: scan type grid (6 types with duration/description), coverage budget selector (`fast`, `balanced`, `thorough`, `exhaustive`), advanced option toggles (Active Testing, Nuclei Templates, Subdomain Discovery, Enhanced DNS, JS Dependency Scanning, JS Secret Scanning), and optional custom budget overrides. Warning for active testing types.
 - **Targets (`/targets`)**: hierarchical tree (root domains with collapsible subdomains), filter by discovery source/grade/has-findings, sort by domain/last-scanned/findings/score/date, search. Actions: add target, scan individual (dropdown), scan all in domain set, discover subdomains, create schedule (icon link). Shows subdomain count, scan count, findings count, grade per target.
-- **Schedules (`/schedules`)**: create/toggle/delete recurring daily/weekly actions. Supports normal scans, typed ASM coverage waves (`asm_improve`), and approval-gated evidence-retention sweeps (`evidence_retention_sweep`).
+- **Schedules (`/schedules`)**: create/toggle/delete recurring daily/weekly normal scans and typed ASM coverage waves (`asm_improve`). Evidence cleanup is intentionally interactive-only; legacy `evidence_retention_sweep` schedules are disabled and cannot be created or resumed.
 - **Findings (`/findings`)**: filter by DAST, AI Gate, Model Intake, ASM, or Manual source plus severity/status/last-seen/domain/search; sort by severity/first-seen/last-seen/CVSS; bulk cleanup with dry-run preview.
 - **Finding Detail (`/findings/{id}`)**: status triage buttons (active/resolved/false_positive/accepted_risk), **delete finding** with confirmation, source badge, analyst notes, CVSS, CWE link, evidence summary (URLs, payloads, parameters, status codes, response anomalies), remediation steps, AI analysis (verdict/confidence/rationale/recommendations), raw HTTP request/response, copy buttons for URLs/payloads/IDs, external links to vulnerable URLs, one-shot proof replay, and a separate **Investigate autonomously** action for target-linked DAST/ASM/manual web findings. The autonomous exact-finding mission may run at most one bounded proof replay, waits for it, and returns to a visible outcome.
 - **AI Gate (`/ai-gate`)**: create and manage AI targets, use Secure RAG + Agent presets, choose auth, target type, probe pack, profile, and environment, then queue AI safety scans for chat APIs, RAG APIs, agent traces, and MCP endpoints.
@@ -768,17 +768,6 @@ curl -X POST http://localhost:8080/schedules \
     "time_of_day": "02:00"
   }'
 
-# Create a preview-only evidence retention sweep
-curl -X POST http://localhost:8080/schedules \
-  -H "Content-Type: application/json" \
-  -d '{
-    "schedule_kind": "evidence_retention_sweep",
-    "frequency": "weekly",
-    "day_of_week": 0,
-    "time_of_day": "03:00",
-    "scan_options": {"dry_run": true, "retention_class": "short", "limit": 100}
-  }'
-
 # Update/toggle schedule
 curl -X PATCH http://localhost:8080/schedules/{schedule_id} \
   -H "Content-Type: application/json" \
@@ -787,6 +776,26 @@ curl -X PATCH http://localhost:8080/schedules/{schedule_id} \
 # Delete schedule
 curl -X DELETE http://localhost:8080/schedules/{schedule_id}
 ```
+
+Evidence retention cannot be scheduled. Legacy retention schedules are fail-closed and disabled by
+the scheduler; migrate them to a normal scan or ASM schedule, or delete them. Interactive deletion at
+`POST /evidence/retention/sweep` starts with a target-scoped dry run that durably binds an immutable
+candidate snapshot, criteria, storage effects, policy hash, and expiry to a `preview_id`. Preview TTL
+defaults to 600 seconds and `EVIDENCE_RETENTION_PREVIEW_TTL_SECONDS` is clamped to 60-3600 seconds.
+
+Deletion confirmation creates a one-use `dangerous` approval scoped to the preview target, with
+`action_name: "evidence.retention_sweep"` and exact `action_context` keys `preview_id`,
+`preview_hash`, and `target_id`. The approval must be created for that preview and expire no later
+than it. The execution request must contain only `dry_run:false`, `preview_id`, and
+`approval_receipt_id`; resubmitting target or retention criteria is rejected.
+
+Before blob deletion, the server locks and revalidates the exact previewed objects, commits durable
+`executing` intent, and marks the candidate rows as pending for that preview. A retry with the same
+preview/approval resumes unfinished finalization safely; already-missing content-addressed blobs are
+treated as completed work. Once consumed, the same retry returns the stored result idempotently
+without repeating deletion. Expired, changed, mismatched, or reused preview/approval pairs fail
+closed. A committed `executing` intent remains authoritative if finding state changes later, and
+canonical target merges are blocked until that intent is finalized.
 
 ### Certificate Transparency Monitoring (Gungnir)
 

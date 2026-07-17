@@ -39,6 +39,8 @@ def test_blocks_private_and_loopback_outside_lab():
     assert "loopback_or_private_range" in blocked_by("http://10.0.0.5/", allowed_hosts=["10.0.0.5"])
     lab = evaluate_scope("http://127.0.0.1:8080/", allowed_hosts=["127.0.0.1"], environment="lab")
     assert lab.verdict == "allowed"
+    localhost_lab = evaluate_scope("http://localhost:8080/", allowed_hosts=["localhost"], environment="lab")
+    assert localhost_lab.verdict == "allowed"
 
 
 def test_blocks_broad_cidr_and_out_of_scope_hosts():

@@ -175,7 +175,9 @@ from research_agent import (
     validate_decision as _research_validate_decision,
 )
 from target_dedupe import (
+    TargetMergeBlockedError,
     canonical_target_key as _canonical_target_key,
+    ensure_no_executing_retention_previews as _ensure_target_merge_safe,
     merge_target_group as _merge_target_group,
     plan_canonical_merges,
 )
@@ -2373,66 +2375,8 @@ def calculate_next_run(frequency: str, day_of_week: int | None, time_of_day: str
     return candidate.astimezone(ZoneInfo('UTC')).replace(tzinfo=None)
 
 
-def _scheduled_retention_sweep_request(scan_options: dict[str, Any]):
-    allowed = {
-        "dry_run",
-        "older_than_days",
-        "retention_class",
-        "limit",
-        "delete_local_files",
-        "approval_receipt_id",
-    }
-    fields = {key: scan_options[key] for key in allowed if key in scan_options}
-    fields.setdefault("dry_run", True)
-    if fields.get("dry_run") is False and not fields.get("approval_receipt_id"):
-        raise ValueError("Scheduled evidence retention execution requires approval_receipt_id")
-    return EvidenceRetentionSweepRequest(**fields)
-
-
-async def _run_scheduled_retention_sweep(
-    pool: asyncpg.Pool,
-    schedule: Any,
-    scan_options: dict[str, Any],
-    now: datetime,
-) -> bool:
-    schedule_id = schedule["id"]
-    try:
-        req = _scheduled_retention_sweep_request(scan_options)
-        result = await _evidence_retention_sweep(req, pool=pool)
-        next_run = calculate_next_run(
-            schedule["frequency"],
-            schedule["day_of_week"],
-            schedule["time_of_day"] or "02:00",
-            schedule["timezone"] or "UTC",
-            schedule["jitter_minutes"] or 0,
-        )
-        async with pool.acquire() as conn:
-            await conn.execute(
-                "UPDATE schedules SET last_run_at = $1, next_run_at = $2, updated_at = NOW() WHERE id = $3",
-                now,
-                next_run,
-                schedule_id,
-            )
-        print(
-            f"[scheduler] Evidence retention sweep schedule {str(schedule_id)[:8]} "
-            f"completed dry_run={req.dry_run} candidates={result.get('candidate_count', 0)}",
-            flush=True,
-        )
-        return True
-    except Exception as exc:
-        retry_at = now + timedelta(minutes=ASM_SCHEDULE_RETRY_MINUTES)
-        async with pool.acquire() as conn:
-            await conn.execute(
-                "UPDATE schedules SET next_run_at = $1, updated_at = NOW() WHERE id = $2",
-                retry_at,
-                schedule_id,
-        )
-        print(f"[scheduler] Evidence retention sweep failed for schedule {str(schedule_id)[:8]}: {exc}", flush=True)
-        return False
-
-
 async def run_due_schedules(pool: asyncpg.Pool):
-    """Check for and execute due scheduled scans.
+    """Check for and execute due scheduled target actions.
 
     Connection lifetime: acquire a connection only to fetch the due list, then
     release it. Each due schedule then re-acquires for its own short-lived
@@ -2461,11 +2405,20 @@ async def run_due_schedules(pool: asyncpg.Pool):
         except ValueError as exc:
             print(f"[scheduler] Skipping schedule {str(schedule_id)[:8]}: {exc}", flush=True)
             continue
-        scan_options = dict(_schedule_options_dict(schedule['scan_options']))
-
         if schedule_kind == "evidence_retention_sweep":
-            await _run_scheduled_retention_sweep(pool, schedule, scan_options, now)
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    "UPDATE schedules SET is_active = false, updated_at = NOW() WHERE id = $1",
+                    schedule_id,
+                )
+            print(
+                f"[scheduler] Disabled legacy evidence retention schedule {str(schedule_id)[:8]}; "
+                "retention now requires an interactive exact-preview approval",
+                flush=True,
+            )
             continue
+
+        scan_options = dict(_schedule_options_dict(schedule['scan_options']))
 
         async with pool.acquire() as conn:
             # Check if target already has a running/pending scan
@@ -3581,6 +3534,8 @@ class ApprovalReceiptRequest(BaseModel):
     scope_receipt_id: str
     risk_tier: str = Field(pattern="^(active|intrusive|credential|dangerous)$")
     confirmations: list[str] = Field(default_factory=list)
+    action_name: Optional[str] = Field(default=None, max_length=160)
+    action_context: dict[str, Any] = Field(default_factory=dict)
     approved_by: Optional[str] = None
     denial_reason: Optional[str] = None
     expires_at: Optional[datetime] = None
@@ -3938,12 +3893,16 @@ class EvidenceInstanceRequest(BaseModel):
 
 
 class EvidenceRetentionSweepRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     dry_run: bool = True
+    target_id: Optional[str] = None
     older_than_days: Optional[int] = Field(default=None, ge=0, le=3650)
     retention_class: Optional[str] = Field(default=None, pattern="^(standard|short|audit|legal_hold|sensitive)$")
     limit: int = Field(default=200, ge=1, le=1000)
     delete_local_files: bool = True
     approval_receipt_id: Optional[str] = None
+    preview_id: Optional[str] = None
 
 
 class AgentDecisionTraceStep(BaseModel):
@@ -13303,12 +13262,23 @@ async def dedupe_targets(dry_run: bool = True):
 
         executed = 0
         if not dry_run:
-            for item in plan:
-                survivor_id = uuid.UUID(item["survivor"]["id"])
-                dupe_ids = [uuid.UUID(m["id"]) for m in item["merged"]]
-                async with conn.transaction():
-                    await _merge_target_group(conn, survivor_id, dupe_ids)
-                executed += 1
+            try:
+                # Preflight the full plan so a blocked later group cannot make an
+                # API request appear to fail after earlier groups already merged.
+                plan_target_ids = [
+                    uuid.UUID(target["id"])
+                    for item in plan
+                    for target in (item["survivor"], *item["merged"])
+                ]
+                await _ensure_target_merge_safe(conn, plan_target_ids)
+                for item in plan:
+                    survivor_id = uuid.UUID(item["survivor"]["id"])
+                    dupe_ids = [uuid.UUID(m["id"]) for m in item["merged"]]
+                    async with conn.transaction():
+                        await _merge_target_group(conn, survivor_id, dupe_ids)
+                    executed += 1
+            except TargetMergeBlockedError as exc:
+                raise HTTPException(status_code=409, detail=exc.api_detail()) from exc
 
         return {
             "dry_run": dry_run,
@@ -15381,6 +15351,7 @@ def _public_scope_receipt_row(row: Any) -> dict[str, Any]:
 def _public_approval_receipt_row(row: Any) -> dict[str, Any]:
     payload = row_to_dict(row)
     payload["confirmations"] = _decode_json_value(payload.get("confirmations")) or []
+    payload["action_context"] = _decode_json_value(payload.get("action_context")) or {}
     return payload
 
 
@@ -20087,7 +20058,12 @@ async def _upsert_hypothesis(conn, req: HypothesisRequest) -> dict[str, Any]:
     return {"hypothesis": _public_hypothesis_row(row), "created": True, "execution_enabled": False}
 
 
-async def _record_campaign_action_from_command_result(conn, command_result: dict[str, Any]) -> dict[str, Any] | None:
+async def _record_campaign_action_from_command_result(
+    conn,
+    command_result: dict[str, Any],
+    *,
+    target_id: str | uuid.UUID | None = None,
+) -> dict[str, Any] | None:
     """Best-effort campaign/action audit row paired with a CommandResult.
 
     Command results remain the broad audit record. Campaign actions are the
@@ -20117,7 +20093,7 @@ async def _record_campaign_action_from_command_result(conn, command_result: dict
             _optional_uuid(command_result.get("campaign_id")),
             _optional_uuid(command_result.get("operation_plan_id")),
             command_result_id,
-            None,
+            _optional_uuid(target_id),
             command_result.get("scope_receipt_id") or None,
             _optional_uuid(command_result.get("approval_receipt_id")),
             _optional_uuid(command_result.get("scan_id")),
@@ -20153,6 +20129,7 @@ async def _record_command_result(
     scope_receipt_id: str | None = None,
     approval_receipt_id: str | uuid.UUID | None = None,
     campaign_id: str | uuid.UUID | None = None,
+    target_id: str | uuid.UUID | None = None,
     scan_id: str | uuid.UUID | None = None,
     finding_ids: list[str] | None = None,
     hypothesis_ids: list[str] | None = None,
@@ -20199,7 +20176,7 @@ async def _record_command_result(
         effective_created_by,
     )
     result = _public_command_result_row(row)
-    await _record_campaign_action_from_command_result(conn, result)
+    await _record_campaign_action_from_command_result(conn, result, target_id=target_id)
     return result
 
 
@@ -20733,6 +20710,12 @@ async def _validate_approval_receipt_for_action(
     record_blocked: bool = True,
     created_by: str | None = None,
     always_require_receipt: bool = False,
+    require_target_binding: bool = False,
+    required_action_name: str | None = None,
+    required_action_context: dict[str, Any] | None = None,
+    require_expiry: bool = False,
+    created_not_before: datetime | str | None = None,
+    expires_no_later_than: datetime | str | None = None,
 ) -> dict[str, Any] | None:
     async def _deny(
         reason: str,
@@ -20790,12 +20773,58 @@ async def _validate_approval_receipt_for_action(
     if "confirm_authorized" not in confirmations:
         await _deny("approval_receipt_missing_confirm_authorized", "Approval receipt is missing confirm_authorized", approval_ref=approval_ref)
     expires_at = approval_row["expires_at"]
+    if require_expiry and not expires_at:
+        await _deny(
+            "approval_receipt_expiry_required",
+            "Approval receipt must have a bounded expiry for this action",
+            approval_ref=approval_ref,
+        )
     if expires_at:
         now = datetime.now(timezone.utc)
         if expires_at.tzinfo is None:
             now = utc_now()
         if expires_at <= now:
             await _deny("approval_receipt_expired", "Approval receipt is expired", approval_ref=approval_ref)
+        latest_expiry = _parse_hypothesis_time(expires_no_later_than)
+        normalized_expiry = _parse_hypothesis_time(expires_at)
+        if latest_expiry and normalized_expiry and normalized_expiry > latest_expiry:
+            await _deny(
+                "approval_receipt_expiry_too_long",
+                "Approval receipt outlives the bound action preview",
+                approval_ref=approval_ref,
+            )
+    earliest_creation = _parse_hypothesis_time(created_not_before)
+    if earliest_creation:
+        approval_created_at = _parse_hypothesis_time(approval.get("created_at"))
+        if not approval_created_at or approval_created_at < earliest_creation:
+            await _deny(
+                "approval_receipt_predates_preview",
+                "Approval receipt predates the bound action preview",
+                approval_ref=approval_ref,
+            )
+
+    receipt_action_name = str(approval.get("action_name") or "").strip()
+    if receipt_action_name and receipt_action_name != str(action_name or "").strip():
+        await _deny(
+            "approval_receipt_action_mismatch",
+            "Approval receipt is bound to a different action",
+            approval_ref=approval_ref,
+        )
+    if required_action_name and receipt_action_name != required_action_name:
+        await _deny(
+            "approval_receipt_action_mismatch",
+            "Approval receipt is not bound to this action",
+            approval_ref=approval_ref,
+        )
+    expected_context = required_action_context or {}
+    actual_context = approval.get("action_context") if isinstance(approval.get("action_context"), dict) else {}
+    for key, expected in expected_context.items():
+        if str(actual_context.get(key) or "") != str(expected or ""):
+            await _deny(
+                "approval_receipt_context_mismatch",
+                f"Approval receipt is not bound to this {key}",
+                approval_ref=approval_ref,
+            )
 
     scope_id = approval.get("scope_receipt_id")
     if not scope_id:
@@ -20812,6 +20841,13 @@ async def _validate_approval_receipt_for_action(
 
     requested_target_id = str(target_id) if target_id else None
     scope_target_id = str(scope.get("target_id") or "")
+    if requested_target_id and require_target_binding and not scope_target_id:
+        await _deny(
+            "approval_scope_target_missing",
+            "Approval receipt scope is not bound to the requested target",
+            approval_ref=approval_ref,
+            scope_ref=scope_ref,
+        )
     if requested_target_id and scope_target_id and requested_target_id != scope_target_id:
         await _deny("approval_scope_target_mismatch", "Approval receipt scope target does not match requested target", approval_ref=approval_ref, scope_ref=scope_ref)
 
@@ -20906,19 +20942,61 @@ async def arsenal_create_approval(req: ApprovalReceiptRequest):
             raise HTTPException(status_code=400, detail="Blocked scope receipts cannot be approved")
         if approved_by and scope.get("verdict") == "needs_approval" and "confirm_scope_reviewed" not in confirmations:
             raise HTTPException(status_code=400, detail="confirm_scope_reviewed is required for needs_approval scope receipts")
+        action_name = str(req.action_name or "").strip() or None
+        action_context = dict(req.action_context or {})
+        stored_expires_at = req.expires_at
+        if action_name == "evidence.retention_sweep":
+            if not approved_by:
+                raise HTTPException(status_code=400, detail="Retention preview bindings are only valid on approvals")
+            if req.risk_tier != "dangerous":
+                raise HTTPException(status_code=400, detail="Evidence deletion approval requires dangerous risk tier")
+            try:
+                preview_uuid = uuid.UUID(str(action_context.get("preview_id") or ""))
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail="Retention approval requires a valid preview_id") from exc
+            preview_row = await conn.fetchrow(
+                "SELECT * FROM evidence_retention_previews WHERE id=$1",
+                preview_uuid,
+            )
+            if not preview_row:
+                raise HTTPException(status_code=404, detail="Retention preview not found")
+            preview = _evidence_retention_preview_payload(preview_row)
+            _validate_evidence_retention_preview_payload(preview)
+            expected_context = {
+                "preview_id": preview["preview_id"],
+                "preview_hash": preview["preview_hash"],
+                "target_id": preview["target_id"],
+            }
+            if any(str(action_context.get(key) or "") != str(value) for key, value in expected_context.items()):
+                raise HTTPException(status_code=400, detail="Retention approval context does not match the preview")
+            if str(scope.get("target_id") or "") != preview["target_id"]:
+                raise HTTPException(status_code=400, detail="Retention approval scope must match the preview target")
+            expires_at = _parse_hypothesis_time(req.expires_at)
+            preview_expires_at = _parse_hypothesis_time(preview.get("expires_at"))
+            now = datetime.now(timezone.utc)
+            if not expires_at or not preview_expires_at or expires_at <= now or expires_at > preview_expires_at:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Retention approval must expire no later than the bound preview",
+                )
+            action_context = expected_context
+            stored_expires_at = expires_at
         row = await conn.fetchrow(
             """
             INSERT INTO approval_receipts
-                (scope_receipt_id, risk_tier, confirmations, approved_by, denial_reason, expires_at)
-            VALUES ($1,$2,$3::jsonb,$4,$5,$6)
+                (scope_receipt_id, risk_tier, confirmations, action_name, action_context,
+                 approved_by, denial_reason, expires_at)
+            VALUES ($1,$2,$3::jsonb,$4,$5::jsonb,$6,$7,$8)
             RETURNING *
             """,
             req.scope_receipt_id,
             req.risk_tier,
             json.dumps(confirmations),
+            action_name,
+            json.dumps(action_context, sort_keys=True),
             approved_by,
             denial_reason,
-            req.expires_at,
+            stored_expires_at,
         )
     return {
         "approval_receipt": _public_approval_receipt_row(row),
@@ -23671,9 +23749,16 @@ async def _arsenal_dispatch_model_intake_scan(p: dict[str, Any], approval_receip
 
 
 async def _arsenal_dispatch_evidence_retention_sweep(p: dict[str, Any], approval_receipt_id: str | None) -> dict[str, Any]:
-    allowed = _arsenal_model_fields(EvidenceRetentionSweepRequest)
-    fields = {k: v for k, v in p.items() if k in allowed and v is not None}
-    fields["approval_receipt_id"] = approval_receipt_id or p.get("approval_receipt_id")
+    if p.get("dry_run", True) is False:
+        fields = {
+            "dry_run": False,
+            "preview_id": p.get("preview_id"),
+            "approval_receipt_id": approval_receipt_id or p.get("approval_receipt_id"),
+        }
+    else:
+        allowed = set(EVIDENCE_RETENTION_PREVIEW_FIELDS) | {"dry_run"}
+        fields = {k: v for k, v in p.items() if k in allowed and v is not None}
+        fields["dry_run"] = True
     body = EvidenceRetentionSweepRequest(**fields)
     return await evidence_retention_sweep(body)
 
@@ -25378,6 +25463,56 @@ async def _arsenal_execute(conn, req: ArsenalExecuteRequest) -> dict[str, Any]:
     readonly = _arsenal_readonly_adapters()
     gated = _arsenal_gated_adapters()
 
+    # This command has two mutually exclusive contracts. Its target-scoped
+    # dry-run is read-only even though execution of a consumed preview is
+    # dangerous. Dispatch previews before the state-changing gateway so callers
+    # do not need an execution flag, global active-work gate, or approval just to
+    # inspect the immutable cohort.
+    if req.command == "evidence.retention_sweep" and req.parameters.get("dry_run", True) is not False:
+        result = await gated[req.command](req.parameters, None)
+        cr = await _record_command_result(
+            conn,
+            command=req.command,
+            status="completed",
+            risk_tier="read_only",
+            dry_run=True,
+            target_id=req.parameters.get("target_id"),
+            operator_message="Created a target-scoped immutable evidence-retention preview",
+            result_json={
+                "dispatched": True,
+                "via": "arsenal.execute",
+                "preview_id": result.get("preview_id"),
+                "candidate_count": result.get("candidate_count", 0),
+            },
+            created_by=req.created_by,
+        )
+        await _link_command_result_to_campaign(conn, req.campaign_id, cr["id"])
+        linked_action = await _link_command_result_to_campaign_action(conn, req.campaign_action_id, cr)
+        return {
+            "command": req.command,
+            "dispatched": True,
+            "dry_run": True,
+            "result": result,
+            "operation_id": cr["id"],
+            "command_result": cr,
+            "action_state": _arsenal_action_state(
+                req,
+                command,
+                catalog_status=status,
+                risk_tier="read_only",
+                phase="completed",
+                dispatched=True,
+                dry_run=True,
+                execution_enabled=False,
+                operation_id=cr["id"],
+                command_result=cr,
+                missing_confirmations=[],
+                adapter_status="dispatched",
+            ),
+            "campaign_action": linked_action,
+            "execution_enabled": False,
+        }
+
     # Read-only / dry-run inspection: safe, no state change -> dispatch directly.
     if req.command in readonly and status in {"read_only", "dry_run"}:
         result = await readonly[req.command](req.parameters)
@@ -25582,6 +25717,56 @@ async def _arsenal_execute_detached(req: ArsenalExecuteRequest) -> dict[str, Any
 
     readonly = _arsenal_readonly_adapters()
     gated = _arsenal_gated_adapters()
+
+    # Evidence retention has a read-only preview contract even though consuming
+    # that preview is dangerous. The public route uses this detached gateway, so
+    # dispatch the preview before the state-changing execution gate just as the
+    # in-connection helper does.
+    if req.command == "evidence.retention_sweep" and req.parameters.get("dry_run", True) is not False:
+        result = await gated[req.command](req.parameters, None)
+        durable_result = _bounded_research_payload(result)
+        async with db_pool.acquire() as conn:
+            cr = await _record_command_result(
+                conn,
+                command=req.command,
+                status="completed",
+                risk_tier="read_only",
+                dry_run=True,
+                target_id=req.parameters.get("target_id"),
+                operator_message="Created a target-scoped immutable evidence-retention preview",
+                result_json={
+                    "dispatched": True,
+                    "via": "arsenal.execute",
+                    "result": durable_result,
+                },
+                created_by=req.created_by,
+            )
+            await _link_command_result_to_campaign(conn, req.campaign_id, cr["id"])
+            linked_action = await _link_command_result_to_campaign_action(conn, req.campaign_action_id, cr)
+        return {
+            "command": req.command,
+            "dispatched": True,
+            "dry_run": True,
+            "result": result,
+            "operation_id": cr["id"],
+            "command_result": cr,
+            "action_state": _arsenal_action_state(
+                req,
+                _command,
+                catalog_status=status,
+                risk_tier="read_only",
+                phase="completed",
+                dispatched=True,
+                dry_run=True,
+                execution_enabled=False,
+                operation_id=cr["id"],
+                command_result=cr,
+                missing_confirmations=[],
+                adapter_status="dispatched",
+            ),
+            "campaign_action": linked_action,
+            "execution_enabled": False,
+        }
 
     if req.command in readonly and status in {"read_only", "dry_run"}:
         result = await readonly[req.command](req.parameters)
@@ -37484,6 +37669,228 @@ EVIDENCE_RETENTION_DAYS = {
 # excluded from sweeps entirely.
 EVIDENCE_RETENTION_PROTECTED_CLASSES = frozenset({"audit", "sensitive"})
 
+try:
+    EVIDENCE_RETENTION_PREVIEW_TTL_SECONDS = max(
+        60,
+        min(3600, int(os.environ.get("EVIDENCE_RETENTION_PREVIEW_TTL_SECONDS", "600"))),
+    )
+except (TypeError, ValueError):
+    EVIDENCE_RETENTION_PREVIEW_TTL_SECONDS = 600
+
+EVIDENCE_RETENTION_PREVIEW_SCHEMA_VERSION = 1
+EVIDENCE_RETENTION_PREVIEW_FIELDS = (
+    "target_id",
+    "older_than_days",
+    "retention_class",
+    "limit",
+    "delete_local_files",
+)
+
+
+def _evidence_retention_criteria(req: EvidenceRetentionSweepRequest) -> dict[str, Any]:
+    """Canonical destructive scope persisted with a retention preview."""
+    return {
+        "scope": "target",
+        "target_id": str(req.target_id or ""),
+        "older_than_days": req.older_than_days,
+        "retention_class": req.retention_class,
+        "limit": int(req.limit),
+        "delete_local_files": bool(req.delete_local_files),
+    }
+
+
+def _evidence_retention_candidate_snapshot(candidates: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Content-free identity snapshot used to detect preview drift before deletion."""
+    snapshots: list[dict[str, Any]] = []
+    for candidate in candidates:
+        created_at = _parse_hypothesis_time(candidate.get("created_at"))
+        snapshots.append({
+            "id": str(candidate.get("id") or ""),
+            "finding_id": str(candidate.get("finding_id")) if candidate.get("finding_id") else None,
+            "scan_id": str(candidate.get("scan_id")) if candidate.get("scan_id") else None,
+            "object_type": str(candidate.get("object_type") or ""),
+            "content_sha256": str(candidate.get("content_sha256") or ""),
+            "size_bytes": int(candidate.get("size_bytes") or 0),
+            "storage_uri": str(candidate.get("storage_uri") or ""),
+            "retention_class": str(candidate.get("retention_class") or ""),
+            "created_at": created_at.isoformat() if created_at else None,
+            "retention_days": int(candidate.get("retention_days") or 0),
+            "shared_reference_count": int(candidate.get("shared_reference_count") or 0),
+            "planned_blob_action": str(candidate.get("planned_blob_action") or "row_only"),
+        })
+    return sorted(snapshots, key=lambda item: item["id"])
+
+
+def _evidence_retention_policy_hash() -> str:
+    encoded = json.dumps(
+        {
+            "schema_version": EVIDENCE_RETENTION_PREVIEW_SCHEMA_VERSION,
+            "policy_days": EVIDENCE_RETENTION_DAYS,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _evidence_retention_preview_hash(payload: dict[str, Any]) -> str:
+    material = {
+        "schema_version": payload.get("schema_version"),
+        "issued_at": payload.get("issued_at"),
+        "expires_at": payload.get("expires_at"),
+        "criteria": payload.get("criteria"),
+        "policy_hash": payload.get("policy_hash"),
+        "candidates": payload.get("candidates"),
+    }
+    encoded = json.dumps(material, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _evidence_retention_preview_payload(row: Any) -> dict[str, Any]:
+    payload = row_to_dict(row)
+    criteria = _decode_json_value(payload.get("criteria_json")) or {}
+    candidates = _decode_json_value(payload.get("candidate_snapshot_json")) or []
+    issued_at = _parse_hypothesis_time(payload.get("created_at"))
+    expires_at = _parse_hypothesis_time(payload.get("expires_at"))
+    return {
+        "preview_id": str(payload.get("id") or ""),
+        "target_id": str(payload.get("target_id") or ""),
+        "schema_version": int(payload.get("schema_version") or 0),
+        "issued_at": issued_at.isoformat() if issued_at else None,
+        "expires_at": expires_at.isoformat() if expires_at else None,
+        "criteria": criteria if isinstance(criteria, dict) else {},
+        "policy_hash": str(payload.get("policy_hash") or ""),
+        "candidates": candidates if isinstance(candidates, list) else [],
+        "preview_hash": str(payload.get("preview_hash") or ""),
+        "status": str(payload.get("status") or ""),
+        "approval_receipt_id": str(payload.get("approval_receipt_id")) if payload.get("approval_receipt_id") else None,
+        "scope_receipt_id": str(payload.get("scope_receipt_id")) if payload.get("scope_receipt_id") else None,
+        "operation_id": str(payload.get("operation_id")) if payload.get("operation_id") else None,
+        "execution_started_at": (
+            parsed.isoformat()
+            if (parsed := _parse_hypothesis_time(payload.get("execution_started_at")))
+            else None
+        ),
+        "result": _decode_json_value(payload.get("result_json")) or {},
+    }
+
+
+def _validate_evidence_retention_preview_payload(payload: dict[str, Any], *, allow_consumed: bool = False) -> None:
+    if payload.get("schema_version") != EVIDENCE_RETENTION_PREVIEW_SCHEMA_VERSION:
+        raise HTTPException(status_code=409, detail="Retention preview uses an unsupported schema; run a new preview")
+    expected_hash = _evidence_retention_preview_hash(payload)
+    if not secrets.compare_digest(str(payload.get("preview_hash") or ""), expected_hash):
+        raise HTTPException(status_code=409, detail="Retention preview is invalid; run a new preview")
+    criteria = payload.get("criteria")
+    if not isinstance(criteria, dict) or criteria.get("scope") != "target" or not criteria.get("target_id"):
+        raise HTTPException(status_code=409, detail="Retention preview scope is invalid; run a new preview")
+    if str(payload.get("target_id") or "") != str(criteria.get("target_id") or ""):
+        raise HTTPException(status_code=409, detail="Retention preview target binding is invalid; run a new preview")
+    if not isinstance(payload.get("candidates"), list):
+        raise HTTPException(status_code=409, detail="Retention preview candidate set is invalid; run a new preview")
+    status = str(payload.get("status") or "")
+    if status in {"executing", "consumed"} and allow_consumed:
+        return
+    if payload.get("policy_hash") != _evidence_retention_policy_hash():
+        raise HTTPException(status_code=409, detail="Retention policy changed after preview; run a new preview")
+    if status != "ready":
+        raise HTTPException(status_code=409, detail="Retention preview is no longer executable; run a new preview")
+    expires_at = _parse_hypothesis_time(payload.get("expires_at"))
+    if not expires_at or expires_at <= datetime.now(timezone.utc):
+        raise HTTPException(status_code=409, detail="Retention preview expired; run a new preview")
+
+
+def _evidence_retention_blob_lock_keys(candidates: Sequence[dict[str, Any]]) -> list[str]:
+    # Lock every candidate hash, including previewed preserve_shared objects.
+    # A runtime recheck must never widen a preserved consequence into deletion.
+    return sorted({
+        str(candidate.get("content_sha256") or "")
+        for candidate in candidates
+        if candidate.get("content_sha256")
+    })
+
+
+def _evidence_retention_identity_lock_keys(candidates: Sequence[dict[str, Any]]) -> list[str]:
+    return sorted({
+        f"{candidate.get('finding_id')}:{candidate.get('object_type')}"
+        for candidate in candidates
+        if candidate.get("finding_id") and candidate.get("object_type")
+    })
+
+
+async def _acquire_evidence_retention_identity_locks(conn, keys: Sequence[str]) -> list[str]:
+    acquired: list[str] = []
+    for key in sorted(set(str(item) for item in keys if item)):
+        await conn.fetchval(
+            "SELECT pg_advisory_lock(hashtextextended($1, 0))",
+            f"evidence-row:{key}",
+        )
+        acquired.append(key)
+    return acquired
+
+
+async def _release_evidence_retention_identity_locks(conn, keys: Sequence[str]) -> None:
+    for key in reversed(list(keys)):
+        try:
+            await conn.fetchval(
+                "SELECT pg_advisory_unlock(hashtextextended($1, 0))",
+                f"evidence-row:{key}",
+            )
+        except Exception:
+            pass
+
+
+async def _acquire_evidence_retention_blob_locks(conn, keys: Sequence[str]) -> list[str]:
+    acquired: list[str] = []
+    for key in sorted(set(str(item) for item in keys if item)):
+        await conn.fetchval(
+            "SELECT pg_advisory_lock(hashtextextended($1, 0))",
+            f"evidence-blob:{key}",
+        )
+        acquired.append(key)
+    return acquired
+
+
+async def _release_evidence_retention_blob_locks(conn, keys: Sequence[str]) -> None:
+    for key in reversed(list(keys)):
+        try:
+            await conn.fetchval(
+                "SELECT pg_advisory_unlock(hashtextextended($1, 0))",
+                f"evidence-blob:{key}",
+            )
+        except Exception:
+            # Closing/resetting the session releases any remaining advisory locks.
+            pass
+
+
+def _evidence_retention_row_matches_snapshot(row: Any, snapshot: dict[str, Any]) -> bool:
+    payload = row_to_dict(row)
+    created_at = _parse_hypothesis_time(payload.get("created_at"))
+    normalized = {
+        "id": str(payload.get("id") or ""),
+        "finding_id": str(payload.get("finding_id")) if payload.get("finding_id") else None,
+        "scan_id": str(payload.get("scan_id")) if payload.get("scan_id") else None,
+        "object_type": str(payload.get("object_type") or ""),
+        "content_sha256": str(payload.get("content_sha256") or ""),
+        "size_bytes": int(payload.get("size_bytes") or 0),
+        "storage_uri": str(payload.get("storage_uri") or ""),
+        "retention_class": str(payload.get("retention_class") or ""),
+        "created_at": created_at.isoformat() if created_at else None,
+    }
+    return all(normalized[key] == snapshot.get(key) for key in normalized)
+
+
+def _evidence_retention_request_from_preview(payload: dict[str, Any]) -> EvidenceRetentionSweepRequest:
+    criteria = dict(payload.get("criteria") or {})
+    return EvidenceRetentionSweepRequest(
+        dry_run=False,
+        target_id=criteria.get("target_id"),
+        older_than_days=criteria.get("older_than_days"),
+        retention_class=criteria.get("retention_class"),
+        limit=criteria.get("limit", 200),
+        delete_local_files=criteria.get("delete_local_files", True),
+    )
+
 
 def _evidence_storage_backend(storage_uri: str) -> str:
     value = str(storage_uri or "")
@@ -37795,22 +38202,139 @@ def _evidence_retention_candidates(
     return candidates
 
 
+async def _enrich_evidence_retention_candidates(
+    conn,
+    candidates: Sequence[dict[str, Any]],
+    *,
+    delete_local_files: bool,
+) -> list[dict[str, Any]]:
+    """Bind shared-reference counts and the exact blob consequence into a preview."""
+    enriched = [dict(candidate) for candidate in candidates]
+    candidate_uri_counts = Counter(
+        str(item.get("storage_uri") or "") for item in enriched if item.get("storage_uri")
+    )
+    total_uri_counts: dict[str, int] = {}
+    if candidate_uri_counts:
+        rows = await conn.fetch(
+            """
+            SELECT storage_uri, COUNT(*) AS reference_count
+            FROM evidence_objects
+            WHERE storage_uri = ANY($1::text[])
+            GROUP BY storage_uri
+            """,
+            sorted(candidate_uri_counts),
+        )
+        total_uri_counts = {
+            str(row["storage_uri"]): int(row["reference_count"] or 0)
+            for row in rows if row["storage_uri"]
+        }
+    for candidate in enriched:
+        storage_uri = str(candidate.get("storage_uri") or "")
+        outside_references = max(
+            0,
+            total_uri_counts.get(storage_uri, 0) - candidate_uri_counts.get(storage_uri, 0),
+        ) if storage_uri else 0
+        backend = str(candidate.get("storage_backend") or _evidence_storage_backend(storage_uri))
+        if outside_references:
+            action = "preserve_shared"
+        elif backend == "s3":
+            action = "delete_remote"
+        elif backend == "local" and delete_local_files:
+            action = "delete_local"
+        elif backend == "local":
+            action = "preserve_local"
+        else:
+            action = "row_only"
+        candidate["shared_reference_count"] = outside_references
+        candidate["planned_blob_action"] = action
+    return enriched
+
+
+async def _evidence_retention_links_match_target(
+    conn,
+    rows: Sequence[Any],
+    *,
+    target_id: uuid.UUID,
+) -> bool:
+    """Lock linked owners and fail closed if scope or finding protection drifted."""
+    finding_ids = sorted({
+        uuid.UUID(str(row["finding_id"]))
+        for row in rows if row.get("finding_id")
+    })
+    scan_ids = sorted({
+        uuid.UUID(str(row["scan_id"]))
+        for row in rows if row.get("scan_id")
+    })
+    findings: dict[uuid.UUID, Any] = {}
+    scans: dict[uuid.UUID, Any] = {}
+    if finding_ids:
+        finding_rows = await conn.fetch(
+            """
+            SELECT id, target_id, status
+            FROM findings
+            WHERE id = ANY($1::uuid[])
+            ORDER BY id
+            FOR SHARE
+            """,
+            finding_ids,
+        )
+        findings = {row["id"]: row for row in finding_rows}
+    if scan_ids:
+        scan_rows = await conn.fetch(
+            """
+            SELECT id, target_id
+            FROM scans
+            WHERE id = ANY($1::uuid[])
+            ORDER BY id
+            FOR SHARE
+            """,
+            scan_ids,
+        )
+        scans = {row["id"]: row for row in scan_rows}
+    for raw_row in rows:
+        row = row_to_dict(raw_row)
+        finding_id = uuid.UUID(str(row["finding_id"])) if row.get("finding_id") else None
+        scan_id = uuid.UUID(str(row["scan_id"])) if row.get("scan_id") else None
+        if not finding_id and not scan_id:
+            return False
+        if finding_id:
+            finding = findings.get(finding_id)
+            if (
+                not finding
+                or finding["target_id"] != target_id
+                or str(finding["status"] or "") == "active"
+            ):
+                return False
+        if scan_id:
+            scan = scans.get(scan_id)
+            if not scan or scan["target_id"] != target_id:
+                return False
+    return True
+
+
 def _delete_local_evidence_files(candidates: Sequence[dict[str, Any]]) -> dict[str, Any]:
     deleted: list[str] = []
     missing: list[str] = []
     errors: list[dict[str, str]] = []
+    deleted_ids: set[str] = set()
+    by_uri: dict[str, list[dict[str, Any]]] = {}
     for candidate in candidates:
+        by_uri.setdefault(str(candidate.get("storage_uri") or ""), []).append(candidate)
+    for storage_uri, group in by_uri.items():
+        candidate = group[0]
         path = local_evidence_path(RESULTS_DIR, str(candidate.get("storage_uri") or ""))
         if not path:
             continue
         try:
             path.unlink()
             deleted.append(str(path))
+            deleted_ids.update(str(item.get("id")) for item in group if item.get("id"))
         except FileNotFoundError:
             missing.append(str(path))
+            deleted_ids.update(str(item.get("id")) for item in group if item.get("id"))
         except OSError as exc:
             errors.append({"path": str(path), "error": f"{type(exc).__name__}: {exc}"})
-    return {"deleted": deleted, "missing": missing, "errors": errors}
+    return {"deleted": deleted, "missing": missing, "errors": errors, "deleted_ids": sorted(deleted_ids)}
 
 
 def _delete_remote_evidence_objects(candidates: Sequence[dict[str, Any]]) -> dict[str, Any]:
@@ -37818,17 +38342,21 @@ def _delete_remote_evidence_objects(candidates: Sequence[dict[str, Any]]) -> dic
     missing: list[dict[str, str]] = []
     errors: list[dict[str, Any]] = []
     deleted_ids: set[str] = set()
+    by_uri: dict[str, list[dict[str, Any]]] = {}
     for candidate in candidates:
+        by_uri.setdefault(str(candidate.get("storage_uri") or ""), []).append(candidate)
+    for storage_uri, group in by_uri.items():
+        candidate = group[0]
         if not candidate.get("remote_object"):
             continue
-        result = delete_remote_evidence_object(str(candidate.get("storage_uri") or ""))
+        result = delete_remote_evidence_object(storage_uri)
         result["evidence_object_id"] = str(candidate.get("id") or "")
         status = str(result.get("status") or "")
         if result.get("deleted"):
-            deleted_ids.add(str(candidate.get("id")))
+            deleted_ids.update(str(item.get("id")) for item in group if item.get("id"))
             item = {
-                "evidence_object_id": str(candidate.get("id") or ""),
-                "storage_uri": str(candidate.get("storage_uri") or ""),
+                "evidence_object_ids": sorted(str(item.get("id")) for item in group if item.get("id")),
+                "storage_uri": storage_uri,
             }
             if status == "missing":
                 missing.append(item)
@@ -37842,6 +38370,47 @@ def _delete_remote_evidence_objects(candidates: Sequence[dict[str, Any]]) -> dic
         "errors": errors,
         "deleted_ids": sorted(deleted_ids),
     }
+
+
+async def _run_evidence_retention_deletion_io(
+    remote_candidates: Sequence[dict[str, Any]],
+    local_candidates: Sequence[dict[str, Any]],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Run blocking blob I/O without releasing locks while threads are alive.
+
+    Cancelling an ``asyncio.to_thread`` await does not stop its worker thread.
+    Shield the aggregate task and, if the request is cancelled, wait until every
+    underlying deletion call has actually returned before propagating cancellation
+    to the transaction/lock cleanup path.
+    """
+
+    async def run_all() -> tuple[dict[str, Any], dict[str, Any]]:
+        remote_result, local_result = await asyncio.gather(
+            asyncio.to_thread(_delete_remote_evidence_objects, remote_candidates),
+            asyncio.to_thread(_delete_local_evidence_files, local_candidates),
+        )
+        return remote_result, local_result
+
+    work = asyncio.create_task(run_all())
+    try:
+        return await asyncio.shield(work)
+    except asyncio.CancelledError:
+        # A second cancellation may arrive during shutdown. Keep shielding until
+        # the threads are truly done; only then may the caller release advisory
+        # locks or roll back its row-lock transaction.
+        while not work.done():
+            try:
+                await asyncio.shield(work)
+            except asyncio.CancelledError:
+                continue
+            except Exception:
+                break
+        if work.done():
+            try:
+                work.result()
+            except Exception:
+                pass
+        raise
 
 
 @app.get("/findings/{finding_id}/evidence")
@@ -38014,164 +38583,661 @@ async def evidence_retention_sweep(req: EvidenceRetentionSweepRequest):
 
 
 async def _evidence_retention_sweep(req: EvidenceRetentionSweepRequest, *, pool: asyncpg.Pool):
-    """Preview or execute bounded evidence-object retention cleanup.
-
-    Defaults to dry-run and never selects legal_hold evidence. Execution removes
-    matching DB rows and, when requested, their local object-store files.
-    """
-    command_result: dict[str, Any] | None = None
-    async with pool.acquire() as conn:
-        # Executing the sweep (dry_run=false) deletes durable evidence, so it is a
-        # gated state-changing action: it goes through the same approval-receipt
-        # enforcement as scans/retests. A preview (dry_run=true) is read-only.
-        if not req.dry_run:
-            await _validate_approval_receipt_for_action(
-                conn,
-                req.approval_receipt_id,
-                action_name="evidence.retention_sweep",
-                command="evidence.retention_sweep",
-                risk_tier="active",
-            )
-        rows = await conn.fetch(
-            """
-            SELECT *
-            FROM evidence_objects
-            WHERE ($2::text IS NULL OR retention_class = $2)
-              AND retention_class <> 'legal_hold'
-              AND NOT EXISTS (
-                  SELECT 1 FROM findings f
-                  WHERE f.id = evidence_objects.finding_id AND f.status = 'active'
-              )
-            ORDER BY created_at ASC
-            LIMIT $1
-            """,
-            req.limit,
-            req.retention_class,
-        )
-        candidates = _evidence_retention_candidates(
-            rows,
-            older_than_days=req.older_than_days,
-            retention_class_filter=req.retention_class,
-        )
-        file_result = {"deleted": [], "missing": [], "errors": []}
-        remote_result = {"deleted": [], "missing": [], "errors": [], "deleted_ids": []}
-        deleted_count = 0
-        if candidates and not req.dry_run:
-            # Evidence blobs are content-addressed (dedup by sha256), so one blob can back
-            # multiple evidence rows. Only delete a blob when THIS sweep drops its last
-            # reference; if a spared row (e.g. an active finding, or any row outside this
-            # candidate set) still points at the same storage_uri, keep the blob and delete
-            # only the aged DB row. Without this, sweeping a resolved finding could destroy
-            # an active finding's shared evidence.
-            candidate_ids_all = [uuid.UUID(str(item["id"])) for item in candidates if item.get("id")]
-            candidate_uris = [str(item.get("storage_uri") or "") for item in candidates if item.get("storage_uri")]
-            shared_uris: set[str] = set()
-            if candidate_uris and candidate_ids_all:
-                shared_rows = await conn.fetch(
+    """Preview or execute exact, target-scoped evidence retention cleanup."""
+    supplied_fields = set(getattr(req, "model_fields_set", set()))
+    if req.dry_run:
+        if req.preview_id:
+            raise HTTPException(status_code=400, detail="preview_id is only valid when executing a retention sweep")
+        if not req.target_id:
+            raise HTTPException(status_code=400, detail="target_id is required for a retention preview")
+        try:
+            target_uuid = uuid.UUID(str(req.target_id))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="target_id must be a UUID") from exc
+        effective_req = req.model_copy(update={"target_id": str(target_uuid)})
+        current = datetime.now(timezone.utc)
+        expires = current + timedelta(seconds=EVIDENCE_RETENTION_PREVIEW_TTL_SECONDS)
+        preview_id = uuid.uuid4()
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                target = await conn.fetchrow("SELECT id, url FROM targets WHERE id=$1 FOR SHARE", target_uuid)
+                if not target:
+                    raise HTTPException(status_code=404, detail="Target not found")
+                rows = await conn.fetch(
                     """
-                    SELECT DISTINCT storage_uri
-                    FROM evidence_objects
-                    WHERE storage_uri = ANY($1::text[])
-                      AND NOT (id = ANY($2::uuid[]))
-                    """,
-                    candidate_uris,
-                    candidate_ids_all,
-                )
-                shared_uris = {str(r["storage_uri"]) for r in shared_rows if r["storage_uri"]}
-
-            def _blob_shared(item: dict[str, Any]) -> bool:
-                return str(item.get("storage_uri") or "") in shared_uris
-
-            remote_result = _delete_remote_evidence_objects(
-                [item for item in candidates if item.get("remote_object") and not _blob_shared(item)]
-            )
-            remote_deleted_ids = set(remote_result.get("deleted_ids") or [])
-            db_deletable_candidates = [
-                item for item in candidates
-                if _blob_shared(item)                                   # shared blob: drop row, keep blob
-                or not item.get("remote_object")                        # local blob: row deletion is safe
-                or str(item.get("id")) in remote_deleted_ids            # remote blob deleted successfully
-            ]
-            candidate_ids = [uuid.UUID(str(item["id"])) for item in db_deletable_candidates if item.get("id")]
-            deleted_ids: set[str] = set()
-            if candidate_ids:
-                deleted_rows = await conn.fetch(
-                    """
-                    DELETE FROM evidence_objects
-                    WHERE id = ANY($1::uuid[])
-                      AND retention_class <> 'legal_hold'
-                      AND NOT EXISTS (
-                          SELECT 1 FROM findings f
-                          WHERE f.id = evidence_objects.finding_id AND f.status = 'active'
+                    SELECT eo.*
+                    FROM evidence_objects eo
+                    LEFT JOIN findings f ON f.id = eo.finding_id
+                    LEFT JOIN scans s ON s.id = eo.scan_id
+                    WHERE ($2::text IS NULL OR eo.retention_class = $2)
+                      AND eo.retention_class IN ('short', 'sensitive', 'standard', 'audit')
+                      AND eo.created_at <= $4::timestamptz - (
+                          CASE
+                              WHEN $5::int IS NULL THEN
+                                  CASE eo.retention_class
+                                      WHEN 'short' THEN 30
+                                      WHEN 'sensitive' THEN 90
+                                      WHEN 'standard' THEN 365
+                                      WHEN 'audit' THEN 2555
+                                  END
+                              WHEN eo.retention_class = 'sensitive' THEN GREATEST($5::int, 90)
+                              WHEN eo.retention_class = 'audit' THEN GREATEST($5::int, 2555)
+                              ELSE $5::int
+                          END * INTERVAL '1 day'
                       )
-                    RETURNING id
+                      AND eo.retention_delete_pending_at IS NULL
+                      AND (eo.finding_id IS NOT NULL OR eo.scan_id IS NOT NULL)
+                      AND (eo.finding_id IS NULL OR f.target_id = $1)
+                      AND (eo.scan_id IS NULL OR s.target_id = $1)
+                      AND (f.target_id = $1 OR s.target_id = $1)
+                      AND (f.id IS NULL OR f.status <> 'active')
+                    ORDER BY eo.created_at ASC, eo.id ASC
+                    LIMIT $3
                     """,
-                    candidate_ids,
+                    target_uuid,
+                    effective_req.retention_class,
+                    effective_req.limit,
+                    current,
+                    effective_req.older_than_days,
                 )
-                deleted_count = len(deleted_rows)
-                deleted_ids = {str(row["id"]) for row in deleted_rows}
-            if req.delete_local_files and deleted_ids:
-                file_result = _delete_local_evidence_files(
-                    [item for item in candidates
-                     if str(item.get("id")) in deleted_ids and not _blob_shared(item)]
+                candidates = _evidence_retention_candidates(
+                    rows,
+                    now=current,
+                    older_than_days=effective_req.older_than_days,
+                    retention_class_filter=effective_req.retention_class,
                 )
-        if not req.dry_run:
-            remote_candidate_count = sum(1 for item in candidates if item.get("remote_object"))
-            remote_deleted_count = len(remote_result.get("deleted", []))
-            remote_missing_count = len(remote_result.get("missing", []))
-            remote_failed_count = len(remote_result.get("errors", []))
-            command_result = await _record_command_result(
-                conn,
-                command="evidence.retention_sweep",
-                status="completed",
-                risk_tier="active",
-                approval_receipt_id=req.approval_receipt_id,
-                operator_message=(
-                    f"Swept {deleted_count} evidence object(s); "
-                    f"{len(file_result.get('deleted', []))} local file(s) removed; "
-                    f"{remote_deleted_count + remote_missing_count} remote object(s) retired"
-                ),
-                result_json={
-                    "retention_class": req.retention_class,
-                    "older_than_days": req.older_than_days,
-                    "candidate_count": len(candidates),
-                    "deleted_count": deleted_count,
-                    "remote_candidate_count": remote_candidate_count,
-                    "remote_deleted_count": remote_deleted_count,
-                    "remote_missing_count": remote_missing_count,
-                    "remote_failed_count": remote_failed_count,
-                    "remote_preserved_count": remote_failed_count,
-                },
-                next_action="/settings/arsenal?tab=timeline",
+                candidates = await _enrich_evidence_retention_candidates(
+                    conn,
+                    candidates,
+                    delete_local_files=effective_req.delete_local_files,
+                )
+                payload = {
+                    "preview_id": str(preview_id),
+                    "target_id": str(target_uuid),
+                    "schema_version": EVIDENCE_RETENTION_PREVIEW_SCHEMA_VERSION,
+                    "issued_at": current.isoformat(),
+                    "expires_at": expires.isoformat(),
+                    "criteria": _evidence_retention_criteria(effective_req),
+                    "policy_hash": _evidence_retention_policy_hash(),
+                    "candidates": _evidence_retention_candidate_snapshot(candidates),
+                    "status": "ready",
+                }
+                payload["preview_hash"] = _evidence_retention_preview_hash(payload)
+                await conn.execute(
+                    """
+                    INSERT INTO evidence_retention_previews (
+                        id, target_id, schema_version, criteria_json,
+                        candidate_snapshot_json, preview_hash, policy_hash,
+                        status, created_at, expires_at
+                    ) VALUES ($1,$2,$3,$4::jsonb,$5::jsonb,$6,$7,'ready',$8,$9)
+                    """,
+                    preview_id,
+                    target_uuid,
+                    EVIDENCE_RETENTION_PREVIEW_SCHEMA_VERSION,
+                    json.dumps(payload["criteria"], sort_keys=True),
+                    json.dumps(payload["candidates"], sort_keys=True),
+                    payload["preview_hash"],
+                    payload["policy_hash"],
+                    current,
+                    expires,
+                )
+        remote_candidate_count = sum(1 for item in candidates if item.get("remote_object"))
+        return {
+            "dry_run": True,
+            "target_id": str(target_uuid),
+            "candidate_count": len(candidates),
+            "deleted_count": 0,
+            "delete_local_files": effective_req.delete_local_files,
+            "local_files": {"deleted": [], "missing": [], "errors": []},
+            "remote_objects": {
+                "candidate_count": remote_candidate_count,
+                "deleted_count": 0,
+                "missing_count": 0,
+                "failed_count": 0,
+                "preserved_count": remote_candidate_count,
+                "delete_supported": True,
+                "deleted": [],
+                "missing": [],
+                "errors": [],
+            },
+            "retention_policy_days": EVIDENCE_RETENTION_DAYS,
+            "candidates": candidates,
+            "execution_enabled": False,
+            "preview_bound": True,
+            "preview_status": "ready",
+            "preview_id": str(preview_id),
+            "preview_hash": payload["preview_hash"],
+            "preview_issued_at": payload["issued_at"],
+            "preview_expires_at": payload["expires_at"],
+            "preview_criteria": payload["criteria"],
+            "preview_candidate_count": len(payload["candidates"]),
+        }
+
+    changed_execution_fields = supplied_fields.intersection(EVIDENCE_RETENTION_PREVIEW_FIELDS)
+    if changed_execution_fields:
+        changed = ", ".join(sorted(changed_execution_fields))
+        raise HTTPException(
+            status_code=409,
+            detail=f"Execution accepts only dry_run=false, preview_id, and approval_receipt_id; remove: {changed}",
+        )
+    if not req.preview_id:
+        raise HTTPException(status_code=409, detail="A fresh retention preview is required before deletion")
+    try:
+        preview_uuid = uuid.UUID(str(req.preview_id))
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail="Retention preview ID is invalid; run a new preview") from exc
+
+    async with pool.acquire() as conn:
+        preview_row = await conn.fetchrow(
+            "SELECT * FROM evidence_retention_previews WHERE id=$1",
+            preview_uuid,
+        )
+        if not preview_row:
+            raise HTTPException(status_code=409, detail="Retention preview was not found; run a new preview")
+        preview_payload = _evidence_retention_preview_payload(preview_row)
+        _validate_evidence_retention_preview_payload(preview_payload, allow_consumed=True)
+        if preview_payload["status"] == "consumed":
+            if preview_payload.get("approval_receipt_id") != str(req.approval_receipt_id or ""):
+                raise HTTPException(status_code=409, detail="Retention preview was already used with another approval receipt")
+            stored = dict(preview_payload.get("result") or {})
+            stored["idempotent_replay"] = True
+            return stored
+
+        effective_req = _evidence_retention_request_from_preview(preview_payload)
+        target_uuid = uuid.UUID(str(effective_req.target_id))
+        target = await conn.fetchrow("SELECT id, url FROM targets WHERE id=$1", target_uuid)
+        if not target:
+            raise HTTPException(status_code=409, detail="Retention preview target no longer exists; run a new preview")
+        approval_id = str(req.approval_receipt_id or "")
+        expected_context = {
+            "preview_id": str(preview_uuid),
+            "preview_hash": preview_payload["preview_hash"],
+            "target_id": str(target_uuid),
+        }
+
+        expected_snapshot = preview_payload["candidates"]
+        try:
+            candidate_ids = sorted(
+                uuid.UUID(str(item["id"]))
+                for item in expected_snapshot
+                if isinstance(item, dict) and item.get("id")
             )
-    response = {
-        "dry_run": req.dry_run,
+            if len(candidate_ids) != len(expected_snapshot):
+                raise ValueError("missing candidate id")
+        except (KeyError, TypeError, ValueError) as exc:
+            raise HTTPException(
+                status_code=409,
+                detail="Retention preview candidate set is invalid; run a new preview",
+            ) from exc
+
+        locked_identity_keys: list[str] = []
+        locked_blob_keys: list[str] = []
+        drift_detail: str | None = None
+        try:
+            locked_identity_keys = await _acquire_evidence_retention_identity_locks(
+                conn,
+                _evidence_retention_identity_lock_keys(expected_snapshot),
+            )
+            locked_blob_keys = await _acquire_evidence_retention_blob_locks(
+                conn,
+                _evidence_retention_blob_lock_keys(expected_snapshot),
+            )
+
+            if preview_payload["status"] == "ready":
+                # Validate after potentially waiting for blob writers. This keeps a
+                # short-lived, exact-preview approval from expiring while queued on
+                # locks and then being used anyway.
+                approval_context = await _validate_approval_receipt_for_action(
+                    conn,
+                    req.approval_receipt_id,
+                    target_id=target_uuid,
+                    target_url=str(target["url"] or ""),
+                    action_name="evidence.retention_sweep",
+                    command="evidence.retention_sweep",
+                    risk_tier="dangerous",
+                    always_require_receipt=True,
+                    require_target_binding=True,
+                    required_action_name="evidence.retention_sweep",
+                    required_action_context=expected_context,
+                    require_expiry=True,
+                    created_not_before=preview_payload["issued_at"],
+                    expires_no_later_than=preview_payload["expires_at"],
+                )
+            else:
+                approval_context = {
+                    "approval_receipt_id": preview_payload.get("approval_receipt_id"),
+                    "scope_receipt_id": preview_payload.get("scope_receipt_id"),
+                }
+
+            response: dict[str, Any] | None = None
+            async with conn.transaction():
+                locked_row = await conn.fetchrow(
+                    "SELECT * FROM evidence_retention_previews WHERE id=$1 FOR UPDATE",
+                    preview_uuid,
+                )
+                if not locked_row:
+                    drift_detail = "Retention preview disappeared; run a new preview"
+                else:
+                    locked_payload = _evidence_retention_preview_payload(locked_row)
+                    _validate_evidence_retention_preview_payload(locked_payload, allow_consumed=True)
+                    if locked_payload["status"] == "consumed":
+                        if locked_payload.get("approval_receipt_id") != approval_id:
+                            drift_detail = "Retention preview was already used with another approval receipt"
+                        else:
+                            response = dict(locked_payload.get("result") or {})
+                            response["idempotent_replay"] = True
+                    elif locked_payload["status"] == "executing":
+                        if locked_payload.get("approval_receipt_id") != approval_id:
+                            drift_detail = "Retention preview is already executing with another approval receipt"
+                    else:
+                        # Repeat validation after the preview row lock is held. The
+                        # first validation writes a durable blocked record; this one
+                        # closes the expiry race immediately before intent commit.
+                        approval_context = await _validate_approval_receipt_for_action(
+                            conn,
+                            req.approval_receipt_id,
+                            target_id=target_uuid,
+                            target_url=str(target["url"] or ""),
+                            action_name="evidence.retention_sweep",
+                            command="evidence.retention_sweep",
+                            risk_tier="dangerous",
+                            always_require_receipt=True,
+                            require_target_binding=True,
+                            required_action_name="evidence.retention_sweep",
+                            required_action_context=expected_context,
+                            require_expiry=True,
+                            created_not_before=locked_payload["issued_at"],
+                            expires_no_later_than=locked_payload["expires_at"],
+                            record_blocked=False,
+                        )
+                        rows = []
+                        if candidate_ids:
+                            rows = await conn.fetch(
+                                """
+                                SELECT * FROM evidence_objects
+                                WHERE id = ANY($1::uuid[])
+                                ORDER BY id
+                                FOR UPDATE
+                                """,
+                                candidate_ids,
+                            )
+                        links_match = await _evidence_retention_links_match_target(
+                            conn,
+                            rows,
+                            target_id=target_uuid,
+                        ) if rows else not candidate_ids
+                        candidates = _evidence_retention_candidates(
+                            rows,
+                            older_than_days=effective_req.older_than_days,
+                            retention_class_filter=effective_req.retention_class,
+                        )
+                        candidates = await _enrich_evidence_retention_candidates(
+                            conn,
+                            candidates,
+                            delete_local_files=effective_req.delete_local_files,
+                        )
+                        actual_snapshot = _evidence_retention_candidate_snapshot(candidates)
+                        pending_elsewhere = any(
+                            row.get("retention_delete_pending_at")
+                            and str(row.get("retention_delete_preview_id") or "") != str(preview_uuid)
+                            for row in rows
+                        )
+                        if not links_match or pending_elsewhere or actual_snapshot != expected_snapshot:
+                            drift_detail = (
+                                "Evidence eligibility, ownership, or storage references changed after preview; "
+                                "no deletion was attempted. Run a new preview"
+                            )
+                            await conn.execute(
+                                """
+                                UPDATE evidence_retention_previews
+                                SET status='stale', result_json=$2::jsonb
+                                WHERE id=$1 AND status='ready'
+                                """,
+                                preview_uuid,
+                                json.dumps({"reason": "candidate_snapshot_changed"}),
+                            )
+                        else:
+                            already_used = await conn.fetchval(
+                                """
+                                SELECT id FROM evidence_retention_previews
+                                WHERE approval_receipt_id=$1 AND id<>$2
+                                LIMIT 1
+                                """,
+                                uuid.UUID(approval_id),
+                                preview_uuid,
+                            )
+                            if already_used:
+                                raise HTTPException(
+                                    status_code=409,
+                                    detail="Approval receipt was already used for another retention preview",
+                                )
+                            if candidate_ids:
+                                marked = await conn.fetch(
+                                    """
+                                    UPDATE evidence_objects
+                                    SET retention_delete_preview_id=$1,
+                                        retention_delete_pending_at=NOW()
+                                    WHERE id = ANY($2::uuid[])
+                                      AND retention_delete_pending_at IS NULL
+                                    RETURNING id
+                                    """,
+                                    preview_uuid,
+                                    candidate_ids,
+                                )
+                                if {row["id"] for row in marked} != set(candidate_ids):
+                                    raise HTTPException(
+                                        status_code=409,
+                                        detail="Evidence deletion intent conflicted with another operation; run a new preview",
+                                    )
+                            await conn.execute(
+                                """
+                                UPDATE evidence_retention_previews
+                                SET status='executing', approval_receipt_id=$2,
+                                    scope_receipt_id=$3, execution_started_at=NOW()
+                                WHERE id=$1 AND status='ready'
+                                """,
+                                preview_uuid,
+                                uuid.UUID(approval_id),
+                                str(approval_context.get("scope_receipt_id") or "") or None,
+                            )
+
+            if response is not None:
+                return response
+            if drift_detail:
+                raise HTTPException(status_code=409, detail=drift_detail)
+
+            # The exact deletion intent is now durable. External side effects run
+            # outside SQL transactions; retries of an `executing` preview safely
+            # resume and treat already-missing content-addressed blobs as success.
+            runtime_candidates: list[dict[str, Any]] = []
+            consistency_errors: list[dict[str, str]] = []
+            guard_detail: str | None = None
+            remote_result: dict[str, Any] = {"deleted": [], "missing": [], "errors": [], "deleted_ids": []}
+            file_result: dict[str, Any] = {"deleted": [], "missing": [], "errors": [], "deleted_ids": []}
+            # The committed `executing` row is the deletion linearization point:
+            # ownership and active-finding protection were checked while that
+            # intent was recorded. A retry must finish the same intent even if a
+            # finding resurfaces later; staling it after a blob may already have
+            # been deleted would leave a durable row pointing at missing content.
+            # Evidence-row and advisory locks still prevent the candidate itself
+            # from being replaced while the irreversible side effect runs.
+            async with conn.transaction():
+                current_rows = []
+                if candidate_ids:
+                    current_rows = await conn.fetch(
+                        """
+                        SELECT * FROM evidence_objects
+                        WHERE id = ANY($1::uuid[])
+                        ORDER BY id
+                        FOR UPDATE
+                        """,
+                        candidate_ids,
+                    )
+                rows_by_id = {str(row["id"]): row for row in current_rows}
+                safe_candidates: list[dict[str, Any]] = []
+                for snapshot in expected_snapshot:
+                    item_id = str(snapshot.get("id") or "")
+                    row = rows_by_id.get(item_id)
+                    if not row:
+                        consistency_errors.append({"evidence_object_id": item_id, "error": "row_missing_during_execution"})
+                        continue
+                    if (
+                        not _evidence_retention_row_matches_snapshot(row, snapshot)
+                        or str(row.get("retention_delete_preview_id") or "") != str(preview_uuid)
+                        or not row.get("retention_delete_pending_at")
+                    ):
+                        consistency_errors.append({"evidence_object_id": item_id, "error": "row_changed_during_execution"})
+                        continue
+                    candidate = dict(snapshot)
+                    candidate["storage_backend"] = _evidence_storage_backend(str(candidate.get("storage_uri") or ""))
+                    candidate["remote_object"] = candidate["storage_backend"] == "s3"
+                    candidate["local_file"] = candidate["storage_backend"] == "local"
+                    safe_candidates.append(candidate)
+                if consistency_errors:
+                    guard_detail = (
+                        "Evidence row identity changed after deletion intent; "
+                        "no new blob deletion was attempted"
+                    )
+                    await conn.execute(
+                        """
+                        UPDATE evidence_objects
+                        SET retention_delete_preview_id=NULL,
+                            retention_delete_pending_at=NULL
+                        WHERE retention_delete_preview_id=$1
+                        """,
+                        preview_uuid,
+                    )
+                    await conn.execute(
+                        """
+                        UPDATE evidence_retention_previews
+                        SET status='stale', result_json=$2::jsonb
+                        WHERE id=$1 AND status='executing'
+                        """,
+                        preview_uuid,
+                        json.dumps({"reason": "execution_guard_changed", "errors": consistency_errors}),
+                    )
+                else:
+                    # Use the approved snapshot consequences verbatim. In
+                    # particular, preserve_shared may never become delete_* at
+                    # runtime even if another reference disappears.
+                    runtime_candidates = safe_candidates
+                    remote_result, file_result = await _run_evidence_retention_deletion_io(
+                        [item for item in runtime_candidates if item.get("planned_blob_action") == "delete_remote"],
+                        [item for item in runtime_candidates if item.get("planned_blob_action") == "delete_local"],
+                    )
+            if guard_detail:
+                raise HTTPException(status_code=409, detail=guard_detail)
+            remote_success_ids = set(remote_result.get("deleted_ids") or [])
+            local_success_ids = set(file_result.get("deleted_ids") or [])
+            deletable: list[uuid.UUID] = []
+            for item in runtime_candidates:
+                item_id = str(item.get("id") or "")
+                action = str(item.get("planned_blob_action") or "row_only")
+                if action == "delete_remote" and item_id not in remote_success_ids:
+                    continue
+                if action == "delete_local" and item_id not in local_success_ids:
+                    continue
+                deletable.append(uuid.UUID(item_id))
+
+            async with conn.transaction():
+                final_row = await conn.fetchrow(
+                    "SELECT * FROM evidence_retention_previews WHERE id=$1 FOR UPDATE",
+                    preview_uuid,
+                )
+                if not final_row:
+                    raise HTTPException(status_code=409, detail="Retention execution intent disappeared")
+                final_payload = _evidence_retention_preview_payload(final_row)
+                _validate_evidence_retention_preview_payload(final_payload, allow_consumed=True)
+                if final_payload["status"] == "consumed":
+                    if final_payload.get("approval_receipt_id") != approval_id:
+                        raise HTTPException(status_code=409, detail="Retention preview was consumed by another approval")
+                    stored = dict(final_payload.get("result") or {})
+                    stored["idempotent_replay"] = True
+                    return stored
+                if final_payload["status"] != "executing" or final_payload.get("approval_receipt_id") != approval_id:
+                    raise HTTPException(status_code=409, detail="Retention execution intent is no longer valid")
+
+                deleted_rows = []
+                if deletable:
+                    deleted_rows = await conn.fetch(
+                        """
+                        DELETE FROM evidence_objects
+                        WHERE id = ANY($1::uuid[])
+                          AND retention_delete_preview_id=$2
+                        RETURNING id
+                        """,
+                        sorted(deletable),
+                        preview_uuid,
+                    )
+                deleted_ids = sorted(str(row["id"]) for row in deleted_rows)
+                await conn.execute(
+                    """
+                    UPDATE evidence_objects
+                    SET retention_delete_preview_id=NULL,
+                        retention_delete_pending_at=NULL
+                    WHERE retention_delete_preview_id=$1
+                    """,
+                    preview_uuid,
+                )
+                deleted_count = len(deleted_ids)
+                remote_candidate_count = sum(1 for item in runtime_candidates if item.get("remote_object"))
+                remote_success_count = len(remote_success_ids)
+                storage_failed = bool(
+                    remote_result.get("errors")
+                    or file_result.get("errors")
+                    or consistency_errors
+                    or deleted_count != len(expected_snapshot)
+                )
+                command_status = "partial" if storage_failed else "completed"
+                command_result = await _record_command_result(
+                    conn,
+                    command="evidence.retention_sweep",
+                    status=command_status,
+                    risk_tier="dangerous",
+                    target_id=target_uuid,
+                    scope_receipt_id=str(approval_context.get("scope_receipt_id") or "") or None,
+                    approval_receipt_id=req.approval_receipt_id,
+                    evidence_object_ids=deleted_ids,
+                    operator_message=(
+                        f"Swept {deleted_count} of {len(expected_snapshot)} previewed evidence object(s); "
+                        f"{len(file_result.get('deleted', []))} local file(s) removed; "
+                        f"{len(remote_result.get('deleted', [])) + len(remote_result.get('missing', []))} "
+                        "remote blob(s) retired"
+                    ),
+                    result_json={
+                        "target_id": str(target_uuid),
+                        "preview_id": str(preview_uuid),
+                        "preview_hash": final_payload["preview_hash"],
+                        "candidate_count": len(expected_snapshot),
+                        "deleted_count": deleted_count,
+                        "remote_candidate_count": remote_candidate_count,
+                        "remote_success_count": remote_success_count,
+                        "remote_failed_count": len(remote_result.get("errors", [])),
+                        "local_failed_count": len(file_result.get("errors", [])),
+                        "consistency_failed_count": len(consistency_errors),
+                    },
+                    next_action="/settings/arsenal?tab=timeline",
+                )
+                response = {
+                    "dry_run": False,
+                    "target_id": str(target_uuid),
+                    "candidate_count": len(expected_snapshot),
+                    "deleted_count": deleted_count,
+                    "delete_local_files": effective_req.delete_local_files,
+                    "local_files": {
+                        "deleted": file_result.get("deleted", []),
+                        "missing": file_result.get("missing", []),
+                        "errors": file_result.get("errors", []),
+                    },
+                    "remote_objects": {
+                        "candidate_count": remote_candidate_count,
+                        "deleted_count": len(remote_result.get("deleted", [])),
+                        "missing_count": len(remote_result.get("missing", [])),
+                        "failed_count": len(remote_result.get("errors", [])),
+                        "preserved_count": max(0, remote_candidate_count - remote_success_count),
+                        "delete_supported": True,
+                        "deleted": remote_result.get("deleted", []),
+                        "missing": remote_result.get("missing", []),
+                        "errors": remote_result.get("errors", []),
+                    },
+                    "consistency_errors": consistency_errors,
+                    "retention_policy_days": EVIDENCE_RETENTION_DAYS,
+                    "candidates": runtime_candidates,
+                    "execution_enabled": True,
+                    "preview_bound": True,
+                    "preview_status": "consumed",
+                    "preview_id": str(preview_uuid),
+                    "preview_hash": final_payload["preview_hash"],
+                    "preview_issued_at": final_payload["issued_at"],
+                    "preview_expires_at": final_payload["expires_at"],
+                    "preview_criteria": final_payload["criteria"],
+                    "preview_candidate_count": len(expected_snapshot),
+                    "operation_id": command_result["id"],
+                    "idempotent_replay": False,
+                }
+                await conn.execute(
+                    """
+                    UPDATE evidence_retention_previews
+                    SET status='consumed', operation_id=$2,
+                        result_json=$3::jsonb, consumed_at=NOW()
+                    WHERE id=$1 AND status='executing'
+                    """,
+                    preview_uuid,
+                    uuid.UUID(str(command_result["id"])),
+                    json.dumps(response, default=str, sort_keys=True),
+                )
+            return response
+        finally:
+            await _release_evidence_retention_blob_locks(conn, locked_blob_keys)
+            await _release_evidence_retention_identity_locks(conn, locked_identity_keys)
+
+
+def _public_evidence_retention_execution(payload: dict[str, Any]) -> dict[str, Any]:
+    """Content-free recovery descriptor for a durable executing intent."""
+    candidates = list(payload.get("candidates") or [])
+    remote_count = sum(1 for item in candidates if item.get("planned_blob_action") == "delete_remote")
+    return {
+        "dry_run": False,
+        "target_id": payload["target_id"],
         "candidate_count": len(candidates),
-        "deleted_count": deleted_count,
-        "delete_local_files": req.delete_local_files,
-        "local_files": file_result,
+        "deleted_count": 0,
+        "delete_local_files": bool((payload.get("criteria") or {}).get("delete_local_files", True)),
+        "local_files": {"deleted": [], "missing": [], "errors": []},
         "remote_objects": {
-            "candidate_count": sum(1 for item in candidates if item.get("remote_object")),
-            "deleted_count": len(remote_result.get("deleted", [])),
-            "missing_count": len(remote_result.get("missing", [])),
-            "failed_count": len(remote_result.get("errors", [])),
-            "preserved_count": (
-                sum(1 for item in candidates if item.get("remote_object"))
-                if req.dry_run
-                else len(remote_result.get("errors", []))
-            ),
+            "candidate_count": remote_count,
+            "deleted_count": 0,
+            "missing_count": 0,
+            "failed_count": 0,
+            "preserved_count": remote_count,
             "delete_supported": True,
-            "deleted": remote_result.get("deleted", []),
-            "missing": remote_result.get("missing", []),
-            "errors": remote_result.get("errors", []),
+            "deleted": [],
+            "missing": [],
+            "errors": [],
         },
         "retention_policy_days": EVIDENCE_RETENTION_DAYS,
         "candidates": candidates,
-        "execution_enabled": not req.dry_run,
+        "execution_enabled": True,
+        "preview_bound": True,
+        "preview_status": payload["status"],
+        "preview_id": payload["preview_id"],
+        "preview_hash": payload["preview_hash"],
+        "preview_issued_at": payload["issued_at"],
+        "preview_expires_at": payload["expires_at"],
+        "preview_criteria": payload["criteria"],
+        "preview_candidate_count": len(candidates),
+        "approval_receipt_id": payload.get("approval_receipt_id"),
+        "execution_started_at": payload.get("execution_started_at"),
+        "idempotent_replay": False,
     }
-    if command_result:
-        response["operation_id"] = command_result["id"]
-    return response
+
+
+@app.get("/evidence/retention/executions")
+async def list_evidence_retention_executions(
+    target_id: Optional[str] = Query(None),
+    limit: int = Query(20, ge=1, le=100),
+):
+    """List durable unfinished deletion intents so an operator can resume after reload."""
+    try:
+        target_uuid = _optional_uuid(target_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="target_id must be a UUID") from exc
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT * FROM evidence_retention_previews
+            WHERE status='executing'
+              AND ($1::uuid IS NULL OR target_id=$1)
+            ORDER BY execution_started_at DESC NULLS LAST, created_at DESC
+            LIMIT $2
+            """,
+            target_uuid,
+            limit,
+        )
+    executions = [
+        _public_evidence_retention_execution(_evidence_retention_preview_payload(row))
+        for row in rows
+    ]
+    return {"executions": executions, "count": len(executions), "execution_enabled": False}
 
 
 @app.get("/evidence/{evidence_id}")
@@ -41507,6 +42573,14 @@ async def create_schedule(request: ScheduleCreate):
         raise HTTPException(status_code=400, detail=str(exc))
     scan_options = _schedule_options_dict(request.scan_options)
     scan_options.pop("kind", None)
+    if schedule_kind == "evidence_retention_sweep":
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Scheduled evidence retention is no longer supported. "
+                "Use Evidence cleanup to review and approve an exact target-scoped preview."
+            ),
+        )
 
     # Validate frequency
     if request.frequency not in ('daily', 'weekly'):
@@ -41673,9 +42747,19 @@ async def update_schedule(schedule_id: str, request: ScheduleUpdate):
                 )
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail=str(exc))
+            if normalized_schedule_kind == "evidence_retention_sweep":
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "Scheduled evidence retention is no longer supported. "
+                        "Choose a scan or ASM schedule, or use Evidence cleanup interactively."
+                    ),
+                )
             updates.append(f"schedule_kind = ${param_idx}")
             params.append(normalized_schedule_kind)
             param_idx += 1
+
+        effective_schedule_kind = normalized_schedule_kind or _schedule_kind_from_row(existing)
 
         if request.scan_type is not None:
             valid_scan_types = ['quick', 'standard', 'deep', 'full', 'aggressive', 'smart']
@@ -41688,13 +42772,33 @@ async def update_schedule(schedule_id: str, request: ScheduleUpdate):
         if request.scan_options is not None:
             scan_options = _schedule_options_dict(request.scan_options)
             scan_options.pop("kind", None)
+            if effective_schedule_kind == "evidence_retention_sweep":
+                raise HTTPException(
+                    status_code=409,
+                    detail="Legacy evidence retention schedules must be migrated to a scan or ASM schedule.",
+                )
             updates.append(f"scan_options = ${param_idx}")
             params.append(json.dumps(scan_options))
             param_idx += 1
         elif explicit_kind_update:
             existing_options = _schedule_options_dict(existing["scan_options"])
-            if "kind" in existing_options:
-                existing_options.pop("kind", None)
+            existing_options.pop("kind", None)
+            if (
+                _schedule_kind_from_row(existing) == "evidence_retention_sweep"
+                and effective_schedule_kind != "evidence_retention_sweep"
+            ):
+                for legacy_key in (
+                    "dry_run",
+                    "older_than_days",
+                    "retention_class",
+                    "limit",
+                    "delete_local_files",
+                    "approval_receipt_id",
+                    "preview_id",
+                    "target_id",
+                ):
+                    existing_options.pop(legacy_key, None)
+            if existing_options != _schedule_options_dict(existing["scan_options"]):
                 updates.append(f"scan_options = ${param_idx}")
                 params.append(json.dumps(existing_options))
                 param_idx += 1
@@ -41706,6 +42810,14 @@ async def update_schedule(schedule_id: str, request: ScheduleUpdate):
             timing_changed = True
 
         if request.is_active is not None:
+            if request.is_active and effective_schedule_kind == "evidence_retention_sweep":
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "Legacy evidence retention schedules cannot be enabled. "
+                        "Migrate this schedule to a scan or ASM schedule, or delete it."
+                    ),
+                )
             updates.append(f"is_active = ${param_idx}")
             params.append(request.is_active)
             param_idx += 1

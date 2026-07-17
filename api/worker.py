@@ -57,7 +57,7 @@ except ModuleNotFoundError:
         normalize_endpoint_attempt,
     )
     from scanner.scanner_tools.build_fingerprint import hash_source_files, runtime_file_map
-from evidence_storage import store_evidence_content
+from evidence_storage import serialize_evidence_content, store_evidence_content
 from secret_store import decrypt_secret
 try:
     from action_scope import evaluate_runtime_destination_scope
@@ -240,6 +240,48 @@ def _tool_receipt_hash(payload: dict[str, Any]) -> str:
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
+async def _acquire_evidence_blob_lock(conn, content: Any) -> str | None:
+    """Serialize writers with retention GC for the same content-addressed blob."""
+    _raw, content_sha256, _size = serialize_evidence_content(content)
+    if content_sha256:
+        await conn.fetchval(
+            "SELECT pg_advisory_lock(hashtextextended($1, 0))",
+            f"evidence-blob:{content_sha256}",
+        )
+    return content_sha256
+
+
+async def _release_evidence_blob_lock(conn, content_sha256: str | None) -> None:
+    if not content_sha256:
+        return
+    try:
+        await conn.fetchval(
+            "SELECT pg_advisory_unlock(hashtextextended($1, 0))",
+            f"evidence-blob:{content_sha256}",
+        )
+    except Exception:
+        # A broken/closed connection releases session advisory locks itself.
+        pass
+
+
+async def _acquire_evidence_identity_lock(conn, finding_id: Any, object_type: str) -> str | None:
+    """Serialize a finding/object upsert with retention intent for that exact row."""
+    if not finding_id or not object_type:
+        return None
+    key = f"evidence-row:{finding_id}:{object_type}"
+    await conn.fetchval("SELECT pg_advisory_lock(hashtextextended($1, 0))", key)
+    return key
+
+
+async def _release_evidence_identity_lock(conn, key: str | None) -> None:
+    if not key:
+        return
+    try:
+        await conn.fetchval("SELECT pg_advisory_unlock(hashtextextended($1, 0))", key)
+    except Exception:
+        pass
+
+
 async def _persist_tool_output_artifact(
     conn,
     *,
@@ -251,21 +293,21 @@ async def _persist_tool_output_artifact(
 ) -> str | None:
     if not isinstance(artifact, dict) or not artifact.get("content"):
         return None
+    locked_sha: str | None = None
     try:
-        stored = store_evidence_content(
-            _redact_receipt_value({
-                "tool_name": tool_name,
-                "command_hash": command_hash,
-                "stream": stream_name,
-                "content": artifact.get("content"),
-                "original_length": artifact.get("original_length"),
-                "redacted_length": artifact.get("redacted_length"),
-                "captured_length": artifact.get("captured_length"),
-                "truncated": bool(artifact.get("truncated")),
-                "source_content_sha256": artifact.get("content_sha256"),
-            }),
-            results_dir=RESULTS_DIR,
-        )
+        content = _redact_receipt_value({
+            "tool_name": tool_name,
+            "command_hash": command_hash,
+            "stream": stream_name,
+            "content": artifact.get("content"),
+            "original_length": artifact.get("original_length"),
+            "redacted_length": artifact.get("redacted_length"),
+            "captured_length": artifact.get("captured_length"),
+            "truncated": bool(artifact.get("truncated")),
+            "source_content_sha256": artifact.get("content_sha256"),
+        })
+        locked_sha = await _acquire_evidence_blob_lock(conn, content)
+        stored = store_evidence_content(content, results_dir=RESULTS_DIR)
         row = await conn.fetchrow(
             """
             INSERT INTO evidence_objects (
@@ -288,6 +330,8 @@ async def _persist_tool_output_artifact(
     except Exception as exc:
         print(f"[tool-receipt] output artifact persist failed for {tool_name}/{stream_name}: {type(exc).__name__}: {exc}", flush=True)
         return None
+    finally:
+        await _release_evidence_blob_lock(conn, locked_sha)
 
 
 def _internal_executor_receipt_spec(options: dict[str, Any]) -> dict[str, str] | None:
@@ -2641,11 +2685,31 @@ async def _persist_evidence_object(conn, scan_uuid, finding_id, finding: dict, e
     truth. Large payloads are content-addressed under RESULTS_DIR/evidence-objects."""
     if not finding_id:
         return
+    locked_sha: str | None = None
+    identity_lock: str | None = None
     try:
         content = evidence_redacted if evidence_redacted else None
-        stored = store_evidence_content(content, results_dir=RESULTS_DIR)
         tool = tool_override or finding.get("tool")
         object_type = (f"{tool}_evidence" if tool else "finding_evidence")[:64]
+        # Lock the stable row identity before checking pending state. Otherwise a
+        # retention intent can land between the check and a different-content
+        # upsert, making the conditional UPSERT a silent no-op after a new blob
+        # was already written.
+        identity_lock = await _acquire_evidence_identity_lock(conn, finding_id, object_type)
+        pending_preview = await conn.fetchval(
+            """
+            SELECT retention_delete_preview_id
+            FROM evidence_objects
+            WHERE finding_id=$1 AND object_type=$2
+              AND retention_delete_pending_at IS NOT NULL
+            """,
+            finding_id,
+            object_type,
+        )
+        if pending_preview:
+            return
+        locked_sha = await _acquire_evidence_blob_lock(conn, content)
+        stored = store_evidence_content(content, results_dir=RESULTS_DIR)
         retention = "sensitive" if (
             finding.get("request") or finding.get("response")
             or tool in ("ai_gate", "ai_session", "model_intake")
@@ -2659,11 +2723,15 @@ async def _persist_evidence_object(conn, scan_uuid, finding_id, finding: dict, e
                 content_sha256=EXCLUDED.content_sha256, size_bytes=EXCLUDED.size_bytes,
                 storage_uri=EXCLUDED.storage_uri, content=EXCLUDED.content,
                 retention_class=EXCLUDED.retention_class, created_at=NOW()
+            WHERE evidence_objects.retention_delete_pending_at IS NULL
         """, scan_uuid, finding_id, object_type,
              stored["content_sha256"], stored["size_bytes"], stored["storage_uri"],
              "redact_sensitive_v1", retention, stored["content"])
     except Exception as e:
         print(f"[evidence] persist failed for finding {finding_id}: {type(e).__name__}: {e}", flush=True)
+    finally:
+        await _release_evidence_blob_lock(conn, locked_sha)
+        await _release_evidence_identity_lock(conn, identity_lock)
 
 
 def build_application_graph(result: dict) -> tuple[dict, dict]:

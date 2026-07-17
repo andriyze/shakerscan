@@ -199,6 +199,8 @@ export interface ApprovalReceipt {
   approved_by?: string | null
   denial_reason?: string | null
   expires_at?: string | null
+  action_name?: string | null
+  action_context?: Record<string, unknown> | null
   created_at?: string
 }
 
@@ -655,6 +657,7 @@ export interface EvidenceExportManifest {
 
 export interface EvidenceRetentionSweepResult {
   dry_run: boolean
+  target_id: string
   candidate_count: number
   deleted_count: number
   delete_local_files?: boolean
@@ -671,6 +674,23 @@ export interface EvidenceRetentionSweepResult {
   candidates?: Array<Record<string, unknown>>
   execution_enabled: boolean
   operation_id?: string | null
+  preview_status?: 'ready' | 'executing' | 'consumed' | 'stale'
+  approval_receipt_id?: string | null
+  execution_started_at?: string | null
+  preview_bound: boolean
+  preview_id?: string | null
+  preview_hash?: string | null
+  preview_issued_at?: string | null
+  preview_expires_at?: string | null
+  preview_candidate_count?: number
+  preview_criteria?: {
+    scope: 'target'
+    target_id: string
+    older_than_days?: number | null
+    retention_class?: string | null
+    limit: number
+    delete_local_files: boolean
+  } | null
 }
 
 export interface ArsenalExecutionResponse {
@@ -2266,6 +2286,8 @@ export async function createApprovalReceipt(payload: {
   approved_by?: string
   denial_reason?: string
   expires_at?: string
+  action_name?: string
+  action_context?: Record<string, unknown>
 }): Promise<ApprovalReceiptResponse> {
   const res = await fetch(`${API_URL}/arsenal/approvals`, {
     method: 'POST',
@@ -2450,20 +2472,50 @@ export function evidenceExportBundleUrl(params?: {
   return `${API_URL}/evidence/export-bundle?${query.toString()}`
 }
 
-export async function sweepEvidenceRetention(payload: {
-  dry_run?: boolean
+export type EvidenceRetentionPreviewRequest = {
+  dry_run?: true
+  target_id: string
   older_than_days?: number
   retention_class?: string
   limit?: number
   delete_local_files?: boolean
-  approval_receipt_id?: string
-}): Promise<EvidenceRetentionSweepResult> {
+  approval_receipt_id?: never
+  preview_id?: never
+}
+
+export type EvidenceRetentionExecutionRequest = {
+  dry_run: false
+  preview_id: string
+  approval_receipt_id: string
+  target_id?: never
+  older_than_days?: never
+  retention_class?: never
+  limit?: never
+  delete_local_files?: never
+}
+
+export async function sweepEvidenceRetention(
+  payload: EvidenceRetentionPreviewRequest | EvidenceRetentionExecutionRequest
+): Promise<EvidenceRetentionSweepResult> {
   const res = await fetch(`${API_URL}/evidence/retention/sweep`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
   })
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to run evidence retention sweep'))
+  return res.json()
+}
+
+export async function getEvidenceRetentionExecutions(params?: {
+  target_id?: string
+  limit?: number
+}): Promise<{ executions: EvidenceRetentionSweepResult[]; count: number; execution_enabled: boolean }> {
+  const query = new URLSearchParams()
+  if (params?.target_id) query.set('target_id', params.target_id)
+  if (params?.limit) query.set('limit', String(params.limit))
+  const suffix = query.toString() ? `?${query.toString()}` : ''
+  const res = await fetch(`${API_URL}/evidence/retention/executions${suffix}`)
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load unfinished retention cleanup'))
   return res.json()
 }
 
@@ -3424,9 +3476,10 @@ export async function getTarget(targetId: string): Promise<Target> {
   return res.json()
 }
 
-export async function getTargets(params?: { includeInactive?: boolean }) {
+export async function getTargets(params?: { includeInactive?: boolean; limit?: number }): Promise<{ targets: Target[]; total: number }> {
   const searchParams = new URLSearchParams()
   if (params?.includeInactive) searchParams.set('include_inactive', 'true')
+  if (params?.limit) searchParams.set('limit', String(params.limit))
 
   const res = await fetch(`${API_URL}/targets?${searchParams}`)
   if (!res.ok) throw new Error('Failed to fetch targets')
@@ -4841,7 +4894,7 @@ export interface ScheduleCreate {
   day_of_week?: number
   time_of_day: string
   timezone?: string
-  schedule_kind?: 'normal_scan' | 'asm_improve' | 'evidence_retention_sweep'
+  schedule_kind?: 'normal_scan' | 'asm_improve'
   scan_type: string
   scan_options?: Record<string, unknown>
   jitter_minutes?: number

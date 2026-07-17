@@ -173,10 +173,14 @@ def test_evidence_manifest_and_retention_commands_are_bounded():
     # Executing the sweep deletes durable evidence, so it must be gated (not a
     # read-only/dry-run shortcut that the operation-plan approval gate ignores).
     assert sweep["status"] == "gated"
-    assert sweep["risk_tier"] == "active"
+    assert sweep["risk_tier"] == "dangerous"
     assert "confirm_authorized" in sweep["required_confirmations"]
     assert sweep["path"] == "/evidence/retention/sweep"
     assert sweep["parameters_schema"]["dry_run"]["default"] is True
+    assert "target_id" in sweep["parameters_schema"]
+    assert "preview_id" in sweep["parameters_schema"]
+    assert "preview_hash" in sweep["evidence_contract"]
+    assert "remote_objects" in sweep["evidence_contract"]
 
 
 def test_finding_exception_lifecycle_sweep_is_one_way_and_gated():

@@ -224,10 +224,27 @@ Organize root domains and subdomains, filter the attack surface, launch per-targ
 
 ### Schedules
 
-Create recurring daily or weekly normal scans, Continuous ASM coverage waves, or approval-gated
-evidence-retention sweeps so important targets and stored evidence stay governed.
+Create recurring daily or weekly normal scans and Continuous ASM coverage waves. Evidence cleanup is
+interactive-only because each deletion must be reviewed and confirmed against a fresh, immutable,
+target-scoped preview. Legacy retention schedules are disabled and cannot be resumed.
 
-![Recurring scan schedules](docs/screenshots/schedules.png)
+### Evidence Retention Cleanup
+
+An interactive dry run persists the exact candidate objects, cleanup criteria, storage effects,
+policy hash, and expiry under a `preview_id`. The preview TTL is 600 seconds by default; operators
+may set `EVIDENCE_RETENTION_PREVIEW_TTL_SECONDS`, bounded to 60-3600 seconds.
+
+On confirmation, the UI creates a one-use, target-scoped `dangerous` approval for the exact action
+`evidence.retention_sweep`. Its action context is bound to the preview's `preview_id`,
+`preview_hash`, and `target_id`, and it expires no later than the preview. The deletion request sends
+only `dry_run:false`, `preview_id`, and `approval_receipt_id`; cleanup criteria cannot be changed or
+resubmitted at execution time.
+
+The server revalidates the immutable cohort and durably records `executing` intent before deleting
+external blobs or database rows. If execution is interrupted, retrying the same preview and approval
+resumes finalization safely. A retry after completion returns the stored result idempotently instead
+of repeating deletion. The committed intent is the cutoff: a later finding-status change does not
+widen or cancel that exact cohort, and target merges are blocked until the intent is finalized.
 
 ### Findings
 
@@ -491,7 +508,7 @@ claude    # Claude reads CLAUDE.md and understands the project
 - **Continuous ASM (`/asm`)**: scheduler state, endpoint and family proof coverage, gaps, recommendations, and campaign timeline
 - **Targets (`/targets`)**: hierarchical root/subdomains, filter and scan
 - **Application Graph (`/targets/{id}/graph`)**: route/object/principal nodes, auth boundaries, producer/consumer edges, and graph hypotheses
-- **Schedules (`/schedules`)**: normal scans, ASM waves, and approval-gated evidence-retention sweeps
+- **Schedules (`/schedules`)**: recurring normal scans and target-scoped ASM coverage waves; legacy retention schedules are disabled
 - **Findings (`/findings`)**: filter by DAST, AI Gate, Model Intake, ASM, or Manual source; severity/status/date/domain; bulk cleanup and CVSS sorting
 - **Finding Detail (`/findings/{id}`)**: triage buttons, analyst notes, evidence, AI analysis, remediation
 - **Interactive (`/interactive`)**: browser sessions, managed credentials, principals, authz expectations, endpoint replay, screenshots, and manual findings

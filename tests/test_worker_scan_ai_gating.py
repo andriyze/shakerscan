@@ -827,6 +827,11 @@ class _FakeReceiptConnection:
             return {"id": self.evidence_id}
         return {"id": self.receipt_id}
 
+    async def fetchval(self, query, *args):
+        if "pg_advisory_lock" in query or "pg_advisory_unlock" in query:
+            return True
+        return None
+
 
 class _FakeSlotRedis:
     def __init__(self):

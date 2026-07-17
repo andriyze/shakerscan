@@ -254,11 +254,53 @@ CREATE TABLE evidence_objects (
     redaction_profile TEXT,
     retention_class TEXT NOT NULL DEFAULT 'standard',
     content JSONB,
+    retention_delete_preview_id UUID,
+    retention_delete_pending_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     CONSTRAINT evidence_objects_finding_type_unique UNIQUE (finding_id, object_type)
 );
 CREATE INDEX idx_evidence_objects_finding ON evidence_objects(finding_id);
 CREATE INDEX idx_evidence_objects_scan ON evidence_objects(scan_id);
+CREATE INDEX idx_evidence_objects_retention_pending ON evidence_objects(retention_delete_pending_at)
+    WHERE retention_delete_pending_at IS NOT NULL;
+
+-- One-use, target-scoped retention previews bind destructive cleanup to the
+-- exact server-computed evidence snapshot the operator reviewed.
+CREATE TABLE evidence_retention_previews (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    target_id UUID NOT NULL REFERENCES targets(id) ON DELETE CASCADE,
+    schema_version INTEGER NOT NULL,
+    criteria_json JSONB NOT NULL,
+    candidate_snapshot_json JSONB NOT NULL,
+    preview_hash TEXT NOT NULL,
+    policy_hash TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'ready',
+    approval_receipt_id UUID,
+    scope_receipt_id TEXT,
+    operation_id UUID,
+    result_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    expires_at TIMESTAMPTZ NOT NULL,
+    execution_started_at TIMESTAMPTZ,
+    consumed_at TIMESTAMPTZ,
+    CONSTRAINT evidence_retention_previews_status_check
+        CHECK (status IN ('ready','executing','consumed','stale'))
+);
+CREATE INDEX idx_evidence_retention_previews_target
+    ON evidence_retention_previews(target_id, created_at DESC);
+CREATE INDEX idx_evidence_retention_previews_ready
+    ON evidence_retention_previews(expires_at) WHERE status = 'ready';
+CREATE UNIQUE INDEX idx_evidence_retention_previews_approval_once
+    ON evidence_retention_previews(approval_receipt_id) WHERE approval_receipt_id IS NOT NULL;
+
+-- An executing preview is the durable recovery record for pending evidence rows.
+-- RESTRICT prevents target cascades (including canonical target de-duplication)
+-- from deleting that record until the pending rows are finalized or cleared.
+ALTER TABLE evidence_objects
+    ADD CONSTRAINT evidence_objects_retention_delete_preview_fk
+    FOREIGN KEY (retention_delete_preview_id)
+    REFERENCES evidence_retention_previews(id)
+    ON DELETE RESTRICT;
 
 -- ============================================================
 -- EXPORT EVENTS - Durable content-free export/audit records
@@ -406,7 +448,7 @@ CREATE TABLE discovery_runs (
 );
 
 -- ============================================================
--- SCHEDULES - Recurring scans (optional feature)
+-- SCHEDULES - Recurring target actions (optional feature)
 -- ============================================================
 CREATE TABLE schedules (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -416,14 +458,14 @@ CREATE TABLE schedules (
     name TEXT,
 
     -- Schedule configuration
-    frequency TEXT NOT NULL,  -- daily, weekly, biweekly, monthly
-    day_of_week INTEGER,  -- 0-6 (Sunday-Saturday) for weekly
+    frequency TEXT NOT NULL,  -- daily, weekly
+    day_of_week INTEGER,  -- 0-6 (Monday-Sunday) for weekly
     time_of_day TEXT DEFAULT '02:00',  -- HH:MM in UTC
     timezone TEXT DEFAULT 'UTC',
     jitter_minutes INTEGER DEFAULT 30,
 
-    -- Scan configuration
-    schedule_kind TEXT DEFAULT 'normal_scan',  -- normal_scan, asm_improve
+    -- Action configuration
+    schedule_kind TEXT DEFAULT 'normal_scan',  -- normal_scan, asm_improve, evidence_retention_sweep
     scan_type TEXT DEFAULT 'standard',
     scan_options JSONB DEFAULT '{}',
 

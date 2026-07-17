@@ -10,6 +10,54 @@ import uuid
 from typing import Any
 
 
+RETENTION_PREVIEW_FK_CONSTRAINT = "evidence_objects_retention_delete_preview_fk"
+
+
+class TargetMergeBlockedError(RuntimeError):
+    """A target merge would invalidate an in-flight retention deletion intent."""
+
+    def __init__(self, target_ids: list[Any], preview_ids: list[Any] | None = None):
+        self.target_ids = sorted({str(item) for item in target_ids if item})
+        self.preview_ids = sorted({str(item) for item in (preview_ids or []) if item})
+        super().__init__(
+            "Target merge is blocked while an evidence retention deletion is executing"
+        )
+
+    def api_detail(self) -> dict[str, Any]:
+        return {
+            "error": "target_merge_blocked_by_evidence_retention",
+            "message": (
+                "Cannot merge these targets while an evidence retention deletion is executing. "
+                "Resume or finish the unfinished Evidence cleanup, then retry the merge."
+            ),
+            "target_ids": self.target_ids,
+            "preview_ids": self.preview_ids,
+        }
+
+
+async def ensure_no_executing_retention_previews(conn, target_ids: list[Any]) -> None:
+    """Fail closed before a merge can rewrite/delete an executing preview's target."""
+    normalized = sorted({uuid.UUID(str(item)) for item in target_ids if item})
+    if not normalized:
+        return
+    rows = await conn.fetch(
+        """
+        SELECT id, target_id
+        FROM evidence_retention_previews
+        WHERE target_id = ANY($1::uuid[])
+          AND status = 'executing'
+        ORDER BY target_id, id
+        FOR SHARE
+        """,
+        normalized,
+    )
+    if rows:
+        raise TargetMergeBlockedError(
+            [row["target_id"] for row in rows],
+            [row["id"] for row in rows],
+        )
+
+
 def canonical_target_key(url: Any) -> str:
     """Scheme-and-trailing-slash-insensitive canonical origin. MUST stay equivalent to
     the SQL form in the targets_set_canonical_key trigger (db/init.sql / migration)."""
@@ -36,6 +84,8 @@ MERGE_PLAIN_TABLES: list[str] = [
 async def merge_target_group(conn, survivor_id, dupe_ids: list) -> None:
     """Reassign every child row of the duplicate targets to the survivor, then delete
     the duplicates and recompute the survivor's counts. Runs in the caller's txn."""
+    group_target_ids = [survivor_id, *dupe_ids]
+    await ensure_no_executing_retention_previews(conn, group_target_ids)
     for table, key_cols in MERGE_UNIQUE_TABLES:
         key_match = " AND ".join(f"o.{c} = d.{c}" for c in key_cols)
         await conn.execute(f"""
@@ -57,7 +107,15 @@ async def merge_target_group(conn, survivor_id, dupe_ids: list) -> None:
     await conn.execute(
         "UPDATE targets SET parent_target_id = $2 WHERE parent_target_id = ANY($1::uuid[])",
         dupe_ids, survivor_id)
-    await conn.execute("DELETE FROM targets WHERE id = ANY($1::uuid[])", dupe_ids)
+    try:
+        await conn.execute("DELETE FROM targets WHERE id = ANY($1::uuid[])", dupe_ids)
+    except Exception as exc:
+        # The restrictive FK is the race-proof backstop if a preview transitions
+        # to executing after the explicit check above. Translate only that named
+        # constraint; unrelated integrity failures must retain their original error.
+        if getattr(exc, "constraint_name", None) == RETENTION_PREVIEW_FK_CONSTRAINT:
+            raise TargetMergeBlockedError(group_target_ids) from exc
+        raise
     await conn.execute("""
         UPDATE targets SET
             active_findings_count = (SELECT count(*) FROM findings WHERE target_id = $1 AND status = 'active'),
@@ -102,7 +160,14 @@ async def merge_all_canonical_duplicates(conn) -> int:
     """Merge every canonical-duplicate group (per-group transactional). Returns the
     number of duplicate rows removed. Used by the migration's index-build fail-safe."""
     removed = 0
-    for item in await plan_canonical_merges(conn):
+    plan = await plan_canonical_merges(conn)
+    all_target_ids = [
+        uuid.UUID(target["id"])
+        for item in plan
+        for target in (item["survivor"], *item["merged"])
+    ]
+    await ensure_no_executing_retention_previews(conn, all_target_ids)
+    for item in plan:
         survivor_id = uuid.UUID(item["survivor"]["id"])
         dupe_ids = [uuid.UUID(m["id"]) for m in item["merged"]]
         async with conn.transaction():

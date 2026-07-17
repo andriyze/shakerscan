@@ -6,14 +6,17 @@ JSON-decode helper that have grown enough surface to be worth pinning.
 
 import asyncio
 import base64
+import copy
 import hashlib
 import io
 import json
 import os
 import sys
+import threading
 import types
 import uuid
 import zipfile
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -1307,19 +1310,19 @@ def test_schedule_kind_normalizer_supports_typed_and_legacy_contracts():
         api_module._normalize_schedule_kind("bad_kind", {})
 
 
-def test_scheduled_retention_sweep_request_defaults_to_dry_run_and_requires_approval_for_execute():
-    req = api_module._scheduled_retention_sweep_request({
-        "retention_class": "short",
-        "older_than_days": 90,
-        "limit": 10,
-    })
-    assert req.dry_run is True
-    assert req.retention_class == "short"
-    assert req.older_than_days == 90
-    assert req.limit == 10
+def test_create_schedule_rejects_retention_schedule_before_database_access():
+    request = api_module.ScheduleCreate(
+        target_id=str(uuid.uuid4()),
+        frequency="daily",
+        schedule_kind="evidence_retention_sweep",
+        scan_options={"dry_run": True},
+    )
 
-    with pytest.raises(ValueError):
-        api_module._scheduled_retention_sweep_request({"dry_run": False})
+    with pytest.raises(api_module.HTTPException) as exc:
+        asyncio.run(api_module.create_schedule(request))
+
+    assert exc.value.status_code == 400
+    assert "no longer supported" in str(exc.value.detail)
 
 
 def test_run_due_schedules_does_not_advance_schedule_on_redis_failure(monkeypatch):
@@ -1327,7 +1330,8 @@ def test_run_due_schedules_does_not_advance_schedule_on_redis_failure(monkeypatc
     redis_client = _FailingRedis()
     monkeypatch.setattr(api_module, "get_redis", lambda: redis_client)
 
-    asyncio.run(api_module.run_due_schedules(_FakePool(conn)))
+    scheduler_pool = _FakePool(conn)
+    asyncio.run(api_module.run_due_schedules(scheduler_pool))
 
     executed_sql = "\n".join(query for query, _args in conn.executes)
     assert "INSERT INTO scans" in executed_sql
@@ -1352,7 +1356,7 @@ def test_run_due_schedules_advances_schedule_after_successful_enqueue(monkeypatc
     assert len(redis_client.hset_calls) == 1
 
 
-def test_run_due_schedules_runs_retention_sweep_schedule(monkeypatch):
+def test_run_due_schedules_disables_legacy_retention_schedule(monkeypatch):
     schedule = _due_schedule()
     schedule["schedule_kind"] = "evidence_retention_sweep"
     schedule["scan_options"] = {
@@ -1362,21 +1366,20 @@ def test_run_due_schedules_runs_retention_sweep_schedule(monkeypatch):
     }
     conn = _FakeConn([schedule])
     redis_client = _RecordingRedis()
-    sentinel_pool = object()
-    monkeypatch.setattr(api_module, "db_pool", sentinel_pool)
     monkeypatch.setattr(api_module, "get_redis", lambda: redis_client)
 
-    asyncio.run(api_module.run_due_schedules(_FakePool(conn)))
+    scheduler_pool = _FakePool(conn)
+    asyncio.run(api_module.run_due_schedules(scheduler_pool))
 
     executed_sql = "\n".join(query for query, _args in conn.executes)
     assert "INSERT INTO scans" not in executed_sql
-    assert "UPDATE schedules SET last_run_at" in executed_sql
+    assert "UPDATE schedules SET is_active = false" in executed_sql
+    assert "UPDATE schedules SET last_run_at" not in executed_sql
     assert redis_client.rpush_calls == []
     assert redis_client.hset_calls == []
-    assert api_module.db_pool is sentinel_pool
 
 
-def test_run_due_schedules_retries_invalid_retention_sweep_schedule(monkeypatch):
+def test_run_due_schedules_disables_legacy_destructive_retention_schedule(monkeypatch):
     schedule = _due_schedule()
     schedule["schedule_kind"] = "evidence_retention_sweep"
     schedule["scan_options"] = {"dry_run": False}
@@ -1388,7 +1391,8 @@ def test_run_due_schedules_retries_invalid_retention_sweep_schedule(monkeypatch)
 
     executed_sql = "\n".join(query for query, _args in conn.executes)
     assert "INSERT INTO scans" not in executed_sql
-    assert "UPDATE schedules SET next_run_at" in executed_sql
+    assert "UPDATE schedules SET is_active = false" in executed_sql
+    assert "UPDATE schedules SET next_run_at" not in executed_sql
     assert "UPDATE schedules SET last_run_at" not in executed_sql
 
 
@@ -5933,27 +5937,271 @@ def test_older_than_days_cannot_shorten_audit_or_sensitive_retention_floor():
     assert sensitive["retention_days"] == api_module.EVIDENCE_RETENTION_DAYS["sensitive"]
 
 
-class _SweepConn:
-    """Fake conn for the retention-sweep endpoint: durable policy read, blocked
-    command_results INSERT capture, and empty evidence/finding fetches."""
+class _RetentionTransaction:
+    def __init__(self, conn):
+        self.conn = conn
+        self.snapshot = None
 
-    def __init__(self, *, policy_on=False):
+    async def __aenter__(self):
+        self.snapshot = {
+            "evidence": copy.deepcopy(self.conn.evidence),
+            "previews": copy.deepcopy(self.conn.previews),
+            "recorded": copy.deepcopy(self.conn.recorded),
+            "deleted_arg": copy.deepcopy(self.conn.deleted_arg),
+        }
+        return self
+
+    async def __aexit__(self, exc_type, _exc, _tb):
+        if exc_type is not None and self.snapshot is not None:
+            self.conn.evidence = self.snapshot["evidence"]
+            self.conn.previews = self.snapshot["previews"]
+            self.conn.recorded = self.snapshot["recorded"]
+            self.conn.deleted_arg = self.snapshot["deleted_arg"]
+        return False
+
+
+class _RetentionConn:
+    """Small stateful Postgres fake for the preview/execute retention contract."""
+
+    def __init__(self, evidence=None, *, policy_on=False, scope_target_id=None):
+        self.target_id = uuid.uuid4()
+        self.target_url = "https://example.test"
+        self.approval_id = uuid.uuid4()
+        self.scope_id = "scope-retention-test"
+        self.scope_target_id = scope_target_id or self.target_id
         self.policy_on = policy_on
+        self.approval_risk = "dangerous"
+        self.approval_action_name = "evidence.retention_sweep"
+        self.approval_expires_at = "preview"
+        self.evidence = [dict(row) for row in (evidence or [])]
+        self.previews = {}
+        self.findings = {}
+        self.scans = {}
         self.recorded = []
+        self.deleted_arg = []
+        for row in self.evidence:
+            if row.get("scan_id"):
+                self.scans.setdefault(row["scan_id"], {"id": row["scan_id"], "target_id": self.target_id})
+            if row.get("finding_id"):
+                self.findings.setdefault(row["finding_id"], {
+                    "id": row["finding_id"], "target_id": self.target_id, "status": "resolved",
+                })
+
+    def transaction(self):
+        return _RetentionTransaction(self)
 
     async def fetchval(self, query, *args):
         if "FROM app_settings" in query:
             return "true" if self.policy_on else None
+        if "pg_advisory_lock" in query or "pg_advisory_unlock" in query:
+            return True
+        if "FROM evidence_retention_previews" in query and "approval_receipt_id" in query:
+            approval_id, preview_id = args
+            for item in self.previews.values():
+                if item["id"] != preview_id and item.get("approval_receipt_id") == approval_id:
+                    return item["id"]
         return None
 
     async def fetchrow(self, query, *args):
-        if "command_results" in query:
-            self.recorded.append({"command": args[0], "status": args[1]})
-            return {"id": "cmd-x", "command": args[0], "status": args[1], "created_at": None}
+        if "FROM targets" in query:
+            return {"id": self.target_id, "url": self.target_url} if args[0] == self.target_id else None
+        if "FROM evidence_retention_previews" in query:
+            return self.previews.get(args[0])
+        if "FROM approval_receipts" in query:
+            if args[0] != self.approval_id:
+                return None
+            preview = next(reversed(self.previews.values()), {})
+            approval_expires_at = (
+                preview.get("expires_at")
+                if self.approval_expires_at == "preview"
+                else self.approval_expires_at
+            )
+            return {
+                "id": self.approval_id,
+                "scope_receipt_id": self.scope_id,
+                "risk_tier": self.approval_risk,
+                "confirmations": ["confirm_authorized"],
+                "action_name": self.approval_action_name,
+                "action_context": {
+                    "preview_id": str(preview.get("id") or ""),
+                    "preview_hash": str(preview.get("preview_hash") or ""),
+                    "target_id": str(preview.get("target_id") or ""),
+                },
+                "approved_by": "test",
+                "denial_reason": None,
+                "expires_at": approval_expires_at,
+                "created_at": datetime.now(timezone.utc),
+            }
+        if "FROM scope_receipts" in query:
+            if args[0] != self.scope_id:
+                return None
+            return {
+                "id": self.scope_id,
+                "target_id": self.scope_target_id,
+                "verdict": "allowed",
+                "normalized_scope": {"host": "example.test"},
+                "allowed_hosts": ["example.test"],
+                "allowed_root_domains": [],
+                "blocked_by": [],
+                "warnings": [],
+                "checks": [],
+            }
+        if "INSERT INTO command_results" in query:
+            command_id = uuid.uuid4()
+            row = {
+                "id": command_id,
+                "command": args[0],
+                "status": args[1],
+                "dry_run": args[2],
+                "risk_tier": args[3],
+                "operation_plan_id": args[4],
+                "scope_receipt_id": args[5],
+                "approval_receipt_id": args[6],
+                "campaign_id": args[7],
+                "scan_id": args[8],
+                "finding_ids": args[9],
+                "hypothesis_ids": args[10],
+                "evidence_object_ids": args[11],
+                "tool_receipt_ids": args[12],
+                "blocked_by": args[13],
+                "next_action": args[14],
+                "operator_message": args[15],
+                "result_json": args[16],
+                "created_by": args[17],
+                "created_at": datetime.now(timezone.utc),
+            }
+            self.recorded.append(row)
+            return row
+        if "INSERT INTO approval_receipts" in query:
+            return {
+                "id": uuid.uuid4(),
+                "scope_receipt_id": args[0],
+                "risk_tier": args[1],
+                "confirmations": args[2],
+                "action_name": args[3],
+                "action_context": args[4],
+                "approved_by": args[5],
+                "denial_reason": args[6],
+                "expires_at": args[7],
+                "created_at": datetime.now(timezone.utc),
+            }
+        if "INSERT INTO campaign_actions" in query:
+            return None
         return None
 
     async def fetch(self, query, *args):
+        if "FROM evidence_retention_previews" in query:
+            target_id, limit = args
+            rows = [
+                dict(row) for row in self.previews.values()
+                if row.get("status") == "executing"
+                and (target_id is None or row.get("target_id") == target_id)
+            ]
+            return rows[:limit]
+        if "SELECT eo.*" in query:
+            target_id, retention_class, limit, current, older_than_days = args
+            rows = []
+            for row in self.evidence:
+                finding = self.findings.get(row.get("finding_id"))
+                scan = self.scans.get(row.get("scan_id"))
+                if not finding and not scan:
+                    continue
+                if finding and (finding["target_id"] != target_id or finding["status"] == "active"):
+                    continue
+                if scan and scan["target_id"] != target_id:
+                    continue
+                if retention_class and row.get("retention_class") != retention_class:
+                    continue
+                if row.get("retention_class") == "legal_hold":
+                    continue
+                if row.get("retention_delete_pending_at"):
+                    continue
+                if api_module._evidence_retention_candidate(
+                    row,
+                    now=current,
+                    older_than_days=older_than_days,
+                    retention_class_filter=retention_class,
+                ) is None:
+                    continue
+                rows.append(dict(row))
+            return sorted(rows, key=lambda row: (row["created_at"], row["id"]))[:limit]
+        if "SELECT storage_uri, COUNT(*) AS reference_count" in query:
+            counts = Counter(
+                str(row.get("storage_uri") or "") for row in self.evidence
+                if row.get("storage_uri") in set(args[0])
+            )
+            return [{"storage_uri": key, "reference_count": value} for key, value in counts.items()]
+        if "SELECT * FROM evidence_objects" in query:
+            ids = set(args[0])
+            return sorted((dict(row) for row in self.evidence if row["id"] in ids), key=lambda row: row["id"])
+        if "UPDATE evidence_objects" in query and "retention_delete_pending_at=NOW()" in query:
+            preview_id, ids = args
+            marked = []
+            for row in self.evidence:
+                if row["id"] in set(ids) and not row.get("retention_delete_pending_at"):
+                    row["retention_delete_preview_id"] = preview_id
+                    row["retention_delete_pending_at"] = datetime.now(timezone.utc)
+                    marked.append({"id": row["id"]})
+            return marked
+        if "FROM findings" in query:
+            return [self.findings[item] for item in args[0] if item in self.findings]
+        if "FROM scans" in query:
+            return [self.scans[item] for item in args[0] if item in self.scans]
+        if "DELETE FROM evidence_objects" in query:
+            ids = set(args[0])
+            preview_id = args[1] if len(args) > 1 else None
+            self.deleted_arg = sorted(ids)
+            deleted = [
+                {"id": row["id"]}
+                for row in self.evidence
+                if row["id"] in ids
+                and (preview_id is None or row.get("retention_delete_preview_id") == preview_id)
+            ]
+            deleted_ids = {row["id"] for row in deleted}
+            self.evidence = [row for row in self.evidence if row["id"] not in deleted_ids]
+            return deleted
         return []
+
+    async def execute(self, query, *args):
+        if "INSERT INTO evidence_retention_previews" in query:
+            self.previews[args[0]] = {
+                "id": args[0],
+                "target_id": args[1],
+                "schema_version": args[2],
+                "criteria_json": args[3],
+                "candidate_snapshot_json": args[4],
+                "preview_hash": args[5],
+                "policy_hash": args[6],
+                "status": "ready",
+                "created_at": args[7],
+                "expires_at": args[8],
+                "approval_receipt_id": None,
+                "scope_receipt_id": None,
+                "operation_id": None,
+                "execution_started_at": None,
+                "result_json": {},
+            }
+        elif "SET status='stale'" in query:
+            self.previews[args[0]]["status"] = "stale"
+            self.previews[args[0]]["result_json"] = args[1]
+        elif "SET status='executing'" in query:
+            preview = self.previews[args[0]]
+            preview["status"] = "executing"
+            preview["approval_receipt_id"] = args[1]
+            preview["scope_receipt_id"] = args[2]
+            preview["execution_started_at"] = datetime.now(timezone.utc)
+        elif "SET status='consumed'" in query:
+            preview = self.previews[args[0]]
+            preview["status"] = "consumed"
+            preview["operation_id"] = args[1]
+            preview["result_json"] = args[2]
+            preview["consumed_at"] = datetime.now(timezone.utc)
+        elif "SET retention_delete_preview_id=NULL" in query:
+            for row in self.evidence:
+                if row.get("retention_delete_preview_id") == args[0]:
+                    row["retention_delete_preview_id"] = None
+                    row["retention_delete_pending_at"] = None
+        return "OK"
 
 
 def _pool_for(conn):
@@ -5971,8 +6219,43 @@ def _pool_for(conn):
     return _Pool()
 
 
-def test_retention_sweep_execute_requires_approval_when_policy_on(monkeypatch):
-    conn = _SweepConn(policy_on=True)
+def _retention_row(*, storage_uri="inline:evidence_objects", finding_id=None, scan_id=None):
+    return {
+        "id": uuid.uuid4(),
+        "scan_id": scan_id or uuid.uuid4(),
+        "finding_id": finding_id,
+        "object_type": "finding_evidence",
+        "content_sha256": "a" * 64,
+        "size_bytes": 4096,
+        "retention_class": "short",
+        "storage_uri": storage_uri,
+        "created_at": datetime(2025, 1, 1, tzinfo=timezone.utc),
+    }
+
+
+def _run_retention_preview(conn, **overrides):
+    fields = {"dry_run": True, "target_id": str(conn.target_id), **overrides}
+    return asyncio.run(api_module._evidence_retention_sweep(
+        api_module.EvidenceRetentionSweepRequest(**fields),
+        pool=_pool_for(conn),
+    ))
+
+
+def _run_retention_execute(conn, preview_id, **overrides):
+    fields = {
+        "dry_run": False,
+        "preview_id": preview_id,
+        "approval_receipt_id": str(conn.approval_id),
+        **overrides,
+    }
+    return asyncio.run(api_module._evidence_retention_sweep(
+        api_module.EvidenceRetentionSweepRequest(**fields),
+        pool=_pool_for(conn),
+    ))
+
+
+def test_retention_sweep_execute_requires_preview_before_approval(monkeypatch):
+    conn = _RetentionConn(policy_on=True)
     monkeypatch.setattr(api_module, "db_pool", _pool_for(conn))
     req = api_module.EvidenceRetentionSweepRequest(dry_run=False)
 
@@ -5980,46 +6263,64 @@ def test_retention_sweep_execute_requires_approval_when_policy_on(monkeypatch):
         asyncio.run(api_module.evidence_retention_sweep(req))
 
     assert exc.value.status_code == 409
-    assert conn.recorded and conn.recorded[0]["command"] == "evidence.retention_sweep"
-    assert conn.recorded[0]["status"] == "approval_required"
+    assert conn.recorded == []
 
 
-def test_retention_sweep_dry_run_preview_needs_no_approval(monkeypatch):
-    conn = _SweepConn(policy_on=True)
-    monkeypatch.setattr(api_module, "db_pool", _pool_for(conn))
-    req = api_module.EvidenceRetentionSweepRequest(dry_run=True)
+def test_retention_sweep_execute_always_requires_target_scoped_approval():
+    conn = _RetentionConn(policy_on=False)
+    preview = _run_retention_preview(conn)
+    req = api_module.EvidenceRetentionSweepRequest(dry_run=False, preview_id=preview["preview_id"])
 
-    result = asyncio.run(api_module.evidence_retention_sweep(req))
+    with pytest.raises(api_module.HTTPException) as exc:
+        asyncio.run(api_module._evidence_retention_sweep(req, pool=_pool_for(conn)))
+
+    assert exc.value.status_code == 400
+    assert conn.recorded[-1]["status"] == "blocked"
+
+
+def test_retention_sweep_dry_run_preview_is_target_bound_and_needs_no_approval():
+    conn = _RetentionConn(policy_on=True)
+    result = _run_retention_preview(conn, retention_class="short", older_than_days=90, limit=10)
 
     assert result["dry_run"] is True
     assert result["execution_enabled"] is False
-    assert conn.recorded == []  # preview records nothing and requires no receipt
+    assert result["target_id"] == str(conn.target_id)
+    assert result["preview_criteria"] == {
+        "scope": "target",
+        "target_id": str(conn.target_id),
+        "older_than_days": 90,
+        "retention_class": "short",
+        "limit": 10,
+        "delete_local_files": True,
+    }
+    assert uuid.UUID(result["preview_id"])
+    assert conn.recorded == []
 
 
-def test_retention_sweep_dry_run_reports_remote_objects_as_preserved(monkeypatch):
-    old = datetime(2025, 1, 1, tzinfo=timezone.utc)
-    remote_id = uuid.uuid4()
+def test_retention_sweep_applies_limit_after_mixed_class_age_eligibility():
+    ineligible_audit = _retention_row()
+    ineligible_audit.update({
+        "retention_class": "audit",
+        "created_at": datetime.now(timezone.utc) - timedelta(days=100),
+    })
+    eligible_short = _retention_row()
+    eligible_short.update({
+        "retention_class": "short",
+        "created_at": datetime.now(timezone.utc) - timedelta(days=40),
+    })
+    conn = _RetentionConn([ineligible_audit, eligible_short])
 
-    class _RemoteSweepConn(_SweepConn):
-        async def fetch(self, query, *args):
-            return [
-                {
-                    "id": remote_id,
-                    "scan_id": None,
-                    "finding_id": None,
-                    "object_type": "finding_evidence",
-                    "content_sha256": "a" * 64,
-                    "size_bytes": 4096,
-                    "retention_class": "short",
-                    "storage_uri": "s3:evidence_objects/audit-bucket/evidence-objects/aa/" + ("a" * 64) + ".json",
-                    "created_at": old,
-                }
-            ]
+    result = _run_retention_preview(conn, limit=1)
 
-    conn = _RemoteSweepConn(policy_on=False)
-    monkeypatch.setattr(api_module, "db_pool", _pool_for(conn))
+    assert result["candidate_count"] == 1
+    assert result["candidates"][0]["id"] == str(eligible_short["id"])
+    assert result["candidates"][0]["retention_class"] == "short"
 
-    result = asyncio.run(api_module.evidence_retention_sweep(api_module.EvidenceRetentionSweepRequest(dry_run=True)))
+
+def test_retention_sweep_dry_run_reports_remote_objects_as_preserved():
+    row = _retention_row(storage_uri="s3:evidence_objects/audit-bucket/evidence-objects/aa/" + ("a" * 64) + ".json")
+    conn = _RetentionConn([row])
+    result = _run_retention_preview(conn)
 
     assert result["candidate_count"] == 1
     assert result["remote_objects"] == {
@@ -6034,85 +6335,99 @@ def test_retention_sweep_dry_run_reports_remote_objects_as_preserved(monkeypatch
         "errors": [],
     }
     assert result["local_files"] == {"deleted": [], "missing": [], "errors": []}
-    assert result["candidates"][0]["id"] == str(remote_id)
+    assert result["candidates"][0]["id"] == str(row["id"])
     assert result["candidates"][0]["storage_backend"] == "s3"
     assert result["candidates"][0]["remote_object"] is True
 
 
-def test_retention_sweep_executes_remote_delete_before_db_delete(monkeypatch):
-    old = datetime(2025, 1, 1, tzinfo=timezone.utc)
-    remote_id = uuid.uuid4()
-    rows = [
-        {
-            "id": remote_id,
-            "scan_id": None,
-            "finding_id": None,
-            "object_type": "finding_evidence",
-            "content_sha256": "a" * 64,
-            "size_bytes": 4096,
-            "retention_class": "short",
-            "storage_uri": "s3:evidence_objects/audit-bucket/evidence-objects/aa/" + ("a" * 64) + ".json",
-            "created_at": old,
-        }
-    ]
-
-    class _RemoteDeleteSweepConn(_SweepConn):
-        async def fetch(self, query, *args):
-            if "DELETE FROM evidence_objects" in query:
-                self.deleted_arg = args[0]
-                return [{"id": item} for item in args[0]]
-            if "SELECT DISTINCT storage_uri" in query:
-                return []  # no other evidence row shares this blob
-            return rows
-
-    conn = _RemoteDeleteSweepConn(policy_on=False)
+def test_retention_approval_creation_binds_exact_preview_and_normalizes_expiry(monkeypatch):
+    conn = _RetentionConn([_retention_row()])
+    preview = _run_retention_preview(conn)
     monkeypatch.setattr(api_module, "db_pool", _pool_for(conn))
-    monkeypatch.setattr(api_module, "delete_remote_evidence_object", lambda storage_uri: {
-        "storage_uri": storage_uri,
-        "storage_backend": "s3",
-        "status": "deleted",
-        "deleted": True,
-        "retryable": False,
-    })
+    # A timezone-less API value is interpreted as UTC rather than raising during
+    # comparison with the preview's timezone-aware expiry.
+    expires_at = datetime.fromisoformat(preview["preview_expires_at"]).replace(tzinfo=None)
+    request = api_module.ApprovalReceiptRequest(
+        scope_receipt_id=conn.scope_id,
+        risk_tier="dangerous",
+        confirmations=["confirm_authorized"],
+        approved_by="test",
+        expires_at=expires_at,
+        action_name="evidence.retention_sweep",
+        action_context={
+            "preview_id": preview["preview_id"],
+            "preview_hash": preview["preview_hash"],
+            "target_id": str(conn.target_id),
+        },
+    )
 
-    result = asyncio.run(api_module.evidence_retention_sweep(api_module.EvidenceRetentionSweepRequest(dry_run=False)))
+    result = asyncio.run(api_module.arsenal_create_approval(request))
+
+    approval = result["approval_receipt"]
+    assert approval["risk_tier"] == "dangerous"
+    assert approval["action_name"] == "evidence.retention_sweep"
+    assert approval["action_context"] == request.action_context
+    assert api_module._parse_hypothesis_time(approval["expires_at"]).tzinfo == timezone.utc
+
+
+def test_retention_approval_creation_rejects_preview_context_mismatch(monkeypatch):
+    conn = _RetentionConn([_retention_row()])
+    preview = _run_retention_preview(conn)
+    monkeypatch.setattr(api_module, "db_pool", _pool_for(conn))
+    request = api_module.ApprovalReceiptRequest(
+        scope_receipt_id=conn.scope_id,
+        risk_tier="dangerous",
+        confirmations=["confirm_authorized"],
+        approved_by="test",
+        expires_at=datetime.fromisoformat(preview["preview_expires_at"]),
+        action_name="evidence.retention_sweep",
+        action_context={
+            "preview_id": preview["preview_id"],
+            "preview_hash": "0" * 64,
+            "target_id": str(conn.target_id),
+        },
+    )
+
+    with pytest.raises(api_module.HTTPException) as exc:
+        asyncio.run(api_module.arsenal_create_approval(request))
+
+    assert exc.value.status_code == 400
+    assert "does not match" in str(exc.value.detail)
+
+
+def test_retention_sweep_executes_exact_remote_preview_once(monkeypatch):
+    row = _retention_row(storage_uri="s3:evidence_objects/audit-bucket/evidence-objects/aa/" + ("a" * 64) + ".json")
+    conn = _RetentionConn([row])
+    calls = []
+    monkeypatch.setattr(api_module, "delete_remote_evidence_object", lambda storage_uri: (
+        calls.append(storage_uri) or {
+            "storage_uri": storage_uri,
+            "storage_backend": "s3",
+            "status": "deleted",
+            "deleted": True,
+            "retryable": False,
+        }
+    ))
+
+    preview = _run_retention_preview(conn)
+    result = _run_retention_execute(conn, preview["preview_id"])
+    original_target_id = conn.target_id
+    conn.target_id = uuid.uuid4()
+    replay = _run_retention_execute(conn, preview["preview_id"])
 
     assert result["deleted_count"] == 1
     assert result["remote_objects"]["candidate_count"] == 1
     assert result["remote_objects"]["deleted_count"] == 1
     assert result["remote_objects"]["preserved_count"] == 0
-    assert conn.deleted_arg == [remote_id]
+    assert conn.deleted_arg == [row["id"]]
+    assert replay["idempotent_replay"] is True
+    assert replay["target_id"] == str(original_target_id)
+    assert calls == [row["storage_uri"]]
 
 
 def test_retention_sweep_preserves_row_when_remote_delete_fails(monkeypatch):
-    old = datetime(2025, 1, 1, tzinfo=timezone.utc)
-    remote_id = uuid.uuid4()
-    rows = [
-        {
-            "id": remote_id,
-            "scan_id": None,
-            "finding_id": None,
-            "object_type": "finding_evidence",
-            "content_sha256": "a" * 64,
-            "size_bytes": 4096,
-            "retention_class": "short",
-            "storage_uri": "s3:evidence_objects/audit-bucket/evidence-objects/aa/" + ("a" * 64) + ".json",
-            "created_at": old,
-        }
-    ]
-
-    class _RemoteDeleteFailureSweepConn(_SweepConn):
-        async def fetch(self, query, *args):
-            if "DELETE FROM evidence_objects" in query:
-                self.delete_called = True
-                return [{"id": item} for item in args[0]]
-            if "SELECT DISTINCT storage_uri" in query:
-                return []  # no other evidence row shares this blob
-            return rows
-
-    conn = _RemoteDeleteFailureSweepConn(policy_on=False)
-    conn.delete_called = False
-    monkeypatch.setattr(api_module, "db_pool", _pool_for(conn))
+    row = _retention_row(storage_uri="s3:evidence_objects/audit-bucket/evidence-objects/aa/" + ("a" * 64) + ".json")
+    conn = _RetentionConn([row])
     monkeypatch.setattr(api_module, "delete_remote_evidence_object", lambda storage_uri: {
         "storage_uri": storage_uri,
         "storage_backend": "s3",
@@ -6122,12 +6437,371 @@ def test_retention_sweep_preserves_row_when_remote_delete_fails(monkeypatch):
         "error": "HTTPError: 403",
     })
 
-    result = asyncio.run(api_module.evidence_retention_sweep(api_module.EvidenceRetentionSweepRequest(dry_run=False)))
+    preview = _run_retention_preview(conn)
+    result = _run_retention_execute(conn, preview["preview_id"])
 
     assert result["deleted_count"] == 0
     assert result["remote_objects"]["failed_count"] == 1
     assert result["remote_objects"]["preserved_count"] == 1
-    assert conn.delete_called is False
+    assert conn.deleted_arg == []
+    assert [item["id"] for item in conn.evidence] == [row["id"]]
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("target_id", "11111111-1111-4111-8111-111111111111"),
+        ("older_than_days", 90),
+        ("retention_class", "short"),
+        ("limit", 10),
+        ("delete_local_files", False),
+    ],
+)
+def test_retention_execute_rejects_resubmitted_criteria(field, value):
+    conn = _RetentionConn()
+    preview = _run_retention_preview(conn)
+
+    with pytest.raises(api_module.HTTPException) as exc:
+        _run_retention_execute(conn, preview["preview_id"], **{field: value})
+
+    assert exc.value.status_code == 409
+    assert conn.previews[uuid.UUID(preview["preview_id"])]["status"] == "ready"
+
+
+@pytest.mark.parametrize(
+    "attribute,value",
+    [
+        ("approval_risk", "active"),
+        ("approval_action_name", "scan.submit"),
+        ("approval_expires_at", None),
+    ],
+)
+def test_retention_execute_requires_short_lived_exact_action_approval(attribute, value):
+    conn = _RetentionConn([_retention_row()])
+    preview = _run_retention_preview(conn)
+    setattr(conn, attribute, value)
+
+    with pytest.raises(api_module.HTTPException) as exc:
+        _run_retention_execute(conn, preview["preview_id"])
+
+    assert exc.value.status_code == 400
+    assert conn.previews[uuid.UUID(preview["preview_id"])]["status"] == "ready"
+    assert all(not row.get("retention_delete_pending_at") for row in conn.evidence)
+
+
+def test_retention_execute_ignores_newly_eligible_rows():
+    first = _retention_row()
+    conn = _RetentionConn([first])
+    preview = _run_retention_preview(conn)
+    later = _retention_row(storage_uri="inline:evidence_objects/newly-eligible")
+    conn.evidence.append(later)
+    conn.scans[later["scan_id"]] = {"id": later["scan_id"], "target_id": conn.target_id}
+
+    result = _run_retention_execute(conn, preview["preview_id"])
+
+    assert result["deleted_count"] == 1
+    assert [row["id"] for row in conn.evidence] == [later["id"]]
+
+
+def test_retention_execute_aborts_all_when_finding_becomes_active(monkeypatch):
+    finding_id = uuid.uuid4()
+    row = _retention_row(
+        finding_id=finding_id,
+        storage_uri="s3:evidence_objects/audit-bucket/evidence-objects/aa/" + ("a" * 64) + ".json",
+    )
+    conn = _RetentionConn([row])
+    preview = _run_retention_preview(conn)
+    conn.findings[finding_id]["status"] = "active"
+    calls = []
+    monkeypatch.setattr(api_module, "delete_remote_evidence_object", lambda uri: calls.append(uri))
+
+    with pytest.raises(api_module.HTTPException) as exc:
+        _run_retention_execute(conn, preview["preview_id"])
+
+    assert exc.value.status_code == 409
+    assert calls == []
+    assert [item["id"] for item in conn.evidence] == [row["id"]]
+    assert conn.previews[uuid.UUID(preview["preview_id"])]["status"] == "stale"
+
+
+def test_retention_execute_aborts_when_shared_blob_effect_changes(monkeypatch):
+    uri = "s3:evidence_objects/audit-bucket/evidence-objects/aa/" + ("a" * 64) + ".json"
+    first = _retention_row(storage_uri=uri)
+    conn = _RetentionConn([first])
+    preview = _run_retention_preview(conn)
+    shared = _retention_row(storage_uri=uri)
+    shared["retention_class"] = "legal_hold"
+    conn.evidence.append(shared)
+    conn.scans[shared["scan_id"]] = {"id": shared["scan_id"], "target_id": conn.target_id}
+    calls = []
+    monkeypatch.setattr(api_module, "delete_remote_evidence_object", lambda value: calls.append(value))
+
+    with pytest.raises(api_module.HTTPException) as exc:
+        _run_retention_execute(conn, preview["preview_id"])
+
+    assert exc.value.status_code == 409
+    assert calls == []
+    assert len(conn.evidence) == 2
+
+
+def test_retention_execution_never_escalates_previewed_shared_blob_to_delete(monkeypatch):
+    uri = "s3:evidence_objects/audit-bucket/evidence-objects/aa/" + ("a" * 64) + ".json"
+    candidate = _retention_row(storage_uri=uri)
+    shared = _retention_row(storage_uri=uri)
+    shared["retention_class"] = "legal_hold"
+    conn = _RetentionConn([candidate, shared])
+    preview = _run_retention_preview(conn)
+    assert preview["candidates"][0]["planned_blob_action"] == "preserve_shared"
+    original_links_match = api_module._evidence_retention_links_match_target
+    link_checks = 0
+
+    async def remove_shared_after_intent(*args, **kwargs):
+        nonlocal link_checks
+        link_checks += 1
+        if link_checks == 2:
+            conn.evidence = [row for row in conn.evidence if row["id"] != shared["id"]]
+        return await original_links_match(*args, **kwargs)
+
+    blob_deletes = []
+    monkeypatch.setattr(api_module, "_evidence_retention_links_match_target", remove_shared_after_intent)
+    monkeypatch.setattr(api_module, "delete_remote_evidence_object", lambda uri: blob_deletes.append(uri))
+
+    result = _run_retention_execute(conn, preview["preview_id"])
+
+    assert result["deleted_count"] == 1
+    assert blob_deletes == []
+    assert result["candidates"][0]["planned_blob_action"] == "preserve_shared"
+
+
+def test_retention_execution_finishes_committed_intent_if_finding_resurfaces(monkeypatch):
+    finding_id = uuid.uuid4()
+    row = _retention_row(
+        finding_id=finding_id,
+        storage_uri="s3:evidence_objects/audit-bucket/evidence-objects/aa/" + ("a" * 64) + ".json",
+    )
+    conn = _RetentionConn([row])
+    preview = _run_retention_preview(conn)
+    original_links_match = api_module._evidence_retention_links_match_target
+    async def activate_after_intent(*args, **kwargs):
+        result = await original_links_match(*args, **kwargs)
+        conn.findings[finding_id]["status"] = "active"
+        return result
+
+    blob_deletes = []
+    monkeypatch.setattr(api_module, "_evidence_retention_links_match_target", activate_after_intent)
+    monkeypatch.setattr(api_module, "delete_remote_evidence_object", lambda uri: (
+        blob_deletes.append(uri) or {
+            "storage_uri": uri,
+            "storage_backend": "s3",
+            "status": "deleted",
+            "deleted": True,
+            "retryable": False,
+        }
+    ))
+
+    result = _run_retention_execute(conn, preview["preview_id"])
+
+    assert result["deleted_count"] == 1
+    assert blob_deletes == [row["storage_uri"]]
+    assert conn.evidence == []
+    assert conn.findings[finding_id]["status"] == "active"
+    assert conn.previews[uuid.UUID(preview["preview_id"])]["status"] == "consumed"
+
+
+def test_retention_execute_aborts_when_candidate_becomes_legal_hold(monkeypatch):
+    row = _retention_row(
+        storage_uri="s3:evidence_objects/audit-bucket/evidence-objects/aa/" + ("a" * 64) + ".json"
+    )
+    conn = _RetentionConn([row])
+    preview = _run_retention_preview(conn)
+    conn.evidence[0]["retention_class"] = "legal_hold"
+    calls = []
+    monkeypatch.setattr(api_module, "delete_remote_evidence_object", lambda uri: calls.append(uri))
+
+    with pytest.raises(api_module.HTTPException) as exc:
+        _run_retention_execute(conn, preview["preview_id"])
+
+    assert exc.value.status_code == 409
+    assert conn.previews[uuid.UUID(preview["preview_id"])]["status"] == "stale"
+    assert calls == []
+
+
+def test_retention_execute_rejects_approval_target_mismatch():
+    conn = _RetentionConn(scope_target_id=uuid.uuid4())
+    preview = _run_retention_preview(conn)
+
+    with pytest.raises(api_module.HTTPException) as exc:
+        _run_retention_execute(conn, preview["preview_id"])
+
+    assert exc.value.status_code == 400
+    assert conn.previews[uuid.UUID(preview["preview_id"])]["status"] == "ready"
+
+
+def test_retention_execute_rejects_missing_previewed_candidate():
+    row = _retention_row()
+    conn = _RetentionConn([row])
+    preview = _run_retention_preview(conn)
+    conn.evidence = []
+
+    with pytest.raises(api_module.HTTPException) as exc:
+        _run_retention_execute(conn, preview["preview_id"])
+
+    assert exc.value.status_code == 409
+    assert conn.deleted_arg == []
+    assert conn.previews[uuid.UUID(preview["preview_id"])]["status"] == "stale"
+
+
+def test_retention_execute_rejects_expired_preview():
+    conn = _RetentionConn()
+    preview = _run_retention_preview(conn)
+    preview_row = conn.previews[uuid.UUID(preview["preview_id"])]
+    preview_row["expires_at"] = datetime.now(timezone.utc) - timedelta(seconds=1)
+    payload = api_module._evidence_retention_preview_payload(preview_row)
+    preview_row["preview_hash"] = api_module._evidence_retention_preview_hash(payload)
+
+    with pytest.raises(api_module.HTTPException) as exc:
+        _run_retention_execute(conn, preview["preview_id"])
+
+    assert exc.value.status_code == 409
+    assert "expired" in str(exc.value.detail).lower()
+
+
+def test_retention_execute_rejects_policy_change(monkeypatch):
+    conn = _RetentionConn()
+    preview = _run_retention_preview(conn)
+    changed_policy = dict(api_module.EVIDENCE_RETENTION_DAYS)
+    changed_policy["short"] += 1
+    monkeypatch.setattr(api_module, "EVIDENCE_RETENTION_DAYS", changed_policy)
+
+    with pytest.raises(api_module.HTTPException) as exc:
+        _run_retention_execute(conn, preview["preview_id"])
+
+    assert exc.value.status_code == 409
+    assert "policy" in str(exc.value.detail).lower()
+
+
+def test_retention_local_delete_failure_preserves_evidence_row(monkeypatch):
+    row = _retention_row(storage_uri="local:evidence_objects/aa/evidence.json")
+    conn = _RetentionConn([row])
+
+    class _FailingPath:
+        def unlink(self):
+            raise OSError("disk is read-only")
+
+        def __str__(self):
+            return "/safe/evidence.json"
+
+    monkeypatch.setattr(api_module, "local_evidence_path", lambda *_args: _FailingPath())
+    preview = _run_retention_preview(conn)
+    result = _run_retention_execute(conn, preview["preview_id"])
+
+    assert result["deleted_count"] == 0
+    assert result["local_files"]["errors"]
+    assert [item["id"] for item in conn.evidence] == [row["id"]]
+
+
+def test_retention_execution_resumes_after_post_blob_database_failure(monkeypatch):
+    finding_id = uuid.uuid4()
+    row = _retention_row(
+        finding_id=finding_id,
+        storage_uri="s3:evidence_objects/audit-bucket/evidence-objects/aa/" + ("a" * 64) + ".json"
+    )
+    conn = _RetentionConn([row])
+    storage_calls = []
+
+    def delete_blob(storage_uri):
+        storage_calls.append(storage_uri)
+        missing = len(storage_calls) > 1
+        return {
+            "storage_uri": storage_uri,
+            "storage_backend": "s3",
+            "status": "missing" if missing else "deleted",
+            "deleted": True,
+            "retryable": False,
+        }
+
+    original_record = api_module._record_command_result
+    failures = 0
+
+    async def fail_first_finalize(*args, **kwargs):
+        nonlocal failures
+        if kwargs.get("command") == "evidence.retention_sweep" and failures == 0:
+            failures += 1
+            raise RuntimeError("database connection lost after blob deletion")
+        return await original_record(*args, **kwargs)
+
+    monkeypatch.setattr(api_module, "delete_remote_evidence_object", delete_blob)
+    monkeypatch.setattr(api_module, "_record_command_result", fail_first_finalize)
+    preview = _run_retention_preview(conn)
+
+    with pytest.raises(RuntimeError):
+        _run_retention_execute(conn, preview["preview_id"])
+
+    preview_row = conn.previews[uuid.UUID(preview["preview_id"])]
+    assert preview_row["status"] == "executing"
+    assert conn.evidence[0]["retention_delete_preview_id"] == uuid.UUID(preview["preview_id"])
+    conn.findings[finding_id]["status"] = "active"
+
+    result = _run_retention_execute(conn, preview["preview_id"])
+
+    assert result["deleted_count"] == 1
+    assert result["remote_objects"]["missing_count"] == 1
+    assert conn.previews[uuid.UUID(preview["preview_id"])]["status"] == "consumed"
+    assert conn.evidence == []
+    assert conn.findings[finding_id]["status"] == "active"
+    assert len(storage_calls) == 2
+
+
+def test_retention_deletion_io_waits_for_threads_before_propagating_cancellation(monkeypatch):
+    started = threading.Event()
+    release = threading.Event()
+
+    def blocking_remote(_candidates):
+        started.set()
+        release.wait(timeout=5)
+        return {"deleted": [], "missing": [], "errors": [], "deleted_ids": []}
+
+    monkeypatch.setattr(api_module, "_delete_remote_evidence_objects", blocking_remote)
+
+    async def scenario():
+        task = asyncio.create_task(api_module._run_evidence_retention_deletion_io([{"id": "one"}], []))
+        while not started.is_set():
+            await asyncio.sleep(0.001)
+        task.cancel()
+        await asyncio.sleep(0.02)
+        assert task.done() is False
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(scenario())
+
+
+def test_retention_executing_intent_is_listed_for_reload_recovery(monkeypatch):
+    conn = _RetentionConn([_retention_row()])
+    preview = _run_retention_preview(conn)
+    row = conn.previews[uuid.UUID(preview["preview_id"])]
+    row["status"] = "executing"
+    row["approval_receipt_id"] = conn.approval_id
+    row["scope_receipt_id"] = conn.scope_id
+    row["execution_started_at"] = datetime.now(timezone.utc)
+    monkeypatch.setattr(api_module, "db_pool", _pool_for(conn))
+
+    result = asyncio.run(api_module.list_evidence_retention_executions(
+        target_id=str(conn.target_id),
+        limit=20,
+    ))
+
+    assert result["count"] == 1
+    execution = result["executions"][0]
+    assert execution["preview_status"] == "executing"
+    assert execution["preview_id"] == preview["preview_id"]
+    assert execution["approval_receipt_id"] == str(conn.approval_id)
+    assert [candidate["id"] for candidate in execution["candidates"]] == [
+        candidate["id"] for candidate in preview["candidates"]
+    ]
+    assert all("storage_backend" not in candidate for candidate in execution["candidates"])
+    assert all("age_days" not in candidate for candidate in execution["candidates"])
 
 
 # ----- §2 Command Arsenal execution gateway ------------------------------------
@@ -6510,7 +7184,10 @@ def test_arsenal_execute_gated_evidence_retention_sweep_dispatches_when_allowed(
         _BlockedRecordingConn(),
         api_module.ArsenalExecuteRequest(
             command="evidence.retention_sweep",
-            parameters={"dry_run": False, "older_than_days": 90, "retention_class": "short"},
+            parameters={
+                "dry_run": False,
+                "preview_id": "55555555-5555-4555-8555-555555555555",
+            },
             execute=True,
             confirmations=["confirm_authorized"],
             approval_receipt_id="r",
@@ -6520,8 +7197,91 @@ def test_arsenal_execute_gated_evidence_retention_sweep_dispatches_when_allowed(
     assert result["dispatched"] is True
     assert result["operation_id"] == "op-sweep"
     assert captured["body"].dry_run is False
-    assert captured["body"].older_than_days == 90
+    assert captured["body"].preview_id == "55555555-5555-4555-8555-555555555555"
+    assert captured["body"].target_id is None
+    assert captured["body"].older_than_days is None
+    assert captured["body"].retention_class is None
     assert captured["body"].approval_receipt_id == "r"
+
+
+def test_arsenal_retention_preview_dispatches_without_execution_gate_or_approval(monkeypatch):
+    monkeypatch.setattr(api_module, "_ai_ops_execute_enabled", lambda: False)
+    captured = {}
+
+    async def reject_if_validated(*args, **kwargs):
+        raise AssertionError("read-only preview must not validate a destructive approval")
+
+    async def fake_sweep(body):
+        captured["body"] = body
+        return {
+            "dry_run": True,
+            "preview_id": "66666666-6666-4666-8666-666666666666",
+            "candidate_count": 3,
+        }
+
+    monkeypatch.setattr(api_module, "_validate_approval_receipt_for_action", reject_if_validated)
+    monkeypatch.setattr(api_module, "evidence_retention_sweep", fake_sweep)
+
+    result = asyncio.run(api_module._arsenal_execute(
+        _BlockedRecordingConn(),
+        api_module.ArsenalExecuteRequest(
+            command="evidence.retention_sweep",
+            parameters={
+                "dry_run": True,
+                "target_id": "55555555-5555-4555-8555-555555555555",
+                "retention_class": "short",
+            },
+            execute=False,
+            confirmations=[],
+        ),
+    ))
+
+    assert result["dispatched"] is True
+    assert result["dry_run"] is True
+    assert result["execution_enabled"] is False
+    assert result["command_result"]["risk_tier"] == "read_only"
+    assert captured["body"].dry_run is True
+    assert captured["body"].target_id == "55555555-5555-4555-8555-555555555555"
+
+
+def test_public_arsenal_retention_preview_uses_read_only_detached_path(monkeypatch):
+    monkeypatch.setattr(api_module, "_ai_ops_execute_enabled", lambda: False)
+    conn = _BlockedRecordingConn()
+    captured = {}
+
+    async def reject_if_validated(*args, **kwargs):
+        raise AssertionError("public read-only preview must not validate a destructive approval")
+
+    async def fake_sweep(body):
+        captured["body"] = body
+        return {
+            "dry_run": True,
+            "preview_id": "77777777-7777-4777-8777-777777777777",
+            "candidate_count": 0,
+            "candidates": [],
+        }
+
+    monkeypatch.setattr(api_module, "db_pool", _pool_for(conn))
+    monkeypatch.setattr(api_module, "_validate_approval_receipt_for_action", reject_if_validated)
+    monkeypatch.setattr(api_module, "evidence_retention_sweep", fake_sweep)
+
+    result = asyncio.run(api_module.arsenal_execute(api_module.ArsenalExecuteRequest(
+        command="evidence.retention_sweep",
+        parameters={
+            "dry_run": True,
+            "target_id": "55555555-5555-4555-8555-555555555555",
+            "retention_class": "short",
+        },
+        execute=False,
+        confirmations=[],
+    )))
+
+    assert result["dispatched"] is True
+    assert result["dry_run"] is True
+    assert result["execution_enabled"] is False
+    assert result["command_result"]["risk_tier"] == "read_only"
+    assert captured["body"].dry_run is True
+    assert captured["body"].target_id == "55555555-5555-4555-8555-555555555555"
 
 
 def test_arsenal_execute_gated_exception_lifecycle_sweep_dispatches_when_allowed(monkeypatch):
@@ -8873,6 +9633,27 @@ def test_validate_approval_receipt_accepts_valid_receipt():
     assert ctx["runtime_scope_guard"]["allowed_hosts"] == ["app.example.com"]
     assert ctx["runtime_scope_guard"]["allowed_root_domains"] == ["example.com"]
     assert ctx["runtime_scope_guard"]["requires_runtime_destination_check"] is True
+
+
+def test_validate_action_bound_approval_rejects_unrelated_action():
+    conn = _approval_receipt_conn(
+        approval_row=_make_approval_row(
+            action_name="evidence.retention_sweep",
+            action_context={"preview_id": str(uuid.uuid4())},
+        ),
+        scope_row=_make_scope_row(),
+    )
+
+    with pytest.raises(api_module.HTTPException) as exc:
+        _run_validate(
+            conn,
+            APPROVAL_ID,
+            target_url="https://app.example.com/x",
+            action_name="scan.submit:smart",
+        )
+
+    assert exc.value.status_code == 400
+    assert "different action" in str(exc.value.detail)
 
 
 def test_validate_approval_receipt_can_require_receipt_even_when_global_policy_is_off():

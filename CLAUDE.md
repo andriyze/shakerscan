@@ -341,31 +341,44 @@ curl http://localhost:8080/schedules                              # List
 
 # Daily normal scan
 curl -X POST http://localhost:8080/schedules \
+  -H "Content-Type: application/json" \
   -d '{"target_id": "target-uuid", "frequency": "daily",
        "time_of_day": "02:00", "schedule_kind": "normal_scan", "scan_type": "standard"}'
 
 # Weekly ASM coverage wave
 curl -X POST http://localhost:8080/schedules \
+  -H "Content-Type: application/json" \
   -d '{"target_id": "target-uuid", "frequency": "weekly",
        "day_of_week": 1, "time_of_day": "03:00", "schedule_kind": "asm_improve"}'
 
-# Preview-only evidence retention sweep
-curl -X POST http://localhost:8080/schedules \
-  -d '{"frequency":"weekly", "day_of_week":0, "time_of_day":"04:00",
-       "schedule_kind":"evidence_retention_sweep",
-       "scan_options":{"dry_run":true,"retention_class":"short","limit":100}}'
-
 # Update/toggle
 curl -X PATCH http://localhost:8080/schedules/{schedule_id} \
+  -H "Content-Type: application/json" \
   -d '{"is_active": false}'
 
 # Delete
 curl -X DELETE http://localhost:8080/schedules/{schedule_id}
 ```
 
-Schedule kinds are `normal_scan`, `asm_improve`, and `evidence_retention_sweep`. Normal/ASM actions
-are target-scoped; retention sweeps can be global. Executing evidence deletion requires an approval
-receipt and preserves remote objects.
+New schedule kinds are `normal_scan` and `asm_improve`; both are target-scoped. Evidence retention
+cannot be scheduled. Legacy `evidence_retention_sweep` records are disabled and cannot be resumed.
+Interactive deletion
+starts with a target-scoped dry run that persists an immutable candidate snapshot, criteria, storage
+effects, policy hash, and expiry. Its TTL defaults to 600 seconds; the
+`EVIDENCE_RETENTION_PREVIEW_TTL_SECONDS` override is clamped to 60-3600 seconds.
+
+The UI creates a one-use `dangerous` approval for the exact action
+`evidence.retention_sweep`, scoped to the preview target and bound to action context
+`{preview_id, preview_hash, target_id}`. That approval expires no later than the preview. The
+execution body contains only `dry_run:false`, `preview_id`, and `approval_receipt_id`; changed or
+resubmitted cleanup criteria are rejected.
+
+Execution revalidates the immutable cohort, then durably records `executing` intent and per-object
+pending markers before external blob deletion. Retrying the same preview/approval resumes an
+unfinished execution and finalizes it safely; after consumption, retries return the stored result
+without repeating side effects. Expired, stale, mismatched, or reused preview/approval pairs fail
+closed. A committed `executing` intent remains authoritative if finding state changes later, and
+canonical target merges are blocked until that intent is finalized.
 
 ### Certificate Transparency Monitoring (Gungnir)
 

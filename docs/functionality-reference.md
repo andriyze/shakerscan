@@ -6,7 +6,7 @@ governance, automation, UI, CLI, API, and agent-facing surfaces. The human-reada
 the behavior; the generated inventory in §17 enumerates every current public route, registry command,
 CLI flag, wrapper command, Make target, release gate, runtime configuration key, UI page, skill,
 agent, adapter, scanner module, and durable table.
-**Reconciled:** 2026-07-11
+**Reconciled:** 2026-07-16
 **Audience:** users, operators, AI coding agents, and engineers who need one place that explains the
 product's functionality end to end.
 
@@ -449,9 +449,11 @@ discovered surface inherits the ASM policy. Controlled via `./scanner.sh gungnir
 and `/gungnir/*` endpoints.
 
 **Schedules** (`schedule_runner`, `/schedules`): recurring daily/weekly actions with timezone and
-jitter support. `schedule_kind` supports normal scans, bounded `asm_improve` coverage waves, and
-`evidence_retention_sweep`. Retention sweeps default to preview; deletion requires a valid approval
-receipt and preserves remote objects. Schedule listings include derived `schedule_health` when recent scan results
+jitter support. New schedules support normal scans and bounded `asm_improve` coverage waves.
+Legacy `evidence_retention_sweep` records remain readable for migration but are automatically
+disabled and cannot be created or resumed. Interactive deletion requires a fresh immutable preview
+and an exact-action, target-matching approval created through the interactive flow.
+Schedule listings include derived `schedule_health` when recent scan results
 show repeated failures or timeout/heartbeat failures for the same active target/type pair, and the
 Dashboard Action Center links operators to the affected schedule plus the latest failed scan.
 
@@ -681,9 +683,26 @@ Findings support filtering, sorting, bulk update/cleanup, manual creation, and p
 **Evidence objects**: finding evidence is indexed by hash, storage URI, retention class, scan/finding
 links, and redaction profile. Large evidence can live in local content-addressed storage or an opt-in
 S3/MinIO-compatible backend; evidence reads verify SHA-256 before returning remote or local content.
-Retention sweeps are dry-run by default, skip legal hold, can delete local object files only when
-explicitly executed, and report remote-object candidates as preserved because remote deletion is not
-yet supported.
+Retention sweeps are target-scoped and dry-run by default. A preview persists the exact candidate
+snapshot, criteria, storage effects, policy hash, and expiry in PostgreSQL and cannot be altered at
+execution time. The preview TTL defaults to 600 seconds; `EVIDENCE_RETENTION_PREVIEW_TTL_SECONDS`
+is clamped to 60-3600 seconds.
+
+Deletion requires a target-scoped, one-use `dangerous` approval whose `action_name` is exactly
+`evidence.retention_sweep` and whose canonical action context is exactly `preview_id`,
+`preview_hash`, and `target_id` from that preview. The approval must expire no later than the
+preview. The execution body contains only `dry_run:false`, `preview_id`, and
+`approval_receipt_id`; resubmitted target, age, class, limit, or storage-deletion criteria are
+rejected.
+
+Execution locks and revalidates the immutable rows, storage-reference effects, and finding/scan
+ownership, then commits durable `executing` intent and per-object pending markers before external
+blob deletion. A retry with the same preview and approval resumes unfinished work, treats an
+already-missing content-addressed blob as completed, and finalizes the persisted intent. Once the
+preview is consumed, the same retry returns the stored result idempotently instead of repeating
+side effects. Legal hold and evidence attached to active findings are never candidates. Local or
+remote blob failures preserve their database rows, and drift or a reused/mismatched approval fails
+closed.
 
 **Evidence instances and exports**: proof instances bind a concrete route/object/payload/principal
 pair to evidence objects, tool receipts, campaign actions, proof state, and retention policy. APIs
@@ -910,6 +929,8 @@ explicit per-scan auth fields retain precedence, and undecryptable/expired profi
 - AI retest verification: `AI_VERIFY_ENABLED`, `AI_VERIFY_URL`, `AI_VERIFY_API_KEY`,
   `AI_VERIFY_MODEL`, `AI_VERIFY_USE_BROWSER`, `AI_VERIFY_MAX_PER_SCAN`, `AI_VERIFY_MIN_SEVERITY`.
 - AI Ops Router execution gate: `AI_OPS_ROUTER_EXECUTE_ENABLED`.
+- Evidence-retention preview lifetime: `EVIDENCE_RETENTION_PREVIEW_TTL_SECONDS` (default 600
+  seconds, clamped to 60-3600 seconds).
 - AI Gate transcripts: `AI_GATE_TRANSCRIPT_RETENTION_DAYS` (retention label, default 30);
   `AI_TRANSCRIPT_ALLOW_SENSITIVE` (default off — when on, `GET /ai/scans/{id}/transcript?include_sensitive=true` returns raw, audit-logged bodies; otherwise responses are redacted at response time).
 - Credential encryption-at-rest: `AI_CREDENTIAL_ENC_KEY` (a Fernet key; when set, AI-target and DAST
@@ -972,9 +993,9 @@ concurrency-limited with per-tool timeouts and a global deadline.
 | `/exposure` | Cross-product graph, asset inventory, deltas, and attack paths |
 | `/findings` | Granular source/severity/status/domain/date filters, sorting, bulk triage, cleanup, and retest entry points |
 | `/findings/{id}` | Evidence, raw request/response, proof/retest history, notes, status, deletion, and remediation |
-| `/evidence` | Evidence-instance inventory, single-object inspection, content-free export manifests/bundles, and approval-gated retention sweeps |
+| `/evidence` | Evidence-instance inventory, single-object inspection, content-free export manifests/bundles, and immutable-preview, exact-approval retention cleanup |
 | `/interactive` | Browser sessions, credential profiles, principals, authorization expectations, endpoint replay, and manual findings |
-| `/schedules` | Normal scans, ASM waves, and approval-gated evidence-retention schedules |
+| `/schedules` | Recurring normal scans and target-scoped ASM waves; evidence cleanup is interactive-only and legacy retention schedules are disabled |
 | `/settings` | AI provider, scan execution, and automation policy settings |
 | `/settings/ai-gate` | AI target/principal lifecycle, inventory, readiness, probe packs, scans, longitudinal history, and durable AI surface inventory |
 | `/settings/ai-ops-router` | Natural-language → safe API plan preview, with confirmation-gated execution |
@@ -1050,8 +1071,8 @@ it is the exhaustive backstop behind the human-readable product map above.
 
 | Surface | Count | Source |
 |---|---|---|
-| Public REST operations | 223 | `api/api.py` FastAPI decorators |
-| Unique REST paths | 181 | `api/api.py` |
+| Public REST operations | 224 | `api/api.py` FastAPI decorators |
+| Unique REST paths | 182 | `api/api.py` |
 | Check families | 13 | `api/check_registry.py` |
 | Command Arsenal commands | 82 | `api/command_arsenal.py` |
 | Tool adapters | 13 | `api/command_arsenal.py` |
@@ -1060,13 +1081,13 @@ it is the exhaustive backstop behind the human-readable product map above.
 | Scanner wrapper commands | 23 | `scanner.sh` |
 | Make targets | 7 | `Makefile` |
 | Release gates | 10 | `scripts/release_gates.py` |
-| Runtime environment keys | 191 | Python sources + Compose manifests |
+| Runtime environment keys | 192 | Python sources + Compose manifests |
 | Scanner modules | 83 | `scanner/scanner_tools/` |
 | UI pages | 27 | `ui/src/app/` |
 | Skills | 5 | `skills/` |
 | Slash commands | 14 | `.claude/commands/` |
 | Specialized subagents | 3 | `.claude/agents/` |
-| Durable tables | 44 | `db/init.sql` + migrations |
+| Durable tables | 45 | `db/init.sql` + migrations |
 
 ### Public REST Operations
 
@@ -1160,6 +1181,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | `GET` | `/evidence/export-manifest` | `evidence_export_manifest` |
 | `GET` | `/evidence/instances` | `list_evidence_instances` |
 | `POST` | `/evidence/instances` | `record_evidence_instance` |
+| `GET` | `/evidence/retention/executions` | `list_evidence_retention_executions` |
 | `POST` | `/evidence/retention/sweep` | `evidence_retention_sweep` |
 | `GET` | `/evidence/{evidence_id}` | `get_evidence_object` |
 | `POST` | `/experiments/workflows/{workflow_id}/cancel` | `cancel_workflow_experiment` |
@@ -1345,7 +1367,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | `evidence.export_bundle` | evidence | read_only | read_only | GET | `/evidence/export-bundle` | Read a content-free evidence export bundle descriptor or metadata zip with manifest hash, API replay paths, and retention/integrity summaries. |
 | `evidence.export_manifest` | evidence | read_only | read_only | GET | `/evidence/export-manifest` | Read a content-free evidence export manifest with hashes, storage URIs, retention classes, and integrity status. |
 | `evidence.get` | evidence | read_only | read_only | GET | `/findings/{finding_id}/evidence` | Read redacted durable evidence objects for a finding. |
-| `evidence.retention_sweep` | evidence | gated | active | POST | `/evidence/retention/sweep` | Preview or execute bounded evidence-object retention cleanup. dry_run=true is a safe preview; dry_run=false deletes rows/files and is gated (state-changing). legal_hold is never selected and active-finding evidence is never deleted. |
+| `evidence.retention_sweep` | evidence | gated | dangerous | POST | `/evidence/retention/sweep` | Preview or execute target-scoped evidence-object retention cleanup. Preview is read-only and needs no approval. Gated execution requires dry_run=false, that exact preview ID, and a matching approval receipt. Scheduled deletion is not supported. |
 | `evidence_instance.list` | evidence | read_only | read_only | GET | `/evidence/instances` | Read concrete evidence instances split from canonical findings. |
 | `evidence_instance.record` | evidence | dry_run | read_only | POST | `/evidence/instances` | Record a concrete evidence instance without updating finding proof state. |
 | `experiment.http_diff` | research | gated | active | POST | `/arsenal/execute` | Run a bounded same-origin read-only HTTP differential and record unverified evidence. |
@@ -1669,6 +1691,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `DOMAIN_RATE_REQUEUE_DELAY_SECONDS` | `api/worker.py` |
 | `ENV` | `scanner/scanner_tools/remediation_kb.py` |
 | `EVIDENCE_INLINE_MAX_BYTES` | `api/evidence_storage.py` |
+| `EVIDENCE_RETENTION_PREVIEW_TTL_SECONDS` | `api/api.py` |
 | `EVIDENCE_S3_ACCESS_KEY_ID` | `api/evidence_storage.py` |
 | `EVIDENCE_S3_BUCKET` | `api/evidence_storage.py` |
 | `EVIDENCE_S3_ENDPOINT_URL` | `api/evidence_storage.py` |
@@ -1887,6 +1910,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `discovery_runs` | `db/init.sql` |
 | `evidence_instances` | `api/retest_contract.py` |
 | `evidence_objects` | `db/init.sql` |
+| `evidence_retention_previews` | `db/init.sql` |
 | `export_events` | `db/init.sql` |
 | `finding_exceptions` | `db/init.sql` |
 | `finding_verifications` | `db/init.sql` |
