@@ -12235,6 +12235,20 @@ def test_experiment_workflow_templates_are_contract_valid():
             assert any(a["type"] == "restored" for a in normalized["assertions"])
 
 
+def test_mass_assignment_template_carries_generic_forbidden_field_candidates():
+    # The proof only fires on a persisted privilege elevation, so the planner needs generic privilege
+    # markers to aim at (never app-specific), or it guesses a benign field and finds nothing.
+    import workflow_experiment
+    template = api_module._EXPERIMENT_WORKFLOW_TEMPLATES["mass_assignment"]
+    candidates = template.get("forbidden_field_candidates") or []
+    fields = {str(c.get("field", "")).lower() for c in candidates}
+    assert {"role", "isadmin", "verified"} <= fields
+    # Every candidate field must be one the proof actually treats as security-sensitive, so the hint
+    # cannot steer the planner toward a field that can never promote.
+    sensitive = {f.lower() for f in workflow_experiment.SECURITY_SENSITIVE_MUTATION_FIELDS}
+    assert all(str(c.get("field", "")).lower() in sensitive for c in candidates)
+
+
 def test_planner_sends_only_the_most_provable_family_template():
     templates = api_module._research_selected_experiment_templates({
         "selected_hypothesis_contracts": [

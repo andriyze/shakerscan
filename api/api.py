@@ -29167,6 +29167,12 @@ async def _build_research_observation(
             "fresh ranked leads (e.g. mass_assignment, data_exposure, auth_bypass); if none remain, stop.",
             "For a ranked lead, use selected_hypothesis_contracts as the authoritative route/request "
             "shape. Do not ask the operator for request fields or examples already present there.",
+            "For a mass_assignment experiment, the forbidden field must be a genuine privilege marker: "
+            "substitute the template's <forbidden_field>/<forbidden_value> with an entry from the template's "
+            "forbidden_field_candidates (e.g. role=admin, isAdmin=true, verified=true), preferring a field "
+            "that already appears in the resource's own read response. A benign field cannot prove the bug -- "
+            "the proof only fires when a persisted privilege elevation is accepted and a lower-privilege "
+            "control is rejected.",
         ],
         "previous_observation": _research_previous_result_digest(previous_result or {}),
         "planner_contract": {
@@ -34702,6 +34708,19 @@ _EXPERIMENT_WORKFLOW_TEMPLATES: dict[str, dict[str, Any]] = {
         "objective": "A security-sensitive field is overposted and its exact value persists",
         "expected_signal": "the benign write succeeds and the added forbidden field persists with the submitted value",
         "falsifier": "the benign write fails, the forbidden field is rejected, or its exact value does not persist",
+        # GENERIC privilege markers (never app-specific): the proof only fires when a persisted PRIVILEGE
+        # elevation is accepted, so substitute <forbidden_field>/<forbidden_value> with one of these
+        # instead of a benign field. Try the resource's own response field names first, then these.
+        "forbidden_field_candidates": [
+            {"field": "role", "value": "admin"},
+            {"field": "roles", "value": ["admin"]},
+            {"field": "isAdmin", "value": True},
+            {"field": "is_admin", "value": True},
+            {"field": "admin", "value": True},
+            {"field": "verified", "value": True},
+            {"field": "is_verified", "value": True},
+            {"field": "permissions", "value": ["admin"]},
+        ],
         "steps": [
             {"label": "before", "kind": "http", "principal": "user1", "checkpoint": "before", "method": "GET", "path": "/api/<resource>", "select_json": ["$.<forbidden_field>", "$.<allowed_field>"]},
             {"label": "control", "kind": "http", "principal": "user1", "checkpoint": "mutation", "method": "PATCH", "path": "/api/<resource>", "json_body": {"<allowed_field>": "<benign_value>"}},
