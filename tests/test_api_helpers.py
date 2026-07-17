@@ -15048,6 +15048,52 @@ def test_research_autobind_mass_assignment_binds_on_mutation_step_without_suppli
     assert errors2 == ["experiment_hypothesis_not_on_ranked_live_surface"]
 
 
+def test_research_autobind_supplied_id_binds_via_db_when_board_compacted():
+    # Compaction can drop BOTH ranked_hypotheses and selected_hypothesis_contracts from an oversized
+    # pack. A supplied id the planner read in an earlier observation must still bind by resolving the
+    # live lead from the hypotheses table -- otherwise every experiment rejects against an empty board.
+    target_id = uuid.uuid4()
+    hid = uuid.uuid4()
+    action = {
+        "command": "experiment.workflow",
+        "parameters": {
+            "proof_family": "mass_assignment",
+            "steps": [
+                {"label": "control", "method": "POST", "path": "/workshop/api/past-orders"},
+                {"label": "mutate", "method": "POST", "path": "/workshop/api/past-orders"},
+                {"label": "verify", "method": "GET", "path": "/workshop/api/past-orders"},
+            ],
+            "assertions": [{"type": "x", "step": "mutate", "predicate": "forbidden_field_accepted"}],
+        },
+    }
+    empty_obs = {"current_surface": {"ranked_hypotheses": []}, "selected_hypothesis_contracts": []}
+
+    class _Conn:
+        def __init__(self, row):
+            self._row = row
+        async def fetchrow(self, *args, **kwargs):
+            return self._row
+
+    live_row = {
+        "family": "mass_assignment",
+        "next_test_action": {"command": "experiment.workflow", "parameters": {"proof_family": "mass_assignment"}},
+        "metadata_json": {"dedupe_dimensions": {"route": "/workshop/api/past-orders", "method": "POST"}},
+    }
+    raw = {"hypothesis_id": str(hid), "action": json.loads(json.dumps(action))}
+    errors = asyncio.run(api_module._research_autobind_hypothesis(
+        _Conn(live_row), {"target_id": target_id}, raw, empty_obs,
+    ))
+    assert errors == []
+    assert raw["hypothesis_id"] == str(hid)
+
+    # No live lead in the DB (compacted board + no durable match) -> fail-closed reject.
+    bad = {"hypothesis_id": str(hid), "action": json.loads(json.dumps(action))}
+    errors2 = asyncio.run(api_module._research_autobind_hypothesis(
+        _Conn(None), {"target_id": target_id}, bad, empty_obs,
+    ))
+    assert errors2 == ["experiment_hypothesis_not_on_ranked_live_surface"]
+
+
 def test_research_autobind_accepts_explicit_ranked_id_when_typed_workflow_refines_dimensions():
     target_id = uuid.uuid4()
     hypothesis_id = uuid.uuid4()

@@ -33797,6 +33797,42 @@ async def _research_autobind_hypothesis(
                 return ["experiment_hypothesis_not_on_ranked_live_surface"]
             raw["hypothesis_id"] = supplied_hypothesis_id
             return []
+        # Compaction can drop BOTH the ranked board and the selected contracts from an oversized pack
+        # (grok's large crAPI packs). The planner still legitimately references an id it read in an
+        # earlier observation, so resolve it straight from the durable hypotheses table: bind only a
+        # live, actionable lead on THIS target whose canonical family+route+method matches the
+        # experiment -- the same identity check the board branches enforce, just DB-sourced when the
+        # board was compacted away. Fail-closed: no such live lead -> reject.
+        lead_uuid = _optional_uuid(supplied_hypothesis_id)
+        target_uuid = _optional_uuid(target_id)
+        if lead_uuid is not None and target_uuid is not None:
+            row = await conn.fetchrow(
+                """
+                SELECT family, next_test_action, metadata_json
+                FROM hypotheses
+                WHERE id=$1 AND target_id=$2
+                  AND status IN ('open','claimed','testing','supported')
+                """,
+                lead_uuid,
+                target_uuid,
+            )
+            if row is not None:
+                lead = {
+                    "family": row["family"],
+                    "next_test_action": _decode_json_value(row["next_test_action"]),
+                    "metadata_json": _decode_json_value(row["metadata_json"]),
+                }
+                contract = _research_hypothesis_experiment_contract(lead)
+                contract_route = _canonical_vulnerability_route(contract.get("route"))
+                contract_method = str(contract.get("method") or "").upper()
+                if (
+                    family_proof.canonical_family(contract.get("family") or lead.get("family")) == family
+                    and contract_route
+                    and contract_route == route
+                    and (not contract_method or contract_method == method)
+                ):
+                    raw["hypothesis_id"] = supplied_hypothesis_id
+                    return []
         return ["experiment_hypothesis_not_on_ranked_live_surface"]
 
     # When the planner omitted the id, autobinding stays deliberately stricter: only an exact
