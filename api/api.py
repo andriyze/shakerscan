@@ -34845,6 +34845,136 @@ _MASS_ASSIGNMENT_CREATE_TEMPLATE: dict[str, Any] = {
 }
 
 
+_CREATE_MA_LOGIN_TOKENS = ("email", "mail", "login", "username", "user")
+_CREATE_MA_SECRET_TOKENS = ("password", "passwd", "passphrase", "pwd", "secret", "pass")
+_CREATE_MA_ID_ENVELOPES = ("data", "result", "item", "user", "record", "payload")
+
+
+def _classify_create_field(name: str) -> str:
+    """Universal field-name heuristic: is a create-body field a login, a secret, or something else.
+
+    Uses only conventional field naming (email/password/...), never a target-specific fact.
+    """
+    low = re.sub(r"[^a-z0-9]+", "", str(name or "").lower())
+    if any(token in low for token in _CREATE_MA_SECRET_TOKENS):
+        return "secret"
+    if any(token in low for token in _CREATE_MA_LOGIN_TOKENS):
+        return "login"
+    return "other"
+
+
+def _discover_create_object_shape(response_json: Any) -> tuple[str | None, str] | None:
+    """Locate a created object's envelope + id field in a real create response, universally.
+
+    Returns (envelope_key_or_None, id_field) or None. Checks the root object then one level of common
+    REST envelopes for an id-like scalar key -- so the created-id extract path is discovered, not guessed.
+    """
+    def _id_field(obj: dict[str, Any]) -> str | None:
+        for key in obj:
+            if str(key).lower() == "id" and not isinstance(obj[key], (dict, list)):
+                return str(key)
+        for key in obj:
+            low = str(key).lower()
+            if low.endswith("id") and not isinstance(obj[key], (dict, list)):
+                return str(key)
+        return None
+
+    if not isinstance(response_json, dict):
+        return None
+    root_id = _id_field(response_json)
+    if root_id:
+        return (None, root_id)
+    for env in _CREATE_MA_ID_ENVELOPES:
+        nested = response_json.get(env)
+        if isinstance(nested, dict):
+            nested_id = _id_field(nested)
+            if nested_id:
+                return (env, nested_id)
+    return None
+
+
+def _create_mass_assignment_credentials() -> dict[str, str]:
+    """Server-generated, unique-per-run throwaway credentials for a create-MA experiment.
+
+    Never model-supplied (only their sha256 is persisted as principal_variable receipts). Two distinct
+    logins so a unique-identifier constraint cannot collide across the control and mutate creates.
+    """
+    nonce = uuid.uuid4().hex
+    return {
+        "ctrl_login": f"shakerscan-ma-c-{nonce[:14]}@shakerscan-probe.test",
+        "adm_login": f"shakerscan-ma-m-{nonce[14:28]}@shakerscan-probe.test",
+        "reg_cred": "ShakerScan9!" + uuid.uuid4().hex[:12],
+    }
+
+
+def _materialize_create_mass_assignment_workflow(
+    *,
+    collection_route: str,
+    request_fields: str | None,
+    forbidden_field: str,
+    forbidden_value: str,
+    envelope: str | None,
+    id_field: str,
+) -> dict[str, Any] | None:
+    """Build a complete create-based mass_assignment workflow from a lead + discovered response shape.
+
+    Universal: field roles come from name heuristics; extract/read-back paths from the discovered
+    envelope. Requires a login-like field (a unique identifier, so the two independent creates do not
+    collide) and a forbidden field; returns None otherwise rather than fabricate an unprovable workflow.
+    """
+    collection = "/" + str(collection_route or "").strip().lstrip("/")
+    forbidden = str(forbidden_field or "").strip()
+    fields = [f.strip() for f in str(request_fields or "").split(",") if f.strip()]
+    roles = {f: _classify_create_field(f) for f in fields}
+    if not forbidden or not any(role == "login" for role in roles.values()):
+        return None
+    id_path = f"$.{envelope}.{id_field}" if envelope else f"$.{id_field}"
+    forbidden_path = f"$.{envelope}.{forbidden}" if envelope else f"$.{forbidden}"
+
+    def _body(login_var: str, include_forbidden: bool) -> dict[str, Any]:
+        body: dict[str, Any] = {}
+        for field in fields:
+            if field == forbidden:
+                continue
+            role = roles[field]
+            body[field] = (
+                "${%s}" % login_var if role == "login"
+                else "${reg_cred}" if role == "secret"
+                else "shakerscan-benign"
+            )
+        if include_forbidden:
+            body[forbidden] = forbidden_value
+        return body
+
+    return {
+        "proof_family": "mass_assignment",
+        "objective": f"{forbidden}={forbidden_value} overposted on POST {collection} persists in the created object",
+        "expected_signal": "the create succeeds and the created-object read-back shows the forbidden field, while a benign create does not",
+        "falsifier": "the create fails, the forbidden field is rejected, or the read-back does not show it",
+        "principal_variables": [
+            {"name": "ctrl_login", "principal": "user1", "ref": "ctrl_login"},
+            {"name": "adm_login", "principal": "user1", "ref": "adm_login"},
+            {"name": "reg_cred", "principal": "user1", "ref": "reg_cred"},
+        ],
+        "steps": [
+            {"label": "list_before", "kind": "http", "principal": "user1", "checkpoint": "before", "method": "GET", "path": collection},
+            {"label": "control", "kind": "http", "principal": "user1", "checkpoint": "mutation", "method": "POST", "path": collection, "json_body": _body("ctrl_login", False), "extract": [{"name": "control_id", "source": "json", "path": id_path}]},
+            {"label": "mutate", "kind": "http", "principal": "user1", "checkpoint": "mutation", "method": "POST", "path": collection, "json_body": _body("adm_login", True), "extract": [{"name": "created_id", "source": "json", "path": id_path}]},
+            {"label": "control_verify", "kind": "http", "principal": "user1", "checkpoint": "action", "method": "GET", "path": collection + "/${control_id}", "select_json": [forbidden_path]},
+            {"label": "verify", "kind": "http", "principal": "user1", "checkpoint": "action", "method": "GET", "path": collection + "/${created_id}", "select_json": [forbidden_path], "compare_to": "control_verify"},
+            {"label": "cleanup_created", "kind": "http", "principal": "user1", "checkpoint": "cleanup", "method": "DELETE", "path": collection + "/${created_id}"},
+            {"label": "cleanup_control", "kind": "http", "principal": "user1", "checkpoint": "cleanup", "method": "DELETE", "path": collection + "/${control_id}"},
+            {"label": "list_after", "kind": "http", "principal": "user1", "checkpoint": "after", "method": "GET", "path": collection, "compare_to": "list_before"},
+        ],
+        "assertions": [
+            {"type": "status_in", "step": "control", "values": [200, 201, 202, 204], "predicate": "benign_control_accepted"},
+            {"type": "status_in", "step": "mutate", "values": [200, 201, 202, 204], "predicate": "forbidden_field_accepted"},
+            {"type": "comparison_changed", "control": "control_verify", "candidate": "verify", "predicate": "observable_state_change"},
+            {"type": "restored", "control": "list_before", "candidate": "list_after", "predicate": "before_after_state"},
+        ],
+    }
+
+
 def _research_selected_experiment_templates(pack: Any) -> dict[str, dict[str, Any]]:
     """Attach only the family template for the most provable selected lead."""
     payload = pack if isinstance(pack, dict) else {}

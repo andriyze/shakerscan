@@ -14681,6 +14681,45 @@ def test_restoration_stays_required_for_non_create_mass_assignment():
     assert proof["promotable"] is False
 
 
+def test_create_field_classification_is_name_based_and_universal():
+    c = api_module._classify_create_field
+    assert c("email") == "login" and c("userEmail") == "login" and c("username") == "login"
+    assert c("password") == "secret" and c("passwordRepeat") == "secret" and c("pwd") == "secret"
+    assert c("role") == "other" and c("isAdmin") == "other" and c("quantity") == "other"
+
+
+def test_discover_create_object_shape_finds_envelope_and_id():
+    d = api_module._discover_create_object_shape
+    assert d({"status": "success", "data": {"id": 5, "role": "admin"}}) == ("data", "id")
+    assert d({"id": 9, "role": "x"}) == (None, "id")
+    assert d({"result": {"userId": 3}}) == ("result", "userId")
+    assert d({"status": "ok"}) is None          # no id-bearing object
+    assert d("not-json") is None
+
+
+def test_materialize_create_mass_assignment_workflow_is_valid_and_universal():
+    import workflow_experiment
+    wf = api_module._materialize_create_mass_assignment_workflow(
+        collection_route="/api/Users", request_fields="email,password",
+        forbidden_field="role", forbidden_value="admin", envelope="data", id_field="id")
+    assert wf is not None
+    # Normalizes cleanly (managed password body passes the sensitive-key relax; create-cleanup present).
+    workflow_experiment.normalize_workflow("https://shop.test", wf)
+    steps = {s["label"]: s for s in wf["steps"]}
+    # Managed credentials, never literals; forbidden field only on the mutate create.
+    assert steps["control"]["json_body"] == {"email": "${ctrl_login}", "password": "${reg_cred}"}
+    assert steps["mutate"]["json_body"] == {"email": "${adm_login}", "password": "${reg_cred}", "role": "admin"}
+    # Distinct logins so the two creates cannot collide on a unique constraint.
+    assert steps["control"]["json_body"]["email"] != steps["mutate"]["json_body"]["email"]
+    # Extract + read-back paths use the DISCOVERED envelope, not a guess.
+    assert steps["mutate"]["extract"][0]["path"] == "$.data.id"
+    assert steps["verify"]["select_json"] == ["$.data.role"]
+    # No login field -> refuse rather than fabricate an unprovable (collision-prone) workflow.
+    assert api_module._materialize_create_mass_assignment_workflow(
+        collection_route="/api/Orders", request_fields="quantity,price",
+        forbidden_field="discount", forbidden_value="100", envelope="data", id_field="id") is None
+
+
 def test_trusted_workflow_bola_proof_requires_full_server_bound_receipt():
     execution = {
         "proof_family": "bola",
