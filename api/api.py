@@ -3978,7 +3978,9 @@ class ResearchObservationRequest(BaseModel):
 
 class ResearchPlannerStepRequest(BaseModel):
     execute: bool = True
-    timeout_seconds: int = Field(default=60, ge=10, le=180)
+    # Large reasoning planners (grok-4.5) need >120s on the first, largest observation pack; the old
+    # 180s ceiling left no room for a retry after a provider ClientConnectionError. Allow up to 300s.
+    timeout_seconds: int = Field(default=60, ge=10, le=300)
     max_tokens: int = Field(default=2500, ge=500, le=8000)
     created_by: Optional[str] = Field(default="configured_ai_research_planner", max_length=120)
 
@@ -35176,8 +35178,12 @@ async def research_autopilot_runner(pool) -> None:
                     episode_id,
                     ResearchPlannerStepRequest(
                         execute=True,
-                        timeout_seconds=120,
-                        max_tokens=5000,
+                        # 240s (of a 300s ceiling) so a large reasoning planner finishes the first big
+                        # pack with room for one retry after a transient provider connection error; the
+                        # full 8000 max_tokens so a filled mass_assignment/BOLA workflow isn't truncated
+                        # into a harness-repair/misinferred stop.
+                        timeout_seconds=240,
+                        max_tokens=8000,
                         created_by="server_autopilot",
                     ),
                 )
