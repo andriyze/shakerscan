@@ -16357,9 +16357,31 @@ def _select_research_hypothesis_context(
         },
     )
     by_id = {str(item.get("id")): item for item in candidates}
+    scheduled = list(schedule.get("scheduled") or [])
+
+    # Family balance: the richest family (e.g. 100+ mass_assignment leads) would otherwise take every
+    # board slot and starve data_exposure / bfla / bola. Float the highest-priority lead of EACH family
+    # to the front -- so the bounded board and the top-N selected contracts span families -- then append
+    # the rest in priority order. Deterministic and priority-preserving within each group.
+    def _entry_family(entry: dict[str, Any]) -> str:
+        hypothesis = by_id.get(str(entry.get("hypothesis_id"))) or {}
+        return family_proof.canonical_family(hypothesis.get("family")) or "?"
+
+    seen_family: set[str] = set()
+    family_firsts: list[dict[str, Any]] = []
+    family_rest: list[dict[str, Any]] = []
+    for entry in scheduled:
+        family = _entry_family(entry)
+        if family not in seen_family:
+            seen_family.add(family)
+            family_firsts.append(entry)
+        else:
+            family_rest.append(entry)
+    balanced = family_firsts + family_rest
+
     ranked = [
         {**entry, "hypothesis": by_id.get(str(entry.get("hypothesis_id")))}
-        for entry in list(schedule.get("scheduled") or [])[:bounded_limit]
+        for entry in balanced[:bounded_limit]
     ]
     ranked_order = [
         str(entry.get("hypothesis_id"))
@@ -28427,6 +28449,13 @@ def _compact_research_observation_pack(pack: dict[str, Any]) -> dict[str, Any]:
             ("id", "title", "family", "severity_guess", "confidence", "status", "dedupe_key"),
             text_limit=320,
         )
+        # Keep the dedupe route+method so a compacted ranked lead is still bindable by the autobind
+        # (family+route+method identity) -- dropping it forced the planner to work from memory.
+        hyp_metadata = hypothesis.get("metadata_json") if isinstance(hypothesis.get("metadata_json"), dict) else {}
+        hyp_dims = hyp_metadata.get("dedupe_dimensions") if isinstance(hyp_metadata.get("dedupe_dimensions"), dict) else {}
+        dims_projected = _scalars(hyp_dims, ("route", "method", "object_key"), text_limit=200)
+        if dims_projected:
+            projected["hypothesis"]["metadata_json"] = {"dedupe_dimensions": dims_projected}
         next_test = hypothesis.get("next_test_action")
         if isinstance(next_test, dict):
             projected["hypothesis"]["next_test_action"] = _bound_once(next_test, 1)
@@ -28484,6 +28513,10 @@ def _compact_research_observation_pack(pack: dict[str, Any]) -> dict[str, Any]:
         recent_scans.append(projected)
     if recent_scans:
         surface["recent_scans"] = recent_scans
+    # Steer the planner off already-owned families even in the compacted fallback.
+    exhausted_families = _string_list(surface_source.get("exhausted_families"), count=12, item_limit=40)
+    if exhausted_families:
+        surface["exhausted_families"] = exhausted_families
     _add_if_fits("current_surface", surface)
 
     hypotheses = []
@@ -30643,6 +30676,42 @@ async def _research_known_coverage_keys(conn: Any, target_id: Any) -> set[str]:
     }
 
 
+async def _research_net_new_finding_count(
+    conn: Any, target_id: Any, *, tool: str = "autonomous_workflow", verdict: str | None = "exploited",
+) -> int:
+    """Count findings from `tool` whose coarse coverage key no OTHER-tool finding owns.
+
+    This is the net-new-over-DAST measure: an autonomous promotion on a family+route+method the
+    deterministic scanner never reported. Same coarse key the board de-duplication uses.
+    """
+    rows = await conn.fetch(
+        """
+        SELECT tool, cwe, title, url, method, evidence, request, last_verification_verdict
+        FROM findings
+        WHERE target_id=$1 AND status IN ('active','resolved','accepted_risk')
+        """,
+        _optional_uuid(target_id),
+    )
+    other_keys: set[str] = set()
+    tool_rows: list[dict[str, Any]] = []
+    for row in rows:
+        finding = row_to_dict(row)
+        if str(finding.get("tool") or "") == tool:
+            tool_rows.append(finding)
+        else:
+            key = _finding_coverage_key(finding)
+            if key:
+                other_keys.add(key)
+    net_new = 0
+    for finding in tool_rows:
+        if verdict and str(finding.get("last_verification_verdict") or "") != verdict:
+            continue
+        key = _finding_coverage_key(finding)
+        if key and key not in other_keys:
+            net_new += 1
+    return net_new
+
+
 async def _research_campaign_readiness(conn: Any, campaign: Any) -> dict[str, Any]:
     """Fail-closed launch gate for authenticated autonomous hunting."""
     payload = row_to_dict(campaign)
@@ -31522,6 +31591,9 @@ async def _research_campaign_yield_metrics(conn: Any, campaign: Any) -> dict[str
     aggregate_budget = await _research_campaign_budget_snapshot(conn, campaign)
     before = config.get("surface_before_preflight") if isinstance(config.get("surface_before_preflight"), dict) else {}
     after = config.get("surface_after_preflight") if isinstance(config.get("surface_after_preflight"), dict) else {}
+    # Net-new-over-DAST: autonomous promotions on a family+route+method no deterministic scanner
+    # finding owns. This is the number that actually answers "did deep_hunt find something DAST missed".
+    net_new_verified = await _research_net_new_finding_count(conn, target_id)
     return {
         "episodes": len(episode_rows),
         "decisions": len(decisions),
@@ -31537,6 +31609,7 @@ async def _research_campaign_yield_metrics(conn: Any, campaign: Any) -> dict[str
         "rejected_decisions": rejected_decisions,
         "rejection_reasons": dict(rejection_reasons.most_common(20)),
         "verified_autonomous_findings": verified_findings,
+        "net_new_verified_findings": net_new_verified,
         "finding_yield_per_experiment": round(verified_findings / experiments, 4) if experiments else 0.0,
         "model_units_per_verified_finding": (model_units // verified_findings) if verified_findings else None,
         "aggregate_budget": aggregate_budget,

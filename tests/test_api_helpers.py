@@ -11845,6 +11845,84 @@ def test_scheduler_lifts_data_exposure_off_the_boundary_floor():
     assert de["breakdown"]["boundary_value"] == 2.0
 
 
+def test_board_balances_families_so_a_rich_family_does_not_starve_others():
+    # 100 mass_assignment leads would take every slot; the board must still surface data_exposure + bfla
+    # by floating the top lead of each family to the front.
+    cands = [
+        {"id": f"ma-{i}", "source": "app_graph", "family": "mass_assignment", "status": "open",
+         "severity_guess": "medium", "confidence": 0.5, "dedupe_key": f"ma-{i}",
+         "dedupe_dimensions": {"method": "POST", "route": f"/api/things/{i}"},
+         "metadata_json": {"unexplained_residue": True, "route": f"/api/things/{i}"}}
+        for i in range(100)
+    ]
+    cands.append({"id": "de-1", "source": "app_graph", "family": "data_exposure", "status": "open",
+                  "severity_guess": "medium", "confidence": 0.5, "dedupe_key": "de-1",
+                  "dedupe_dimensions": {"method": "GET", "route": "/api/profile"},
+                  "metadata_json": {"unexplained_residue": True, "route": "/api/profile"}})
+    cands.append({"id": "bfla-1", "source": "app_graph", "family": "auth_bypass", "status": "open",
+                  "severity_guess": "high", "confidence": 0.55, "dedupe_key": "bfla-1",
+                  "dedupe_dimensions": {"method": "GET", "route": "/api/admin/config"},
+                  "metadata_json": {"unexplained_residue": True, "route": "/api/admin/config"}})
+    _s, ranked = api_module._select_research_hypothesis_context(
+        cands, completed_dimensions=[], auth_available=True, limit=6,
+    )
+    fams = {(e.get("hypothesis") or {}).get("family") for e in ranked}
+    assert {"mass_assignment", "data_exposure", "auth_bypass"} <= fams
+
+
+def test_compaction_preserves_slim_ranked_board_when_oversized():
+    # The oversized-projection path used to drop current_surface entirely; it must keep a slim ranked
+    # board so the planner still sees the live leads (not just the 5 selected contracts).
+    pack = {
+        "observation_version": "v1", "episode_id": "e", "objective": "obj",
+        # A 100-item list of 4000-char strings survives the light-bound stage (>48 KiB) and forces the
+        # aggressive-projection path, unlike a single long string (truncated to 4000).
+        "recent_actions": [{"detail": "z" * 4000} for _ in range(100)],
+        "selected_hypothesis_contracts": [
+            {"hypothesis_id": "h1", "family": "mass_assignment", "route": "/a", "method": "POST"}],
+        "current_surface": {
+            "ranked_hypotheses": [
+                {"hypothesis_id": "h1", "hypothesis": {"id": "h1", "family": "mass_assignment",
+                 "metadata_json": {"dedupe_dimensions": {"route": "/a", "method": "POST"}}}}],
+            "exhausted_families": ["bola"],
+        },
+    }
+    out = api_module._compact_research_observation_pack(pack)
+    assert out.get("observation_compaction", {}).get("applied") is True
+    assert out.get("selected_hypothesis_contracts")
+    cs = out.get("current_surface") or {}
+    assert cs.get("ranked_hypotheses")
+    assert cs["ranked_hypotheses"][0]["hypothesis"]["family"] == "mass_assignment"
+    assert cs.get("exhausted_families") == ["bola"]
+
+
+def test_research_net_new_finding_count_excludes_dast_owned():
+    # An autonomous promotion on a family+route+method DAST already owns is NOT net-new; a distinct one is.
+    class _Conn:
+        def __init__(self, rows):
+            self._rows = rows
+        async def fetch(self, *args, **kwargs):
+            return self._rows
+
+    rows = [
+        {"tool": "smart_bola", "cwe": "CWE-639", "title": "BOLA on order API",
+         "url": "https://x/api/orders/1", "method": "GET", "evidence": {}, "request": None,
+         "last_verification_verdict": None},
+        {"tool": "autonomous_workflow", "cwe": "CWE-639", "title": "BOLA auto",
+         "url": "https://x/api/orders/2", "method": "GET",
+         "evidence": {"dedupe_dimensions": {"route": "/api/orders/{id}", "method": "GET"}},
+         "request": None, "last_verification_verdict": "exploited"},
+        {"tool": "autonomous_workflow", "cwe": "CWE-915", "title": "Mass-assignment auto",
+         "url": "https://x/api/profile", "method": "POST",
+         "evidence": {"dedupe_dimensions": {"route": "/api/profile", "method": "POST"}},
+         "request": None, "last_verification_verdict": "exploited"},
+    ]
+    n = asyncio.run(api_module._research_net_new_finding_count(
+        _Conn(rows), "11111111-1111-4111-8111-111111111111",
+    ))
+    assert n == 1
+
+
 def test_research_vertical_contract_endpoint_schema_reaches_provider_prompt():
     request = api_module._endpoint_inventory_hypothesis_requests(
         "11111111-1111-4111-8111-111111111111",
