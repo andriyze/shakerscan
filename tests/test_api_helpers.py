@@ -11783,6 +11783,60 @@ def test_research_workflow_rejects_non_live_method_and_auth_session_mass_assignm
     )
 
 
+def test_create_mass_assignment_object_siblings_accepted_on_surface():
+    # P1-1: the object-instance sibling (/collection/{id}) of an on-surface create collection is a valid
+    # read-back/cleanup target for a create-based mass_assignment, even if the crawler never captured a
+    # concrete /collection/{id}. Scoped to mass_assignment + a real create collection (POST on surface).
+    class Conn:
+        async def fetch(self, _q, *_a):
+            return [{"method": "POST", "path": "/api/Users"}, {"method": "GET", "path": "/api/Users"}]
+
+    errors = asyncio.run(api_module._research_workflow_surface_violations(
+        Conn(), "11111111-1111-4111-8111-111111111111",
+        {"proof_family": "mass_assignment", "steps": [
+            {"label": "control", "method": "POST", "path": "/api/Users"},
+            {"label": "verify", "method": "GET", "path": "/api/Users/5"},
+            {"label": "cleanup", "method": "DELETE", "path": "/api/Users/5"},
+        ]}))
+    assert errors == []  # POST create is on surface; GET/DELETE /api/Users/{id} accepted as siblings
+
+    # The object sibling of a NON-create collection (no POST on surface) is still rejected.
+    class Conn2:
+        async def fetch(self, _q, *_a):
+            return [{"method": "GET", "path": "/api/Orders"}]
+
+    errs2 = asyncio.run(api_module._research_workflow_surface_violations(
+        Conn2(), "11111111-1111-4111-8111-111111111111",
+        {"proof_family": "mass_assignment", "steps": [{"label": "v", "method": "GET", "path": "/api/Orders/5"}]}))
+    assert any(e.startswith("experiment_step_method_not_on_surface:v:") for e in errs2)
+
+
+def test_listable_create_collection_infers_readback_and_forms_create_based_lead():
+    # P0-1: a listable create collection (GET + POST on the same route) forms a create-based
+    # mass_assignment lead with an INFERRED object read-back, even without a discovered /collection/{id}.
+    reqs = api_module._endpoint_inventory_hypothesis_requests(
+        "11111111-1111-4111-8111-111111111111",
+        [
+            {"method": "GET", "path": "/api/Users", "param_location": "", "auth_state": "user1"},
+            {"method": "POST", "path": "/api/Users", "param_location": "body", "auth_state": "user1",
+             "param_shape": "email,password", "replay_spec": '{"email":"a@b.c","password":"x"}'},
+        ], created_by="test")
+    ma = [r for r in reqs if r.family == "mass_assignment" and (r.metadata_json or {}).get("route") == "/api/Users"]
+    assert ma, "a create-based mass_assignment lead should form for a listable create collection"
+    md = ma[0].metadata_json
+    assert md.get("create_based") is True
+    assert md.get("readback_route") == "/api/Users/{id}"
+    assert "readback_route_missing" not in (md.get("provability_blockers") or [])
+
+    # A POST action that is NOT a listable collection (no GET on the route) does not become create-based.
+    reqs2 = api_module._endpoint_inventory_hypothesis_requests(
+        "11111111-1111-4111-8111-111111111111",
+        [{"method": "POST", "path": "/rest/auth/token", "param_location": "body", "auth_state": "user1",
+          "param_shape": "email,password"}], created_by="test")
+    assert all((r.metadata_json or {}).get("create_based") is not True
+               for r in reqs2 if r.family == "mass_assignment")
+
+
 def test_research_action_secret_policy_allows_only_unresolved_body_placeholders():
     assert api_module._research_action_contains_secret_material({
         "steps": [{"json_body": {"token": "${managed_reset_token}"}}],

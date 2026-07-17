@@ -29752,6 +29752,15 @@ async def _research_workflow_surface_violations(
         for row in rows
         if row.get("path")
     }
+    # Object-instance siblings (/collection/{id}) of an on-surface create collection (POST /collection)
+    # are valid read-back / cleanup targets for a create-based mass_assignment even when the crawler
+    # never captured a concrete /collection/{id}. The family proof gates whether the object actually
+    # reads back, so accepting the sibling here cannot mint a false finding -- it only lets the
+    # create-MA experiment run. Scoped to mass_assignment and to the sibling of a real create collection.
+    create_collections = {
+        route for (method, route) in live_surface
+        if method == "POST" and route and not route.endswith("/{id}")
+    }
     errors: list[str] = []
     family = family_proof.canonical_family(parameters.get("proof_family"))
     for index, step in enumerate(http_steps):
@@ -29761,7 +29770,13 @@ async def _research_workflow_surface_violations(
         label = str(step.get("label") or index)[:80]
         if family == "mass_assignment" and _research_auth_session_route(raw_path):
             errors.append(f"mass_assignment_auth_session_route_forbidden:{label}")
-        if not route or (method, route) not in live_surface:
+        on_surface = bool(route) and (method, route) in live_surface
+        if (
+            not on_surface and family == "mass_assignment" and route
+            and route.endswith("/{id}") and route[: -len("/{id}")] in create_collections
+        ):
+            on_surface = True
+        if not on_surface:
             errors.append(f"experiment_step_method_not_on_surface:{label}:{method}:{route or '<missing>'}")
     return list(dict.fromkeys(errors))
 
@@ -37740,7 +37755,15 @@ def _endpoint_inventory_hypothesis_requests(
                 object_route = route.rstrip("/") + "/{id}"
                 object_route_methods = methods_by_route.get(object_route, set()) if is_create else set()
                 if is_create:
-                    readback_route = object_route if "GET" in object_route_methods else None
+                    # A listable collection (GET on the same route) that also accepts POST is a create
+                    # collection; its object-instance route is the natural read-back even when the crawler
+                    # never captured a concrete /collection/{id} (it won't create objects during passive
+                    # discovery). Infer it so the create-based lead can form -- the experiment probes it and
+                    # the family proof falsifies a non-readable create, so an inferred read-back cannot mint
+                    # a false finding. A discovered read-back stays a stronger signal (see provability).
+                    discovered_readback = object_route if "GET" in object_route_methods else None
+                    collection_is_listable = "GET" in same_route_methods
+                    readback_route = discovered_readback or (object_route if collection_is_listable else None)
                     cleanup_route = object_route if "DELETE" in object_route_methods else None
                     create_based = bool(readback_route)
                 else:
