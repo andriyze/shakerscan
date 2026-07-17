@@ -6,7 +6,11 @@ import Link from 'next/link'
 import { Activity, Bot, Crosshair, FileArchive, Lightbulb, Menu, Network, PackageCheck, Radar, ShieldAlert, ShieldCheck, X } from 'lucide-react'
 import { buttonClasses } from '@/components/ui'
 
-const navGroups: { heading: string | null; items: { href: string; label: string; icon: ReactNode }[] }[] = [
+const navGroups: {
+  heading: string | null
+  badge?: string
+  items: { href: string; label: string; icon: ReactNode }[]
+}[] = [
   {
     heading: null,
     items: [
@@ -71,6 +75,7 @@ const navGroups: { heading: string | null; items: { href: string; label: string;
   },
   {
     heading: 'AI Investigator',
+    badge: 'Alpha',
     items: [
       { href: '/settings/research-agent', label: 'Autonomous Hunt', icon: <Crosshair className="w-5 h-5" /> },
       { href: '/settings/research-agent/leads', label: 'Leads', icon: <Lightbulb className="w-5 h-5" /> },
@@ -139,8 +144,13 @@ function NavContent({ pathname }: { pathname: string }) {
         {navGroups.map((group, groupIndex) => (
           <div key={group.heading ?? 'overview'} className={`space-y-1 ${groupIndex === 0 ? '' : 'mt-4'}`}>
             {group.heading ? (
-              <div className="px-3 pb-0.5 text-[10px] font-semibold uppercase tracking-wider text-gray-600">
-                {group.heading}
+              <div className="flex items-center gap-1.5 px-3 pb-0.5 text-[10px] font-semibold uppercase tracking-wider text-gray-600">
+                <span>{group.heading}</span>
+                {group.badge ? (
+                  <span className="rounded-full border border-blue-500/30 bg-blue-500/10 px-1.5 py-px text-[8px] font-bold tracking-wider text-blue-400">
+                    {group.badge}
+                  </span>
+                ) : null}
               </div>
             ) : null}
             {group.items.map((item) => {
@@ -318,7 +328,7 @@ export default function Sidebar() {
       )}
 
       {/* Desktop: persistent sidebar. */}
-      <aside className="hidden w-64 flex-col border-r border-gray-800 bg-gray-900 p-4 md:flex">
+      <aside className="sticky top-0 hidden h-screen w-64 shrink-0 flex-col overflow-y-auto overscroll-contain border-r border-gray-800 bg-gray-900 p-4 md:flex">
         <NavContent pathname={pathname} />
       </aside>
     </>
