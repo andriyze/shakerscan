@@ -254,6 +254,13 @@ executable focused SQLi/XSS checks are surfaced as preferred actions. Campaign y
 autonomous workflow promotions, campaign-linked scan findings, campaign-linked retest confirmations,
 and net-new-over-DAST findings separately.
 
+The default Deep Hunt episode keeps the 25-step/action boundary but allows 500,000 model tokens so
+prompt-heavy scientific workflows can reach the step ceiling. Campaign defaults multiply that
+per-episode allowance by the configured episode count; aggregate overrides may only reduce it.
+Within one campaign, a finding receives at most one completed retest until the finding is observed
+again after that retest completed. This prevents false-positive retest churn while reopening the
+proof path when genuinely newer target evidence arrives.
+
 Scope:
 
 - dedicated experiment builder inside `/settings/research-agent`;

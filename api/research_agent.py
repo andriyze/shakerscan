@@ -110,7 +110,7 @@ def normalize_budget_limits(value: Any, *, max_steps: int) -> dict[str, int]:
         "active_actions": 10,
         "requests": 500,
         "seconds": 3600,
-        "model_tokens": 250000,
+        "model_tokens": 500000,
     }
     for key, ceiling in ceilings.items():
         if key not in raw:

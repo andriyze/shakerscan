@@ -12297,6 +12297,55 @@ def test_inferred_contracts_and_recommendations_remain_planning_only():
         "sqli", "xss",
     }
 
+    suppressed = api_module._research_recommended_actions(
+        [{
+            "id": "f1", "severity": "critical",
+            "last_verification_verdict": "inconclusive",
+        }],
+        [{"name": "finding.retest", "proposable": True}],
+        {"sqli"},
+        [{
+            "status": "completed",
+            "action": {"command": "finding.retest", "parameters": {"finding_id": "f1"}},
+        }],
+    )
+    assert suppressed == []
+
+
+def test_deep_hunt_default_model_budget_reaches_full_step_ceiling():
+    profile = api_module.RESEARCH_LAUNCH_PROFILES["deep_hunt"]
+    assert profile["max_steps"] == 25
+    assert profile["budget_limits"]["model_tokens"] == 500_000
+    aggregate = api_module._research_campaign_budget_limits("deep_hunt", 3)
+    assert aggregate["model_tokens"] == 1_500_000
+
+
+def test_campaign_retest_cap_reopens_only_for_newer_finding_evidence():
+    campaign_id = uuid.uuid4()
+    finding_id = uuid.uuid4()
+
+    class Conn:
+        def __init__(self, capped):
+            self.capped = capped
+            self.args = None
+
+        async def fetchval(self, query, *args):
+            assert "f.last_seen_at <= prior.completed_at" in query
+            assert "re.campaign_id=$1" in query
+            self.args = args
+            return self.capped
+
+    capped = Conn(True)
+    assert asyncio.run(api_module._research_campaign_retest_cap_reached(
+        capped, campaign_id, finding_id,
+    )) is True
+    assert capped.args == (campaign_id, finding_id)
+
+    newer_evidence = Conn(False)
+    assert asyncio.run(api_module._research_campaign_retest_cap_reached(
+        newer_evidence, campaign_id, finding_id,
+    )) is False
+
 
 def test_research_provider_probe_exercises_server_bound_action_contract(monkeypatch):
     captured = {}

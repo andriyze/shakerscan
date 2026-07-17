@@ -15476,7 +15476,7 @@ RESEARCH_LAUNCH_PROFILES: dict[str, dict[str, Any]] = {
         "max_steps": 25,
         "budget_limits": {
             "steps": 25, "actions": 24, "active_actions": 12, "requests": 500,
-            "seconds": 3600, "model_tokens": 250000,
+            "seconds": 3600, "model_tokens": 500000,
         },
     },
 }
@@ -27934,12 +27934,20 @@ def _research_recommended_actions(
     findings: Any,
     commands: Any,
     allowed_families: Any,
+    recent_actions: Any = None,
 ) -> list[dict[str, Any]]:
     proposable = {
         str(item.get("name") or "")
         for item in commands if isinstance(item, dict) and item.get("proposable")
     }
     recommendations: list[dict[str, Any]] = []
+    prior_retest_ids = {
+        str(((item.get("action") or {}).get("parameters") or {}).get("finding_id") or "")
+        for item in (recent_actions if isinstance(recent_actions, list) else [])
+        if isinstance(item, dict)
+        if str((item.get("action") or {}).get("command") or "") == "finding.retest"
+        and str(item.get("status") or "") in {"accepted", "dispatching", "completed"}
+    }
     if "finding.retest" in proposable:
         for finding in findings if isinstance(findings, list) else []:
             if not isinstance(finding, dict):
@@ -27949,7 +27957,7 @@ def _research_recommended_actions(
             if severity not in {"critical", "high"} or verdict in {"exploited", "likely_fixed", "fixed"}:
                 continue
             finding_id = str(finding.get("id") or "")
-            if finding_id:
+            if finding_id and finding_id not in prior_retest_ids:
                 recommendations.append({
                     "priority": "high",
                     "reason": "unverified_high_severity_residue",
@@ -28260,6 +28268,7 @@ def _research_decision_action_is_excluded(item: Any) -> bool:
         "known_vulnerability_already_covered",
         "repeated_action_without_state_change",
         "campaign_recon_cap_reached",
+        "finding_retest_campaign_cap_reached",
     }) or any(
         error.startswith(("semantic_dimension_exhausted:", "experiment_actuator_exhausted:"))
         for error in validation_errors
@@ -28303,6 +28312,7 @@ def _research_rejection_is_policy_steering(errors: Any) -> bool:
         "known_vulnerability_already_covered",
         "repeated_action_without_state_change",
         "campaign_recon_cap_reached",
+        "finding_retest_campaign_cap_reached",
     }
     return all(
         error in fixed
@@ -29042,6 +29052,7 @@ async def _build_research_observation(
         context.get("findings_summary") or [],
         commands,
         allowed_families,
+        recent_actions,
     )
     mission = _research_mission(episode)
     focus = await _research_focus_snapshot(conn, episode)
@@ -29670,6 +29681,41 @@ async def _research_workflow_surface_violations(
     return list(dict.fromkeys(errors))
 
 
+async def _research_campaign_retest_cap_reached(
+    conn: Any,
+    campaign_id: Any,
+    finding_id: Any,
+) -> bool:
+    """Allow one completed retest per finding until genuinely newer evidence arrives."""
+    if not campaign_id:
+        return False
+    return bool(await conn.fetchval(
+        """
+        SELECT COALESCE((
+            SELECT f.last_seen_at IS NULL OR f.last_seen_at <= prior.completed_at
+            FROM findings f
+            JOIN LATERAL (
+                SELECT fv.completed_at
+                FROM research_decisions rd
+                JOIN research_episodes re ON re.id=rd.episode_id
+                JOIN command_results cr ON cr.id=rd.command_result_id
+                JOIN finding_verifications fv
+                  ON fv.id::text=cr.result_json->>'retest_id'
+                WHERE re.campaign_id=$1
+                  AND fv.finding_id=f.id
+                  AND fv.status='completed'
+                  AND fv.completed_at IS NOT NULL
+                ORDER BY fv.completed_at DESC
+                LIMIT 1
+            ) prior ON true
+            WHERE f.id=$2
+        ), false)
+        """,
+        _optional_uuid(campaign_id),
+        _optional_uuid(finding_id),
+    ))
+
+
 async def _research_prepare_action(
     conn,
     episode: dict[str, Any],
@@ -29761,6 +29807,12 @@ async def _research_prepare_action(
                     )
                     if active_retest:
                         errors.append("finding_retest_already_active")
+                    elif await _research_campaign_retest_cap_reached(
+                        conn,
+                        episode.get("campaign_id"),
+                        finding_uuid,
+                    ):
+                        errors.append("finding_retest_campaign_cap_reached")
     if command.get("name") in {"scan.result", "deployment.decision"}:
         scan_id = str(params.get("scan_id") or "").strip()
         if not scan_id:

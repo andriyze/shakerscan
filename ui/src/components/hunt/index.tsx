@@ -58,7 +58,7 @@ export const PROFILES: Record<Intensity, {
     summary: 'Multi-user workflows',
     detail: 'Designs app-specific control/test workflows across two logins to prove access-control, field, and business-logic flaws. Credentials never enter the model.',
     mode: 'gated', maxSteps: 25, risk: 'credential',
-    budget: { steps: 25, actions: 24, active_actions: 12, requests: 500, seconds: 3600, model_tokens: 250000 },
+    budget: { steps: 25, actions: 24, active_actions: 12, requests: 500, seconds: 3600, model_tokens: 500000 },
     accent: 'text-fuchsia-300', selected: 'border-fuchsia-500/60 bg-fuchsia-500/[0.09]',
   },
 }

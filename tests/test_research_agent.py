@@ -154,6 +154,11 @@ def test_budget_application_is_monotonic_and_bounded():
     assert agent.budget_violations(limits, used, {"actions": 1, "seconds": 11}) == ["budget_exhausted:seconds"]
 
 
+def test_budget_normalization_allows_deep_hunt_model_ceiling():
+    limits = agent.normalize_budget_limits({"model_tokens": 900_000}, max_steps=25)
+    assert limits["model_tokens"] == 500_000
+
+
 def test_only_explicit_command_sets_can_be_research_actuators():
     assert "asm.gaps" in agent.READ_ONLY_RESEARCH_COMMANDS
     assert "asm.test" in agent.GATED_RESEARCH_COMMANDS
