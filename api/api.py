@@ -25067,6 +25067,11 @@ async def _arsenal_dispatch_workflow(p: dict[str, Any], approval_receipt_id: str
             raise HTTPException(status_code=404, detail="Active target not found")
         if str(target["discovery_source"] or "") == "model-intake":
             raise HTTPException(status_code=400, detail="Model Intake artifacts are not workflow targets")
+        # A create-based mass_assignment lead selected WITHOUT a planner-supplied workflow is materialized
+        # server-side: probe the create surface for its real body/envelope, then build the workflow. This
+        # is what makes an unattended deep_hunt promote registration mass_assignment -- the planner only
+        # selects the lead. No-op when the planner supplied steps or the lead is not create-based MA.
+        await _server_materialize_create_ma(conn, str(target["url"]), target_uuid, p, hypothesis_id)
         workflow_payload = {
             key: value for key, value in p.items()
             if key in {
@@ -35016,6 +35021,97 @@ def _materialize_create_mass_assignment_workflow(
             {"type": "restored", "control": "list_before", "candidate": "list_after", "predicate": "before_after_state"},
         ],
     }
+
+
+async def _probe_create_surface(
+    target_url: str, collection_route: str, headers: dict[str, str], transport: Any = None,
+) -> dict[str, Any] | None:
+    """Actively discover a create collection's real body + response envelope with one throwaway create.
+
+    Passive discovery never submits registration, so the real body (e.g. email/password) and the object
+    response envelope are otherwise invisible (the recorded param_shape is polluted by the scanner's own
+    fuzzing). Tries the dominant account-create field conventions -- not app-specific facts -- and returns
+    the first body the endpoint accepts (2xx) whose response exposes an id-bearing object. Returns None if
+    none is accepted (the lead simply does not run). The created object is a bounded, labeled artifact and
+    the family proof backstops everything downstream.
+    """
+    import httpx
+    from urllib.parse import urljoin
+
+    creds = _create_mass_assignment_credentials()
+    candidate_bodies = [
+        {"email": creds["ctrl_login"], "password": creds["reg_cred"], "passwordRepeat": creds["reg_cred"]},
+        {"email": creds["ctrl_login"], "password": creds["reg_cred"]},
+        {"username": creds["ctrl_login"], "email": creds["ctrl_login"], "password": creds["reg_cred"]},
+    ]
+    path = collection_route if str(collection_route).startswith("/") else "/" + str(collection_route)
+    url = urljoin(target_url, path)
+    safe_headers = {k: v for k, v in (headers or {}).items() if k.lower() == "authorization"}
+    try:
+        async with httpx.AsyncClient(timeout=12, trust_env=False, follow_redirects=False, transport=transport) as client:
+            for body in candidate_bodies:
+                try:
+                    resp = await client.post(url, json=body, headers=safe_headers)
+                except httpx.HTTPError:
+                    continue
+                if resp.status_code not in (200, 201, 202, 204):
+                    continue
+                try:
+                    shape = _discover_create_object_shape(resp.json())
+                except (ValueError, TypeError):
+                    shape = None
+                if not shape:
+                    continue
+                envelope, id_field = shape
+                return {"request_fields": ",".join(body.keys()), "envelope": envelope, "id_field": id_field}
+    except Exception:
+        logger.warning("create-surface probe failed for %s", path, exc_info=True)
+    return None
+
+
+async def _server_materialize_create_ma(
+    conn: Any, target_url: str, target_uuid: uuid.UUID, params: dict[str, Any], hypothesis_id: str | None,
+) -> bool:
+    """When a create-based mass_assignment lead is dispatched WITHOUT a planner-supplied workflow, the
+    server discovers the real create body (active probe) and materializes the workflow itself, so the
+    planner only has to SELECT the lead. Respects a planner-supplied workflow (does nothing if steps are
+    present). Returns True if it materialized. Backstopped end-to-end by the family proof."""
+    if params.get("steps") or not hypothesis_id:
+        return False
+    hypothesis_uuid = _optional_uuid(hypothesis_id)
+    if not hypothesis_uuid:
+        return False
+    row = await conn.fetchrow(
+        "SELECT family, metadata_json FROM hypotheses WHERE id=$1 AND target_id=$2",
+        hypothesis_uuid, target_uuid,
+    )
+    if not row or family_proof.canonical_family(row.get("family")) != "mass_assignment":
+        return False
+    metadata = _decode_json_value(row.get("metadata_json")) or {}
+    collection = str(metadata.get("route") or "").strip()
+    if not metadata.get("create_based") or not collection:
+        return False
+    headers: dict[str, str] = {}
+    try:
+        contexts = await _resolve_workflow_principal_contexts(conn, target_uuid, {"user1"})
+        headers = (contexts.get("user1") or {}).get("headers") if isinstance(contexts.get("user1"), dict) else {}
+    except Exception:
+        headers = {}
+    probe = await _probe_create_surface(target_url, collection, headers or {})
+    if not probe:
+        return False
+    # role=admin is the dominant privilege-escalation overpost; a wrong field is falsified by the proof.
+    workflow = _materialize_create_mass_assignment_workflow(
+        collection_route=collection, request_fields=probe["request_fields"],
+        forbidden_field="role", forbidden_value="admin",
+        envelope=probe["envelope"], id_field=probe["id_field"],
+    )
+    if not workflow:
+        return False
+    for key in ("proof_family", "objective", "expected_signal", "falsifier",
+                "principal_variables", "assertions", "steps"):
+        params[key] = workflow[key]
+    return True
 
 
 def _research_selected_experiment_templates(pack: Any) -> dict[str, dict[str, Any]]:
