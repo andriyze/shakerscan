@@ -331,6 +331,24 @@ def _scrub_sample(value: str) -> str:
     return text
 
 
+def _semantically_populated(value: Any) -> bool:
+    """Return whether decoded content carries at least one concrete value.
+
+    Empty JSON containers and nulls are shells, regardless of their serialized byte
+    length. Scalars such as ``0`` and ``False`` are real values and must not be
+    discarded merely because they are falsey in Python.
+    """
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, dict):
+        return any(_semantically_populated(item) for item in value.values())
+    if isinstance(value, (list, tuple, set)):
+        return any(_semantically_populated(item) for item in value)
+    return True
+
+
 def response_summary(
     response: httpx.Response,
     body: bytes,
@@ -369,6 +387,11 @@ def response_summary(
         "body_sample": _scrub_sample(text),
         "json_type": type(parsed_json).__name__ if parsed_json is not None else None,
         "json_keys": json_keys,
+        "content_semantically_populated": (
+            _semantically_populated(parsed_json)
+            if parsed_json is not None
+            else bool(text.strip())
+        ),
         "truncated": truncated,
         "location": str(response.headers.get("location") or "")[:500] or None,
         "elapsed_ms": elapsed_ms,

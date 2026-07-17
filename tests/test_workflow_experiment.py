@@ -342,12 +342,18 @@ def test_auth_bypass_uses_protected_route_policy_not_secret_content():
             {
                 "label": "authed", "principal": "admin",
                 "request": {"method": "GET", "path": "/admin/stats"},
-                "response": {"status": 200, "content_length": 32, "json_keys": ["active_users"]},
+                "response": {
+                    "status": 200, "content_length": 32, "json_keys": ["active_users"],
+                    "content_semantically_populated": True,
+                },
             },
             {
                 "label": "anon", "principal": "anonymous",
                 "request": {"method": "GET", "path": "/admin/stats"},
-                "response": {"status": 200, "content_length": 32, "json_keys": ["active_users"]},
+                "response": {
+                    "status": 200, "content_length": 32, "json_keys": ["active_users"],
+                    "content_semantically_populated": True,
+                },
                 "sensitive_value_categories": [],
             },
         ],
@@ -420,6 +426,36 @@ def test_auth_bypass_rejects_identical_empty_shell_public_endpoint():
     })
 
 
+def test_meaningful_equivalent_response_uses_semantics_not_serialized_size():
+    comparison = {
+        "comparable": True, "status_changed": False,
+        "body_changed": False, "body_similarity": 1.0,
+    }
+    long_empty_shell = {
+        "response": {
+            "content_length": 40,
+            "json_keys": ["authenticatedUser"],
+            "selected_json": {"$.authenticatedUser": {}},
+            "content_semantically_populated": False,
+        },
+    }
+    assert workflow._meaningful_equivalent_response(
+        long_empty_shell, long_empty_shell, comparison,
+    ) is False
+
+    for value in (0, False, {"id": 1}):
+        populated = {
+            "response": {
+                "content_length": 8,
+                "selected_json": {"$.value": value},
+                "content_semantically_populated": True,
+            },
+        }
+        assert workflow._meaningful_equivalent_response(
+            populated, populated, comparison,
+        ) is True
+
+
 def test_cross_principal_access_requires_distinct_authenticated_principals_and_equivalence():
     shared = {
         "principal_receipts": [
@@ -489,9 +525,15 @@ def test_reenabled_families_corroborate_on_real_signals():
         "trusted_protected_routes": [{"method": "GET", "path": "/private"}],
         "observations": [
             {"label": "authed", "principal": "user1", "request": {"method": "GET", "path": "/private"},
-             "response": {"status": 200, "content_length": 80, "json_keys": ["token"]}},
+             "response": {
+                 "status": 200, "content_length": 80, "json_keys": ["token"],
+                 "content_semantically_populated": True,
+             }},
             {"label": "anon", "principal": "anonymous", "request": {"method": "GET", "path": "/private"},
-             "response": {"status": 200, "content_length": 80, "json_keys": ["token"]},
+             "response": {
+                 "status": 200, "content_length": 80, "json_keys": ["token"],
+                 "content_semantically_populated": True,
+             },
              "sensitive_value_categories": ["jwt"]},
         ],
         "comparisons": [{"control": "authed", "candidate": "anon", "comparable": True,

@@ -79,6 +79,19 @@ def test_response_summary_redacts_common_secret_fields():
     assert summary["json_keys"] == ["id", "token"]
 
 
+def test_response_summary_classifies_semantic_content_without_byte_thresholds():
+    response = httpx.Response(200, headers={"content-type": "application/json"})
+    assert experiment.response_summary(
+        response, b'{"authenticatedUser": {}}',
+    )["content_semantically_populated"] is False
+    assert experiment.response_summary(
+        response, b'{"id": 0}',
+    )["content_semantically_populated"] is True
+    assert experiment.response_summary(
+        response, b'false',
+    )["content_semantically_populated"] is True
+
+
 def test_normalize_experiment_supports_form_extract_and_selected_fields():
     payload = _payload(
         method="POST",

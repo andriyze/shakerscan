@@ -16330,9 +16330,9 @@ def _select_research_hypothesis_context(
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Rank a broad candidate pool, then return a bounded planner-visible work board.
 
-    A lead is dropped when its exact v3 key OR its coarse family+method+route coverage key matches an
-    already-owned finding. The coarse key is what keeps DAST-owned BOLA (whose enriched dimensions the
-    sparse residue lead can't reproduce) off the board so net-new families are not starved of slots.
+    Exact v3 identity suppresses already-owned vulnerabilities. Coarse
+    family+method+route coverage is only a ranking hint: distinct fields,
+    parameters, roles, tenants, or invariants on one operation remain huntable.
     """
     bounded_limit = max(1, min(int(limit or 10), 25))
     known = known_vulnerability_keys or set()
@@ -16341,9 +16341,6 @@ def _select_research_hypothesis_context(
     def _is_uncovered(item: dict[str, Any]) -> bool:
         exact = _research_hypothesis_vulnerability_key(item)
         if exact and exact in known:
-            return False
-        coverage = _research_hypothesis_coverage_key(item)
-        if coverage and coverage in known_coverage:
             return False
         return True
 
@@ -16358,6 +16355,7 @@ def _select_research_hypothesis_context(
     )
     by_id = {str(item.get("id")): item for item in candidates}
     scheduled = list(schedule.get("scheduled") or [])
+    scheduled_position = {id(entry): index for index, entry in enumerate(scheduled)}
 
     # Family balance: the richest family (e.g. 100+ mass_assignment leads) would otherwise take every
     # board slot and starve data_exposure / bfla / bola. Float the highest-priority lead of EACH family
@@ -16367,16 +16365,49 @@ def _select_research_hypothesis_context(
         hypothesis = by_id.get(str(entry.get("hypothesis_id"))) or {}
         return family_proof.canonical_family(hypothesis.get("family")) or "?"
 
-    seen_family: set[str] = set()
-    family_firsts: list[dict[str, Any]] = []
-    family_rest: list[dict[str, Any]] = []
+    # Prefer a not-yet-covered operation within each family, but retain covered
+    # operations because a different exact dimension on that route can still be
+    # a distinct vulnerability.
+    by_family_entries: dict[str, list[dict[str, Any]]] = {}
+    family_order: list[str] = []
     for entry in scheduled:
         family = _entry_family(entry)
-        if family not in seen_family:
-            seen_family.add(family)
-            family_firsts.append(entry)
-        else:
-            family_rest.append(entry)
+        if family not in by_family_entries:
+            family_order.append(family)
+            by_family_entries[family] = []
+        by_family_entries[family].append(entry)
+    for entries in by_family_entries.values():
+        entries.sort(
+            key=lambda entry: (
+                _research_hypothesis_coverage_key(
+                    by_id.get(str(entry.get("hypothesis_id"))) or {}
+                ) in known_coverage,
+            )
+        )
+
+    family_firsts: list[dict[str, Any]] = []
+    family_rest: list[dict[str, Any]] = []
+    for family in family_order:
+        entries = by_family_entries[family]
+        if entries:
+            family_firsts.append(entries[0])
+            family_rest.extend(entries[1:])
+    family_firsts.sort(
+        key=lambda entry: (
+            _research_hypothesis_coverage_key(
+                by_id.get(str(entry.get("hypothesis_id"))) or {}
+            ) in known_coverage,
+            family_order.index(_entry_family(entry)),
+        )
+    )
+    family_rest.sort(
+        key=lambda entry: (
+            _research_hypothesis_coverage_key(
+                by_id.get(str(entry.get("hypothesis_id"))) or {}
+            ) in known_coverage,
+            scheduled_position.get(id(entry), len(scheduled)),
+        )
+    )
     balanced = family_firsts + family_rest
 
     ranked = [
@@ -16645,24 +16676,33 @@ async def _build_agent_context_pack_from_target(conn, req: AgentContextPackFromT
         hypothesis_rows = await _savepoint_fetch(
             conn,
             """
+            WITH family_ranked AS (
+                SELECT h.*,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY COALESCE(NULLIF(lower(h.family), ''), 'unknown')
+                           ORDER BY
+                             CASE WHEN h.source IN ('app_graph','benchmark','dast','scan','scanner','asm')
+                                    OR lower(COALESCE(h.metadata_json->>'unexplained_residue', '')) IN ('true','1','yes','on')
+                                    OR h.metadata_json ? 'graph_edge_id'
+                                    OR h.metadata_json ? 'edge_id'
+                                    OR h.metadata_json ? 'source_scan_id'
+                                    OR h.metadata_json ? 'baseline_scan_id'
+                                  THEN 0 ELSE 1 END,
+                             h.confidence DESC, h.updated_at DESC
+                       ) AS family_rank
+                FROM hypotheses h
+                WHERE h.target_id = $1
+                  AND h.status IN ('open','claimed','testing','supported')
+            )
             SELECT id, target_id, source, family, cwe, title, description,
                    severity_guess, confidence,
                    dedupe_key, status, version, claim_owner, claim_lease_expires_at,
                    smoke_score, evidence_object_ids, tool_receipt_ids,
                    next_test_action, metadata_json, endorsements, refutations,
                    updated_at
-            FROM hypotheses
-            WHERE target_id = $1 AND status IN ('open','claimed','testing','supported')
-            ORDER BY
-              CASE WHEN source IN ('app_graph','benchmark','dast','scan','scanner','asm')
-                     OR lower(COALESCE(metadata_json->>'unexplained_residue', '')) IN ('true','1','yes','on')
-                     OR metadata_json ? 'graph_edge_id'
-                     OR metadata_json ? 'edge_id'
-                     OR metadata_json ? 'source_scan_id'
-                     OR metadata_json ? 'baseline_scan_id'
-                   THEN 0 ELSE 1 END,
-              confidence DESC, updated_at DESC
-            LIMIT 200
+            FROM family_ranked
+            ORDER BY family_rank, confidence DESC, updated_at DESC
+            LIMIT 500
             """,
             target_uuid,
         )
@@ -16854,7 +16894,7 @@ async def _build_agent_context_pack_from_target(conn, req: AgentContextPackFromT
         # Families whose every lead is already an owned finding — the planner should pivot away from
         # these to a net-new family rather than re-proposing suppressed leads.
         "exhausted_families": _research_exhausted_families(
-            hypothesis_candidates, known_coverage_keys if 'known_coverage_keys' in locals() else set(),
+            hypothesis_candidates, known_vulnerability_keys if 'known_vulnerability_keys' in locals() else set(),
         ),
         "attack_graph": attack_graph,
         # Bounded history includes normal DAST parents and internal ASM activities. Findings,
@@ -30311,15 +30351,14 @@ def _research_hypothesis_coverage_key(hypothesis: dict[str, Any]) -> str | None:
 
 
 def _research_exhausted_families(
-    candidates: list[dict[str, Any]], known_coverage_keys: set[str] | None,
+    candidates: list[dict[str, Any]], known_vulnerability_keys: set[str] | None,
 ) -> list[str]:
-    """Families whose EVERY board candidate is already an owned finding (coarse coverage).
+    """Families whose every candidate has the same exact identity as an owned finding.
 
-    Surfaced to the planner so it pivots off a DAST-owned family (e.g. crAPI BOLA) to a net-new one
-    instead of re-proposing suppressed leads. A family with no candidates is not 'exhausted' — only a
-    family that has leads and all of them are covered.
+    Coarse operation coverage is deliberately insufficient here because one route
+    may contain distinct parameter, field, role, tenant, or invariant failures.
     """
-    known = known_coverage_keys or set()
+    known = known_vulnerability_keys or set()
     if not known:
         return []
     by_family: dict[str, list[bool]] = {}
@@ -30329,8 +30368,8 @@ def _research_exhausted_families(
         family = family_proof.canonical_family(item.get("family"))
         if not family:
             continue
-        coverage = _research_hypothesis_coverage_key(item)
-        by_family.setdefault(family, []).append(bool(coverage and coverage in known))
+        identity = _research_hypothesis_vulnerability_key(item)
+        by_family.setdefault(family, []).append(bool(identity and identity in known))
     return sorted(family for family, flags in by_family.items() if flags and all(flags))
 
 
@@ -30677,12 +30716,18 @@ async def _research_known_coverage_keys(conn: Any, target_id: Any) -> set[str]:
 
 
 async def _research_net_new_finding_count(
-    conn: Any, target_id: Any, *, tool: str = "autonomous_workflow", verdict: str | None = "exploited",
+    conn: Any,
+    target_id: Any,
+    *,
+    campaign_id: Any = None,
+    tool: str = "autonomous_workflow",
+    verdict: str | None = "exploited",
 ) -> int:
-    """Count findings from `tool` whose coarse coverage key no OTHER-tool finding owns.
+    """Count distinct exact findings from ``tool`` not owned by another tool.
 
-    This is the net-new-over-DAST measure: an autonomous promotion on a family+route+method the
-    deterministic scanner never reported. Same coarse key the board de-duplication uses.
+    When a campaign is supplied, only findings carrying that campaign's durable
+    research provenance count. This prevents a new campaign inheriting credit
+    from earlier target hunts.
     """
     rows = await conn.fetch(
         """
@@ -30694,22 +30739,39 @@ async def _research_net_new_finding_count(
     )
     other_keys: set[str] = set()
     tool_rows: list[dict[str, Any]] = []
+    campaign_text = str(campaign_id or "").strip()
     for row in rows:
         finding = row_to_dict(row)
         if str(finding.get("tool") or "") == tool:
+            if campaign_text:
+                evidence = _decode_json_value(finding.get("evidence")) or {}
+                provenance_items = (
+                    evidence.get("research_provenance_history")
+                    if isinstance(evidence, dict)
+                    and isinstance(evidence.get("research_provenance_history"), list)
+                    else []
+                )
+                if isinstance(evidence, dict) and isinstance(evidence.get("research_provenance"), dict):
+                    provenance_items = [*provenance_items, evidence["research_provenance"]]
+                if not any(
+                    isinstance(item, dict)
+                    and str(item.get("campaign_id") or "") == campaign_text
+                    for item in provenance_items
+                ):
+                    continue
             tool_rows.append(finding)
         else:
-            key = _finding_coverage_key(finding)
+            key = _finding_vulnerability_key(finding)
             if key:
                 other_keys.add(key)
-    net_new = 0
+    net_new_keys: set[str] = set()
     for finding in tool_rows:
         if verdict and str(finding.get("last_verification_verdict") or "") != verdict:
             continue
-        key = _finding_coverage_key(finding)
+        key = _finding_vulnerability_key(finding)
         if key and key not in other_keys:
-            net_new += 1
-    return net_new
+            net_new_keys.add(key)
+    return len(net_new_keys)
 
 
 async def _research_campaign_readiness(conn: Any, campaign: Any) -> dict[str, Any]:
@@ -31566,9 +31628,10 @@ async def _research_campaign_yield_metrics(conn: Any, campaign: Any) -> dict[str
     # (novelty-suppressed at dispatch) and nothing is actually executing. Stop cleanly and early rather
     # than burning the model budget on a covered-board spin (faster than the generic rejection ceiling).
     all_leads_already_covered = (
-        novelty_blocks >= 4
+        novelty_blocks >= 8
         and experiments == 0
-        and novelty_blocks >= max(4, int(len(decisions) * 0.6))
+        and novelty_blocks == rejected_decisions
+        and novelty_blocks >= max(8, int(len(decisions) * 0.75))
     )
     verified_findings = int(await conn.fetchval(
         """
@@ -31591,9 +31654,11 @@ async def _research_campaign_yield_metrics(conn: Any, campaign: Any) -> dict[str
     aggregate_budget = await _research_campaign_budget_snapshot(conn, campaign)
     before = config.get("surface_before_preflight") if isinstance(config.get("surface_before_preflight"), dict) else {}
     after = config.get("surface_after_preflight") if isinstance(config.get("surface_after_preflight"), dict) else {}
-    # Net-new-over-DAST: autonomous promotions on a family+route+method no deterministic scanner
-    # finding owns. This is the number that actually answers "did deep_hunt find something DAST missed".
-    net_new_verified = await _research_net_new_finding_count(conn, target_id)
+    # Net-new-over-DAST: campaign-attributed exact vulnerability identities
+    # that no deterministic scanner finding owns.
+    net_new_verified = await _research_net_new_finding_count(
+        conn, target_id, campaign_id=campaign_id,
+    )
     return {
         "episodes": len(episode_rows),
         "decisions": len(decisions),
@@ -33778,11 +33843,23 @@ async def _research_autobind_hypothesis(
     # rejection seen for grok's mass_assignment experiments. Prefer the mutation step for those families.
     mutation_family = family in {"mass_assignment", "field_constraint", "workflow"}
     def _is_state_changing(step: dict[str, Any]) -> bool:
-        return str(step.get("method") or "").upper() in {"POST", "PUT", "PATCH"}
+        return str(step.get("method") or "").upper() in {"POST", "PUT", "PATCH", "DELETE"}
+    def _mutation_binding_priority(step: dict[str, Any]) -> tuple[int, int, int]:
+        label = str(step.get("label") or "").strip().lower()
+        explicitly_mutating = bool(
+            re.search(r"(?:^|[_-])(mutat|transition|violat|attack|candidate)", label)
+        )
+        return (
+            0 if explicitly_mutating else 1,
+            0 if _in_preferred(step) else 1,
+            0 if str(step.get("checkpoint") or "").lower() == "mutation" else 1,
+        )
     if mutation_family and any(_is_state_changing(step) for step in steps):
         ordered_steps = (
-            [s for s in steps if _is_state_changing(s) and _in_preferred(s)]
-            + [s for s in steps if _is_state_changing(s) and not _in_preferred(s)]
+            sorted(
+                (s for s in steps if _is_state_changing(s)),
+                key=_mutation_binding_priority,
+            )
             + [s for s in steps if not _is_state_changing(s)]
         )
     else:
@@ -33881,7 +33958,7 @@ async def _research_autobind_hypothesis(
         if lead_uuid is not None and target_uuid is not None:
             row = await conn.fetchrow(
                 """
-                SELECT family, next_test_action, metadata_json
+                SELECT source, family, next_test_action, metadata_json
                 FROM hypotheses
                 WHERE id=$1 AND target_id=$2
                   AND status IN ('open','claimed','testing','supported')
@@ -33891,6 +33968,7 @@ async def _research_autobind_hypothesis(
             )
             if row is not None:
                 lead = {
+                    "source": row.get("source"),
                     "family": row["family"],
                     "next_test_action": _decode_json_value(row["next_test_action"]),
                     "metadata_json": _decode_json_value(row["metadata_json"]),
@@ -33898,11 +33976,34 @@ async def _research_autobind_hypothesis(
                 contract = _research_hypothesis_experiment_contract(lead)
                 contract_route = _canonical_vulnerability_route(contract.get("route"))
                 contract_method = str(contract.get("method") or "").upper()
+                live_operation = str(lead.get("source") or "").strip().lower() == "invariant"
+                if not live_operation:
+                    endpoint_rows = await conn.fetch(
+                        """
+                        SELECT method, path
+                        FROM target_endpoints
+                        WHERE target_id=$1
+                          AND COALESCE(test_status, '') <> 'gone'
+                          AND COALESCE(last_http_status, 0) NOT IN (404, 410)
+                          AND COALESCE(unreachable_streak, 0) < 2
+                        LIMIT 2000
+                        """,
+                        target_uuid,
+                    )
+                    live_operation = any(
+                        _canonical_vulnerability_route(endpoint.get("path")) == contract_route
+                        and (
+                            not contract_method
+                            or str(endpoint.get("method") or "GET").upper() == contract_method
+                        )
+                        for endpoint in endpoint_rows
+                    )
                 if (
                     family_proof.canonical_family(contract.get("family") or lead.get("family")) == family
                     and contract_route
                     and contract_route == route
                     and (not contract_method or contract_method == method)
+                    and live_operation
                 ):
                     raw["hypothesis_id"] = supplied_hypothesis_id
                     return []
@@ -36764,7 +36865,25 @@ def _endpoint_inventory_hypothesis_requests(
                     endorsement={"source": "endpoint_inventory", "method": method, "route": route, "auth_state": auth_state},
                     created_by=created_by,
                 ))
-    return requests[:100]
+    # Apply the cap after family-aware round-robin selection. Otherwise a long
+    # object-reference prefix can consume all 100 slots before later
+    # data-exposure, auth-bypass, or mutation leads are persisted.
+    by_family: dict[str, list[HypothesisRequest]] = {}
+    family_order: list[str] = []
+    for request in requests:
+        if request.family not in by_family:
+            family_order.append(request.family)
+            by_family[request.family] = []
+        by_family[request.family].append(request)
+    balanced: list[HypothesisRequest] = []
+    while len(balanced) < 100 and any(by_family.values()):
+        for family in family_order:
+            bucket = by_family[family]
+            if bucket:
+                balanced.append(bucket.pop(0))
+                if len(balanced) >= 100:
+                    break
+    return balanced
 
 
 @app.post("/targets/{target_id}/inventory/hypotheses")

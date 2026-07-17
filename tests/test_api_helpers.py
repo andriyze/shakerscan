@@ -8,9 +8,11 @@ import asyncio
 import base64
 import copy
 import hashlib
+import inspect
 import io
 import json
 import os
+import re
 import sys
 import threading
 import types
@@ -18,6 +20,7 @@ import uuid
 import zipfile
 from collections import Counter
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 
@@ -11776,10 +11779,9 @@ def test_coverage_key_matches_finding_and_lead_across_sparse_dimensions():
     assert api_module._research_hypothesis_coverage_key(de_lead) != finding_cov
 
 
-def test_board_drops_covered_family_so_a_fresh_family_surfaces():
-    # The whole point of Fix 1: a DAST-owned BOLA lead outranks a medium mass_assignment lead on
-    # severity, so without coverage-aware removal it monopolizes the board. Once its coverage key is
-    # known, it must leave the board and the fresh family must surface.
+def test_board_downranks_coarse_coverage_without_hiding_distinct_dimensions():
+    # Coarse family+method+route coverage is a ranking hint, not proof that every
+    # field/parameter/role dimension on the operation is exhausted.
     covered_bola = _covered_bola_lead()
     fresh_mass = _fresh_mass_assignment_lead()
     known_coverage = {api_module._research_hypothesis_coverage_key(covered_bola)}
@@ -11790,9 +11792,10 @@ def test_board_drops_covered_family_so_a_fresh_family_surfaces():
         known_coverage_keys=known_coverage,
     )
     ranked_ids = {entry["hypothesis_id"] for entry in ranked}
-    assert "bola-1" not in ranked_ids
+    assert "bola-1" in ranked_ids
     assert "ma-1" in ranked_ids
-    # Without the coverage set the higher-severity BOLA still ranks first (regression guard).
+    assert ranked[0]["hypothesis_id"] == "ma-1"
+    # Without the coverage hint the higher-severity BOLA still ranks first.
     _s, ranked_default = api_module._select_research_hypothesis_context(
         [covered_bola, fresh_mass], completed_dimensions=[], auth_available=True,
     )
@@ -11802,8 +11805,11 @@ def test_board_drops_covered_family_so_a_fresh_family_surfaces():
 def test_exhausted_families_lists_only_fully_covered_families():
     covered_bola = _covered_bola_lead()
     fresh_mass = _fresh_mass_assignment_lead()
-    known = {api_module._research_hypothesis_coverage_key(covered_bola)}
+    known = {api_module._research_hypothesis_vulnerability_key(covered_bola)}
     assert api_module._research_exhausted_families([covered_bola, fresh_mass], known) == ["bola"]
+    # Coarse operation coverage alone must never exhaust a family.
+    coarse = {api_module._research_hypothesis_coverage_key(covered_bola)}
+    assert api_module._research_exhausted_families([covered_bola, fresh_mass], coarse) == []
     # No known coverage -> nothing exhausted.
     assert api_module._research_exhausted_families([covered_bola, fresh_mass], set()) == []
 
@@ -11833,6 +11839,25 @@ def test_inventory_producers_emit_data_exposure_and_bfla_leads():
     )
     de = next(r for r in reqs if r.family == "data_exposure")
     assert de.next_test_action["parameters"]["proof_family"] == "data_exposure"
+
+
+def test_inventory_hypothesis_cap_is_family_balanced():
+    endpoints = [
+        {"method": "GET", "path": f"/api/order-type-{index}/orders/1", "auth_state": "user1"}
+        for index in range(150)
+    ]
+    endpoints.extend([
+        {"method": "GET", "path": "/api/users/profile", "auth_state": "user1"},
+        {"method": "POST", "path": "/api/admin/settings", "param_location": "json body",
+         "param_shape": "enabled", "auth_state": "user1"},
+    ])
+    requests = api_module._endpoint_inventory_hypothesis_requests(
+        "11111111-1111-4111-8111-111111111111", endpoints,
+    )
+    assert len(requests) == 100
+    assert {"bola", "data_exposure", "auth_bypass", "mass_assignment"} <= {
+        request.family for request in requests
+    }
 
 
 def test_scheduler_lifts_data_exposure_off_the_boundary_floor():
@@ -11923,6 +11948,67 @@ def test_research_net_new_finding_count_excludes_dast_owned():
         _Conn(rows), "11111111-1111-4111-8111-111111111111",
     ))
     assert n == 1
+
+
+def test_research_net_new_finding_count_is_campaign_scoped_and_distinct():
+    campaign_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    other_campaign_id = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+    shared_evidence = {
+        "dedupe_dimensions": {"route": "/api/profile", "method": "PATCH", "fields": ["role"]},
+        "research_provenance_history": [{"campaign_id": campaign_id}],
+    }
+
+    class _Conn:
+        async def fetch(self, *args, **kwargs):
+            return [
+                {"tool": "autonomous_workflow", "cwe": "CWE-915", "title": "Role overpost",
+                 "url": "https://x/api/profile", "evidence": shared_evidence, "request": None,
+                 "last_verification_verdict": "exploited"},
+                # Duplicate row for the same exact vulnerability counts once.
+                {"tool": "autonomous_workflow", "cwe": "CWE-915", "title": "Role overpost duplicate",
+                 "url": "https://x/api/profile", "evidence": shared_evidence, "request": None,
+                 "last_verification_verdict": "exploited"},
+                {"tool": "autonomous_workflow", "cwe": "CWE-915", "title": "Other campaign",
+                 "url": "https://x/api/account",
+                 "evidence": {
+                     "dedupe_dimensions": {"route": "/api/account", "method": "PATCH"},
+                     "research_provenance_history": [{"campaign_id": other_campaign_id}],
+                 },
+                 "request": None, "last_verification_verdict": "exploited"},
+            ]
+
+    assert asyncio.run(api_module._research_net_new_finding_count(
+        _Conn(), "11111111-1111-4111-8111-111111111111", campaign_id=campaign_id,
+    )) == 1
+
+
+def test_deep_hunt_finding_selects_match_persisted_schema():
+    schema = Path(__file__).parents[1].joinpath("db", "init.sql").read_text()
+    table = re.search(
+        r"CREATE TABLE findings \((.*?)\n\);",
+        schema,
+        re.DOTALL,
+    )
+    assert table
+    columns = {
+        match.group(1)
+        for line in table.group(1).splitlines()
+        if (match := re.match(r"\s*([a-z_][a-z0-9_]*)\s+[A-Z]", line))
+    }
+    for function in (
+        api_module._research_known_vulnerability_keys,
+        api_module._research_known_coverage_keys,
+        api_module._research_net_new_finding_count,
+    ):
+        source = inspect.getsource(function)
+        selected = re.search(r"SELECT\s+(.*?)\s+FROM findings", source, re.DOTALL)
+        assert selected
+        plain_columns = {
+            item.strip().split()[0]
+            for item in selected.group(1).split(",")
+            if re.fullmatch(r"[a-z_][a-z0-9_]*(?:\s+AS\s+[a-z_][a-z0-9_]*)?", item.strip(), re.IGNORECASE)
+        }
+        assert plain_columns <= columns
 
 
 def test_research_vertical_contract_endpoint_schema_reaches_provider_prompt():
@@ -15128,6 +15214,41 @@ def test_research_autobind_mass_assignment_binds_on_mutation_step_without_suppli
     assert errors2 == ["experiment_hypothesis_not_on_ranked_live_surface"]
 
 
+def test_research_autobind_prefers_actual_mutation_over_setup_write():
+    target_id = uuid.uuid4()
+    hypothesis_id = uuid.uuid4()
+    action = {
+        "command": "experiment.workflow",
+        "parameters": {
+            "proof_family": "mass_assignment",
+            "steps": [
+                {"label": "create_fixture", "checkpoint": "mutation", "method": "POST",
+                 "path": "/api/fixtures"},
+                {"label": "mutate_forbidden_field", "checkpoint": "mutation", "method": "PATCH",
+                 "path": "/api/profiles/42", "json_body": {"role": "admin"}},
+                {"label": "verify", "checkpoint": "action", "method": "GET",
+                 "path": "/api/profiles/42"},
+            ],
+            "assertions": [
+                {"type": "comparison_changed", "candidate": "verify", "control": "create_fixture",
+                 "predicate": "forbidden_field_accepted"},
+            ],
+        },
+    }
+    raw = {"action": action}
+    observation = {
+        "current_surface": {"ranked_hypotheses": []},
+        "selected_hypothesis_contracts": [{
+            "hypothesis_id": str(hypothesis_id), "family": "mass_assignment",
+            "route": "/api/profiles/{id}", "method": "PATCH",
+        }],
+    }
+    assert asyncio.run(api_module._research_autobind_hypothesis(
+        object(), {"target_id": target_id}, raw, observation,
+    )) == []
+    assert raw["hypothesis_id"] == str(hypothesis_id)
+
+
 def test_research_autobind_supplied_id_binds_via_db_when_board_compacted():
     # Compaction can drop BOTH ranked_hypotheses and selected_hypothesis_contracts from an oversized
     # pack. A supplied id the planner read in an earlier observation must still bind by resolving the
@@ -15149,19 +15270,24 @@ def test_research_autobind_supplied_id_binds_via_db_when_board_compacted():
     empty_obs = {"current_surface": {"ranked_hypotheses": []}, "selected_hypothesis_contracts": []}
 
     class _Conn:
-        def __init__(self, row):
+        def __init__(self, row, endpoints=None):
             self._row = row
+            self._endpoints = endpoints or []
         async def fetchrow(self, *args, **kwargs):
             return self._row
+        async def fetch(self, *args, **kwargs):
+            return self._endpoints
 
     live_row = {
+        "source": "app_graph",
         "family": "mass_assignment",
         "next_test_action": {"command": "experiment.workflow", "parameters": {"proof_family": "mass_assignment"}},
         "metadata_json": {"dedupe_dimensions": {"route": "/workshop/api/past-orders", "method": "POST"}},
     }
     raw = {"hypothesis_id": str(hid), "action": json.loads(json.dumps(action))}
     errors = asyncio.run(api_module._research_autobind_hypothesis(
-        _Conn(live_row), {"target_id": target_id}, raw, empty_obs,
+        _Conn(live_row, [{"method": "POST", "path": "/workshop/api/past-orders"}]),
+        {"target_id": target_id}, raw, empty_obs,
     ))
     assert errors == []
     assert raw["hypothesis_id"] == str(hid)
@@ -15172,6 +15298,13 @@ def test_research_autobind_supplied_id_binds_via_db_when_board_compacted():
         _Conn(None), {"target_id": target_id}, bad, empty_obs,
     ))
     assert errors2 == ["experiment_hypothesis_not_on_ranked_live_surface"]
+
+    # A durable hypothesis on a stale/gone operation is not current live residue.
+    stale = {"hypothesis_id": str(hid), "action": json.loads(json.dumps(action))}
+    stale_errors = asyncio.run(api_module._research_autobind_hypothesis(
+        _Conn(live_row, []), {"target_id": target_id}, stale, empty_obs,
+    ))
+    assert stale_errors == ["experiment_hypothesis_not_on_ranked_live_surface"]
 
 
 def test_research_autobind_accepts_explicit_ranked_id_when_typed_workflow_refines_dimensions():

@@ -22,6 +22,7 @@ from http_experiment import (
     _mapping_contains_control_character,
     _origin,
     _render_variables,
+    _semantically_populated,
     _sensitive_name,
     _sensitive_object_key,
     _variable_references,
@@ -307,11 +308,6 @@ def _same_resource(left: dict[str, Any], right: dict[str, Any], *, same_method: 
     return left_signature[1] == right_signature[1]
 
 
-# An empty-nested JSON shell such as {"user":{}} is ~11 bytes; a response carrying even one populated
-# scalar clears this. Below it, "content" is just braces and a key with no value -- not a resource.
-_MIN_MEANINGFUL_CONTENT_BYTES = 16
-
-
 def _meaningful_equivalent_response(
     control: dict[str, Any],
     candidate: dict[str, Any],
@@ -324,21 +320,21 @@ def _meaningful_equivalent_response(
     to EVERY principal, so authenticated == anonymous (body_changed False, similarity 1.0) and a naive
     body-equality check mints a false auth-bypass on what is really a public endpoint.
 
-    Require both the protected read and the anonymous read to carry more than an empty-shell amount of
-    content (or workflow-selected values). Top-level json_keys are NOT sufficient -- {"user":{}} has the
-    key "user" but exposes nothing.
+    Require both reads to carry a concrete decoded value. Serialized byte length and
+    top-level keys are not semantic evidence: a long-keyed nested empty object is
+    still empty, while short scalars such as 0 and false are meaningful.
     """
     if not comparison.get("comparable") or comparison.get("status_changed") is True:
         return False
     control_response = control.get("response") if isinstance(control.get("response"), dict) else {}
     candidate_response = candidate.get("response") if isinstance(candidate.get("response"), dict) else {}
-    control_has_content = bool(
-        int(control_response.get("content_length") or 0) >= _MIN_MEANINGFUL_CONTENT_BYTES
-        or control_response.get("selected_json")
+    control_has_content = (
+        control_response.get("content_semantically_populated") is True
+        or _semantically_populated(control_response.get("selected_json"))
     )
-    candidate_has_content = bool(
-        int(candidate_response.get("content_length") or 0) >= _MIN_MEANINGFUL_CONTENT_BYTES
-        or candidate_response.get("selected_json")
+    candidate_has_content = (
+        candidate_response.get("content_semantically_populated") is True
+        or _semantically_populated(candidate_response.get("selected_json"))
     )
     if not (control_has_content and candidate_has_content):
         return False
