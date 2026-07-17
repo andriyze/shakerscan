@@ -11736,6 +11736,115 @@ def test_endpoint_inventory_hypotheses_are_residue_backed_leads():
     assert not any((r.dedupe_dimensions.get("route") or "").endswith("/health") for r in reqs)
 
 
+def _covered_bola_lead():
+    return {
+        "id": "bola-1", "source": "app_graph", "family": "bola", "status": "open",
+        "severity_guess": "high", "confidence": 0.6, "dedupe_key": "bola-1",
+        "dedupe_dimensions": {"method": "GET", "route": "/api/orders/{id}", "proof_surface": "runtime_authz_replay"},
+        "metadata_json": {"unexplained_residue": True, "route": "/api/orders/{id}",
+                          "dedupe_dimensions": {"method": "GET", "route": "/api/orders/{id}"}},
+    }
+
+
+def _fresh_mass_assignment_lead():
+    return {
+        "id": "ma-1", "source": "app_graph", "family": "mass_assignment", "status": "open",
+        "severity_guess": "medium", "confidence": 0.5, "dedupe_key": "ma-1",
+        "dedupe_dimensions": {"method": "POST", "route": "/api/orders", "proof_surface": "mutation_differential"},
+        "metadata_json": {"unexplained_residue": True, "route": "/api/orders"},
+    }
+
+
+def test_coverage_key_matches_finding_and_lead_across_sparse_dimensions():
+    # A DAST finding and a residue lead on the SAME family+method+route must share a coarse coverage
+    # key even though their fine-grained dimensions differ -- that parity is what lets the board drop
+    # already-owned BOLA. The smart_bola method fallback (empty evidence -> GET) must survive the
+    # shared-extraction refactor, or the coverage key would be family|*|route and never match.
+    dast_finding = {
+        "tool": "smart_bola", "cwe": "CWE-639", "title": "BOLA on order API",
+        "url": "https://app.example.test/api/orders/42", "evidence": {},
+    }
+    finding_cov = api_module._finding_coverage_key(dast_finding)
+    lead_cov = api_module._research_hypothesis_coverage_key(_covered_bola_lead())
+    assert finding_cov and finding_cov == lead_cov
+    # The refactor must not change the exact v3 finding key.
+    assert api_module._finding_vulnerability_key(dast_finding)
+    # Different family on the same route does NOT collide (family is in the coverage key).
+    de_lead = {"family": "data_exposure",
+               "dedupe_dimensions": {"method": "GET", "route": "/api/orders/{id}"},
+               "metadata_json": {"route": "/api/orders/{id}"}}
+    assert api_module._research_hypothesis_coverage_key(de_lead) != finding_cov
+
+
+def test_board_drops_covered_family_so_a_fresh_family_surfaces():
+    # The whole point of Fix 1: a DAST-owned BOLA lead outranks a medium mass_assignment lead on
+    # severity, so without coverage-aware removal it monopolizes the board. Once its coverage key is
+    # known, it must leave the board and the fresh family must surface.
+    covered_bola = _covered_bola_lead()
+    fresh_mass = _fresh_mass_assignment_lead()
+    known_coverage = {api_module._research_hypothesis_coverage_key(covered_bola)}
+    summaries, ranked = api_module._select_research_hypothesis_context(
+        [covered_bola, fresh_mass],
+        completed_dimensions=[],
+        auth_available=True,
+        known_coverage_keys=known_coverage,
+    )
+    ranked_ids = {entry["hypothesis_id"] for entry in ranked}
+    assert "bola-1" not in ranked_ids
+    assert "ma-1" in ranked_ids
+    # Without the coverage set the higher-severity BOLA still ranks first (regression guard).
+    _s, ranked_default = api_module._select_research_hypothesis_context(
+        [covered_bola, fresh_mass], completed_dimensions=[], auth_available=True,
+    )
+    assert ranked_default[0]["hypothesis_id"] == "bola-1"
+
+
+def test_exhausted_families_lists_only_fully_covered_families():
+    covered_bola = _covered_bola_lead()
+    fresh_mass = _fresh_mass_assignment_lead()
+    known = {api_module._research_hypothesis_coverage_key(covered_bola)}
+    assert api_module._research_exhausted_families([covered_bola, fresh_mass], known) == ["bola"]
+    # No known coverage -> nothing exhausted.
+    assert api_module._research_exhausted_families([covered_bola, fresh_mass], set()) == []
+
+
+def test_inventory_producers_emit_data_exposure_and_bfla_leads():
+    # Fix 2: the inventory must yield data_exposure + auth_bypass(bfla) leads so a de-BOLA'd board is
+    # not empty. Generic nouns only -- a sensitive-named GET is a data_exposure lead; an admin path is
+    # a function-level-authz lead; a plain public health GET is neither.
+    reqs = api_module._endpoint_inventory_hypothesis_requests(
+        "11111111-1111-4111-8111-111111111111",
+        [
+            {"method": "GET", "path": "/api/users/profile", "param_location": "", "auth_state": "user1"},
+            {"method": "POST", "path": "/api/admin/settings", "param_location": "body",
+             "auth_state": "user1", "param_shape": "flag"},
+            {"method": "GET", "path": "/api/health", "param_location": "", "auth_state": "anonymous"},
+        ],
+        created_by="test",
+    )
+    families = {r.family for r in reqs}
+    assert "data_exposure" in families
+    assert "auth_bypass" in families
+    assert all(r.metadata_json.get("unexplained_residue") for r in reqs)
+    # No data_exposure/auth_bypass lead for the plain public health endpoint.
+    assert not any(
+        (r.dedupe_dimensions.get("route") or "").endswith("/health")
+        for r in reqs if r.family in {"data_exposure", "auth_bypass"}
+    )
+    de = next(r for r in reqs if r.family == "data_exposure")
+    assert de.next_test_action["parameters"]["proof_family"] == "data_exposure"
+
+
+def test_scheduler_lifts_data_exposure_off_the_boundary_floor():
+    import hypothesis_scheduler
+    de = hypothesis_scheduler.score_hypothesis(
+        {"id": "de", "family": "data_exposure", "severity_guess": "medium", "source": "app_graph",
+         "dedupe_key": "de", "metadata_json": {"unexplained_residue": True}},
+        context={"auth_available": True},
+    )
+    assert de["breakdown"]["boundary_value"] == 2.0
+
+
 def test_research_vertical_contract_endpoint_schema_reaches_provider_prompt():
     request = api_module._endpoint_inventory_hypothesis_requests(
         "11111111-1111-4111-8111-111111111111",

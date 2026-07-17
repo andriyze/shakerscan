@@ -27,6 +27,10 @@ _HIGH_BOUNDARY_FAMILIES = frozenset(
      "privilege_escalation", "tenant_isolation", "business_logic", "workflow"}
 )
 _INJECTION_FAMILIES = frozenset({"sqli", "xss", "ssrf", "rce", "xxe", "nosqli", "ssti", "lfi", "injection"})
+# Sensitive-data / disclosure families: real high-value classes DAST under-proves, but not on an
+# authz object boundary. A mid-tier so they can win a board slot once covered authz leads are pruned,
+# without outranking a genuine BOLA/BFLA lead.
+_MID_BOUNDARY_FAMILIES = frozenset({"data_exposure", "information_disclosure", "sensitive_data_exposure"})
 
 # Evidence-strength rung -> score (mirrors adjudicate.EVIDENCE_STRENGTH_ORDER).
 _STRENGTH_SCORE = {"claimed": 0.0, "signal": 1.0, "reproduced": 2.0, "cross_principal_verified": 3.0}
@@ -80,7 +84,11 @@ def score_hypothesis(h: dict[str, Any], *, context: dict[str, Any] | None = None
 
     impact = _SEVERITY_IMPACT.get(str(h.get("severity_guess") or "").strip().lower(), 2.0)
 
-    boundary = 3.0 if family in _HIGH_BOUNDARY_FAMILIES else (2.0 if family in _INJECTION_FAMILIES else 1.0)
+    boundary = (
+        3.0 if family in _HIGH_BOUNDARY_FAMILIES
+        else 2.0 if family in _INJECTION_FAMILIES or family in _MID_BOUNDARY_FAMILIES
+        else 1.0
+    )
     if md.get("authenticated") or md.get("requires_auth"):
         boundary += 1.0
     if md.get("boundary") in {"role", "tenant", "money", "entitlement", "approval", "state_transition"}:

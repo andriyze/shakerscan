@@ -16323,15 +16323,29 @@ def _select_research_hypothesis_context(
     completed_dimensions: list[str],
     auth_available: bool,
     known_vulnerability_keys: set[str] | None = None,
+    known_coverage_keys: set[str] | None = None,
     limit: int = 10,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Rank a broad candidate pool, then return a bounded planner-visible work board."""
+    """Rank a broad candidate pool, then return a bounded planner-visible work board.
+
+    A lead is dropped when its exact v3 key OR its coarse family+method+route coverage key matches an
+    already-owned finding. The coarse key is what keeps DAST-owned BOLA (whose enriched dimensions the
+    sparse residue lead can't reproduce) off the board so net-new families are not starved of slots.
+    """
     bounded_limit = max(1, min(int(limit or 10), 25))
     known = known_vulnerability_keys or set()
-    candidates = [
-        item for item in candidates
-        if not (key := _research_hypothesis_vulnerability_key(item)) or key not in known
-    ]
+    known_coverage = known_coverage_keys or set()
+
+    def _is_uncovered(item: dict[str, Any]) -> bool:
+        exact = _research_hypothesis_vulnerability_key(item)
+        if exact and exact in known:
+            return False
+        coverage = _research_hypothesis_coverage_key(item)
+        if coverage and coverage in known_coverage:
+            return False
+        return True
+
+    candidates = [item for item in candidates if _is_uncovered(item)]
     schedule = hypothesis_scheduler.rank_hypotheses(
         candidates,
         context={
@@ -16672,6 +16686,8 @@ async def _build_agent_context_pack_from_target(conn, req: AgentContextPackFromT
         completed_dimensions = [str(row["dedupe_key"]) for row in completed_rows if row["dedupe_key"]]
         async with _optional_database_savepoint(conn):
             known_vulnerability_keys = await _research_known_vulnerability_keys(conn, target_uuid)
+        async with _optional_database_savepoint(conn):
+            known_coverage_keys = await _research_known_coverage_keys(conn, target_uuid)
         # Planner context should lead with the same residue-backed candidates selected by the
         # deterministic scheduler. Fill any spare slots with the original ordering for useful
         # context, but never let high-confidence generic noise crowd all scheduled residue out.
@@ -16683,6 +16699,7 @@ async def _build_agent_context_pack_from_target(conn, req: AgentContextPackFromT
                 for item in principal_summary.get("principals", [])
             ),
             known_vulnerability_keys=known_vulnerability_keys,
+            known_coverage_keys=known_coverage_keys,
         )
         graph_nodes = await _savepoint_fetch(
             conn,
@@ -16810,6 +16827,11 @@ async def _build_agent_context_pack_from_target(conn, req: AgentContextPackFromT
         "approved_invariant_contracts": approved_invariant_contracts,
         "ranked_hypotheses": ranked_hypotheses,
         "known_vulnerability_count": len(known_vulnerability_keys) if 'known_vulnerability_keys' in locals() else 0,
+        # Families whose every lead is already an owned finding — the planner should pivot away from
+        # these to a net-new family rather than re-proposing suppressed leads.
+        "exhausted_families": _research_exhausted_families(
+            hypothesis_candidates, known_coverage_keys if 'known_coverage_keys' in locals() else set(),
+        ),
         "attack_graph": attack_graph,
         # Bounded history includes normal DAST parents and internal ASM activities. Findings,
         # endpoint inventory, and graph remain the detailed canonical surfaces above.
@@ -28811,6 +28833,9 @@ async def _build_research_observation(
             "Do not test a semantic dimension listed in campaign_exhaustion.exhausted_dimensions. "
             "Three independent falsifications retire that family+route dimension for the campaign; "
             "when no non-exhausted hypothesis remains, stop with the evidence instead of restarting recon.",
+            "Do not propose an experiment in a family listed in current_surface.exhausted_families: every "
+            "lead there is already an owned finding and will be suppressed. Pivot to a family that still has "
+            "fresh ranked leads (e.g. mass_assignment, data_exposure, auth_bypass); if none remain, stop.",
             "For a ranked lead, use selected_hypothesis_contracts as the authoritative route/request "
             "shape. Do not ask the operator for request fields or examples already present there.",
         ],
@@ -29995,16 +30020,43 @@ def _canonical_vulnerability_key(
     ).hexdigest()
 
 
-def _finding_vulnerability_key(value: Any) -> str | None:
+def _canonical_coverage_key(*, family: Any, route: Any, method: Any = None) -> str | None:
+    """Coarse family+method+route coverage key (dimension-less).
+
+    The exact v3 vulnerability key folds in fine-grained dimensions, so a DAST finding and a
+    residue lead on the SAME endpoint hash differently whenever the lead's sparse dimensions can't
+    reproduce the finding's enriched ones — which lets already-owned BOLA leads slip onto the hunt
+    board and monopolize it. This coarse key deliberately drops dimensions so "same family + method
+    + route as an existing finding" is enough to recognise coverage at ranking time. The precise v3
+    key still guards dispatch, so this only affects board ordering, never promotion.
+    """
+    canonical_family = family_proof.canonical_family(family)
+    canonical_route = _canonical_vulnerability_route(route)
+    if not canonical_family or not canonical_route:
+        return None
+    canonical_method = str(method or "").strip().upper() or "*"
+    return hashlib.sha256(
+        f"coverage:v1|{canonical_family}|{canonical_method}|{canonical_route}".encode()
+    ).hexdigest()
+
+
+def _finding_family_route_method(value: Any) -> tuple[dict[str, Any], Any, Any, Any, dict[str, Any], Any, Any]:
+    """Extract (finding, family, route, method, dedupe_dimensions, evidence, request) from a finding.
+
+    Shared by the exact vulnerability key and the coarse coverage key so both agree on identity —
+    in particular the smart_bola/smart_authz method fallback below, without which a covered BOLA
+    finding's method would be unknown and never match a GET residue lead's coverage key.
+    """
     finding = row_to_dict(value) if value is not None and not isinstance(value, dict) else dict(value or {})
     evidence = _decode_json_value(finding.get("evidence")) or {}
     family = _research_finding_family(finding)
     route = finding.get("url")
     method = finding.get("method")
+    dedupe_dimensions: dict[str, Any] = {}
     if isinstance(evidence, dict):
-        dimensions = evidence.get("dedupe_dimensions") if isinstance(evidence.get("dedupe_dimensions"), dict) else {}
-        route = dimensions.get("route") or evidence.get("route") or evidence.get("path") or route
-        method = dimensions.get("method") or evidence.get("method") or method
+        dedupe_dimensions = evidence.get("dedupe_dimensions") if isinstance(evidence.get("dedupe_dimensions"), dict) else {}
+        route = dedupe_dimensions.get("route") or evidence.get("route") or evidence.get("path") or route
+        method = dedupe_dimensions.get("method") or evidence.get("method") or method
         if not method:
             consumer = str(evidence.get("consumer_endpoint") or "").strip()
             consumer_match = re.match(r"^(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\s+", consumer, re.IGNORECASE)
@@ -30032,13 +30084,18 @@ def _finding_vulnerability_key(value: Any) -> str | None:
         proof_type = str((evidence or {}).get("proof_type") or "").lower()
         if "write" not in proof_type:
             method = "GET"
+    return finding, family, route, method, dedupe_dimensions, evidence, request
+
+
+def _finding_vulnerability_key(value: Any) -> str | None:
+    finding, family, route, method, dedupe_dimensions, evidence, request = _finding_family_route_method(value)
     computed = _canonical_vulnerability_key(
         family=family,
         route=route,
         method=method,
         dimensions=_research_vulnerability_dimensions(
             family,
-            dimensions if isinstance(evidence, dict) else {},
+            dedupe_dimensions if isinstance(evidence, dict) else {},
             evidence,
             finding,
             request if isinstance(request, dict) else {},
@@ -30050,6 +30107,11 @@ def _finding_vulnerability_key(value: Any) -> str | None:
     # Recompute whenever possible so legacy explicit hashes cannot bypass the v3 dimensional key.
     explicit = str((evidence or {}).get("canonical_vulnerability_key") or "").strip().lower()
     return explicit if re.fullmatch(r"[a-f0-9]{64}", explicit) else None
+
+
+def _finding_coverage_key(value: Any) -> str | None:
+    _finding, family, route, method, _dims, _evidence, _request = _finding_family_route_method(value)
+    return _canonical_coverage_key(family=family, route=route, method=method)
 
 
 RESEARCH_SURFACE_MIN_UNIQUE_ROUTES = 20
@@ -30198,6 +30260,43 @@ def _research_hypothesis_vulnerability_key(hypothesis: dict[str, Any]) -> str | 
             hypothesis.get("next_test_action") if isinstance(hypothesis.get("next_test_action"), dict) else {},
         ),
     )
+
+
+def _research_hypothesis_coverage_key(hypothesis: dict[str, Any]) -> str | None:
+    """Coarse family+method+route coverage key for a hunt lead (see _canonical_coverage_key)."""
+    metadata = hypothesis.get("metadata_json") if isinstance(hypothesis.get("metadata_json"), dict) else {}
+    metadata_dimensions = metadata.get("dedupe_dimensions") if isinstance(metadata.get("dedupe_dimensions"), dict) else {}
+    direct_dimensions = hypothesis.get("dedupe_dimensions") if isinstance(hypothesis.get("dedupe_dimensions"), dict) else {}
+    dimensions = {**metadata_dimensions, **direct_dimensions}
+    return _canonical_coverage_key(
+        family=hypothesis.get("family"),
+        route=_research_hypothesis_route(hypothesis),
+        method=dimensions.get("method") or metadata.get("method"),
+    )
+
+
+def _research_exhausted_families(
+    candidates: list[dict[str, Any]], known_coverage_keys: set[str] | None,
+) -> list[str]:
+    """Families whose EVERY board candidate is already an owned finding (coarse coverage).
+
+    Surfaced to the planner so it pivots off a DAST-owned family (e.g. crAPI BOLA) to a net-new one
+    instead of re-proposing suppressed leads. A family with no candidates is not 'exhausted' — only a
+    family that has leads and all of them are covered.
+    """
+    known = known_coverage_keys or set()
+    if not known:
+        return []
+    by_family: dict[str, list[bool]] = {}
+    for item in candidates:
+        if not isinstance(item, dict):
+            continue
+        family = family_proof.canonical_family(item.get("family"))
+        if not family:
+            continue
+        coverage = _research_hypothesis_coverage_key(item)
+        by_family.setdefault(family, []).append(bool(coverage and coverage in known))
+    return sorted(family for family, flags in by_family.items() if flags and all(flags))
 
 
 def _research_action_semantic_dimension(action: dict[str, Any]) -> str | None:
@@ -30514,6 +30613,30 @@ async def _research_known_vulnerability_keys(conn: Any, target_id: Any) -> set[s
     return {
         key
         for key in (_finding_vulnerability_key(row) for row in rows)
+        if key
+    }
+
+
+async def _research_known_coverage_keys(conn: Any, target_id: Any) -> set[str]:
+    """Coarse family+method+route coverage keys of already-owned findings (see _canonical_coverage_key).
+
+    Used only to keep already-found vulnerabilities off the hunt board so net-new families surface;
+    dispatch still checks the exact v3 key via _research_known_vulnerability_keys.
+    """
+    rows = await conn.fetch(
+        """
+        SELECT tool, cwe, title, url, evidence, request
+        FROM findings
+        WHERE target_id=$1
+          AND status IN ('active','resolved','accepted_risk')
+        ORDER BY last_seen_at DESC
+        LIMIT 2000
+        """,
+        _optional_uuid(target_id),
+    )
+    return {
+        key
+        for key in (_finding_coverage_key(row) for row in rows)
         if key
     }
 
@@ -31362,6 +31485,14 @@ async def _research_campaign_yield_metrics(conn: Any, campaign: Any) -> dict[str
         dimension for dimension, count in falsification_counts.items()
         if count >= RESEARCH_SEMANTIC_FALSIFICATION_LIMIT
     )
+    # The board is offering nothing net-new: the planner keeps proposing already-owned vulnerabilities
+    # (novelty-suppressed at dispatch) and nothing is actually executing. Stop cleanly and early rather
+    # than burning the model budget on a covered-board spin (faster than the generic rejection ceiling).
+    all_leads_already_covered = (
+        novelty_blocks >= 4
+        and experiments == 0
+        and novelty_blocks >= max(4, int(len(decisions) * 0.6))
+    )
     verified_findings = int(await conn.fetchval(
         """
         SELECT COUNT(*) FROM findings
@@ -31410,7 +31541,8 @@ async def _research_campaign_yield_metrics(conn: Any, campaign: Any) -> dict[str
         "stop_recommended": bool(
             verified_findings == 0
             and (
-                (
+                all_leads_already_covered
+                or (
                     experiments >= 12
                     and falsified >= max(9, int(experiments * 0.75))
                 )
@@ -31432,6 +31564,8 @@ async def _research_campaign_yield_metrics(conn: Any, campaign: Any) -> dict[str
             if experiments >= 8 and verified_findings == 0
             and outcome_counts.get("inconclusive", 0) + outcome_counts.get("blocked", 0)
             >= max(6, int(experiments * 0.75))
+            else "all_leads_already_covered"
+            if verified_findings == 0 and all_leads_already_covered
             else "planner_rejection_ceiling"
             if rejected_decisions >= 8 and verified_findings == 0
             and rejected_decisions >= max(8, int(len(decisions) * 0.75))
@@ -36313,6 +36447,22 @@ _ID_PATH_SEGMENT = re.compile(
     r"/(?:\d+|[0-9a-fA-F]{8}-[0-9a-fA-F-]{27,36}|\{[^/{}]+\}|:[A-Za-z_][A-Za-z0-9_]*)(?=/|$)"
 )
 
+# Generic field/path signals that a READ route may return sensitive VALUES -> data-exposure leads.
+# Universal nouns only (no app-specific paths); the server proof still has to observe a live
+# high-precision sensitive value on a protected/denied read before anything is promoted.
+_SENSITIVE_FIELD_TOKENS = re.compile(
+    r"(?:user|account|profile|email|ssn|social|passport|credit|card|cvv|iban|secret|"
+    r"password|apikey|api_key|order|invoice|payment|billing|balance|salary|address|phone|"
+    r"birth|dob|license|medical|patient|tax|private)",
+    re.IGNORECASE,
+)
+# Generic path signals of a privileged/admin function -> function-level-authz (BFLA/auth_bypass) leads.
+_PRIVILEGED_FUNCTION_TOKENS = re.compile(
+    r"(?:admin|internal|manage|management|config|dashboard|approve|approval|grant|revoke|"
+    r"privilege|superuser|backend|console|moderat|impersonat)",
+    re.IGNORECASE,
+)
+
 
 def _endpoint_inventory_hypothesis_requests(
     target_id: str, endpoints: list[dict[str, Any]], *, created_by: str | None = None,
@@ -36395,6 +36545,65 @@ def _endpoint_inventory_hypothesis_requests(
                     metadata_json={"unexplained_residue": True, "residue_source": "endpoint_inventory",
                                    "route": route, "request_fields": request_fields, "request_example": request_example},
                     endorsement={"source": "endpoint_inventory", "method": method, "route": route},
+                    created_by=created_by,
+                ))
+        # Sensitive-value read: a GET route whose path/fields name sensitive data is a data-exposure
+        # lead. The app graph only emits these off a two-user resource map (usually empty), so the
+        # inventory is the fallback that keeps data_exposure on the board. Lead only -- the workflow
+        # proof still requires a live server-classified sensitive value on a protected/denied read.
+        if (
+            method == "GET"
+            and not auth_session_noise
+            and _SENSITIVE_FIELD_TOKENS.search(f"{path} {request_fields or ''}")
+        ):
+            key = f"asm_residue|data_exposure|{method}|{route}"
+            if key not in seen:
+                seen.add(key)
+                requests.append(HypothesisRequest(
+                    target_id=target_id, source="app_graph", family="data_exposure", cwe="CWE-200",
+                    title=f"Sensitive-read lead: {method} {route}",
+                    description=(
+                        "A read endpoint whose path or fields name sensitive data the scanner discovered "
+                        "but did not prove for over-exposure. Re-read it as a lower-privilege/anonymous "
+                        "principal and require a live server-classified sensitive value before promotion."
+                    ),
+                    severity_guess="medium", confidence=0.5, dedupe_key=key,
+                    dedupe_dimensions={"method": method, "route": route, "proof_surface": "sensitive_value_boundary"},
+                    next_test_action={
+                        "command": "experiment.workflow",
+                        "parameters": {"proof_family": "data_exposure"},
+                        "requires": ["primary_auth"],
+                    },
+                    metadata_json={"unexplained_residue": True, "residue_source": "endpoint_inventory",
+                                   "route": route, "request_fields": request_fields, "request_example": request_example},
+                    endorsement={"source": "endpoint_inventory", "method": method, "route": route, "auth_state": auth_state},
+                    created_by=created_by,
+                ))
+        # Privileged function: a path that names an admin/management function is a function-level-authz
+        # (BFLA/auth_bypass) lead. Also inventory-sourced so it survives an empty app graph. Lead only --
+        # the workflow proof still has to show the function executes for an unauthorized principal.
+        if not auth_session_noise and _PRIVILEGED_FUNCTION_TOKENS.search(path):
+            key = f"asm_residue|auth_bypass|{method}|{route}"
+            if key not in seen:
+                seen.add(key)
+                requests.append(HypothesisRequest(
+                    target_id=target_id, source="app_graph", family="auth_bypass", cwe="CWE-862",
+                    title=f"Privileged-function lead: {method} {route}",
+                    description=(
+                        "A path that names an administrative/management function the scanner discovered "
+                        "but did not prove for authorization. Invoke it as an unauthorized/anonymous "
+                        "principal and require a server-confirmed access differential before promotion."
+                    ),
+                    severity_guess="high", confidence=0.55, dedupe_key=key,
+                    dedupe_dimensions={"method": method, "route": route, "proof_surface": "function_authz_control"},
+                    next_test_action={
+                        "command": "experiment.workflow",
+                        "parameters": {"proof_family": "auth_bypass"},
+                        "requires": ["primary_auth"],
+                    },
+                    metadata_json={"unexplained_residue": True, "residue_source": "endpoint_inventory",
+                                   "route": route, "request_fields": request_fields, "request_example": request_example},
+                    endorsement={"source": "endpoint_inventory", "method": method, "route": route, "auth_state": auth_state},
                     created_by=created_by,
                 ))
     return requests[:100]
