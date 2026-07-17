@@ -11276,6 +11276,38 @@ def test_research_provider_contract_rejects_semantically_empty_action():
     assert api_module._research_provider_contract_error(valid, observation) is None
 
 
+def test_research_provider_contract_promotes_workflow_semantics_from_action():
+    observation = {
+        "id": "observation-1",
+        "context_hash": "a" * 64,
+        "observation_pack": {
+            "proposable_commands": [{
+                "name": "experiment.workflow", "proposable": True, "risk_tier": "credential",
+            }]
+        },
+    }
+    provider_response = {
+        "decision": "execute_action",
+        "action": {
+            "command": "experiment.workflow",
+            "parameters": {
+                "expected_signal": "The forbidden field persists after the mutation.",
+                "falsifier": "The mutation is rejected or the field does not persist.",
+            },
+        },
+        "expected_signal": None,
+        "falsifier": None,
+    }
+
+    bound = api_module._bind_research_decision_to_observation(provider_response, observation)
+
+    assert bound["expected_signal"] == provider_response["action"]["parameters"]["expected_signal"]
+    assert bound["falsifier"] == provider_response["action"]["parameters"]["falsifier"]
+    assert "expected_signal_promoted_from_action" in bound["_harness_repairs"]
+    assert "falsifier_promoted_from_action" in bound["_harness_repairs"]
+    assert api_module._research_provider_contract_error(provider_response, observation) is None
+
+
 def test_research_provider_contract_rejects_vague_or_premature_stop():
     observation = {
         "id": "observation-1",

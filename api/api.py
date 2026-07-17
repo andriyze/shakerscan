@@ -34324,6 +34324,23 @@ def _bind_research_decision_to_observation(
         if len(inferred) == 1:
             bound["decision"] = inferred[0]
             repairs.append("decision_type_inferred")
+    # Workflow commands carry their own proof-level expected signal and falsifier. Some structured
+    # output providers satisfy that nested command schema but leave the duplicate decision-level
+    # fields null. Preserve fail-closed semantics while accepting the model's actual meaning by
+    # promoting only non-empty strings the provider already supplied; never invent either field.
+    if bound.get("decision") == "execute_action":
+        action = bound.get("action") if isinstance(bound.get("action"), dict) else {}
+        parameters = action.get("parameters") if isinstance(action.get("parameters"), dict) else {}
+        for field in ("expected_signal", "falsifier"):
+            current = bound.get(field)
+            nested = parameters.get(field)
+            if (
+                not (isinstance(current, str) and current.strip())
+                and isinstance(nested, str)
+                and nested.strip()
+            ):
+                bound[field] = nested.strip()[:2000]
+                repairs.append(f"{field}_promoted_from_action")
     # Some OpenAI-compatible providers still omit semantic fields despite the structured schema.
     # Bind safe, non-authorizing defaults so a
     # valid stop/request-input intent cannot spin the controller on a cosmetic omission.
@@ -34368,7 +34385,12 @@ def _research_provider_contract_error(
     unexpected = sorted(set(response) - provider_fields)
     if unexpected:
         return "unexpected_fields:" + ",".join(str(item)[:80] for item in unexpected[:10])
-    bound = _bind_research_decision_to_observation(response, observation)
+    try:
+        bound = _bind_research_decision_to_observation(response, observation)
+    except Exception as exc:
+        # A malformed provider payload must be a normal contract rejection, not an opaque validator
+        # crash that consumes an entire model fallback chain. Keep the response itself out of logs.
+        return f"decision_binding_error:{type(exc).__name__}"
     typed_candidate = dict(bound)
     typed_candidate.pop("_harness_repairs", None)
     try:
@@ -34379,6 +34401,11 @@ def _research_provider_contract_error(
             location = ".".join(str(part) for part in item.get("loc") or []) or "decision"
             violations.append(f"{location}:{item.get('type') or 'invalid'}")
         return "decision_schema_invalid:" + ",".join(violations)
+    except (TypeError, ValueError) as exc:
+        # Pydantic normally wraps bad field values in ValidationError, but custom/provider-derived
+        # container shapes can still raise directly. Classify them deterministically for retry and
+        # observability rather than surfacing validator_error:TypeError with no location.
+        return f"decision_schema_invalid:decision:{type(exc).__name__}"
     decision = str(bound.get("decision") or "")
     if decision not in {"execute_action", "request_input", "stop"}:
         return "decision_type_invalid"

@@ -1234,7 +1234,17 @@ async def call_ai_provider(
                                 try:
                                     validation_error = response_validator(parsed)
                                 except Exception as exc:
-                                    validation_error = f"validator_error:{type(exc).__name__}"
+                                    logger.exception(
+                                        "AI semantic response validator raised unexpectedly "
+                                        "(model=%s, mode=%s)",
+                                        model_name,
+                                        mode_name,
+                                    )
+                                    detail = " ".join(str(exc).split())[:160]
+                                    validation_error = (
+                                        f"validator_error:{type(exc).__name__}"
+                                        + (f":{detail}" if detail else "")
+                                    )
                                 if validation_error:
                                     mode_error = f"Semantic JSON contract rejected: {str(validation_error)[:300]}"
                                     if attempt < AI_RETRY_ATTEMPTS - 1 and not strict_retry:
