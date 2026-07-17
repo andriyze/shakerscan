@@ -28296,11 +28296,11 @@ def _research_hypothesis_provability(item: Any) -> tuple[int, list[str]]:
             score += 3
         else:
             blockers.append("readback_route_missing")
-        # Create-based leads restore only by DELETE-ing the object they created; without that they cannot
-        # form a moat-valid cleanup+restored workflow, so they are not provable.
-        if metadata.get("create_based") and not metadata.get("cleanup_route"):
-            score -= 3
-            blockers.append("cleanup_route_missing")
+        # Create-based restoration is best-effort (the create template always attempts a DELETE and the
+        # two-run proof accepts an unrestorable create), so a missing cleanup route neither blocks nor
+        # penalizes the lead; a real DELETE route is a small provability bonus for cleaner restoration.
+        if metadata.get("create_based") and metadata.get("cleanup_route"):
+            score += 1
     if _research_auth_session_route(route):
         score -= 8
         blockers.append("auth_session_shape")
@@ -35022,13 +35022,11 @@ def _research_selected_experiment_templates(pack: Any) -> dict[str, dict[str, An
             if family == "mass_assignment":
                 method = str(contract.get("method") or "").upper()
                 methods = {str(value).upper() for value in contract.get("available_methods") or []}
-                # Create-based: POST /collection with a paired object read-back AND delete-cleanup route
-                # gets the create template (create -> read the created object -> DELETE to restore).
-                if (
-                    contract.get("create_based")
-                    and contract.get("readback_route")
-                    and contract.get("cleanup_route")
-                ):
+                # Create-based: POST /collection with a paired object read-back gets the create template
+                # (create -> read the created object -> best-effort DELETE). A discovered cleanup route is
+                # preferred but not required -- the template always attempts the DELETE and the two-run
+                # proof accepts an unrestorable create, so a missing DELETE only leaves a labeled test object.
+                if contract.get("create_based") and contract.get("readback_route"):
                     return {family: copy.deepcopy(_MASS_ASSIGNMENT_CREATE_TEMPLATE)}
                 # Update-based: a same-route PUT/PATCH with a same-route GET read-back. A POST-only create
                 # surface with no paired read/delete gets nothing -- do not teach the planner to fake it.
@@ -37752,13 +37750,16 @@ def _endpoint_inventory_hypothesis_requests(
                 mass_blockers: list[str] = []
                 if not readback_route:
                     mass_blockers.append("readback_route_missing")
-                elif create_based and not cleanup_route:
-                    mass_blockers.append("cleanup_route_missing")
+                # cleanup_route is NOT required: create-based mass_assignment restoration is best-effort
+                # (the create template always attempts a DELETE on the created object, and the two-run
+                # proof accepts an unrestorable create). A missing DELETE only means the labeled test
+                # object persists -- a bounded artifact, not a soundness gap -- so it neither blocks the
+                # lead nor penalizes it; a real cleanup route is a small provability bonus.
                 mass_provability = (
                     2 + (3 if readback_route else 0)
                     + (1 if method in {"POST", "PUT", "PATCH"} else 0)
                     + (2 if request_fields or request_example else 0)
-                    - (3 if "cleanup_route_missing" in mass_blockers else 0)
+                    + (1 if cleanup_route else 0)
                 )
                 requests.append(HypothesisRequest(
                     target_id=target_id, source="app_graph", family="mass_assignment", cwe="CWE-915",

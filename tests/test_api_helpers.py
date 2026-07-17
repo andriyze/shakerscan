@@ -12301,7 +12301,19 @@ def test_create_based_mass_assignment_gets_the_create_template_and_normalizes():
     assert norm["mutating"] is True
     assert any(a["type"] == "restored" for a in norm["assertions"])
 
-    # A POST create WITHOUT a paired read-back/cleanup gets nothing -- do not teach the planner to fake it.
+    # A create with a read-back but NO discovered cleanup route STILL gets the create template:
+    # restoration is best-effort (the template always attempts a DELETE; the two-run proof accepts an
+    # unrestorable create). A missing DELETE only leaves a labeled test object, not a soundness gap.
+    no_cleanup = api_module._research_selected_experiment_templates({
+        "selected_hypothesis_contracts": [{
+            "family": "mass_assignment", "method": "POST", "available_methods": ["POST"],
+            "create_based": True, "readback_route": "/api/Users/{id}", "provability_score": 8,
+        }],
+    })
+    assert set(no_cleanup) == {"mass_assignment"}
+    assert no_cleanup["mass_assignment"]["steps"][0]["label"] == "list_before"
+
+    # A POST create WITHOUT a paired read-back still gets nothing -- the read-back is essential.
     none = api_module._research_selected_experiment_templates({
         "selected_hypothesis_contracts": [{
             "family": "mass_assignment", "method": "POST", "available_methods": ["POST"],
