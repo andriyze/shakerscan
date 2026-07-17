@@ -48,7 +48,7 @@ function familyLabel(family: string): string {
 }
 
 function statusLabel(status: string): string {
-  return ({ open: 'Ready', claimed: 'In review', testing: 'Test planned', supported: 'Signal observed' } as Record<string, string>)[status] || status
+  return ({ open: 'Ready to plan', claimed: 'In review', testing: 'Test planned', supported: 'Signal observed' } as Record<string, string>)[status] || status
 }
 
 function severityClass(severity?: string | null): string {
@@ -136,7 +136,7 @@ function LeadCard({ lead, rank, selected, onSelect }: { lead: ScheduledLead; ran
         </div>
         <div className="text-right">
           <div className="font-mono text-lg text-gray-300">#{rank}</div>
-          <div className="text-[10px] uppercase tracking-wider text-gray-600">recommended</div>
+          {rank === 1 ? <div className="text-[10px] uppercase tracking-wider text-gray-600">recommended</div> : null}
         </div>
         <ChevronRight className="mt-2 h-4 w-4 text-gray-600" />
       </div>
@@ -144,9 +144,10 @@ function LeadCard({ lead, rank, selected, onSelect }: { lead: ScheduledLead; ran
   )
 }
 
-function LeadInspector({ lead, contracts, busy, onTransition }: {
+function LeadInspector({ lead, contracts, target, busy, onTransition }: {
   lead: ScheduledLead | null
   contracts: FamilyProofContracts | null
+  target?: TargetLite
   busy: boolean
   onTransition: (lead: ScheduledLead, state: string) => Promise<void>
 }) {
@@ -170,6 +171,7 @@ function LeadInspector({ lead, contracts, busy, onTransition }: {
           </div>
           <h2 className="mt-3 text-xl font-semibold text-white">{h.title || familyLabel(h.family)}</h2>
           <p className="mt-2 text-sm leading-6 text-gray-400">{h.description || 'Validate this lead with a bounded control and test sequence.'}</p>
+          {target ? <p className="mt-2 truncate text-xs text-gray-500" title={target.url}>Target: {target.name || target.url}</p> : null}
           <div className="mt-4 flex flex-wrap gap-2">
             {needsAuth ? <Badge className="bg-violet-500/15 text-violet-300"><LockKeyhole className="mr-1 h-3 w-3" />Two-account context</Badge> : null}
             <Badge className="bg-gray-800 text-gray-300"><Route className="mr-1 h-3 w-3" />{h.source.replaceAll('_', ' ')}</Badge>
@@ -254,9 +256,15 @@ export default function InvestigationWorkspacePage() {
   }, [])
 
   const load = useCallback(async () => {
+    if (!targetId) {
+      setData(null)
+      setSelectedId('')
+      setLoading(false)
+      return
+    }
     setLoading(true); setError(null)
     try {
-      const next = await scheduleHypotheses({ targetId: targetId || undefined, remainingRequests: 12, limit: 50 })
+      const next = await scheduleHypotheses({ targetId, remainingRequests: 12, limit: 50 })
       setData(next)
       setSelectedId((current) => current && next.scheduled.some((x) => x.hypothesis_id === current) ? current : (next.scheduled[0]?.hypothesis_id || ''))
     } catch (e) { setError(e instanceof Error ? e.message : 'Failed to load investigation leads') }
@@ -266,7 +274,8 @@ export default function InvestigationWorkspacePage() {
   useEffect(() => { load().catch(() => undefined) }, [load])
 
   const selected = useMemo(() => data?.scheduled.find((x) => x.hypothesis_id === selectedId) || null, [data, selectedId])
-  const visibleLeads = useMemo(() => data?.scheduled.slice(0, 12) || [], [data])
+  const visibleLeads = useMemo(() => data?.scheduled.slice(0, 5) || [], [data])
+  const selectedTarget = useMemo(() => targets.find((target) => target.id === targetId), [targetId, targets])
 
   const transition = useCallback(async (lead: ScheduledLead, to: string) => {
     const h = lead.hypothesis
@@ -291,7 +300,7 @@ export default function InvestigationWorkspacePage() {
         <nav className="flex rounded-lg border border-gray-800 bg-gray-950 p-1 text-sm">
           <Link href="/settings/research-agent" className="px-3 py-1.5 text-gray-400 hover:text-white">Autonomous Hunt</Link>
           <span className="rounded-md bg-gray-800 px-3 py-1.5 text-white">Leads</span>
-          <Link href="/settings/research-agent/experiment" className="px-3 py-1.5 text-gray-400 hover:text-white">Manual test</Link>
+          <Link href="/settings/research-agent/experiment" className="px-3 py-1.5 text-gray-400 hover:text-white">Plan a test</Link>
         </nav>
       </header>
 
@@ -310,7 +319,7 @@ export default function InvestigationWorkspacePage() {
         <div className="grid gap-4 md:grid-cols-[minmax(260px,1fr)_auto] md:items-end">
           <label className="text-xs font-medium text-gray-400">1. Choose a target
             <select value={targetId} onChange={(e) => setTargetId(e.target.value)} className="mt-1.5 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-gray-200">
-              <option value="">All registered targets</option>
+              <option value="">Choose a target…</option>
               {targets.map((t) => <option key={t.id} value={t.id}>{t.name ? `${t.name} — ` : ''}{t.url}</option>)}
             </select>
           </label>
@@ -326,10 +335,11 @@ export default function InvestigationWorkspacePage() {
           <div className="mb-3 flex items-end justify-between"><div><h2 className="font-semibold text-white">2. Choose one lead <span className="ml-1 text-sm font-normal text-gray-500">({data?.counts.scheduled ?? 0} ready)</span></h2><p className="mt-1 text-xs text-gray-500">The first card is ShakerScan’s recommendation. Click any card to change the work order on the right.</p></div></div>
           {loading ? <div className="grid gap-3"><Skeleton className="h-28" /><Skeleton className="h-28" /></div>
             : error ? <ErrorState message={error} onRetry={() => load().catch(() => undefined)} />
+            : !targetId ? <EmptyState message="Choose a target first" hint="Leads are ranked within one target so their scope and evidence stay clear." />
             : !data?.scheduled.length ? <EmptyState message="No leads are ready" hint="Try a different target. New leads appear after discovery, scans, and application-graph analysis." />
             : <><div className="grid gap-3">{visibleLeads.map((lead, index) => <LeadCard key={lead.hypothesis_id} lead={lead} rank={index + 1} selected={selectedId === lead.hypothesis_id} onSelect={() => setSelectedId(lead.hypothesis_id)} />)}</div>{data.counts.scheduled > visibleLeads.length ? <p className="mt-3 text-center text-xs text-gray-600">Showing the top {visibleLeads.length} of {data.counts.scheduled}. Choose a target to narrow the worklist.</p> : null}</>}
         </section>
-        <aside><LeadInspector lead={selected} contracts={contracts} busy={busy} onTransition={transition} /></aside>
+        <aside><LeadInspector lead={selected} contracts={contracts} target={selectedTarget} busy={busy} onTransition={transition} /></aside>
       </div>
     </div>
   )

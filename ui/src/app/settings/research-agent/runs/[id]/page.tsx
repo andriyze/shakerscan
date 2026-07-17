@@ -17,7 +17,7 @@ import {
   type ResearchEpisodeDetail,
   type ResearchPlannerMode,
 } from '@/lib/api'
-import { Button, Card, ErrorState, Skeleton } from '@/components/ui'
+import { Button, Card, ConfirmDialog, ErrorState, Skeleton } from '@/components/ui'
 import {
   LiveActivity, PROFILES, RunStatusBadge, activeEpisode, findingCount, hostFromUrl, runState,
   type Intensity,
@@ -52,6 +52,7 @@ export default function RunDetailPage() {
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [pendingConfirm, setPendingConfirm] = useState<'stop' | ResearchPlannerMode | null>(null)
   const [now, setNow] = useState(() => Date.now())
 
   // Refs keep the polling interval from restarting on every tick / data change.
@@ -182,7 +183,15 @@ export default function RunDetailPage() {
 
   if (loading) return <div className="mx-auto max-w-4xl px-4 py-6"><Skeleton className="h-96" /></div>
 
-  const state = campaign ? runState(campaign) : (detail?.episode.terminal ? 'completed' : 'running')
+  const campaignState = campaign ? runState(campaign) : (detail?.episode.terminal ? 'completed' : 'running')
+  const automaticallyStopped = Boolean(yieldMetrics?.stop_recommended && yieldMetrics.stop_reason)
+  const agentWaiting = Boolean(
+    detail
+    && !detail.episode.terminal
+    && detail.episode.status === 'awaiting_planner'
+    && detail.episode.autopilot_enabled === false
+  )
+  const state = automaticallyStopped ? 'completed' : agentWaiting ? 'waiting' : campaignState
   const intensity = String(metaField<string>(campaign, 'intensity') || '')
   const intensityName = PROFILES[intensity as Intensity]?.name || intensity
   const maxEpisodes = metaField<number>(campaign, 'max_episodes') || 0
@@ -190,8 +199,8 @@ export default function RunDetailPage() {
   const found = findingCount(campaign)
   const targetUrl = String((campaign?.target_scope?.url as string) || '')
   const canPause = state === 'running'
-  const canResume = state === 'paused'
-  const canStop = state === 'running' || state === 'paused'
+  const canResume = state === 'paused' && !automaticallyStopped
+  const canStop = state === 'running' || state === 'waiting' || state === 'paused'
   const preflightState = metaField<string>(campaign, 'preflight_state')
   const preflightScanId = metaField<string>(campaign, 'preflight_scan_id')
   const readiness = metaField<Record<string, unknown>>(campaign, 'readiness')
@@ -200,6 +209,12 @@ export default function RunDetailPage() {
       || (detail?.episode.planner?.mode as string | undefined)
       || (detail?.episode.autopilot_enabled ? 'configured_ai' : 'agent'),
   )
+  const autonomousProofs = yieldMetrics?.verified_autonomous_findings || 0
+  const linkedProofs = (yieldMetrics?.verified_campaign_scan_findings || 0)
+    + (yieldMetrics?.verified_campaign_retest_findings || 0)
+  const netNewProofs = yieldMetrics?.net_new_verified_findings || 0
+  const inconclusive = yieldMetrics?.non_scientific_experiments || 0
+  const activeRun = state === 'running' || state === 'waiting' || state === 'paused'
 
   return (
     <div className="mx-auto max-w-4xl px-4 py-6">
@@ -219,7 +234,7 @@ export default function RunDetailPage() {
         <div className="flex flex-none gap-2">
           {canPause ? <Button variant="secondary" onClick={() => control('pause')} disabled={busy}><Pause className="h-4 w-4" />Pause</Button> : null}
           {canResume ? <Button onClick={() => control('resume')} disabled={busy}><Play className="h-4 w-4" />Resume</Button> : null}
-          {canStop ? <Button variant="danger" onClick={() => control('cancel')} disabled={busy}><CircleStop className="h-4 w-4" />Stop</Button> : null}
+          {canStop ? <Button variant="danger" onClick={() => setPendingConfirm('stop')} disabled={busy}><CircleStop className="h-4 w-4" />Stop</Button> : null}
         </div>
       </header>
 
@@ -229,23 +244,23 @@ export default function RunDetailPage() {
           <span>Planner:</span>
           <Button
             variant={plannerMode === 'agent' ? 'primary' : 'secondary'}
-            onClick={() => switchPlanner('agent')}
+            onClick={() => setPendingConfirm('agent')}
             disabled={busy || plannerMode === 'agent'}
           >
-            This coding agent
+            Agent-guided
           </Button>
           <Button
             variant={plannerMode === 'configured_ai' ? 'primary' : 'secondary'}
-            onClick={() => switchPlanner('configured_ai')}
+            onClick={() => setPendingConfirm('configured_ai')}
             disabled={busy || plannerMode === 'configured_ai'}
           >
-            Stored AI provider
+            Unattended
           </Button>
         </div>
       ) : null}
       {plannerMode !== 'configured_ai' && detail && !detail.episode.terminal ? (
         <div className="mt-4 rounded-lg border border-blue-500/30 bg-blue-500/[0.06] p-3 text-sm text-blue-100">
-          Waiting for {plannerMode === 'local_codex' ? 'the local Codex runner' : 'your current coding agent'} to choose the next bounded action.
+          Waiting for {plannerMode === 'local_codex' ? 'the local Codex runner' : 'your coding agent'} to choose the next bounded action. This run will not advance by itself.
           {plannerMode === 'local_codex' ? (
             <code className="mt-1 block text-xs text-blue-200">shakerscan research {detail.episode.id} 5</code>
           ) : (
@@ -255,15 +270,21 @@ export default function RunDetailPage() {
       ) : null}
 
       {/* Vitals — the three numbers that matter */}
-      <div className="mt-5 grid grid-cols-3 gap-3">
-        <Stat label="Findings" value={found > 0 ? `${found}` : '0'} tone={found > 0 ? 'good' : 'muted'} hint={found > 0 ? 'verified' : 'none yet'} />
+      <div className="mt-5 grid grid-cols-1 gap-3 sm:grid-cols-3">
+        <Stat label="Linked findings" value={found > 0 ? `${found}` : '0'} tone={found > 0 ? 'good' : 'muted'} hint={found > 0 ? 'verified in linked work' : activeRun ? 'none verified yet' : 'none verified'} />
         <Stat label="Episodes" value={maxEpisodes ? `${episodeCount}/${maxEpisodes}` : `${episodeCount}`} hint="work shifts" />
-        <Stat label="Time" value={deadline ? timeLeft(deadline, now).split(' ')[0] : '—'} hint={deadline ? timeLeft(deadline, now).split(' ').slice(1).join(' ') || 'left' : 'no deadline'} />
+        <Stat
+          label="Time"
+          value={state === 'running' || state === 'waiting' || state === 'paused' ? (deadline ? timeLeft(deadline, now).split(' ')[0] : '—') : 'Ended'}
+          hint={state === 'running' || state === 'waiting' || state === 'paused'
+            ? (deadline ? timeLeft(deadline, now).split(' ').slice(1).join(' ') || 'left' : 'no deadline')
+            : 'run is not active'}
+        />
       </div>
 
       {found > 0 ? (
         <Link href={`/findings?target_id=${encodeURIComponent(campaign?.target_id || '')}&status=active`} className="mt-3 flex items-center justify-between rounded-lg border border-emerald-500/30 bg-emerald-500/[0.06] p-3 text-sm hover:bg-emerald-500/[0.1]">
-          <span className="text-emerald-200">{found} verified finding{found === 1 ? '' : 's'} on this target</span>
+          <span className="text-emerald-200">{found} verified finding{found === 1 ? '' : 's'} in linked target work</span>
           <span className="text-xs text-emerald-300">View findings →</span>
         </Link>
       ) : null}
@@ -283,6 +304,29 @@ export default function RunDetailPage() {
 
       {yieldMetrics ? (
         <Card className="mt-4 p-4">
+          <div className="mb-4 border-b border-gray-800 pb-4">
+            <h2 className="text-sm font-semibold text-white">Run outcome</h2>
+            <p className="mt-1 text-sm text-gray-300">
+              {netNewProofs > 0
+                ? `${netNewProofs} net-new verified finding${netNewProofs === 1 ? '' : 's'} produced by this run.`
+                : autonomousProofs > 0
+                  ? `${autonomousProofs} autonomous proof${autonomousProofs === 1 ? '' : 's'}; none were net-new over existing scan evidence.`
+                  : linkedProofs > 0
+                    ? `No net-new autonomous findings. Linked scans or retests confirmed ${linkedProofs} existing finding${linkedProofs === 1 ? '' : 's'}.`
+                    : activeRun
+                      ? 'No verified result yet.'
+                      : 'The run ended without a verified finding.'}
+            </p>
+            {inconclusive > 0 ? <p className="mt-1 text-xs text-gray-500">{inconclusive} experiment{inconclusive === 1 ? ' was' : 's were'} inconclusive or blocked.</p> : null}
+            {yieldMetrics.stop_reason ? <p className="mt-2 text-xs text-amber-300">Automatically stopped: {friendlyStopReason(yieldMetrics.stop_reason)}</p> : null}
+            <p className="mt-2 text-xs text-gray-500">
+              {netNewProofs > 0
+                ? 'Next: review the finding evidence and remediation guidance.'
+                : linkedProofs > 0
+                  ? 'Next: review the linked findings; they were reconfirmed rather than newly discovered here.'
+                  : 'Next: review blocked experiments and target readiness before starting another run.'}
+            </p>
+          </div>
           <div className="grid grid-cols-2 gap-3 text-xs sm:grid-cols-4">
             <Metric label="Experiments" value={yieldMetrics.experiments} />
             <Metric label="Refuted" value={yieldMetrics.falsified_experiments} />
@@ -290,13 +334,12 @@ export default function RunDetailPage() {
             <Metric label="Inconclusive / blocked" value={yieldMetrics.non_scientific_experiments || 0} />
             <Metric label="Recon actions" value={yieldMetrics.recon_actions} />
             <Metric label="Known-vuln skips" value={yieldMetrics.novelty_suppressions} />
-            <Metric label="Model units" value={yieldMetrics.model_units.toLocaleString()} />
+            <Metric label="Estimated model units used" value={yieldMetrics.model_units.toLocaleString()} />
             <Metric label="Autonomous proofs" value={yieldMetrics.verified_autonomous_findings} />
             <Metric label="Focused-scan proofs" value={yieldMetrics.verified_campaign_scan_findings || 0} />
             <Metric label="Retest confirmations" value={yieldMetrics.verified_campaign_retest_findings || 0} />
             <Metric label="Net-new over DAST" value={yieldMetrics.net_new_verified_findings || 0} />
           </div>
-          {yieldMetrics.stop_reason ? <p className="mt-3 text-xs text-amber-300">Stopped by yield guard: {yieldMetrics.stop_reason}</p> : null}
         </Card>
       ) : null}
 
@@ -306,8 +349,42 @@ export default function RunDetailPage() {
           <Card className="p-8 text-center text-sm text-gray-500">This run has no episode activity yet.</Card>
         )}
       </div>
+      <ConfirmDialog
+        open={pendingConfirm === 'stop'}
+        title="Stop this hunt?"
+        message="The campaign and any linked work will be cancelled. You cannot resume this run afterward."
+        confirmLabel="Stop hunt"
+        danger
+        busy={busy}
+        onCancel={() => setPendingConfirm(null)}
+        onConfirm={() => { setPendingConfirm(null); void control('cancel') }}
+      />
+      <ConfirmDialog
+        open={pendingConfirm === 'agent' || pendingConfirm === 'configured_ai'}
+        title={`Switch to ${pendingConfirm === 'configured_ai' ? 'unattended' : 'agent-guided'} planning?`}
+        message={pendingConfirm === 'configured_ai'
+          ? 'The stored AI provider will choose bounded actions on the server and can continue after you close this page.'
+          : 'The run will pause between actions until your coding agent returns to continue it.'}
+        confirmLabel="Switch planner"
+        busy={busy}
+        onCancel={() => setPendingConfirm(null)}
+        onConfirm={() => {
+          const mode = pendingConfirm
+          setPendingConfirm(null)
+          if (mode && mode !== 'stop') void switchPlanner(mode)
+        }}
+      />
     </div>
   )
+}
+
+function friendlyStopReason(reason: string): string {
+  const labels: Record<string, string> = {
+    experiment_harness_failure_ceiling: 'too many experiments could not run reliably',
+    no_progress_ceiling: 'repeated actions produced no new evidence',
+    experiment_yield_ceiling: 'additional experiments were unlikely to add useful evidence',
+  }
+  return labels[reason] || reason.replace(/_/g, ' ')
 }
 
 function Metric({ label, value }: { label: string; value: string | number }) {

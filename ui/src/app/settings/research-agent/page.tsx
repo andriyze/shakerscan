@@ -6,6 +6,7 @@ import { useRouter, useSearchParams } from 'next/navigation'
 import { ArrowRight, BrainCircuit, Check, ChevronDown, Rocket } from 'lucide-react'
 import {
   createTargetPolicyApproval,
+  getCampaign,
   getCampaigns,
   getResearchEpisode,
   getResearchReadiness,
@@ -56,10 +57,13 @@ function ResearchAgentPage() {
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [showAllRuns, setShowAllRuns] = useState(false)
 
   const profile = PROFILES[intensity]
   const availableFamilies = familiesForIntensity(intensity)
   const activeTarget = useMemo(() => targets.find((t) => t.id === targetId), [targetId, targets])
+  const attentionRuns = useMemo(() => runs.filter((run) => ['active', 'paused'].includes(String(run.status))), [runs])
+  const historyRuns = useMemo(() => runs.filter((run) => !['active', 'paused'].includes(String(run.status))), [runs])
 
   // Backend deep-links land here as ?episode_id=… — resolve to the run it belongs to.
   useEffect(() => {
@@ -72,7 +76,13 @@ function ResearchAgentPage() {
 
   const loadRuns = useCallback(async () => {
     const data = await getCampaigns({ limit: 100 }).catch(() => ({ campaigns: [] as Campaign[], count: 0, execution_enabled: false }))
-    setRuns((data.campaigns || []).filter((c) => c.campaign_type === 'autonomous_research'))
+    const researchRuns = (data.campaigns || []).filter((c) => c.campaign_type === 'autonomous_research')
+    const normalized = await Promise.all(researchRuns.map(async (run) => {
+      if (run.status !== 'paused') return run
+      const detail = await getCampaign(run.id).catch(() => null)
+      return detail?.research_yield?.stop_recommended ? { ...run, status: 'completed' } : run
+    }))
+    setRuns(normalized)
   }, [])
 
   useEffect(() => {
@@ -83,7 +93,8 @@ function ResearchAgentPage() {
         const rows: Target[] = Array.isArray(targetData?.targets) ? targetData.targets : Array.isArray(targetData) ? targetData : []
         const web = rows.filter(isWebTarget)
         setTargets(web)
-        setTargetId(web[0]?.id || '')
+        const requestedTarget = searchParams.get('target')?.trim()
+        setTargetId(requestedTarget && web.some((target) => target.id === requestedTarget) ? requestedTarget : '')
         setAiReady(readiness.configured_planner_ready ?? readiness.planner_ready)
         setPlannerMode(readiness.default_planner_mode || 'agent')
         setExecutionReady(readiness.execution_enabled)
@@ -92,7 +103,7 @@ function ResearchAgentPage() {
       .finally(() => { if (!cancelled) setLoading(false) })
     loadRuns()
     return () => { cancelled = true }
-  }, [loadRuns])
+  }, [loadRuns, searchParams])
 
   const gated = profile.mode === 'gated'
   const canStart = Boolean(targetId)
@@ -142,7 +153,7 @@ function ResearchAgentPage() {
         <nav className="flex rounded-lg border border-gray-800 bg-gray-950 p-1 text-sm">
           <span className="rounded-md bg-gray-800 px-3 py-1.5 text-white">Autonomous Hunt</span>
           <Link href="/settings/research-agent/leads" className="px-3 py-1.5 text-gray-400 hover:text-white">Leads</Link>
-          <Link href="/settings/research-agent/experiment" className="px-3 py-1.5 text-gray-400 hover:text-white">Manual test</Link>
+          <Link href="/settings/research-agent/experiment" className="px-3 py-1.5 text-gray-400 hover:text-white">Plan a test</Link>
         </nav>
       </header>
 
@@ -156,23 +167,25 @@ function ResearchAgentPage() {
       {/* Start a hunt — three picks */}
       <Card className="mt-5 overflow-hidden">
         <div className="grid gap-6 p-5 sm:p-6">
-          <Field label="Planner · Who should choose each test?">
+          <Field label="How should it run?">
             <div className="grid gap-3 sm:grid-cols-2">
               <button
                 type="button"
                 onClick={() => setPlannerMode('agent')}
+                aria-pressed={plannerMode === 'agent'}
                 className={`rounded-xl border p-3.5 text-left transition-colors ${plannerMode === 'agent' ? 'border-blue-500/60 bg-blue-500/[0.09]' : 'border-gray-800 bg-gray-950/50 hover:border-gray-700'}`}
               >
-                <div className="font-semibold text-white">This coding agent <span className="text-xs font-normal text-blue-300">Default</span></div>
-                <p className="mt-1 text-xs leading-5 text-gray-400">Uses the Codex, Claude, or OpenCode session you launched with ShakerScan. No provider key required.</p>
+                <div className="font-semibold text-white">Agent-guided <span className="text-xs font-normal text-blue-300">Default</span></div>
+                <p className="mt-1 text-xs leading-5 text-gray-400">Your coding agent chooses each bounded action. The hunt pauses when that agent is not connected.</p>
               </button>
               <button
                 type="button"
                 onClick={() => setPlannerMode('configured_ai')}
                 disabled={aiReady === false}
+                aria-pressed={plannerMode === 'configured_ai'}
                 className={`rounded-xl border p-3.5 text-left transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${plannerMode === 'configured_ai' ? 'border-violet-500/60 bg-violet-500/[0.09]' : 'border-gray-800 bg-gray-950/50 hover:border-gray-700'}`}
               >
-                <div className="font-semibold text-white">Stored AI provider</div>
+                <div className="font-semibold text-white">Unattended</div>
                 <p className="mt-1 text-xs leading-5 text-gray-400">{aiReady === false ? 'Configure a provider in Settings first.' : 'Runs unattended on the server and continues after your agent closes.'}</p>
               </button>
             </div>
@@ -184,20 +197,22 @@ function ResearchAgentPage() {
               onChange={(e) => { setTargetId(e.target.value); setAuthorized(false) }}
               className="w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2.5 text-sm text-white focus:border-blue-500 focus:outline-none"
             >
+              <option value="">Choose a target…</option>
               {!targets.length ? <option value="">No web targets — add one under Targets</option> : null}
               {targets.map((t) => <option key={t.id} value={t.id}>{targetLabel(t)} · {hostFromUrl(t.url)}</option>)}
             </select>
           </Field>
 
           <Field label="2 · How hard should it go?">
-            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-              {(['analyze', 'hunt', 'relentless', 'deep_hunt'] as Intensity[]).map((value) => {
+            <div className="grid gap-3 sm:grid-cols-2">
+              {(['analyze', 'hunt'] as Intensity[]).map((value) => {
                 const p = PROFILES[value]
                 const on = intensity === value
                 return (
                   <button
                     key={value}
                     type="button"
+                    aria-pressed={on}
                     onClick={() => {
                       setIntensity(value)
                       setFamilies(familiesForIntensity(value))
@@ -215,6 +230,37 @@ function ResearchAgentPage() {
                 )
               })}
             </div>
+            <details className="mt-3 rounded-lg border border-gray-800 bg-gray-950/30">
+              <summary className="cursor-pointer px-3 py-2.5 text-xs font-medium text-gray-500 hover:text-gray-300">Advanced hunt types</summary>
+              <div className="grid gap-3 border-t border-gray-800 p-3 sm:grid-cols-2">
+                {(['relentless', 'deep_hunt'] as Intensity[]).map((value) => {
+                  const p = PROFILES[value]
+                  const on = intensity === value
+                  return (
+                    <button
+                      key={value}
+                      type="button"
+                      aria-pressed={on}
+                      onClick={() => {
+                        setIntensity(value)
+                        setFamilies(familiesForIntensity(value))
+                      }}
+                      className={`rounded-xl border p-3.5 text-left transition-colors ${on ? p.selected : 'border-gray-800 bg-gray-950/50 hover:border-gray-700'}`}
+                    >
+                      <div className="flex items-center justify-between">
+                        <span className={`font-semibold ${on ? p.accent : 'text-white'}`}>{p.name}</span>
+                        <span className={`flex h-4 w-4 items-center justify-center rounded-full border ${on ? 'border-current bg-current/20' : 'border-gray-700'}`}>{on ? <Check className="h-3 w-3" /> : null}</span>
+                      </div>
+                      <p className="mt-0.5 text-[11px] font-medium uppercase tracking-wide text-gray-500">{p.summary}</p>
+                      <p className="mt-2 text-xs leading-5 text-gray-400">{p.detail}</p>
+                    </button>
+                  )
+                })}
+              </div>
+            </details>
+            {intensity === 'deep_hunt' ? (
+              <p className="mt-2 text-xs text-fuchsia-200">Deep requires two configured test accounts. Readiness is checked before active work starts. <Link href="/interactive" className="underline underline-offset-2">Manage test accounts</Link>.</p>
+            ) : null}
           </Field>
 
           <Field label="3 · How long?">
@@ -227,6 +273,7 @@ function ResearchAgentPage() {
                     key={key}
                     type="button"
                     onClick={() => setDuration(key)}
+                    aria-pressed={on}
                     className={`rounded-xl border p-3 text-center transition-colors ${on ? 'border-blue-500/60 bg-blue-500/[0.09]' : 'border-gray-800 bg-gray-950/50 hover:border-gray-700'}`}
                   >
                     <div className={`text-sm font-semibold ${on ? 'text-blue-200' : 'text-white'}`}>{d.name}</div>
@@ -261,7 +308,7 @@ function ResearchAgentPage() {
                     {availableFamilies.map((f) => (
                       <label key={f} className="flex items-center gap-2 rounded-lg border border-gray-800 px-3 py-1.5 text-xs text-gray-300">
                         <input type="checkbox" checked={families.includes(f)} onChange={() => setFamilies((cur) => cur.includes(f) ? cur.filter((x) => x !== f) : [...cur, f])} />
-                        {f.toUpperCase()}
+                        {familyLabel(f)}
                       </label>
                     ))}
                   </div>
@@ -273,7 +320,7 @@ function ResearchAgentPage() {
           <div className="flex items-center justify-between gap-3 border-t border-gray-800 pt-4">
             <p className="text-xs text-gray-500">
               {gated
-                ? `Runs ${DURATIONS[duration].detail}, chaining up to ${DURATIONS[duration].episodes} episodes.`
+                ? `${plannerMode === 'configured_ai' ? 'Continues on the server after this page closes.' : 'Pauses whenever your coding agent is unavailable.'} Up to ${DURATIONS[duration].episodes} episodes over ${DURATIONS[duration].detail}; each episode is limited to ${profile.budget.active_actions} active actions and ${profile.budget.requests} request units. Stops early when useful progress ends.`
                 : 'Read-only — inspects evidence and sends no active probes.'}
             </p>
             <Button onClick={startHunt} disabled={!canStart} className="min-w-44">
@@ -292,33 +339,66 @@ function ResearchAgentPage() {
         {!runs.length ? (
           <div className="mt-3"><EmptyState message="No hunts yet" hint="Start one above — it'll show here with live status." /></div>
         ) : (
-          <div className="mt-3 grid gap-2">
-            {runs.map((run) => {
-              const found = findingCount(run)
-              const prog = episodeProgress(run)
-              return (
-                <Link key={run.id} href={`/settings/research-agent/runs/${run.id}`} className="flex items-center gap-4 rounded-lg border border-gray-800 bg-gray-950/40 p-3.5 hover:border-gray-700">
-                  <RunStatusBadge state={runState(run)} />
-                  <div className="min-w-0 flex-1">
-                    <div className="truncate text-sm font-medium text-gray-200">{run.name || hostFromUrl(String((run.target_scope?.url as string) || ''))}</div>
-                    <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-gray-500">
-                      <span>{intensityOf(run)}</span>
-                      {prog.max ? <><span>·</span><span className="tabular-nums">episode {prog.started}/{prog.max}</span></> : null}
-                      <span>·</span><span>started {relativeTime(run.created_at)}</span>
-                    </div>
-                  </div>
-                  {found > 0 ? (
-                    <span className="flex items-center gap-1.5 rounded-full bg-emerald-500/15 px-2.5 py-1 text-xs font-medium text-emerald-300">
-                      <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />{found} found
-                    </span>
-                  ) : <span className="text-xs text-gray-600">no findings yet</span>}
-                  <ArrowRight className="h-4 w-4 flex-none text-gray-600" />
-                </Link>
-              )
-            })}
+          <div className="mt-3 grid gap-5">
+            {attentionRuns.length ? <RunGroup title="Needs attention or active" runs={attentionRuns} /> : null}
+            {historyRuns.length ? (
+              <div>
+                <div className="mb-2 flex items-center justify-between">
+                  <h3 className="text-xs font-semibold uppercase tracking-wider text-gray-500">Recent history</h3>
+                  {historyRuns.length > 8 ? <button type="button" onClick={() => setShowAllRuns((value) => !value)} className="text-xs text-blue-300 hover:text-blue-200">{showAllRuns ? 'Show recent only' : `Show all ${historyRuns.length}`}</button> : null}
+                </div>
+                <RunGroup runs={showAllRuns ? historyRuns : historyRuns.slice(0, 8)} />
+              </div>
+            ) : null}
           </div>
         )}
       </section>
+    </div>
+  )
+}
+
+function familyLabel(value: string): string {
+  const labels: Record<string, string> = {
+    sqli: 'SQL injection', xss: 'Cross-site scripting', auth: 'Authentication',
+    bola: 'Object-level authorization', mass_assignment: 'Mass assignment',
+    workflow: 'Workflow abuse', data_exposure: 'Sensitive data exposure',
+    access_control: 'Access control', field_constraint: 'Restricted fields',
+  }
+  return labels[value] || value.replace(/_/g, ' ')
+}
+
+function RunGroup({ title, runs }: { title?: string; runs: Campaign[] }) {
+  return (
+    <div>
+      {title ? <h3 className="mb-2 text-xs font-semibold uppercase tracking-wider text-gray-500">{title}</h3> : null}
+      <div className="grid gap-2">
+        {runs.map((run) => {
+          const found = findingCount(run)
+          const prog = episodeProgress(run)
+          const state = runState(run)
+          const terminal = ['completed', 'cancelled', 'failed'].includes(state)
+          const url = String((run.target_scope?.url as string) || '')
+          return (
+            <Link key={run.id} href={`/settings/research-agent/runs/${run.id}`} className="flex flex-col gap-3 rounded-lg border border-gray-800 bg-gray-950/40 p-3.5 hover:border-gray-700 sm:flex-row sm:items-center">
+              <RunStatusBadge state={state} />
+              <div className="min-w-0 flex-1">
+                <div className="truncate text-sm font-medium text-gray-200">{hostFromUrl(url) || run.name || 'Autonomous hunt'}</div>
+                <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-gray-500">
+                  <span>{intensityOf(run)}</span>
+                  {prog.max ? <><span>·</span><span className="tabular-nums">episode {prog.started}/{prog.max}</span></> : null}
+                  <span>·</span><span>started {relativeTime(run.created_at)}</span>
+                </div>
+              </div>
+              {found > 0 ? (
+                <span className="flex items-center gap-1.5 rounded-full bg-emerald-500/15 px-2.5 py-1 text-xs font-medium text-emerald-300">
+                  <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />{found} verified in linked work
+                </span>
+              ) : <span className="text-xs text-gray-600">{terminal ? 'No verified findings' : 'No verified findings yet'}</span>}
+              <ArrowRight className="hidden h-4 w-4 flex-none text-gray-600 sm:block" />
+            </Link>
+          )
+        })}
+      </div>
     </div>
   )
 }

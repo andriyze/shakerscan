@@ -121,7 +121,7 @@ export function relativeTime(value?: string | null, now: number = Date.now()): s
 
 // ---- Run (campaign) status: what the operator watches --------------------
 
-export type RunState = 'running' | 'paused' | 'completed' | 'cancelled' | 'failed' | 'idle'
+export type RunState = 'running' | 'waiting' | 'paused' | 'completed' | 'cancelled' | 'failed' | 'idle'
 
 export function runState(campaign: Pick<Campaign, 'status'>): RunState {
   const s = String(campaign.status || '').toLowerCase()
@@ -135,6 +135,7 @@ export function runState(campaign: Pick<Campaign, 'status'>): RunState {
 
 const RUN_STATE_STYLE: Record<RunState, { label: string; className: string; pulse: boolean }> = {
   running: { label: 'Running', className: 'bg-blue-500/20 text-blue-300', pulse: true },
+  waiting: { label: 'Waiting for agent', className: 'bg-violet-500/20 text-violet-300', pulse: false },
   paused: { label: 'Paused', className: 'bg-yellow-500/20 text-yellow-300', pulse: false },
   completed: { label: 'Done', className: 'bg-green-500/20 text-green-300', pulse: false },
   cancelled: { label: 'Stopped', className: 'bg-orange-500/20 text-orange-300', pulse: false },
@@ -155,7 +156,7 @@ export function RunStatusBadge({ state, className = '' }: { state: RunState; cla
 // ---- Episode status: the moment-to-moment state inside a run --------------
 
 export function episodeStatusLabel(status: string, autopilot?: boolean): string {
-  if (status === 'awaiting_planner' && autopilot === false) return 'Paused'
+  if (status === 'awaiting_planner' && autopilot === false) return 'Waiting for agent'
   return ({
     created: 'Starting', awaiting_planner: 'Thinking', dispatching: 'Running a test',
     awaiting_observation: 'Reading evidence', awaiting_input: 'Needs input',
@@ -206,10 +207,18 @@ export function decisionSentence(action?: { command?: string; parameters?: Recor
     ? str((p.steps[0] as Record<string, unknown>)?.method) : '')
   const family = (str(p.proof_family) || str(p.check_family) || str(p.family)).replace(/_/g, ' ')
   const target = [method, route].filter(Boolean).join(' ').trim()
+  const steps = Array.isArray(p.steps) ? p.steps as Record<string, unknown>[] : []
+  const changedStep = steps.find((step) => str(step.role) === 'mutation') || steps[1]
+  const changedTarget = changedStep
+    ? [str(changedStep.method), str(changedStep.path)].filter(Boolean).join(' ').trim()
+    : ''
+  const workflowDetail = changedTarget
+    ? `${changedTarget}${target && target !== changedTarget ? ` · baseline ${target}` : ''}`
+    : (str(p.objective) || target)
 
   switch (command) {
     case 'experiment.workflow':
-      return { verb: `Testing for ${family || 'a vulnerability'}`, detail: str(p.objective) || target }
+      return { verb: `Testing for ${family || 'a vulnerability'}`, detail: workflowDetail }
     case 'experiment.http_diff':
       return { verb: 'Comparing responses', detail: str(p.objective) || target }
     case 'asm.improve':
@@ -257,7 +266,7 @@ export function LiveActivity({ detail, now }: { detail: ResearchEpisodeDetail; n
           </span>
           <div>
             <div className="text-sm font-medium text-white">
-              {running ? 'Working' : episode.autopilot_enabled === false && !episode.terminal ? 'Paused' : episodeStatusLabel(episode.status, episode.autopilot_enabled)}
+              {running ? 'Working' : episodeStatusLabel(episode.status, episode.autopilot_enabled)}
             </div>
             <div className="text-xs text-gray-500">
               {lastMove ? `last move ${relativeTime(lastMove, now)}` : 'no moves yet'} · shift step {episode.step_count}/{stepLimit || '—'}
@@ -331,8 +340,15 @@ export function LiveActivity({ detail, now }: { detail: ResearchEpisodeDetail; n
                   {sentence.detail ? <code className="rounded bg-black/40 px-1.5 py-0.5 font-mono text-[11px] text-gray-400">{sentence.detail}</code> : null}
                   <Badge className={`ml-auto ${episodeStatusClass(decision.status)}`}>{blocked ? 'blocked' : decision.status.replace(/_/g, ' ')}</Badge>
                 </div>
-                {decision.reason ? <p className="mt-1.5 text-xs leading-5 text-gray-500">{decision.reason}</p> : null}
-                {blocked ? <p className="mt-1.5 text-xs text-red-300">Held back: {decision.validation_errors.join(', ')}</p> : null}
+                {(decision.reason || blocked) ? (
+                  <details className="mt-2">
+                    <summary className="cursor-pointer text-xs text-gray-500 hover:text-gray-300">
+                      {blocked ? 'Why this was blocked' : 'Why this action'}
+                    </summary>
+                    {decision.reason ? <p className="mt-1.5 text-xs leading-5 text-gray-500">{decision.reason}</p> : null}
+                    {blocked ? <p className="mt-1.5 text-xs text-red-300">Diagnostics: {decision.validation_errors.join(', ')}</p> : null}
+                  </details>
+                ) : null}
               </div>
             )
           })}
@@ -353,8 +369,8 @@ export function LiveActivity({ detail, now }: { detail: ResearchEpisodeDetail; n
               return (
                 <div key={key}>
                   <div className="flex justify-between text-xs">
-                    <span className="text-gray-500">{key === 'requests' ? 'request units' : key.replace(/_/g, ' ')}</span>
-                    <span className="tabular-nums text-gray-300">{remaining} / {limit}</span>
+                    <span className="text-gray-500">{key === 'requests' ? 'request units remaining' : `${key.replace(/_/g, ' ')} remaining`}</span>
+                    <span className="tabular-nums text-gray-300">{remaining} of {limit}</span>
                   </div>
                   <div className="mt-1.5 h-1.5 overflow-hidden rounded bg-gray-800"><div className="h-full bg-cyan-400" style={{ width: `${pct}%` }} /></div>
                 </div>
@@ -385,8 +401,8 @@ export function activeEpisode(episodes: ResearchEpisode[]): ResearchEpisode | un
   return [...episodes].sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''))[0]
 }
 
-// A run is "found something" if any episode promoted a verified finding. We can't
-// read that per-episode cheaply, so callers pass the campaign deployment impact.
+// This is the count of active findings associated with the linked target work.
+// It is not necessarily net-new evidence produced by the autonomous planner.
 export function findingCount(campaign?: Pick<Campaign, 'deployment_impact'> | null): number {
   return campaign?.deployment_impact?.active_finding_count ?? 0
 }

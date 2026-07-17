@@ -162,7 +162,6 @@ export default function ExperimentBuilderPage() {
     getTargets().then((data) => {
       const list = ((data?.targets || data || []) as TargetLite[]).filter(isWebTarget)
       setTargets(list)
-      setTargetId((current) => current || list[0]?.id || '')
     }).catch(() => undefined)
   }, [])
 
@@ -213,9 +212,9 @@ export default function ExperimentBuilderPage() {
           <nav className="mb-2 inline-flex rounded-lg border border-gray-800 bg-gray-950 p-1 text-sm">
             <Link href="/settings/research-agent" className="px-3 py-1.5 text-gray-400 hover:text-white">Autonomous Hunt</Link>
             <Link href="/settings/research-agent/leads" className="px-3 py-1.5 text-gray-400 hover:text-white">Leads</Link>
-            <span className="rounded-md bg-gray-800 px-3 py-1.5 text-white">Manual test</span>
+            <span className="rounded-md bg-gray-800 px-3 py-1.5 text-white">Plan a test</span>
           </nav>
-          <h1 className="mt-2 text-3xl font-bold tracking-tight text-white">Prepare a bounded experiment</h1>
+          <h1 className="mt-2 text-3xl font-bold tracking-tight text-white">Prepare a bounded test plan</h1>
           <p className="mt-2 max-w-2xl text-sm leading-6 text-gray-400">Define a baseline, change one thing, and compare the result. Validation checks the plan and records intent—it does not send requests.</p>
         </div>
         <div className="flex items-center gap-2 rounded-lg border border-emerald-500/20 bg-emerald-500/[0.06] px-3 py-2 text-xs text-emerald-200"><ShieldCheck className="h-4 w-4" />Same-origin · bounded · approval-gated</div>
@@ -228,6 +227,7 @@ export default function ExperimentBuilderPage() {
             <div className="grid gap-4">
               <label className="text-xs font-medium text-gray-400">Registered target
                 <select value={targetId} onChange={(e) => setTargetId(e.target.value)} className="mt-1.5 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2.5 text-sm text-gray-200">
+                  <option value="">Choose a target…</option>
                   {!targets.length ? <option value="">No registered targets</option> : null}
                   {targets.map((target) => <option key={target.id} value={target.id}>{target.name ? `${target.name} — ` : ''}{target.url}</option>)}
                 </select>
@@ -272,7 +272,7 @@ export default function ExperimentBuilderPage() {
             <div className="mt-5 border-t border-gray-800 pt-4">
               {issues.length ? <div className="grid gap-2">{issues.slice(0, 4).map((issue) => <div key={issue} className="flex items-start gap-2 text-xs text-amber-300"><AlertCircle className="mt-0.5 h-3.5 w-3.5 flex-none" />{issue}</div>)}</div>
                 : <div className="flex items-center gap-2 text-sm text-emerald-300"><Check className="h-4 w-4" />Ready to validate</div>}
-              <Button onClick={validate} disabled={busy || issues.length > 0} className="mt-4 w-full"><FileCheck2 className="h-4 w-4" />Validate experiment plan</Button>
+              <Button onClick={validate} disabled={busy || issues.length > 0} className="mt-4 w-full"><FileCheck2 className="h-4 w-4" />Validate test plan</Button>
               <p className="mt-2 text-center text-[11px] leading-4 text-gray-600">Validation records a dry-run intent. Active execution requires a matching scope and approval receipt.</p>
             </div>
           </Card>
@@ -280,9 +280,12 @@ export default function ExperimentBuilderPage() {
           {error ? <ErrorState message={error} /> : null}
           {result ? <Card className="border-blue-500/30 bg-blue-500/[0.05] p-5">
             <div className="flex items-center gap-2 text-blue-200"><FileCheck2 className="h-5 w-5" /><h2 className="font-semibold">Plan recorded</h2></div>
-            <p className="mt-2 text-sm leading-6 text-gray-400">No requests were sent. The plan is ready for the separate scope and approval flow.</p>
+            <p className="mt-2 text-sm leading-6 text-gray-400">No requests were sent. This screen validates and records the plan only; an authorized agent or Autonomous Hunt must initiate execution.</p>
             {result.execution_blocked_reason ? <div className="mt-3 rounded-lg bg-gray-950/60 p-3 text-xs text-gray-400"><span className="font-medium text-amber-300">Execution gate:</span> {result.execution_blocked_reason}</div> : null}
-            <Link href="/settings/research-agent/leads" className="mt-4 inline-flex items-center gap-1 text-sm text-blue-300 hover:text-blue-200">Return to leads <ArrowRight className="h-4 w-4" /></Link>
+            <div className="mt-4 flex flex-wrap gap-3">
+              <Link href={`/settings/research-agent?target=${encodeURIComponent(targetId)}`} className="inline-flex items-center gap-1 text-sm text-blue-300 hover:text-blue-200">Use target in Autonomous Hunt <ArrowRight className="h-4 w-4" /></Link>
+              <Link href="/settings/research-agent/leads" className="inline-flex items-center gap-1 text-sm text-gray-400 hover:text-gray-200">Return to leads</Link>
+            </div>
           </Card> : null}
 
           <details className="group rounded-lg border border-gray-800 bg-gray-900">
