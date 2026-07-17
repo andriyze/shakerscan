@@ -11904,16 +11904,18 @@ def test_research_net_new_finding_count_excludes_dast_owned():
         async def fetch(self, *args, **kwargs):
             return self._rows
 
+    # Note: findings have no `method` column -- method is extracted from evidence/request/title, so the
+    # rows here intentionally omit it (the earlier draft selected a non-existent column).
     rows = [
         {"tool": "smart_bola", "cwe": "CWE-639", "title": "BOLA on order API",
-         "url": "https://x/api/orders/1", "method": "GET", "evidence": {}, "request": None,
+         "url": "https://x/api/orders/1", "evidence": {}, "request": None,
          "last_verification_verdict": None},
         {"tool": "autonomous_workflow", "cwe": "CWE-639", "title": "BOLA auto",
-         "url": "https://x/api/orders/2", "method": "GET",
+         "url": "https://x/api/orders/2",
          "evidence": {"dedupe_dimensions": {"route": "/api/orders/{id}", "method": "GET"}},
          "request": None, "last_verification_verdict": "exploited"},
         {"tool": "autonomous_workflow", "cwe": "CWE-915", "title": "Mass-assignment auto",
-         "url": "https://x/api/profile", "method": "POST",
+         "url": "https://x/api/profile",
          "evidence": {"dedupe_dimensions": {"route": "/api/profile", "method": "POST"}},
          "request": None, "last_verification_verdict": "exploited"},
     ]

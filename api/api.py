@@ -30686,7 +30686,7 @@ async def _research_net_new_finding_count(
     """
     rows = await conn.fetch(
         """
-        SELECT tool, cwe, title, url, method, evidence, request, last_verification_verdict
+        SELECT tool, cwe, title, url, evidence, request, last_verification_verdict
         FROM findings
         WHERE target_id=$1 AND status IN ('active','resolved','accepted_risk')
         """,
