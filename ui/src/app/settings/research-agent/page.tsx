@@ -15,6 +15,7 @@ import {
   type Target,
 } from '@/lib/api'
 import { Button, Card, EmptyState, ErrorState, Skeleton } from '@/components/ui'
+import { isWebTarget } from '@/lib/targets'
 import {
   DURATIONS, PROFILES, RunStatusBadge, familiesForIntensity, type DurationKey, type Intensity,
   findingCount, hostFromUrl, relativeTime, runState, targetLabel,
@@ -78,7 +79,7 @@ function ResearchAgentPage() {
       .then(([targetData, readiness]) => {
         if (cancelled) return
         const rows: Target[] = Array.isArray(targetData?.targets) ? targetData.targets : Array.isArray(targetData) ? targetData : []
-        const web = rows.filter((t) => /^https?:\/\//i.test(t.url) && t.discovery_source !== 'model-intake')
+        const web = rows.filter(isWebTarget)
         setTargets(web)
         setTargetId(web[0]?.id || '')
         setAiReady(readiness.planner_ready)

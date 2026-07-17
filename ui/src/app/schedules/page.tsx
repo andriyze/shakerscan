@@ -9,6 +9,7 @@ import {
 } from '@/lib/api'
 import { SCAN_TYPES, type ScanType } from '@/lib/constants'
 import { Button, Card, CardSkeleton, ConfirmDialog, EmptyState, ErrorState, useToast } from '@/components/ui'
+import { isWebTarget } from '@/lib/targets'
 import { utcTimeToLocalLabel } from '@/lib/format'
 import {
   buildAsmScheduleOptions,
@@ -173,7 +174,7 @@ function SchedulesContent() {
   useEffect(() => {
     if (showCreateModal) {
       getTargets().then(data => {
-        setTargets(data.targets || [])
+        setTargets((data.targets || []).filter(isWebTarget))
         // Pre-select first target if none selected
         if (!formTargetId && data.targets?.length > 0) {
           setFormTargetId(data.targets[0].id)

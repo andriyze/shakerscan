@@ -8,8 +8,9 @@ import {
 } from 'lucide-react'
 import { executeArsenalCommand, getTargets, type ArsenalExecuteResult } from '@/lib/api'
 import { Badge, Button, Card, ErrorState } from '@/components/ui'
+import { isWebTarget } from '@/lib/targets'
 
-interface TargetLite { id: string; url: string; name?: string | null }
+interface TargetLite { id: string; url: string; name?: string | null; discovery_source?: string | null }
 type StepRole = 'control' | 'mutation' | 'verify'
 interface StepDraft {
   label: string
@@ -159,7 +160,7 @@ export default function ExperimentBuilderPage() {
     setFalsifier(params.get('falsifier') || '')
     if (initialPath !== '/') setSteps([blankStep(0, initialPath), blankStep(1, initialPath)])
     getTargets().then((data) => {
-      const list = (data?.targets || data || []) as TargetLite[]
+      const list = ((data?.targets || data || []) as TargetLite[]).filter(isWebTarget)
       setTargets(list)
       setTargetId((current) => current || list[0]?.id || '')
     }).catch(() => undefined)

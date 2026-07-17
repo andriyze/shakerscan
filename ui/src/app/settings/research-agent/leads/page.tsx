@@ -17,8 +17,9 @@ import {
   type ScheduledLead,
 } from '@/lib/api'
 import { Badge, Button, Card, EmptyState, ErrorState, Skeleton, buttonClasses } from '@/components/ui'
+import { isWebTarget } from '@/lib/targets'
 
-interface TargetLite { id: string; url: string; name?: string | null }
+interface TargetLite { id: string; url: string; name?: string | null; discovery_source?: string | null }
 
 const FAMILY_LABELS: Record<string, string> = {
   bola: 'Object access control', idor: 'Object access control', auth_bypass: 'Authentication bypass',
@@ -246,7 +247,7 @@ export default function InvestigationWorkspacePage() {
 
   useEffect(() => {
     Promise.all([getTargets(), getFamilyProofContracts()]).then(([targetData, proofData]) => {
-      const list = (targetData?.targets || targetData || []) as TargetLite[]
+      const list = ((targetData?.targets || targetData || []) as TargetLite[]).filter(isWebTarget)
       setTargets(list)
       setContracts(proofData)
     }).catch((e) => setError(e instanceof Error ? e.message : 'Failed to load investigation context'))

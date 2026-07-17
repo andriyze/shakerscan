@@ -533,7 +533,8 @@ function ActionCenter({
   items: DashboardActionItem[]
   loading: boolean
 }) {
-  const visibleItems = items.slice(0, 6)
+  const [showAll, setShowAll] = useState(false)
+  const visibleItems = showAll ? items : items.slice(0, 6)
 
   return (
     <Card className="p-4">
@@ -553,11 +554,22 @@ function ActionCenter({
           <Skeleton className="h-20" />
         </div>
       ) : visibleItems.length ? (
-        <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
-          {visibleItems.map((item) => (
-            <ActionCenterRow key={item.id} item={item} />
-          ))}
-        </div>
+        <>
+          <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+            {visibleItems.map((item) => (
+              <ActionCenterRow key={item.id} item={item} />
+            ))}
+          </div>
+          {items.length > 6 && (
+            <button
+              type="button"
+              onClick={() => setShowAll((value) => !value)}
+              className="mt-3 w-full rounded-md border border-gray-800 bg-gray-950 px-4 py-2 text-sm text-gray-300 hover:bg-gray-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+            >
+              {showAll ? 'Show less' : `Show all ${items.length}`}
+            </button>
+          )}
+        </>
       ) : (
         <div className="rounded-md border border-gray-800 bg-gray-950 px-4 py-3 text-sm text-gray-400">
           No high-priority operational actions right now.
