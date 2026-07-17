@@ -30921,7 +30921,13 @@ async def _research_campaign_readiness(conn: Any, campaign: Any) -> dict[str, An
     for injection_family in ("sqli", "xss"):
         if injection_family in families and family_parameterized_routes > 0:
             executable_families.append(injection_family)
-    if "mass_assignment" in families and family_mutation_routes > 0:
+    # Mass-assignment leads come from the persistent endpoint inventory (any authenticated write route
+    # with a captured body), NOT from a fresh two-principal preflight like BOLA. A BOLA-focused reused
+    # preflight leaves fresh_mutation_routes=0 even when the inventory holds 100+ writable routes, which
+    # wrongly drops the whole family and lets its many leads flood the pre-truncation board only to be
+    # stripped later, starving executable families. The live-surface filter already discards stale/gone
+    # routes, so gate on the persistent mutation surface (whole-target) instead of the fresh count.
+    if "mass_assignment" in families and (family_mutation_routes > 0 or mutation_routes > 0):
         executable_families.append("mass_assignment")
     if (
         "field_constraint" in families
