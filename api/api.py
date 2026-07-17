@@ -37859,7 +37859,14 @@ def _endpoint_inventory_hypothesis_requests(
                     # a false finding. A discovered read-back stays a stronger signal (see provability).
                     discovered_readback = object_route if "GET" in object_route_methods else None
                     collection_is_listable = "GET" in same_route_methods
-                    readback_route = discovered_readback or (object_route if collection_is_listable else None)
+                    # An account/user resource create (register, signup, users, accounts, ...) is the
+                    # canonical create-based mass_assignment surface even when the GET sibling isn't
+                    # co-discovered (trailing-slash/auth-state variants split the inventory). Universal
+                    # name heuristic; the dispatch probe confirms the endpoint and the proof backstops it.
+                    account_create = bool(re.search(
+                        r"(?i)(user|account|register|signup|member|customer|profile|credential)", route))
+                    readback_route = discovered_readback or (
+                        object_route if (collection_is_listable or account_create) else None)
                     cleanup_route = object_route if "DELETE" in object_route_methods else None
                     create_based = bool(readback_route)
                 else:
@@ -37984,6 +37991,17 @@ def _endpoint_inventory_hypothesis_requests(
             family_order.append(request.family)
             by_family[request.family] = []
         by_family[request.family].append(request)
+    # Within each family, float the highest-value leads to the front so the round-robin cap keeps them:
+    # create-based mass_assignment (the net-new surface a huge inventory would otherwise bury) and then
+    # higher provability. Stable sort preserves discovery order among equals.
+    for bucket in by_family.values():
+        bucket.sort(
+            key=lambda request: (
+                bool((request.metadata_json or {}).get("create_based")),
+                int((request.metadata_json or {}).get("provability_score") or 0),
+            ),
+            reverse=True,
+        )
     balanced: list[HypothesisRequest] = []
     while len(balanced) < 100 and any(by_family.values()):
         for family in family_order:
@@ -38029,30 +38047,66 @@ async def generate_endpoint_inventory_hypotheses(
         # the create-based lead can form; the family proof backstops any speculative lead.
         create_rows = await conn.fetch(
             """
-            SELECT method, path, param_shape, replay_spec, param_location, auth_state,
-                   test_status, last_verdict, last_tested_at
-            FROM target_endpoints e
-            WHERE e.target_id=$1 AND COALESCE(e.test_status,'') <> 'gone'
-              AND upper(e.method) IN ('POST', 'GET')
-              AND rtrim(e.path, '/') IN (
-                SELECT rtrim(p.path, '/') FROM target_endpoints p
-                WHERE p.target_id=$1 AND upper(p.method)='POST' AND COALESCE(p.test_status,'') <> 'gone'
-                INTERSECT
-                SELECT rtrim(g.path, '/') FROM target_endpoints g
-                WHERE g.target_id=$1 AND upper(g.method)='GET' AND COALESCE(g.test_status,'') <> 'gone'
-              )
-            LIMIT 400
+            SELECT * FROM (
+                SELECT DISTINCT ON (upper(method), rtrim(path, '/'))
+                       method, path, param_shape, replay_spec, param_location, auth_state,
+                       test_status, last_verdict, last_tested_at
+                FROM target_endpoints e
+                WHERE e.target_id=$1 AND COALESCE(e.test_status,'') <> 'gone'
+                  AND upper(e.method) IN ('POST', 'GET')
+                  AND rtrim(e.path, '/') IN (
+                    SELECT rtrim(p.path, '/') FROM target_endpoints p
+                    WHERE p.target_id=$1 AND upper(p.method)='POST' AND COALESCE(p.test_status,'') <> 'gone'
+                    INTERSECT
+                    SELECT rtrim(g.path, '/') FROM target_endpoints g
+                    WHERE g.target_id=$1 AND upper(g.method)='GET' AND COALESCE(g.test_status,'') <> 'gone'
+                  )
+                ORDER BY upper(method), rtrim(path, '/'),
+                         (COALESCE(param_location, '') ~* '(body|json|form)') DESC,
+                         (COALESCE(param_shape, '') ~* '(email|password|passwd)') DESC
+            ) dedup
+            -- Dedupe to one row per (method, route) so a huge inventory (thousands of collections, many
+            -- rows each) does not exhaust the budget on one path, then float user/account create surfaces
+            -- (where create-based mass_assignment matters most) and bodies that already look like account
+            -- registration. Universal name heuristic, not an app-specific fact.
+            ORDER BY (path ~* '(user|account|register|signup|member|customer|profile)') DESC,
+                     (COALESCE(param_shape,'') ~* '(email|password|passwd)') DESC
+            LIMIT 600
             """,
             tgt,
         )
+        # Create collections go FIRST: the producer caps how many candidates it emits, so a large
+        # inventory would otherwise exhaust the budget on the top-300 generic rows before reaching the
+        # (lower-ranked) create surfaces where create-based mass_assignment lives.
         merged: dict[tuple[str, str], Any] = {
-            (str(r["method"]).upper(), str(r["path"])): r for r in rows
+            (str(r["method"]).upper(), str(r["path"])): r for r in create_rows
         }
-        for r in create_rows:
+        for r in rows:
             merged.setdefault((str(r["method"]).upper(), str(r["path"])), r)
         requests = _endpoint_inventory_hypothesis_requests(
             target_id, [row_to_dict(r) for r in merged.values()], created_by=created_by,
         )
+        # Deterministic create-collection pass: the main producer round-robin-caps candidates, so on a
+        # huge inventory the create surfaces get buried. Re-run the producer over EACH user/account create
+        # collection ALONE (its POST + GET rows only -- 2-3 endpoints, no cap) and merge any create-based
+        # mass_assignment lead the capped pass missed, so create-MA always reaches the board.
+        existing_keys = {req.dedupe_key for req in requests}
+        account_rows: dict[str, list[Any]] = {}
+        for row in create_rows:
+            base = str(row["path"]).rstrip("/")
+            if re.search(r"(?i)(user|account|register|signup|member|customer|profile|credential)", base):
+                account_rows.setdefault(base, []).append(row)
+        for rows_for_collection in list(account_rows.values())[:40]:
+            for req in _endpoint_inventory_hypothesis_requests(
+                target_id, [row_to_dict(r) for r in rows_for_collection], created_by=created_by,
+            ):
+                if (
+                    req.dedupe_key not in existing_keys
+                    and req.family == "mass_assignment"
+                    and (req.metadata_json or {}).get("create_based")
+                ):
+                    requests.append(req)
+                    existing_keys.add(req.dedupe_key)
         records = [await _upsert_hypothesis(conn, req) for req in requests]
     return {
         "target_id": target_id,
