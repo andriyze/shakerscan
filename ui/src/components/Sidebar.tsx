@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { usePathname } from 'next/navigation'
 import Link from 'next/link'
-import { Activity, Bot, Crosshair, FileArchive, Flag, Lightbulb, Menu, Network, PackageCheck, Radar, ShieldAlert, ShieldCheck, X } from 'lucide-react'
+import { Activity, Bot, Crosshair, FileArchive, Lightbulb, Menu, Network, PackageCheck, Radar, ShieldAlert, ShieldCheck, X } from 'lucide-react'
 import { buttonClasses } from '@/components/ui'
 
 const navGroups: { heading: string | null; items: { href: string; label: string; icon: ReactNode }[] }[] = [
@@ -81,7 +81,6 @@ const navGroups: { heading: string | null; items: { href: string; label: string;
     items: [
       { href: '/evidence', label: 'Evidence', icon: <FileArchive className="w-5 h-5" /> },
       { href: '/timeline', label: 'Timeline', icon: <Activity className="w-5 h-5" /> },
-      { href: '/campaigns', label: 'Campaigns', icon: <Flag className="w-5 h-5" /> },
     ],
   },
   {

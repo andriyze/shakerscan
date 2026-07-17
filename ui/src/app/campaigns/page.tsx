@@ -7,7 +7,6 @@ import { getCampaigns, formatDate, type Campaign } from '@/lib/api'
 import { useUrlFilters } from '@/lib/useUrlFilters'
 import { CAMPAIGN_TYPE_LABELS } from '@/lib/constants'
 import {
-  Button,
   CampaignStatusBadge,
   Card,
   EmptyState,
@@ -15,9 +14,7 @@ import {
   LastUpdated,
   RiskTierBadge,
   TableSkeleton,
-  useToast,
 } from '@/components/ui'
-import CampaignCreateForm from '@/components/CampaignCreateForm'
 
 const CAMPAIGN_STATUSES = ['planned', 'active', 'paused', 'completed', 'cancelled']
 
@@ -29,14 +26,12 @@ interface CampaignFilters {
 
 function CampaignsContent() {
   const { filters, setFilter } = useUrlFilters<CampaignFilters>()
-  const toast = useToast()
   const router = useRouter()
 
   const [campaigns, setCampaigns] = useState<Campaign[]>([])
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState(false)
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null)
-  const [showCreate, setShowCreate] = useState(false)
 
   const statusFilter = filters.status || ''
   const targetFilter = (filters.target || '').trim()
@@ -71,13 +66,10 @@ function CampaignsContent() {
         <div>
           <h1 className="text-2xl font-bold text-white">Campaigns</h1>
           <p className="mt-1 text-gray-400">
-            Group related security work and track current linked-finding impact. Campaigns are bookkeeping records — creating one queues no scan.
+            Read-only records of related security work and current linked-finding impact.
           </p>
         </div>
-        <div className="flex items-center gap-3">
-          <LastUpdated updatedAt={lastUpdated} onRefresh={load} />
-          <Button size="sm" onClick={() => setShowCreate(true)}>New campaign</Button>
-        </div>
+        <LastUpdated updatedAt={lastUpdated} onRefresh={load} />
       </div>
 
       <Card className="p-4">
@@ -113,9 +105,8 @@ function CampaignsContent() {
         <TableSkeleton rows={6} />
       ) : campaigns.length === 0 ? (
         <EmptyState
-          message="No campaigns yet"
-          hint="Create a campaign to group related security work and track its deployment impact."
-          action={{ label: 'New campaign', onClick: () => setShowCreate(true) }}
+          message="No campaign records"
+          hint="Campaign records created by supported workflows will appear here."
         />
       ) : (
         <Card className="overflow-hidden">
@@ -162,15 +153,6 @@ function CampaignsContent() {
         </Card>
       )}
 
-      <CampaignCreateForm
-        open={showCreate}
-        onClose={() => setShowCreate(false)}
-        onCreated={(campaign) => {
-          setShowCreate(false)
-          toast.success('Campaign created')
-          router.push(`/campaigns/${campaign.id}`)
-        }}
-      />
     </div>
   )
 }
