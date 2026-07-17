@@ -9,19 +9,25 @@ Use ShakerScan's research episode controller for adaptive investigation. The age
 
 ## Choose The Planner
 
-- **Current Codex as the brain:** create an episode through the API, then run `./scanner.sh research <episode-id> [max-decisions]`. This starts isolated, ephemeral, read-only Codex planner processes with tools disabled. Each process receives one bounded observation and returns one structured decision.
-- **Configured AI provider:** call `POST /research/episodes/{id}/plan-step`. This uses the provider and model from `/settings/ai`, including OpenRouter. The UI at `/settings/research-agent` uses this path.
+- **Current agent session (default):** launch with `planner_mode: "agent"` and `autopilot: false`, then read the current observation and submit exactly one decision to `/research/episodes/{id}/decisions`. When `SHAKERSCAN_RESEARCH_PLANNER_MODE=agent` is present (set by `shakerscan agent codex|claude|opencode`), always use this mode unless the user explicitly asks for a stored provider or isolated local Codex. No ShakerScan AI provider configuration is required.
+- **Isolated local Codex:** launch or switch with `planner_mode: "local_codex"` and run `./scanner.sh research <episode-id> [max-decisions]`. This starts separate ephemeral, read-only Codex planner processes with tools disabled. It uses the host Codex authentication, not the current conversation state.
+- **Configured AI provider:** launch with `planner_mode: "configured_ai"` or call `POST /research/episodes/{id}/plan-step`. This uses the provider and model from `/settings/ai`, including OpenRouter, and is the only mode that runs unattended through server autopilot.
 - **Claude or another agent as the brain:** read `GET /research/episodes/{id}`, construct exactly one decision from the current observation, and submit it to `POST /research/episodes/{id}/decisions`. Never execute the proposed operation outside ShakerScan.
 
 ## Workflow
 
 1. Check `GET /health` and identify a registered web/API `target_id`.
-2. Create a `shadow` or `read_only` episode first. Use `gated` only with valid scope and approval receipts.
+2. Create a `shadow` or `read_only` episode first. Use `gated` only with valid scope and approval receipts. For Deep Hunt campaigns started by the current coding agent, set `planner_mode: "agent"`; this is also the API default.
 3. Inspect the current immutable observation and its `proposable_commands`.
 4. Select exactly one action, request operator input, or stop.
 5. For an action, state a concrete `expected_signal` and `falsifier`.
 6. Submit the decision to ShakerScan and use the next observation returned by the controller.
 7. Stop when the objective is met, evidence falsifies the lead, the budget is exhausted, or operator input is required.
+
+For a campaign launched in `agent` mode, drive the returned first episode immediately when it is
+awaiting a planner. If launch queued a readiness/preflight scan, report that scan and stop as usual;
+on the user's next request, find the campaign's non-terminal episode and continue it. After any
+decision queues a scan or retest, report the linked work and stop rather than polling.
 
 ## Hard Rules
 
@@ -48,7 +54,7 @@ curl -X POST "$API_BASE/research/episodes" \
 
 ./scanner.sh research EPISODE_UUID 5
 
-# Or use the configured provider used by the UI:
+# Or use the configured provider:
 curl -X POST "$API_BASE/research/episodes/EPISODE_UUID/plan-step" \
   -H 'Content-Type: application/json' \
   -d '{"execute":true,"timeout_seconds":90,"max_tokens":3000}'

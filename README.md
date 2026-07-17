@@ -21,6 +21,10 @@ Then drive it with your AI agent — just open one inside the runtime and ask in
 shakerscan agent claude       # or: codex, opencode
 ```
 
+That agent session is the default brain for Deep Hunt and other adaptive research. A clean install
+does not need a separately configured LLM provider or API key. ShakerScan still owns execution,
+target scope, approvals, budgets, and proof; the agent chooses one bounded action at a time.
+
 ```text
 Start ShakerScan
 Run a quick scan on https://example.com
@@ -103,6 +107,13 @@ shakerscan agent codex
 shakerscan agent opencode
 shakerscan agent claude
 ```
+
+`shakerscan agent ...` also selects the current coding-agent session as the default research
+planner. Ask it to run or continue Deep Hunt and it will use `planner_mode: agent`. To run hunts
+unattended after the agent closes, configure an AI provider in Settings and explicitly choose
+**Stored AI provider** (`planner_mode: configured_ai`). An optional `local_codex` mode uses separate
+isolated `codex exec` calls rather than the current conversation. The default for future hunts can
+be changed under **Settings → Automation Defaults → Default Deep Hunt planner**.
 
 Then ask:
 

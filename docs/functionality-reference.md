@@ -808,12 +808,15 @@ records decisions without dispatch. Read-only mode dispatches only the target-sc
 allowlist. Gated mode can additionally dispatch `asm.improve`, `asm.recon`, `asm.test`,
 `finding.retest`, `scan.focused_family`, `experiment.http_diff`, and `experiment.workflow` through the existing Arsenal gateway when a matching
 scope/approval receipt and the global execution flag are present. Target IDs/URLs and receipts are
-injected by the server. The configured AI provider can plan one step from the UI/API; the host-side
-`./scanner.sh research <episode-id> [max-decisions]` uses an isolated ephemeral Codex process and
+injected by the server. Research campaigns persist one of three planner modes. `agent` is the
+clean-install default: the current Codex/Claude/OpenCode session reads the immutable observation and
+submits one bounded decision without a stored provider. `configured_ai` uses AI settings and durable
+server autopilot. `local_codex` uses the host-side
+`./scanner.sh research <episode-id> [max-decisions]` with an isolated ephemeral Codex process and
 fails fast when server autopilot is enabled for the episode, preventing two planners from racing the
 same immutable observation. Pause server autopilot before invoking the local runner. The command
 prints a compact decision/episode receipt and UI path instead of the full observation pack.
-Neither planner path can mint proof or findings. Cancellation terminates the episode, cancels linked
+No planner path can mint proof or findings. Cancellation terminates the episode, cancels linked
 queued retests and pending/running scans where possible, and reports already-running retests as
 continuing rather than pretending they stopped.
 
@@ -1081,7 +1084,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | Scanner wrapper commands | 23 | `scanner.sh` |
 | Make targets | 7 | `Makefile` |
 | Release gates | 10 | `scripts/release_gates.py` |
-| Runtime environment keys | 192 | Python sources + Compose manifests |
+| Runtime environment keys | 193 | Python sources + Compose manifests |
 | Scanner modules | 83 | `scanner/scanner_tools/` |
 | UI pages | 27 | `ui/src/app/` |
 | Skills | 5 | `skills/` |
@@ -1688,6 +1691,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `COVERAGE_ALLOCATION_DEFAULT` | `api/parallel_scan.py` |
 | `DATABASE_URL` | `api/api.py`, `api/gungnir_worker.py`, `api/worker.py`, `scanner/gungnir_worker.py` |
 | `DEFAULT_ASM_ENABLED` | `api/api.py` |
+| `DEFAULT_RESEARCH_PLANNER_MODE` | `api/api.py` |
 | `DOMAIN_RATE_REQUEUE_DELAY_SECONDS` | `api/worker.py` |
 | `ENV` | `scanner/scanner_tools/remediation_kb.py` |
 | `EVIDENCE_INLINE_MAX_BYTES` | `api/evidence_storage.py` |

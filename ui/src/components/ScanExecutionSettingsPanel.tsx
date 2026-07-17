@@ -119,6 +119,7 @@ export default function ScanExecutionSettingsPanel() {
   const scan = settings?.scan_execution
   const asm = settings?.default_continuous_asm
   const safety = settings?.safety_boundaries
+  const research = settings?.research_agent
   const asmConfig = asm?.config
   const eligibleTypes = scan?.eligible_scan_types?.join(', ') || 'smart, full, aggressive'
   const workerText = scan?.running_workers == null
@@ -195,6 +196,55 @@ export default function ScanExecutionSettingsPanel() {
               <span className="rounded border border-gray-800 px-2 py-1">{countLabel(asmConfig.max_requests_per_hour_per_domain, 'request')}/hour/domain</span>
             </div>
           )}
+        </div>
+      </div>
+
+      <div className="mt-3 rounded-lg border border-gray-800 bg-gray-950/40 p-3">
+        <div>
+          <h3 className="text-sm font-medium text-gray-100">Default Deep Hunt planner</h3>
+          <p className="mt-1 text-xs text-gray-500">
+            Sets who chooses each bounded research action. Individual hunts can override this.
+          </p>
+        </div>
+        <div className="mt-3 grid gap-2 md:grid-cols-3">
+          {([
+            {
+              mode: 'agent' as const,
+              label: 'Current coding agent',
+              description: 'Default for clean installs; no separate provider key.',
+            },
+            {
+              mode: 'local_codex' as const,
+              label: 'Isolated local Codex',
+              description: 'Separate ephemeral codex exec planner processes.',
+            },
+            {
+              mode: 'configured_ai' as const,
+              label: 'Stored AI provider',
+              description: 'Unattended server autopilot using AI Settings.',
+            },
+          ]).map((option) => {
+            const active = research?.default_planner_mode === option.mode
+            return (
+              <button
+                key={option.mode}
+                type="button"
+                onClick={() => save(
+                  { default_research_planner_mode: option.mode },
+                  `Default Deep Hunt planner set to ${option.label}`,
+                )}
+                disabled={loading || saving || !research}
+                className={`rounded-lg border px-3 py-2 text-left transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${
+                  active
+                    ? 'border-blue-500 bg-blue-600/15 text-blue-100'
+                    : 'border-gray-800 bg-gray-950/40 text-gray-300 hover:bg-gray-800/70'
+                }`}
+              >
+                <div className="text-sm font-medium">{option.label}</div>
+                <div className="mt-1 text-xs leading-5 text-gray-500">{option.description}</div>
+              </button>
+            )
+          })}
         </div>
       </div>
 

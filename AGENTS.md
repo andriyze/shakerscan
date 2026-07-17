@@ -73,6 +73,7 @@ flags, skills, agents, adapters, modules, and durable tables) plus architecture/
 - **Command Arsenal (`/settings/arsenal`)**: command contracts, plans, scope/approval receipts, action ledger, hypotheses, refuters, tools, local agents, context packs, and decision traces.
 - **Autonomous Hunt (`/settings/research-agent`)**: create target-bound analysis or gated active episodes and optionally run them with durable server-side autopilot. Subject-bound launch profiles cover target hunts, exact-finding verification, and ASM gap closure. The controller leases one episode at a time, waits for linked scans and finding retests, rejects duplicate no-progress actions, reserves a final conclusion turn, meters failed provider attempts, and continues if the browser closes. Inspect the actual model, immutable observations, linked work, finding outcome, request-unit budgets, decisions, errors, and events; pause/resume or cancel the episode plus linked work. The lead backlog remains at `/settings/research-agent/leads`.
 - **Long-running research campaigns**: the Research Agent can wrap bounded episodes in a durable campaign. A campaign shares recent-action memory across episodes, starts a fresh episode after a bounded one concludes, and continues until its time/episode ceiling, operator pause/cancel, missing input, or expired approval. The default UI path needs only a target, authorization confirmation, and optional ceilings.
+- **Research planner choice**: `shakerscan agent codex|claude|opencode` marks the current coding-agent session as the default research brain. On a clean install, launch Deep Hunt with `planner_mode: "agent"` (the campaign API default), drive the returned awaiting-planner episode immediately, and submit one bounded decision at a time from the current observation; no stored LLM/API key is required. Use `planner_mode: "configured_ai"` only when the user explicitly wants unattended server autopilot backed by `/settings/ai`, or `planner_mode: "local_codex"` for separate isolated `codex exec` planner processes. Stop after a decision queues linked scan/retest work; continue the campaign when the user asks again.
 - **Settings (`/settings`)**: AI providers, scan execution policy, automation defaults, and approval-receipt enforcement.
 - **Application Graph (`/targets/{id}/graph`)**: inspect persisted route/object/principal nodes, producer/consumer/auth-boundary edges, node/edge filters, search, and selected-node connections.
 
@@ -478,6 +479,7 @@ curl -X POST http://localhost:8080/research/campaigns/launch \
   -d '{
     "target_id": "target-uuid",
     "intensity": "deep_hunt",
+    "planner_mode": "agent",
     "approval_receipt_id": "approval-uuid",
     "duration_hours": 24,
     "max_episodes": 12
@@ -486,6 +488,11 @@ curl -X POST http://localhost:8080/research/campaigns/launch \
 curl -X POST http://localhost:8080/research/campaigns/{campaign_id}/control \
   -H "Content-Type: application/json" -d '{"action":"pause"}'
 ```
+
+`planner_mode` is `agent` by default. In that mode the current Codex/Claude/OpenCode session must
+read the active episode and submit decisions through `/research/episodes/{id}/decisions`; ShakerScan
+remains the only executor. `configured_ai` enables durable server autopilot and requires AI settings.
+`local_codex` uses `./scanner.sh research {episode_id} 5` and a separate ephemeral Codex process.
 
 Modes are `shadow`, `read_only`, and `gated`. Gated episodes require a target-matching scope receipt,
 approval receipt, explicit active budgets, and `AI_OPS_ROUTER_EXECUTE_ENABLED=true`; the current
@@ -532,10 +539,12 @@ curl -X PUT http://localhost:8080/settings/automation \
   -H "Content-Type: application/json" \
   -d '{"auto_sharding_enabled": true, "default_asm_enabled": true,
        "default_asm_config": {"batch_size": 50, "stale_days": 30},
+       "default_research_planner_mode": "agent",
        "approval_receipts_required_for_state_changing_actions": false}'
 ```
 
 `/settings/automation` is the preferred compact surface for UI/API/AI agents. It keeps global `exploit_depth` locked off; Lab/deep ASM still requires explicit per-target or per-action intent. Set `approval_receipts_required_for_state_changing_actions` to `true` to require a valid scope/approval receipt before queueing scans, ASM actions, AI Gate runs, Model Intake scans, or retests.
+`default_research_planner_mode` accepts `agent`, `local_codex`, or `configured_ai`; clean installs default to `agent`.
 
 ### Worker Management
 

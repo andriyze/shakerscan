@@ -416,6 +416,7 @@ export interface ResearchEpisodeLaunchRequest {
   mission_profile: 'target_hunt' | 'verify_finding' | 'close_asm_gaps'
   intensity: 'analyze' | 'hunt' | 'relentless' | 'deep_hunt'
   approval_receipt_id?: string
+  planner_mode?: ResearchPlannerMode
   autopilot?: boolean
   force_new?: boolean
   created_by?: string
@@ -426,10 +427,13 @@ export interface ResearchEpisodeLaunchResponse extends ResearchEpisodeDetail {
   reused: boolean
 }
 
+export type ResearchPlannerMode = 'agent' | 'local_codex' | 'configured_ai'
+
 export interface ResearchCampaignLaunchRequest {
   target_id: string
   intensity?: 'analyze' | 'hunt' | 'relentless' | 'deep_hunt'
   approval_receipt_id?: string
+  planner_mode?: ResearchPlannerMode
   duration_hours?: number
   max_episodes?: number
   objective?: string
@@ -447,6 +451,13 @@ export interface ResearchCampaignLaunchResponse {
 
 export interface ResearchReadiness {
   planner_ready: boolean
+  configured_planner_ready?: boolean
+  default_planner_mode?: ResearchPlannerMode
+  planner_modes?: Partial<Record<ResearchPlannerMode, {
+    ready: boolean
+    durable: boolean
+    label: string
+  }>>
   execution_enabled: boolean
   campaign_readiness_policy?: Record<string, unknown>
   model?: string | null
@@ -1918,11 +1929,16 @@ export interface AutomationSettings {
     planned_high_risk_families_fail_closed: boolean
     approval_receipts_required_for_state_changing_actions: boolean
   }
+  research_agent: {
+    default_planner_mode: ResearchPlannerMode
+    available_planner_modes: ResearchPlannerMode[]
+  }
 }
 
 export interface AutomationSettingsUpdate extends ScanExecutionSettingsUpdate {
   default_asm_enabled?: boolean
   default_asm_config?: Partial<AsmAutomationConfig>
+  default_research_planner_mode?: ResearchPlannerMode
   approval_receipts_required_for_state_changing_actions?: boolean
 }
 
@@ -3045,11 +3061,15 @@ export async function planResearchEpisodeStep(episodeId: string, payload: {
   return res.json()
 }
 
-export async function setResearchEpisodeAutopilot(episodeId: string, enabled: boolean): Promise<ResearchEpisodeDetail> {
+export async function setResearchEpisodeAutopilot(
+  episodeId: string,
+  enabled: boolean,
+  plannerMode?: ResearchPlannerMode,
+): Promise<ResearchEpisodeDetail> {
   const res = await fetch(`${API_URL}/research/episodes/${encodeURIComponent(episodeId)}/autopilot`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ enabled, created_by: 'research_agent_ui' }),
+    body: JSON.stringify({ enabled, planner_mode: plannerMode, created_by: 'research_agent_ui' }),
   })
   if (!res.ok) throw new Error(await getApiErrorMessage(res, enabled ? 'Failed to resume autopilot' : 'Failed to pause autopilot'))
   return res.json()

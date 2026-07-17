@@ -45,7 +45,7 @@ Available skills in this folder:
 - `js-analyze/` - JS bundle, frontend route, library, and secret analysis with ShakerScan `custom_endpoints` output
 - `content-discovery/` - target-specific route and file discovery plans with `custom_list` and `custom_endpoints` output
 - `review-skills/` - audit the repo’s skills, commands, and agents as a severity-ordered review
-- `research-agent/` - bounded adaptive research episodes using Codex, Claude/agent decisions, or the configured UI provider
+- `research-agent/` - bounded adaptive research episodes using the current coding agent by default, isolated local Codex, or an explicitly configured server provider
 
 Project-local command and agent entrypoints live under:
 - `.claude/commands/js-analyze.md`

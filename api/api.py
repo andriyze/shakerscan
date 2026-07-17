@@ -978,6 +978,13 @@ def _merge_safe_default_asm_config(base: Any, update: Any) -> dict[str, Any]:
     return _safe_default_asm_config(merged)
 
 
+def _normalize_research_planner_mode(value: Any, default: str = "agent") -> str:
+    candidate = str(value or "").strip().lower()
+    if candidate in {"agent", "local_codex", "configured_ai"}:
+        return candidate
+    return default
+
+
 def _load_effective_automation_settings() -> dict[str, Any]:
     settings: dict[str, Any] = {
         "default_asm_enabled": _default_asm_enabled_setting(),
@@ -985,6 +992,9 @@ def _load_effective_automation_settings() -> dict[str, Any]:
         "approval_receipts_required_for_state_changing_actions": _is_truthy(
             os.environ.get("APPROVAL_RECEIPTS_REQUIRED_FOR_STATE_CHANGING_ACTIONS", "false"),
             default=False,
+        ),
+        "default_research_planner_mode": _normalize_research_planner_mode(
+            os.environ.get("DEFAULT_RESEARCH_PLANNER_MODE", "agent"),
         ),
     }
     try:
@@ -1006,6 +1016,11 @@ def _load_effective_automation_settings() -> dict[str, Any]:
         settings["approval_receipts_required_for_state_changing_actions"] = _is_truthy(
             overrides.get("approval_receipts_required_for_state_changing_actions"),
             default=settings["approval_receipts_required_for_state_changing_actions"],
+        )
+    if "default_research_planner_mode" in overrides:
+        settings["default_research_planner_mode"] = _normalize_research_planner_mode(
+            overrides.get("default_research_planner_mode"),
+            default=settings["default_research_planner_mode"],
         )
     return settings
 
@@ -1137,6 +1152,12 @@ def _sanitize_automation_settings_response(
             "approval_receipts_required_for_state_changing_actions": bool(
                 automation.get("approval_receipts_required_for_state_changing_actions")
             ),
+        },
+        "research_agent": {
+            "default_planner_mode": _normalize_research_planner_mode(
+                automation.get("default_research_planner_mode"),
+            ),
+            "available_planner_modes": ["agent", "local_codex", "configured_ai"],
         },
     }
 
@@ -3987,6 +4008,10 @@ class ResearchPlannerStepRequest(BaseModel):
 
 class ResearchAutopilotRequest(BaseModel):
     enabled: bool
+    planner_mode: Optional[str] = Field(
+        default=None,
+        pattern="^(configured_ai|agent|local_codex)$",
+    )
     created_by: Optional[str] = Field(default="research_agent_operator", max_length=120)
 
 
@@ -3998,6 +4023,10 @@ class ResearchLaunchRequest(BaseModel):
     mission_profile: str = Field(pattern="^(target_hunt|verify_finding|close_asm_gaps)$")
     intensity: str = Field(default="hunt", pattern="^(analyze|hunt|relentless|deep_hunt)$")
     approval_receipt_id: Optional[str] = None
+    planner_mode: Optional[str] = Field(
+        default=None,
+        pattern="^(configured_ai|agent|local_codex)$",
+    )
     autopilot: bool = True
     force_new: bool = False
     created_by: Optional[str] = Field(default="research_launch_api", max_length=120)
@@ -4014,6 +4043,14 @@ class ResearchCampaignLaunchRequest(BaseModel):
     target_id: str
     intensity: str = Field(default="deep_hunt", pattern="^(analyze|hunt|relentless|deep_hunt)$")
     approval_receipt_id: Optional[str] = None
+    planner_mode: Optional[str] = Field(
+        default=None,
+        pattern="^(configured_ai|agent|local_codex)$",
+        description=(
+            "Who chooses each bounded action. Agent mode is the clean-install default and uses "
+            "the current Codex/Claude/OpenCode session; configured_ai uses the provider in AI settings."
+        ),
+    )
     duration_hours: int = Field(default=24, ge=1, le=168)
     max_episodes: int = Field(default=12, ge=1, le=100)
     budget_limits: dict[str, Any] = Field(
@@ -4146,6 +4183,10 @@ class ScanExecutionSettingsUpdate(BaseModel):
 class AutomationSettingsUpdate(ScanExecutionSettingsUpdate):
     default_asm_enabled: Optional[bool] = None
     default_asm_config: Optional[dict[str, Any]] = None
+    default_research_planner_mode: Optional[str] = Field(
+        default=None,
+        pattern="^(agent|local_codex|configured_ai)$",
+    )
     approval_receipts_required_for_state_changing_actions: Optional[bool] = None
 
 
@@ -7383,6 +7424,10 @@ async def update_automation_settings(request: AutomationSettingsUpdate):
                 current_automation.get("default_asm_config"),
                 request.default_asm_config,
             )
+        )
+    if request.default_research_planner_mode is not None:
+        automation_updates["default_research_planner_mode"] = _normalize_research_planner_mode(
+            request.default_research_planner_mode,
         )
     if request.approval_receipts_required_for_state_changing_actions is not None:
         automation_updates[APPROVAL_POLICY_SETTING_KEY] = (
@@ -15435,6 +15480,41 @@ RESEARCH_LAUNCH_PROFILES: dict[str, dict[str, Any]] = {
         },
     },
 }
+
+RESEARCH_PLANNER_MODES = {"configured_ai", "agent", "local_codex"}
+
+
+def _research_configured_planner_ready() -> bool:
+    settings = _load_effective_ai_settings()
+    return all(
+        str(settings.get(key) or "").strip()
+        for key in ("ai_url", "ai_api_key", "ai_model")
+    )
+
+
+def _research_episode_planner_mode(episode: Any) -> str:
+    payload = row_to_dict(episode) if episode is not None else {}
+    planner = _decode_json_value(payload.get("planner")) or {}
+    mode = str(planner.get("mode") or "").strip()
+    if mode in RESEARCH_PLANNER_MODES:
+        return mode
+    return "configured_ai" if bool(payload.get("autopilot_enabled")) else "agent"
+
+
+def _research_launch_planner_mode(req: ResearchLaunchRequest) -> str:
+    if req.planner_mode in RESEARCH_PLANNER_MODES:
+        return str(req.planner_mode)
+    # Backward compatibility for existing launch clients that only know the autopilot boolean.
+    return "configured_ai" if req.autopilot else "agent"
+
+
+def _research_planner_kind(mode: str) -> str:
+    return {
+        "configured_ai": "configured_ai",
+        "local_codex": "local_agent",
+        "agent": "interactive_agent",
+    }.get(mode, "interactive_agent")
+
 
 RESEARCH_BUDGET_KEYS = ("steps", "actions", "active_actions", "requests", "seconds", "model_tokens")
 RESEARCH_PREFLIGHT_RESERVED_COST = {
@@ -29925,12 +30005,32 @@ async def create_research_episode(req: ResearchEpisodeRequest):
 @app.get("/research/readiness")
 async def research_readiness():
     settings = _load_effective_ai_settings()
-    planner_ready = all(
-        str(settings.get(key) or "").strip()
-        for key in ("ai_url", "ai_api_key", "ai_model")
+    configured_planner_ready = _research_configured_planner_ready()
+    default_planner_mode = _normalize_research_planner_mode(
+        _load_effective_automation_settings().get("default_research_planner_mode"),
     )
     return {
-        "planner_ready": planner_ready,
+        # Backward-compatible alias for UI surfaces that still launch configured-provider autopilot.
+        "planner_ready": configured_planner_ready,
+        "default_planner_mode": default_planner_mode,
+        "planner_modes": {
+            "agent": {
+                "ready": True,
+                "durable": False,
+                "label": "Current coding agent",
+            },
+            "local_codex": {
+                "ready": True,
+                "durable": False,
+                "label": "Isolated local Codex",
+            },
+            "configured_ai": {
+                "ready": configured_planner_ready,
+                "durable": True,
+                "label": "Stored AI provider",
+            },
+        },
+        "configured_planner_ready": configured_planner_ready,
         "execution_enabled": _ai_ops_execute_enabled(),
         "campaign_readiness_policy": {
             "focused_preflight_required_for_gated_campaigns": True,
@@ -31872,7 +31972,12 @@ async def _reuse_research_launch_episode(
         UPDATE research_episodes
         SET approval_receipt_id=COALESCE($2, approval_receipt_id),
             scope_receipt_id=COALESCE($3, scope_receipt_id),
-            autopilot_enabled=$4, autopilot_error=NULL,
+            autopilot_enabled=$4,
+            planner=jsonb_set(
+                jsonb_set(planner, '{mode}', to_jsonb($5::text), true),
+                '{kind}', to_jsonb($6::text), true
+            ),
+            autopilot_error=NULL,
             autopilot_consecutive_failures=0, updated_at=NOW()
         WHERE id=$1
         RETURNING *
@@ -31880,7 +31985,9 @@ async def _reuse_research_launch_episode(
         existing["id"],
         approval_id,
         scope_id,
-        req.autopilot,
+        _research_launch_planner_mode(req) == "configured_ai",
+        _research_launch_planner_mode(req),
+        _research_planner_kind(_research_launch_planner_mode(req)),
     )
     detail = await _research_episode_detail(conn, str(updated["id"]))
     detail["reused"] = True
@@ -31900,9 +32007,10 @@ async def launch_research_episode(req: ResearchLaunchRequest):
         raise HTTPException(status_code=400, detail="Mission profile does not support this subject type")
 
     launch_profile = dict(RESEARCH_LAUNCH_PROFILES[req.intensity])
-    if req.autopilot:
-        settings = _load_effective_ai_settings()
-        if not all(str(settings.get(key) or "").strip() for key in ("ai_url", "ai_api_key", "ai_model")):
+    planner_mode = _research_launch_planner_mode(req)
+    autopilot_enabled = planner_mode == "configured_ai"
+    if autopilot_enabled:
+        if not _research_configured_planner_ready():
             raise HTTPException(status_code=409, detail="Autonomous planner is not configured in AI settings")
     if launch_profile["execution_mode"] == "gated" and not _ai_ops_execute_enabled():
         raise HTTPException(status_code=409, detail="Autonomous active execution is disabled by server policy")
@@ -32102,7 +32210,8 @@ async def launch_research_episode(req: ResearchLaunchRequest):
         target_id=str(target_id),
         objective=objective,
         planner={
-            "kind": "configured_ai",
+            "kind": _research_planner_kind(planner_mode),
+            "mode": planner_mode,
             "created_by": req.created_by,
             "launch_intensity": req.intensity,
             "dedupe_launch": not req.force_new,
@@ -32121,7 +32230,7 @@ async def launch_research_episode(req: ResearchLaunchRequest):
         subject_id=str(subject_uuid),
         mission_profile=req.mission_profile,
         created_by=req.created_by,
-        autopilot=req.autopilot,
+        autopilot=autopilot_enabled,
     )
     try:
         detail = await create_research_episode(create_request)
@@ -32170,6 +32279,17 @@ async def launch_research_episode(req: ResearchLaunchRequest):
 async def launch_research_campaign(req: ResearchCampaignLaunchRequest):
     """Launch a durable sequence of autonomous episodes from minimal operator input."""
     target_uuid = _uuid_or_400(req.target_id, "target id")
+    planner_mode = _normalize_research_planner_mode(
+        req.planner_mode,
+        default=_normalize_research_planner_mode(
+            _load_effective_automation_settings().get("default_research_planner_mode"),
+        ),
+    )
+    if planner_mode == "configured_ai" and not _research_configured_planner_ready():
+        raise HTTPException(
+            status_code=409,
+            detail="Stored-provider planning was selected, but no AI provider is configured",
+        )
     unsupported_families = sorted({
         str(item).strip().lower() for item in req.allowed_families if str(item).strip()
     } - RESEARCH_CAMPAIGN_FAMILIES)
@@ -32195,6 +32315,7 @@ async def launch_research_campaign(req: ResearchCampaignLaunchRequest):
     metadata = {
         "autonomous_research": {
             "intensity": req.intensity,
+            "planner_mode": planner_mode,
             "deadline_at": deadline.isoformat(),
             "max_episodes": req.max_episodes,
             "budget_limits": _research_campaign_budget_limits(
@@ -32235,7 +32356,11 @@ async def launch_research_campaign(req: ResearchCampaignLaunchRequest):
             target_uuid,
             json.dumps({"target_id": str(target_uuid), "url": str(target["url"])}),
             RESEARCH_LAUNCH_PROFILES[req.intensity]["max_risk_tier"],
-            json.dumps({"kind": "configured_ai", "mode": "durable_campaign"}),
+            json.dumps({
+                "kind": _research_planner_kind(planner_mode),
+                "mode": planner_mode,
+                "campaign": True,
+            }),
             json.dumps(metadata),
             req.created_by,
         )
@@ -32324,7 +32449,8 @@ async def launch_research_campaign(req: ResearchCampaignLaunchRequest):
             mission_profile="target_hunt",
             intensity=req.intensity,
             approval_receipt_id=req.approval_receipt_id,
-            autopilot=True,
+            planner_mode=planner_mode,
+            autopilot=planner_mode == "configured_ai",
             force_new=True,
             created_by=req.created_by,
             campaign_id=campaign_id,
@@ -32459,6 +32585,8 @@ async def _continue_autonomous_research_campaigns() -> int:
                   e.status='awaiting_input'
                   OR (e.status IN ('awaiting_planner','awaiting_observation')
                       AND e.autopilot_enabled=false
+                      AND COALESCE(c.metadata_json->'autonomous_research'->>'planner_mode',
+                                   e.planner->>'mode', 'configured_ai') = 'configured_ai'
                       AND (e.lease_expires_at IS NULL OR e.lease_expires_at < NOW()))
               )
             """
@@ -32621,10 +32749,14 @@ async def _continue_autonomous_research_campaigns() -> int:
             effective_families = list(
                 (readiness.get("surface") or {}).get("executable_families") or []
             )
+            planner_mode = str(config.get("planner_mode") or "configured_ai")
             await launch_research_episode(ResearchLaunchRequest(
                 subject_type="target", subject_id=str(row["target_id"]), mission_profile="target_hunt",
                 intensity=str(config.get("intensity") or "deep_hunt"),
-                approval_receipt_id=config.get("approval_receipt_id"), autopilot=True, force_new=True,
+                approval_receipt_id=config.get("approval_receipt_id"),
+                planner_mode=planner_mode,
+                autopilot=planner_mode == "configured_ai",
+                force_new=True,
                 created_by="research_campaign_supervisor", campaign_id=str(row["id"]),
                 objective_override=config.get("objective"),
                 allowed_families_override=effective_families,
@@ -32766,13 +32898,17 @@ async def control_research_campaign(campaign_id: str, req: ResearchCampaignContr
                 campaign_uuid, status,
             )
         if req.action in {"pause", "resume"} and active_rows:
+            resume_autopilot = (
+                req.action == "resume"
+                and str(research_config.get("planner_mode") or "configured_ai") == "configured_ai"
+            )
             await conn.execute(
                 """
                 UPDATE research_episodes SET autopilot_enabled=$2,
                     autopilot_error=CASE WHEN $2 THEN NULL ELSE autopilot_error END,
                     updated_at=NOW() WHERE id=ANY($1::uuid[])
                 """,
-                [row["id"] for row in active_rows], req.action == "resume",
+                [row["id"] for row in active_rows], resume_autopilot,
             )
     cancelled: list[str] = []
     cancelled_preflight_scan_ids: list[str] = []
@@ -35554,6 +35690,18 @@ async def set_research_episode_autopilot(episode_id: str, req: ResearchAutopilot
             row = await conn.fetchrow("SELECT * FROM research_episodes WHERE id=$1 FOR UPDATE", episode_uuid)
             if not row:
                 raise HTTPException(status_code=404, detail="Research episode not found")
+            current_mode = _research_episode_planner_mode(row)
+            planner_mode = str(req.planner_mode or ("configured_ai" if req.enabled else current_mode))
+            if req.enabled and planner_mode != "configured_ai":
+                raise HTTPException(
+                    status_code=400,
+                    detail="Only configured_ai uses server autopilot; agent planners submit decisions directly",
+                )
+            if req.enabled and not _research_configured_planner_ready():
+                raise HTTPException(
+                    status_code=409,
+                    detail="Stored-provider planning cannot resume until AI settings are configured",
+                )
             if req.enabled and str(row["status"]) not in {"awaiting_planner", "awaiting_observation"}:
                 raise HTTPException(status_code=409, detail="Only a planning/waiting episode can resume autopilot")
             if req.enabled and row.get("lease_owner") and row.get("lease_expires_at"):
@@ -35563,7 +35711,12 @@ async def set_research_episode_autopilot(episode_id: str, req: ResearchAutopilot
             updated = await conn.fetchrow(
                 """
                 UPDATE research_episodes
-                SET autopilot_enabled=$2, autopilot_error=CASE WHEN $2 THEN NULL ELSE autopilot_error END,
+                SET autopilot_enabled=$2,
+                    planner=jsonb_set(
+                        jsonb_set(planner, '{mode}', to_jsonb($3::text), true),
+                        '{kind}', to_jsonb($4::text), true
+                    ),
+                    autopilot_error=CASE WHEN $2 THEN NULL ELSE autopilot_error END,
                     autopilot_consecutive_failures=CASE WHEN $2 THEN 0 ELSE autopilot_consecutive_failures END,
                     lease_owner=CASE
                         WHEN $2 AND (lease_expires_at IS NULL OR lease_expires_at < NOW()) THEN NULL
@@ -35577,15 +35730,34 @@ async def set_research_episode_autopilot(episode_id: str, req: ResearchAutopilot
                 WHERE id=$1
                 RETURNING *
                 """,
-                episode_uuid, req.enabled,
+                episode_uuid, req.enabled, planner_mode, _research_planner_kind(planner_mode),
             )
+            if row.get("campaign_id") and req.planner_mode:
+                await conn.execute(
+                    """
+                    UPDATE campaigns
+                    SET planner=jsonb_set(
+                            jsonb_set(planner, '{mode}', to_jsonb($2::text), true),
+                            '{kind}', to_jsonb($3::text), true
+                        ),
+                        metadata_json=jsonb_set(
+                            metadata_json,
+                            '{autonomous_research,planner_mode}',
+                            to_jsonb($2::text),
+                            true
+                        ),
+                        updated_at=NOW()
+                    WHERE id=$1 AND campaign_type='autonomous_research'
+                    """,
+                    row["campaign_id"], planner_mode, _research_planner_kind(planner_mode),
+                )
             await _record_research_event(
                 conn,
                 episode_uuid,
                 event_type="autopilot_resumed" if req.enabled else "autopilot_paused",
                 status=str(updated["status"]) if req.enabled else "paused",
                 summary="Server autopilot resumed" if req.enabled else "Server autopilot paused by operator",
-                details={"created_by": req.created_by},
+                details={"created_by": req.created_by, "planner_mode": planner_mode},
             )
             return await _research_episode_detail(conn, str(updated["id"]))
 

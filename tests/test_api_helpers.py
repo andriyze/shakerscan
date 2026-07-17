@@ -13137,6 +13137,184 @@ def test_gated_research_campaign_rejects_explicit_empty_family_scope():
     assert "At least one vulnerability family" in str(exc.value.detail)
 
 
+def test_research_campaign_omits_mode_so_persisted_default_can_apply():
+    request = api_module.ResearchCampaignLaunchRequest(
+        target_id="11111111-1111-4111-8111-111111111111",
+    )
+
+    assert request.planner_mode is None
+    assert api_module._normalize_research_planner_mode(None) == "agent"
+
+
+def test_research_launch_planner_mode_preserves_legacy_autopilot_and_explicit_agent():
+    legacy = api_module.ResearchLaunchRequest(
+        subject_type="target",
+        subject_id="11111111-1111-4111-8111-111111111111",
+        mission_profile="target_hunt",
+        autopilot=True,
+    )
+    agent = api_module.ResearchLaunchRequest(
+        subject_type="target",
+        subject_id="11111111-1111-4111-8111-111111111111",
+        mission_profile="target_hunt",
+        planner_mode="agent",
+        autopilot=True,
+    )
+    local = api_module.ResearchLaunchRequest(
+        subject_type="target",
+        subject_id="11111111-1111-4111-8111-111111111111",
+        mission_profile="target_hunt",
+        planner_mode="local_codex",
+        autopilot=False,
+    )
+
+    assert api_module._research_launch_planner_mode(legacy) == "configured_ai"
+    assert api_module._research_launch_planner_mode(agent) == "agent"
+    assert api_module._research_launch_planner_mode(local) == "local_codex"
+    assert api_module._research_planner_kind("agent") == "interactive_agent"
+
+
+def test_research_readiness_exposes_agent_default_without_configured_provider(monkeypatch):
+    monkeypatch.setattr(api_module, "_load_effective_ai_settings", lambda: {
+        "ai_url": "", "ai_api_key": "", "ai_model": "", "ai_model_fallback": "",
+    })
+    monkeypatch.setattr(api_module, "_load_effective_automation_settings", lambda: {
+        "default_research_planner_mode": "agent",
+    })
+
+    readiness = asyncio.run(api_module.research_readiness())
+
+    assert readiness["default_planner_mode"] == "agent"
+    assert readiness["planner_ready"] is False
+    assert readiness["configured_planner_ready"] is False
+    assert readiness["planner_modes"]["agent"]["ready"] is True
+    assert readiness["planner_modes"]["configured_ai"]["ready"] is False
+
+
+def test_automation_settings_expose_persisted_research_planner_default():
+    payload = api_module._sanitize_automation_settings_response(
+        automation={
+            "default_asm_enabled": True,
+            "default_asm_config": {},
+            "approval_receipts_required_for_state_changing_actions": False,
+            "default_research_planner_mode": "configured_ai",
+        },
+        scan_execution={},
+    )
+
+    assert payload["research_agent"]["default_planner_mode"] == "configured_ai"
+    assert payload["research_agent"]["available_planner_modes"] == [
+        "agent", "local_codex", "configured_ai",
+    ]
+    assert api_module.AutomationSettingsUpdate(
+        default_research_planner_mode="local_codex",
+    ).default_research_planner_mode == "local_codex"
+
+
+def test_configured_campaign_fails_before_db_when_provider_is_missing(monkeypatch):
+    monkeypatch.setattr(api_module, "_research_configured_planner_ready", lambda: False)
+    request = api_module.ResearchCampaignLaunchRequest(
+        target_id="11111111-1111-4111-8111-111111111111",
+        planner_mode="configured_ai",
+    )
+
+    with pytest.raises(api_module.HTTPException) as exc:
+        asyncio.run(api_module.launch_research_campaign(request))
+
+    assert exc.value.status_code == 409
+    assert "no AI provider" in str(exc.value.detail)
+
+
+def test_campaign_supervisor_does_not_reap_agent_driven_episode(monkeypatch):
+    class Conn:
+        def __init__(self):
+            self.executed = []
+
+        async def execute(self, query, *args):
+            self.executed.append(query)
+            return "UPDATE 0"
+
+        async def fetch(self, query, *args):
+            return []
+
+    conn = Conn()
+    monkeypatch.setattr(api_module, "db_pool", _FakePool(conn))
+
+    assert asyncio.run(api_module._continue_autonomous_research_campaigns()) == 0
+    reaper_query = conn.executed[0]
+    assert "planner_mode" in reaper_query
+    assert "= 'configured_ai'" in reaper_query
+
+
+def test_switching_episode_planner_persists_mode_to_campaign(monkeypatch):
+    episode_id = uuid.uuid4()
+    campaign_id = uuid.uuid4()
+
+    class Transaction:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+    class Conn:
+        def __init__(self):
+            self.campaign_update = None
+
+        def transaction(self):
+            return Transaction()
+
+        async def fetchrow(self, query, *args):
+            if "FOR UPDATE" in query:
+                return {
+                    "id": episode_id,
+                    "campaign_id": campaign_id,
+                    "status": "awaiting_planner",
+                    "planner": {"kind": "interactive_agent", "mode": "agent"},
+                    "autopilot_enabled": False,
+                    "lease_owner": None,
+                    "lease_expires_at": None,
+                }
+            if "UPDATE research_episodes" in query:
+                assert args[1:] == (True, "configured_ai", "configured_ai")
+                return {
+                    "id": episode_id,
+                    "status": "awaiting_planner",
+                    "planner": {"kind": "configured_ai", "mode": "configured_ai"},
+                    "autopilot_enabled": True,
+                }
+            raise AssertionError(query)
+
+        async def execute(self, query, *args):
+            if "UPDATE campaigns" in query:
+                self.campaign_update = (query, args)
+            return "UPDATE 1"
+
+    async def fake_event(*args, **kwargs):
+        return None
+
+    async def fake_detail(_conn, _episode_id):
+        return {"episode": {"id": _episode_id, "autopilot_enabled": True}}
+
+    conn = Conn()
+    monkeypatch.setattr(api_module, "db_pool", _FakePool(conn))
+    monkeypatch.setattr(api_module, "_research_configured_planner_ready", lambda: True)
+    monkeypatch.setattr(api_module, "_record_research_event", fake_event)
+    monkeypatch.setattr(api_module, "_research_episode_detail", fake_detail)
+
+    result = asyncio.run(api_module.set_research_episode_autopilot(
+        str(episode_id),
+        api_module.ResearchAutopilotRequest(
+            enabled=True,
+            planner_mode="configured_ai",
+        ),
+    ))
+
+    assert result["episode"]["autopilot_enabled"] is True
+    assert conn.campaign_update is not None
+    assert conn.campaign_update[1] == (campaign_id, "configured_ai", "configured_ai")
+
+
 def test_active_research_intensities_reject_credential_only_families_before_db_access():
     request = api_module.ResearchCampaignLaunchRequest(
         target_id="11111111-1111-4111-8111-111111111111",
@@ -13158,6 +13336,7 @@ def test_deep_campaign_bootstraps_principals_before_readiness_repair(monkeypatch
     target_id = uuid.uuid4()
     campaign_id = uuid.uuid4()
     calls = []
+    launched = []
     campaign = {
         "id": campaign_id,
         "target_id": target_id,
@@ -13203,6 +13382,7 @@ def test_deep_campaign_bootstraps_principals_before_readiness_repair(monkeypatch
         return {"readiness": {"ready": True}}
 
     async def fake_launch(_request):
+        launched.append(_request)
         return {"episode": {"id": "episode-1"}, "ui_path": "/settings/research-agent?episode_id=episode-1"}
 
     monkeypatch.setattr(api_module, "db_pool", Pool())
@@ -13220,6 +13400,8 @@ def test_deep_campaign_bootstraps_principals_before_readiness_repair(monkeypatch
 
     assert calls[0][0] == (target_id,)
     assert calls[0][1]["require_second_user"] is False
+    assert launched[0].planner_mode == "agent"
+    assert launched[0].autopilot is False
 
 
 class _StaleResearchDispatchConn:

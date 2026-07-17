@@ -12,6 +12,7 @@ import {
   getTargets,
   launchResearchCampaign,
   type Campaign,
+  type ResearchPlannerMode,
   type Target,
 } from '@/lib/api'
 import { Button, Card, EmptyState, ErrorState, Skeleton } from '@/components/ui'
@@ -49,6 +50,7 @@ function ResearchAgentPage() {
   const [authorized, setAuthorized] = useState(false)
   const [objective, setObjective] = useState(DEFAULT_OBJECTIVE)
   const [families, setFamilies] = useState<string[]>(familiesForIntensity('hunt'))
+  const [plannerMode, setPlannerMode] = useState<ResearchPlannerMode>('agent')
   const [aiReady, setAiReady] = useState<boolean | null>(null)
   const [executionReady, setExecutionReady] = useState<boolean | null>(null)
   const [loading, setLoading] = useState(true)
@@ -82,7 +84,8 @@ function ResearchAgentPage() {
         const web = rows.filter(isWebTarget)
         setTargets(web)
         setTargetId(web[0]?.id || '')
-        setAiReady(readiness.planner_ready)
+        setAiReady(readiness.configured_planner_ready ?? readiness.planner_ready)
+        setPlannerMode(readiness.default_planner_mode || 'agent')
         setExecutionReady(readiness.execution_enabled)
       })
       .catch((err) => { if (!cancelled) setError(err instanceof Error ? err.message : 'Failed to load') })
@@ -92,7 +95,8 @@ function ResearchAgentPage() {
   }, [loadRuns])
 
   const gated = profile.mode === 'gated'
-  const canStart = Boolean(targetId) && aiReady === true
+  const canStart = Boolean(targetId)
+    && (plannerMode !== 'configured_ai' || aiReady === true)
     && (!gated || (authorized && families.length > 0 && executionReady !== false)) && !busy
 
   const startHunt = async () => {
@@ -110,6 +114,7 @@ function ResearchAgentPage() {
       const res = await launchResearchCampaign({
         target_id: activeTarget.id,
         intensity,
+        planner_mode: plannerMode,
         approval_receipt_id: approvalReceiptId,
         duration_hours: hours,
         max_episodes: episodes,
@@ -132,7 +137,7 @@ function ResearchAgentPage() {
         <div>
           <div className="flex items-center gap-2 text-sm text-blue-300"><BrainCircuit className="h-4 w-4" />AI Investigator</div>
           <h1 className="mt-1 text-2xl font-bold tracking-tight text-white">Turn the hunter loose on a target</h1>
-          <p className="mt-2 max-w-2xl text-sm leading-6 text-gray-400">Pick a target, choose how hard and how long it should go, and start. It runs on the server — you can close this page and check back.</p>
+          <p className="mt-2 max-w-2xl text-sm leading-6 text-gray-400">Pick a target, choose the planner, then choose how hard and how long it should go. ShakerScan keeps execution, scope, budgets, and proof under server control.</p>
         </div>
         <nav className="flex rounded-lg border border-gray-800 bg-gray-950 p-1 text-sm">
           <span className="rounded-md bg-gray-800 px-3 py-1.5 text-white">Autonomous Hunt</span>
@@ -142,7 +147,7 @@ function ResearchAgentPage() {
       </header>
 
       {error ? <div className="mt-4"><ErrorState message={error} /></div> : null}
-      {aiReady === false ? (
+      {plannerMode === 'configured_ai' && aiReady === false ? (
         <div className="mt-4 rounded-lg border border-red-500/30 bg-red-500/[0.06] p-4 text-sm text-red-200">
           No AI provider is configured. <Link href="/settings" className="font-medium underline underline-offset-2">Open AI settings</Link> to add one before hunting.
         </div>
@@ -151,6 +156,28 @@ function ResearchAgentPage() {
       {/* Start a hunt — three picks */}
       <Card className="mt-5 overflow-hidden">
         <div className="grid gap-6 p-5 sm:p-6">
+          <Field label="Planner · Who should choose each test?">
+            <div className="grid gap-3 sm:grid-cols-2">
+              <button
+                type="button"
+                onClick={() => setPlannerMode('agent')}
+                className={`rounded-xl border p-3.5 text-left transition-colors ${plannerMode === 'agent' ? 'border-blue-500/60 bg-blue-500/[0.09]' : 'border-gray-800 bg-gray-950/50 hover:border-gray-700'}`}
+              >
+                <div className="font-semibold text-white">This coding agent <span className="text-xs font-normal text-blue-300">Default</span></div>
+                <p className="mt-1 text-xs leading-5 text-gray-400">Uses the Codex, Claude, or OpenCode session you launched with ShakerScan. No provider key required.</p>
+              </button>
+              <button
+                type="button"
+                onClick={() => setPlannerMode('configured_ai')}
+                disabled={aiReady === false}
+                className={`rounded-xl border p-3.5 text-left transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${plannerMode === 'configured_ai' ? 'border-violet-500/60 bg-violet-500/[0.09]' : 'border-gray-800 bg-gray-950/50 hover:border-gray-700'}`}
+              >
+                <div className="font-semibold text-white">Stored AI provider</div>
+                <p className="mt-1 text-xs leading-5 text-gray-400">{aiReady === false ? 'Configure a provider in Settings first.' : 'Runs unattended on the server and continues after your agent closes.'}</p>
+              </button>
+            </div>
+          </Field>
+
           <Field label="1 · Target">
             <select
               value={targetId}

@@ -766,7 +766,7 @@ def run_research_episode(
             raise AdapterError(
                 "research episode server autopilot is enabled; pause it before using the local "
                 "Codex runner (PUT /research/episodes/"
-                f'{episode_id}/autopilot with {{"enabled":false}})'
+                f'{episode_id}/autopilot with {{"enabled":false,"planner_mode":"local_codex"}})'
             )
         if episode.get("terminal") or episode.get("status") in {
             "completed", "cancelled", "failed", "budget_exhausted", "blocked",

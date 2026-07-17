@@ -15,6 +15,7 @@ import {
   type CampaignDetailResponse,
   type ResearchEpisode,
   type ResearchEpisodeDetail,
+  type ResearchPlannerMode,
 } from '@/lib/api'
 import { Button, Card, ErrorState, Skeleton } from '@/components/ui'
 import {
@@ -149,8 +150,7 @@ export default function RunDetailPage() {
         await controlResearchCampaign(campId, action)
         setCampaign((await getCampaign(campId)).campaign)
         if (detail && !detail.episode.terminal) {
-          if (action === 'cancel') setDetail(await getResearchEpisode(detail.episode.id))
-          else setDetail(await setResearchEpisodeAutopilot(detail.episode.id, action === 'resume'))
+          setDetail(await getResearchEpisode(detail.episode.id))
         }
       } else if (detail) {
         if (action === 'cancel') setDetail(await cancelResearchEpisode(detail.episode.id))
@@ -159,6 +159,25 @@ export default function RunDetailPage() {
     } catch (err) {
       setError(err instanceof Error ? err.message : `Could not ${action} the run`)
     } finally { setBusy(false) }
+  }
+
+  const switchPlanner = async (mode: ResearchPlannerMode) => {
+    if (!detail || detail.episode.terminal) return
+    setBusy(true); setError(null)
+    try {
+      const updated = await setResearchEpisodeAutopilot(
+        detail.episode.id,
+        mode === 'configured_ai',
+        mode,
+      )
+      setDetail(updated)
+      const campId = campaignIdRef.current
+      if (campId) setCampaign((await getCampaign(campId)).campaign)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not switch the planner')
+    } finally {
+      setBusy(false)
+    }
   }
 
   if (loading) return <div className="mx-auto max-w-4xl px-4 py-6"><Skeleton className="h-96" /></div>
@@ -176,6 +195,11 @@ export default function RunDetailPage() {
   const preflightState = metaField<string>(campaign, 'preflight_state')
   const preflightScanId = metaField<string>(campaign, 'preflight_scan_id')
   const readiness = metaField<Record<string, unknown>>(campaign, 'readiness')
+  const plannerMode = String(
+    metaField<string>(campaign, 'planner_mode')
+      || (detail?.episode.planner?.mode as string | undefined)
+      || (detail?.episode.autopilot_enabled ? 'configured_ai' : 'agent'),
+  )
 
   return (
     <div className="mx-auto max-w-4xl px-4 py-6">
@@ -200,6 +224,35 @@ export default function RunDetailPage() {
       </header>
 
       {error ? <div className="mt-4"><ErrorState message={error} /></div> : null}
+      {detail && !detail.episode.terminal ? (
+        <div className="mt-4 flex flex-wrap items-center gap-2 text-xs text-gray-400">
+          <span>Planner:</span>
+          <Button
+            variant={plannerMode === 'agent' ? 'primary' : 'secondary'}
+            onClick={() => switchPlanner('agent')}
+            disabled={busy || plannerMode === 'agent'}
+          >
+            This coding agent
+          </Button>
+          <Button
+            variant={plannerMode === 'configured_ai' ? 'primary' : 'secondary'}
+            onClick={() => switchPlanner('configured_ai')}
+            disabled={busy || plannerMode === 'configured_ai'}
+          >
+            Stored AI provider
+          </Button>
+        </div>
+      ) : null}
+      {plannerMode !== 'configured_ai' && detail && !detail.episode.terminal ? (
+        <div className="mt-4 rounded-lg border border-blue-500/30 bg-blue-500/[0.06] p-3 text-sm text-blue-100">
+          Waiting for {plannerMode === 'local_codex' ? 'the local Codex runner' : 'your current coding agent'} to choose the next bounded action.
+          {plannerMode === 'local_codex' ? (
+            <code className="mt-1 block text-xs text-blue-200">shakerscan research {detail.episode.id} 5</code>
+          ) : (
+            <span className="mt-1 block text-xs text-gray-400">Return to the agent session that launched this hunt and ask it to continue Deep Hunt.</span>
+          )}
+        </div>
+      ) : null}
 
       {/* Vitals — the three numbers that matter */}
       <div className="mt-5 grid grid-cols-3 gap-3">
