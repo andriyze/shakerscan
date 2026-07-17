@@ -30471,6 +30471,10 @@ def _canonical_vulnerability_route(value: Any) -> str | None:
         r"(?:^|&)(?:id|[a-z0-9_]+_id)=[^&]+", parsed.query, re.IGNORECASE
     ):
         path = path.rstrip("/") + "/{id}"
+    # Normalize a trailing slash: /api/Users/ and /api/Users are the same resource. Without this the
+    # inventory's slash/no-slash variants split into different routes, so a create lead, its workflow,
+    # and the promotion route-binding never line up.
+    path = path.rstrip("/") or "/"
     return path[:1000]
 
 
@@ -33734,6 +33738,24 @@ async def submit_research_decision(episode_id: str, req: ResearchDecisionRequest
             # surface and designs a valid experiment for it, but omits hypothesis_id (the lead is not
             # on the seeded board). Bind a matching ranked lead, or create a tracked planner-derived
             # hypothesis, so valid experiments are not rejected for provenance alone.
+            # Server-materialize a create-based mass_assignment lead selected without a workflow, so an
+            # agent-mode planner only has to SELECT the lead: probe the create surface and build the
+            # workflow before binding/validation. No-op if the planner supplied steps or it isn't create MA.
+            materialize_params = (
+                raw.get("action", {}).get("parameters")
+                if isinstance(raw.get("action"), dict) else None
+            )
+            if isinstance(materialize_params, dict) and raw.get("hypothesis_id"):
+                materialize_target_uuid = _optional_uuid(str(episode.get("target_id") or ""))
+                materialize_target = (
+                    await conn.fetchrow("SELECT url FROM targets WHERE id=$1", materialize_target_uuid)
+                    if materialize_target_uuid else None
+                )
+                if materialize_target:
+                    await _server_materialize_create_ma(
+                        conn, str(materialize_target["url"]), materialize_target_uuid,
+                        materialize_params, str(raw["hypothesis_id"]),
+                    )
             binding_errors.extend(
                 await _research_autobind_hypothesis(conn, episode, raw, observation_pack)
             )
@@ -34631,6 +34653,10 @@ async def _research_autobind_hypothesis(
                 contract_method = str(contract.get("method") or "").upper()
                 live_operation = str(lead.get("source") or "").strip().lower() == "invariant"
                 if not live_operation:
+                    # Route-target the liveness lookup. A blanket LIMIT 2000 over a large inventory can
+                    # omit the very endpoint being bound (e.g. POST /api/Users ranked ~900th), which
+                    # wrongly rejected a live create lead. Prefix-filter to the lead's route first.
+                    route_prefix = str(contract_route or "").split("/{id}")[0].rstrip("/")
                     endpoint_rows = await conn.fetch(
                         """
                         SELECT method, path
@@ -34639,9 +34665,11 @@ async def _research_autobind_hypothesis(
                           AND COALESCE(test_status, '') <> 'gone'
                           AND COALESCE(last_http_status, 0) NOT IN (404, 410)
                           AND COALESCE(unreachable_streak, 0) < 2
+                          AND ($2 = '' OR path LIKE $2 || '%')
                         LIMIT 2000
                         """,
                         target_uuid,
+                        route_prefix,
                     )
                     live_operation = any(
                         _canonical_vulnerability_route(endpoint.get("path")) == contract_route
@@ -34970,7 +34998,7 @@ def _materialize_create_mass_assignment_workflow(
     envelope. Requires a login-like field (a unique identifier, so the two independent creates do not
     collide) and a forbidden field; returns None otherwise rather than fabricate an unprovable workflow.
     """
-    collection = "/" + str(collection_route or "").strip().lstrip("/")
+    collection = "/" + str(collection_route or "").strip().strip("/")
     forbidden = str(forbidden_field or "").strip()
     fields = [f.strip() for f in str(request_fields or "").split(",") if f.strip()]
     roles = {f: _classify_create_field(f) for f in fields}
@@ -37894,7 +37922,11 @@ def _endpoint_inventory_hypothesis_requests(
                         "A write endpoint with a request body the scanner discovered but did not probe for "
                         "forbidden-field acceptance. Test a mutation + a rejected control before treating it as a finding."
                     ),
-                    severity_guess="medium", confidence=0.5, dedupe_key=key,
+                    # A create-based mass_assignment (overposting role/isAdmin on a registration-style
+                    # create) is a privilege escalation -> genuinely high, and this floats the net-new
+                    # create surface onto the ranked board instead of being buried under generic writes.
+                    severity_guess="high" if create_based else "medium",
+                    confidence=0.55 if create_based else 0.5, dedupe_key=key,
                     dedupe_dimensions={"method": method, "route": route, "proof_surface": "mutation_differential"},
                     next_test_action={
                         # No ASM mass-assignment actuator + gated hunts reject check_family='all';
