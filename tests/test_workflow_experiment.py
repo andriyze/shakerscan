@@ -391,6 +391,35 @@ def test_auth_bypass_rejects_soft_200_denial_or_shell():
     })
 
 
+def test_auth_bypass_rejects_identical_empty_shell_public_endpoint():
+    # Regression for the live false positive on Juice Shop /rest/user/whoami: it returns {"user":{}}
+    # (11 bytes, empty nested shell) to BOTH the authenticated and anonymous principal -- identical
+    # bodies (body_changed False, similarity 1.0). That is a public endpoint exposing nothing, not a
+    # bypassed protected resource, and must NOT promote even though the route is policy-protected.
+    result = {
+        "trusted_protected_routes": [{"method": "GET", "path": "/rest/user/whoami"}],
+        "observations": [
+            {"label": "authed", "principal": "user1",
+             "request": {"method": "GET", "path": "/rest/user/whoami"},
+             "response": {"status": 200, "content_length": 11, "json_keys": ["user"], "selected_json": {}}},
+            {"label": "anon", "principal": "anonymous",
+             "request": {"method": "GET", "path": "/rest/user/whoami"},
+             "response": {"status": 200, "content_length": 11, "json_keys": ["user"], "selected_json": {}}},
+        ],
+        "comparisons": [{
+            "control": "authed", "candidate": "anon", "comparable": True,
+            "status_changed": False, "body_changed": False, "body_similarity": 1.0,
+        }],
+        "assertion_results": [
+            {"passed": True, "predicate": "protected_resource_accessed", "step": "authed"},
+            {"passed": True, "predicate": "unauthenticated_control", "step": "anon"},
+        ],
+    }
+    assert workflow.server_corroborated_predicates(result).isdisjoint({
+        "protected_resource_accessed", "unauthenticated_control",
+    })
+
+
 def test_cross_principal_access_requires_distinct_authenticated_principals_and_equivalence():
     shared = {
         "principal_receipts": [
