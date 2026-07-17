@@ -51,8 +51,9 @@ Use `API_BASE=${SHAKERSCAN_API_BASE:-http://localhost:8080}` for API calls. Use 
 | deep | `"scan_type": "deep"` | 30-60 min | + port scan, discovery |
 | full | `"scan_type": "full"` | 1-2 hrs | + active XSS/SQLi |
 | aggressive | `"scan_type": "aggressive"` | 2+ hrs | maximum coverage |
+| smart | `"scan_type": "smart"` | Variable | adaptive discovery, active XSS/SQLi, verification, and attack chains |
 
-**Note**: `full` and `aggressive` require user permission (active testing).
+**Note**: `full`, `aggressive`, and `smart` require explicit user permission (active testing).
 
 ## Example Output
 

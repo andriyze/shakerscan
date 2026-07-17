@@ -61,6 +61,6 @@ Use `API_BASE=${SHAKERSCAN_API_BASE:-http://localhost:8080}` for API calls. Use 
 
 6. To review results later:
    ```bash
-   curl "http://localhost:8080/findings?source_type=ai&status=active"
+   curl "http://localhost:8080/findings?source_type=ai_gate&status=active"
    curl http://localhost:8080/ai/scans/{scan_id}/transcript
    ```

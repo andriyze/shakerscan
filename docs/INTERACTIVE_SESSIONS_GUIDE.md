@@ -1,282 +1,229 @@
-# Interactive AI Security Sessions - User Guide
+# Interactive security sessions
 
-**Status:** live guide, reconciled 2026-07-11. Interactive sessions are agent-driven manual testing,
-not autonomous proof or permission to test a third party. Use them only for local systems or targets
-you own and are authorized to test. Saving a finding is an explicit operator action.
+**Status:** live user guide, reconciled 2026-07-17.
 
-A real-time, browser-based security testing mode where you and a coding agent collaborate to investigate
-behavior that automated scans may miss. The agent drives ShakerScan's headless Playwright session API,
-takes screenshots, and tests endpoints while you guide the exploration. The conversations below are
-illustrative; they are not claims that a vulnerability will exist or that every action is automatic.
+Interactive sessions let you and a coding agent investigate an authorized web application with a
+real headless browser. They are useful for authentication flows, multi-step business logic, visual
+evidence, and access-control checks that need more context than an automated scan.
 
-## What You Can Do
+An interactive session is not proof by itself and does not expand testing permission. ShakerScan
+keeps navigation same-origin by default, separates user contexts, and saves a finding only when the
+operator or agent explicitly submits evidence.
 
-| Capability | Description |
-|------------|-------------|
-| **BOLA/IDOR Testing** | Test if User A can access User B's resources (carts, profiles, orders) |
-| **Authentication Testing** | Session fixation, JWT manipulation, logout invalidation |
-| **Business Logic Flaws** | Price manipulation, coupon abuse, workflow bypass, race conditions |
-| **Finding Validation** | Reproduce and confirm vulnerabilities from automated scans |
-| **Attack Chaining** | Combine findings (XSS + weak cookies = account takeover) |
-| **Visual Evidence** | Screenshots for reports and proof of exploitation |
+## Before you begin
 
-## How to Use
+- Test only systems you own or have explicit permission to test.
+- Use dedicated test accounts and non-production data when possible.
+- Define the target origin and any additional authorized origins.
+- Do not paste credentials into findings, chat summaries, or screenshots.
+- Treat an HTTP 200, response difference, reflection, or visible route as a lead until controls
+  prove security impact.
 
-### Option 1: Quick Start
+## Start a session
 
-```
-/ai-security-session https://juice-shop.example.com
-```
+The easiest route is the project command:
 
-Claude will analyze the app, suggest testing approaches, and ask what you want to focus on.
-
-### Option 2: Recommended Workflow (Scan First)
-
-```
-/scan-smart https://juice-shop.example.com
+```text
+/ai-security-session https://app.example.test
 ```
 
-Wait for completion, then:
+Or ask naturally:
 
-```
-/ai-security-session https://juice-shop.example.com
-```
-
-Claude auto-fetches discovered endpoints and existing findings to validate.
-
-## Example Conversations
-
-### Testing BOLA
-
-```
-You: /ai-security-session https://juice-shop.example.com
-
-Claude: [Takes screenshot, analyzes app]
-        Found shopping cart API at /rest/basket/{id}. Want to test BOLA?
-
-You: Yes, test if users can access each other's baskets
-
-Claude: Creating two test accounts...
-        ✓ user1@test.com - basket ID 9
-        ✓ user2@test.com - basket ID 10
-
-        Testing cross-user access...
-        🔴 BOLA CONFIRMED: user2 can read user1's basket!
-
-        Want me to save this finding?
-
-You: Yes, save it
-
-Claude: [Saves via POST /session/{id}/findings]
-        ✓ Finding saved - view at http://localhost:3000/findings/abc123
+```text
+Start an interactive security session for my authorized staging app.
+Use the two managed test principals to check order ownership.
 ```
 
-### Validating Scan Findings
+The agent follows `skills/ai-security-session/SKILL.md` and uses the local `/session` API.
 
-```
-You: /ai-security-session https://api.example.com
+### Optional scan context
 
-Claude: Found 3 existing findings from your last scan:
-        1. SQLi in /api/search (HIGH)
-        2. XSS in /api/comments (MEDIUM)
-        3. Missing rate limiting (LOW)
+Existing scan results can provide known routes, browser-captured APIs, technology hints, and
+findings to reproduce. If a suitable completed scan exists, the agent can load it first.
 
-        Which would you like to validate first?
+If a new scan would help, choose one explicitly:
 
-You: Validate the SQLi
+- `quick`, `standard`, or `deep` for non-active context gathering
+- `full`, `aggressive`, or `smart` only after explicit active-testing authorization
 
-Claude: Navigating to search endpoint...
-        Testing payload from finding evidence...
-        [Screenshot showing SQL error]
+After a scan is submitted, the agent reports the scan ID and UI link and stops. Start or continue
+the interactive session after the scan completes or proceed without that context.
 
-        ✓ Confirmed exploitable. Attempting data extraction...
-        Successfully extracted 5 user emails.
+## Session workflow
 
-        This escalates from HIGH to CRITICAL. Save updated finding?
-```
+1. Confirm the authorized origin and objective.
+2. Check ShakerScan health.
+3. Load an existing scan or note that no scan context is available.
+4. Start the browser session and capture the initial page state.
+5. Apply the required auth context.
+6. Exercise one bounded workflow and record controls.
+7. Save only validated findings.
+8. End the browser session.
 
-### Business Logic Testing
+Supported browser actions include:
 
-```
-You: Test if I can manipulate prices at checkout
+- same-origin navigation
+- click, fill, submit, wait, and extract
+- registration and login with dedicated test accounts
+- direct bearer/cookie auth setup
+- managed credential profiles for `user1` and `user2`
+- screenshots
+- bounded endpoint replay
 
-Claude: Adding item to cart (price: $29.99)...
-        Intercepting checkout request...
-        Modifying price to $0.01...
+Cross-origin navigation or endpoint testing requires explicit authorization and
+`allow_out_of_scope: true`.
 
-        🔴 Price manipulation successful! Order completed for $0.01
+## Access-control and BOLA/IDOR testing
 
-        This is a CRITICAL business logic flaw. Save finding?
-```
+Use two provably distinct principals. Reusing the same account, token, tenant identity, or copied
+session in both browser contexts cannot prove a cross-user authorization failure.
 
-### Authentication Testing
+A strong BOLA/IDOR workflow is:
 
-```
-You: Test JWT security
+1. Bind distinct managed profiles to `user1` and `user2`, or log in separately.
+2. Verify the profiles map to different account identities.
+3. As `user1`, create or read a resource and record its identifier.
+4. Run the owner control as `user1`.
+5. Replay the same identifier as `user2`.
+6. Run a denied/nonexistent-object control to rule out generic success pages.
+7. Compare status, response structure, sensitive fields, and before/after state.
+8. Save a finding only if `user2` receives unauthorized sensitive data or performs an unauthorized
+   state change.
 
-Claude: Analyzing JWT from localStorage...
-        Token: eyJhbGciOiJIUzI1NiIs...
+For write or delete tests, use disposable records and prove state before and after. Do not infer a
+successful mutation from the response status alone.
 
-        Testing:
-        1. Algorithm confusion (alg:none) - ❌ Rejected
-        2. Weak secret brute force - ✓ Secret is "secret"!
-        3. Token expiry - Token valid for 7 days (excessive)
+## Other useful investigations
 
-        🔴 JWT uses weak secret "secret" - can forge any user token
+| Area | Example bounded question |
+|---|---|
+| Authentication | Does logout invalidate this test session? |
+| Tenant isolation | Can a test principal from tenant A read a tenant B object? |
+| Business logic | Does the server reject an invalid workflow transition? |
+| Mass assignment | Are server-controlled fields ignored or rejected? |
+| CSRF | Does a state-changing test action require the expected anti-CSRF control? |
+| Finding reproduction | Does the exact recorded request still reproduce under the same scope? |
+| Visual evidence | Does the browser show the security-relevant state described by the request proof? |
 
-        Want me to demonstrate admin access?
-```
+Keep tests narrow and reversible. Use automated scans for broad discovery, template checks, headers,
+TLS, and large endpoint coverage.
 
-### Multi-Tenant Isolation
+## API quick reference
 
-```
-You: Test if tenant A can access tenant B's data
+Base URL on the ShakerScan host: `http://localhost:8080`.
 
-Claude: Setting up two tenant contexts...
-        ✓ Tenant A (acme-corp) - logged in
-        ✓ Tenant B (globex) - logged in
-
-        Testing cross-tenant API access...
-        GET /api/projects with Tenant A token but Tenant B project ID...
-
-        🔴 TENANT ISOLATION BYPASS: Tenant A can read Tenant B projects!
-
-        This is CRITICAL for multi-tenant SaaS. Save finding?
-```
-
-## Key Commands During Session
-
-| What You Say | What Claude Does |
-|--------------|------------------|
-| "Take a screenshot" | Captures current page state |
-| "Login as user1/user2" | Creates separate auth contexts |
-| "Test endpoint X as user2" | BOLA/IDOR cross-user test |
-| "Save this finding" | Persists to database |
-| "What endpoints were discovered?" | Shows API endpoints from scan/crawl |
-| "Validate the SQLi finding" | Reproduces finding with real browser |
-| "Test price manipulation" | Business logic testing |
-| "Check JWT security" | Token analysis and attacks |
-| "End session" | Cleans up browser contexts |
-
-## Testing Scenarios Reference
-
-### Access Control
-
-| Test | How to Ask |
-|------|------------|
-| Horizontal BOLA | "Can user2 access user1's cart/profile/orders?" |
-| Vertical BOLA | "Can regular user access admin endpoints?" |
-| IDOR | "Test if I can access resources by changing IDs" |
-| Function-level | "Can user call admin-only API functions?" |
-
-### Authentication & Sessions
-
-| Test | How to Ask |
-|------|------------|
-| Session fixation | "Check if session ID changes after login" |
-| Token expiry | "How long are sessions/tokens valid?" |
-| Logout | "Does logout actually invalidate the token?" |
-| Concurrent sessions | "Can I have multiple active sessions?" |
-| JWT attacks | "Analyze the JWT for vulnerabilities" |
-
-### Business Logic
-
-| Test | How to Ask |
-|------|------------|
-| Price manipulation | "Can I change the price at checkout?" |
-| Quantity abuse | "What happens with negative quantities?" |
-| Coupon stacking | "Can I apply the same coupon twice?" |
-| Workflow bypass | "Can I skip the payment step?" |
-| Race conditions | "Test concurrent requests to the same endpoint" |
-
-### API Security
-
-| Test | How to Ask |
-|------|------------|
-| Mass assignment | "Can I add admin:true to my profile update?" |
-| Rate limiting | "Is there rate limiting on login/search?" |
-| GraphQL introspection | "Can I query the GraphQL schema?" |
-| Parameter pollution | "Test duplicate parameters" |
-
-## When to Use Interactive vs Automated
-
-| Use Interactive Session | Use Automated Scan |
-|------------------------|-------------------|
-| Validating scanner findings | Initial reconnaissance |
-| Multi-user access control (BOLA) | Known CVE detection |
-| Complex business logic | Security headers check |
-| Auth flow edge cases | Large endpoint coverage |
-| Generating evidence for reports | Scheduled assessments |
-| Chaining vulnerabilities | Technology fingerprinting |
-| Demonstrating to stakeholders | Compliance checks |
-
-## Saving Findings
-
-All discoveries can be saved to the database:
-
-**Option 1: Ask Claude**
-```
-You: Save this finding
-Claude: [Saves automatically with proper metadata]
-```
-
-**Option 2: Use the skill**
-```
-/save-finding {session_id}
-```
-
-**Option 3: Direct API**
 ```bash
-curl -X POST "http://localhost:8080/session/{session_id}/findings" \
+# Start
+curl -X POST http://localhost:8080/session/start \
+  -H "Content-Type: application/json" \
+  -d '{"target":"https://app.example.test"}'
+
+# Read state
+curl http://localhost:8080/session/{session_id}
+
+# Capture a PNG
+curl -s http://localhost:8080/session/{session_id}/screenshot.png \
+  -o /tmp/shakerscan-session.png
+
+# Navigate
+curl -X POST http://localhost:8080/session/{session_id}/action \
+  -H "Content-Type: application/json" \
+  -d '{"action":"navigate","user":"user1","data":{"url":"/orders"}}'
+
+# Apply a managed profile
+curl -X POST http://localhost:8080/session/{session_id}/action \
   -H "Content-Type: application/json" \
   -d '{
-    "title": "BOLA on Basket API",
-    "severity": "critical",
-    "category": "BOLA",
-    "cwe": "CWE-639",
-    "description": "User2 can access User1 basket items"
+    "action":"use_credential_profile",
+    "user":"user1",
+    "data":{"credential_profile_id":"PROFILE_UUID"}
+  }'
+
+# Replay one endpoint as user2
+curl -X POST http://localhost:8080/session/{session_id}/test-endpoint \
+  -H "Content-Type: application/json" \
+  -d '{"endpoint":"/api/orders/42","method":"GET","as_user":"user2"}'
+
+# End and clean up
+curl -X DELETE http://localhost:8080/session/{session_id}
+```
+
+See [`../skills/ai-security-session/references/api.md`](../skills/ai-security-session/references/api.md)
+for the request shapes.
+
+## Saving a finding
+
+Session findings are linked to the session target and marked with `source_type=ai_session`.
+
+Before saving, include:
+
+- exact endpoint and method
+- principal roles and proof they are distinct
+- owner and attacker results
+- a negative or nonexistent-object control
+- sensitive data or state impact
+- redacted request and response evidence
+- remediation
+
+```bash
+curl -X POST http://localhost:8080/session/{session_id}/findings \
+  -H "Content-Type: application/json" \
+  -d '{
+    "title":"BOLA on order detail API",
+    "severity":"high",
+    "description":"A distinct second principal can read the first principal order.",
+    "category":"BOLA",
+    "cwe":"CWE-639",
+    "url":"/api/orders/42",
+    "evidence":"Owner, attacker, and negative-control evidence...",
+    "request":"GET /api/orders/42 ...",
+    "response":"Redacted sensitive response...",
+    "remediation":"Enforce object ownership on every order lookup."
   }'
 ```
 
-All findings appear in the UI at `http://localhost:3000/findings` with an **AI Session** badge.
-API callers can filter them exactly with `source_type=ai_session` or combine AI Gate and session
-findings with the broader `source_type=ai` filter.
+Review saved findings at `http://localhost:3000/findings` or filter them:
 
-## Tips for Effective Sessions
+```bash
+curl "http://localhost:8080/findings?source_type=ai_session&status=active"
+```
 
-1. **Run a scan first** - `/scan-smart` gives Claude endpoints and context to work with
-2. **Start with high-severity findings** - Validate critical/high findings from scans first
-3. **Test in layers** - Read access → Write access → Delete access
-4. **Chain findings** - XSS + weak cookies = account takeover
-5. **Save as you go** - Don't wait until the end to save findings
-6. **Take screenshots** - Visual evidence is valuable for reports
-7. **Be specific** - "Test BOLA on /api/orders" is better than "find vulnerabilities"
+If the proof is incomplete, do not save a confirmed vulnerability. Record the lead and missing
+evidence in the session notes or research workflow instead.
 
 ## Troubleshooting
 
-### Session expired
-Sessions timeout after 30 minutes of inactivity. Start a new one:
-```
-/ai-security-session https://example.com
+### The session expired
+
+Sessions close after inactivity. Start a new session and reapply the managed profiles.
+
+### A screenshot does not load
+
+Use the raw PNG endpoint again and verify the requested user context exists:
+
+```bash
+curl -s "http://localhost:8080/session/{session_id}/screenshot.png?user=user1" \
+  -o /tmp/shakerscan-session.png
 ```
 
-### Screenshot not loading
-```
-You: Screenshot isn't working
-Claude: [Retakes screenshot with fresh browser context]
-```
+### The endpoint is rejected as out of scope
 
-### Need to switch targets
-End current session first:
-```
-You: End session and start new one for https://other-site.com
-```
+Verify the URL. Keep the request same-origin unless the additional origin is explicitly authorized.
+Only then use `allow_out_of_scope: true`.
 
-## Related Commands
+### The two users behave identically
 
-| Command | Description |
-|---------|-------------|
-| `/scan-smart <url>` | Run smart scan (do this first) |
-| `/save-finding [session_id]` | Save discovered vulnerability |
-| `/findings` | List all findings |
-| `/status` | Check scanner status |
+Confirm they are truly distinct accounts and that the resource belongs to only one of them. A
+shared, public, or nonexistent resource does not prove BOLA.
+
+### The browser or API contains secrets
+
+Stop, avoid copying the value into notes, and rotate the credential if it was exposed unexpectedly.
+
+## Related workflows
+
+- [`../README.md`](../README.md) for installation and workflow selection
+- [`AI_TEST_WORKFLOWS.md`](AI_TEST_WORKFLOWS.md) for AI Gate and Model Intake
+- [`functionality-reference.md`](functionality-reference.md) for the exhaustive API and UI map
+- `/save-finding` for the evidence-gated finding workflow
+- `/research` for a bounded adaptive investigation

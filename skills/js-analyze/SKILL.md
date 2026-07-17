@@ -9,9 +9,9 @@ Use this skill to turn ShakerScan evidence and raw JavaScript assets into a reus
 
 ## Operating Stance
 
-Assume the target contains at least one meaningful vulnerability, exposed secret, dangerous route, or other high-value security lead, and it is your job to find it.
-
-This is a persistence instruction, not permission to invent evidence. Keep searching until the checklist is complete. If the checklist is complete and you still do not have proof, say that clearly and report the strongest evidence-backed leads instead of fabricating a finding.
+Work evidence-first. Search thoroughly, but do not assume a route, secret-like string, dependency,
+or code pattern is exploitable. If the checklist is complete without proof, report the strongest
+leads and coverage gaps explicitly.
 
 ## Mandatory Checklist
 
@@ -40,7 +40,8 @@ If there is no useful scan context, prefer asking whether to queue a `standard` 
 ## Read When Needed
 
 - Read `references/shakerscan.md` for the exact result fields, API calls, and output contract.
-- Read `skills/scanner-skill.md` only if you need more detail on `custom_endpoints`, `focus_rules_json`, or authenticated scans.
+- Read `skills/shakerscan/SKILL.md` for general scan safety and handoff rules.
+- Read `AGENTS.md` when you need exact details for `custom_endpoints`, `focus_rules_json`, or authenticated scans.
 
 ## Workflow
 

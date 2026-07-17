@@ -1,147 +1,74 @@
 # Save Finding
 
-Use `API_BASE=${SHAKERSCAN_API_BASE:-http://localhost:8080}` for API calls. Use `UI_BASE=${SHAKERSCAN_UI_BASE:-http://localhost:3000}` for UI links; on a remote VPS, use the URL printed by `./scanner.sh start --remote` or `./scanner.sh status`.
-
-Save a security finding discovered during manual testing or an AI security session.
+Save an evidence-backed finding from authorized manual or interactive testing.
 
 **Usage**: `/save-finding [session_id]`
 
-## Overview
+Use `API_BASE=${SHAKERSCAN_API_BASE:-http://localhost:8080}` for API calls and
+`UI_BASE=${SHAKERSCAN_UI_BASE:-http://localhost:3000}` for UI links.
 
-This skill helps you save findings discovered during:
-- Interactive AI security sessions (`/ai-security-session`)
-- Manual penetration testing
-- Bug bounty hunting
+## Evidence gate
 
-Findings are persisted to the database and linked to the target for tracking.
+Before saving, establish:
 
-## Instructions
+- authorized target and exact affected endpoint
+- title, severity, category, and applicable CWE
+- reproducible request and response or workflow evidence
+- control result that distinguishes vulnerable behavior from normal behavior
+- concrete security impact
+- remediation guidance
 
-### Step 1: Gather Finding Details
+Do not save a vulnerability from a status code, reflection, route existence, version string, or
+model judgment alone. If evidence is incomplete, keep it as a lead or hypothesis.
 
-Ask the user for the following information (or extract from conversation context):
+## Save from a session
 
-**Required:**
-- **Title**: Short description (e.g., "BOLA on Basket API")
-- **Severity**: critical, high, medium, low, or info
-- **Target**: The target URL (auto-populated if session_id provided)
-
-**Optional but recommended:**
-- **Description**: Detailed explanation of the vulnerability
-- **Category**: BOLA, XSS, SQLi, SSRF, IDOR, Auth Bypass, etc.
-- **CWE**: CWE identifier (e.g., "CWE-639" for BOLA)
-- **Evidence**: Proof of the vulnerability
-- **URL**: Specific vulnerable endpoint
-- **Request/Response**: HTTP traffic showing the issue
-- **Remediation**: How to fix
-
-### Step 2: Save the Finding
-
-**If a session_id is provided (from an active AI security session):**
+The target is derived from the active session:
 
 ```bash
-curl -X POST "http://localhost:8080/session/{session_id}/findings" \
+curl -X POST "$API_BASE/session/{session_id}/findings" \
   -H "Content-Type: application/json" \
   -d '{
-    "title": "FINDING_TITLE",
-    "severity": "SEVERITY",
-    "description": "DESCRIPTION",
-    "category": "CATEGORY",
-    "cwe": "CWE-XXX",
-    "evidence": "EVIDENCE",
-    "url": "VULNERABLE_URL"
+    "title": "BOLA on order detail API",
+    "severity": "high",
+    "description": "A distinct second principal can read the first principal order.",
+    "category": "BOLA",
+    "cwe": "CWE-639",
+    "url": "/api/orders/42",
+    "evidence": "Owner control and attacker replay evidence...",
+    "request": "GET /api/orders/42 ...",
+    "response": "Redacted sensitive response...",
+    "remediation": "Enforce object ownership on every order lookup."
   }'
 ```
 
-**For standalone manual findings (no session):**
+## Save a standalone manual finding
 
 ```bash
-curl -X POST "http://localhost:8080/findings/manual" \
+curl -X POST "$API_BASE/findings/manual" \
   -H "Content-Type: application/json" \
   -d '{
-    "target": "https://example.com",
-    "title": "FINDING_TITLE",
-    "severity": "SEVERITY",
-    "description": "DESCRIPTION",
-    "category": "CATEGORY",
-    "cwe": "CWE-XXX",
-    "evidence": "EVIDENCE",
-    "url": "VULNERABLE_URL"
+    "target": "https://app.example.test",
+    "title": "Evidence-backed finding title",
+    "severity": "medium",
+    "description": "What is vulnerable and why it matters.",
+    "category": "Access Control",
+    "cwe": "CWE-284",
+    "url": "/affected/path",
+    "evidence": "Reproduction and control evidence...",
+    "request": "Redacted request...",
+    "response": "Redacted response...",
+    "remediation": "Specific corrective action."
   }'
 ```
 
-### Step 3: Confirm Save
+Report the finding ID, whether it was created, matched, or resurfaced, and
+`${UI_BASE}/findings/{id}`.
 
-Report back to the user:
-- Finding ID
-- Whether it was created new or matched an existing finding
-- Link to view in UI: `${UI_BASE}/findings/{id}`
+Use `source_type=ai_session` to list interactive-session findings and `source_type=manual` for
+standalone manual findings:
 
-## Common Categories and CWEs
-
-| Category | CWE | Description |
-|----------|-----|-------------|
-| BOLA/IDOR | CWE-639 | Broken Object Level Authorization |
-| XSS | CWE-79 | Cross-Site Scripting |
-| SQLi | CWE-89 | SQL Injection |
-| SSRF | CWE-918 | Server-Side Request Forgery |
-| Auth Bypass | CWE-287 | Improper Authentication |
-| CSRF | CWE-352 | Cross-Site Request Forgery |
-| Open Redirect | CWE-601 | URL Redirection to Untrusted Site |
-| Path Traversal | CWE-22 | Path Traversal |
-| Command Injection | CWE-78 | OS Command Injection |
-| XXE | CWE-611 | XML External Entity |
-| Insecure Deserialization | CWE-502 | Deserialization of Untrusted Data |
-| Broken Access Control | CWE-284 | Improper Access Control |
-| Security Misconfiguration | CWE-16 | Configuration |
-| Sensitive Data Exposure | CWE-200 | Information Exposure |
-
-## Severity Guidelines
-
-| Severity | CVSS | Examples |
-|----------|------|----------|
-| **Critical** | 9.0-10.0 | RCE, Auth bypass to admin, SQLi with data exfil |
-| **High** | 7.0-8.9 | BOLA with write access, Stored XSS, SSRF to internal |
-| **Medium** | 4.0-6.9 | BOLA read-only, Reflected XSS, CSRF |
-| **Low** | 0.1-3.9 | Information disclosure, Missing headers |
-| **Info** | 0.0 | Best practice recommendations |
-
-## Example Conversation
-
+```bash
+curl "$API_BASE/findings?source_type=ai_session&status=active"
+curl "$API_BASE/findings?source_type=manual&status=active"
 ```
-User: /save-finding abc123
-
-Claude: I'll help you save a finding from session abc123 (target: https://juice-shop.herokuapp.com).
-
-Based on our testing, I found a BOLA vulnerability. Let me save it:
-
-[Executes API call]
-
-✓ Finding saved successfully!
-  - ID: f8a3b2c1-...
-  - Title: BOLA on Basket API
-  - Severity: Critical
-  - Target: https://juice-shop.herokuapp.com
-
-View in UI: ${UI_BASE}/findings/f8a3b2c1-...
-```
-
-## Finding Sources
-
-All findings are tagged with a `source` field to track their origin:
-
-| Source | Description | Created By |
-|--------|-------------|------------|
-| `scan` | Automated scanner findings | Automated scans (quick, standard, deep, full, smart) |
-| `ai_session` | AI security session discoveries | `POST /session/{id}/findings` |
-| `manual` | Manual testing findings | `POST /findings/manual` |
-
-Session findings also include a `session_id` field linking back to the original testing session.
-
-## Tips
-
-- **Be specific**: Include the exact endpoint, parameter, and payload in the evidence
-- **Include reproduction steps**: Make findings actionable for developers
-- **Link related findings**: Note if this finding enables other attacks
-- **Use session context**: If saving from an AI session, reference the session for context
-- **Filter by source**: Use `curl "http://localhost:8080/findings?source=ai_session"` to view only session findings

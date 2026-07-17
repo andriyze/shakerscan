@@ -1,11 +1,14 @@
 ---
 name: research-agent
-description: Create and drive bounded adaptive ShakerScan research episodes. Use when asked to investigate unexplained security gaps iteratively with Codex or another agent while preserving target scope, budgets, approvals, and deterministic proof gates.
+description: Create and drive bounded adaptive ShakerScan research episodes and Deep Hunt campaigns. Use when asked to investigate an authorized target, verify one finding, close Continuous ASM gaps, continue an awaiting-planner episode, or run a multi-episode campaign while preserving target scope, budgets, approvals, and deterministic proof gates.
 ---
 
 # Bounded Research Agent
 
 Use ShakerScan's research episode controller for adaptive investigation. The agent chooses one action at a time; ShakerScan remains authoritative for scope, command allowlists, budgets, approvals, execution, evidence, and finding promotion.
+
+Use a single episode for a bounded investigation. Use a campaign when the user explicitly wants
+Deep Hunt to continue across multiple bounded episodes under shared time and episode ceilings.
 
 ## Choose The Planner
 
@@ -28,6 +31,15 @@ For a campaign launched in `agent` mode, drive the returned first episode immedi
 awaiting a planner. If launch queued a readiness/preflight scan, report that scan and stop as usual;
 on the user's next request, find the campaign's non-terminal episode and continue it. After any
 decision queues a scan or retest, report the linked work and stop rather than polling.
+
+For a durable campaign:
+
+1. Confirm the target, authorization, intensity, and requested time/episode ceilings.
+2. Use `planner_mode: "agent"` unless the user explicitly chooses another planner.
+3. Launch with `POST /research/campaigns/launch`.
+4. If a readiness scan is queued, report its scan ID and stop.
+5. Otherwise drive the returned awaiting-planner episode one decision at a time.
+6. Use `POST /research/campaigns/{campaign_id}/control` with `pause`, `resume`, or `cancel`.
 
 ## Hard Rules
 

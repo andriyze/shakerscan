@@ -1,6 +1,6 @@
 # Scanner Status
 
-Check the status of the Shaker Scan scanner.
+Check the status of ShakerScan.
 
 **Usage**: `/status`
 

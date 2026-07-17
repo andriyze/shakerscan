@@ -1,88 +1,248 @@
 # ShakerScan
 
-**Open-source security scanner for web apps and AI systems — driven by plain English through your AI coding agent.**
+ShakerScan is an open-source security testing platform for web applications, APIs, and AI systems.
+It runs locally in Docker and gives you a web UI, REST API, CLI, persistent findings, and agent-ready
+workflows.
 
-- **DAST (Dynamic Application Security Testing)** — it actively probes a running website or API for real vulnerabilities (XSS, SQL injection, exposed secrets, broken access control, weak TLS/headers, and more), the way an attacker would, and grades what it finds.
-- **AI red teaming** — it attacks your AI features the same way: chatbots, RAG endpoints, agents, and MCP tools get tested for prompt injection, data leakage, unsafe tool use, and approval bypass.
-
-ShakerScan runs locally (Docker) with a web UI, stores everything in a database, and is built to be **driven directly by an AI agent** like Claude Code, Codex, or OpenCode. You just ask in plain English — *"scan example.com"*, *"show me critical findings"*, *"red team my chatbot"* — and the agent runs the scans, reads the results, and explains them.
-
-## Quick Install
-
-Install and start the scanner (Docker, local web UI at http://localhost:3000):
-
-```bash
-curl -fsSL https://install.shakerscan.com | sh
-```
-
-Then drive it with your AI agent — just open one inside the runtime and ask in plain English:
-
-```bash
-shakerscan agent claude       # or: codex, opencode
-```
-
-That agent session is the default brain for Deep Hunt and other adaptive research. A clean install
-does not need a separately configured LLM provider or API key. ShakerScan still owns execution,
-target scope, approvals, budgets, and proof; the agent chooses one bounded action at a time.
+Use it directly or ask Codex, Claude Code, or OpenCode in plain English:
 
 ```text
-Start ShakerScan
-Run a quick scan on https://example.com
-Show active high and critical findings
-Red team my chatbot API with AI Gate smoke tests
+Start ShakerScan.
+Run a quick scan on https://app.example.test.
+Show active critical and high findings.
+Red-team my chatbot API.
+Check this model artifact before deployment.
 ```
 
-Prefer to run it yourself without AI? Use the CLI directly:
+ShakerScan covers:
 
-```bash
-shakerscan scan https://example.com     # quick scan
-shakerscan status                       # check what's running
-```
+- DAST for websites and APIs, from fast posture checks to authorized active XSS/SQLi testing
+- Continuous attack-surface management (ASM), subdomain discovery, and certificate-transparency monitoring
+- AI Gate tests for chat, RAG, agent, and MCP endpoints
+- Model Intake checks for provenance, signatures, checksums, unsafe serialization, and policy readiness
+- Interactive browser testing, finding retests, evidence, exceptions, campaigns, and bounded autonomous research
 
-See [Quick Start](#quick-start) below for remote/VPS setup, source builds, and more.
+> Only scan systems you own or are explicitly authorized to test. Active scan modes can change
+> application state, trigger alerts, and create significant traffic.
 
-## Contents
+## Install and start
 
-- [Quick Start](#quick-start)
-- [Resources](#resources)
-- [Product Tour](#product-tour)
-- [Features](#features)
-- [Scan Types](#scan-types)
-- [CLI Reference](#cli-reference)
-- [API Quick Reference](#api-quick-reference)
-- [AI Agent Integration](#ai-agent-integration)
-- [Configuration](#configuration)
-- [Architecture](#architecture)
-- [Integrated Tools](#integrated-tools)
-- [Troubleshooting](#troubleshooting)
-- [Prerequisites](#prerequisites)
-- [Contributing](#contributing)
-- [Acknowledgments](#acknowledgments)
-- [License](#license)
-- [Legal Disclaimer](#legal-disclaimer)
-
-## Quick Start
-
-### Local Laptop
+The supported first-run path installs ShakerScan to `~/.shakerscan`, creates the `shakerscan`
+command, starts the Docker stack, and opens only local interfaces by default:
 
 ```bash
 curl -fsSL https://install.shakerscan.com | sh
 ```
 
-This installs ShakerScan, starts the scanner with the latest Docker Hub images, and keeps the UI/API private on your machine.
+Open:
 
-- **Web UI**: http://localhost:3000
-- **API**: http://localhost:8080
+- Web UI: [http://localhost:3000](http://localhost:3000)
+- API: [http://localhost:8080](http://localhost:8080)
 
-### Remote VPS
+Then choose how you want to work.
 
-Use this when ShakerScan runs on a VPS and you want to open the UI from your laptop over Tailscale:
+### Use an AI coding agent
+
+Start the agent inside the installed runtime so it can load ShakerScan's instructions and skills:
+
+```bash
+shakerscan agent codex
+shakerscan agent claude
+shakerscan agent opencode
+```
+
+If the new command is not available in the current shell yet:
+
+```bash
+~/.local/bin/shakerscan env
+~/.local/bin/shakerscan agent codex
+```
+
+The current agent session is also the default planner for Deep Hunt. No separate LLM API key is
+required for agent-driven research; ShakerScan remains responsible for target scope, approvals,
+budgets, execution, and proof.
+
+### Use the CLI
+
+```bash
+shakerscan scan https://app.example.test
+shakerscan status
+```
+
+`scan` submits a quick scan. Standard, deep, aggressive, authenticated, and advanced scans are
+available in the web UI or REST API.
+
+### Use the web UI
+
+Open [http://localhost:3000](http://localhost:3000), select **New Scan**, enter an authorized target,
+choose a scan type and coverage budget, and submit. The scan detail page shows live progress, logs,
+findings, proof state, coverage, and the final report.
+
+## Pick the right workflow
+
+| Goal | Start here |
+|---|---|
+| Check DNS, TLS, and security headers | Quick scan |
+| Add safe templates, CORS, cookies, and JS dependency checks | Standard scan |
+| Add deeper discovery, ports, templates, and JS secret checks | Deep scan |
+| Run authorized active XSS/SQLi and broader application checks | Full, Aggressive, or Smart scan |
+| Test an authenticated application or API | New Scan → Authentication, or `POST /scans` |
+| Keep an endpoint inventory fresh and close coverage gaps | **Continuous ASM** |
+| Discover subdomains continuously | **Targets** or Gungnir CT monitoring |
+| Test a chatbot, RAG pipeline, agent, or MCP server | **AI Gate** |
+| Vet a model artifact before deployment | **Model Intake** |
+| Reproduce a workflow or test two user roles | **Interactive** |
+| Review, retest, suppress, or triage issues | **Findings** and **Exceptions** |
+| Inspect retained proof or export evidence | **Evidence** |
+| Run a bounded adaptive investigation | **Autonomous Hunt / Deep Hunt** |
+| Preview a natural-language operation safely | **AI Operations Router** |
+
+### Scan types and coverage budgets
+
+Scan type controls what is tested. The coverage budget controls how much time and depth it receives.
+
+| Scan type | Typical use | Active testing |
+|---|---|---|
+| `quick` | DNS, TLS, headers, and basic technology detection | No |
+| `standard` | Safe web posture, Nuclei, cookies, CORS, and JS dependencies | No |
+| `deep` | Broader discovery, full templates, ports, and JS secrets | No active XSS/SQLi |
+| `full` | Comprehensive application assessment | Yes |
+| `aggressive` | Maximum authorized depth and extended network coverage | Yes |
+| `smart` | Adaptive discovery, XSS/SQLi, verification, and attack-chain analysis | Yes |
+
+Coverage budgets are `fast`, `balanced`, `thorough`, and `exhaustive`. Prefer a deeper budget when
+you want more coverage from the same scan type.
+
+`full`, `aggressive`, and `smart` require explicit authorization. Smart scan policy and tuning are
+documented in the [Smart Scan Policy](https://github.com/andriyze/shakerscan/blob/main/docs/SMART_SCAN_POLICY.md).
+
+## Common workflows
+
+### Submit scans
+
+```bash
+# Quick scan
+shakerscan scan https://app.example.test
+
+# Full or Smart scans require an explicit authorization confirmation
+shakerscan scan-full https://app.example.test --confirm-active
+shakerscan scan-smart https://app.example.test \
+  --budget-profile thorough \
+  --confirm-active
+```
+
+After a scan is queued, ShakerScan returns a scan ID. Follow it in the UI at
+`http://localhost:3000/scans/{scan_id}`. Long-running scans are asynchronous.
+
+### Scan with authentication
+
+Use **New Scan → Authentication** for bearer tokens, cookies, custom headers, form login, or two-user
+BOLA/IDOR testing. The REST API supports the same options:
+
+```bash
+curl -X POST http://localhost:8080/scans \
+  -H "Content-Type: application/json" \
+  -d '{
+    "target": "https://api.example.test",
+    "options": {
+      "scan_type": "smart",
+      "auth_header": "Bearer REDACTED",
+      "user2_header": "Bearer REDACTED"
+    }
+  }'
+```
+
+Treat authentication values as secrets. API responses redact stored credentials; ShakerScan can
+also use managed credential profiles for interactive and research workflows.
+
+### Review and retest findings
+
+```bash
+curl "http://localhost:8080/findings?status=active&severity=high"
+curl "http://localhost:8080/findings?source_type=ai&status=active"
+
+curl -X POST http://localhost:8080/findings/{finding_id}/retest \
+  -H "Content-Type: application/json" \
+  -d '{"requested_by":"api"}'
+```
+
+The findings workflow distinguishes reported, suspected, and verified issues. A label or HTTP 200
+alone is not exploit proof; use the finding detail page and retest history to inspect the evidence.
+
+### Test AI systems
+
+AI Gate supports chat APIs, RAG APIs, agent traces, MCP traces, and embeddable widgets. In the UI:
+
+1. Open **AI Gate**.
+2. Add a target and its request/response mapping.
+3. Test connectivity.
+4. Select a probe pack and scan profile.
+5. Review transcripts and findings after the scan finishes.
+
+Production AI targets require explicit confirmation. See
+[AI Test Workflows](https://github.com/andriyze/shakerscan/blob/main/docs/AI_TEST_WORKFLOWS.md).
+
+### Check a model artifact
+
+Open **Model Intake** to resolve a model reference, provide optional metadata, checksums, detached
+signatures, and trust anchors, preview the trust policy, and submit a non-executing artifact check.
+Results include provenance, serialization risk, license posture, model-card controls, and a
+deployment decision.
+
+### Run Continuous ASM
+
+Continuous ASM maintains a target endpoint inventory and recommends the next bounded action:
+discovery, an endpoint test batch, a focused SQLi/XSS/auth/BOLA wave, or waiting for active work.
+Use **Continuous ASM** in the UI or:
+
+```bash
+curl http://localhost:8080/targets/{target_id}/asm/gaps
+
+curl -X POST http://localhost:8080/targets/{target_id}/asm/improve \
+  -H "Content-Type: application/json" \
+  -d '{"batch_size":50,"stale_days":30}'
+```
+
+Auth checks require a primary auth context. BOLA testing also requires a distinct second user,
+explicit deep intent, and the applicable approvals.
+
+### Run bounded research
+
+Autonomous Hunt uses immutable observations and one policy-checked action at a time. It can
+investigate a target, verify one finding, or close ASM gaps without giving the planner raw shell or
+credential access.
+
+- `agent` is the default: the current Codex, Claude, or OpenCode session plans one step at a time.
+- `configured_ai` uses the provider in Settings for unattended server autopilot.
+- `local_codex` launches separate isolated Codex planner processes.
+
+Deep Hunt campaigns can span multiple bounded episodes while preserving the original target,
+approval, time, and episode limits.
+
+## Web UI map
+
+| Area | What it provides |
+|---|---|
+| Dashboard | Health, queue activity, worker freshness/scaling, Gungnir, recent work, and priority findings |
+| Scans / New Scan | Submission, filters, cancellation, live logs, reports, proof, coverage, and PDF export |
+| Targets / Exposure | Asset inventory, subdomains, exposure graph, and application graph |
+| Continuous ASM | Endpoint inventory, proof-family coverage, gaps, recommendations, and activity |
+| Findings / Exceptions | Triage, notes, retests, replay, cleanup, accepted risk, and exception lifecycle |
+| AI Gate / Model Intake | AI endpoint red teaming and pre-deployment model checks |
+| Interactive | Browser sessions, credentials, principals, auth expectations, replay, and manual findings |
+| Evidence / Timeline / Campaigns | Proof inventory, exports, retention, mission history, and bounded action ledgers |
+| Settings | AI providers, scan policy, automation, deployment policies, Arsenal, Router, and Research Agent |
+
+The exhaustive route and capability catalog is in the
+[Functionality Reference](https://github.com/andriyze/shakerscan/blob/main/docs/functionality-reference.md).
+
+## Installation options
+
+### Remote VPS over Tailscale
 
 ```bash
 curl -fsSL https://install.shakerscan.com | SHAKERSCAN_REMOTE=1 sh
 ```
-
-Remote mode binds the UI/API to the VPS Tailscale IPv4 address, persists that access mode in `~/.shakerscan/.env`, and prints URLs such as `http://100.x.y.z:3000`.
 
 For an existing install:
 
@@ -90,65 +250,19 @@ For an existing install:
 shakerscan start --remote
 ```
 
-If Tailscale is not available, set the bind and public host explicitly:
+Remote mode binds the UI and API to the VPS Tailscale IPv4 address and prints browser-facing URLs.
+If Tailscale is unavailable:
 
 ```bash
-SHAKERSCAN_BIND_HOST=0.0.0.0 SHAKERSCAN_PUBLIC_HOST=<server-ip-or-dns> shakerscan start --remote
+SHAKERSCAN_BIND_HOST=0.0.0.0 \
+SHAKERSCAN_PUBLIC_HOST=<server-ip-or-dns> \
+shakerscan start --remote
 ```
 
-Only use `0.0.0.0` behind a firewall, VPN, or reverse proxy. ShakerScan is a security tool and should not be exposed directly to the public internet.
+Use `0.0.0.0` only behind a firewall, VPN, or authenticated reverse proxy. Do not expose ShakerScan
+directly to the public internet.
 
-### Run With AI
-
-After install, launch your AI coding agent inside the ShakerScan runtime so it can read the installed instructions and skills:
-
-```bash
-shakerscan agent codex
-shakerscan agent opencode
-shakerscan agent claude
-```
-
-`shakerscan agent ...` also selects the current coding-agent session as the default research
-planner. Ask it to run or continue Deep Hunt and it will use `planner_mode: agent`. To run hunts
-unattended after the agent closes, configure an AI provider in Settings and explicitly choose
-**Stored AI provider** (`planner_mode: configured_ai`). An optional `local_codex` mode uses separate
-isolated `codex exec` calls rather than the current conversation. The default for future hunts can
-be changed under **Settings → Automation Defaults → Default Deep Hunt planner**.
-
-Then ask:
-
-```text
-Start ShakerScan
-Run a quick scan on https://example.com
-Show active high and critical findings
-Run AI Gate smoke tests against my chatbot API
-```
-
-The installer creates `~/.local/bin/shakerscan`, adds `~/.local/bin` to future shell sessions when needed, and downloads the runtime workspace to `~/.shakerscan` with `README.md`, `AGENTS.md`, `CLAUDE.md`, `skills/`, and `.claude/`.
-
-Because `curl | sh` cannot modify the current parent shell, use the absolute launcher if `shakerscan` is not found until you open a new shell:
-
-```bash
-~/.local/bin/shakerscan env
-~/.local/bin/shakerscan agent codex
-```
-
-Useful CLI commands:
-
-```bash
-shakerscan start
-shakerscan status
-shakerscan stop
-shakerscan env
-```
-
-To upgrade an installed runtime, re-run the same installer command. It refreshes `scanner.sh`, `docker-compose.release.yml`, `VERSION`, `README.md`, `AGENTS.md`, `CLAUDE.md`, `skills/`, and `.claude/` in `~/.shakerscan`, preserves `.env`, `results`, and Docker volumes, and pulls the selected prebuilt Docker Hub images during startup. Use `curl -fsSL https://install.shakerscan.com | SHAKERSCAN_START=0 sh` to update files without starting services, or `SHAKERSCAN_PULL_IMAGES=0 shakerscan start` to skip image pulls.
-
-The installer supports macOS and common Linux package managers: apt-based hosts such as Ubuntu, Debian, Pop!_OS, Linux Mint, Zorin, and Kali; rpm-based hosts such as Fedora, RHEL, CentOS, Rocky, and AlmaLinux; plus Arch, openSUSE, and Alpine. It installs Docker Engine or Docker Desktop, Docker Compose, `curl`, and `jq`, then starts/enables Docker where the host init system allows it.
-
-### Local Source Build
-
-Use this path when you want to edit ShakerScan, build images locally, or run from a clone:
+### Build from source
 
 ```bash
 git clone https://github.com/andriyze/shakerscan.git
@@ -156,522 +270,151 @@ cd shakerscan
 ./scanner.sh start --local
 ```
 
-From a clone, you can still use prebuilt Docker Hub images:
+Use `./scanner.sh start` in a clone to run the published images instead.
+
+### Upgrade
+
+Re-run the installer:
 
 ```bash
-./scanner.sh start
+curl -fsSL https://install.shakerscan.com | sh
 ```
 
-### Run a Scan
+It refreshes the runtime files and skills, preserves `.env`, `results`, and Docker volumes, and pulls
+the selected images. Useful overrides:
 
 ```bash
-./scanner.sh scan https://example.com        # Quick scan
-./scanner.sh scan-full https://example.com --confirm-active   # Full assessment with active testing
-./scanner.sh scan-smart https://example.com --confirm-active  # Adaptive smart scan
-./scanner.sh status                          # Check status
-./scanner.sh mcp                             # Read-only Command Arsenal MCP over stdio
-./scanner.sh logs worker -f                  # Follow worker logs
-./scanner.sh stop                            # Stop all services
+# Update files without starting services
+curl -fsSL https://install.shakerscan.com | SHAKERSCAN_START=0 sh
+
+# Skip image pulls on the next start
+SHAKERSCAN_PULL_IMAGES=0 shakerscan start
 ```
 
-> **Safety**: `scan-full` and `scan-smart` can send active probes. Only scan targets you own or have explicit permission to test.
+The installer supports macOS and common Linux distributions using `apt`, `dnf`/`yum`, `pacman`,
+`zypper`, or `apk`. Windows users should run ShakerScan inside WSL2.
 
-### Use with AI Agents
-
-Open this repo in Claude Code, Codex, OpenCode, or another agent that can read repository instructions, then ask in plain language:
+## CLI reference
 
 ```text
-"Start ShakerScan"
-"Run a quick scan on https://example.com"
-"Show active high and critical findings"
-"Run AI Gate smoke tests against my chatbot API"
-"Scale workers to 10"
+start                         Start the stack
+stop | restart               Stop or restart the stack
+reload                        Reload edited source and verify container parity
+status                        Show services, queue state, workers, and access URLs
+scale <N>                     Scale to 1-20 workers
+logs [service] [-f]           Read API, worker, UI, PostgreSQL, or Redis logs
+scan <target>                 Submit a quick scan
+scan-full <target>            Submit an authorized full scan
+scan-smart <target>           Submit an authorized smart scan
+doctor | install-deps         Diagnose or install local prerequisites
+env                           Show runtime, PATH, and agent-launch guidance
+agent [codex|claude|opencode] Launch an agent in the runtime
+mcp                           Start the read-only Command Arsenal MCP adapter
+research <episode-id> [N]     Drive bounded local Codex decisions
+gungnir <command>             Manage certificate-transparency monitoring
+build | rebuild               Build local images
+reset                         Delete scanner data and recreate the database
+shell                         Open a shell in the scanner container
 ```
 
-## Resources
+Run `shakerscan` or `./scanner.sh` without arguments for current options and examples. `reset` is
+destructive.
 
-- **[Documentation Index](docs/README.md)** - Current references, architecture status, and the historical archive.
-- **[Functionality Reference](docs/functionality-reference.md)** - Canonical exhaustive catalog across DAST, ASM, AI, evidence, governance, API, UI, CLI, skills, agents, adapters, modules, and storage.
-- **[Visual Walkthrough](WALKTHROUGH.md)** - Terminal and web UI screenshots.
-- **[Smart Scan Policy](docs/SMART_SCAN_POLICY.md)** - Smart scan budgets, safety controls, and quality checks.
-- **[AI Test Workflows](docs/AI_TEST_WORKFLOWS.md)** - operator workflow and Honey endpoint contract for secure RAG/agent testing and model-intake approval checks.
-- **[Documentation Archive](docs/archive/README.md)** - historical audits, completed implementation prompts, and superseded plans retained for traceability.
+## REST API
 
-<video src="https://github.com/user-attachments/assets/ffdbd6e1-6e41-49dd-812e-ccabba5e2d6e" controls width="100%"></video>
-
-## Product Tour
-
-ShakerScan gives local teams a full security scanning workspace: DAST scans, AI Gate probes, targets, schedules, findings triage, worker scaling, and detailed evidence views. The screenshots below use a `shakerscan.com` demo dataset so the main workflows are visible with real-looking scan and AI Gate results.
-
-### Dashboard
-
-Monitor scanner health, queue activity, worker capacity, recent scans, and high-priority findings from one landing page.
-
-![Dashboard overview](docs/screenshots/dashboard.png)
-
-### Scan Management
-
-Filter scans by domain, review status and grades, cancel running work, or re-run a target with a different scan profile.
-
-![Scans filtered to shakerscan.com](docs/screenshots/scans-shakerscan-domain.png)
-
-### Detailed Scan Reports
-
-Open a completed scan to review score, grade, DNS/TLS/HTTP evidence, logs, compliance context, findings, and exportable reporting data.
-
-![Completed scan report](docs/screenshots/scan-detail-report.png)
-
-### New Scan Setup
-
-Start quick, standard, deep, full, aggressive, or smart scans with separate coverage budgets for fast, balanced, thorough, or exhaustive testing.
-
-![New scan setup](docs/screenshots/new-scan.png)
-
-### Targets
-
-Organize root domains and subdomains, filter the attack surface, launch per-target scans, and trigger subdomain discovery.
-
-![Targets filtered to shakerscan.com](docs/screenshots/targets-shakerscan-domain.png)
-
-### Schedules
-
-Create recurring daily or weekly normal scans and Continuous ASM coverage waves. Evidence cleanup is
-interactive-only because each deletion must be reviewed and confirmed against a fresh, immutable,
-target-scoped preview. Legacy retention schedules are disabled and cannot be resumed.
-
-### Evidence Retention Cleanup
-
-An interactive dry run persists the exact candidate objects, cleanup criteria, storage effects,
-policy hash, and expiry under a `preview_id`. The preview TTL is 600 seconds by default; operators
-may set `EVIDENCE_RETENTION_PREVIEW_TTL_SECONDS`, bounded to 60-3600 seconds.
-
-On confirmation, the UI creates a one-use, target-scoped `dangerous` approval for the exact action
-`evidence.retention_sweep`. Its action context is bound to the preview's `preview_id`,
-`preview_hash`, and `target_id`, and it expires no later than the preview. The deletion request sends
-only `dry_run:false`, `preview_id`, and `approval_receipt_id`; cleanup criteria cannot be changed or
-resubmitted at execution time.
-
-The server revalidates the immutable cohort and durably records `executing` intent before deleting
-external blobs or database rows. If execution is interrupted, retrying the same preview and approval
-resumes finalization safely. A retry after completion returns the stored result idempotently instead
-of repeating deletion. The committed intent is the cutoff: a later finding-status change does not
-widen or cancel that exact cohort, and target merges are blocked until the intent is finalized.
-
-### Findings
-
-Filter and sort findings by DAST, AI Gate, Model Intake, ASM, or Manual source; severity, status,
-domain, recency, CVSS, first seen, or last seen. All sources share the same triage workflow.
-
-![Findings filtered to shakerscan.com](docs/screenshots/findings-shakerscan-domain.png)
-
-### AI Gate Findings
-
-Use the `AI Gate` source filter for chatbot, RAG, agent, or MCP probe results and `Model Intake` for
-artifact findings, then combine either with severity and domain filters.
-
-![High AI findings filtered to shakerscan.com](docs/screenshots/findings-ai-high-shakerscan-domain.png)
-
-### AI Probe Evidence
-
-AI Gate finding details show probe context, classifier output, and expanded raw evidence for auditing why a response was graded as vulnerable.
-
-![AI finding probe transcript](docs/screenshots/ai-finding-detail-chat.png)
-
-### AI Gate Settings
-
-Register AI targets, choose auth, select probe packs, run smoke or focused checks, and review prior AI Gate scan history.
-
-![AI Gate settings](docs/screenshots/ai-gate-settings.png)
-
-## Features
-
-- **Comprehensive Security Scanning**
-  - DNS analysis (SPF, DMARC, DKIM, DNSSEC)
-  - TLS/SSL certificate validation and cipher analysis
-  - HTTP security headers evaluation
-  - Content discovery and technology fingerprinting
-  - Headless browser crawl (Playwright) with API capture
-  - Subdomain enumeration (Gungnir, Subfinder, crt.sh)
-  - JavaScript dependency scanning and secret detection
-  - OpenAPI discovery and Schemathesis testing
-  - IP/ASN/domain intelligence, breach checks, typosquatting, and vendor risk
-  - SSH, SMTP, VPN/RDP/VNC, IoT, industrial, and database-service posture
-
-- **Active Vulnerability Testing** (opt-in)
-  - XSS detection (dalfox), SQL injection testing (sqlmap)
-  - Nuclei template-based vulnerability checks
-  - Coverage budget profiles (`fast`, `balanced`, `thorough`, `exhaustive`) plus advanced depth/time overrides
-  - Auth-aware scanning across discovered endpoints
-  - CSRF, IDOR, path traversal detection
-  - Mass assignment, JWT, webhook, WebSocket, OAuth, file-upload, and business-logic checks
-
-- **AI Gate and AI-Assisted Verification** (optional)
-  - Chat, RAG, agent, and MCP probe packs
-  - Prompt injection, sensitive disclosure, approval bypass, and tool-abuse checks
-  - AI asset inventory, discovered target candidates, risk tiering, RAG/agent control evidence, and optional missing-control findings from target metadata
-  - Target connectivity preflight, MCP live-readiness checks, coverage matrix, evidence manifest, and analyst validation workflow
-  - Chat-style evidence views with probe, target response, classifier output, and raw evidence
-  - Confidence scoring and false-positive reduction
-  - Cross-finding correlation and attack-chain analysis
-  - AI surface/attempt inventory, bounded replay, and longitudinal campaign history
-
-- **Model Intake Checks**
-  - Model provenance, checksum, signature/attestation verification status, model-card, and deployment approval checks
-  - AIBOM generation, registry/reference parsing, format-specific inspection, suspicious loader markers, and license policy posture
-  - Unsafe serialization detection for pickle-like artifacts, PyTorch archives, joblib/pickle files, and executable archive contents
-  - License review, SBOM/dependency evidence, malware scan evidence, security evals, deployment restrictions, and monitoring-plan checks
-  - Safe, non-executing artifact inspection for pre-deployment model approval workflows
-  - Saved trust anchors, strict trust preview, policy requirements, and evidence export
-
-- **Evidence, Governance, and Agent Operations**
-  - Content-addressed evidence objects, concrete evidence instances, manifests, bundles, and retention
-  - Mission campaigns, action ledger, cross-product timeline, hypotheses, and refuter reviews
-  - Scope and approval receipts, operation plans, command results, tool receipts, context packs, and decision traces
-  - Read-only MCP plus dry-run local-agent planning with schema and proof boundaries
-  - SARIF, baselines, known-finding suppression, CI quality gates, and GRC evidence mapping
-
-- **Modern Web Interface**
-  - Real-time dashboard with metrics and scan management
-  - Finding tracking with status management and PDF export
-  - Target organization, scheduling, and worker scaling
-
-- **Containerized Architecture**
-  - PostgreSQL persistent storage, Redis job queue
-  - Horizontal scaling (1-20 workers)
-
-## Scan Types
-
-Scan type controls **what** ShakerScan tests. Coverage budget controls **how hard** it tests.
-
-| Type | Duration | What It Does |
-|------|----------|--------------|
-| **Quick** | 1-2 min | DNS, TLS, headers, basic tech detection |
-| **Standard** | 5-10 min | + Nuclei (safe), cookies, CORS, JS deps |
-| **Deep** | 30-60 min | + Full Nuclei, top-1000 port scan, JS secrets |
-| **Full** | 1-2 hrs | + Active XSS/SQLi, all security tests |
-| **Aggressive** | 2-5 hrs | + Bruteforce, fuzzing, full port scan |
-| **Smart** | Budget-dependent | Adaptive: staged Nuclei, DBMS-aware SQLi, context-aware XSS, attack chain analysis |
-
-> **Note**: `full`, `aggressive`, and `smart` include active testing. Only run these against targets you have permission to test.
-
-### Coverage Budgets
-
-| Budget | Use Case |
-|--------|----------|
-| `fast` | CI smoke or quick feedback |
-| `balanced` | Default depth and runtime limits |
-| `thorough` | Staging/release checks where useful findings matter more than speed |
-| `exhaustive` | Long-running authorized testing with maximum coverage |
-
-Advanced users can override resolved limits with `custom_budget`, including `max_duration_minutes`, `discovery_depth`, `max_urls`, `browser_max_pages`, `api_probe_limit`, `nuclei_max_targets`, `active_max_seconds`, `active_max_endpoints`, `active_params_per_endpoint`, `smart_bola_max_endpoints`, and `dom_xss_max_files`.
-
-**Smart scan** highlights: staged Nuclei waves with early stopping, DBMS fingerprinting, context-aware XSS, DOM XSS analysis, authenticated Playwright crawl, adaptive rate limiting, attack chain correlation, and coverage tracking. See [Smart Scan Policy](docs/SMART_SCAN_POLICY.md) for details.
-
-## CLI Reference
-
-```
-./scanner.sh [command] [options]
-
-Commands:
-  start              Start all services (API, workers, UI)
-  stop               Stop all services
-  restart            Restart all services
-  status             Show service status and queue metrics
-  scale <N>          Scale to N workers (1-20)
-  logs [service]     View logs (api, worker, ui, postgres, redis)
-  scan <target>      Quick scan a target
-  scan-full <target> Full assessment scan
-  scan-smart <target> Smart adaptive scan
-  install-deps       Install missing prerequisites
-  doctor             Check local prerequisites and common startup issues
-  env                Show PATH, launcher, and runtime guidance
-  agent [name]       Start Codex, Claude, or OpenCode in this runtime dir
-  gungnir <cmd>      CT monitor: start, stop, status, logs
-  build              Build Docker images
-  rebuild [opts]     Rebuild images (supports --no-cache, scanner, ui)
-  reset              Reset database (WARNING: deletes all data)
-  shell              Open shell in scanner container
-
-Options:
-  -w, --workers N    Number of workers (default: auto)
-  -f, --follow       Follow logs in real-time
-  -y, --yes          Auto-confirm dependency installation prompts
-  --local            Force local Docker build instead of prebuilt images
-  --prebuilt         Force prebuilt Docker Hub images (default)
-  --image-tag TAG    Override Docker image tag (default: latest)
-  --remote           Bind UI/API to this host's Tailscale IPv4 address
-  --confirm-active   Confirm authorization for scan-full or scan-smart
-```
-
-### Advanced Scan Examples
-
-`scanner.sh` wraps common scans. Use the REST API for authenticated scans, focused XSS/SQLi-only scans, and custom budgets.
+The API base URL is `http://localhost:8080` when commands run on the ShakerScan host.
 
 ```bash
-./scanner.sh scan-smart https://example.com --budget-profile thorough --confirm-active
-```
+# Health and queue
+curl http://localhost:8080/health
+curl http://localhost:8080/queue/stats
 
-## API Quick Reference
-
-Base URL: `http://localhost:8080`
-
-```bash
-# Submit a scan
+# Submit a quick scan
 curl -X POST http://localhost:8080/scans \
   -H "Content-Type: application/json" \
-  -d '{"target": "https://example.com", "options": {"scan_type": "quick"}}'
+  -d '{"target":"https://app.example.test","options":{"scan_type":"quick"}}'
 
-# Thorough smart scan with explicit coverage budget
-curl -X POST http://localhost:8080/scans \
-  -H "Content-Type: application/json" \
-  -d '{"target": "https://example.com", "options": {"scan_type": "smart", "budget_profile": "thorough"}}'
-
-# List scans
-curl "http://localhost:8080/scans?status=completed&limit=10"
-
-# Get scan details
+# Read one scan
 curl http://localhost:8080/scans/{scan_id}
-
-# List findings
-curl "http://localhost:8080/findings?severity=critical&status=active"
-curl "http://localhost:8080/findings?source_type=ai&status=active"
-
-# List AI test workflow templates
-curl http://localhost:8080/ai/test-scenarios
-
-# AI Gate target + scan
-curl -X POST http://localhost:8080/ai/targets \
-  -H "Content-Type: application/json" \
-  -d '{"name":"Support bot","target_type":"api_chat","endpoint_url":"https://example.com/api/chat","request_template":{"message":"{{prompt}}","session_id":"{{session_id}}"},"response_path":"$.answer"}'
-
-curl -X POST http://localhost:8080/ai/targets/{target_id}/scan \
-  -H "Content-Type: application/json" \
-  -d '{"probe_pack":"shaker-ai-smoke","scan_profile":"smoke","environment":"staging"}'
-
-# Model artifact intake scan
-curl -X POST http://localhost:8080/model-intake/scan \
-  -H "Content-Type: application/json" \
-  -d '{"artifact_url":"https://example.com/models/model.safetensors","metadata_url":"https://example.com/models/model.metadata.json"}'
-
-# Update finding status
-curl -X PATCH http://localhost:8080/findings/{id} \
-  -H "Content-Type: application/json" \
-  -d '{"status": "resolved", "notes": "Fixed in v2.1"}'
-
-# Dashboard metrics
-curl http://localhost:8080/dashboard
-
-# Scale workers
-curl -X POST http://localhost:8080/workers \
-  -H "Content-Type: application/json" \
-  -d '{"count": 5}'
 ```
 
-Full API documentation including authenticated scanning, custom endpoints, AI Gate, model intake, schedules, and advanced options is in [`CLAUDE.md`](CLAUDE.md). FastAPI also exposes the live OpenAPI schema at `http://localhost:8080/openapi.json`.
-
-## AI Agent Integration
-
-This project is designed to work well with coding agents. After the curl installer, open the runtime directory in your agent so it can read the local `AGENTS.md` or `CLAUDE.md` instructions:
-
-```bash
-cd ~/.shakerscan
-codex     # reads AGENTS.md
-claude    # reads CLAUDE.md
-```
-
-From any directory, you can also run:
-
-```bash
-shakerscan agent codex      # or claude, or opencode
-```
-
-For source changes, clone the repo and open the clone in your agent:
-
-```bash
-cd shakerscan
-claude    # Claude reads CLAUDE.md and understands the project
-```
-
-### Slash Commands
-
-| Command | Description |
-|---------|-------------|
-| `/scan <url>` | Quick security scan |
-| `/scan-full <url>` | Full assessment (asks permission first) |
-| `/scan-smart <url>` | Smart adaptive scan |
-| `/ai-gate` | Manage AI Gate targets and run AI safety probe packs |
-| `/ai-security-session <url>` | Start an interactive browser security session |
-| `/findings` | List active vulnerabilities |
-| `/save-finding [session_id]` | Save a validated manual/session finding |
-| `/status` | Check scanner status |
-| `/subdomains <domain>` | Discover subdomains |
-| `/workers` | Manage scanner workers |
-| `/js-analyze <target|scan|file>` | Build a frontend route/API/secret inventory and scan seeds |
-| `/content-discovery <target|scan>` | Build route/file/API discovery seeds and custom endpoints |
-| `/review-skills [scope]` | Audit skill, command, and subagent contracts |
-
-## Web UI Overview
-
-- **Dashboard (`/`)**: real-time metrics, queue health, worker scaling, Gungnir CT monitor toggle
-- **Scans (`/scans`)**: filter by status/domain/search, cancel running jobs, re-scan
-- **Scan Report (`/scans/{id}`)**: live logs, progress bar, PDF export, compliance section, AI Gate evidence, and Model Intake artifact checks
-- **Exposure (`/exposure`)**: graph of domains, targets, APIs, auth roles, vendors, AI surfaces, MCP tools, model artifacts, scans, and findings
-- **Continuous ASM (`/asm`)**: scheduler state, endpoint and family proof coverage, gaps, recommendations, and campaign timeline
-- **Targets (`/targets`)**: hierarchical root/subdomains, filter and scan
-- **Application Graph (`/targets/{id}/graph`)**: route/object/principal nodes, auth boundaries, producer/consumer edges, and graph hypotheses
-- **Schedules (`/schedules`)**: recurring normal scans and target-scoped ASM coverage waves; legacy retention schedules are disabled
-- **Findings (`/findings`)**: filter by DAST, AI Gate, Model Intake, ASM, or Manual source; severity/status/date/domain; bulk cleanup and CVSS sorting
-- **Finding Detail (`/findings/{id}`)**: triage buttons, analyst notes, evidence, AI analysis, remediation
-- **Interactive (`/interactive`)**: browser sessions, managed credentials, principals, authz expectations, endpoint replay, screenshots, and manual findings
-- **AI Gate (`/ai-gate`)**: review inventory/candidates, add AI targets, test connectivity, run MCP readiness checks, choose auth, select probe packs/profiles, and run AI safety checks for chat, RAG, agent, and MCP surfaces
-- **Model Intake (`/model-intake`)**: resolve references, manage trust anchors, preview trust policy, and submit artifact checks
-- **Policy Profiles (`/settings/policy-profiles`)**: deployment-gate policy lifecycle for DAST, AI Gate, and Model Intake
-- **Exceptions (`/exceptions`)**: finding-exception queue, metadata repair, expiry, and lifecycle sweep
-- **Command Arsenal (`/settings/arsenal`)**: commands, tools, receipts, plans, campaigns, hypotheses, refuters, local agents, context packs, and traces
-- **Settings (`/settings`)**: AI providers, scan execution, and automation policy
-- **New Scan (`/scan/new`)**: scan type picker, coverage budget selector, and advanced toggles
+The live OpenAPI document is available at
+[http://localhost:8080/openapi.json](http://localhost:8080/openapi.json). Exact request examples and
+agent safety rules are in [`AGENTS.md`](AGENTS.md); the generated inventory in the
+[Functionality Reference](https://github.com/andriyze/shakerscan/blob/main/docs/functionality-reference.md)
+lists every public route.
 
 ## Configuration
 
-Create a `.env` file to customize settings:
+Most users can configure AI providers, scan execution, automation defaults, and deployment policies
+from **Settings**. AI analysis and AI verification are optional; ordinary scans and agent-planned
+research do not require a stored AI key.
+
+Common `.env` settings:
 
 ```bash
-# AI Analysis (optional)
 AI_URL=https://api.openai.com/v1/chat/completions
-AI_API_KEY=sk-...
-AI_MODEL=your-model
-AI_FALLBACK_MODEL=provider/model-a,provider/model-b
+AI_API_KEY=...
+AI_MODEL=...
 
-# AI Retest Verification (optional, runtime override via /settings/ai)
 AI_VERIFY_ENABLED=false
 AI_VERIFY_URL=https://api.openai.com/v1/chat/completions
-AI_VERIFY_API_KEY=sk-...
-AI_VERIFY_MODEL=your-verification-model
+AI_VERIFY_API_KEY=...
+AI_VERIFY_MODEL=...
 ```
 
-### Scaling Workers
-
-```bash
-./scanner.sh start -w 10                       # Start with 10 workers
-docker compose up -d --scale worker=20         # Scale running workers
-```
-
-| Scan Type | RAM/Worker | Workers for 32GB |
-|-----------|------------|------------------|
-| Quick | ~1GB | 20 |
-| Standard | ~2GB | 12 |
-| Deep/Full | ~4GB | 6 |
-
-## Architecture
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                         Web UI (:3000)                          │
-│                     Next.js Dashboard                           │
-└─────────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                        API Server (:8080)                       │
-│                     FastAPI + PostgreSQL                        │
-└─────────────────────────────────────────────────────────────────┘
-                              │
-              ┌───────────────┼───────────────┐
-              ▼               ▼               ▼
-       ┌──────────┐    ┌──────────┐    ┌──────────┐
-       │ Worker 1 │    │ Worker 2 │    │ Worker N │
-       └──────────┘    └──────────┘    └──────────┘
-              │               │               │
-              └───────────────┼───────────────┘
-                              ▼
-┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
-│   PostgreSQL    │    │      Redis      │    │   File Results  │
-│   (Persistent)  │    │     (Queue)     │    │    (./results)  │
-└─────────────────┘    └─────────────────┘    └─────────────────┘
-```
-
-## Integrated Tools
-
-| Tool | Purpose |
-|------|---------|
-| **httpx** | HTTP probing and fingerprinting |
-| **katana** | Web crawling and URL discovery |
-| **nuclei** | Template-based vulnerability scanning |
-| **dalfox** | XSS vulnerability detection |
-| **sqlmap** | SQL injection testing |
-| **subfinder** | Passive subdomain enumeration |
-| **gungnir** | CT log subdomain discovery |
-| **sslyze** | SSL/TLS analysis |
-| **testssl.sh** | Comprehensive TLS testing |
-| **nmap** | Port scanning and service detection |
+See the [Functionality Reference](https://github.com/andriyze/shakerscan/blob/main/docs/functionality-reference.md#14-configuration-and-integrated-tools)
+for the current configuration map. Never commit real credentials.
 
 ## Troubleshooting
 
-### Services won't start
-
 ```bash
-docker info                    # Check Docker is running
-lsof -i :3000 && lsof -i :8080  # Check for port conflicts
-./scanner.sh logs -f           # View detailed logs
+shakerscan doctor
+shakerscan status
+shakerscan logs api
+shakerscan logs worker -f
+docker stats
 ```
 
-### Scans failing
+Common fixes:
 
-```bash
-./scanner.sh logs worker -f              # Check worker logs
-curl http://localhost:8080/health         # Verify API health
-curl http://localhost:8080/queue/stats    # Check queue status
-```
+- Docker unavailable: start Docker Desktop or the Docker service, then run `shakerscan doctor`.
+- Ports `3000` or `8080` busy: stop the conflicting process or change the bind configuration.
+- Scans remain pending: inspect `shakerscan status`, worker logs, and worker freshness; scale only
+  when the host has enough memory.
+- Memory pressure: reduce the worker count with `shakerscan scale 2`.
+- Remote UI unavailable: use the exact URLs printed by `shakerscan status`; local mode binds only to
+  `127.0.0.1`.
 
-### Database issues
+## Documentation
 
-```bash
-docker compose ps postgres               # Check PostgreSQL health
-./scanner.sh reset                       # Reset database (deletes all data)
-```
+- [Documentation index](https://github.com/andriyze/shakerscan/blob/main/docs/README.md)
+- [Full functionality reference](https://github.com/andriyze/shakerscan/blob/main/docs/functionality-reference.md)
+- [Visual walkthrough](https://github.com/andriyze/shakerscan/blob/main/WALKTHROUGH.md)
+- [Skill and agent guide](skills/README.md)
+- [Smart Scan Policy](https://github.com/andriyze/shakerscan/blob/main/docs/SMART_SCAN_POLICY.md)
+- [OWASP coverage matrix](https://github.com/andriyze/shakerscan/blob/main/docs/owasp-coverage-matrix.md)
+- [AI security workflows](https://github.com/andriyze/shakerscan/blob/main/docs/AI_TEST_WORKFLOWS.md)
+- [Interactive session guide](https://github.com/andriyze/shakerscan/blob/main/docs/INTERACTIVE_SESSIONS_GUIDE.md)
 
-### Memory issues
-
-```bash
-./scanner.sh start -w 2                  # Reduce worker count
-docker stats                             # Check memory usage
-```
-
-## Prerequisites
-
-- Docker and Docker Compose
-- curl and jq
-- 8GB+ RAM recommended
-- Linux, macOS, or Windows with WSL2
-
-`curl -fsSL https://install.shakerscan.com | sh` is the easiest first-run path. In a source clone, `./scanner.sh install-deps` can install missing prerequisites on macOS and on Linux hosts using `apt`, `dnf`, `yum`, `pacman`, `zypper`, or `apk`. On Linux, the script starts/enables the Docker service and adds the invoking user to the `docker` group when needed; log out/in or run `newgrp docker` if group permissions were just changed.
+Historical implementation plans and point-in-time audits live under
+[`docs/archive/`](https://github.com/andriyze/shakerscan/tree/main/docs/archive). They are retained
+for traceability and are not current product instructions.
 
 ## Contributing
 
-Contributions are welcome! Please:
+Issues and pull requests are welcome. For source changes:
 
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Submit a pull request
+1. Fork and clone the repository.
+2. Create a feature branch.
+3. Make and test the change.
+4. Submit a pull request with the behavior and verification described.
 
-## Acknowledgments
+## License and legal
 
-- [ProjectDiscovery](https://projectdiscovery.io/) for httpx, katana, nuclei, subfinder
-- [g0ldencybersec](https://github.com/g0ldencybersec/gungnir) for Gungnir CT log monitoring
-- [dalfox](https://github.com/hahwul/dalfox) for XSS detection
-- [sqlmap](https://sqlmap.org/) for SQL injection testing
-- [Retire.js](https://retirejs.github.io/) for JavaScript vulnerability database
-- [testssl.sh](https://testssl.sh/) for comprehensive TLS testing
+ShakerScan is licensed under the
+[Apache License 2.0](https://github.com/andriyze/shakerscan/blob/main/LICENSE).
 
-## License
-
-This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENSE) file for details.
-
----
-
-## Legal Disclaimer
-
-**Only scan targets you own or have explicit written permission to test.** Unauthorized scanning may violate computer crime laws in your jurisdiction.
-
-This software is provided under the Apache License 2.0 on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND. Active scanning modes (`full`, `aggressive`, `smart`) send probes that may trigger security alerts, be logged by target systems, or affect application state. The authors are not responsible for any misuse, damage, or legal consequences resulting from use of this tool.
+Only use ShakerScan on targets you own or have explicit written permission to test. The software is
+provided on an “AS IS” basis without warranties or conditions of any kind. The authors are not
+responsible for unauthorized use, disruption, damage, or legal consequences.

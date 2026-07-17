@@ -1,12 +1,13 @@
-# ShakerScan - Visual Walkthrough
+# ShakerScan visual walkthrough
 
-This guide shows how to use ShakerScan via Claude Code (terminal) and the Web UI.
+This guide shows the basic ShakerScan flow through an AI coding agent and the web UI. The screenshots
+use Claude Code, but the same plain-English workflow works with Codex and OpenCode.
 
-## Terminal Experience (Claude Code)
+## Agent terminal experience
 
 ### 1. Start the Scanner
 
-Just ask Claude to start the scanner - it handles the Docker setup:
+Ask the agent to start the scanner. It checks Docker and the local API:
 
 ![Starting ShakerScan](docs/screenshots/walkthrough/start.png)
 
@@ -18,25 +19,26 @@ Once running, you'll see all services healthy:
 
 ### 3. Run a Scan
 
-Ask for a scan in natural language. For active testing (smart/full scans), Claude asks for authorization first:
+Ask for a scan in natural language. For active testing (`smart`, `full`, or `aggressive`), the agent
+asks for authorization first:
 
 ![Authorization Prompt](docs/screenshots/walkthrough/smart.png)
 
 ### 4. Scan Submitted
 
-Claude submits the scan and gives you tracking info:
+The agent submits the scan and gives you its ID and UI link:
 
 ![Scan Running](docs/screenshots/walkthrough/running.png)
 
 ### 5. View Findings
 
-Ask about findings - Claude formats them in a readable table:
+Ask about findings and the agent formats the current API results:
 
 ![Findings in Terminal](docs/screenshots/walkthrough/findings_terminal.png)
 
 ---
 
-## Web UI Experience
+## Web UI experience
 
 ### Dashboard
 
@@ -58,6 +60,12 @@ Browse all findings with severity filters and status management:
 
 ---
 
+The current UI also includes Continuous ASM, Exposure, AI Gate, Model Intake, Interactive sessions,
+Evidence, Timeline, Campaigns, Exceptions, the AI Operations Router, and Autonomous Hunt. See the
+[README](README.md#web-ui-map) for a concise map and the
+[Functionality Reference](docs/functionality-reference.md#16-ui-cli-skills-and-agent-surfaces) for
+the exhaustive route list.
+
 ## Quick Commands
 
 ```bash
@@ -65,8 +73,8 @@ Browse all findings with severity filters and status management:
 "start ShakerScan"
 
 # Run scans
-"scan example.com"
-"run smart scan for example.com"
+"scan my authorized staging app"
+"run a smart scan on my authorized staging app"
 
 # Check findings
 "show me critical findings"
@@ -76,4 +84,4 @@ Browse all findings with severity filters and status management:
 "scale to 5 workers"
 ```
 
-See [README.md](README.md) for full documentation.
+See the [README](README.md) for installation and everyday use.

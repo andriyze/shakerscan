@@ -43228,7 +43228,9 @@ async def session_test_endpoint(session_id: str, request: EndpointTestRequest):
     1. Login as user1, discover resource at /api/items/42
     2. Login as user2
     3. Call this endpoint with endpoint="/api/items/42" and as_user="user2"
-    4. If status is 200, BOLA vulnerability confirmed
+    4. Treat a 200 or response difference as a lead; confirm principal distinctness,
+       object ownership, sensitive data/state impact, and a denied control before
+       recording a BOLA vulnerability
 
     Args:
         endpoint: API endpoint path (e.g., "/api/items/42")

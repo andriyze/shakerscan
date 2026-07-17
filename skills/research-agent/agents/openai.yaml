@@ -1,5 +1,4 @@
 interface:
   display_name: "Bounded Research Agent"
   short_description: "Drive one-step adaptive ShakerScan research loops"
-  default_prompt: "Use ShakerScan research episodes to investigate the target adaptively. Choose one proposable action per current observation and keep all execution inside ShakerScan's policy controller."
-
+  default_prompt: "Use $research-agent to investigate the authorized target one proposable action per observation inside ShakerScan's policy controller."

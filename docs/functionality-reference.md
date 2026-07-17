@@ -6,7 +6,7 @@ governance, automation, UI, CLI, API, and agent-facing surfaces. The human-reada
 the behavior; the generated inventory in §17 enumerates every current public route, registry command,
 CLI flag, wrapper command, Make target, release gate, runtime configuration key, UI page, skill,
 agent, adapter, scanner module, and durable table.
-**Reconciled:** 2026-07-16
+**Reconciled:** 2026-07-17
 **Audience:** users, operators, AI coding agents, and engineers who need one place that explains the
 product's functionality end to end.
 
@@ -1000,13 +1000,16 @@ concurrency-limited with per-tool timeouts and a global deadline.
 | `/interactive` | Browser sessions, credential profiles, principals, authorization expectations, endpoint replay, and manual findings |
 | `/schedules` | Recurring normal scans and target-scoped ASM waves; evidence cleanup is interactive-only and legacy retention schedules are disabled |
 | `/settings` | AI provider, scan execution, and automation policy settings |
-| `/settings/ai-gate` | AI target/principal lifecycle, inventory, readiness, probe packs, scans, longitudinal history, and durable AI surface inventory |
+| `/ai-gate` | AI target/principal lifecycle, inventory, readiness, probe packs, scans, longitudinal history, and durable AI surface inventory |
 | `/settings/ai-ops-router` | Natural-language → safe API plan preview, with confirmation-gated execution |
-| `/settings/model-intake` | Reference resolution, trust preview/anchors, presets, policy selection, and intake submission |
+| `/model-intake` | Reference resolution, trust preview/anchors, presets, policy selection, and intake submission |
 | `/settings/policy-profiles` | Deployment policy profile lifecycle across DAST, AI Gate, and Model Intake |
-| `/settings/exceptions` | Finding-exception queue, repair, expiry visibility, and lifecycle sweep |
+| `/exceptions` | Finding-exception queue, repair, expiry visibility, and lifecycle sweep |
 | `/settings/arsenal` | Command contracts, receipts, plans, actions, hypotheses (claim/signal/plan-campaign, from-plan/from-benchmark generators), refuters, tools, local agents, context packs, and traces |
 | `/settings/research-agent` | Create and inspect bounded shadow/read-only/gated research episodes, run configured-AI steps, inspect budgets/actions/decisions/events, refresh observations, and cancel episodes |
+| `/settings/research-agent/experiment` | Create bounded HTTP-differential or managed-principal workflow experiments |
+| `/settings/research-agent/runs/{id}` | Inspect a durable experiment run and its proof handoff |
+| `/settings/research-agent/leads` | Review durable research leads and route them to the appropriate product workflow |
 
 ### API-only or partially UI-backed workflows
 
@@ -1019,7 +1022,7 @@ this boundary is visible rather than accidental.
 Several workflows that were previously API-only now have UI surfaces: the cross-product mission timeline
 (`/timeline`), mission campaign list/detail/create (`/campaigns`), evidence browsing plus content-free
 manifest/bundle export and approval-gated retention sweeps (`/evidence`), the durable AI surface inventory
-(inside `/settings/ai-gate`), hypothesis claim/signal/plan-campaign and the from-plan/from-benchmark
+(inside `/ai-gate`), hypothesis claim/signal/plan-campaign and the from-plan/from-benchmark
 generators (inside `/settings/arsenal`), the natural-language AI Operations Router (`/settings/ai-ops-router`),
 and the one-click operational actions batch scan (`/scan/new`), target dedupe (`/targets`), queue emergency
 clear (`/`), and ASM inventory prune (`/asm`).
@@ -1045,15 +1048,20 @@ never read into documentation.
 
 - `ai-security-session`: drives authorized interactive Playwright testing with explicit evidence and
   finding-save boundaries.
+- `shakerscan`: routes general scans, targets, findings, Continuous ASM, AI Gate, Model Intake,
+  operations, and bounded research while enforcing authorization and asynchronous handoff rules.
 - `js-analyze`: converts bundles and browser evidence into routes, APIs, libraries, secret leads,
   `custom_endpoints`, and content-discovery seeds.
 - `content-discovery`: builds generic and app-specific route/file/API lists and scanner/ffuf inputs.
+- `research-agent`: creates or continues bounded research episodes and Deep Hunt campaigns with one
+  policy-controlled decision per observation.
 - `review-skills`: audits skills, commands, and subagents for broken references, unsafe prompts, and
   missing gates or output contracts.
 
 The slash-command layer provides scan, smart/full scan, AI Gate, interactive session, finding list/
-save, subdomain, worker, status, JS analysis, content discovery, and skill-review workflows. Three
-specialized Claude subagents back JS analysis, content discovery, and skill review. The product also
+save, subdomain, worker, status, JS analysis, content discovery, bounded research, and skill-review
+workflows. Three specialized Claude subagents back JS analysis, content discovery, and skill review.
+The product also
 catalogs Codex, Claude Code, OpenCode, and Hermes local-agent capabilities. The Codex research runner
 can submit one schema-constrained decision at a time, but only the API policy controller can dispatch
 an accepted Arsenal action; local-agent output never grants execution or finding authority.
@@ -1087,7 +1095,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | Runtime environment keys | 193 | Python sources + Compose manifests |
 | Scanner modules | 83 | `scanner/scanner_tools/` |
 | UI pages | 27 | `ui/src/app/` |
-| Skills | 5 | `skills/` |
+| Skills | 6 | `skills/` |
 | Slash commands | 14 | `.claude/commands/` |
 | Specialized subagents | 3 | `.claude/agents/` |
 | Durable tables | 45 | `db/init.sql` + migrations |
@@ -1861,23 +1869,24 @@ Only key names and declaring sources are documented; secret values are never rea
 | `ai-security-session` | Interactive Playwright session control for the ShakerScan `/session` API. Use when asked to start or drive an AI security testing session, perform manual browser actions, or run BOLA/IDOR testing via session endpoints. | `skills/ai-security-session/SKILL.md` |
 | `content-discovery` | Build target-specific content discovery seeds, path lists, and ShakerScan scan inputs from scan results, JS analysis, framework clues, and exposed docs. Use when asked for content discovery, wordlist generation, ffuf seeds, admin path discovery, hidden file discovery, route discovery, or custom endpoint seeding. | `skills/content-discovery/SKILL.md` |
 | `js-analyze` | Analyze JavaScript bundles, frontend routes, browser-captured APIs, libraries, and secrets for a ShakerScan target or completed scan. Use when asked for JS analysis, route analysis, frontend endpoint discovery, library review, source-map hints, or to build `custom_endpoints` for a ShakerScan scan. | `skills/js-analyze/SKILL.md` |
-| `research-agent` | Create and drive bounded adaptive ShakerScan research episodes. Use when asked to investigate unexplained security gaps iteratively with Codex or another agent while preserving target scope, budgets, approvals, and deterministic proof gates. | `skills/research-agent/SKILL.md` |
+| `research-agent` | Create and drive bounded adaptive ShakerScan research episodes and Deep Hunt campaigns. Use when asked to investigate an authorized target, verify one finding, close Continuous ASM gaps, continue an awaiting-planner episode, or run a multi-episode campaign while preserving target scope, budgets, approvals, and deterministic proof gates. | `skills/research-agent/SKILL.md` |
 | `review-skills` | Review ShakerScan skills, commands, and subagents for broken references, invalid Claude Code configuration, prompt anti-patterns, missing hard gates, missing outputs, and weak operational guidance. Use when asked to audit, review, or quality-check the skill system itself. | `skills/review-skills/SKILL.md` |
+| `shakerscan` | Operate the ShakerScan web, API, and AI security platform. Use when asked to start or diagnose ShakerScan; scan an authorized website or API; manage targets, workers, schedules, findings, evidence, or Continuous ASM; test AI Gate or Model Intake targets; run interactive security sessions; or create and drive bounded research episodes and Deep Hunt campaigns. | `skills/shakerscan/SKILL.md` |
 
 | Slash command | Title | Purpose | Source |
 |---|---|---|---|
 | `/ai-gate` | AI Gate | Create/list AI Gate targets and queue AI safety scans. | `.claude/commands/ai-gate.md` |
-| `/ai-security-session` | AI Security Session | Use `API_BASE=${SHAKERSCAN_API_BASE:-http://localhost:8080}` for API calls. Use `UI_BASE=${SHAKERSCAN_UI_BASE:-http://localhost:3000}` for UI links; on a remote VPS, use the URL printed by `./scanner.sh start --remote` or `./scanner.sh status`. | `.claude/commands/ai-security-session.md` |
+| `/ai-security-session` | AI Security Session | Drive an authorized interactive browser security workflow with the `ai-security-session` skill. | `.claude/commands/ai-security-session.md` |
 | `/content-discovery` | Content Discovery | Build a high-signal route and file discovery plan for a target using ShakerScan evidence, JS outputs, and framework clues. | `.claude/commands/content-discovery.md` |
 | `/findings` | List Security Findings | Show security findings from scans. | `.claude/commands/findings.md` |
 | `/js-analyze` | JS Analyze | Run JavaScript and frontend attack-surface analysis for a target, completed scan, or supplied JS bundle set. | `.claude/commands/js-analyze.md` |
-| `/research` | Bounded Research Agent | Use the `research-agent` skill to create or continue a target-bound ShakerScan research episode. | `.claude/commands/research.md` |
+| `/research` | Bounded Research Agent | Use the `research-agent` skill to create or continue a target-bound research episode or Deep Hunt campaign. | `.claude/commands/research.md` |
 | `/review-skills` | Review Skills | Review all ShakerScan skills, commands, and agents for prompt bugs and quality gaps. | `.claude/commands/review-skills.md` |
-| `/save-finding` | Save Finding | Use `API_BASE=${SHAKERSCAN_API_BASE:-http://localhost:8080}` for API calls. Use `UI_BASE=${SHAKERSCAN_UI_BASE:-http://localhost:3000}` for UI links; on a remote VPS, use the URL printed by `./scanner.sh start --remote` or `./scanner.sh status`. | `.claude/commands/save-finding.md` |
+| `/save-finding` | Save Finding | Save an evidence-backed finding from authorized manual or interactive testing. | `.claude/commands/save-finding.md` |
 | `/scan-full` | Full Security Assessment | Run a comprehensive security assessment with ALL security tests including active XSS/SQLi. | `.claude/commands/scan-full.md` |
 | `/scan-smart` | Smart Adaptive Scan | Run an intelligent adaptive security scan that adjusts based on findings. | `.claude/commands/scan-smart.md` |
 | `/scan` | Scan a target | Run a security scan on the specified target. | `.claude/commands/scan.md` |
-| `/status` | Scanner Status | Check the status of the Shaker Scan scanner. | `.claude/commands/status.md` |
+| `/status` | Scanner Status | Check the status of ShakerScan. | `.claude/commands/status.md` |
 | `/subdomains` | Subdomain Discovery | Discover subdomains for a domain using CT logs and passive sources. | `.claude/commands/subdomains.md` |
 | `/workers` | Worker Management | View and scale scanner workers. | `.claude/commands/workers.md` |
 

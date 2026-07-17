@@ -10,9 +10,9 @@ Use the `/session` API to run interactive, manual security testing with a real h
 
 ## Operating Stance
 
-Assume the target contains at least one meaningful weakness that automated scanning may have missed, and it is your job to find and validate it.
-
-This is a persistence instruction, not permission to invent a bug. Keep testing until the checklist is complete. If the checklist is complete and there is still no validated issue, say that clearly and return the best evidence-backed leads.
+Work evidence-first. Test the authorized workflow thoroughly, but do not assume a weakness exists.
+A successful response, cross-user difference, or unusual UI state is a lead until the applicable
+authorization and proof checks confirm impact.
 
 ## Mandatory Checklist
 
@@ -42,6 +42,8 @@ Supported `action` values for `POST /session/{id}/action`:
 - `navigate` with `data.url`
 - `click` with `data.selector`
 - `fill` with `data.selector`, `data.value`
+- `set_auth` with a bearer header or cookie data
+- `use_credential_profile` with `data.credential_profile_id` for a managed `user1` or `user2` profile
 - `submit` with optional `data.selector`
 - `wait` with optional `data.selector` or `data.timeout`
 - `extract` with optional `data.selector` and `data.attribute`
@@ -49,13 +51,17 @@ Supported `action` values for `POST /session/{id}/action`:
 - `login` with `data.email`, `data.password`
 
 **Scope Rules**
-Same‑origin is enforced by default to prevent SSRF. Cross‑origin static assets are allowed so modern apps still render. For cross‑origin navigation or endpoint tests, you must explicitly set `allow_out_of_scope: true`.
+Same-origin is enforced by default to prevent SSRF. Cross-origin static assets are allowed so modern
+apps still render. Set `allow_out_of_scope: true` only when the user has explicitly authorized that
+additional origin.
 
 **BOLA/IDOR Pattern**
-1. Register or login as `user1` and create or view a resource.
-2. Capture a resource ID from network traffic or the API response.
-3. Login as `user2` in a separate context.
-4. Call `/session/{id}/test-endpoint` with `as_user: "user2"` using the `user1` resource ID.
+1. Apply distinct managed profiles or register/login separately as `user1` and `user2`.
+2. Verify the profiles represent distinct account identities.
+3. As `user1`, create or view a resource and capture its identifier.
+4. Replay the `user1` identifier as `user2`.
+5. Compare with an owner control and a denied/nonexistent-object control.
+6. Save a finding only when the replay proves unauthorized sensitive access or state change.
 
 **Scan Context Hints**
 When a scan is available, extract and use:

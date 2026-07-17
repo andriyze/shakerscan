@@ -2,7 +2,7 @@
 
 Show security findings from scans.
 
-**Usage**: `/findings [severity|ai|dast]`
+**Usage**: `/findings [severity|dast|ai|ai_gate|ai_session|autonomous|model_intake|asm|manual]`
 
 ## Instructions
 
@@ -18,7 +18,7 @@ Show security findings from scans.
    curl "http://localhost:8080/findings?status=active&limit=50"
    ```
 
-   If type specified (`ai` or `dast`):
+   If a source type is specified:
    ```bash
    curl "http://localhost:8080/findings?source_type=$ARGUMENTS&status=active&limit=50"
    ```
@@ -37,3 +37,6 @@ Show security findings from scans.
    ```
 
 4. Include summary counts at the end
+
+Keep reported/suspected and exploit-verified findings distinct. Include the latest verification
+verdict when it affects the interpretation.

@@ -1,14 +1,23 @@
 # Documentation Index
 
-**Reconciled:** 2026-07-12. Top-level documents are maintained references or active designs. Dated
+**Reconciled:** 2026-07-17. Top-level documents are maintained references or active designs. Dated
 audits, completed implementation prompts, and superseded plans belong in [`archive/`](archive/README.md).
 Code, database schemas, runtime receipts, and tests remain authoritative when a document disagrees.
+
+## Start Here
+
+| Document | Audience and purpose |
+|---|---|
+| [`../README.md`](../README.md) | Install, first scan, workflow selection, UI/CLI/API orientation, safety, and troubleshooting |
+| [`../WALKTHROUGH.md`](../WALKTHROUGH.md) | Screenshot-based terminal and UI walkthrough |
+| [`../skills/README.md`](../skills/README.md) | Agent skill catalog, setup, and maintenance |
+| [`../AGENTS.md`](../AGENTS.md) | Canonical coding-agent operations and request examples |
+| [`functionality-reference.md`](functionality-reference.md) | Exhaustive product map plus generated code-surface inventory |
 
 ## Product And Operations
 
 | Document | Purpose |
 |---|---|
-| [`functionality-reference.md`](functionality-reference.md) | Canonical exhaustive product map plus generated code-surface inventory |
 | [`proposed-next-steps.md`](proposed-next-steps.md) | Single live hardening roadmap and acceptance status |
 | [`SMART_SCAN_POLICY.md`](SMART_SCAN_POLICY.md) | Smart-scan budget, proof, safety, and release policy |
 | [`owasp-coverage-matrix.md`](owasp-coverage-matrix.md) | Implemented DAST mechanisms mapped to OWASP categories |

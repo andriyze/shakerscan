@@ -60,6 +60,9 @@ flags, skills, agents, adapters, modules, and durable tables) plus architecture/
 - **Scan Detail (`/scans/{id}`)**: live logs with auto-scroll while running (5s refresh), progress bar + current phase, partial-results view for failed scans (warning banner), refreshed deployment decision, full report with PDF export, compliance section, resolved coverage budget, AI Gate evidence, and Model Intake artifact checks when complete. Preserves list filter context on back navigation.
 - **Exposure (`/exposure`)**: graph linking domains, targets, APIs, auth roles, third-party JS/vendors, cloud hints, AI targets, MCP tools, model artifacts, scans, and findings. Registered web assets expose a separate **Investigate autonomously** action that launches a target-bound hunt after readiness and authorization checks.
 - **Continuous ASM (`/asm`)**: target coverage, family proof rollups, scheduler decisions, endpoint inventory, gaps, recommendations, and target campaign timeline. **Close gaps autonomously** launches an ASM-bound mission; ordinary improve/test actions remain available separately.
+- **Timeline (`/timeline`)**: cross-product mission feed for scans, schedules, command results, evidence bindings, refuters, and exports.
+- **Campaigns (`/campaigns`, `/campaigns/{id}`)**: create and inspect bounded mission campaigns, lifecycle state, finding impact, and the action ledger.
+- **Evidence (`/evidence`)**: browse evidence instances, inspect objects, export content-free manifests/bundles, and run immutable-preview, approval-gated retention cleanup.
 - **New Scan (`/scan/new`)**: scan type grid (6 types with duration/description), coverage budget selector (`fast`, `balanced`, `thorough`, `exhaustive`), advanced option toggles (Active Testing, Nuclei Templates, Subdomain Discovery, Enhanced DNS, JS Dependency Scanning, JS Secret Scanning), and optional custom budget overrides. Warning for active testing types.
 - **Targets (`/targets`)**: hierarchical tree (root domains with collapsible subdomains), filter by discovery source/grade/has-findings, sort by domain/last-scanned/findings/score/date, search. Actions: add target, scan individual (dropdown), scan all in domain set, discover subdomains, create schedule (icon link). Shows subdomain count, scan count, findings count, grade per target.
 - **Schedules (`/schedules`)**: create/toggle/delete recurring daily/weekly normal scans and typed ASM coverage waves (`asm_improve`). Evidence cleanup is intentionally interactive-only; legacy `evidence_retention_sweep` schedules are disabled and cannot be created or resumed.
@@ -71,7 +74,9 @@ flags, skills, agents, adapters, modules, and durable tables) plus architecture/
 - **Interactive (`/interactive`)**: browser sessions, managed credential profiles, target principals, authz expectations, endpoint replay, screenshots, and explicit manual finding creation.
 - **Exceptions (`/exceptions`)**: exception queue, owner/approver/control repair, expiry visibility, and lifecycle sweep.
 - **Command Arsenal (`/settings/arsenal`)**: command contracts, plans, scope/approval receipts, action ledger, hypotheses, refuters, tools, local agents, context packs, and decision traces.
+- **AI Operations Router (`/settings/ai-ops-router`)**: preview natural-language operations as bounded API plans with safety, missing-input, blast-radius, and confirmation details before optional execution.
 - **Autonomous Hunt (`/settings/research-agent`)**: create target-bound analysis or gated active episodes and optionally run them with durable server-side autopilot. Subject-bound launch profiles cover target hunts, exact-finding verification, and ASM gap closure. The controller leases one episode at a time, waits for linked scans and finding retests, rejects duplicate no-progress actions, reserves a final conclusion turn, meters failed provider attempts, and continues if the browser closes. Inspect the actual model, immutable observations, linked work, finding outcome, request-unit budgets, decisions, errors, and events; pause/resume or cancel the episode plus linked work. The lead backlog remains at `/settings/research-agent/leads`.
+- **Research Experiments and Runs (`/settings/research-agent/experiment`, `/settings/research-agent/runs/{id}`)**: create bounded HTTP/workflow experiments and inspect durable run state and proof handoff.
 - **Long-running research campaigns**: the Research Agent can wrap bounded episodes in a durable campaign. A campaign shares recent-action memory across episodes, starts a fresh episode after a bounded one concludes, and continues until its time/episode ceiling, operator pause/cancel, missing input, or expired approval. The default UI path needs only a target, authorization confirmation, and optional ceilings.
 - **Research planner choice**: `shakerscan agent codex|claude|opencode` marks the current coding-agent session as the default research brain. On a clean install, launch Deep Hunt with `planner_mode: "agent"` (the campaign API default), drive the returned awaiting-planner episode immediately, and submit one bounded decision at a time from the current observation; no stored LLM/API key is required. Use `planner_mode: "configured_ai"` only when the user explicitly wants unattended server autopilot backed by `/settings/ai`, or `planner_mode: "local_codex"` for separate isolated `codex exec` planner processes. Stop after a decision queues linked scan/retest work; continue the campaign when the user asks again.
 - **Settings (`/settings`)**: AI providers, scan execution policy, automation defaults, and approval-receipt enforcement.
@@ -270,8 +275,8 @@ curl -X POST "http://localhost:8080/session/{session_id}/findings" \
 
 Status options: `active`, `resolved`, `false_positive`, `accepted_risk`
 
-Finding source filters are first-class: `dast`, `ai`, `ai_gate`, `ai_session`, `model_intake`,
-`asm`, and `manual`. The UI exposes DAST, AI Gate, Model Intake, ASM, and Manual controls; use the
+Finding source filters are first-class: `dast`, `ai`, `ai_gate`, `ai_session`, `autonomous`,
+`model_intake`, `asm`, and `manual`. The UI exposes DAST, AI Gate, Model Intake, ASM, and Manual controls; use the
 broader `ai` API filter when AI Gate and AI-session findings should be combined.
 
 **Findings Query Parameters:**
@@ -1334,7 +1339,9 @@ Interactive security testing sessions enable collaborative manual penetration te
 4. AI executes tests and reports findings immediately
 5. Validated findings are saved to the database
 
-**Recommended Workflow**: Run a smart scan first, then use interactive session to validate findings and explore areas scanners miss.
+**Recommended Workflow**: When the user has authorized active testing and a Smart scan would add
+useful context, run it first; otherwise bootstrap from an existing scan or use the interactive
+session directly. After submitting any scan, report its ID and UI link and stop.
 
 ### Bootstrapping from Scan Data
 
@@ -1480,7 +1487,7 @@ For authenticated scans, focused XSS/SQLi-only checks, budget profiles/custom bu
 ## Files Structure
 
 ```
-scanner-oss/
+shakerscan/
 ├── scanner.sh           # CLI tool (start, stop, scan, scale, etc.)
 ├── docker-compose.yml   # Docker stack orchestration
 ├── CLAUDE.md            # Claude Code instructions

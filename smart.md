@@ -781,7 +781,7 @@ Each finding is updated with verification metadata:
 
 ---
 
-## Phase 5: Smart IDOR/BOLA Testing (New)
+## Phase 5: Smart IDOR/BOLA Testing
 
 ### 5.1 ID Pattern Discovery
 
@@ -820,12 +820,14 @@ For each discovered ID pattern:
 if user1_status == 200 and user2_status == 200:
     if user1_body == user2_body:  # Identical responses
         if has_user_data_indicators(user1_body):  # Contains user-specific data
-            # Potential BOLA - both users accessing same resource
+            # BOLA candidate: require distinct-principal, ownership, impact,
+            # and control receipts before promotion
 
 # Unauthenticated access detection
 if no_auth_status == 200 and len(no_auth_body) > 50:
     if not is_login_page(no_auth_body):
-        # Critical BOLA - no authentication required
+        # Unauthenticated-access candidate: verify the object is non-public,
+        # sensitive, and distinguishable from a normal public response
 ```
 
 ### 5.4 Method Variation Testing
@@ -837,7 +839,8 @@ For each endpoint with ID:
 ├─ Test DELETE (deletion)
 └─ Test PATCH (partial modification)
 
-If 200 response: Report potential unauthorized action
+If a response suggests success: record a candidate and require before/after state or sensitive-data
+proof plus an authorized control before promoting it to a finding.
 ```
 
 ---
