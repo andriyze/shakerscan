@@ -14558,6 +14558,124 @@ def test_trusted_workflow_proof_requires_stable_replay_and_restoration():
     assert proof["reexecuted_at_handoff"] is False
 
 
+# --- create-based mass_assignment: best-effort restoration (registration is unpromotable otherwise,
+# because the target has no delete route). The finding stays proven by the three server-derived MA
+# predicates across two runs; verified restoration is a cleanliness gate, not a soundness gate. These
+# guards prove the relax is zero-FP: it is scoped to the mass_assignment family AND the create->delete
+# shape, it never bypasses a predicate, and it never relaxes any other family's restoration. ---
+
+_CREATE_MA_NORMALIZED = {
+    "steps": [
+        {"label": "list_before", "checkpoint": "before", "method": "GET"},
+        {"label": "control", "checkpoint": "mutation", "method": "POST", "extract": [{"name": "control_id"}]},
+        {"label": "mutate", "checkpoint": "mutation", "method": "POST", "extract": [{"name": "created_id"}]},
+        {"label": "cleanup_created", "checkpoint": "cleanup", "method": "DELETE"},
+        {"label": "list_after", "checkpoint": "after", "method": "GET"},
+    ]
+}
+
+
+def _create_ma_execution(*, benign_ok=True):
+    import workflow_experiment as _we
+    created_hash = hashlib.sha256(b"42").hexdigest()
+    control_hash = hashlib.sha256(b"43").hexdigest()
+    # The persistence proof requires the submitted privilege value's fingerprint to equal the
+    # read-back value's fingerprint -- so the forbidden field genuinely persisted (admin, not a label).
+    role_fp = _we._value_fingerprint("admin")
+    return {
+        "proof_family": "mass_assignment",
+        # No delete route on the target -> restoration can never be *verified*.
+        "restoration_verified": False,
+        "observations": [
+            {"label": "control", "principal": "user1", "checkpoint": "mutation",
+             "request": {"method": "POST", "path": "/api/Users"},
+             "submitted_fields": ["display_name"],
+             "submitted_field_hashes": {"display_name": "h"},
+             "extracted": {"control_id": {"sha256": control_hash}},
+             "response": {"status": 201 if benign_ok else 400}, "error": None},
+            {"label": "mutate", "principal": "user1", "checkpoint": "mutation",
+             "request": {"method": "POST", "path": "/api/Users"},
+             "submitted_fields": ["role"],
+             "submitted_field_hashes": {"role": role_fp},
+             "extracted": {"created_id": {"sha256": created_hash}},
+             "response": {"status": 201, "json_keys": ["role", "id"]}, "error": None},
+            {"label": "control_verify", "principal": "user1", "checkpoint": "action",
+             "request": {"method": "GET", "path": "/api/Users/43"},
+             "response": {"status": 200, "selected_json": {"$.role": "user"}}, "error": None},
+            {"label": "verify", "principal": "user1", "checkpoint": "action",
+             "request": {"method": "GET", "path": "/api/Users/42"},
+             "response": {"status": 200, "selected_json": {"$.role": "admin"}}, "error": None},
+            # Best-effort cleanup that the target rejects (401) -- attempted, but not a hard error.
+            {"label": "cleanup_created", "principal": "user1", "checkpoint": "cleanup",
+             "request": {"method": "DELETE", "path": "/api/Users/42"},
+             "response": {"status": 401}, "error": None},
+        ],
+        "comparisons": [{"control": "control_verify", "candidate": "verify", "comparable": True,
+                         "selected_json_changed": {"$.role": ["user", "admin"]}}],
+        "assertion_results": [
+            {"id": "c", "type": "status_in", "step": "control", "values": [201],
+             "predicate": "benign_control_accepted", "passed": benign_ok},
+            {"id": "f", "type": "status_in", "step": "mutate", "values": [201],
+             "predicate": "forbidden_field_accepted", "passed": True},
+            {"id": "s", "type": "comparison_changed", "control": "control_verify", "candidate": "verify",
+             "predicate": "observable_state_change", "passed": True},
+            # The restored assertion FAILS (the created admin persists) -- consistently across both runs.
+            {"id": "r", "type": "restored", "control": "list_before", "candidate": "list_after",
+             "predicate": "before_after_state", "passed": False},
+        ],
+    }
+
+
+def test_create_based_mass_assignment_promotes_without_verified_restoration():
+    execution = _create_ma_execution()
+    proof = api_module._trusted_workflow_family_proof(execution, execution, normalized=_CREATE_MA_NORMALIZED)
+    assert proof["restoration_verified"] is False        # honestly reported
+    assert proof["reexecuted_at_handoff"] is True         # rescued by the two-run create-MA path
+    assert proof["verdict"] == "verified"
+    assert proof["promotable"] is True
+    assert set(proof["stable_predicates"]) == {
+        "forbidden_field_accepted", "observable_state_change", "benign_control_accepted"}
+
+
+def test_create_based_mass_assignment_gate_is_family_and_shape_scoped():
+    ok = _CREATE_MA_NORMALIZED
+    # family gate: only mass_assignment is ever relaxed.
+    assert api_module._is_create_based_mass_assignment("mass_assignment", ok) is True
+    assert api_module._is_create_based_mass_assignment("bola", ok) is False
+    assert api_module._is_create_based_mass_assignment("workflow", ok) is False
+    assert api_module._is_create_based_mass_assignment("data_exposure", ok) is False
+    # shape gate: needs BOTH a create (POST mutation with extract) AND an attempted DELETE cleanup.
+    no_create = {"steps": [{"checkpoint": "mutation", "method": "PUT"},
+                            {"checkpoint": "rollback", "method": "PUT"}]}
+    assert api_module._is_create_based_mass_assignment("mass_assignment", no_create) is False
+    no_cleanup = {"steps": [{"checkpoint": "mutation", "method": "POST", "extract": [{"name": "id"}]}]}
+    assert api_module._is_create_based_mass_assignment("mass_assignment", no_cleanup) is False
+    create_no_extract = {"steps": [{"checkpoint": "mutation", "method": "POST"},
+                                    {"checkpoint": "cleanup", "method": "DELETE"}]}
+    assert api_module._is_create_based_mass_assignment("mass_assignment", create_no_extract) is False
+
+
+def test_create_based_mass_assignment_relax_still_requires_every_predicate():
+    # Even with the restoration relax, a MISSING required predicate (benign control rejected) cannot
+    # reach `verified`. The relax only drops the cleanup gate; it never manufactures a predicate.
+    execution = _create_ma_execution(benign_ok=False)
+    proof = api_module._trusted_workflow_family_proof(execution, execution, normalized=_CREATE_MA_NORMALIZED)
+    assert "benign_control_accepted" not in proof["stable_predicates"]
+    assert proof["verdict"] != "verified"
+    assert proof["promotable"] is False
+
+
+def test_restoration_stays_required_for_non_create_mass_assignment():
+    # An UPDATE-based mass_assignment (PUT + rollback, no create) is NOT create-based, so it still
+    # needs verified restoration -- the relax must not leak to the restorable update path.
+    execution = _create_ma_execution()
+    update_shape = {"steps": [{"checkpoint": "mutation", "method": "PUT"},
+                              {"checkpoint": "rollback", "method": "PUT"}]}
+    proof = api_module._trusted_workflow_family_proof(execution, execution, normalized=update_shape)
+    assert proof["reexecuted_at_handoff"] is False
+    assert proof["promotable"] is False
+
+
 def test_trusted_workflow_bola_proof_requires_full_server_bound_receipt():
     execution = {
         "proof_family": "bola",

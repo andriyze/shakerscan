@@ -812,6 +812,46 @@ def _normalize_principal_variables(raw: Any) -> list[dict[str, str]]:
     return normalized
 
 
+_MANAGED_REFERENCE_PATTERN = re.compile(r"\$\{([A-Za-z][A-Za-z0-9_]*)\}")
+
+
+def _is_pure_managed_reference(value: Any, declared: set[str]) -> bool:
+    """True only when ``value`` is EXACTLY one ``${var}`` bound to a declared principal variable.
+
+    A principal variable resolves server-side from ``captured_refs`` (never a model literal) and is
+    persisted only as a sha256 receipt. So a sensitive body key whose value is a pure managed
+    reference sends a SERVER-provided credential to the same-origin target -- it cannot smuggle a
+    literal secret into the stored workflow, and the model cannot choose the value. Any other shape
+    (literal, concatenation, partial interpolation) is NOT managed and stays forbidden.
+    """
+    if not isinstance(value, str):
+        return False
+    match = _MANAGED_REFERENCE_PATTERN.fullmatch(value.strip())
+    return bool(match and match.group(1) in declared)
+
+
+def _sensitive_body_violation(value: Any, declared: set[str]) -> str | None:
+    """Return the first sensitive body key carrying a NON-managed (literal) value, else None.
+
+    Preserves the original recursive sensitive-key ban (``_sensitive_object_key``) but exempts a
+    sensitive key whose value is a pure managed reference -- e.g. a registration ``password`` bound
+    to a server-provided ``${reg_cred}``.  Literal secrets remain forbidden.
+    """
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if _sensitive_name(key) and not _is_pure_managed_reference(item, declared):
+                return str(key)
+            nested = _sensitive_body_violation(item, declared)
+            if nested:
+                return nested
+    elif isinstance(value, list):
+        for item in value:
+            nested = _sensitive_body_violation(item, declared)
+            if nested:
+                return nested
+    return None
+
+
 def normalize_workflow(target_url: str, raw: Any) -> dict[str, Any]:
     payload = raw if isinstance(raw, dict) else {}
     steps = payload.get("steps") if isinstance(payload.get("steps"), list) else []
@@ -872,7 +912,7 @@ def normalize_workflow(target_url: str, raw: Any) -> dict[str, Any]:
             form_body = _normalize_mapping(index, "form_body", item.get("form_body"), max_items=50) if isinstance(item.get("form_body"), dict) else None
             if json_body is not None and form_body is not None:
                 raise WorkflowContractError(f"step_{index}_multiple_body_types")
-            if _sensitive_object_key(json_body):
+            if _sensitive_body_violation(json_body, declared) is not None:
                 raise WorkflowContractError(f"step_{index}_json_body_sensitive_key_forbidden")
             _bounded_json_size(query)
             _bounded_json_size(json_body)
@@ -1147,6 +1187,7 @@ async def execute_workflow(
     }
     receipts = validate_principal_contexts(principal_contexts, used_slots)
     variables: dict[str, str] = {}
+    managed_names = {binding["name"] for binding in workflow.get("principal_variables") or []}
     principal_variable_receipts: list[dict[str, Any]] = []
     for binding in workflow.get("principal_variables") or []:
         context = principal_contexts.get(binding["principal"]) or {}
@@ -1239,7 +1280,13 @@ async def execute_workflow(
                         for name, value in headers.items()
                     ):
                         raise WorkflowContractError("rendered_header_forbidden")
-                    if any(_sensitive_object_key(value) for value in (query, json_body, form_body)):
+                    if _sensitive_object_key(query) or _sensitive_object_key(form_body):
+                        raise WorkflowContractError("rendered_sensitive_key_forbidden")
+                    # json_body sensitive keys are validated against the UNRENDERED step body so a
+                    # managed-reference credential (e.g. password bound to a server ${reg_cred}) is
+                    # allowed while any literal secret still fails closed. Keys are static across
+                    # rendering, so checking the pre-render body is equivalent for key names.
+                    if _sensitive_body_violation(step["json_body"], managed_names) is not None:
                         raise WorkflowContractError("rendered_sensitive_key_forbidden")
                     if _mapping_contains_control_character(query):
                         raise WorkflowContractError("rendered_query_contains_control_character")

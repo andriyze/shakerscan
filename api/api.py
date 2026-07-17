@@ -24541,6 +24541,36 @@ def _trusted_invariant_execution_evidence(
     return {"family": family, "predicates": predicates, "bindings": bindings}
 
 
+def _is_create_based_mass_assignment(family: Any, normalized: dict[str, Any] | None) -> bool:
+    """Server-derived: a mass_assignment workflow that CREATES an object it then best-effort deletes.
+
+    Create-based mass_assignment leaves a bounded, labeled object the target usually has no delete
+    route for (registration is the canonical case), so *verified* restoration is unreachable. The
+    finding is still fully proven by forbidden_field_accepted + observable_state_change +
+    benign_control_accepted across two runs -- verified restoration is a cleanliness gate, not a
+    soundness gate, and dropping it does not touch any family predicate. This is computed ONLY from
+    the workflow shape and the server-derived family (never a model-supplied flag) and is gated to
+    mass_assignment, so it cannot relax restoration for any other family or fake any predicate.
+    """
+    if family_proof.canonical_family(family) != "mass_assignment":
+        return False
+    steps = (normalized or {}).get("steps") or []
+    creates = any(
+        isinstance(step, dict)
+        and step.get("checkpoint") == "mutation"
+        and str(step.get("method") or "").upper() == "POST"
+        and step.get("extract")
+        for step in steps
+    )
+    attempts_cleanup = any(
+        isinstance(step, dict)
+        and step.get("checkpoint") in {"cleanup", "rollback"}
+        and str(step.get("method") or "").upper() == "DELETE"
+        for step in steps
+    )
+    return creates and attempts_cleanup
+
+
 def _trusted_workflow_family_proof(
     first: dict[str, Any],
     replay: dict[str, Any],
@@ -24687,8 +24717,12 @@ def _trusted_workflow_family_proof(
         for item in result.get("observations") or []
         if isinstance(item, dict)
     )
+    # Create-based mass_assignment cannot verify restoration (the target has no delete route for the
+    # created object); its two-run soundness comes from stable predicates surviving re-execution, not
+    # from cleanup. Restoration stays a required gate for every other family and every non-create MA.
+    restoration_ok = restoration_verified or _is_create_based_mass_assignment(family, normalized)
     evidence = {predicate: True for predicate in stable_predicates}
-    evidence["reexecuted_at_handoff"] = bool(stable and restoration_verified and no_errors)
+    evidence["reexecuted_at_handoff"] = bool(stable and restoration_ok and no_errors)
     proof = family_proof.evaluate_family_proof(family, evidence)
     proof_paths = {binding[1] for binding in stable_bindings.values()}
     proof_methods = {
@@ -25108,7 +25142,10 @@ async def _arsenal_dispatch_workflow(p: dict[str, Any], approval_receipt_id: str
             cancel_event,
         )
         annotate_trusted_route_expectations(executed)
-        if executed.get("restoration_verified") is not True:
+        # Create-based mass_assignment cannot verify restoration (no delete route for the created
+        # object), so it is re-executed to establish two-run soundness instead of being replay-blocked.
+        create_based_ma = _is_create_based_mass_assignment(executed.get("proof_family"), normalized)
+        if executed.get("restoration_verified") is not True and not create_based_ma:
             replayed = {
                 "proof_family": executed.get("proof_family"),
                 "observations": [], "assertion_results": [],

@@ -650,6 +650,46 @@ def test_mass_assignment_create_based_binds_readback_to_created_object():
     })
 
 
+def _registration_workflow(password_value, declare_cred=True):
+    # Minimal valid create-based mass_assignment: register (POST) with an overposted role, then
+    # best-effort cleanup. Registration requires a `password` -- a sensitive key.
+    return {
+        "proof_family": "mass_assignment",
+        "objective": "o", "expected_signal": "e", "falsifier": "f",
+        "principal_variables": (
+            [{"name": "reg_cred", "principal": "user1", "ref": "reg_cred"}] if declare_cred else []
+        ),
+        "steps": [
+            {"label": "list_before", "kind": "http", "principal": "user1", "checkpoint": "before",
+             "method": "GET", "path": "/api/Users"},
+            {"label": "mutate", "kind": "http", "principal": "user1", "checkpoint": "mutation",
+             "method": "POST", "path": "/api/Users",
+             "json_body": {"email": "x@y.test", "password": password_value, "role": "admin"},
+             "extract": [{"name": "created_id", "source": "json", "path": "$.id"}]},
+            {"label": "cleanup", "kind": "http", "principal": "user1", "checkpoint": "cleanup",
+             "method": "DELETE", "path": "/api/Users/${created_id}"},
+            {"label": "list_after", "kind": "http", "principal": "user1", "checkpoint": "after",
+             "method": "GET", "path": "/api/Users", "compare_to": "list_before"},
+        ],
+        "assertions": [
+            {"type": "restored", "control": "list_before", "candidate": "list_after",
+             "predicate": "before_after_state"},
+        ],
+    }
+
+
+def test_managed_credential_body_allowed_but_literal_secret_blocked():
+    # A managed reference (a server-resolved ${reg_cred}, persisted only as a sha256 receipt) may back
+    # a sensitive body key -- this is what lets registration mass_assignment send a password.
+    workflow.normalize_workflow("https://x.test", _registration_workflow("${reg_cred}"))
+    # A literal secret in that same key still fails closed -- the moat never stores a plaintext secret.
+    with pytest.raises(workflow.WorkflowContractError):
+        workflow.normalize_workflow("https://x.test", _registration_workflow("literal-password-123"))
+    # A reference to an UNDECLARED variable is not managed, so it is not exempted either.
+    with pytest.raises(workflow.WorkflowContractError):
+        workflow.normalize_workflow("https://x.test", _registration_workflow("${reg_cred}", declare_cred=False))
+
+
 def test_strengthened_family_proofs_reject_benign_behavior():
     # data_exposure: a principal reading its OWN authenticated data (its own JWT) is not exposure.
     own = {
