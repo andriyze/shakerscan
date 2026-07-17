@@ -14997,6 +14997,57 @@ def test_research_autobind_binds_selected_contract_when_ranked_compacted_away():
     assert errors2 == ["experiment_hypothesis_not_on_ranked_live_surface"]
 
 
+def test_research_autobind_mass_assignment_binds_on_mutation_step_without_supplied_id():
+    # A mass_assignment proof reads the field back on a GET verify step, but the lead's identity is the
+    # POST mutation route. The autobind must bind on the state-changing step (not the asserted read
+    # step) and, with no id supplied, match a selected lead by family+route+method -- otherwise grok's
+    # mass_assignment experiments reject with experiment_hypothesis_not_on_ranked_live_surface.
+    target_id = uuid.uuid4()
+    hid = uuid.uuid4()
+    action = {
+        "command": "experiment.workflow",
+        "parameters": {
+            "proof_family": "mass_assignment",
+            "steps": [
+                {"label": "before", "method": "GET", "path": "/orders/all?id=1", "principal": "user1"},
+                {"label": "mutate", "method": "POST", "path": "/orders/1", "principal": "user1",
+                 "json_body": {"status": "paid"}},
+                {"label": "verify", "method": "GET", "path": "/orders/all?id=1", "principal": "user1"},
+            ],
+            "assertions": [
+                {"type": "field_persisted", "step": "verify", "predicate": "forbidden_field_accepted"},
+            ],
+        },
+    }
+    raw = {"action": json.loads(json.dumps(action))}  # no hypothesis_id supplied
+    observation = {
+        "current_surface": {"ranked_hypotheses": []},
+        "selected_hypothesis_contracts": [{
+            "hypothesis_id": str(hid), "family": "mass_assignment",
+            "route": "/orders/{id}", "method": "POST",
+        }],
+    }
+    errors = asyncio.run(api_module._research_autobind_hypothesis(
+        object(), {"target_id": target_id}, raw, observation,
+    ))
+    assert errors == []
+    assert raw["hypothesis_id"] == str(hid)
+
+    # Fail-closed preserved: a mutation route with no matching lead still rejects.
+    bad = {"action": json.loads(json.dumps(action))}
+    bad_obs = {
+        "current_surface": {"ranked_hypotheses": []},
+        "selected_hypothesis_contracts": [{
+            "hypothesis_id": str(hid), "family": "mass_assignment",
+            "route": "/unrelated/{id}", "method": "POST",
+        }],
+    }
+    errors2 = asyncio.run(api_module._research_autobind_hypothesis(
+        object(), {"target_id": target_id}, bad, bad_obs,
+    ))
+    assert errors2 == ["experiment_hypothesis_not_on_ranked_live_surface"]
+
+
 def test_research_autobind_accepts_explicit_ranked_id_when_typed_workflow_refines_dimensions():
     target_id = uuid.uuid4()
     hypothesis_id = uuid.uuid4()

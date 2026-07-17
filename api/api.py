@@ -33694,9 +33694,24 @@ async def _research_autobind_hypothesis(
     for assertion in (params.get("assertions") or []):
         if isinstance(assertion, dict) and assertion.get("predicate") in preferred_predicates:
             preferred_labels.update(str(assertion.get(key) or "") for key in ("step", "candidate") if assertion.get(key))
-    ordered_steps = [step for step in steps if str(step.get("label") or "") in preferred_labels] + [
-        step for step in steps if str(step.get("label") or "") not in preferred_labels
-    ]
+    def _in_preferred(step: dict[str, Any]) -> bool:
+        return str(step.get("label") or "") in preferred_labels
+    # For mutation-based families the vulnerability identity is the state-changing endpoint the
+    # forbidden field is assigned to (the lead's POST/PUT/PATCH route), NOT the GET step an assertion
+    # reads it back on. Binding on the read step derives (GET, /orders/all/{id}) and can never match a
+    # (POST, /orders/{id}) mass_assignment lead -- the experiment_hypothesis_not_on_ranked_live_surface
+    # rejection seen for grok's mass_assignment experiments. Prefer the mutation step for those families.
+    mutation_family = family in {"mass_assignment", "field_constraint", "workflow"}
+    def _is_state_changing(step: dict[str, Any]) -> bool:
+        return str(step.get("method") or "").upper() in {"POST", "PUT", "PATCH"}
+    if mutation_family and any(_is_state_changing(step) for step in steps):
+        ordered_steps = (
+            [s for s in steps if _is_state_changing(s) and _in_preferred(s)]
+            + [s for s in steps if _is_state_changing(s) and not _in_preferred(s)]
+            + [s for s in steps if not _is_state_changing(s)]
+        )
+    else:
+        ordered_steps = [s for s in steps if _in_preferred(s)] + [s for s in steps if not _in_preferred(s)]
     for step in ordered_steps:
         if isinstance(step, dict) and step.get("path"):
             route = _canonical_vulnerability_route(step.get("path"))
@@ -33792,6 +33807,28 @@ async def _research_autobind_hypothesis(
             continue
         if _research_hypothesis_vulnerability_key(hypothesis) == candidate_key:
             raw["hypothesis_id"] = str(hypothesis["id"])
+            return []
+    # The exact dimensional hash legitimately diverges when the planner refines a sparse residue lead
+    # into a typed workflow (extra assertions/variables). When the id was omitted, still bind to a
+    # visibly ranked or selected lead of the SAME family+route+method: that is a real live-surface lead
+    # the board showed the planner, not a manufactured route, so it meets the residue requirement (the
+    # same match the supplied-id branch already accepts) without a brittle full-hash equality.
+    for contract in (
+        list(observation_pack.get("selected_hypothesis_contracts") or [])
+        + [entry.get("hypothesis") for entry in ranked if isinstance(entry, dict)]
+    ):
+        if not isinstance(contract, dict):
+            continue
+        if family_proof.canonical_family(contract.get("family")) != family:
+            continue
+        if _canonical_vulnerability_route(contract.get("route")) != route:
+            continue
+        contract_method = str(contract.get("method") or "").upper()
+        if contract_method and contract_method != method:
+            continue
+        bind_id = str(contract.get("hypothesis_id") or contract.get("id") or "").strip()
+        if bind_id:
+            raw["hypothesis_id"] = bind_id
             return []
     return ["experiment_hypothesis_not_on_ranked_live_surface"]
 
