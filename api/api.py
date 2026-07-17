@@ -37927,8 +37927,35 @@ async def generate_endpoint_inventory_hypotheses(
             """,
             tgt,
         )
+        # A large inventory can sample create collections out of the top-300 (they rank low once
+        # generically "tested"), yet a listable create collection (POST + GET on the same route) is the
+        # highest-value create-based mass_assignment surface. Always include them + their GET sibling so
+        # the create-based lead can form; the family proof backstops any speculative lead.
+        create_rows = await conn.fetch(
+            """
+            SELECT method, path, param_shape, replay_spec, param_location, auth_state,
+                   test_status, last_verdict, last_tested_at
+            FROM target_endpoints e
+            WHERE e.target_id=$1 AND COALESCE(e.test_status,'') <> 'gone'
+              AND upper(e.method) IN ('POST', 'GET')
+              AND rtrim(e.path, '/') IN (
+                SELECT rtrim(p.path, '/') FROM target_endpoints p
+                WHERE p.target_id=$1 AND upper(p.method)='POST' AND COALESCE(p.test_status,'') <> 'gone'
+                INTERSECT
+                SELECT rtrim(g.path, '/') FROM target_endpoints g
+                WHERE g.target_id=$1 AND upper(g.method)='GET' AND COALESCE(g.test_status,'') <> 'gone'
+              )
+            LIMIT 400
+            """,
+            tgt,
+        )
+        merged: dict[tuple[str, str], Any] = {
+            (str(r["method"]).upper(), str(r["path"])): r for r in rows
+        }
+        for r in create_rows:
+            merged.setdefault((str(r["method"]).upper(), str(r["path"])), r)
         requests = _endpoint_inventory_hypothesis_requests(
-            target_id, [row_to_dict(r) for r in rows], created_by=created_by,
+            target_id, [row_to_dict(r) for r in merged.values()], created_by=created_by,
         )
         records = [await _upsert_hypothesis(conn, req) for req in requests]
     return {
