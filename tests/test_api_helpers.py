@@ -14720,6 +14720,30 @@ def test_materialize_create_mass_assignment_workflow_is_valid_and_universal():
         forbidden_field="discount", forbidden_value="100", envelope="data", id_field="id") is None
 
 
+def test_inject_create_ma_credentials_scoped_and_fresh_per_run():
+    pv = [{"name": "ctrl_login", "principal": "user1", "ref": "ctrl_login"},
+          {"name": "adm_login", "principal": "user1", "ref": "adm_login"},
+          {"name": "reg_cred", "principal": "user1", "ref": "reg_cred"}]
+    create_ma = {"proof_family": "mass_assignment", "principal_variables": pv,
+                 "steps": [{"checkpoint": "mutation", "method": "POST", "extract": [{"name": "created_id"}]},
+                           {"checkpoint": "cleanup", "method": "DELETE"}]}
+    ctx = {}
+    api_module._inject_create_mass_assignment_credentials(ctx, create_ma)
+    refs = ctx["user1"]["captured_refs"]
+    assert set(refs) == {"ctrl_login", "adm_login", "reg_cred"}
+    assert refs["ctrl_login"] != refs["adm_login"]        # distinct logins within a run
+    first_login = refs["ctrl_login"]
+    api_module._inject_create_mass_assignment_credentials(ctx, create_ma)  # next run
+    assert ctx["user1"]["captured_refs"]["ctrl_login"] != first_login       # fresh, no replay collision
+    # No-op for non-create-mass_assignment: a bola workflow, or an update-based MA (no POST create).
+    for other in ({"proof_family": "bola", "principal_variables": pv, "steps": []},
+                  {"proof_family": "mass_assignment", "principal_variables": pv,
+                   "steps": [{"checkpoint": "mutation", "method": "PUT"}]}):
+        empty = {}
+        api_module._inject_create_mass_assignment_credentials(empty, other)
+        assert empty == {}
+
+
 def test_trusted_workflow_bola_proof_requires_full_server_bound_receipt():
     execution = {
         "proof_family": "bola",

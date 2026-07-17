@@ -25163,6 +25163,7 @@ async def _arsenal_dispatch_workflow(p: dict[str, Any], approval_receipt_id: str
     _active_workflow_cancellations[workflow_id] = cancel_event
     started_at = datetime.now(timezone.utc)
     try:
+        _inject_create_mass_assignment_credentials(principal_contexts, normalized)
         executed = await _execute_workflow_runtime(
             str(target["url"]),
             workflow_payload,
@@ -25182,6 +25183,7 @@ async def _arsenal_dispatch_workflow(p: dict[str, Any], approval_receipt_id: str
                 "replay_blocked_reason": "first_execution_restoration_not_verified",
             }
         else:
+            _inject_create_mass_assignment_credentials(principal_contexts, normalized)
             replayed = await _execute_workflow_runtime(
                 str(target["url"]),
                 workflow_payload,
@@ -34905,6 +34907,32 @@ def _create_mass_assignment_credentials() -> dict[str, str]:
         "adm_login": f"shakerscan-ma-m-{nonce[14:28]}@shakerscan-probe.test",
         "reg_cred": "ShakerScan9!" + uuid.uuid4().hex[:12],
     }
+
+
+def _inject_create_mass_assignment_credentials(
+    principal_contexts: dict[str, dict[str, Any]], normalized: dict[str, Any],
+) -> None:
+    """Refresh server-generated create-MA credentials before EACH run of the two-run.
+
+    A create with a unique-identifier constraint (e.g. a registration email) would collide on the
+    replay if both runs reused one login, breaking the two-run. Fresh unique credentials per run keep
+    it sound; the predicates, assertion shapes, and proof routes are identical across runs regardless
+    of the concrete login. No-op for every non-create-based-mass_assignment workflow. Values are
+    server-generated (never model-supplied); only their sha256 receipts persist.
+    """
+    if not _is_create_based_mass_assignment(normalized.get("proof_family"), normalized):
+        return
+    fresh = _create_mass_assignment_credentials()
+    for binding in normalized.get("principal_variables") or []:
+        ref = str(binding.get("ref") or "")
+        if ref not in fresh:
+            continue
+        context = principal_contexts.setdefault(str(binding.get("principal") or "user1"), {})
+        refs = context.get("captured_refs")
+        if not isinstance(refs, dict):
+            refs = {}
+            context["captured_refs"] = refs
+        refs[ref] = fresh[ref]
 
 
 def _materialize_create_mass_assignment_workflow(
