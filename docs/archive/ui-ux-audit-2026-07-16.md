@@ -1,5 +1,42 @@
 # Deep UI/UX audit report
 
+> **ARCHIVED (2026-07-17).** This report describes the build inspected on 2026-07-16. Its original
+> findings and “not release-ready” conclusion are preserved below for traceability; they are not a
+> description of the current branch. Use the disposition table immediately below and
+> [`../release-readiness.md`](../release-readiness.md) for current release decisions.
+
+## Release disposition (2026-07-17)
+
+“Fixed” means the reported path has a code/test correction, not that a current release-candidate
+browser pass has occurred. “Partial” means meaningful mitigation landed but the original contract
+has not been completely accepted. Open and accepted-boundary items remain visible in the live
+release checklist.
+
+| ID | Current disposition | Evidence or remaining requirement |
+|---|---|---|
+| AUD-01 | Fixed; RC verification required | `e619b00` introduced immutable, expiring, target-bound retention previews, exact preview approval, one-shot execution, and contract tests. |
+| AUD-02 | **Open release blocker** | Structured dictionaries/lists and bearer/JWT strings are redacted, but serialized nested JSON/form/cookie content is not yet structurally parsed and existing stored evidence has no migration/containment proof. |
+| AUD-03 | Partial; release blocker | UI proof badges now consume one server-derived proof state and trusted research promotion is proof-gated. Public evidence creation still accepts caller-supplied proof/provenance fields and needs a complete authority review. |
+| AUD-04 | Fixed | `5eafecb` normalizes JSONB values; `00a5c2f` also hardens the Arsenal UI against malformed responses. |
+| AUD-05 | Fixed | `dafb83e` loads finding evidence independently for UUID and fingerprint-style deep links. |
+| AUD-06 | Fixed | `5eafecb` adds the canonical `autonomous` source filter and the UI clears failed/stale results. |
+| AUD-07 | Fixed by removing the misleading entry point | `7168c17` removed standalone Campaign creation UI/navigation. `/campaigns` is a read-only mission ledger; executable research runs start from Autonomous Hunt and Arsenal may plan linked mission records. |
+| AUD-08 | Partial; release blocker | Complete chains now require the configured required findings plus verified supporting evidence; the release still needs contract/browser acceptance that hypothetical template steps cannot read as observed proof or inflate confidence. |
+| AUD-09 | Mitigated; RC verification required | The Hunt hub exposes readiness, run detail is outcome-first, and completed runs show yield, blockers, conclusion, and next action. Recheck failure/readiness states in release-candidate browser QA. |
+| AUD-10 | **Open release blocker** | The New Scan UI shows an ownership/permission warning, but Full/Aggressive/Smart and scheduled active work still lack the requested reusable server-authoritative acknowledgement. |
+| AUD-11 | Accepted deployment boundary; architecture work open | Current supported exposure is localhost, Tailscale, or an authenticated firewall/VPN/reverse proxy. Direct public exposure remains unsupported until application authentication/authorization is designed. |
+| AUD-12 | Partial | Evidence storage, integrity, and remote-delete state are more explicit, but a shared end-to-end schema/contract test is still required before closing the original mismatch. |
+| AUD-13 | Mitigated | Failed scans now explain the failing phase, distinguish partial results, retain logs, and offer retry/re-scan paths. Recheck representative worker, policy, and target failures in browser QA. |
+| AUD-14 | Mitigated | ASM now leads with one recommendation, blockers, rationale, and **Improve coverage**; advanced campaign and autonomous actions remain secondary. Continue usability QA on dense target histories. |
+| AUD-15 | Fixed | `8b46f55` added modal drawer semantics, Escape handling, focus trap/restore, inert background behavior, and unique navigation labels. |
+| AUD-16 | Partial | Settings now identifies organization-wide defaults and individual-scan/target precedence, but every operational control does not yet expose a uniform scope/durability label. |
+| AUD-17 | Fixed | `1011e77` restricts web-operation selectors to web targets. |
+| AUD-18 | Fixed | `1011e77` makes the dashboard priority count match the accessible action list; `eb1651c` subsequently redesigned the dashboard around posture, actions, and recent activity. |
+| AUD-19 | Mitigated | Timeline categories and event titles use user-facing investigation/verification language and route to product outcomes; run-level grouping remains a future simplification. |
+| AUD-20 | Mitigated | AI Gate limits inline inventory candidates and separates inventory summary from target setup. Remote deployments must still provide the public API base rather than rely on the localhost fallback. |
+| AUD-21 | **Open validation item** | Focused contract/UI tests were added, but the release-candidate checklist still requires targeted browser coverage for retention, Hunt outcomes, Campaign/Evidence navigation, active authorization, and remote links. |
+| AUD-22 | Fixed by documentation reconciliation; RC sign-off required | README, AGENTS, skills, routes, terminology, status sources, and the walkthrough were reconciled on 2026-07-17. The final candidate must rerun the documentation checks. |
+
 ## 1. Executive summary
 
 The current build is not release-ready.

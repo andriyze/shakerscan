@@ -1,6 +1,12 @@
 # Adaptive Bug Discovery Implementation Plan
 
-**Status:** Active implementation plan  
+> **ARCHIVED (2026-07-17).** This is the implementation ledger for the July adaptive-research
+> waves. It preserves original scope, commit boundaries, acceptance notes, and residuals, including
+> places where the closing commit table lagged later implementation. It is not a current capability
+> or release-status source. Use [`../functionality-reference.md`](../functionality-reference.md) for
+> shipped behavior and [`../proposed-next-steps.md`](../proposed-next-steps.md) for current open work.
+
+**Status:** Historical implementation ledger
 **Started:** 2026-07-12  
 **Primary objective:** Increase verified vulnerability recall on unfamiliar owned applications without increasing false-positive findings.  
 **Authority model:** LLMs propose one bounded action; ShakerScan enforces scope, identity, budgets, execution, evidence, and proof.

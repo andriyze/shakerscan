@@ -1,6 +1,8 @@
 # Full Security Assessment
 
-Run a comprehensive security assessment with ALL security tests including active XSS/SQLi.
+Run a comprehensive security assessment with the Full profile, including authorized active
+XSS/SQLi. Actual coverage depends on discovered surface, authentication, target behavior, configured
+options, budgets, prerequisites, and tool availability.
 
 **Usage**: `/scan-full <target_url>`
 
@@ -36,9 +38,10 @@ Use `API_BASE=${SHAKERSCAN_API_BASE:-http://localhost:8080}` for API calls. Use 
 
 6. When user asks for results later, provide a comprehensive report
 
-## What Full Scan Includes
+## What Full Scan Can Include
 
-Everything in **deep** scan PLUS:
+Full enables the following eligible families in addition to Deep coverage. A family may still be
+blocked, skipped, partial, or unattempted when its prerequisites or budget are unavailable:
 - Active XSS testing (dalfox)
 - Active SQLi testing (sqlmap)
 - WebSocket security testing

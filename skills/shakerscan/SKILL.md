@@ -38,7 +38,7 @@ target binding, approvals, budgets, evidence, and finding proof.
 | Model artifact intake | `/model-intake/*` |
 | Schedules and safe automation defaults | `/schedules*`, `/settings/automation` |
 | Evidence export or retention | `/evidence/*` |
-| Mission timeline and campaigns | `/timeline`, `/arsenal/campaigns*` |
+| Mission timeline and read-only campaign ledger | `/timeline`, `/arsenal/campaigns*` |
 | Natural-language operation preview | `/ai/ops/route` |
 | Interactive browser or BOLA/IDOR workflow | Use the `ai-security-session` skill |
 | JS or frontend attack-surface analysis | Use the `js-analyze` skill |
@@ -118,4 +118,6 @@ when the user asks again.
 - Read `AGENTS.md` for exact request bodies, filters, authentication options, and operational rules.
 - Read `skills/ai-security-session/references/api.md` for interactive session schemas.
 - Use `http://localhost:8080/openapi.json` when an API contract may have changed.
-- In a source checkout, use `docs/functionality-reference.md` for the exhaustive product map.
+- Use the public
+  `https://github.com/andriyze/shakerscan/blob/main/docs/functionality-reference.md` for the
+  exhaustive product map. A source checkout also has it at `docs/functionality-reference.md`.

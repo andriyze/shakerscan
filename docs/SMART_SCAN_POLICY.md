@@ -1,9 +1,11 @@
 # Smart Scan Policy
 
-**Status:** reconciled 2026-07-11. Resolved profile budgets, hard override ceilings, phase watchdogs,
+**Status:** reconciled 2026-07-17. Resolved profile budgets, hard override ceilings, phase watchdogs,
 request-meter telemetry, adaptive throttling, and proof-aware reporting are shipped. Yield-based
 cross-phase budget reallocation below is a target policy, not current runtime behavior. Release SLOs
-are acceptance goals and must not be represented as passing without a current scorecard.
+are acceptance goals and must not be represented as passing without a current scorecard. The named
+release-gate runner and benchmark commands exist, but the GitHub Release workflow does not yet
+enforce this full policy; that automation gap is tracked in `release-readiness.md`.
 
 ## Purpose
 Define how ShakerScan budgets time and attack effort in `smart` mode, while keeping scans safe, explainable, and commercially defensible.
@@ -44,7 +46,9 @@ Resolved smart-scan budget fields include:
 - `active_worklist_max`
 - `request_max`
 
-Default profile values are centralized in `scanner/constants.py` as `SCAN_BUDGET_DEFAULTS`. Per-scan overrides are accepted through `custom_budget`.
+Smart-specific adaptive values are centralized in `scanner/constants.py` as `SMART_SCAN_BUDGETS`.
+General scan-type and coverage-profile defaults use `SCAN_BUDGET_DEFAULTS`. Per-scan overrides are
+accepted through `custom_budget` and capped by the configured ceilings.
 
 ## Target Phase Allocation
 
@@ -80,7 +84,8 @@ Recommended thresholds:
 - Cap active probes per endpoint and per parameter family.
 - Apply adaptive backoff on `429`/`503`.
 - Downgrade unverified `critical/high` findings after verification budget exhaustion.
-- Require explicit operator consent for aggressive active modes.
+- Require explicit operator consent for active modes. Agent workflows enforce this conversationally;
+  the reusable server-authoritative acknowledgement remains a release-readiness item.
 
 ## Verification Policy
 - `critical/high` findings require proof or independent corroboration.
@@ -104,8 +109,10 @@ Coverage and confidence targets:
 - `smart_endpoint_coverage`: `>= 0.50` on authenticated test apps
 - `benchmark_quality_score`: `>= 60` for reference corpora
 
-## Release Gates
-A release is blocked if any of these fail:
+## Release Acceptance Policy
+
+The release owner must block a release if any of these fail. These are policy requirements; they are
+not all automatically enforced by the current GitHub Release workflow:
 - Schema/API compatibility checks for upgraded environments.
 - Benchmark assertion suite (`tests/benchmark/*`) fails.
 - Precision or confidence SLO regressions exceed tolerance.

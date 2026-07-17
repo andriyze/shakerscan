@@ -1,5 +1,11 @@
 # Deep Hunt — Discovery & Loop Improvement Plan
 
+> **ARCHIVED (2026-07-17).** This is a point-in-time implementation and live-drive ledger for the
+> create-based mass-assignment session. It preserves the observed proof path, campaign blockers, and
+> proposed sequence. The still-open discovery, surface-gating, ranking, and configured-planner items
+> have been migrated to [`../proposed-next-steps.md`](../proposed-next-steps.md); use that document
+> for current ordering and [`../release-readiness.md`](../release-readiness.md) for release gates.
+
 _Grounded in the 2026-07-17 create-based mass-assignment session: the engine was made to find AND
 verify a genuinely net-new bug with zero false positives, proven end-to-end through the real dispatch,
 then driven through a live gated campaign to the exact blocking gates. This document captures the

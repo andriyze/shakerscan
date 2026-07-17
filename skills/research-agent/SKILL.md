@@ -10,6 +10,14 @@ Use ShakerScan's research episode controller for adaptive investigation. The age
 Use a single episode for a bounded investigation. Use a campaign when the user explicitly wants
 Deep Hunt to continue across multiple bounded episodes under shared time and episode ceilings.
 
+## Keep The Product Terms Straight
+
+- **Autonomous Hunt** is the UI front door under the **AI Investigator** navigation group.
+- A **research episode** is one bounded observation/decision loop.
+- A **Deep Hunt run/research campaign** chains bounded episodes under shared ceilings.
+- `/campaigns` is a separate read-only mission-action ledger. Do not send users there to start or
+  control a Deep Hunt; use `/settings/research-agent` and its run pages.
+
 ## Choose The Planner
 
 - **Current agent session (default):** launch with `planner_mode: "agent"` and `autopilot: false`, then read the current observation and submit exactly one decision to `/research/episodes/{id}/decisions`. When `SHAKERSCAN_RESEARCH_PLANNER_MODE=agent` is present (set by `shakerscan agent codex|claude|opencode`), always use this mode unless the user explicitly asks for a stored provider or isolated local Codex. No ShakerScan AI provider configuration is required.
@@ -49,11 +57,24 @@ For a durable campaign:
 - Do not claim a vulnerability is verified. Only ShakerScan proof contracts can promote findings.
 - Do not bypass a rejected decision. Read its validation errors and choose a new bounded step.
 - Active work requires a `gated` episode, receipts, the execution feature flag, and existing command-specific checks.
-- `experiment.http_diff` may use only relative same-origin paths and anonymous headers. Use two to four steps with the first as the control; never place credentials or receipt data in a step.
+- `experiment.http_diff` may use only relative same-origin paths, anonymous headers, and
+  `GET`/`HEAD`/`OPTIONS`. Use two to four steps with the first as the control; never place credentials
+  or receipt data in a step.
 - A step may use `json_body` or `form_body`, extract a non-sensitive scalar with `extract`, and reference it in later steps as `${name}`. Use `role: verify` and `compare_to` for before/after side-effect checks.
-- Use `experiment.workflow` only when managed target principals are already configured. Supply a caller-generated `workflow_id`, two to twelve typed HTTP/browser steps, principal slots, and checkpoints; never supply credential material. Cross-principal runs fail closed unless ShakerScan can prove distinct profiles and account identities.
+- Use `experiment.workflow` only when managed target principals are already configured. Supply two
+  to twelve typed HTTP/browser steps, principal slots, checkpoints, and the identifiers required by
+  the current projected schema; never supply credential material. Cross-principal runs fail closed
+  unless ShakerScan can prove distinct profiles and account identities.
+- Credential-tier Deep Hunt may expose typed `PUT`/`PATCH`/`DELETE` workflow steps only when later
+  cleanup/rollback and restoration assertions are present. Do not remove those steps or weaken the
+  predicates supplied by the server-selected family template.
 - Workflow browser actions are limited to same-origin navigate, click, non-sensitive fill, submit, bounded wait, and scalar extract. Use `POST /experiments/workflows/{workflow_id}/cancel` to stop an active run; partial output remains unverified.
-- Treat HTTP experiment differences as leads. Route them to a deterministic family verifier before describing a vulnerability as proven.
+- Treat HTTP-differential results as leads. A workflow may produce a verified finding only when
+  ShakerScan independently re-executes it, derives the deterministic family predicates, and passes
+  the promotion gate. Never infer that outcome from planner prose or an HTTP status alone.
+- A server-materialized create-based mass-assignment test can leave labeled test objects when the
+  target has no discovered delete route. Use it only when the current observation/template offers
+  it, and surface that cleanup limitation in the final outcome.
 
 ## API Skeleton
 

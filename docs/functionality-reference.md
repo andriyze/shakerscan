@@ -160,8 +160,9 @@ knobs: `max_urls`, `browser_max_pages`, `api_probe_limit`, `nuclei_max_targets`,
 `param_discovery_url_limit`, `param_discovery_max_params`, and `phase4_max_seconds`.
 
 The **smart** scan applies its own adaptive budget matrix (`SMART_SCAN_BUDGETS`) and supports
-`no_early_stop` + `thorough_params` shortcuts. See [`smart.md`](../smart.md) and
-[`docs/SMART_SCAN_POLICY.md`](SMART_SCAN_POLICY.md) for the full smart-scan policy.
+`no_early_stop` + `thorough_params` shortcuts. See
+[`docs/SMART_SCAN_POLICY.md`](SMART_SCAN_POLICY.md) for the current operator policy. Historical
+phase-by-phase implementation notes are archived and are not a current source-location map.
 
 ---
 
@@ -815,18 +816,20 @@ server autopilot. `local_codex` uses the host-side
 `./scanner.sh research <episode-id> [max-decisions]` with an isolated ephemeral Codex process and
 fails fast when server autopilot is enabled for the episode, preventing two planners from racing the
 same immutable observation. Pause server autopilot before invoking the local runner. The command
-prints a compact decision/episode receipt and UI path instead of the full observation pack.
-No planner path can mint proof or findings. Cancellation terminates the episode, cancels linked
-queued retests and pending/running scans where possible, and reports already-running retests as
-continuing rather than pretending they stopped.
+prints a compact decision/episode receipt and UI path instead of the full observation pack. A planner
+cannot mint proof or findings. A trusted server-side workflow replay may create or refresh a finding
+only after deterministic family proof and the promotion gate pass. Cancellation terminates the
+episode, cancels linked queued retests and pending/running scans where possible, and reports
+already-running retests as continuing rather than pretending they stopped.
 
 `experiment.http_diff` is the first typed adaptive experiment actuator. It accepts two to four
 anonymous control/mutation/verification requests using relative same-origin paths, JSON or form
 bodies, bounded query/header mutations, and named scalar extraction from non-sensitive JSON paths
 or response headers. Later steps may reference extracted resource values as `${name}`; every
 rendered request is revalidated before dispatch. It forbids model-supplied credential/host headers
-and redirects. Autonomous planner proposals are limited to non-destructive `GET`, `HEAD`, `OPTIONS`,
-and `POST`; the manual typed-experiment surface retains the broader runtime method contract. Variable
+and redirects. Autonomous planner proposals are limited to `GET`, `HEAD`, and `OPTIONS`;
+`experiment.http_diff` cannot receive cleanup-safe write authority because it has no restoration
+contract. The manual typed-experiment surface retains the broader runtime method contract. Variable
 references and extract names are preflighted across the complete experiment,
 so undeclared, forward, duplicate, or over-budget variables fail before any request is sent. Query
 and form values are constrained to bounded scalars. Responses are closed after a capped streaming
@@ -843,12 +846,16 @@ fill, submit, bounded wait, scalar extraction, and shared `${name}` resources. C
 are decrypted only in API memory and are never accepted in planner parameters. Cross-principal
 workflows require distinct profile IDs and distinct verified account fingerprints before any target
 or browser request. Results contain content-free principal/profile/role/tenant identity receipts,
-bounded mixed HTTP/browser observations, and unverified comparisons. A caller-supplied workflow UUID
-allows cooperative cancellation through `POST /experiments/workflows/{id}/cancel`; cancellation is
-checked between steps and browser contexts always close in a `finally` block. Workflow output cannot
-create or verify a finding. Unattended research exposes only `GET`, `HEAD`, `OPTIONS`, and `POST`
-HTTP steps for both experiment commands; `PUT`, `PATCH`, and `DELETE` remain available only through
-manual typed experiment execution with explicit operator control and cleanup.
+bounded mixed HTTP/browser observations, comparisons, assertions, and restoration outcomes. A
+caller-supplied workflow UUID allows cooperative cancellation through
+`POST /experiments/workflows/{id}/cancel`; cancellation is checked between steps and browser contexts
+always close in a `finally` block. Credential-tier Deep Hunt may receive `PUT`, `PATCH`, and `DELETE`
+steps only through the typed workflow contract, with later cleanup/rollback and restoration
+assertions. The server independently re-executes a promotable workflow, derives family predicates
+from observed results, and may create or refresh a canonical finding only when deterministic family
+proof and promotion gates pass. Create-based mass-assignment workflows may leave explicitly labeled
+test objects when the discovered target has no delete route; this bounded exception is limited to
+server-materialized create/read-back proof and is surfaced in the run outcome.
 
 **Read-only MCP**: `./scanner.sh mcp` starts a stdio MCP adapter over `POST /arsenal/execute`.
 It exposes targets, ASM gaps, findings, content-free evidence manifests, the mission timeline,
@@ -983,7 +990,7 @@ concurrency-limited with per-tool timeouts and a global deadline.
 
 | Route | Operator capability |
 |---|---|
-| `/` | Dashboard metrics plus a compact live-operations header for pending/running queue state, emergency clear, worker scaling/freshness, and Gungnir CT; product status and action center follow below |
+| `/` | Security posture, prioritized action center, recent activity, and a compact operations header for queue state, emergency clear, worker scaling/freshness, and Gungnir CT |
 | `/scan/new` | Scan type, parallel strategy, coverage budget, active options, auth, custom budget, and bounded batch submission with partial-failure receipts |
 | `/scans` | Filter, inspect, cancel, and rescan logical scans without exposing internal rows by default |
 | `/scans/{id}` | Live progress/logs, report, proof/coverage, deployment decision, AI/Model Intake panels, replay, history, and PDF |
@@ -991,7 +998,7 @@ concurrency-limited with per-tool timeouts and a global deadline.
 | `/targets/{id}/graph` | Route/object/principal graph, producer/consumer/auth edges, and graph-derived hypotheses |
 | `/asm` | Coverage, scheduler state, proof-family gaps, recommendations, endpoint inventory, inventory prune, and campaign timeline |
 | `/timeline` | Cross-product mission feed of command results, scans, schedules, evidence bindings, refuters, and exports |
-| `/campaigns` | Mission campaign list with lifecycle status and live linked-finding impact; create new campaigns |
+| `/campaigns` | Read-only mission campaign records with lifecycle status and live linked-finding impact |
 | `/campaigns/{id}` | Campaign detail: live default-policy impact estimate, all-action status rollup, and the bounded action ledger |
 | `/exposure` | Cross-product graph, asset inventory, deltas, and attack paths |
 | `/findings` | Granular source/severity/status/domain/date filters, sorting, bulk triage, cleanup, and retest entry points |
@@ -1020,7 +1027,7 @@ local-agent output parsing; host-side Codex episode driving; and bulk finding re
 this boundary is visible rather than accidental.
 
 Several workflows that were previously API-only now have UI surfaces: the cross-product mission timeline
-(`/timeline`), mission campaign list/detail/create (`/campaigns`), evidence browsing plus content-free
+(`/timeline`), read-only mission campaign list/detail (`/campaigns`), evidence browsing plus content-free
 manifest/bundle export and approval-gated retention sweeps (`/evidence`), the durable AI surface inventory
 (inside `/ai-gate`), hypothesis claim/signal/plan-campaign and the from-plan/from-benchmark
 generators (inside `/settings/arsenal`), the natural-language AI Operations Router (`/settings/ai-ops-router`),
@@ -1883,7 +1890,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `/research` | Bounded Research Agent | Use the `research-agent` skill to create or continue a target-bound research episode or Deep Hunt campaign. | `.claude/commands/research.md` |
 | `/review-skills` | Review Skills | Review all ShakerScan skills, commands, and agents for prompt bugs and quality gaps. | `.claude/commands/review-skills.md` |
 | `/save-finding` | Save Finding | Save an evidence-backed finding from authorized manual or interactive testing. | `.claude/commands/save-finding.md` |
-| `/scan-full` | Full Security Assessment | Run a comprehensive security assessment with ALL security tests including active XSS/SQLi. | `.claude/commands/scan-full.md` |
+| `/scan-full` | Full Security Assessment | Run a comprehensive security assessment with the Full profile, including authorized active | `.claude/commands/scan-full.md` |
 | `/scan-smart` | Smart Adaptive Scan | Run an intelligent adaptive security scan that adjusts based on findings. | `.claude/commands/scan-smart.md` |
 | `/scan` | Scan a target | Run a security scan on the specified target. | `.claude/commands/scan.md` |
 | `/status` | Scanner Status | Check the status of ShakerScan. | `.claude/commands/status.md` |
@@ -1960,11 +1967,12 @@ Only key names and declaring sources are documented; secret values are never rea
 |-------|----------|
 | Agent-facing API how-to (request bodies, examples) | [`CLAUDE.md`](../CLAUDE.md) · [`AGENTS.md`](../AGENTS.md) |
 | Getting started, install, product tour | [`README.md`](../README.md) |
-| Smart scan internals (phase-by-phase) | [`smart.md`](../smart.md) |
 | Smart scan budgets, SLOs, release gates | [`SMART_SCAN_POLICY.md`](SMART_SCAN_POLICY.md) |
+| Historical smart-scan implementation notes | [`archive/smart-scan-implementation-notes.md`](archive/smart-scan-implementation-notes.md) |
 | OWASP coverage and intentional gaps | [`owasp-coverage-matrix.md`](owasp-coverage-matrix.md) |
 | AI red teaming + model intake (engineering onboarding) | [`AI_REDTEAM_AND_MODEL_INTAKE.md`](AI_REDTEAM_AND_MODEL_INTAKE.md) |
 | Current product hardening roadmap | [`proposed-next-steps.md`](proposed-next-steps.md) |
+| Release readiness and publishing checklist | [`release-readiness.md`](release-readiness.md) |
 | Historical AI red teaming + model intake fix ledger | [`archive/ai-redteam-model-intake-fix-plan-2026-06.md`](archive/ai-redteam-model-intake-fix-plan-2026-06.md) |
 | AI test workflows + Honey contract | [`AI_TEST_WORKFLOWS.md`](AI_TEST_WORKFLOWS.md) |
 | Interactive AI security sessions | [`INTERACTIVE_SESSIONS_GUIDE.md`](INTERACTIVE_SESSIONS_GUIDE.md) |

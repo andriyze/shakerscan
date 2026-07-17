@@ -80,7 +80,9 @@ product implementations.
 The general skill covers the full operator workflow by routing complex tasks to the appropriate
 specialized skill or current API reference. The exhaustive list of REST operations, UI pages, CLI
 commands, scanner modules, skills, slash commands, and agents is generated in
-[`docs/functionality-reference.md`](../docs/functionality-reference.md).
+[the public functionality reference](https://github.com/andriyze/shakerscan/blob/main/docs/functionality-reference.md).
+A source checkout also has it at `docs/functionality-reference.md`; the minimal hosted-install
+runtime does not include the full `docs/` tree.
 
 After changing a skill, command, agent, API, CLI, or UI surface:
 

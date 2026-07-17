@@ -1,26 +1,32 @@
 # Proposed Next Steps - Current Status and Hardening Roadmap
 
-**Status (2026-07-12):** the bounded local/owned-target product is implemented, but it is not
+**Status (2026-07-17):** the bounded local/owned-target product is implemented, but it is not
 release-complete. Detector acceptance, strict registry authority, engine-wide cancellation,
-metering-quality contracts, and Wave 6 live parity/soak remain open. The bounded Research Agent now
-ships shadow and read-only one-step loops plus receipt-gated selection of a narrow existing-action
-allowlist. The first typed custom HTTP experiment actuator now supports anonymous same-origin
-control/mutation comparisons with strict request/body/time limits, durable unverified evidence, and
-no direct finding promotion. Authenticated/stateful experiments, unattended production autonomy,
-and multi-node execution remain gated.
+metering-quality contracts, current-fleet validation, and live parity/soak remain open. The Research
+Agent now ships immutable one-decision observations, current-agent/configured-provider/local-Codex
+planner modes, durable multi-episode campaigns, anonymous read-only HTTP differentials, and
+principal-bound HTTP/browser workflows. Credential-tier workflows may use bounded same-origin
+state-changing steps with server-resolved principals, cleanup/restoration contracts, two-run
+corroboration, deterministic family proof, and proof-gated finding promotion. The server can
+materialize selected create-based mass-assignment leads using per-run credentials and discovered
+create/read-back shapes. This remains bounded authorized-target execution, not unrestricted or
+unattended production autonomy.
 
-This is the single live DAST/ASM status and dependency document. Historical implementation detail is
-preserved in the [archive](archive/README.md), including the completed deferred-wave plan and the
-evidence-grounded 2026-07-11 architecture review.
+This is the single live implementation/hardening status document. Historical implementation detail
+is preserved in the [archive](archive/README.md), including the completed adaptive-research wave
+ledger, deferred-wave plan, and evidence-grounded 2026-07-11 architecture review. The separate
+[`release-readiness.md`](release-readiness.md) checklist owns release validation, metadata, installer,
+and publication prerequisites.
 
 ## Current acceptance snapshot
 
 | Area | Current status | Evidence boundary |
 |---|---|---|
-| Unit and contract tests | Passing at the 2026-07-11 implementation checkpoint | Python `1794 passed, 6 skipped`; bounded-agent/API subset `317 passed` |
-| UI production build and browser QA | Passed | Next.js build plus desktop and 390 px scan/ASM/schedule QA |
-| Fleet freshness | Passed at last rebuild | 16/16 workers on `957b688918e9ea58`, zero stale at verification time |
-| Full current-build E2E | Open | Older Model Intake/AI Gate/DAST result counts have not been rerun on the latest rebuilt fleet |
+| Unit and contract tests | No current release-candidate claim | Earlier checkpoints passed, but product work continued after them; rerun on the frozen candidate |
+| Documentation and skill checks | Passing at the 2026-07-17 documentation reconciliation | Generated inventory, local-link/index checks, skill validation, shell syntax, and focused documentation tests; rerun after final candidate changes |
+| UI production build and browser QA | Open for the release candidate | Older desktop/narrow-view acceptance predates the current dashboard and recent research changes |
+| Fleet freshness | No current release-candidate claim | Worker fingerprints must be checked immediately before every benchmark/E2E run |
+| Full current-build E2E | Open | Historical Model Intake/AI Gate/DAST counts are not current-build evidence; implemented versus planned cases are explicit in `E2E_TEST_PLAN.md` |
 | Juice Shop benchmark | Non-current pass | `6/9` on anonymous fleet `ddc6173b`; not a current-fleet claim |
 | Authenticated crAPI benchmark | Corrected rescore fails | scan `94ac5c7f` was previously marked passing from an identity-only BOLA heuristic. The 2026-07-11 corrected rescore is `1/4` but fails `require_verified_bola`: no persisted distinct-principal receipt and no independent authorization control. |
 | Auth bootstrap | Partially proven | Harness minted different JWT identity claims and scheduled two auth lanes; server acceptance is not yet receipt-backed |
@@ -28,10 +34,11 @@ evidence-grounded 2026-07-11 architecture review.
 | Request budgets | Compatibility by default | Meter exists; known opaque tools are rejected in enforce mode; per-adapter quality and soak remain open |
 | Multi-node | Design only | No fencing, stale-owner-write prevention, partition/skew acceptance, or brokered short-lived secrets |
 
-Current implementation progress: commit `53cd5fc` adds redacted principal-validation receipts for
-future benchmark submissions and fixes SQLi's double completion count. Completion ratios are bounded,
-and inconsistent telemetry now fails an explicit benchmark gate. The existing `85d3bafb` artifact
-predates that receipt and remains historical evidence with the limitations recorded in the ledger.
+Current implementation progress includes redacted principal-validation receipts and bounded
+completion ratios (`53cd5fc`), the trusted adaptive workflow/promotion loop, and create-based
+mass-assignment materialization through `2d0dde4`. None of those commits upgrades an older benchmark
+or E2E artifact into a current-build claim. Limitations and reinterpretations remain preserved in the
+[`Benchmark Integrity Ledger`](../results/benchmark-runs/INTEGRITY_LEDGER.md).
 
 ## 1. Detector acceptance
 
@@ -119,11 +126,14 @@ runtime validators rather than descriptive metadata.
 AI may propose, prioritize, correlate, and explain. ShakerScan-owned deterministic contracts decide
 scope, approval, request construction, execution, proof, evidence, severity promotion, finding state,
 and deployment gates. The shipped Research Agent binds each single decision to an immutable
-`ObservationPack` hash, injects target and receipt authority server-side, rejects model-supplied
-control fields, reserves bounded budget, and dispatches only the explicit research allowlist through
-the existing Arsenal gateway. Shadow mode never dispatches; read-only mode cannot select gated
-commands; gated mode additionally requires a target-matching approval/scope receipt and
-`AI_OPS_ROUTER_EXECUTE_ENABLED=true`. AI output still cannot create or verify findings.
+`ObservationPack` hash, injects target, principal, and receipt authority server-side, rejects
+model-supplied control fields, reserves bounded budget, and dispatches only the explicit research
+allowlist through the Arsenal gateway. Shadow mode never dispatches; read-only mode cannot select
+gated commands; gated mode additionally requires target-matching approval/scope receipts and
+`AI_OPS_ROUTER_EXECUTE_ENABLED=true`. Anonymous HTTP differentials remain read-only. Credential-tier
+workflows can use server-authorized writes only through typed same-origin steps and restoration/
+cleanup rules. AI output cannot create or verify findings; trusted live re-execution and the family
+promotion gate control any autonomous finding.
 
 ## 10. Registry and invocation contracts
 
@@ -148,20 +158,49 @@ Prioritize universal response-guided request completion, authenticated API/spec 
 and producer/consumer graph induction, replay-safe sibling-field preservation, and deterministic
 benign-alternative controls. Do not optimize directly against benchmark routes or labels.
 
+## 13. Research discovery and loop acceptance
+
+The create-based mass-assignment dispatcher, server materializer, per-run credentials, read-back
+proof, and proof-gated promotion are implemented. The 2026-07-17 live-drive ledger also established
+that a normal campaign can still stop before dispatch because the persistent target surface does not
+contain the object-instance read-back route or the create-based lead is absent from the ranked live
+board. Treat the dispatcher proof and autonomous campaign acceptance as separate boundaries.
+
+Required next increments:
+
+1. Infer object-instance routes only from target-observed collection/concrete-route facts; do not
+   invent a delete capability merely because an API looks REST-like.
+2. Persist authorized operator/OpenAPI/custom-endpoint ingestion into the canonical target surface
+   used by decision validation.
+3. Design an explicit Lab-only create-surface probe if passive/schema/browser discovery cannot
+   establish the returned object route. Keep server-generated credentials, labels, budgets, and
+   best-effort cleanup visible.
+4. Admit a create-object read-back sibling only through a family-specific, server-derived rule with
+   tests proving unrelated off-surface routes remain rejected.
+5. Keep create-based/net-new and operator-seeded high-severity leads visible under family-balanced
+   ranking without allowing untrusted priority to bypass evidence/provability.
+6. Prove the same server-materialized workflow works with the configured-provider planner, not only
+   the current-agent path.
+7. Rerun a clean live campaign from ordinary discovery to promotion and record findings plus test
+   objects left behind. Do not hand-seed routes/rank to manufacture a green acceptance result.
+
 ## Ordered next work
 
-1. Benchmark truth contract: principal-validation receipt, bounded discovery manifest, valid
-   completion metrics.
-2. Seeded BOLA/SQLi detector controls, followed by universal authenticated discovery.
-3. Registry bypass closure and runtime proof/severity validation.
-4. Engine-wide cancellation plus per-adapter metering-quality contracts.
-5. Quantitative dynamic/static parity, cancellation, rate, and current-fleet detector soak.
-6. Expand held-out Research Agent evaluations beyond contract/scope/risk fixtures and measure useful
-   action selection, model cost, and retry behavior across configured and local planners.
-7. Add a typed `http.experiment` preview/compiler with endpoint/principal references, mutation DSL,
-   benign controls, deterministic predicates, and no raw shell or credentials.
-8. Admit typed experiments to lab/staging only after cancellation, metering, registry, proof, and
-   false-positive gates remain green.
+1. Close the release-blocking evidence redaction, proof-authority, attack-path semantics, and active
+   authorization contracts tracked in `release-readiness.md`.
+2. Freeze a candidate and rerun unit, UI build/browser, release-gate, E2E, and current-fleet
+   benchmark acceptance. Preserve exact fingerprints and content-free receipts.
+3. Seed BOLA/SQLi detector-isolation controls, followed by universal authenticated discovery and an
+   unseeded scorecard.
+4. Close registered-family bypasses and enforce runtime proof/severity validation uniformly.
+5. Complete engine-wide cancellation plus per-adapter metering-quality contracts.
+6. Run quantitative dynamic/static parity, cancellation, rate, and current-fleet detector soak.
+7. Close the research discovery/surface/ranking items in §13, then expand held-out Research Agent
+   evaluations beyond contract/scope/risk fixtures. Measure useful
+   action selection, verified net-new yield, false promotion, model cost, retry behavior, cleanup,
+   and stop quality across current-agent, configured-provider, and isolated-local planners.
+8. Wire the named release gates and version-specific release notes into release automation, correct
+   image license metadata, then deploy and fresh-install-smoke the hosted bootstrap.
 9. Multi-node fencing/idempotency proof last.
 
 ## Intentionally excluded

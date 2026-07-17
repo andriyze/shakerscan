@@ -219,18 +219,29 @@ credential access.
 Deep Hunt campaigns can span multiple bounded episodes while preserving the original target,
 approval, time, and episode limits.
 
+#### Research terminology
+
+| Term | Meaning |
+|---|---|
+| AI Investigator | Navigation group containing the investigation tools |
+| Autonomous Hunt | Main UI for starting and following target-bound research |
+| Research episode | One bounded observation/decision loop |
+| Deep Hunt | Credential-tier intensity that can use proof-gated principal workflows |
+| Research run/campaign | Durable chain of bounded episodes under shared ceilings |
+| Mission campaign | Read-only action ledger shown under **Campaigns**; it is not the Deep Hunt launcher |
+
 ## Web UI map
 
 | Area | What it provides |
 |---|---|
-| Dashboard | Health, queue activity, worker freshness/scaling, Gungnir, recent work, and priority findings |
+| Dashboard | Security posture, prioritized actions, recent activity, queue operations, worker freshness/scaling, and Gungnir |
 | Scans / New Scan | Submission, filters, cancellation, live logs, reports, proof, coverage, and PDF export |
 | Targets / Exposure | Asset inventory, subdomains, exposure graph, and application graph |
 | Continuous ASM | Endpoint inventory, proof-family coverage, gaps, recommendations, and activity |
 | Findings / Exceptions | Triage, notes, retests, replay, cleanup, accepted risk, and exception lifecycle |
 | AI Gate / Model Intake | AI endpoint red teaming and pre-deployment model checks |
 | Interactive | Browser sessions, credentials, principals, auth expectations, replay, and manual findings |
-| Evidence / Timeline / Campaigns | Proof inventory, exports, retention, mission history, and bounded action ledgers |
+| Evidence / Timeline / Campaigns | Proof inventory, exports, retention, mission history, and read-only bounded action ledgers |
 | Settings | AI providers, scan policy, automation, deployment policies, Arsenal, Router, and Research Agent |
 
 The exhaustive route and capability catalog is in the
@@ -390,7 +401,8 @@ Common fixes:
 
 - [Documentation index](https://github.com/andriyze/shakerscan/blob/main/docs/README.md)
 - [Full functionality reference](https://github.com/andriyze/shakerscan/blob/main/docs/functionality-reference.md)
-- [Visual walkthrough](https://github.com/andriyze/shakerscan/blob/main/WALKTHROUGH.md)
+- [Release readiness checklist](https://github.com/andriyze/shakerscan/blob/main/docs/release-readiness.md)
+- [First-run walkthrough](https://github.com/andriyze/shakerscan/blob/main/WALKTHROUGH.md)
 - [Skill and agent guide](skills/README.md)
 - [Smart Scan Policy](https://github.com/andriyze/shakerscan/blob/main/docs/SMART_SCAN_POLICY.md)
 - [OWASP coverage matrix](https://github.com/andriyze/shakerscan/blob/main/docs/owasp-coverage-matrix.md)

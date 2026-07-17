@@ -1,5 +1,12 @@
 # Smart Scan Workflow - Detailed Technical Documentation
 
+> **ARCHIVED (2026-07-17).** These phase-by-phase implementation notes retain historical source
+> locations and tuning rationale. Their line numbers and “new” labels drifted as the scanner grew,
+> so they must not be used as a current code map. Use
+> [`../SMART_SCAN_POLICY.md`](../SMART_SCAN_POLICY.md) for current operator policy,
+> [`../functionality-reference.md`](../functionality-reference.md) for shipped behavior, and named
+> symbols in the code when investigating internals.
+
 This document provides a comprehensive breakdown of the smart scan workflow, including all phases, decision points, and the intelligence mechanisms that make it adaptive.
 
 ## Overview

@@ -1,15 +1,16 @@
 # Documentation Index
 
-**Reconciled:** 2026-07-17. Top-level documents are maintained references or active designs. Dated
-audits, completed implementation prompts, and superseded plans belong in [`archive/`](archive/README.md).
-Code, database schemas, runtime receipts, and tests remain authoritative when a document disagrees.
+**Reconciled:** 2026-07-17. Top-level documents are maintained references, live operating policy, or
+active architecture. Dated audits, completed implementation prompts, detailed implementation
+ledgers, and superseded plans belong in [`archive/`](archive/README.md). Code, database schemas,
+runtime receipts, and tests remain authoritative when a document disagrees.
 
 ## Start Here
 
 | Document | Audience and purpose |
 |---|---|
 | [`../README.md`](../README.md) | Install, first scan, workflow selection, UI/CLI/API orientation, safety, and troubleshooting |
-| [`../WALKTHROUGH.md`](../WALKTHROUGH.md) | Screenshot-based terminal and UI walkthrough |
+| [`../WALKTHROUGH.md`](../WALKTHROUGH.md) | Current text walkthrough for first run, findings, UI workflows, and agent requests |
 | [`../skills/README.md`](../skills/README.md) | Agent skill catalog, setup, and maintenance |
 | [`../AGENTS.md`](../AGENTS.md) | Canonical coding-agent operations and request examples |
 | [`functionality-reference.md`](functionality-reference.md) | Exhaustive product map plus generated code-surface inventory |
@@ -19,11 +20,18 @@ Code, database schemas, runtime receipts, and tests remain authoritative when a 
 | Document | Purpose |
 |---|---|
 | [`proposed-next-steps.md`](proposed-next-steps.md) | Single live hardening roadmap and acceptance status |
+| [`release-readiness.md`](release-readiness.md) | Live pre-release blockers, validation, publishing, installer, and documentation checklist |
 | [`SMART_SCAN_POLICY.md`](SMART_SCAN_POLICY.md) | Smart-scan budget, proof, safety, and release policy |
 | [`owasp-coverage-matrix.md`](owasp-coverage-matrix.md) | Implemented DAST mechanisms mapped to OWASP categories |
-| [`E2E_TEST_PLAN.md`](E2E_TEST_PLAN.md) | Real-stack E2E scope, cases, and freshness rules |
+| [`E2E_TEST_PLAN.md`](E2E_TEST_PLAN.md) | Real-stack E2E contract, implemented/planned cases, and freshness rules |
 | [`read-only-mcp.md`](read-only-mcp.md) | Read-only MCP adapter contract and boundaries |
-| [`adaptive-bug-discovery-implementation-plan.md`](adaptive-bug-discovery-implementation-plan.md) | Active delivery plan for bounded adaptive experiments, workflows, hypotheses, proof handoffs, scheduling, metrics, and UI |
+
+## Acceptance And Integrity Ledgers
+
+| Document | Purpose |
+|---|---|
+| [`../results/benchmark-runs/INTEGRITY_LEDGER.md`](../results/benchmark-runs/INTEGRITY_LEDGER.md) | Benchmark contamination, stale-fleet, scoring, and interpretation corrections |
+| [`../results/planner-evals/INTEGRITY_LEDGER.md`](../results/planner-evals/INTEGRITY_LEDGER.md) | Planner-evaluation limitations, invalidations, and rerun requirements |
 
 ## AI Security
 
@@ -48,5 +56,9 @@ Code, database schemas, runtime receipts, and tests remain authoritative when a 
   Make/release-gate, runtime configuration, UI, skill/agent, adapter, scanner-module, or durable-table
   surfaces; CI checks the generated block.
 - Move point-in-time reviews, completed plans, and execution prompts into [`archive/`](archive/README.md).
+- Treat [`screenshots/`](screenshots/README.md) as historical until a complete same-build set is
+  recaptured; do not mix old and current UI images in release documentation.
+- Update [`release-readiness.md`](release-readiness.md) when an audit blocker, validation gate, or
+  release/deployment prerequisite changes.
 - Never convert an old benchmark or E2E artifact into a current-build claim.
 - Keep benchmark hostnames, product nouns, answer-key routes, and expected findings out of detector inputs.

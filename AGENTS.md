@@ -51,17 +51,17 @@ The scanner runs as Docker containers:
 
 For the exhaustive generated capability catalog (all REST operations, registries, UI pages, CLI
 flags, skills, agents, adapters, modules, and durable tables) plus architecture/policy pointers, see
-[docs/functionality-reference.md](docs/functionality-reference.md).
+[the functionality reference](https://github.com/andriyze/shakerscan/blob/main/docs/functionality-reference.md).
 
 ## Current UI (Implemented)
 
-- **Dashboard (`/`)**: real-time metrics (targets, scans, findings, avg score), a compact top-right operations bar for live pending/running queue state, emergency clear, worker count/scaling/stale-build warning, and Gungnir CT status/toggle; plus recent scans and critical/high findings. Auto-refreshes every 10-30s.
+- **Dashboard (`/`)**: security-posture summary, prioritized action center, recent meaningful activity, and a compact operations bar for live queue state, emergency clear, worker count/scaling/stale-build warning, and Gungnir CT status/toggle. Auto-refreshes every 10-30s.
 - **Scans (`/scans`)**: filter by status/domain/search, pagination (50/page), cancel running/pending scans, re-scan dropdown (all 6 scan types), auto-refresh every 5s. Shows target, type, status, score/grade, findings count, duration, date.
 - **Scan Detail (`/scans/{id}`)**: live logs with auto-scroll while running (5s refresh), progress bar + current phase, partial-results view for failed scans (warning banner), refreshed deployment decision, full report with PDF export, compliance section, resolved coverage budget, AI Gate evidence, and Model Intake artifact checks when complete. Preserves list filter context on back navigation.
 - **Exposure (`/exposure`)**: graph linking domains, targets, APIs, auth roles, third-party JS/vendors, cloud hints, AI targets, MCP tools, model artifacts, scans, and findings. Registered web assets expose a separate **Investigate autonomously** action that launches a target-bound hunt after readiness and authorization checks.
 - **Continuous ASM (`/asm`)**: target coverage, family proof rollups, scheduler decisions, endpoint inventory, gaps, recommendations, and target campaign timeline. **Close gaps autonomously** launches an ASM-bound mission; ordinary improve/test actions remain available separately.
 - **Timeline (`/timeline`)**: cross-product mission feed for scans, schedules, command results, evidence bindings, refuters, and exports.
-- **Campaigns (`/campaigns`, `/campaigns/{id}`)**: create and inspect bounded mission campaigns, lifecycle state, finding impact, and the action ledger.
+- **Campaigns (`/campaigns`, `/campaigns/{id}`)**: inspect read-only mission records, lifecycle state, finding impact, and the action ledger. Start executable research from **Autonomous Hunt**; Arsenal may create linked mission records while planning authorized work.
 - **Evidence (`/evidence`)**: browse evidence instances, inspect objects, export content-free manifests/bundles, and run immutable-preview, approval-gated retention cleanup.
 - **New Scan (`/scan/new`)**: scan type grid (6 types with duration/description), coverage budget selector (`fast`, `balanced`, `thorough`, `exhaustive`), advanced option toggles (Active Testing, Nuclei Templates, Subdomain Discovery, Enhanced DNS, JS Dependency Scanning, JS Secret Scanning), and optional custom budget overrides. Warning for active testing types.
 - **Targets (`/targets`)**: hierarchical tree (root domains with collapsible subdomains), filter by discovery source/grade/has-findings, sort by domain/last-scanned/findings/score/date, search. Actions: add target, scan individual (dropdown), scan all in domain set, discover subdomains, create schedule (icon link). Shows subdomain count, scan count, findings count, grade per target.
@@ -285,7 +285,7 @@ broader `ai` API filter when AI Gate and AI-session findings should be combined.
 |-----------|-------------|
 | `status` | Filter by status (active, resolved, false_positive, accepted_risk) |
 | `severity` | Filter by severity (critical, high, medium, low, info) |
-| `source_type` | `dast`, `ai`, `ai_gate`, `ai_session`, `model_intake`, `asm`, or `manual` |
+| `source_type` | `dast`, `ai`, `ai_gate`, `ai_session`, `autonomous`, `model_intake`, `asm`, or `manual` |
 | `seen_within_days` | Only findings seen within N days (e.g., 7, 30, 60, 90) |
 | `root_domain` | Filter by root domain |
 | `target_id` | Filter by target ID |
@@ -426,9 +426,10 @@ Active or budget-increasing intents return `dry_run: true` unless `execute`, `co
 
 ### Bounded Research Agent
 
-Research episodes let a configured AI provider or an isolated host-side Codex process select one
-registered action at a time from a fresh, redacted target observation. The API remains authoritative
-for command schemas, target binding, scope, approval, risk, budget, execution, and proof.
+Research episodes let the current coding-agent session, a configured AI provider, or an isolated
+host-side Codex process select one registered action at a time from a fresh, redacted target
+observation. The API remains authoritative for command schemas, target binding, principals, scope,
+approval, risk, budget, execution, and proof.
 
 ```bash
 # Check whether the configured planner and active-execution gate are ready
@@ -501,12 +502,16 @@ remains the only executor. `configured_ai` enables durable server autopilot and 
 
 Modes are `shadow`, `read_only`, and `gated`. Gated episodes require a target-matching scope receipt,
 approval receipt, explicit active budgets, and `AI_OPS_ROUTER_EXECUTE_ENABLED=true`; the current
-allowlist is Continuous ASM recon/test/improve, focused-family scans, and finding retests. The model
-cannot provide receipt IDs in a decision, access credentials, use raw shell, or create verified
-findings. A decision must reference the current observation ID/hash and declare its expected signal
-and falsifier. Request budgets shown for queued scans/ASM work are conservative reservation units,
-not a claim of exact outbound HTTP metering. Autopilot waits for both linked scans and retests before
-creating exactly one result-bearing observation and choosing another action.
+allowlist includes Continuous ASM recon/test/improve, focused-family scans, finding retests, read-only
+HTTP differentials, and typed principal workflows. `experiment.http_diff` is restricted to
+`GET`/`HEAD`/`OPTIONS`. Credential-tier Deep Hunt may use typed workflow `PUT`/`PATCH`/`DELETE` only
+with server-resolved principals, cleanup/rollback, and restoration assertions. The model cannot
+provide receipt IDs, access credentials, use raw shell, or directly create verified findings. A
+trusted server replay may promote a finding only after deterministic family proof passes. A decision
+must reference the current observation ID/hash and declare its expected signal and falsifier. Request
+budgets shown for queued scans/ASM work are conservative reservation units, not a claim of exact
+outbound HTTP metering. Autopilot waits for linked scans and retests before creating exactly one
+result-bearing observation and choosing another action.
 
 ### Subdomain Discovery
 
@@ -1160,7 +1165,8 @@ By default, smart scan:
 - **Uses the `balanced` budget** unless `budget_profile` or `custom_budget` is provided
 
 With `no_early_stop` and `thorough_params`:
-- **Continues scanning** regardless of findings (finds all vulnerabilities, not just first few)
+- **Continues scanning** after high-severity findings instead of stopping at the normal threshold;
+  this increases coverage but does not guarantee that every vulnerability will be found
 - **Promotes to the `thorough` budget** when no explicit budget is provided, increasing discovery, browser, nuclei, and active-test coverage
 
 ## Scan Types Explained
@@ -1172,7 +1178,7 @@ Scan type controls **what** ShakerScan tests. `budget_profile` controls **how ha
 | **quick** | `"scan_type": "quick"` | 1-2 min | DNS, TLS cert, HTTP headers, basic tech detection |
 | **standard** | `"scan_type": "standard"` | 5-10 min | + Nuclei (safe), cookies, CORS, JS dependencies (no port scan by default) |
 | **deep** | `"scan_type": "deep"` | 30-60 min | + Full Nuclei, top-ports scan (1000), JS secrets |
-| **full** | `"scan_type": "full"` | 1-2 hrs | + Active XSS/SQLi, all security tests, WebSocket |
+| **full** | `"scan_type": "full"` | 1-2 hrs | + Broad active XSS/SQLi and WebSocket testing |
 | **aggressive** | `"scan_type": "aggressive"` | 2+ hrs | + Aggressive exploits, extended ports, threat intel |
 | **smart** | `"scan_type": "smart"` | Variable | Adaptive: staged templates, DBMS-aware SQLi, context-aware XSS |
 

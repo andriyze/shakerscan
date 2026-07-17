@@ -4,7 +4,10 @@ Historical, point-in-time, or superseded docs kept for root-cause/QA history onl
 is a current roadmap or reference.** For the live state, use:
 
 - [../functionality-reference.md](../functionality-reference.md) — what the product does, end to end
-- [../proposed-next-steps.md](../proposed-next-steps.md) — the single live DAST/ASM quality roadmap
+- [../proposed-next-steps.md](../proposed-next-steps.md) — the single live implementation and
+  hardening roadmap
+- [../release-readiness.md](../release-readiness.md) — current release blockers and validation
+  checklist
 - [../parallel-scan-architecture.md](../parallel-scan-architecture.md),
   [../continuous-asm-architecture.md](../continuous-asm-architecture.md),
   [../multi-node-architecture.md](../multi-node-architecture.md) — architecture
@@ -29,4 +32,7 @@ is a current roadmap or reference.** For the live state, use:
 | `architecture-review-2026-07-11.md` | Point-in-time reconciled review; findings were migrated into the single live roadmap |
 | `deferred-work-implementation-plan-2026-07-11.md` | Completed/partial wave ledger; all remaining dependencies are represented in `proposed-next-steps.md` |
 | `owasp-injection-integrity-implementation-plan-2026-06.md` | Completed injection/integrity implementation record removed from the live coverage matrix |
-| `ui-ux-audit-2026-07-16.md` | Point-in-time deep UI/UX audit snapshot; actionable findings are being triaged and fixed on the live branch |
+| `adaptive-bug-discovery-implementation-plan-2026-07.md` | July adaptive-research wave ledger; shipped behavior and remaining work were reconciled into the functionality reference and live roadmap |
+| `deep-hunt-discovery-loop-session-2026-07-17.md` | Point-in-time create-based mass-assignment proof/live-drive ledger; remaining discovery, surface, ranking, and planner work moved to the live roadmap |
+| `smart-scan-implementation-notes.md` | Historical phase-by-phase implementation notes with source line references that no longer form a reliable current code map |
+| `ui-ux-audit-2026-07-16.md` | Point-in-time deep UI/UX audit snapshot; its 2026-07-17 disposition table identifies fixed, partial, accepted-boundary, and still-open items |

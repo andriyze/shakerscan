@@ -1,5 +1,8 @@
 # Continuous ASM Architecture — Current State and Target Design
 
+**Reconciled:** 2026-07-17 against current code, the shared status matrix, and the live roadmap.
+Historical benchmark artifacts retain their original status.
+
 **Status:** the bounded local/owned-fleet Continuous ASM loop is shipped; correctness hardening for auth-aware inventory,
 replay fidelity, partial-timeout coverage semantics, dispatcher rate reservation, ASM campaign
 records, durable endpoint leases, normalized ASM endpoint attempt rows, and one-shot Full Coverage
@@ -73,7 +76,7 @@ editing.
 | Known-endpoint distributed rate limits | Shipped | Standalone request-token reservation and metering are shipped opt-in; complete live rate soak before changing the compatibility default. |
 | First-class check registry | Dispatch foundation shipped; strict authority partial | Close legacy registered-family bypasses and enforce proof/severity contracts. |
 | Operator-facing campaign/ASM UX | Bounded phase shipped with schedule/skip/remediation/rollup contract tests | Add actions only with tested confirmation boundaries. |
-| DAST quality benchmark loop | Juice Shop pass is on older fleet `ddc6173b`; current-fleet authenticated crAPI fails `0/4` | Seed detector-isolation controls, then improve universal authenticated discovery and rerun unseeded. |
+| DAST quality benchmark loop | Juice Shop pass is on older fleet `ddc6173b`; corrected authenticated crAPI scorecard has one raw match (`1/4`) but fails the verified-BOLA gate and is not a current-build pass | Seed detector-isolation controls, then improve universal authenticated discovery and rerun unseeded. |
 | Multi-node WireGuard POC | Proposed/RFC | Build a two-VPS proof only after local queue/worker invariants stay green. |
 | Production multi-node fleet | Proposed/RFC | Add node registry, reliable queue leases, object evidence, and routing. |
 | HTTPS broker for untrusted workers | Future | Do not build until owned-fleet primitives are stable. |
@@ -752,10 +755,11 @@ New quality gaps to track:
 - **Coverage mode loses global checks:** parallel `coverage` detects fewer crit/high than a single
   Smart scan (zero-rediscovery children + fragmented global posture checks). Prefer single Smart for
   DAST-quality benchmarking; coverage is for breadth.
-- **Authenticated BOLA gap:** current-fleet crAPI schedules two auth lanes but proves no expected
-  BOLA. Discovery is a confirmed blocker; seeded detector controls are still required before calling
-  the differential accepted. Safe non-destructive write/BFLA and workflow/object creation remain
-  future Lab/deep-gated work.
+- **Authenticated BOLA gap:** the corrected 2026-07-11 crAPI artifact schedules two auth lanes but
+  does not pass the verified-BOLA gate. Discovery remains a confirmed blocker; seeded
+  detector-isolation and unseeded current-candidate runs are still required. Typed, proof-gated
+  research workflows now support bounded object/state tests, but their success does not satisfy the
+  DAST benchmark gate.
 - **Family/proof rollups:** `/asm/gaps` now returns `family_coverage` (completed vs attempts) and
   `recommended_campaigns`; it should keep distinguishing "endpoint attempted" from "SQLi proof
   attempted", "XSS browser proof attempted", and "BOLA cross-principal proof attempted".

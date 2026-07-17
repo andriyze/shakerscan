@@ -1,4 +1,4 @@
 interface:
   display_name: "Bounded Research Agent"
-  short_description: "Drive one-step adaptive ShakerScan research loops"
-  default_prompt: "Use $research-agent to investigate the authorized target one proposable action per observation inside ShakerScan's policy controller."
+  short_description: "Drive bounded Hunt episodes and proof-gated runs"
+  default_prompt: "Use $research-agent to investigate this authorized target one policy-controlled decision per observation and summarize the proof-gated outcome."
