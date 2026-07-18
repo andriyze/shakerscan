@@ -42489,10 +42489,10 @@ async def get_discovery(discovery_id: str):
 # WORKER MANAGEMENT
 # ============================================================
 
-# Fleet container ceiling the /workers scaler allows. Default is derived from
-# Docker RAM (~1.2GB budgeted per worker) so a bigger Docker allocation auto-raises
-# the cap instead of a hardcoded number; an explicit SHAKERSCAN_MAX_WORKERS env
-# always overrides. Hard sanity bound: 200.
+# Fleet container ceiling the /workers scaler allows. The default mirrors
+# scanner.sh startup sizing: reserve RAM for Docker/the OS and the supporting
+# PostgreSQL, Redis, API, and UI containers, then budget ~1GB for each worker.
+# An explicit SHAKERSCAN_MAX_WORKERS always overrides. Hard sanity bound: 200.
 def _compute_max_allowed_workers() -> int:
     env_override = os.environ.get("SHAKERSCAN_MAX_WORKERS")
     if env_override:
@@ -42506,16 +42506,20 @@ def _compute_max_allowed_workers() -> int:
     except Exception:
         mem_gb = 0
     try:
-        per_worker_gb = float(os.environ.get("SHAKERSCAN_PER_WORKER_MEM_GB") or 1.2)
+        per_worker_gb = float(os.environ.get("SHAKERSCAN_PER_WORKER_MEM_GB") or 1)
     except (TypeError, ValueError):
-        per_worker_gb = 1.2
+        per_worker_gb = 1
     try:
-        fraction = float(os.environ.get("SHAKERSCAN_SCAN_MEM_FRACTION") or 0.85)
+        platform_reserve_gb = float(os.environ.get("SHAKERSCAN_PLATFORM_MEMORY_RESERVE_GB") or 7)
     except (TypeError, ValueError):
-        fraction = 0.85
+        platform_reserve_gb = 7
     if mem_gb <= 0 or per_worker_gb <= 0:
-        return 30
-    return max(2, min(200, int((mem_gb * fraction) / per_worker_gb)))
+        return 5
+    if mem_gb < 8:
+        return max(1, min(4, int(mem_gb) - 3))
+    if mem_gb < 16:
+        return 5
+    return max(5, min(200, int((mem_gb - max(0, platform_reserve_gb)) / per_worker_gb)))
 
 # Hard per-worker memory cap applied to scaler-created worker containers. Without
 # it, a runaway/large scan can exhaust the whole Docker VM and OOM-thrash every
@@ -42546,8 +42550,9 @@ def _worker_hostconfig(network: str, binds: list) -> dict:
 def _compute_max_active_scans(max_allowed: int | None = None) -> int:
     """Max concurrent ACTIVE scans across the fleet (workers enforce it via a Redis
     semaphore). Memory safety primarily comes from the RAM-derived fleet cap
-    (_compute_max_allowed_workers, ~1.2GB/worker) plus the per-worker hard memory
-    cap (each worker is OOM-isolated and its job requeued). With no explicit
+    (_compute_max_allowed_workers, ~1GB/worker after the platform reserve) plus
+    the per-worker hard memory cap (each worker is OOM-isolated and its job
+    requeued). With no explicit
     override this defaults to the full RAM-derived fleet capacity so a busy fleet —
     and single large Full Coverage parents — can actually use every worker instead
     of leaving most idle behind a flat cap. Set SHAKERSCAN_MAX_ACTIVE_SCANS to pin

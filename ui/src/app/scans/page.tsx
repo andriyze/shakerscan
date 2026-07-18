@@ -1,12 +1,12 @@
 'use client'
 
-import { useEffect, useState, useCallback, useRef, Suspense } from 'react'
+import { useEffect, useState, useCallback, useMemo, useRef, Suspense } from 'react'
 import Link from 'next/link'
-import { getScans, cancelScan, getDomains, getGradeColor, formatDate, formatDuration, submitScan, type Scan } from '@/lib/api'
+import { getScans, cancelScan, getCampaigns, getDomains, getGradeColor, formatDate, formatDuration, submitScan, type Campaign, type Scan } from '@/lib/api'
 import { useUrlFilters } from '@/lib/useUrlFilters'
 import { SCAN_STATUSES, SCAN_TYPES, type ScanType } from '@/lib/constants'
 import { Card, ConfirmDialog, ErrorState, LastUpdated, ScanStatusBadge, TableSkeleton, useToast } from '@/components/ui'
-import { ActiveHunts } from '@/components/hunt'
+import { episodesStarted, findingCount, RunStatusBadge, runState } from '@/components/hunt'
 
 const PAGE_SIZE = 50
 const SEARCH_DEBOUNCE_MS = 300
@@ -64,6 +64,23 @@ function formatAITargetType(value?: string | null): string | null {
   return labels[value] || value.replace(/_/g, ' ')
 }
 
+function huntTargetUrl(campaign: Campaign): string {
+  const url = campaign.target_scope?.url
+  return typeof url === 'string' && url.trim() ? url : ''
+}
+
+function huntTargetLabel(campaign: Campaign): string {
+  return huntTargetUrl(campaign) || campaign.name || 'Target-bound autonomous hunt'
+}
+
+function huntMatchesFilters(campaign: Campaign, status: string, domain: string, search: string): boolean {
+  if (status && !['active', 'running', 'pending', 'queued'].includes(status.toLowerCase())) return false
+  const target = huntTargetUrl(campaign).toLowerCase()
+  if (domain && !target.includes(domain.toLowerCase())) return false
+  const query = search.trim().toLowerCase()
+  return !query || `${campaign.name || ''} ${target}`.toLowerCase().includes(query)
+}
+
 interface ScansFilters {
   [key: string]: string | number | undefined
   status?: string
@@ -80,6 +97,7 @@ function ScansContent() {
   const toast = useToast()
 
   const [scans, setScans] = useState<Scan[]>([])
+  const [activeHunts, setActiveHunts] = useState<Campaign[]>([])
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState(false)
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null)
@@ -198,11 +216,26 @@ function ScansContent() {
     }
   }, [statusFilter, domainFilter, searchQuery, withinFilter, includeInternal, rawPage, setFilter])
 
+  const fetchActiveHunts = useCallback(async (): Promise<boolean> => {
+    try {
+      const data = await getCampaigns({ status: 'active', limit: 50 })
+      setActiveHunts((data.campaigns || []).filter((campaign) => campaign.campaign_type === 'autonomous_research'))
+      return true
+    } catch (err) {
+      console.error('Failed to fetch active autonomous hunts:', err)
+      return false
+    }
+  }, [])
+
   useEffect(() => {
     fetchScans()
-    const interval = setInterval(() => fetchScans(true), 5000)
+    fetchActiveHunts()
+    const interval = setInterval(() => {
+      fetchScans(true)
+      fetchActiveHunts()
+    }, 5000)
     return () => clearInterval(interval)
-  }, [fetchScans])
+  }, [fetchActiveHunts, fetchScans])
 
   // Keep running scan elapsed durations fresh without per-second churn.
   useEffect(() => {
@@ -224,10 +257,10 @@ function ScansContent() {
 
   async function handleManualRefresh() {
     setRefreshing(true)
-    const ok = await fetchScans(true)
+    const [scansOk, huntsOk] = await Promise.all([fetchScans(true), fetchActiveHunts()])
     setRefreshing(false)
-    if (!ok) {
-      toast.error('Failed to refresh scans')
+    if (!scansOk || !huntsOk) {
+      toast.error('Some work could not be refreshed')
     }
   }
 
@@ -274,6 +307,10 @@ function ScansContent() {
   }
 
   const totalPages = Math.ceil(total / PAGE_SIZE)
+  const visibleHunts = useMemo(
+    () => activeHunts.filter((campaign) => huntMatchesFilters(campaign, statusFilter, domainFilter, searchQuery)),
+    [activeHunts, statusFilter, domainFilter, searchQuery],
+  )
 
   // Clamp page to valid range for display
   const page = Math.min(rawPage, Math.max(1, totalPages))
@@ -307,7 +344,7 @@ function ScansContent() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold text-white">Scans</h1>
-          <p className="text-gray-400 mt-1">View all security scans</p>
+          <p className="text-gray-400 mt-1">Scans and active autonomous testing in one place</p>
         </div>
         <div className="flex items-center gap-4">
           <LastUpdated updatedAt={lastUpdated} onRefresh={handleManualRefresh} refreshing={refreshing} />
@@ -322,8 +359,6 @@ function ScansContent() {
           </Link>
         </div>
       </div>
-
-      <ActiveHunts />
 
       {/* Filters */}
       <div className="flex gap-4 flex-wrap">
@@ -410,6 +445,7 @@ function ScansContent() {
               ? `Showing ${total} scan${total !== 1 ? 's' : ''}`
               : `Showing ${(page - 1) * PAGE_SIZE + 1}-${Math.min(page * PAGE_SIZE, total)} of ${total}`
             }
+            {visibleHunts.length > 0 ? ` · ${visibleHunts.length} active hunt${visibleHunts.length === 1 ? '' : 's'}` : ''}
           </span>
           <PaginationControls />
         </div>
@@ -425,7 +461,7 @@ function ScansContent() {
       <Card>
         {loading ? (
           <TableSkeleton rows={8} cols={6} />
-        ) : scans.length === 0 ? (
+        ) : scans.length === 0 && visibleHunts.length === 0 ? (
           <div className="p-8 text-center text-gray-500">
             {searchQuery || domainFilter || statusFilter ? 'No scans found matching your filters.' : 'No scans found. Start a new scan to get started.'}
           </div>
@@ -435,6 +471,54 @@ function ScansContent() {
               the important columns off-screen on a phone, so render each scan as
               a stacked card with everything visible in the first viewport. */}
           <div className="lg:hidden space-y-3 p-3">
+            {visibleHunts.map((campaign) => {
+              const progress = episodesStarted(campaign)
+              const found = findingCount(campaign)
+              const createdAtMs = Date.parse(campaign.created_at)
+              const duration = Number.isNaN(createdAtMs)
+                ? '-'
+                : formatDuration(Math.max(0, Math.floor((durationTickMs - createdAtMs) / 1000)))
+              return (
+                <div key={`hunt-${campaign.id}`} className="rounded-lg border border-blue-500/30 bg-blue-500/[0.04] p-4">
+                  <div className="flex items-start justify-between gap-3">
+                    <Link
+                      href={`/settings/research-agent/runs/${campaign.id}`}
+                      className="min-w-0 flex-1 truncate text-sm font-medium text-blue-300 hover:text-blue-200"
+                      title={huntTargetLabel(campaign)}
+                    >
+                      {huntTargetLabel(campaign)}
+                    </Link>
+                    <RunStatusBadge state={runState(campaign)} />
+                  </div>
+                  <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2 text-sm">
+                    <span className="text-gray-400">No score yet</span>
+                    <span className={found > 0 ? 'text-emerald-300' : 'text-gray-400'}>
+                      {found} active finding{found === 1 ? '' : 's'}
+                    </span>
+                  </div>
+                  <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-gray-500">
+                    <span className="text-blue-300">Autonomous Hunt</span>
+                    {progress.max > 0 ? (
+                      <span className="rounded bg-gray-800 px-1.5 py-0.5 text-gray-400">
+                        Episode {progress.started}/{progress.max}
+                      </span>
+                    ) : null}
+                    <span aria-hidden="true">·</span>
+                    <span>{duration}</span>
+                    <span aria-hidden="true">·</span>
+                    <span>{formatDate(campaign.created_at)}</span>
+                  </div>
+                  <div className="mt-3">
+                    <Link
+                      href={`/settings/research-agent/runs/${campaign.id}`}
+                      className="inline-flex rounded bg-blue-600 px-2 py-1 text-xs font-medium text-white hover:bg-blue-700"
+                    >
+                      View hunt
+                    </Link>
+                  </div>
+                </div>
+              )
+            })}
             {scans.map((scan) => {
               const isAIScan = scan.scan_type === 'ai_gate' || scan.run_kind?.startsWith('ai_')
               const authenticated = isAuthenticatedScan(scan)
@@ -541,6 +625,49 @@ function ScansContent() {
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-800">
+              {visibleHunts.map((campaign) => {
+                const progress = episodesStarted(campaign)
+                const found = findingCount(campaign)
+                const createdAtMs = Date.parse(campaign.created_at)
+                const duration = Number.isNaN(createdAtMs)
+                  ? '-'
+                  : formatDuration(Math.max(0, Math.floor((durationTickMs - createdAtMs) / 1000)))
+                return (
+                  <tr key={`hunt-${campaign.id}`} className="bg-blue-500/[0.035] transition-colors hover:bg-blue-500/[0.07]">
+                    <td className="max-w-[20rem] px-4 py-3">
+                      <Link
+                        href={`/settings/research-agent/runs/${campaign.id}`}
+                        className="block truncate text-sm text-blue-300 hover:text-blue-200"
+                        title={huntTargetLabel(campaign)}
+                      >
+                        {huntTargetLabel(campaign)}
+                      </Link>
+                    </td>
+                    <td className="hidden px-4 py-3 xl:table-cell">
+                      <span className="text-sm text-blue-300">Autonomous Hunt</span>
+                      {progress.max > 0 ? <div className="mt-0.5 text-xs text-gray-500">Episode {progress.started}/{progress.max}</div> : null}
+                    </td>
+                    <td className="hidden px-4 py-3 text-center text-gray-600 2xl:table-cell">—</td>
+                    <td className="px-4 py-3"><RunStatusBadge state={runState(campaign)} /></td>
+                    <td className="px-4 py-3 text-gray-600">—</td>
+                    <td className="px-4 py-3">
+                      {found > 0 && campaign.target_id ? (
+                        <Link href={`/findings?target_id=${campaign.target_id}&status=active`} className="text-sm text-emerald-300 hover:text-emerald-200">{found}</Link>
+                      ) : <span className="text-sm text-gray-400">{found}</span>}
+                    </td>
+                    <td className="hidden px-4 py-3 text-sm text-gray-400 xl:table-cell">{duration}</td>
+                    <td className="hidden px-4 py-3 text-sm text-gray-500 2xl:table-cell">{formatDate(campaign.created_at)}</td>
+                    <td className="px-4 py-3">
+                      <Link
+                        href={`/settings/research-agent/runs/${campaign.id}`}
+                        className="inline-flex rounded bg-blue-600 px-2 py-1 text-xs font-medium text-white hover:bg-blue-700"
+                      >
+                        View
+                      </Link>
+                    </td>
+                  </tr>
+                )
+              })}
               {scans.map((scan) => {
                 const isAIScan = scan.scan_type === 'ai_gate' || scan.run_kind?.startsWith('ai_')
                 const authenticated = isAuthenticatedScan(scan)
@@ -704,6 +831,7 @@ function ScansContent() {
               ? `Showing ${total} scan${total !== 1 ? 's' : ''}`
               : `Showing ${(page - 1) * PAGE_SIZE + 1}-${Math.min(page * PAGE_SIZE, total)} of ${total}`
             }
+            {visibleHunts.length > 0 ? ` · ${visibleHunts.length} active hunt${visibleHunts.length === 1 ? '' : 's'}` : ''}
           </span>
           <PaginationControls />
         </div>

@@ -1178,6 +1178,62 @@ total_memory_gb() {
     echo 0
 }
 
+runtime_memory_gb() {
+    local bytes
+    local host_memory_gb
+
+    # Docker Desktop and VM-backed engines can expose substantially less memory
+    # than the host. Size the fleet against the memory the containers can
+    # actually use, then fall back to host RAM when Docker cannot report it.
+    if command_exists docker; then
+        bytes="$(docker info --format '{{.MemTotal}}' 2>/dev/null || echo "")"
+        if [[ "$bytes" =~ ^[0-9]+$ ]] && [ "$bytes" -gt 0 ]; then
+            # Round down so the startup fleet never spends a fractional GB that
+            # the API's Docker-memory calculation correctly leaves unavailable.
+            echo $(( bytes / 1073741824 ))
+            return 0
+        fi
+    fi
+
+    host_memory_gb="$(total_memory_gb)"
+    echo "${host_memory_gb:-0}"
+}
+
+auto_workers_for_memory_gb() {
+    local memory_gb="${1:-0}"
+    local platform_reserve_gb="${SHAKERSCAN_PLATFORM_MEMORY_RESERVE_GB:-7}"
+    local per_worker_gb="${SHAKERSCAN_PER_WORKER_MEM_GB:-1}"
+    local workers
+
+    if ! [[ "$memory_gb" =~ ^[0-9]+$ ]] || [ "$memory_gb" -le 0 ]; then
+        echo 5
+        return 0
+    fi
+    if ! [[ "$platform_reserve_gb" =~ ^[0-9]+$ ]]; then
+        platform_reserve_gb=7
+    fi
+    if ! [[ "$per_worker_gb" =~ ^[0-9]+$ ]] || [ "$per_worker_gb" -lt 1 ]; then
+        per_worker_gb=1
+    fi
+
+    # Very small installations cannot safely carry five scanner processes.
+    # Normal sub-16GB installations get a predictable five-worker fleet.
+    if [ "$memory_gb" -lt 8 ]; then
+        workers=$((memory_gb - 3))
+        [ "$workers" -lt 1 ] && workers=1
+    elif [ "$memory_gb" -lt 16 ]; then
+        workers=5
+    else
+        # Reserve memory for Docker/the OS plus PostgreSQL, Redis, API and UI,
+        # then spend the remaining budget at roughly 1GB per scanner worker.
+        workers=$(( (memory_gb - platform_reserve_gb) / per_worker_gb ))
+        [ "$workers" -lt 5 ] && workers=5
+    fi
+
+    [ "$workers" -gt 20 ] && workers=20
+    echo "$workers"
+}
+
 resolve_start_workers() {
     local memory_gb
 
@@ -1190,16 +1246,8 @@ resolve_start_workers() {
         return 0
     fi
 
-    memory_gb="$(total_memory_gb)"
-    if [ "$memory_gb" -ge 48 ]; then
-        echo 5
-    elif [ "$memory_gb" -ge 24 ]; then
-        echo 3
-    elif [ "$memory_gb" -ge 12 ]; then
-        echo 2
-    else
-        echo 1
-    fi
+    memory_gb="$(runtime_memory_gb)"
+    auto_workers_for_memory_gb "$memory_gb"
 }
 
 prepare_runtime_files() {
@@ -1373,7 +1421,7 @@ start_services() {
     set_build_env
     echo -e "${GREEN}Starting ShakerScan with $start_workers worker(s)...${NC}"
     if [ "$WORKERS" = "auto" ]; then
-        echo "Worker sizing: auto ($(total_memory_gb)GB RAM detected)"
+        echo "Worker sizing: auto ($(runtime_memory_gb)GB container RAM; ${SHAKERSCAN_PLATFORM_MEMORY_RESERVE_GB:-7}GB platform reserve; ${SHAKERSCAN_PER_WORKER_MEM_GB:-1}GB/worker)"
     fi
     if [ "$USE_PREBUILT" -eq 1 ]; then
         echo "Mode: prebuilt images"

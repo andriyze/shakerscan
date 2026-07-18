@@ -10,7 +10,6 @@ import { useEffect, useState } from 'react'
 import Link from 'next/link'
 import { ArrowRight, ShieldCheck } from 'lucide-react'
 import { Badge, Card } from '@/components/ui'
-import { getCampaigns } from '@/lib/api'
 import type { Campaign, ResearchBudget, ResearchEpisode, ResearchEpisodeDetail } from '@/lib/api'
 
 export type Intensity = 'analyze' | 'hunt' | 'relentless' | 'deep_hunt'
@@ -407,54 +406,12 @@ export function findingCount(campaign?: Pick<Campaign, 'deployment_impact'> | nu
   return campaign?.deployment_impact?.active_finding_count ?? 0
 }
 
-function episodesStarted(campaign: Campaign): { started: number; max: number } {
+export function episodesStarted(campaign: Campaign): { started: number; max: number } {
   const meta = (campaign.metadata_json?.autonomous_research ?? {}) as Record<string, unknown>
   return {
     started: typeof meta.episodes_started === 'number' ? meta.episodes_started : 0,
     max: typeof meta.max_episodes === 'number' ? meta.max_episodes : 0,
   }
-}
-
-// Compact strip of currently-running autonomous hunts. Renders nothing when idle,
-// so it can be dropped at the top of the Scans page without taking space.
-export function ActiveHunts() {
-  const [runs, setRuns] = useState<Campaign[]>([])
-  useEffect(() => {
-    let cancelled = false
-    const load = () => getCampaigns({ status: 'active', limit: 20 })
-      .then((d) => { if (!cancelled) setRuns((d.campaigns || []).filter((c) => c.campaign_type === 'autonomous_research')) })
-      .catch(() => undefined)
-    load()
-    const timer = window.setInterval(load, 5000)
-    return () => { cancelled = true; window.clearInterval(timer) }
-  }, [])
-  if (!runs.length) return null
-  return (
-    <Card className="p-4">
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-2">
-          <span className="h-2 w-2 rounded-full bg-blue-400 animate-pulse" aria-hidden="true" />
-          <h2 className="text-sm font-semibold text-gray-200">Autonomous hunts running</h2>
-        </div>
-        <Link href="/settings/research-agent" className="text-xs text-blue-300 hover:text-blue-200">Start a hunt →</Link>
-      </div>
-      <div className="mt-3 grid gap-2">
-        {runs.map((run) => {
-          const prog = episodesStarted(run)
-          const found = findingCount(run)
-          return (
-            <Link key={run.id} href={`/settings/research-agent/runs/${run.id}`} className="flex items-center gap-3 rounded-lg border border-gray-800 bg-gray-950/40 p-3 hover:border-gray-700">
-              <RunStatusBadge state={runState(run)} />
-              <span className="min-w-0 flex-1 truncate text-sm text-gray-200">{run.name || hostFromUrl(String((run.target_scope?.url as string) || ''))}</span>
-              {found > 0 ? <span className="rounded-full bg-emerald-500/15 px-2 py-0.5 text-xs font-medium text-emerald-300">{found} found</span> : null}
-              {prog.max ? <span className="tabular-nums text-xs text-gray-600">episode {prog.started}/{prog.max}</span> : null}
-              <ArrowRight className="h-4 w-4 flex-none text-gray-600" />
-            </Link>
-          )
-        })}
-      </div>
-    </Card>
-  )
 }
 
 export { Card }

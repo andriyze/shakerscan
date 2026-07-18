@@ -60,9 +60,11 @@ services:
       - LOCAL_ENV_FILE=/workspace/.env
       - SCANNER_VERSION=${SCANNER_VERSION:-dev}
       - GIT_COMMIT=${GIT_COMMIT:-dev}
-      # Fleet cap. Empty => derived from Docker RAM (~1.2GB/worker); set a number
-      # to force a fixed ceiling.
+      # Fleet cap. Empty => Docker RAM minus the supporting-stack reserve, at
+      # roughly 1GB per worker. Set a number to force a fixed ceiling.
       - SHAKERSCAN_MAX_WORKERS=${SHAKERSCAN_MAX_WORKERS:-}
+      - SHAKERSCAN_PLATFORM_MEMORY_RESERVE_GB=${SHAKERSCAN_PLATFORM_MEMORY_RESERVE_GB:-7}
+      - SHAKERSCAN_PER_WORKER_MEM_GB=${SHAKERSCAN_PER_WORKER_MEM_GB:-1}
       # AI options (optional - set in .env file)
       - AI_URL=${AI_URL:-}
       - AI_API_KEY=${AI_API_KEY:-}

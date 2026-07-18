@@ -25,6 +25,30 @@ from pathlib import Path
 import pytest
 
 
+def test_worker_capacity_uses_one_gb_budget_after_platform_reserve(monkeypatch):
+    monkeypatch.delenv("SHAKERSCAN_MAX_WORKERS", raising=False)
+    monkeypatch.delenv("SHAKERSCAN_PER_WORKER_MEM_GB", raising=False)
+    monkeypatch.delenv("SHAKERSCAN_PLATFORM_MEMORY_RESERVE_GB", raising=False)
+    monkeypatch.setattr(
+        api_module,
+        "docker_socket_request",
+        lambda *_args, **_kwargs: (200, {"MemTotal": 23 * 1024 ** 3}),
+    )
+
+    assert api_module._compute_max_allowed_workers() == 16
+
+
+def test_worker_capacity_defaults_to_five_below_sixteen_gb(monkeypatch):
+    monkeypatch.delenv("SHAKERSCAN_MAX_WORKERS", raising=False)
+    monkeypatch.setattr(
+        api_module,
+        "docker_socket_request",
+        lambda *_args, **_kwargs: (200, {"MemTotal": 12 * 1024 ** 3}),
+    )
+
+    assert api_module._compute_max_allowed_workers() == 5
+
+
 def _test_jwt(**claims):
     encode = lambda value: base64.urlsafe_b64encode(json.dumps(value).encode()).decode().rstrip("=")
     return f"{encode({'alg': 'none'})}.{encode(claims)}.signature"
