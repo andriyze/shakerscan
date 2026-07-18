@@ -1,0 +1,193 @@
+"""Unit tests for the T3MP3ST-ported autonomous-agent primitives.
+
+Pure-stdlib modules, so this runs on the host with no scanner deps:
+    python3 tests/test_agent_ports.py
+(also importable by pytest). Covers the provenance gate, the text tool-contract shim,
+and the honest context packer.
+"""
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "api"))
+
+import agent_provenance as prov
+import agent_text_toolcalls as tc
+import agent_context_pack as cp
+
+
+# ------------------------------------------------------------------ provenance gate ----
+
+def test_tool_evidence_passes():
+    f = {"severity": "high", "evidence": [{"type": "response", "content": "HTTP/1.1 200 ... token=abc"}]}
+    g = prov.gate_live_finding(f)
+    assert g["passed"] is True
+    assert g["provenance"] == "tool"
+    assert g["reasons"] == []
+
+
+def test_prose_only_fails():
+    f = {"severity": "critical", "evidence": []}
+    g = prov.gate_live_finding(f)
+    assert g["passed"] is False
+    assert g["provenance"] == "none"
+    # both RULE 1 (no tool evidence) and RULE 2 (crit + zero evidence) trip
+    assert len(g["reasons"]) == 2
+
+
+def test_context_only_is_not_tool():
+    # a non-tool evidence kind (e.g. a model 'note') counts as context, not tool output
+    f = {"severity": "medium", "evidence": [{"type": "note", "content": "looks suspicious"}]}
+    g = prov.gate_live_finding(f)
+    assert g["passed"] is False
+    assert g["provenance"] == "context"
+    assert len(g["reasons"]) == 1  # only RULE 1; medium severity does not trip overclaim
+
+
+def test_empty_tool_content_does_not_count():
+    f = {"severity": "low", "evidence": [{"type": "output", "content": "   "}]}
+    g = prov.gate_live_finding(f)
+    assert g["passed"] is False
+    assert g["provenance"] == "context"  # evidence present but empty content -> not tool
+
+
+def test_strip_self_verification():
+    payload = {"title": "x", "verified_at": 123, "last_verification_verdict": "exploited", "promotable": True, "evidence": []}
+    out = prov.strip_self_verification(payload)
+    assert "verified_at" not in out
+    assert "last_verification_verdict" not in out
+    assert "promotable" not in out
+    assert out["title"] == "x"  # non-owned fields preserved
+
+
+# ---------------------------------------------------------------- text tool-calls ------
+
+def test_render_tool_contract_marks_required():
+    tools = [{
+        "name": "http_request",
+        "description": "issue an HTTP request",
+        "parameters": {"type": "object", "properties": {"method": {"type": "string"}, "path": {"type": "string"}}, "required": ["path"]},
+    }]
+    out = tc.render_tool_contract(tools)
+    assert "## ARSENAL" in out
+    assert "## ACTION CONTRACT" in out
+    assert "path*: string" in out       # required marked
+    assert "method: string" in out      # optional unmarked
+    assert '{"tool_calls":[' in out
+
+
+def test_parse_fenced_json():
+    text = 'Let me try that.\n```json\n{"tool_calls":[{"name":"http_request","arguments":{"method":"GET","path":"/rest/products/search?q=1"}}]}\n```'
+    calls = tc.parse_text_tool_calls(text)
+    assert calls and len(calls) == 1
+    assert calls[0]["name"] == "http_request"
+    assert calls[0]["arguments"]["path"].startswith("/rest/products/search")
+
+
+def test_parse_balanced_no_fence():
+    text = '{"tool_calls":[{"name":"note","arguments":{"kind":"idea"}}]}'
+    calls = tc.parse_text_tool_calls(text)
+    assert calls and calls[0]["name"] == "note"
+    assert calls[0]["arguments"] == {"kind": "idea"}
+
+
+def test_parse_single_unwrapped():
+    text = '{"name":"query_kb","arguments":{"kind":"endpoints"}}'
+    calls = tc.parse_text_tool_calls(text)
+    assert calls and calls[0]["name"] == "query_kb"
+
+
+def test_parse_trailing_commas_tolerated():
+    text = '```json\n{"tool_calls":[{"name":"note","arguments":{"a":1,},},],}\n```'
+    calls = tc.parse_text_tool_calls(text)
+    assert calls and calls[0]["name"] == "note"
+
+
+def test_parse_multiple_calls():
+    text = '```json\n{"tool_calls":[{"name":"http_request","arguments":{"path":"/a"}},{"name":"http_request","arguments":{"path":"/b"}}]}\n```'
+    calls = tc.parse_text_tool_calls(text)
+    assert calls and len(calls) == 2
+    assert [c["arguments"]["path"] for c in calls] == ["/a", "/b"]
+
+
+def test_prose_is_final_answer():
+    assert tc.parse_text_tool_calls("The surface is exhausted; no exploitable issue found.") is None
+
+
+def test_balanced_spans_ignore_braces_in_strings():
+    text = '{"name":"note","arguments":{"payload":"a { nested } brace and \\" quote"}}'
+    calls = tc.parse_text_tool_calls(text)
+    assert calls and calls[0]["arguments"]["payload"] == 'a { nested } brace and " quote'
+
+
+def test_refusal_detection():
+    assert tc.is_likely_refusal("I can't help with that request.") is True
+    assert tc.is_likely_refusal("I'm not able to assist with this.") is True
+    assert tc.is_likely_refusal("This is against my guidelines.") is True
+    assert tc.is_likely_refusal("I can't find the flag on this endpoint yet.") is False
+    assert tc.is_likely_refusal("x" * 1400) is False   # long substantive output
+    assert tc.is_likely_refusal("", "content_filter") is True
+
+
+def test_history_replay_summarizes():
+    assert tc.render_history_tool_request(["http_request", "note"]) == "[requested tools: http_request, note]"
+
+
+# ---------------------------------------------------------------- context packer -------
+
+def test_map_header_always_present():
+    pack = cp.pack_context([{"key": "endpoints", "body": "GET /a\nGET /b"}], token_budget=2000)
+    assert "=== CONTEXT MAP (1 sections) ===" in pack["text"]
+    assert pack["included"] == ["endpoints"]
+    assert pack["dropped"] == []
+
+
+def test_return_shape():
+    pack = cp.pack_context([], token_budget=100)
+    assert set(pack) == {"text", "included", "dropped", "tokens_used", "token_budget"}
+    assert pack["token_budget"] == 100
+
+
+def test_over_budget_drops_and_notes():
+    items = [{"key": f"sec_{i}", "body": "Z" * 2000} for i in range(6)]
+    pack = cp.pack_context(items, token_budget=400)
+    assert len(pack["included"]) >= 1
+    assert len(pack["dropped"]) >= 1  # honest drop, not silent
+
+
+def test_map_capped_note():
+    items = [{"key": f"sec_{i:03d}", "body": "y"} for i in range(100)]
+    pack = cp.pack_context(items, token_budget=300)
+    assert "more sections (not listed — map capped for budget)" in pack["text"]
+
+
+def test_oversized_body_elided_not_truncated():
+    pack = cp.pack_context([{"key": "big", "body": "Q" * 8000}], token_budget=500)
+    assert "…[middle elided for context budget]…" in pack["text"]
+    assert "big" in pack["included"]
+
+
+def test_relevance_ranks_objective_keyword_first():
+    items = [
+        {"key": "misc", "body": "some unrelated content about weather"},
+        {"key": "login_flow", "body": "POST /rest/user/login handles password auth token"},
+    ]
+    pack = cp.pack_context(items, token_budget=4000, objective="find broken authentication and login token flaws")
+    ti = pack["text"].index
+    # the login section body should appear before the misc section body
+    assert ti("=== SECTION: login_flow ===") < ti("=== SECTION: misc ===")
+
+
+# ------------------------------------------------------------------------ runner --------
+
+if __name__ == "__main__":
+    fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
+    failed = 0
+    for fn in fns:
+        try:
+            fn()
+            print(f"  ok  {fn.__name__}")
+        except Exception as e:  # noqa: BLE001
+            failed += 1
+            print(f"FAIL  {fn.__name__}: {type(e).__name__}: {e}")
+    print(f"\n{len(fns) - failed}/{len(fns)} passed")
+    sys.exit(1 if failed else 0)
