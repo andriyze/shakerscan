@@ -18765,17 +18765,19 @@ class AgentVerifyRequest(BaseModel):
 
 
 # Families the bridge can currently verify. bola needs distinct captured object refs; auth_bypass
-# and data_exposure are anon-vs-authed reads of a fixed route (no object ids). Every family is
-# verified by the UNCHANGED family_proof two-run moat — the bridge only supplies routes/bindings.
-_AGENT_VERIFIABLE_FAMILIES: frozenset[str] = frozenset({"bola", "auth_bypass", "data_exposure"})
+# and data_exposure are anon-vs-authed reads of a fixed route (no object ids); create-based
+# mass_assignment reuses the proven server materializer. Every family is verified by the UNCHANGED
+# family_proof two-run moat — the bridge only supplies routes/bindings, never a verdict.
+_AGENT_VERIFIABLE_FAMILIES: frozenset[str] = frozenset({"bola", "auth_bypass", "data_exposure", "mass_assignment"})
 
 
 async def _agent_verification_workflow_for(
-    conn: Any, target_uuid: uuid.UUID, family: str, path: str
-) -> tuple[dict[str, Any], str]:
-    """Return ``(workflow, canonical_object_route)`` for a suspected finding's family, or raise
-    HTTPException(422) when the inputs cannot support a sound proof. Only bola needs the two-principal
-    captured object references (resolved here); the anon-vs-authed families use the finding route."""
+    conn: Any, target_uuid: uuid.UUID, family: str, path: str, method: str
+) -> tuple[dict[str, Any], str, str, dict[str, Any]]:
+    """Return ``(workflow, canonical_object_route, proof_method, hypothesis_metadata_extra)`` for a
+    suspected finding's family, or raise HTTPException(422) when the inputs cannot support a sound
+    proof. ``workflow`` with ``server_materialize=True`` means dispatch WITHOUT steps and let the
+    proven create-MA server materializer build them (probe runs under the authorized dispatch)."""
     if family == "bola":
         contexts = await _resolve_workflow_principal_contexts(conn, target_uuid, {"user1", "user2"})
         targets = agent_tools.derive_bola_verification_targets(
@@ -18789,12 +18791,19 @@ async def _agent_verification_workflow_for(
                 detail="insufficient distinct owned object references to build a sound BOLA proof (finding stays suspected)")
         workflow = _materialize_bola_verification_workflow(
             targets["collection"], targets["owner_ref_key"], targets["attacker_ref_key"])
-        return workflow, targets["collection"].rstrip("/") + "/{id}"
+        return workflow, targets["collection"].rstrip("/") + "/{id}", "GET", {}
     route = _canonical_vulnerability_route(path) or path
     if family == "auth_bypass":
-        return _materialize_authbypass_verification_workflow(path), route
+        return _materialize_authbypass_verification_workflow(path), route, "GET", {}
     if family == "data_exposure":
-        return _materialize_dataexposure_verification_workflow(path), route
+        return _materialize_dataexposure_verification_workflow(path), route, "GET", {}
+    if family == "mass_assignment":
+        # Create-based only: dispatch with NO steps so _server_materialize_create_ma probes the create
+        # surface and builds the role=admin overpost workflow (a wrong field is falsified by the proof).
+        # Update-based (PUT/PATCH a privileged field) is not yet supported by the bridge.
+        if str(method or "POST").upper() != "POST":
+            raise HTTPException(status_code=422, detail="mass_assignment verification currently supports create-based (POST) leads only")
+        return {"proof_family": "mass_assignment", "server_materialize": True}, route, "POST", {"create_based": True}
     raise HTTPException(status_code=422, detail=f"verification bridge supports {sorted(_AGENT_VERIFIABLE_FAMILIES)}, not '{family or 'unknown'}'")
 
 
@@ -18826,38 +18835,44 @@ async def _verify_suspected_finding_workflow(
         if family not in _AGENT_VERIFIABLE_FAMILIES:
             raise HTTPException(status_code=422, detail=f"verification bridge supports {sorted(_AGENT_VERIFIABLE_FAMILIES)}, not '{family or 'unknown'}'")
         path = urllib.parse.urlsplit(str(finding["url"] or "")).path or "/"
+        _, _, _, finding_method, _, _, _ = _finding_family_route_method(finding)
         # Family-dispatched workflow build (raises 422 on insufficient inputs -> stays suspected).
-        workflow, object_route = await _agent_verification_workflow_for(conn, target_uuid, family, path)
+        workflow, object_route, method, extra_metadata = await _agent_verification_workflow_for(
+            conn, target_uuid, family, path, str(finding_method or ""))
         # Gate: a valid, target-bound approval receipt for the credential-tier workflow action.
         await _validate_approval_receipt_for_action(
             conn, approval_receipt_id, target_url=target_url, target_id=str(target_uuid),
             action_name="experiment.workflow", command="experiment.workflow", risk_tier="credential",
             require_target_binding=True, created_by=created_by)
-        dedupe_dimensions = {"route": object_route, "method": "GET"}
+        dedupe_dimensions = {"route": object_route, "method": method}
         severity = str(finding["severity"] or "high")
         if severity not in {"critical", "high", "medium", "low", "info"}:
             severity = "high"
         hyp = await _upsert_hypothesis(conn, HypothesisRequest(
             source="ai_planner", family=family,
-            dedupe_key=f"agent_verify:{family}:{object_route}:GET",
+            dedupe_key=f"agent_verify:{family}:{object_route}:{method}",
             dedupe_dimensions=dedupe_dimensions,
             target_id=str(target_uuid),
             title=str(finding["title"] or f"{family} (agent-suspected)")[:200],
             severity_guess=severity, confidence=0.5,
-            metadata_json={"route": object_route, "method": "GET", "dedupe_dimensions": dedupe_dimensions,
-                           "source_suspected_finding_id": str(finding_uuid)},
+            metadata_json={"route": object_route, "method": method, "dedupe_dimensions": dedupe_dimensions,
+                           "source_suspected_finding_id": str(finding_uuid), **extra_metadata},
             created_by=created_by))
         hypothesis_id = str(hyp["hypothesis"]["id"])
 
-    # Dispatch the family_proof workflow (the moat verifies via two-run re-execution).
-    dispatch_params = {
+    # Dispatch the family_proof workflow (the moat verifies via two-run re-execution). A
+    # server-materialized family (create-MA) dispatches WITHOUT steps so _server_materialize_create_ma
+    # probes the create surface and builds them under the authorized dispatch.
+    dispatch_params: dict[str, Any] = {
         "target_id": str(target_uuid), "workflow_id": str(uuid.uuid4()),
-        "proof_family": workflow["proof_family"], "steps": workflow["steps"],
-        "assertions": workflow["assertions"],
+        "proof_family": workflow["proof_family"],
         "_research_hypothesis_id": hypothesis_id,
     }
-    if workflow.get("principal_variables"):
-        dispatch_params["principal_variables"] = workflow["principal_variables"]
+    if not workflow.get("server_materialize"):
+        dispatch_params["steps"] = workflow["steps"]
+        dispatch_params["assertions"] = workflow["assertions"]
+        if workflow.get("principal_variables"):
+            dispatch_params["principal_variables"] = workflow["principal_variables"]
     try:
         result = await _arsenal_dispatch_workflow(dispatch_params, approval_receipt_id)
     except HTTPException as exc:
