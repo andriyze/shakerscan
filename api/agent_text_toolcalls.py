@@ -61,7 +61,8 @@ def render_tool_contract(tools: list[dict[str, Any]]) -> str:
         "```json",
         '{"done":true,"findings":[{"title":"…","severity":"critical|high|medium|low|info",'
         '"family":"bola|mass_assignment|injection|…","predicate":"one verifiable predicate '
-        'or null","details":"… cite the exact tool output/receipt that evidences it …",'
+        'or null","route":"/exact/vulnerable/operation","method":"GET|POST|PUT|PATCH|DELETE",'
+        '"details":"… cite the exact tool output/receipt that evidences it …",'
         '"evidence_refs":["resp_1"],"cvss":0.0,"cwe":"CWE-…","remediation":"…"}],'
         '"abstained":false}',
         "```",
@@ -222,6 +223,8 @@ def _findings_from_obj(obj: dict[str, Any]) -> list[dict[str, Any]]:
                 "cwe": (str(f.get("cwe"))[:16] if f.get("cwe") else None),
                 "family": (str(f.get("family")).strip().lower()[:80] if f.get("family") else None),
                 "predicate": (str(f.get("predicate")).strip()[:64] if f.get("predicate") else None),
+                "route": (str(f.get("route")).strip()[:500] if f.get("route") else None),
+                "method": (str(f.get("method")).strip().upper()[:12] if f.get("method") else None),
                 "evidence_refs": (
                     [str(r)[:24] for r in refs if str(r).strip()][:8] if isinstance(refs, list) else []
                 ),

@@ -14716,13 +14716,13 @@ def _create_ma_execution(*, benign_ok=True):
     }
 
 
-def test_create_based_mass_assignment_promotes_without_verified_restoration():
+def test_create_based_mass_assignment_does_not_promote_without_verified_restoration():
     execution = _create_ma_execution()
     proof = api_module._trusted_workflow_family_proof(execution, execution, normalized=_CREATE_MA_NORMALIZED)
-    assert proof["restoration_verified"] is False        # honestly reported
-    assert proof["reexecuted_at_handoff"] is True         # rescued by the two-run create-MA path
-    assert proof["verdict"] == "verified"
-    assert proof["promotable"] is True
+    assert proof["restoration_verified"] is False
+    assert proof["reexecuted_at_handoff"] is False
+    assert proof["verdict"] != "verified"
+    assert proof["promotable"] is False
     assert set(proof["stable_predicates"]) == {
         "forbidden_field_accepted", "observable_state_change", "benign_control_accepted"}
     # The proven route must bind to the WRITE (the create), not the read-back that verifies it --
@@ -14734,7 +14734,7 @@ def test_create_based_mass_assignment_promotes_without_verified_restoration():
 
 def test_create_based_mass_assignment_gate_is_family_and_shape_scoped():
     ok = _CREATE_MA_NORMALIZED
-    # family gate: only mass_assignment is ever relaxed.
+    # Shape detection remains scoped to create-based mass assignment; it no longer relaxes cleanup.
     assert api_module._is_create_based_mass_assignment("mass_assignment", ok) is True
     assert api_module._is_create_based_mass_assignment("bola", ok) is False
     assert api_module._is_create_based_mass_assignment("workflow", ok) is False
@@ -14750,9 +14750,8 @@ def test_create_based_mass_assignment_gate_is_family_and_shape_scoped():
     assert api_module._is_create_based_mass_assignment("mass_assignment", create_no_extract) is False
 
 
-def test_create_based_mass_assignment_relax_still_requires_every_predicate():
-    # Even with the restoration relax, a MISSING required predicate (benign control rejected) cannot
-    # reach `verified`. The relax only drops the cleanup gate; it never manufactures a predicate.
+def test_create_based_mass_assignment_still_requires_every_predicate():
+    # A missing required predicate cannot reach verified, independent of the restoration gate.
     execution = _create_ma_execution(benign_ok=False)
     proof = api_module._trusted_workflow_family_proof(execution, execution, normalized=_CREATE_MA_NORMALIZED)
     assert "benign_control_accepted" not in proof["stable_predicates"]
@@ -14761,8 +14760,7 @@ def test_create_based_mass_assignment_relax_still_requires_every_predicate():
 
 
 def test_restoration_stays_required_for_non_create_mass_assignment():
-    # An UPDATE-based mass_assignment (PUT + rollback, no create) is NOT create-based, so it still
-    # needs verified restoration -- the relax must not leak to the restorable update path.
+    # An UPDATE-based mass_assignment also requires verified restoration.
     execution = _create_ma_execution()
     update_shape = {"steps": [{"checkpoint": "mutation", "method": "PUT"},
                               {"checkpoint": "rollback", "method": "PUT"}]}
@@ -14785,6 +14783,120 @@ def test_discover_create_object_shape_finds_envelope_and_id():
     assert d({"result": {"userId": 3}}) == ("result", "userId")
     assert d({"status": "ok"}) is None          # no id-bearing object
     assert d("not-json") is None
+
+
+def test_agent_finding_locus_requires_an_exact_cited_operation():
+    evidence = [
+        {"content": json.dumps({"request": {"method": "GET", "path": "/api/items/7"}})},
+        {"content": json.dumps({"request": {"method": "POST", "path": "/api/items"}})},
+    ]
+    # Multi-operation evidence is ambiguous without an explicit operation.
+    assert api_module._agent_finding_locus({"evidence": evidence}) == (None, None)
+    # An exact operation named by the debrief is accepted only when cited.
+    assert api_module._agent_finding_locus({
+        "evidence": evidence,
+        "route": "/api/items",
+        "method": "POST",
+    }) == ("/api/items", "POST")
+    assert api_module._agent_finding_locus({
+        "evidence": evidence,
+        "route": "/api/admin",
+        "method": "POST",
+    }) == (None, None)
+
+
+def test_mass_assignment_verification_requires_evidenced_post_method():
+    with pytest.raises(api_module.HTTPException) as exc:
+        asyncio.run(api_module._agent_verification_workflow_for(
+            None,
+            uuid.uuid4(),
+            "mass_assignment",
+            "/api/users",
+            "",
+        ))
+    assert exc.value.status_code == 422
+    workflow, route, method, metadata = asyncio.run(
+        api_module._agent_verification_workflow_for(
+            None,
+            uuid.uuid4(),
+            "mass_assignment",
+            "/api/users",
+            "POST",
+        )
+    )
+    assert workflow["server_materialize"] is True
+    assert (route, method, metadata) == ("/api/users", "POST", {"create_based": True})
+
+
+def test_probe_create_surface_cleans_trackable_artifact_with_same_cookie():
+    import httpx
+
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        assert "session=managed" in request.headers.get("cookie", "")
+        if request.method == "POST":
+            return httpx.Response(201, json={"data": {"id": 42, "role": "user"}})
+        assert request.method == "DELETE"
+        assert request.url.path == "/api/users/42"
+        return httpx.Response(204)
+
+    result = asyncio.run(api_module._probe_create_surface(
+        "https://target.test",
+        "/api/users",
+        {},
+        {"session": "managed"},
+        httpx.MockTransport(handler),
+    ))
+    assert result["usable"] is True
+    assert result["request_count"] == 1
+    assert result["cleanup_request_count"] == 1
+    assert result["artifacts"] == [{
+        "id_sha256": hashlib.sha256(b"42").hexdigest(),
+        "cleanup_attempted": True,
+        "cleanup_succeeded": True,
+        "cleanup_status": 204,
+    }]
+    assert [request.method for request in requests] == ["POST", "DELETE"]
+
+
+def test_probe_create_surface_stops_after_untrackable_accepted_create():
+    import httpx
+
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(201, json={"status": "created"})
+
+    result = asyncio.run(api_module._probe_create_surface(
+        "https://target.test",
+        "/api/users",
+        {},
+        transport=httpx.MockTransport(handler),
+    ))
+    assert result["usable"] is False
+    assert result["reason"] == "accepted_probe_missing_trackable_id"
+    assert result["request_count"] == 1
+    assert len(requests) == 1
+
+
+def test_probe_create_surface_rejects_non_same_origin_collection_without_io():
+    import httpx
+
+    def should_not_run(_request):
+        raise AssertionError("out-of-scope probe performed network I/O")
+
+    result = asyncio.run(api_module._probe_create_surface(
+        "https://target.test",
+        "//other.test/api/users",
+        {},
+        transport=httpx.MockTransport(should_not_run),
+    ))
+    assert result["usable"] is False
+    assert result["reason"] == "probe_collection_outside_same_origin_scope"
+    assert result["request_count"] == 0
 
 
 def test_materialize_create_mass_assignment_workflow_is_valid_and_universal():

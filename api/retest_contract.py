@@ -1877,6 +1877,7 @@ async def run_schema_migrations(pool) -> None:
                     approval_receipt_id UUID,
                     token_budget INT NOT NULL DEFAULT 6000,
                     state JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    planning_token UUID,
                     stop_reason TEXT,
                     result JSONB NOT NULL DEFAULT '{}'::jsonb,
                     created_by TEXT,
@@ -1885,6 +1886,10 @@ async def run_schema_migrations(pool) -> None:
                     CONSTRAINT agent_hunt_runs_status_check
                         CHECK (status IN ('awaiting_planner','planning','completed','cancelled','failed'))
                 )
+            """)
+            await conn.execute("""
+                ALTER TABLE agent_hunt_runs
+                ADD COLUMN IF NOT EXISTS planning_token UUID
             """)
             # 'planning' is a transient claim status: a reply flips awaiting_planner->planning under a
             # short row lock, RELEASES the lock, executes tools, then writes the result back. This keeps

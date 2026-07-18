@@ -17494,6 +17494,7 @@ async def _agent_tool_run_tool(
     status_label = "success"
     error: Optional[str] = None
     stdout = ""
+    proc: Optional[asyncio.subprocess.Process] = None
     try:
         proc = await asyncio.create_subprocess_exec(
             binary, *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
@@ -17514,6 +17515,12 @@ async def _agent_tool_run_tool(
     except FileNotFoundError:
         # Scanner missing is an operational fact worth an audit receipt, not a silent early return.
         status_label, error, stdout = "failed", "scanner_not_available", ""
+    except asyncio.CancelledError:
+        # A hunt wall-clock cancellation must not orphan an external scanner process.
+        if proc is not None and proc.returncode is None:
+            proc.kill()
+            await proc.wait()
+        raise
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "error": f"run_tool_fault:{type(exc).__name__}"}
     finished_at = datetime.now(timezone.utc)
@@ -17661,7 +17668,7 @@ _AGENT_MAX_TOOLS_PER_TURN = 8
 
 async def _agent_planner_reply(
     messages: list[dict[str, Any]], *, max_tokens: int = 1400, timeout: int = 90
-) -> tuple[Any, Optional[str]]:
+) -> tuple[Any, Optional[str], int]:
     """One planner turn via the configured AI provider in json_object mode (no schema —
     the model returns {"tool_calls":[...]} or {"done":true,"findings":[...]})."""
     settings = _load_effective_ai_settings()
@@ -17669,10 +17676,10 @@ async def _agent_planner_reply(
     ai_key = str(settings.get("ai_api_key") or "").strip()
     ai_model = str(settings.get("ai_model") or "").strip()
     if not (ai_url and ai_key and ai_model):
-        return None, "configured_ai_not_ready"
+        return None, "configured_ai_not_ready", 0
     call_provider = _load_research_ai_provider()
     if not call_provider:
-        return None, "provider_unavailable"
+        return None, "provider_unavailable", 0
     failure_meta: dict[str, Any] = {}
     response, error, _latency = await call_provider(
         ai_url=ai_url,
@@ -17687,7 +17694,51 @@ async def _agent_planner_reply(
         failure_meta_sink=failure_meta,
         use_circuit_breaker=False,
     )
-    return response, error
+    provider_meta = (
+        response.get("_provider_meta")
+        if isinstance(response, dict) and isinstance(response.get("_provider_meta"), dict)
+        else failure_meta
+    ) or {}
+    usage = (
+        provider_meta.get("usage_units")
+        if isinstance(provider_meta.get("usage_units"), dict)
+        else provider_meta.get("usage") if isinstance(provider_meta.get("usage"), dict) else {}
+    )
+    try:
+        provider_tokens = max(
+            0,
+            int(
+                provider_meta.get("planning_units_spent")
+                or provider_meta.get("token_units_spent")
+                or usage.get("total_units")
+                or usage.get("total_tokens")
+                or 0
+            ),
+        )
+    except (TypeError, ValueError):
+        provider_tokens = 0
+    estimated_tokens = max(
+        1,
+        (
+            len(json.dumps(messages, default=str).encode("utf-8"))
+            + len(json.dumps(response, default=str).encode("utf-8"))
+            + 3
+        ) // 4,
+    ) if response is not None else 0
+    return response, error, provider_tokens or estimated_tokens
+
+
+def _agent_planner_turn_token_reservation(
+    messages: list[dict[str, Any]],
+    *,
+    max_output_tokens: int,
+) -> int:
+    """Conservative pre-call reservation used to fail closed before exceeding episode tokens."""
+    prompt_tokens = max(
+        1,
+        (len(json.dumps(messages, default=str).encode("utf-8")) + 3) // 4,
+    )
+    return prompt_tokens + max(0, int(max_output_tokens))
 
 
 def _agent_trim_transcript(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -17702,7 +17753,14 @@ def _agent_trim_transcript(messages: list[dict[str, Any]]) -> list[dict[str, Any
 
 
 def _agent_finding_locus(finding: dict[str, Any]) -> tuple[Optional[str], Optional[str]]:
-    """Best-effort (url_path, method) for an agent finding, read from its tool evidence."""
+    """Resolve the exact vulnerable operation from this finding's cited tool evidence.
+
+    A control/test finding often cites multiple requests. Never choose the first request
+    arbitrarily: honor an explicit model-selected route/method only when that exact operation is
+    among the cited evidence, or infer it only when all cited requests identify one operation.
+    Ambiguity stays SUSPECTED and cannot be auto-verified against the wrong endpoint.
+    """
+    operations: list[tuple[str, str]] = []
     for ev in finding.get("evidence") or []:
         if not isinstance(ev, dict):
             continue
@@ -17712,7 +17770,21 @@ def _agent_finding_locus(finding: dict[str, Any]) -> tuple[Optional[str], Option
             continue
         request_view = payload.get("request") if isinstance(payload, dict) else None
         if isinstance(request_view, dict) and request_view.get("path"):
-            return str(request_view.get("path"))[:500], str(request_view.get("method") or "GET").upper()
+            operation = (
+                str(request_view.get("path"))[:500],
+                str(request_view.get("method") or "GET").upper(),
+            )
+            if operation not in operations:
+                operations.append(operation)
+    requested_route = str(finding.get("route") or "").strip()[:500]
+    requested_method = str(finding.get("method") or "").strip().upper()[:12]
+    if requested_route and requested_method:
+        for path, method in operations:
+            if path == requested_route and method == requested_method:
+                return path, method
+        return None, None
+    if len(operations) == 1:
+        return operations[0]
     return None, None
 
 
@@ -17745,15 +17817,26 @@ async def _persist_agent_suspected_finding(
         _canonical_vulnerability_key(family=family, route=(url_path or concrete_url), method=method)
         if family else None
     )
-    net_new = not (vuln_key and vuln_key in known_keys)
+    # "Net new vs DAST" is meaningful only for a recognized family + exact operation.
+    # Novel/unknown taxonomy still remains visible as SUSPECTED, but must not inflate this metric.
+    net_new = bool(vuln_key) and vuln_key not in known_keys
+    fingerprint_identity = vuln_key or (
+        f"unclassified:{title}:{severity}:{method or ''}:{url_path or ''}"
+    )
     fingerprint = hashlib.sha256(
-        f"{target_url}:{title}:{severity}:{url_path or ''}:autonomous_agent".encode()
+        f"{target_uuid}:{fingerprint_identity}:autonomous_agent".encode()
     ).hexdigest()[:32]
     evidence_json = _redact_finding_evidence({
         "trust_tier": "suspected",
         "provenance": gate.get("provenance"),
         "predicate": finding.get("predicate"),
         "family": family,
+        "route": url_path,
+        "method": method,
+        "dedupe_dimensions": {
+            "route": url_path,
+            "method": method,
+        } if url_path and method else {},
         "proof": finding.get("details"),
         "remediation": finding.get("remediation"),
         "evidence_refs": finding.get("evidence_refs"),
@@ -17779,6 +17862,7 @@ async def _persist_agent_suspected_finding(
         """INSERT INTO findings (target_id, fingerprint, title, description, severity, cvss_score,
                tool, cwe, url, evidence, notes, source, status)
            VALUES ($1,$2,$3,$4,$5,$6,'autonomous_agent',$7,$8,$9,$10,'autonomous','active')
+           ON CONFLICT DO NOTHING
            RETURNING id""",
         target_uuid, fingerprint, title, str(finding.get("details") or title)[:8000], severity,
         (float(finding["cvss"]) if isinstance(finding.get("cvss"), (int, float)) else None),
@@ -17786,6 +17870,28 @@ async def _persist_agent_suspected_finding(
         concrete_url, json.dumps(evidence_json),
         "Suspected (autonomous agent, provenance-gated; NOT server-verified).",
     )
+    if not finding_id:
+        # A concurrent hunt inserted the same operation after our SELECT. Treat it as an ordinary
+        # rediscovery instead of swallowing UniqueViolation as a run-level persist failure.
+        concurrent = await conn.fetchrow(
+            "SELECT id, status FROM findings WHERE fingerprint=$1 AND target_id=$2",
+            fingerprint,
+            target_uuid,
+        )
+        if not concurrent:
+            raise RuntimeError("suspected finding conflict could not be reconciled")
+        await conn.execute(
+            "UPDATE findings SET last_seen_at=NOW(), updated_at=NOW() WHERE id=$1",
+            concurrent["id"],
+        )
+        return {
+            "id": str(concurrent["id"]),
+            "persisted": "existing",
+            "net_new": net_new,
+            "title": title,
+            "url": url_path,
+            "existing_status": concurrent["status"],
+        }
     return {"id": str(finding_id), "persisted": "created", "net_new": net_new, "title": title, "url": url_path}
 
 
@@ -17802,6 +17908,12 @@ def _agent_new_state(objective: str, messages: list[dict[str, Any]], included: l
         "no_progress": 0,
         "empty_replies": 0,
         "tool_calls_made": 0,
+        "request_units_used": 0,
+        "active_actions_used": 0,
+        "model_tokens_used": 0,
+        "action_budget_limit": None,
+        "request_budget_limit": None,
+        "active_action_budget_limit": None,
         "iterations": 0,
         "findings": [],            # model debrief findings (set on finalize)
         "abstained": False,
@@ -17856,6 +17968,8 @@ async def _agent_apply_reply(
     hypothesis_id: Optional[str],
     iteration: int,
     max_iterations: int,
+    deadline_monotonic: Optional[float] = None,
+    should_stop: Optional[Any] = None,
 ) -> dict[str, Any]:
     """Apply ONE planner reply to the loop state: interpret it, execute any requested tools
     (gated), record evidence, and run the anti-stall steering. Mutates ``state`` and returns
@@ -17911,6 +18025,13 @@ async def _agent_apply_reply(
             f"{_AGENT_MAX_TOOLS_PER_TURN} were run. Request the remaining {dropped} next turn.]"
         )})
     for call in turn_calls:
+        if should_stop is not None:
+            try:
+                if await should_stop():
+                    state["events"].append({"iteration": iteration, "cancelled": True})
+                    return {"stop": True, "stop_reason": "cancelled"}
+            except Exception:
+                pass
         name = str(call.get("name") or "")
         args = call.get("arguments") if isinstance(call.get("arguments"), dict) else {}
         kind, signature = agent_loop.classify_tool_call(
@@ -17925,13 +18046,94 @@ async def _agent_apply_reply(
             state["events"].append({"iteration": iteration, "tool": name, "duplicate": True})
             continue
 
+        request_units = 1 if name in {"http_request", "run_tool"} else 0
+        active_units = 0
+        if name == "http_request":
+            try:
+                active_units = 1 if agent_tools.is_write_method(
+                    agent_tools.coerce_method(args.get("method"))
+                ) else 0
+            except agent_tools.AgentToolError:
+                active_units = 0
+        elif name == "run_tool":
+            try:
+                tool_name, _, _ = agent_tools.coerce_run_tool(args)
+                active_units = 1 if agent_tools.SCANNER_ARG_TEMPLATES[tool_name]["risk"] != "read_only" else 0
+            except (agent_tools.AgentToolError, KeyError):
+                active_units = 0
+
+        action_limit = state.get("action_budget_limit")
+        request_limit = state.get("request_budget_limit")
+        active_limit = state.get("active_action_budget_limit")
+        if action_limit is not None and int(state["tool_calls_made"]) >= int(action_limit):
+            state["events"].append({"iteration": iteration, "budget_exhausted": "actions"})
+            return {"stop": True, "stop_reason": "budget_exhausted:actions"}
+        if request_limit is not None and int(state["request_units_used"]) + request_units > int(request_limit):
+            state["events"].append({"iteration": iteration, "budget_exhausted": "requests"})
+            return {"stop": True, "stop_reason": "budget_exhausted:requests"}
+        if active_limit is not None and int(state["active_actions_used"]) + active_units > int(active_limit):
+            state["events"].append({"iteration": iteration, "budget_exhausted": "active_actions"})
+            return {"stop": True, "stop_reason": "budget_exhausted:active_actions"}
+
         state["tool_calls_made"] += 1
-        result = await _execute_agent_tool(
-            target_uuid, target_url, name, args, created_by=created_by,
-            allow_write=allow_write, allow_active=allow_active,
-            approval_receipt_id=approval_receipt_id,
-            results=state["results_store"], hypothesis_id=hypothesis_id,
+        state["request_units_used"] += request_units
+        state["active_actions_used"] += active_units
+        remaining_seconds = (
+            None if deadline_monotonic is None
+            else deadline_monotonic - time.monotonic()
         )
+        if remaining_seconds is not None and remaining_seconds <= 0:
+            state["events"].append({"iteration": iteration, "budget_exhausted": "seconds"})
+            return {"stop": True, "stop_reason": "budget_exhausted:seconds"}
+        try:
+            tool_call = _execute_agent_tool(
+                target_uuid, target_url, name, args, created_by=created_by,
+                allow_write=allow_write, allow_active=allow_active,
+                approval_receipt_id=approval_receipt_id,
+                results=state["results_store"], hypothesis_id=hypothesis_id,
+            )
+            if should_stop is None:
+                result = (
+                    await tool_call
+                    if remaining_seconds is None
+                    else await asyncio.wait_for(tool_call, timeout=max(0.1, remaining_seconds))
+                )
+            else:
+                tool_task = asyncio.create_task(tool_call)
+                while not tool_task.done():
+                    poll_timeout = 1.0
+                    if deadline_monotonic is not None:
+                        poll_timeout = min(
+                            poll_timeout,
+                            max(0.1, deadline_monotonic - time.monotonic()),
+                        )
+                    done, _pending = await asyncio.wait({tool_task}, timeout=poll_timeout)
+                    if done:
+                        break
+                    if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
+                        tool_task.cancel()
+                        try:
+                            await tool_task
+                        except asyncio.CancelledError:
+                            pass
+                        state["events"].append({"iteration": iteration, "budget_exhausted": "seconds"})
+                        return {"stop": True, "stop_reason": "budget_exhausted:seconds"}
+                    try:
+                        cancelled = bool(await should_stop())
+                    except Exception:
+                        cancelled = False
+                    if cancelled:
+                        tool_task.cancel()
+                        try:
+                            await tool_task
+                        except asyncio.CancelledError:
+                            pass
+                        state["events"].append({"iteration": iteration, "cancelled": True})
+                        return {"stop": True, "stop_reason": "cancelled"}
+                result = await tool_task
+        except asyncio.TimeoutError:
+            state["events"].append({"iteration": iteration, "budget_exhausted": "seconds"})
+            return {"stop": True, "stop_reason": "budget_exhausted:seconds"}
         state["seen_calls"][signature] = agent_loop.format_tool_result(result, max_chars=160)
 
         if result.get("ok") and result.get("provenance") == "tool":
@@ -18047,10 +18249,29 @@ async def _agent_persist_suspected_findings(
 
 
 _AGENT_AUTO_VERIFY_LIMIT = 3
+_AGENT_VERIFY_REQUEST_RESERVATIONS: dict[str, int] = {
+    "bola": 8,             # four requests, independently replayed
+    "auth_bypass": 4,      # two requests, independently replayed
+    "data_exposure": 4,    # two requests, independently replayed
+    "mass_assignment": 20, # up to three shape probes + cleanup + eight-step two-run workflow
+}
+_AGENT_VERIFY_SECONDS_RESERVATIONS: dict[str, int] = {
+    "bola": 180,
+    "auth_bypass": 180,
+    "data_exposure": 180,
+    "mass_assignment": 400,
+}
 
 
 async def _agent_auto_verify(
-    gated_findings: list[dict[str, Any]], *, approval_receipt_id: Optional[str], created_by: str
+    gated_findings: list[dict[str, Any]],
+    *,
+    approval_receipt_id: Optional[str],
+    created_by: str,
+    request_budget: Optional[int] = None,
+    action_budget: Optional[int] = None,
+    active_action_budget: Optional[int] = None,
+    seconds_budget: Optional[int] = None,
 ) -> list[dict[str, Any]]:
     """Close the loop unattended (Gap B auto-wiring): when the hunt carries an approval receipt AND
     execution is enabled, auto-attempt VERIFIED promotion for the gate-passing SUSPECTED findings the
@@ -18063,19 +18284,73 @@ async def _agent_auto_verify(
         if len(attempts) >= _AGENT_AUTO_VERIFY_LIMIT:
             break
         record = entry.get("persisted")
-        if not isinstance(record, dict) or record.get("persisted") != "created" or not record.get("id"):
+        if not isinstance(record, dict) or not record.get("id"):
             continue
-        if family_proof.canonical_family((entry.get("finding") or {}).get("family")) not in _AGENT_VERIFIABLE_FAMILIES:
+        persistence_state = str(record.get("persisted") or "")
+        if persistence_state not in {"created", "existing"}:
             continue
+        if persistence_state == "existing" and str(record.get("existing_status") or "") != "active":
+            continue
+        family = family_proof.canonical_family((entry.get("finding") or {}).get("family"))
+        if family not in _AGENT_VERIFIABLE_FAMILIES:
+            continue
+        request_reservation = int(_AGENT_VERIFY_REQUEST_RESERVATIONS.get(family) or 0)
+        seconds_reservation = int(_AGENT_VERIFY_SECONDS_RESERVATIONS.get(family) or 0)
+        reserved_requests = sum(int(item.get("request_units_reserved") or 0) for item in attempts)
+        reserved_actions = sum(int(item.get("action_units_reserved") or 0) for item in attempts)
+        reserved_active = sum(int(item.get("active_action_units_reserved") or 0) for item in attempts)
+        reserved_seconds = sum(int(item.get("seconds_reserved") or 0) for item in attempts)
+        if request_budget is not None and reserved_requests + request_reservation > request_budget:
+            attempts.append({"verified": False, "skipped": "budget_exhausted:requests"})
+            break
+        if action_budget is not None and reserved_actions + 1 > action_budget:
+            attempts.append({"verified": False, "skipped": "budget_exhausted:actions"})
+            break
+        if active_action_budget is not None and reserved_active + 1 > active_action_budget:
+            attempts.append({"verified": False, "skipped": "budget_exhausted:active_actions"})
+            break
+        if seconds_budget is not None and reserved_seconds + seconds_reservation > seconds_budget:
+            attempts.append({"verified": False, "skipped": "budget_exhausted:seconds"})
+            break
         try:
             result = await _verify_suspected_finding_workflow(
                 _uuid_or_400(str(record["id"]), "finding id"), approval_receipt_id, created_by=created_by)
-            attempts.append({"finding_id": str(record["id"]), "verified": bool(result.get("verified")),
-                             "verdict": (result.get("family_proof") or {}).get("verdict")})
+            attempt = {
+                "finding_id": str(record["id"]),
+                "verified": bool(result.get("verified")),
+                "verified_finding_id": result.get("verified_finding_id"),
+                "verdict": (result.get("family_proof") or {}).get("verdict"),
+                "request_units_reserved": request_reservation,
+                "action_units_reserved": 1,
+                "active_action_units_reserved": 1,
+                "seconds_reserved": seconds_reservation,
+            }
+            attempts.append(attempt)
+            if attempt["verified"]:
+                entry["tier"] = "verified"
+                entry["verified_finding_id"] = attempt["verified_finding_id"]
+                record["persisted"] = "verified"
+                record["verified_finding_id"] = attempt["verified_finding_id"]
         except HTTPException as exc:
-            attempts.append({"finding_id": str(record["id"]), "verified": False, "skipped": str(exc.detail)[:160]})
+            attempts.append({
+                "finding_id": str(record["id"]),
+                "verified": False,
+                "skipped": str(exc.detail)[:160],
+                "request_units_reserved": request_reservation,
+                "action_units_reserved": 1,
+                "active_action_units_reserved": 1,
+                "seconds_reserved": seconds_reservation,
+            })
         except Exception as exc:  # noqa: BLE001 — a verify failure must never break the hunt
-            attempts.append({"finding_id": str(record["id"]), "verified": False, "error": type(exc).__name__})
+            attempts.append({
+                "finding_id": str(record["id"]),
+                "verified": False,
+                "error": type(exc).__name__,
+                "request_units_reserved": request_reservation,
+                "action_units_reserved": 1,
+                "active_action_units_reserved": 1,
+                "seconds_reserved": seconds_reservation,
+            })
     return attempts
 
 
@@ -18088,6 +18363,10 @@ async def _agent_finalize_and_persist(
     approval_receipt_id: Optional[str],
     hypothesis_id: Optional[str],
     persist: bool,
+    request_budget_limit: Optional[int] = None,
+    action_budget_limit: Optional[int] = None,
+    active_action_budget_limit: Optional[int] = None,
+    seconds_budget_limit: Optional[int] = None,
 ) -> dict[str, Any]:
     """Gate -> receipt -> persist -> (auto-verify) -> assemble the run result. Shared final stage of
     both drivers, so a keyless hunt produces the identical result shape as configured_ai."""
@@ -18104,14 +18383,47 @@ async def _agent_finalize_and_persist(
         persisted = await _agent_persist_suspected_findings(
             gated_findings, target_uuid=target_uuid, target_url=target_url, receipt_id=receipt_id,
         )
+        remaining_requests = (
+            None if request_budget_limit is None
+            else max(0, int(request_budget_limit) - int(state.get("request_units_used") or 0))
+        )
+        remaining_actions = (
+            None if action_budget_limit is None
+            else max(0, int(action_budget_limit) - int(state.get("tool_calls_made") or 0))
+        )
+        remaining_active_actions = (
+            None if active_action_budget_limit is None
+            else max(0, int(active_action_budget_limit) - int(state.get("active_actions_used") or 0))
+        )
+        remaining_seconds = (
+            None if seconds_budget_limit is None
+            else max(0, int(seconds_budget_limit) - int(state.get("elapsed_seconds") or 0))
+        )
         auto_verified = await _agent_auto_verify(
-            gated_findings, approval_receipt_id=approval_receipt_id, created_by=f"{created_by}:auto_verify")
+            gated_findings,
+            approval_receipt_id=approval_receipt_id,
+            created_by=f"{created_by}:auto_verify",
+            request_budget=remaining_requests,
+            action_budget=remaining_actions,
+            active_action_budget=remaining_active_actions,
+            seconds_budget=remaining_seconds,
+        )
+    auto_verify_requests = sum(int(item.get("request_units_reserved") or 0) for item in auto_verified)
+    auto_verify_actions = sum(int(item.get("action_units_reserved") or 0) for item in auto_verified)
+    auto_verify_active_actions = sum(
+        int(item.get("active_action_units_reserved") or 0) for item in auto_verified
+    )
+    auto_verify_seconds = sum(int(item.get("seconds_reserved") or 0) for item in auto_verified)
     return {
         "target_id": str(target_uuid),
         "objective": objective,
         "iterations": state["iterations"],
         "stop_reason": state["stop_reason"],
         "tool_calls_made": state["tool_calls_made"],
+        "request_units_used": int(state.get("request_units_used") or 0),
+        "active_actions_used": int(state.get("active_actions_used") or 0),
+        "model_tokens_used": int(state.get("model_tokens_used") or 0),
+        "elapsed_seconds": int(state.get("elapsed_seconds") or 0),
         "http_evidence_count": len(state["evidence_by_ref"]),
         "abstained": state["abstained"],
         "findings": gated_findings,
@@ -18119,6 +18431,10 @@ async def _agent_finalize_and_persist(
         "net_new_count": sum(1 for record in persisted if record.get("net_new")),
         "auto_verified": auto_verified,
         "verified_count": sum(1 for a in auto_verified if a.get("verified")),
+        "auto_verify_requests_reserved": auto_verify_requests,
+        "auto_verify_actions_reserved": auto_verify_actions,
+        "auto_verify_active_actions_reserved": auto_verify_active_actions,
+        "auto_verify_seconds_reserved": auto_verify_seconds,
         "run_receipt_id": receipt_id,
         "events": state["events"][-50:],
         "context_included": state["context_included"],
@@ -18141,14 +18457,52 @@ async def _run_agent_hunt(
     persist: bool = True,
     allow_active: bool = False,
     should_stop: Optional[Any] = None,
+    request_budget_limit: Optional[int] = None,
+    action_budget_limit: Optional[int] = None,
+    active_action_budget_limit: Optional[int] = None,
+    wall_time_budget_seconds: Optional[int] = None,
+    model_token_budget_limit: Optional[int] = None,
 ) -> dict[str, Any]:
+    run_started = time.monotonic()
     state = await _agent_seed_state(
         target_uuid, target_url, objective,
         created_by=created_by, token_budget=token_budget, max_iterations=max_iterations,
     )
+    state["request_budget_limit"] = request_budget_limit
+    state["action_budget_limit"] = action_budget_limit
+    state["active_action_budget_limit"] = active_action_budget_limit
+    deadline_monotonic = (
+        None if wall_time_budget_seconds is None
+        else run_started + max(0, int(wall_time_budget_seconds))
+    )
+    if max_iterations <= 0:
+        state["stop_reason"] = "budget_exhausted:steps"
+        state["events"].append({"iteration": 0, "budget_exhausted": "steps"})
+        state["elapsed_seconds"] = max(0, math.ceil(time.monotonic() - run_started))
+        return await _agent_finalize_and_persist(
+            state,
+            target_uuid=target_uuid,
+            target_url=target_url,
+            created_by=created_by,
+            approval_receipt_id=approval_receipt_id,
+            hypothesis_id=hypothesis_id,
+            persist=persist,
+            request_budget_limit=request_budget_limit,
+            action_budget_limit=action_budget_limit,
+            active_action_budget_limit=active_action_budget_limit,
+            seconds_budget_limit=wall_time_budget_seconds,
+        )
     planner_errors = 0
     for i in range(max_iterations):
         state["iterations"] = i + 1
+        remaining_seconds = (
+            None if deadline_monotonic is None
+            else deadline_monotonic - time.monotonic()
+        )
+        if remaining_seconds is not None and remaining_seconds <= 0:
+            state["stop_reason"] = "budget_exhausted:seconds"
+            state["events"].append({"iteration": i, "budget_exhausted": "seconds"})
+            break
         if should_stop is not None:
             try:
                 if await should_stop():
@@ -18157,7 +18511,25 @@ async def _run_agent_hunt(
                     break
             except Exception:
                 pass
-        reply, error = await _agent_planner_reply(state["messages"], max_tokens=1400, timeout=120)
+        planner_timeout = 120 if remaining_seconds is None else max(1, min(120, math.ceil(remaining_seconds)))
+        token_reservation = _agent_planner_turn_token_reservation(
+            state["messages"],
+            max_output_tokens=1400,
+        )
+        if (
+            model_token_budget_limit is not None
+            and int(state.get("model_tokens_used") or 0) + token_reservation
+            > int(model_token_budget_limit)
+        ):
+            state["stop_reason"] = "budget_exhausted:model_tokens"
+            state["events"].append({"iteration": i, "budget_exhausted": "model_tokens"})
+            break
+        reply, error, model_tokens_used = await _agent_planner_reply(
+            state["messages"],
+            max_tokens=1400,
+            timeout=planner_timeout,
+        )
+        state["model_tokens_used"] += int(model_tokens_used or 0)
         if error or reply is None:
             err_str = str(error or "no_reply")
             # HONOR a model safety refusal — record it and stop. We deliberately do NOT
@@ -18181,6 +18553,8 @@ async def _run_agent_hunt(
             state, reply, target_uuid=target_uuid, target_url=target_url, created_by=created_by,
             allow_write=allow_write, allow_active=allow_active, approval_receipt_id=approval_receipt_id,
             hypothesis_id=hypothesis_id, iteration=i, max_iterations=max_iterations,
+            deadline_monotonic=deadline_monotonic,
+            should_stop=should_stop,
         )
         if outcome["stop"]:
             state["stop_reason"] = outcome["stop_reason"]
@@ -18188,9 +18562,40 @@ async def _run_agent_hunt(
 
     # Hit the iteration cap without a debrief — force a final-summary turn so the model's
     # analysis is captured, not lost (T3MP3ST src/agent/index.ts:264-283).
-    if state["stop_reason"] == "max_iterations" and not state["findings"] and not state["abstained"]:
+    remaining_seconds = (
+        None if deadline_monotonic is None
+        else deadline_monotonic - time.monotonic()
+    )
+    if (
+        state["stop_reason"] == "max_iterations"
+        and not state["findings"]
+        and not state["abstained"]
+        and (remaining_seconds is None or remaining_seconds > 0)
+    ):
         state["messages"].append({"role": "user", "content": agent_loop.forced_debrief_message()})
-        reply, error = await _agent_planner_reply(state["messages"], max_tokens=1600, timeout=120)
+        debrief_timeout = 120 if remaining_seconds is None else max(1, min(120, math.ceil(remaining_seconds)))
+        token_reservation = _agent_planner_turn_token_reservation(
+            state["messages"],
+            max_output_tokens=1600,
+        )
+        if (
+            model_token_budget_limit is not None
+            and int(state.get("model_tokens_used") or 0) + token_reservation
+            > int(model_token_budget_limit)
+        ):
+            state["stop_reason"] = "budget_exhausted:model_tokens"
+            state["events"].append({
+                "iteration": state["iterations"],
+                "budget_exhausted": "model_tokens",
+            })
+            reply, error, model_tokens_used = None, "model_token_budget_exhausted", 0
+        else:
+            reply, error, model_tokens_used = await _agent_planner_reply(
+                state["messages"],
+                max_tokens=1600,
+                timeout=debrief_timeout,
+            )
+            state["model_tokens_used"] += int(model_tokens_used or 0)
         if not error and reply is not None:
             if isinstance(reply, dict):
                 reply.pop("_provider_meta", None)
@@ -18201,10 +18606,18 @@ async def _run_agent_hunt(
             state["abstained"] = bool(final.get("abstained"))
             state["stop_reason"] = "forced_debrief"
             state["events"].append({"iteration": state["iterations"], "forced_debrief": True, "findings": len(state["findings"])})
+    elif state["stop_reason"] == "max_iterations" and remaining_seconds is not None and remaining_seconds <= 0:
+        state["stop_reason"] = "budget_exhausted:seconds"
+        state["events"].append({"iteration": state["iterations"], "budget_exhausted": "seconds"})
 
+    state["elapsed_seconds"] = max(0, math.ceil(time.monotonic() - run_started))
     return await _agent_finalize_and_persist(
         state, target_uuid=target_uuid, target_url=target_url, created_by=created_by,
         approval_receipt_id=approval_receipt_id, hypothesis_id=hypothesis_id, persist=persist,
+        request_budget_limit=request_budget_limit,
+        action_budget_limit=action_budget_limit,
+        active_action_budget_limit=active_action_budget_limit,
+        seconds_budget_limit=wall_time_budget_seconds,
     )
 
 
@@ -18229,7 +18642,19 @@ async def _run_agent_hunt_for_episode(episode_id: str) -> dict[str, Any]:
         target = await conn.fetchrow("SELECT url, is_active FROM targets WHERE id=$1", row["target_id"])
     target_url = str((target or {}).get("url") or "")
     if not target_url:
-        return {"accepted": True, "agent_loop": True, "error": "target_missing"}
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE research_episodes SET status='failed', stop_reason='target_missing', "
+                "updated_at=NOW() WHERE id=$1 "
+                "AND status NOT IN ('cancelled','failed','completed','budget_exhausted','blocked')",
+                row["id"],
+            )
+        return {
+            "accepted": True,
+            "agent_loop": True,
+            "error": "target_missing",
+            "episode_id": episode_id,
+        }
     # Respect operator deactivation: a soft-deleted (deactivated) target must not keep being hunted
     # by an in-flight campaign. Stop cleanly rather than send more requests. (External-audit P1.)
     if not (target or {}).get("is_active"):
@@ -18240,7 +18665,13 @@ async def _run_agent_hunt_for_episode(episode_id: str) -> dict[str, Any]:
                 row["id"],
             )
         return {"accepted": True, "agent_loop": True, "error": "target_deactivated", "episode_id": episode_id}
-    budget = _decode_json_value(row["budget_limits"]) or {}
+    budget = _research_normalize_budget_limits(
+        _decode_json_value(row["budget_limits"]) or {},
+        max_steps=int((_decode_json_value(row["budget_limits"]) or {}).get("steps") or 1),
+    )
+    budget_used_before = _research_normalize_budget_used(
+        _decode_json_value(row["budget_used"]) or {}
+    )
     execution_mode = str(row["execution_mode"] or "read_only")
     approval_receipt_id = str(row["approval_receipt_id"]) if row["approval_receipt_id"] else None
     # A gated episode with a bound approval receipt (and the server execute switch on) unlocks
@@ -18258,7 +18689,25 @@ async def _run_agent_hunt_for_episode(episode_id: str) -> dict[str, Any]:
         if allow and receipt_row.get("expires_at"):
             async with db_pool.acquire() as conn:
                 allow = bool(await conn.fetchval("SELECT $1::timestamptz > NOW()", receipt_row["expires_at"]))
-    max_iters = max(4, min(int(budget.get("steps") or 12) + 4, _AGENT_HUNT_MAX_ITERATIONS))
+    remaining_steps = max(0, int(budget.get("steps") or 0) - int(budget_used_before.get("steps") or 0))
+    remaining_actions = max(0, int(budget.get("actions") or 0) - int(budget_used_before.get("actions") or 0))
+    remaining_active_actions = max(
+        0,
+        int(budget.get("active_actions") or 0) - int(budget_used_before.get("active_actions") or 0),
+    )
+    remaining_requests = max(
+        0,
+        int(budget.get("requests") or 0) - int(budget_used_before.get("requests") or 0),
+    )
+    remaining_seconds = max(
+        0,
+        int(budget.get("seconds") or 0) - int(budget_used_before.get("seconds") or 0),
+    )
+    remaining_model_tokens = max(
+        0,
+        int(budget.get("model_tokens") or 0) - int(budget_used_before.get("model_tokens") or 0),
+    )
+    max_iters = min(remaining_steps, _AGENT_HUNT_MAX_ITERATIONS)
 
     async def _episode_cancelled() -> bool:
         async with db_pool.acquire() as conn:
@@ -18270,6 +18719,11 @@ async def _run_agent_hunt_for_episode(episode_id: str) -> dict[str, Any]:
         max_iterations=max_iters, created_by=f"deep_hunt_episode:{episode_id}",
         allow_write=allow, allow_active=allow, approval_receipt_id=approval_receipt_id,
         persist=True, should_stop=_episode_cancelled,
+        request_budget_limit=remaining_requests,
+        action_budget_limit=remaining_actions,
+        active_action_budget_limit=remaining_active_actions,
+        wall_time_budget_seconds=remaining_seconds,
+        model_token_budget_limit=remaining_model_tokens,
     )
     suspected = sum(1 for g in result.get("findings", []) if g.get("tier") == "suspected")
     net_new = int(result.get("net_new_count") or 0)
@@ -18277,9 +18731,19 @@ async def _run_agent_hunt_for_episode(episode_id: str) -> dict[str, Any]:
     stop_reason = str(result.get("stop_reason") or "")
     iterations = int(result.get("iterations") or 0)
     tool_calls = int(result.get("tool_calls_made") or 0)
+    request_units = int(result.get("request_units_used") or 0)
+    active_actions = int(result.get("active_actions_used") or 0)
+    verify_requests = int(result.get("auto_verify_requests_reserved") or 0)
+    verify_actions = int(result.get("auto_verify_actions_reserved") or 0)
+    verify_active_actions = int(result.get("auto_verify_active_actions_reserved") or 0)
+    verify_seconds = int(result.get("auto_verify_seconds_reserved") or 0)
+    elapsed_seconds = int(result.get("elapsed_seconds") or 0)
+    model_tokens = int(result.get("model_tokens_used") or 0)
     # Map the loop's stop reason to the correct terminal state so the campaign's failed/blocked
     # handling and episode ceilings are not fed a false "completed". (External-audit P2.)
-    if stop_reason.startswith("planner_error") or stop_reason == "empty_replies":
+    if stop_reason.startswith("budget_exhausted"):
+        final_status, event_type = "budget_exhausted", "episode_budget_exhausted"
+    elif stop_reason.startswith("planner_error") or stop_reason == "empty_replies":
         final_status, event_type = "failed", "episode_failed"
     elif stop_reason == "model_declined":
         final_status, event_type = "blocked", "episode_blocked"
@@ -18290,12 +18754,14 @@ async def _run_agent_hunt_for_episode(episode_id: str) -> dict[str, Any]:
     # Record durable usage so campaign aggregate budgets actually see agent-loop work (was zero).
     # Conservative: one request/action per executed tool call; active only when the episode was
     # gated for writes/active tools. (External-audit P1.)
-    used = _decode_json_value(row["budget_used"]) or {}
+    used = budget_used_before
     used = {**used,
             "steps": int(used.get("steps") or 0) + iterations,
-            "actions": int(used.get("actions") or 0) + tool_calls,
-            "active_actions": int(used.get("active_actions") or 0) + (tool_calls if allow else 0),
-            "requests": int(used.get("requests") or 0) + tool_calls}
+            "actions": int(used.get("actions") or 0) + tool_calls + verify_actions,
+            "active_actions": int(used.get("active_actions") or 0) + active_actions + verify_active_actions,
+            "requests": int(used.get("requests") or 0) + request_units + verify_requests,
+            "seconds": int(used.get("seconds") or 0) + elapsed_seconds + verify_seconds,
+            "model_tokens": int(used.get("model_tokens") or 0) + model_tokens}
     async with db_pool.acquire() as conn:
         async with conn.transaction():
             # Only emit the terminal event if THIS update actually transitioned the episode, so a
@@ -18494,17 +18960,18 @@ async def submit_agent_hunt_reply(run_id: str, req: AgentHuntReplyRequest):
     a row-locked transaction (audit N3): a SHORT locked phase claims the turn (awaiting_planner ->
     planning), tools run UNLOCKED, then a SHORT locked phase writes the result back."""
     run_uuid = _uuid_or_400(run_id, "run id")
+    planning_token = uuid.uuid4()
 
     # --- Phase 1: claim the turn under a short lock (no tool work here) ---
     async with db_pool.acquire() as conn:
         async with conn.transaction():
             row = await _agent_hunt_run_or_404(conn, run_id, for_update=True)
             status = str(row["status"])
-            # A 'planning' row is another reply in flight — unless it is stale (its worker died
-            # mid-turn without writing back), in which case reclaim it.
-            reclaimable = status == "planning" and bool(await conn.fetchval(
-                "SELECT updated_at < NOW() - INTERVAL '5 minutes' FROM agent_hunt_runs WHERE id=$1", run_uuid))
-            if status != "awaiting_planner" and not reclaimable:
+            # Never auto-reclaim an apparently stale in-flight turn. A slow scanner/provider can
+            # legitimately exceed the stale threshold; replaying the reply would duplicate target
+            # traffic. Operators can cancel the run (which clears its fencing token) and start a new
+            # session. The old worker may finish locally but cannot write over cancellation.
+            if status != "awaiting_planner":
                 if status in ("completed", "cancelled", "failed"):
                     raise HTTPException(status_code=409, detail=f"Hunt run is {status}, not awaiting a planner reply")
                 raise HTTPException(status_code=409, detail="Another reply for this run is already in flight")
@@ -18528,13 +18995,25 @@ async def submit_agent_hunt_reply(run_id: str, req: AgentHuntReplyRequest):
             allow_write = bool(row["allow_write"])
             allow_active = bool(row["allow_active"])
             await conn.execute(
-                "UPDATE agent_hunt_runs SET status='planning', updated_at=NOW() WHERE id=$1", run_uuid)
+                "UPDATE agent_hunt_runs SET status='planning', planning_token=$2, updated_at=NOW() WHERE id=$1",
+                run_uuid,
+                planning_token,
+            )
 
     iteration = int(state.get("iterations") or 0)
     was_forced = bool(state.get("forced_debrief"))
 
     # --- Phase 2: run the turn UNLOCKED (target HTTP / subprocesses live here) ---
     try:
+        async def _turn_cancelled() -> bool:
+            async with db_pool.acquire() as conn:
+                return not bool(await conn.fetchval(
+                    "SELECT status='planning' AND planning_token=$2 "
+                    "FROM agent_hunt_runs WHERE id=$1",
+                    run_uuid,
+                    planning_token,
+                ))
+
         if was_forced:
             # Forced-debrief turn: extract findings ONLY — do NOT execute any tool_calls in it. This
             # mirrors the in-process driver's forced debrief so the keyless path cannot grant an extra
@@ -18554,7 +19033,8 @@ async def submit_agent_hunt_reply(run_id: str, req: AgentHuntReplyRequest):
                 state, req.reply, target_uuid=target_uuid, target_url=target_url,
                 created_by=f"agent_hunt_session:{run_id}", allow_write=allow_write,
                 allow_active=allow_active, approval_receipt_id=approval_receipt_id,
-                hypothesis_id=None, iteration=iteration, max_iterations=max_iterations)
+                hypothesis_id=None, iteration=iteration, max_iterations=max_iterations,
+                should_stop=_turn_cancelled)
             state["iterations"] = iteration + 1
             finalize = bool(outcome["stop"])
             if outcome["stop"]:
@@ -18565,7 +19045,7 @@ async def submit_agent_hunt_reply(run_id: str, req: AgentHuntReplyRequest):
                 state["forced_debrief"] = True
                 state["messages"].append({"role": "user", "content": agent_loop.forced_debrief_message()})
         result = None
-        if finalize:
+        if finalize and state.get("stop_reason") != "cancelled":
             result = await _agent_finalize_and_persist(
                 state, target_uuid=target_uuid, target_url=target_url,
                 created_by=f"agent_hunt_session:{run_id}", approval_receipt_id=approval_receipt_id,
@@ -18574,8 +19054,11 @@ async def submit_agent_hunt_reply(run_id: str, req: AgentHuntReplyRequest):
         # Release the claim so the session can retry this turn, then surface the error.
         async with db_pool.acquire() as conn:
             await conn.execute(
-                "UPDATE agent_hunt_runs SET status='awaiting_planner', updated_at=NOW() "
-                "WHERE id=$1 AND status='planning'", run_uuid)
+                "UPDATE agent_hunt_runs SET status='awaiting_planner', planning_token=NULL, updated_at=NOW() "
+                "WHERE id=$1 AND status='planning' AND planning_token=$2",
+                run_uuid,
+                planning_token,
+            )
         raise
 
     # --- Phase 3: write the result back under a short lock ---
@@ -18584,14 +19067,18 @@ async def submit_agent_hunt_reply(run_id: str, req: AgentHuntReplyRequest):
             if finalize:
                 updated = await conn.fetchrow(
                     "UPDATE agent_hunt_runs SET status=$2, stop_reason=$3, state=$4, result=$5, "
-                    "updated_at=NOW() WHERE id=$1 RETURNING *",
+                    "planning_token=NULL, updated_at=NOW() "
+                    "WHERE id=$1 AND status='planning' AND planning_token=$6 RETURNING *",
                     run_uuid, _agent_run_final_status(state["stop_reason"]), state["stop_reason"],
-                    json.dumps(state, default=str), json.dumps(result, default=str))
+                    json.dumps(state, default=str), json.dumps(result, default=str), planning_token)
             else:
                 updated = await conn.fetchrow(
-                    "UPDATE agent_hunt_runs SET status='awaiting_planner', state=$2, updated_at=NOW() "
-                    "WHERE id=$1 RETURNING *",
-                    run_uuid, json.dumps(state, default=str))
+                    "UPDATE agent_hunt_runs SET status='awaiting_planner', state=$2, "
+                    "planning_token=NULL, updated_at=NOW() "
+                    "WHERE id=$1 AND status='planning' AND planning_token=$3 RETURNING *",
+                    run_uuid, json.dumps(state, default=str), planning_token)
+            if not updated:
+                updated = await _agent_hunt_run_or_404(conn, run_id)
     return _agent_hunt_run_public(updated)
 
 
@@ -18602,10 +19089,11 @@ async def cancel_agent_hunt_session(run_id: str):
     async with db_pool.acquire() as conn:
         async with conn.transaction():
             row = await _agent_hunt_run_or_404(conn, run_id, for_update=True)
-            if str(row["status"]) != "awaiting_planner":
+            if str(row["status"]) not in {"awaiting_planner", "planning"}:
                 return _agent_hunt_run_public(row)
             updated = await conn.fetchrow(
-                "UPDATE agent_hunt_runs SET status='cancelled', stop_reason='cancelled', updated_at=NOW() "
+                "UPDATE agent_hunt_runs SET status='cancelled', stop_reason='cancelled', "
+                "planning_token=NULL, updated_at=NOW() "
                 "WHERE id=$1 RETURNING *",
                 row["id"],
             )
@@ -18771,6 +19259,31 @@ class AgentVerifyRequest(BaseModel):
 _AGENT_VERIFIABLE_FAMILIES: frozenset[str] = frozenset({"bola", "auth_bypass", "data_exposure", "mass_assignment"})
 
 
+@asynccontextmanager
+async def _agent_finding_verification_lock(finding_uuid: uuid.UUID):
+    """Cross-process, finding-scoped execution lock.
+
+    A random workflow id cannot dedupe two callers verifying the same finding. Hold a PostgreSQL
+    advisory lock across the proof so manual verification, hunt finalization, stale-turn recovery,
+    and multiple API replicas cannot send duplicate target traffic for one finding.
+    """
+    lock_name = f"agent-finding-verification:{finding_uuid}"
+    async with db_pool.acquire() as conn:
+        acquired = bool(await conn.fetchval(
+            "SELECT pg_try_advisory_lock(hashtextextended($1, 0))",
+            lock_name,
+        ))
+        if not acquired:
+            raise HTTPException(status_code=409, detail="Finding verification is already in progress")
+        try:
+            yield
+        finally:
+            await conn.execute(
+                "SELECT pg_advisory_unlock(hashtextextended($1, 0))",
+                lock_name,
+            )
+
+
 async def _agent_verification_workflow_for(
     conn: Any, target_uuid: uuid.UUID, family: str, path: str, method: str
 ) -> tuple[dict[str, Any], str, str, dict[str, Any]]:
@@ -18801,13 +19314,16 @@ async def _agent_verification_workflow_for(
         # Create-based only: dispatch with NO steps so _server_materialize_create_ma probes the create
         # surface and builds the role=admin overpost workflow (a wrong field is falsified by the proof).
         # Update-based (PUT/PATCH a privileged field) is not yet supported by the bridge.
-        if str(method or "POST").upper() != "POST":
-            raise HTTPException(status_code=422, detail="mass_assignment verification currently supports create-based (POST) leads only")
+        if str(method or "").upper() != "POST":
+            raise HTTPException(
+                status_code=422,
+                detail="mass_assignment verification requires an explicitly evidenced POST create operation",
+            )
         return {"proof_family": "mass_assignment", "server_materialize": True}, route, "POST", {"create_based": True}
     raise HTTPException(status_code=422, detail=f"verification bridge supports {sorted(_AGENT_VERIFIABLE_FAMILIES)}, not '{family or 'unknown'}'")
 
 
-async def _verify_suspected_finding_workflow(
+async def _verify_suspected_finding_workflow_unlocked(
     finding_uuid: uuid.UUID, approval_receipt_id: str, *, created_by: str
 ) -> dict[str, Any]:
     """Core of the SUSPECTED->VERIFIED bridge (Gap B): run ONE suspected autonomous-agent finding
@@ -18823,6 +19339,8 @@ async def _verify_suspected_finding_workflow(
             raise HTTPException(status_code=404, detail="Finding not found")
         if str(finding["tool"] or "") != "autonomous_agent" or str(finding["source"] or "") != "autonomous":
             raise HTTPException(status_code=409, detail="Not a suspected autonomous-agent finding")
+        if str(finding["status"] or "") != "active":
+            raise HTTPException(status_code=409, detail="Only an active suspected finding can be verified")
         if str(finding["last_verification_verdict"] or "") == "exploited":
             raise HTTPException(status_code=409, detail="Finding is already verified")
         target = await conn.fetchrow("SELECT id, url, is_active FROM targets WHERE id=$1", finding["target_id"])
@@ -18905,6 +19423,17 @@ async def _verify_suspected_finding_workflow(
                          "novelty_gate": proof.get("novelty_gate")},
         "superseded_suspected": superseded,
     }
+
+
+async def _verify_suspected_finding_workflow(
+    finding_uuid: uuid.UUID, approval_receipt_id: str, *, created_by: str
+) -> dict[str, Any]:
+    async with _agent_finding_verification_lock(finding_uuid):
+        return await _verify_suspected_finding_workflow_unlocked(
+            finding_uuid,
+            approval_receipt_id,
+            created_by=created_by,
+        )
 
 
 @app.post("/agent/findings/{finding_id}/verify")
@@ -26429,16 +26958,7 @@ def _trusted_invariant_execution_evidence(
 
 
 def _is_create_based_mass_assignment(family: Any, normalized: dict[str, Any] | None) -> bool:
-    """Server-derived: a mass_assignment workflow that CREATES an object it then best-effort deletes.
-
-    Create-based mass_assignment leaves a bounded, labeled object the target usually has no delete
-    route for (registration is the canonical case), so *verified* restoration is unreachable. The
-    finding is still fully proven by forbidden_field_accepted + observable_state_change +
-    benign_control_accepted across two runs -- verified restoration is a cleanliness gate, not a
-    soundness gate, and dropping it does not touch any family predicate. This is computed ONLY from
-    the workflow shape and the server-derived family (never a model-supplied flag) and is gated to
-    mass_assignment, so it cannot relax restoration for any other family or fake any predicate.
-    """
+    """Server-derived shape check for a create + cleanup mass-assignment workflow."""
     if family_proof.canonical_family(family) != "mass_assignment":
         return False
     steps = (normalized or {}).get("steps") or []
@@ -26604,12 +27124,8 @@ def _trusted_workflow_family_proof(
         for item in result.get("observations") or []
         if isinstance(item, dict)
     )
-    # Create-based mass_assignment cannot verify restoration (the target has no delete route for the
-    # created object); its two-run soundness comes from stable predicates surviving re-execution, not
-    # from cleanup. Restoration stays a required gate for every other family and every non-create MA.
-    restoration_ok = restoration_verified or _is_create_based_mass_assignment(family, normalized)
     evidence = {predicate: True for predicate in stable_predicates}
-    evidence["reexecuted_at_handoff"] = bool(stable and restoration_ok and no_errors)
+    evidence["reexecuted_at_handoff"] = bool(stable and restoration_verified and no_errors)
     proof = family_proof.evaluate_family_proof(family, evidence)
     # The vulnerable operation for a mutation family is the WRITE, not the read-back that verifies it.
     # A create-based mass_assignment writes POST /collection and reads back GET /collection/{id}, so
@@ -26944,7 +27460,19 @@ async def _arsenal_dispatch_workflow(p: dict[str, Any], approval_receipt_id: str
         # server-side: probe the create surface for its real body/envelope, then build the workflow. This
         # is what makes an unattended deep_hunt promote registration mass_assignment -- the planner only
         # selects the lead. No-op when the planner supplied steps or the lead is not create-based MA.
-        await _server_materialize_create_ma(conn, str(target["url"]), target_uuid, p, hypothesis_id)
+        await _server_materialize_create_ma(
+            conn,
+            str(target["url"]),
+            target_uuid,
+            p,
+            hypothesis_id,
+            approval_receipt_id,
+        )
+        materialization = (
+            p.get("_server_materialization")
+            if isinstance(p.get("_server_materialization"), dict)
+            else {}
+        )
         workflow_payload = {
             key: value for key, value in p.items()
             if key in {
@@ -27050,10 +27578,10 @@ async def _arsenal_dispatch_workflow(p: dict[str, Any], approval_receipt_id: str
             cancel_event,
         )
         annotate_trusted_route_expectations(executed)
-        # Create-based mass_assignment cannot verify restoration (no delete route for the created
-        # object), so it is re-executed to establish two-run soundness instead of being replay-blocked.
-        create_based_ma = _is_create_based_mass_assignment(executed.get("proof_family"), normalized)
-        if executed.get("restoration_verified") is not True and not create_based_ma:
+        # Never replay a state-changing workflow whose first run failed to restore target state.
+        # The first-run evidence remains available as unverified signal, but a second run would only
+        # compound residue and cannot satisfy the VERIFIED handoff contract.
+        if executed.get("restoration_verified") is not True:
             replayed = {
                 "proof_family": executed.get("proof_family"),
                 "observations": [], "assertion_results": [],
@@ -27114,6 +27642,7 @@ async def _arsenal_dispatch_workflow(p: dict[str, Any], approval_receipt_id: str
                     "proof_state": "verified" if trusted_proof.get("promotable") else "unverified_workflow_signal",
                     "family_proof": trusted_proof,
                     "hypothesis_id": hypothesis_id,
+                    "server_materialization": materialization,
                     "invariant_contract_id": (
                         str(invariant_contract.get("id")) if invariant_contract else None
                     ),
@@ -27181,7 +27710,14 @@ async def _arsenal_dispatch_workflow(p: dict[str, Any], approval_receipt_id: str
                 approval_receipt_id=approval_receipt_id,
                 finding_ids=finding_ids,
                 hypothesis_ids=[hypothesis_id] if hypothesis_id else [],
-                tool_receipt_ids=[str(receipt.get("id"))] if receipt.get("id") else [],
+                tool_receipt_ids=[
+                    receipt_id for receipt_id in (
+                        str(receipt.get("id")) if receipt.get("id") else None,
+                        str(materialization.get("tool_receipt_id"))
+                        if materialization.get("tool_receipt_id") else None,
+                    )
+                    if receipt_id
+                ],
                 operator_message=(
                     "Independent replay passed deterministic proof and created or refreshed a verified finding."
                     if promotion else
@@ -27195,6 +27731,7 @@ async def _arsenal_dispatch_workflow(p: dict[str, Any], approval_receipt_id: str
                     "hypothesis_id": hypothesis_id,
                     "evidence_instance_id": str(evidence.get("id")) if evidence.get("id") else None,
                     "tool_receipt_id": str(receipt.get("id")) if receipt.get("id") else None,
+                    "server_materialization": materialization,
                     "findings_created": 1 if promotion and promotion.get("status") == "created" else 0,
                     "verified_findings_created": 1 if promotion else 0,
                 },
@@ -27210,6 +27747,7 @@ async def _arsenal_dispatch_workflow(p: dict[str, Any], approval_receipt_id: str
         "promotion": promotion,
         "evidence_instance_id": str(evidence.get("id")) if evidence.get("id") else None,
         "tool_receipt_id": str(receipt.get("id")) if receipt.get("id") else None,
+        "server_materialization": materialization,
         "findings_created": 1 if promotion and promotion.get("status") == "created" else 0,
         "verified_findings_created": 1 if promotion else 0,
         "proof_state": "verified" if promotion else "unverified_workflow_signal",
@@ -32509,6 +33047,31 @@ def _finding_family_route_method(value: Any) -> tuple[dict[str, Any], Any, Any, 
         dedupe_dimensions = evidence.get("dedupe_dimensions") if isinstance(evidence.get("dedupe_dimensions"), dict) else {}
         route = dedupe_dimensions.get("route") or evidence.get("route") or evidence.get("path") or route
         method = dedupe_dimensions.get("method") or evidence.get("method") or method
+        # Backward compatibility for SUSPECTED rows written before route/method were persisted at the
+        # top level. Only this finding's cited tool evidence is stored in tool_evidence.
+        if not method or not route:
+            legacy_operations: list[tuple[str, str]] = []
+            for item in evidence.get("tool_evidence") or []:
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    payload = json.loads(str(item.get("content") or "{}"))
+                except (TypeError, ValueError):
+                    continue
+                request_view = payload.get("request") if isinstance(payload, dict) else None
+                if not isinstance(request_view, dict):
+                    continue
+                candidate_route = str(request_view.get("path") or "").strip()
+                candidate_method = str(request_view.get("method") or "").strip().upper()
+                if candidate_route and candidate_method:
+                    operation = (candidate_route, candidate_method)
+                    if operation not in legacy_operations:
+                        legacy_operations.append(operation)
+            # Never bind an old multi-request finding to whichever control happened to be cited
+            # first. Only an unambiguous legacy operation is safe to auto-verify.
+            if len(legacy_operations) == 1:
+                route = route or legacy_operations[0][0]
+                method = method or legacy_operations[0][1]
         if not method:
             consumer = str(evidence.get("consumer_endpoint") or "").strip()
             consumer_match = re.match(r"^(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\s+", consumer, re.IGNORECASE)
@@ -35616,37 +36179,10 @@ async def submit_research_decision(episode_id: str, req: ResearchDecisionRequest
             # surface and designs a valid experiment for it, but omits hypothesis_id (the lead is not
             # on the seeded board). Bind a matching ranked lead, or create a tracked planner-derived
             # hypothesis, so valid experiments are not rejected for provenance alone.
-            # Server-materialize a create-based mass_assignment lead selected without a workflow, so an
-            # agent-mode planner only has to SELECT the lead: probe the create surface and build the
-            # workflow before binding/validation. No-op if the planner supplied steps or it isn't create MA.
-            materialize_params = (
-                raw.get("action", {}).get("parameters")
-                if isinstance(raw.get("action"), dict) else None
-            )
-            # CONTAINMENT: _server_materialize_create_ma runs a LIVE create probe (up to 3
-            # registration POSTs) that MUTATES the target. Only run it for a gated episode that is
-            # actually executing this action — never in a read_only/shadow episode, on a dry-run
-            # preview (execute=False), or a non-execute (request_input/stop) decision — so the target
-            # is not mutated before authorization. The legitimate create-MA flow is unaffected: a
-            # gated execute_action still materializes here (so validation sees the workflow) and the
-            # authorized Arsenal dispatch re-materializes as a no-op. (Residual: a gated+execute
-            # decision later rejected by validation, or an idempotent replay, still probes; closing
-            # those needs deferring the live create to authorized dispatch.)
-            if (
-                isinstance(materialize_params, dict) and raw.get("hypothesis_id")
-                and str(episode.get("execution_mode") or "") == "gated"
-                and req.decision == "execute_action" and req.execute
-            ):
-                materialize_target_uuid = _optional_uuid(str(episode.get("target_id") or ""))
-                materialize_target = (
-                    await conn.fetchrow("SELECT url FROM targets WHERE id=$1", materialize_target_uuid)
-                    if materialize_target_uuid else None
-                )
-                if materialize_target:
-                    await _server_materialize_create_ma(
-                        conn, str(materialize_target["url"]), materialize_target_uuid,
-                        materialize_params, str(raw["hypothesis_id"]),
-                    )
+            # Live create-MA materialization is deliberately deferred to the already-authorized
+            # Arsenal dispatch. Decision validation, idempotency checks, semantic policy, and budget
+            # checks are pure with respect to the target; rejected or replayed decisions cannot send
+            # registration requests or hold this row lock across target I/O.
             binding_errors.extend(
                 await _research_autobind_hypothesis(conn, episode, raw, observation_pack)
             )
@@ -36943,53 +37479,167 @@ def _materialize_create_mass_assignment_workflow(
 
 
 async def _probe_create_surface(
-    target_url: str, collection_route: str, headers: dict[str, str], transport: Any = None,
-) -> dict[str, Any] | None:
-    """Actively discover a create collection's real body + response envelope with one throwaway create.
+    target_url: str,
+    collection_route: str,
+    headers: dict[str, str],
+    cookies: dict[str, str] | None = None,
+    transport: Any = None,
+) -> dict[str, Any]:
+    """Discover a create body/response shape and immediately clean up the probe object.
 
-    Passive discovery never submits registration, so the real body (e.g. email/password) and the object
-    response envelope are otherwise invisible (the recorded param_shape is polluted by the scanner's own
-    fuzzing). Tries the dominant account-create field conventions -- not app-specific facts -- and returns
-    the first body the endpoint accepts (2xx) whose response exposes an id-bearing object. Returns None if
-    none is accepted (the lead simply does not run). The created object is a bounded, labeled artifact and
-    the family proof backstops everything downstream.
+    The first accepted create must expose a scalar identifier and its same-principal DELETE must
+    succeed. Otherwise probing stops and the workflow is not materialized. This retains autonomous
+    schema discovery without silently accumulating registration artifacts.
     """
     import httpx
-    from urllib.parse import urljoin
+    from urllib.parse import quote
 
+    try:
+        path = agent_tools.validate_same_origin_path(collection_route)
+    except agent_tools.AgentToolError:
+        return {
+            "usable": False,
+            "reason": "probe_collection_outside_same_origin_scope",
+            "request_count": 0,
+            "cleanup_request_count": 0,
+            "artifacts": [],
+        }
+    parsed_path = urllib.parse.urlsplit(path)
+    if parsed_path.query or parsed_path.fragment:
+        return {
+            "usable": False,
+            "reason": "probe_collection_must_not_include_query_or_fragment",
+            "request_count": 0,
+            "cleanup_request_count": 0,
+            "artifacts": [],
+        }
+    path = parsed_path.path
+    url = _provision_same_origin_url(target_url, path)
     creds = _create_mass_assignment_credentials()
     candidate_bodies = [
         {"email": creds["ctrl_login"], "password": creds["reg_cred"], "passwordRepeat": creds["reg_cred"]},
         {"email": creds["ctrl_login"], "password": creds["reg_cred"]},
         {"username": creds["ctrl_login"], "email": creds["ctrl_login"], "password": creds["reg_cred"]},
     ]
-    path = collection_route if str(collection_route).startswith("/") else "/" + str(collection_route)
-    url = urljoin(target_url, path)
     safe_headers = {k: v for k, v in (headers or {}).items() if k.lower() == "authorization"}
+    request_count = 0
+    cleanup_request_count = 0
+    artifacts: list[dict[str, Any]] = []
     try:
-        async with httpx.AsyncClient(timeout=12, trust_env=False, follow_redirects=False, transport=transport) as client:
+        async with httpx.AsyncClient(
+            timeout=12,
+            trust_env=False,
+            follow_redirects=False,
+            transport=transport,
+            cookies=cookies or {},
+        ) as client:
             for body in candidate_bodies:
                 try:
-                    resp = await client.post(url, json=body, headers=safe_headers)
+                    request_count += 1
+                    resp = await client.post(
+                        url,
+                        json=body,
+                        headers=safe_headers,
+                    )
                 except httpx.HTTPError:
                     continue
                 if resp.status_code not in (200, 201, 202, 204):
                     continue
                 try:
-                    shape = _discover_create_object_shape(resp.json())
+                    response_json = resp.json()
+                    shape = _discover_create_object_shape(response_json)
                 except (ValueError, TypeError):
+                    response_json = None
                     shape = None
                 if not shape:
-                    continue
+                    return {
+                        "usable": False,
+                        "reason": "accepted_probe_missing_trackable_id",
+                        "request_count": request_count,
+                        "cleanup_request_count": cleanup_request_count,
+                        "artifacts": artifacts,
+                    }
                 envelope, id_field = shape
-                return {"request_fields": ",".join(body.keys()), "envelope": envelope, "id_field": id_field}
+                created_object = (
+                    response_json.get(envelope)
+                    if envelope and isinstance(response_json, dict)
+                    else response_json
+                )
+                created_id = (
+                    created_object.get(id_field)
+                    if isinstance(created_object, dict)
+                    else None
+                )
+                if created_id in (None, "") or isinstance(created_id, (dict, list)):
+                    return {
+                        "usable": False,
+                        "reason": "accepted_probe_identifier_invalid",
+                        "request_count": request_count,
+                        "cleanup_request_count": cleanup_request_count,
+                        "artifacts": artifacts,
+                    }
+                artifact = {
+                    "id_sha256": hashlib.sha256(str(created_id).encode()).hexdigest(),
+                    "cleanup_attempted": True,
+                    "cleanup_succeeded": False,
+                }
+                artifacts.append(artifact)
+                cleanup_url = _provision_same_origin_url(
+                    target_url,
+                    path.rstrip("/") + "/" + quote(str(created_id), safe=""),
+                )
+                try:
+                    cleanup_request_count += 1
+                    cleanup = await client.delete(
+                        cleanup_url,
+                        headers=safe_headers,
+                    )
+                    artifact["cleanup_status"] = cleanup.status_code
+                    artifact["cleanup_succeeded"] = cleanup.status_code in (200, 202, 204)
+                except httpx.HTTPError:
+                    artifact["cleanup_status"] = None
+                if not artifact["cleanup_succeeded"]:
+                    return {
+                        "usable": False,
+                        "reason": "probe_cleanup_unconfirmed",
+                        "request_count": request_count,
+                        "cleanup_request_count": cleanup_request_count,
+                        "artifacts": artifacts,
+                    }
+                return {
+                    "usable": True,
+                    "request_fields": ",".join(body.keys()),
+                    "envelope": envelope,
+                    "id_field": id_field,
+                    "request_count": request_count,
+                    "cleanup_request_count": cleanup_request_count,
+                    "artifacts": artifacts,
+                }
     except Exception:
         logger.warning("create-surface probe failed for %s", path, exc_info=True)
-    return None
+        return {
+            "usable": False,
+            "reason": "probe_runtime_error",
+            "request_count": request_count,
+            "cleanup_request_count": cleanup_request_count,
+            "artifacts": artifacts,
+        }
+    return {
+        "usable": False,
+        "reason": "no_create_candidate_accepted",
+        "request_count": request_count,
+        "cleanup_request_count": cleanup_request_count,
+        "artifacts": artifacts,
+    }
 
 
 async def _server_materialize_create_ma(
-    conn: Any, target_url: str, target_uuid: uuid.UUID, params: dict[str, Any], hypothesis_id: str | None,
+    conn: Any,
+    target_url: str,
+    target_uuid: uuid.UUID,
+    params: dict[str, Any],
+    hypothesis_id: str | None,
+    approval_receipt_id: str | None = None,
 ) -> bool:
     """When a create-based mass_assignment lead is dispatched WITHOUT a planner-supplied workflow, the
     server discovers the real create body (active probe) and materializes the workflow itself, so the
@@ -37010,14 +37660,76 @@ async def _server_materialize_create_ma(
     collection = str(metadata.get("route") or "").strip()
     if not metadata.get("create_based") or not collection:
         return False
-    headers: dict[str, str] = {}
+    cleanup_rows = await conn.fetch(
+        """
+        SELECT path FROM target_endpoints
+        WHERE target_id=$1 AND upper(method)='DELETE' AND COALESCE(test_status, '') <> 'gone'
+        """,
+        target_uuid,
+    )
+    expected_cleanup_route = (
+        (_canonical_vulnerability_route(collection) or "").rstrip("/") + "/{id}"
+    )
+    if not any(
+        _canonical_vulnerability_route(row.get("path")) == expected_cleanup_route
+        for row in cleanup_rows
+    ):
+        params["_server_materialization"] = {
+            "usable": False,
+            "reason": "cleanup_route_not_on_discovered_surface",
+            "request_count": 0,
+            "cleanup_request_count": 0,
+            "artifacts": [],
+        }
+        return False
     try:
         contexts = await _resolve_workflow_principal_contexts(conn, target_uuid, {"user1"})
-        headers = (contexts.get("user1") or {}).get("headers") if isinstance(contexts.get("user1"), dict) else {}
-    except Exception:
-        headers = {}
-    probe = await _probe_create_surface(target_url, collection, headers or {})
-    if not probe:
+    except WorkflowContractError:
+        # Do not mutate anonymously and only then discover the credential-bound workflow is invalid.
+        return False
+    context = contexts.get("user1") if isinstance(contexts.get("user1"), dict) else {}
+    started_at = datetime.now(timezone.utc)
+    probe = await _probe_create_surface(
+        target_url,
+        collection,
+        context.get("headers") or {},
+        context.get("cookies") or {},
+    )
+    materialization = {
+        "usable": bool(probe.get("usable")),
+        "reason": probe.get("reason"),
+        "request_count": int(probe.get("request_count") or 0),
+        "cleanup_request_count": int(probe.get("cleanup_request_count") or 0),
+        "artifacts": probe.get("artifacts") or [],
+    }
+    if materialization["request_count"]:
+        receipt_result = await _record_tool_receipt(conn, ToolReceiptRequest(
+            tool_name="experiment.create_surface_probe",
+            adapter_version="2026-07-18.v1",
+            redacted_argv=[
+                "experiment.create_surface_probe",
+                str(target_uuid),
+                _canonical_vulnerability_route(collection) or "/",
+            ],
+            target_scope={
+                "target_id": str(target_uuid),
+                "target_url": target_url,
+                "same_origin_only": True,
+            },
+            approval_receipt_id=approval_receipt_id,
+            status="success" if materialization["usable"] else "failed",
+            parser_status="parsed",
+            started_at=started_at.isoformat(),
+            finished_at=datetime.now(timezone.utc).isoformat(),
+            redaction_summary="Managed credentials stayed in memory; artifact identifiers are hashed.",
+            metadata_json=materialization,
+            created_by="research_create_surface_probe",
+        ))
+        materialization["tool_receipt_id"] = (
+            receipt_result.get("tool_receipt") or {}
+        ).get("id")
+    params["_server_materialization"] = materialization
+    if not probe.get("usable"):
         return False
     # role=admin is the dominant privilege-escalation overpost; a wrong field is falsified by the proof.
     workflow = _materialize_create_mass_assignment_workflow(
@@ -37026,6 +37738,8 @@ async def _server_materialize_create_ma(
         envelope=probe["envelope"], id_field=probe["id_field"],
     )
     if not workflow:
+        materialization["usable"] = False
+        materialization["reason"] = "discovered_shape_not_materializable"
         return False
     for key in ("proof_family", "objective", "expected_signal", "falsifier",
                 "principal_variables", "assertions", "steps"):

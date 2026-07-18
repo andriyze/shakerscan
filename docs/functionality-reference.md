@@ -1089,8 +1089,8 @@ it is the exhaustive backstop behind the human-readable product map above.
 
 | Surface | Count | Source |
 |---|---|---|
-| Public REST operations | 224 | `api/api.py` FastAPI decorators |
-| Unique REST paths | 182 | `api/api.py` |
+| Public REST operations | 234 | `api/api.py` FastAPI decorators |
+| Unique REST paths | 192 | `api/api.py` |
 | Check families | 13 | `api/check_registry.py` |
 | Command Arsenal commands | 82 | `api/command_arsenal.py` |
 | Tool adapters | 13 | `api/command_arsenal.py` |
@@ -1105,13 +1105,23 @@ it is the exhaustive backstop behind the human-readable product map above.
 | Skills | 6 | `skills/` |
 | Slash commands | 14 | `.claude/commands/` |
 | Specialized subagents | 3 | `.claude/agents/` |
-| Durable tables | 45 | `db/init.sql` + migrations |
+| Durable tables | 46 | `db/init.sql` + migrations |
 
 ### Public REST Operations
 
 | Method | Path | Handler |
 |---|---|---|
 | `GET` | `/` | `root` |
+| `GET` | `/agent/context/{target_id}` | `get_agent_context_pack` |
+| `POST` | `/agent/findings/{finding_id}/verify` | `verify_suspected_agent_finding` |
+| `GET` | `/agent/findings/{target_id}` | `get_agent_two_tier_findings` |
+| `GET` | `/agent/hunt/runs` | `list_agent_hunt_runs` |
+| `GET` | `/agent/hunt/session/{run_id}` | `get_agent_hunt_session` |
+| `POST` | `/agent/hunt/session/{run_id}/cancel` | `cancel_agent_hunt_session` |
+| `POST` | `/agent/hunt/session/{run_id}/reply` | `submit_agent_hunt_reply` |
+| `POST` | `/agent/hunt/{target_id}` | `run_agent_hunt_endpoint` |
+| `POST` | `/agent/hunt/{target_id}/session` | `start_agent_hunt_session` |
+| `POST` | `/agent/tools/{target_id}/execute` | `execute_agent_tool_endpoint` |
 | `GET` | `/agents/local` | `local_agents` |
 | `POST` | `/agents/local/plan` | `local_agent_dry_run_plan` |
 | `POST` | `/agents/local/plan/parse` | `local_agent_parse_candidate_plan` |
@@ -1809,13 +1819,13 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SHAKERSCAN_MCP_ALLOW_REMOTE_API` | `scripts/shakerscan_mcp.py` |
 | `SHAKERSCAN_MCP_TIMEOUT_SECONDS` | `scripts/shakerscan_mcp.py` |
 | `SHAKERSCAN_PAYLOAD_PACK_MAX` | `scanner/scanner_tools/active_checks.py` |
-| `SHAKERSCAN_PER_WORKER_MEM_GB` | `api/api.py` |
+| `SHAKERSCAN_PER_WORKER_MEM_GB` | `api/api.py`, `docker-compose.yml` |
+| `SHAKERSCAN_PLATFORM_MEMORY_RESERVE_GB` | `api/api.py`, `docker-compose.yml` |
 | `SHAKERSCAN_PUBLIC_API_URL` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_REQUEST_BUDGET_DOMAIN` | `scanner/scanner.py` |
 | `SHAKERSCAN_REQUEST_BUDGET_LIMIT` | `scanner/scanner.py` |
 | `SHAKERSCAN_REQUEST_BUDGET_MODE` | `api/worker.py`, `scanner/scanner.py` |
 | `SHAKERSCAN_REQUEST_BUDGET_RESERVED` | `scanner/scanner.py` |
-| `SHAKERSCAN_SCAN_MEM_FRACTION` | `api/api.py` |
 | `SHAKERSCAN_SCAN_SLOT_MAX_WAIT_SECONDS` | `api/worker.py` |
 | `SHAKERSCAN_SCAN_SLOT_TTL_SECONDS` | `api/worker.py` |
 | `SHAKERSCAN_STALE_DURATION_GRACE_MIN` | `api/api.py` |
@@ -1913,6 +1923,7 @@ Only key names and declaring sources are documented; secret values are never rea
 |---|---|
 | `agent_context_packs` | `api/retest_contract.py` |
 | `agent_decision_traces` | `api/retest_contract.py` |
+| `agent_hunt_runs` | `api/retest_contract.py` |
 | `ai_surface_attempts` | `db/init.sql` |
 | `ai_surfaces` | `db/init.sql` |
 | `ai_target_credentials` | `db/init.sql` |

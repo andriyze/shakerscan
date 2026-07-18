@@ -137,12 +137,14 @@ def test_history_replay_summarizes():
 def test_parse_final_findings():
     text = ('Here is my debrief.\n```json\n{"done":true,"findings":[{"title":"BOLA on basket",'
             '"severity":"high","family":"BOLA","predicate":"cross_principal_equivalent",'
+            '"route":"/api/baskets/7","method":"GET",'
             '"details":"user2 read user1 basket","evidence_refs":["resp_2","resp_3"],'
             '"cwe":"CWE-639"}],"abstained":false}\n```')
     fs = tc.parse_final_findings(text)
     assert len(fs) == 1
     assert fs[0]["title"] == "BOLA on basket" and fs[0]["severity"] == "high"
     assert fs[0]["predicate"] == "cross_principal_equivalent"
+    assert fs[0]["route"] == "/api/baskets/7" and fs[0]["method"] == "GET"
     assert fs[0]["evidence_refs"] == ["resp_2", "resp_3"]
     assert fs[0]["provenance"] == "model"
 
