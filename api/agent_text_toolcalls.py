@@ -269,7 +269,16 @@ def interpret_assistant(reply: Any) -> dict[str, Any]:
     if calls:
         return {"tool_calls": calls, "findings": [], "done": False, "abstained": False}
     findings = parse_final_findings(text)
-    return {"tool_calls": [], "findings": findings, "done": True, "abstained": not findings}
+    # A text turn is TERMINAL only if it actually parsed a debrief structure (findings, or a
+    # done/abstained JSON block). Unparseable prose is NOT terminal (done=False) so the caller
+    # re-prompts instead of finalizing the hunt on one bad reply (audit N1).
+    terminal = bool(findings) or has_terminal_json(text)
+    return {
+        "tool_calls": [],
+        "findings": findings,
+        "done": terminal,
+        "abstained": (not findings) if terminal else False,
+    }
 
 
 def render_history_tool_request(names: list[str]) -> str:
@@ -303,15 +312,31 @@ _POLICY = re.compile(
 )
 
 
-_END_MARKER = re.compile(r'(done|abstain|no\s+(?:vuln|finding|issue))', re.IGNORECASE)
+_TERMINAL_KEYS = ("done", "abstained", "findings")
 
 
-def has_explicit_end_marker(text: Optional[str]) -> bool:
-    """True if a free-text reply actually signals a deliberate finish (a done/abstain/`no
-    vulnerability` marker), vs unparseable prose. Used so a garbage text reply — which
-    :func:`interpret_assistant` also reports as ``abstained=True`` — does not masquerade as a
-    clean abstention and skip the malformed-reply retry (external-audit P2)."""
-    return bool(_END_MARKER.search(text or ""))
+def has_terminal_json(text: Optional[str]) -> bool:
+    """True if the reply STRUCTURALLY declares a terminal turn — a fenced/balanced JSON object
+    carrying a ``done``/``abstained``/``findings`` key. This is how a genuine debrief is told
+    apart from unparseable prose (which :func:`parse_final_findings` also yields no findings
+    for). Structural, not keyword-based: prose that merely says "I'm done thinking" is NOT a
+    terminal turn, so it is re-prompted rather than silently finalizing the hunt (audit N1)."""
+    if not text:
+        return False
+    candidates: list[str] = [m.group(1) for m in _FENCE.finditer(text)]
+    candidates.extend(balanced_object_spans(text))
+    for span in candidates:
+        start = span.find("{")
+        end = span.rfind("}")
+        if start == -1 or end <= start:
+            continue
+        try:
+            obj = json.loads(_TRAILING_COMMA.sub(r"\1", span[start : end + 1]))
+        except Exception:
+            continue
+        if isinstance(obj, dict) and any(k in obj for k in _TERMINAL_KEYS):
+            return True
+    return False
 
 
 def is_likely_refusal(content: Optional[str], finish_reason: Optional[str] = None) -> bool:

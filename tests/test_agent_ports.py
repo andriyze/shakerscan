@@ -374,14 +374,31 @@ def test_forced_debrief_message_shape():
     assert "final" in msg.lower() and '"done":true' in msg
 
 
-def test_explicit_end_marker_distinguishes_abstain_from_prose():
-    # deliberate finish markers -> explicit end (honor the abstain/finish)
-    assert tc.has_explicit_end_marker('{"done":true,"findings":[]}')
-    assert tc.has_explicit_end_marker("I abstain — nothing proven.")
-    assert tc.has_explicit_end_marker("Found no vulnerabilities after testing.")
-    # unparseable prose with no marker -> NOT an explicit end (route to malformed-reply retry)
-    assert not tc.has_explicit_end_marker("Let me now check the basket endpoints.")
-    assert not tc.has_explicit_end_marker("")
+def test_terminal_json_is_structural_not_keyword():
+    # a real debrief structure -> terminal
+    assert tc.has_terminal_json('```json\n{"done":true,"findings":[]}\n```')
+    assert tc.has_terminal_json('{"abstained":true}')
+    # prose that merely says "done" is NOT a terminal turn (structural, not keyword)
+    assert not tc.has_terminal_json("Let me check the basket, I'm done thinking about login.")
+    assert not tc.has_terminal_json("I will now probe /api/Cards as user2.")
+    assert not tc.has_terminal_json("")
+
+
+def test_interpret_prose_is_not_terminal():
+    # unparseable prose must NOT be a terminal/abstain turn (audit N1) -> caller re-prompts
+    d = tc.interpret_assistant("Let me now check the basket endpoints. I'm done thinking.")
+    assert d["tool_calls"] == [] and d["findings"] == []
+    assert d["done"] is False and d["abstained"] is False
+
+
+def test_interpret_explicit_abstain_is_terminal():
+    d = tc.interpret_assistant('```json\n{"done":true,"findings":[],"abstained":true}\n```')
+    assert d["done"] is True and d["abstained"] is True and d["findings"] == []
+
+
+def test_interpret_dict_no_toolcalls_is_terminal():
+    d = tc.interpret_assistant({"findings": [], "abstained": True})
+    assert d["done"] is True and d["abstained"] is True
 
 
 # ------------------------------------------------------------------------ runner --------

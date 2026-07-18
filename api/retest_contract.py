@@ -1883,8 +1883,19 @@ async def run_schema_migrations(pool) -> None:
                     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                     CONSTRAINT agent_hunt_runs_status_check
-                        CHECK (status IN ('awaiting_planner','completed','cancelled','failed'))
+                        CHECK (status IN ('awaiting_planner','planning','completed','cancelled','failed'))
                 )
+            """)
+            # 'planning' is a transient claim status: a reply flips awaiting_planner->planning under a
+            # short row lock, RELEASES the lock, executes tools, then writes the result back. This keeps
+            # target HTTP/subprocess work OUT of the row-locked transaction (audit N3). Widen the
+            # constraint on already-created tables.
+            await conn.execute("""
+                ALTER TABLE agent_hunt_runs DROP CONSTRAINT IF EXISTS agent_hunt_runs_status_check
+            """)
+            await conn.execute("""
+                ALTER TABLE agent_hunt_runs ADD CONSTRAINT agent_hunt_runs_status_check
+                    CHECK (status IN ('awaiting_planner','planning','completed','cancelled','failed'))
             """)
             await conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_agent_hunt_runs_target

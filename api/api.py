@@ -17878,13 +17878,11 @@ async def _agent_apply_reply(
             state["events"].append({"iteration": iteration, "model_declined": True})
             state["abstained"] = True
             return {"stop": True, "stop_reason": "model_declined"}
-        # Genuine finish: findings reported, OR an EXPLICIT abstain. A dict (JSON-mode) reply's
-        # abstain flag is trustworthy; a free-text reply is only a genuine abstain if it actually
-        # contains a done/abstain/findings marker — otherwise unparseable prose (which the shim also
-        # reports as abstained=True) would masquerade as a clean finish and skip the retry below.
-        # (External-audit P2.)
-        explicit_end = isinstance(reply, dict) or agent_text_toolcalls.has_explicit_end_marker(reply_text)
-        if decision["findings"] or (decision["abstained"] and explicit_end):
+        # Genuine finish: a TERMINAL turn — findings reported, or a structural done/abstain block
+        # (interpret_assistant sets done only for a parsed debrief structure, never for prose). A
+        # bad/prose reply is done=False and falls through to the malformed-reply retry, so one bad
+        # reply cannot silently finalize the hunt with zero findings. (External-audit N1.)
+        if decision.get("done"):
             state["findings"] = decision.get("findings") or []
             state["abstained"] = bool(decision.get("abstained"))
             state["events"].append({"iteration": iteration, "final": True, "findings": len(state["findings"]), "abstained": state["abstained"]})
@@ -18432,81 +18430,127 @@ async def get_agent_hunt_session(run_id: str):
     return _agent_hunt_run_public(row)
 
 
+def _agent_run_final_status(stop_reason: str) -> str:
+    """Map a loop stop reason to a terminal agent_hunt_runs status (audit N5a). The runs table has
+    no 'blocked'; a refusal or repeated malformed replies are 'failed', not a clean 'completed'."""
+    reason = str(stop_reason or "")
+    if reason in ("model_declined", "empty_replies") or reason.startswith("planner_error"):
+        return "failed"
+    if reason == "cancelled":
+        return "cancelled"
+    return "completed"
+
+
 @app.post("/agent/hunt/session/{run_id}/reply")
 async def submit_agent_hunt_reply(run_id: str, req: AgentHuntReplyRequest):
     """Submit one planner reply to a keyless hunt run and get the next observation. The server
     executes any requested tools (scope-/approval-gated), advances the loop with the same
     anti-stall steering as the in-process driver, and — on a debrief or the iteration cap —
     provenance-gates and persists SUSPECTED findings (the family_proof VERIFIED moat is untouched).
-    Returns the next transcript to reason over, or the finalized result when the hunt ends."""
+    Returns the next transcript to reason over, or the finalized result when the hunt ends.
+
+    Turn execution is split lock / execute / write so target HTTP and subprocesses never run inside
+    a row-locked transaction (audit N3): a SHORT locked phase claims the turn (awaiting_planner ->
+    planning), tools run UNLOCKED, then a SHORT locked phase writes the result back."""
+    run_uuid = _uuid_or_400(run_id, "run id")
+
+    # --- Phase 1: claim the turn under a short lock (no tool work here) ---
     async with db_pool.acquire() as conn:
         async with conn.transaction():
             row = await _agent_hunt_run_or_404(conn, run_id, for_update=True)
-            if str(row["status"]) != "awaiting_planner":
-                raise HTTPException(status_code=409, detail=f"Hunt run is {row['status']}, not awaiting a planner reply")
+            status = str(row["status"])
+            # A 'planning' row is another reply in flight — unless it is stale (its worker died
+            # mid-turn without writing back), in which case reclaim it.
+            reclaimable = status == "planning" and bool(await conn.fetchval(
+                "SELECT updated_at < NOW() - INTERVAL '5 minutes' FROM agent_hunt_runs WHERE id=$1", run_uuid))
+            if status != "awaiting_planner" and not reclaimable:
+                if status in ("completed", "cancelled", "failed"):
+                    raise HTTPException(status_code=409, detail=f"Hunt run is {status}, not awaiting a planner reply")
+                raise HTTPException(status_code=409, detail="Another reply for this run is already in flight")
             target_uuid = row["target_id"]
-            async with db_pool.acquire() as conn2:
-                target = await conn2.fetchrow("SELECT url, is_active FROM targets WHERE id=$1", target_uuid)
+            target = await conn.fetchrow("SELECT url, is_active FROM targets WHERE id=$1", target_uuid)
             target_url = str((target or {}).get("url") or "")
-            # Stop hunting a target the operator has deactivated (soft-deleted) mid-run, instead of
-            # sending more requests. Commit the cancel and return it (raising here would roll the
-            # update back inside this transaction). (External-audit P1.)
+            # Stop hunting a target the operator has deactivated (soft-deleted) mid-run. (Audit P1.)
             if not target_url or not (target or {}).get("is_active"):
                 cancelled = await conn.fetchrow(
                     "UPDATE agent_hunt_runs SET status='cancelled', stop_reason='target_deactivated', "
-                    "updated_at=NOW() WHERE id=$1 RETURNING *", row["id"],
-                )
+                    "updated_at=NOW() WHERE id=$1 RETURNING *", run_uuid)
                 return _agent_hunt_run_public(cancelled)
-
+            approval_receipt_id = str(row["approval_receipt_id"]) if row["approval_receipt_id"] else None
+            # Re-check the approval policy on this state-changing reply, using the run's stored
+            # receipt — not only at session start. (Audit N5c.)
+            await _require_approval_receipt_if_policy_enabled(
+                conn, approval_receipt_id, action_name="agent.hunt", risk_tier="active",
+                created_by=f"agent_hunt_session:{run_id}")
             state = _decode_json_value(row["state"]) or {}
             max_iterations = int(row["max_iterations"] or _AGENT_HUNT_DEFAULT_ITERATIONS)
             allow_write = bool(row["allow_write"])
             allow_active = bool(row["allow_active"])
-            approval_receipt_id = str(row["approval_receipt_id"]) if row["approval_receipt_id"] else None
-            iteration = int(state.get("iterations") or 0)
-            was_forced = bool(state.get("forced_debrief"))
+            await conn.execute(
+                "UPDATE agent_hunt_runs SET status='planning', updated_at=NOW() WHERE id=$1", run_uuid)
 
+    iteration = int(state.get("iterations") or 0)
+    was_forced = bool(state.get("forced_debrief"))
+
+    # --- Phase 2: run the turn UNLOCKED (target HTTP / subprocesses live here) ---
+    try:
+        if was_forced:
+            # Forced-debrief turn: extract findings ONLY — do NOT execute any tool_calls in it. This
+            # mirrors the in-process driver's forced debrief so the keyless path cannot grant an extra
+            # round of tool execution beyond the declared iteration cap. (Audit N2.)
+            if len(state["debug_replies"]) < 3:
+                state["debug_replies"].append(req.reply[:700])
+            state["messages"].append({"role": "assistant", "content": req.reply[:6000]})
+            final = agent_text_toolcalls.interpret_assistant(req.reply)
+            state["findings"] = final.get("findings") or []
+            state["abstained"] = bool(final.get("abstained"))
+            state["stop_reason"] = "forced_debrief"
+            state["iterations"] = iteration + 1
+            state["events"].append({"iteration": iteration, "forced_debrief": True, "findings": len(state["findings"])})
+            finalize = True
+        else:
             outcome = await _agent_apply_reply(
                 state, req.reply, target_uuid=target_uuid, target_url=target_url,
                 created_by=f"agent_hunt_session:{run_id}", allow_write=allow_write,
                 allow_active=allow_active, approval_receipt_id=approval_receipt_id,
-                hypothesis_id=None, iteration=iteration, max_iterations=max_iterations,
-            )
+                hypothesis_id=None, iteration=iteration, max_iterations=max_iterations)
             state["iterations"] = iteration + 1
-
-            finalize = False
+            finalize = bool(outcome["stop"])
             if outcome["stop"]:
                 state["stop_reason"] = outcome["stop_reason"]
-                finalize = True
-            elif was_forced:
-                # The forced-debrief reply produced no clean stop — end anyway, capturing whatever
-                # was proven, so a run can never spin past its cap.
-                state["stop_reason"] = "forced_debrief"
-                finalize = True
             elif state["iterations"] >= max_iterations:
-                # Cap reached without a debrief: request a final-summary turn (the next reply is
-                # treated as terminal), mirroring the in-process forced-debrief.
+                # Cap reached without a debrief: request a final-summary turn (its reply is terminal,
+                # findings only), mirroring the in-process forced debrief.
                 state["forced_debrief"] = True
                 state["messages"].append({"role": "user", "content": agent_loop.forced_debrief_message()})
+        result = None
+        if finalize:
+            result = await _agent_finalize_and_persist(
+                state, target_uuid=target_uuid, target_url=target_url,
+                created_by=f"agent_hunt_session:{run_id}", approval_receipt_id=approval_receipt_id,
+                hypothesis_id=None, persist=True)
+    except Exception:
+        # Release the claim so the session can retry this turn, then surface the error.
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE agent_hunt_runs SET status='awaiting_planner', updated_at=NOW() "
+                "WHERE id=$1 AND status='planning'", run_uuid)
+        raise
 
+    # --- Phase 3: write the result back under a short lock ---
+    async with db_pool.acquire() as conn:
+        async with conn.transaction():
             if finalize:
-                result = await _agent_finalize_and_persist(
-                    state, target_uuid=target_uuid, target_url=target_url,
-                    created_by=f"agent_hunt_session:{run_id}", approval_receipt_id=approval_receipt_id,
-                    hypothesis_id=None, persist=True,
-                )
                 updated = await conn.fetchrow(
-                    """UPDATE agent_hunt_runs
-                       SET status='completed', stop_reason=$2, state=$3, result=$4, updated_at=NOW()
-                       WHERE id=$1 RETURNING *""",
-                    row["id"], state["stop_reason"], json.dumps(state, default=str),
-                    json.dumps(result, default=str),
-                )
+                    "UPDATE agent_hunt_runs SET status=$2, stop_reason=$3, state=$4, result=$5, "
+                    "updated_at=NOW() WHERE id=$1 RETURNING *",
+                    run_uuid, _agent_run_final_status(state["stop_reason"]), state["stop_reason"],
+                    json.dumps(state, default=str), json.dumps(result, default=str))
             else:
                 updated = await conn.fetchrow(
-                    "UPDATE agent_hunt_runs SET state=$2, updated_at=NOW() WHERE id=$1 RETURNING *",
-                    row["id"], json.dumps(state, default=str),
-                )
+                    "UPDATE agent_hunt_runs SET status='awaiting_planner', state=$2, updated_at=NOW() "
+                    "WHERE id=$1 RETURNING *",
+                    run_uuid, json.dumps(state, default=str))
     return _agent_hunt_run_public(updated)
 
 
@@ -18525,6 +18569,38 @@ async def cancel_agent_hunt_session(run_id: str):
                 row["id"],
             )
     return _agent_hunt_run_public(updated)
+
+
+@app.get("/agent/hunt/runs")
+async def list_agent_hunt_runs(
+    target_id: Optional[str] = Query(None),
+    status: Optional[str] = Query(None),
+    limit: int = Query(50, ge=1, le=200),
+):
+    """List keyless hunt runs (newest first, summary only — no transcript) so abandoned
+    awaiting_planner/planning runs are visible rather than accumulating invisibly (audit N5b).
+    Filter by target_id and/or status."""
+    clauses: list[str] = []
+    params: list[Any] = []
+    if target_id:
+        params.append(_uuid_or_400(target_id, "target id"))
+        clauses.append(f"target_id=${len(params)}")
+    if status:
+        s = str(status).strip().lower()
+        if s not in ("awaiting_planner", "planning", "completed", "cancelled", "failed"):
+            raise HTTPException(status_code=400, detail="invalid status filter")
+        params.append(s)
+        clauses.append(f"status=${len(params)}")
+    where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+    params.append(limit)
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT id, target_id, objective, status, stop_reason, max_iterations, "
+            "(state->>'iterations') AS iterations, created_by, created_at, updated_at "
+            f"FROM agent_hunt_runs{where} ORDER BY created_at DESC LIMIT ${len(params)}",
+            *params,
+        )
+    return {"runs": [_json_safe_row(r) for r in rows], "count": len(rows)}
 
 
 @app.get("/agent/findings/{target_id}")
