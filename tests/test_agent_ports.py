@@ -13,6 +13,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "api"))
 import agent_provenance as prov
 import agent_text_toolcalls as tc
 import agent_context_pack as cp
+import agent_tools as at
 
 
 # ------------------------------------------------------------------ provenance gate ----
@@ -175,6 +176,80 @@ def test_relevance_ranks_objective_keyword_first():
     ti = pack["text"].index
     # the login section body should appear before the misc section body
     assert ti("=== SECTION: login_flow ===") < ti("=== SECTION: misc ===")
+
+
+# ---------------------------------------------------------------- agent tools ---------
+
+def test_tool_schemas_render():
+    schemas = at.tool_schemas()
+    names = {s["name"] for s in schemas}
+    assert names == {"http_request", "query_kb", "diff", "note"}
+    # the schemas must render through the text-contract shim
+    contract = tc.render_tool_contract(schemas)
+    assert "http_request(" in contract
+    assert "path*: string" in contract  # required marked
+
+
+def test_method_classification():
+    assert at.coerce_method("get") == "GET"
+    assert at.is_write_method("POST") is True
+    assert at.is_write_method("GET") is False
+    try:
+        at.coerce_method("TRACE")
+        assert False, "expected AgentToolError"
+    except at.AgentToolError:
+        pass
+
+
+def test_same_origin_path_guard():
+    assert at.validate_same_origin_path("/rest/basket/1") == "/rest/basket/1"
+    for bad in ["//evil.com/x", "http://evil.com", "rest/x", "/x\x00y"]:
+        try:
+            at.validate_same_origin_path(bad)
+            assert False, f"expected rejection for {bad!r}"
+        except at.AgentToolError:
+            pass
+
+
+def test_header_filter_drops_auth():
+    filtered = at.filter_request_headers({
+        "Authorization": "Bearer x", "Cookie": "s=1", "X-Api-Key": "k",
+        "X-Forwarded-For": "1.2.3.4", "Accept": "application/json", "X-Custom": "ok",
+    })
+    assert "Authorization" not in filtered and "Cookie" not in filtered
+    assert "X-Api-Key" not in filtered and "X-Forwarded-For" not in filtered
+    assert filtered.get("Accept") == "application/json"
+    assert filtered.get("X-Custom") == "ok"
+
+
+def test_principal_slot_normalize():
+    assert at.normalize_principal_slot("") == "anonymous"
+    assert at.normalize_principal_slot("User1") == "user1"
+    assert at.normalize_principal_slot(None) == "anonymous"
+
+
+def test_query_kb_and_note_coercion():
+    assert at.coerce_query_kb({"kind": "findings"})[0] == "findings"
+    try:
+        at.coerce_query_kb({"kind": "passwords"})
+        assert False
+    except at.AgentToolError:
+        pass
+    note = at.coerce_note({"kind": "hypothesis", "title": "BOLA on basket", "detail": "x", "family": "BOLA"})
+    assert note["kind"] == "hypothesis" and note["family"] == "bola"
+    try:
+        at.coerce_note({"kind": "observation", "title": ""})
+        assert False
+    except at.AgentToolError:
+        pass
+
+
+def test_http_evidence_is_tool_provenance():
+    ev = at.http_evidence_item({"method": "GET", "path": "/x"}, {"status": 200, "body_sample": "hi"})
+    assert ev["type"] in prov.TOOL_EVIDENCE_KINDS
+    # a finding carrying this evidence passes the provenance gate
+    g = prov.gate_live_finding({"severity": "high", "evidence": [ev]})
+    assert g["passed"] and g["provenance"] == "tool"
 
 
 # ------------------------------------------------------------------------ runner --------

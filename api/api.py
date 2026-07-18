@@ -149,7 +149,14 @@ import invariant_contracts
 import agent_context_pack
 import agent_provenance
 import agent_text_toolcalls
-from http_experiment import ExperimentContractError, execute_experiment
+import agent_tools
+from http_experiment import (
+    ExperimentContractError,
+    MAX_BODY_BYTES,
+    compare_summaries,
+    execute_experiment,
+    response_summary,
+)
 from workflow_experiment import (
     WorkflowContractError,
     execute_workflow,
@@ -17216,6 +17223,309 @@ async def get_agent_context_pack(
         "sections_available": [section["key"] for section in sections],
         "pack": pack,
     }
+
+
+# =============================================================================
+# Autonomous-agent tools (slice 3). Each tool enforces scope + approval BEFORE its
+# handler (borrow T3MP3ST execute() placement — containment in code, not the model):
+# http_request is same-origin only and auth comes only from a server-resolved principal;
+# writes are gated. Every tool call records a durable tool_receipt.
+# =============================================================================
+
+_AGENT_TOOL_MAX_QUERY_ROWS = 50
+_AGENT_TOOL_HTTP_TIMEOUT_SECONDS = 15
+
+
+async def _agent_tool_http_request(
+    target_uuid: uuid.UUID,
+    target_url: str,
+    args: dict[str, Any],
+    *,
+    created_by: str,
+    allow_write: bool,
+    approval_receipt_id: Optional[str] = None,
+    hypothesis_id: Optional[str] = None,
+) -> dict[str, Any]:
+    import httpx  # container-local; api.py has no top-level httpx dependency
+
+    method = agent_tools.coerce_method(args.get("method"))
+    path = agent_tools.validate_same_origin_path(args.get("path"))
+    if agent_tools.is_write_method(method) and not allow_write:
+        return {
+            "ok": False,
+            "needs_approval": True,
+            "error": f"{method} is a state-changing request; it requires a credential-tier "
+            "approval receipt on the episode (gated). Use a read method to probe first.",
+        }
+    headers = agent_tools.filter_request_headers(args.get("headers"))
+    slot = agent_tools.normalize_principal_slot(args.get("as_principal"))
+    query = args.get("query") if isinstance(args.get("query"), dict) else None
+    json_body = args.get("json_body") if isinstance(args.get("json_body"), dict) else None
+    form_body = args.get("form_body") if isinstance(args.get("form_body"), dict) else None
+
+    try:
+        url = _provision_same_origin_url(target_url, path)
+    except HTTPException as exc:
+        return {"ok": False, "error": f"scope: {exc.detail}"}
+
+    auth_headers: dict[str, Any] = {}
+    cookies: dict[str, Any] = {}
+    principal_identity = None
+    if slot != "anonymous":
+        try:
+            async with db_pool.acquire() as conn:
+                contexts = await _resolve_workflow_principal_contexts(conn, target_uuid, {slot})
+            ctx = contexts.get(slot) or {}
+            auth_headers = ctx.get("headers") or {}
+            cookies = ctx.get("cookies") or {}
+            principal_identity = ctx.get("identity_fingerprint")
+        except WorkflowContractError as exc:
+            return {"ok": False, "error": f"principal '{slot}' unavailable: {exc}"}
+
+    request_view = {
+        "method": method,
+        "path": path,
+        "query_keys": sorted(query or {}),
+        "as_principal": slot,
+        "body_kind": "json" if json_body is not None else "form" if form_body is not None else None,
+    }
+    started_at = datetime.now(timezone.utc)
+    started = time.perf_counter()
+    status_label = "success"
+    summary: Optional[dict[str, Any]] = None
+    error: Optional[str] = None
+    try:
+        timeout = httpx.Timeout(_AGENT_TOOL_HTTP_TIMEOUT_SECONDS)
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=False, trust_env=False) as client:
+            request = client.build_request(
+                method, url, params=query,
+                headers={**headers, **auth_headers}, cookies=cookies,
+                json=json_body if json_body is not None else None,
+                data=form_body if form_body is not None else None,
+            )
+            response = await client.send(request, stream=True)
+            chunks: list[bytes] = []
+            received = 0
+            try:
+                async for chunk in response.aiter_bytes():
+                    remaining = MAX_BODY_BYTES + 1 - received
+                    if remaining <= 0:
+                        break
+                    chunks.append(chunk[:remaining])
+                    received += min(len(chunk), remaining)
+                    if received > MAX_BODY_BYTES:
+                        break
+            finally:
+                await response.aclose()
+            body = b"".join(chunks)
+            summary = response_summary(response, body, elapsed_ms=round((time.perf_counter() - started) * 1000))
+    except (httpx.InvalidURL, httpx.HTTPError, UnicodeError, ValueError) as exc:
+        status_label = "failed"
+        error = type(exc).__name__
+
+    safe_summary = _redact_agent_payload(summary) if summary else None
+    finished_at = datetime.now(timezone.utc)
+    receipt_id = None
+    try:
+        async with db_pool.acquire() as conn:
+            async with conn.transaction():
+                receipt_result = await _record_tool_receipt(conn, ToolReceiptRequest(
+                    tool_name="agent.http_request",
+                    adapter_version="2026-07-18.v1",
+                    redacted_argv=["agent.http_request", method, path, f"as:{slot}"],
+                    target_scope={"target_id": str(target_uuid), "target_url": target_url, "same_origin_only": True},
+                    approval_receipt_id=approval_receipt_id,
+                    status=status_label,
+                    parser_status="parsed" if safe_summary else "not_applicable",
+                    started_at=started_at.isoformat(),
+                    finished_at=finished_at.isoformat(),
+                    redaction_summary="Credential headers server-injected from principal; response bounded + redacted.",
+                    metadata_json={
+                        "request": request_view,
+                        "status": (safe_summary or {}).get("status"),
+                        "principal_identity": principal_identity,
+                        "hypothesis_id": hypothesis_id,
+                        "error": error,
+                    },
+                    created_by=created_by,
+                ))
+                receipt_id = (receipt_result.get("tool_receipt") or {}).get("id")
+    except Exception:
+        receipt_id = None
+
+    if error:
+        return {"ok": False, "error": f"request_error:{error}", "request": request_view, "receipt_id": receipt_id}
+    return {"ok": True, "request": request_view, "response": safe_summary, "receipt_id": receipt_id, "provenance": "tool"}
+
+
+async def _agent_tool_query_kb(target_uuid: uuid.UUID, kind: str, flt: dict[str, Any]) -> dict[str, Any]:
+    try:
+        limit = int(flt.get("limit"))
+    except (TypeError, ValueError):
+        limit = 25
+    limit = max(1, min(limit, _AGENT_TOOL_MAX_QUERY_ROWS))
+    path_contains = str(flt.get("path_contains") or "").strip()
+    family = str(flt.get("family") or "").strip().lower()
+    severity = str(flt.get("severity") or "").strip().lower()
+    method = str(flt.get("method") or "").strip().upper()
+    rows: list[Any] = []
+    async with db_pool.acquire() as conn:
+        if kind == "endpoints":
+            rows = await conn.fetch(
+                """SELECT method, path, auth_state, test_status, last_verdict, param_shape, content_type, priority_score
+                   FROM target_endpoints WHERE target_id=$1 AND COALESCE(test_status,'')<>'gone'
+                     AND ($2='' OR path ILIKE '%'||$2||'%') AND ($3='' OR method=$3)
+                   ORDER BY priority_score DESC, last_seen_at DESC LIMIT $4""",
+                target_uuid, path_contains, method, limit,
+            )
+        elif kind == "findings":
+            rows = await conn.fetch(
+                """SELECT title, severity, status, tool, url, last_verification_verdict
+                   FROM findings WHERE target_id=$1 AND ($2='' OR severity=$2)
+                   ORDER BY last_seen_at DESC LIMIT $3""",
+                target_uuid, severity, limit,
+            )
+        elif kind == "hypotheses":
+            rows = await conn.fetch(
+                """SELECT family, title, status, confidence, source, dedupe_key
+                   FROM hypotheses WHERE target_id=$1 AND ($2='' OR lower(family)=$2)
+                   ORDER BY updated_at DESC LIMIT $3""",
+                target_uuid, family, limit,
+            )
+        elif kind == "principals":
+            rows = await conn.fetch(
+                """SELECT label, role, tenant_id, auth_state, is_active FROM target_principals
+                   WHERE target_id=$1 AND is_active=true ORDER BY role, label LIMIT $2""",
+                target_uuid, limit,
+            )
+        elif kind == "graph_nodes":
+            rows = await conn.fetch(
+                """SELECT node_type, node_key, label FROM application_graph_nodes
+                   WHERE target_id=$1 ORDER BY last_seen_at DESC LIMIT $2""",
+                target_uuid, limit,
+            )
+        elif kind == "graph_edges":
+            rows = await conn.fetch(
+                """SELECT src_key, edge_type, dst_key FROM application_graph_edges
+                   WHERE target_id=$1 ORDER BY last_seen_at DESC LIMIT $2""",
+                target_uuid, limit,
+            )
+        elif kind == "tool_receipts":
+            rows = await conn.fetch(
+                """SELECT tool_name, status, redacted_argv, created_at FROM tool_receipts
+                   WHERE target_scope->>'target_id'=$1 ORDER BY created_at DESC LIMIT $2""",
+                str(target_uuid), limit,
+            )
+        elif kind == "notes":
+            rows = await conn.fetch(
+                """SELECT metadata_json, created_at FROM tool_receipts
+                   WHERE tool_name='agent.note' AND target_scope->>'target_id'=$1
+                   ORDER BY created_at DESC LIMIT $2""",
+                str(target_uuid), limit,
+            )
+    items = [_redact_agent_payload(_json_safe_row(row)) for row in rows]
+    return {"ok": True, "kind": kind, "count": len(items), "rows": items}
+
+
+async def _agent_tool_note(target_uuid: uuid.UUID, note: dict[str, Any], *, created_by: str) -> dict[str, Any]:
+    receipt_id = None
+    async with db_pool.acquire() as conn:
+        async with conn.transaction():
+            receipt_result = await _record_tool_receipt(conn, ToolReceiptRequest(
+                tool_name="agent.note",
+                adapter_version="2026-07-18.v1",
+                redacted_argv=["agent.note", note["kind"], note["title"][:60]],
+                target_scope={"target_id": str(target_uuid)},
+                status="success",
+                parser_status="not_applicable",
+                redaction_summary="Agent scratchpad note.",
+                metadata_json={
+                    "kind": note["kind"], "title": note["title"], "detail": note["detail"],
+                    "family": note.get("family"), "severity": note.get("severity"),
+                },
+                created_by=created_by,
+            ))
+            receipt_id = (receipt_result.get("tool_receipt") or {}).get("id")
+    return {"ok": True, "note": note, "receipt_id": receipt_id}
+
+
+def _agent_resolve_ref(value: Any, results: dict[str, Any]) -> dict[str, Any]:
+    """Resolve a diff argument to a response summary: an inline summary dict, a ref like
+    'resp_1' into the loop's result store, or a stored {response: summary} wrapper."""
+    if isinstance(value, dict):
+        return value.get("response") if isinstance(value.get("response"), dict) else value
+    if isinstance(value, str):
+        entry = results.get(value)
+        if isinstance(entry, dict):
+            return entry.get("response") if isinstance(entry.get("response"), dict) else entry
+    return {}
+
+
+def _agent_tool_diff(left: Any, right: Any, results: dict[str, Any]) -> dict[str, Any]:
+    return {"ok": True, "diff": compare_summaries(_agent_resolve_ref(left, results), _agent_resolve_ref(right, results))}
+
+
+async def _execute_agent_tool(
+    target_uuid: uuid.UUID,
+    target_url: str,
+    name: str,
+    args: dict[str, Any],
+    *,
+    created_by: str,
+    allow_write: bool = False,
+    approval_receipt_id: Optional[str] = None,
+    results: Optional[dict[str, Any]] = None,
+    hypothesis_id: Optional[str] = None,
+) -> dict[str, Any]:
+    """Dispatch one agent tool call. Guard errors are returned (not raised) so the ReAct
+    loop can feed them back to the model as an error-recovery message."""
+    results = results or {}
+    args = args if isinstance(args, dict) else {}
+    try:
+        if name == "http_request":
+            return await _agent_tool_http_request(
+                target_uuid, target_url, args, created_by=created_by,
+                allow_write=allow_write, approval_receipt_id=approval_receipt_id,
+                hypothesis_id=hypothesis_id,
+            )
+        if name == "query_kb":
+            kind, flt = agent_tools.coerce_query_kb(args)
+            return await _agent_tool_query_kb(target_uuid, kind, flt)
+        if name == "note":
+            return await _agent_tool_note(target_uuid, agent_tools.coerce_note(args), created_by=created_by)
+        if name == "diff":
+            return _agent_tool_diff(args.get("left"), args.get("right"), results)
+    except agent_tools.AgentToolError as exc:
+        return {"ok": False, "error": str(exc)}
+    except Exception as exc:  # noqa: BLE001 — a tool fault must not crash the loop
+        return {"ok": False, "error": f"tool_fault:{type(exc).__name__}"}
+    return {"ok": False, "error": f"unknown tool '{name}'. Callable: {sorted(agent_tools.AGENT_TOOL_NAMES)}"}
+
+
+class AgentToolExecuteRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    tool: str = Field(min_length=1, max_length=64)
+    arguments: dict[str, Any] = Field(default_factory=dict)
+
+
+@app.post("/agent/tools/{target_id}/execute")
+async def execute_agent_tool_endpoint(target_id: str, req: AgentToolExecuteRequest):
+    """Execute ONE autonomous-agent tool against a target (read-only surface: http_request
+    is limited to safe methods here; state-changing writes flow through a gated research
+    episode with a validated approval receipt). Same building block the ReAct loop uses."""
+    target_uuid = _uuid_or_400(target_id, "target id")
+    async with db_pool.acquire() as conn:
+        target = await conn.fetchrow("SELECT id, url, is_active FROM targets WHERE id=$1", target_uuid)
+    if not target or not target["is_active"]:
+        raise HTTPException(status_code=404, detail="Active target not found")
+    name = str(req.tool or "").strip()
+    if name not in agent_tools.AGENT_TOOL_NAMES:
+        raise HTTPException(status_code=400, detail=f"unknown tool; allowed {sorted(agent_tools.AGENT_TOOL_NAMES)}")
+    result = await _execute_agent_tool(
+        target_uuid, str(target["url"]), name, req.arguments,
+        created_by="agent_tool_endpoint", allow_write=False,
+    )
+    return {"target_id": str(target_uuid), "tool": name, "result": result}
 
 
 def _canonical_agent_decision_trace(req: AgentDecisionTraceRequest) -> dict[str, Any]:
