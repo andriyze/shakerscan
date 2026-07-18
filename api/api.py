@@ -18046,6 +18046,39 @@ async def _agent_persist_suspected_findings(
     return persisted
 
 
+_AGENT_AUTO_VERIFY_LIMIT = 3
+
+
+async def _agent_auto_verify(
+    gated_findings: list[dict[str, Any]], *, approval_receipt_id: Optional[str], created_by: str
+) -> list[dict[str, Any]]:
+    """Close the loop unattended (Gap B auto-wiring): when the hunt carries an approval receipt AND
+    execution is enabled, auto-attempt VERIFIED promotion for the gate-passing SUSPECTED findings the
+    bridge can verify. The family_proof moat decides — a non-provable finding stays SUSPECTED. This is
+    best-effort: a verify failure is recorded, never allowed to break the hunt. Bounded per run."""
+    if not approval_receipt_id or not _ai_ops_execute_enabled():
+        return []
+    attempts: list[dict[str, Any]] = []
+    for entry in gated_findings:
+        if len(attempts) >= _AGENT_AUTO_VERIFY_LIMIT:
+            break
+        record = entry.get("persisted")
+        if not isinstance(record, dict) or record.get("persisted") != "created" or not record.get("id"):
+            continue
+        if family_proof.canonical_family((entry.get("finding") or {}).get("family")) not in _AGENT_VERIFIABLE_FAMILIES:
+            continue
+        try:
+            result = await _verify_suspected_finding_workflow(
+                _uuid_or_400(str(record["id"]), "finding id"), approval_receipt_id, created_by=created_by)
+            attempts.append({"finding_id": str(record["id"]), "verified": bool(result.get("verified")),
+                             "verdict": (result.get("family_proof") or {}).get("verdict")})
+        except HTTPException as exc:
+            attempts.append({"finding_id": str(record["id"]), "verified": False, "skipped": str(exc.detail)[:160]})
+        except Exception as exc:  # noqa: BLE001 — a verify failure must never break the hunt
+            attempts.append({"finding_id": str(record["id"]), "verified": False, "error": type(exc).__name__})
+    return attempts
+
+
 async def _agent_finalize_and_persist(
     state: dict[str, Any],
     *,
@@ -18056,8 +18089,8 @@ async def _agent_finalize_and_persist(
     hypothesis_id: Optional[str],
     persist: bool,
 ) -> dict[str, Any]:
-    """Gate -> receipt -> persist -> assemble the run result. Shared final stage of both
-    drivers, so a keyless hunt produces the identical result shape as configured_ai."""
+    """Gate -> receipt -> persist -> (auto-verify) -> assemble the run result. Shared final stage of
+    both drivers, so a keyless hunt produces the identical result shape as configured_ai."""
     objective = str(state.get("objective") or "")
     gated_findings = _agent_finalize_gate(state)
     receipt_id = await _agent_run_summary_receipt(
@@ -18066,10 +18099,13 @@ async def _agent_finalize_and_persist(
         gated_findings=gated_findings, created_by=created_by,
     )
     persisted: list[dict[str, Any]] = []
+    auto_verified: list[dict[str, Any]] = []
     if persist and gated_findings:
         persisted = await _agent_persist_suspected_findings(
             gated_findings, target_uuid=target_uuid, target_url=target_url, receipt_id=receipt_id,
         )
+        auto_verified = await _agent_auto_verify(
+            gated_findings, approval_receipt_id=approval_receipt_id, created_by=f"{created_by}:auto_verify")
     return {
         "target_id": str(target_uuid),
         "objective": objective,
@@ -18081,6 +18117,8 @@ async def _agent_finalize_and_persist(
         "findings": gated_findings,
         "persisted": persisted,
         "net_new_count": sum(1 for record in persisted if record.get("net_new")),
+        "auto_verified": auto_verified,
+        "verified_count": sum(1 for a in auto_verified if a.get("verified")),
         "run_receipt_id": receipt_id,
         "events": state["events"][-50:],
         "context_included": state["context_included"],
@@ -18235,6 +18273,7 @@ async def _run_agent_hunt_for_episode(episode_id: str) -> dict[str, Any]:
     )
     suspected = sum(1 for g in result.get("findings", []) if g.get("tier") == "suspected")
     net_new = int(result.get("net_new_count") or 0)
+    verified = int(result.get("verified_count") or 0)
     stop_reason = str(result.get("stop_reason") or "")
     iterations = int(result.get("iterations") or 0)
     tool_calls = int(result.get("tool_calls_made") or 0)
@@ -18266,21 +18305,23 @@ async def _run_agent_hunt_for_episode(episode_id: str) -> dict[str, Any]:
                 "budget_used=$5::jsonb, updated_at=NOW() "
                 "WHERE id=$1 AND status NOT IN ('cancelled','failed','completed') RETURNING id",
                 row["id"], final_status,
-                f"agent_hunt: {suspected} suspected ({net_new} net-new), {tool_calls} tool calls, stop={stop_reason}",
+                f"agent_hunt: {suspected} suspected ({net_new} net-new, {verified} auto-verified), "
+                f"{tool_calls} tool calls, stop={stop_reason}",
                 iterations, json.dumps(used),
             )
             if transitioned:
                 await _record_research_event(
                     conn, row["id"], event_type=event_type, status=final_status,
-                    summary=f"Autonomous agent hunt ({final_status}): {suspected} suspected findings ({net_new} net-new)",
+                    summary=f"Autonomous agent hunt ({final_status}): {suspected} suspected findings "
+                            f"({net_new} net-new, {verified} auto-verified)",
                     details={
                         "iterations": iterations, "tool_calls_made": tool_calls,
                         "http_evidence": result.get("http_evidence_count"),
-                        "stop_reason": stop_reason, "allow_active": allow,
+                        "stop_reason": stop_reason, "allow_active": allow, "verified": verified,
                     },
                 )
     return {"accepted": True, "agent_loop": True, "episode_id": episode_id, "status": final_status,
-            "suspected": suspected, "net_new": net_new, "stop_reason": stop_reason}
+            "suspected": suspected, "net_new": net_new, "verified": verified, "stop_reason": stop_reason}
 
 
 class AgentHuntRequest(BaseModel):
@@ -18687,15 +18728,18 @@ class AgentVerifyRequest(BaseModel):
     approval_receipt_id: str = Field(min_length=1)
 
 
-@app.post("/agent/findings/{finding_id}/verify")
-async def verify_suspected_agent_finding(finding_id: str, req: AgentVerifyRequest):
-    """Attempt to UPGRADE one SUSPECTED autonomous-agent finding to VERIFIED via the existing
-    family_proof two-run verification (Gap B). The moat is unchanged: the server re-executes the
-    workflow twice and derives the verdict from server-corroborated predicates; the agent's claim
-    is never trusted. On success the SUSPECTED row is superseded by the VERIFIED one; otherwise the
-    finding stays SUSPECTED. Requires AI_OPS_ROUTER_EXECUTE_ENABLED + a valid approval receipt.
-    Currently supports the bola family."""
-    finding_uuid = _uuid_or_400(finding_id, "finding id")
+# Families the bridge can currently verify (each needs a materializer + captured inputs).
+_AGENT_VERIFIABLE_FAMILIES: frozenset[str] = frozenset({"bola"})
+
+
+async def _verify_suspected_finding_workflow(
+    finding_uuid: uuid.UUID, approval_receipt_id: str, *, created_by: str
+) -> dict[str, Any]:
+    """Core of the SUSPECTED->VERIFIED bridge (Gap B): run ONE suspected autonomous-agent finding
+    through the EXISTING family_proof two-run verification. The moat is unchanged — the server
+    re-executes the workflow twice and derives the verdict from server-corroborated predicates; the
+    agent's claim is never trusted. Raises HTTPException on guard failures (the manual endpoint
+    surfaces them; the auto-verify path catches them). Currently supports the bola family."""
     if not _ai_ops_execute_enabled():
         raise HTTPException(status_code=400, detail="execution_feature_disabled")
     async with db_pool.acquire() as conn:
@@ -18713,8 +18757,8 @@ async def verify_suspected_agent_finding(finding_id: str, req: AgentVerifyReques
         target_url = str(target["url"])
         evidence = _decode_json_value(finding["evidence"]) or {}
         family = family_proof.canonical_family(evidence.get("family") or _research_finding_family(finding))
-        if family != "bola":
-            raise HTTPException(status_code=422, detail=f"verification bridge currently supports 'bola', not '{family or 'unknown'}'")
+        if family not in _AGENT_VERIFIABLE_FAMILIES:
+            raise HTTPException(status_code=422, detail=f"verification bridge supports {sorted(_AGENT_VERIFIABLE_FAMILIES)}, not '{family or 'unknown'}'")
         path = urllib.parse.urlsplit(str(finding["url"] or "")).path or "/"
         contexts = await _resolve_workflow_principal_contexts(conn, target_uuid, {"user1", "user2"})
         targets = agent_tools.derive_bola_verification_targets(
@@ -18728,9 +18772,9 @@ async def verify_suspected_agent_finding(finding_id: str, req: AgentVerifyReques
                 detail="insufficient distinct owned object references to build a sound BOLA proof (finding stays suspected)")
         # Gate: a valid, target-bound approval receipt for the credential-tier workflow action.
         await _validate_approval_receipt_for_action(
-            conn, req.approval_receipt_id, target_url=target_url, target_id=str(target_uuid),
+            conn, approval_receipt_id, target_url=target_url, target_id=str(target_uuid),
             action_name="experiment.workflow", command="experiment.workflow", risk_tier="credential",
-            require_target_binding=True, created_by="agent_verify_bridge")
+            require_target_binding=True, created_by=created_by)
         collection = targets["collection"]
         object_route = collection.rstrip("/") + "/{id}"
         dedupe_dimensions = {"route": object_route, "method": "GET"}
@@ -18746,7 +18790,7 @@ async def verify_suspected_agent_finding(finding_id: str, req: AgentVerifyReques
             severity_guess=severity, confidence=0.5,
             metadata_json={"route": object_route, "method": "GET", "dedupe_dimensions": dedupe_dimensions,
                            "source_suspected_finding_id": str(finding_uuid)},
-            created_by="agent_verify_bridge"))
+            created_by=created_by))
         hypothesis_id = str(hyp["hypothesis"]["id"])
 
     # Build + dispatch the family_proof workflow (the moat verifies via two-run re-execution).
@@ -18759,9 +18803,9 @@ async def verify_suspected_agent_finding(finding_id: str, req: AgentVerifyReques
         "_research_hypothesis_id": hypothesis_id,
     }
     try:
-        result = await _arsenal_dispatch_workflow(dispatch_params, req.approval_receipt_id)
+        result = await _arsenal_dispatch_workflow(dispatch_params, approval_receipt_id)
     except HTTPException as exc:
-        return {"finding_id": finding_id, "verified": False, "hypothesis_id": hypothesis_id,
+        return {"finding_id": str(finding_uuid), "verified": False, "hypothesis_id": hypothesis_id,
                 "error": exc.detail}
 
     proof = result.get("family_proof") or {}
@@ -18780,7 +18824,7 @@ async def verify_suspected_agent_finding(finding_id: str, req: AgentVerifyReques
                 finding_uuid, f" [superseded by verified finding {verified_finding_id}]")
         superseded = True
     return {
-        "finding_id": finding_id,
+        "finding_id": str(finding_uuid),
         "verified": bool(verified_finding_id),
         "verified_finding_id": verified_finding_id,
         "upgraded_in_place": upgraded_in_place,
@@ -18790,6 +18834,17 @@ async def verify_suspected_agent_finding(finding_id: str, req: AgentVerifyReques
                          "novelty_gate": proof.get("novelty_gate")},
         "superseded_suspected": superseded,
     }
+
+
+@app.post("/agent/findings/{finding_id}/verify")
+async def verify_suspected_agent_finding(finding_id: str, req: AgentVerifyRequest):
+    """Attempt to UPGRADE one SUSPECTED autonomous-agent finding to VERIFIED via the existing
+    family_proof two-run verification (Gap B). On success the SUSPECTED row becomes the VERIFIED one
+    (in place); otherwise it stays SUSPECTED. Requires AI_OPS_ROUTER_EXECUTE_ENABLED + a valid
+    target-bound approval receipt. Currently supports the bola family."""
+    finding_uuid = _uuid_or_400(finding_id, "finding id")
+    return await _verify_suspected_finding_workflow(
+        finding_uuid, req.approval_receipt_id, created_by="agent_verify_bridge")
 
 
 def _canonical_agent_decision_trace(req: AgentDecisionTraceRequest) -> dict[str, Any]:
