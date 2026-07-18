@@ -513,6 +513,42 @@ budgets shown for queued scans/ASM work are conservative reservation units, not 
 outbound HTTP metering. Autopilot waits for linked scans and retests before creating exactly one
 result-bearing observation and choosing another action.
 
+#### Keyless autonomous hunt (session-driven ReAct loop)
+
+For an unattended, key-free hunt, drive the turn-based ReAct loop directly: the current coding-agent
+session is the planner (no AI provider key required). ShakerScan seeds a redacted context pack, then
+suspends at each turn; the session reads the transcript, requests tools with a fenced
+` ```json {"tool_calls":[...]} ``` ` block (or ends with a `{"done":true,"findings":[...]}` debrief),
+and the server executes the tools (same-origin/approval-gated) and returns the next observation. Tools:
+`http_request` (send as a server-managed `as_principal` — credentials are never model-visible),
+`query_kb`, `diff`, `note`, and a bounded argv-templated `run_tool`. Findings land in the **SUSPECTED**
+tier only (provenance-gated: a surfaced finding needs real tool-output evidence; zero-evidence
+overclaims are blocked and never persisted); the deterministic `family_proof` **VERIFIED** moat is
+untouched. Writes/active scanners require a gated episode with an approval receipt.
+
+```bash
+# Start a keyless hunt (read-only tool surface). Returns run_id + the first observation transcript.
+curl -X POST http://localhost:8080/agent/hunt/{target_id}/session \
+  -H "Content-Type: application/json" \
+  -d '{"objective": "Find a net-new access-control bug DAST missed and prove it", "max_iterations": 12}'
+
+# Submit one planner reply (a tool_calls block or a final debrief); get the next observation.
+curl -X POST http://localhost:8080/agent/hunt/session/{run_id}/reply \
+  -H "Content-Type: application/json" \
+  -d '{"reply": "```json\n{\"tool_calls\":[{\"name\":\"query_kb\",\"arguments\":{\"kind\":\"findings\"}}]}\n```"}'
+
+# Inspect / cancel
+curl http://localhost:8080/agent/hunt/session/{run_id}
+curl -X POST http://localhost:8080/agent/hunt/session/{run_id}/cancel
+
+# Two-tier finding view for the target (VERIFIED moat vs SUSPECTED agent)
+curl http://localhost:8080/agent/findings/{target_id}
+```
+
+The same loop core also runs server-side (`POST /agent/hunt/{target_id}` synchronous, or a `configured_ai`
+`agent_loop` deep-hunt campaign) when an AI provider key is configured; the keyless session endpoints
+are the no-key default path.
+
 ### Subdomain Discovery
 
 ```bash

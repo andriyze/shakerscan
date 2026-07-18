@@ -1858,6 +1858,42 @@ async def run_schema_migrations(pool) -> None:
                 CREATE INDEX IF NOT EXISTS idx_agent_decision_traces_plan
                 ON agent_decision_traces(operation_plan_id, created_at DESC) WHERE operation_plan_id IS NOT NULL
             """)
+            # Durable, turn-based ReAct hunt runs (keyless planner). The server suspends at each
+            # planner turn and an external coding-agent session drives it via /agent/hunt/session/*;
+            # the loop transcript + counters + evidence live in `state` (JSONB) so a run survives
+            # across turns and restarts. Tool execution and gating remain server-side; findings land
+            # in the SUSPECTED tier (findings table), never the family_proof VERIFIED moat.
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS agent_hunt_runs (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    target_id UUID REFERENCES targets(id) ON DELETE CASCADE,
+                    episode_id UUID REFERENCES research_episodes(id) ON DELETE SET NULL,
+                    objective TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT 'awaiting_planner',
+                    planner_mode TEXT NOT NULL DEFAULT 'agent',
+                    max_iterations INT NOT NULL DEFAULT 12,
+                    allow_write BOOLEAN NOT NULL DEFAULT FALSE,
+                    allow_active BOOLEAN NOT NULL DEFAULT FALSE,
+                    approval_receipt_id UUID,
+                    token_budget INT NOT NULL DEFAULT 6000,
+                    state JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    stop_reason TEXT,
+                    result JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    created_by TEXT,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    CONSTRAINT agent_hunt_runs_status_check
+                        CHECK (status IN ('awaiting_planner','completed','cancelled','failed'))
+                )
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_agent_hunt_runs_target
+                ON agent_hunt_runs(target_id, created_at DESC)
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_agent_hunt_runs_status
+                ON agent_hunt_runs(status, updated_at DESC)
+            """)
             # Bounded adaptive research agent. The model owns no authorization
             # state: episodes reference durable scope/approval receipts and each
             # immutable decision is validated before Arsenal dispatch.

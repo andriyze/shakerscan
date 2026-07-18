@@ -17771,6 +17771,294 @@ async def _persist_agent_suspected_finding(
     return {"id": str(finding_id), "persisted": "created", "net_new": net_new, "title": title, "url": url_path}
 
 
+def _agent_new_state(objective: str, messages: list[dict[str, Any]], included: list[str]) -> dict[str, Any]:
+    """A fresh, JSONB-serializable ReAct loop state. Shared by the in-process (configured_ai)
+    loop and the durable turn-based keyless driver so the two can never diverge."""
+    return {
+        "objective": objective,
+        "messages": messages,
+        "seen_calls": {},          # dup_signature -> short prior-result preview
+        "results_store": {},       # ref -> full tool result (for diff resolution)
+        "evidence_by_ref": {},     # ref -> {type, content} tool-provenance evidence item
+        "resp_counter": 0,
+        "no_progress": 0,
+        "empty_replies": 0,
+        "tool_calls_made": 0,
+        "iterations": 0,
+        "findings": [],            # model debrief findings (set on finalize)
+        "abstained": False,
+        "stop_reason": "max_iterations",
+        "events": [],
+        "debug_replies": [],
+        "context_included": included,
+        "forced_debrief": False,   # keyless: cap reached, the NEXT reply is the forced debrief
+    }
+
+
+async def _agent_seed_state(
+    target_uuid: uuid.UUID,
+    target_url: str,
+    objective: str,
+    *,
+    created_by: str,
+    token_budget: int,
+    max_iterations: int,
+) -> dict[str, Any]:
+    """Build the context pack (slice 1) + system/user seed and return a fresh loop state."""
+    async with db_pool.acquire() as conn:
+        context_req = await _build_agent_context_pack_from_target(
+            conn,
+            AgentContextPackFromTargetRequest(
+                target_id=str(target_uuid), finding_limit=15, endpoint_limit=25,
+                created_by=created_by,
+            ),
+        )
+    context = _canonical_agent_context_pack(context_req)
+    sections = _agent_context_pack_sections(context)
+    pack = agent_context_pack.pack_context(sections, token_budget=token_budget, objective=objective)
+    tools = agent_tools.tool_schemas()
+    contract = agent_text_toolcalls.render_tool_contract(tools)
+    messages: list[dict[str, Any]] = [
+        {"role": "system", "content": agent_loop.build_system_prompt(contract, max_iterations=max_iterations)},
+        {"role": "user", "content": agent_loop.build_user_message(objective, pack["text"])},
+    ]
+    return _agent_new_state(objective, messages, pack["included"])
+
+
+async def _agent_apply_reply(
+    state: dict[str, Any],
+    reply: Any,
+    *,
+    target_uuid: uuid.UUID,
+    target_url: str,
+    created_by: str,
+    allow_write: bool,
+    allow_active: bool,
+    approval_receipt_id: Optional[str],
+    hypothesis_id: Optional[str],
+    iteration: int,
+    max_iterations: int,
+) -> dict[str, Any]:
+    """Apply ONE planner reply to the loop state: interpret it, execute any requested tools
+    (gated), record evidence, and run the anti-stall steering. Mutates ``state`` and returns
+    ``{"stop": bool, "stop_reason": str|None}``. This is the shared heart of both drivers; the
+    provider-error / cancellation handling that is specific to the in-process loop stays in
+    :func:`_run_agent_hunt`. A keyless turn just calls this once per submitted reply."""
+    if isinstance(reply, dict):
+        reply.pop("_provider_meta", None)  # provider telemetry must not pollute the transcript
+    decision = agent_text_toolcalls.interpret_assistant(reply)
+    assistant_content = reply if isinstance(reply, str) else json.dumps(reply, default=str)[:6000]
+    if len(state["debug_replies"]) < 3:
+        state["debug_replies"].append((reply if isinstance(reply, str) else json.dumps(reply, default=str))[:700])
+    state["messages"].append({"role": "assistant", "content": assistant_content})
+
+    if not decision["tool_calls"]:
+        # A refusal returned as a *successful* reply is HONORED (recorded + stop), never
+        # auto-overridden — we respect the model's safety signal rather than route around it.
+        reply_text = reply if isinstance(reply, str) else json.dumps(reply, default=str)
+        if not decision["findings"] and agent_text_toolcalls.is_likely_refusal(reply_text):
+            state["events"].append({"iteration": iteration, "model_declined": True})
+            state["abstained"] = True
+            return {"stop": True, "stop_reason": "model_declined"}
+        # Genuine finish: findings reported OR an explicit abstain.
+        if decision["findings"] or decision["abstained"]:
+            state["findings"] = decision.get("findings") or []
+            state["abstained"] = bool(decision.get("abstained"))
+            state["events"].append({"iteration": iteration, "final": True, "findings": len(state["findings"]), "abstained": state["abstained"]})
+            return {"stop": True, "stop_reason": "natural_stop"}
+        # Otherwise a malformed/empty reply (JSON-mode hiccup) — re-prompt, don't end the hunt.
+        state["empty_replies"] += 1
+        if state["empty_replies"] > 2:
+            state["events"].append({"iteration": iteration, "empty_reply_giveup": True})
+            return {"stop": True, "stop_reason": "empty_replies"}
+        state["events"].append({"iteration": iteration, "empty_reply_reprompt": state["empty_replies"]})
+        state["messages"].append({"role": "user", "content": (
+            "[System: your last reply had no tool_calls and no findings. If you are still "
+            'hunting, reply with a ```json {"tool_calls":[...]} ``` block. If you are truly '
+            'done, reply with {"done":true,"findings":[...],"abstained":bool}.]'
+        )})
+        return {"stop": False, "stop_reason": None}
+    state["empty_replies"] = 0
+
+    made_progress = False
+    for call in decision["tool_calls"]:
+        name = str(call.get("name") or "")
+        args = call.get("arguments") if isinstance(call.get("arguments"), dict) else {}
+        kind, signature = agent_loop.classify_tool_call(
+            name, args, state["seen_calls"], agent_tools.CALLABLE_TOOL_NAMES
+        )
+        if kind == "hallucinated":
+            state["messages"].append({"role": "user", "content": f"[tool {name}] " + agent_loop.hallucinated_tool_message(name, sorted(agent_tools.CALLABLE_TOOL_NAMES))})
+            state["events"].append({"iteration": iteration, "tool": name, "hallucinated": True})
+            continue
+        if kind == "duplicate":
+            state["messages"].append({"role": "user", "content": f"[tool {name}] " + agent_loop.dup_steer_message(name, state["seen_calls"][signature])})
+            state["events"].append({"iteration": iteration, "tool": name, "duplicate": True})
+            continue
+
+        state["tool_calls_made"] += 1
+        result = await _execute_agent_tool(
+            target_uuid, target_url, name, args, created_by=created_by,
+            allow_write=allow_write, allow_active=allow_active,
+            approval_receipt_id=approval_receipt_id,
+            results=state["results_store"], hypothesis_id=hypothesis_id,
+        )
+        state["seen_calls"][signature] = agent_loop.format_tool_result(result, max_chars=160)
+
+        if result.get("ok") and result.get("provenance") == "tool":
+            made_progress = True
+            state["resp_counter"] += 1
+            if name == "run_tool":
+                ref = f"scan_{state['resp_counter']}"
+                state["evidence_by_ref"][ref] = {"type": "output", "content": json.dumps(
+                    {"tool": result.get("tool"), "url": result.get("url"), "lines": result.get("output_lines")},
+                    default=str)[:6000]}
+            else:  # http_request
+                ref = f"resp_{state['resp_counter']}"
+                state["results_store"][ref] = result
+                state["evidence_by_ref"][ref] = agent_tools.http_evidence_item(result.get("request") or {}, result.get("response") or {})
+            result = {**result, "ref": ref}
+        elif name == "diff" and result.get("ok"):
+            made_progress = True
+
+        state["messages"].append({"role": "user", "content": f"[tool {name} -> {'ok' if result.get('ok') else 'error'}] " + agent_loop.format_tool_result(result)})
+        state["events"].append({"iteration": iteration, "tool": name, "ok": bool(result.get("ok")), "ref": result.get("ref")})
+
+    state["messages"] = _agent_trim_transcript(state["messages"])
+    state["no_progress"] = 0 if made_progress else state["no_progress"] + 1
+    if state["no_progress"] >= 4 and iteration < max_iterations - 2:
+        state["messages"].append({"role": "user", "content": agent_loop.no_progress_message(state["no_progress"])})
+        state["no_progress"] = 0
+    return {"stop": False, "stop_reason": None, "made_progress": made_progress}
+
+
+def _agent_finalize_gate(state: dict[str, Any]) -> list[dict[str, Any]]:
+    """Provenance-gate the model's debrief findings (SUSPECTED tier). ONLY a finding's OWN
+    cited evidence refs count — never borrow another finding's (or the run's) tool output. A
+    finding whose refs do not resolve to real tool evidence fails the gate and is surfaced
+    (tier 'blocked') but NOT persisted: fail-closed against false-positive persistence."""
+    gated_findings: list[dict[str, Any]] = []
+    for raw in state["findings"]:
+        finding = agent_provenance.strip_self_verification(dict(raw))
+        refs = raw.get("evidence_refs") or []
+        finding["evidence"] = [state["evidence_by_ref"][r] for r in refs if r in state["evidence_by_ref"]]
+        gate = agent_provenance.gate_live_finding(finding)
+        gated_findings.append({"finding": finding, "gate": gate, "tier": "suspected" if gate["passed"] else "blocked"})
+    return gated_findings
+
+
+async def _agent_run_summary_receipt(
+    state: dict[str, Any],
+    *,
+    target_uuid: uuid.UUID,
+    target_url: str,
+    objective: str,
+    approval_receipt_id: Optional[str],
+    hypothesis_id: Optional[str],
+    gated_findings: list[dict[str, Any]],
+    created_by: str,
+) -> Optional[str]:
+    """Durable run-summary tool receipt (audit trail). Best-effort: a receipt failure must not
+    lose the findings."""
+    try:
+        async with db_pool.acquire() as conn:
+            async with conn.transaction():
+                receipt_result = await _record_tool_receipt(conn, ToolReceiptRequest(
+                    tool_name="agent.hunt",
+                    adapter_version="2026-07-18.v1",
+                    redacted_argv=["agent.hunt", str(target_uuid), f"iters:{state['iterations']}"],
+                    target_scope={"target_id": str(target_uuid), "target_url": target_url, "same_origin_only": True},
+                    approval_receipt_id=approval_receipt_id,
+                    status="success",
+                    parser_status="parsed",
+                    redaction_summary="Autonomous ReAct hunt; tool outputs bounded + redacted.",
+                    metadata_json={
+                        "objective": objective[:500],
+                        "iterations": state["iterations"],
+                        "tool_calls_made": state["tool_calls_made"],
+                        "http_evidence": len(state["evidence_by_ref"]),
+                        "stop_reason": state["stop_reason"],
+                        "findings_suspected": sum(1 for g in gated_findings if g["tier"] == "suspected"),
+                        "findings_blocked": sum(1 for g in gated_findings if g["tier"] == "blocked"),
+                        "hypothesis_id": hypothesis_id,
+                    },
+                    created_by=created_by,
+                ))
+                return (receipt_result.get("tool_receipt") or {}).get("id")
+    except Exception:
+        return None
+
+
+async def _agent_persist_suspected_findings(
+    gated_findings: list[dict[str, Any]],
+    *,
+    target_uuid: uuid.UUID,
+    target_url: str,
+    receipt_id: Optional[str],
+) -> list[dict[str, Any]]:
+    """Persist gate-passing SUSPECTED findings (slice 4). Blocked overclaims are never
+    persisted. Never writes a VERIFIED verdict — that is the family_proof moat."""
+    persisted: list[dict[str, Any]] = []
+    try:
+        async with db_pool.acquire() as conn:
+            known_keys = await _research_known_vulnerability_keys(conn, target_uuid)
+            for entry in gated_findings:
+                if not entry["gate"]["passed"]:
+                    continue  # blocked overclaim — never persisted
+                async with conn.transaction():
+                    record = await _persist_agent_suspected_finding(
+                        conn, target_uuid, target_url, entry["finding"], entry["gate"],
+                        run_receipt_id=receipt_id, known_keys=known_keys,
+                    )
+                entry["persisted"] = record
+                persisted.append(record)
+    except Exception as exc:  # noqa: BLE001
+        persisted.append({"error": f"persist_failed:{type(exc).__name__}"})
+    return persisted
+
+
+async def _agent_finalize_and_persist(
+    state: dict[str, Any],
+    *,
+    target_uuid: uuid.UUID,
+    target_url: str,
+    created_by: str,
+    approval_receipt_id: Optional[str],
+    hypothesis_id: Optional[str],
+    persist: bool,
+) -> dict[str, Any]:
+    """Gate -> receipt -> persist -> assemble the run result. Shared final stage of both
+    drivers, so a keyless hunt produces the identical result shape as configured_ai."""
+    objective = str(state.get("objective") or "")
+    gated_findings = _agent_finalize_gate(state)
+    receipt_id = await _agent_run_summary_receipt(
+        state, target_uuid=target_uuid, target_url=target_url, objective=objective,
+        approval_receipt_id=approval_receipt_id, hypothesis_id=hypothesis_id,
+        gated_findings=gated_findings, created_by=created_by,
+    )
+    persisted: list[dict[str, Any]] = []
+    if persist and gated_findings:
+        persisted = await _agent_persist_suspected_findings(
+            gated_findings, target_uuid=target_uuid, target_url=target_url, receipt_id=receipt_id,
+        )
+    return {
+        "target_id": str(target_uuid),
+        "objective": objective,
+        "iterations": state["iterations"],
+        "stop_reason": state["stop_reason"],
+        "tool_calls_made": state["tool_calls_made"],
+        "http_evidence_count": len(state["evidence_by_ref"]),
+        "abstained": state["abstained"],
+        "findings": gated_findings,
+        "persisted": persisted,
+        "net_new_count": sum(1 for record in persisted if record.get("net_new")),
+        "run_receipt_id": receipt_id,
+        "events": state["events"][-50:],
+        "context_included": state["context_included"],
+        "debug_replies": state["debug_replies"],
+    }
+
+
 async def _run_agent_hunt(
     target_uuid: uuid.UUID,
     target_url: str,
@@ -17786,256 +18074,70 @@ async def _run_agent_hunt(
     allow_active: bool = False,
     should_stop: Optional[Any] = None,
 ) -> dict[str, Any]:
-    # --- context pack (slice 1) ---
-    async with db_pool.acquire() as conn:
-        context_req = await _build_agent_context_pack_from_target(
-            conn,
-            AgentContextPackFromTargetRequest(
-                target_id=str(target_uuid), finding_limit=15, endpoint_limit=25,
-                created_by=created_by,
-            ),
-        )
-    context = _canonical_agent_context_pack(context_req)
-    sections = _agent_context_pack_sections(context)
-    pack = agent_context_pack.pack_context(sections, token_budget=token_budget, objective=objective)
-
-    tools = agent_tools.tool_schemas()
-    contract = agent_text_toolcalls.render_tool_contract(tools)
-    messages: list[dict[str, Any]] = [
-        {"role": "system", "content": agent_loop.build_system_prompt(contract, max_iterations=max_iterations)},
-        {"role": "user", "content": agent_loop.build_user_message(objective, pack["text"])},
-    ]
-
-    seen_calls: dict[str, str] = {}
-    results_store: dict[str, Any] = {}
-    evidence_by_ref: dict[str, dict[str, Any]] = {}
-    resp_counter = 0
-    no_progress = 0
+    state = await _agent_seed_state(
+        target_uuid, target_url, objective,
+        created_by=created_by, token_budget=token_budget, max_iterations=max_iterations,
+    )
     planner_errors = 0
-    findings: list[dict[str, Any]] = []
-    abstained = False
-    events: list[dict[str, Any]] = []
-    tool_calls_made = 0
-    empty_replies = 0
-    stop_reason = "max_iterations"
-    iterations = 0
-    debug_replies: list[str] = []
-
     for i in range(max_iterations):
-        iterations = i + 1
+        state["iterations"] = i + 1
         if should_stop is not None:
             try:
                 if await should_stop():
-                    stop_reason = "cancelled"
-                    events.append({"iteration": i, "cancelled": True})
+                    state["stop_reason"] = "cancelled"
+                    state["events"].append({"iteration": i, "cancelled": True})
                     break
             except Exception:
                 pass
-        reply, error = await _agent_planner_reply(messages, max_tokens=1400, timeout=120)
+        reply, error = await _agent_planner_reply(state["messages"], max_tokens=1400, timeout=120)
         if error or reply is None:
             err_str = str(error or "no_reply")
             # HONOR a model safety refusal — record it and stop. We deliberately do NOT
             # auto-"reframe"/override a refusal: routing around the model's own safety signal
             # is a bypass we will not ship. (The borrowed reframe helper is left unwired.)
             if agent_text_toolcalls.is_likely_refusal(err_str):
-                events.append({"iteration": i, "planner_refusal": err_str[:160]})
-                stop_reason = "model_declined"
+                state["events"].append({"iteration": i, "planner_refusal": err_str[:160]})
+                state["stop_reason"] = "model_declined"
                 break
             # Transient provider error (timeout / rate-limit): retry a bounded number of times so
             # a durable unattended hunt survives a hiccup instead of dying on the first timeout.
             planner_errors += 1
-            events.append({"iteration": i, "planner_error": err_str[:160], "retry": planner_errors})
+            state["events"].append({"iteration": i, "planner_error": err_str[:160], "retry": planner_errors})
             if planner_errors > 2:
-                stop_reason = f"planner_error:{err_str[:60]}"
+                state["stop_reason"] = f"planner_error:{err_str[:60]}"
                 break
             continue
         planner_errors = 0
 
-        if isinstance(reply, dict):
-            reply.pop("_provider_meta", None)  # provider telemetry must not pollute the transcript
-        decision = agent_text_toolcalls.interpret_assistant(reply)
-        assistant_content = reply if isinstance(reply, str) else json.dumps(reply, default=str)[:6000]
-        if len(debug_replies) < 3:
-            debug_replies.append((reply if isinstance(reply, str) else json.dumps(reply, default=str))[:700])
-        messages.append({"role": "assistant", "content": assistant_content})
-
-        if not decision["tool_calls"]:
-            # A refusal returned as a *successful* reply is HONORED (recorded + stop), never
-            # auto-overridden — we respect the model's safety signal rather than route around it.
-            reply_text = reply if isinstance(reply, str) else json.dumps(reply, default=str)
-            if not decision["findings"] and agent_text_toolcalls.is_likely_refusal(reply_text):
-                events.append({"iteration": i, "model_declined": True})
-                abstained = True
-                stop_reason = "model_declined"
-                break
-            # Genuine finish: findings reported OR an explicit abstain.
-            if decision["findings"] or decision["abstained"]:
-                findings = decision.get("findings") or []
-                abstained = bool(decision.get("abstained"))
-                events.append({"iteration": i, "final": True, "findings": len(findings), "abstained": abstained})
-                stop_reason = "natural_stop"
-                break
-            # Otherwise a malformed/empty reply (JSON-mode hiccup) — re-prompt, don't end the hunt.
-            empty_replies += 1
-            if empty_replies > 2:
-                stop_reason = "empty_replies"
-                events.append({"iteration": i, "empty_reply_giveup": True})
-                break
-            events.append({"iteration": i, "empty_reply_reprompt": empty_replies})
-            messages.append({"role": "user", "content": (
-                "[System: your last reply had no tool_calls and no findings. If you are still "
-                'hunting, reply with a ```json {"tool_calls":[...]} ``` block. If you are truly '
-                'done, reply with {"done":true,"findings":[...],"abstained":bool}.]'
-            )})
-            continue
-        empty_replies = 0
-
-        made_progress = False
-        for call in decision["tool_calls"]:
-            name = str(call.get("name") or "")
-            args = call.get("arguments") if isinstance(call.get("arguments"), dict) else {}
-            if name not in agent_tools.CALLABLE_TOOL_NAMES:
-                messages.append({"role": "user", "content": f"[tool {name}] " + agent_loop.hallucinated_tool_message(name, sorted(agent_tools.CALLABLE_TOOL_NAMES))})
-                events.append({"iteration": i, "tool": name, "hallucinated": True})
-                continue
-            signature = agent_loop.dup_signature(name, args)
-            if signature in seen_calls:
-                messages.append({"role": "user", "content": f"[tool {name}] " + agent_loop.dup_steer_message(name, seen_calls[signature])})
-                events.append({"iteration": i, "tool": name, "duplicate": True})
-                continue
-
-            tool_calls_made += 1
-            result = await _execute_agent_tool(
-                target_uuid, target_url, name, args, created_by=created_by,
-                allow_write=allow_write, allow_active=allow_active,
-                approval_receipt_id=approval_receipt_id,
-                results=results_store, hypothesis_id=hypothesis_id,
-            )
-            seen_calls[signature] = agent_loop.format_tool_result(result, max_chars=160)
-
-            if result.get("ok") and result.get("provenance") == "tool":
-                made_progress = True
-                resp_counter += 1
-                if name == "run_tool":
-                    ref = f"scan_{resp_counter}"
-                    evidence_by_ref[ref] = {"type": "output", "content": json.dumps(
-                        {"tool": result.get("tool"), "url": result.get("url"), "lines": result.get("output_lines")},
-                        default=str)[:6000]}
-                else:  # http_request
-                    ref = f"resp_{resp_counter}"
-                    results_store[ref] = result
-                    evidence_by_ref[ref] = agent_tools.http_evidence_item(result.get("request") or {}, result.get("response") or {})
-                result = {**result, "ref": ref}
-            elif name == "diff" and result.get("ok"):
-                made_progress = True
-
-            messages.append({"role": "user", "content": f"[tool {name} -> {'ok' if result.get('ok') else 'error'}] " + agent_loop.format_tool_result(result)})
-            events.append({"iteration": i, "tool": name, "ok": bool(result.get("ok")), "ref": result.get("ref")})
-
-        messages = _agent_trim_transcript(messages)
-        no_progress = 0 if made_progress else no_progress + 1
-        if no_progress >= 4 and i < max_iterations - 2:
-            messages.append({"role": "user", "content": agent_loop.no_progress_message(no_progress)})
-            no_progress = 0
+        outcome = await _agent_apply_reply(
+            state, reply, target_uuid=target_uuid, target_url=target_url, created_by=created_by,
+            allow_write=allow_write, allow_active=allow_active, approval_receipt_id=approval_receipt_id,
+            hypothesis_id=hypothesis_id, iteration=i, max_iterations=max_iterations,
+        )
+        if outcome["stop"]:
+            state["stop_reason"] = outcome["stop_reason"]
+            break
 
     # Hit the iteration cap without a debrief — force a final-summary turn so the model's
     # analysis is captured, not lost (T3MP3ST src/agent/index.ts:264-283).
-    if stop_reason == "max_iterations" and not findings and not abstained:
-        messages.append({"role": "user", "content": (
-            "You have reached the maximum number of steps. Reply NOW with ONLY your final "
-            'debrief block: {"done":true,"findings":[...],"abstained":bool}. Include only '
-            "findings you PROVED with tool evidence, and cite their evidence_refs."
-        )})
-        reply, error = await _agent_planner_reply(messages, max_tokens=1600, timeout=120)
+    if state["stop_reason"] == "max_iterations" and not state["findings"] and not state["abstained"]:
+        state["messages"].append({"role": "user", "content": agent_loop.forced_debrief_message()})
+        reply, error = await _agent_planner_reply(state["messages"], max_tokens=1600, timeout=120)
         if not error and reply is not None:
             if isinstance(reply, dict):
                 reply.pop("_provider_meta", None)
-            if len(debug_replies) < 3:
-                debug_replies.append((reply if isinstance(reply, str) else json.dumps(reply, default=str))[:700])
+            if len(state["debug_replies"]) < 3:
+                state["debug_replies"].append((reply if isinstance(reply, str) else json.dumps(reply, default=str))[:700])
             final = agent_text_toolcalls.interpret_assistant(reply)
-            findings = final.get("findings") or []
-            abstained = bool(final.get("abstained"))
-            stop_reason = "forced_debrief"
-            events.append({"iteration": iterations, "forced_debrief": True, "findings": len(findings)})
+            state["findings"] = final.get("findings") or []
+            state["abstained"] = bool(final.get("abstained"))
+            state["stop_reason"] = "forced_debrief"
+            state["events"].append({"iteration": state["iterations"], "forced_debrief": True, "findings": len(state["findings"])})
 
-    # --- provenance gate the debrief (SUSPECTED tier) ---
-    gated_findings: list[dict[str, Any]] = []
-    for raw in findings:
-        finding = agent_provenance.strip_self_verification(dict(raw))
-        # ONLY the finding's OWN cited evidence refs count — never borrow another finding's
-        # (or the run's) tool output to satisfy the gate. A finding whose refs do not resolve
-        # to real tool evidence fails the gate and is surfaced (tier 'blocked') but NOT
-        # persisted: fail-closed against false-positive persistence, even in the SUSPECTED tier.
-        refs = raw.get("evidence_refs") or []
-        finding["evidence"] = [evidence_by_ref[r] for r in refs if r in evidence_by_ref]
-        gate = agent_provenance.gate_live_finding(finding)
-        gated_findings.append({"finding": finding, "gate": gate, "tier": "suspected" if gate["passed"] else "blocked"})
-
-    # --- durable run summary receipt (audit trail) ---
-    receipt_id = None
-    try:
-        async with db_pool.acquire() as conn:
-            async with conn.transaction():
-                receipt_result = await _record_tool_receipt(conn, ToolReceiptRequest(
-                    tool_name="agent.hunt",
-                    adapter_version="2026-07-18.v1",
-                    redacted_argv=["agent.hunt", str(target_uuid), f"iters:{iterations}"],
-                    target_scope={"target_id": str(target_uuid), "target_url": target_url, "same_origin_only": True},
-                    approval_receipt_id=approval_receipt_id,
-                    status="success",
-                    parser_status="parsed",
-                    redaction_summary="Autonomous ReAct hunt; tool outputs bounded + redacted.",
-                    metadata_json={
-                        "objective": objective[:500],
-                        "iterations": iterations,
-                        "tool_calls_made": tool_calls_made,
-                        "http_evidence": len(evidence_by_ref),
-                        "stop_reason": stop_reason,
-                        "findings_suspected": sum(1 for g in gated_findings if g["tier"] == "suspected"),
-                        "findings_blocked": sum(1 for g in gated_findings if g["tier"] == "blocked"),
-                        "hypothesis_id": hypothesis_id,
-                    },
-                    created_by=created_by,
-                ))
-                receipt_id = (receipt_result.get("tool_receipt") or {}).get("id")
-    except Exception:
-        receipt_id = None
-
-    # --- persist SUSPECTED-tier findings (slice 4): provenance-gated only; never verified ---
-    persisted: list[dict[str, Any]] = []
-    if persist and gated_findings:
-        try:
-            async with db_pool.acquire() as conn:
-                known_keys = await _research_known_vulnerability_keys(conn, target_uuid)
-                for entry in gated_findings:
-                    if not entry["gate"]["passed"]:
-                        continue  # blocked overclaim — never persisted
-                    async with conn.transaction():
-                        record = await _persist_agent_suspected_finding(
-                            conn, target_uuid, target_url, entry["finding"], entry["gate"],
-                            run_receipt_id=receipt_id, known_keys=known_keys,
-                        )
-                    entry["persisted"] = record
-                    persisted.append(record)
-        except Exception as exc:  # noqa: BLE001
-            persisted.append({"error": f"persist_failed:{type(exc).__name__}"})
-
-    return {
-        "target_id": str(target_uuid),
-        "objective": objective,
-        "iterations": iterations,
-        "stop_reason": stop_reason,
-        "tool_calls_made": tool_calls_made,
-        "http_evidence_count": len(evidence_by_ref),
-        "abstained": abstained,
-        "findings": gated_findings,
-        "persisted": persisted,
-        "net_new_count": sum(1 for record in persisted if record.get("net_new")),
-        "run_receipt_id": receipt_id,
-        "events": events[-50:],
-        "context_included": pack["included"],
-        "debug_replies": debug_replies,
-    }
+    return await _agent_finalize_and_persist(
+        state, target_uuid=target_uuid, target_url=target_url, created_by=created_by,
+        approval_receipt_id=approval_receipt_id, hypothesis_id=hypothesis_id, persist=persist,
+    )
 
 
 def _research_episode_uses_agent_loop(episode: Any) -> bool:
@@ -18141,6 +18243,199 @@ async def run_agent_hunt_endpoint(target_id: str, req: AgentHuntRequest):
         max_iterations=req.max_iterations, created_by="agent_hunt_endpoint",
         allow_write=False, allow_active=False, token_budget=req.token_budget, persist=req.persist,
     )
+
+
+# =============================================================================
+# Keyless, turn-based ReAct hunt (Gap A). The default planner_mode:"agent" is KEYLESS — the
+# current coding-agent session (Codex/Claude/OpenCode) is the planner, so the server cannot call
+# an LLM in a loop. Instead the server suspends at each planner turn: it returns the running
+# transcript as an observation, the session reasons and POSTs its next reply (a text-contract
+# tool_calls block or a final debrief), and the server executes the requested tools (scope- and
+# approval-gated) and returns the next observation. Same loop core, same anti-stall, same
+# provenance gate, same SUSPECTED persistence as the configured_ai in-process driver — only the
+# planner turn is externalized. No API key required.
+# =============================================================================
+
+
+class AgentHuntSessionStartRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    objective: str = Field(default="", max_length=2000)
+    max_iterations: int = Field(default=_AGENT_HUNT_DEFAULT_ITERATIONS, ge=1, le=_AGENT_HUNT_MAX_ITERATIONS)
+    token_budget: int = Field(default=6000, ge=1000, le=20000)
+
+
+class AgentHuntReplyRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    # The session's raw planner reply: a ```json {"tool_calls":[...]} ``` block to keep hunting,
+    # or a {"done":true,"findings":[...],"abstained":bool} debrief to finish. Parsed by the same
+    # text-contract shim the configured_ai path uses, so there is one tool-calling contract.
+    reply: str = Field(min_length=1, max_length=200_000)
+
+
+def _agent_hunt_run_public(row: Any) -> dict[str, Any]:
+    """Serialize an agent_hunt_runs row into the session-facing observation: the transcript to
+    reason over, the loop status, and (on completion) the finalized SUSPECTED result."""
+    item = row_to_dict(row) if row is not None and not isinstance(row, dict) else dict(row or {})
+    state = _decode_json_value(item.get("state")) or {}
+    result = _decode_json_value(item.get("result")) or {}
+    status = str(item.get("status") or "")
+    awaiting = status == "awaiting_planner"
+    return {
+        "run_id": str(item.get("id")) if item.get("id") else None,
+        "target_id": str(item.get("target_id")) if item.get("target_id") else None,
+        "objective": item.get("objective"),
+        "status": status,
+        "awaiting_planner": awaiting,
+        "iterations": int(state.get("iterations") or 0),
+        "max_iterations": item.get("max_iterations"),
+        "stop_reason": item.get("stop_reason"),
+        "tool_surface": {
+            "allow_write": bool(item.get("allow_write")),
+            "allow_active": bool(item.get("allow_active")),
+            "note": "read-only tool surface; state-changing/active tools require a gated episode with an approval receipt",
+        },
+        # The full (trimmed) transcript the session must reason over to produce its next reply.
+        "transcript": state.get("messages") or [],
+        "next_action": (
+            f"POST /agent/hunt/session/{item.get('id')}/reply with your next tool_calls block or final debrief"
+            if awaiting else status
+        ),
+        "result": result or None,
+    }
+
+
+async def _agent_hunt_run_or_404(conn, run_id: str, *, for_update: bool = False) -> Any:
+    query = "SELECT * FROM agent_hunt_runs WHERE id=$1"
+    if for_update:
+        query += " FOR UPDATE"
+    row = await conn.fetchrow(query, _uuid_or_400(run_id, "run id"))
+    if not row:
+        raise HTTPException(status_code=404, detail="Agent hunt run not found")
+    return row
+
+
+@app.post("/agent/hunt/{target_id}/session")
+async def start_agent_hunt_session(target_id: str, req: AgentHuntSessionStartRequest):
+    """Start a KEYLESS, turn-based ReAct hunt. Seeds the context pack + loop transcript, persists
+    a durable run, and returns the first observation for the coding-agent session to reason over.
+    The session then drives it via POST /agent/hunt/session/{run_id}/reply. Read-only tool surface
+    (writes/active scanners require a gated episode with an approval receipt). No API key needed."""
+    target_uuid = _uuid_or_400(target_id, "target id")
+    async with db_pool.acquire() as conn:
+        target = await conn.fetchrow("SELECT id, url, is_active FROM targets WHERE id=$1", target_uuid)
+    if not target or not target["is_active"]:
+        raise HTTPException(status_code=404, detail="Active target not found")
+    state = await _agent_seed_state(
+        target_uuid, str(target["url"]), req.objective,
+        created_by="agent_hunt_session", token_budget=req.token_budget, max_iterations=req.max_iterations,
+    )
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """INSERT INTO agent_hunt_runs
+                   (target_id, objective, status, planner_mode, max_iterations,
+                    allow_write, allow_active, token_budget, state, created_by)
+               VALUES ($1,$2,'awaiting_planner','agent',$3,FALSE,FALSE,$4,$5,'agent_hunt_session')
+               RETURNING *""",
+            target_uuid, req.objective, req.max_iterations, req.token_budget,
+            json.dumps(state, default=str),
+        )
+    return _agent_hunt_run_public(row)
+
+
+@app.get("/agent/hunt/session/{run_id}")
+async def get_agent_hunt_session(run_id: str):
+    """Return the current observation (transcript + status) for a keyless hunt run."""
+    async with db_pool.acquire() as conn:
+        row = await _agent_hunt_run_or_404(conn, run_id)
+    return _agent_hunt_run_public(row)
+
+
+@app.post("/agent/hunt/session/{run_id}/reply")
+async def submit_agent_hunt_reply(run_id: str, req: AgentHuntReplyRequest):
+    """Submit one planner reply to a keyless hunt run and get the next observation. The server
+    executes any requested tools (scope-/approval-gated), advances the loop with the same
+    anti-stall steering as the in-process driver, and — on a debrief or the iteration cap —
+    provenance-gates and persists SUSPECTED findings (the family_proof VERIFIED moat is untouched).
+    Returns the next transcript to reason over, or the finalized result when the hunt ends."""
+    async with db_pool.acquire() as conn:
+        async with conn.transaction():
+            row = await _agent_hunt_run_or_404(conn, run_id, for_update=True)
+            if str(row["status"]) != "awaiting_planner":
+                raise HTTPException(status_code=409, detail=f"Hunt run is {row['status']}, not awaiting a planner reply")
+            target_uuid = row["target_id"]
+            async with db_pool.acquire() as conn2:
+                target = await conn2.fetchrow("SELECT url FROM targets WHERE id=$1", target_uuid)
+            target_url = str((target or {}).get("url") or "")
+            if not target_url:
+                raise HTTPException(status_code=409, detail="Hunt run target is missing or inactive")
+
+            state = _decode_json_value(row["state"]) or {}
+            max_iterations = int(row["max_iterations"] or _AGENT_HUNT_DEFAULT_ITERATIONS)
+            allow_write = bool(row["allow_write"])
+            allow_active = bool(row["allow_active"])
+            approval_receipt_id = str(row["approval_receipt_id"]) if row["approval_receipt_id"] else None
+            iteration = int(state.get("iterations") or 0)
+            was_forced = bool(state.get("forced_debrief"))
+
+            outcome = await _agent_apply_reply(
+                state, req.reply, target_uuid=target_uuid, target_url=target_url,
+                created_by=f"agent_hunt_session:{run_id}", allow_write=allow_write,
+                allow_active=allow_active, approval_receipt_id=approval_receipt_id,
+                hypothesis_id=None, iteration=iteration, max_iterations=max_iterations,
+            )
+            state["iterations"] = iteration + 1
+
+            finalize = False
+            if outcome["stop"]:
+                state["stop_reason"] = outcome["stop_reason"]
+                finalize = True
+            elif was_forced:
+                # The forced-debrief reply produced no clean stop — end anyway, capturing whatever
+                # was proven, so a run can never spin past its cap.
+                state["stop_reason"] = "forced_debrief"
+                finalize = True
+            elif state["iterations"] >= max_iterations:
+                # Cap reached without a debrief: request a final-summary turn (the next reply is
+                # treated as terminal), mirroring the in-process forced-debrief.
+                state["forced_debrief"] = True
+                state["messages"].append({"role": "user", "content": agent_loop.forced_debrief_message()})
+
+            if finalize:
+                result = await _agent_finalize_and_persist(
+                    state, target_uuid=target_uuid, target_url=target_url,
+                    created_by=f"agent_hunt_session:{run_id}", approval_receipt_id=approval_receipt_id,
+                    hypothesis_id=None, persist=True,
+                )
+                updated = await conn.fetchrow(
+                    """UPDATE agent_hunt_runs
+                       SET status='completed', stop_reason=$2, state=$3, result=$4, updated_at=NOW()
+                       WHERE id=$1 RETURNING *""",
+                    row["id"], state["stop_reason"], json.dumps(state, default=str),
+                    json.dumps(result, default=str),
+                )
+            else:
+                updated = await conn.fetchrow(
+                    "UPDATE agent_hunt_runs SET state=$2, updated_at=NOW() WHERE id=$1 RETURNING *",
+                    row["id"], json.dumps(state, default=str),
+                )
+    return _agent_hunt_run_public(updated)
+
+
+@app.post("/agent/hunt/session/{run_id}/cancel")
+async def cancel_agent_hunt_session(run_id: str):
+    """Cancel a keyless hunt run. No debrief findings exist until the session finishes, so this
+    just marks the run cancelled; anything already probed remains in the audit trail (receipts)."""
+    async with db_pool.acquire() as conn:
+        async with conn.transaction():
+            row = await _agent_hunt_run_or_404(conn, run_id, for_update=True)
+            if str(row["status"]) != "awaiting_planner":
+                return _agent_hunt_run_public(row)
+            updated = await conn.fetchrow(
+                "UPDATE agent_hunt_runs SET status='cancelled', stop_reason='cancelled', updated_at=NOW() "
+                "WHERE id=$1 RETURNING *",
+                row["id"],
+            )
+    return _agent_hunt_run_public(updated)
 
 
 @app.get("/agent/findings/{target_id}")

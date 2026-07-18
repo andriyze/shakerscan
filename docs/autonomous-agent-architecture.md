@@ -230,19 +230,31 @@ T3MP3ST's `execute()` does — never left to the model.
 
 ## 9. Smallest first slice (borrow-first, proves the paradigm)
 
+**BUILD STATUS (2026-07-18): slices 1–4 DONE; keyless default (Gap A) DONE + live-validated.**
+Both drivers now share one loop core (`_agent_seed_state` / `_agent_apply_reply` / `_agent_finalize_and_persist`
+in `api/api.py`): the in-process `configured_ai` loop and a durable, turn-based **keyless** driver
+(`agent_hunt_runs` table + `POST /agent/hunt/{target}/session`, `.../session/{run_id}/reply|cancel`). Live
+keyless proof on Juice Shop (this coding-agent session as planner, no key): 4 turns / 7 tool calls; all four
+tools executed server-side; a tool-proven BOLA passed the provenance gate → SUSPECTED, while a zero-evidence
+"critical SQLi" was **blocked and never persisted** (fail-closed); the `family_proof` VERIFIED moat added
+nothing (0 FP). Remaining: **(B)** auto-bridge a gate-passing SUSPECTED finding into `family_proof` re-execution
+(unattended promotion), and **(C)** present keyless turns from the durable campaign supervisor so a
+`planner_mode:"agent"` deep-hunt campaign drives this loop end-to-end.
+
 1. **Context pack** — `GET /agent/context/{target_id}` from Layer-1 tables, token-bounded, **with drop
-   telemetry** (borrow `packContext`).
+   telemetry** (borrow `packContext`). **[DONE]**
 2. **The ReAct loop** — port `T:src/agent/index.ts`: bounded loop, transcript-as-memory, **the four anti-stall
-   mechanisms**, natural stop. Drive it from `_plan_research_episode_step` with **tool schemas** + the
-   **text-contract fallback** (keyless `planner_mode: "agent"`).
+   mechanisms**, natural stop. Driven server-side for `configured_ai`, and **turn-by-turn for keyless
+   `planner_mode:"agent"`** via the shared `_agent_apply_reply` core + the **text-contract fallback**. **[DONE]**
 3. **Four tools** as function-calls, scope+approval-gated: `http_request` (the "try it" primitive; every call a
-   `tool_receipt`), `query_kb` (read-only), `diff`, `note`. Scanners via **argv templates** next.
+   `tool_receipt`), `query_kb` (read-only), `diff`, `note` + argv-templated `run_tool`. **[DONE]**
 4. **Provenance + two-tier output** — borrow `gateLiveFinding` for the SUSPECTED bar; keep `family_proof`
-   re-execution as VERIFIED; add `verified | suspected` status + UI lane.
+   re-execution as VERIFIED; `GET /agent/findings/{target}` splits `verified | suspected`. **[DONE]**
 5. **Unsteered test** — point it at Juice Shop with **no seeding, no hardcoded field**, budget-bounded, and
    measure: does the LLM's brains + our tools + our DB **find and verify** something we did not pre-build,
    with **0 false positives in the verified tier**? Then crAPI / honey. (Contrast with today's `role=admin`
-   hardcoded create-MA — that is the crutch we are removing.)
+   hardcoded create-MA — that is the crutch we are removing.) **[keyless plumbing validated 0-FP; a genuinely
+   net-new *verified* promotion still needs Gap B.]**
 
 ## 10. Borrow map (T3MP3ST) + Reuse map (ours)
 

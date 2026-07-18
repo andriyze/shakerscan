@@ -102,6 +102,36 @@ def hallucinated_tool_message(name: str, available: list[str]) -> str:
     )
 
 
+def forced_debrief_message() -> str:
+    """The final-summary prompt sent when the iteration cap is hit without a debrief, so the
+    model's analysis is captured, not lost (T3MP3ST src/agent/index.ts:264-283). Shared by the
+    in-process (configured_ai) loop and the turn-based keyless driver."""
+    return (
+        "You have reached the maximum number of steps. Reply NOW with ONLY your final "
+        'debrief block: {"done":true,"findings":[...],"abstained":bool}. Include only '
+        "findings you PROVED with tool evidence, and cite their evidence_refs."
+    )
+
+
+def classify_tool_call(
+    name: str, arguments: Any, seen_signatures: Any, callable_names: Any
+) -> tuple[str, str]:
+    """Pure pre-execution classification of one requested tool call, shared by both loop
+    drivers so dedup/hallucination handling can never diverge between them.
+
+    Returns ``(kind, signature)`` where kind is ``"hallucinated"`` (name not callable — feed
+    the tool list back), ``"duplicate"`` (this exact name+args already ran — feed the steer
+    back), or ``"execute"`` (run it). ``seen_signatures`` is any container supporting ``in``
+    keyed by :func:`dup_signature`.
+    """
+    signature = dup_signature(name, arguments)
+    if name not in callable_names:
+        return "hallucinated", signature
+    if signature in seen_signatures:
+        return "duplicate", signature
+    return "execute", signature
+
+
 def format_tool_result(result: Any, *, max_chars: int = MAX_TOOL_OUTPUT_CHARS) -> str:
     """Serialize a tool result, capped HEAD+TAIL (flags/status often land at the end)."""
     try:

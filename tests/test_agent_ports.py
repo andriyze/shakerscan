@@ -342,6 +342,38 @@ def test_http_evidence_is_tool_provenance():
     assert g["passed"] and g["provenance"] == "tool"
 
 
+# ---------------------------------------------------- shared turn-driver classification --
+
+def test_classify_tool_call_execute():
+    kind, sig = al.classify_tool_call("http_request", {"method": "GET", "path": "/a"}, set(), at.CALLABLE_TOOL_NAMES)
+    assert kind == "execute"
+    assert sig == al.dup_signature("http_request", {"method": "GET", "path": "/a"})
+
+
+def test_classify_tool_call_duplicate():
+    seen = {al.dup_signature("query_kb", {"kind": "findings"})}
+    kind, sig = al.classify_tool_call("query_kb", {"kind": "findings"}, seen, at.CALLABLE_TOOL_NAMES)
+    assert kind == "duplicate"
+
+
+def test_classify_tool_call_hallucinated():
+    # an unknown tool is flagged BEFORE the dedup check — the model gets the tool list back
+    kind, _ = al.classify_tool_call("sqlmap", {"x": 1}, set(), at.CALLABLE_TOOL_NAMES)
+    assert kind == "hallucinated"
+
+
+def test_classify_arg_order_is_stable():
+    # dup detection is argument-order-insensitive (dup_signature sorts keys)
+    seen = {al.dup_signature("http_request", {"path": "/a", "method": "GET"})}
+    kind, _ = al.classify_tool_call("http_request", {"method": "GET", "path": "/a"}, seen, at.CALLABLE_TOOL_NAMES)
+    assert kind == "duplicate"
+
+
+def test_forced_debrief_message_shape():
+    msg = al.forced_debrief_message()
+    assert "final" in msg.lower() and '"done":true' in msg
+
+
 # ------------------------------------------------------------------------ runner --------
 
 if __name__ == "__main__":
