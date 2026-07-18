@@ -146,6 +146,9 @@ import hypothesis_lifecycle
 import hypothesis_scheduler
 import family_proof
 import invariant_contracts
+import agent_context_pack
+import agent_provenance
+import agent_text_toolcalls
 from http_experiment import ExperimentContractError, execute_experiment
 from workflow_experiment import (
     WorkflowContractError,
@@ -17049,6 +17052,170 @@ async def _build_agent_context_pack_from_target(conn, req: AgentContextPackFromT
         redaction_profile="agent-plan-generated-target",
         created_by=req.created_by,
     )
+
+
+def _agent_pack_compact(value: Any, limit: int = 1500) -> str:
+    try:
+        text = json.dumps(value, default=str, ensure_ascii=False, sort_keys=True)
+    except Exception:
+        text = str(value)
+    return text[:limit]
+
+
+def _agent_context_pack_sections(context: dict[str, Any]) -> list[dict[str, Any]]:
+    """Convert a canonical (already-redacted) agent context pack into rankable pack
+    sections for :func:`agent_context_pack.pack_context`. Each section is
+    ``{key, body, loc, bytes}``; bodies are compact human-readable text so the honest
+    packer can relevance-rank, elide, and drop with visible telemetry."""
+    surface = context.get("current_surface") if isinstance(context.get("current_surface"), dict) else {}
+    principals = surface.get("principal_matrix") if isinstance(surface.get("principal_matrix"), dict) else {}
+    graph = surface.get("attack_graph") if isinstance(surface.get("attack_graph"), dict) else {}
+
+    def _rows(value: Any) -> list[dict[str, Any]]:
+        return [item for item in (value or []) if isinstance(item, dict)]
+
+    sections: list[dict[str, Any]] = []
+
+    def _add(key: str, lines: Any, loc: int) -> None:
+        body = ("\n".join(lines) if isinstance(lines, list) else str(lines)).strip()
+        if body:
+            sections.append({"key": key, "body": body, "loc": loc, "bytes": len(body)})
+
+    target_summary = context.get("target_summary") if isinstance(context.get("target_summary"), dict) else {}
+    if target_summary:
+        _add("target", [f"{k}: {v}" for k, v in target_summary.items()], 1)
+
+    endpoint_lines: list[str] = []
+    for endpoint in _rows(surface.get("sample_endpoints")):
+        method = str(endpoint.get("method") or "GET").upper()
+        path = endpoint.get("path") or ""
+        bits = [f"[{endpoint.get('auth_state') or 'anonymous'}]"]
+        if endpoint.get("test_status"):
+            bits.append(str(endpoint["test_status"]))
+        if endpoint.get("last_verdict"):
+            bits.append(f"verdict={endpoint['last_verdict']}")
+        if endpoint.get("content_type"):
+            bits.append(str(endpoint["content_type"]))
+        line = f"{method} {path}  {' '.join(bits)}".rstrip()
+        if endpoint.get("param_shape"):
+            line += f"\n    params: {_agent_pack_compact(endpoint['param_shape'], 200)}"
+        if endpoint.get("replay_spec"):
+            line += f"\n    replay: {str(endpoint['replay_spec'])[:200]}"
+        endpoint_lines.append(line)
+    _add("endpoints", endpoint_lines, len(endpoint_lines))
+
+    coverage_lines = [f"coverage: {_agent_pack_compact(surface.get('coverage'), 400)}"]
+    for count in _rows(surface.get("endpoint_counts")):
+        coverage_lines.append(f"  {count.get('auth_state')}/{count.get('test_status')}: {count.get('count')}")
+    if surface.get("exhausted_families"):
+        coverage_lines.append(f"exhausted_families: {_agent_pack_compact(surface.get('exhausted_families'), 200)}")
+    _add("coverage", coverage_lines, len(coverage_lines))
+
+    principal_lines: list[str] = []
+    for principal in _rows(principals.get("principals")):
+        principal_lines.append(
+            f"{principal.get('label')}  role={principal.get('role')} "
+            f"tenant={principal.get('tenant_id') or '-'} auth={principal.get('auth_state')} "
+            f"credential={'yes' if principal.get('credential_configured') else 'no'}"
+        )
+    for expectation in _rows(principals.get("expectations")):
+        principal_lines.append(
+            f"expect {expectation.get('method')} {expectation.get('path')} "
+            f"role={expectation.get('principal_role')} access={expectation.get('expected_access')} "
+            f"status={expectation.get('expected_http_status')}"
+        )
+    _add("principals", principal_lines, len(principal_lines))
+
+    graph_lines = [
+        f"nodes={len(_rows(graph.get('nodes')))} edges={len(_rows(graph.get('edges')))} "
+        f"truncated={graph.get('truncated')}"
+    ]
+    for node in _rows(graph.get("nodes")):
+        graph_lines.append(f"node {node.get('node_type')}:{node.get('node_key')} {node.get('label') or ''}".rstrip())
+    for edge in _rows(graph.get("edges")):
+        graph_lines.append(f"edge {edge.get('src_key')} -[{edge.get('edge_type')}]-> {edge.get('dst_key')}")
+    _add("application_graph", graph_lines, len(graph_lines))
+
+    hypothesis_lines: list[str] = []
+    for hypothesis in _rows(context.get("hypotheses_summary")):
+        hypothesis_lines.append(
+            f"[{hypothesis.get('family')}] {hypothesis.get('title') or hypothesis.get('dedupe_key') or ''} "
+            f"status={hypothesis.get('status')} conf={hypothesis.get('confidence')} src={hypothesis.get('source')}"
+        )
+    _add("hypotheses", hypothesis_lines, len(hypothesis_lines))
+
+    finding_lines: list[str] = []
+    for finding in _rows(context.get("findings_summary")):
+        verdict = finding.get("last_verification_verdict") or "unverified"
+        finding_lines.append(
+            f"{str(finding.get('severity', '')).upper()} [{verdict}] {finding.get('title')} "
+            f"@ {finding.get('url') or ''}  ({finding.get('tool')}/{finding.get('status')})"
+        )
+    _add("known_findings", finding_lines, len(finding_lines))
+
+    gap_rows = _rows(context.get("current_gaps"))
+    _add("gaps", [_agent_pack_compact(gap, 300) for gap in gap_rows], len(gap_rows))
+
+    invariant_rows = _rows(surface.get("approved_invariant_contracts"))
+    if invariant_rows:
+        _add("invariant_contracts", [_agent_pack_compact(item, 400) for item in invariant_rows], len(invariant_rows))
+
+    scan_rows = _rows(surface.get("recent_scans"))
+    if scan_rows:
+        _add("recent_scans", [_agent_pack_compact(scan, 400) for scan in scan_rows], len(scan_rows))
+
+    preconditions = context.get("known_preconditions") if isinstance(context.get("known_preconditions"), dict) else {}
+    if preconditions:
+        _add("preconditions", [f"{k}: {v}" for k, v in preconditions.items()], 1)
+
+    return sections
+
+
+@app.get("/agent/context/{target_id}")
+async def get_agent_context_pack(
+    target_id: str,
+    objective: str = Query(default=""),
+    token_budget: int = Query(default=6000, ge=500, le=24000),
+    endpoint_limit: int = Query(default=25, ge=0, le=50),
+    finding_limit: int = Query(default=15, ge=0, le=25),
+):
+    """Reasoning-grade, token-bounded context pack for the autonomous agent.
+
+    Assembled from Layer-1 tables (endpoint inventory, application graph, findings,
+    principals, hypotheses, recent scan tech/WAF/verification rollups) through the same
+    redaction path as research observations, then packed with **honest drop telemetry**
+    (borrows T3MP3ST ``packContext``: always-present map, relevance ranking by objective,
+    head/tail elision, explicit included/dropped lists — no silent loss). Read-only.
+    """
+    async with db_pool.acquire() as conn:
+        context_req = await _build_agent_context_pack_from_target(
+            conn,
+            AgentContextPackFromTargetRequest(
+                target_id=target_id,
+                include_findings=True,
+                include_endpoints=True,
+                include_gaps=True,
+                finding_limit=finding_limit,
+                endpoint_limit=endpoint_limit,
+                created_by="agent_context_endpoint",
+            ),
+        )
+    context = _canonical_agent_context_pack(context_req)
+    sections = _agent_context_pack_sections(context)
+    pack = agent_context_pack.pack_context(
+        sections,
+        token_budget=token_budget,
+        objective=objective,
+        prior_intel=_agent_pack_compact(context.get("known_preconditions"), 400),
+    )
+    return {
+        "target_id": context.get("target_id"),
+        "objective": objective,
+        "context_hash": context.get("context_hash"),
+        "token_budget": token_budget,
+        "sections_available": [section["key"] for section in sections],
+        "pack": pack,
+    }
 
 
 def _canonical_agent_decision_trace(req: AgentDecisionTraceRequest) -> dict[str, Any]:
