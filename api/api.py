@@ -147,6 +147,7 @@ import hypothesis_scheduler
 import family_proof
 import invariant_contracts
 import agent_context_pack
+import agent_loop
 import agent_provenance
 import agent_text_toolcalls
 import agent_tools
@@ -17526,6 +17527,278 @@ async def execute_agent_tool_endpoint(target_id: str, req: AgentToolExecuteReque
         created_by="agent_tool_endpoint", allow_write=False,
     )
     return {"target_id": str(target_uuid), "tool": name, "result": result}
+
+
+# =============================================================================
+# Autonomous ReAct loop (slice 2). Port of T3MP3ST src/agent/index.ts onto our durable
+# primitives: LLM-driven observe->reason->act over the four gated tools, the four
+# anti-stall mechanisms, natural stop, and a single-json-block debrief through the
+# provenance gate (SUSPECTED tier). Driven by call_ai_provider (configured_ai) in
+# json_object mode; the same core is reusable for a keyless planner turn.
+# =============================================================================
+
+_AGENT_HUNT_DEFAULT_ITERATIONS = 12
+_AGENT_HUNT_MAX_ITERATIONS = 24
+_AGENT_HUNT_TRANSCRIPT_SOFT_CAP = 60
+
+
+async def _agent_planner_reply(
+    messages: list[dict[str, Any]], *, max_tokens: int = 1400, timeout: int = 90
+) -> tuple[Any, Optional[str]]:
+    """One planner turn via the configured AI provider in json_object mode (no schema —
+    the model returns {"tool_calls":[...]} or {"done":true,"findings":[...]})."""
+    settings = _load_effective_ai_settings()
+    ai_url = str(settings.get("ai_url") or "").strip()
+    ai_key = str(settings.get("ai_api_key") or "").strip()
+    ai_model = str(settings.get("ai_model") or "").strip()
+    if not (ai_url and ai_key and ai_model):
+        return None, "configured_ai_not_ready"
+    call_provider = _load_research_ai_provider()
+    if not call_provider:
+        return None, "provider_unavailable"
+    failure_meta: dict[str, Any] = {}
+    response, error, _latency = await call_provider(
+        ai_url=ai_url,
+        ai_api_key=ai_key,
+        model=ai_model,
+        messages=messages,
+        timeout_seconds=timeout,
+        max_tokens=max_tokens,
+        temperature=0.3,
+        fallback_models=settings.get("ai_model_fallback"),
+        overall_budget_seconds=timeout,
+        failure_meta_sink=failure_meta,
+        use_circuit_breaker=False,
+    )
+    return response, error
+
+
+def _agent_trim_transcript(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep system + first user + the most recent turns; drop the oldest middle messages
+    so a long run stays inside the window (T3MP3ST caps per-result; we also cap count)."""
+    if len(messages) <= _AGENT_HUNT_TRANSCRIPT_SOFT_CAP:
+        return messages
+    head = messages[:2]
+    tail = messages[-(_AGENT_HUNT_TRANSCRIPT_SOFT_CAP - 3):]
+    note = {"role": "user", "content": "[System: older transcript elided to fit the context window.]"}
+    return [*head, note, *tail]
+
+
+async def _run_agent_hunt(
+    target_uuid: uuid.UUID,
+    target_url: str,
+    objective: str,
+    *,
+    max_iterations: int,
+    created_by: str,
+    allow_write: bool = False,
+    approval_receipt_id: Optional[str] = None,
+    token_budget: int = 6000,
+    hypothesis_id: Optional[str] = None,
+) -> dict[str, Any]:
+    # --- context pack (slice 1) ---
+    async with db_pool.acquire() as conn:
+        context_req = await _build_agent_context_pack_from_target(
+            conn,
+            AgentContextPackFromTargetRequest(
+                target_id=str(target_uuid), finding_limit=15, endpoint_limit=25,
+                created_by=created_by,
+            ),
+        )
+    context = _canonical_agent_context_pack(context_req)
+    sections = _agent_context_pack_sections(context)
+    pack = agent_context_pack.pack_context(sections, token_budget=token_budget, objective=objective)
+
+    tools = agent_tools.tool_schemas()
+    contract = agent_text_toolcalls.render_tool_contract(tools)
+    messages: list[dict[str, Any]] = [
+        {"role": "system", "content": agent_loop.build_system_prompt(contract, max_iterations=max_iterations)},
+        {"role": "user", "content": agent_loop.build_user_message(objective, pack["text"])},
+    ]
+
+    seen_calls: dict[str, str] = {}
+    results_store: dict[str, Any] = {}
+    evidence_by_ref: dict[str, dict[str, Any]] = {}
+    resp_counter = 0
+    no_progress = 0
+    reframed = False
+    findings: list[dict[str, Any]] = []
+    abstained = False
+    events: list[dict[str, Any]] = []
+    tool_calls_made = 0
+    empty_replies = 0
+    stop_reason = "max_iterations"
+    iterations = 0
+    debug_replies: list[str] = []
+
+    for i in range(max_iterations):
+        iterations = i + 1
+        reply, error = await _agent_planner_reply(messages, max_tokens=1400, timeout=90)
+        if error or reply is None:
+            if not reframed and agent_text_toolcalls.is_likely_refusal(str(error or "")):
+                messages = agent_text_toolcalls.reframe_with_authorized_context(messages)
+                reframed = True
+                events.append({"iteration": i, "planner_reframe": True})
+                continue
+            events.append({"iteration": i, "planner_error": str(error or "no_reply")[:200]})
+            stop_reason = f"planner_error:{str(error or 'no_reply')[:60]}"
+            break
+
+        if isinstance(reply, dict):
+            reply.pop("_provider_meta", None)  # provider telemetry must not pollute the transcript
+        decision = agent_text_toolcalls.interpret_assistant(reply)
+        assistant_content = reply if isinstance(reply, str) else json.dumps(reply, default=str)[:6000]
+        if len(debug_replies) < 3:
+            debug_replies.append((reply if isinstance(reply, str) else json.dumps(reply, default=str))[:700])
+        messages.append({"role": "assistant", "content": assistant_content})
+
+        if not decision["tool_calls"]:
+            # Genuine finish: findings reported OR an explicit abstain.
+            if decision["findings"] or decision["abstained"]:
+                findings = decision.get("findings") or []
+                abstained = bool(decision.get("abstained"))
+                events.append({"iteration": i, "final": True, "findings": len(findings), "abstained": abstained})
+                stop_reason = "natural_stop"
+                break
+            # Otherwise a malformed/empty reply (JSON-mode hiccup) — re-prompt, don't end the hunt.
+            empty_replies += 1
+            if empty_replies > 2:
+                stop_reason = "empty_replies"
+                events.append({"iteration": i, "empty_reply_giveup": True})
+                break
+            events.append({"iteration": i, "empty_reply_reprompt": empty_replies})
+            messages.append({"role": "user", "content": (
+                "[System: your last reply had no tool_calls and no findings. If you are still "
+                'hunting, reply with a ```json {"tool_calls":[...]} ``` block. If you are truly '
+                'done, reply with {"done":true,"findings":[...],"abstained":bool}.]'
+            )})
+            continue
+        empty_replies = 0
+
+        made_progress = False
+        for call in decision["tool_calls"]:
+            name = str(call.get("name") or "")
+            args = call.get("arguments") if isinstance(call.get("arguments"), dict) else {}
+            if name not in agent_tools.AGENT_TOOL_NAMES:
+                messages.append({"role": "user", "content": f"[tool {name}] " + agent_loop.hallucinated_tool_message(name, sorted(agent_tools.AGENT_TOOL_NAMES))})
+                events.append({"iteration": i, "tool": name, "hallucinated": True})
+                continue
+            signature = agent_loop.dup_signature(name, args)
+            if signature in seen_calls:
+                messages.append({"role": "user", "content": f"[tool {name}] " + agent_loop.dup_steer_message(name, seen_calls[signature])})
+                events.append({"iteration": i, "tool": name, "duplicate": True})
+                continue
+
+            tool_calls_made += 1
+            result = await _execute_agent_tool(
+                target_uuid, target_url, name, args, created_by=created_by,
+                allow_write=allow_write, approval_receipt_id=approval_receipt_id,
+                results=results_store, hypothesis_id=hypothesis_id,
+            )
+            seen_calls[signature] = agent_loop.format_tool_result(result, max_chars=160)
+
+            if name == "http_request" and result.get("ok"):
+                resp_counter += 1
+                ref = f"resp_{resp_counter}"
+                results_store[ref] = result
+                evidence_by_ref[ref] = agent_tools.http_evidence_item(result.get("request") or {}, result.get("response") or {})
+                result = {**result, "ref": ref}
+                made_progress = True
+            elif name == "diff" and result.get("ok"):
+                made_progress = True
+
+            messages.append({"role": "user", "content": f"[tool {name} -> {'ok' if result.get('ok') else 'error'}] " + agent_loop.format_tool_result(result)})
+            events.append({"iteration": i, "tool": name, "ok": bool(result.get("ok")), "ref": result.get("ref")})
+
+        messages = _agent_trim_transcript(messages)
+        no_progress = 0 if made_progress else no_progress + 1
+        if no_progress >= 4 and i < max_iterations - 2:
+            messages.append({"role": "user", "content": agent_loop.no_progress_message(no_progress)})
+            no_progress = 0
+
+    # --- provenance gate the debrief (SUSPECTED tier) ---
+    gated_findings: list[dict[str, Any]] = []
+    for raw in findings:
+        finding = agent_provenance.strip_self_verification(dict(raw))
+        refs = raw.get("evidence_refs") or []
+        evidence = [evidence_by_ref[r] for r in refs if r in evidence_by_ref]
+        if not evidence:
+            # fall back to the run's most recent tool provenance so a real-run finding still
+            # carries tool evidence (never verified — that is the family_proof tier, slice 4).
+            evidence = list(evidence_by_ref.values())[-6:]
+        finding["evidence"] = evidence
+        gate = agent_provenance.gate_live_finding(finding)
+        gated_findings.append({"finding": finding, "gate": gate, "tier": "suspected" if gate["passed"] else "blocked"})
+
+    # --- durable run summary receipt (audit trail) ---
+    receipt_id = None
+    try:
+        async with db_pool.acquire() as conn:
+            async with conn.transaction():
+                receipt_result = await _record_tool_receipt(conn, ToolReceiptRequest(
+                    tool_name="agent.hunt",
+                    adapter_version="2026-07-18.v1",
+                    redacted_argv=["agent.hunt", str(target_uuid), f"iters:{iterations}"],
+                    target_scope={"target_id": str(target_uuid), "target_url": target_url, "same_origin_only": True},
+                    approval_receipt_id=approval_receipt_id,
+                    status="success",
+                    parser_status="parsed",
+                    redaction_summary="Autonomous ReAct hunt; tool outputs bounded + redacted.",
+                    metadata_json={
+                        "objective": objective[:500],
+                        "iterations": iterations,
+                        "tool_calls_made": tool_calls_made,
+                        "http_evidence": len(evidence_by_ref),
+                        "stop_reason": stop_reason,
+                        "findings_suspected": sum(1 for g in gated_findings if g["tier"] == "suspected"),
+                        "findings_blocked": sum(1 for g in gated_findings if g["tier"] == "blocked"),
+                        "hypothesis_id": hypothesis_id,
+                    },
+                    created_by=created_by,
+                ))
+                receipt_id = (receipt_result.get("tool_receipt") or {}).get("id")
+    except Exception:
+        receipt_id = None
+
+    return {
+        "target_id": str(target_uuid),
+        "objective": objective,
+        "iterations": iterations,
+        "stop_reason": stop_reason,
+        "tool_calls_made": tool_calls_made,
+        "http_evidence_count": len(evidence_by_ref),
+        "abstained": abstained,
+        "findings": gated_findings,
+        "run_receipt_id": receipt_id,
+        "events": events[-50:],
+        "context_included": pack["included"],
+        "debug_replies": debug_replies,
+    }
+
+
+class AgentHuntRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    objective: str = Field(default="", max_length=2000)
+    max_iterations: int = Field(default=_AGENT_HUNT_DEFAULT_ITERATIONS, ge=1, le=_AGENT_HUNT_MAX_ITERATIONS)
+    token_budget: int = Field(default=6000, ge=1000, le=20000)
+
+
+@app.post("/agent/hunt/{target_id}")
+async def run_agent_hunt_endpoint(target_id: str, req: AgentHuntRequest):
+    """Run the autonomous LLM-driven ReAct hunt against a target (read-only tool surface:
+    writes require a gated episode with an approval receipt). Synchronous, bounded. Returns
+    the SUSPECTED-tier findings (provenance-gated), the tool-call transcript events, and the
+    durable run receipt id."""
+    target_uuid = _uuid_or_400(target_id, "target id")
+    async with db_pool.acquire() as conn:
+        target = await conn.fetchrow("SELECT id, url, is_active FROM targets WHERE id=$1", target_uuid)
+    if not target or not target["is_active"]:
+        raise HTTPException(status_code=404, detail="Active target not found")
+    return await _run_agent_hunt(
+        target_uuid, str(target["url"]), req.objective,
+        max_iterations=req.max_iterations, created_by="agent_hunt_endpoint",
+        allow_write=False, token_budget=req.token_budget,
+    )
 
 
 def _canonical_agent_decision_trace(req: AgentDecisionTraceRequest) -> dict[str, Any]:

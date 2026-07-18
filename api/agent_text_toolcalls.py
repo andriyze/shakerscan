@@ -56,13 +56,18 @@ def render_tool_contract(tools: list[dict[str, Any]]) -> str:
         "```",
         "  The harness runs them (scope- and approval-gated) and returns the results as "
         "new messages; then you reason again.",
-        "• When the attack surface is exhausted and you are DONE, reply with your "
-        "final debrief in prose and end it with a single fenced ```json block: "
-        '{"findings":[{"title":"…","severity":"critical|high|medium|low|info",'
-        '"details":"… cite the tool output that evidences it …","cvss":0.0,'
-        '"cwe":"…","predicate":"…","remediation":"…"}],"abstained":false}. '
-        "That block is the ONLY finding channel the harness records — anything "
-        "described only in prose is dropped. Emit [] + \"abstained\":true if nothing real.",
+        "• When the attack surface is exhausted and you are DONE, reply with ONLY this "
+        "block (no prose, no tool_calls):",
+        "```json",
+        '{"done":true,"findings":[{"title":"…","severity":"critical|high|medium|low|info",'
+        '"family":"bola|mass_assignment|injection|…","predicate":"one verifiable predicate '
+        'or null","details":"… cite the exact tool output/receipt that evidences it …",'
+        '"evidence_refs":["resp_1"],"cvss":0.0,"cwe":"CWE-…","remediation":"…"}],'
+        '"abstained":false}',
+        "```",
+        "  evidence_refs are the http_request result refs (e.g. resp_1) that PROVE the "
+        "finding. That block is the ONLY finding channel recorded — prose is dropped. Emit "
+        'findings:[] + "abstained":true if nothing real was proven.',
         "• Never run these tools yourself — REQUEST them. Requesting is how you act.",
     ]
     return "\n".join(lines)
@@ -193,6 +198,78 @@ def parse_text_tool_calls(text: str) -> Optional[list[dict[str, Any]]]:
             return calls
     calls = _try_parse(text)
     return calls or None
+
+
+_SEVERITIES: frozenset[str] = frozenset({"critical", "high", "medium", "low", "info"})
+
+
+def _findings_from_obj(obj: dict[str, Any]) -> list[dict[str, Any]]:
+    findings = obj.get("findings")
+    if not isinstance(findings, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for f in findings:
+        if not isinstance(f, dict) or not f.get("title"):
+            continue
+        sev = str(f.get("severity", "")).strip().lower()
+        refs = f.get("evidence_refs")
+        out.append(
+            {
+                "title": str(f["title"])[:200],
+                "severity": sev if sev in _SEVERITIES else "info",
+                "details": str(f.get("details") or f.get("evidence") or "")[:4000],
+                "cvss": f.get("cvss") if isinstance(f.get("cvss"), (int, float)) else None,
+                "cwe": (str(f.get("cwe"))[:16] if f.get("cwe") else None),
+                "family": (str(f.get("family")).strip().lower()[:80] if f.get("family") else None),
+                "predicate": (str(f.get("predicate")).strip()[:64] if f.get("predicate") else None),
+                "evidence_refs": (
+                    [str(r)[:24] for r in refs if str(r).strip()][:8] if isinstance(refs, list) else []
+                ),
+                "remediation": (str(f.get("remediation"))[:1000] if f.get("remediation") else None),
+                # Model-asserted in the debrief — NO tool provenance yet. The gate downgrades these.
+                "provenance": "model",
+            }
+        )
+    return out
+
+
+def parse_final_findings(text: str) -> list[dict[str, Any]]:
+    """Parse the model's final debrief block. The agent is told to end with a fenced
+    ```json {"findings":[…]} ``` block; this is the ONLY prose→data channel honored (no
+    substring guessing). Port of ``parseFinalFindings`` (T:src/agent/index.ts:474)."""
+    if not text:
+        return []
+    blocks = [m.group(1) for m in _FENCE.finditer(text)]
+    for candidate in (list(reversed(blocks)) if blocks else [text]):
+        start = candidate.find("{")
+        end = candidate.rfind("}")
+        if start == -1 or end <= start:
+            continue
+        try:
+            obj = json.loads(candidate[start : end + 1])
+        except Exception:
+            continue
+        if isinstance(obj, dict) and isinstance(obj.get("findings"), list):
+            return _findings_from_obj(obj)
+    return []
+
+
+def interpret_assistant(reply: Any) -> dict[str, Any]:
+    """Normalize one assistant turn (a parsed dict from a JSON-mode provider, or raw text
+    from a keyless planner) into ``{tool_calls, findings, done, abstained}``. Tool calls =>
+    keep acting; no tool calls => natural stop with the debrief findings (T3MP3ST)."""
+    if isinstance(reply, dict):
+        calls = _build_calls(reply)
+        if calls:
+            return {"tool_calls": calls, "findings": [], "done": False, "abstained": False}
+        findings = _findings_from_obj(reply)
+        return {"tool_calls": [], "findings": findings, "done": True, "abstained": bool(reply.get("abstained")) and not findings}
+    text = str(reply or "")
+    calls = parse_text_tool_calls(text)
+    if calls:
+        return {"tool_calls": calls, "findings": [], "done": False, "abstained": False}
+    findings = parse_final_findings(text)
+    return {"tool_calls": [], "findings": findings, "done": True, "abstained": not findings}
 
 
 def render_history_tool_request(names: list[str]) -> str:

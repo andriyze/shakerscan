@@ -14,6 +14,7 @@ import agent_provenance as prov
 import agent_text_toolcalls as tc
 import agent_context_pack as cp
 import agent_tools as at
+import agent_loop as al
 
 
 # ------------------------------------------------------------------ provenance gate ----
@@ -131,6 +132,63 @@ def test_refusal_detection():
 
 def test_history_replay_summarizes():
     assert tc.render_history_tool_request(["http_request", "note"]) == "[requested tools: http_request, note]"
+
+
+def test_parse_final_findings():
+    text = ('Here is my debrief.\n```json\n{"done":true,"findings":[{"title":"BOLA on basket",'
+            '"severity":"high","family":"BOLA","predicate":"cross_principal_equivalent",'
+            '"details":"user2 read user1 basket","evidence_refs":["resp_2","resp_3"],'
+            '"cwe":"CWE-639"}],"abstained":false}\n```')
+    fs = tc.parse_final_findings(text)
+    assert len(fs) == 1
+    assert fs[0]["title"] == "BOLA on basket" and fs[0]["severity"] == "high"
+    assert fs[0]["predicate"] == "cross_principal_equivalent"
+    assert fs[0]["evidence_refs"] == ["resp_2", "resp_3"]
+    assert fs[0]["provenance"] == "model"
+
+
+def test_interpret_assistant_dict_toolcalls():
+    d = tc.interpret_assistant({"tool_calls": [{"name": "http_request", "arguments": {"path": "/x"}}]})
+    assert d["done"] is False and len(d["tool_calls"]) == 1
+
+
+def test_interpret_assistant_dict_done():
+    d = tc.interpret_assistant({"done": True, "findings": [{"title": "x", "severity": "low"}], "abstained": False})
+    assert d["done"] is True and d["tool_calls"] == [] and len(d["findings"]) == 1
+
+
+def test_interpret_assistant_dict_abstain():
+    d = tc.interpret_assistant({"done": True, "findings": [], "abstained": True})
+    assert d["done"] is True and d["abstained"] is True and d["findings"] == []
+
+
+def test_interpret_assistant_text_toolcalls():
+    d = tc.interpret_assistant('```json\n{"tool_calls":[{"name":"query_kb","arguments":{"kind":"findings"}}]}\n```')
+    assert d["done"] is False and d["tool_calls"][0]["name"] == "query_kb"
+
+
+def test_loop_prompt_builders():
+    contract = tc.render_tool_contract(at.tool_schemas())
+    sysp = al.build_system_prompt(contract, max_iterations=12)
+    assert "RECON" in sysp and "SELF-CRITIQUE" in sysp and "12 tool-using iterations" in sysp
+    assert "## ACTION CONTRACT" in sysp
+    user = al.build_user_message("find BOLA", "endpoints: GET /x")
+    assert "find BOLA" in user and "TARGET CONTEXT" in user
+
+
+def test_loop_format_tool_result_caps():
+    big = {"blob": "Z" * 9000}
+    out = al.format_tool_result(big, max_chars=1000)
+    assert len(out) < 1200 and "truncated" in out
+
+
+def test_loop_dup_and_steer():
+    sig1 = al.dup_signature("http_request", {"path": "/a", "method": "GET"})
+    sig2 = al.dup_signature("http_request", {"method": "GET", "path": "/a"})
+    assert sig1 == sig2  # order-independent
+    assert "Duplicate call" in al.dup_steer_message("http_request", "200 OK")
+    assert "different vector" in al.no_progress_message(4)
+    assert "do not invent" in al.hallucinated_tool_message("frobnicate", ["http_request"]).lower()
 
 
 # ---------------------------------------------------------------- context packer -------
