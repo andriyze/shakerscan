@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any
+from typing import Any, Optional
 
 # Methods the model may request. Reads are read-only; writes are credential/active-gated.
 READ_METHODS: frozenset[str] = frozenset({"GET", "HEAD", "OPTIONS"})
@@ -328,3 +328,71 @@ def http_evidence_item(request_view: dict[str, Any], summary: dict[str, Any]) ->
     except Exception:
         content = str(summary)[:6000]
     return {"type": "response", "content": content}
+
+
+# --------------------------------------------------------------------------------------
+# SUSPECTED -> VERIFIED bridge (Gap B): derive the concrete targets for a BOLA family_proof
+# verification workflow from a suspected finding's route + each principal's captured object
+# references. Pure/host-testable; the workflow assembly + dispatch (the moat) live in api.py.
+# --------------------------------------------------------------------------------------
+
+_ID_SEGMENT = re.compile(r"^(\d+|\{[^}]+\}|[0-9a-fA-F-]{8,})$")
+
+
+def _bola_collection_and_segment(route: Any) -> tuple[Optional[str], str]:
+    """Split a finding route into its collection route + the collection's last path segment,
+    dropping a trailing object-id segment (numeric, uuid-ish, or ``{id}``)."""
+    path = str(route or "").split("?", 1)[0].rstrip("/")
+    parts = [p for p in path.split("/") if p]
+    if not parts:
+        return None, ""
+    collection_parts = parts[:-1] if (len(parts) >= 2 and _ID_SEGMENT.match(parts[-1])) else parts
+    if not collection_parts:
+        return None, ""
+    return "/" + "/".join(collection_parts), collection_parts[-1].lower()
+
+
+def _pick_object_ref(refs: Any, segment: str) -> tuple[Optional[str], Optional[str]]:
+    """Choose a principal's own object reference for ``segment`` from its captured references.
+    Returns ``(key, value)`` — the ORIGINAL captured-ref key (needed to bind a principal_variable
+    that resolves server-side, marking it a managed reference) and its value."""
+    if not isinstance(refs, dict) or not refs:
+        return None, None
+    lower = {str(k).lower(): (k, v) for k, v in refs.items()}
+    for candidate in (f"{segment}_id", f"{segment}id", segment, "object_id", "id"):
+        pair = lower.get(candidate)
+        if pair is not None and str(pair[1]).strip():
+            return str(pair[0]), str(pair[1]).strip()
+    if len(refs) == 1:  # a single captured ref is unambiguous
+        key, value = next(iter(refs.items()))
+        text = str(value).strip()
+        return (str(key), text) if text else (None, None)
+    return None, None
+
+
+def derive_bola_verification_targets(
+    finding_route: Any, user1_refs: Any, user2_refs: Any
+) -> Optional[dict[str, Any]]:
+    """Return targets for a BOLA verification workflow, or ``None`` when the inputs cannot support
+    a SOUND proof:
+    ``{collection, owner_object_id, attacker_object_id, owner_ref_key, attacker_ref_key, ref_segment}``.
+
+    The ``*_ref_key`` fields name each principal's captured-ref key so the workflow can bind a
+    ``principal_variable`` that resolves the id server-side (a managed reference) — the only form the
+    ownership predicate accepts. Requires two *distinct* owned object references (owner=user1,
+    attacker=user2); equal or missing refs yield None (the finding stays SUSPECTED)."""
+    collection, segment = _bola_collection_and_segment(finding_route)
+    if not collection or collection == "/":
+        return None
+    owner_key, owner_value = _pick_object_ref(user1_refs, segment)
+    attacker_key, attacker_value = _pick_object_ref(user2_refs, segment)
+    if not owner_value or not attacker_value or owner_value == attacker_value:
+        return None
+    return {
+        "collection": collection,
+        "owner_object_id": owner_value,
+        "attacker_object_id": attacker_value,
+        "owner_ref_key": owner_key,
+        "attacker_ref_key": attacker_key,
+        "ref_segment": segment,
+    }

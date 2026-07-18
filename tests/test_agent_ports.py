@@ -401,6 +401,36 @@ def test_interpret_dict_no_toolcalls_is_terminal():
     assert d["done"] is True and d["abstained"] is True
 
 
+# ------------------------------------------------ SUSPECTED->VERIFIED bridge (Gap B) ----
+
+def test_bola_targets_juice_shop_basket():
+    t = at.derive_bola_verification_targets("/rest/basket/1", {"basket_id": "15"}, {"basket_id": "16"})
+    assert t == {"collection": "/rest/basket", "owner_object_id": "15", "attacker_object_id": "16",
+                 "owner_ref_key": "basket_id", "attacker_ref_key": "basket_id", "ref_segment": "basket"}
+
+
+def test_bola_targets_require_distinct_refs():
+    # equal owned refs cannot prove an ownership differential -> None (stays suspected)
+    assert at.derive_bola_verification_targets("/rest/basket/1", {"basket_id": "9"}, {"basket_id": "9"}) is None
+
+
+def test_bola_targets_missing_ref_is_none():
+    assert at.derive_bola_verification_targets("/rest/basket/1", {"basket_id": "15"}, {}) is None
+    assert at.derive_bola_verification_targets("/rest/basket/1", {}, {"basket_id": "16"}) is None
+
+
+def test_bola_targets_single_ref_fallback_and_templated_route():
+    # a {id}-templated route + a single unambiguous captured ref
+    t = at.derive_bola_verification_targets("/api/Users/{id}", {"uid": "1"}, {"uid": "2"})
+    assert t["collection"] == "/api/Users" and t["owner_object_id"] == "1" and t["attacker_object_id"] == "2"
+
+
+def test_bola_targets_bare_collection_route():
+    # no trailing id segment -> the route itself is the collection
+    t = at.derive_bola_verification_targets("/rest/basket", {"basket_id": "15"}, {"basket_id": "16"})
+    assert t["collection"] == "/rest/basket"
+
+
 # ------------------------------------------------------------------------ runner --------
 
 if __name__ == "__main__":

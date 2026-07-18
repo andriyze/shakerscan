@@ -18623,6 +18623,7 @@ async def get_agent_two_tier_findings(target_id: str):
             """SELECT id, title, severity, tool, url, evidence, first_seen_at
                FROM findings WHERE target_id=$1 AND status='active'
                  AND source='autonomous' AND tool='autonomous_agent'
+                 AND (last_verification_verdict IS NULL OR last_verification_verdict <> 'exploited')
                ORDER BY first_seen_at DESC LIMIT 200""",
             target_uuid,
         )
@@ -18638,6 +18639,156 @@ async def get_agent_two_tier_findings(target_id: str):
         "target_id": str(target_uuid),
         "verified": [_json_safe_row(row) for row in verified],
         "suspected": [_suspected_row(row) for row in suspected],
+    }
+
+
+# =============================================================================
+# SUSPECTED -> VERIFIED bridge (Gap B). Upgrade a provenance-gated SUSPECTED autonomous-agent
+# finding to VERIFIED by running it through the EXISTING family_proof two-run verification (the
+# moat) — never by trusting the agent. The server re-executes and DERIVES the verdict; a finding
+# that is not a real, provable vulnerability stays SUSPECTED. Currently supports BOLA.
+# =============================================================================
+
+
+def _materialize_bola_verification_workflow(
+    collection: str, owner_ref_key: str, attacker_ref_key: str
+) -> dict[str, Any]:
+    """Build a BOLA family_proof workflow from the borrowed template shape. The owner/attacker object
+    ids are bound as ``principal_variables`` that resolve SERVER-SIDE from each principal's captured
+    references (never model literals) — that is the only form the ownership predicate accepts as a
+    managed reference (`owner_established_by_captured_ref` + distinct-reference control). Reuses the
+    template's assertions/predicates verbatim; the server re-derives every predicate from live
+    observations, so this supplies routes/bindings, never a verdict."""
+    base = str(collection).rstrip("/")
+    return {
+        "proof_family": "bola",
+        "principal_variables": [
+            {"name": "owner_object_id", "principal": "user1", "ref": owner_ref_key},
+            {"name": "attacker_object_id", "principal": "user2", "ref": attacker_ref_key},
+        ],
+        "steps": [
+            {"label": "owner_read", "kind": "http", "principal": "user1", "checkpoint": "action",
+             "method": "GET", "path": f"{base}/${{owner_object_id}}"},
+            {"label": "attacker_own_read", "kind": "http", "principal": "user2", "checkpoint": "before",
+             "method": "GET", "path": f"{base}/${{attacker_object_id}}"},
+            {"label": "attacker_read", "kind": "http", "principal": "user2", "checkpoint": "action",
+             "method": "GET", "path": f"{base}/${{owner_object_id}}", "compare_to": "owner_read"},
+            {"label": "anon_denied", "kind": "http", "principal": "anonymous", "checkpoint": "action",
+             "method": "GET", "path": f"{base}/${{owner_object_id}}"},
+        ],
+        "assertions": copy.deepcopy(_EXPERIMENT_WORKFLOW_TEMPLATES["bola"]["assertions"]),
+    }
+
+
+class AgentVerifyRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    # Verification runs a gated credential-tier workflow, so a valid target-bound approval receipt
+    # is required (the same authorization the menu experiment.workflow path uses).
+    approval_receipt_id: str = Field(min_length=1)
+
+
+@app.post("/agent/findings/{finding_id}/verify")
+async def verify_suspected_agent_finding(finding_id: str, req: AgentVerifyRequest):
+    """Attempt to UPGRADE one SUSPECTED autonomous-agent finding to VERIFIED via the existing
+    family_proof two-run verification (Gap B). The moat is unchanged: the server re-executes the
+    workflow twice and derives the verdict from server-corroborated predicates; the agent's claim
+    is never trusted. On success the SUSPECTED row is superseded by the VERIFIED one; otherwise the
+    finding stays SUSPECTED. Requires AI_OPS_ROUTER_EXECUTE_ENABLED + a valid approval receipt.
+    Currently supports the bola family."""
+    finding_uuid = _uuid_or_400(finding_id, "finding id")
+    if not _ai_ops_execute_enabled():
+        raise HTTPException(status_code=400, detail="execution_feature_disabled")
+    async with db_pool.acquire() as conn:
+        finding = await conn.fetchrow("SELECT * FROM findings WHERE id=$1", finding_uuid)
+        if not finding:
+            raise HTTPException(status_code=404, detail="Finding not found")
+        if str(finding["tool"] or "") != "autonomous_agent" or str(finding["source"] or "") != "autonomous":
+            raise HTTPException(status_code=409, detail="Not a suspected autonomous-agent finding")
+        if str(finding["last_verification_verdict"] or "") == "exploited":
+            raise HTTPException(status_code=409, detail="Finding is already verified")
+        target = await conn.fetchrow("SELECT id, url, is_active FROM targets WHERE id=$1", finding["target_id"])
+        if not target or not target["is_active"]:
+            raise HTTPException(status_code=404, detail="Active target not found")
+        target_uuid = finding["target_id"]
+        target_url = str(target["url"])
+        evidence = _decode_json_value(finding["evidence"]) or {}
+        family = family_proof.canonical_family(evidence.get("family") or _research_finding_family(finding))
+        if family != "bola":
+            raise HTTPException(status_code=422, detail=f"verification bridge currently supports 'bola', not '{family or 'unknown'}'")
+        path = urllib.parse.urlsplit(str(finding["url"] or "")).path or "/"
+        contexts = await _resolve_workflow_principal_contexts(conn, target_uuid, {"user1", "user2"})
+        targets = agent_tools.derive_bola_verification_targets(
+            path,
+            (contexts.get("user1") or {}).get("captured_refs"),
+            (contexts.get("user2") or {}).get("captured_refs"),
+        )
+        if not targets:
+            raise HTTPException(
+                status_code=422,
+                detail="insufficient distinct owned object references to build a sound BOLA proof (finding stays suspected)")
+        # Gate: a valid, target-bound approval receipt for the credential-tier workflow action.
+        await _validate_approval_receipt_for_action(
+            conn, req.approval_receipt_id, target_url=target_url, target_id=str(target_uuid),
+            action_name="experiment.workflow", command="experiment.workflow", risk_tier="credential",
+            require_target_binding=True, created_by="agent_verify_bridge")
+        collection = targets["collection"]
+        object_route = collection.rstrip("/") + "/{id}"
+        dedupe_dimensions = {"route": object_route, "method": "GET"}
+        severity = str(finding["severity"] or "high")
+        if severity not in {"critical", "high", "medium", "low", "info"}:
+            severity = "high"
+        hyp = await _upsert_hypothesis(conn, HypothesisRequest(
+            source="ai_planner", family="bola",
+            dedupe_key=f"agent_verify:bola:{object_route}:GET",
+            dedupe_dimensions=dedupe_dimensions,
+            target_id=str(target_uuid),
+            title=str(finding["title"] or "BOLA (agent-suspected)")[:200],
+            severity_guess=severity, confidence=0.5,
+            metadata_json={"route": object_route, "method": "GET", "dedupe_dimensions": dedupe_dimensions,
+                           "source_suspected_finding_id": str(finding_uuid)},
+            created_by="agent_verify_bridge"))
+        hypothesis_id = str(hyp["hypothesis"]["id"])
+
+    # Build + dispatch the family_proof workflow (the moat verifies via two-run re-execution).
+    workflow = _materialize_bola_verification_workflow(
+        targets["collection"], targets["owner_ref_key"], targets["attacker_ref_key"])
+    dispatch_params = {
+        "target_id": str(target_uuid), "workflow_id": str(uuid.uuid4()),
+        "proof_family": "bola", "steps": workflow["steps"], "assertions": workflow["assertions"],
+        "principal_variables": workflow["principal_variables"],
+        "_research_hypothesis_id": hypothesis_id,
+    }
+    try:
+        result = await _arsenal_dispatch_workflow(dispatch_params, req.approval_receipt_id)
+    except HTTPException as exc:
+        return {"finding_id": finding_id, "verified": False, "hypothesis_id": hypothesis_id,
+                "error": exc.detail}
+
+    proof = result.get("family_proof") or {}
+    promotion = result.get("promotion") or {}
+    verified_finding_id = str(promotion.get("finding_id")) if isinstance(promotion, dict) and promotion.get("finding_id") else None
+    # The promotion upgrades the SAME vuln-key row in place (relabeled tool='autonomous_workflow',
+    # verdict='exploited'), so a suspected->verified upgrade normally lands on THIS finding's row —
+    # nothing to supersede. Only if the moat wrote a DIFFERENT row do we resolve this suspected one.
+    upgraded_in_place = bool(verified_finding_id) and verified_finding_id == str(finding_uuid)
+    superseded = False
+    if verified_finding_id and not upgraded_in_place:
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE findings SET status='resolved', updated_at=NOW(), "
+                "notes=(COALESCE(notes,'') || $2::text) WHERE id=$1 AND status='active'",
+                finding_uuid, f" [superseded by verified finding {verified_finding_id}]")
+        superseded = True
+    return {
+        "finding_id": finding_id,
+        "verified": bool(verified_finding_id),
+        "verified_finding_id": verified_finding_id,
+        "upgraded_in_place": upgraded_in_place,
+        "hypothesis_id": hypothesis_id,
+        "proof_state": result.get("proof_state"),
+        "family_proof": {"verdict": proof.get("verdict"), "promotable": proof.get("promotable"),
+                         "novelty_gate": proof.get("novelty_gate")},
+        "superseded_suspected": superseded,
     }
 
 
@@ -26490,7 +26641,13 @@ async def _promote_trusted_workflow_finding(
         ),
         None,
     )
-    if known_match and str(known_match.get("tool") or "") != "autonomous_workflow":
+    # A prior SUSPECTED autonomous-agent finding for this same vuln is exactly the thing being
+    # UPGRADED to verified — it must not suppress its own promotion. This is DEDUP logic only; the
+    # proof gate above (promotion_gate) is unchanged, so recognizing the upgrade cannot promote
+    # anything unproven. A DAST/other-tool finding still suppresses (we don't re-clone what another
+    # detector already owns). The superseded suspected row is resolved by the caller after promotion.
+    _upgradeable_prior_tools = {"autonomous_workflow", "autonomous_agent"}
+    if known_match and str(known_match.get("tool") or "") not in _upgradeable_prior_tools:
         proof["novelty_gate"] = "known_vulnerability_already_covered"
         proof["known_finding_id"] = str(known_match["id"])
         await conn.execute(
@@ -26586,7 +26743,7 @@ async def _promote_trusted_workflow_finding(
                 last_verification_status='still_vulnerable',
                 last_verification_verdict='exploited',
                 last_verification_confidence=1.0, last_verified_at=NOW(),
-                fingerprint=$2, url=$3, source='autonomous',
+                fingerprint=$2, url=$3, source='autonomous', tool='autonomous_workflow',
                 evidence=$4::jsonb, updated_at=NOW()
             WHERE id=$1
             """,
