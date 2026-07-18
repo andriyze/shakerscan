@@ -17500,7 +17500,7 @@ async def _agent_tool_run_tool(
             status_label = "timeout"
             error = "timeout"
             out, err = b"", b""
-        stdout = (out or b"").decode("utf-8", "replace")
+        stdout = (out or b"")[: _AGENT_RUN_TOOL_MAX_OUTPUT * 4].decode("utf-8", "replace")
         if proc.returncode not in (0, None) and not stdout.strip():
             status_label = "failed"
             error = ((err or b"").decode("utf-8", "replace")[:300]) or f"exit_{proc.returncode}"
@@ -17777,6 +17777,7 @@ async def _run_agent_hunt(
     token_budget: int = 6000,
     hypothesis_id: Optional[str] = None,
     persist: bool = True,
+    allow_active: bool = False,
 ) -> dict[str, Any]:
     # --- context pack (slice 1) ---
     async with db_pool.acquire() as conn:
@@ -17874,7 +17875,7 @@ async def _run_agent_hunt(
             tool_calls_made += 1
             result = await _execute_agent_tool(
                 target_uuid, target_url, name, args, created_by=created_by,
-                allow_write=allow_write, allow_active=True,
+                allow_write=allow_write, allow_active=allow_active,
                 approval_receipt_id=approval_receipt_id,
                 results=results_store, hypothesis_id=hypothesis_id,
             )
@@ -17929,13 +17930,12 @@ async def _run_agent_hunt(
     gated_findings: list[dict[str, Any]] = []
     for raw in findings:
         finding = agent_provenance.strip_self_verification(dict(raw))
+        # ONLY the finding's OWN cited evidence refs count — never borrow another finding's
+        # (or the run's) tool output to satisfy the gate. A finding whose refs do not resolve
+        # to real tool evidence fails the gate and is surfaced (tier 'blocked') but NOT
+        # persisted: fail-closed against false-positive persistence, even in the SUSPECTED tier.
         refs = raw.get("evidence_refs") or []
-        evidence = [evidence_by_ref[r] for r in refs if r in evidence_by_ref]
-        if not evidence:
-            # fall back to the run's most recent tool provenance so a real-run finding still
-            # carries tool evidence (never verified — that is the family_proof tier, slice 4).
-            evidence = list(evidence_by_ref.values())[-6:]
-        finding["evidence"] = evidence
+        finding["evidence"] = [evidence_by_ref[r] for r in refs if r in evidence_by_ref]
         gate = agent_provenance.gate_live_finding(finding)
         gated_findings.append({"finding": finding, "gate": gate, "tier": "suspected" if gate["passed"] else "blocked"})
 
@@ -18028,7 +18028,7 @@ async def run_agent_hunt_endpoint(target_id: str, req: AgentHuntRequest):
     return await _run_agent_hunt(
         target_uuid, str(target["url"]), req.objective,
         max_iterations=req.max_iterations, created_by="agent_hunt_endpoint",
-        allow_write=False, token_budget=req.token_budget, persist=req.persist,
+        allow_write=False, allow_active=False, token_budget=req.token_budget, persist=req.persist,
     )
 
 
