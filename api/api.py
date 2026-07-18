@@ -34880,7 +34880,20 @@ async def submit_research_decision(episode_id: str, req: ResearchDecisionRequest
                 raw.get("action", {}).get("parameters")
                 if isinstance(raw.get("action"), dict) else None
             )
-            if isinstance(materialize_params, dict) and raw.get("hypothesis_id"):
+            # CONTAINMENT: _server_materialize_create_ma runs a LIVE create probe (up to 3
+            # registration POSTs) that MUTATES the target. Only run it for a gated episode that is
+            # actually executing this action — never in a read_only/shadow episode, on a dry-run
+            # preview (execute=False), or a non-execute (request_input/stop) decision — so the target
+            # is not mutated before authorization. The legitimate create-MA flow is unaffected: a
+            # gated execute_action still materializes here (so validation sees the workflow) and the
+            # authorized Arsenal dispatch re-materializes as a no-op. (Residual: a gated+execute
+            # decision later rejected by validation, or an idempotent replay, still probes; closing
+            # those needs deferring the live create to authorized dispatch.)
+            if (
+                isinstance(materialize_params, dict) and raw.get("hypothesis_id")
+                and str(episode.get("execution_mode") or "") == "gated"
+                and req.decision == "execute_action" and req.execute
+            ):
                 materialize_target_uuid = _optional_uuid(str(episode.get("target_id") or ""))
                 materialize_target = (
                     await conn.fetchrow("SELECT url FROM targets WHERE id=$1", materialize_target_uuid)
