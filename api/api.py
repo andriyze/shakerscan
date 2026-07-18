@@ -18721,6 +18721,42 @@ def _materialize_bola_verification_workflow(
     }
 
 
+def _materialize_authbypass_verification_workflow(route: str) -> dict[str, Any]:
+    """Build an auth_bypass family_proof workflow: an authenticated read and an anonymous read of
+    the SAME protected route. The moat's `unauthenticated_control` predicate requires the anonymous
+    body to EQUAL the authenticated protected body (Tier-0 content differential), so a 200 shell or
+    a deny page cannot promote. No object ids / captured refs needed."""
+    base = str(route)
+    return {
+        "proof_family": "auth_bypass",
+        "steps": [
+            {"label": "authed", "kind": "http", "principal": "user1", "checkpoint": "action",
+             "method": "GET", "path": base},
+            {"label": "anon", "kind": "http", "principal": "anonymous", "checkpoint": "action",
+             "method": "GET", "path": base, "compare_to": "authed"},
+        ],
+        "assertions": copy.deepcopy(_EXPERIMENT_WORKFLOW_TEMPLATES["auth_bypass"]["assertions"]),
+    }
+
+
+def _materialize_dataexposure_verification_workflow(route: str) -> dict[str, Any]:
+    """Build a data_exposure family_proof workflow: an authenticated baseline read and an anonymous
+    read of the SAME resource. The moat's `sensitive_value_present` predicate gates on a successful
+    anonymous read of a server-deemed non-public route with an entropy-tightened sensitive value
+    (Tier-0), so benign/example values cannot promote. No object ids / captured refs needed."""
+    base = str(route)
+    return {
+        "proof_family": "data_exposure",
+        "steps": [
+            {"label": "owner", "kind": "http", "principal": "user1", "checkpoint": "before",
+             "method": "GET", "path": base},
+            {"label": "exposed", "kind": "http", "principal": "anonymous", "checkpoint": "action",
+             "method": "GET", "path": base},
+        ],
+        "assertions": copy.deepcopy(_EXPERIMENT_WORKFLOW_TEMPLATES["data_exposure"]["assertions"]),
+    }
+
+
 class AgentVerifyRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     # Verification runs a gated credential-tier workflow, so a valid target-bound approval receipt
@@ -18728,8 +18764,38 @@ class AgentVerifyRequest(BaseModel):
     approval_receipt_id: str = Field(min_length=1)
 
 
-# Families the bridge can currently verify (each needs a materializer + captured inputs).
-_AGENT_VERIFIABLE_FAMILIES: frozenset[str] = frozenset({"bola"})
+# Families the bridge can currently verify. bola needs distinct captured object refs; auth_bypass
+# and data_exposure are anon-vs-authed reads of a fixed route (no object ids). Every family is
+# verified by the UNCHANGED family_proof two-run moat — the bridge only supplies routes/bindings.
+_AGENT_VERIFIABLE_FAMILIES: frozenset[str] = frozenset({"bola", "auth_bypass", "data_exposure"})
+
+
+async def _agent_verification_workflow_for(
+    conn: Any, target_uuid: uuid.UUID, family: str, path: str
+) -> tuple[dict[str, Any], str]:
+    """Return ``(workflow, canonical_object_route)`` for a suspected finding's family, or raise
+    HTTPException(422) when the inputs cannot support a sound proof. Only bola needs the two-principal
+    captured object references (resolved here); the anon-vs-authed families use the finding route."""
+    if family == "bola":
+        contexts = await _resolve_workflow_principal_contexts(conn, target_uuid, {"user1", "user2"})
+        targets = agent_tools.derive_bola_verification_targets(
+            path,
+            (contexts.get("user1") or {}).get("captured_refs"),
+            (contexts.get("user2") or {}).get("captured_refs"),
+        )
+        if not targets:
+            raise HTTPException(
+                status_code=422,
+                detail="insufficient distinct owned object references to build a sound BOLA proof (finding stays suspected)")
+        workflow = _materialize_bola_verification_workflow(
+            targets["collection"], targets["owner_ref_key"], targets["attacker_ref_key"])
+        return workflow, targets["collection"].rstrip("/") + "/{id}"
+    route = _canonical_vulnerability_route(path) or path
+    if family == "auth_bypass":
+        return _materialize_authbypass_verification_workflow(path), route
+    if family == "data_exposure":
+        return _materialize_dataexposure_verification_workflow(path), route
+    raise HTTPException(status_code=422, detail=f"verification bridge supports {sorted(_AGENT_VERIFIABLE_FAMILIES)}, not '{family or 'unknown'}'")
 
 
 async def _verify_suspected_finding_workflow(
@@ -18739,7 +18805,7 @@ async def _verify_suspected_finding_workflow(
     through the EXISTING family_proof two-run verification. The moat is unchanged — the server
     re-executes the workflow twice and derives the verdict from server-corroborated predicates; the
     agent's claim is never trusted. Raises HTTPException on guard failures (the manual endpoint
-    surfaces them; the auto-verify path catches them). Currently supports the bola family."""
+    surfaces them; the auto-verify path catches them). Supports bola / auth_bypass / data_exposure."""
     if not _ai_ops_execute_enabled():
         raise HTTPException(status_code=400, detail="execution_feature_disabled")
     async with db_pool.acquire() as conn:
@@ -18760,48 +18826,38 @@ async def _verify_suspected_finding_workflow(
         if family not in _AGENT_VERIFIABLE_FAMILIES:
             raise HTTPException(status_code=422, detail=f"verification bridge supports {sorted(_AGENT_VERIFIABLE_FAMILIES)}, not '{family or 'unknown'}'")
         path = urllib.parse.urlsplit(str(finding["url"] or "")).path or "/"
-        contexts = await _resolve_workflow_principal_contexts(conn, target_uuid, {"user1", "user2"})
-        targets = agent_tools.derive_bola_verification_targets(
-            path,
-            (contexts.get("user1") or {}).get("captured_refs"),
-            (contexts.get("user2") or {}).get("captured_refs"),
-        )
-        if not targets:
-            raise HTTPException(
-                status_code=422,
-                detail="insufficient distinct owned object references to build a sound BOLA proof (finding stays suspected)")
+        # Family-dispatched workflow build (raises 422 on insufficient inputs -> stays suspected).
+        workflow, object_route = await _agent_verification_workflow_for(conn, target_uuid, family, path)
         # Gate: a valid, target-bound approval receipt for the credential-tier workflow action.
         await _validate_approval_receipt_for_action(
             conn, approval_receipt_id, target_url=target_url, target_id=str(target_uuid),
             action_name="experiment.workflow", command="experiment.workflow", risk_tier="credential",
             require_target_binding=True, created_by=created_by)
-        collection = targets["collection"]
-        object_route = collection.rstrip("/") + "/{id}"
         dedupe_dimensions = {"route": object_route, "method": "GET"}
         severity = str(finding["severity"] or "high")
         if severity not in {"critical", "high", "medium", "low", "info"}:
             severity = "high"
         hyp = await _upsert_hypothesis(conn, HypothesisRequest(
-            source="ai_planner", family="bola",
-            dedupe_key=f"agent_verify:bola:{object_route}:GET",
+            source="ai_planner", family=family,
+            dedupe_key=f"agent_verify:{family}:{object_route}:GET",
             dedupe_dimensions=dedupe_dimensions,
             target_id=str(target_uuid),
-            title=str(finding["title"] or "BOLA (agent-suspected)")[:200],
+            title=str(finding["title"] or f"{family} (agent-suspected)")[:200],
             severity_guess=severity, confidence=0.5,
             metadata_json={"route": object_route, "method": "GET", "dedupe_dimensions": dedupe_dimensions,
                            "source_suspected_finding_id": str(finding_uuid)},
             created_by=created_by))
         hypothesis_id = str(hyp["hypothesis"]["id"])
 
-    # Build + dispatch the family_proof workflow (the moat verifies via two-run re-execution).
-    workflow = _materialize_bola_verification_workflow(
-        targets["collection"], targets["owner_ref_key"], targets["attacker_ref_key"])
+    # Dispatch the family_proof workflow (the moat verifies via two-run re-execution).
     dispatch_params = {
         "target_id": str(target_uuid), "workflow_id": str(uuid.uuid4()),
-        "proof_family": "bola", "steps": workflow["steps"], "assertions": workflow["assertions"],
-        "principal_variables": workflow["principal_variables"],
+        "proof_family": workflow["proof_family"], "steps": workflow["steps"],
+        "assertions": workflow["assertions"],
         "_research_hypothesis_id": hypothesis_id,
     }
+    if workflow.get("principal_variables"):
+        dispatch_params["principal_variables"] = workflow["principal_variables"]
     try:
         result = await _arsenal_dispatch_workflow(dispatch_params, approval_receipt_id)
     except HTTPException as exc:
@@ -18841,7 +18897,7 @@ async def verify_suspected_agent_finding(finding_id: str, req: AgentVerifyReques
     """Attempt to UPGRADE one SUSPECTED autonomous-agent finding to VERIFIED via the existing
     family_proof two-run verification (Gap B). On success the SUSPECTED row becomes the VERIFIED one
     (in place); otherwise it stays SUSPECTED. Requires AI_OPS_ROUTER_EXECUTE_ENABLED + a valid
-    target-bound approval receipt. Currently supports the bola family."""
+    target-bound approval receipt. Supports the bola / auth_bypass / data_exposure families."""
     finding_uuid = _uuid_or_400(finding_id, "finding id")
     return await _verify_suspected_finding_workflow(
         finding_uuid, req.approval_receipt_id, created_by="agent_verify_bridge")
