@@ -15,6 +15,7 @@ left to the model.
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 # Methods the model may request. Reads are read-only; writes are credential/active-gated.
@@ -48,6 +49,8 @@ QUERY_KB_KINDS: frozenset[str] = frozenset(
 NOTE_KINDS: frozenset[str] = frozenset({"hypothesis", "observation", "todo"})
 
 AGENT_TOOL_NAMES: frozenset[str] = frozenset({"http_request", "query_kb", "diff", "note"})
+# Includes run_tool (defined below); used by the loop's hallucinated-tool guard.
+CALLABLE_TOOL_NAMES: frozenset[str] = AGENT_TOOL_NAMES | {"run_tool"}
 
 
 # --------------------------------------------------------------------------------------
@@ -143,10 +146,88 @@ AGENT_TOOL_SCHEMAS: list[dict[str, Any]] = [
 ]
 
 
-def tool_schemas(*, include_run_tool: bool = False) -> list[dict[str, Any]]:
-    """Return the callable tool schemas (a copy). ``include_run_tool`` is a forward hook
-    for the argv-template scanner tool (slice 5)."""
-    return [dict(schema) for schema in AGENT_TOOL_SCHEMAS]
+# --------------------------------------------------------------------------------------
+# run_tool — external scanners via hardcoded argv templates (port of T3MP3ST
+# adapter-tools.ts ARG_TEMPLATES). The LLM picks tool + target ONLY; every flag is baked
+# into build(); only regex-gated tunables are read by name. No arbitrary shell.
+# --------------------------------------------------------------------------------------
+
+_SEV_RE = re.compile(r"^(critical|high|medium|low|info)(,(critical|high|medium|low|info))*$")
+_TAGS_RE = re.compile(r"^[a-z0-9][a-z0-9,\-]{0,80}$")
+
+
+def _tmpl_httpx(url: str, opts: dict[str, Any]) -> list[str]:
+    # Passive fingerprint: status, title, tech, redirect chain. No tunables.
+    return ["-u", url, "-status-code", "-title", "-tech-detect", "-web-server",
+            "-json", "-silent", "-timeout", "10", "-no-color"]
+
+
+def _tmpl_nuclei(url: str, opts: dict[str, Any]) -> list[str]:
+    # Bounded template scan. Severity + tags are the ONLY tunables, both regex-gated.
+    severity = str(opts.get("severity") or "").strip().lower()
+    if not _SEV_RE.match(severity):
+        severity = "high,critical"
+    args = ["-target", url, "-severity", severity, "-silent", "-jsonl",
+            "-timeout", "8", "-retries", "1", "-no-color", "-disable-update-check"]
+    tags = str(opts.get("tags") or "").strip().lower()
+    if _TAGS_RE.match(tags):
+        args += ["-tags", tags]
+    return args
+
+
+# {tool: {binary, target_param, risk, default_timeout_ms, build}}. Only httpx (passive)
+# and a bounded nuclei are loop-safe; slower/intrusive scanners stay off the sync loop.
+SCANNER_ARG_TEMPLATES: dict[str, dict[str, Any]] = {
+    "httpx": {"binary": "httpx", "risk": "read_only", "default_timeout_ms": 30_000, "build": _tmpl_httpx,
+              "desc": "passive HTTP fingerprint (status, title, tech, server) of a same-origin URL"},
+    "nuclei": {"binary": "nuclei", "risk": "active", "default_timeout_ms": 90_000, "build": _tmpl_nuclei,
+               "desc": "bounded Nuclei template scan (default high,critical) of a same-origin URL; options {severity,tags}"},
+}
+RUN_TOOL_NAMES: frozenset[str] = frozenset(SCANNER_ARG_TEMPLATES)
+
+RUN_TOOL_SCHEMA: dict[str, Any] = {
+    "name": "run_tool",
+    "risk": "active",
+    "description": (
+        "Run a bounded external scanner against a SAME-ORIGIN URL. You pick tool + target "
+        f"only; all flags are fixed. Tools: {sorted(RUN_TOOL_NAMES)} — httpx is a passive "
+        "fingerprint; nuclei runs bounded templates (options {severity,tags}). Returns the "
+        "scanner's JSON/JSONL output (bounded)."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "name": {"type": "string", "description": "httpx | nuclei"},
+            "target": {"type": "string", "description": "same-origin absolute path (/) or URL to scan"},
+            "options": {"type": "object", "description": "nuclei: {severity:'high,critical', tags:'cve,exposure'}"},
+        },
+        "required": ["name", "target"],
+    },
+}
+
+
+def tool_schemas(*, include_run_tool: bool = True) -> list[dict[str, Any]]:
+    """Return the callable tool schemas (a copy). ``include_run_tool`` adds the
+    argv-template scanner tool (slice 5)."""
+    schemas = [dict(schema) for schema in AGENT_TOOL_SCHEMAS]
+    if include_run_tool:
+        schemas.append(dict(RUN_TOOL_SCHEMA))
+    return schemas
+
+
+def coerce_run_tool(args: dict[str, Any]) -> tuple[str, Any, dict[str, Any]]:
+    name = str(args.get("name") or "").strip().lower()
+    if name not in RUN_TOOL_NAMES:
+        raise AgentToolError(f"unknown run_tool:{name} (allowed: {sorted(RUN_TOOL_NAMES)})")
+    options = args.get("options") if isinstance(args.get("options"), dict) else {}
+    return name, args.get("target"), options
+
+
+def build_scanner_argv(name: str, url: str, options: dict[str, Any]) -> tuple[str, list[str], int]:
+    """Return (binary, argv, timeout_ms) for a scanner run. The binary name is NOT in argv
+    (passed separately to the subprocess); every flag is hardcoded in the template."""
+    template = SCANNER_ARG_TEMPLATES[name]
+    return template["binary"], template["build"](url, options or {}), int(template["default_timeout_ms"])
 
 
 # --------------------------------------------------------------------------------------

@@ -17450,6 +17450,96 @@ async def _agent_tool_note(target_uuid: uuid.UUID, note: dict[str, Any], *, crea
     return {"ok": True, "note": note, "receipt_id": receipt_id}
 
 
+_AGENT_RUN_TOOL_MAX_OUTPUT = 20000
+
+
+async def _agent_tool_run_tool(
+    target_uuid: uuid.UUID,
+    target_url: str,
+    args: dict[str, Any],
+    *,
+    created_by: str,
+    allow_active: bool,
+    approval_receipt_id: Optional[str] = None,
+    hypothesis_id: Optional[str] = None,
+) -> dict[str, Any]:
+    """Run a bounded external scanner via a hardcoded argv template (port of T3MP3ST
+    adapterToCustomTool): the model picks tool + target only; every flag is fixed; the
+    target is forced same-origin; active scanners require the gated tier."""
+    name, raw_target, options = agent_tools.coerce_run_tool(args)
+    template = agent_tools.SCANNER_ARG_TEMPLATES[name]
+    if template["risk"] != "read_only" and not allow_active:
+        return {"ok": False, "needs_approval": True,
+                "error": f"run_tool '{name}' is active; it requires a gated episode with an approval receipt."}
+
+    raw = str(raw_target or "")
+    if raw.startswith("http://") or raw.startswith("https://"):
+        if urllib.parse.urlsplit(raw)[:2] != urllib.parse.urlsplit(target_url)[:2]:
+            return {"ok": False, "error": "run_tool target must be same-origin as the target"}
+        url = raw
+    else:
+        try:
+            url = _provision_same_origin_url(target_url, raw if raw.startswith("/") else "/" + raw)
+        except HTTPException as exc:
+            return {"ok": False, "error": f"scope: {exc.detail}"}
+
+    binary, argv, timeout_ms = agent_tools.build_scanner_argv(name, url, options)
+    started_at = datetime.now(timezone.utc)
+    status_label = "success"
+    error: Optional[str] = None
+    stdout = ""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            binary, *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        )
+        try:
+            out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout_ms / 1000.0)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            status_label = "timeout"
+            error = "timeout"
+            out, err = b"", b""
+        stdout = (out or b"").decode("utf-8", "replace")
+        if proc.returncode not in (0, None) and not stdout.strip():
+            status_label = "failed"
+            error = ((err or b"").decode("utf-8", "replace")[:300]) or f"exit_{proc.returncode}"
+    except FileNotFoundError:
+        return {"ok": False, "error": f"scanner '{binary}' not available in this container"}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": f"run_tool_fault:{type(exc).__name__}"}
+    finished_at = datetime.now(timezone.utc)
+
+    lines = [ln for ln in stdout.splitlines() if ln.strip()][:200]
+    receipt_id = None
+    try:
+        async with db_pool.acquire() as conn:
+            async with conn.transaction():
+                receipt_result = await _record_tool_receipt(conn, ToolReceiptRequest(
+                    tool_name=f"agent.run_tool.{name}",
+                    adapter_version="2026-07-18.v1",
+                    redacted_argv=[binary, name, url[:200]],
+                    target_scope={"target_id": str(target_uuid), "target_url": target_url, "same_origin_only": True},
+                    approval_receipt_id=approval_receipt_id,
+                    status=status_label,
+                    parser_status="parsed" if lines else "not_applicable",
+                    started_at=started_at.isoformat(),
+                    finished_at=finished_at.isoformat(),
+                    redaction_summary="Hardcoded-argv scanner; output bounded + redacted.",
+                    metadata_json={"tool": name, "url_scanned": url, "lines": len(lines), "error": error, "hypothesis_id": hypothesis_id},
+                    created_by=created_by,
+                ))
+                receipt_id = (receipt_result.get("tool_receipt") or {}).get("id")
+    except Exception:
+        receipt_id = None
+
+    if error and not lines:
+        return {"ok": False, "error": f"{name}:{error}", "receipt_id": receipt_id}
+    safe_lines = [_redact_agent_text(ln)[:1200] for ln in lines[:60]]
+    return {"ok": True, "tool": name, "url": url, "line_count": len(lines),
+            "output_lines": safe_lines, "receipt_id": receipt_id, "provenance": "tool"}
+
+
 def _agent_resolve_ref(value: Any, results: dict[str, Any]) -> dict[str, Any]:
     """Resolve a diff argument to a response summary: an inline summary dict, a ref like
     'resp_1' into the loop's result store, or a stored {response: summary} wrapper."""
@@ -17474,6 +17564,7 @@ async def _execute_agent_tool(
     *,
     created_by: str,
     allow_write: bool = False,
+    allow_active: bool = False,
     approval_receipt_id: Optional[str] = None,
     results: Optional[dict[str, Any]] = None,
     hypothesis_id: Optional[str] = None,
@@ -17496,11 +17587,17 @@ async def _execute_agent_tool(
             return await _agent_tool_note(target_uuid, agent_tools.coerce_note(args), created_by=created_by)
         if name == "diff":
             return _agent_tool_diff(args.get("left"), args.get("right"), results)
+        if name == "run_tool":
+            return await _agent_tool_run_tool(
+                target_uuid, target_url, args, created_by=created_by,
+                allow_active=allow_active, approval_receipt_id=approval_receipt_id,
+                hypothesis_id=hypothesis_id,
+            )
     except agent_tools.AgentToolError as exc:
         return {"ok": False, "error": str(exc)}
     except Exception as exc:  # noqa: BLE001 — a tool fault must not crash the loop
         return {"ok": False, "error": f"tool_fault:{type(exc).__name__}"}
-    return {"ok": False, "error": f"unknown tool '{name}'. Callable: {sorted(agent_tools.AGENT_TOOL_NAMES)}"}
+    return {"ok": False, "error": f"unknown tool '{name}'. Callable: {sorted(agent_tools.CALLABLE_TOOL_NAMES)}"}
 
 
 class AgentToolExecuteRequest(BaseModel):
@@ -17520,11 +17617,11 @@ async def execute_agent_tool_endpoint(target_id: str, req: AgentToolExecuteReque
     if not target or not target["is_active"]:
         raise HTTPException(status_code=404, detail="Active target not found")
     name = str(req.tool or "").strip()
-    if name not in agent_tools.AGENT_TOOL_NAMES:
-        raise HTTPException(status_code=400, detail=f"unknown tool; allowed {sorted(agent_tools.AGENT_TOOL_NAMES)}")
+    if name not in agent_tools.CALLABLE_TOOL_NAMES:
+        raise HTTPException(status_code=400, detail=f"unknown tool; allowed {sorted(agent_tools.CALLABLE_TOOL_NAMES)}")
     result = await _execute_agent_tool(
         target_uuid, str(target["url"]), name, req.arguments,
-        created_by="agent_tool_endpoint", allow_write=False,
+        created_by="agent_tool_endpoint", allow_write=False, allow_active=False,
     )
     return {"target_id": str(target_uuid), "tool": name, "result": result}
 
@@ -17584,6 +17681,90 @@ def _agent_trim_transcript(messages: list[dict[str, Any]]) -> list[dict[str, Any
     return [*head, note, *tail]
 
 
+def _agent_finding_locus(finding: dict[str, Any]) -> tuple[Optional[str], Optional[str]]:
+    """Best-effort (url_path, method) for an agent finding, read from its tool evidence."""
+    for ev in finding.get("evidence") or []:
+        if not isinstance(ev, dict):
+            continue
+        try:
+            payload = json.loads(ev.get("content") or "{}")
+        except Exception:
+            continue
+        request_view = payload.get("request") if isinstance(payload, dict) else None
+        if isinstance(request_view, dict) and request_view.get("path"):
+            return str(request_view.get("path"))[:500], str(request_view.get("method") or "GET").upper()
+    return None, None
+
+
+async def _persist_agent_suspected_finding(
+    conn,
+    target_uuid: uuid.UUID,
+    target_url: str,
+    finding: dict[str, Any],
+    gate: dict[str, Any],
+    *,
+    run_receipt_id: Optional[str],
+    known_keys: set[str],
+) -> dict[str, Any]:
+    """Persist a provenance-gated agent finding into the SUSPECTED tier: source='autonomous',
+    tool='autonomous_agent', last_verification_verdict left NULL (NEVER 'exploited' — that is
+    the family_proof VERIFIED tier). Dedupes on fingerprint and flags net-new vs known
+    (DAST/verified) vulnerability keys so the operator sees what the loop found that the
+    scanner did not. Touches NONE of the moat functions."""
+    severity = str(finding.get("severity") or "info").lower()
+    if severity not in ("critical", "high", "medium", "low", "info"):
+        severity = "info"
+    title = (str(finding.get("title") or "Autonomous agent finding")).strip()[:300]
+    url_path, method = _agent_finding_locus(finding)
+    try:
+        concrete_url = _provision_same_origin_url(target_url, url_path) if url_path else target_url
+    except HTTPException:
+        concrete_url = target_url
+    family = finding.get("family")
+    vuln_key = (
+        _canonical_vulnerability_key(family=family, route=(url_path or concrete_url), method=method)
+        if family else None
+    )
+    net_new = not (vuln_key and vuln_key in known_keys)
+    fingerprint = hashlib.sha256(
+        f"{target_url}:{title}:{severity}:{url_path or ''}:autonomous_agent".encode()
+    ).hexdigest()[:32]
+    evidence_json = _redact_finding_evidence({
+        "trust_tier": "suspected",
+        "provenance": gate.get("provenance"),
+        "predicate": finding.get("predicate"),
+        "family": family,
+        "proof": finding.get("details"),
+        "remediation": finding.get("remediation"),
+        "evidence_refs": finding.get("evidence_refs"),
+        "tool_evidence": finding.get("evidence"),
+        "agent_run_receipt_id": run_receipt_id,
+        "net_new_vs_known": net_new,
+    })
+    existing = await conn.fetchrow(
+        "SELECT id, status FROM findings WHERE fingerprint=$1 AND target_id=$2", fingerprint, target_uuid
+    )
+    if existing:
+        await conn.execute(
+            "UPDATE findings SET last_seen_at=NOW(), updated_at=NOW(), "
+            "status=CASE WHEN status='resolved' THEN 'active' ELSE status END WHERE id=$1",
+            existing["id"],
+        )
+        return {"id": str(existing["id"]), "persisted": "existing", "net_new": net_new, "title": title, "url": url_path}
+    finding_id = await conn.fetchval(
+        """INSERT INTO findings (target_id, fingerprint, title, description, severity, cvss_score,
+               tool, cwe, url, evidence, notes, source, status)
+           VALUES ($1,$2,$3,$4,$5,$6,'autonomous_agent',$7,$8,$9,$10,'autonomous','active')
+           RETURNING id""",
+        target_uuid, fingerprint, title, str(finding.get("details") or title)[:8000], severity,
+        (float(finding["cvss"]) if isinstance(finding.get("cvss"), (int, float)) else None),
+        (str(finding.get("cwe"))[:32] if finding.get("cwe") else None),
+        concrete_url, json.dumps(evidence_json),
+        "Suspected (autonomous agent, provenance-gated; NOT server-verified).",
+    )
+    return {"id": str(finding_id), "persisted": "created", "net_new": net_new, "title": title, "url": url_path}
+
+
 async def _run_agent_hunt(
     target_uuid: uuid.UUID,
     target_url: str,
@@ -17595,6 +17776,7 @@ async def _run_agent_hunt(
     approval_receipt_id: Optional[str] = None,
     token_budget: int = 6000,
     hypothesis_id: Optional[str] = None,
+    persist: bool = True,
 ) -> dict[str, Any]:
     # --- context pack (slice 1) ---
     async with db_pool.acquire() as conn:
@@ -17679,8 +17861,8 @@ async def _run_agent_hunt(
         for call in decision["tool_calls"]:
             name = str(call.get("name") or "")
             args = call.get("arguments") if isinstance(call.get("arguments"), dict) else {}
-            if name not in agent_tools.AGENT_TOOL_NAMES:
-                messages.append({"role": "user", "content": f"[tool {name}] " + agent_loop.hallucinated_tool_message(name, sorted(agent_tools.AGENT_TOOL_NAMES))})
+            if name not in agent_tools.CALLABLE_TOOL_NAMES:
+                messages.append({"role": "user", "content": f"[tool {name}] " + agent_loop.hallucinated_tool_message(name, sorted(agent_tools.CALLABLE_TOOL_NAMES))})
                 events.append({"iteration": i, "tool": name, "hallucinated": True})
                 continue
             signature = agent_loop.dup_signature(name, args)
@@ -17692,18 +17874,25 @@ async def _run_agent_hunt(
             tool_calls_made += 1
             result = await _execute_agent_tool(
                 target_uuid, target_url, name, args, created_by=created_by,
-                allow_write=allow_write, approval_receipt_id=approval_receipt_id,
+                allow_write=allow_write, allow_active=True,
+                approval_receipt_id=approval_receipt_id,
                 results=results_store, hypothesis_id=hypothesis_id,
             )
             seen_calls[signature] = agent_loop.format_tool_result(result, max_chars=160)
 
-            if name == "http_request" and result.get("ok"):
-                resp_counter += 1
-                ref = f"resp_{resp_counter}"
-                results_store[ref] = result
-                evidence_by_ref[ref] = agent_tools.http_evidence_item(result.get("request") or {}, result.get("response") or {})
-                result = {**result, "ref": ref}
+            if result.get("ok") and result.get("provenance") == "tool":
                 made_progress = True
+                resp_counter += 1
+                if name == "run_tool":
+                    ref = f"scan_{resp_counter}"
+                    evidence_by_ref[ref] = {"type": "output", "content": json.dumps(
+                        {"tool": result.get("tool"), "url": result.get("url"), "lines": result.get("output_lines")},
+                        default=str)[:6000]}
+                else:  # http_request
+                    ref = f"resp_{resp_counter}"
+                    results_store[ref] = result
+                    evidence_by_ref[ref] = agent_tools.http_evidence_item(result.get("request") or {}, result.get("response") or {})
+                result = {**result, "ref": ref}
             elif name == "diff" and result.get("ok"):
                 made_progress = True
 
@@ -17715,6 +17904,26 @@ async def _run_agent_hunt(
         if no_progress >= 4 and i < max_iterations - 2:
             messages.append({"role": "user", "content": agent_loop.no_progress_message(no_progress)})
             no_progress = 0
+
+    # Hit the iteration cap without a debrief — force a final-summary turn so the model's
+    # analysis is captured, not lost (T3MP3ST src/agent/index.ts:264-283).
+    if stop_reason == "max_iterations" and not findings and not abstained:
+        messages.append({"role": "user", "content": (
+            "You have reached the maximum number of steps. Reply NOW with ONLY your final "
+            'debrief block: {"done":true,"findings":[...],"abstained":bool}. Include only '
+            "findings you PROVED with tool evidence, and cite their evidence_refs."
+        )})
+        reply, error = await _agent_planner_reply(messages, max_tokens=1600, timeout=90)
+        if not error and reply is not None:
+            if isinstance(reply, dict):
+                reply.pop("_provider_meta", None)
+            if len(debug_replies) < 3:
+                debug_replies.append((reply if isinstance(reply, str) else json.dumps(reply, default=str))[:700])
+            final = agent_text_toolcalls.interpret_assistant(reply)
+            findings = final.get("findings") or []
+            abstained = bool(final.get("abstained"))
+            stop_reason = "forced_debrief"
+            events.append({"iteration": iterations, "forced_debrief": True, "findings": len(findings)})
 
     # --- provenance gate the debrief (SUSPECTED tier) ---
     gated_findings: list[dict[str, Any]] = []
@@ -17760,6 +17969,25 @@ async def _run_agent_hunt(
     except Exception:
         receipt_id = None
 
+    # --- persist SUSPECTED-tier findings (slice 4): provenance-gated only; never verified ---
+    persisted: list[dict[str, Any]] = []
+    if persist and gated_findings:
+        try:
+            async with db_pool.acquire() as conn:
+                known_keys = await _research_known_vulnerability_keys(conn, target_uuid)
+                for entry in gated_findings:
+                    if not entry["gate"]["passed"]:
+                        continue  # blocked overclaim — never persisted
+                    async with conn.transaction():
+                        record = await _persist_agent_suspected_finding(
+                            conn, target_uuid, target_url, entry["finding"], entry["gate"],
+                            run_receipt_id=receipt_id, known_keys=known_keys,
+                        )
+                    entry["persisted"] = record
+                    persisted.append(record)
+        except Exception as exc:  # noqa: BLE001
+            persisted.append({"error": f"persist_failed:{type(exc).__name__}"})
+
     return {
         "target_id": str(target_uuid),
         "objective": objective,
@@ -17769,6 +17997,8 @@ async def _run_agent_hunt(
         "http_evidence_count": len(evidence_by_ref),
         "abstained": abstained,
         "findings": gated_findings,
+        "persisted": persisted,
+        "net_new_count": sum(1 for record in persisted if record.get("net_new")),
         "run_receipt_id": receipt_id,
         "events": events[-50:],
         "context_included": pack["included"],
@@ -17781,14 +18011,15 @@ class AgentHuntRequest(BaseModel):
     objective: str = Field(default="", max_length=2000)
     max_iterations: int = Field(default=_AGENT_HUNT_DEFAULT_ITERATIONS, ge=1, le=_AGENT_HUNT_MAX_ITERATIONS)
     token_budget: int = Field(default=6000, ge=1000, le=20000)
+    persist: bool = True
 
 
 @app.post("/agent/hunt/{target_id}")
 async def run_agent_hunt_endpoint(target_id: str, req: AgentHuntRequest):
     """Run the autonomous LLM-driven ReAct hunt against a target (read-only tool surface:
     writes require a gated episode with an approval receipt). Synchronous, bounded. Returns
-    the SUSPECTED-tier findings (provenance-gated), the tool-call transcript events, and the
-    durable run receipt id."""
+    the SUSPECTED-tier findings (provenance-gated), which of them are net-new vs the DAST
+    baseline, the tool-call transcript events, and the durable run receipt id."""
     target_uuid = _uuid_or_400(target_id, "target id")
     async with db_pool.acquire() as conn:
         target = await conn.fetchrow("SELECT id, url, is_active FROM targets WHERE id=$1", target_uuid)
@@ -17797,8 +18028,46 @@ async def run_agent_hunt_endpoint(target_id: str, req: AgentHuntRequest):
     return await _run_agent_hunt(
         target_uuid, str(target["url"]), req.objective,
         max_iterations=req.max_iterations, created_by="agent_hunt_endpoint",
-        allow_write=False, token_budget=req.token_budget,
+        allow_write=False, token_budget=req.token_budget, persist=req.persist,
     )
+
+
+@app.get("/agent/findings/{target_id}")
+async def get_agent_two_tier_findings(target_id: str):
+    """Two-tier finding view for a target: VERIFIED (server re-executed the evidence and
+    derived a closed predicate — the family_proof moat, tool IN autonomous_workflow/bola,
+    verdict=exploited) vs SUSPECTED (autonomous agent, provenance-gated tool evidence but
+    NOT server-verified — a human promotes). Makes the trust line explicit."""
+    target_uuid = _uuid_or_400(target_id, "target id")
+    async with db_pool.acquire() as conn:
+        verified = await conn.fetch(
+            """SELECT id, title, severity, tool, url, last_verification_verdict, first_seen_at
+               FROM findings WHERE target_id=$1 AND status='active'
+                 AND last_verification_verdict='exploited'
+               ORDER BY CASE severity WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2
+                        WHEN 'low' THEN 3 ELSE 4 END, first_seen_at DESC LIMIT 200""",
+            target_uuid,
+        )
+        suspected = await conn.fetch(
+            """SELECT id, title, severity, tool, url, evidence, first_seen_at
+               FROM findings WHERE target_id=$1 AND status='active'
+                 AND source='autonomous' AND tool='autonomous_agent'
+               ORDER BY first_seen_at DESC LIMIT 200""",
+            target_uuid,
+        )
+    def _suspected_row(row: Any) -> dict[str, Any]:
+        item = _json_safe_row(row)
+        evidence = _decode_json_value(item.pop("evidence", None)) or {}
+        item["predicate"] = evidence.get("predicate")
+        item["family"] = evidence.get("family")
+        item["net_new_vs_known"] = evidence.get("net_new_vs_known")
+        item["trust_tier"] = evidence.get("trust_tier") or "suspected"
+        return item
+    return {
+        "target_id": str(target_uuid),
+        "verified": [_json_safe_row(row) for row in verified],
+        "suspected": [_suspected_row(row) for row in suspected],
+    }
 
 
 def _canonical_agent_decision_trace(req: AgentDecisionTraceRequest) -> dict[str, Any]:

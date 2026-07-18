@@ -239,9 +239,9 @@ def test_relevance_ranks_objective_keyword_first():
 # ---------------------------------------------------------------- agent tools ---------
 
 def test_tool_schemas_render():
-    schemas = at.tool_schemas()
-    names = {s["name"] for s in schemas}
-    assert names == {"http_request", "query_kb", "diff", "note"}
+    assert {s["name"] for s in at.tool_schemas(include_run_tool=False)} == {"http_request", "query_kb", "diff", "note"}
+    schemas = at.tool_schemas()  # default includes run_tool
+    assert {s["name"] for s in schemas} == {"http_request", "query_kb", "diff", "note", "run_tool"}
     # the schemas must render through the text-contract shim
     contract = tc.render_tool_contract(schemas)
     assert "http_request(" in contract
@@ -297,6 +297,38 @@ def test_query_kb_and_note_coercion():
     assert note["kind"] == "hypothesis" and note["family"] == "bola"
     try:
         at.coerce_note({"kind": "observation", "title": ""})
+        assert False
+    except at.AgentToolError:
+        pass
+
+
+def test_run_tool_schema_and_names():
+    schemas = at.tool_schemas(include_run_tool=True)
+    assert any(s["name"] == "run_tool" for s in schemas)
+    assert "run_tool" in at.CALLABLE_TOOL_NAMES
+    assert at.tool_schemas(include_run_tool=False) == [s for s in schemas if s["name"] != "run_tool"]
+
+
+def test_run_tool_argv_templates_hardcode_flags():
+    b, argv, timeout = at.build_scanner_argv("httpx", "http://t/x", {})
+    assert b == "httpx" and "-json" in argv and "-silent" in argv and argv[argv.index("-u") + 1] == "http://t/x"
+    b, argv, timeout = at.build_scanner_argv("nuclei", "http://t/x", {"severity": "high,critical", "tags": "cve,exposure"})
+    assert b == "nuclei" and "-jsonl" in argv
+    assert argv[argv.index("-severity") + 1] == "high,critical"
+    assert argv[argv.index("-tags") + 1] == "cve,exposure"
+
+
+def test_run_tool_rejects_flag_injection():
+    # a severity/tags value trying to inject flags is rejected -> safe defaults, no extra flags
+    _, argv, _ = at.build_scanner_argv("nuclei", "http://t/x", {"severity": "-o /etc/passwd", "tags": "; rm -rf /"})
+    assert argv[argv.index("-severity") + 1] == "high,critical"  # bad severity -> default
+    assert "-tags" not in argv  # bad tags dropped
+    assert "-o" not in argv and "/etc/passwd" not in argv
+
+
+def test_run_tool_unknown_rejected():
+    try:
+        at.coerce_run_tool({"name": "metasploit", "target": "/x"})
         assert False
     except at.AgentToolError:
         pass
