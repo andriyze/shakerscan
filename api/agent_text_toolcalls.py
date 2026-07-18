@@ -303,6 +303,17 @@ _POLICY = re.compile(
 )
 
 
+_END_MARKER = re.compile(r'(done|abstain|no\s+(?:vuln|finding|issue))', re.IGNORECASE)
+
+
+def has_explicit_end_marker(text: Optional[str]) -> bool:
+    """True if a free-text reply actually signals a deliberate finish (a done/abstain/`no
+    vulnerability` marker), vs unparseable prose. Used so a garbage text reply — which
+    :func:`interpret_assistant` also reports as ``abstained=True`` — does not masquerade as a
+    clean abstention and skip the malformed-reply retry (external-audit P2)."""
+    return bool(_END_MARKER.search(text or ""))
+
+
 def is_likely_refusal(content: Optional[str], finish_reason: Optional[str] = None) -> bool:
     """Heuristic: a content-filter stop, or a short reply with a decline-verb bound to a
     help-class object, or explicit policy language. Long substantive output (>1200 chars)

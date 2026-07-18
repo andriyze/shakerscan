@@ -127,9 +127,10 @@ AGENT_TOOL_SCHEMAS: list[dict[str, Any]] = [
         "name": "note",
         "risk": "read_only",
         "description": (
-            "Record a hypothesis, observation, or TODO to your durable scratchpad so it "
-            "survives across steps and is visible to the operator. kind ∈ "
-            f"{sorted(NOTE_KINDS)}. A 'hypothesis' note also seeds the lead board."
+            "Record a hypothesis, observation, or TODO to your durable scratchpad (a tool "
+            "receipt) so it survives across steps and is visible to the operator. kind ∈ "
+            f"{sorted(NOTE_KINDS)}. (A note is scratchpad only — it does not itself seed the "
+            "lead board or create a finding.)"
         ),
         "parameters": {
             "type": "object",

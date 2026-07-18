@@ -374,6 +374,16 @@ def test_forced_debrief_message_shape():
     assert "final" in msg.lower() and '"done":true' in msg
 
 
+def test_explicit_end_marker_distinguishes_abstain_from_prose():
+    # deliberate finish markers -> explicit end (honor the abstain/finish)
+    assert tc.has_explicit_end_marker('{"done":true,"findings":[]}')
+    assert tc.has_explicit_end_marker("I abstain — nothing proven.")
+    assert tc.has_explicit_end_marker("Found no vulnerabilities after testing.")
+    # unparseable prose with no marker -> NOT an explicit end (route to malformed-reply retry)
+    assert not tc.has_explicit_end_marker("Let me now check the basket endpoints.")
+    assert not tc.has_explicit_end_marker("")
+
+
 # ------------------------------------------------------------------------ runner --------
 
 if __name__ == "__main__":

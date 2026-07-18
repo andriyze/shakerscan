@@ -48,6 +48,7 @@ runtime receipts, and tests remain authoritative when a document disagrees.
 | [`parallel-scan-architecture.md`](parallel-scan-architecture.md) | Local parent/plan/shard/merge core shipped; remaining hardening is explicit |
 | [`continuous-asm-architecture.md`](continuous-asm-architecture.md) | Bounded local Continuous ASM shipped; target design and open gates retained |
 | [`multi-node-architecture.md`](multi-node-architecture.md) | RFC only; multi-node fleet is not implemented |
+| [`autonomous-agent-architecture.md`](autonomous-agent-architecture.md) | Keyless ReAct hunt loop shipped (SUSPECTED tier); SUSPECTED→VERIFIED bridge + campaign wiring remain |
 
 ## Maintenance Rule
 

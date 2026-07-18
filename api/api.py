@@ -17507,16 +17507,21 @@ async def _agent_tool_run_tool(
             error = "timeout"
             out, err = b"", b""
         stdout = (out or b"")[: _AGENT_RUN_TOOL_MAX_OUTPUT * 4].decode("utf-8", "replace")
-        if proc.returncode not in (0, None) and not stdout.strip():
+        # Do NOT let the killed process's -9 exit code overwrite a real timeout label. (Audit P2.)
+        if status_label != "timeout" and proc.returncode not in (0, None) and not stdout.strip():
             status_label = "failed"
             error = ((err or b"").decode("utf-8", "replace")[:300]) or f"exit_{proc.returncode}"
     except FileNotFoundError:
-        return {"ok": False, "error": f"scanner '{binary}' not available in this container"}
+        # Scanner missing is an operational fact worth an audit receipt, not a silent early return.
+        status_label, error, stdout = "failed", "scanner_not_available", ""
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "error": f"run_tool_fault:{type(exc).__name__}"}
     finished_at = datetime.now(timezone.utc)
 
     lines = [ln for ln in stdout.splitlines() if ln.strip()][:200]
+    # The scanned URL can carry query values the model chose; keep only the path in the durable
+    # receipt so a receipt never persists a query-string secret. (External-audit P2.)
+    safe_url = url.split("?", 1)[0][:200]
     receipt_id = None
     try:
         async with db_pool.acquire() as conn:
@@ -17524,15 +17529,15 @@ async def _agent_tool_run_tool(
                 receipt_result = await _record_tool_receipt(conn, ToolReceiptRequest(
                     tool_name=f"agent.run_tool.{name}",
                     adapter_version="2026-07-18.v1",
-                    redacted_argv=[binary, name, url[:200]],
+                    redacted_argv=[binary, name, safe_url],
                     target_scope={"target_id": str(target_uuid), "target_url": target_url, "same_origin_only": True},
                     approval_receipt_id=approval_receipt_id,
                     status=status_label,
                     parser_status="parsed" if lines else "not_applicable",
                     started_at=started_at.isoformat(),
                     finished_at=finished_at.isoformat(),
-                    redaction_summary="Hardcoded-argv scanner; output bounded + redacted.",
-                    metadata_json={"tool": name, "url_scanned": url, "lines": len(lines), "error": error, "hypothesis_id": hypothesis_id},
+                    redaction_summary="Hardcoded-argv scanner; output bounded + redacted; receipt URL query-stripped.",
+                    metadata_json={"tool": name, "url_scanned": safe_url, "lines": len(lines), "error": error, "hypothesis_id": hypothesis_id},
                     created_by=created_by,
                 ))
                 receipt_id = (receipt_result.get("tool_receipt") or {}).get("id")
@@ -17610,6 +17615,7 @@ class AgentToolExecuteRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     tool: str = Field(min_length=1, max_length=64)
     arguments: dict[str, Any] = Field(default_factory=dict)
+    approval_receipt_id: Optional[str] = None
 
 
 @app.post("/agent/tools/{target_id}/execute")
@@ -17620,8 +17626,12 @@ async def execute_agent_tool_endpoint(target_id: str, req: AgentToolExecuteReque
     target_uuid = _uuid_or_400(target_id, "target id")
     async with db_pool.acquire() as conn:
         target = await conn.fetchrow("SELECT id, url, is_active FROM targets WHERE id=$1", target_uuid)
-    if not target or not target["is_active"]:
-        raise HTTPException(status_code=404, detail="Active target not found")
+        if not target or not target["is_active"]:
+            raise HTTPException(status_code=404, detail="Active target not found")
+        await _require_approval_receipt_if_policy_enabled(
+            conn, req.approval_receipt_id, action_name="agent.tool", risk_tier="active",
+            created_by="agent_tool_endpoint",
+        )
     name = str(req.tool or "").strip()
     if name not in agent_tools.CALLABLE_TOOL_NAMES:
         raise HTTPException(status_code=400, detail=f"unknown tool; allowed {sorted(agent_tools.CALLABLE_TOOL_NAMES)}")
@@ -17643,6 +17653,10 @@ async def execute_agent_tool_endpoint(target_id: str, req: AgentToolExecuteReque
 _AGENT_HUNT_DEFAULT_ITERATIONS = 12
 _AGENT_HUNT_MAX_ITERATIONS = 24
 _AGENT_HUNT_TRANSCRIPT_SOFT_CAP = 60
+# A single planner turn may not fan out unbounded tool calls: the model's response-token limit is
+# not a dependable execution cap, so bound outbound work per turn explicitly. Extras are dropped
+# with a steer to request them next turn. (External-audit P1.)
+_AGENT_MAX_TOOLS_PER_TURN = 8
 
 
 async def _agent_planner_reply(
@@ -17751,12 +17765,16 @@ async def _persist_agent_suspected_finding(
         "SELECT id, status FROM findings WHERE fingerprint=$1 AND target_id=$2", fingerprint, target_uuid
     )
     if existing:
+        # SUSPECTED rediscovery updates VISIBILITY ONLY — it must never reopen a human-triaged
+        # finding (resolved / false_positive / accepted_risk). A weak-provenance agent claim (it
+        # only cleared the "cited some tool output" bar) cannot undo operator triage; only the
+        # VERIFIED family_proof tier may reactivate. (External-audit P2.)
         await conn.execute(
-            "UPDATE findings SET last_seen_at=NOW(), updated_at=NOW(), "
-            "status=CASE WHEN status='resolved' THEN 'active' ELSE status END WHERE id=$1",
+            "UPDATE findings SET last_seen_at=NOW(), updated_at=NOW() WHERE id=$1",
             existing["id"],
         )
-        return {"id": str(existing["id"]), "persisted": "existing", "net_new": net_new, "title": title, "url": url_path}
+        return {"id": str(existing["id"]), "persisted": "existing", "net_new": net_new,
+                "title": title, "url": url_path, "existing_status": existing["status"]}
     finding_id = await conn.fetchval(
         """INSERT INTO findings (target_id, fingerprint, title, description, severity, cvss_score,
                tool, cwe, url, evidence, notes, source, status)
@@ -17860,13 +17878,18 @@ async def _agent_apply_reply(
             state["events"].append({"iteration": iteration, "model_declined": True})
             state["abstained"] = True
             return {"stop": True, "stop_reason": "model_declined"}
-        # Genuine finish: findings reported OR an explicit abstain.
-        if decision["findings"] or decision["abstained"]:
+        # Genuine finish: findings reported, OR an EXPLICIT abstain. A dict (JSON-mode) reply's
+        # abstain flag is trustworthy; a free-text reply is only a genuine abstain if it actually
+        # contains a done/abstain/findings marker — otherwise unparseable prose (which the shim also
+        # reports as abstained=True) would masquerade as a clean finish and skip the retry below.
+        # (External-audit P2.)
+        explicit_end = isinstance(reply, dict) or agent_text_toolcalls.has_explicit_end_marker(reply_text)
+        if decision["findings"] or (decision["abstained"] and explicit_end):
             state["findings"] = decision.get("findings") or []
             state["abstained"] = bool(decision.get("abstained"))
             state["events"].append({"iteration": iteration, "final": True, "findings": len(state["findings"]), "abstained": state["abstained"]})
             return {"stop": True, "stop_reason": "natural_stop"}
-        # Otherwise a malformed/empty reply (JSON-mode hiccup) — re-prompt, don't end the hunt.
+        # Otherwise a malformed/empty reply (JSON-mode hiccup or unparseable prose) — re-prompt.
         state["empty_replies"] += 1
         if state["empty_replies"] > 2:
             state["events"].append({"iteration": iteration, "empty_reply_giveup": True})
@@ -17881,7 +17904,15 @@ async def _agent_apply_reply(
     state["empty_replies"] = 0
 
     made_progress = False
-    for call in decision["tool_calls"]:
+    turn_calls = decision["tool_calls"][:_AGENT_MAX_TOOLS_PER_TURN]
+    if len(decision["tool_calls"]) > _AGENT_MAX_TOOLS_PER_TURN:
+        dropped = len(decision["tool_calls"]) - _AGENT_MAX_TOOLS_PER_TURN
+        state["events"].append({"iteration": iteration, "tool_calls_capped": dropped})
+        state["messages"].append({"role": "user", "content": (
+            f"[System: you requested {len(decision['tool_calls'])} tools in one turn; only the first "
+            f"{_AGENT_MAX_TOOLS_PER_TURN} were run. Request the remaining {dropped} next turn.]"
+        )})
+    for call in turn_calls:
         name = str(call.get("name") or "")
         args = call.get("arguments") if isinstance(call.get("arguments"), dict) else {}
         kind, signature = agent_loop.classify_tool_call(
@@ -18055,7 +18086,8 @@ async def _agent_finalize_and_persist(
         "run_receipt_id": receipt_id,
         "events": state["events"][-50:],
         "context_included": state["context_included"],
-        "debug_replies": state["debug_replies"],
+        # Raw model output can echo values it observed in tool results; redact before surfacing.
+        "debug_replies": [_redact_agent_text(r) for r in state["debug_replies"]],
     }
 
 
@@ -18158,10 +18190,20 @@ async def _run_agent_hunt_for_episode(episode_id: str) -> dict[str, Any]:
         row = await conn.fetchrow("SELECT * FROM research_episodes WHERE id=$1", uuid.UUID(episode_id))
         if not row:
             return {"accepted": True, "agent_loop": True, "error": "episode_not_found"}
-        target = await conn.fetchrow("SELECT url FROM targets WHERE id=$1", row["target_id"])
+        target = await conn.fetchrow("SELECT url, is_active FROM targets WHERE id=$1", row["target_id"])
     target_url = str((target or {}).get("url") or "")
     if not target_url:
         return {"accepted": True, "agent_loop": True, "error": "target_missing"}
+    # Respect operator deactivation: a soft-deleted (deactivated) target must not keep being hunted
+    # by an in-flight campaign. Stop cleanly rather than send more requests. (External-audit P1.)
+    if not (target or {}).get("is_active"):
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE research_episodes SET status='blocked', stop_reason='target_deactivated', "
+                "updated_at=NOW() WHERE id=$1 AND status NOT IN ('cancelled','failed','completed')",
+                row["id"],
+            )
+        return {"accepted": True, "agent_loop": True, "error": "target_deactivated", "episode_id": episode_id}
     budget = _decode_json_value(row["budget_limits"]) or {}
     execution_mode = str(row["execution_mode"] or "read_only")
     approval_receipt_id = str(row["approval_receipt_id"]) if row["approval_receipt_id"] else None
@@ -18195,28 +18237,52 @@ async def _run_agent_hunt_for_episode(episode_id: str) -> dict[str, Any]:
     )
     suspected = sum(1 for g in result.get("findings", []) if g.get("tier") == "suspected")
     net_new = int(result.get("net_new_count") or 0)
+    stop_reason = str(result.get("stop_reason") or "")
+    iterations = int(result.get("iterations") or 0)
+    tool_calls = int(result.get("tool_calls_made") or 0)
+    # Map the loop's stop reason to the correct terminal state so the campaign's failed/blocked
+    # handling and episode ceilings are not fed a false "completed". (External-audit P2.)
+    if stop_reason.startswith("planner_error") or stop_reason == "empty_replies":
+        final_status, event_type = "failed", "episode_failed"
+    elif stop_reason == "model_declined":
+        final_status, event_type = "blocked", "episode_blocked"
+    elif stop_reason == "cancelled":
+        final_status, event_type = "cancelled", "episode_cancelled"
+    else:
+        final_status, event_type = "completed", "episode_completed"
+    # Record durable usage so campaign aggregate budgets actually see agent-loop work (was zero).
+    # Conservative: one request/action per executed tool call; active only when the episode was
+    # gated for writes/active tools. (External-audit P1.)
+    used = _decode_json_value(row["budget_used"]) or {}
+    used = {**used,
+            "steps": int(used.get("steps") or 0) + iterations,
+            "actions": int(used.get("actions") or 0) + tool_calls,
+            "active_actions": int(used.get("active_actions") or 0) + (tool_calls if allow else 0),
+            "requests": int(used.get("requests") or 0) + tool_calls}
     async with db_pool.acquire() as conn:
         async with conn.transaction():
-            await conn.execute(
-                "UPDATE research_episodes SET status='completed', stop_reason=$2, updated_at=NOW() "
-                "WHERE id=$1 AND status NOT IN ('cancelled','failed','completed')",
-                row["id"],
-                f"agent_hunt: {suspected} suspected ({net_new} net-new), "
-                f"{result.get('tool_calls_made')} tool calls, stop={result.get('stop_reason')}",
+            # Only emit the terminal event if THIS update actually transitioned the episode, so a
+            # concurrent cancel does not get a contradictory "completed" event written after it.
+            transitioned = await conn.fetchval(
+                "UPDATE research_episodes SET status=$2, stop_reason=$3, step_count=step_count+$4, "
+                "budget_used=$5::jsonb, updated_at=NOW() "
+                "WHERE id=$1 AND status NOT IN ('cancelled','failed','completed') RETURNING id",
+                row["id"], final_status,
+                f"agent_hunt: {suspected} suspected ({net_new} net-new), {tool_calls} tool calls, stop={stop_reason}",
+                iterations, json.dumps(used),
             )
-            await _record_research_event(
-                conn, row["id"], event_type="episode_completed", status="completed",
-                summary=f"Autonomous agent hunt: {suspected} suspected findings ({net_new} net-new)",
-                details={
-                    "iterations": result.get("iterations"),
-                    "tool_calls_made": result.get("tool_calls_made"),
-                    "http_evidence": result.get("http_evidence_count"),
-                    "stop_reason": result.get("stop_reason"),
-                    "allow_active": allow,
-                },
-            )
-    return {"accepted": True, "agent_loop": True, "episode_id": episode_id,
-            "suspected": suspected, "net_new": net_new, "stop_reason": result.get("stop_reason")}
+            if transitioned:
+                await _record_research_event(
+                    conn, row["id"], event_type=event_type, status=final_status,
+                    summary=f"Autonomous agent hunt ({final_status}): {suspected} suspected findings ({net_new} net-new)",
+                    details={
+                        "iterations": iterations, "tool_calls_made": tool_calls,
+                        "http_evidence": result.get("http_evidence_count"),
+                        "stop_reason": stop_reason, "allow_active": allow,
+                    },
+                )
+    return {"accepted": True, "agent_loop": True, "episode_id": episode_id, "status": final_status,
+            "suspected": suspected, "net_new": net_new, "stop_reason": stop_reason}
 
 
 class AgentHuntRequest(BaseModel):
@@ -18225,6 +18291,9 @@ class AgentHuntRequest(BaseModel):
     max_iterations: int = Field(default=_AGENT_HUNT_DEFAULT_ITERATIONS, ge=1, le=_AGENT_HUNT_MAX_ITERATIONS)
     token_budget: int = Field(default=6000, ge=1000, le=20000)
     persist: bool = True
+    # Persisting a SUSPECTED finding is a state change; when the operator has enabled the
+    # approval-receipt policy, a hunt must carry a receipt (the app's authorization mechanism).
+    approval_receipt_id: Optional[str] = None
 
 
 @app.post("/agent/hunt/{target_id}")
@@ -18236,12 +18305,17 @@ async def run_agent_hunt_endpoint(target_id: str, req: AgentHuntRequest):
     target_uuid = _uuid_or_400(target_id, "target id")
     async with db_pool.acquire() as conn:
         target = await conn.fetchrow("SELECT id, url, is_active FROM targets WHERE id=$1", target_uuid)
-    if not target or not target["is_active"]:
-        raise HTTPException(status_code=404, detail="Active target not found")
+        if not target or not target["is_active"]:
+            raise HTTPException(status_code=404, detail="Active target not found")
+        await _require_approval_receipt_if_policy_enabled(
+            conn, req.approval_receipt_id, action_name="agent.hunt", risk_tier="active",
+            created_by="agent_hunt_endpoint",
+        )
     return await _run_agent_hunt(
         target_uuid, str(target["url"]), req.objective,
         max_iterations=req.max_iterations, created_by="agent_hunt_endpoint",
-        allow_write=False, allow_active=False, token_budget=req.token_budget, persist=req.persist,
+        allow_write=False, allow_active=False, token_budget=req.token_budget,
+        approval_receipt_id=req.approval_receipt_id, persist=req.persist,
     )
 
 
@@ -18262,6 +18336,9 @@ class AgentHuntSessionStartRequest(BaseModel):
     objective: str = Field(default="", max_length=2000)
     max_iterations: int = Field(default=_AGENT_HUNT_DEFAULT_ITERATIONS, ge=1, le=_AGENT_HUNT_MAX_ITERATIONS)
     token_budget: int = Field(default=6000, ge=1000, le=20000)
+    # Optional: satisfies the approval-receipt policy when the operator has enabled it (persisting
+    # SUSPECTED findings is a state change). Not required by default.
+    approval_receipt_id: Optional[str] = None
 
 
 class AgentHuntReplyRequest(BaseModel):
@@ -18323,8 +18400,12 @@ async def start_agent_hunt_session(target_id: str, req: AgentHuntSessionStartReq
     target_uuid = _uuid_or_400(target_id, "target id")
     async with db_pool.acquire() as conn:
         target = await conn.fetchrow("SELECT id, url, is_active FROM targets WHERE id=$1", target_uuid)
-    if not target or not target["is_active"]:
-        raise HTTPException(status_code=404, detail="Active target not found")
+        if not target or not target["is_active"]:
+            raise HTTPException(status_code=404, detail="Active target not found")
+        await _require_approval_receipt_if_policy_enabled(
+            conn, req.approval_receipt_id, action_name="agent.hunt", risk_tier="active",
+            created_by="agent_hunt_session",
+        )
     state = await _agent_seed_state(
         target_uuid, str(target["url"]), req.objective,
         created_by="agent_hunt_session", token_budget=req.token_budget, max_iterations=req.max_iterations,
@@ -18333,11 +18414,12 @@ async def start_agent_hunt_session(target_id: str, req: AgentHuntSessionStartReq
         row = await conn.fetchrow(
             """INSERT INTO agent_hunt_runs
                    (target_id, objective, status, planner_mode, max_iterations,
-                    allow_write, allow_active, token_budget, state, created_by)
-               VALUES ($1,$2,'awaiting_planner','agent',$3,FALSE,FALSE,$4,$5,'agent_hunt_session')
+                    allow_write, allow_active, approval_receipt_id, token_budget, state, created_by)
+               VALUES ($1,$2,'awaiting_planner','agent',$3,FALSE,FALSE,$4,$5,$6,'agent_hunt_session')
                RETURNING *""",
-            target_uuid, req.objective, req.max_iterations, req.token_budget,
-            json.dumps(state, default=str),
+            target_uuid, req.objective, req.max_iterations,
+            _optional_uuid(req.approval_receipt_id) if req.approval_receipt_id else None,
+            req.token_budget, json.dumps(state, default=str),
         )
     return _agent_hunt_run_public(row)
 
@@ -18364,10 +18446,17 @@ async def submit_agent_hunt_reply(run_id: str, req: AgentHuntReplyRequest):
                 raise HTTPException(status_code=409, detail=f"Hunt run is {row['status']}, not awaiting a planner reply")
             target_uuid = row["target_id"]
             async with db_pool.acquire() as conn2:
-                target = await conn2.fetchrow("SELECT url FROM targets WHERE id=$1", target_uuid)
+                target = await conn2.fetchrow("SELECT url, is_active FROM targets WHERE id=$1", target_uuid)
             target_url = str((target or {}).get("url") or "")
-            if not target_url:
-                raise HTTPException(status_code=409, detail="Hunt run target is missing or inactive")
+            # Stop hunting a target the operator has deactivated (soft-deleted) mid-run, instead of
+            # sending more requests. Commit the cancel and return it (raising here would roll the
+            # update back inside this transaction). (External-audit P1.)
+            if not target_url or not (target or {}).get("is_active"):
+                cancelled = await conn.fetchrow(
+                    "UPDATE agent_hunt_runs SET status='cancelled', stop_reason='target_deactivated', "
+                    "updated_at=NOW() WHERE id=$1 RETURNING *", row["id"],
+                )
+                return _agent_hunt_run_public(cancelled)
 
             state = _decode_json_value(row["state"]) or {}
             max_iterations = int(row["max_iterations"] or _AGENT_HUNT_DEFAULT_ITERATIONS)

@@ -3,8 +3,8 @@
 _Goal: an autonomous pentest agent that uses the **brains of an LLM to try new things**, driving the
 **existing tools** and the **knowledge already in our DB**, while keeping the zero-false-positive moat.
 This is the target architecture. It is deliberately built by **borrowing T3MP3ST's proven implementation**
-(`/Users/user/work/T3MP3ST`, cited as `T:path:line`), not by inventing our own scaffolding — that was the
-mistake of the last 100 commits._
+(the T3MP3ST reference checkout, cited as `T:path:line`), not by inventing our own scaffolding — that was
+the mistake of the last 100 commits._
 
 ## 0. The honest gap, and T3MP3ST's lesson
 
