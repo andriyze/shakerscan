@@ -4045,6 +4045,9 @@ class ResearchLaunchRequest(BaseModel):
     objective_override: Optional[str] = Field(default=None, min_length=1, max_length=2000)
     allowed_families_override: list[str] = Field(default_factory=list, max_length=25)
     budget_limits_override: dict[str, Any] = Field(default_factory=dict)
+    # Opt-in: run the LLM-driven ReAct hunt loop for this episode instead of the menu
+    # planner. Only honored with configured_ai (the loop uses the server AI provider).
+    agent_loop: bool = False
 
 
 class ResearchCampaignLaunchRequest(BaseModel):
@@ -4071,6 +4074,9 @@ class ResearchCampaignLaunchRequest(BaseModel):
     objective: Optional[str] = Field(default=None, min_length=1, max_length=2000)
     allowed_families: list[str] = Field(default_factory=list, max_length=25)
     created_by: Optional[str] = Field(default="research_campaign_api", max_length=120)
+    # Opt-in: every episode this campaign spawns runs the LLM-driven ReAct hunt loop
+    # (configured_ai only). Leaves the menu/create-MA path untouched for non-agent_loop runs.
+    agent_loop: bool = False
 
 
 class ResearchCampaignControlRequest(BaseModel):
@@ -17778,6 +17784,7 @@ async def _run_agent_hunt(
     hypothesis_id: Optional[str] = None,
     persist: bool = True,
     allow_active: bool = False,
+    should_stop: Optional[Any] = None,
 ) -> dict[str, Any]:
     # --- context pack (slice 1) ---
     async with db_pool.acquire() as conn:
@@ -17804,7 +17811,7 @@ async def _run_agent_hunt(
     evidence_by_ref: dict[str, dict[str, Any]] = {}
     resp_counter = 0
     no_progress = 0
-    reframed = False
+    planner_errors = 0
     findings: list[dict[str, Any]] = []
     abstained = False
     events: list[dict[str, Any]] = []
@@ -17816,16 +17823,33 @@ async def _run_agent_hunt(
 
     for i in range(max_iterations):
         iterations = i + 1
-        reply, error = await _agent_planner_reply(messages, max_tokens=1400, timeout=90)
+        if should_stop is not None:
+            try:
+                if await should_stop():
+                    stop_reason = "cancelled"
+                    events.append({"iteration": i, "cancelled": True})
+                    break
+            except Exception:
+                pass
+        reply, error = await _agent_planner_reply(messages, max_tokens=1400, timeout=120)
         if error or reply is None:
-            if not reframed and agent_text_toolcalls.is_likely_refusal(str(error or "")):
-                messages = agent_text_toolcalls.reframe_with_authorized_context(messages)
-                reframed = True
-                events.append({"iteration": i, "planner_reframe": True})
-                continue
-            events.append({"iteration": i, "planner_error": str(error or "no_reply")[:200]})
-            stop_reason = f"planner_error:{str(error or 'no_reply')[:60]}"
-            break
+            err_str = str(error or "no_reply")
+            # HONOR a model safety refusal — record it and stop. We deliberately do NOT
+            # auto-"reframe"/override a refusal: routing around the model's own safety signal
+            # is a bypass we will not ship. (The borrowed reframe helper is left unwired.)
+            if agent_text_toolcalls.is_likely_refusal(err_str):
+                events.append({"iteration": i, "planner_refusal": err_str[:160]})
+                stop_reason = "model_declined"
+                break
+            # Transient provider error (timeout / rate-limit): retry a bounded number of times so
+            # a durable unattended hunt survives a hiccup instead of dying on the first timeout.
+            planner_errors += 1
+            events.append({"iteration": i, "planner_error": err_str[:160], "retry": planner_errors})
+            if planner_errors > 2:
+                stop_reason = f"planner_error:{err_str[:60]}"
+                break
+            continue
+        planner_errors = 0
 
         if isinstance(reply, dict):
             reply.pop("_provider_meta", None)  # provider telemetry must not pollute the transcript
@@ -17836,6 +17860,14 @@ async def _run_agent_hunt(
         messages.append({"role": "assistant", "content": assistant_content})
 
         if not decision["tool_calls"]:
+            # A refusal returned as a *successful* reply is HONORED (recorded + stop), never
+            # auto-overridden — we respect the model's safety signal rather than route around it.
+            reply_text = reply if isinstance(reply, str) else json.dumps(reply, default=str)
+            if not decision["findings"] and agent_text_toolcalls.is_likely_refusal(reply_text):
+                events.append({"iteration": i, "model_declined": True})
+                abstained = True
+                stop_reason = "model_declined"
+                break
             # Genuine finish: findings reported OR an explicit abstain.
             if decision["findings"] or decision["abstained"]:
                 findings = decision.get("findings") or []
@@ -17914,7 +17946,7 @@ async def _run_agent_hunt(
             'debrief block: {"done":true,"findings":[...],"abstained":bool}. Include only '
             "findings you PROVED with tool evidence, and cite their evidence_refs."
         )})
-        reply, error = await _agent_planner_reply(messages, max_tokens=1600, timeout=90)
+        reply, error = await _agent_planner_reply(messages, max_tokens=1600, timeout=120)
         if not error and reply is not None:
             if isinstance(reply, dict):
                 reply.pop("_provider_meta", None)
@@ -18004,6 +18036,85 @@ async def _run_agent_hunt(
         "context_included": pack["included"],
         "debug_replies": debug_replies,
     }
+
+
+def _research_episode_uses_agent_loop(episode: Any) -> bool:
+    """True when this episode should be driven by the LLM ReAct hunt loop instead of the menu
+    planner. Opt-in at launch (planner.agent_loop); only set for configured_ai episodes."""
+    payload = row_to_dict(episode) if episode is not None and not isinstance(episode, dict) else dict(episode or {})
+    planner = _decode_json_value(payload.get("planner")) or {}
+    return bool(planner.get("agent_loop"))
+
+
+async def _run_agent_hunt_for_episode(episode_id: str) -> dict[str, Any]:
+    """Run one bounded LLM ReAct hunt bound to a research episode (target / objective / budget /
+    approval), then complete the episode. This is the durable deep-hunt driver for agent_loop
+    episodes: it reuses the episode lifecycle (lease + heartbeat + status, managed by the
+    autopilot controller) but swaps the menu planner for the autonomous tool loop. SUSPECTED
+    findings persist; the family_proof VERIFIED moat is untouched."""
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT * FROM research_episodes WHERE id=$1", uuid.UUID(episode_id))
+        if not row:
+            return {"accepted": True, "agent_loop": True, "error": "episode_not_found"}
+        target = await conn.fetchrow("SELECT url FROM targets WHERE id=$1", row["target_id"])
+    target_url = str((target or {}).get("url") or "")
+    if not target_url:
+        return {"accepted": True, "agent_loop": True, "error": "target_missing"}
+    budget = _decode_json_value(row["budget_limits"]) or {}
+    execution_mode = str(row["execution_mode"] or "read_only")
+    approval_receipt_id = str(row["approval_receipt_id"]) if row["approval_receipt_id"] else None
+    # A gated episode with a bound approval receipt (and the server execute switch on) unlocks
+    # write/active tools; otherwise the hunt stays read-only.
+    allow = execution_mode == "gated" and bool(approval_receipt_id) and _ai_ops_execute_enabled()
+    if allow:
+        # Re-validate the approval receipt AT HUNT TIME, not only at launch: a deep_hunt campaign
+        # runs for hours and a receipt bound at launch may expire or be denied mid-campaign.
+        async with db_pool.acquire() as conn:
+            receipt_row = await conn.fetchrow(
+                "SELECT denial_reason, expires_at FROM approval_receipts WHERE id=$1",
+                _optional_uuid(approval_receipt_id),
+            )
+        allow = bool(receipt_row) and not receipt_row.get("denial_reason")
+        if allow and receipt_row.get("expires_at"):
+            async with db_pool.acquire() as conn:
+                allow = bool(await conn.fetchval("SELECT $1::timestamptz > NOW()", receipt_row["expires_at"]))
+    max_iters = max(4, min(int(budget.get("steps") or 12) + 4, _AGENT_HUNT_MAX_ITERATIONS))
+
+    async def _episode_cancelled() -> bool:
+        async with db_pool.acquire() as conn:
+            return bool(await conn.fetchval(
+                "SELECT cancel_requested FROM research_episodes WHERE id=$1", row["id"]))
+
+    result = await _run_agent_hunt(
+        row["target_id"], target_url, str(row["objective"] or ""),
+        max_iterations=max_iters, created_by=f"deep_hunt_episode:{episode_id}",
+        allow_write=allow, allow_active=allow, approval_receipt_id=approval_receipt_id,
+        persist=True, should_stop=_episode_cancelled,
+    )
+    suspected = sum(1 for g in result.get("findings", []) if g.get("tier") == "suspected")
+    net_new = int(result.get("net_new_count") or 0)
+    async with db_pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute(
+                "UPDATE research_episodes SET status='completed', stop_reason=$2, updated_at=NOW() "
+                "WHERE id=$1 AND status NOT IN ('cancelled','failed','completed')",
+                row["id"],
+                f"agent_hunt: {suspected} suspected ({net_new} net-new), "
+                f"{result.get('tool_calls_made')} tool calls, stop={result.get('stop_reason')}",
+            )
+            await _record_research_event(
+                conn, row["id"], event_type="episode_completed", status="completed",
+                summary=f"Autonomous agent hunt: {suspected} suspected findings ({net_new} net-new)",
+                details={
+                    "iterations": result.get("iterations"),
+                    "tool_calls_made": result.get("tool_calls_made"),
+                    "http_evidence": result.get("http_evidence_count"),
+                    "stop_reason": result.get("stop_reason"),
+                    "allow_active": allow,
+                },
+            )
+    return {"accepted": True, "agent_loop": True, "episode_id": episode_id,
+            "suspected": suspected, "net_new": net_new, "stop_reason": result.get("stop_reason")}
 
 
 class AgentHuntRequest(BaseModel):
@@ -33758,6 +33869,8 @@ async def launch_research_episode(req: ResearchLaunchRequest):
             # Server-authored marker used by the campaign-only active-slot uniqueness index. It
             # intentionally does not constrain legacy/manual mission campaigns.
             "campaign_autopilot": bool(req.campaign_id),
+            # Opt-in ReAct hunt loop (only meaningful with the server AI provider).
+            "agent_loop": bool(req.agent_loop and planner_mode == "configured_ai"),
         },
         execution_mode=launch_profile["execution_mode"],
         max_risk_tier=launch_profile["max_risk_tier"],
@@ -33856,6 +33969,7 @@ async def launch_research_campaign(req: ResearchCampaignLaunchRequest):
         "autonomous_research": {
             "intensity": req.intensity,
             "planner_mode": planner_mode,
+            "agent_loop": bool(req.agent_loop and planner_mode == "configured_ai"),
             "deadline_at": deadline.isoformat(),
             "max_episodes": req.max_episodes,
             "budget_limits": _research_campaign_budget_limits(
@@ -33999,6 +34113,7 @@ async def launch_research_campaign(req: ResearchCampaignLaunchRequest):
                 (readiness.get("surface") or {}).get("executable_families") or []
             ),
             budget_limits_override=episode_budget_limits,
+            agent_loop=bool(req.agent_loop and planner_mode == "configured_ai"),
         ))
     except asyncpg.UniqueViolationError:
         # Finding 2: the campaign supervisor's 30s tick raced this launch and already started episode #1
@@ -34301,6 +34416,7 @@ async def _continue_autonomous_research_campaigns() -> int:
                 objective_override=config.get("objective"),
                 allowed_families_override=effective_families,
                 budget_limits_override=episode_budget_limits,
+                agent_loop=bool(config.get("agent_loop")),
             ))
         except asyncpg.UniqueViolationError:
             continue
@@ -37438,19 +37554,25 @@ async def research_autopilot_runner(pool) -> None:
                 _research_lease_heartbeat(pool, episode_id, owner, heartbeat_stop)
             )
             try:
-                result = await _plan_research_episode_step(
-                    episode_id,
-                    ResearchPlannerStepRequest(
-                        execute=True,
-                        # 240s (of a 300s ceiling) so a large reasoning planner finishes the first big
-                        # pack with room for one retry after a transient provider connection error; the
-                        # full 8000 max_tokens so a filled mass_assignment/BOLA workflow isn't truncated
-                        # into a harness-repair/misinferred stop.
-                        timeout_seconds=240,
-                        max_tokens=8000,
-                        created_by="server_autopilot",
-                    ),
-                )
+                if _research_episode_uses_agent_loop(row):
+                    # Opt-in: drive this episode with the LLM ReAct hunt loop instead of the
+                    # menu planner. The existing create-MA/menu path is untouched (this branch
+                    # only fires when planner.agent_loop was set at launch).
+                    result = await _run_agent_hunt_for_episode(episode_id)
+                else:
+                    result = await _plan_research_episode_step(
+                        episode_id,
+                        ResearchPlannerStepRequest(
+                            execute=True,
+                            # 240s (of a 300s ceiling) so a large reasoning planner finishes the first big
+                            # pack with room for one retry after a transient provider connection error; the
+                            # full 8000 max_tokens so a filled mass_assignment/BOLA workflow isn't truncated
+                            # into a harness-repair/misinferred stop.
+                            timeout_seconds=240,
+                            max_tokens=8000,
+                            created_by="server_autopilot",
+                        ),
+                    )
             except asyncio.CancelledError:
                 heartbeat_stop.set()
                 # Graceful shutdown cancels this task and awaits it BEFORE closing the pool (see
