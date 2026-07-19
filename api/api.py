@@ -18270,6 +18270,7 @@ async def _agent_auto_verify(
     approval_receipt_id: Optional[str],
     created_by: str,
     allow_write: bool = False,
+    cancelled_check: Optional[Any] = None,
     request_budget: Optional[int] = None,
     action_budget: Optional[int] = None,
     active_action_budget: Optional[int] = None,
@@ -18285,6 +18286,16 @@ async def _agent_auto_verify(
     for entry in gated_findings:
         if len(attempts) >= _AGENT_AUTO_VERIFY_LIMIT:
             break
+        # Re-check cancellation before EACH credential-tier verification: a cancel arriving during
+        # finalize/auto-verify is not caught by the pre-finalize stop_reason guard, so without this a
+        # cancelled episode could still begin up to _AGENT_AUTO_VERIFY_LIMIT verifications. (Audit P1.)
+        if cancelled_check is not None:
+            try:
+                if await cancelled_check():
+                    attempts.append({"verified": False, "skipped": "cancelled_during_auto_verify"})
+                    break
+            except Exception:
+                pass
         record = entry.get("persisted")
         if not isinstance(record, dict) or not record.get("id"):
             continue
@@ -18373,6 +18384,7 @@ async def _agent_finalize_and_persist(
     hypothesis_id: Optional[str],
     persist: bool,
     allow_write: bool = False,
+    cancelled_check: Optional[Any] = None,
     request_budget_limit: Optional[int] = None,
     action_budget_limit: Optional[int] = None,
     active_action_budget_limit: Optional[int] = None,
@@ -18416,6 +18428,7 @@ async def _agent_finalize_and_persist(
             approval_receipt_id=approval_receipt_id,
             created_by=f"{created_by}:auto_verify",
             allow_write=allow_write,
+            cancelled_check=cancelled_check,
             request_budget=remaining_requests,
             action_budget=remaining_actions,
             active_action_budget=remaining_active_actions,
@@ -18501,6 +18514,7 @@ async def _run_agent_hunt(
             hypothesis_id=hypothesis_id,
             persist=persist,
             allow_write=allow_write,
+            cancelled_check=should_stop,
             request_budget_limit=request_budget_limit,
             action_budget_limit=action_budget_limit,
             active_action_budget_limit=active_action_budget_limit,
@@ -18628,7 +18642,7 @@ async def _run_agent_hunt(
     return await _agent_finalize_and_persist(
         state, target_uuid=target_uuid, target_url=target_url, created_by=created_by,
         approval_receipt_id=approval_receipt_id, hypothesis_id=hypothesis_id, persist=persist,
-        allow_write=allow_write,
+        allow_write=allow_write, cancelled_check=should_stop,
         request_budget_limit=request_budget_limit,
         action_budget_limit=action_budget_limit,
         active_action_budget_limit=active_action_budget_limit,
@@ -18771,11 +18785,6 @@ async def _run_agent_hunt_for_episode(episode_id: str) -> dict[str, Any]:
         wall_time_budget_seconds=remaining_seconds,
         model_token_budget_limit=remaining_model_tokens,
     )
-    # Release the run-once claim to a terminal state so a legitimate future relaunch is not blocked.
-    async with db_pool.acquire() as conn:
-        await conn.execute(
-            "UPDATE agent_hunt_runs SET status='completed', stop_reason=$2, updated_at=NOW() WHERE id=$1",
-            checkpoint_run_id, str(result.get("stop_reason") or "")[:120])
     suspected = sum(1 for g in result.get("findings", []) if g.get("tier") == "suspected")
     net_new = int(result.get("net_new_count") or 0)
     verified = int(result.get("verified_count") or 0)
@@ -18826,6 +18835,13 @@ async def _run_agent_hunt_for_episode(episode_id: str) -> dict[str, Any]:
                 f"{tool_calls} tool calls, stop={stop_reason}",
                 iterations, json.dumps(used),
             )
+            # Release the run-once claim ATOMICALLY with the episode terminalization: if the process
+            # crashes before this transaction commits, the claim stays 'planning' (fail-closed -> a
+            # re-lease refuses to re-run), never 'completed' with the episode still runnable (which
+            # would repeat target traffic). (External-audit P1 — claim replay window.)
+            await conn.execute(
+                "UPDATE agent_hunt_runs SET status='completed', stop_reason=$2, updated_at=NOW() WHERE id=$1",
+                checkpoint_run_id, stop_reason[:120])
             if transitioned:
                 await _record_research_event(
                     conn, row["id"], event_type=event_type, status=final_status,
@@ -38533,19 +38549,24 @@ async def _reap_abandoned_research_episodes(conn) -> int:
     legitimately-slow session is safe. Also GCs old terminal keyless `agent_hunt_runs`.
     (External-audit P2 — stuck episodes / no GC.)"""
     ttl = max(1, RESEARCH_EPISODE_ABANDON_TTL_HOURS)
+    # Reap ONLY genuinely-stranded work: agent-mode (autopilot_enabled=false) episodes stuck waiting
+    # for a PLANNER/OPERATOR that never returned, whose campaign is not operator-paused. Deliberately
+    # EXCLUDE awaiting_observation (that state is blocked on real linked scan/retest work — the
+    # stale-dispatch reconciler owns it; cancelling it would orphan a live scan) and autopilot
+    # episodes (the runner advances/re-leases them). No hard delete of hunt transcripts — those are
+    # run records under the evidence-retention discipline, not reaper-deletable. (External-audit P1/P2.)
     reaped = await conn.fetch(
-        """UPDATE research_episodes
+        """UPDATE research_episodes re
            SET status='cancelled', stop_reason='abandoned_reaper_timeout',
                lease_expires_at=NULL, updated_at=NOW()
-           WHERE status IN ('awaiting_planner','awaiting_observation','awaiting_input')
-             AND cancel_requested=false
-             AND updated_at < NOW() - make_interval(hours => $1::int)
+           WHERE re.status IN ('awaiting_planner','awaiting_input')
+             AND re.autopilot_enabled=false
+             AND re.cancel_requested=false
+             AND re.updated_at < NOW() - make_interval(hours => $1::int)
+             AND NOT EXISTS (
+                 SELECT 1 FROM campaigns c WHERE c.id=re.campaign_id AND c.status='paused')
            RETURNING id""",
         ttl,
-    )
-    await conn.execute(
-        "DELETE FROM agent_hunt_runs WHERE status IN ('completed','cancelled','failed') "
-        "AND updated_at < NOW() - INTERVAL '7 days'"
     )
     return len(reaped)
 

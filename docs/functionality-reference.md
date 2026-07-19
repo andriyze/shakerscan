@@ -1099,7 +1099,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | Scanner wrapper commands | 23 | `scanner.sh` |
 | Make targets | 7 | `Makefile` |
 | Release gates | 10 | `scripts/release_gates.py` |
-| Runtime environment keys | 193 | Python sources + Compose manifests |
+| Runtime environment keys | 194 | Python sources + Compose manifests |
 | Scanner modules | 83 | `scanner/scanner_tools/` |
 | UI pages | 27 | `ui/src/app/` |
 | Skills | 6 | `skills/` |
@@ -1755,6 +1755,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `PROOF_REQUIRED_FOR_SMART` | `api/api.py`, `api/retest_contract.py`, `api/worker.py`, `scanner/scanner.py` |
 | `REDIS_PORT` | `docker-compose.yml` |
 | `REDIS_URL` | `api/api.py`, `api/gungnir_worker.py`, `api/worker.py`, `scanner/gungnir_worker.py` |
+| `RESEARCH_EPISODE_ABANDON_TTL_HOURS` | `api/api.py` |
 | `RESULTS_DIR` | `api/api.py`, `api/secret_store.py`, `api/worker.py` |
 | `RETEST_AI_BUDGET_SECONDS` | `api/worker.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `RETEST_AI_CIRCUIT_COOLDOWN_SECONDS` | `api/worker.py`, `docker-compose.release.yml`, `docker-compose.yml` |
