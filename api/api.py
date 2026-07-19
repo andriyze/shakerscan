@@ -11270,7 +11270,9 @@ async def exposure_assets(
                    COALESCE(fc.active_critical, 0) AS active_critical,
                    COALESCE(fc.active_high, 0) AS active_high,
                    COALESCE(fc.active_verified, 0) AS active_verified,
-                   COALESCE(fc.active_needs_verification, 0) AS active_needs_verification
+                   COALESCE(fc.active_needs_verification, 0) AS active_needs_verification,
+                   COALESCE(fc.investigator_verified_count, 0) AS investigator_verified_count,
+                   COALESCE(fc.investigator_suspected_count, 0) AS investigator_suspected_count
             FROM targets t
             LEFT JOIN LATERAL (
                 SELECT id, status, scan_type, completed_at,
@@ -11288,6 +11290,17 @@ async def exposure_assets(
                     COUNT(*) FILTER (WHERE status = 'active' AND severity = 'critical') AS active_critical,
                     COUNT(*) FILTER (WHERE status = 'active' AND severity = 'high') AS active_high,
                     COUNT(*) FILTER (WHERE status = 'active' AND last_verification_verdict = 'exploited') AS active_verified,
+                    COUNT(*) FILTER (
+                        WHERE status = 'active'
+                          AND last_verification_verdict = 'exploited'
+                          AND tool IN ('autonomous_workflow', 'bola')
+                    ) AS investigator_verified_count,
+                    COUNT(*) FILTER (
+                        WHERE status = 'active'
+                          AND source = 'autonomous'
+                          AND tool = 'autonomous_agent'
+                          AND (last_verification_verdict IS NULL OR last_verification_verdict <> 'exploited')
+                    ) AS investigator_suspected_count,
                     COUNT(*) FILTER (
                         WHERE status = 'active'
                           AND (
@@ -11366,6 +11379,8 @@ async def exposure_assets(
         total = int(row["active_total"] or 0)
         verified = int(row.get("active_verified") or 0)
         needs_verification = int(row.get("active_needs_verification") or 0)
+        investigator_verified = int(row.get("investigator_verified_count") or 0)
+        investigator_suspected = int(row.get("investigator_suspected_count") or 0)
         completion = _scan_completion_flags(row.get("completion_status"), row.get("top_coverage_status"))
         exposure_class = _exposure_class(row.get("url"), kind=asset_kind)
         total_scans = int(row.get("total_scans") or 0)
@@ -11412,6 +11427,8 @@ async def exposure_assets(
             "active_high": high,
             "active_verified": verified,
             "active_needs_verification": needs_verification,
+            "investigator_verified_count": investigator_verified,
+            "investigator_suspected_count": investigator_suspected,
             "total_scans": total_scans,
             "last_scanned_at": last_scanned_at,
             "latest_scan_id": str(row["latest_scan_id"]) if row.get("latest_scan_id") else None,
@@ -11567,6 +11584,8 @@ async def exposure_assets(
         "failed_scans": sum(1 for a in assets if "failed_scan" in a.get("action_reasons", [])),
         "fresh_scans": sum(1 for a in assets if a.get("coverage_posture") == "fresh"),
         "verified_assets": sum(1 for a in assets if (a.get("active_verified") or 0) > 0),
+        "investigator_verified_assets": sum(1 for a in assets if (a.get("investigator_verified_count") or 0) > 0),
+        "investigator_suspected_assets": sum(1 for a in assets if (a.get("investigator_suspected_count") or 0) > 0),
         "unverified_high_assets": sum(
             1 for a in assets
             if (a.get("active_needs_verification") or 0) > 0
@@ -13430,10 +13449,38 @@ async def list_targets_grouped(
         # doesn't expose the same origin multiple times.
         rows = _dedupe_canonical_target_rows(rows)
 
-        # Per-target ASM coverage (one aggregate query over the persistent inventory).
+        # Per-target ASM coverage and exact AI Investigator trust-tier counts.
         asm_by_target: dict[str, dict] = {}
+        investigator_findings_by_target: dict[str, dict[str, int]] = {}
         target_ids = [row['id'] for row in rows]
         if target_ids:
+            investigator_rows = await conn.fetch(
+                """
+                SELECT target_id,
+                       COUNT(*) FILTER (
+                           WHERE status = 'active'
+                             AND last_verification_verdict = 'exploited'
+                             AND tool IN ('autonomous_workflow', 'bola')
+                       ) AS investigator_verified_count,
+                       COUNT(*) FILTER (
+                           WHERE status = 'active'
+                             AND source = 'autonomous'
+                             AND tool = 'autonomous_agent'
+                             AND (last_verification_verdict IS NULL OR last_verification_verdict <> 'exploited')
+                       ) AS investigator_suspected_count
+                FROM findings
+                WHERE target_id = ANY($1::uuid[])
+                GROUP BY target_id
+                """,
+                target_ids,
+            )
+            investigator_findings_by_target = {
+                str(row['target_id']): {
+                    'investigator_verified_count': int(row['investigator_verified_count'] or 0),
+                    'investigator_suspected_count': int(row['investigator_suspected_count'] or 0),
+                }
+                for row in investigator_rows
+            }
             asm_rows = await conn.fetch(
                 """
                 WITH inventory AS (
@@ -13493,6 +13540,10 @@ async def list_targets_grouped(
     def _attach_asm(target_data):
         if target_data:
             target_data['asm_coverage'] = asm_by_target.get(str(target_data['id']))
+            target_data.update(investigator_findings_by_target.get(str(target_data['id']), {
+                'investigator_verified_count': 0,
+                'investigator_suspected_count': 0,
+            }))
         return target_data
 
     # Group by root_domain

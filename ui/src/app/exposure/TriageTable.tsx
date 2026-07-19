@@ -57,6 +57,8 @@ export const POSTURE_FILTERS = [
   { value: 'verified', label: 'Proven risk' },
   { value: 'needs_verification', label: 'Needs verification' },
   { value: 'unverified_high', label: 'Unverified high-impact' },
+  { value: 'investigator_verified', label: 'Investigator verified' },
+  { value: 'investigator_suspected', label: 'Investigator suspected' },
   { value: 'prod', label: 'Production' },
   { value: 'new', label: 'New (7d)' },
   { value: 'unowned', label: 'Unowned' },
@@ -138,6 +140,8 @@ export function postureMatches(asset: ExposureAsset, filter: PostureFilter, newW
   // High-impact slice of the (otherwise ~all-assets) needs-verification set:
   // unreviewed findings on an asset that also carries critical/high risk.
   if (filter === 'unverified_high') return (asset.active_needs_verification || 0) > 0 && asset.active_critical + asset.active_high > 0
+  if (filter === 'investigator_verified') return (asset.investigator_verified_count || 0) > 0
+  if (filter === 'investigator_suspected') return (asset.investigator_suspected_count || 0) > 0
   if (filter === 'prod') return Boolean(asset.production_mode) || (asset.environment || '').toLowerCase() === 'production'
   if (filter === 'new') {
     // The change strip links here with its own window (?window=30); fall back
@@ -285,6 +289,7 @@ function RowPosture({ asset }: { asset: ExposureAsset }) {
       <PriorityBadge priority={asset.action_priority} />
       <ExposureBadge asset={asset} />
       <BlastBadge asset={asset} />
+      <InvestigatorTierBadges asset={asset} />
       {shown.map((reason) => (
         <span key={reason} className="inline-flex items-center gap-1 rounded bg-gray-800 px-1.5 py-0.5 text-[10px] text-gray-400">
           <AlertTriangle className="h-2.5 w-2.5" aria-hidden="true" />
@@ -298,6 +303,26 @@ function RowPosture({ asset }: { asset: ExposureAsset }) {
         <span className="inline-flex items-center rounded border border-amber-400/25 bg-amber-400/5 px-1.5 py-0.5 text-[10px] text-amber-200/90">unowned</span>
       )}
     </div>
+  )
+}
+
+function InvestigatorTierBadges({ asset }: { asset: ExposureAsset }) {
+  const verified = asset.investigator_verified_count || 0
+  const suspected = asset.investigator_suspected_count || 0
+  if (verified === 0 && suspected === 0) return null
+  return (
+    <>
+      {verified > 0 && (
+        <span className="inline-flex items-center rounded border border-emerald-500/30 bg-emerald-500/10 px-1.5 py-0.5 text-[10px] text-emerald-300" title="Deterministically verified investigator findings">
+          {verified} verified
+        </span>
+      )}
+      {suspected > 0 && (
+        <span className="inline-flex items-center rounded border border-amber-500/30 bg-amber-500/10 px-1.5 py-0.5 text-[10px] text-amber-300" title="Evidence-backed investigator leads awaiting deterministic proof">
+          {suspected} suspected
+        </span>
+      )}
+    </>
   )
 }
 
@@ -460,6 +485,11 @@ function AssetDetailDrawer({
               <div className="mt-0.5 text-[11px] text-gray-600">
                 {needsVerification > 0 ? `${needsVerification} unverified` : 'all findings reviewed'}
               </div>
+              {(asset.investigator_verified_count || asset.investigator_suspected_count) ? (
+                <div className="mt-2 flex flex-wrap gap-1.5">
+                  <InvestigatorTierBadges asset={asset} />
+                </div>
+              ) : null}
             </div>
             <div className="rounded border border-gray-800 bg-black/20 p-3">
               <div className="text-[10px] uppercase tracking-wide text-gray-600">Coverage</div>

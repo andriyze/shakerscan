@@ -1,50 +1,34 @@
 'use client'
 
-import { Suspense, useCallback, useEffect, useMemo, useState } from 'react'
+import { Suspense, useEffect, useMemo, useState } from 'react'
 import Link from 'next/link'
 import { useRouter, useSearchParams } from 'next/navigation'
-import { ArrowRight, BrainCircuit, Check, ChevronDown, Rocket } from 'lucide-react'
+import { BrainCircuit, Check, ChevronDown, Rocket } from 'lucide-react'
 import {
   createTargetPolicyApproval,
-  getCampaign,
-  getCampaigns,
   getResearchEpisode,
   getResearchReadiness,
   getTargets,
   launchResearchCampaign,
-  type Campaign,
   type ResearchPlannerMode,
   type Target,
 } from '@/lib/api'
-import { Button, Card, EmptyState, ErrorState, Skeleton } from '@/components/ui'
+import { Button, Card, ErrorState, Skeleton } from '@/components/ui'
 import { isWebTarget } from '@/lib/targets'
 import {
-  DURATIONS, PROFILES, RunStatusBadge, familiesForIntensity, type DurationKey, type Intensity,
-  findingCount, hostFromUrl, relativeTime, runState, targetLabel,
+  DURATIONS, PROFILES, familiesForIntensity, type DurationKey, type Intensity,
+  hostFromUrl, targetLabel,
 } from '@/components/hunt'
+import { EngineHint, InvestigatorTabs } from '@/components/hunt/InvestigatorTabs'
+import { RecentHunts } from '@/components/hunt/RecentHunts'
 
 const DEFAULT_OBJECTIVE =
   'Find and verify the highest-impact security weaknesses on this target. Prioritize authorization, injection, sensitive data exposure, and workflow abuse. Keep going until the budget is spent or no valuable action remains.'
-
-function intensityOf(campaign: Campaign): string {
-  const meta = (campaign.metadata_json?.autonomous_research ?? {}) as Record<string, unknown>
-  const value = typeof meta.intensity === 'string' ? meta.intensity : ''
-  return PROFILES[value as Intensity]?.name || value || 'Hunt'
-}
-
-function episodeProgress(campaign: Campaign): { started: number; max: number } {
-  const meta = (campaign.metadata_json?.autonomous_research ?? {}) as Record<string, unknown>
-  return {
-    started: typeof meta.episodes_started === 'number' ? meta.episodes_started : 0,
-    max: typeof meta.max_episodes === 'number' ? meta.max_episodes : 0,
-  }
-}
 
 function ResearchAgentPage() {
   const router = useRouter()
   const searchParams = useSearchParams()
   const [targets, setTargets] = useState<Target[]>([])
-  const [runs, setRuns] = useState<Campaign[]>([])
   const [targetId, setTargetId] = useState('')
   const [intensity, setIntensity] = useState<Intensity>('hunt')
   const [duration, setDuration] = useState<DurationKey>('standard')
@@ -57,13 +41,10 @@ function ResearchAgentPage() {
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [showAllRuns, setShowAllRuns] = useState(false)
 
   const profile = PROFILES[intensity]
   const availableFamilies = familiesForIntensity(intensity)
   const activeTarget = useMemo(() => targets.find((t) => t.id === targetId), [targetId, targets])
-  const attentionRuns = useMemo(() => runs.filter((run) => ['active', 'paused'].includes(String(run.status))), [runs])
-  const historyRuns = useMemo(() => runs.filter((run) => !['active', 'paused'].includes(String(run.status))), [runs])
 
   // Backend deep-links land here as ?episode_id=… — resolve to the run it belongs to.
   useEffect(() => {
@@ -73,17 +54,6 @@ function ResearchAgentPage() {
       .then((detail) => router.replace(`/settings/research-agent/runs/${detail.episode.campaign_id || episodeId}`))
       .catch(() => undefined)
   }, [searchParams, router])
-
-  const loadRuns = useCallback(async () => {
-    const data = await getCampaigns({ limit: 100 }).catch(() => ({ campaigns: [] as Campaign[], count: 0, execution_enabled: false }))
-    const researchRuns = (data.campaigns || []).filter((c) => c.campaign_type === 'autonomous_research')
-    const normalized = await Promise.all(researchRuns.map(async (run) => {
-      if (run.status !== 'paused') return run
-      const detail = await getCampaign(run.id).catch(() => null)
-      return detail?.research_yield?.stop_recommended ? { ...run, status: 'completed' } : run
-    }))
-    setRuns(normalized)
-  }, [])
 
   useEffect(() => {
     let cancelled = false
@@ -101,9 +71,8 @@ function ResearchAgentPage() {
       })
       .catch((err) => { if (!cancelled) setError(err instanceof Error ? err.message : 'Failed to load') })
       .finally(() => { if (!cancelled) setLoading(false) })
-    loadRuns()
     return () => { cancelled = true }
-  }, [loadRuns, searchParams])
+  }, [searchParams])
 
   const gated = profile.mode === 'gated'
   const canStart = Boolean(targetId)
@@ -150,12 +119,10 @@ function ResearchAgentPage() {
           <h1 className="mt-1 text-2xl font-bold tracking-tight text-white">Turn the hunter loose on a target</h1>
           <p className="mt-2 max-w-2xl text-sm leading-6 text-gray-400">Operator runs vetted, menu-driven actions and can prove findings all the way to verified. For free-form probing that composes its own requests and surfaces new leads, use <Link href="/settings/research-agent/explorer" className="text-blue-300 underline-offset-2 hover:underline">Explorer</Link>.</p>
         </div>
-        <nav className="flex rounded-lg border border-gray-800 bg-gray-950 p-1 text-sm">
-          <span className="rounded-md bg-gray-800 px-3 py-1.5 text-white">Operator</span>
-          <Link href="/settings/research-agent/explorer" className="px-3 py-1.5 text-gray-400 hover:text-white">Explorer</Link>
-          <Link href="/settings/research-agent/leads" className="px-3 py-1.5 text-gray-400 hover:text-white">Leads</Link>
-          <Link href="/settings/research-agent/experiment" className="px-3 py-1.5 text-gray-400 hover:text-white">Plan a test</Link>
-        </nav>
+        <div className="flex flex-col items-start gap-1.5 sm:items-end">
+          <InvestigatorTabs />
+          <EngineHint />
+        </div>
       </header>
 
       {error ? <div className="mt-4"><ErrorState message={error} /></div> : null}
@@ -331,28 +298,11 @@ function ResearchAgentPage() {
         </div>
       </Card>
 
-      {/* Runs */}
+      {/* Unified run feed */}
       <section className="mt-8">
-        <div className="flex items-center justify-between">
-          <h2 className="text-sm font-semibold text-gray-300">Runs</h2>
-          <button onClick={() => loadRuns()} className="text-xs text-gray-500 hover:text-gray-300">Refresh</button>
-        </div>
-        {!runs.length ? (
-          <div className="mt-3"><EmptyState message="No hunts yet" hint="Start one above — it'll show here with live status." /></div>
-        ) : (
-          <div className="mt-3 grid gap-5">
-            {attentionRuns.length ? <RunGroup title="Needs attention or active" runs={attentionRuns} /> : null}
-            {historyRuns.length ? (
-              <div>
-                <div className="mb-2 flex items-center justify-between">
-                  <h3 className="text-xs font-semibold uppercase tracking-wider text-gray-500">Recent history</h3>
-                  {historyRuns.length > 8 ? <button type="button" onClick={() => setShowAllRuns((value) => !value)} className="text-xs text-blue-300 hover:text-blue-200">{showAllRuns ? 'Show recent only' : `Show all ${historyRuns.length}`}</button> : null}
-                </div>
-                <RunGroup runs={showAllRuns ? historyRuns : historyRuns.slice(0, 8)} />
-              </div>
-            ) : null}
-          </div>
-        )}
+        <h2 className="text-sm font-semibold text-gray-300">Recent hunts</h2>
+        <p className="mt-1 text-xs text-gray-500">Operator campaigns and Explorer sessions, together in start-time order.</p>
+        <RecentHunts />
       </section>
     </div>
   )
@@ -366,42 +316,6 @@ function familyLabel(value: string): string {
     access_control: 'Access control', field_constraint: 'Restricted fields',
   }
   return labels[value] || value.replace(/_/g, ' ')
-}
-
-function RunGroup({ title, runs }: { title?: string; runs: Campaign[] }) {
-  return (
-    <div>
-      {title ? <h3 className="mb-2 text-xs font-semibold uppercase tracking-wider text-gray-500">{title}</h3> : null}
-      <div className="grid gap-2">
-        {runs.map((run) => {
-          const found = findingCount(run)
-          const prog = episodeProgress(run)
-          const state = runState(run)
-          const terminal = ['completed', 'cancelled', 'failed'].includes(state)
-          const url = String((run.target_scope?.url as string) || '')
-          return (
-            <Link key={run.id} href={`/settings/research-agent/runs/${run.id}`} className="flex flex-col gap-3 rounded-lg border border-gray-800 bg-gray-950/40 p-3.5 hover:border-gray-700 sm:flex-row sm:items-center">
-              <RunStatusBadge state={state} />
-              <div className="min-w-0 flex-1">
-                <div className="truncate text-sm font-medium text-gray-200">{hostFromUrl(url) || run.name || 'Operator run'}</div>
-                <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-gray-500">
-                  <span>{intensityOf(run)}</span>
-                  {prog.max ? <><span>·</span><span className="tabular-nums">episode {prog.started}/{prog.max}</span></> : null}
-                  <span>·</span><span>started {relativeTime(run.created_at)}</span>
-                </div>
-              </div>
-              {found > 0 ? (
-                <span className="flex items-center gap-1.5 rounded-full bg-emerald-500/15 px-2.5 py-1 text-xs font-medium text-emerald-300">
-                  <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />{found} verified in linked work
-                </span>
-              ) : <span className="text-xs text-gray-600">{terminal ? 'No verified findings' : 'No verified findings yet'}</span>}
-              <ArrowRight className="hidden h-4 w-4 flex-none text-gray-600 sm:block" />
-            </Link>
-          )
-        })}
-      </div>
-    </div>
-  )
 }
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {

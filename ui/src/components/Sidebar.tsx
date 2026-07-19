@@ -132,12 +132,11 @@ function NavContent({ pathname }: { pathname: string }) {
       return pathname === '/'
     }
     if (href === '/settings/research-agent') {
-      // Keep the hub highlighted on its own run-detail and experiment pages
-      // (which have no nav entry of their own), but not on /leads.
+      // Keep Operator highlighted on its run-detail pages. The advanced
+      // experiment builder is supporting tooling, so no engine is selected.
       return (
         pathname === href ||
-        pathname.startsWith('/settings/research-agent/runs') ||
-        pathname.startsWith('/settings/research-agent/experiment')
+        pathname.startsWith('/settings/research-agent/runs')
       )
     }
     return pathname.startsWith(href)

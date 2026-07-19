@@ -24,6 +24,7 @@ import {
   LiveActivity, PROFILES, RunStatusBadge, activeEpisode, findingCount, hostFromUrl, runState,
   type Intensity,
 } from '@/components/hunt'
+import { InvestigatorTabs } from '@/components/hunt/InvestigatorTabs'
 
 function metaField<T>(campaign: Campaign | null, key: string): T | undefined {
   const meta = (campaign?.metadata_json?.autonomous_research ?? {}) as Record<string, unknown>
@@ -237,9 +238,12 @@ export default function RunDetailPage() {
 
   return (
     <div>
-      <Link href="/settings/research-agent" className="inline-flex items-center gap-1.5 text-sm text-gray-400 hover:text-white">
-        <ArrowLeft className="h-4 w-4" />All runs
-      </Link>
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <Link href="/settings/research-agent" className="inline-flex items-center gap-1.5 text-sm text-gray-400 hover:text-white">
+          <ArrowLeft className="h-4 w-4" />All hunts
+        </Link>
+        <InvestigatorTabs />
+      </div>
 
       <header className="mt-3 flex flex-col gap-4 border-b border-gray-800 pb-5 sm:flex-row sm:items-start sm:justify-between">
         <div className="min-w-0">

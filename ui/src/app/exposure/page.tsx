@@ -296,6 +296,8 @@ function PostureSummary({
     // Validation leads with the rare, actionable signal (assets with *proven*
     // risk) rather than the ~98%-noisy "needs verification" inverse.
     { label: 'Proven risk', value: metrics?.verified_assets ?? 0, tone: 'text-red-300', posture: 'verified' },
+    { label: 'Verified', value: metrics?.investigator_verified_assets ?? 0, tone: 'text-emerald-300', posture: 'investigator_verified' },
+    { label: 'Suspected', value: metrics?.investigator_suspected_assets ?? 0, tone: 'text-amber-300', posture: 'investigator_suspected' },
     // The high-impact slice of "needs verification" (unreviewed findings on an
     // asset that also has critical/high risk) — the raw inverse is ~all assets.
     { label: 'Unverified high', value: metrics?.unverified_high_assets ?? 0, tone: 'text-orange-300', posture: 'unverified_high' },

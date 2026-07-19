@@ -1,6 +1,6 @@
 'use client'
 
-import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Suspense, useEffect, useMemo, useRef, useState } from 'react'
 import Link from 'next/link'
 import { useSearchParams } from 'next/navigation'
 import { CircleStop, Compass, Rocket, ShieldCheck } from 'lucide-react'
@@ -10,19 +10,19 @@ import {
   getAgentHuntSession,
   getAgentTwoTierFindings,
   getTargets,
-  listAgentHuntRuns,
   replyAgentHuntSession,
   startAgentHuntSession,
   verifySuspectedAgentFinding,
-  type AgentHuntRunSummary,
   type AgentHuntSession,
   type AgentHuntStatus,
   type AgentSuspectedFinding,
   type AgentTwoTierFindings,
   type Target,
 } from '@/lib/api'
-import { Button, Card, EmptyState, ErrorState, Field, Input, SeverityBadge, Select, Skeleton, Textarea, useToast } from '@/components/ui'
-import { RunStatusBadge, hostFromUrl, relativeTime, targetLabel, type RunState } from '@/components/hunt'
+import { Button, Card, ConfirmDialog, EmptyState, ErrorState, Field, Input, SeverityBadge, Select, Skeleton, Textarea, useToast } from '@/components/ui'
+import { RunStatusBadge, hostFromUrl, targetLabel, type RunState } from '@/components/hunt'
+import { EngineHint, InvestigatorTabs } from '@/components/hunt/InvestigatorTabs'
+import { RecentHunts } from '@/components/hunt/RecentHunts'
 import { isWebTarget } from '@/lib/targets'
 
 const DEFAULT_OBJECTIVE =
@@ -46,7 +46,6 @@ function ExplorerPage() {
   const [objective, setObjective] = useState(DEFAULT_OBJECTIVE)
   const [maxIterations, setMaxIterations] = useState('12')
   const [tokenBudget, setTokenBudget] = useState('6000')
-  const [runs, setRuns] = useState<AgentHuntRunSummary[]>([])
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null)
   const [session, setSession] = useState<AgentHuntSession | null>(null)
   const [findings, setFindings] = useState<AgentTwoTierFindings | null>(null)
@@ -54,17 +53,14 @@ function ExplorerPage() {
   const [starting, setStarting] = useState(false)
   const [cancelling, setCancelling] = useState(false)
   const [verifyingId, setVerifyingId] = useState<string | null>(null)
+  const [pendingVerify, setPendingVerify] = useState<AgentSuspectedFinding | null>(null)
   const [error, setError] = useState<string | null>(null)
 
   const sessionRef = useRef<AgentHuntSession | null>(null)
   sessionRef.current = session
   const findingsTargetId = session?.target_id || targetId
   const activeTarget = useMemo(() => targets.find((t) => t.id === findingsTargetId), [targets, findingsTargetId])
-
-  const loadRuns = useCallback(async () => {
-    const data = await listAgentHuntRuns({ limit: 50 }).catch(() => ({ runs: [] as AgentHuntRunSummary[], count: 0 }))
-    setRuns(data.runs || [])
-  }, [])
+  const activeHost = activeTarget ? hostFromUrl(activeTarget.url) : ''
 
   useEffect(() => {
     let cancelled = false
@@ -79,11 +75,10 @@ function ExplorerPage() {
       })
       .catch((err) => { if (!cancelled) setError(err instanceof Error ? err.message : 'Failed to load targets') })
       .finally(() => { if (!cancelled) setLoading(false) })
-    loadRuns()
     const requestedRun = searchParams.get('run')?.trim()
     if (requestedRun) setSelectedRunId(requestedRun)
     return () => { cancelled = true }
-  }, [loadRuns, searchParams])
+  }, [searchParams])
 
   // Poll the selected session while it is non-terminal.
   useEffect(() => {
@@ -128,7 +123,6 @@ function ExplorerPage() {
       setSession(started)
       setSelectedRunId(started.run_id)
       toast.success('Explorer hunt started — drive it from your coding agent')
-      loadRuns()
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Could not start the hunt'
       setError(message)
@@ -144,7 +138,6 @@ function ExplorerPage() {
     try {
       setSession(await cancelAgentHuntSession(selectedRunId))
       toast.success('Explorer hunt cancelled')
-      loadRuns()
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Could not cancel the hunt')
     } finally {
@@ -152,8 +145,9 @@ function ExplorerPage() {
     }
   }
 
-  const verifyFinding = async (finding: AgentSuspectedFinding) => {
-    if (verifyingId || !activeTarget) return
+  // Runs only after the operator confirms the approval grant (see ConfirmDialog).
+  const runVerify = async (finding: AgentSuspectedFinding) => {
+    if (!activeTarget) return
     setVerifyingId(finding.id)
     try {
       const receiptId = await createTargetPolicyApproval(activeTarget.id, activeTarget.url, 30, 'credential')
@@ -180,14 +174,13 @@ function ExplorerPage() {
           <div className="flex items-center gap-2 text-sm text-blue-300"><Compass className="h-4 w-4" />AI Investigator · Explorer</div>
           <h1 className="mt-1 text-2xl font-bold tracking-tight text-white">Free-form hunt that composes its own probes</h1>
           <p className="mt-2 max-w-2xl text-sm leading-6 text-gray-400">
-            Explorer is a read-only ReAct loop. It surfaces <span className="text-amber-300">suspected</span> leads backed by real tool-output evidence; the deterministic proof moat promotes them to <span className="text-emerald-300">verified</span>. It runs one planner turn at a time — start it here, then drive it from your coding agent. For vetted, menu-driven actions use <Link href="/settings/research-agent" className="text-blue-300 underline-offset-2 hover:underline">Operator</Link>.
+            A read-only ReAct loop that surfaces <span className="text-amber-300">suspected</span> leads backed by real tool-output evidence; the deterministic proof moat promotes them to <span className="text-emerald-300">verified</span>. It runs one planner turn at a time — start it here, then drive it from your coding agent.
           </p>
         </div>
-        <nav className="flex rounded-lg border border-gray-800 bg-gray-950 p-1 text-sm">
-          <Link href="/settings/research-agent" className="px-3 py-1.5 text-gray-400 hover:text-white">Operator</Link>
-          <span className="rounded-md bg-gray-800 px-3 py-1.5 text-white">Explorer</span>
-          <Link href="/settings/research-agent/leads" className="px-3 py-1.5 text-gray-400 hover:text-white">Leads</Link>
-        </nav>
+        <div className="flex flex-col items-start gap-1.5 sm:items-end">
+          <InvestigatorTabs />
+          <EngineHint />
+        </div>
       </header>
 
       {error ? <div className="mt-4"><ErrorState message={error} /></div> : null}
@@ -216,7 +209,10 @@ function ExplorerPage() {
               </Field>
             </div>
             <div className="flex items-center justify-between gap-3 border-t border-gray-800 pt-4">
-              <p className="text-xs text-gray-500">Read-only — no writes or active scanners. Findings land in the suspected tier until the moat verifies them.</p>
+              <p className="text-xs text-gray-500">
+                Read-only — no writes or active scanners. Findings land in the suspected tier until the moat verifies them.
+                For gated, verify-capable work, use <Link href="/settings/research-agent" className="text-blue-300 hover:text-blue-200">Operator</Link>.
+              </p>
               <Button onClick={startHunt} loading={starting} disabled={!targetId} className="min-w-36">
                 <Rocket className="h-4 w-4" />Start hunt
               </Button>
@@ -226,64 +222,39 @@ function ExplorerPage() {
 
         {/* Monitor */}
         {selectedRunId ? (
-          <SessionMonitor
-            session={session}
-            cancelling={cancelling}
-            onCancel={cancelHunt}
-            onReplied={(next) => { setSession(next); loadRuns() }}
-          />
+          <SessionMonitor session={session} cancelling={cancelling} onCancel={cancelHunt} onReplied={setSession} />
         ) : (
           <Card className="flex items-center justify-center p-5">
-            <EmptyState message="No hunt selected" hint="Start one, or pick a run from the history below to watch it live." />
+            <EmptyState message="No hunt selected" hint="Start one, or pick a run from the feed below to watch it live." />
           </Card>
         )}
       </div>
 
       {/* Two-tier findings */}
       {findingsTargetId ? (
-        <TwoTierFindings
-          findings={findings}
-          verifyingId={verifyingId}
-          onVerify={verifyFinding}
-          targetHost={activeTarget ? hostFromUrl(activeTarget.url) : ''}
-        />
+        <TwoTierFindings findings={findings} verifyingId={verifyingId} onVerify={setPendingVerify} targetHost={activeHost} />
       ) : null}
 
-      {/* Run history */}
+      {/* Unified feed across both engines */}
       <section className="mt-8">
-        <div className="flex items-center justify-between">
-          <h2 className="text-sm font-semibold text-gray-300">Explorer runs</h2>
-          <button onClick={() => loadRuns()} className="text-xs text-gray-500 hover:text-gray-300">Refresh</button>
-        </div>
-        {!runs.length ? (
-          <div className="mt-3"><EmptyState message="No Explorer hunts yet" hint="Start one above — it'll show here with live status." /></div>
-        ) : (
-          <div className="mt-3 grid gap-2">
-            {runs.map((run) => {
-              const selected = run.id === selectedRunId
-              const host = hostFromUrl(String(targets.find((t) => t.id === run.target_id)?.url || ''))
-              return (
-                <button
-                  key={run.id}
-                  type="button"
-                  onClick={() => { setSelectedRunId(run.id); setSession(null) }}
-                  className={`flex w-full flex-col gap-3 rounded-lg border p-3.5 text-left transition-colors sm:flex-row sm:items-center ${selected ? 'border-blue-500/50 bg-blue-500/[0.06]' : 'border-gray-800 bg-gray-950/40 hover:border-gray-700'}`}
-                >
-                  <RunStatusBadge state={AGENT_RUN_STATE[run.status] ?? 'idle'} />
-                  <div className="min-w-0 flex-1">
-                    <div className="truncate text-sm font-medium text-gray-200">{host || run.objective || 'Explorer run'}</div>
-                    <div className="mt-0.5 flex flex-wrap items-center gap-x-2 text-xs text-gray-500">
-                      <span className="tabular-nums">turn {run.iterations ?? '0'}/{run.max_iterations}</span>
-                      <span>·</span><span>started {relativeTime(run.created_at)}</span>
-                      {run.stop_reason ? <><span>·</span><span>{run.stop_reason.replace(/_/g, ' ')}</span></> : null}
-                    </div>
-                  </div>
-                </button>
-              )
-            })}
-          </div>
-        )}
+        <h2 className="text-sm font-semibold text-gray-300">Recent hunts</h2>
+        <RecentHunts />
       </section>
+
+      <ConfirmDialog
+        open={pendingVerify !== null}
+        title="Verify this finding?"
+        message={
+          <div className="space-y-2">
+            <p>This creates a target-scoped, <span className="text-gray-200">credential-tier approval receipt</span>{activeHost ? <> for <span className="font-mono text-gray-200">{activeHost}</span></> : null} and re-runs the deterministic proof moat against the live target.</p>
+            <p className="text-xs text-gray-500">Only proceed if you own the target or have explicit permission to actively test it. Needs execution enabled; supports BOLA, auth-bypass, data-exposure, and mass-assignment.</p>
+          </div>
+        }
+        confirmLabel="Create approval & verify"
+        busy={verifyingId !== null}
+        onCancel={() => setPendingVerify(null)}
+        onConfirm={() => { const finding = pendingVerify; setPendingVerify(null); if (finding) void runVerify(finding) }}
+      />
     </div>
   )
 }
@@ -481,7 +452,7 @@ function TwoTierFindings({
           )}
         </Card>
       </div>
-      <p className="mt-2 text-[11px] text-gray-600">Verify re-runs the deterministic proof moat (needs execution enabled + a credential-tier approval; supports BOLA, auth-bypass, data-exposure, mass-assignment).</p>
+      <p className="mt-2 text-[11px] text-gray-600">Verify creates a credential-tier approval and re-runs the deterministic proof moat (needs execution enabled; supports BOLA, auth-bypass, data-exposure, mass-assignment).</p>
     </section>
   )
 }

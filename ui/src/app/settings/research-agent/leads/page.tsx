@@ -17,6 +17,7 @@ import {
   type ScheduledLead,
 } from '@/lib/api'
 import { Badge, Button, Card, EmptyState, ErrorState, Skeleton, buttonClasses } from '@/components/ui'
+import { InvestigatorTabs } from '@/components/hunt/InvestigatorTabs'
 import { isWebTarget } from '@/lib/targets'
 
 interface TargetLite { id: string; url: string; name?: string | null; discovery_source?: string | null }
@@ -297,11 +298,7 @@ export default function InvestigationWorkspacePage() {
           <h1 className="mt-1 text-3xl font-bold tracking-tight text-white">Leads</h1>
           <p className="mt-2 max-w-2xl text-sm leading-6 text-gray-400">Choose one security lead, review what would prove or disprove it, then open its recommended verification workflow.</p>
         </div>
-        <nav className="flex rounded-lg border border-gray-800 bg-gray-950 p-1 text-sm">
-          <Link href="/settings/research-agent" className="px-3 py-1.5 text-gray-400 hover:text-white">Autonomous Hunt</Link>
-          <span className="rounded-md bg-gray-800 px-3 py-1.5 text-white">Leads</span>
-          <Link href="/settings/research-agent/experiment" className="px-3 py-1.5 text-gray-400 hover:text-white">Plan a test</Link>
-        </nav>
+        <InvestigatorTabs />
       </header>
 
       <Card className="mt-5 border-blue-500/20 bg-blue-500/[0.04] p-4">

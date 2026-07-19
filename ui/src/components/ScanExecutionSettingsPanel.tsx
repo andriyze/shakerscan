@@ -8,7 +8,7 @@ import {
   type AutomationSettings,
   type AutomationSettingsUpdate,
 } from '@/lib/api'
-import { Button, Card, Toggle, useToast } from '@/components/ui'
+import { Button, Card, ToggleField, useToast } from '@/components/ui'
 
 const ASM_PRESETS: Array<{
   label: string
@@ -141,58 +141,46 @@ export default function ScanExecutionSettingsPanel() {
       </div>
 
       <div className="mt-4 grid gap-3 md:grid-cols-2">
-        <div className="rounded-lg border border-gray-800 bg-gray-950/40 p-3">
-          <div className="flex items-start justify-between gap-3">
-            <div>
-              <h3 className="text-sm font-medium text-gray-100">Auto-shard eligible scans</h3>
-              <p className="mt-1 text-xs text-gray-500">{eligibleTypes}; {workerText}</p>
-            </div>
-            <Toggle
-              checked={Boolean(scan?.auto_sharding_enabled)}
-              disabled={loading || saving || !scan}
-              onChange={(next) => save(
-                { auto_sharding_enabled: next },
-                next ? 'Auto-sharding enabled' : 'Auto-sharding disabled'
-              )}
-              label="Auto-shard eligible scans"
-            />
-          </div>
+        <ToggleField
+          label="Auto-shard eligible scans"
+          description={`${eligibleTypes}; ${workerText}`}
+          checked={Boolean(scan?.auto_sharding_enabled)}
+          disabled={loading || saving || !scan}
+          onChange={(next) => save(
+            { auto_sharding_enabled: next },
+            next ? 'Auto-sharding enabled' : 'Auto-sharding disabled'
+          )}
+          className="p-3"
+        >
           {scan && (
-            <div className="mt-3 flex flex-wrap gap-2 text-[11px] text-gray-500">
+            <span className="mt-3 flex flex-wrap gap-2 text-[11px] text-gray-500">
               <span className="rounded border border-gray-800 px-2 py-1">Strategy: {scan.auto_sharding_strategy}</span>
               <span className="rounded border border-gray-800 px-2 py-1">Max shards: {scan.auto_sharding_max_shards}</span>
               <span className="rounded border border-gray-800 px-2 py-1">Min workers: {scan.auto_sharding_min_workers}</span>
-            </div>
+            </span>
           )}
-        </div>
+        </ToggleField>
 
-        <div className="rounded-lg border border-gray-800 bg-gray-950/40 p-3">
-          <div className="flex items-start justify-between gap-3">
-            <div>
-              <h3 className="text-sm font-medium text-gray-100">Continuous ASM for new web targets</h3>
-              <p className="mt-1 text-xs text-gray-500">
-                New model-intake targets stay excluded. Existing targets keep their own policy.
-              </p>
-            </div>
-            <Toggle
-              checked={Boolean(asm?.enabled_for_new_web_targets)}
-              disabled={loading || saving || !asm}
-              onChange={(next) => save(
-                { default_asm_enabled: next },
-                next ? 'Default Continuous ASM enabled' : 'Default Continuous ASM disabled'
-              )}
-              label="Continuous ASM for new web targets"
-            />
-          </div>
+        <ToggleField
+          label="Continuous ASM for new web targets"
+          description="New model-intake targets stay excluded. Existing targets keep their own policy."
+          checked={Boolean(asm?.enabled_for_new_web_targets)}
+          disabled={loading || saving || !asm}
+          onChange={(next) => save(
+            { default_asm_enabled: next },
+            next ? 'Default Continuous ASM enabled' : 'Default Continuous ASM disabled'
+          )}
+          className="p-3"
+        >
           {asmConfig && (
-            <div className="mt-3 flex flex-wrap gap-2 text-[11px] text-gray-500">
+            <span className="mt-3 flex flex-wrap gap-2 text-[11px] text-gray-500">
               <span className="rounded border border-gray-800 px-2 py-1">{countLabel(asmConfig.batch_size, 'endpoint')} per batch</span>
               <span className="rounded border border-gray-800 px-2 py-1">Retest after {countLabel(asmConfig.stale_days, 'day')}</span>
               <span className="rounded border border-gray-800 px-2 py-1">{countLabel(asmConfig.daily_endpoint_cap, 'endpoint')}/day cap</span>
               <span className="rounded border border-gray-800 px-2 py-1">{countLabel(asmConfig.max_requests_per_hour_per_domain, 'request')}/hour/domain</span>
-            </div>
+            </span>
           )}
-        </div>
+        </ToggleField>
       </div>
 
       <details className="group mt-4 rounded-lg border border-gray-800 bg-gray-950/30">
@@ -259,30 +247,23 @@ export default function ScanExecutionSettingsPanel() {
             </div>
           </div>
 
-          <div className="rounded-lg border border-gray-800 bg-gray-950/40 p-3">
-            <div className="flex items-start justify-between gap-3">
-              <div>
-                <h3 className="text-sm font-medium text-gray-100">Require approval receipts</h3>
-                <p className="mt-1 text-xs text-gray-500">
-                  Enforce scope and approval receipts before queueing scans, ASM actions, AI Gate runs, Model Intake scans, or retests.
-                </p>
-              </div>
-              <Toggle
-                checked={Boolean(safety?.approval_receipts_required_for_state_changing_actions)}
-                disabled={loading || saving || !safety}
-                onChange={(next) => save(
-                  { approval_receipts_required_for_state_changing_actions: next },
-                  next ? 'Approval receipt requirement enabled' : 'Approval receipt requirement disabled'
-                )}
-                label="Require approval receipts"
-              />
-            </div>
-            <div className="mt-3 flex flex-wrap gap-2 text-[11px] text-gray-500">
+          <ToggleField
+            label="Require approval receipts"
+            description="Enforce scope and approval receipts before queueing scans, ASM actions, AI Gate runs, Model Intake scans, or retests."
+            checked={Boolean(safety?.approval_receipts_required_for_state_changing_actions)}
+            disabled={loading || saving || !safety}
+            onChange={(next) => save(
+              { approval_receipts_required_for_state_changing_actions: next },
+              next ? 'Approval receipt requirement enabled' : 'Approval receipt requirement disabled'
+            )}
+            className="p-3"
+          >
+            <span className="mt-3 flex flex-wrap gap-2 text-[11px] text-gray-500">
               <span className="rounded border border-gray-800 px-2 py-1">Scope preview required</span>
               <span className="rounded border border-gray-800 px-2 py-1">Approval receipt required</span>
               <span className="rounded border border-gray-800 px-2 py-1">Legacy mode: {safety?.approval_receipts_required_for_state_changing_actions ? 'blocked' : 'allowed'}</span>
-            </div>
-          </div>
+            </span>
+          </ToggleField>
         </div>
       </details>
 

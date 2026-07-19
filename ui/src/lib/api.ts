@@ -1473,6 +1473,8 @@ export interface Target {
   last_scanned_at?: string
   total_scans: number
   active_findings_count: number
+  investigator_verified_count?: number
+  investigator_suspected_count?: number
   created_at: string
   asm_coverage?: AsmCoverageRollup | null
 }
@@ -2155,6 +2157,8 @@ export interface ExposureAsset {
   active_high: number
   active_verified?: number
   active_needs_verification?: number
+  investigator_verified_count?: number
+  investigator_suspected_count?: number
   total_scans?: number
   last_scanned_at?: string | null
   latest_scan_id?: string | null
@@ -2197,6 +2201,8 @@ export interface ExposureAssetMetrics {
   fresh_scans?: number
   verified_assets?: number
   unverified_high_assets?: number
+  investigator_verified_assets?: number
+  investigator_suspected_assets?: number
   unowned_assets?: number
   needs_action?: number
   p1_count?: number

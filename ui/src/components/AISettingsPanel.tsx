@@ -825,11 +825,9 @@ function ToggleRow({
       className="flex w-full items-start justify-between gap-3 rounded border border-gray-800 bg-gray-900/50 px-2.5 py-2 text-left transition-colors hover:border-gray-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2 focus-visible:ring-offset-gray-950"
     >
       <span className="min-w-0 space-y-0.5">
-        <span className="text-xs text-gray-200 inline-flex items-center gap-1">
-          {label}
-          {hint && <HelpHint text={hint} />}
-        </span>
+        <span className="block text-xs text-gray-200">{label}</span>
         <span className="block text-[11px] text-gray-500">{description}</span>
+        {hint && <span className="block text-[11px] text-gray-600">{hint}</span>}
       </span>
       <ToggleVisual checked={checked} />
     </button>

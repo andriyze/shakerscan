@@ -8,6 +8,7 @@ import {
 } from 'lucide-react'
 import { executeArsenalCommand, getTargets, type ArsenalExecuteResult } from '@/lib/api'
 import { Badge, Button, Card, ErrorState } from '@/components/ui'
+import { InvestigatorTabs } from '@/components/hunt/InvestigatorTabs'
 import { isWebTarget } from '@/lib/targets'
 
 interface TargetLite { id: string; url: string; name?: string | null; discovery_source?: string | null }
@@ -209,15 +210,14 @@ export default function ExperimentBuilderPage() {
     <div>
       <header className="flex flex-col gap-4 border-b border-gray-800 pb-5 sm:flex-row sm:items-end sm:justify-between">
         <div>
-          <nav className="mb-2 inline-flex rounded-lg border border-gray-800 bg-gray-950 p-1 text-sm">
-            <Link href="/settings/research-agent" className="px-3 py-1.5 text-gray-400 hover:text-white">Autonomous Hunt</Link>
-            <Link href="/settings/research-agent/leads" className="px-3 py-1.5 text-gray-400 hover:text-white">Leads</Link>
-            <span className="rounded-md bg-gray-800 px-3 py-1.5 text-white">Plan a test</span>
-          </nav>
-          <h1 className="mt-2 text-3xl font-bold tracking-tight text-white">Prepare a bounded test plan</h1>
+          <div className="text-xs font-semibold uppercase tracking-wider text-gray-500">Advanced tool</div>
+          <h1 className="mt-1 text-3xl font-bold tracking-tight text-white">Prepare a bounded test plan</h1>
           <p className="mt-2 max-w-2xl text-sm leading-6 text-gray-400">Define a baseline, change one thing, and compare the result. Validation checks the plan and records intent—it does not send requests.</p>
         </div>
-        <div className="flex items-center gap-2 rounded-lg border border-emerald-500/20 bg-emerald-500/[0.06] px-3 py-2 text-xs text-emerald-200"><ShieldCheck className="h-4 w-4" />Same-origin · bounded · approval-gated</div>
+        <div className="flex flex-col items-start gap-2 sm:items-end">
+          <InvestigatorTabs />
+          <div className="flex items-center gap-2 rounded-lg border border-emerald-500/20 bg-emerald-500/[0.06] px-3 py-2 text-xs text-emerald-200"><ShieldCheck className="h-4 w-4" />Same-origin · bounded · approval-gated</div>
+        </div>
       </header>
 
       <div className="mt-5 grid gap-5 xl:grid-cols-[minmax(0,1fr)_360px]">
@@ -283,7 +283,7 @@ export default function ExperimentBuilderPage() {
             <p className="mt-2 text-sm leading-6 text-gray-400">No requests were sent. This screen validates and records the plan only; an authorized agent or Autonomous Hunt must initiate execution.</p>
             {result.execution_blocked_reason ? <div className="mt-3 rounded-lg bg-gray-950/60 p-3 text-xs text-gray-400"><span className="font-medium text-amber-300">Execution gate:</span> {result.execution_blocked_reason}</div> : null}
             <div className="mt-4 flex flex-wrap gap-3">
-              <Link href={`/settings/research-agent?target=${encodeURIComponent(targetId)}`} className="inline-flex items-center gap-1 text-sm text-blue-300 hover:text-blue-200">Use target in Autonomous Hunt <ArrowRight className="h-4 w-4" /></Link>
+              <Link href={`/settings/research-agent?target=${encodeURIComponent(targetId)}`} className="inline-flex items-center gap-1 text-sm text-blue-300 hover:text-blue-200">Use target in Operator <ArrowRight className="h-4 w-4" /></Link>
               <Link href="/settings/research-agent/leads" className="inline-flex items-center gap-1 text-sm text-gray-400 hover:text-gray-200">Return to leads</Link>
             </div>
           </Card> : null}

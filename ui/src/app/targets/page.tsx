@@ -432,8 +432,9 @@ function TargetsContent() {
       <div className="flex gap-4 flex-wrap">
         {/* Discovery Source Filter */}
         <div className="flex items-center gap-3">
-          <label className="text-sm text-gray-400">Source:</label>
+          <label htmlFor="targets-source-filter" className="text-sm text-gray-400">Source:</label>
           <Select
+            id="targets-source-filter"
             fullWidth={false}
             value={discoverySourceFilter}
             onChange={(e) => setFilter('discovery_source', e.target.value || undefined)}
@@ -447,8 +448,9 @@ function TargetsContent() {
 
         {/* Grade Filter */}
         <div className="flex items-center gap-3">
-          <label className="text-sm text-gray-400">Grade:</label>
+          <label htmlFor="targets-grade-filter" className="text-sm text-gray-400">Grade:</label>
           <Select
+            id="targets-grade-filter"
             fullWidth={false}
             value={gradeFilter}
             onChange={(e) => setFilter('grade', e.target.value || undefined)}
@@ -462,8 +464,9 @@ function TargetsContent() {
 
         {/* Has Findings Filter */}
         <div className="flex items-center gap-3">
-          <label className="text-sm text-gray-400">Findings:</label>
+          <label htmlFor="targets-findings-filter" className="text-sm text-gray-400">Findings:</label>
           <Select
+            id="targets-findings-filter"
             fullWidth={false}
             value={hasFindingsFilter}
             onChange={(e) => setFilter('has_findings', e.target.value || undefined)}
@@ -476,8 +479,9 @@ function TargetsContent() {
 
         {/* Sort By */}
         <div className="flex items-center gap-3">
-          <label className="text-sm text-gray-400">Sort:</label>
+          <label htmlFor="targets-sort-filter" className="text-sm text-gray-400">Sort:</label>
           <Select
+            id="targets-sort-filter"
             fullWidth={false}
             value={sortBy}
             onChange={(e) => setFilter('sort_by', e.target.value || undefined)}
@@ -606,6 +610,26 @@ function TargetsContent() {
                           className="text-yellow-500 hover:text-yellow-400 transition-colors"
                         >
                           {domain.root_target.active_findings_count} findings
+                        </Link>
+                      )}
+                      {(domain.root_target.investigator_verified_count || 0) > 0 && (
+                        <Link
+                          href={`/settings/research-agent/explorer?target=${domain.root_target.id}`}
+                          onClick={(e) => e.stopPropagation()}
+                          className="text-emerald-400 transition-colors hover:text-emerald-300"
+                          title="Deterministically verified investigator findings"
+                        >
+                          {domain.root_target.investigator_verified_count} verified
+                        </Link>
+                      )}
+                      {(domain.root_target.investigator_suspected_count || 0) > 0 && (
+                        <Link
+                          href={`/settings/research-agent/explorer?target=${domain.root_target.id}`}
+                          onClick={(e) => e.stopPropagation()}
+                          className="text-amber-400 transition-colors hover:text-amber-300"
+                          title="Evidence-backed investigator leads awaiting deterministic proof"
+                        >
+                          {domain.root_target.investigator_suspected_count} suspected
                         </Link>
                       )}
                       {domain.root_target.asm_coverage && (
@@ -812,6 +836,24 @@ function TargetsContent() {
                             className="text-yellow-500 hover:text-yellow-400 transition-colors"
                           >
                             {subdomain.active_findings_count}
+                          </Link>
+                        )}
+                        {(subdomain.investigator_verified_count || 0) > 0 && (
+                          <Link
+                            href={`/settings/research-agent/explorer?target=${subdomain.id}`}
+                            className="text-emerald-400 transition-colors hover:text-emerald-300"
+                            title="Deterministically verified investigator findings"
+                          >
+                            {subdomain.investigator_verified_count} verified
+                          </Link>
+                        )}
+                        {(subdomain.investigator_suspected_count || 0) > 0 && (
+                          <Link
+                            href={`/settings/research-agent/explorer?target=${subdomain.id}`}
+                            className="text-amber-400 transition-colors hover:text-amber-300"
+                            title="Evidence-backed investigator leads awaiting deterministic proof"
+                          >
+                            {subdomain.investigator_suspected_count} suspected
                           </Link>
                         )}
                         {subdomain.asm_coverage && (
