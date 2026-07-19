@@ -75,7 +75,7 @@ flags, skills, agents, adapters, modules, and durable tables) plus architecture/
 - **Exceptions (`/exceptions`)**: exception queue, owner/approver/control repair, expiry visibility, and lifecycle sweep.
 - **Command Arsenal (`/settings/arsenal`)**: command contracts, plans, scope/approval receipts, action ledger, hypotheses, refuters, tools, local agents, context packs, and decision traces.
 - **AI Operations Router (`/settings/ai-ops-router`)**: preview natural-language operations as bounded API plans with safety, missing-input, blast-radius, and confirmation details before optional execution.
-- **Autonomous Hunt (`/settings/research-agent`)**: create target-bound analysis or gated active episodes and optionally run them with durable server-side autopilot. Subject-bound launch profiles cover target hunts, exact-finding verification, and ASM gap closure. The controller leases one episode at a time, waits for linked scans and finding retests, rejects duplicate no-progress actions, reserves a final conclusion turn, meters failed provider attempts, and continues if the browser closes. Inspect the actual model, immutable observations, linked work, finding outcome, request-unit budgets, decisions, errors, and events; pause/resume or cancel the episode plus linked work. The lead backlog remains at `/settings/research-agent/leads`.
+- **Autonomous Hunt (`/settings/research-agent`)** (the **Operator** engine's UI front door; the **Explorer** ReAct engine has no UI yet): create target-bound analysis or gated active episodes and optionally run them with durable server-side autopilot. Subject-bound launch profiles cover target hunts, exact-finding verification, and ASM gap closure. The controller leases one episode at a time, waits for linked scans and finding retests, rejects duplicate no-progress actions, reserves a final conclusion turn, meters failed provider attempts, and continues if the browser closes. Inspect the actual model, immutable observations, linked work, finding outcome, request-unit budgets, decisions, errors, and events; pause/resume or cancel the episode plus linked work. The lead backlog remains at `/settings/research-agent/leads`.
 - **Research Experiments and Runs (`/settings/research-agent/experiment`, `/settings/research-agent/runs/{id}`)**: create bounded HTTP/workflow experiments and inspect durable run state and proof handoff.
 - **Long-running research campaigns**: the Research Agent can wrap bounded episodes in a durable campaign. A campaign shares recent-action memory across episodes, starts a fresh episode after a bounded one concludes, and continues until its time/episode ceiling, operator pause/cancel, missing input, or expired approval. The default UI path needs only a target, authorization confirmation, and optional ceilings.
 - **Research planner choice**: `shakerscan agent codex|claude|opencode` marks the current coding-agent session as the default research brain. On a clean install, launch Deep Hunt with `planner_mode: "agent"` (the campaign API default), drive the returned awaiting-planner episode immediately, and submit one bounded decision at a time from the current observation; no stored LLM/API key is required. Use `planner_mode: "configured_ai"` only when the user explicitly wants unattended server autopilot backed by `/settings/ai`, or `planner_mode: "local_codex"` for separate isolated `codex exec` planner processes. Stop after a decision queues linked scan/retest work; continue the campaign when the user asks again.
@@ -426,10 +426,17 @@ curl -X POST http://localhost:8080/ai/ops/route \
 
 Active or budget-increasing intents return `dry_run: true` unless `execute`, `confirm_execution`, and `confirm_authorized` are true and the server has `AI_OPS_ROUTER_EXECUTE_ENABLED=true`. High-risk BOLA also requires `confirm_high_risk` plus auth context hints.
 
-### Bounded Research Agent
+### Bounded Research Agent (the Operator engine)
 
-Research episodes let the current coding-agent session, a configured AI provider, or an isolated
-host-side Codex process select one registered action at a time from a fresh, redacted target
+ShakerScan has **two autonomous engines**. **Operator** (this section) is the menu-driven engine: each
+turn the AI selects ONE vetted, typed action from a server-offered menu — it is wired into the scan/
+verify pipeline and can reach the **VERIFIED** tier, and it is what the Autonomous Hunt UI launches.
+**Explorer** (the "Keyless autonomous hunt" subsection below) is the free-form ReAct engine: the AI
+composes its own probes to discover net-new **SUSPECTED** bugs. Operator verifies; Explorer discovers;
+they compose (Explorer proposes → the moat promotes).
+
+Operator research episodes let the current coding-agent session, a configured AI provider, or an
+isolated host-side Codex process select one registered action at a time from a fresh, redacted target
 observation. The API remains authoritative for command schemas, target binding, principals, scope,
 approval, risk, budget, execution, and proof.
 
@@ -515,9 +522,10 @@ budgets shown for queued scans/ASM work are conservative reservation units, not 
 outbound HTTP metering. Autopilot waits for linked scans and retests before creating exactly one
 result-bearing observation and choosing another action.
 
-#### Keyless autonomous hunt (session-driven ReAct loop)
+#### Explorer — keyless autonomous hunt (session-driven ReAct loop)
 
-For an unattended, key-free hunt, drive the turn-based ReAct loop directly: the current coding-agent
+This is the **Explorer** engine (contrast the Operator menu engine above). For an unattended, key-free
+hunt, drive the turn-based ReAct loop directly: the current coding-agent
 session is the planner (no AI provider key required). ShakerScan seeds a redacted context pack, then
 suspends at each turn; the session reads the transcript, requests tools with a fenced
 ` ```json {"tool_calls":[...]} ``` ` block (or ends with a `{"done":true,"findings":[...]}` debrief),

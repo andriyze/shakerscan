@@ -1,6 +1,6 @@
 ---
 name: research-agent
-description: Create and drive bounded adaptive ShakerScan research episodes, keyless session-driven ReAct deep hunts, and Deep Hunt campaigns. Use when asked to investigate an authorized target, run an autonomous/keyless deep hunt, verify one finding, close Continuous ASM gaps, continue an awaiting-planner episode, or run a multi-episode campaign while preserving target scope, budgets, approvals, and deterministic proof gates.
+description: Drive ShakerScan's two autonomous engines — Operator (menu-driven research episodes / Deep Hunt campaigns that can reach the VERIFIED tier) and Explorer (the keyless free-form ReAct hunt that discovers net-new SUSPECTED bugs). Use when asked to investigate an authorized target, run an autonomous/keyless deep hunt, verify one finding, close Continuous ASM gaps, continue an awaiting-planner episode, or run a multi-episode campaign while preserving target scope, budgets, approvals, and deterministic proof gates.
 ---
 
 # Bounded Research Agent
@@ -12,9 +12,24 @@ Deep Hunt to continue across multiple bounded episodes under shared time and epi
 
 ## Keep The Product Terms Straight
 
-- **Autonomous Hunt** is the UI front door under the **AI Investigator** navigation group.
-- A **research episode** is one bounded observation/decision loop.
-- A **Deep Hunt run/research campaign** chains bounded episodes under shared ceilings.
+**Two autonomous engines — same goal, different action model. Know which one you are driving:**
+
+- **Operator** — the **menu-driven** engine. Each turn the AI picks ONE vetted, typed action from the
+  server-offered menu (`proposable_commands`: focused scans, finding retests, workflow experiments,
+  ASM-improve). Server-orchestrated and wired into the verify pipeline, so it can reach the
+  **VERIFIED** tier. Everything under "research episode / Deep Hunt campaign / `/research/*`" below is
+  Operator; it is what the **Autonomous Hunt** UI (`POST /research/campaigns/launch`) launches.
+- **Explorer** — the **free-form ReAct** engine (`/agent/hunt/*`; see "Explorer" section below). Each
+  turn the AI composes its OWN probes (raw `http_request`, `diff`, `query_kb`) — open-ended discovery
+  of net-new bugs. Produces **SUSPECTED** findings that the same `family_proof` moat can later promote.
+  Keyless, session-driven, API-only today (no UI surface).
+- **Operator verifies; Explorer discovers.** They compose: Explorer proposes SUSPECTED → the moat
+  promotes to VERIFIED. Choose Operator for coverage/verification, Explorer for novel-bug hunting.
+
+Supporting terms:
+- **Autonomous Hunt** is the UI front door (Operator) under the **AI Investigator** navigation group.
+- A **research episode** is one bounded Operator observation/decision loop.
+- A **Deep Hunt run/research campaign** chains bounded Operator episodes under shared ceilings.
 - `/campaigns` is a separate read-only mission-action ledger. Do not send users there to start or
   control a Deep Hunt; use `/settings/research-agent` and its run pages.
 
@@ -93,9 +108,9 @@ curl -X POST "$API_BASE/research/episodes/EPISODE_UUID/plan-step" \
   -d '{"execute":true,"timeout_seconds":90,"max_tokens":3000}'
 ```
 
-## Keyless ReAct Deep Hunt (session-driven — the no-key autonomous path)
+## Explorer — Keyless ReAct Deep Hunt (session-driven, the no-key autonomous path)
 
-This is a **separate, newer engine** from the menu-planner episodes above. Instead of selecting one
+This is the **Explorer** engine — separate and newer from the Operator (menu) episodes above. Instead of selecting one
 `proposable` command per turn, the current agent session drives a full ReAct loop: the server seeds a
 redacted context pack, suspends each turn, and the session replies with a fenced
 ` ```json {"tool_calls":[...]} ``` ` block; the server executes the tools and returns the next
