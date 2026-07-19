@@ -123,8 +123,11 @@ JWTs, ~7 days) must be re-minted and rotated:
    (bodies are control-char heavy).
 3. To test access control, replay the same request as different principals and `diff` the refs.
 4. Finish with a debrief turn: `{"done":true,"findings":[...],"abstained":false}`.
-5. Keep calling `/reply` until `status: completed`. Inspect: `GET /agent/hunt/session/{run_id}`;
-   `POST .../cancel`. Two-tier view: `GET /agent/findings/{target_id}`.
+5. Drive only while `status: awaiting_planner` (that is the one state where the server is suspended
+   waiting for a planner reply; `planning` is a transient in-flight turn). STOP on any terminal status —
+   a run ends `completed`, `failed`, or `cancelled`, not only `completed` — and surface `stop_reason`
+   when it is not a clean completion. Do not keep replying to a terminal run. Inspect:
+   `GET /agent/hunt/session/{run_id}`; `POST .../cancel`. Two-tier view: `GET /agent/findings/{target_id}`.
 
 ### The evidence contract (do not get this wrong)
 A debrief finding proves itself ONLY via **`evidence_refs`** — the `resp_N` refs from prior

@@ -536,7 +536,9 @@ self-describes the contract each turn. Three things trip up a first-time driver:
   tool-output evidence for the provenance gate. Inline `evidence`/`details` prose is NOT evidence; a
   prose-only finding fails the gate and is silently dropped (persists nothing). Debrief shape:
   `{"done":true,"findings":[{"title","severity","family","predicate","route","method","cwe","details","evidence_refs":["resp_1","resp_2"],"remediation"}],"abstained":false}`.
-- **"Auto" = the session drives each turn in a loop** (keep calling `/reply` until `status: completed`).
+- **"Auto" = the session drives each turn in a loop** — reply while `status: awaiting_planner` and
+  STOP on any terminal status (a run ends `completed`, `failed`, or `cancelled`, not only `completed`;
+  check `stop_reason`). Do not keep replying to a terminal run.
   There is no fully hands-off keyless mode; unattended server autopilot needs `planner_mode:
   "configured_ai"` with a key in `/settings/ai`, or the `configured_ai` `agent_loop` deep-hunt campaign.
 - **Authenticated targets need principals configured FIRST.** Provision managed principals + credential
