@@ -16,6 +16,15 @@ When the user explicitly asks for Deep Hunt or multi-episode research, launch
 `planner_mode: "agent"` by default. If a readiness scan or linked scan/retest is queued, report its
 ID and stop instead of polling.
 
+When the user asks for an **autonomous / keyless deep hunt** to discover net-new bugs, use the
+session-driven ReAct loop instead of the menu planner: `POST /agent/hunt/{target_id}/session`, then
+drive it one turn at a time via `POST /agent/hunt/session/{run_id}/reply` with a fenced
+` ```json {"tool_calls":[...]} ``` ` block, ending in a `{"done":true,"findings":[...]}` debrief. See
+the `research-agent` skill's "Keyless ReAct Deep Hunt" section for the full contract — in particular,
+debrief findings must cite `evidence_refs` (the `resp_N` refs from `http_request`); prose is not
+evidence and is dropped. For an authenticated target, configure managed principals + credential
+profiles first, or the hunt runs anonymous-only.
+
 Use `/settings/research-agent` and `/settings/research-agent/runs/{id}` for user-facing Hunt links.
 `/campaigns` is the separate read-only mission-action ledger, not the place to launch or control a
 Deep Hunt.

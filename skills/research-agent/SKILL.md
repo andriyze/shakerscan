@@ -1,6 +1,6 @@
 ---
 name: research-agent
-description: Create and drive bounded adaptive ShakerScan research episodes and Deep Hunt campaigns. Use when asked to investigate an authorized target, verify one finding, close Continuous ASM gaps, continue an awaiting-planner episode, or run a multi-episode campaign while preserving target scope, budgets, approvals, and deterministic proof gates.
+description: Create and drive bounded adaptive ShakerScan research episodes, keyless session-driven ReAct deep hunts, and Deep Hunt campaigns. Use when asked to investigate an authorized target, run an autonomous/keyless deep hunt, verify one finding, close Continuous ASM gaps, continue an awaiting-planner episode, or run a multi-episode campaign while preserving target scope, budgets, approvals, and deterministic proof gates.
 ---
 
 # Bounded Research Agent
@@ -91,4 +91,61 @@ curl -X POST "$API_BASE/research/episodes" \
 curl -X POST "$API_BASE/research/episodes/EPISODE_UUID/plan-step" \
   -H 'Content-Type: application/json' \
   -d '{"execute":true,"timeout_seconds":90,"max_tokens":3000}'
+```
+
+## Keyless ReAct Deep Hunt (session-driven — the no-key autonomous path)
+
+This is a **separate, newer engine** from the menu-planner episodes above. Instead of selecting one
+`proposable` command per turn, the current agent session drives a full ReAct loop: the server seeds a
+redacted context pack, suspends each turn, and the session replies with a fenced
+` ```json {"tool_calls":[...]} ``` ` block; the server executes the tools and returns the next
+observation. No AI provider key is required — the current Claude/Codex/OpenCode session IS the planner.
+Prefer this when the user asks for an **autonomous / keyless deep hunt** to discover NET-NEW bugs DAST
+missed. Findings land in the **SUSPECTED** tier only (read-only surface); the deterministic
+`family_proof` **VERIFIED** moat is never touched by the loop.
+
+### Prerequisites for an authenticated target
+`as_principal` reads credentials server-side (never model-visible), so configure managed principals
++ credential profiles on the target FIRST, or the hunt runs anonymous-only:
+`POST /targets/{id}/principals` bound (by name) to `POST /targets/{id}/credential-profiles`
+(`auth_kind:"authorization_header"`, secret = full `Bearer <jwt>`). Tokens that expire (crAPI-style
+JWTs, ~7 days) must be re-minted and rotated:
+`POST /targets/{id}/credential-profiles/{profile_id}/rotate {"secret":"Bearer <jwt>"}`.
+
+### Drive loop
+1. `POST /agent/hunt/{target_id}/session {"objective":"...","max_iterations":12}` → `run_id` + first
+   observation. **That first observation is a full system prompt** (tool arsenal, RECON→PLAN→EXECUTE→
+   EVIDENCE→SELF-CRITIQUE cadence, exact debrief schema) — read it; the harness self-describes the
+   contract each turn.
+2. Reply one turn at a time with `POST /agent/hunt/session/{run_id}/reply {"reply":"```json\n{\"tool_calls\":[...]}\n```"}`.
+   Tools: `http_request` (with `as_principal`), `query_kb`, `diff`, `note`, `run_tool`. Batch multiple
+   `tool_calls` per turn. Each `http_request` returns a `resp_N` ref; parse responses with lenient JSON
+   (bodies are control-char heavy).
+3. To test access control, replay the same request as different principals and `diff` the refs.
+4. Finish with a debrief turn: `{"done":true,"findings":[...],"abstained":false}`.
+5. Keep calling `/reply` until `status: completed`. Inspect: `GET /agent/hunt/session/{run_id}`;
+   `POST .../cancel`. Two-tier view: `GET /agent/findings/{target_id}`.
+
+### The evidence contract (do not get this wrong)
+A debrief finding proves itself ONLY via **`evidence_refs`** — the `resp_N` refs from prior
+`http_request` calls. The server resolves them into tool-output evidence for the provenance gate.
+**Inline `evidence`/`details` prose is NOT evidence; a prose-only finding fails the gate and is
+silently dropped (nothing persists).** Finding shape:
+`{"title","severity","family","predicate","route","method","cwe","details","evidence_refs":["resp_1"],"remediation"}`.
+
+### What "auto mode" means here
+Keyless = the coding-agent session drives each turn in a loop (it must keep replying). There is **no
+fully hands-off keyless mode**. For unattended server autopilot use `planner_mode:"configured_ai"`
+(needs a key in `/settings/ai`) or a `configured_ai` `agent_loop` deep-hunt campaign. Writes/active
+scanners still require a `gated` episode with an approval receipt; the SUSPECTED→VERIFIED promotion
+only ever happens through the server's `family_proof` re-execution, never from planner prose.
+
+```bash
+# Start + one recon turn + debrief (read-only, SUSPECTED tier)
+curl -X POST "$API_BASE/agent/hunt/TARGET_UUID/session" -H 'Content-Type: application/json' \
+  -d '{"objective":"Find a net-new access-control or data-exposure bug DAST missed and prove it","max_iterations":12}'
+curl -X POST "$API_BASE/agent/hunt/session/RUN_UUID/reply" -H 'Content-Type: application/json' \
+  -d '{"reply":"```json\n{\"tool_calls\":[{\"name\":\"http_request\",\"arguments\":{\"method\":\"GET\",\"path\":\"/api/feed\",\"as_principal\":\"user1\"}}]}\n```"}'
+curl -X POST "$API_BASE/agent/hunt/session/RUN_UUID/reply" -H 'Content-Type: application/json' \
+  -d '{"reply":"```json\n{\"done\":true,\"findings\":[{\"title\":\"...\",\"severity\":\"medium\",\"family\":\"data_exposure\",\"evidence_refs\":[\"resp_1\"]}],\"abstained\":false}\n```"}'
 ```

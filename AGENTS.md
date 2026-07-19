@@ -528,6 +528,22 @@ tier only (provenance-gated: a surfaced finding needs real tool-output evidence;
 overclaims are blocked and never persisted); the deterministic `family_proof` **VERIFIED** moat is
 untouched. Writes/active scanners require a gated episode with an approval receipt.
 
+The first observation returned by `session` is itself a full system prompt (tool arsenal, the
+RECON→PLAN→EXECUTE→EVIDENCE→SELF-CRITIQUE cadence, and the exact debrief schema) — read it; the harness
+self-describes the contract each turn. Three things trip up a first-time driver:
+- **Evidence is `evidence_refs`, not prose.** Each debrief finding proves itself ONLY through
+  `evidence_refs` — the `resp_N` refs returned by `http_request` — which the server resolves into
+  tool-output evidence for the provenance gate. Inline `evidence`/`details` prose is NOT evidence; a
+  prose-only finding fails the gate and is silently dropped (persists nothing). Debrief shape:
+  `{"done":true,"findings":[{"title","severity","family","predicate","route","method","cwe","details","evidence_refs":["resp_1","resp_2"],"remediation"}],"abstained":false}`.
+- **"Auto" = the session drives each turn in a loop** (keep calling `/reply` until `status: completed`).
+  There is no fully hands-off keyless mode; unattended server autopilot needs `planner_mode:
+  "configured_ai"` with a key in `/settings/ai`, or the `configured_ai` `agent_loop` deep-hunt campaign.
+- **Authenticated targets need principals configured FIRST.** Provision managed principals + credential
+  profiles on the target (`POST /targets/{id}/principals` + credential profiles; `as_principal` reads
+  the profile server-side) before starting, or the hunt runs anonymous-only. crAPI-style JWTs expire,
+  so rotate stale profiles (`POST /targets/{id}/credential-profiles/{profile_id}/rotate`) first.
+
 ```bash
 # Start a keyless hunt (read-only tool surface). Returns run_id + the first observation transcript.
 curl -X POST http://localhost:8080/agent/hunt/{target_id}/session \
@@ -538,6 +554,11 @@ curl -X POST http://localhost:8080/agent/hunt/{target_id}/session \
 curl -X POST http://localhost:8080/agent/hunt/session/{run_id}/reply \
   -H "Content-Type: application/json" \
   -d '{"reply": "```json\n{\"tool_calls\":[{\"name\":\"query_kb\",\"arguments\":{\"kind\":\"findings\"}}]}\n```"}'
+
+# Final debrief — evidence_refs are the resp_N refs from prior http_request calls that PROVE the finding.
+curl -X POST http://localhost:8080/agent/hunt/session/{run_id}/reply \
+  -H "Content-Type: application/json" \
+  -d '{"reply": "```json\n{\"done\":true,\"findings\":[{\"title\":\"Excessive data exposure in feed\",\"severity\":\"medium\",\"family\":\"data_exposure\",\"predicate\":\"sensitive_value_present\",\"route\":\"/api/feed\",\"method\":\"GET\",\"cwe\":\"CWE-200\",\"details\":\"non-requester email present; identical across principals\",\"evidence_refs\":[\"resp_1\",\"resp_2\"]}],\"abstained\":false}\n```"}'
 
 # Inspect / cancel
 curl http://localhost:8080/agent/hunt/session/{run_id}
