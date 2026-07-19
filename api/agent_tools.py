@@ -352,21 +352,43 @@ def _bola_collection_and_segment(route: Any) -> tuple[Optional[str], str]:
     return "/" + "/".join(collection_parts), collection_parts[-1].lower()
 
 
+def _singularize(segment: str) -> str:
+    """Best-effort singular of a REST collection segment so a plural collection matches a singular
+    captured-ref key (``products`` -> ``product`` so ``product_id`` matches). Conservative: keeps
+    ``address`` (``ss``), ``basket`` (already singular)."""
+    s = str(segment or "").lower()
+    if s.endswith("ies") and len(s) > 3:
+        return s[:-3] + "y"           # categories -> category
+    if s.endswith("ses") and len(s) > 3:
+        return s[:-2]                 # addresses -> address, statuses -> status
+    if s.endswith("s") and not s.endswith("ss") and len(s) > 1:
+        return s[:-1]                 # products -> product, baskets -> basket, users -> user
+    return s
+
+
 def _pick_object_ref(refs: Any, segment: str) -> tuple[Optional[str], Optional[str]]:
-    """Choose a principal's own object reference for ``segment`` from its captured references.
-    Returns ``(key, value)`` — the ORIGINAL captured-ref key (needed to bind a principal_variable
-    that resolves server-side, marking it a managed reference) and its value."""
+    """Choose a principal's own object reference for ``segment`` from its captured references, but
+    ONLY when the ref key SEMANTICALLY matches the collection under test. Returns ``(key, value)`` —
+    the ORIGINAL captured-ref key (to bind a server-resolved principal_variable) and its value.
+
+    Zero-FP fail-closed: a captured ref is accepted only if its key is one of the collection's
+    singular/plural forms (``{sing|plur}_id`` / ``{sing|plur}id`` / ``{sing|plur}``). There is NO
+    generic ``object_id``/``id`` match and NO single-ref fallback — binding an UNRELATED ref (e.g.
+    ``basket_id`` to a ``/api/Products`` route) fabricated the "owned object" premise the moat's
+    ownership predicate trusts, which could false-VERIFY a BOLA on an auth-gated shared resource.
+    No matching ref -> ``(None, None)`` -> the finding stays SUSPECTED (external-audit BUG 1)."""
     if not isinstance(refs, dict) or not refs:
         return None, None
     lower = {str(k).lower(): (k, v) for k, v in refs.items()}
-    for candidate in (f"{segment}_id", f"{segment}id", segment, "object_id", "id"):
+    forms: list[str] = []
+    for form in (_singularize(segment), str(segment or "").lower()):
+        if form and form not in forms:
+            forms.append(form)
+    candidates = [c for form in forms for c in (f"{form}_id", f"{form}id", form)]
+    for candidate in candidates:
         pair = lower.get(candidate)
         if pair is not None and str(pair[1]).strip():
             return str(pair[0]), str(pair[1]).strip()
-    if len(refs) == 1:  # a single captured ref is unambiguous
-        key, value = next(iter(refs.items()))
-        text = str(value).strip()
-        return (str(key), text) if text else (None, None)
     return None, None
 
 

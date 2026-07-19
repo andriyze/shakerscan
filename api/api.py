@@ -18269,6 +18269,7 @@ async def _agent_auto_verify(
     *,
     approval_receipt_id: Optional[str],
     created_by: str,
+    allow_write: bool = False,
     request_budget: Optional[int] = None,
     action_budget: Optional[int] = None,
     active_action_budget: Optional[int] = None,
@@ -18294,6 +18295,13 @@ async def _agent_auto_verify(
             continue
         family = family_proof.canonical_family((entry.get("finding") or {}).get("family"))
         if family not in _AGENT_VERIFIABLE_FAMILIES:
+            continue
+        # A mutating verification (create-MA does live create POSTs) must not run from a read-only
+        # hunt, even with a receipt — that would violate the hunt's no-writes invariant. The
+        # GET-only families (bola/auth_bypass/data_exposure) stay allowed. (External-audit BUG 3.)
+        if family in _AGENT_MUTATING_VERIFY_FAMILIES and not allow_write:
+            attempts.append({"finding_id": str(record["id"]), "verified": False,
+                             "skipped": "mutating_verification_requires_gated_hunt"})
             continue
         request_reservation = int(_AGENT_VERIFY_REQUEST_RESERVATIONS.get(family) or 0)
         seconds_reservation = int(_AGENT_VERIFY_SECONDS_RESERVATIONS.get(family) or 0)
@@ -18364,6 +18372,7 @@ async def _agent_finalize_and_persist(
     approval_receipt_id: Optional[str],
     hypothesis_id: Optional[str],
     persist: bool,
+    allow_write: bool = False,
     request_budget_limit: Optional[int] = None,
     action_budget_limit: Optional[int] = None,
     active_action_budget_limit: Optional[int] = None,
@@ -18404,6 +18413,7 @@ async def _agent_finalize_and_persist(
             gated_findings,
             approval_receipt_id=approval_receipt_id,
             created_by=f"{created_by}:auto_verify",
+            allow_write=allow_write,
             request_budget=remaining_requests,
             action_budget=remaining_actions,
             active_action_budget=remaining_active_actions,
@@ -18488,6 +18498,7 @@ async def _run_agent_hunt(
             approval_receipt_id=approval_receipt_id,
             hypothesis_id=hypothesis_id,
             persist=persist,
+            allow_write=allow_write,
             request_budget_limit=request_budget_limit,
             action_budget_limit=action_budget_limit,
             active_action_budget_limit=active_action_budget_limit,
@@ -18615,6 +18626,7 @@ async def _run_agent_hunt(
     return await _agent_finalize_and_persist(
         state, target_uuid=target_uuid, target_url=target_url, created_by=created_by,
         approval_receipt_id=approval_receipt_id, hypothesis_id=hypothesis_id, persist=persist,
+        allow_write=allow_write,
         request_budget_limit=request_budget_limit,
         action_budget_limit=action_budget_limit,
         active_action_budget_limit=active_action_budget_limit,
@@ -19050,7 +19062,7 @@ async def submit_agent_hunt_reply(run_id: str, req: AgentHuntReplyRequest):
             result = await _agent_finalize_and_persist(
                 state, target_uuid=target_uuid, target_url=target_url,
                 created_by=f"agent_hunt_session:{run_id}", approval_receipt_id=approval_receipt_id,
-                hypothesis_id=None, persist=True)
+                hypothesis_id=None, persist=True, allow_write=allow_write)
     except Exception:
         # Release the claim so the session can retry this turn, then surface the error.
         async with db_pool.acquire() as conn:
@@ -19258,6 +19270,9 @@ class AgentVerifyRequest(BaseModel):
 # mass_assignment reuses the proven server materializer. Every family is verified by the UNCHANGED
 # family_proof two-run moat — the bridge only supplies routes/bindings, never a verdict.
 _AGENT_VERIFIABLE_FAMILIES: frozenset[str] = frozenset({"bola", "auth_bypass", "data_exposure", "mass_assignment"})
+# Families whose VERIFICATION workflow mutates the target (create-MA does live create POSTs). These
+# may auto-verify only from a gated (allow_write) hunt, never a read-only one. (External-audit BUG 3.)
+_AGENT_MUTATING_VERIFY_FAMILIES: frozenset[str] = frozenset({"mass_assignment"})
 
 
 @asynccontextmanager

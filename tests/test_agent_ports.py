@@ -421,10 +421,22 @@ def test_bola_targets_missing_ref_is_none():
     assert at.derive_bola_verification_targets("/rest/basket/1", {}, {"basket_id": "16"}) is None
 
 
-def test_bola_targets_single_ref_fallback_and_templated_route():
-    # a {id}-templated route + a single unambiguous captured ref
-    t = at.derive_bola_verification_targets("/api/Users/{id}", {"uid": "1"}, {"uid": "2"})
-    assert t["collection"] == "/api/Users" and t["owner_object_id"] == "1" and t["attacker_object_id"] == "2"
+def test_bola_targets_plural_collection_matches_singular_ref_key():
+    # plural collection segment 'products' must match the singular captured key 'product_id'
+    t = at.derive_bola_verification_targets("/api/Products/1", {"product_id": "5"}, {"product_id": "6"})
+    assert t["collection"] == "/api/Products" and t["owner_ref_key"] == "product_id"
+    # templated /api/Orders/{id} + order_id refs also binds
+    t2 = at.derive_bola_verification_targets("/api/Orders/{id}", {"order_id": "1"}, {"order_id": "2"})
+    assert t2 and t2["owner_object_id"] == "1" and t2["attacker_object_id"] == "2"
+
+
+def test_bola_targets_unrelated_ref_key_is_none_zero_fp():
+    # BUG 1 fix: an UNRELATED captured ref (basket_id) must NOT bind to a /api/Products route,
+    # even though both values are distinct — that fabricated a false-VERIFIED BOLA. Fail closed.
+    assert at.derive_bola_verification_targets("/api/Products/1", {"basket_id": "15"}, {"basket_id": "16"}) is None
+    # a generic 'id'/'object_id' or a lone unrelated single ref no longer binds either
+    assert at.derive_bola_verification_targets("/api/Products/1", {"id": "15"}, {"id": "16"}) is None
+    assert at.derive_bola_verification_targets("/api/Users/{id}", {"uid": "1"}, {"uid": "2"}) is None
 
 
 def test_bola_targets_bare_collection_route():
