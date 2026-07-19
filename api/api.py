@@ -18409,7 +18409,9 @@ async def _agent_finalize_and_persist(
             None if seconds_budget_limit is None
             else max(0, int(seconds_budget_limit) - int(state.get("elapsed_seconds") or 0))
         )
-        auto_verified = await _agent_auto_verify(
+        # Do not spend active verification traffic after a cancel — mirror the keyless driver's guard
+        # so both drivers behave the same on cancellation. (External-audit BUG 4.)
+        auto_verified = [] if state.get("stop_reason") == "cancelled" else await _agent_auto_verify(
             gated_findings,
             approval_receipt_id=approval_receipt_id,
             created_by=f"{created_by}:auto_verify",
@@ -18727,6 +18729,37 @@ async def _run_agent_hunt_for_episode(episode_id: str) -> dict[str, Any]:
             return bool(await conn.fetchval(
                 "SELECT cancel_requested FROM research_episodes WHERE id=$1", row["id"]))
 
+    # Run-once durability guard (External-audit P1 — the configured_ai in-process loop is not
+    # per-turn checkpointed, so a mid-hunt API restart re-leases this episode and would RE-RUN the
+    # whole hunt, re-issuing tool calls and — for a gated episode — create-MA POSTs). Claim a durable
+    # agent_hunt_runs row for this episode; if a non-terminal ('planning') claim already exists, a
+    # prior run died in flight, so FAIL CLOSED (do not re-run / duplicate state-changing work) rather
+    # than resume. A fresh relaunch is the operator's recourse.
+    async with db_pool.acquire() as conn:
+        async with conn.transaction():
+            prior = await conn.fetchrow(
+                "SELECT id, status FROM agent_hunt_runs WHERE episode_id=$1 "
+                "ORDER BY created_at DESC LIMIT 1 FOR UPDATE", row["id"])
+            if prior is not None and str(prior["status"]) == "planning":
+                await conn.execute(
+                    "UPDATE agent_hunt_runs SET status='failed', stop_reason='interrupted_no_resume', "
+                    "updated_at=NOW() WHERE id=$1", prior["id"])
+                await conn.execute(
+                    "UPDATE research_episodes SET status='failed', stop_reason='hunt_interrupted_no_resume', "
+                    "updated_at=NOW() WHERE id=$1 "
+                    "AND status NOT IN ('cancelled','failed','completed','budget_exhausted','blocked')",
+                    row["id"])
+                return {"accepted": True, "agent_loop": True, "episode_id": episode_id,
+                        "status": "failed", "stop_reason": "hunt_interrupted_no_resume"}
+            claim = await conn.fetchrow(
+                "INSERT INTO agent_hunt_runs (target_id, episode_id, objective, status, planner_mode, "
+                "max_iterations, allow_write, allow_active, approval_receipt_id, token_budget, created_by) "
+                "VALUES ($1,$2,$3,'planning','configured_ai',$4,$5,$5,$6,6000,$7) RETURNING id",
+                row["target_id"], row["id"], str(row["objective"] or "")[:2000], max_iters, allow,
+                _optional_uuid(approval_receipt_id) if approval_receipt_id else None,
+                f"deep_hunt_episode:{episode_id}")
+    checkpoint_run_id = claim["id"]
+
     result = await _run_agent_hunt(
         row["target_id"], target_url, str(row["objective"] or ""),
         max_iterations=max_iters, created_by=f"deep_hunt_episode:{episode_id}",
@@ -18738,6 +18771,11 @@ async def _run_agent_hunt_for_episode(episode_id: str) -> dict[str, Any]:
         wall_time_budget_seconds=remaining_seconds,
         model_token_budget_limit=remaining_model_tokens,
     )
+    # Release the run-once claim to a terminal state so a legitimate future relaunch is not blocked.
+    async with db_pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_hunt_runs SET status='completed', stop_reason=$2, updated_at=NOW() WHERE id=$1",
+            checkpoint_run_id, str(result.get("stop_reason") or "")[:120])
     suspected = sum(1 for g in result.get("findings", []) if g.get("tier") == "suspected")
     net_new = int(result.get("net_new_count") or 0)
     verified = int(result.get("verified_count") or 0)
@@ -19157,6 +19195,7 @@ async def get_agent_two_tier_findings(target_id: str):
             """SELECT id, title, severity, tool, url, last_verification_verdict, first_seen_at
                FROM findings WHERE target_id=$1 AND status='active'
                  AND last_verification_verdict='exploited'
+                 AND tool IN ('autonomous_workflow','bola')
                ORDER BY CASE severity WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2
                         WHEN 'low' THEN 3 ELSE 4 END, first_seen_at DESC LIMIT 200""",
             target_uuid,
@@ -38483,6 +38522,34 @@ def _research_autopilot_expected_control_race(exc: Exception) -> bool:
     }
 
 
+RESEARCH_EPISODE_ABANDON_TTL_HOURS = int(os.getenv("RESEARCH_EPISODE_ABANDON_TTL_HOURS", "6") or 6)
+
+
+async def _reap_abandoned_research_episodes(conn) -> int:
+    """Expire episodes stranded in a waiting state with no activity for the abandon TTL — chiefly
+    agent-mode (session-driven) episodes whose driving coding-agent session never returned. The
+    autopilot runner only advances `autopilot_enabled` episodes, so these never get touched and
+    accumulate indefinitely (16 observed, oldest a week old). Conservative TTL (default 6h) so a
+    legitimately-slow session is safe. Also GCs old terminal keyless `agent_hunt_runs`.
+    (External-audit P2 — stuck episodes / no GC.)"""
+    ttl = max(1, RESEARCH_EPISODE_ABANDON_TTL_HOURS)
+    reaped = await conn.fetch(
+        """UPDATE research_episodes
+           SET status='cancelled', stop_reason='abandoned_reaper_timeout',
+               lease_expires_at=NULL, updated_at=NOW()
+           WHERE status IN ('awaiting_planner','awaiting_observation','awaiting_input')
+             AND cancel_requested=false
+             AND updated_at < NOW() - make_interval(hours => $1::int)
+           RETURNING id""",
+        ttl,
+    )
+    await conn.execute(
+        "DELETE FROM agent_hunt_runs WHERE status IN ('completed','cancelled','failed') "
+        "AND updated_at < NOW() - INTERVAL '7 days'"
+    )
+    return len(reaped)
+
+
 async def _reconcile_stale_research_dispatches(conn) -> int:
     """Fail closed on expired dispatch windows; never replay an uncertain active action."""
     rows = await conn.fetch(
@@ -38958,6 +39025,7 @@ async def research_autopilot_runner(pool) -> None:
     owner = f"api-autopilot:{os.getpid()}:{uuid.uuid4()}"
     last_queue_reconcile_monotonic = 0.0
     last_campaign_reconcile_monotonic = 0.0
+    last_episode_reap_monotonic = 0.0
     while True:
         episode_id: str | None = None
         try:
@@ -38973,6 +39041,9 @@ async def research_autopilot_runner(pool) -> None:
                         await _reconcile_unconfirmed_asm_queue_handoffs(conn)
                         await _reconcile_research_orphaned_queue_work(conn)
                         last_queue_reconcile_monotonic = now_monotonic
+                    if now_monotonic - last_episode_reap_monotonic >= 300.0:
+                        await _reap_abandoned_research_episodes(conn)
+                        last_episode_reap_monotonic = now_monotonic
                 row = await conn.fetchrow(
                     """
                     WITH candidate AS (
