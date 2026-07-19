@@ -8,15 +8,14 @@ import {
   type AISettings,
   type AISettingsUpdate,
 } from '@/lib/api'
-import { useToast } from '@/components/ui'
+import { Button, Fieldset, Tabs, Toggle, fieldClasses, useToast } from '@/components/ui'
 
 type Severity = 'critical' | 'high' | 'medium' | 'low' | 'info'
 
 const SEVERITY_OPTIONS: Severity[] = ['critical', 'high', 'medium', 'low', 'info']
-const INPUT_CLASS =
-  'mt-1 w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-sm text-white focus:outline-none focus:border-blue-500'
-const CHECKBOX_CLASS =
-  'h-4 w-4 rounded border-gray-700 bg-gray-800 text-blue-600 focus:ring-blue-500'
+// Point the panel's local field class at the shared field styling so every
+// input/select here matches the rest of the app and gets a real focus ring.
+const INPUT_CLASS = `mt-1 ${fieldClasses()}`
 const HONEY_HOSTED_URL = 'https://honey.shakerscan.com'
 const HONEY_LOCAL_PUBLIC_URL = 'http://localhost:18080'
 const HONEY_LOCAL_SCANNER_URL = 'http://host.docker.internal:18080'
@@ -293,22 +292,12 @@ export default function AISettingsPanel() {
           </p>
         </div>
         <div className="flex items-center gap-2">
-          <button
-            type="button"
-            onClick={fetchAISettings}
-            disabled={loading || aiSaving}
-            className="px-3 py-1.5 bg-gray-800 hover:bg-gray-700 disabled:opacity-50 text-white rounded text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
-          >
+          <Button variant="secondary" size="sm" onClick={fetchAISettings} disabled={loading || aiSaving}>
             Refresh
-          </button>
-          <button
-            type="button"
-            onClick={handleSaveAISettings}
-            disabled={aiSaving || loading}
-            className="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white rounded text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
-          >
-            {aiSaving ? 'Saving...' : 'Save'}
-          </button>
+          </Button>
+          <Button size="sm" onClick={handleSaveAISettings} loading={aiSaving} disabled={loading}>
+            {aiSaving ? 'Saving…' : 'Save'}
+          </Button>
         </div>
       </div>
 
@@ -330,31 +319,18 @@ export default function AISettingsPanel() {
         </div>
       )}
 
-      <div className="inline-flex items-center gap-1 rounded-lg border border-gray-700 bg-gray-800 p-1">
-        <button
-          type="button"
-          onClick={() => setSettingsMode('basic')}
-          className={`px-2.5 py-1 text-xs rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${
-            settingsMode === 'basic' ? 'bg-blue-600 text-white' : 'text-gray-300 hover:bg-gray-700'
-          }`}
-          aria-pressed={settingsMode === 'basic'}
-        >
-          Basic
-        </button>
-        <button
-          type="button"
-          onClick={() => setSettingsMode('advanced')}
-          className={`px-2.5 py-1 text-xs rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${
-            settingsMode === 'advanced' ? 'bg-blue-600 text-white' : 'text-gray-300 hover:bg-gray-700'
-          }`}
-          aria-pressed={settingsMode === 'advanced'}
-        >
-          Advanced
-        </button>
-      </div>
+      <Tabs
+        ariaLabel="AI settings detail level"
+        active={settingsMode}
+        onChange={(key) => setSettingsMode(key as 'basic' | 'advanced')}
+        items={[
+          { key: 'basic', label: 'Basic' },
+          { key: 'advanced', label: 'Advanced' },
+        ]}
+      />
 
       {(settingsMode === 'advanced' || demoModeEnabledInput) && (
-        <SectionCard
+        <Fieldset
           title="Calibration Lab"
           description="Optional Honey regression runner for maintainers. Leave disabled for normal ShakerScan deployments."
         >
@@ -374,38 +350,16 @@ export default function AISettingsPanel() {
                   Hosted uses the public Honey service. Local uses your dev Honey on port 18080 and rewrites scanner traffic for Docker.
                 </p>
               </div>
-              <div className="inline-flex flex-wrap items-center gap-1 rounded border border-gray-700 bg-gray-950 p-1">
-                <button
-                  type="button"
-                  onClick={() => selectDemoHoneyMode('hosted')}
-                  className={`px-2.5 py-1 text-xs rounded ${
-                    demoHoneyModeInput === 'hosted' ? 'bg-blue-600 text-white' : 'text-gray-300 hover:bg-gray-800'
-                  }`}
-                  aria-pressed={demoHoneyModeInput === 'hosted'}
-                >
-                  Hosted Honey
-                </button>
-                <button
-                  type="button"
-                  onClick={() => selectDemoHoneyMode('local')}
-                  className={`px-2.5 py-1 text-xs rounded ${
-                    demoHoneyModeInput === 'local' ? 'bg-blue-600 text-white' : 'text-gray-300 hover:bg-gray-800'
-                  }`}
-                  aria-pressed={demoHoneyModeInput === 'local'}
-                >
-                  Local Honey
-                </button>
-                <button
-                  type="button"
-                  onClick={() => selectDemoHoneyMode('custom')}
-                  className={`px-2.5 py-1 text-xs rounded ${
-                    demoHoneyModeInput === 'custom' ? 'bg-blue-600 text-white' : 'text-gray-300 hover:bg-gray-800'
-                  }`}
-                  aria-pressed={demoHoneyModeInput === 'custom'}
-                >
-                  Custom
-                </button>
-              </div>
+              <Tabs
+                ariaLabel="Honey source"
+                active={demoHoneyModeInput}
+                onChange={(key) => selectDemoHoneyMode(key as DemoHoneyMode)}
+                items={[
+                  { key: 'hosted', label: 'Hosted Honey' },
+                  { key: 'local', label: 'Local Honey' },
+                  { key: 'custom', label: 'Custom' },
+                ]}
+              />
 
               <Field
                 label={demoHoneyModeInput === 'local' ? 'Local Honey URL' : 'Honey URL'}
@@ -454,7 +408,7 @@ export default function AISettingsPanel() {
               )}
             </div>
           )}
-        </SectionCard>
+        </Fieldset>
       )}
 
       <div className="rounded border border-blue-500/30 bg-blue-500/10 px-3 py-2">
@@ -467,7 +421,7 @@ export default function AISettingsPanel() {
 
       {settingsMode === 'basic' ? (
         <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
-          <SectionCard
+          <Fieldset
             title="Quick Setup"
             description="Recommended defaults for most teams: configure one key, enable retest AI, set severity threshold."
           >
@@ -512,25 +466,26 @@ export default function AISettingsPanel() {
               Switch to <span className="text-gray-300">Advanced</span>.
             </p>
             <div className="flex items-center gap-2 pt-1">
-              <button
-                type="button"
+              <Button
+                variant="secondary"
+                size="sm"
                 onClick={() => handleTestAISettings('verify')}
+                loading={testingScope === 'verify'}
                 disabled={loading || aiSaving || testingScope !== null}
-                className="px-3 py-1.5 bg-gray-800 hover:bg-gray-700 disabled:opacity-50 text-white rounded text-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
               >
-                {testingScope === 'verify' ? 'Testing retest AI...' : 'Test AI Verification'}
-              </button>
+                {testingScope === 'verify' ? 'Testing retest AI…' : 'Test AI Verification'}
+              </Button>
               {verifyProbeMessage && (
                 <span className={`text-xs ${verifyProbeMessage.startsWith('Probe succeeded') ? 'text-green-400' : 'text-red-400'}`}>
                   {verifyProbeMessage}
                 </span>
               )}
             </div>
-          </SectionCard>
+          </Fieldset>
         </div>
       ) : (
         <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
-        <SectionCard
+        <Fieldset
           title="Shared Provider"
           description="Default provider used for scan-time classification and as fallback for retest verification."
         >
@@ -597,23 +552,24 @@ export default function AISettingsPanel() {
             onChange={setClearScanAPIKey}
           />
           <div className="flex items-center gap-2 pt-1">
-            <button
-              type="button"
+            <Button
+              variant="secondary"
+              size="sm"
               onClick={() => handleTestAISettings('scan')}
+              loading={testingScope === 'scan'}
               disabled={loading || aiSaving || testingScope !== null}
-              className="px-3 py-1.5 bg-gray-800 hover:bg-gray-700 disabled:opacity-50 text-white rounded text-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
             >
-              {testingScope === 'scan' ? 'Testing provider...' : 'Test Shared Provider'}
-            </button>
+              {testingScope === 'scan' ? 'Testing provider…' : 'Test Shared Provider'}
+            </Button>
             {scanProbeMessage && (
               <span className={`text-xs ${scanProbeMessage.startsWith('Probe succeeded') ? 'text-green-400' : 'text-red-400'}`}>
                 {scanProbeMessage}
               </span>
             )}
           </div>
-        </SectionCard>
+        </Fieldset>
 
-        <SectionCard
+        <Fieldset
           title="Scan-Time Classification"
           description="Optional AI triage during report generation. This does not replace retest verification."
         >
@@ -644,9 +600,9 @@ export default function AISettingsPanel() {
           <p className="text-xs text-gray-500">
             Recommendation: keep this at <code>medium</code> or higher for lower noise.
           </p>
-        </SectionCard>
+        </Fieldset>
 
-        <SectionCard
+        <Fieldset
           title="Retest Verification (Authoritative)"
           description="AI settings used for post-scan retest verification and exploit validation."
         >
@@ -677,23 +633,24 @@ export default function AISettingsPanel() {
             </select>
           </Field>
           <div className="flex items-center gap-2 pt-1">
-            <button
-              type="button"
+            <Button
+              variant="secondary"
+              size="sm"
               onClick={() => handleTestAISettings('verify')}
+              loading={testingScope === 'verify'}
               disabled={loading || aiSaving || testingScope !== null}
-              className="px-3 py-1.5 bg-gray-800 hover:bg-gray-700 disabled:opacity-50 text-white rounded text-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
             >
-              {testingScope === 'verify' ? 'Testing retest AI...' : 'Test Retest AI'}
-            </button>
+              {testingScope === 'verify' ? 'Testing retest AI…' : 'Test Retest AI'}
+            </Button>
             {verifyProbeMessage && (
               <span className={`text-xs ${verifyProbeMessage.startsWith('Probe succeeded') ? 'text-green-400' : 'text-red-400'}`}>
                 {verifyProbeMessage}
               </span>
             )}
           </div>
-        </SectionCard>
+        </Fieldset>
 
-        <SectionCard
+        <Fieldset
           title="Verification Policy"
           description="Controls proof-gating and escalation thresholds used by smart scan and retest workflows."
         >
@@ -763,9 +720,9 @@ export default function AISettingsPanel() {
             If proof-required is enabled, smart scans can look quieter because unverified findings are filtered out of
             the primary report.
           </p>
-        </SectionCard>
+        </Fieldset>
 
-        <SectionCard
+        <Fieldset
           title="Auto Retest Policy"
           description="Queues retests automatically after scan completion."
         >
@@ -805,7 +762,7 @@ export default function AISettingsPanel() {
               className={INPUT_CLASS}
             />
           </Field>
-        </SectionCard>
+        </Fieldset>
         </div>
       )}
 
@@ -822,26 +779,6 @@ export default function AISettingsPanel() {
       {aiSettingsMessage && <p className="text-xs text-green-400">{aiSettingsMessage}</p>}
       {aiSettingsError && <p className="text-xs text-red-400">{aiSettingsError}</p>}
     </div>
-  )
-}
-
-function SectionCard({
-  title,
-  description,
-  children,
-}: {
-  title: string
-  description: string
-  children: React.ReactNode
-}) {
-  return (
-    <section className="bg-gray-950/60 border border-gray-800 rounded-lg p-3 space-y-2">
-      <div>
-        <h3 className="text-xs font-medium text-gray-200 uppercase tracking-wide">{title}</h3>
-        <p className="text-xs text-gray-500 mt-1">{description}</p>
-      </div>
-      {children}
-    </section>
   )
 }
 
@@ -879,21 +816,16 @@ function ToggleRow({
   onChange: (checked: boolean) => void
 }) {
   return (
-    <label className="flex items-start gap-2 rounded border border-gray-800 bg-gray-900/50 px-2.5 py-2">
-      <input
-        type="checkbox"
-        checked={checked}
-        onChange={(e) => onChange(e.target.checked)}
-        className={`${CHECKBOX_CLASS} mt-0.5`}
-      />
-      <span className="space-y-0.5">
+    <div className="flex items-start justify-between gap-3 rounded border border-gray-800 bg-gray-900/50 px-2.5 py-2">
+      <span className="min-w-0 space-y-0.5">
         <span className="text-xs text-gray-200 inline-flex items-center gap-1">
           {label}
           {hint && <HelpHint text={hint} />}
         </span>
         <span className="block text-[11px] text-gray-500">{description}</span>
       </span>
-    </label>
+      <Toggle checked={checked} onChange={onChange} label={label} />
+    </div>
   )
 }
 

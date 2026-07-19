@@ -306,6 +306,8 @@ function FindingDetailContent() {
   const [statusUpdating, setStatusUpdating] = useState(false)
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false)
   const [deleting, setDeleting] = useState(false)
+  const [exceptionToDelete, setExceptionToDelete] = useState<string | null>(null)
+  const [exceptionDeleting, setExceptionDeleting] = useState(false)
   const [autonomousConfirmOpen, setAutonomousConfirmOpen] = useState(false)
   const [autonomousLoading, setAutonomousLoading] = useState(false)
   const [retestLoading, setRetestLoading] = useState(false)
@@ -475,13 +477,19 @@ function FindingDetailContent() {
     }
   }
 
-  async function handleDeleteException(exceptionId: string) {
+  async function handleDeleteException() {
+    const exceptionId = exceptionToDelete
+    if (!exceptionId || exceptionDeleting) return
+    setExceptionDeleting(true)
     try {
       await deleteFindingException(exceptionId)
       setFindingExceptions((prev) => prev.filter((item) => item.id !== exceptionId))
       toast.success('Policy exception deleted')
+      setExceptionToDelete(null)
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Failed to delete exception')
+    } finally {
+      setExceptionDeleting(false)
     }
   }
 
@@ -737,6 +745,17 @@ function FindingDetailContent() {
         onCancel={() => setDeleteConfirmOpen(false)}
       />
 
+      <ConfirmDialog
+        open={exceptionToDelete !== null}
+        title="Delete policy exception"
+        message="Remove this policy exception? The finding will be re-evaluated against the active deployment gate. This cannot be undone."
+        confirmLabel="Delete exception"
+        danger
+        busy={exceptionDeleting}
+        onConfirm={handleDeleteException}
+        onCancel={() => setExceptionToDelete(null)}
+      />
+
       <SectionCard title="Overview">
         <div className="flex flex-col gap-4">
           <div className="flex flex-wrap items-start justify-between gap-4">
@@ -923,8 +942,8 @@ function FindingDetailContent() {
                     </div>
                     <button
                       type="button"
-                      onClick={() => handleDeleteException(item.id)}
-                      className="rounded border border-red-900/70 px-2 py-1 text-xs text-red-300 hover:bg-red-950/40"
+                      onClick={() => setExceptionToDelete(item.id)}
+                      className="rounded border border-red-900/70 px-2 py-1 text-xs text-red-300 hover:bg-red-950/40 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
                     >
                       Delete
                     </button>

@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { usePathname } from 'next/navigation'
 import Link from 'next/link'
-import { Activity, Bot, Crosshair, FileArchive, Lightbulb, Menu, Network, PackageCheck, Radar, ShieldAlert, ShieldCheck, X } from 'lucide-react'
+import { Activity, Bot, Boxes, Crosshair, FileArchive, Lightbulb, Menu, Network, PackageCheck, Radar, ShieldAlert, ShieldCheck, Wand2, X } from 'lucide-react'
 import { buttonClasses } from '@/components/ui'
 
 const navGroups: {
@@ -102,6 +102,13 @@ const navGroups: {
       { href: '/exceptions', label: 'Exceptions Queue', icon: <ShieldAlert className="w-5 h-5" /> },
     ],
   },
+  {
+    heading: 'Developer',
+    items: [
+      { href: '/settings/arsenal', label: 'Command Arsenal', icon: <Boxes className="w-5 h-5" /> },
+      { href: '/settings/ai-ops-router', label: 'AI Ops Router', icon: <Wand2 className="w-5 h-5" /> },
+    ],
+  },
 ]
 
 function BrandMark({ className = 'w-6 h-6' }: { className?: string }) {
@@ -114,7 +121,10 @@ function BrandMark({ className = 'w-6 h-6' }: { className?: string }) {
 
 function NavContent({ pathname }: { pathname: string }) {
   const appVersion = process.env.NEXT_PUBLIC_APP_VERSION
-  const settingsActive = pathname.startsWith('/settings')
+  // Only the Settings landing lights the gear. The /settings/* sub-routes
+  // (research-agent, arsenal, ai-ops-router) belong to their own nav groups
+  // — AI Investigator and Developer — and highlight there instead.
+  const settingsActive = pathname === '/settings'
 
   const isActive = (href: string) => {
     if (href === '/') {

@@ -8,7 +8,7 @@ import {
   type AutomationSettings,
   type AutomationSettingsUpdate,
 } from '@/lib/api'
-import { Button, Card, useToast } from '@/components/ui'
+import { Button, Card, Toggle, useToast } from '@/components/ui'
 
 const ASM_PRESETS: Array<{
   label: string
@@ -147,17 +147,15 @@ export default function ScanExecutionSettingsPanel() {
               <h3 className="text-sm font-medium text-gray-100">Auto-shard eligible scans</h3>
               <p className="mt-1 text-xs text-gray-500">{eligibleTypes}; {workerText}</p>
             </div>
-            <Button
-              variant={scan?.auto_sharding_enabled ? 'primary' : 'secondary'}
-              size="sm"
-              onClick={() => save(
-                { auto_sharding_enabled: !scan?.auto_sharding_enabled },
-                scan?.auto_sharding_enabled ? 'Auto-sharding disabled' : 'Auto-sharding enabled'
-              )}
+            <Toggle
+              checked={Boolean(scan?.auto_sharding_enabled)}
               disabled={loading || saving || !scan}
-            >
-              {scan?.auto_sharding_enabled ? 'On' : 'Off'}
-            </Button>
+              onChange={(next) => save(
+                { auto_sharding_enabled: next },
+                next ? 'Auto-sharding enabled' : 'Auto-sharding disabled'
+              )}
+              label="Auto-shard eligible scans"
+            />
           </div>
           {scan && (
             <div className="mt-3 flex flex-wrap gap-2 text-[11px] text-gray-500">
@@ -176,17 +174,15 @@ export default function ScanExecutionSettingsPanel() {
                 New model-intake targets stay excluded. Existing targets keep their own policy.
               </p>
             </div>
-            <Button
-              variant={asm?.enabled_for_new_web_targets ? 'primary' : 'secondary'}
-              size="sm"
-              onClick={() => save(
-                { default_asm_enabled: !asm?.enabled_for_new_web_targets },
-                asm?.enabled_for_new_web_targets ? 'Default Continuous ASM disabled' : 'Default Continuous ASM enabled'
-              )}
+            <Toggle
+              checked={Boolean(asm?.enabled_for_new_web_targets)}
               disabled={loading || saving || !asm}
-            >
-              {asm?.enabled_for_new_web_targets ? 'On' : 'Off'}
-            </Button>
+              onChange={(next) => save(
+                { default_asm_enabled: next },
+                next ? 'Default Continuous ASM enabled' : 'Default Continuous ASM disabled'
+              )}
+              label="Continuous ASM for new web targets"
+            />
           </div>
           {asmConfig && (
             <div className="mt-3 flex flex-wrap gap-2 text-[11px] text-gray-500">
@@ -271,22 +267,15 @@ export default function ScanExecutionSettingsPanel() {
                   Enforce scope and approval receipts before queueing scans, ASM actions, AI Gate runs, Model Intake scans, or retests.
                 </p>
               </div>
-              <Button
-                variant={safety?.approval_receipts_required_for_state_changing_actions ? 'primary' : 'secondary'}
-                size="sm"
-                onClick={() => save(
-                  {
-                    approval_receipts_required_for_state_changing_actions:
-                      !safety?.approval_receipts_required_for_state_changing_actions,
-                  },
-                  safety?.approval_receipts_required_for_state_changing_actions
-                    ? 'Approval receipt requirement disabled'
-                    : 'Approval receipt requirement enabled'
-                )}
+              <Toggle
+                checked={Boolean(safety?.approval_receipts_required_for_state_changing_actions)}
                 disabled={loading || saving || !safety}
-              >
-                {safety?.approval_receipts_required_for_state_changing_actions ? 'On' : 'Off'}
-              </Button>
+                onChange={(next) => save(
+                  { approval_receipts_required_for_state_changing_actions: next },
+                  next ? 'Approval receipt requirement enabled' : 'Approval receipt requirement disabled'
+                )}
+                label="Require approval receipts"
+              />
             </div>
             <div className="mt-3 flex flex-wrap gap-2 text-[11px] text-gray-500">
               <span className="rounded border border-gray-800 px-2 py-1">Scope preview required</span>

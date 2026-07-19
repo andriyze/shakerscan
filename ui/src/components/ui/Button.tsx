@@ -1,6 +1,7 @@
 'use client'
 
 import { forwardRef } from 'react'
+import { Spinner } from './Spinner'
 
 export type ButtonVariant = 'primary' | 'secondary' | 'danger' | 'ghost'
 export type ButtonSize = 'sm' | 'md'
@@ -29,18 +30,25 @@ export function buttonClasses(variant: ButtonVariant = 'primary', size: ButtonSi
 export interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
   variant?: ButtonVariant
   size?: ButtonSize
+  /** Shows a spinner and disables the button while an action is in flight. */
+  loading?: boolean
 }
 
 export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button(
-  { variant = 'primary', size = 'md', className = '', type = 'button', ...props },
+  { variant = 'primary', size = 'md', className = '', type = 'button', loading = false, disabled, children, ...props },
   ref
 ) {
   return (
     <button
       ref={ref}
       type={type}
+      disabled={disabled || loading}
+      aria-busy={loading || undefined}
       className={`${buttonClasses(variant, size)} ${className}`}
       {...props}
-    />
+    >
+      {loading && <Spinner className={size === 'sm' ? 'h-3.5 w-3.5' : 'h-4 w-4'} />}
+      {children}
+    </button>
   )
 })

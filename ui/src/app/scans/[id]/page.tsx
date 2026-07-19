@@ -5,7 +5,7 @@ import { useParams, useSearchParams } from 'next/navigation'
 import Link from 'next/link'
 import { API_URL, getScan, getScanLogs, getHealth, getScanDeploymentDecision, replayAiScan, getAiScanCampaignHistory, formatDuration, formatDate, type AiScanCampaignHistory, type DeploymentDecision } from '@/lib/api'
 import { SEVERITY_BADGE_STYLES, SEVERITY_LEVELS, type SeverityLevel } from '@/lib/constants'
-import { Card, ErrorState, gradeTextColor } from '@/components/ui'
+import { Card, ErrorState, PageHeader, gradeTextColor } from '@/components/ui'
 import ReportView from '@/components/ReportView'
 import { buildAiGateCampaignReview, type AiGateCampaignReview } from '@/lib/aiGateCampaign'
 import { normalizeParentCoverage } from '@/lib/deferredWorkContracts'
@@ -1293,14 +1293,7 @@ function ScanDetailContent() {
     if (hasPartialResults) {
       return (
         <div>
-          <div className="flex items-center gap-3 mb-4">
-            <Link href={backUrl} className="text-gray-400 hover:text-white">
-              <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
-              </svg>
-            </Link>
-            <span className="text-gray-500">Back to scans</span>
-          </div>
+          <PageHeader title={scan.target_url} backHref={backUrl} backLabel="Back to scans" />
           <FailedScanPanel scan={scan} hasPartialResults={true} />
           <ParallelShardRollup scan={scan} />
           <ParentCoverageRollup scan={scan} />
@@ -1322,14 +1315,7 @@ function ScanDetailContent() {
     // No partial results - show error only
     return (
       <div className="space-y-6">
-        <div className="flex items-center gap-3">
-          <Link href={backUrl} className="text-gray-400 hover:text-white">
-            <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
-            </svg>
-          </Link>
-          <h1 className="text-2xl font-bold text-white">{scan.target_url}</h1>
-        </div>
+        <PageHeader title={scan.target_url} backHref={backUrl} backLabel="Back to scans" />
         <FailedScanPanel scan={scan} hasPartialResults={false} />
         <ParallelShardRollup scan={scan} />
         <ParentCoverageRollup scan={scan} />
@@ -1340,14 +1326,7 @@ function ScanDetailContent() {
   // Show full report for completed scans
   return (
     <div>
-      <div className="flex items-center gap-3 mb-4">
-        <Link href={backUrl} className="text-gray-400 hover:text-white">
-          <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
-          </svg>
-        </Link>
-        <span className="text-gray-500">Back to scans</span>
-      </div>
+      <PageHeader title={scan.target_url} backHref={backUrl} backLabel="Back to scans" />
       {scan.status === 'completed' && <ScanVerdictCard scan={scan} buildVersion={buildVersion} buildFingerprint={buildFingerprint} />}
       <ParallelShardRollup scan={scan} />
       <ParentCoverageRollup scan={scan} />

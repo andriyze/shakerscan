@@ -64,6 +64,7 @@ function TargetsContent() {
   const [dedupePreview, setDedupePreview] = useState<{ groups_found: number; targets_merged: number } | null>(null)
   const [dedupeLoading, setDedupeLoading] = useState(false)
   const [dedupeExecuting, setDedupeExecuting] = useState(false)
+  const [scanAllPending, setScanAllPending] = useState<{ domain: GroupedDomain; scanType: ScanType } | null>(null)
   const scanMenuRef = useRef<HTMLDivElement>(null)
   const scanAllMenuRef = useRef<HTMLDivElement>(null)
   const searchTimeout = useRef<NodeJS.Timeout | null>(null)
@@ -216,6 +217,13 @@ function TargetsContent() {
       console.error('Failed to start scan:', err)
       toast.error('Failed to start scan')
     }
+  }
+
+  function confirmScanAll() {
+    if (!scanAllPending) return
+    const { domain, scanType } = scanAllPending
+    setScanAllPending(null)
+    handleScanDomainSet(domain, scanType)
   }
 
   async function handleScanDomainSet(domain: GroupedDomain, scanType: ScanType) {
@@ -414,6 +422,26 @@ function TargetsContent() {
         busy={dedupeExecuting}
         onConfirm={handleExecuteDedupe}
         onCancel={() => setDedupePreview(null)}
+      />
+
+      <ConfirmDialog
+        open={scanAllPending !== null}
+        title={scanAllPending ? `Scan all of ${scanAllPending.domain.root_domain}?` : ''}
+        message={
+          scanAllPending
+            ? (() => {
+                const count = (scanAllPending.domain.root_target ? 1 : 0) + scanAllPending.domain.subdomain_count
+                const active = SCAN_TYPES.find((t) => t.value === scanAllPending.scanType)?.requiresPermission
+                return `This queues a ${scanAllPending.scanType} scan for ${count} target${count !== 1 ? 's' : ''} (root + subdomains) in this domain set.${
+                  active ? ' This scan type runs active exploitation checks — only start it on targets you are authorized to test.' : ''
+                }`
+              })()
+            : ''
+        }
+        confirmLabel="Start scans"
+        danger={Boolean(scanAllPending && SCAN_TYPES.find((t) => t.value === scanAllPending.scanType)?.requiresPermission)}
+        onConfirm={confirmScanAll}
+        onCancel={() => setScanAllPending(null)}
       />
 
       {/* Filters */}
@@ -723,7 +751,8 @@ function TargetsContent() {
                             key={type.value}
                             onClick={(e) => {
                               e.stopPropagation()
-                              handleScanDomainSet(domain, type.value)
+                              setOpenScanAllMenu(null)
+                              setScanAllPending({ domain, scanType: type.value })
                             }}
                             className="w-full px-3 py-2 text-left hover:bg-gray-700 transition-colors"
                           >
