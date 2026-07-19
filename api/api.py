@@ -16845,20 +16845,28 @@ async def _build_agent_context_pack_from_target(conn, req: AgentContextPackFromT
             FROM target_endpoints te
             WHERE te.target_id=$1
               AND COALESCE(te.test_status, '') <> 'gone'
-              -- Row-level: this method-row isn't itself a client-error/soft-404 (400) or server error (5xx).
-              AND COALESCE(te.last_http_status, 0) NOT IN (400, 404, 410, 500, 501, 502, 503, 504)
+              -- Row-level: this method-row isn't itself a hard soft-404 (404/410) or server error (5xx).
+              -- A 400 is deliberately NOT excluded: it means the route EXISTS and rejected input, so it
+              -- is reachable surface, not a phantom.
+              AND COALESCE(te.last_http_status, 0) NOT IN (404, 410, 500, 501, 502, 503, 504)
               AND COALESCE(te.unreachable_streak, 0) < 2
-              -- Path-level phantom exclusion: if ANY method of this path returned a server error / gone
-              -- (e.g. Juice Shop's 500 "Unexpected path" for inferred app_graph routes like /api/v2/config,
-              -- /rest/v3/users), the whole PATH is phantom — its other, never-probed (NULL) methods must
-              -- NOT keep it in live_surface. unreachable_streak counts only connection failures, so these
-              -- soft-404 phantoms never retire to 'gone' and previously let app_graph leads rank onto
-              -- nonexistent routes, burning every experiment as inconclusive. Real auth-gated (401/403),
-              -- method-limited (405), or 2xx/3xx paths are unaffected. (External-audit — phantom leads.)
-              AND NOT EXISTS (
-                  SELECT 1 FROM target_endpoints ph
-                  WHERE ph.target_id=te.target_id AND ph.path=te.path
-                    AND ph.last_http_status IN (404, 410, 500, 501, 502, 503, 504))
+              -- Method-aware phantom exclusion. Some SPAs/APIs answer inferred, non-existent routes with a
+              -- soft-404: a 500 "unexpected path" body (or a 404/410) instead of a hard 404. Such routes get
+              -- ranked as app_graph leads and burn every experiment as inconclusive. unreachable_streak
+              -- counts only connection failures, so these never retire to 'gone'. BUT the collapse must stay
+              -- method-aware: a method-row that itself returned a concrete status (last_http_status IS NOT
+              -- NULL -- includes 2xx/3xx/400/401/403/405) is proven reachable and is kept regardless of a
+              -- sibling method's soft-404. Only a never-probed (NULL) method on the same path is dropped
+              -- when a sibling method returned a hard soft-404 / server error -- i.e. don't invent a POST on
+              -- a path whose only real evidence is a phantom GET. (External-audit — phantom leads.)
+              AND (
+                  te.last_http_status IS NOT NULL
+                  OR NOT EXISTS (
+                      SELECT 1 FROM target_endpoints ph
+                      WHERE ph.target_id=te.target_id AND ph.path=te.path
+                        AND ph.last_http_status IN (404, 410, 500, 501, 502, 503, 504))
+              )
+            ORDER BY te.path, te.method
             LIMIT 2000
             """,
             target_uuid,
@@ -37655,9 +37663,42 @@ async def _probe_create_surface(
                     response_json = None
                     shape = None
                 if not shape:
+                    # A 2xx create with no id-bearing body (an empty 204, or a registration that echoes
+                    # no identifier) still created a real object -- we must not silently walk away and
+                    # leave it behind. Best-effort cleanup: RFC-7231 says a 201's Location header points
+                    # at the created resource, so DELETE that when it is same-origin. Whatever the
+                    # outcome, record the residual (login hash + status) as an artifact so an uncleaned
+                    # object is visible in telemetry rather than silent.
+                    residual = {
+                        "login_sha256": hashlib.sha256(str(creds["ctrl_login"]).encode()).hexdigest(),
+                        "create_status": resp.status_code,
+                        "cleanup_attempted": False,
+                        "cleanup_succeeded": False,
+                    }
+                    location = resp.headers.get("location")
+                    if location:
+                        joined = urllib.parse.urljoin(url, location)
+                        if (
+                            urllib.parse.urlsplit(joined)[:2]
+                            == urllib.parse.urlsplit(target_url)[:2]
+                            and urllib.parse.urlsplit(joined).path.startswith("/")
+                        ):
+                            residual["cleanup_attempted"] = True
+                            try:
+                                cleanup_request_count += 1
+                                cleanup = await client.delete(joined, headers=safe_headers)
+                                residual["cleanup_status"] = cleanup.status_code
+                                residual["cleanup_succeeded"] = cleanup.status_code in (200, 202, 204)
+                            except httpx.HTTPError:
+                                residual["cleanup_status"] = None
+                    artifacts.append(residual)
                     return {
                         "usable": False,
-                        "reason": "accepted_probe_missing_trackable_id",
+                        "reason": (
+                            "accepted_probe_missing_trackable_id_residual_cleaned"
+                            if residual["cleanup_succeeded"]
+                            else "accepted_probe_missing_trackable_id_residual_uncleaned"
+                        ),
                         "request_count": request_count,
                         "cleanup_request_count": cleanup_request_count,
                         "artifacts": artifacts,
