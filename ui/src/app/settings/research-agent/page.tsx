@@ -146,12 +146,13 @@ function ResearchAgentPage() {
     <div>
       <header className="flex flex-col gap-4 border-b border-gray-800 pb-5 sm:flex-row sm:items-end sm:justify-between">
         <div>
-          <div className="flex items-center gap-2 text-sm text-blue-300"><BrainCircuit className="h-4 w-4" />AI Investigator</div>
+          <div className="flex items-center gap-2 text-sm text-blue-300"><BrainCircuit className="h-4 w-4" />AI Investigator · Operator</div>
           <h1 className="mt-1 text-2xl font-bold tracking-tight text-white">Turn the hunter loose on a target</h1>
-          <p className="mt-2 max-w-2xl text-sm leading-6 text-gray-400">Pick a target, choose the planner, then choose how hard and how long it should go. ShakerScan keeps execution, scope, budgets, and proof under server control.</p>
+          <p className="mt-2 max-w-2xl text-sm leading-6 text-gray-400">Operator runs vetted, menu-driven actions and can prove findings all the way to verified. For free-form probing that composes its own requests and surfaces new leads, use <Link href="/settings/research-agent/explorer" className="text-blue-300 underline-offset-2 hover:underline">Explorer</Link>.</p>
         </div>
         <nav className="flex rounded-lg border border-gray-800 bg-gray-950 p-1 text-sm">
-          <span className="rounded-md bg-gray-800 px-3 py-1.5 text-white">Autonomous Hunt</span>
+          <span className="rounded-md bg-gray-800 px-3 py-1.5 text-white">Operator</span>
+          <Link href="/settings/research-agent/explorer" className="px-3 py-1.5 text-gray-400 hover:text-white">Explorer</Link>
           <Link href="/settings/research-agent/leads" className="px-3 py-1.5 text-gray-400 hover:text-white">Leads</Link>
           <Link href="/settings/research-agent/experiment" className="px-3 py-1.5 text-gray-400 hover:text-white">Plan a test</Link>
         </nav>
@@ -382,7 +383,7 @@ function RunGroup({ title, runs }: { title?: string; runs: Campaign[] }) {
             <Link key={run.id} href={`/settings/research-agent/runs/${run.id}`} className="flex flex-col gap-3 rounded-lg border border-gray-800 bg-gray-950/40 p-3.5 hover:border-gray-700 sm:flex-row sm:items-center">
               <RunStatusBadge state={state} />
               <div className="min-w-0 flex-1">
-                <div className="truncate text-sm font-medium text-gray-200">{hostFromUrl(url) || run.name || 'Autonomous hunt'}</div>
+                <div className="truncate text-sm font-medium text-gray-200">{hostFromUrl(url) || run.name || 'Operator run'}</div>
                 <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-gray-500">
                   <span>{intensityOf(run)}</span>
                   {prog.max ? <><span>·</span><span className="tabular-nums">episode {prog.started}/{prog.max}</span></> : null}

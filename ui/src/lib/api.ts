@@ -3075,6 +3075,171 @@ export async function getResearchReadiness(): Promise<ResearchReadiness> {
   return res.json()
 }
 
+// ---------------------------------------------------------------------------
+// Explorer — keyless free-form ReAct hunt (/agent/hunt/*, /agent/findings/*).
+// Distinct from the menu-driven Operator (/research/*): the session endpoint
+// returns a run_id immediately and is driven one planner turn at a time; the
+// UI launches + monitors + surfaces the two-tier (SUSPECTED vs VERIFIED) view.
+// ---------------------------------------------------------------------------
+
+export type AgentHuntStatus = 'awaiting_planner' | 'planning' | 'completed' | 'cancelled' | 'failed'
+
+export interface AgentHuntTranscriptMessage {
+  role: 'system' | 'user' | 'assistant'
+  content: string
+}
+
+export interface AgentHuntResult {
+  target_id: string
+  objective: string
+  iterations: number
+  stop_reason: string
+  tool_calls_made: number
+  request_units_used: number
+  active_actions_used: number
+  model_tokens_used: number
+  elapsed_seconds: number
+  http_evidence_count: number
+  abstained: boolean
+  net_new_count: number
+  verified_count: number
+  persisted: Array<{ id: string; persisted: string; net_new: boolean; title: string; url: string | null }>
+}
+
+export interface AgentHuntSession {
+  run_id: string | null
+  target_id: string | null
+  objective: string
+  status: AgentHuntStatus
+  awaiting_planner: boolean
+  iterations: number
+  max_iterations: number
+  stop_reason: string | null
+  tool_surface: { allow_write: boolean; allow_active: boolean; note: string }
+  transcript: AgentHuntTranscriptMessage[]
+  next_action: string
+  result: AgentHuntResult | null
+}
+
+export interface AgentHuntRunSummary {
+  id: string
+  target_id: string
+  objective: string
+  status: AgentHuntStatus
+  stop_reason: string | null
+  max_iterations: number
+  iterations: string | null
+  created_by: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface AgentVerifiedFinding {
+  id: string
+  title: string
+  severity: string
+  tool: string
+  url: string
+  last_verification_verdict: string
+  first_seen_at: string
+}
+
+export interface AgentSuspectedFinding {
+  id: string
+  title: string
+  severity: string
+  tool: string
+  url: string
+  first_seen_at: string
+  predicate: string | null
+  family: string | null
+  net_new_vs_known: boolean | null
+  trust_tier: string
+}
+
+export interface AgentTwoTierFindings {
+  target_id: string
+  verified: AgentVerifiedFinding[]
+  suspected: AgentSuspectedFinding[]
+}
+
+export interface AgentVerifyResult {
+  finding_id: string
+  verified: boolean
+  verified_finding_id: string | null
+  upgraded_in_place?: boolean
+  hypothesis_id?: string
+  superseded_suspected?: boolean
+  family_proof?: { verdict: string | null; promotable: boolean | null; novelty_gate: unknown }
+  error?: string
+}
+
+export async function startAgentHuntSession(
+  targetId: string,
+  payload: { objective?: string; max_iterations?: number; token_budget?: number; approval_receipt_id?: string },
+): Promise<AgentHuntSession> {
+  const res = await fetch(`${API_URL}/agent/hunt/${encodeURIComponent(targetId)}/session`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to start Explorer hunt'))
+  return res.json()
+}
+
+export async function getAgentHuntSession(runId: string): Promise<AgentHuntSession> {
+  const res = await fetch(`${API_URL}/agent/hunt/session/${encodeURIComponent(runId)}`)
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load Explorer hunt'))
+  return res.json()
+}
+
+export async function replyAgentHuntSession(runId: string, reply: string): Promise<AgentHuntSession> {
+  const res = await fetch(`${API_URL}/agent/hunt/session/${encodeURIComponent(runId)}/reply`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ reply }),
+  })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to submit planner turn'))
+  return res.json()
+}
+
+export async function cancelAgentHuntSession(runId: string): Promise<AgentHuntSession> {
+  const res = await fetch(`${API_URL}/agent/hunt/session/${encodeURIComponent(runId)}/cancel`, { method: 'POST' })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to cancel Explorer hunt'))
+  return res.json()
+}
+
+export async function listAgentHuntRuns(params?: {
+  target_id?: string
+  status?: AgentHuntStatus
+  limit?: number
+}): Promise<{ runs: AgentHuntRunSummary[]; count: number }> {
+  const query = new URLSearchParams()
+  if (params?.target_id) query.set('target_id', params.target_id)
+  if (params?.status) query.set('status', params.status)
+  if (params?.limit) query.set('limit', String(params.limit))
+  const qs = query.toString()
+  const res = await fetch(`${API_URL}/agent/hunt/runs${qs ? `?${qs}` : ''}`)
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load Explorer runs'))
+  return res.json()
+}
+
+export async function getAgentTwoTierFindings(targetId: string): Promise<AgentTwoTierFindings> {
+  const res = await fetch(`${API_URL}/agent/findings/${encodeURIComponent(targetId)}`)
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load agent findings'))
+  return res.json()
+}
+
+export async function verifySuspectedAgentFinding(findingId: string, approvalReceiptId: string): Promise<AgentVerifyResult> {
+  const res = await fetch(`${API_URL}/agent/findings/${encodeURIComponent(findingId)}/verify`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ approval_receipt_id: approvalReceiptId }),
+  })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to verify finding'))
+  return res.json()
+}
+
 export async function planResearchEpisodeStep(episodeId: string, payload: {
   execute?: boolean
   timeout_seconds?: number

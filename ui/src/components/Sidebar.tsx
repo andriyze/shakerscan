@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { usePathname } from 'next/navigation'
 import Link from 'next/link'
-import { Activity, Bot, Boxes, Crosshair, FileArchive, Lightbulb, Menu, Network, PackageCheck, Radar, ShieldAlert, ShieldCheck, Wand2, X } from 'lucide-react'
+import { Activity, Bot, Boxes, Compass, Crosshair, FileArchive, Lightbulb, Menu, Network, PackageCheck, Radar, ShieldAlert, ShieldCheck, Wand2, X } from 'lucide-react'
 import { buttonClasses } from '@/components/ui'
 
 const navGroups: {
@@ -77,7 +77,8 @@ const navGroups: {
     heading: 'AI Investigator',
     badge: 'Alpha',
     items: [
-      { href: '/settings/research-agent', label: 'Autonomous Hunt', icon: <Crosshair className="w-5 h-5" /> },
+      { href: '/settings/research-agent', label: 'Operator', icon: <Crosshair className="w-5 h-5" /> },
+      { href: '/settings/research-agent/explorer', label: 'Explorer', icon: <Compass className="w-5 h-5" /> },
       { href: '/settings/research-agent/leads', label: 'Leads', icon: <Lightbulb className="w-5 h-5" /> },
     ],
   },
