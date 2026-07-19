@@ -140,10 +140,10 @@ function ResearchAgentPage() {
     }
   }
 
-  if (loading) return <div className="mx-auto max-w-5xl px-4 py-6"><Skeleton className="h-96" /></div>
+  if (loading) return <div><Skeleton className="h-96" /></div>
 
   return (
-    <div className="mx-auto max-w-5xl px-4 py-6">
+    <div>
       <header className="flex flex-col gap-4 border-b border-gray-800 pb-5 sm:flex-row sm:items-end sm:justify-between">
         <div>
           <div className="flex items-center gap-2 text-sm text-blue-300"><BrainCircuit className="h-4 w-4" />AI Investigator</div>
@@ -414,7 +414,7 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
 
 export default function Page() {
   return (
-    <Suspense fallback={<div className="mx-auto max-w-5xl px-4 py-6"><Skeleton className="h-96" /></div>}>
+    <Suspense fallback={<div><Skeleton className="h-96" /></div>}>
       <ResearchAgentPage />
     </Suspense>
   )

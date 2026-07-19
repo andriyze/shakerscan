@@ -7,20 +7,22 @@ import { fieldClasses } from './Input'
 
 export interface SelectProps extends React.SelectHTMLAttributes<HTMLSelectElement> {
   error?: boolean
+  /** Fill the parent width (default). Set false for inline filter controls. */
+  fullWidth?: boolean
 }
 
 // Native <select> styled to match Input, with a consistent chevron so it reads
 // as the same control family across pages instead of the OS default arrow.
 export const Select = forwardRef<HTMLSelectElement, SelectProps>(function Select(
-  { error, className = '', children, ...props },
+  { error, fullWidth = true, className = '', children, ...props },
   ref
 ) {
   return (
-    <span className="relative block">
+    <span className={cn('relative', fullWidth ? 'block' : 'inline-block')}>
       <select
         ref={ref}
         aria-invalid={error || undefined}
-        className={cn(fieldClasses(error), 'appearance-none pr-9', className)}
+        className={cn(fieldClasses(error), 'appearance-none pr-9', fullWidth && 'w-full', className)}
         {...props}
       >
         {children}

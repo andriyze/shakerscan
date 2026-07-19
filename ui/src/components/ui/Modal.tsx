@@ -46,7 +46,10 @@ export function Modal({
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
-        className={cn('flex max-h-[90vh] w-full flex-col rounded-lg border border-gray-800 bg-gray-900 shadow-xl', SIZES[size])}
+        // Focusable so useModalA11y can move focus here on open (a plain div is
+        // not, which would leave focus in the now-inert page until first Tab).
+        tabIndex={-1}
+        className={cn('flex max-h-[90vh] w-full flex-col rounded-lg border border-gray-800 bg-gray-900 shadow-xl focus:outline-none', SIZES[size])}
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-start justify-between gap-4 border-b border-gray-800 p-4">

@@ -6,7 +6,8 @@ import { useRouter } from 'next/navigation'
 import { getTargetsGrouped, createTarget, scanTarget, discoverSubdomains, dedupeTargets, getGradeColor, type Target, type GroupedDomain } from '@/lib/api'
 import { SCAN_TYPES, getScanOptions, DISCOVERY_SOURCES, GRADES, TARGET_SORT_OPTIONS, type ScanType, type SortOrder } from '@/lib/constants'
 import { useUrlFilters } from '@/lib/useUrlFilters'
-import { Card, CardSkeleton, ConfirmDialog, ErrorState, useToast } from '@/components/ui'
+import { ArrowDown, ArrowUp, Plus, Search } from 'lucide-react'
+import { Button, Card, CardSkeleton, ConfirmDialog, EmptyState, ErrorState, Field, Input, Modal, PageHeader, Select, useToast } from '@/components/ui'
 
 const SEARCH_DEBOUNCE_MS = 300
 
@@ -163,18 +164,6 @@ function TargetsContent() {
     setShowAddModal(false)
     setUrlError('')
   }
-
-  useEffect(() => {
-    if (!showAddModal) return
-    function onKey(e: KeyboardEvent) {
-      if (e.key === 'Escape') {
-        setShowAddModal(false)
-        setUrlError('')
-      }
-    }
-    document.addEventListener('keydown', onKey)
-    return () => document.removeEventListener('keydown', onKey)
-  }, [showAddModal])
 
   async function handleAddTarget(e: React.FormEvent) {
     e.preventDefault()
@@ -383,31 +372,26 @@ function TargetsContent() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-bold text-white">Targets</h1>
-          <p className="text-gray-400 mt-1">Manage your scan targets</p>
-        </div>
-        <div className="flex items-center gap-2">
-          <button
-            onClick={handleFindDuplicates}
-            disabled={dedupeLoading}
-            className="flex items-center gap-2 px-3 py-2 border border-gray-700 hover:bg-gray-800 disabled:opacity-50 text-gray-300 rounded-lg text-sm font-medium transition-colors"
-            title="Find and merge scheme/trailing-slash duplicate targets"
-          >
-            {dedupeLoading ? 'Checking…' : 'Find duplicates'}
-          </button>
-          <button
-            onClick={() => setShowAddModal(true)}
-            className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition-colors"
-          >
-            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
-            </svg>
-            Add Target
-          </button>
-        </div>
-      </div>
+      <PageHeader
+        title="Targets"
+        description="Manage your scan targets"
+        actions={
+          <>
+            <Button
+              variant="secondary"
+              onClick={handleFindDuplicates}
+              loading={dedupeLoading}
+              title="Find and merge scheme/trailing-slash duplicate targets"
+            >
+              {dedupeLoading ? 'Checking…' : 'Find duplicates'}
+            </Button>
+            <Button onClick={() => setShowAddModal(true)}>
+              <Plus className="h-4 w-4" aria-hidden="true" />
+              Add Target
+            </Button>
+          </>
+        }
+      />
 
       <ConfirmDialog
         open={dedupePreview !== null}
@@ -449,89 +433,79 @@ function TargetsContent() {
         {/* Discovery Source Filter */}
         <div className="flex items-center gap-3">
           <label className="text-sm text-gray-400">Source:</label>
-          <select
+          <Select
+            fullWidth={false}
             value={discoverySourceFilter}
             onChange={(e) => setFilter('discovery_source', e.target.value || undefined)}
-            className="px-3 py-2 bg-gray-900 border border-gray-800 rounded-lg text-white text-sm focus:outline-none focus:border-blue-500"
           >
             <option value="">All sources</option>
             {DISCOVERY_SOURCES.map((source) => (
               <option key={source} value={source}>{source}</option>
             ))}
-          </select>
+          </Select>
         </div>
 
         {/* Grade Filter */}
         <div className="flex items-center gap-3">
           <label className="text-sm text-gray-400">Grade:</label>
-          <select
+          <Select
+            fullWidth={false}
             value={gradeFilter}
             onChange={(e) => setFilter('grade', e.target.value || undefined)}
-            className="px-3 py-2 bg-gray-900 border border-gray-800 rounded-lg text-white text-sm focus:outline-none focus:border-blue-500"
           >
             <option value="">All grades</option>
             {GRADES.map((grade) => (
               <option key={grade} value={grade}>{grade}</option>
             ))}
-          </select>
+          </Select>
         </div>
 
         {/* Has Findings Filter */}
         <div className="flex items-center gap-3">
           <label className="text-sm text-gray-400">Findings:</label>
-          <select
+          <Select
+            fullWidth={false}
             value={hasFindingsFilter}
             onChange={(e) => setFilter('has_findings', e.target.value || undefined)}
-            className="px-3 py-2 bg-gray-900 border border-gray-800 rounded-lg text-white text-sm focus:outline-none focus:border-blue-500"
           >
             <option value="">All</option>
             <option value="true">With findings</option>
             <option value="false">No findings</option>
-          </select>
+          </Select>
         </div>
 
         {/* Sort By */}
         <div className="flex items-center gap-3">
           <label className="text-sm text-gray-400">Sort:</label>
-          <select
+          <Select
+            fullWidth={false}
             value={sortBy}
             onChange={(e) => setFilter('sort_by', e.target.value || undefined)}
-            className="px-3 py-2 bg-gray-900 border border-gray-800 rounded-lg text-white text-sm focus:outline-none focus:border-blue-500"
           >
             {TARGET_SORT_OPTIONS.map((option) => (
               <option key={option.value} value={option.value}>{option.label}</option>
             ))}
-          </select>
-          <button
+          </Select>
+          <Button
+            variant="secondary"
             onClick={toggleSortOrder}
-            className="px-3 py-2 bg-gray-900 border border-gray-800 rounded-lg text-white text-sm hover:bg-gray-800 focus:outline-none focus:border-blue-500"
             title={sortOrder === 'asc' ? 'Ascending' : 'Descending'}
             aria-label={sortOrder === 'asc' ? 'Sort ascending' : 'Sort descending'}
           >
-            {sortOrder === 'asc' ? (
-              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 15l7-7 7 7" />
-              </svg>
-            ) : (
-              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-              </svg>
-            )}
-          </button>
+            {sortOrder === 'asc' ? <ArrowUp className="h-4 w-4" aria-hidden="true" /> : <ArrowDown className="h-4 w-4" aria-hidden="true" />}
+          </Button>
         </div>
 
         {/* Search */}
         <div className="relative flex-1 min-w-[200px]">
-          <input
+          <Input
             type="text"
             placeholder="Search by URL or domain..."
             value={searchInput}
             onChange={(e) => setSearchInput(e.target.value)}
-            className="w-full px-4 py-2 bg-gray-900 border border-gray-800 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-blue-500"
+            className="pr-10"
           />
-          <svg className="absolute right-3 top-2.5 w-5 h-5 text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-          </svg>
+          <Search className="pointer-events-none absolute right-3 top-1/2 h-5 w-5 -translate-y-1/2 text-gray-500" aria-hidden="true" />
         </div>
       </div>
 
@@ -556,14 +530,15 @@ function TargetsContent() {
       ) : fetchError ? (
         <ErrorState message="Failed to load targets. Is the API running?" onRetry={fetchTargets} />
       ) : domains.length === 0 ? (
-        <Card className="p-8 text-center">
-          <svg className="w-12 h-12 text-gray-600 mx-auto mb-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9" />
-          </svg>
-          <p className="text-gray-500">
-            {hasActiveFilters ? 'No targets found matching your filters.' : 'No targets yet. Add a target to get started.'}
-          </p>
-        </Card>
+        <EmptyState
+          message={hasActiveFilters ? 'No targets found matching your filters.' : 'No targets yet.'}
+          hint={hasActiveFilters ? 'Try clearing your filters.' : 'Add a target to get started.'}
+          action={
+            hasActiveFilters
+              ? { label: 'Clear filters', onClick: clearFilters }
+              : { label: 'Add target', onClick: () => setShowAddModal(true) }
+          }
+        />
       ) : (
         <div className="space-y-3">
           {domains.map((domain) => {
@@ -923,79 +898,39 @@ function TargetsContent() {
         </div>
       )}
 
-      {/* Add Target Modal */}
-      {showAddModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-          <Card
-            className="max-w-md w-full"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="add-target-title"
-          >
-            <div className="p-4 border-b border-gray-800 flex items-center justify-between">
-              <h2 id="add-target-title" className="font-medium text-white">Add Target</h2>
-              <button
-                type="button"
-                onClick={closeAddModal}
-                aria-label="Close"
-                className="text-gray-400 hover:text-white"
-              >
-                <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                </svg>
-              </button>
-            </div>
-            <form onSubmit={handleAddTarget} className="p-4 space-y-4">
-              <div>
-                <label className="block text-sm font-medium text-gray-400 mb-1">URL</label>
-                <input
-                  type="text"
-                  value={newTargetUrl}
-                  onChange={(e) => {
-                    setNewTargetUrl(e.target.value)
-                    if (urlError) setUrlError('')
-                  }}
-                  placeholder="https://example.com"
-                  aria-invalid={urlError ? true : undefined}
-                  className={`w-full px-3 py-2 bg-gray-800 border rounded-lg text-white placeholder-gray-500 focus:outline-none ${
-                    urlError ? 'border-red-500 focus:border-red-500' : 'border-gray-700 focus:border-blue-500'
-                  }`}
-                  required
-                />
-                {urlError && (
-                  <p className="mt-1 text-sm text-red-400">{urlError}</p>
-                )}
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-400 mb-1">Name (optional)</label>
-                <input
-                  type="text"
-                  value={newTargetName}
-                  onChange={(e) => setNewTargetName(e.target.value)}
-                  placeholder="My Website"
-                  className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-blue-500"
-                />
-              </div>
-              <div className="flex gap-3">
-                <button
-                  type="button"
-                  onClick={closeAddModal}
-                  className="flex-1 px-4 py-2 bg-gray-800 hover:bg-gray-700 text-white rounded-lg text-sm font-medium transition-colors"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={adding}
-                  className="flex-1 px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:bg-blue-600/50 text-white rounded-lg text-sm font-medium transition-colors"
-                >
-                  {adding ? 'Adding...' : 'Add Target'}
-                </button>
-              </div>
-            </form>
-          </Card>
-        </div>
-      )}
+      <Modal open={showAddModal} title="Add Target" onClose={closeAddModal}>
+        <form onSubmit={handleAddTarget} className="space-y-4">
+          <Field label="URL" error={urlError || undefined}>
+            <Input
+              type="text"
+              value={newTargetUrl}
+              onChange={(e) => {
+                setNewTargetUrl(e.target.value)
+                if (urlError) setUrlError('')
+              }}
+              placeholder="https://example.com"
+              error={Boolean(urlError)}
+              required
+            />
+          </Field>
+          <Field label="Name (optional)">
+            <Input
+              type="text"
+              value={newTargetName}
+              onChange={(e) => setNewTargetName(e.target.value)}
+              placeholder="My Website"
+            />
+          </Field>
+          <div className="flex gap-3">
+            <Button type="button" variant="secondary" onClick={closeAddModal} className="flex-1">
+              Cancel
+            </Button>
+            <Button type="submit" loading={adding} className="flex-1">
+              {adding ? 'Adding…' : 'Add Target'}
+            </Button>
+          </div>
+        </form>
+      </Modal>
     </div>
   )
 }

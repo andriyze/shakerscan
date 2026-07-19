@@ -8,7 +8,8 @@ import {
   type Schedule, type Target
 } from '@/lib/api'
 import { SCAN_TYPES, type ScanType } from '@/lib/constants'
-import { Button, Card, CardSkeleton, ConfirmDialog, EmptyState, ErrorState, useToast } from '@/components/ui'
+import { Plus } from 'lucide-react'
+import { Button, Card, CardSkeleton, ConfirmDialog, EmptyState, ErrorState, Modal, PageHeader, Select, useToast } from '@/components/ui'
 import { isWebTarget } from '@/lib/targets'
 import { utcTimeToLocalLabel } from '@/lib/format'
 import {
@@ -183,17 +184,6 @@ function SchedulesContent() {
     }
   }, [showCreateModal, formTargetId])
 
-  useEffect(() => {
-    if (!showCreateModal) return
-    function onKey(e: KeyboardEvent) {
-      if (e.key === 'Escape') {
-        setShowCreateModal(false)
-        resetForm()
-      }
-    }
-    document.addEventListener('keydown', onKey)
-    return () => document.removeEventListener('keydown', onKey)
-  }, [showCreateModal])
 
   async function handleCreate(e: React.FormEvent) {
     e.preventDefault()
@@ -328,31 +318,30 @@ function SchedulesContent() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-bold text-white">Schedules</h1>
-          <p className="text-gray-400 mt-1">Manage recurring scans</p>
-        </div>
-        <Button onClick={() => setShowCreateModal(true)}>
-          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
-          </svg>
-          New Schedule
-        </Button>
-      </div>
+      <PageHeader
+        title="Schedules"
+        description="Manage recurring scans"
+        actions={
+          <Button onClick={() => setShowCreateModal(true)}>
+            <Plus className="h-4 w-4" aria-hidden="true" />
+            New Schedule
+          </Button>
+        }
+      />
 
       {/* Status Filter */}
       <div className="flex flex-wrap items-center gap-3">
         <label className="text-sm text-gray-400">Status:</label>
-        <select
+        <Select
+          fullWidth={false}
           value={statusFilter}
           onChange={(e) => setStatusFilter(e.target.value)}
-          className="px-3 py-2 bg-gray-900 border border-gray-800 rounded-lg text-white text-sm focus:outline-none focus:border-blue-500"
+          aria-label="Filter schedules by status"
         >
           <option value="all">All</option>
           <option value="active">Active</option>
           <option value="disabled">Disabled</option>
-        </select>
+        </Select>
         <button
           type="button"
           onClick={() => setHealthFilter(value => !value)}
@@ -551,28 +540,13 @@ function SchedulesContent() {
       )}
 
       {/* Create Modal */}
-      {showCreateModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-          <Card
-            className="max-h-[90vh] w-full max-w-2xl overflow-y-auto"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="schedule-dialog-title"
-          >
-            <div className="p-4 border-b border-gray-800 flex items-center justify-between">
-              <h2 id="schedule-dialog-title" className="font-medium text-white">{editingSchedule ? 'Edit Schedule' : 'New Schedule'}</h2>
-              <button
-                type="button"
-                onClick={() => { setShowCreateModal(false); resetForm() }}
-                aria-label="Close"
-                className="text-gray-400 hover:text-white"
-              >
-                <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                </svg>
-              </button>
-            </div>
-            <form onSubmit={handleCreate} className="p-4 space-y-4">
+      <Modal
+        open={showCreateModal}
+        title={editingSchedule ? 'Edit Schedule' : 'New Schedule'}
+        onClose={() => { setShowCreateModal(false); resetForm() }}
+        size="lg"
+      >
+            <form onSubmit={handleCreate} className="space-y-4">
               {/* Target */}
               <div>
                 <label htmlFor="schedule-target" className="block text-sm font-medium text-gray-400 mb-1">Target</label>
@@ -798,25 +772,25 @@ function SchedulesContent() {
               )}
 
               <div className="flex gap-3">
-                <button
+                <Button
                   type="button"
+                  variant="secondary"
                   onClick={() => { setShowCreateModal(false); resetForm() }}
-                  className="flex-1 px-4 py-2 bg-gray-800 hover:bg-gray-700 text-white rounded-lg text-sm font-medium transition-colors"
+                  className="flex-1"
                 >
                   Cancel
-                </button>
-                <button
+                </Button>
+                <Button
                   type="submit"
-                  disabled={creating || (!formTargetId && !editingSchedule) || asmNeedsLabDepth || formKind === 'evidence_retention_sweep'}
-                  className="flex-1 px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:bg-blue-600/50 text-white rounded-lg text-sm font-medium transition-colors"
+                  loading={creating}
+                  disabled={(!formTargetId && !editingSchedule) || asmNeedsLabDepth || formKind === 'evidence_retention_sweep'}
+                  className="flex-1"
                 >
-                  {creating ? 'Saving...' : editingSchedule ? 'Save Schedule' : 'Create Schedule'}
-                </button>
+                  {creating ? 'Saving…' : editingSchedule ? 'Save Schedule' : 'Create Schedule'}
+                </Button>
               </div>
             </form>
-          </Card>
-        </div>
-      )}
+      </Modal>
 
       <ConfirmDialog
         open={confirmDelete !== null}

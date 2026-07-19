@@ -59,6 +59,19 @@ export function Tabs({
             {item.badge !== undefined && <Badge value={item.badge} />}
           </>
         )
+        if (item.disabled) {
+          // Render as an inert span so a disabled item never navigates, whether
+          // or not it carries an href.
+          return (
+            <span
+              key={item.key}
+              aria-disabled="true"
+              className={cn(ITEM_BASE, 'cursor-not-allowed opacity-50', activeClasses(isActive))}
+            >
+              {inner}
+            </span>
+          )
+        }
         if (item.href) {
           return (
             <Link

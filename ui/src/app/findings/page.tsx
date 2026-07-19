@@ -6,11 +6,14 @@ import { getFindings, cleanupFindings, getDomains, getSeverityBg, formatDate, ge
 import { useUrlFilters } from '@/lib/useUrlFilters'
 import { SEVERITY_LEVELS, FINDING_STATUSES, SORT_OPTIONS, LAST_SEEN_OPTIONS, CLEANUP_AGE_OPTIONS, type FindingSourceType, type SortOption, type SortOrder } from '@/lib/constants'
 import {
+  Button,
   Card,
   ConfirmDialog,
   EmptyState,
   ErrorState,
   FindingStatusBadge,
+  Input,
+  PageHeader,
   ProofStateBadge,
   RetestVerdictBadge,
   SeverityBadge,
@@ -343,22 +346,21 @@ function FindingsContent() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-start justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-bold text-white">Findings</h1>
-          <p className="text-gray-400 mt-1">
+      <PageHeader
+        title="Findings"
+        description={
+          <>
             Vulnerability findings across all scans
             {scanIdFilter && <span className="text-blue-400"> (filtered by scan)</span>}
             {targetIdFilter && <span className="text-blue-400"> (filtered by target)</span>}
-          </p>
-        </div>
-        <button
-          onClick={() => { setShowCleanup(!showCleanup); setCleanupPreview(null) }}
-          className="px-3 py-1.5 bg-gray-800 text-gray-400 rounded-lg text-sm hover:bg-gray-700 shrink-0"
-        >
-          Advanced cleanup
-        </button>
-      </div>
+          </>
+        }
+        actions={
+          <Button variant="secondary" onClick={() => { setShowCleanup(!showCleanup); setCleanupPreview(null) }}>
+            Advanced cleanup
+          </Button>
+        }
+      />
 
       {/* Legend: Severity / Proof / Retest / Status render as look-alike badges on each row.
           Spell out that they are four different questions so newcomers don't conflate them. */}
@@ -476,13 +478,12 @@ function FindingsContent() {
       />
 
       <div className="relative">
-        <input
+        <Input
           type="text"
           placeholder="Search findings by title or URL..."
           value={searchInput}
           onChange={(e) => setSearchInput(e.target.value)}
           aria-label="Search findings by title or URL"
-          className="w-full rounded-lg border border-gray-800 bg-gray-900 px-4 py-2 text-sm text-white placeholder-gray-500 focus:border-blue-500 focus:outline-none"
         />
       </div>
 

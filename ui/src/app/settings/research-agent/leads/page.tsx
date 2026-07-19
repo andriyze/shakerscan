@@ -290,7 +290,7 @@ export default function InvestigationWorkspacePage() {
   }, [load])
 
   return (
-    <div className="mx-auto max-w-7xl px-4 py-6">
+    <div>
       <header className="flex flex-col gap-4 border-b border-gray-800 pb-5 sm:flex-row sm:items-end sm:justify-between">
         <div>
           <div className="flex items-center gap-2 text-sm text-blue-300"><Bot className="h-4 w-4" /> AI Investigator</div>

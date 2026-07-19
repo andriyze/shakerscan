@@ -206,7 +206,7 @@ export default function ExperimentBuilderPage() {
   const selectedTarget = targets.find((target) => target.id === targetId)
 
   return (
-    <div className="mx-auto max-w-7xl px-4 py-6">
+    <div>
       <header className="flex flex-col gap-4 border-b border-gray-800 pb-5 sm:flex-row sm:items-end sm:justify-between">
         <div>
           <nav className="mb-2 inline-flex rounded-lg border border-gray-800 bg-gray-950 p-1 text-sm">

@@ -8,10 +8,12 @@ export interface TextareaProps extends React.TextareaHTMLAttributes<HTMLTextArea
   error?: boolean
   /** Monospace + preserved whitespace, for JSON / payload editing. */
   mono?: boolean
+  /** Fill the parent width (default). */
+  fullWidth?: boolean
 }
 
 export const Textarea = forwardRef<HTMLTextAreaElement, TextareaProps>(function Textarea(
-  { error, mono, className = '', rows = 4, ...props },
+  { error, mono, fullWidth = true, className = '', rows = 4, ...props },
   ref
 ) {
   return (
@@ -19,7 +21,7 @@ export const Textarea = forwardRef<HTMLTextAreaElement, TextareaProps>(function 
       ref={ref}
       rows={rows}
       aria-invalid={error || undefined}
-      className={cn(fieldClasses(error), mono && 'font-mono text-xs leading-relaxed', className)}
+      className={cn(fieldClasses(error), fullWidth && 'w-full', mono && 'font-mono text-xs leading-relaxed', className)}
       {...props}
     />
   )

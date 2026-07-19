@@ -131,8 +131,13 @@ function NavContent({ pathname }: { pathname: string }) {
       return pathname === '/'
     }
     if (href === '/settings/research-agent') {
-      // Keep the hub highlighted on its own run-detail pages, but not on /leads.
-      return pathname === href || pathname.startsWith('/settings/research-agent/runs')
+      // Keep the hub highlighted on its own run-detail and experiment pages
+      // (which have no nav entry of their own), but not on /leads.
+      return (
+        pathname === href ||
+        pathname.startsWith('/settings/research-agent/runs') ||
+        pathname.startsWith('/settings/research-agent/experiment')
+      )
     }
     return pathname.startsWith(href)
   }

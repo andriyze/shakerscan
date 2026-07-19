@@ -5,7 +5,8 @@ import Link from 'next/link'
 import { getScans, cancelScan, getCampaigns, getDomains, getGradeColor, formatDate, formatDuration, submitScan, type Campaign, type Scan } from '@/lib/api'
 import { useUrlFilters } from '@/lib/useUrlFilters'
 import { SCAN_STATUSES, SCAN_TYPES, type ScanType } from '@/lib/constants'
-import { Card, ConfirmDialog, ErrorState, LastUpdated, ScanStatusBadge, TableSkeleton, useToast } from '@/components/ui'
+import { Plus, Search } from 'lucide-react'
+import { buttonClasses, Card, ConfirmDialog, ErrorState, Input, LastUpdated, PageHeader, ScanStatusBadge, Select, TableSkeleton, useToast } from '@/components/ui'
 import { episodesStarted, findingCount, RunStatusBadge, runState } from '@/components/hunt'
 
 const PAGE_SIZE = 50
@@ -341,74 +342,67 @@ function ScansContent() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-bold text-white">Scans</h1>
-          <p className="text-gray-400 mt-1">Scans and active autonomous testing in one place</p>
-        </div>
-        <div className="flex items-center gap-4">
-          <LastUpdated updatedAt={lastUpdated} onRefresh={handleManualRefresh} refreshing={refreshing} />
-          <Link
-            href="/scan/new"
-            className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition-colors"
-          >
-            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
-            </svg>
-            New Scan
-          </Link>
-        </div>
-      </div>
+      <PageHeader
+        title="Scans"
+        description="Scans and active autonomous testing in one place"
+        actions={
+          <>
+            <LastUpdated updatedAt={lastUpdated} onRefresh={handleManualRefresh} refreshing={refreshing} />
+            <Link href="/scan/new" className={buttonClasses('primary')}>
+              <Plus className="h-4 w-4" aria-hidden="true" />
+              New Scan
+            </Link>
+          </>
+        }
+      />
 
       {/* Filters */}
       <div className="flex gap-4 flex-wrap">
         {/* Status Filter */}
         <div className="flex items-center gap-3">
           <label className="text-sm text-gray-400">Status:</label>
-          <select
+          <Select
+            fullWidth={false}
             value={statusFilter}
             onChange={(e) => setFilter('status', e.target.value || undefined)}
             aria-label="Filter by scan status"
-            className="px-3 py-2 bg-gray-900 border border-gray-800 rounded-lg text-white text-sm focus:outline-none focus:border-blue-500"
           >
             <option value="">All statuses</option>
             {SCAN_STATUSES.map((status) => (
               <option key={status} value={status}>{status}</option>
             ))}
-          </select>
+          </Select>
         </div>
 
         {/* Domain Filter */}
         {domains.length > 0 && (
           <div className="flex items-center gap-3">
             <label className="text-sm text-gray-400">Domain:</label>
-            <select
+            <Select
+              fullWidth={false}
               value={domainFilter}
               onChange={(e) => setFilter('domain', e.target.value || undefined)}
               aria-label="Filter by domain"
-              className="px-3 py-2 bg-gray-900 border border-gray-800 rounded-lg text-white text-sm focus:outline-none focus:border-blue-500"
             >
               <option value="">All domains</option>
               {domains.map((domain) => (
                 <option key={domain} value={domain}>{domain}</option>
               ))}
-            </select>
+            </Select>
           </div>
         )}
 
         {/* Search */}
         <div className="relative flex-1 min-w-[200px]">
-          <input
+          <Input
             type="text"
             placeholder="Search by target URL..."
             value={searchInput}
             onChange={(e) => setSearchInput(e.target.value)}
             aria-label="Search scans by target URL"
-            className="w-full px-4 py-2 bg-gray-900 border border-gray-800 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-blue-500"
+            className="pr-10"
           />
-          <svg className="absolute right-3 top-2.5 w-5 h-5 text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-          </svg>
+          <Search className="pointer-events-none absolute right-3 top-1/2 h-5 w-5 -translate-y-1/2 text-gray-500" aria-hidden="true" />
         </div>
 
         {/* Show Continuous-ASM batch/recon scans (hidden by default) */}
@@ -462,8 +456,13 @@ function ScansContent() {
         {loading ? (
           <TableSkeleton rows={8} cols={6} />
         ) : scans.length === 0 && visibleHunts.length === 0 ? (
-          <div className="p-8 text-center text-gray-500">
-            {searchQuery || domainFilter || statusFilter ? 'No scans found matching your filters.' : 'No scans found. Start a new scan to get started.'}
+          <div className="p-8 text-center">
+            <p className="text-gray-500">
+              {searchQuery || domainFilter || statusFilter ? 'No scans found matching your filters.' : 'No scans yet.'}
+            </p>
+            <p className="mt-1 text-sm text-gray-600">
+              {searchQuery || domainFilter || statusFilter ? 'Try clearing your filters.' : 'Start a new scan to get started.'}
+            </p>
           </div>
         ) : (
           <>
@@ -854,11 +853,7 @@ function ScansContent() {
 
 export default function ScansPage() {
   return (
-    <Suspense fallback={
-      <div className="flex items-center justify-center h-32">
-        <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-blue-500"></div>
-      </div>
-    }>
+    <Suspense fallback={<Card><TableSkeleton rows={8} cols={6} /></Card>}>
       <ScansContent />
     </Suspense>
   )

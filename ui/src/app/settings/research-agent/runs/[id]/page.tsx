@@ -200,7 +200,7 @@ export default function RunDetailPage() {
     }
   }
 
-  if (loading) return <div className="mx-auto max-w-4xl px-4 py-6"><Skeleton className="h-96" /></div>
+  if (loading) return <div><Skeleton className="h-96" /></div>
 
   const campaignState = campaign ? runState(campaign) : (detail?.episode.terminal ? 'completed' : 'running')
   const automaticallyStopped = Boolean(yieldMetrics?.stop_recommended && yieldMetrics.stop_reason)
@@ -236,7 +236,7 @@ export default function RunDetailPage() {
   const activeRun = state === 'running' || state === 'waiting' || state === 'paused'
 
   return (
-    <div className="mx-auto max-w-4xl px-4 py-6">
+    <div>
       <Link href="/settings/research-agent" className="inline-flex items-center gap-1.5 text-sm text-gray-400 hover:text-white">
         <ArrowLeft className="h-4 w-4" />All runs
       </Link>

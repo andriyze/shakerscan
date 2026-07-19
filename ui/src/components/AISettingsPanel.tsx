@@ -8,14 +8,14 @@ import {
   type AISettings,
   type AISettingsUpdate,
 } from '@/lib/api'
-import { Button, Fieldset, Tabs, Toggle, fieldClasses, useToast } from '@/components/ui'
+import { Button, Fieldset, Tabs, ToggleVisual, fieldClasses, useToast } from '@/components/ui'
 
 type Severity = 'critical' | 'high' | 'medium' | 'low' | 'info'
 
 const SEVERITY_OPTIONS: Severity[] = ['critical', 'high', 'medium', 'low', 'info']
 // Point the panel's local field class at the shared field styling so every
 // input/select here matches the rest of the app and gets a real focus ring.
-const INPUT_CLASS = `mt-1 ${fieldClasses()}`
+const INPUT_CLASS = `mt-1 w-full ${fieldClasses()}`
 const HONEY_HOSTED_URL = 'https://honey.shakerscan.com'
 const HONEY_LOCAL_PUBLIC_URL = 'http://localhost:18080'
 const HONEY_LOCAL_SCANNER_URL = 'http://host.docker.internal:18080'
@@ -816,7 +816,14 @@ function ToggleRow({
   onChange: (checked: boolean) => void
 }) {
   return (
-    <div className="flex items-start justify-between gap-3 rounded border border-gray-800 bg-gray-900/50 px-2.5 py-2">
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      aria-label={label}
+      onClick={() => onChange(!checked)}
+      className="flex w-full items-start justify-between gap-3 rounded border border-gray-800 bg-gray-900/50 px-2.5 py-2 text-left transition-colors hover:border-gray-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2 focus-visible:ring-offset-gray-950"
+    >
       <span className="min-w-0 space-y-0.5">
         <span className="text-xs text-gray-200 inline-flex items-center gap-1">
           {label}
@@ -824,8 +831,8 @@ function ToggleRow({
         </span>
         <span className="block text-[11px] text-gray-500">{description}</span>
       </span>
-      <Toggle checked={checked} onChange={onChange} label={label} />
-    </div>
+      <ToggleVisual checked={checked} />
+    </button>
   )
 }
 
