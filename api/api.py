@@ -16841,12 +16841,24 @@ async def _build_agent_context_pack_from_target(conn, req: AgentContextPackFromT
         live_endpoint_rows = await _savepoint_fetch(
             conn,
             """
-            SELECT method, path
-            FROM target_endpoints
-            WHERE target_id=$1
-              AND COALESCE(test_status, '') <> 'gone'
-              AND COALESCE(last_http_status, 0) NOT IN (404, 410)
-              AND COALESCE(unreachable_streak, 0) < 2
+            SELECT te.method, te.path
+            FROM target_endpoints te
+            WHERE te.target_id=$1
+              AND COALESCE(te.test_status, '') <> 'gone'
+              -- Row-level: this method-row isn't itself a client-error/soft-404 (400) or server error (5xx).
+              AND COALESCE(te.last_http_status, 0) NOT IN (400, 404, 410, 500, 501, 502, 503, 504)
+              AND COALESCE(te.unreachable_streak, 0) < 2
+              -- Path-level phantom exclusion: if ANY method of this path returned a server error / gone
+              -- (e.g. Juice Shop's 500 "Unexpected path" for inferred app_graph routes like /api/v2/config,
+              -- /rest/v3/users), the whole PATH is phantom — its other, never-probed (NULL) methods must
+              -- NOT keep it in live_surface. unreachable_streak counts only connection failures, so these
+              -- soft-404 phantoms never retire to 'gone' and previously let app_graph leads rank onto
+              -- nonexistent routes, burning every experiment as inconclusive. Real auth-gated (401/403),
+              -- method-limited (405), or 2xx/3xx paths are unaffected. (External-audit — phantom leads.)
+              AND NOT EXISTS (
+                  SELECT 1 FROM target_endpoints ph
+                  WHERE ph.target_id=te.target_id AND ph.path=te.path
+                    AND ph.last_http_status IN (404, 410, 500, 501, 502, 503, 504))
             LIMIT 2000
             """,
             target_uuid,
@@ -19116,7 +19128,8 @@ async def submit_agent_hunt_reply(run_id: str, req: AgentHuntReplyRequest):
             result = await _agent_finalize_and_persist(
                 state, target_uuid=target_uuid, target_url=target_url,
                 created_by=f"agent_hunt_session:{run_id}", approval_receipt_id=approval_receipt_id,
-                hypothesis_id=None, persist=True, allow_write=allow_write)
+                hypothesis_id=None, persist=True, allow_write=allow_write,
+                cancelled_check=_turn_cancelled)
     except Exception:
         # Release the claim so the session can retry this turn, then surface the error.
         async with db_pool.acquire() as conn:
@@ -38565,6 +38578,16 @@ async def _reap_abandoned_research_episodes(conn) -> int:
              AND re.updated_at < NOW() - make_interval(hours => $1::int)
              AND NOT EXISTS (
                  SELECT 1 FROM campaigns c WHERE c.id=re.campaign_id AND c.status='paused')
+             -- Do NOT reap an OPERATOR-PAUSED episode: autopilot pause sets autopilot_enabled=false
+             -- (the same signal as agent-mode), so distinguish a pause via its event trail — skip any
+             -- episode whose latest autopilot event is a pause (no later resume). (External-audit P1.)
+             AND NOT EXISTS (
+                 SELECT 1 FROM research_events ev
+                 WHERE ev.episode_id=re.id AND ev.event_type='autopilot_paused'
+                   AND ev.created_at > COALESCE(
+                       (SELECT max(ev2.created_at) FROM research_events ev2
+                        WHERE ev2.episode_id=re.id AND ev2.event_type='autopilot_resumed'),
+                       '-infinity'::timestamptz))
            RETURNING id""",
         ttl,
     )
