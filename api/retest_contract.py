@@ -18,6 +18,70 @@ from typing import Any
 
 RETEST_QUEUE_SCHEMA_VERSION = 1
 ASM_ENDPOINT_FINGERPRINT_MIGRATION = "asm_endpoint_fingerprint_v2"
+CAMPAIGN_SCAN_FINDING_LINKS_MIGRATION = "campaign_scan_finding_links_v1"
+
+
+async def backfill_campaign_scan_finding_links(conn, *, campaign_id=None, scan_id=None) -> int:
+    """Link research-driven scan findings back to the campaign ledger and stamp provenance.
+
+    A research decision that queues a scan (scan.focused_family, ASM wave) records the scan on
+    the campaign_actions row, but findings the scan produced were never linked back: the
+    campaign impact panel (campaign_actions.finding_ids) stayed empty and the finding rows were
+    indistinguishable from organic DAST output. Idempotently repairs both:
+
+      1. campaign_actions.finding_ids := distinct findings.id where findings.scan_id = action's scan
+      2. findings.evidence.research := {driven_by: 'autonomous_research', campaign_id, campaign_action_id}
+         so hunt-driven scanner findings are distinguishable from organic DAST (no `research`
+         key) and from agent-native output (source='autonomous').
+
+    Returns the number of campaign_action rows (re)linked.
+    """
+    rows = await conn.fetch(
+        """
+        WITH linked AS (
+            SELECT ca.id AS action_id, jsonb_agg(DISTINCT f.id::text ORDER BY f.id::text) AS ids
+            FROM campaign_actions ca
+            JOIN findings f ON f.scan_id = ca.scan_id
+            WHERE ca.scan_id IS NOT NULL
+              AND ($1::uuid IS NULL OR ca.mission_campaign_id = $1)
+              AND ($2::uuid IS NULL OR ca.scan_id = $2)
+            GROUP BY ca.id
+        )
+        UPDATE campaign_actions ca
+        SET finding_ids = linked.ids, updated_at = NOW()
+        FROM linked
+        WHERE ca.id = linked.action_id
+          AND COALESCE(ca.finding_ids, '[]'::jsonb) <> linked.ids
+        RETURNING ca.id
+        """,
+        campaign_id,
+        scan_id,
+    )
+    await conn.execute(
+        """
+        UPDATE findings f
+        SET evidence = jsonb_set(
+                COALESCE(f.evidence, '{}'::jsonb),
+                '{research}',
+                jsonb_build_object(
+                    'driven_by', 'autonomous_research',
+                    'campaign_id', ca.mission_campaign_id::text,
+                    'campaign_action_id', ca.id::text
+                ),
+                true
+            ),
+            updated_at = NOW()
+        FROM campaign_actions ca
+        WHERE f.scan_id = ca.scan_id
+          AND ca.mission_campaign_id IS NOT NULL
+          AND ($1::uuid IS NULL OR ca.mission_campaign_id = $1)
+          AND ($2::uuid IS NULL OR ca.scan_id = $2)
+          AND COALESCE(f.evidence->'research'->>'driven_by', '') <> 'autonomous_research'
+        """,
+        campaign_id,
+        scan_id,
+    )
+    return len(rows)
 
 # ---------------------------------------------------------------------------
 # Verification Policy: single source of truth for severity gates
@@ -1654,6 +1718,26 @@ async def run_schema_migrations(pool) -> None:
                 CREATE INDEX IF NOT EXISTS idx_campaign_actions_mission_campaign
                 ON campaign_actions(mission_campaign_id, created_at DESC) WHERE mission_campaign_id IS NOT NULL
             """)
+            # Findings produced by research-driven scans are linked back to the campaign ledger
+            # by scan_id; the join needs an index on large findings tables.
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_findings_scan_id ON findings(scan_id)
+            """)
+            # One-time retroactive repair: a research decision that queued a scan recorded the
+            # scan on campaign_actions but never backfilled finding_ids, so hunt-driven scanner
+            # findings were invisible in the campaign impact panel and indistinguishable from
+            # organic DAST output. Idempotent; settles instantly on re-run.
+            applied = await conn.fetchval(
+                "SELECT 1 FROM app_schema_migrations WHERE name = $1",
+                CAMPAIGN_SCAN_FINDING_LINKS_MIGRATION,
+            )
+            if not applied:
+                linked = await backfill_campaign_scan_finding_links(conn)
+                print(f"[schema] campaign scan finding links backfill: {linked} actions linked", flush=True)
+                await conn.execute(
+                    "INSERT INTO app_schema_migrations(name) VALUES ($1) ON CONFLICT DO NOTHING",
+                    CAMPAIGN_SCAN_FINDING_LINKS_MIGRATION,
+                )
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS hypotheses (
                     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

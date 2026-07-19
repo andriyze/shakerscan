@@ -21,6 +21,7 @@ import {
   retestAiFinding,
   updateFinding,
   deleteFinding,
+  getFindingResearchProvenance,
   type Finding,
   type FindingException,
   type PolicyProfile,
@@ -582,6 +583,7 @@ function FindingDetailContent() {
       : ''
   const rawEvidenceObject = useMemo(() => asEvidenceObject(rawEvidence), [rawEvidence])
   const isAiFinding = finding ? isAiReplayFinding(finding) : false
+  const research = finding ? getFindingResearchProvenance(finding) : null
   const autonomousTargetUrl = finding ? autonomousWebTargetUrl(finding) : null
   const latestRetest = retestHistory[0]
   // An inconclusive retest that is retryable means "we couldn't decide, try
@@ -743,6 +745,11 @@ function FindingDetailContent() {
                 <SeverityBadge severity={finding.severity} />
                 <FindingStatusBadge status={finding.status} />
                 <SourceTypeBadge type={getFindingSourceType(finding)} />
+                {research && (
+                  <span className="rounded-full bg-indigo-500/15 px-2 py-0.5 text-xs font-medium text-indigo-300">
+                    Deep hunt
+                  </span>
+                )}
                 {finding.cvss_score !== undefined && (
                   <span className="px-2 py-0.5 rounded bg-gray-800 text-gray-200 text-xs">
                     CVSS {finding.cvss_score}
@@ -827,6 +834,20 @@ function FindingDetailContent() {
                 <code className="text-gray-300 break-all">{finding.id}</code>
                 <CopyButton text={finding.id} label="Copy finding ID" />
               </div>
+              {research && (
+                <div className="flex items-center gap-2">
+                  <span>Discovered by:</span>
+                  <span className="text-indigo-300">Deep hunt</span>
+                  {research.campaign_id && (
+                    <Link
+                      href={`/settings/research-agent/runs/${research.campaign_id}`}
+                      className="text-blue-400 hover:text-blue-300"
+                    >
+                      View run {research.campaign_id.slice(0, 8)}…
+                    </Link>
+                  )}
+                </div>
+              )}
               {finding.scan_id && (
                 <div className="flex items-center gap-2">
                   <span>Scan:</span>

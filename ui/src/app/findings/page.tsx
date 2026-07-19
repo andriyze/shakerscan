@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useRef, Suspense } from 'react'
 import Link from 'next/link'
-import { getFindings, cleanupFindings, getDomains, getSeverityBg, formatDate, type Finding } from '@/lib/api'
+import { getFindings, cleanupFindings, getDomains, getSeverityBg, formatDate, getFindingResearchProvenance, type Finding } from '@/lib/api'
 import { useUrlFilters } from '@/lib/useUrlFilters'
 import { SEVERITY_LEVELS, FINDING_STATUSES, SORT_OPTIONS, LAST_SEEN_OPTIONS, CLEANUP_AGE_OPTIONS, type FindingSourceType, type SortOption, type SortOrder } from '@/lib/constants'
 import {
@@ -31,6 +31,8 @@ interface FindingsFilters {
   scan_id?: string
   target_id?: string
   ai_target_id?: string
+  driven_by?: string
+  research_campaign_id?: string
   search?: string
   last_seen?: number
   first_seen_within?: number
@@ -142,6 +144,8 @@ function FindingsContent() {
   const scanIdFilter = filters.scan_id || ''
   const targetIdFilter = filters.target_id || ''
   const aiTargetIdFilter = filters.ai_target_id || ''
+  const drivenByFilter = filters.driven_by || ''
+  const researchCampaignFilter = filters.research_campaign_id || ''
   const searchQuery = filters.search || ''
   const lastSeenFilter = filters.last_seen ? Number(filters.last_seen) : 0
   const firstSeenWithinFilter = filters.first_seen_within ? Number(filters.first_seen_within) : 0
@@ -156,7 +160,8 @@ function FindingsContent() {
 
   const hasActiveFilters = Boolean(
     severityFilter || statusFilter || sourceTypeFilter || domainFilter ||
-    scanIdFilter || targetIdFilter || aiTargetIdFilter || searchQuery || lastSeenFilter ||
+    scanIdFilter || targetIdFilter || aiTargetIdFilter || drivenByFilter || researchCampaignFilter ||
+    searchQuery || lastSeenFilter ||
     firstSeenWithinFilter || resolvedWithinFilter ||
     verificationVerdictFilter || verificationModeFilter || verifiedOnlyFilter
   )
@@ -189,7 +194,7 @@ function FindingsContent() {
 
   useEffect(() => {
     fetchFindings()
-  }, [severityFilter, statusFilter, sourceTypeFilter, domainFilter, scanIdFilter, targetIdFilter, aiTargetIdFilter, searchQuery, lastSeenFilter, firstSeenWithinFilter, resolvedWithinFilter, verificationVerdictFilter, verificationModeFilter, verifiedOnlyFilter, rawPage, sortBy, sortOrder])
+  }, [severityFilter, statusFilter, sourceTypeFilter, domainFilter, scanIdFilter, targetIdFilter, aiTargetIdFilter, drivenByFilter, researchCampaignFilter, searchQuery, lastSeenFilter, firstSeenWithinFilter, resolvedWithinFilter, verificationVerdictFilter, verificationModeFilter, verifiedOnlyFilter, rawPage, sortBy, sortOrder])
 
   async function fetchFindings() {
     try {
@@ -208,6 +213,8 @@ function FindingsContent() {
         verification_verdict: verificationVerdictFilter ? (verificationVerdictFilter as 'exploited' | 'likely_vulnerable' | 'blocked_by_security' | 'out_of_scope_internal' | 'false_positive' | 'likely_fixed' | 'inconclusive' | 'error') : undefined,
         verification_mode: verificationModeFilter ? (verificationModeFilter as 'deterministic' | 'ai_driven') : undefined,
         verified_only: verifiedOnlyFilter || undefined,
+        driven_by: drivenByFilter === 'autonomous_research' ? 'autonomous_research' : undefined,
+        research_campaign_id: researchCampaignFilter || undefined,
         sort_by: sortBy,
         sort_order: sortOrder,
         limit: PAGE_SIZE,
@@ -507,6 +514,27 @@ function FindingsContent() {
           </div>
         </div>
 
+        {/* Driven-by filter: organic DAST vs deep-hunt-driven scanner findings */}
+        <div className="flex items-center gap-2">
+          <label className="text-sm text-gray-400">Driven by:</label>
+          <div className="flex max-w-full flex-wrap gap-1 rounded-lg border border-gray-800 bg-gray-900 p-0.5">
+            {[{ value: '', label: 'Anyone' }, { value: 'autonomous_research', label: 'Deep hunt' }].map((option) => (
+              <button
+                key={option.label}
+                type="button"
+                onClick={() => setFilter('driven_by', option.value || undefined)}
+                className={`px-2.5 py-1 text-sm rounded-md transition-colors sm:px-3 ${
+                  drivenByFilter === option.value
+                    ? 'bg-blue-600 text-white'
+                    : 'text-gray-400 hover:bg-gray-800 hover:text-gray-200'
+                }`}
+              >
+                {option.label}
+              </button>
+            ))}
+          </div>
+        </div>
+
         {/* Domain Filter */}
         {domains.length > 0 && (
           <div className="flex items-center gap-2">
@@ -612,11 +640,14 @@ function FindingsContent() {
       {/* Deep-link filters (arrive via links from scans/targets/exposure and
           have no visible control above) — surface each as a removable chip so
           the active scope is obvious and individually clearable. */}
-      {(scanIdFilter || targetIdFilter || aiTargetIdFilter || firstSeenWithinFilter > 0 || resolvedWithinFilter > 0) && (
+      {(scanIdFilter || targetIdFilter || aiTargetIdFilter || researchCampaignFilter || firstSeenWithinFilter > 0 || resolvedWithinFilter > 0) && (
         <div className="flex flex-wrap items-center gap-2">
           <span className="text-xs text-gray-500">Filtered by:</span>
           {scanIdFilter && (
             <DeepLinkFilterChip label={`Scan ${scanIdFilter.slice(0, 8)}…`} onClear={() => setFilter('scan_id', undefined)} />
+          )}
+          {researchCampaignFilter && (
+            <DeepLinkFilterChip label={`Deep hunt run ${researchCampaignFilter.slice(0, 8)}…`} onClear={() => setFilter('research_campaign_id', undefined)} />
           )}
           {targetIdFilter && (
             <DeepLinkFilterChip
@@ -721,6 +752,7 @@ function FindingsContent() {
           <div className="divide-y divide-gray-800">
             {findings.map((finding) => {
               const sourceType = getFindingSourceType(finding)
+              const research = getFindingResearchProvenance(finding)
               return (
                 <Link
                   key={finding.id}
@@ -732,6 +764,14 @@ function FindingsContent() {
                       <SeverityBadge severity={finding.severity} />
                       <ProofStateBadge proofState={finding.proof_state} />
                       <SourceTypeBadge type={sourceType} />
+                      {research && (
+                        <span
+                          title={`Found by a deep-hunt-driven scan${research.campaign_id ? ` (run ${research.campaign_id.slice(0, 8)}…)` : ''}`}
+                          className="rounded-full bg-indigo-500/15 px-2 py-0.5 text-xs font-medium text-indigo-300"
+                        >
+                          Deep hunt
+                        </span>
+                      )}
                     </div>
                     <div className="flex-1 min-w-0">
                       <h3 className="text-sm font-medium text-white">{finding.title}</h3>

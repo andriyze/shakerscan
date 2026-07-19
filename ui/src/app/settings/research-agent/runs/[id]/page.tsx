@@ -8,16 +8,18 @@ import {
   cancelResearchEpisode,
   controlResearchCampaign,
   getCampaign,
+  getFindings,
   getResearchEpisode,
   getResearchEpisodes,
   setResearchEpisodeAutopilot,
   type Campaign,
   type CampaignDetailResponse,
+  type Finding,
   type ResearchEpisode,
   type ResearchEpisodeDetail,
   type ResearchPlannerMode,
 } from '@/lib/api'
-import { Button, Card, ConfirmDialog, ErrorState, Skeleton } from '@/components/ui'
+import { Button, Card, ConfirmDialog, ErrorState, SeverityBadge, Skeleton } from '@/components/ui'
 import {
   LiveActivity, PROFILES, RunStatusBadge, activeEpisode, findingCount, hostFromUrl, runState,
   type Intensity,
@@ -49,6 +51,7 @@ export default function RunDetailPage() {
   const [detail, setDetail] = useState<ResearchEpisodeDetail | null>(null)
   const [episodeCount, setEpisodeCount] = useState(0)
   const [yieldMetrics, setYieldMetrics] = useState<NonNullable<CampaignDetailResponse['research_yield']> | null>(null)
+  const [runFindings, setRunFindings] = useState<Finding[]>([])
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -98,6 +101,22 @@ export default function RunDetailPage() {
     const t = window.setInterval(() => setNow(Date.now()), 1000)
     return () => window.clearInterval(t)
   }, [])
+
+  // Findings this run produced (hunt-driven scanner findings, stamped with the
+  // campaign's research provenance). Refreshed on a slow poll alongside the run.
+  useEffect(() => {
+    const campId = campaign?.id
+    if (!campId) return
+    let cancelled = false
+    const fetchRunFindings = () => {
+      getFindings({ research_campaign_id: campId, limit: 25, sort_by: 'severity', sort_order: 'desc' })
+        .then((d) => { if (!cancelled) setRunFindings(d.findings || []) })
+        .catch(() => undefined)
+    }
+    fetchRunFindings()
+    const t = window.setInterval(fetchRunFindings, 15000)
+    return () => { cancelled = true; window.clearInterval(t) }
+  }, [campaign?.id])
 
   // Live polling: follow the active episode; when it finishes, pick up the next
   // one the campaign chains, and keep the run summary fresh.
@@ -271,7 +290,7 @@ export default function RunDetailPage() {
 
       {/* Vitals — the three numbers that matter */}
       <div className="mt-5 grid grid-cols-1 gap-3 sm:grid-cols-3">
-        <Stat label="Linked findings" value={found > 0 ? `${found}` : '0'} tone={found > 0 ? 'good' : 'muted'} hint={found > 0 ? 'verified in linked work' : activeRun ? 'none verified yet' : 'none verified'} />
+        <Stat label="Linked findings" value={found > 0 ? `${found}` : '0'} tone={found > 0 ? 'good' : 'muted'} hint={found > 0 ? 'active in linked work' : activeRun ? 'none yet' : 'none produced'} />
         <Stat label="Episodes" value={maxEpisodes ? `${episodeCount}/${maxEpisodes}` : `${episodeCount}`} hint="work shifts" />
         <Stat
           label="Time"
@@ -283,10 +302,39 @@ export default function RunDetailPage() {
       </div>
 
       {found > 0 ? (
-        <Link href={`/findings?target_id=${encodeURIComponent(campaign?.target_id || '')}&status=active`} className="mt-3 flex items-center justify-between rounded-lg border border-emerald-500/30 bg-emerald-500/[0.06] p-3 text-sm hover:bg-emerald-500/[0.1]">
-          <span className="text-emerald-200">{found} verified finding{found === 1 ? '' : 's'} in linked target work</span>
+        <Link href={`/findings?research_campaign_id=${encodeURIComponent(campaign?.id || '')}&status=active`} className="mt-3 flex items-center justify-between rounded-lg border border-emerald-500/30 bg-emerald-500/[0.06] p-3 text-sm hover:bg-emerald-500/[0.1]">
+          <span className="text-emerald-200">{found} active finding{found === 1 ? '' : 's'} linked to this run</span>
           <span className="text-xs text-emerald-300">View findings →</span>
         </Link>
+      ) : null}
+
+      {runFindings.length > 0 ? (
+        <Card className="mt-4 p-4">
+          <div className="mb-3 flex items-center justify-between">
+            <h2 className="text-sm font-semibold text-white">Findings from this run</h2>
+            <Link href={`/findings?research_campaign_id=${encodeURIComponent(campaign?.id || '')}`} className="text-xs text-blue-300 hover:text-blue-200">
+              View all →
+            </Link>
+          </div>
+          <div className="divide-y divide-gray-800">
+            {runFindings.slice(0, 8).map((finding) => (
+              <Link key={finding.id} href={`/findings/${finding.id}`} className="flex items-center gap-3 py-2 hover:bg-gray-800/40 -mx-2 px-2 rounded">
+                <SeverityBadge severity={finding.severity} />
+                <span className="min-w-0 flex-1 truncate text-sm text-gray-200">{finding.title}</span>
+                {finding.last_verification_verdict === 'exploited' ? (
+                  <span className="flex-none text-xs text-emerald-300">verified</span>
+                ) : (
+                  <span className="flex-none text-xs text-gray-500">scan-proven</span>
+                )}
+              </Link>
+            ))}
+            {runFindings.length > 8 ? (
+              <Link href={`/findings?research_campaign_id=${encodeURIComponent(campaign?.id || '')}`} className="block py-2 text-xs text-blue-300 hover:text-blue-200">
+                + {runFindings.length - 8} more →
+              </Link>
+            ) : null}
+          </div>
+        </Card>
       ) : null}
 
       {(preflightState && preflightState !== 'completed' && preflightState !== 'not_required') || readiness?.ready === false ? (

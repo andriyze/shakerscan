@@ -1772,6 +1772,32 @@ export interface Finding {
   retest_unsupported_reason?: string
 }
 
+// Research provenance stamped on hunt-driven scanner findings (evidence.research):
+// the finding came from a scan a deep-hunt decision queued. Absent on organic DAST
+// findings and on agent-native claims (those use source='autonomous' instead).
+export interface ResearchProvenance {
+  driven_by: 'autonomous_research' | string
+  campaign_id?: string
+  campaign_action_id?: string
+}
+
+export function getFindingResearchProvenance(finding: Finding): ResearchProvenance | null {
+  let evidence: unknown = finding.evidence
+  if (typeof evidence === 'string') {
+    try { evidence = JSON.parse(evidence) } catch { return null }
+  }
+  if (!evidence || typeof evidence !== 'object') return null
+  const research = (evidence as Record<string, unknown>).research
+  if (!research || typeof research !== 'object') return null
+  const r = research as Record<string, unknown>
+  if (typeof r.driven_by !== 'string' || !r.driven_by) return null
+  return {
+    driven_by: r.driven_by,
+    campaign_id: typeof r.campaign_id === 'string' ? r.campaign_id : undefined,
+    campaign_action_id: typeof r.campaign_action_id === 'string' ? r.campaign_action_id : undefined,
+  }
+}
+
 export interface RetestRecord {
   id: string
   finding_id: string
@@ -3737,6 +3763,8 @@ export async function getFindings(params?: {
   verification_verdict?: 'exploited' | 'likely_vulnerable' | 'blocked_by_security' | 'out_of_scope_internal' | 'false_positive' | 'likely_fixed' | 'inconclusive' | 'error'
   verification_mode?: 'deterministic' | 'ai_driven'
   verified_only?: boolean
+  driven_by?: 'autonomous_research'
+  research_campaign_id?: string
   sort_by?: 'severity' | 'first_seen' | 'last_seen' | 'cvss'
   sort_order?: 'asc' | 'desc'
 }): Promise<{ findings: Finding[]; total: number; limit: number; offset: number }> {
@@ -3757,6 +3785,8 @@ export async function getFindings(params?: {
   if (params?.verification_verdict) searchParams.set('verification_verdict', params.verification_verdict)
   if (params?.verification_mode) searchParams.set('verification_mode', params.verification_mode)
   if (params?.verified_only) searchParams.set('verified_only', 'true')
+  if (params?.driven_by) searchParams.set('driven_by', params.driven_by)
+  if (params?.research_campaign_id) searchParams.set('research_campaign_id', params.research_campaign_id)
   if (params?.sort_by) searchParams.set('sort_by', params.sort_by)
   if (params?.sort_order) searchParams.set('sort_order', params.sort_order)
 

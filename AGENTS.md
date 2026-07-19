@@ -293,6 +293,8 @@ broader `ai` API filter when AI Gate and AI-session findings should be combined.
 | `verification_verdict` | Filter by latest verification verdict (`exploited`, `likely_fixed`, etc.) |
 | `verification_mode` | Filter findings with verification runs in mode `deterministic` or `ai_driven` |
 | `verified_only` | If true, only return findings with `last_verification_verdict = exploited` |
+| `driven_by` | `autonomous_research`: only findings produced by research-driven work (a deep-hunt decision queued the scan; stamped in `evidence.research`). Distinct from `source_type=autonomous` (agent-native claims) and organic DAST (no marker) |
+| `research_campaign_id` | Only findings driven by a specific research campaign/run (UUID) |
 | `search` | Search by title or URL |
 | `sort_by` | Sort field: severity, first_seen, last_seen, cvss |
 | `sort_order` | asc or desc (default: desc) |

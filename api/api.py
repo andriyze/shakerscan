@@ -129,6 +129,7 @@ from retest_contract import (
     SUPPORTED_RETEST_TYPES,
     SUPPORTED_RETEST_VERDICTS,
     VerificationPolicy,
+    backfill_campaign_scan_finding_links,
     build_replay_commands,
     build_retest_job_payload,
     extract_auth_context,
@@ -31896,6 +31897,10 @@ async def _settle_research_awaiting_observation(conn, episode_row: Any) -> dict[
                 ],
             }),
         )
+    # Link findings produced by hunt-driven scans back to the campaign ledger and stamp
+    # research provenance on the finding rows, so they are distinguishable from organic
+    # DAST output. Idempotent; no-op when nothing new settled.
+    await backfill_campaign_scan_finding_links(conn)
     await _record_research_hypothesis_outcome(
         conn,
         decision_id=decision_context.get("id"),
@@ -41779,6 +41784,8 @@ async def list_findings(
     verification_verdict: Optional[str] = Query(None, regex="^(exploited|likely_vulnerable|blocked_by_security|out_of_scope_internal|false_positive|likely_fixed|inconclusive|error)$"),
     verification_mode: Optional[str] = Query(None, regex="^(deterministic|ai_driven)$"),
     verified_only: bool = False,
+    driven_by: Optional[str] = Query(None, regex="^(autonomous_research)$"),
+    research_campaign_id: Optional[str] = None,
     search: Optional[str] = None,
     seen_within_days: Optional[int] = Query(None, ge=1),
     first_seen_within_days: Optional[int] = Query(None, ge=1),
@@ -41800,7 +41807,8 @@ async def list_findings(
     allowed_params = {
         "severity", "status", "source_type", "target_id", "ai_target_id",
         "scan_id", "root_domain", "verification_verdict", "verification_mode",
-        "verified_only", "search", "seen_within_days", "first_seen_within_days",
+        "verified_only", "driven_by", "research_campaign_id", "search",
+        "seen_within_days", "first_seen_within_days",
         "resolved_within_days", "sort_by", "sort_order",
         "limit", "offset",
     }
@@ -41876,6 +41884,21 @@ async def list_findings(
 
         if verified_only:
             query += " AND f.last_verification_verdict = 'exploited'"
+
+        if driven_by == "autonomous_research":
+            # Findings produced by research-driven work (a deep-hunt decision queued the scan
+            # that found them) — stamped by backfill_campaign_scan_finding_links. Distinct from
+            # source_type='autonomous' (agent-native claims) and organic DAST (no marker).
+            query += " AND f.evidence->'research'->>'driven_by' = 'autonomous_research'"
+
+        if research_campaign_id:
+            try:
+                campaign_uuid = uuid.UUID(str(research_campaign_id))
+            except ValueError:
+                raise HTTPException(status_code=400, detail="research_campaign_id must be a UUID")
+            query += f" AND f.evidence->'research'->>'campaign_id' = ${param_idx}"
+            params.append(str(campaign_uuid))
+            param_idx += 1
 
         if verification_mode:
             query += f""" AND EXISTS (
