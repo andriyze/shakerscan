@@ -18319,6 +18319,16 @@ async def _agent_auto_verify(
         family = family_proof.canonical_family((entry.get("finding") or {}).get("family"))
         if family not in _AGENT_VERIFIABLE_FAMILIES:
             continue
+        # BOLA is NOT auto-promoted. Its family_proof establishes a managed, distinct reference — not
+        # OWNERSHIP — so an authenticated shared-behind-login collection (everyone may read any object)
+        # passes every predicate and would false-VERIFY. Distinguishing "private, broken" from
+        # "intentionally shared" is fundamentally a policy question no autonomous run can settle, so a
+        # suspected BOLA stays SUSPECTED for a human to promote. The manual /agent/findings/{id}/verify
+        # endpoint remains for an accountable human decision. (Zero-FP: unattended never promotes BOLA.)
+        if family in _AGENT_AUTO_VERIFY_EXCLUDED_FAMILIES:
+            attempts.append({"finding_id": str(record["id"]), "verified": False,
+                             "skipped": "auto_verify_disabled_ownership_unprovable"})
+            continue
         # A mutating verification (create-MA does live create POSTs) must not run from a read-only
         # hunt, even with a receipt — that would violate the hunt's no-writes invariant. The
         # GET-only families (bola/auth_bypass/data_exposure) stay allowed. (External-audit BUG 3.)
@@ -19341,6 +19351,11 @@ _AGENT_VERIFIABLE_FAMILIES: frozenset[str] = frozenset({"bola", "auth_bypass", "
 # Families whose VERIFICATION workflow mutates the target (create-MA does live create POSTs). These
 # may auto-verify only from a gated (allow_write) hunt, never a read-only one. (External-audit BUG 3.)
 _AGENT_MUTATING_VERIFY_FAMILIES: frozenset[str] = frozenset({"mass_assignment"})
+# Families the loop will NOT auto-promote to VERIFIED because the family_proof cannot autonomously
+# prove the finding is sound. bola: the proof shows a managed/distinct reference, not OWNERSHIP, so a
+# shared-behind-login collection false-VERIFIES; that is a policy question, not something an unattended
+# run can settle. These stay SUSPECTED for a human to promote (manual /verify endpoint remains).
+_AGENT_AUTO_VERIFY_EXCLUDED_FAMILIES: frozenset[str] = frozenset({"bola"})
 
 
 @asynccontextmanager
