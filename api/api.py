@@ -18386,6 +18386,7 @@ _AGENT_VERIFY_REQUEST_RESERVATIONS: dict[str, int] = {
     "data_exposure": 4,    # two requests, independently replayed
     "access_control": 4,   # same read as two role principals, independently replayed
     "field_constraint": 12, # before/mutate/violation/rollback/after, independently replayed
+    "workflow": 12,        # forbidden-transition attempt + restore, independently replayed
     "mass_assignment": 20, # up to three shape probes + cleanup + eight-step two-run workflow
 }
 _AGENT_VERIFY_SECONDS_RESERVATIONS: dict[str, int] = {
@@ -18394,6 +18395,7 @@ _AGENT_VERIFY_SECONDS_RESERVATIONS: dict[str, int] = {
     "data_exposure": 180,
     "access_control": 180,
     "field_constraint": 300,
+    "workflow": 300,
     "mass_assignment": 400,
 }
 
@@ -19733,6 +19735,44 @@ def _materialize_fieldconstraint_verification_workflow(
     }
 
 
+def _materialize_workflowtransition_verification_workflow(
+    route: str, method: str, field_name: str, probe_state: str, read_path: Optional[str] = None
+) -> Optional[dict[str, Any]]:
+    """Build a MUTATING workflow_transition proof: read the state field (baseline) -> attempt a
+    FORBIDDEN transition (write ``probe_state`` — a state other than the single allowed ``to_state``)
+    -> read back (the forbidden state persisted) -> restore the captured baseline -> read. The
+    invariant binder derives transition_invariant_broken when the observed transition is NOT the
+    approved from->to; the model supplies no verdict. Restoration is mandatory + field-scoped. Returns
+    None (caller 422s -> stays SUSPECTED) when the contract carries no probe_state. proof_family is
+    "workflow" (the FAMILY_CONTRACTS key for workflow_transition)."""
+    probe = str(probe_state or "").strip()
+    if not probe:
+        return None
+    base = str(route)
+    field = str(field_name)                       # WRITE body key (the state field)
+    sel = f"$.{str(read_path or field_name)}"      # READ projection (may differ for wrapping APIs)
+    return {
+        "proof_family": "workflow",
+        "steps": [
+            {"label": "before", "kind": "http", "principal": "user1", "checkpoint": "before",
+             "method": "GET", "path": base, "select_json": [sel],
+             "extract": [{"name": "baseline", "source": "json", "path": sel}]},
+            {"label": "mutate", "kind": "http", "principal": "user1", "checkpoint": "mutation",
+             "method": method, "path": base, "json_body": {field: probe}},
+            {"label": "violation", "kind": "http", "principal": "user1", "checkpoint": "action",
+             "method": "GET", "path": base, "select_json": [sel]},
+            {"label": "rollback", "kind": "http", "principal": "user1", "checkpoint": "rollback",
+             "method": method, "path": base, "json_body": {field: "${baseline}"}},
+            {"label": "after", "kind": "http", "principal": "user1", "checkpoint": "after",
+             "method": "GET", "path": base, "select_json": [sel], "compare_to": "before"},
+        ],
+        "assertions": [
+            {"type": "restored", "control": "before", "candidate": "after",
+             "predicate": "before_after_state", "field_scoped": True},
+        ],
+    }
+
+
 async def _resolve_approved_invariant_contract(
     conn: Any, target_uuid: uuid.UUID, kind: str, route: str, method: Optional[str]
 ) -> Optional[dict[str, Any]]:
@@ -19776,11 +19816,12 @@ class AgentVerifyRequest(BaseModel):
 # gated on an operator-APPROVED invariant contract (the role oracle a bare authz finding lacks) and
 # verified by the invariant binder. Every family is verified by the UNCHANGED family_proof two-run
 # moat — the bridge only supplies routes/bindings, never a verdict.
-_AGENT_VERIFIABLE_FAMILIES: frozenset[str] = frozenset({"bola", "auth_bypass", "data_exposure", "mass_assignment", "access_control", "field_constraint"})
+_AGENT_VERIFIABLE_FAMILIES: frozenset[str] = frozenset({"bola", "auth_bypass", "data_exposure", "mass_assignment", "access_control", "field_constraint", "workflow"})
 # Families whose VERIFICATION workflow mutates the target (create-MA does live create POSTs;
-# field_constraint writes an out-of-bounds value then restores the captured baseline). These may
-# auto-verify only from a gated (allow_write) hunt, never a read-only one. (External-audit BUG 3.)
-_AGENT_MUTATING_VERIFY_FAMILIES: frozenset[str] = frozenset({"mass_assignment", "field_constraint"})
+# field_constraint writes an out-of-bounds value then restores; workflow_transition attempts a
+# forbidden state transition then restores). These may auto-verify only from a gated (allow_write)
+# hunt, never a read-only one. (External-audit BUG 3.)
+_AGENT_MUTATING_VERIFY_FAMILIES: frozenset[str] = frozenset({"mass_assignment", "field_constraint", "workflow"})
 # Families the loop will NOT auto-promote to VERIFIED because the family_proof cannot autonomously
 # prove the finding is sound. bola: the proof shows a managed/distinct reference, not OWNERSHIP, so a
 # shared-behind-login collection false-VERIFIES; that is a policy question, not something an unattended
@@ -19892,6 +19933,30 @@ async def _agent_verification_workflow_for(
             raise HTTPException(
                 status_code=422,
                 detail="cannot construct a violating probe for this field_constraint contract "
+                "(finding stays suspected)")
+        return workflow, route, write_method, {"invariant_contract_id": str(contract["id"])}
+    if family == "workflow":
+        # Verifiable ONLY against an operator-APPROVED workflow_transition invariant contract for this
+        # route. None -> 422 -> stays SUSPECTED. Resolve by ROUTE (the contract supplies the WRITE
+        # method + the forbidden probe_state; a read-only hunt evidences only a GET). The MUTATING proof
+        # attempts the forbidden transition then restores the captured baseline; the binder derives the
+        # verdict from observed states vs the approved from->to. Steps hit the CONCRETE path.
+        contract = await _resolve_approved_invariant_contract(conn, target_uuid, "workflow_transition", route, None)
+        if not contract:
+            raise HTTPException(
+                status_code=422,
+                detail="workflow_transition verification requires an operator-approved invariant "
+                "contract for this route (finding stays suspected)")
+        write_method = str(contract.get("method") or "").upper()
+        conditions = contract.get("conditions") or {}
+        read_path = str(conditions.get("read_path") or "") or None
+        workflow = _materialize_workflowtransition_verification_workflow(
+            path, write_method, str(contract.get("field_name") or ""),
+            str(conditions.get("probe_state") or ""), read_path)
+        if workflow is None:
+            raise HTTPException(
+                status_code=422,
+                detail="workflow_transition contract has no probe_state (forbidden target) to test "
                 "(finding stays suspected)")
         return workflow, route, write_method, {"invariant_contract_id": str(contract["id"])}
     if family == "mass_assignment":

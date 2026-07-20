@@ -16805,3 +16805,23 @@ def test_jsonb_scalar_decode_parses_numeric_bounds():
     assert f('"active"') == "active"
     assert f("not-json") == "not-json"    # non-JSON text unchanged
     assert f(3) == 3                        # already-decoded passthrough
+
+
+def test_workflow_transition_materializer_attempts_forbidden_state_and_restores():
+    """A2: mutating proof attempts the forbidden probe_state then restores the captured baseline;
+    proof_family is 'workflow' (the FAMILY_CONTRACTS key for workflow_transition)."""
+    wf = api_module._materialize_workflowtransition_verification_workflow(
+        "/api/orders/7", "PUT", "status", "delivered", None)
+    assert wf["proof_family"] == "workflow"
+    assert [s["checkpoint"] for s in wf["steps"]] == ["before", "mutation", "action", "rollback", "after"]
+    assert all(s["path"] == "/api/orders/7" and "{" not in s["path"] for s in wf["steps"])  # concrete (M1)
+    assert wf["steps"][1]["json_body"] == {"status": "delivered"}          # attempt the forbidden target
+    assert wf["steps"][3]["json_body"] == {"status": "${baseline}"}        # restore captured baseline
+    assert wf["assertions"][0]["field_scoped"] is True                     # timestamp-tolerant restore
+    # read-path override + no-probe abstain
+    wf2 = api_module._materialize_workflowtransition_verification_workflow("/x", "PUT", "status", "shipped", "data.status")
+    assert wf2["steps"][0]["select_json"] == ["$.data.status"]
+    assert api_module._materialize_workflowtransition_verification_workflow("/x", "PUT", "status", "", None) is None
+    # family gating: verifiable AND mutating (allow_write-gated)
+    assert {"workflow"} <= api_module._AGENT_VERIFIABLE_FAMILIES
+    assert {"workflow"} <= api_module._AGENT_MUTATING_VERIFY_FAMILIES

@@ -18,7 +18,7 @@ CONTRACT_KINDS = frozenset({"access_control", "field_constraint", "workflow_tran
 CONTRACT_STATUSES = frozenset({"draft", "approved", "retired"})
 EXPECTED_ACCESS = frozenset({"allow", "deny", "requires_role"})
 VALUE_OPERATORS = frozenset({"eq", "ne", "lt", "lte", "gt", "gte", "in", "not_in"})
-CONDITION_KEYS = frozenset({"from_state", "to_state", "prerequisite_state", "tenant_relation", "resource_owner", "read_path"})
+CONDITION_KEYS = frozenset({"from_state", "to_state", "prerequisite_state", "tenant_relation", "resource_owner", "read_path", "probe_state"})
 COMPILER_VERSION = "target-invariant-compiler-2026-07-14.v1"
 
 
@@ -287,7 +287,10 @@ def canonical_contract(value: dict[str, Any]) -> dict[str, Any]:
     if unsupported_conditions:
         raise ValueError(f"unsupported invariant conditions:{','.join(unsupported_conditions)}")
     conditions: dict[str, str] = {}
-    for key in ("from_state", "to_state", "prerequisite_state"):
+    # probe_state (workflow_transition): the FORBIDDEN target state to attempt from from_state. The
+    # contract's (from_state, to_state) is the ONLY allowed transition; a violation is reaching any
+    # other state, so the mutating proof needs a concrete forbidden target to write.
+    for key in ("from_state", "to_state", "prerequisite_state", "probe_state"):
         normalized = normalize_identifier(conditions_input.get(key), limit=120)
         if normalized:
             conditions[key] = normalized
