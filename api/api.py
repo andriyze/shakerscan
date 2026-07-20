@@ -27573,6 +27573,7 @@ def _trusted_invariant_execution_evidence(
     elif kind == "workflow_transition":
         from_state = str((contract.get("conditions") or {}).get("from_state") or "").lower()
         to_state = str((contract.get("conditions") or {}).get("to_state") or "").lower()
+        probe_state = str((contract.get("conditions") or {}).get("probe_state") or "").lower()
         # The read projection may differ from the write field on wrapping APIs (write {city: v};
         # read $.data.city) — mirror the field_constraint branch and honor the contract's read_path
         # so the observed state value is actually found. A wrong read_path -> value never observed ->
@@ -27616,13 +27617,26 @@ def _trusted_invariant_execution_evidence(
                     break
             if transition and success(mutation_observation):
                 prior, current = transition
-                broken = not (prior == from_state and current == to_state)
-                if broken:
-                    predicates.add("transition_invariant_broken")
-                    bindings["transition_invariant_broken"] = (method, route)
-                elif prior == from_state and current == to_state:
+                if prior == from_state and current == to_state:
                     predicates.add("invariant_held")
                     bindings["invariant_held"] = (method, route)
+                elif (
+                    prior == from_state
+                    and probe_state
+                    and current == probe_state
+                    and probe_state != to_state
+                ):
+                    # The ONLY sound broken derivation: the object started in the approved
+                    # from-state AND the app accepted and persisted the contract-declared
+                    # FORBIDDEN probe state. Without the prior guard, an object sitting in any
+                    # other state makes every legitimate-but-undocumented transition "violate"
+                    # the single approved pair (false VERIFIED on ordinary state machines);
+                    # without the probe guard, an app that coerced the write to a third legal
+                    # state was reported broken even though it never entered the forbidden
+                    # state. Mirrors the field_constraint branch's allowed-baseline +
+                    # exact-probe-persistence guards. (Zero-FP audit F1.)
+                    predicates.add("transition_invariant_broken")
+                    bindings["transition_invariant_broken"] = (method, route)
             if result.get("restoration_verified") is True:
                 predicates.add("before_after_state")
                 bindings["before_after_state"] = (method, route)

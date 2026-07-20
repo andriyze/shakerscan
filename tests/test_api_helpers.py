@@ -13385,7 +13385,10 @@ def test_approved_workflow_transition_distinguishes_forbidden_from_allowed_chang
         "field_name": "status",
         "method": "PATCH",
         "path": "/api/order/42",
-        "conditions": {"from_state": "pending", "to_state": "paid"},
+        # probe_state declares the FORBIDDEN target the proof attempts; the binder only fires
+        # broken when the object started in from_state AND the app persisted this probe state
+        # (zero-FP audit F1 — an undocumented-but-legal transition is not a broken invariant).
+        "conditions": {"from_state": "pending", "to_state": "paid", "probe_state": "cancelled"},
     }
     payload = {
         "proof_family": "workflow",
