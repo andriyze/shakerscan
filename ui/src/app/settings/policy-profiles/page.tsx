@@ -13,10 +13,11 @@ import {
   type PolicyProfile,
   type PolicyProfilePayload,
 } from '@/lib/api'
-import { Button, Card, ConfirmDialog, ErrorState, SectionCard, useToast } from '@/components/ui'
+import { Button, Card, ConfirmDialog, ErrorState, PageHeader, SectionCard, fieldClasses, useToast } from '@/components/ui'
 
-const inputClass =
-  'w-full rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-white placeholder-gray-500 focus:border-blue-500 focus:outline-none'
+// Point the local field class at the shared field styling so every input/select
+// here matches the rest of the app and gets a real focus ring.
+const inputClass = `w-full ${fieldClasses()}`
 const selectClass = inputClass
 
 const SEVERITIES = ['critical', 'high', 'medium', 'low', 'info']
@@ -204,26 +205,17 @@ export default function PolicyProfilesPage() {
 
   return (
     <div className="space-y-6">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <div className="flex items-center gap-2">
-            <ShieldCheck className="h-6 w-6 text-blue-300" />
-            <h1 className="text-2xl font-bold text-white">Policy Profiles</h1>
-          </div>
-          <p className="mt-1 text-sm text-gray-400">
-            Deployment gate policies used by AI Gate, Model Intake, and CI/CD decisions.
-          </p>
-        </div>
-        <div className="flex gap-2">
+      <PageHeader
+        title="Policy Profiles"
+        description="Deployment gate policies used by AI Gate, Model Intake, and CI/CD decisions."
+        icon={<ShieldCheck className="h-6 w-6" />}
+        actions={
           <Button variant="secondary" onClick={loadProfiles} disabled={loading}>
             <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
             Refresh
           </Button>
-          <Link href="/settings" className="rounded-lg border border-gray-700 px-3 py-2 text-sm text-gray-300 hover:bg-gray-800">
-            Settings
-          </Link>
-        </div>
-      </div>
+        }
+      />
 
       {error && <div role="alert" className="rounded-lg border border-red-500/20 bg-red-500/10 p-3 text-sm text-red-300">{error}</div>}
 

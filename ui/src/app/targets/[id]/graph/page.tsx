@@ -260,9 +260,14 @@ function GraphContent() {
               <div className="mt-1 text-xs text-gray-500">{selectedNode.node_type} · {selectedNode.node_key}</div>
             </div>
             {selectedNode.attributes && Object.keys(selectedNode.attributes).length > 0 && (
-              <pre className="max-h-56 overflow-auto rounded border border-gray-800 bg-gray-950 p-2 text-xs text-gray-300">
-                {JSON.stringify(selectedNode.attributes, null, 2)}
-              </pre>
+              <details className="rounded border border-gray-800 bg-gray-950">
+                <summary className="cursor-pointer px-2 py-1.5 text-xs text-gray-400 hover:text-gray-200">
+                  Attributes ({Object.keys(selectedNode.attributes).length})
+                </summary>
+                <pre className="max-h-56 overflow-auto border-t border-gray-800 p-2 text-xs text-gray-300">
+                  {JSON.stringify(selectedNode.attributes, null, 2)}
+                </pre>
+              </details>
             )}
             <div className="space-y-1">
               <div className="text-xs font-medium text-gray-400">Connected edges ({selectedNodeEdges.length})</div>
@@ -416,9 +421,14 @@ function GraphContent() {
                   </button>
                 </div>
                 {edge.attributes && Object.keys(edge.attributes).length > 0 && (
-                  <pre className="mt-2 max-h-40 overflow-auto rounded bg-gray-900 p-2 text-gray-400">
-                    {JSON.stringify(edge.attributes, null, 2)}
-                  </pre>
+                  <details className="mt-2 rounded bg-gray-900">
+                    <summary className="cursor-pointer px-2 py-1 text-xs text-gray-500 hover:text-gray-300">
+                      Attributes ({Object.keys(edge.attributes).length})
+                    </summary>
+                    <pre className="max-h-40 overflow-auto p-2 text-gray-400">
+                      {JSON.stringify(edge.attributes, null, 2)}
+                    </pre>
+                  </details>
                 )}
               </div>
             ))}

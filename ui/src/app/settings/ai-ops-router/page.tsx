@@ -4,7 +4,7 @@ import { useState } from 'react'
 import Link from 'next/link'
 import { ArrowLeft, Wand2 } from 'lucide-react'
 import { routeAiOps, type AIOpsRouteResponse } from '@/lib/api'
-import { Badge, Button, Card, ConfirmDialog, SectionCard, useToast } from '@/components/ui'
+import { Badge, Button, Card, ConfirmDialog, Input, PageHeader, SectionCard, Textarea, useToast } from '@/components/ui'
 
 function PlannedCall({ call }: { call: NonNullable<AIOpsRouteResponse['planned_api_call']> }) {
   return (
@@ -96,41 +96,36 @@ export default function AIOpsRouterPage() {
 
   return (
     <div className="space-y-6">
-      <Link href="/settings" className="inline-flex items-center gap-1 text-sm text-gray-400 hover:text-white">
-        <ArrowLeft className="h-4 w-4" /> Back to settings
-      </Link>
-
-      <div>
-        <h1 className="flex items-center gap-2 text-2xl font-bold text-white">
-          <Wand2 className="h-5 w-5 text-purple-300" /> AI Operations Router
-        </h1>
-        <p className="mt-1 text-gray-400">
-          Translate a natural-language DAST/ASM request into a safe, explicit API plan. Active or state-changing intents
-          dry-run by default and require explicit confirmation plus the <code className="text-xs">AI_OPS_ROUTER_EXECUTE_ENABLED</code> server flag to run.
-        </p>
-      </div>
+      <PageHeader
+        title="AI Operations Router"
+        icon={<Wand2 className="h-5 w-5" />}
+        description={
+          <>
+            Translate a natural-language DAST/ASM request into a safe, explicit API plan. Active or state-changing intents
+            dry-run by default and require explicit confirmation plus the <code className="text-xs">AI_OPS_ROUTER_EXECUTE_ENABLED</code> server flag to run.
+          </>
+        }
+      />
 
       <Card className="p-4 space-y-3">
         <div>
           <label htmlFor="ops-prompt" className="mb-1 block text-xs font-medium text-gray-400">Request</label>
-          <textarea
+          <Textarea
             id="ops-prompt"
             value={prompt}
             onChange={(e) => { setPrompt(e.target.value); invalidatePreview() }}
             rows={3}
             placeholder="e.g. Run full coverage on this target, or improve ASM coverage for the API"
-            className="w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white placeholder-gray-600 focus:border-blue-500 focus:outline-none"
           />
         </div>
         <div>
           <label htmlFor="ops-target" className="mb-1 block text-xs font-medium text-gray-400">Target (optional)</label>
-          <input
+          <Input
             id="ops-target"
             type="text"
             value={target}
             onChange={(e) => { setTarget(e.target.value); invalidatePreview() }}
             placeholder="https://example.com"
-            className="w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white placeholder-gray-600 focus:border-blue-500 focus:outline-none"
           />
         </div>
         {error && <p className="text-sm text-red-400">{error}</p>}
