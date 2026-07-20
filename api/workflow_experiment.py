@@ -741,6 +741,53 @@ def server_corroborated_predicate_bindings(result: dict[str, Any]) -> dict[str, 
     return _server_corroborated_evidence(result)[1]
 
 
+def _assert_restoration_renderable(workflow: dict[str, Any], mutation_index: int, variables: dict[str, str]) -> None:
+    """Fail BEFORE a mutation fires when a rollback/cleanup step can never be rendered.
+
+    A restore that depends on an unbound variable (the classic case: the ``before`` read failed,
+    so ``baseline`` never extracted) cannot run — and without this gate the mutation still fired
+    while the rollback step later failed to render, leaving the target mutated with no restore
+    possible (zero-FP audit F2). Variables a LATER step produces (e.g. create-MA's cleanup needs
+    the created id extracted from the mutation response) are legitimately unbound at this point
+    and are excluded from the check. Also rejects statically-detectable forbidden restore bodies
+    pre-mutation. Raises WorkflowContractError; the mutation step records the error and sends
+    nothing.
+    """
+    steps = [item for item in workflow.get("steps") or [] if isinstance(item, dict)]
+    future_produced: set[str] = set()
+    for later in steps[mutation_index:]:
+        if str(later.get("checkpoint") or "").lower() in {"cleanup", "rollback"}:
+            continue
+        for spec in later.get("extract") or []:
+            if isinstance(spec, dict) and spec.get("name"):
+                future_produced.add(str(spec["name"]))
+    managed_names = {
+        str(binding.get("name"))
+        for binding in workflow.get("principal_variables") or []
+        if isinstance(binding, dict) and binding.get("name")
+    }
+    missing: set[str] = set()
+    for candidate in steps:
+        if str(candidate.get("checkpoint") or "").lower() not in {"cleanup", "rollback"}:
+            continue
+        refs = set().union(*(
+            _variable_references(value)
+            for value in (
+                candidate.get("path"), candidate.get("query"), candidate.get("headers"),
+                candidate.get("json_body"), candidate.get("form_body"),
+            )
+        ))
+        for name in refs - future_produced:
+            if name not in variables:
+                missing.add(name)
+        if _sensitive_body_violation(candidate.get("json_body"), managed_names) is not None:
+            raise WorkflowContractError("restoration_sensitive_key_pre_mutation")
+    if missing:
+        raise WorkflowContractError(
+            "restoration_unrenderable_pre_mutation:" + ",".join(sorted(missing)[:4])
+        )
+
+
 class WorkflowContractError(ExperimentContractError):
     pass
 
@@ -1230,7 +1277,7 @@ async def execute_workflow(
     started = time.monotonic()
     timeout = httpx.Timeout(min(workflow["timeout_seconds"], 15))
     async with httpx.AsyncClient(timeout=timeout, follow_redirects=False, trust_env=False, transport=transport) as client:
-        for step in workflow["steps"]:
+        for step_position, step in enumerate(workflow["steps"]):
             interrupted = (cancelled and cancelled()) or time.monotonic() - started > workflow["timeout_seconds"]
             if interrupted and not (
                 mutation_succeeded and step.get("checkpoint") in {"cleanup", "rollback"}
@@ -1247,6 +1294,11 @@ async def execute_workflow(
             request_view: dict[str, Any] = {"kind": step["kind"], "principal": step["principal"]}
             error: str | None = None
             try:
+                if str(step.get("checkpoint") or "").lower() == "mutation":
+                    # No state change unless every rollback/cleanup step is renderable with what
+                    # is already bound (the baseline). A failed before-read must stop the mutation,
+                    # not strand the target mutated. (Zero-FP audit F2.)
+                    _assert_restoration_renderable(workflow, step_position, variables)
                 if step["kind"] == "http":
                     variable_references = sorted(set().union(*(
                         _variable_references(value)

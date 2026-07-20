@@ -158,6 +158,91 @@ def test_mutating_workflow_requires_and_verifies_restoration():
         workflow.normalize_workflow("https://example.test", unsafe)
 
 
+def test_mutation_blocked_when_baseline_extract_failed():
+    """Audit F2: a failed before-read must STOP the mutation — without the gate the mutation
+    fired and the rollback failed to render ${baseline}, leaving the target mutated."""
+    state = {"quantity": 1}
+    sent_methods: list[str] = []
+
+    def handler(request):
+        sent_methods.append(request.method)
+        if request.url.path == "/missing":
+            return httpx.Response(404, json={"error": "gone"})
+        if request.method == "PUT":
+            state["quantity"] = 4
+        return httpx.Response(200, json={"quantity": state["quantity"]})
+
+    payload = {
+        "proof_family": "field_constraint",
+        "steps": [
+            {"label": "before", "checkpoint": "before", "method": "GET", "path": "/missing",
+             "select_json": ["$.quantity"],
+             "extract": [{"name": "baseline", "source": "json", "path": "$.quantity"}]},
+            {"label": "mutate", "checkpoint": "mutation", "method": "PUT", "path": "/object",
+             "json_body": {"quantity": 4}},
+            {"label": "rollback", "checkpoint": "rollback", "method": "PUT", "path": "/object",
+             "json_body": {"quantity": "${baseline}"}},
+            {"label": "after", "checkpoint": "after", "method": "GET", "path": "/object",
+             "select_json": ["$.quantity"], "compare_to": "before"},
+        ],
+        "assertions": [
+            {"type": "restored", "control": "before", "candidate": "after",
+             "predicate": "before_after_state", "field_scoped": True},
+        ],
+    }
+    result = asyncio.run(workflow.execute_workflow(
+        "https://example.test", payload, principal_contexts={}, transport=httpx.MockTransport(handler)
+    ))
+    assert state["quantity"] == 1  # never mutated
+    assert "PUT" not in sent_methods  # neither mutation nor rollback sent a request
+    by_label = {obs["label"]: obs for obs in result["observations"]}
+    # The before-read 404s, so baseline never binds; the mutation is then blocked by the F2 gate
+    # (the exact guard error surfaces as a contract error from the failed variable reference).
+    assert by_label["before"]["error"]
+    assert by_label["mutate"]["error"]
+    assert "restoration_unrenderable_pre_mutation" in by_label["mutate"]["error"] or \
+        "ExperimentContractError" in by_label["mutate"]["error"]
+
+
+def test_mutation_allowed_when_cleanup_needs_later_produced_variable():
+    """Create-MA shape: the cleanup references the created id extracted from the MUTATION
+    response — legitimately unbound pre-mutation — so the gate must not block it."""
+    state: dict[str, Any] = {"created": None, "deleted": None}
+
+    def handler(request):
+        if request.method == "POST":
+            state["created"] = "obj-9"
+            return httpx.Response(201, json={"id": "obj-9"})
+        if request.method == "DELETE":
+            state["deleted"] = request.url.path.rsplit("/", 1)[-1]
+            return httpx.Response(204)
+        return httpx.Response(200, json={})
+
+    payload = {
+        "proof_family": "mass_assignment",
+        "steps": [
+            {"label": "list_before", "checkpoint": "before", "method": "GET", "path": "/objects"},
+            {"label": "create", "checkpoint": "mutation", "method": "POST", "path": "/objects",
+             "json_body": {"name": "probe"},
+             "extract": [{"name": "created_id", "source": "json", "path": "$.id"}]},
+            {"label": "cleanup", "checkpoint": "cleanup", "method": "DELETE",
+             "path": "/objects/${created_id}"},
+            {"label": "list_after", "checkpoint": "after", "method": "GET", "path": "/objects",
+             "compare_to": "list_before"},
+        ],
+        "assertions": [
+            {"type": "restored", "control": "list_before", "candidate": "list_after",
+             "predicate": "before_after_state"},
+        ],
+    }
+    result = asyncio.run(workflow.execute_workflow(
+        "https://example.test", payload, principal_contexts={}, transport=httpx.MockTransport(handler)
+    ))
+    assert state["created"] == "obj-9"
+    assert state["deleted"] == "obj-9"
+    assert all(not obs.get("error") for obs in result["observations"])
+
+
 def test_browser_mutation_success_and_restoration_use_hashed_extracted_state():
     state = {"value": "off"}
 
