@@ -216,6 +216,7 @@ function RollupView({
         <select
           value={filters.domain ?? ''}
           onChange={(e) => setFilter('domain', e.target.value || undefined)}
+          aria-label="Filter endpoints by domain"
           className="rounded-lg border border-gray-700 bg-gray-800 px-3 py-1.5 text-sm text-gray-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
         >
           <option value="">All domains</option>
@@ -578,6 +579,7 @@ function ContinuousCard({ targetId }: { targetId: string }) {
               <span className="text-xs text-gray-400">Window (UTC h):</span>
               <input
                 type="number" min={0} max={23} placeholder="start"
+                aria-label="Coverage window start hour (UTC, 0-23)"
                 value={cfg.window_start_hour ?? ''}
                 onChange={(e) => set({ window_start_hour: e.target.value === '' ? null : Number(e.target.value) })}
                 className="w-16 rounded border border-gray-700 bg-gray-800 px-2 py-1 text-sm text-gray-200"
@@ -585,6 +587,7 @@ function ContinuousCard({ targetId }: { targetId: string }) {
               <span className="text-gray-600">–</span>
               <input
                 type="number" min={0} max={23} placeholder="end"
+                aria-label="Coverage window end hour (UTC, 0-23)"
                 value={cfg.window_end_hour ?? ''}
                 onChange={(e) => set({ window_end_hour: e.target.value === '' ? null : Number(e.target.value) })}
                 className="w-16 rounded border border-gray-700 bg-gray-800 px-2 py-1 text-sm text-gray-200"
@@ -1550,6 +1553,7 @@ function TargetView({ targetId }: { targetId: string }) {
           <select
             value={filters.status ?? ''}
             onChange={(e) => setFilter('status', e.target.value || undefined)}
+            aria-label="Filter endpoints by status"
             className="rounded-lg border border-gray-700 bg-gray-800 px-3 py-1.5 text-sm text-gray-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
           >
             {STATUS_OPTIONS.map((o) => (

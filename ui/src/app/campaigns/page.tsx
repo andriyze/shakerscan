@@ -13,6 +13,7 @@ import {
   ErrorState,
   LastUpdated,
   RiskTierBadge,
+  Spinner,
   TableSkeleton,
 } from '@/components/ui'
 
@@ -77,8 +78,9 @@ function CampaignsContent() {
           <span className="text-xs font-medium text-gray-400">Status:</span>
           <button
             type="button"
+            aria-pressed={!statusFilter}
             onClick={() => setFilter('status', undefined)}
-            className={`rounded-full border px-3 py-1 text-xs transition-colors ${
+            className={`rounded-full border px-3 py-1 text-xs transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${
               !statusFilter ? 'border-blue-500 bg-blue-600/20 text-blue-300' : 'border-gray-700 text-gray-400 hover:bg-gray-800'
             }`}
           >
@@ -88,8 +90,9 @@ function CampaignsContent() {
             <button
               key={s}
               type="button"
+              aria-pressed={statusFilter === s}
               onClick={() => setFilter('status', s)}
-              className={`rounded-full border px-3 py-1 text-xs capitalize transition-colors ${
+              className={`rounded-full border px-3 py-1 text-xs capitalize transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${
                 statusFilter === s ? 'border-blue-500 bg-blue-600/20 text-blue-300' : 'border-gray-700 text-gray-400 hover:bg-gray-800'
               }`}
             >
@@ -161,7 +164,7 @@ export default function CampaignsPage() {
   return (
     <Suspense fallback={
       <div className="flex h-32 items-center justify-center">
-        <div className="h-6 w-6 animate-spin rounded-full border-b-2 border-blue-500"></div>
+        <Spinner className="h-6 w-6 text-blue-500" />
       </div>
     }>
       <CampaignsContent />

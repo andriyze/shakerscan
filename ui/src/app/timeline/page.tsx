@@ -11,6 +11,8 @@ import {
   LastUpdated,
   RiskTierBadge,
   SectionCard,
+  Select,
+  Spinner,
   TableSkeleton,
   TimelineStatusBadge,
 } from '@/components/ui'
@@ -194,24 +196,25 @@ function TimelineContent() {
               Target
             </label>
             <div className="flex gap-2">
-              <select
-                id="timeline-target"
-                value={targetFilter}
-                onChange={(e) => setFilter('target', e.target.value || undefined)}
-                className="w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white placeholder-gray-600 focus:border-blue-500 focus:outline-none"
-              >
-                <option value="">All targets</option>
-                {targets.map((target) => (
-                  <option key={target.id} value={target.id}>
-                    {target.name ? `${target.name} — ` : ''}{target.url}
-                  </option>
-                ))}
-              </select>
+              <div className="flex-1">
+                <Select
+                  id="timeline-target"
+                  value={targetFilter}
+                  onChange={(e) => setFilter('target', e.target.value || undefined)}
+                >
+                  <option value="">All targets</option>
+                  {targets.map((target) => (
+                    <option key={target.id} value={target.id}>
+                      {target.name ? `${target.name} — ` : ''}{target.url}
+                    </option>
+                  ))}
+                </Select>
+              </div>
               {targetFilter && (
                 <button
                   type="button"
                   onClick={() => setFilter('target', undefined)}
-                  className="rounded-lg border border-gray-700 px-3 py-2 text-sm text-gray-300 hover:bg-gray-800"
+                  className="rounded-lg border border-gray-700 px-3 py-2 text-sm text-gray-300 hover:bg-gray-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
                 >
                   Clear
                 </button>
@@ -280,7 +283,7 @@ export default function TimelinePage() {
   return (
     <Suspense fallback={
       <div className="flex h-32 items-center justify-center">
-        <div className="h-6 w-6 animate-spin rounded-full border-b-2 border-blue-500"></div>
+        <Spinner className="h-6 w-6 text-blue-500" />
       </div>
     }>
       <TimelineContent />

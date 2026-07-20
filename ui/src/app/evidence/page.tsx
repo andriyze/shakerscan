@@ -6,13 +6,16 @@ import { getEvidenceInstances, getFindingEvidence, formatDate, type EvidenceInst
 import { useUrlFilters } from '@/lib/useUrlFilters'
 import {
   Badge,
+  Button,
   Card,
   EmptyState,
   ErrorState,
+  Input,
   LastUpdated,
   ProofStateBadge,
   RetentionClassBadge,
   SectionCard,
+  Spinner,
   TableSkeleton,
 } from '@/components/ui'
 import EvidenceRetentionPanel from '@/components/EvidenceRetentionPanel'
@@ -163,6 +166,7 @@ function EvidenceContent() {
                   <button
                     key={pf}
                     type="button"
+                    aria-pressed={active}
                     onClick={() => setProofFilter(pf)}
                     className={`rounded-lg border px-3 py-1.5 text-sm transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${
                       active
@@ -178,27 +182,27 @@ function EvidenceContent() {
             <p className="text-xs text-gray-500">
               Proven evidence is shown first. Choose another proof state to inspect incomplete or unverified records.
             </p>
-            <input
+            <Input
               type="text"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               placeholder="Search by vulnerability type, objective, target, or ID"
-              className="w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white placeholder-gray-600 focus:border-blue-500 focus:outline-none"
+              aria-label="Search evidence"
             />
             <details className="rounded-lg border border-gray-800 bg-gray-950/40">
               <summary className="cursor-pointer list-none px-3 py-2 text-xs font-medium text-gray-500 hover:text-gray-300">
                 Advanced: filter by finding ID / fingerprint
               </summary>
               <div className="flex gap-2 border-t border-gray-800 p-3">
-                <input
+                <Input
                   type="text"
                   value={findingInput}
                   onChange={(e) => setFindingInput(e.target.value)}
                   onKeyDown={(e) => { if (e.key === 'Enter') setFilter('finding_id', findingInput.trim() || undefined) }}
                   placeholder="Finding UUID / fingerprint"
-                  className="w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white placeholder-gray-600 focus:border-blue-500 focus:outline-none"
+                  aria-label="Filter by finding ID or fingerprint"
                 />
-                <button type="button" onClick={() => setFilter('finding_id', findingInput.trim() || undefined)} className="rounded-lg bg-blue-600 px-3 py-2 text-sm text-white hover:bg-blue-500">Apply</button>
+                <Button variant="secondary" onClick={() => setFilter('finding_id', findingInput.trim() || undefined)}>Apply</Button>
               </div>
             </details>
           </div>
@@ -436,7 +440,7 @@ export default function EvidencePage() {
   return (
     <Suspense fallback={
       <div className="flex h-32 items-center justify-center">
-        <div className="h-6 w-6 animate-spin rounded-full border-b-2 border-blue-500"></div>
+        <Spinner className="h-6 w-6 text-blue-500" />
       </div>
     }>
       <EvidenceContent />
