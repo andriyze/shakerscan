@@ -1022,3 +1022,53 @@ def test_injection_predicates_are_never_workflow_corroborated():
         ],
     }
     assert workflow.server_corroborated_predicates(result) == set()
+
+
+def _field_scoped_restore_workflow(field_scoped, restore_value):
+    return {
+        "proof_family": "field_constraint",
+        "steps": [
+            {"label": "before", "checkpoint": "before", "method": "GET", "path": "/o", "select_json": ["$.quantity"]},
+            {"label": "mutate", "checkpoint": "mutation", "method": "PATCH", "path": "/o", "json_body": {"quantity": 999}},
+            {"label": "violation", "checkpoint": "action", "method": "GET", "path": "/o", "select_json": ["$.quantity"]},
+            {"label": "rollback", "checkpoint": "rollback", "method": "PUT", "path": "/o", "json_body": {"quantity": restore_value}},
+            {"label": "after", "checkpoint": "after", "method": "GET", "path": "/o", "select_json": ["$.quantity"], "compare_to": "before"},
+        ],
+        "assertions": [
+            {"type": "restored", "control": "before", "candidate": "after",
+             "predicate": "before_after_state", "field_scoped": field_scoped},
+        ],
+    }
+
+
+def _run_field_scoped(field_scoped, restore_value):
+    # Object read carries a monotonically-bumping updated_at, so any write changes the full body even
+    # when the constraint field (quantity) is restored to baseline.
+    state = {"quantity": 5, "clock": 0}
+
+    def handler(request):
+        state["clock"] += 1
+        if request.method in ("PUT", "PATCH"):
+            import json as _json
+            body = _json.loads((request.content or b"{}").decode() or "{}")
+            if "quantity" in body:
+                state["quantity"] = body["quantity"]
+        return httpx.Response(200, json={"quantity": state["quantity"], "updated_at": state["clock"]})
+
+    return asyncio.run(workflow.execute_workflow(
+        "https://example.test", _field_scoped_restore_workflow(field_scoped, restore_value),
+        principal_contexts={}, transport=httpx.MockTransport(handler)))
+
+
+def test_field_scoped_restored_ignores_incidental_body_change():
+    # Non-scoped: the updated_at bump makes before/after bodies differ -> restoration NOT verified,
+    # even though quantity is back to baseline. This is the snag field-scoping fixes.
+    assert _run_field_scoped(field_scoped=False, restore_value=5)["restoration_verified"] is False
+    # Field-scoped: quantity returned to baseline (5) -> restoration verified, timestamp ignored.
+    assert _run_field_scoped(field_scoped=True, restore_value=5)["restoration_verified"] is True
+
+
+def test_field_scoped_restored_still_fails_on_genuine_non_restore():
+    # Fail-closed: if the rollback does NOT restore the field (quantity left at 42), the field-scoped
+    # comparison sees $.quantity changed and restoration is NOT verified.
+    assert _run_field_scoped(field_scoped=True, restore_value=42)["restoration_verified"] is False

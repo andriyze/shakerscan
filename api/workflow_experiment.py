@@ -157,6 +157,12 @@ def _normalize_assertions(raw: Any, labels: set[str]) -> list[dict[str, Any]]:
             "steps": steps,
             "values": values,
             "predicate": predicate,
+            # Opt-in, `restored`-only: recognize restoration by the mutated FIELD (its selected_json
+            # projection) returning to baseline rather than a byte-identical full body, so an
+            # incidental server-side change on the restore write (e.g. a bumped updated_at) does not
+            # read as "not restored". No existing assertion sets this, so behavior is unchanged
+            # everywhere else; and it only governs restoration recognition, never a vuln predicate.
+            "field_scoped": bool(item.get("field_scoped")) and assertion_type == "restored",
         })
     return normalized
 
@@ -179,12 +185,20 @@ def evaluate_assertions(workflow: dict[str, Any], observations: list[dict[str, A
             observed = {"status": status, "error": observation.get("error")}
         elif assertion_type in {"comparison_changed", "comparison_equivalent", "restored"}:
             comparison = by_pair.get((str(assertion.get("control") or ""), str(assertion.get("candidate") or "")), {})
-            changed = any(bool(comparison.get(key)) for key in (
-                "state_changed", "status_changed", "body_changed", "selected_json_changed", "selected_headers_changed"
-            ))
+            if assertion_type == "restored" and assertion.get("field_scoped"):
+                # Field-scoped restoration: pass iff the projected field(s) returned to baseline and the
+                # read status is unchanged. `body_changed` is deliberately excluded so an incidental
+                # timestamp bump on the restore write cannot mask a genuine restore. This governs ONLY
+                # restoration recognition — the vuln predicate (constraint_violation_persisted) is
+                # derived separately by the invariant binder from the actual field value.
+                changed = bool(comparison.get("selected_json_changed")) or bool(comparison.get("status_changed"))
+            else:
+                changed = any(bool(comparison.get(key)) for key in (
+                    "state_changed", "status_changed", "body_changed", "selected_json_changed", "selected_headers_changed"
+                ))
             comparable = bool(comparison.get("comparable"))
             passed = comparable and (not changed if assertion_type in {"comparison_equivalent", "restored"} else changed)
-            observed = {"comparable": comparable, "changed": changed}
+            observed = {"comparable": comparable, "changed": changed, "field_scoped": bool(assertion.get("field_scoped"))}
         elif assertion_type == "distinct_principals":
             principals = [str(by_label.get(label, {}).get("principal") or "") for label in assertion["steps"]]
             passed = all(principals) and len(set(principals)) == len(principals)
