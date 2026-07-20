@@ -27573,7 +27573,12 @@ def _trusted_invariant_execution_evidence(
     elif kind == "workflow_transition":
         from_state = str((contract.get("conditions") or {}).get("from_state") or "").lower()
         to_state = str((contract.get("conditions") or {}).get("to_state") or "").lower()
-        selected_path = f"$.{str(contract.get('field_name') or '')}"
+        # The read projection may differ from the write field on wrapping APIs (write {city: v};
+        # read $.data.city) — mirror the field_constraint branch and honor the contract's read_path
+        # so the observed state value is actually found. A wrong read_path -> value never observed ->
+        # transition never derived -> fails closed (stays SUSPECTED).
+        read_field = str((contract.get("conditions") or {}).get("read_path") or "") or str(contract.get("field_name") or "")
+        selected_path = f"$.{read_field}"
         mutation_step = next((
             step for step in normalized_steps
             if step.get("checkpoint") == "mutation"
