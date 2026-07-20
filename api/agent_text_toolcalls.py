@@ -70,10 +70,12 @@ def render_tool_contract(tools: list[dict[str, Any]]) -> str:
         "  evidence_refs are the http_request result refs (e.g. resp_1) that PROVE the "
         "finding. That block is the ONLY finding channel recorded — prose is dropped. Emit "
         'findings:[] + "abstained":true if nothing real was proven.',
-        "  For an INJECTION finding (family xss / sqli / nosqli / ssrf) ALSO set \"param\" (the "
-        "vulnerable parameter) and \"payload\" (the exact value you injected). The server hands "
-        "these to the deterministic DAST prover (headless-DOM XSS / DBMS SQLi / OOB SSRF) to "
-        "promote the lead; without them the injection stays a SUSPECTED signal.",
+        "  For a DAST-VERIFIABLE finding — family xss / sqli / nosqli / ssrf / path_traversal / "
+        "open_redirect / ssti / command_injection — ALSO set \"param\" (the vulnerable parameter) "
+        "and \"payload\" (the exact value you injected): the server hands these to the deterministic "
+        "prover (DOM-exec / DBMS / timing / file-content / Location-header / template-eval) to "
+        "PROMOTE the lead; without them it stays a SUSPECTED signal. (family cors needs only the "
+        "route — no param/payload.)",
         "• Never run these tools yourself — REQUEST them. Requesting is how you act.",
     ]
     return "\n".join(lines)

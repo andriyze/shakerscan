@@ -16700,7 +16700,34 @@ def test_explorer_injection_finding_routes_to_deterministic_prover():
     assert inputs["param"] == "q"
     assert inputs["payload"] == "<script>alert(1)</script>"
     assert inputs["method"] == "GET"
-    # sanity: xss/sqli/nosqli/ssrf are exactly the agent injection retest types
-    assert api_module._AGENT_INJECTION_RETEST_TYPES == frozenset({"xss", "sqli", "nosqli", "ssrf"})
-    for t in api_module._AGENT_INJECTION_RETEST_TYPES:
+    # Every DAST-retest family maps to a real (non-AI) deterministic prover type, and the route-only
+    # set is a subset. Injection stays covered; Phase 1 adds the GET-observable provers.
+    fams = api_module._AGENT_DAST_RETEST_FAMILIES
+    assert {"xss", "sqli", "nosqli", "ssrf"}.issubset(fams)
+    assert {"path_traversal", "open_redirect", "ssti", "command_injection", "cors"}.issubset(fams)
+    for t in fams:
         assert t in api_module.SUPPORTED_RETEST_TYPES
+        assert t not in api_module.AI_ONLY_RETEST_TYPES   # each has a deterministic prover ladder
+    assert api_module._AGENT_ROUTE_ONLY_RETEST_FAMILIES <= fams
+
+
+def test_explorer_pathtraversal_and_cors_findings_resolve_to_deterministic_provers():
+    """Phase 1: a path_traversal lead (param+payload) and a route-only cors lead both resolve to their
+    deterministic prover type — not the generic_http AI tier."""
+    lfi = {
+        "title": "LFI in file param", "tool": "autonomous_agent", "source": "autonomous",
+        "url": "http://t.example.com/download",
+        "evidence": json.dumps({"family": "path_traversal", "retest_type": "path_traversal",
+                                 "method": "GET", "param": "file", "payload": "../../../../etc/passwd"}),
+    }
+    li = api_module.extract_retest_inputs(lfi)
+    assert li["finding_type"] == "path_traversal" and li["param"] == "file"
+    # cors is route-only: no param needed, still resolves to the cors prover
+    cors = {
+        "title": "CORS reflects arbitrary Origin with credentials", "tool": "autonomous_agent",
+        "source": "autonomous", "url": "http://t.example.com/api/account",
+        "evidence": json.dumps({"family": "cors", "retest_type": "cors", "method": "GET"}),
+    }
+    ci = api_module.extract_retest_inputs(cors)
+    assert ci["finding_type"] == "cors"
+    assert "cors" in api_module._AGENT_ROUTE_ONLY_RETEST_FAMILIES
