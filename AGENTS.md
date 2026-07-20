@@ -474,7 +474,7 @@ self-describes the contract each turn. Three things trip up a first-time driver:
 curl -X POST http://localhost:8080/agent/hunt/{target_id}/session \
   -H "Content-Type: application/json" \
   -d '{"objective":"Explore autonomously and verify the highest-value weaknesses",
-       "mode":"deep_hunt","max_iterations":12,
+       "mode":"deep_hunt","max_iterations":20,
        "approval_receipt_id":"approval-uuid"}'
 
 # Submit one planner reply (a tool_calls block or a final debrief); get the next observation.

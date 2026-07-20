@@ -17322,7 +17322,7 @@ async def get_agent_context_pack(
 # writes are gated. Every tool call records a durable tool_receipt.
 # =============================================================================
 
-_AGENT_TOOL_MAX_QUERY_ROWS = 50
+_AGENT_TOOL_MAX_QUERY_ROWS = 100
 _AGENT_TOOL_HTTP_TIMEOUT_SECONDS = 15
 
 
@@ -17740,13 +17740,13 @@ async def execute_agent_tool_endpoint(target_id: str, req: AgentToolExecuteReque
 # json_object mode; the same core is reusable for a keyless planner turn.
 # =============================================================================
 
-_AGENT_HUNT_DEFAULT_ITERATIONS = 12
-_AGENT_HUNT_MAX_ITERATIONS = 24
-_AGENT_HUNT_TRANSCRIPT_SOFT_CAP = 60
+_AGENT_HUNT_DEFAULT_ITERATIONS = 20
+_AGENT_HUNT_MAX_ITERATIONS = 40
+_AGENT_HUNT_TRANSCRIPT_SOFT_CAP = 120
 # A single planner turn may not fan out unbounded tool calls: the model's response-token limit is
 # not a dependable execution cap, so bound outbound work per turn explicitly. Extras are dropped
 # with a steer to request them next turn. (External-audit P1.)
-_AGENT_MAX_TOOLS_PER_TURN = 8
+_AGENT_MAX_TOOLS_PER_TURN = 12
 
 
 async def _agent_planner_reply(
@@ -18022,7 +18022,7 @@ async def _agent_seed_state(
         context_req = await _build_agent_context_pack_from_target(
             conn,
             AgentContextPackFromTargetRequest(
-                target_id=str(target_uuid), finding_limit=15, endpoint_limit=25,
+                target_id=str(target_uuid), finding_limit=20, endpoint_limit=40,
                 created_by=created_by,
             ),
         )
@@ -18953,7 +18953,7 @@ class AgentHuntRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     objective: str = Field(default="", max_length=2000)
     max_iterations: int = Field(default=_AGENT_HUNT_DEFAULT_ITERATIONS, ge=1, le=_AGENT_HUNT_MAX_ITERATIONS)
-    token_budget: int = Field(default=6000, ge=1000, le=20000)
+    token_budget: int = Field(default=9000, ge=1000, le=24000)
     persist: bool = True
     # Persisting a SUSPECTED finding is a state change; when the operator has enabled the
     # approval-receipt policy, a hunt must carry a receipt (the app's authorization mechanism).
@@ -18999,7 +18999,7 @@ class AgentHuntSessionStartRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     objective: str = Field(default="", max_length=2000)
     max_iterations: int = Field(default=_AGENT_HUNT_DEFAULT_ITERATIONS, ge=1, le=_AGENT_HUNT_MAX_ITERATIONS)
-    token_budget: int = Field(default=6000, ge=1000, le=20000)
+    token_budget: int = Field(default=9000, ge=1000, le=24000)
     mode: str = Field(
         default="read_only",
         pattern="^(read_only|deep_hunt)$",
@@ -19121,10 +19121,13 @@ async def start_agent_hunt_session(target_id: str, req: AgentHuntSessionStartReq
     )
     # Keyless sessions are turn-bounded already; Deep Hunt additionally receives hard
     # request/action ceilings so a single planner reply cannot turn authorization into
-    # unbounded traffic. The model sees the granted capability and its boundary.
+    # unbounded traffic. Ceilings are set for exploration room (bucket-2 breadth) — they bound
+    # only how much the discovery tier may probe, never what it may trust; the provenance gate
+    # and family_proof moat are the trust boundary and are untouched. The model sees the granted
+    # capability and its boundary.
     state["action_budget_limit"] = req.max_iterations * _AGENT_MAX_TOOLS_PER_TURN
-    state["request_budget_limit"] = min(120, req.max_iterations * 8)
-    state["active_action_budget_limit"] = min(12, req.max_iterations)
+    state["request_budget_limit"] = min(400, req.max_iterations * 12)
+    state["active_action_budget_limit"] = min(24, req.max_iterations)
     capability_message = (
         "Deep Hunt authorization is active for this target. You may use bounded active run_tool "
         "templates and authenticated read probes when useful. Raw POST/PUT/PATCH/DELETE requests "
@@ -19510,6 +19513,19 @@ _AGENT_MUTATING_VERIFY_FAMILIES: frozenset[str] = frozenset({"mass_assignment"})
 _AGENT_AUTO_VERIFY_EXCLUDED_FAMILIES: frozenset[str] = frozenset({"bola"})
 
 
+def _verification_route_from_finding_url(url: Any) -> Optional[str]:
+    """The concrete same-origin PATH a route-specific family_proof must re-execute, or None when the
+    finding has no resolved route — its ``url`` is only the target base, so the path is empty or "/".
+
+    A None MUST make the verifier abstain (the finding stays SUSPECTED). A route-specific
+    access-control proof (bola / auth_bypass / data_exposure) run against the public site root
+    trivially "passes" — anon == authed on a public page — which false-VERIFIES. Zero-FP hole found
+    by the crAPI deep-hunt smoke: a bfla lead whose evidence cited two distinct routes had an
+    ambiguous locus, so its url collapsed to the base and it verified against "/"."""
+    path = urllib.parse.urlsplit(str(url or "")).path
+    return path if path and path != "/" else None
+
+
 @asynccontextmanager
 async def _agent_finding_verification_lock(finding_uuid: uuid.UUID):
     """Cross-process, finding-scoped execution lock.
@@ -19603,7 +19619,16 @@ async def _verify_suspected_finding_workflow_unlocked(
         family = family_proof.canonical_family(evidence.get("family") or _research_finding_family(finding))
         if family not in _AGENT_VERIFIABLE_FAMILIES:
             raise HTTPException(status_code=422, detail=f"verification bridge supports {sorted(_AGENT_VERIFIABLE_FAMILIES)}, not '{family or 'unknown'}'")
-        path = urllib.parse.urlsplit(str(finding["url"] or "")).path or "/"
+        # Zero-FP: a route-specific access-control proof must re-execute against the finding's
+        # CONCRETE route. An unresolved route (url == target base -> path "/") would false-VERIFY an
+        # auth_bypass/data_exposure proof against the public site root, so abstain -> stays SUSPECTED.
+        path = _verification_route_from_finding_url(finding["url"])
+        if path is None:
+            raise HTTPException(
+                status_code=422,
+                detail="verification_route_unresolved: finding has no concrete protected route to "
+                "re-execute (ambiguous evidence locus); it stays SUSPECTED",
+            )
         _, _, _, finding_method, _, _, _ = _finding_family_route_method(finding)
         # Family-dispatched workflow build (raises 422 on insufficient inputs -> stays suspected).
         workflow, object_route, method, extra_metadata = await _agent_verification_workflow_for(

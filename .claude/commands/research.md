@@ -12,8 +12,8 @@ POST /agent/hunt/{target_id}/session
 {
   "objective": "...",
   "mode": "deep_hunt",
-  "max_iterations": 12,
-  "token_budget": 6000,
+  "max_iterations": 20,
+  "token_budget": 9000,
   "approval_receipt_id": "..."
 }
 ```

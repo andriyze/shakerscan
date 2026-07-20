@@ -47,8 +47,8 @@ function DeepHuntPage() {
   const [targets, setTargets] = useState<Target[]>([])
   const [targetId, setTargetId] = useState('')
   const [objective, setObjective] = useState(DEFAULT_OBJECTIVE)
-  const [maxIterations, setMaxIterations] = useState('12')
-  const [tokenBudget, setTokenBudget] = useState('6000')
+  const [maxIterations, setMaxIterations] = useState('20')
+  const [tokenBudget, setTokenBudget] = useState('9000')
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null)
   const [session, setSession] = useState<AgentHuntSession | null>(null)
   const [findings, setFindings] = useState<AgentTwoTierFindings | null>(null)
@@ -130,8 +130,8 @@ function DeepHuntPage() {
       )
       const started = await startAgentHuntSession(targetId, {
         objective: objective.trim() || DEFAULT_OBJECTIVE,
-        max_iterations: Math.min(24, Math.max(1, Number.parseInt(maxIterations, 10) || 12)),
-        token_budget: Math.min(20000, Math.max(1000, Number.parseInt(tokenBudget, 10) || 6000)),
+        max_iterations: Math.min(40, Math.max(1, Number.parseInt(maxIterations, 10) || 20)),
+        token_budget: Math.min(24000, Math.max(1000, Number.parseInt(tokenBudget, 10) || 9000)),
         mode: 'deep_hunt',
         approval_receipt_id: approvalReceiptId,
       })
@@ -216,11 +216,11 @@ function DeepHuntPage() {
               <Textarea value={objective} onChange={(e) => setObjective(e.target.value)} rows={3} maxLength={2000} />
             </Field>
             <div className="grid grid-cols-2 gap-3">
-              <Field label="Max turns" hint="1–24 planner turns.">
-                <Input type="number" min={1} max={24} value={maxIterations} onChange={(e) => setMaxIterations(e.target.value)} />
+              <Field label="Max turns" hint="1–40 planner turns.">
+                <Input type="number" min={1} max={40} value={maxIterations} onChange={(e) => setMaxIterations(e.target.value)} />
               </Field>
-              <Field label="Token budget" hint="1000–20000 per run.">
-                <Input type="number" min={1000} max={20000} step={500} value={tokenBudget} onChange={(e) => setTokenBudget(e.target.value)} />
+              <Field label="Token budget" hint="1000–24000 per run.">
+                <Input type="number" min={1000} max={24000} step={500} value={tokenBudget} onChange={(e) => setTokenBudget(e.target.value)} />
               </Field>
             </div>
             <div className="flex items-center justify-between gap-3 border-t border-gray-800 pt-4">

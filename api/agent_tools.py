@@ -176,13 +176,49 @@ def _tmpl_nuclei(url: str, opts: dict[str, Any]) -> list[str]:
     return args
 
 
-# {tool: {binary, target_param, risk, default_timeout_ms, build}}. Only httpx (passive)
-# and a bounded nuclei are loop-safe; slower/intrusive scanners stay off the sync loop.
+# Bundled small wordlists for content discovery. The model picks a NAME from this map (dict
+# lookup, unknown -> common); it can NEVER pass an arbitrary path, so ffuf's -w is injection-proof.
+_AGENT_FFUF_WORDLISTS: dict[str, str] = {
+    "common": "/app/wordlists/common.txt",
+    "api": "/app/wordlists/api-resources.txt",
+    "admin": "/app/wordlists/admin-common.txt",
+}
+
+
+def _tmpl_katana(url: str, opts: dict[str, Any]) -> list[str]:
+    # Same-origin crawl + JS endpoint extraction. Read-only (GET only; form auto-fill stays OFF),
+    # bounded: depth 2, 45s wall cap, 50 req/s, field-scope fqdn (same HOST only — never crosses
+    # origin), 8s per-request timeout, jsonl output. No tunables.
+    return ["-u", url, "-js-crawl", "-depth", "2", "-concurrency", "10",
+            "-rate-limit", "50", "-crawl-duration", "45s", "-field-scope", "fqdn",
+            "-timeout", "8", "-silent", "-jsonl"]
+
+
+def _tmpl_ffuf(url: str, opts: dict[str, Any]) -> list[str]:
+    # Bounded content/dir discovery. Read-only (GET). One tunable: wordlist in {common,api,admin}
+    # -> a small BUNDLED list (unknown/invalid -> common; no arbitrary path). Auto-calibrated
+    # soft-404 filtering (-ac), 60s wall cap, 50 req/s. FUZZ appended to the same-origin base path.
+    wordlist = _AGENT_FFUF_WORDLISTS.get(
+        str(opts.get("wordlist") or "").strip().lower(), _AGENT_FFUF_WORDLISTS["common"]
+    )
+    base = url.split("?", 1)[0].rstrip("/")
+    return ["-u", f"{base}/FUZZ", "-w", wordlist,
+            "-mc", "200,204,301,302,307,401,403,405", "-ac",
+            "-t", "20", "-rate", "50", "-timeout", "8", "-maxtime", "60", "-s", "-json"]
+
+
+# {tool: {binary, target_param, risk, default_timeout_ms, build}}. httpx is the only passive
+# (read_only) scanner; nuclei/katana/ffuf are bounded ACTIVE discovery (deep_hunt-gated) — each
+# has a fixed argv (no arbitrary flags/paths) and a hard wall-clock cap so the sync loop stays safe.
 SCANNER_ARG_TEMPLATES: dict[str, dict[str, Any]] = {
     "httpx": {"binary": "httpx", "risk": "read_only", "default_timeout_ms": 30_000, "build": _tmpl_httpx,
               "desc": "passive HTTP fingerprint (status, title, tech, server) of a same-origin URL"},
     "nuclei": {"binary": "nuclei", "risk": "active", "default_timeout_ms": 90_000, "build": _tmpl_nuclei,
                "desc": "bounded Nuclei template scan (default high,critical) of a same-origin URL; options {severity,tags}"},
+    "katana": {"binary": "katana", "risk": "active", "default_timeout_ms": 75_000, "build": _tmpl_katana,
+               "desc": "bounded same-origin crawl + JS endpoint extraction (depth 2, 45s, same-host only)"},
+    "ffuf": {"binary": "ffuf", "risk": "active", "default_timeout_ms": 75_000, "build": _tmpl_ffuf,
+             "desc": "bounded content/dir discovery over a small bundled wordlist; options {wordlist: common|api|admin}"},
 }
 RUN_TOOL_NAMES: frozenset[str] = frozenset(SCANNER_ARG_TEMPLATES)
 
@@ -191,16 +227,19 @@ RUN_TOOL_SCHEMA: dict[str, Any] = {
     "risk": "active",
     "description": (
         "Run a bounded external scanner against a SAME-ORIGIN URL. You pick tool + target "
-        f"only; all flags are fixed. Tools: {sorted(RUN_TOOL_NAMES)} — httpx is a passive "
-        "fingerprint; nuclei runs bounded templates (options {severity,tags}). Returns the "
-        "scanner's JSON/JSONL output (bounded)."
+        f"only; all flags are fixed. Tools: {sorted(RUN_TOOL_NAMES)} — httpx = passive "
+        "fingerprint; nuclei = bounded templates (options {severity,tags}); katana = crawl + "
+        "JS endpoint extraction (finds linked/JS-referenced routes); ffuf = content/dir "
+        "discovery over a bundled wordlist (options {wordlist: common|api|admin} — finds "
+        "UNLINKED paths). Use katana/ffuf to expand the surface, then probe hits with "
+        "http_request. Returns the scanner's JSON/JSONL output (bounded)."
     ),
     "parameters": {
         "type": "object",
         "properties": {
-            "name": {"type": "string", "description": "httpx | nuclei"},
+            "name": {"type": "string", "description": "httpx | nuclei | katana | ffuf"},
             "target": {"type": "string", "description": "same-origin absolute path (/) or URL to scan"},
-            "options": {"type": "object", "description": "nuclei: {severity:'high,critical', tags:'cve,exposure'}"},
+            "options": {"type": "object", "description": "nuclei: {severity:'high,critical', tags:'cve,exposure'}; ffuf: {wordlist:'common'|'api'|'admin'}"},
         },
         "required": ["name", "target"],
     },

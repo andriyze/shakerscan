@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-MAX_TOOL_OUTPUT_CHARS = 4000
+MAX_TOOL_OUTPUT_CHARS = 8000
 
 # The closed server-derived predicate vocabulary the model may claim for a finding (it
 # only *picks* one; the server derives the verdict — the zero-FP invariant).

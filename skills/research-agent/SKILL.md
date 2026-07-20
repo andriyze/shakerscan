@@ -35,8 +35,8 @@ compatibility. Do not launch `/research/campaigns/launch` when the user asks for
    {
      "objective": "Explore autonomously and verify the highest-value security weaknesses",
      "mode": "deep_hunt",
-     "max_iterations": 12,
-     "token_budget": 6000,
+     "max_iterations": 20,
+     "token_budget": 9000,
      "approval_receipt_id": "APPROVAL_UUID"
    }
    ```

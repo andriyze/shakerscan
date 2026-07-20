@@ -336,6 +336,41 @@ def test_run_tool_unknown_rejected():
         pass
 
 
+def test_discovery_scanners_present_and_active_gated():
+    # katana + ffuf are part of the arsenal and classified active (deep_hunt-gated), never read_only,
+    # so they cannot run in a passive (no-approval) session.
+    assert {"katana", "ffuf"}.issubset(at.RUN_TOOL_NAMES)
+    for name in ("katana", "ffuf"):
+        assert at.SCANNER_ARG_TEMPLATES[name]["risk"] == "active"
+
+
+def test_katana_argv_is_bounded_and_same_host():
+    b, argv, timeout = at.build_scanner_argv("katana", "http://t/app", {})
+    assert b == "katana"
+    assert argv[argv.index("-u") + 1] == "http://t/app"
+    assert "-js-crawl" in argv                                   # JS endpoint extraction on
+    assert argv[argv.index("-field-scope") + 1] == "fqdn"        # same host ONLY, never cross-origin
+    assert argv[argv.index("-depth") + 1] == "2"                 # bounded depth
+    assert argv[argv.index("-crawl-duration") + 1] == "45s"      # hard wall cap
+    assert timeout > 0
+    # no form-submission / cross-scope flags leaked in
+    for unsafe in ("-form-extraction", "-automatic-form-fill", "-aff", "-display-out-scope", "-do"):
+        assert unsafe not in argv
+
+
+def test_ffuf_wordlist_tunable_is_injection_proof():
+    # a valid selector maps to a BUNDLED list and FUZZ is appended to the same-origin base
+    _, argv, _ = at.build_scanner_argv("ffuf", "http://t/base", {"wordlist": "api"})
+    assert argv[argv.index("-u") + 1] == "http://t/base/FUZZ"
+    assert argv[argv.index("-w") + 1] == at._AGENT_FFUF_WORDLISTS["api"]
+    assert "-maxtime" in argv and "-ac" in argv                  # hard wall cap + soft-404 filtering
+    # unknown / path-injection selectors fall back to the bundled common list — never an arbitrary path
+    for bad in ("/etc/passwd", "; rm -rf /", "nope"):
+        _, argv2, _ = at.build_scanner_argv("ffuf", "http://t/x", {"wordlist": bad})
+        assert argv2[argv2.index("-w") + 1] == at._AGENT_FFUF_WORDLISTS["common"]
+        assert "/etc/passwd" not in argv2
+
+
 def test_http_evidence_is_tool_provenance():
     ev = at.http_evidence_item({"method": "GET", "path": "/x"}, {"status": 200, "body_sample": "hi"})
     assert ev["type"] in prov.TOOL_EVIDENCE_KINDS

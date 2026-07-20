@@ -16656,3 +16656,19 @@ def test_research_graph_preserves_history_and_attributes_parallel_children():
         "node_count": 1,
         "edge_count": 1,
     }
+
+
+def test_verification_route_abstains_when_finding_has_no_concrete_route():
+    """Zero-FP: a route-specific family_proof (bola/auth_bypass/data_exposure) must abstain when the
+    suspected finding has no resolved route. An ambiguous evidence locus leaves ``url`` at the target
+    base, so the path collapses to "/" — and an auth_bypass proof against the public site root
+    trivially passes (anon == authed). Regression from the crAPI deep-hunt smoke."""
+    f = api_module._verification_route_from_finding_url
+    # concrete protected route -> returned as-is (verification proceeds)
+    assert f("http://host.docker.internal:8888/identity/api/v2/admin/videos/search") == "/identity/api/v2/admin/videos/search"
+    assert f("https://t/rest/basket/1") == "/rest/basket/1"
+    # unresolved route -> None (verifier must abstain, finding stays SUSPECTED)
+    assert f("http://host.docker.internal:8888/") is None   # target base with trailing slash
+    assert f("http://host.docker.internal:8888") is None     # target base, no path
+    assert f("") is None
+    assert f(None) is None
