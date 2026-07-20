@@ -29,7 +29,29 @@ def test_workflow_contract_requires_from_and_to_states():
         "conditions": {"from_state": "submitted"},
     })
 
-    assert errors == ["transition_to_state_required"]
+    assert errors == ["transition_to_state_required", "transition_probe_state_required"]
+
+
+def test_workflow_contract_requires_a_probe_state_distinct_from_to_state():
+    base = {
+        "contract_kind": "workflow_transition",
+        "title": "Only submitted orders can ship",
+        "action": "ship",
+        "resource": "order",
+        "field_name": "status",
+    }
+    missing = contracts.approval_errors({
+        **base, "conditions": {"from_state": "submitted", "to_state": "shipped"},
+    })
+    assert missing == ["transition_probe_state_required"]
+    same_as_target = contracts.approval_errors({
+        **base, "conditions": {"from_state": "submitted", "to_state": "shipped", "probe_state": "shipped"},
+    })
+    assert same_as_target == ["transition_probe_state_must_differ_from_to_state"]
+    ok = contracts.approval_errors({
+        **base, "conditions": {"from_state": "submitted", "to_state": "shipped", "probe_state": "cancelled"},
+    })
+    assert ok == []
 
 
 def test_unknown_or_untyped_conditions_are_rejected():

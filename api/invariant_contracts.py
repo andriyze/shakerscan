@@ -382,6 +382,14 @@ def approval_errors(value: dict[str, Any]) -> list[str]:
             and contract["conditions"].get("from_state") == contract["conditions"].get("to_state")
         ):
             errors.append("transition_states_must_differ")
+        # The mutating proof needs a concrete FORBIDDEN target to attempt (from_state -> probe_state);
+        # without it verification cannot run, so it is an approval error, not a runtime surprise.
+        # probe_state must also differ from to_state, or the "violation" IS the allowed transition.
+        probe_state = contract["conditions"].get("probe_state")
+        if not probe_state:
+            errors.append("transition_probe_state_required")
+        elif probe_state == contract["conditions"].get("to_state"):
+            errors.append("transition_probe_state_must_differ_from_to_state")
     elif kind == "ownership":
         if not contract["subject_role"]:
             errors.append("subject_role_required")
