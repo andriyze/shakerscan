@@ -453,6 +453,12 @@ in the free-form loop; mutations belong to typed workflows with cleanup/restorat
 Findings land in the **SUSPECTED** tier only after the provenance gate resolves real tool evidence.
 Supported claims may become **VERIFIED** only through deterministic server re-execution.
 
+Business-logic families (access_control, field_constraint, workflow_transition) verify through
+operator-approved typed invariant contracts: the hunt auto-drafts review candidates from black-box
+facts (endpoint expectations, app-graph auth_boundary edges, its own SUSPECTED findings) at board
+seeding — drafts never auto-approve. Approve a draft, then re-verify. workflow_transition contracts
+require a `probe_state` (the forbidden target state to attempt) at approval time.
+
 The first observation returned by `session` is itself a full system prompt (tool arsenal, the
 RECON→PLAN→EXECUTE→EVIDENCE→SELF-CRITIQUE cadence, and the exact debrief schema) — read it; the harness
 self-describes the contract each turn. Three things trip up a first-time driver:
@@ -476,6 +482,17 @@ curl -X POST http://localhost:8080/agent/hunt/{target_id}/session \
   -d '{"objective":"Explore autonomously and verify the highest-value weaknesses",
        "mode":"deep_hunt","max_iterations":20,
        "approval_receipt_id":"approval-uuid"}'
+
+# Optional grey-box grounding (B2): when you have the target's source locally, set
+# SHAKERSCAN_SOURCE_ROOT on the API host to the containing tree (mounted into the api container),
+# then pass source_dir. The hunt gets a security-ranked source_excerpt pack section + source-derived
+# leads. Containment is enforced (realpath both sides; 400 outside the root). Black-box is the default.
+curl -X POST http://localhost:8080/agent/hunt/{target_id}/session \
+  -H "Content-Type: application/json" \
+  -d '{"objective":"Explore autonomously and verify the highest-value weaknesses",
+       "mode":"deep_hunt","max_iterations":20,
+       "approval_receipt_id":"approval-uuid",
+       "source_dir":"/srv/sources/juice-shop"}'
 
 # Submit one planner reply (a tool_calls block or a final debrief); get the next observation.
 curl -X POST http://localhost:8080/agent/hunt/session/{run_id}/reply \

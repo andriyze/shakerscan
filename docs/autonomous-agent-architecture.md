@@ -281,3 +281,40 @@ persistence discipline.
 - This re-architects the *propose* side (menu-selector → ReAct agent) but keeps the verification moat intact
   and unchanged. It is a **port of T3MP3ST's loop onto our moat**, not a new invention — that distinction is
   the whole point of this revision.
+
+## 12. Shipped: the business-logic VERIFIED bridge (Explorer vs T3MP3ST, phases 0–B2)
+
+Follow-up to §11's honest ceiling: business-logic findings now reach VERIFIED **from operator-approved
+invariant contracts**, not from any vocabulary growth. The moat already verified
+access_control / field_constraint / workflow_transition from live observations
+(`_trusted_invariant_execution_evidence` + unchanged two-run `evaluate_family_proof`); what shipped is
+the wiring plus the auto-draft pipeline, black-box first.
+
+| Phase | Content | Status |
+|---|---|---|
+| **0** | access_control auto-verify against an APPROVED role oracle + `invariant_proposals` drafts | shipped |
+| **A1** | field_constraint auto-verify (first mutating family; runtime-captured baseline; mandatory field-scoped restoration) | shipped, live-validated |
+| **A2** | workflow_transition auto-verify (contract's `probe_state` = the forbidden target attempted) | shipped, live-validated |
+| **A3** | generalized auto-draft flow: ownership (graph auth_boundary edges), field_constraint (numeric caps), workflow_transition (state hints), SUSPECTED findings → matching drafts; auto-persisted at board seeding; `invariant_candidates` pack section | shipped |
+| **B1** | black-box observed-artifact grounding: inventory-sourced leads (already residue-backed) + `observed_artifacts` pack section | shipped |
+| **B2** | opt-in grey-box source ingester (`source_dir` on hunt start; `SHAKERSCAN_SOURCE_ROOT` containment; security-ranked `source_excerpt` pack section + source-derived leads) | shipped |
+| — | decomposition orchestrator | **skipped** per plan (blind-worker decomposition solves refusal-avoidance + >1-context-window repos; neither is our black-box-first case) |
+
+**Non-negotiable invariants (reaffirmed, enforced by tests):** the model never supplies a verdict —
+only the two-run server binder derives predicates; the new families never enter the non-invariant
+proof branch or `_server_confirms_predicate`; `VERIFIABLE_PREDICATES` / `FAMILY_CONTRACTS` stay closed
+(`invariant_violated` already means "a typed contract is broken"); the free-form loop stays read-only —
+all mutation lives in the server-materialized verify workflow with a mandatory restoration contract;
+auto-proposed invariants are always `status='draft'` (approval is a human action).
+
+**Zero-FP guardrails added during this work (audit fixes):** the workflow_transition binder derives
+`transition_invariant_broken` ONLY when the object started in the approved `from_state` AND the app
+persisted the contract-declared forbidden `probe_state` (a wrong starting state or a coerced write
+derives nothing); a mutation never fires unless every rollback/cleanup step is renderable with what is
+already bound (a failed baseline read stops the workflow before any state change); restoration replays
+the full captured parent object with original JSON types (a PUT-replace API gets every sibling field
+back); `probe_state` is an approval-time requirement for workflow_transition contracts.
+
+Tests: `tests/test_invariant_binder.py` (two-run binder: verified/supported_unverified/refuted/no-restoration
++ the FP shapes), `tests/test_invariant_proposals.py`, `tests/test_source_ingest.py`, plus
+workflow-executor regression tests for the restoration gate and full-body restore.
