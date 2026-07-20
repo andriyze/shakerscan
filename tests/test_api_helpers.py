@@ -14877,7 +14877,9 @@ def test_probe_create_surface_stops_after_untrackable_accepted_create():
         transport=httpx.MockTransport(handler),
     ))
     assert result["usable"] is False
-    assert result["reason"] == "accepted_probe_missing_trackable_id"
+    # Reason gained a residual-cleanup suffix (_residual_cleaned / _residual_uncleaned) in c239cb3;
+    # match the stable prefix so the assertion tracks the create-probe cleanup outcome. (Audit M2.)
+    assert result["reason"].startswith("accepted_probe_missing_trackable_id")
     assert result["request_count"] == 1
     assert len(requests) == 1
 
@@ -16740,9 +16742,43 @@ def test_access_control_is_invariant_gated_verifiable_family():
     assert "access_control" in api_module._AGENT_VERIFIABLE_FAMILIES
     assert "access_control" not in api_module._AGENT_MUTATING_VERIFY_FAMILIES
     assert "access_control" not in api_module._AGENT_AUTO_VERIFY_EXCLUDED_FAMILIES
-    wf = api_module._materialize_accesscontrol_verification_workflow("/workshop/api/mechanic/x")
+    wf = api_module._materialize_accesscontrol_verification_workflow("/api/users/1234/orders")
     assert wf["proof_family"] == "access_control"                 # matches the contract's proof_family
     assert [s["principal"] for s in wf["steps"]] == ["user1", "user2"]  # role-differential
     assert all(s["method"] == "GET" for s in wf["steps"])         # GET-only -> read-only hunt safe
     assert all(s.get("checkpoint") != "mutation" for s in wf["steps"])
+    # Steps must carry the CONCRETE path — a canonical {id} route has no substitution here and would
+    # 404 every run (audit M1). Materializer renders input verbatim; the BRANCH must pass `path`.
+    assert all(s["path"] == "/api/users/1234/orders" and "{" not in s["path"] for s in wf["steps"])
     assert wf["assertions"] == []                                  # predicates come from the invariant binder, not static assertions
+
+
+def test_field_constraint_probe_values_always_violate():
+    """A1: every probe the materializer would submit VIOLATES its constraint — the binder recomputes
+    this from the submitted value, so a wrong probe only fails to persist a violation (stays SUSPECTED)."""
+    pv = api_module._field_constraint_probe_value
+    allowed = api_module._invariant_value_allowed
+    for op, expected in [("lte", 10), ("lt", 10), ("gte", 10), ("gt", 10), ("eq", "active"),
+                         ("ne", "locked"), ("in", ["a", "b"]), ("not_in", ["a", "b"])]:
+        probe = pv(op, expected)
+        assert probe is not None, (op, expected)
+        assert not allowed(probe, op, expected), (op, expected, probe)
+    assert pv("lte", "not-a-number") is None            # non-numeric bound -> no probe
+    assert pv("lte", 10) == 11 and isinstance(pv("lte", 10), int)  # int bound -> int probe
+
+
+def test_field_constraint_materializer_is_mutating_restoring_and_field_scoped():
+    wf = api_module._materialize_fieldconstraint_verification_workflow("/api/orders/1234", "PATCH", "quantity", "lte", 10)
+    assert wf is not None and wf["proof_family"] == "field_constraint"
+    assert [s["label"] for s in wf["steps"]] == ["before", "mutate", "violation", "rollback", "after"]
+    assert [s["checkpoint"] for s in wf["steps"]] == ["before", "mutation", "action", "rollback", "after"]
+    # Every step (reads + writes) hits the CONCRETE path, not a canonical {id} route (audit M1).
+    assert all(s["path"] == "/api/orders/1234" and "{" not in s["path"] for s in wf["steps"])
+    assert wf["steps"][0]["extract"][0]["path"] == "$.quantity"          # baseline captured at runtime
+    assert wf["steps"][3]["json_body"] == {"quantity": "${baseline}"}    # ... and restored, no debrief capture
+    assert not api_module._invariant_value_allowed(wf["steps"][1]["json_body"]["quantity"], "lte", 10)  # out-of-bounds write
+    ra = wf["assertions"][0]
+    assert ra["type"] == "restored" and ra["field_scoped"] is True and ra["predicate"] == "before_after_state"
+    assert {"field_constraint"} <= api_module._AGENT_VERIFIABLE_FAMILIES
+    assert {"field_constraint"} <= api_module._AGENT_MUTATING_VERIFY_FAMILIES   # allow_write-gated
+    assert api_module._materialize_fieldconstraint_verification_workflow("/x", "PATCH", "f", "lte", "nan") is None

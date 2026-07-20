@@ -18371,6 +18371,7 @@ _AGENT_VERIFY_REQUEST_RESERVATIONS: dict[str, int] = {
     "auth_bypass": 4,      # two requests, independently replayed
     "data_exposure": 4,    # two requests, independently replayed
     "access_control": 4,   # same read as two role principals, independently replayed
+    "field_constraint": 12, # before/mutate/violation/rollback/after, independently replayed
     "mass_assignment": 20, # up to three shape probes + cleanup + eight-step two-run workflow
 }
 _AGENT_VERIFY_SECONDS_RESERVATIONS: dict[str, int] = {
@@ -18378,6 +18379,7 @@ _AGENT_VERIFY_SECONDS_RESERVATIONS: dict[str, int] = {
     "auth_bypass": 180,
     "data_exposure": 180,
     "access_control": 180,
+    "field_constraint": 300,
     "mass_assignment": 400,
 }
 
@@ -19630,15 +19632,100 @@ def _materialize_accesscontrol_verification_workflow(route: str) -> dict[str, An
     }
 
 
-async def _resolve_approved_access_control_contract(
-    conn: Any, target_uuid: uuid.UUID, route: str, method: str
-) -> Optional[str]:
-    """Return the id of an APPROVED access_control invariant contract whose canonical route+method
-    match this finding, or None. The contract is the operator-declared role oracle; without it an
-    access_control finding cannot be soundly verified and stays SUSPECTED. Uses the same row
-    serializer the dispatch uses, so it is robust to the contract's column/JSON layout."""
+def _field_constraint_probe_value(operator: str, expected: Any) -> Any:
+    """Return a value that VIOLATES the (operator, expected) constraint, or None if one cannot be built
+    deterministically. The invariant binder recomputes `violates` from the value actually submitted, so
+    a wrong/None probe only fails to persist a violation -> the finding stays SUSPECTED (never
+    false-verifies). Keeps the probe the same JSON type as ``expected`` so the app accepts the write."""
+    op = str(operator or "").strip().lower()
+
+    def _num(delta: float) -> Any:
+        try:
+            base = float(expected)
+        except (TypeError, ValueError):
+            return None
+        value = base + delta
+        if not math.isfinite(base) or not math.isfinite(value):   # a nan/inf bound yields no usable probe
+            return None
+        return int(value) if isinstance(expected, int) and value.is_integer() else value
+
+    if op in {"lte", "lt"}:       # allowed <= / < expected  ->  expected+1 exceeds it
+        return _num(1)
+    if op in {"gte", "gt"}:       # allowed >= / > expected  ->  expected-1 falls short
+        return _num(-1)
+    if op == "ne":                # allowed != expected      ->  expected itself violates
+        return expected
+    if op == "eq":                # allowed == expected      ->  any other value violates
+        if isinstance(expected, bool):
+            return not expected
+        if isinstance(expected, (int, float)):
+            return expected + 1
+        if isinstance(expected, str):
+            return (expected + "_shakerscan_violation")[:200]
+        return "shakerscan_violation"
+    if op == "not_in":            # allowed NOT in list      ->  a member violates
+        return expected[0] if isinstance(expected, list) and expected else None
+    if op == "in":                # allowed in list          ->  a non-member violates
+        if not isinstance(expected, list):
+            return None
+        for candidate in ("shakerscan_not_in_set", 0, -1, "__none__"):
+            if candidate not in expected:
+                return candidate
+        return None
+    return None
+
+
+def _materialize_fieldconstraint_verification_workflow(
+    route: str, method: str, field_name: str, operator: str, expected_value: Any
+) -> Optional[dict[str, Any]]:
+    """Build a MUTATING field_constraint proof: read the field (baseline within the constraint) ->
+    write it OUT OF BOUNDS -> read back (the out-of-bounds value persisted) -> restore the captured
+    baseline -> read again. The invariant binder derives constraint_baseline_observed /
+    constraint_violation_persisted from the observed field values vs the approved contract; the model
+    supplies no verdict. Restoration is mandatory (before_after_state needs it) and field-scoped so a
+    write-bumped timestamp does not mask a genuine restore. Returns None (caller 422s -> stays
+    SUSPECTED) when no violating probe can be built."""
+    probe = _field_constraint_probe_value(operator, expected_value)
+    if probe is None or _invariant_value_allowed(probe, operator, expected_value):
+        return None
+    base = str(route)
+    field = str(field_name)
+    sel = f"$.{field}"
+    return {
+        "proof_family": "field_constraint",
+        "steps": [
+            {"label": "before", "kind": "http", "principal": "user1", "checkpoint": "before",
+             "method": "GET", "path": base, "select_json": [sel],
+             "extract": [{"name": "baseline", "source": "json", "path": sel}]},
+            {"label": "mutate", "kind": "http", "principal": "user1", "checkpoint": "mutation",
+             "method": method, "path": base, "json_body": {field: probe}},
+            {"label": "violation", "kind": "http", "principal": "user1", "checkpoint": "action",
+             "method": "GET", "path": base, "select_json": [sel]},
+            {"label": "rollback", "kind": "http", "principal": "user1", "checkpoint": "rollback",
+             "method": method, "path": base, "json_body": {field: "${baseline}"}},
+            {"label": "after", "kind": "http", "principal": "user1", "checkpoint": "after",
+             "method": "GET", "path": base, "select_json": [sel], "compare_to": "before"},
+        ],
+        "assertions": [
+            {"type": "restored", "control": "before", "candidate": "after",
+             "predicate": "before_after_state", "field_scoped": True},
+        ],
+    }
+
+
+async def _resolve_approved_invariant_contract(
+    conn: Any, target_uuid: uuid.UUID, kind: str, route: str, method: Optional[str]
+) -> Optional[dict[str, Any]]:
+    """Return the APPROVED invariant contract of ``kind`` whose canonical route matches this finding
+    (and method, when a ``method`` is given), or None. The contract is the operator-declared oracle;
+    without it the family cannot be soundly verified and the finding stays SUSPECTED.
+
+    ``method`` is None/"" for families whose verify OPERATION differs from the finding's observed one:
+    a field_constraint lead is observed via a GET read but exploited via the contract's WRITE method,
+    which a read-only hunt never evidences — so match on route and let the contract supply the method.
+    Uses the same row serializer the dispatch uses, so it is robust to the contract's column layout."""
     want_route = _canonical_vulnerability_route(route) or route
-    want_method = str(method or "GET").upper()
+    want_method = str(method or "").upper() or None
     rows = await conn.fetch(
         "SELECT * FROM target_invariant_contracts WHERE target_id=$1 AND status='approved' "
         "ORDER BY updated_at DESC LIMIT 200",
@@ -19646,13 +19733,13 @@ async def _resolve_approved_access_control_contract(
     )
     for row in rows:
         contract = _public_target_invariant_contract_row(row)
-        if str(contract.get("contract_kind") or "") != "access_control":
+        if str(contract.get("contract_kind") or "") != kind:
             continue
-        if str(contract.get("method") or "").upper() != want_method:
+        if want_method is not None and str(contract.get("method") or "").upper() != want_method:
             continue
         contract_route = _canonical_vulnerability_route(contract.get("path")) or contract.get("path")
         if contract_route == want_route:
-            return str(contract.get("id"))
+            return contract
     return None
 
 
@@ -19669,10 +19756,11 @@ class AgentVerifyRequest(BaseModel):
 # gated on an operator-APPROVED invariant contract (the role oracle a bare authz finding lacks) and
 # verified by the invariant binder. Every family is verified by the UNCHANGED family_proof two-run
 # moat — the bridge only supplies routes/bindings, never a verdict.
-_AGENT_VERIFIABLE_FAMILIES: frozenset[str] = frozenset({"bola", "auth_bypass", "data_exposure", "mass_assignment", "access_control"})
-# Families whose VERIFICATION workflow mutates the target (create-MA does live create POSTs). These
-# may auto-verify only from a gated (allow_write) hunt, never a read-only one. (External-audit BUG 3.)
-_AGENT_MUTATING_VERIFY_FAMILIES: frozenset[str] = frozenset({"mass_assignment"})
+_AGENT_VERIFIABLE_FAMILIES: frozenset[str] = frozenset({"bola", "auth_bypass", "data_exposure", "mass_assignment", "access_control", "field_constraint"})
+# Families whose VERIFICATION workflow mutates the target (create-MA does live create POSTs;
+# field_constraint writes an out-of-bounds value then restores the captured baseline). These may
+# auto-verify only from a gated (allow_write) hunt, never a read-only one. (External-audit BUG 3.)
+_AGENT_MUTATING_VERIFY_FAMILIES: frozenset[str] = frozenset({"mass_assignment", "field_constraint"})
 # Families the loop will NOT auto-promote to VERIFIED because the family_proof cannot autonomously
 # prove the finding is sound. bola: the proof shows a managed/distinct reference, not OWNERSHIP, so a
 # shared-behind-login collection false-VERIFIES; that is a policy question, not something an unattended
@@ -19749,16 +19837,42 @@ async def _agent_verification_workflow_for(
         # (the role oracle a bare authz finding lacks). None -> 422 -> the finding stays SUSPECTED; the
         # server never guesses the intended policy. The two-run role-differential proof + verdict come
         # entirely from the invariant binder (source="invariant" + invariant_contract_id routes it there).
-        contract_id = await _resolve_approved_access_control_contract(conn, target_uuid, route, method)
-        if not contract_id:
+        contract = await _resolve_approved_invariant_contract(conn, target_uuid, "access_control", route, method)
+        if not contract:
             raise HTTPException(
                 status_code=422,
                 detail="access_control verification requires an operator-approved invariant contract "
                 "for this route (finding stays suspected)")
+        # Steps must hit the CONCRETE path — the canonical `route` carries {id} placeholders with no
+        # substitution mechanism in this (no-captured-refs) workflow, so a canonical path would 404
+        # every run. Canonical `route` is only for contract matching + the dedupe dimension. (Audit M1.)
         return (
-            _materialize_accesscontrol_verification_workflow(route), route, "GET",
-            {"invariant_contract_id": contract_id},
+            _materialize_accesscontrol_verification_workflow(path), route, "GET",
+            {"invariant_contract_id": str(contract["id"])},
         )
+    if family == "field_constraint":
+        # Verifiable ONLY against an operator-APPROVED field_constraint invariant contract for this
+        # route. None -> 422 -> stays SUSPECTED. The MUTATING proof writes an out-of-bounds value then
+        # restores the captured baseline; the binder derives the verdict from observed field values vs
+        # the contract, and restoration is mandatory. Resolve by ROUTE only: a read-only hunt evidences
+        # a GET of the object, never the write, so the CONTRACT supplies the write method. Steps hit the
+        # CONCRETE path (canonical route is for matching/dedupe only). (Audit M1.)
+        contract = await _resolve_approved_invariant_contract(conn, target_uuid, "field_constraint", route, None)
+        if not contract:
+            raise HTTPException(
+                status_code=422,
+                detail="field_constraint verification requires an operator-approved invariant contract "
+                "for this route (finding stays suspected)")
+        write_method = str(contract.get("method") or "").upper()
+        workflow = _materialize_fieldconstraint_verification_workflow(
+            path, write_method, str(contract.get("field_name") or ""),
+            str(contract.get("operator") or ""), contract.get("expected_value"))
+        if workflow is None:
+            raise HTTPException(
+                status_code=422,
+                detail="cannot construct a violating probe for this field_constraint contract "
+                "(finding stays suspected)")
+        return workflow, route, write_method, {"invariant_contract_id": str(contract["id"])}
     if family == "mass_assignment":
         # Create-based only: dispatch with NO steps so _server_materialize_create_ma probes the create
         # surface and builds the role=admin overpost workflow (a wrong field is falsified by the proof).
