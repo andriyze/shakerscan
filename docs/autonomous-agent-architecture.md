@@ -315,6 +315,13 @@ already bound (a failed baseline read stops the workflow before any state change
 the full captured parent object with original JSON types (a PUT-replace API gets every sibling field
 back); `probe_state` is an approval-time requirement for workflow_transition contracts.
 
+**Re-validated live at HEAD after the audit fixes:** a keyless deep_hunt on the local Juice Shop
+honey target drove a `field_constraint` finding (`BasketItem.quantity<=3`) SUSPECTED→VERIFIED through
+the *post-fix* full-body typed restore — `family_proof.verdict=verified`, and the live object was
+left at `quantity=1` (int) with every sibling field intact (only the server `updatedAt` bumped, which
+field-scoped restoration tolerates). Confirms the F1/F3/F4 changes preserve the A1/A2 live positives
+end-to-end, not just in unit tests.
+
 Tests: `tests/test_invariant_binder.py` (two-run binder: verified/supported_unverified/refuted/no-restoration
 + the FP shapes), `tests/test_invariant_proposals.py`, `tests/test_source_ingest.py`, plus
 workflow-executor regression tests for the restoration gate and full-body restore.
