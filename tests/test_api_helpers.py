@@ -16731,3 +16731,18 @@ def test_explorer_pathtraversal_and_cors_findings_resolve_to_deterministic_prove
     ci = api_module.extract_retest_inputs(cors)
     assert ci["finding_type"] == "cors"
     assert "cors" in api_module._AGENT_ROUTE_ONLY_RETEST_FAMILIES
+
+
+def test_access_control_is_invariant_gated_verifiable_family():
+    """Phase 0: access_control is auto-verifiable, GET-only (not mutating), and NOT in the auto-verify
+    exclusion (unlike bola) — because the operator-approved invariant contract supplies the role oracle
+    that makes an unattended promotion sound."""
+    assert "access_control" in api_module._AGENT_VERIFIABLE_FAMILIES
+    assert "access_control" not in api_module._AGENT_MUTATING_VERIFY_FAMILIES
+    assert "access_control" not in api_module._AGENT_AUTO_VERIFY_EXCLUDED_FAMILIES
+    wf = api_module._materialize_accesscontrol_verification_workflow("/workshop/api/mechanic/x")
+    assert wf["proof_family"] == "access_control"                 # matches the contract's proof_family
+    assert [s["principal"] for s in wf["steps"]] == ["user1", "user2"]  # role-differential
+    assert all(s["method"] == "GET" for s in wf["steps"])         # GET-only -> read-only hunt safe
+    assert all(s.get("checkpoint") != "mutation" for s in wf["steps"])
+    assert wf["assertions"] == []                                  # predicates come from the invariant binder, not static assertions

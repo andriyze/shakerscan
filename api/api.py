@@ -18370,12 +18370,14 @@ _AGENT_VERIFY_REQUEST_RESERVATIONS: dict[str, int] = {
     "bola": 8,             # four requests, independently replayed
     "auth_bypass": 4,      # two requests, independently replayed
     "data_exposure": 4,    # two requests, independently replayed
+    "access_control": 4,   # same read as two role principals, independently replayed
     "mass_assignment": 20, # up to three shape probes + cleanup + eight-step two-run workflow
 }
 _AGENT_VERIFY_SECONDS_RESERVATIONS: dict[str, int] = {
     "bola": 180,
     "auth_bypass": 180,
     "data_exposure": 180,
+    "access_control": 180,
     "mass_assignment": 400,
 }
 
@@ -19600,6 +19602,60 @@ def _materialize_dataexposure_verification_workflow(route: str) -> dict[str, Any
     }
 
 
+def _materialize_accesscontrol_verification_workflow(route: str) -> dict[str, Any]:
+    """Build an access_control family_proof workflow: the SAME protected read issued as two
+    distinct-role principals (user1, user2). The approved invariant contract's ``subject_role`` is the
+    ORACLE; the invariant binder (`_trusted_invariant_execution_evidence`) derives
+    authorized_role_control / forbidden_role_access / distinct_identity from each principal's
+    SERVER-resolved role + identity + success — the model supplies neither the roles nor the verdict.
+    GET-only, so it runs from a read-only hunt with no mutation/restoration. No static assertions: the
+    invariant path derives predicates from the contract, and if the ``source="invariant"`` binding is
+    ever missing the moat falls through to the corroborated-predicate path with nothing to corroborate
+    -> stays SUSPECTED (fail-closed)."""
+    base = str(route)
+    return {
+        "proof_family": "access_control",
+        "steps": [
+            {"label": "role_a", "kind": "http", "principal": "user1", "checkpoint": "action",
+             "method": "GET", "path": base},
+            {"label": "role_b", "kind": "http", "principal": "user2", "checkpoint": "action",
+             "method": "GET", "path": base, "compare_to": "role_a"},
+        ],
+        # Empty by design: the invariant binder derives access_control predicates from the approved
+        # contract + observations, not from static assertions. Present so the dispatch's
+        # `dispatch_params["assertions"] = workflow["assertions"]` has a value; if the invariant
+        # binding is ever missing, the moat falls through to the corroborated-predicate path with
+        # nothing to corroborate -> stays SUSPECTED (fail-closed).
+        "assertions": [],
+    }
+
+
+async def _resolve_approved_access_control_contract(
+    conn: Any, target_uuid: uuid.UUID, route: str, method: str
+) -> Optional[str]:
+    """Return the id of an APPROVED access_control invariant contract whose canonical route+method
+    match this finding, or None. The contract is the operator-declared role oracle; without it an
+    access_control finding cannot be soundly verified and stays SUSPECTED. Uses the same row
+    serializer the dispatch uses, so it is robust to the contract's column/JSON layout."""
+    want_route = _canonical_vulnerability_route(route) or route
+    want_method = str(method or "GET").upper()
+    rows = await conn.fetch(
+        "SELECT * FROM target_invariant_contracts WHERE target_id=$1 AND status='approved' "
+        "ORDER BY updated_at DESC LIMIT 200",
+        target_uuid,
+    )
+    for row in rows:
+        contract = _public_target_invariant_contract_row(row)
+        if str(contract.get("contract_kind") or "") != "access_control":
+            continue
+        if str(contract.get("method") or "").upper() != want_method:
+            continue
+        contract_route = _canonical_vulnerability_route(contract.get("path")) or contract.get("path")
+        if contract_route == want_route:
+            return str(contract.get("id"))
+    return None
+
+
 class AgentVerifyRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     # Verification runs a gated credential-tier workflow, so a valid target-bound approval receipt
@@ -19609,9 +19665,11 @@ class AgentVerifyRequest(BaseModel):
 
 # Families the bridge can currently verify. bola needs distinct captured object refs; auth_bypass
 # and data_exposure are anon-vs-authed reads of a fixed route (no object ids); create-based
-# mass_assignment reuses the proven server materializer. Every family is verified by the UNCHANGED
-# family_proof two-run moat — the bridge only supplies routes/bindings, never a verdict.
-_AGENT_VERIFIABLE_FAMILIES: frozenset[str] = frozenset({"bola", "auth_bypass", "data_exposure", "mass_assignment"})
+# mass_assignment reuses the proven server materializer; access_control is a role-differential read
+# gated on an operator-APPROVED invariant contract (the role oracle a bare authz finding lacks) and
+# verified by the invariant binder. Every family is verified by the UNCHANGED family_proof two-run
+# moat — the bridge only supplies routes/bindings, never a verdict.
+_AGENT_VERIFIABLE_FAMILIES: frozenset[str] = frozenset({"bola", "auth_bypass", "data_exposure", "mass_assignment", "access_control"})
 # Families whose VERIFICATION workflow mutates the target (create-MA does live create POSTs). These
 # may auto-verify only from a gated (allow_write) hunt, never a read-only one. (External-audit BUG 3.)
 _AGENT_MUTATING_VERIFY_FAMILIES: frozenset[str] = frozenset({"mass_assignment"})
@@ -19686,6 +19744,21 @@ async def _agent_verification_workflow_for(
         return _materialize_authbypass_verification_workflow(path), route, "GET", {}
     if family == "data_exposure":
         return _materialize_dataexposure_verification_workflow(path), route, "GET", {}
+    if family == "access_control":
+        # Verifiable ONLY against an operator-APPROVED access_control invariant contract for this route
+        # (the role oracle a bare authz finding lacks). None -> 422 -> the finding stays SUSPECTED; the
+        # server never guesses the intended policy. The two-run role-differential proof + verdict come
+        # entirely from the invariant binder (source="invariant" + invariant_contract_id routes it there).
+        contract_id = await _resolve_approved_access_control_contract(conn, target_uuid, route, method)
+        if not contract_id:
+            raise HTTPException(
+                status_code=422,
+                detail="access_control verification requires an operator-approved invariant contract "
+                "for this route (finding stays suspected)")
+        return (
+            _materialize_accesscontrol_verification_workflow(route), route, "GET",
+            {"invariant_contract_id": contract_id},
+        )
     if family == "mass_assignment":
         # Create-based only: dispatch with NO steps so _server_materialize_create_ma probes the create
         # surface and builds the role=admin overpost workflow (a wrong field is falsified by the proof).
@@ -19751,8 +19824,13 @@ async def _verify_suspected_finding_workflow_unlocked(
         severity = str(finding["severity"] or "high")
         if severity not in {"critical", "high", "medium", "low", "info"}:
             severity = "high"
+        # An invariant-backed verification (access_control) MUST stamp source="invariant" +
+        # metadata.invariant_contract_id (threaded via extra_metadata), or _arsenal_dispatch_workflow
+        # silently skips the invariant binder. That skip is fail-closed — the finding then stays
+        # SUSPECTED, never false-verifies — but the feature only works when the binding is present.
+        invariant_backed = bool(extra_metadata.get("invariant_contract_id"))
         hyp = await _upsert_hypothesis(conn, HypothesisRequest(
-            source="ai_planner", family=family,
+            source="invariant" if invariant_backed else "ai_planner", family=family,
             dedupe_key=f"agent_verify:{family}:{object_route}:{method}",
             dedupe_dimensions=dedupe_dimensions,
             target_id=str(target_uuid),
