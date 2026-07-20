@@ -43,3 +43,20 @@ def test_proposer_dedupes_identical_expectations():
     row = {"method": "GET", "path": "/a", "principal_role": "admin", "expected_access": "requires_role"}
     drafts = ip.propose_access_control_drafts([row, dict(row), dict(row)])
     assert len(drafts) == 1
+
+
+import invariant_contracts as ic
+import pytest
+
+
+def test_canonical_contract_preserves_read_path_verbatim():
+    c = ic.canonical_contract({"contract_kind": "field_constraint", "method": "PUT", "path": "/api/o/1",
+                               "field_name": "quantity", "operator": "lte", "expected_value": 3,
+                               "title": "q<=3", "conditions": {"read_path": "data.quantity"}})
+    assert c["conditions"]["read_path"] == "data.quantity"        # dots preserved (not identifier-mangled)
+    assert ic.approval_errors({**c, "status": "approved"}) == []
+    for bad in ["data/quantity", "../x", "a b"]:
+        with pytest.raises(ValueError):
+            ic.canonical_contract({"contract_kind": "field_constraint", "method": "PUT", "path": "/x",
+                                   "field_name": "q", "operator": "lte", "expected_value": 3,
+                                   "title": "t", "conditions": {"read_path": bad}})

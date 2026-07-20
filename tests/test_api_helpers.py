@@ -16782,3 +16782,26 @@ def test_field_constraint_materializer_is_mutating_restoring_and_field_scoped():
     assert {"field_constraint"} <= api_module._AGENT_VERIFIABLE_FAMILIES
     assert {"field_constraint"} <= api_module._AGENT_MUTATING_VERIFY_FAMILIES   # allow_write-gated
     assert api_module._materialize_fieldconstraint_verification_workflow("/x", "PATCH", "f", "lte", "nan") is None
+
+
+def test_field_constraint_read_path_splits_read_from_write():
+    """A1 refinement: for response-wrapping APIs the READ projects $.data.quantity while the WRITE
+    keys on `quantity`. Surfaced by the Juice Shop live validation."""
+    wf = api_module._materialize_fieldconstraint_verification_workflow("/api/BasketItems/10", "PUT", "quantity", "lte", 3, "data.quantity")
+    assert wf["steps"][0]["select_json"] == ["$.data.quantity"]              # READ projection
+    assert wf["steps"][0]["extract"][0]["path"] == "$.data.quantity"
+    assert wf["steps"][1]["json_body"] == {"quantity": 4}                     # WRITE body (probe, flat)
+    assert wf["steps"][3]["json_body"] == {"quantity": "${baseline}"}         # restore (flat)
+    # default (no read_path) -> read path == write field
+    assert api_module._materialize_fieldconstraint_verification_workflow("/x", "PUT", "amount", "lte", 5)["steps"][0]["select_json"] == ["$.amount"]
+
+
+def test_jsonb_scalar_decode_parses_numeric_bounds():
+    """A numeric invariant bound stored as jsonb comes back as text "3"; it must decode to int 3 so the
+    ordered-operator approval check passes (pre-existing bug surfaced by the A1 validation)."""
+    f = api_module._decode_jsonb_scalar
+    assert f("3") == 3 and isinstance(f("3"), int)
+    assert f("3.5") == 3.5
+    assert f('"active"') == "active"
+    assert f("not-json") == "not-json"    # non-JSON text unchanged
+    assert f(3) == 3                        # already-decoded passthrough

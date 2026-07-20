@@ -18,7 +18,7 @@ CONTRACT_KINDS = frozenset({"access_control", "field_constraint", "workflow_tran
 CONTRACT_STATUSES = frozenset({"draft", "approved", "retired"})
 EXPECTED_ACCESS = frozenset({"allow", "deny", "requires_role"})
 VALUE_OPERATORS = frozenset({"eq", "ne", "lt", "lte", "gt", "gte", "in", "not_in"})
-CONDITION_KEYS = frozenset({"from_state", "to_state", "prerequisite_state", "tenant_relation", "resource_owner"})
+CONDITION_KEYS = frozenset({"from_state", "to_state", "prerequisite_state", "tenant_relation", "resource_owner", "read_path"})
 COMPILER_VERSION = "target-invariant-compiler-2026-07-14.v1"
 
 
@@ -300,6 +300,16 @@ def canonical_contract(value: dict[str, Any]) -> dict[str, Any]:
             raise ValueError(f"unsupported invariant condition {key}:{normalized}")
         if normalized:
             conditions[key] = normalized
+    # read_path (field_constraint): the dotted response projection to observe the field on the READ,
+    # for APIs whose read wraps the field differently than the WRITE body — e.g. write {"quantity": N}
+    # but read $.data.quantity. Preserved VERBATIM (dots kept, unlike the identifier-normalized
+    # conditions above); optional, defaulting to field_name. It only redirects the read projection —
+    # a wrong read_path means the binder never observes the field -> fails closed (stays SUSPECTED).
+    read_path = str(conditions_input.get("read_path") or "").strip()
+    if read_path:
+        if len(read_path) > 200 or not re.fullmatch(r"[A-Za-z0-9_]+(\.[A-Za-z0-9_]+)*", read_path):
+            raise ValueError("unsupported invariant condition read_path (dotted field path only)")
+        conditions["read_path"] = read_path
     return {
         "version": CONTRACT_VERSION,
         "contract_kind": kind,

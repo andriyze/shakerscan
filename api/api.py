@@ -601,6 +601,20 @@ def _decode_json_value(value: Any) -> Any:
     return value
 
 
+def _decode_jsonb_scalar(value: Any) -> Any:
+    """Decode a JSONB column value that may be a SCALAR (number/bool/quoted string) as well as an
+    object/array. asyncpg returns jsonb as raw text; the general :func:`_decode_json_value` only parses
+    objects/arrays, so a numeric invariant bound (jsonb ``3``) would come back as the string ``"3"`` and
+    fail the ordered-operator numeric check — no field_constraint contract with a numeric bound could
+    be approved. Non-JSON text is returned unchanged."""
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except (json.JSONDecodeError, ValueError):
+            return value
+    return value
+
+
 def _schedule_options_dict(value: Any) -> dict[str, Any]:
     decoded = _decode_json_value(value) or {}
     return decoded if isinstance(decoded, dict) else {}
@@ -13854,7 +13868,7 @@ def _public_target_endpoint_expectation_row(row: Any) -> dict[str, Any]:
 
 def _public_target_invariant_contract_row(row: Any) -> dict[str, Any]:
     payload = row_to_dict(row)
-    payload["expected_value"] = _decode_json_value(payload.get("expected_value"))
+    payload["expected_value"] = _decode_jsonb_scalar(payload.get("expected_value"))
     payload["conditions"] = _decode_json_value(payload.get("conditions")) or {}
     payload["metadata_json"] = _redact_agent_payload(_decode_json_value(payload.get("metadata_json")) or {})
     projection = invariant_contracts.planner_projection(payload)
@@ -19676,7 +19690,8 @@ def _field_constraint_probe_value(operator: str, expected: Any) -> Any:
 
 
 def _materialize_fieldconstraint_verification_workflow(
-    route: str, method: str, field_name: str, operator: str, expected_value: Any
+    route: str, method: str, field_name: str, operator: str, expected_value: Any,
+    read_path: Optional[str] = None,
 ) -> Optional[dict[str, Any]]:
     """Build a MUTATING field_constraint proof: read the field (baseline within the constraint) ->
     write it OUT OF BOUNDS -> read back (the out-of-bounds value persisted) -> restore the captured
@@ -19684,13 +19699,18 @@ def _materialize_fieldconstraint_verification_workflow(
     constraint_violation_persisted from the observed field values vs the approved contract; the model
     supplies no verdict. Restoration is mandatory (before_after_state needs it) and field-scoped so a
     write-bumped timestamp does not mask a genuine restore. Returns None (caller 422s -> stays
-    SUSPECTED) when no violating probe can be built."""
+    SUSPECTED) when no violating probe can be built.
+
+    ``read_path`` (contract condition) is the dotted response projection to OBSERVE the field on the
+    read, for APIs whose read wraps it differently than the write body (write {field: v}; read
+    $.data.field). It defaults to ``field_name`` so symmetric APIs are unchanged; the WRITE body always
+    keys on ``field_name``."""
     probe = _field_constraint_probe_value(operator, expected_value)
     if probe is None or _invariant_value_allowed(probe, operator, expected_value):
         return None
     base = str(route)
-    field = str(field_name)
-    sel = f"$.{field}"
+    field = str(field_name)                       # WRITE body key (flat)
+    sel = f"$.{str(read_path or field_name)}"      # READ projection (may differ for wrapping APIs)
     return {
         "proof_family": "field_constraint",
         "steps": [
@@ -19864,9 +19884,10 @@ async def _agent_verification_workflow_for(
                 detail="field_constraint verification requires an operator-approved invariant contract "
                 "for this route (finding stays suspected)")
         write_method = str(contract.get("method") or "").upper()
+        read_path = str((contract.get("conditions") or {}).get("read_path") or "") or None
         workflow = _materialize_fieldconstraint_verification_workflow(
             path, write_method, str(contract.get("field_name") or ""),
-            str(contract.get("operator") or ""), contract.get("expected_value"))
+            str(contract.get("operator") or ""), contract.get("expected_value"), read_path)
         if workflow is None:
             raise HTTPException(
                 status_code=422,
@@ -27430,7 +27451,12 @@ def _trusted_invariant_execution_evidence(
 
     elif kind == "field_constraint":
         field_name = str(contract.get("field_name") or "")
-        selected_path = f"$.{field_name}"
+        # The READ projection may differ from the WRITE field for response-wrapping APIs (write
+        # {field: v}; read $.data.field). `read_path` redirects only where the binder OBSERVES the
+        # value; the mutation body is still keyed on field_name. A wrong read_path -> the field is
+        # never observed -> no predicate binds -> fails closed (stays SUSPECTED).
+        read_field = str((contract.get("conditions") or {}).get("read_path") or "") or field_name
+        selected_path = f"$.{read_field}"
         mutation_steps = [
             step for step in normalized_steps
             if step.get("checkpoint") == "mutation"
