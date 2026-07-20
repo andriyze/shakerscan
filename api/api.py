@@ -148,6 +148,7 @@ import hypothesis_scheduler
 import family_proof
 import invariant_contracts
 import invariant_proposals
+import source_ingest
 import agent_context_pack
 import agent_loop
 import agent_provenance
@@ -18148,6 +18149,7 @@ async def _agent_seed_state(
     created_by: str,
     token_budget: int,
     max_iterations: int,
+    source_excerpt: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     """Build the context pack (slice 1) + system/user seed and return a fresh loop state."""
     async with db_pool.acquire() as conn:
@@ -18160,6 +18162,11 @@ async def _agent_seed_state(
         )
     context = _canonical_agent_context_pack(context_req)
     sections = _agent_context_pack_sections(context)
+    # B2: operator-supplied source excerpt (grey-box opt-in). One ranked section; pack_context
+    # ranking/elision applies unchanged. Absent -> black-box-only pack (the default).
+    if source_excerpt and str(source_excerpt.get("text") or "").strip():
+        body = str(source_excerpt["text"])
+        sections.append({"key": "source_excerpt", "body": body, "loc": len(body), "bytes": len(body.encode())})
     pack = agent_context_pack.pack_context(sections, token_budget=token_budget, objective=objective)
     tools = agent_tools.tool_schemas()
     contract = agent_text_toolcalls.render_tool_contract(tools)
@@ -18167,7 +18174,10 @@ async def _agent_seed_state(
         {"role": "system", "content": agent_loop.build_system_prompt(contract, max_iterations=max_iterations)},
         {"role": "user", "content": agent_loop.build_user_message(objective, pack["text"])},
     ]
-    return _agent_new_state(objective, messages, pack["included"])
+    state = _agent_new_state(objective, messages, pack["included"])
+    if source_excerpt and isinstance(source_excerpt.get("stats"), dict):
+        state["source_ingest"] = source_excerpt["stats"]
+    return state
 
 
 async def _agent_apply_reply(
@@ -19224,6 +19234,10 @@ class AgentHuntSessionStartRequest(BaseModel):
     # Optional: satisfies the approval-receipt policy when the operator has enabled it (persisting
     # SUSPECTED findings is a state change). Required for deep_hunt.
     approval_receipt_id: Optional[str] = None
+    # B2 opt-in grey-box grounding: a LOCAL source directory (contained in SHAKERSCAN_SOURCE_ROOT)
+    # to ingest into a security-ranked source_excerpt pack section + source-derived leads. Absent
+    # -> the hunt runs black-box only (the default).
+    source_dir: Optional[str] = Field(default=None, max_length=500)
 
 
 class AgentHuntReplyRequest(BaseModel):
@@ -19326,12 +19340,38 @@ async def start_agent_hunt_session(target_id: str, req: AgentHuntSessionStartReq
                 conn, req.approval_receipt_id, action_name="agent.hunt", risk_tier="active",
                 created_by="agent_hunt_session",
             )
+    # B2: opt-in grey-box source grounding. Containment-checked local ingest (400 on any
+    # boundary failure); absent -> black-box-only hunt (the default).
+    source_excerpt: Optional[dict[str, Any]] = None
+    if req.source_dir:
+        try:
+            source_excerpt = source_ingest.ingest_source(
+                req.source_dir, token_budget=min(6000, req.token_budget // 2 or 1000))
+        except source_ingest.SourceIngestError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
     state = await _agent_seed_state(
         target_uuid, str(target["url"]), req.objective,
         created_by="deep_hunt_session" if allow_active else "agent_hunt_session",
         token_budget=req.token_budget,
         max_iterations=req.max_iterations,
+        source_excerpt=source_excerpt,
     )
+    # Source-derived route hints become residue-backed LEADS on the board (never findings);
+    # best-effort, bounded — a hint ingest failure must never block a hunt.
+    if source_excerpt and source_excerpt.get("hints"):
+        try:
+            async with db_pool.acquire() as conn:
+                for hint in list(source_excerpt["hints"])[:25]:
+                    hint_req, _skip = _source_hint_to_hypothesis_request(
+                        hint,
+                        target_id=str(target_uuid),
+                        source_label="source_ingest",
+                        created_by="source_ingest",
+                    )
+                    if hint_req is not None:
+                        await _upsert_hypothesis(conn, hint_req)
+        except Exception:
+            logger.exception("source-ingest lead seeding failed for target %s (best-effort)", target_uuid)
     # Keyless sessions are turn-bounded already; Deep Hunt additionally receives hard
     # request/action ceilings so a single planner reply cannot turn authorization into
     # unbounded traffic. Ceilings are set for exploration room (bucket-2 breadth) — they bound
