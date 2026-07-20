@@ -756,7 +756,14 @@ function FindingDetailContent() {
         onCancel={() => setExceptionToDelete(null)}
       />
 
-      <SectionCard title="Overview">
+      <nav aria-label="Jump to section" className="flex flex-wrap items-center gap-1.5 rounded-lg border border-gray-800 bg-gray-900/60 p-2 text-xs">
+        <span className="px-2 py-1 font-medium text-gray-500">Jump to</span>
+        {([['overview', 'Overview'], ['tracking', 'Tracking'], ['retest', 'Retest'], ['evidence', 'Evidence'], ['ai-analysis', 'AI analysis'], ['http', 'HTTP']] as const).map(([anchor, label]) => (
+          <a key={anchor} href={`#${anchor}`} className="rounded px-2 py-1 text-gray-400 transition-colors hover:bg-gray-800 hover:text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500">{label}</a>
+        ))}
+      </nav>
+
+      <SectionCard id="overview" title="Overview">
         <div className="flex flex-col gap-4">
           <div className="flex flex-wrap items-start justify-between gap-4">
             <div className="min-w-0">
@@ -900,7 +907,7 @@ function FindingDetailContent() {
 
       <TriagePanel finding={finding} />
 
-      <SectionCard title="Tracking">
+      <SectionCard id="tracking" title="Tracking">
         <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4">
           <InfoItem label="First seen">{formatDate(finding.first_seen_at)}</InfoItem>
           <InfoItem label="Last seen">{formatDate(finding.last_seen_at)}</InfoItem>
@@ -1028,7 +1035,7 @@ function FindingDetailContent() {
         </div>
       </SectionCard>
 
-      <SectionCard title="Retest Verification">
+      <SectionCard id="retest" title="Retest Verification">
         <div className="space-y-3">
           {!retestSupported && (
             <div className="text-xs rounded px-2 py-1 bg-amber-900/30 text-amber-300 border border-amber-900/60">
@@ -1194,7 +1201,7 @@ function FindingDetailContent() {
         </div>
       </SectionCard>
 
-      <SectionCard title="Evidence Summary">
+      <SectionCard id="evidence" title="Evidence Summary">
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <InfoItem label="Primary URL">
             {primaryUrl ? (
@@ -1437,7 +1444,7 @@ function FindingDetailContent() {
         </SectionCard>
       )}
 
-      <SectionCard title="AI Analysis">
+      <SectionCard id="ai-analysis" title="AI Analysis">
         {finding.ai_verdict || finding.ai_rationale || finding.ai_recommendations ? (
           <div className="space-y-3">
             {finding.ai_verdict && (
@@ -1491,7 +1498,7 @@ function FindingDetailContent() {
       </SectionCard>
 
       {(request || response) && (
-        <SectionCard title="HTTP Request/Response">
+        <SectionCard id="http" title="HTTP Request/Response">
           <div className="space-y-3">
             {request && (
               <details className="bg-gray-800/60 rounded-lg p-3">
