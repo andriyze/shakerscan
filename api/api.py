@@ -147,6 +147,7 @@ import hypothesis_lifecycle
 import hypothesis_scheduler
 import family_proof
 import invariant_contracts
+import invariant_proposals
 import agent_context_pack
 import agent_loop
 import agent_provenance
@@ -16848,6 +16849,41 @@ async def _build_agent_context_pack_from_target(conn, req: AgentContextPackFromT
         # migration: no invariant is safer than treating an unavailable/draft rule as authoritative.
         approved_invariant_contracts = []
 
+    # A3: auto-drafted (and manually drafted) invariant CANDIDATES — review-only hints for the
+    # planner, kept strictly separate from the approved rules above. A draft has no authority:
+    # only an operator approval turns a candidate into a contract the binder can use.
+    invariant_candidate_contracts: list[dict[str, Any]] = []
+    try:
+        async with _optional_database_savepoint(conn):
+            candidate_rows = await conn.fetch(
+                """
+                SELECT contract_kind, title, method, path, field_name, subject_role,
+                       expected_access, source, metadata_json, updated_at
+                FROM target_invariant_contracts
+                WHERE target_id=$1 AND status='draft'
+                ORDER BY updated_at DESC
+                LIMIT 15
+                """,
+                target_uuid,
+            )
+            invariant_candidate_contracts = [
+                {
+                    "contract_kind": str(row["contract_kind"] or ""),
+                    "title": str(row["title"] or "")[:160],
+                    "method": row["method"],
+                    "path": row["path"],
+                    "field_name": row["field_name"],
+                    "subject_role": row["subject_role"],
+                    "expected_access": row["expected_access"],
+                    "source": row["source"],
+                    "approvable": bool(((_decode_json_value(row["metadata_json"]) or {})).get("approvable")),
+                    "approval_errors": (((_decode_json_value(row["metadata_json"]) or {})).get("approval_errors") or [])[:4],
+                }
+                for row in candidate_rows
+            ]
+    except Exception:
+        invariant_candidate_contracts = []
+
     findings_summary: list[dict[str, Any]] = []
     if req.include_findings and req.finding_limit > 0:
         finding_rows = await conn.fetch(
@@ -17116,6 +17152,7 @@ async def _build_agent_context_pack_from_target(conn, req: AgentContextPackFromT
         "sample_endpoints": sample_endpoints,
         "principal_matrix": principal_summary,
         "approved_invariant_contracts": approved_invariant_contracts,
+        "invariant_candidate_contracts": invariant_candidate_contracts,
         "ranked_hypotheses": ranked_hypotheses,
         "known_vulnerability_count": len(known_vulnerability_keys) if 'known_vulnerability_keys' in locals() else 0,
         # Families whose every lead is already an owned finding — the planner should pivot away from
@@ -17270,6 +17307,17 @@ def _agent_context_pack_sections(context: dict[str, Any]) -> list[dict[str, Any]
     invariant_rows = _rows(surface.get("approved_invariant_contracts"))
     if invariant_rows:
         _add("invariant_contracts", [_agent_pack_compact(item, 400) for item in invariant_rows], len(invariant_rows))
+
+    # A3: UNAPPROVED invariant candidates (auto-drafted from black-box facts + operator drafts).
+    # Explicitly labeled non-authoritative: they are review hints for the planner, never rules;
+    # a SUSPECTED observation matching one is the signal to ask the operator for approval.
+    candidate_rows = _rows(surface.get("invariant_candidate_contracts"))
+    if candidate_rows:
+        candidate_lines = [
+            f"UNAPPROVED CANDIDATE (no authority): {_agent_pack_compact(item, 300)}"
+            for item in candidate_rows
+        ]
+        _add("invariant_candidates", candidate_lines, len(candidate_lines))
 
     scan_rows = _rows(surface.get("recent_scans"))
     if scan_rows:
@@ -41090,6 +41138,107 @@ async def get_application_graph(target_id: str, node_type: Optional[str] = None,
     }
 
 
+async def _auto_persist_invariant_drafts(
+    conn: Any,
+    target_uuid: uuid.UUID,
+    *,
+    expectation_rows: list[Any] | None = None,
+    graph_edges: list[Any] | None = None,
+    created_by: str | None = None,
+) -> dict[str, int]:
+    """Auto-draft typed invariant candidates from black-box facts already loaded for board seeding
+    (A3): endpoint expectations -> access_control, app-graph auth_boundary edges -> ownership,
+    SUSPECTED autonomous findings -> field_constraint / workflow_transition.
+
+    A draft is a REVIEW CANDIDATE only: status='draft', source='auto_black_box', promotion_authority
+    False — it can never route through the binder (the dispatch fetches status='approved' only) and
+    never enters the authoritative pack section. Idempotent: a (kind, method, canonical path,
+    field/role) already contracted for the target (any status) is skipped. Capped per kind per call
+    so a huge inventory cannot flood the review queue. Best-effort: a failure never breaks seeding.
+    """
+    summary = {"candidates": 0, "created": 0, "skipped_existing": 0}
+    try:
+        drafts: list[dict[str, Any]] = []
+        drafts.extend(invariant_proposals.propose_access_control_drafts(expectation_rows or []))
+        drafts.extend(invariant_proposals.propose_ownership_drafts(graph_edges or []))
+        suspected_rows = await conn.fetch(
+            """
+            SELECT id, url, evidence FROM findings
+            WHERE target_id=$1 AND tool='autonomous_agent' AND status='active'
+            ORDER BY last_seen_at DESC LIMIT 100
+            """,
+            target_uuid,
+        )
+        drafts.extend(invariant_proposals.propose_drafts_from_suspected_findings(
+            [row_to_dict(row) for row in suspected_rows]))
+        summary["candidates"] = len(drafts)
+        if not drafts:
+            return summary
+        existing_rows = await conn.fetch(
+            "SELECT contract_kind, method, path, field_name, subject_role FROM target_invariant_contracts "
+            "WHERE target_id=$1 LIMIT 500",
+            target_uuid,
+        )
+        existing: set[tuple[Any, ...]] = set()
+        for row in existing_rows:
+            kind = str(row["contract_kind"] or "")
+            method = str(row["method"] or "").upper()
+            path = _canonical_vulnerability_route(row["path"]) or str(row["path"] or "")
+            who = str(row["field_name"] or row["subject_role"] or "")
+            existing.add((kind, method, path, who))
+        created_per_kind: dict[str, int] = {}
+        for draft in drafts:
+            kind = str(draft.get("contract_kind") or "")
+            if created_per_kind.get(kind, 0) >= 25:
+                continue
+            method = str(draft.get("method") or "").upper()
+            path = _canonical_vulnerability_route(draft.get("path")) or str(draft.get("path") or "")
+            who = str(draft.get("field_name") or draft.get("subject_role") or "")
+            if (kind, method, path, who) in existing:
+                summary["skipped_existing"] += 1
+                continue
+            await conn.execute(
+                """
+                INSERT INTO target_invariant_contracts (
+                    target_id, contract_version, contract_kind, title, source_text,
+                    subject_role, action, resource, method, path, field_name, operator,
+                    expected_value, expected_access, conditions, status, source,
+                    metadata_json, created_by
+                ) VALUES (
+                    $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::jsonb,$14,$15::jsonb,
+                    'draft','auto_black_box',$16::jsonb,$17
+                )
+                """,
+                target_uuid,
+                str(draft.get("version") or ""),
+                kind,
+                str(draft.get("title") or "")[:300],
+                None,
+                draft.get("subject_role"),
+                draft.get("action"),
+                draft.get("resource"),
+                draft.get("method"),
+                draft.get("path"),
+                draft.get("field_name"),
+                draft.get("operator"),
+                json.dumps(draft.get("expected_value")),
+                draft.get("expected_access"),
+                json.dumps(draft.get("conditions") or {}),
+                json.dumps({
+                    "auto_proposed": True,
+                    "approvable": bool(draft.get("approvable")),
+                    "approval_errors": list(draft.get("approval_errors") or []),
+                }),
+                created_by or "invariant_auto_proposals",
+            )
+            existing.add((kind, method, path, who))
+            created_per_kind[kind] = created_per_kind.get(kind, 0) + 1
+            summary["created"] += 1
+    except Exception:
+        logger.exception("auto invariant draft persistence failed for target %s (best-effort)", target_uuid)
+    return summary
+
+
 @app.post("/targets/{target_id}/graph/hypotheses")
 async def generate_application_graph_hypotheses(
     target_id: str,
@@ -41156,12 +41305,23 @@ async def generate_application_graph_hypotheses(
             created_by=created_by,
         )
         records = [await _upsert_hypothesis(conn, req) for req in requests]
+        # A3: auto-draft invariant candidates from the same black-box facts (review-only; never
+        # authoritative until an operator approves through the existing invariant approval flow).
+        draft_summary = await _auto_persist_invariant_drafts(
+            conn,
+            tgt,
+            expectation_rows=list(expectation_rows),
+            graph_edges=[_graph_row_payload(row) for row in edges],
+            created_by=created_by,
+        )
     return {
         "target_id": target_id,
         "candidate_count": len(requests),
         "created": sum(1 for item in records if item.get("created")),
         "endorsed": sum(1 for item in records if not item.get("created")),
         "hypotheses": [item["hypothesis"] for item in records],
+        "invariant_draft_candidates": draft_summary.get("candidates", 0),
+        "invariant_drafts_created": draft_summary.get("created", 0),
         "execution_enabled": False,
         "findings_created": 0,
     }
