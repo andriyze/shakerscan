@@ -135,12 +135,13 @@ function NavContent({ pathname }: { pathname: string }) {
       return pathname === '/'
     }
     if (href === '/settings/research-agent') {
-      // Deep Hunt is the canonical investigator launcher. Leads and Test
-      // Builder highlight through their own local tabs instead.
+      // Deep Hunt is the canonical investigator launcher; keep it lit across its
+      // cluster pages that have no sidebar entry of their own (run detail and
+      // Test Builder). Leads highlights its own item.
       return (
         pathname === href ||
-        pathname.startsWith('/settings/research-agent/explorer') ||
-        pathname.startsWith('/settings/research-agent/runs')
+        pathname.startsWith('/settings/research-agent/runs') ||
+        pathname.startsWith('/settings/research-agent/experiment')
       )
     }
     return pathname.startsWith(href)

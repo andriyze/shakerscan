@@ -11,7 +11,7 @@ import {
   type FindingException,
   type FindingExceptionPayload,
 } from '@/lib/api'
-import { Badge, Button, Card, ConfirmDialog, EmptyState, ErrorState, useToast } from '@/components/ui'
+import { Badge, Button, Card, ConfirmDialog, EmptyState, ErrorState, Modal, useToast } from '@/components/ui'
 
 type QueueFilter =
   | ''
@@ -469,28 +469,34 @@ export default function ExceptionsQueuePage() {
         onConfirm={revokeSelected}
         onCancel={() => setRevoking(null)}
       />
-      {repairing && repairForm && typeof document !== 'undefined' && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick={() => !saving && setRepairing(null)}>
-          <div
-            role="dialog"
-            aria-modal="true"
-            aria-label="Repair exception metadata"
-            className="max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-lg border border-gray-800 bg-gray-900 p-5 shadow-xl"
-            onClick={(event) => event.stopPropagation()}
-          >
+      <Modal
+        open={Boolean(repairing && repairForm)}
+        title="Repair exception metadata"
+        onClose={() => { if (!saving) setRepairing(null) }}
+        size="lg"
+        footer={
+          <>
+            <Button variant="secondary" onClick={() => setRepairing(null)} disabled={saving}>
+              Cancel
+            </Button>
+            <Button onClick={saveRepair} loading={saving}>
+              Save repair
+            </Button>
+          </>
+        }
+      >
+        {repairing && repairForm ? (
+          <div className="space-y-4">
             <div className="flex flex-wrap items-start justify-between gap-3">
-              <div>
-                <h2 className="text-lg font-semibold text-white">Repair exception metadata</h2>
-                <p className="mt-1 text-sm text-gray-400">
-                  Update accountability, expiry, and controls without changing the exception scope.
-                </p>
-              </div>
+              <p className="text-sm text-gray-400">
+                Update accountability, expiry, and controls without changing the exception scope.
+              </p>
               <Badge className={STATUS_STYLES[repairing.status] || 'bg-gray-800 text-gray-300'}>
                 {repairing.status.replace(/_/g, ' ')}
               </Badge>
             </div>
 
-            <div className="mt-4 grid gap-3 sm:grid-cols-2">
+            <div className="grid gap-3 sm:grid-cols-2">
               <label className="grid gap-1 text-sm text-gray-300">
                 Owner
                 <input value={repairForm.owner} onChange={(event) => updateRepairForm('owner', event.target.value)} className={inputClass} placeholder="team or person" />
@@ -515,7 +521,7 @@ export default function ExceptionsQueuePage() {
               </label>
             </div>
 
-            <div className="mt-3 grid gap-3">
+            <div className="grid gap-3">
               <label className="grid gap-1 text-sm text-gray-300">
                 Reason
                 <textarea value={repairForm.reason} onChange={(event) => updateRepairForm('reason', event.target.value)} className={textareaClass} placeholder="Why this exception is justified" />
@@ -526,24 +532,15 @@ export default function ExceptionsQueuePage() {
               </label>
             </div>
 
-            <div className="mt-4 rounded-lg border border-gray-800 bg-gray-950 p-3 text-xs text-gray-400">
+            <div className="rounded-lg border border-gray-800 bg-gray-950 p-3 text-xs text-gray-400">
               <div className="font-medium text-gray-300">Scope stays unchanged</div>
               <div className="mt-1 break-all">
                 {repairing.finding_id || repairing.fingerprint || repairing.policy_id || repairing.target_id || repairing.scope || 'global exception'}
               </div>
             </div>
-
-            <div className="mt-5 flex justify-end gap-3">
-              <Button variant="secondary" onClick={() => setRepairing(null)} disabled={saving}>
-                Cancel
-              </Button>
-              <Button onClick={saveRepair} disabled={saving}>
-                {saving ? 'Saving...' : 'Save repair'}
-              </Button>
-            </div>
           </div>
-        </div>
-      )}
+        ) : null}
+      </Modal>
     </div>
   )
 }

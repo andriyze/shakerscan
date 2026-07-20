@@ -71,7 +71,7 @@ function huntTargetUrl(campaign: Campaign): string {
 }
 
 function huntTargetLabel(campaign: Campaign): string {
-  return huntTargetUrl(campaign) || campaign.name || 'Target-bound autonomous hunt'
+  return huntTargetUrl(campaign) || campaign.name || 'Autonomous run'
 }
 
 function huntMatchesFilters(campaign: Campaign, status: string, domain: string, search: string): boolean {

@@ -69,7 +69,7 @@ export function RecentHunts({ limit = 12 }: { limit?: number }) {
           : []
       const targetUrl = new Map(targetRows.map((t) => [t.id, t.url]))
 
-      const operatorItems: FeedItem[] = campaigns
+      const legacyItems: FeedItem[] = campaigns
         .map((c) => {
           const url = String((c.target_scope?.url as string) || '')
           const found = findingCount(c)
@@ -86,7 +86,7 @@ export function RecentHunts({ limit = 12 }: { limit?: number }) {
           }
         })
 
-      const explorerItems: FeedItem[] = runs.map((r) => ({
+      const deepHuntItems: FeedItem[] = runs.map((r) => ({
         key: `ex-${r.id}`,
         engine: 'deep_hunt' as const,
         href: `/settings/research-agent?run=${r.id}`,
@@ -96,7 +96,7 @@ export function RecentHunts({ limit = 12 }: { limit?: number }) {
         detail: `turn ${r.iterations ?? '0'}/${r.max_iterations}`,
       }))
 
-      const merged = [...operatorItems, ...explorerItems]
+      const merged = [...legacyItems, ...deepHuntItems]
         .sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''))
         .slice(0, limit)
       setItems(merged)

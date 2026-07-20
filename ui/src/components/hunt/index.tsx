@@ -13,7 +13,6 @@ import { Badge, Card } from '@/components/ui'
 import type { Campaign, ResearchBudget, ResearchEpisode, ResearchEpisodeDetail } from '@/lib/api'
 
 export type Intensity = 'analyze' | 'hunt' | 'relentless' | 'deep_hunt'
-export type DurationKey = 'quick' | 'standard' | 'extended' | 'marathon'
 
 // How hard the hunter goes. Mirrors RESEARCH_LAUNCH_PROFILES on the server; the
 // server remains the source of truth for the actual budgets and risk ceiling.
@@ -62,26 +61,6 @@ export const PROFILES: Record<Intensity, {
   },
 }
 
-// How long the campaign chains episodes before it stops on its own.
-export const DURATIONS: Record<DurationKey, { name: string; detail: string; hours: number; episodes: number }> = {
-  quick: { name: 'Quick', detail: '~1 hour', hours: 1, episodes: 3 },
-  standard: { name: 'Standard', detail: '~8 hours', hours: 8, episodes: 12 },
-  extended: { name: 'Extended', detail: '~1 day', hours: 24, episodes: 24 },
-  marathon: { name: 'Marathon', detail: '~7 days', hours: 168, episodes: 100 },
-}
-
-export const ACTIVE_FAMILIES = [
-  'sqli', 'xss', 'auth', 'bola',
-  'mass_assignment', 'workflow', 'data_exposure', 'access_control', 'field_constraint',
-]
-
-export const ACTIVE_SCAN_FAMILIES = ['sqli', 'xss', 'auth', 'bola']
-
-export function familiesForIntensity(intensity: Intensity): string[] {
-  if (intensity === 'analyze') return []
-  return intensity === 'deep_hunt' ? [...ACTIVE_FAMILIES] : [...ACTIVE_SCAN_FAMILIES]
-}
-
 export function targetLabel(target: { name?: string | null; url: string }): string {
   const known: Record<string, string> = {
     'http://host.docker.internal:3001': 'OWASP Juice Shop',
@@ -97,7 +76,7 @@ export function hostFromUrl(url: string): string {
   try { return new URL(url).host } catch { return url }
 }
 
-export function shortDate(value?: string | null): string {
+function shortDate(value?: string | null): string {
   if (!value) return ''
   const date = new Date(value)
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString()
@@ -154,7 +133,7 @@ export function RunStatusBadge({ state, className = '' }: { state: RunState; cla
 
 // ---- Episode status: the moment-to-moment state inside a run --------------
 
-export function episodeStatusLabel(status: string, autopilot?: boolean): string {
+function episodeStatusLabel(status: string, autopilot?: boolean): string {
   if (status === 'awaiting_planner' && autopilot === false) return 'Waiting for agent'
   return ({
     created: 'Starting', awaiting_planner: 'Thinking', dispatching: 'Running a test',
@@ -173,18 +152,6 @@ function episodeStatusClass(status: string): string {
   return 'bg-gray-800 text-gray-300'
 }
 
-export function EpisodeStatusBadge({ status, autopilot }: { status: string; autopilot?: boolean }) {
-  const nonTerminal = ['created', 'awaiting_planner', 'dispatching', 'awaiting_observation'].includes(status)
-  return (
-    <Badge className={episodeStatusClass(status)}>
-      {nonTerminal && autopilot !== false && (
-        <span className="h-1.5 w-1.5 rounded-full bg-blue-400 animate-pulse" aria-hidden="true" />
-      )}
-      {episodeStatusLabel(status, autopilot)}
-    </Badge>
-  )
-}
-
 // ---- Turning a raw planner decision into a plain-English sentence ---------
 
 function str(value: unknown): string {
@@ -194,7 +161,7 @@ function str(value: unknown): string {
 // The one job here: make "what the AI just did" legible. A move like an
 // experiment.workflow against /orders/11 becomes "Testing GET /orders/11 for
 // auth bypass" instead of a JSON blob.
-export function decisionSentence(action?: { command?: string; parameters?: Record<string, unknown> }): {
+function decisionSentence(action?: { command?: string; parameters?: Record<string, unknown> }): {
   verb: string
   detail: string
 } {

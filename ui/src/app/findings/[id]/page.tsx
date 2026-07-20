@@ -568,7 +568,7 @@ function FindingDetailContent() {
       })
       setAutonomousConfirmOpen(false)
       toast.success(detail.reused ? 'Opened the existing autonomous investigation' : 'Autonomous investigation started')
-      router.push(`/settings/research-agent?episode_id=${encodeURIComponent(detail.episode.id)}`)
+      router.push(`/settings/research-agent/runs/${encodeURIComponent(detail.episode.id)}`)
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Failed to start autonomous investigation')
     } finally {
