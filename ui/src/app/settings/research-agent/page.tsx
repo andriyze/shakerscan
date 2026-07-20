@@ -360,7 +360,11 @@ function SessionMonitor({
         </div>
       ) : null}
 
-      <div ref={scrollRef} className="mt-3 max-h-80 overflow-y-auto rounded-lg border border-gray-800 bg-gray-950/60 p-2">
+      <div className="mt-3 flex items-center justify-between">
+        <h3 className="text-xs font-semibold uppercase tracking-wider text-gray-500">Activity</h3>
+        <span className="hidden text-[10px] text-gray-600 sm:inline">what the agent did, step by step</span>
+      </div>
+      <div ref={scrollRef} className="mt-1.5 max-h-80 overflow-y-auto rounded-lg border border-gray-800 bg-gray-950/60 p-2">
         {session.transcript.length ? (
           <ol className="space-y-2">
             {session.transcript.map((message, index) => <TranscriptRow key={index} role={message.role} content={message.content} />)}
@@ -386,18 +390,117 @@ function SessionMonitor({
   )
 }
 
-function TranscriptRow({ role, content }: { role: 'system' | 'user' | 'assistant'; content: string }) {
-  const isTool = role === 'user' && content.startsWith('[tool ')
-  const isSteering = content.startsWith('[System:')
-  const label = role === 'assistant' ? 'Planner' : isTool ? 'Tool result' : isSteering ? 'System' : role === 'system' ? 'System prompt' : 'Context'
-  const tone =
-    role === 'assistant' ? 'border-emerald-500/30 bg-emerald-500/[0.05] text-emerald-100'
-      : isTool ? 'border-blue-500/25 bg-blue-500/[0.05] text-blue-100'
-        : 'border-gray-800 bg-gray-900/60 text-gray-300'
+// Pull a fenced ```json block (or raw JSON) out of a planner message.
+function extractPlannerJson(content: string): Record<string, unknown> | null {
+  const fence = content.match(/```(?:json)?\s*([\s\S]*?)```/)
+  const raw = (fence ? fence[1] : content).trim()
+  if (!raw.startsWith('{') && !raw.startsWith('[')) return null
+  try {
+    const parsed = JSON.parse(raw)
+    return parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : null
+  } catch {
+    return null
+  }
+}
+
+function toolCallSummary(call: Record<string, unknown>): string {
+  const name = String(call.name || 'tool')
+  const args = (call.arguments || {}) as Record<string, unknown>
+  const method = typeof args.method === 'string' ? args.method : ''
+  const focus =
+    (typeof args.path === 'string' && args.path) ||
+    (typeof args.kind === 'string' && args.kind) ||
+    (typeof args.target === 'string' && args.target) ||
+    (typeof args.name === 'string' && args.name) ||
+    ''
+  return [name, method, focus].filter(Boolean).join(' ')
+}
+
+function RawDetails({ label, content }: { label: string; content: string }) {
   return (
-    <li className={`rounded-md border px-2.5 py-2 ${tone}`}>
-      <div className="mb-1 text-[10px] font-semibold uppercase tracking-wider opacity-70">{label}</div>
-      <pre className="whitespace-pre-wrap break-words font-mono text-[11px] leading-5">{content}</pre>
+    <details className="mt-1">
+      <summary className="cursor-pointer text-[10px] uppercase tracking-wider text-gray-500 hover:text-gray-300">{label}</summary>
+      <pre className="mt-1 max-h-56 overflow-auto whitespace-pre-wrap break-words font-mono text-[11px] leading-5 text-gray-400">{content}</pre>
+    </details>
+  )
+}
+
+// Renders the raw ReAct transcript as a readable activity log: planner tool
+// calls become "http_request GET /path" chips, tool results collapse to
+// "name -> ok/error" with the payload behind a disclosure, the final debrief
+// lists its findings, and the bulky system prompt / context pack collapse away.
+function TranscriptRow({ role, content }: { role: 'system' | 'user' | 'assistant'; content: string }) {
+  // System prompt + the big objective/context pack: technical setup, collapse.
+  if (role === 'system' || (role === 'user' && !content.startsWith('[tool ') && !content.startsWith('[System:'))) {
+    return (
+      <li>
+        <details className="rounded-md border border-gray-800 bg-gray-900/40">
+          <summary className="cursor-pointer px-2.5 py-1.5 text-[10px] font-semibold uppercase tracking-wider text-gray-500 hover:text-gray-300">
+            {role === 'system' ? 'System prompt' : 'Objective & context'}
+          </summary>
+          <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words border-t border-gray-800 px-2.5 py-2 font-mono text-[11px] leading-5 text-gray-400">{content}</pre>
+        </details>
+      </li>
+    )
+  }
+
+  // Tool result: "[tool NAME -> ok|error] {payload}"
+  if (role === 'user' && content.startsWith('[tool ')) {
+    const match = content.match(/^\[tool (\S+) -> (ok|error)\]\s*([\s\S]*)$/)
+    const name = match?.[1] || 'tool'
+    const ok = match?.[2] !== 'error'
+    const payload = (match?.[3] || content).trim()
+    return (
+      <li className="rounded-md border border-blue-500/25 bg-blue-500/[0.05] px-2.5 py-2">
+        <div className="flex items-center gap-2 text-[11px] text-blue-100">
+          <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${ok ? 'bg-emerald-400' : 'bg-red-400'}`} aria-hidden="true" />
+          <span className="font-medium">{name}</span>
+          <span className={ok ? 'text-emerald-300' : 'text-red-300'}>→ {ok ? 'ok' : 'error'}</span>
+        </div>
+        {payload ? <RawDetails label="result" content={payload} /> : null}
+      </li>
+    )
+  }
+
+  // Anti-stall / system steering line.
+  if (content.startsWith('[System:')) {
+    return <li className="rounded-md border border-gray-800 bg-gray-900/60 px-2.5 py-1.5 text-[11px] text-gray-400">{content}</li>
+  }
+
+  // Planner (assistant) turn.
+  const parsed = extractPlannerJson(content)
+  const toolCalls = parsed && Array.isArray(parsed.tool_calls) ? (parsed.tool_calls as Record<string, unknown>[]) : null
+  const done = Boolean(parsed && parsed.done === true)
+  const findings = done && parsed && Array.isArray(parsed.findings) ? (parsed.findings as Record<string, unknown>[]) : null
+  return (
+    <li className="rounded-md border border-emerald-500/30 bg-emerald-500/[0.05] px-2.5 py-2">
+      <div className="text-[10px] font-semibold uppercase tracking-wider text-emerald-300/80">Planner</div>
+      {toolCalls ? (
+        <div className="mt-1 flex flex-wrap gap-1.5">
+          {toolCalls.map((call, i) => (
+            <span key={i} className="rounded bg-emerald-500/10 px-1.5 py-0.5 font-mono text-[11px] text-emerald-200">{toolCallSummary(call)}</span>
+          ))}
+        </div>
+      ) : done ? (
+        <div className="mt-1">
+          <div className="text-xs font-medium text-emerald-200">
+            Concluded{findings && findings.length ? ` — ${findings.length} finding${findings.length === 1 ? '' : 's'}` : parsed?.abstained ? ' — abstained (no finding)' : ''}
+          </div>
+          {findings && findings.length ? (
+            <div className="mt-1.5 grid gap-1">
+              {findings.map((finding, i) => (
+                <div key={i} className="flex items-center gap-2">
+                  <SeverityBadge severity={String(finding.severity || 'info')} />
+                  <span className="min-w-0 truncate text-xs text-emerald-100">{String(finding.title || 'finding')}</span>
+                </div>
+              ))}
+            </div>
+          ) : null}
+        </div>
+      ) : (
+        <pre className="mt-1 whitespace-pre-wrap break-words font-mono text-[11px] leading-5 text-emerald-100/80">{content}</pre>
+      )}
+      {toolCalls || done ? <RawDetails label="raw" content={content} /> : null}
     </li>
   )
 }
