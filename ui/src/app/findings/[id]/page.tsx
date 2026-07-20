@@ -50,10 +50,10 @@ function getFindingSourceType(finding: Finding): FindingSourceType {
     return 'AI Gate'
   }
   if (finding.source === 'ai_session') {
-    return 'AI Session'
+    return 'Interactive'
   }
-  if (finding.source === 'autonomous' || finding.tool === 'autonomous_workflow') {
-    return 'Autonomous'
+  if (finding.source === 'autonomous' || finding.tool === 'autonomous_workflow' || getFindingResearchProvenance(finding)) {
+    return 'Deep Hunt'
   }
   if (finding.source === 'asm') {
     return 'ASM'
@@ -66,12 +66,12 @@ function getFindingSourceType(finding: Finding): FindingSourceType {
 
 function isAiReplayFinding(finding: Finding): boolean {
   const sourceType = getFindingSourceType(finding)
-  return sourceType === 'AI Gate' || sourceType === 'AI Session'
+  return sourceType === 'AI Gate' || sourceType === 'Interactive'
 }
 
 function autonomousWebTargetUrl(finding: Finding): string | null {
   const sourceType = getFindingSourceType(finding)
-  if (!finding.target_id || !(['DAST', 'Autonomous', 'ASM', 'Manual'] as FindingSourceType[]).includes(sourceType)) return null
+  if (!finding.target_id || !(['DAST', 'Deep Hunt', 'ASM', 'Manual'] as FindingSourceType[]).includes(sourceType)) return null
   const candidate = finding.target_url || finding.url
   if (!candidate) return null
   try {
@@ -87,8 +87,8 @@ function autonomousUnsupportedReason(finding: Finding): string {
   if (sourceType === 'Model Intake') {
     return 'Model Intake findings must be investigated by re-running the artifact check.'
   }
-  if (sourceType === 'AI Gate' || sourceType === 'AI Session') {
-    return 'AI findings use their dedicated replay workflow; autonomous web hunts support DAST, ASM, and manual findings.'
+  if (sourceType === 'AI Gate' || sourceType === 'Interactive') {
+    return 'These findings use their dedicated replay workflow; web verification supports DAST, Deep Hunt, ASM, and manual findings.'
   }
   if (!finding.target_id) {
     return 'This finding is not linked to a ShakerScan web target.'
@@ -677,7 +677,7 @@ function FindingDetailContent() {
             className="inline-flex items-center gap-2 rounded-lg bg-violet-600 px-3 py-2 text-sm font-medium text-white transition-colors hover:bg-violet-500 disabled:cursor-not-allowed disabled:opacity-45"
           >
             <BrainCircuit className="h-4 w-4" />
-            Investigate autonomously
+            Verify finding
           </button>
           {(!autonomousTargetUrl || hasPendingRetest) && (
             <span className={`max-w-64 text-xs leading-4 ${hasPendingRetest ? 'text-gray-500' : 'text-amber-300/80'}`}>
@@ -721,11 +721,11 @@ function FindingDetailContent() {
 
       <ConfirmDialog
         open={autonomousConfirmOpen}
-        title="Authorize autonomous investigation"
+        title="Authorize finding verification"
         message={
           <div className="space-y-2">
-            <p>The investigator will inspect this exact finding, run at most one bounded proof replay against <span className="font-medium text-gray-200">{autonomousTargetUrl}</span>, wait for the result, and conclude.</p>
-            <p>Continue only if you own this target or have explicit permission to test it. Active authorization expires after 30 minutes; the investigation keeps running on the server if you leave the page.</p>
+            <p>The verifier will inspect this exact finding, run at most one bounded proof replay against <span className="font-medium text-gray-200">{autonomousTargetUrl}</span>, wait for the result, and conclude.</p>
+            <p>Continue only if you own this target or have explicit permission to test it. Active authorization expires after 30 minutes.</p>
           </div>
         }
         confirmLabel="Authorize and start"
@@ -764,11 +764,6 @@ function FindingDetailContent() {
                 <SeverityBadge severity={finding.severity} />
                 <FindingStatusBadge status={finding.status} />
                 <SourceTypeBadge type={getFindingSourceType(finding)} />
-                {research && (
-                  <span className="rounded-full bg-indigo-500/15 px-2 py-0.5 text-xs font-medium text-indigo-300">
-                    Deep hunt
-                  </span>
-                )}
                 {finding.cvss_score !== undefined && (
                   <span className="px-2 py-0.5 rounded bg-gray-800 text-gray-200 text-xs">
                     CVSS {finding.cvss_score}

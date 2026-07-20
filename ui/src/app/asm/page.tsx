@@ -21,7 +21,6 @@ import {
   Trash2,
 } from 'lucide-react'
 import {
-  createTargetPolicyApproval,
   getAsmActivity,
   getAsmCheckFamilies,
   getAsmEndpoints,
@@ -29,12 +28,10 @@ import {
   getAsmGaps,
   getAsmPolicy,
   getDomains,
-  getResearchReadiness,
   getTarget,
   getTargetsGrouped,
   getWorkers,
   improveAsmTarget,
-  launchResearchEpisode,
   pruneAsmInventory,
   reconAsmTarget,
   testAsmTarget,
@@ -1389,8 +1386,6 @@ function TargetView({ targetId }: { targetId: string }) {
   const [error, setError] = useState(false)
   const [confirmOpen, setConfirmOpen] = useState(false)
   const [testing, setTesting] = useState(false)
-  const [autonomousConfirmOpen, setAutonomousConfirmOpen] = useState(false)
-  const [autonomousLoading, setAutonomousLoading] = useState(false)
   const [workerCount, setWorkerCount] = useState<number | null>(null)
 
   const load = useCallback(() => {
@@ -1451,35 +1446,14 @@ function TargetView({ targetId }: { targetId: string }) {
     }
   }
 
-  const launchAutonomousGapClosure = async () => {
-    if (!target || autonomousLoading) return
+  const openDeepHuntForGaps = () => {
+    if (!target) return
     if (!/^https?:\/\//i.test(target.url)) {
-      toast.error('Autonomous gap closure requires an HTTP or HTTPS web target.')
+      toast.error('Deep Hunt requires an HTTP or HTTPS web target.')
       return
     }
-    setAutonomousLoading(true)
-    try {
-      const readiness = await getResearchReadiness()
-      if (!readiness.planner_ready) throw new Error('Configure an AI model before starting autonomous gap closure.')
-      if (!readiness.execution_enabled) throw new Error('Autonomous active execution is disabled by server policy.')
-      const approvalReceiptId = await createTargetPolicyApproval(target.id, target.url, 30)
-      const detail = await launchResearchEpisode({
-        subject_type: 'asm',
-        subject_id: target.id,
-        mission_profile: 'close_asm_gaps',
-        intensity: 'hunt',
-        approval_receipt_id: approvalReceiptId,
-        autopilot: true,
-        created_by: 'asm_ui',
-      })
-      setAutonomousConfirmOpen(false)
-      toast.success(detail.reused ? 'Opened the existing autonomous gap-closure run' : 'Autonomous gap closure started')
-      router.push(`/settings/research-agent?episode_id=${encodeURIComponent(detail.episode.id)}`)
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Failed to start autonomous gap closure')
-    } finally {
-      setAutonomousLoading(false)
-    }
+    const objective = 'Explore this target autonomously and close the highest-value unexplained coverage gaps with evidence.'
+    router.push(`/settings/research-agent?target=${encodeURIComponent(target.id)}&objective=${encodeURIComponent(objective)}`)
   }
 
   const coverageDenominator = asmCoverageDenominator(coverage)
@@ -1506,12 +1480,12 @@ function TargetView({ targetId }: { targetId: string }) {
           </Button>
           <button
             type="button"
-            onClick={() => setAutonomousConfirmOpen(true)}
-            disabled={!target || autonomousLoading}
-            title="Let the autonomous investigator choose, run, and evaluate bounded ASM work until it reaches a conclusion."
+            onClick={openDeepHuntForGaps}
+            disabled={!target}
+            title="Open Deep Hunt with this target and a coverage-gap objective."
             className="inline-flex items-center gap-1.5 rounded-lg bg-violet-600 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-violet-500 disabled:cursor-not-allowed disabled:opacity-45"
           >
-            <BrainCircuit className="h-4 w-4" /> Close gaps autonomously
+            <BrainCircuit className="h-4 w-4" /> Open Deep Hunt
           </button>
         </div>
       </div>
@@ -1639,26 +1613,6 @@ function TargetView({ targetId }: { targetId: string }) {
         )}
         </div>
       </details>
-
-      <ConfirmDialog
-        open={autonomousConfirmOpen}
-        title="Authorize autonomous ASM gap closure"
-        confirmLabel="Authorize and start"
-        busy={autonomousLoading}
-        message={
-          <div className="space-y-2 text-sm text-gray-400">
-            <p>
-              The investigator will review the inventory for <span className="font-medium text-gray-200">{target?.url || 'this target'}</span>,
-              choose eligible discovery and endpoint-testing actions, wait for each result, and continue until it can explain the remaining gaps or reaches its budget.
-            </p>
-            <p>
-              This sends active security probes. Continue only if you own the target or have explicit permission to test it. Authorization expires after 30 minutes; the server-side run continues if you leave this page.
-            </p>
-          </div>
-        }
-        onConfirm={launchAutonomousGapClosure}
-        onCancel={() => setAutonomousConfirmOpen(false)}
-      />
 
       <ConfirmDialog
         open={confirmOpen}

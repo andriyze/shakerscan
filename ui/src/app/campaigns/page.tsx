@@ -43,7 +43,7 @@ function CampaignsContent() {
         status: statusFilter || undefined,
         target_id: targetFilter || undefined,
       })
-      // Autonomous research runs live on the Autonomous Hunt page; keep them out
+      // Legacy research runs live on the verifier pages; keep them out
       // of the Mission Campaigns ledger so this list isn't a mix of two things.
       setCampaigns((res.campaigns || []).filter((c) => c.campaign_type !== 'autonomous_research'))
       setLoadError(false)

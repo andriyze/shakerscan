@@ -39,7 +39,7 @@ const navGroups: {
       },
       {
         href: '/scans',
-        label: 'Scans',
+        label: 'DAST Scans',
         icon: (
           <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
@@ -64,6 +64,11 @@ const navGroups: {
           </svg>
         ),
       },
+      {
+        href: '/interactive',
+        label: 'Interactive Testing',
+        icon: <Crosshair className="w-5 h-5" />,
+      },
     ],
   },
   {
@@ -77,8 +82,7 @@ const navGroups: {
     heading: 'AI Investigator',
     badge: 'Alpha',
     items: [
-      { href: '/settings/research-agent', label: 'Operator', icon: <Crosshair className="w-5 h-5" /> },
-      { href: '/settings/research-agent/explorer', label: 'Explorer', icon: <Compass className="w-5 h-5" /> },
+      { href: '/settings/research-agent', label: 'Deep Hunt', icon: <Compass className="w-5 h-5" /> },
       { href: '/settings/research-agent/leads', label: 'Leads', icon: <Lightbulb className="w-5 h-5" /> },
     ],
   },
@@ -123,8 +127,7 @@ function BrandMark({ className = 'w-6 h-6' }: { className?: string }) {
 function NavContent({ pathname }: { pathname: string }) {
   const appVersion = process.env.NEXT_PUBLIC_APP_VERSION
   // Only the Settings landing lights the gear. The /settings/* sub-routes
-  // (research-agent, arsenal, ai-ops-router) belong to their own nav groups
-  // — AI Investigator and Developer — and highlight there instead.
+  // (research-agent, arsenal, ai-ops-router) belong to their own nav groups.
   const settingsActive = pathname === '/settings'
 
   const isActive = (href: string) => {
@@ -132,10 +135,11 @@ function NavContent({ pathname }: { pathname: string }) {
       return pathname === '/'
     }
     if (href === '/settings/research-agent') {
-      // Keep Operator highlighted on its run-detail pages. The advanced
-      // experiment builder is supporting tooling, so no engine is selected.
+      // Deep Hunt is the canonical investigator launcher. Leads and Test
+      // Builder highlight through their own local tabs instead.
       return (
         pathname === href ||
+        pathname.startsWith('/settings/research-agent/explorer') ||
         pathname.startsWith('/settings/research-agent/runs')
       )
     }

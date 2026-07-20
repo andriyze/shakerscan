@@ -1,6 +1,6 @@
 'use client'
 
-// Shared building blocks for the Autonomous Hunt surface: one place for the
+// Shared building blocks for the Deep Hunt surface: one place for the
 // "how hard" intensity profiles, the "how long" duration presets, run/episode
 // status semantics, and the live activity trace. Kept self-contained so the hub,
 // the run-detail page, and the Scans page read a run the same way without

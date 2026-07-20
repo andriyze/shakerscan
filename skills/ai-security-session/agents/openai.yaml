@@ -1,4 +1,4 @@
 interface:
-  display_name: "AI Security Session"
-  short_description: "Drive interactive /session API testing"
-  default_prompt: "Use $ai-security-session to drive an authorized Playwright session with evidence-first BOLA/IDOR checks and same-origin scope by default."
+  display_name: "Interactive Testing"
+  short_description: "Drive manual browser and endpoint testing"
+  default_prompt: "Use $ai-security-session to drive an authorized Interactive Testing session with evidence-first BOLA/IDOR checks and same-origin scope by default."

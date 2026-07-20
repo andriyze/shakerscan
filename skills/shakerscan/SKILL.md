@@ -1,6 +1,6 @@
 ---
 name: shakerscan
-description: Operate the ShakerScan web, API, and AI security platform. Use when asked to start or diagnose ShakerScan; scan an authorized website or API; manage targets, workers, schedules, findings, evidence, or Continuous ASM; test AI Gate or Model Intake targets; run interactive security sessions; or create and drive bounded research episodes and Deep Hunt campaigns.
+description: Operate ShakerScan. Route scan requests to Web DAST, Deep Hunt requests to the keyless AI investigator, and manual browser work to Interactive Testing; also manage targets, Continuous ASM, findings, AI Gate, Model Intake, evidence, schedules, and workers.
 ---
 
 # ShakerScan
@@ -27,7 +27,9 @@ target binding, approvals, budgets, evidence, and finding proof.
 
 | User intent | ShakerScan surface |
 |---|---|
+| “Scan this target” with no type | Quick Web DAST (`POST /scans`, `scan_type=quick`) |
 | Quick, standard, deep, full, aggressive, or smart DAST | `POST /scans` |
+| Deep Hunt, autonomous hunt, or investigate autonomously | Use the `research-agent` skill and `/agent/hunt/*` |
 | Multiple targets | `POST /scans/batch` |
 | Authenticated or two-user testing | `POST /scans` with auth options |
 | Targets and subdomains | `/targets`, `/domains`, `/discovery` |
@@ -40,10 +42,10 @@ target binding, approvals, budgets, evidence, and finding proof.
 | Evidence export or retention | `/evidence/*` |
 | Mission timeline and read-only campaign ledger | `/timeline`, `/arsenal/campaigns*` |
 | Natural-language operation preview | `/ai/ops/route` |
-| Interactive browser or BOLA/IDOR workflow | Use the `ai-security-session` skill |
+| Interactive browser or BOLA/IDOR workflow | Use the `ai-security-session` skill (Interactive Testing) |
 | JS or frontend attack-surface analysis | Use the `js-analyze` skill |
 | Content-discovery seeds | Use the `content-discovery` skill |
-| Bounded adaptive investigation | Use the `research-agent` skill |
+| Deep Hunt | Use the `research-agent` skill |
 | Health, queue, and workers | `/health`, `/queue/stats`, `/workers` |
 | Exhaustive operation or schema lookup | Read `AGENTS.md` and the live `/openapi.json` |
 
@@ -52,6 +54,10 @@ target binding, approvals, budgets, evidence, and finding proof.
 - Never scan a target without ownership or explicit authorization.
 - Ask for explicit confirmation before `full`, `aggressive`, or `smart`; these modes send active
   probes.
+- Deep Hunt performs AI-driven exploration and bounded active exploitation. Confirm target
+  authorization, create a target-bound credential-tier approval, and let ShakerScan enforce the
+  request/action ceilings. The phrase “Deep Hunt” requests the workflow but is not itself a claim
+  that the user owns the target.
 - Treat credentials, auth headers, cookies, API keys, and approval receipts as secrets. Do not echo
   them in reports.
 - Production AI Gate scans require their production confirmation.
@@ -95,23 +101,27 @@ Keep these distinctions visible:
 
 - reported or suspected versus exploit-verified
 - completed coverage versus attempted, skipped, timed out, or stale coverage
-- DAST, AI Gate, AI session, autonomous, Model Intake, ASM, and manual sources
+- DAST, Deep Hunt, Interactive, AI Gate, Model Intake, ASM, and Manual sources
 - partial results from failed scans versus complete reports
 
 Prefer concise summaries with IDs and links. Include proof, confidence, coverage gaps, and next
 actions when they affect the user's decision.
 
-## Research Planning
+## Natural-language routing
 
-Use `planner_mode: "agent"` by default when the session was launched by
-`shakerscan agent codex|claude|opencode`. Read the current immutable observation and submit exactly
-one decision through `/research/episodes/{id}/decisions`.
+Keep these intents distinct:
 
-Use `configured_ai` only when the user explicitly wants the stored provider and unattended server
-autopilot. Use `local_codex` only when the user wants separate isolated Codex processes.
+- `scan`, `quick scan` → Quick DAST by default.
+- `standard scan`, `deep scan`, `full scan`, `aggressive scan`, `smart scan` → that exact DAST type.
+- `deep hunt`, `autonomous hunt`, `investigate autonomously` → Deep Hunt, never DAST and never the
+  legacy `/research/campaigns/launch` path.
+- `verify this finding` → the bounded deterministic finding verification/retest path.
+- `test manually`, `interactive testing`, `browser session` → Interactive Testing.
 
-When a research decision queues linked work, report it and stop. Continue the episode or campaign
-when the user asks again.
+For Deep Hunt, use the current coding-agent session as the planner. Start
+`POST /agent/hunt/{target_id}/session` with `mode:"deep_hunt"` and the approved receipt, then drive
+one reply at a time only while the run is `awaiting_planner`. ShakerScan executes every tool and
+remains authoritative for scope, credentials, active-tool access, evidence, and proof.
 
 ## Read Detailed References
 

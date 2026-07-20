@@ -20,7 +20,7 @@ ShakerScan covers:
 - Continuous attack-surface management (ASM), subdomain discovery, and certificate-transparency monitoring
 - AI Gate tests for chat, RAG, agent, and MCP endpoints
 - Model Intake checks for provenance, signatures, checksums, unsafe serialization, and policy readiness
-- Interactive browser testing, finding retests, evidence, exceptions, campaigns, and bounded autonomous research
+- Interactive Testing, finding retests, evidence, exceptions, the mission ledger, and Deep Hunt
 
 > Only scan systems you own or are explicitly authorized to test. Active scan modes can change
 > application state, trigger alerts, and create significant traffic.
@@ -58,8 +58,8 @@ If the new command is not available in the current shell yet:
 ~/.local/bin/shakerscan agent codex
 ```
 
-The current agent session is also the default planner for Deep Hunt. No separate LLM API key is
-required for agent-driven research; ShakerScan remains responsible for target scope, approvals,
+The current agent session is the planner for Deep Hunt. No separate LLM API key is required for
+agent-driven investigation; ShakerScan remains responsible for target scope, approvals,
 budgets, execution, and proof.
 
 ### Use the CLI
@@ -91,10 +91,10 @@ findings, proof state, coverage, and the final report.
 | Discover subdomains continuously | **Targets** or Gungnir CT monitoring |
 | Test a chatbot, RAG pipeline, agent, or MCP server | **AI Gate** |
 | Vet a model artifact before deployment | **Model Intake** |
-| Reproduce a workflow or test two user roles | **Interactive** |
+| Reproduce a workflow or test two user roles manually | **Interactive Testing** |
 | Review, retest, suppress, or triage issues | **Findings** and **Exceptions** |
 | Inspect retained proof or export evidence | **Evidence** |
-| Run a bounded adaptive investigation | **Autonomous Hunt / Deep Hunt** |
+| Let the current AI agent explore and exploit autonomously | **Deep Hunt** |
 | Preview a natural-language operation safely | **AI Operations Router** |
 
 ### Scan types and coverage budgets
@@ -153,13 +153,13 @@ curl -X POST http://localhost:8080/scans \
 ```
 
 Treat authentication values as secrets. API responses redact stored credentials; ShakerScan can
-also use managed credential profiles for interactive and research workflows.
+also use managed credential profiles for Interactive Testing and Deep Hunt.
 
 ### Review and retest findings
 
 ```bash
 curl "http://localhost:8080/findings?status=active&severity=high"
-curl "http://localhost:8080/findings?source_type=ai&status=active"
+curl "http://localhost:8080/findings?source_type=deep_hunt&status=active"
 
 curl -X POST http://localhost:8080/findings/{finding_id}/retest \
   -H "Content-Type: application/json" \
@@ -206,29 +206,29 @@ curl -X POST http://localhost:8080/targets/{target_id}/asm/improve \
 Auth checks require a primary auth context. BOLA testing also requires a distinct second user,
 explicit deep intent, and the applicable approvals.
 
-### Run bounded research
+### Run Deep Hunt
 
-Autonomous Hunt uses immutable observations and one policy-checked action at a time. It can
-investigate a target, verify one finding, or close ASM gaps without giving the planner raw shell or
-credential access.
+Deep Hunt uses the current Codex, Claude, or OpenCode session as an autonomous security
+investigator. The AI composes its own same-origin probes, uses bounded active scanner tools, compares
+anonymous and authenticated behavior, and records only claims backed by real tool output.
 
-- `agent` is the default: the current Codex, Claude, or OpenCode session plans one step at a time.
-- `configured_ai` uses the provider in Settings for unattended server autopilot.
-- `local_codex` launches separate isolated Codex planner processes.
+Deep Hunt requires explicit target authorization and an expiring target-bound approval. ShakerScan
+keeps credentials server-side, enforces turn/request/action ceilings, blocks arbitrary write methods
+in the free-form loop, and promotes a Suspected finding to Verified only through deterministic proof.
 
-Deep Hunt campaigns can span multiple bounded episodes while preserving the original target,
-approval, time, and episode limits.
+The UI launcher is **AI Investigator → Deep Hunt**. Through an agent, the routing is:
 
-#### Research terminology
-
-| Term | Meaning |
+| Request | Workflow |
 |---|---|
-| AI Investigator | Navigation group containing the investigation tools |
-| Autonomous Hunt | Main UI for starting and following target-bound research |
-| Research episode | One bounded observation/decision loop |
-| Deep Hunt | Credential-tier intensity that can use proof-gated principal workflows |
-| Research run/campaign | Durable chain of bounded episodes under shared ceilings |
-| Mission campaign | Read-only action ledger shown under **Campaigns**; it is not the Deep Hunt launcher |
+| “Scan example.com” | Quick DAST |
+| “Run a deep scan” | Deep DAST |
+| “Run a smart scan” | Smart DAST, after active-testing confirmation |
+| “Run a Deep Hunt” | Keyless AI-driven `/agent/hunt/*` investigation |
+| “Verify this finding” | Bounded deterministic verifier |
+| “Test this manually” | Interactive Testing |
+
+The older `/research/*` episode controller remains available for specialized guided verification
+and compatibility. It is not the Deep Hunt launcher.
 
 ## Web UI map
 
@@ -240,9 +240,10 @@ approval, time, and episode limits.
 | Continuous ASM | Endpoint inventory, proof-family coverage, gaps, recommendations, and activity |
 | Findings / Exceptions | Triage, notes, retests, replay, cleanup, accepted risk, and exception lifecycle |
 | AI Gate / Model Intake | AI endpoint red teaming and pre-deployment model checks |
-| Interactive | Browser sessions, credentials, principals, auth expectations, replay, and manual findings |
-| Evidence / Timeline / Campaigns | Proof inventory, exports, retention, mission history, and read-only bounded action ledgers |
-| Settings | AI providers, scan policy, automation, deployment policies, Arsenal, Router, and Research Agent |
+| Deep Hunt / Leads | AI-driven exploration, bounded exploitation, proof promotion, and the hypothesis backlog |
+| Interactive Testing | Browser sessions, credentials, principals, auth expectations, replay, and explicit findings |
+| Evidence / Timeline / Campaigns | Proof inventory, exports, retention, mission history, and the read-only mission ledger |
+| Settings | AI providers, scan policy, automation, deployment policies, Arsenal, and Router |
 
 The exhaustive route and capability catalog is in the
 [Functionality Reference](https://github.com/andriyze/shakerscan/blob/main/docs/functionality-reference.md).

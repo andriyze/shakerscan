@@ -496,7 +496,7 @@ function ScansContent() {
                     </span>
                   </div>
                   <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-gray-500">
-                    <span className="text-blue-300">Autonomous Hunt</span>
+                    <span className="text-blue-300">Verifier · legacy</span>
                     {progress.max > 0 ? (
                       <span className="rounded bg-gray-800 px-1.5 py-0.5 text-gray-400">
                         Episode {progress.started}/{progress.max}
@@ -643,7 +643,7 @@ function ScansContent() {
                       </Link>
                     </td>
                     <td className="hidden px-4 py-3 xl:table-cell">
-                      <span className="text-sm text-blue-300">Autonomous Hunt</span>
+                      <span className="text-sm text-blue-300">Verifier · legacy</span>
                       {progress.max > 0 ? <div className="mt-0.5 text-xs text-gray-500">Episode {progress.started}/{progress.max}</div> : null}
                     </td>
                     <td className="hidden px-4 py-3 text-center text-gray-600 2xl:table-cell">—</td>

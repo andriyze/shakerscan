@@ -14,9 +14,8 @@ import {
 import { EmptyState, Skeleton } from '@/components/ui'
 import { RunStatusBadge, findingCount, hostFromUrl, relativeTime, runState, type RunState } from './index'
 
-// One feed across both engines so a hunt is never "lost" between two separate
-// run lists. Operator campaigns and Explorer sessions are merged, engine-badged,
-// and linked to each engine's own detail view.
+// One investigation history. Current Deep Hunt sessions are primary; older
+// guided research campaigns remain visible as legacy verifier runs.
 const AGENT_RUN_STATE: Record<AgentHuntStatus, RunState> = {
   awaiting_planner: 'waiting',
   planning: 'running',
@@ -27,7 +26,7 @@ const AGENT_RUN_STATE: Record<AgentHuntStatus, RunState> = {
 
 interface FeedItem {
   key: string
-  engine: 'operator' | 'explorer'
+  engine: 'legacy_verifier' | 'deep_hunt'
   href: string
   title: string
   state: RunState
@@ -76,22 +75,22 @@ export function RecentHunts({ limit = 12 }: { limit?: number }) {
           const found = findingCount(c)
           return {
             key: `op-${c.id}`,
-            engine: 'operator' as const,
+            engine: 'legacy_verifier' as const,
             href: `/settings/research-agent/runs/${c.id}`,
-            title: hostFromUrl(url) || c.name || 'Operator run',
+            title: hostFromUrl(url) || c.name || 'Guided verifier run',
             state: runState(c),
             createdAt: c.created_at,
             // deployment_impact.active_finding_count is linked active
             // target work, not a proof-tier count.
-            detail: found > 0 ? `${found} active findings` : 'menu-driven',
+            detail: found > 0 ? `${found} active findings` : 'legacy guided run',
           }
         })
 
       const explorerItems: FeedItem[] = runs.map((r) => ({
         key: `ex-${r.id}`,
-        engine: 'explorer' as const,
-        href: `/settings/research-agent/explorer?run=${r.id}`,
-        title: hostFromUrl(targetUrl.get(r.target_id) || '') || r.objective || 'Explorer run',
+        engine: 'deep_hunt' as const,
+        href: `/settings/research-agent?run=${r.id}`,
+        title: hostFromUrl(targetUrl.get(r.target_id) || '') || r.objective || 'Deep Hunt',
         state: AGENT_RUN_STATE[r.status] ?? 'idle',
         createdAt: r.created_at,
         detail: `turn ${r.iterations ?? '0'}/${r.max_iterations}`,
@@ -126,7 +125,7 @@ export function RecentHunts({ limit = 12 }: { limit?: number }) {
   if (!items.length) {
     return (
       <div className="mt-3">
-        <EmptyState message="No hunts yet" hint="Start one from Operator or Explorer — both engines show up here." />
+        <EmptyState message="No investigations yet" hint="Start a Deep Hunt to begin AI-driven exploration." />
       </div>
     )
   }
@@ -155,17 +154,17 @@ export function RecentHunts({ limit = 12 }: { limit?: number }) {
   )
 }
 
-function EngineBadge({ engine }: { engine: 'operator' | 'explorer' }) {
-  const op = engine === 'operator'
-  const Icon = op ? Crosshair : Compass
+function EngineBadge({ engine }: { engine: 'legacy_verifier' | 'deep_hunt' }) {
+  const legacy = engine === 'legacy_verifier'
+  const Icon = legacy ? Crosshair : Compass
   return (
     <span
       className={`inline-flex flex-none items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] font-medium ${
-        op ? 'border-blue-500/30 bg-blue-500/10 text-blue-300' : 'border-violet-500/30 bg-violet-500/10 text-violet-300'
+        legacy ? 'border-gray-700 bg-gray-800/50 text-gray-400' : 'border-violet-500/30 bg-violet-500/10 text-violet-300'
       }`}
     >
       <Icon className="h-3 w-3" aria-hidden="true" />
-      {op ? 'Operator' : 'Explorer'}
+      {legacy ? 'Verifier · legacy' : 'Deep Hunt'}
     </span>
   )
 }

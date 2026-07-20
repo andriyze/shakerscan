@@ -1,111 +1,182 @@
 'use client'
 
-import { Suspense, useEffect, useMemo, useState } from 'react'
+// Deep Hunt is the product surface. The implementation uses the keyless,
+// free-form agent-hunt controller and the current coding-agent session.
+
+import { Suspense, useEffect, useMemo, useRef, useState } from 'react'
 import Link from 'next/link'
-import { useRouter, useSearchParams } from 'next/navigation'
-import { BrainCircuit, Check, ChevronDown, Rocket } from 'lucide-react'
+import { useSearchParams } from 'next/navigation'
+import { CircleStop, Compass, Rocket, ShieldCheck } from 'lucide-react'
 import {
+  cancelAgentHuntSession,
   createTargetPolicyApproval,
-  getResearchEpisode,
-  getResearchReadiness,
+  getAgentHuntSession,
+  getAgentTwoTierFindings,
   getTargets,
-  launchResearchCampaign,
-  type ResearchPlannerMode,
+  replyAgentHuntSession,
+  startAgentHuntSession,
+  verifySuspectedAgentFinding,
+  type AgentHuntSession,
+  type AgentHuntStatus,
+  type AgentSuspectedFinding,
+  type AgentTwoTierFindings,
   type Target,
 } from '@/lib/api'
-import { Button, Card, ErrorState, Skeleton } from '@/components/ui'
-import { isWebTarget } from '@/lib/targets'
-import {
-  DURATIONS, PROFILES, familiesForIntensity, type DurationKey, type Intensity,
-  hostFromUrl, targetLabel,
-} from '@/components/hunt'
+import { Button, Card, ConfirmDialog, EmptyState, ErrorState, Field, Input, SeverityBadge, Select, Skeleton, Textarea, useToast } from '@/components/ui'
+import { RunStatusBadge, hostFromUrl, targetLabel, type RunState } from '@/components/hunt'
 import { EngineHint, InvestigatorTabs } from '@/components/hunt/InvestigatorTabs'
 import { RecentHunts } from '@/components/hunt/RecentHunts'
+import { isWebTarget } from '@/lib/targets'
 
 const DEFAULT_OBJECTIVE =
-  'Find and verify the highest-impact security weaknesses on this target. Prioritize authorization, injection, sensitive data exposure, and workflow abuse. Keep going until the budget is spent or no valuable action remains.'
+  'Explore the target autonomously, pursue the highest-value security leads, use bounded active testing where it adds evidence, and verify supported findings through the proof moat.'
 
-function ResearchAgentPage() {
-  const router = useRouter()
+const TERMINAL: AgentHuntStatus[] = ['completed', 'cancelled', 'failed']
+const AGENT_RUN_STATE: Record<AgentHuntStatus, RunState> = {
+  awaiting_planner: 'waiting',
+  planning: 'running',
+  completed: 'completed',
+  cancelled: 'cancelled',
+  failed: 'failed',
+}
+const isTerminal = (status?: AgentHuntStatus | null) => !!status && TERMINAL.includes(status)
+
+function DeepHuntPage() {
+  const toast = useToast()
   const searchParams = useSearchParams()
   const [targets, setTargets] = useState<Target[]>([])
   const [targetId, setTargetId] = useState('')
-  const [intensity, setIntensity] = useState<Intensity>('hunt')
-  const [duration, setDuration] = useState<DurationKey>('standard')
-  const [authorized, setAuthorized] = useState(false)
   const [objective, setObjective] = useState(DEFAULT_OBJECTIVE)
-  const [families, setFamilies] = useState<string[]>(familiesForIntensity('hunt'))
-  const [plannerMode, setPlannerMode] = useState<ResearchPlannerMode>('agent')
-  const [aiReady, setAiReady] = useState<boolean | null>(null)
-  const [executionReady, setExecutionReady] = useState<boolean | null>(null)
+  const [maxIterations, setMaxIterations] = useState('12')
+  const [tokenBudget, setTokenBudget] = useState('6000')
+  const [selectedRunId, setSelectedRunId] = useState<string | null>(null)
+  const [session, setSession] = useState<AgentHuntSession | null>(null)
+  const [findings, setFindings] = useState<AgentTwoTierFindings | null>(null)
   const [loading, setLoading] = useState(true)
-  const [busy, setBusy] = useState(false)
+  const [starting, setStarting] = useState(false)
+  const [pendingStart, setPendingStart] = useState(false)
+  const [cancelling, setCancelling] = useState(false)
+  const [verifyingId, setVerifyingId] = useState<string | null>(null)
+  const [pendingVerify, setPendingVerify] = useState<AgentSuspectedFinding | null>(null)
   const [error, setError] = useState<string | null>(null)
 
-  const profile = PROFILES[intensity]
-  const availableFamilies = familiesForIntensity(intensity)
-  const activeTarget = useMemo(() => targets.find((t) => t.id === targetId), [targetId, targets])
-
-  // Backend deep-links land here as ?episode_id=… — resolve to the run it belongs to.
-  useEffect(() => {
-    const episodeId = searchParams.get('episode_id')?.trim()
-    if (!episodeId) return
-    getResearchEpisode(episodeId)
-      .then((detail) => router.replace(`/settings/research-agent/runs/${detail.episode.campaign_id || episodeId}`))
-      .catch(() => undefined)
-  }, [searchParams, router])
+  const sessionRef = useRef<AgentHuntSession | null>(null)
+  sessionRef.current = session
+  const findingsTargetId = session?.target_id || targetId
+  const activeTarget = useMemo(() => targets.find((t) => t.id === findingsTargetId), [targets, findingsTargetId])
+  const launchTarget = useMemo(() => targets.find((t) => t.id === targetId), [targets, targetId])
+  const activeHost = activeTarget ? hostFromUrl(activeTarget.url) : ''
 
   useEffect(() => {
     let cancelled = false
-    Promise.all([getTargets(), getResearchReadiness()])
-      .then(([targetData, readiness]) => {
+    getTargets()
+      .then((data) => {
         if (cancelled) return
-        const rows: Target[] = Array.isArray(targetData?.targets) ? targetData.targets : Array.isArray(targetData) ? targetData : []
+        const rows: Target[] = Array.isArray(data?.targets) ? data.targets : Array.isArray(data) ? data : []
         const web = rows.filter(isWebTarget)
         setTargets(web)
-        const requestedTarget = searchParams.get('target')?.trim()
-        setTargetId(requestedTarget && web.some((target) => target.id === requestedTarget) ? requestedTarget : '')
-        setAiReady(readiness.configured_planner_ready ?? readiness.planner_ready)
-        setPlannerMode(readiness.default_planner_mode || 'agent')
-        setExecutionReady(readiness.execution_enabled)
+        const requested = searchParams.get('target')?.trim()
+        if (requested && web.some((t) => t.id === requested)) setTargetId(requested)
+        const requestedObjective = searchParams.get('objective')?.trim()
+        if (requestedObjective) setObjective(requestedObjective)
       })
-      .catch((err) => { if (!cancelled) setError(err instanceof Error ? err.message : 'Failed to load') })
+      .catch((err) => { if (!cancelled) setError(err instanceof Error ? err.message : 'Failed to load targets') })
       .finally(() => { if (!cancelled) setLoading(false) })
+    const requestedRun = searchParams.get('run')?.trim()
+    if (requestedRun) setSelectedRunId(requestedRun)
     return () => { cancelled = true }
   }, [searchParams])
 
-  const gated = profile.mode === 'gated'
-  const canStart = Boolean(targetId)
-    && (plannerMode !== 'configured_ai' || aiReady === true)
-    && (!gated || (authorized && families.length > 0 && executionReady !== false)) && !busy
+  // Poll the selected session while it is non-terminal.
+  useEffect(() => {
+    if (!selectedRunId) return
+    let cancelled = false
+    const tick = () => {
+      getAgentHuntSession(selectedRunId)
+        .then((data) => { if (!cancelled) setSession(data) })
+        .catch(() => undefined)
+    }
+    tick()
+    const timer = window.setInterval(() => {
+      if (isTerminal(sessionRef.current?.status)) return
+      tick()
+    }, 2500)
+    return () => { cancelled = true; window.clearInterval(timer) }
+  }, [selectedRunId])
+
+  // Poll the two-tier findings for whichever target is in focus.
+  useEffect(() => {
+    if (!findingsTargetId) { setFindings(null); return }
+    let cancelled = false
+    const tick = () => {
+      getAgentTwoTierFindings(findingsTargetId)
+        .then((data) => { if (!cancelled) setFindings(data) })
+        .catch(() => undefined)
+    }
+    tick()
+    const timer = window.setInterval(tick, 15000)
+    return () => { cancelled = true; window.clearInterval(timer) }
+  }, [findingsTargetId])
 
   const startHunt = async () => {
-    if (!activeTarget || !canStart) return
-    setBusy(true); setError(null)
+    if (!targetId || !launchTarget || starting) return
+    setStarting(true); setError(null)
     try {
-      const { hours, episodes } = DURATIONS[duration]
-      let approvalReceiptId: string | undefined
-      if (gated) {
-        approvalReceiptId = await createTargetPolicyApproval(
-          activeTarget.id, activeTarget.url, hours * 60 + 10,
-          profile.risk === 'credential' ? 'credential' : 'active',
-        )
-      }
-      const res = await launchResearchCampaign({
-        target_id: activeTarget.id,
-        intensity,
-        planner_mode: plannerMode,
-        approval_receipt_id: approvalReceiptId,
-        duration_hours: hours,
-        max_episodes: episodes,
+      const approvalReceiptId = await createTargetPolicyApproval(
+        launchTarget.id,
+        launchTarget.url,
+        120,
+        'credential',
+      )
+      const started = await startAgentHuntSession(targetId, {
         objective: objective.trim() || DEFAULT_OBJECTIVE,
-        allowed_families: gated ? families : [],
-        created_by: 'autonomous_hunt_ui',
+        max_iterations: Math.min(24, Math.max(1, Number.parseInt(maxIterations, 10) || 12)),
+        token_budget: Math.min(20000, Math.max(1000, Number.parseInt(tokenBudget, 10) || 6000)),
+        mode: 'deep_hunt',
+        approval_receipt_id: approvalReceiptId,
       })
-      router.push(`/settings/research-agent/runs/${res.campaign.id}`)
+      setSession(started)
+      setSelectedRunId(started.run_id)
+      toast.success('Deep Hunt started — continue it from your coding agent')
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Could not start the hunt')
-      setBusy(false)
+      const message = err instanceof Error ? err.message : 'Could not start the hunt'
+      setError(message)
+      toast.error(message)
+    } finally {
+      setStarting(false)
+    }
+  }
+
+  const cancelHunt = async () => {
+    if (!selectedRunId || cancelling) return
+    setCancelling(true)
+    try {
+      setSession(await cancelAgentHuntSession(selectedRunId))
+      toast.success('Deep Hunt cancelled')
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not cancel the hunt')
+    } finally {
+      setCancelling(false)
+    }
+  }
+
+  // Runs only after the operator confirms the approval grant (see ConfirmDialog).
+  const runVerify = async (finding: AgentSuspectedFinding) => {
+    if (!activeTarget) return
+    setVerifyingId(finding.id)
+    try {
+      const receiptId = await createTargetPolicyApproval(activeTarget.id, activeTarget.url, 30, 'credential')
+      const result = await verifySuspectedAgentFinding(finding.id, receiptId)
+      if (result.verified) {
+        toast.success('Verified — promoted through the proof moat', { link: { href: `/findings/${result.verified_finding_id || finding.id}`, label: 'View finding' } })
+      } else {
+        toast.info(result.error ? `Not promoted: ${result.error}` : 'Not promoted — proof moat did not confirm it')
+      }
+      if (findingsTargetId) setFindings(await getAgentTwoTierFindings(findingsTargetId))
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Verification failed')
+    } finally {
+      setVerifyingId(null)
     }
   }
 
@@ -115,9 +186,11 @@ function ResearchAgentPage() {
     <div>
       <header className="flex flex-col gap-4 border-b border-gray-800 pb-5 sm:flex-row sm:items-end sm:justify-between">
         <div>
-          <div className="flex items-center gap-2 text-sm text-blue-300"><BrainCircuit className="h-4 w-4" />AI Investigator · Operator</div>
-          <h1 className="mt-1 text-2xl font-bold tracking-tight text-white">Turn the hunter loose on a target</h1>
-          <p className="mt-2 max-w-2xl text-sm leading-6 text-gray-400">Operator runs vetted, menu-driven actions and can prove findings all the way to verified. For free-form probing that composes its own requests and surfaces new leads, use <Link href="/settings/research-agent/explorer" className="text-blue-300 underline-offset-2 hover:underline">Explorer</Link>.</p>
+          <div className="flex items-center gap-2 text-sm text-blue-300"><Compass className="h-4 w-4" />AI Investigator</div>
+          <h1 className="mt-1 text-2xl font-bold tracking-tight text-white">Deep Hunt</h1>
+          <p className="mt-2 max-w-2xl text-sm leading-6 text-gray-400">
+            Your coding agent explores freely, runs bounded active probes, and backs every claim with real tool output. Evidence-backed leads begin <span className="text-amber-300">suspected</span>; supported proof workflows promote them to <span className="text-emerald-300">verified</span>.
+          </p>
         </div>
         <div className="flex flex-col items-start gap-1.5 sm:items-end">
           <InvestigatorTabs />
@@ -126,211 +199,297 @@ function ResearchAgentPage() {
       </header>
 
       {error ? <div className="mt-4"><ErrorState message={error} /></div> : null}
-      {plannerMode === 'configured_ai' && aiReady === false ? (
-        <div className="mt-4 rounded-lg border border-red-500/30 bg-red-500/[0.06] p-4 text-sm text-red-200">
-          No AI provider is configured. <Link href="/settings" className="font-medium underline underline-offset-2">Open AI settings</Link> to add one before hunting.
-        </div>
+
+      <div className="mt-5 grid gap-5 lg:grid-cols-2">
+        {/* Launch */}
+        <Card className="p-5">
+          <h2 className="text-sm font-semibold text-white">Start a Deep Hunt</h2>
+          <div className="mt-4 space-y-4">
+            <Field label="Target">
+              <Select value={targetId} onChange={(e) => setTargetId(e.target.value)}>
+                <option value="">Choose a target…</option>
+                {!targets.length ? <option value="" disabled>No web targets — add one under Targets</option> : null}
+                {targets.map((t) => <option key={t.id} value={t.id}>{targetLabel(t)} · {hostFromUrl(t.url)}</option>)}
+              </Select>
+            </Field>
+            <Field label="Objective" hint="What should it investigate? The AI chooses its own requests and tools.">
+              <Textarea value={objective} onChange={(e) => setObjective(e.target.value)} rows={3} maxLength={2000} />
+            </Field>
+            <div className="grid grid-cols-2 gap-3">
+              <Field label="Max turns" hint="1–24 planner turns.">
+                <Input type="number" min={1} max={24} value={maxIterations} onChange={(e) => setMaxIterations(e.target.value)} />
+              </Field>
+              <Field label="Token budget" hint="1000–20000 per run.">
+                <Input type="number" min={1000} max={20000} step={500} value={tokenBudget} onChange={(e) => setTokenBudget(e.target.value)} />
+              </Field>
+            </div>
+            <div className="flex items-center justify-between gap-3 border-t border-gray-800 pt-4">
+              <p className="text-xs text-gray-500">
+                Active, same-origin security testing with hard turn, request, and action ceilings. Arbitrary write requests remain blocked; deterministic workflows handle proof and controlled mutation.
+              </p>
+              <Button onClick={() => setPendingStart(true)} loading={starting} disabled={!targetId} className="min-w-36">
+                <Rocket className="h-4 w-4" />Start Deep Hunt
+              </Button>
+            </div>
+          </div>
+        </Card>
+
+        {/* Monitor */}
+        {selectedRunId ? (
+          <SessionMonitor session={session} cancelling={cancelling} onCancel={cancelHunt} onReplied={setSession} />
+        ) : (
+          <Card className="flex items-center justify-center p-5">
+            <EmptyState message="No hunt selected" hint="Start one, or pick a run from the feed below to watch it live." />
+          </Card>
+        )}
+      </div>
+
+      {/* Two-tier findings */}
+      {findingsTargetId ? (
+        <TwoTierFindings findings={findings} verifyingId={verifyingId} onVerify={setPendingVerify} targetHost={activeHost} />
       ) : null}
 
-      {/* Start a hunt — three picks */}
-      <Card className="mt-5 overflow-hidden">
-        <div className="grid gap-6 p-5 sm:p-6">
-          <Field label="How should it run?">
-            <div className="grid gap-3 sm:grid-cols-2">
-              <button
-                type="button"
-                onClick={() => setPlannerMode('agent')}
-                aria-pressed={plannerMode === 'agent'}
-                className={`rounded-xl border p-3.5 text-left transition-colors ${plannerMode === 'agent' ? 'border-blue-500/60 bg-blue-500/[0.09]' : 'border-gray-800 bg-gray-950/50 hover:border-gray-700'}`}
-              >
-                <div className="font-semibold text-white">Agent-guided <span className="text-xs font-normal text-blue-300">Default</span></div>
-                <p className="mt-1 text-xs leading-5 text-gray-400">Your coding agent chooses each bounded action. The hunt pauses when that agent is not connected.</p>
-              </button>
-              <button
-                type="button"
-                onClick={() => setPlannerMode('configured_ai')}
-                disabled={aiReady === false}
-                aria-pressed={plannerMode === 'configured_ai'}
-                className={`rounded-xl border p-3.5 text-left transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${plannerMode === 'configured_ai' ? 'border-violet-500/60 bg-violet-500/[0.09]' : 'border-gray-800 bg-gray-950/50 hover:border-gray-700'}`}
-              >
-                <div className="font-semibold text-white">Unattended</div>
-                <p className="mt-1 text-xs leading-5 text-gray-400">{aiReady === false ? 'Configure a provider in Settings first.' : 'Runs unattended on the server and continues after your agent closes.'}</p>
-              </button>
-            </div>
-          </Field>
-
-          <Field label="1 · Target">
-            <select
-              value={targetId}
-              onChange={(e) => { setTargetId(e.target.value); setAuthorized(false) }}
-              className="w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2.5 text-sm text-white focus:border-blue-500 focus:outline-none"
-            >
-              <option value="">Choose a target…</option>
-              {!targets.length ? <option value="">No web targets — add one under Targets</option> : null}
-              {targets.map((t) => <option key={t.id} value={t.id}>{targetLabel(t)} · {hostFromUrl(t.url)}</option>)}
-            </select>
-          </Field>
-
-          <Field label="2 · How hard should it go?">
-            <div className="grid gap-3 sm:grid-cols-2">
-              {(['analyze', 'hunt'] as Intensity[]).map((value) => {
-                const p = PROFILES[value]
-                const on = intensity === value
-                return (
-                  <button
-                    key={value}
-                    type="button"
-                    aria-pressed={on}
-                    onClick={() => {
-                      setIntensity(value)
-                      setFamilies(familiesForIntensity(value))
-                      if (value === 'analyze') setAuthorized(false)
-                    }}
-                    className={`rounded-xl border p-3.5 text-left transition-colors ${on ? p.selected : 'border-gray-800 bg-gray-950/50 hover:border-gray-700'}`}
-                  >
-                    <div className="flex items-center justify-between">
-                      <span className={`font-semibold ${on ? p.accent : 'text-white'}`}>{p.name}</span>
-                      <span className={`flex h-4 w-4 items-center justify-center rounded-full border ${on ? 'border-current bg-current/20' : 'border-gray-700'}`}>{on ? <Check className="h-3 w-3" /> : null}</span>
-                    </div>
-                    <p className="mt-0.5 text-[11px] font-medium uppercase tracking-wide text-gray-500">{p.summary}</p>
-                    <p className="mt-2 text-xs leading-5 text-gray-400">{p.detail}</p>
-                  </button>
-                )
-              })}
-            </div>
-            <details className="mt-3 rounded-lg border border-gray-800 bg-gray-950/30">
-              <summary className="cursor-pointer px-3 py-2.5 text-xs font-medium text-gray-500 hover:text-gray-300">Advanced hunt types</summary>
-              <div className="grid gap-3 border-t border-gray-800 p-3 sm:grid-cols-2">
-                {(['relentless', 'deep_hunt'] as Intensity[]).map((value) => {
-                  const p = PROFILES[value]
-                  const on = intensity === value
-                  return (
-                    <button
-                      key={value}
-                      type="button"
-                      aria-pressed={on}
-                      onClick={() => {
-                        setIntensity(value)
-                        setFamilies(familiesForIntensity(value))
-                      }}
-                      className={`rounded-xl border p-3.5 text-left transition-colors ${on ? p.selected : 'border-gray-800 bg-gray-950/50 hover:border-gray-700'}`}
-                    >
-                      <div className="flex items-center justify-between">
-                        <span className={`font-semibold ${on ? p.accent : 'text-white'}`}>{p.name}</span>
-                        <span className={`flex h-4 w-4 items-center justify-center rounded-full border ${on ? 'border-current bg-current/20' : 'border-gray-700'}`}>{on ? <Check className="h-3 w-3" /> : null}</span>
-                      </div>
-                      <p className="mt-0.5 text-[11px] font-medium uppercase tracking-wide text-gray-500">{p.summary}</p>
-                      <p className="mt-2 text-xs leading-5 text-gray-400">{p.detail}</p>
-                    </button>
-                  )
-                })}
-              </div>
-            </details>
-            {intensity === 'deep_hunt' ? (
-              <p className="mt-2 text-xs text-fuchsia-200">Deep requires two configured test accounts. Readiness is checked before active work starts. <Link href="/interactive" className="underline underline-offset-2">Manage test accounts</Link>.</p>
-            ) : null}
-          </Field>
-
-          <Field label="3 · How long?">
-            <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-              {(Object.keys(DURATIONS) as DurationKey[]).map((key) => {
-                const d = DURATIONS[key]
-                const on = duration === key
-                return (
-                  <button
-                    key={key}
-                    type="button"
-                    onClick={() => setDuration(key)}
-                    aria-pressed={on}
-                    className={`rounded-xl border p-3 text-center transition-colors ${on ? 'border-blue-500/60 bg-blue-500/[0.09]' : 'border-gray-800 bg-gray-950/50 hover:border-gray-700'}`}
-                  >
-                    <div className={`text-sm font-semibold ${on ? 'text-blue-200' : 'text-white'}`}>{d.name}</div>
-                    <div className="mt-0.5 text-xs text-gray-500">{d.detail}</div>
-                  </button>
-                )
-              })}
-            </div>
-          </Field>
-
-          {gated ? (
-            <label className="flex cursor-pointer items-start gap-3 rounded-lg border border-orange-500/25 bg-orange-500/[0.05] p-3">
-              <input type="checkbox" checked={authorized} onChange={(e) => setAuthorized(e.target.checked)} className="mt-0.5" />
-              <span className="text-sm text-orange-100">I own this target or have explicit permission to test it.
-                <span className="mt-0.5 block text-xs text-gray-500">Required for active testing — creates a target-scoped approval.</span>
-              </span>
-            </label>
-          ) : null}
-
-          <details className="rounded-lg border border-gray-800 bg-gray-950/30">
-            <summary className="flex cursor-pointer list-none items-center justify-between px-3 py-2.5 text-xs font-medium text-gray-500 hover:text-gray-300">
-              <span>Advanced — objective &amp; focus</span><ChevronDown className="h-4 w-4" />
-            </summary>
-            <div className="grid gap-4 border-t border-gray-800 p-3">
-              <label className="text-xs font-medium text-gray-400">What should it focus on?
-                <textarea value={objective} onChange={(e) => setObjective(e.target.value)} rows={3} maxLength={2000} className="mt-1.5 w-full resize-y rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm leading-6 text-white focus:border-blue-500 focus:outline-none" />
-              </label>
-              {gated ? (
-                <div>
-                  <div className="text-xs font-medium text-gray-400">Vulnerability families</div>
-                  <div className="mt-1.5 flex flex-wrap gap-2">
-                    {availableFamilies.map((f) => (
-                      <label key={f} className="flex items-center gap-2 rounded-lg border border-gray-800 px-3 py-1.5 text-xs text-gray-300">
-                        <input type="checkbox" checked={families.includes(f)} onChange={() => setFamilies((cur) => cur.includes(f) ? cur.filter((x) => x !== f) : [...cur, f])} />
-                        {familyLabel(f)}
-                      </label>
-                    ))}
-                  </div>
-                </div>
-              ) : null}
-            </div>
-          </details>
-
-          <div className="flex items-center justify-between gap-3 border-t border-gray-800 pt-4">
-            <p className="text-xs text-gray-500">
-              {gated
-                ? `${plannerMode === 'configured_ai' ? 'Continues on the server after this page closes.' : 'Pauses whenever your coding agent is unavailable.'} Up to ${DURATIONS[duration].episodes} episodes over ${DURATIONS[duration].detail}; each episode is limited to ${profile.budget.active_actions} active actions and ${profile.budget.requests} request units. Stops early when useful progress ends.`
-                : 'Read-only — inspects evidence and sends no active probes.'}
-            </p>
-            <Button onClick={startHunt} disabled={!canStart} className="min-w-44">
-              <Rocket className="h-4 w-4" />{busy ? 'Starting…' : `Start ${profile.name}`}
-            </Button>
-          </div>
-        </div>
-      </Card>
-
-      {/* Unified run feed */}
+      {/* Unified history retains legacy guided runs alongside current Deep Hunts. */}
       <section className="mt-8">
-        <h2 className="text-sm font-semibold text-gray-300">Recent hunts</h2>
-        <p className="mt-1 text-xs text-gray-500">Operator campaigns and Explorer sessions, together in start-time order.</p>
+        <h2 className="text-sm font-semibold text-gray-300">Recent investigations</h2>
         <RecentHunts />
       </section>
+
+      <ConfirmDialog
+        open={pendingStart}
+        title="Authorize Deep Hunt?"
+        message={
+          <div className="space-y-2">
+            <p>Deep Hunt performs AI-driven exploration and bounded active exploitation against <span className="font-mono text-gray-200">{launchTarget ? hostFromUrl(launchTarget.url) : 'this target'}</span>.</p>
+            <p className="text-xs text-gray-500">Continue only if you own the target or have explicit permission. This creates a target-scoped, expiring credential-tier approval. Requests remain same-origin and bounded; arbitrary write methods stay blocked.</p>
+          </div>
+        }
+        confirmLabel="Authorize & start"
+        busy={starting}
+        onCancel={() => setPendingStart(false)}
+        onConfirm={() => { setPendingStart(false); void startHunt() }}
+      />
+
+      <ConfirmDialog
+        open={pendingVerify !== null}
+        title="Verify this finding?"
+        message={
+          <div className="space-y-2">
+            <p>This creates a target-scoped, <span className="text-gray-200">credential-tier approval receipt</span>{activeHost ? <> for <span className="font-mono text-gray-200">{activeHost}</span></> : null} and re-runs the deterministic proof moat against the live target.</p>
+            <p className="text-xs text-gray-500">Only proceed if you own the target or have explicit permission to actively test it. Needs execution enabled; supports BOLA, auth-bypass, data-exposure, and mass-assignment.</p>
+          </div>
+        }
+        confirmLabel="Create approval & verify"
+        busy={verifyingId !== null}
+        onCancel={() => setPendingVerify(null)}
+        onConfirm={() => { const finding = pendingVerify; setPendingVerify(null); if (finding) void runVerify(finding) }}
+      />
     </div>
   )
 }
 
-function familyLabel(value: string): string {
-  const labels: Record<string, string> = {
-    sqli: 'SQL injection', xss: 'Cross-site scripting', auth: 'Authentication',
-    bola: 'Object-level authorization', mass_assignment: 'Mass assignment',
-    workflow: 'Workflow abuse', data_exposure: 'Sensitive data exposure',
-    access_control: 'Access control', field_constraint: 'Restricted fields',
+function SessionMonitor({
+  session,
+  cancelling,
+  onCancel,
+  onReplied,
+}: {
+  session: AgentHuntSession | null
+  cancelling: boolean
+  onCancel: () => void
+  onReplied: (next: AgentHuntSession) => void
+}) {
+  const toast = useToast()
+  const [reply, setReply] = useState('')
+  const [submitting, setSubmitting] = useState(false)
+  const scrollRef = useRef<HTMLDivElement>(null)
+
+  // Keep the transcript pinned to the latest message as it grows.
+  useEffect(() => {
+    const el = scrollRef.current
+    if (el) el.scrollTop = el.scrollHeight
+  }, [session?.transcript.length])
+
+  if (!session) return <Card className="p-5"><Skeleton className="h-64" /></Card>
+
+  const terminal = isTerminal(session.status)
+  const awaiting = session.status === 'awaiting_planner'
+
+  const submitReply = async () => {
+    if (!session.run_id || !reply.trim() || submitting) return
+    setSubmitting(true)
+    try {
+      const next = await replyAgentHuntSession(session.run_id, reply.trim())
+      onReplied(next)
+      setReply('')
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not submit the turn')
+    } finally {
+      setSubmitting(false)
+    }
   }
-  return labels[value] || value.replace(/_/g, ' ')
+
+  return (
+    <Card className="flex flex-col p-5">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2">
+            <RunStatusBadge state={AGENT_RUN_STATE[session.status] ?? 'idle'} />
+            <span className="text-xs tabular-nums text-gray-500">turn {session.iterations}/{session.max_iterations}</span>
+          </div>
+          <p className="mt-1 line-clamp-2 text-xs text-gray-500">{session.objective}</p>
+        </div>
+        {!terminal ? (
+          <Button variant="danger" onClick={onCancel} loading={cancelling}><CircleStop className="h-4 w-4" />Stop</Button>
+        ) : null}
+      </div>
+
+      {awaiting ? (
+        <div className="mt-3 rounded-lg border border-blue-500/30 bg-blue-500/[0.06] p-3 text-xs text-blue-100">
+          Waiting for a planner turn. Return to the coding agent that started this hunt and ask it to continue — it reads the transcript and replies with a tool-calls block. Nothing advances on its own.
+        </div>
+      ) : null}
+      {session.stop_reason && terminal ? (
+        <p className="mt-3 text-xs text-amber-300">Stopped: {session.stop_reason.replace(/_/g, ' ')}</p>
+      ) : null}
+      {session.result ? (
+        <div className="mt-3 grid grid-cols-3 gap-2 text-center">
+          <Outcome label="Suspected" value={session.result.net_new_count} />
+          <Outcome label="Verified" value={session.result.verified_count} tone="good" />
+          <Outcome label="HTTP evidence" value={session.result.http_evidence_count} />
+        </div>
+      ) : null}
+
+      <div ref={scrollRef} className="mt-3 max-h-80 overflow-y-auto rounded-lg border border-gray-800 bg-gray-950/60 p-2">
+        {session.transcript.length ? (
+          <ol className="space-y-2">
+            {session.transcript.map((message, index) => <TranscriptRow key={index} role={message.role} content={message.content} />)}
+          </ol>
+        ) : (
+          <p className="p-4 text-center text-xs text-gray-600">No transcript yet.</p>
+        )}
+      </div>
+
+      {!terminal ? (
+        <details className="mt-3 rounded-lg border border-gray-800 bg-gray-950/30">
+          <summary className="cursor-pointer px-3 py-2 text-xs font-medium text-gray-500 hover:text-gray-300">Advanced — submit a planner turn manually</summary>
+          <div className="space-y-2 border-t border-gray-800 p-3">
+            <p className="text-[11px] leading-4 text-gray-500">Paste a fenced <code>json</code> block with <code>tool_calls</code>, or a final <code>{'{"done":true,"findings":[...]}'}</code> debrief. For power users and demos; normally your coding agent does this.</p>
+            <Textarea value={reply} onChange={(e) => setReply(e.target.value)} rows={4} mono placeholder={'```json\n{"tool_calls":[{"name":"query_kb","arguments":{"kind":"findings"}}]}\n```'} disabled={!awaiting || submitting} />
+            <div className="flex justify-end">
+              <Button size="sm" onClick={submitReply} loading={submitting} disabled={!awaiting || !reply.trim()}>Submit turn</Button>
+            </div>
+          </div>
+        </details>
+      ) : null}
+    </Card>
+  )
 }
 
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
+function TranscriptRow({ role, content }: { role: 'system' | 'user' | 'assistant'; content: string }) {
+  const isTool = role === 'user' && content.startsWith('[tool ')
+  const isSteering = content.startsWith('[System:')
+  const label = role === 'assistant' ? 'Planner' : isTool ? 'Tool result' : isSteering ? 'System' : role === 'system' ? 'System prompt' : 'Context'
+  const tone =
+    role === 'assistant' ? 'border-emerald-500/30 bg-emerald-500/[0.05] text-emerald-100'
+      : isTool ? 'border-blue-500/25 bg-blue-500/[0.05] text-blue-100'
+        : 'border-gray-800 bg-gray-900/60 text-gray-300'
   return (
-    <div>
-      <div className="mb-2 text-xs font-semibold uppercase tracking-wider text-gray-500">{label}</div>
-      {children}
+    <li className={`rounded-md border px-2.5 py-2 ${tone}`}>
+      <div className="mb-1 text-[10px] font-semibold uppercase tracking-wider opacity-70">{label}</div>
+      <pre className="whitespace-pre-wrap break-words font-mono text-[11px] leading-5">{content}</pre>
+    </li>
+  )
+}
+
+function Outcome({ label, value, tone = 'default' }: { label: string; value: number; tone?: 'default' | 'good' }) {
+  return (
+    <div className="rounded-lg border border-gray-800 bg-gray-950/40 p-2">
+      <div className={`text-lg font-semibold tabular-nums ${tone === 'good' ? 'text-emerald-300' : 'text-white'}`}>{value}</div>
+      <div className="text-[10px] uppercase tracking-wider text-gray-500">{label}</div>
     </div>
+  )
+}
+
+function TwoTierFindings({
+  findings,
+  verifyingId,
+  onVerify,
+  targetHost,
+}: {
+  findings: AgentTwoTierFindings | null
+  verifyingId: string | null
+  onVerify: (finding: AgentSuspectedFinding) => void
+  targetHost: string
+}) {
+  const verified = findings?.verified || []
+  const suspected = findings?.suspected || []
+  return (
+    <section className="mt-8">
+      <h2 className="text-sm font-semibold text-gray-300">Findings{targetHost ? ` · ${targetHost}` : ''}</h2>
+      <div className="mt-3 grid gap-5 lg:grid-cols-2">
+        <Card className="p-4">
+          <div className="mb-3 flex items-center gap-2">
+            <span className="h-2 w-2 rounded-full bg-emerald-400" />
+            <h3 className="text-sm font-semibold text-white">Verified</h3>
+            <span className="text-xs text-gray-500">proven by the moat</span>
+          </div>
+          {verified.length ? (
+            <div className="divide-y divide-gray-800">
+              {verified.map((finding) => (
+                <Link key={finding.id} href={`/findings/${finding.id}`} className="-mx-2 flex items-center gap-3 rounded px-2 py-2 hover:bg-gray-800/40">
+                  <SeverityBadge severity={finding.severity} />
+                  <span className="min-w-0 flex-1 truncate text-sm text-gray-200">{finding.title}</span>
+                  <span className="flex-none text-xs text-emerald-300">verified</span>
+                </Link>
+              ))}
+            </div>
+          ) : (
+            <p className="py-6 text-center text-xs text-gray-600">Nothing verified yet.</p>
+          )}
+        </Card>
+
+        <Card className="p-4">
+          <div className="mb-3 flex items-center gap-2">
+            <span className="h-2 w-2 rounded-full bg-amber-400" />
+            <h3 className="text-sm font-semibold text-white">Suspected</h3>
+            <span className="text-xs text-gray-500">agent leads, not yet proven</span>
+          </div>
+          {suspected.length ? (
+            <div className="divide-y divide-gray-800">
+              {suspected.map((finding) => (
+                <div key={finding.id} className="flex items-center gap-3 py-2">
+                  <SeverityBadge severity={finding.severity} />
+                  <div className="min-w-0 flex-1">
+                    <Link href={`/findings/${finding.id}`} className="block truncate text-sm text-gray-200 hover:text-white">{finding.title}</Link>
+                    {finding.family ? <span className="text-[11px] text-gray-500">{finding.family.replace(/_/g, ' ')}{finding.net_new_vs_known ? ' · net-new' : ''}</span> : null}
+                  </div>
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={() => onVerify(finding)}
+                    loading={verifyingId === finding.id}
+                    disabled={verifyingId !== null}
+                  >
+                    <ShieldCheck className="h-3.5 w-3.5" />Verify
+                  </Button>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="py-6 text-center text-xs text-gray-600">No suspected leads yet.</p>
+          )}
+        </Card>
+      </div>
+      <p className="mt-2 text-[11px] text-gray-600">Verify creates a credential-tier approval and re-runs the deterministic proof moat (needs execution enabled; supports BOLA, auth-bypass, data-exposure, mass-assignment).</p>
+    </section>
   )
 }
 
 export default function Page() {
   return (
     <Suspense fallback={<div><Skeleton className="h-96" /></div>}>
-      <ResearchAgentPage />
+      <DeepHuntPage />
     </Suspense>
   )
 }

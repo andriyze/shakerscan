@@ -1,4 +1,4 @@
 interface:
-  display_name: "Bounded Research Agent"
-  short_description: "Drive bounded Hunt episodes and proof-gated runs"
-  default_prompt: "Use $research-agent to investigate this authorized target one policy-controlled decision per observation and summarize the proof-gated outcome."
+  display_name: "Deep Hunt"
+  short_description: "AI-driven exploration and bounded active testing"
+  default_prompt: "Use $research-agent to run an authorized Deep Hunt through the keyless agent-hunt loop, preserve scope and budgets, cite tool evidence, and rely on deterministic proof for verification."

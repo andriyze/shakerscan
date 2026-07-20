@@ -1,8 +1,8 @@
-# Interactive security sessions
+# Interactive Testing
 
-**Status:** live user guide, reconciled 2026-07-17.
+**Status:** live user guide, reconciled 2026-07-20.
 
-Interactive sessions let you and a coding agent investigate an authorized web application with a
+Interactive Testing lets you and a coding agent investigate an authorized web application with a
 real headless browser. They are useful for authentication flows, multi-step business logic, visual
 evidence, and access-control checks that need more context than an automated scan.
 

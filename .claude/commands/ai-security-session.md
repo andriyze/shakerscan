@@ -1,6 +1,6 @@
-# AI Security Session
+# Interactive Testing
 
-Drive an authorized interactive browser security workflow with the `ai-security-session` skill.
+Drive an authorized Interactive Testing browser workflow with the compatibility-named `ai-security-session` skill.
 
 **Usage**: `/ai-security-session <target_url>`
 

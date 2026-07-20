@@ -1,0 +1,112 @@
+# ShakerScan product model
+
+This document is the canonical user-facing vocabulary for ShakerScan. API namespaces and database
+values may retain older names for compatibility, but the UI, README, agent skills, and live
+documentation should use the terms below.
+
+## Four primary workflows
+
+| User goal | Product workflow | Execution |
+|---|---|---|
+| Run established automated checks | **DAST Scan** | `/scans`, scanner workers |
+| Let an AI investigate autonomously | **Deep Hunt** | keyless `/agent/hunt/*` loop |
+| Test manually with a browser or multiple users | **Interactive Testing** | `/session/*` |
+| Review and triage results | **Findings** | `/findings*`, `/retests*` |
+
+Specialized scanners remain first-class:
+
+- **Continuous ASM** keeps a target’s endpoint inventory and coverage current.
+- **AI Gate** tests chat, RAG, agent, and MCP systems.
+- **Model Intake** checks model artifacts, provenance, signatures, and policy.
+
+## Natural-language routing
+
+Agents must preserve these distinctions:
+
+| User phrase | Route |
+|---|---|
+| “scan example.com” | Quick DAST, the documented default |
+| “quick/standard/deep/full/aggressive/smart scan” | Exact DAST scan type |
+| “deep hunt”, “autonomous hunt”, “investigate autonomously” | Deep Hunt |
+| “verify this finding” | Deterministic finding verifier/retest |
+| “interactive testing”, “test manually”, “browser session” | Interactive Testing |
+
+`deep scan` is DAST. `Deep Hunt` is AI-driven exploration and bounded exploitation.
+
+## Deep Hunt
+
+Deep Hunt is one user workflow. The current coding-agent session:
+
+1. reads a redacted target context;
+2. composes its own same-origin probes;
+3. queries stored endpoints, findings, leads, and principal state;
+4. runs bounded active scanner templates when authorized;
+5. compares responses across controls and principals;
+6. records only findings backed by tool-output evidence;
+7. asks the server’s deterministic proof workflows to verify supported claims.
+
+The user does not choose between “Operator” and “Explorer.” Those were implementation concepts.
+The compatibility `/research/*` controller remains available for specialized guided verification,
+but a Deep Hunt request launches `/agent/hunt/{target_id}/session` with `mode:"deep_hunt"`.
+
+Deep Hunt requires:
+
+- explicit confirmation that the target is owned or authorized;
+- a target-bound, expiring credential-tier approval;
+- the server active-execution feature flag;
+- hard turn, request, and active-action ceilings.
+
+The free-form loop may use approved active scanner templates. Arbitrary state-changing HTTP remains
+blocked; controlled mutations belong to typed workflows with cleanup, restoration, and proof
+contracts.
+
+## Findings
+
+The primary source labels are:
+
+- DAST
+- Deep Hunt
+- Interactive
+- AI Gate
+- Model Intake
+- ASM
+- Manual
+
+Deep Hunt includes direct AI-investigator findings and scanner findings created as part of a hunt.
+Compatibility API values such as `autonomous`, `ai_session`, and the
+`evidence.research.driven_by` marker are normalized to those display labels.
+
+Finding dimensions stay separate:
+
+- **Severity:** Critical, High, Medium, Low, Info
+- **Proof:** Verified, Suspected, Unverified, Inconclusive, Refuted
+- **Source:** the workflow above
+- **Lifecycle:** Active, Resolved, False positive, Accepted risk
+
+Do not show both `DAST` and `Deep Hunt` as equal source badges for the same row. If a hunt launched
+the DAST work, the user-facing source is Deep Hunt; the underlying scanner remains available in
+technical metadata.
+
+## Supporting surfaces
+
+- **Leads** is the hypothesis backlog used by Deep Hunt and verification.
+- **Test Builder** is an advanced, hand-crafted experiment tool.
+- **Mission Ledger** is the read-only `/campaigns` action history; it does not launch Deep Hunt.
+- **Evidence** stores proof objects and export/retention records.
+- **Timeline** combines activity across products.
+
+## Compatibility terminology
+
+| Compatibility term | User-facing term |
+|---|---|
+| Autonomous Hunt | Deep Hunt |
+| Explorer | Deep Hunt implementation |
+| Operator | Guided verifier implementation |
+| Research Agent | Deep Hunt or guided verifier, depending on route |
+| AI Session / `ai_session` | Interactive |
+| Autonomous / `autonomous` finding source | Deep Hunt |
+| Plan a test | Test Builder |
+| Campaigns | Mission Ledger |
+
+Archived documents may retain historical terminology. New product copy and agent instructions must
+follow this document.

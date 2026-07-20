@@ -18,13 +18,13 @@ Project-local commands under `.claude/commands/` cover:
 
 - `/scan`, `/scan-full`, and `/scan-smart`
 - `/status`, `/workers`, `/subdomains`, and `/findings`
-- `/ai-gate`, `/ai-security-session`, and `/save-finding`
+- `/ai-gate`, `/ai-security-session`, `/deep-hunt`, and `/save-finding`
 - `/js-analyze` and `/content-discovery`
-- `/research` and `/review-skills`
+- `/research` (compatibility) and `/review-skills`
 
 Reusable task instructions live under `skills/`. Use `skills/shakerscan/SKILL.md` for the general
-workflow and the specialized skill directory for interactive testing, JS analysis, content
-discovery, bounded research, or skill-system review.
+workflow and the specialized skill directory for Interactive Testing, JS analysis, content
+discovery, Deep Hunt, or skill-system review.
 
 Do not duplicate API contracts in this file. Use `AGENTS.md`, the live
 `http://localhost:8080/openapi.json`, and the public

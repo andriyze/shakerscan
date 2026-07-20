@@ -3082,10 +3082,9 @@ export async function getResearchReadiness(): Promise<ResearchReadiness> {
 }
 
 // ---------------------------------------------------------------------------
-// Explorer — keyless free-form ReAct hunt (/agent/hunt/*, /agent/findings/*).
-// Distinct from the menu-driven Operator (/research/*): the session endpoint
-// returns a run_id immediately and is driven one planner turn at a time; the
-// UI launches + monitors + surfaces the two-tier (SUSPECTED vs VERIFIED) view.
+// Deep Hunt — keyless, free-form AI investigation (/agent/hunt/*).
+// The current coding-agent session plans each turn; ShakerScan owns scope,
+// active-tool authorization, budgets, evidence, and deterministic promotion.
 // ---------------------------------------------------------------------------
 
 export type AgentHuntStatus = 'awaiting_planner' | 'planning' | 'completed' | 'cancelled' | 'failed'
@@ -3121,6 +3120,7 @@ export interface AgentHuntSession {
   iterations: number
   max_iterations: number
   stop_reason: string | null
+  mode: 'read_only' | 'deep_hunt'
   tool_surface: { allow_write: boolean; allow_active: boolean; note: string }
   transcript: AgentHuntTranscriptMessage[]
   next_action: string
@@ -3182,20 +3182,26 @@ export interface AgentVerifyResult {
 
 export async function startAgentHuntSession(
   targetId: string,
-  payload: { objective?: string; max_iterations?: number; token_budget?: number; approval_receipt_id?: string },
+  payload: {
+    objective?: string
+    max_iterations?: number
+    token_budget?: number
+    mode?: 'read_only' | 'deep_hunt'
+    approval_receipt_id?: string
+  },
 ): Promise<AgentHuntSession> {
   const res = await fetch(`${API_URL}/agent/hunt/${encodeURIComponent(targetId)}/session`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
   })
-  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to start Explorer hunt'))
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to start Deep Hunt'))
   return res.json()
 }
 
 export async function getAgentHuntSession(runId: string): Promise<AgentHuntSession> {
   const res = await fetch(`${API_URL}/agent/hunt/session/${encodeURIComponent(runId)}`)
-  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load Explorer hunt'))
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load Deep Hunt'))
   return res.json()
 }
 
@@ -3211,7 +3217,7 @@ export async function replyAgentHuntSession(runId: string, reply: string): Promi
 
 export async function cancelAgentHuntSession(runId: string): Promise<AgentHuntSession> {
   const res = await fetch(`${API_URL}/agent/hunt/session/${encodeURIComponent(runId)}/cancel`, { method: 'POST' })
-  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to cancel Explorer hunt'))
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to cancel Deep Hunt'))
   return res.json()
 }
 
@@ -3226,7 +3232,7 @@ export async function listAgentHuntRuns(params?: {
   if (params?.limit) query.set('limit', String(params.limit))
   const qs = query.toString()
   const res = await fetch(`${API_URL}/agent/hunt/runs${qs ? `?${qs}` : ''}`)
-  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load Explorer runs'))
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load Deep Hunt runs'))
   return res.json()
 }
 
@@ -3920,7 +3926,7 @@ export async function scanTarget(targetId: string, options: Record<string, unkno
 export async function getFindings(params?: {
   severity?: string
   status?: string
-  source_type?: 'dast' | 'ai' | 'ai_gate' | 'ai_session' | 'autonomous' | 'model_intake' | 'asm' | 'manual'
+  source_type?: 'dast' | 'ai' | 'ai_gate' | 'ai_session' | 'deep_hunt' | 'autonomous' | 'model_intake' | 'asm' | 'manual'
   limit?: number
   offset?: number
   root_domain?: string

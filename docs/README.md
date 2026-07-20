@@ -1,6 +1,6 @@
 # Documentation Index
 
-**Reconciled:** 2026-07-17. Top-level documents are maintained references, live operating policy, or
+**Reconciled:** 2026-07-20. Top-level documents are maintained references, live operating policy, or
 active architecture. Dated audits, completed implementation prompts, detailed implementation
 ledgers, and superseded plans belong in [`archive/`](archive/README.md). Code, database schemas,
 runtime receipts, and tests remain authoritative when a document disagrees.
@@ -13,6 +13,7 @@ runtime receipts, and tests remain authoritative when a document disagrees.
 | [`../WALKTHROUGH.md`](../WALKTHROUGH.md) | Current text walkthrough for first run, findings, UI workflows, and agent requests |
 | [`../skills/README.md`](../skills/README.md) | Agent skill catalog, setup, and maintenance |
 | [`../AGENTS.md`](../AGENTS.md) | Canonical coding-agent operations and request examples |
+| [`product-model.md`](product-model.md) | Canonical product names, natural-language routing, source labels, and compatibility terms |
 | [`functionality-reference.md`](functionality-reference.md) | Exhaustive product map plus generated code-surface inventory |
 
 ## Product And Operations

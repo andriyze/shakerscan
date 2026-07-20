@@ -671,7 +671,8 @@ def _public_target_row(row: Any) -> dict[str, Any]:
 def _source_type_filter_sql(source_type: Optional[str]) -> str:
     """SQL fragment for the findings `source_type` filter (first-class taxonomy).
 
-    Values: dast / ai / ai_gate / ai_session / autonomous / model_intake / asm / manual.
+    Values: dast / ai / ai_gate / ai_session / deep_hunt / autonomous /
+    model_intake / asm / manual.
     model_intake, ASM, manual, and the AI sources filter separately from DAST;
     the UI exposes this same product taxonomy.
     """
@@ -681,6 +682,14 @@ def _source_type_filter_sql(source_type: Optional[str]) -> str:
         return " AND f.source = 'ai_gate'"
     if source_type == "ai_session":
         return " AND f.source = 'ai_session'"
+    if source_type == "deep_hunt":
+        return (
+            " AND ("
+            "f.source = 'autonomous'"
+            " OR f.tool = 'autonomous_workflow'"
+            " OR f.evidence->'research'->>'driven_by' = 'autonomous_research'"
+            ")"
+        )
     if source_type == "autonomous":
         return " AND (f.source = 'autonomous' OR f.tool = 'autonomous_workflow')"
     if source_type == "model_intake":
@@ -691,9 +700,11 @@ def _source_type_filter_sql(source_type: Optional[str]) -> str:
         return " AND f.source = 'manual'"
     if source_type == "dast":
         return (
-            " AND COALESCE(f.source, 'scan') NOT IN ('ai_gate', 'ai_session', 'autonomous', 'model_intake')"
+            " AND COALESCE(f.source, 'scan') NOT IN "
+            "('ai_gate', 'ai_session', 'autonomous', 'model_intake', 'asm', 'manual')"
             " AND f.ai_target_id IS NULL"
             " AND COALESCE(f.tool, '') NOT IN ('model_intake', 'autonomous_workflow')"
+            " AND COALESCE(f.evidence->'research'->>'driven_by', '') <> 'autonomous_research'"
         )
     return ""
 
@@ -18989,8 +19000,16 @@ class AgentHuntSessionStartRequest(BaseModel):
     objective: str = Field(default="", max_length=2000)
     max_iterations: int = Field(default=_AGENT_HUNT_DEFAULT_ITERATIONS, ge=1, le=_AGENT_HUNT_MAX_ITERATIONS)
     token_budget: int = Field(default=6000, ge=1000, le=20000)
+    mode: str = Field(
+        default="read_only",
+        pattern="^(read_only|deep_hunt)$",
+        description=(
+            "read_only keeps the free-form investigator passive. deep_hunt requires a "
+            "target-bound credential approval and enables bounded active tools plus proof promotion."
+        ),
+    )
     # Optional: satisfies the approval-receipt policy when the operator has enabled it (persisting
-    # SUSPECTED findings is a state change). Not required by default.
+    # SUSPECTED findings is a state change). Required for deep_hunt.
     approval_receipt_id: Optional[str] = None
 
 
@@ -19010,6 +19029,9 @@ def _agent_hunt_run_public(row: Any) -> dict[str, Any]:
     result = _decode_json_value(item.get("result")) or {}
     status = str(item.get("status") or "")
     awaiting = status == "awaiting_planner"
+    allow_write = bool(item.get("allow_write"))
+    allow_active = bool(item.get("allow_active"))
+    execution_mode = "deep_hunt" if allow_active else "read_only"
     return {
         "run_id": str(item.get("id")) if item.get("id") else None,
         "target_id": str(item.get("target_id")) if item.get("target_id") else None,
@@ -19019,10 +19041,16 @@ def _agent_hunt_run_public(row: Any) -> dict[str, Any]:
         "iterations": int(state.get("iterations") or 0),
         "max_iterations": item.get("max_iterations"),
         "stop_reason": item.get("stop_reason"),
+        "mode": execution_mode,
         "tool_surface": {
-            "allow_write": bool(item.get("allow_write")),
-            "allow_active": bool(item.get("allow_active")),
-            "note": "read-only tool surface; state-changing/active tools require a gated episode with an approval receipt",
+            "allow_write": allow_write,
+            "allow_active": allow_active,
+            "note": (
+                "Deep Hunt: bounded active scanners and approved proof promotion are enabled; "
+                "arbitrary state-changing HTTP remains blocked."
+                if allow_active else
+                "Read-only discovery: active scanners and state-changing HTTP are blocked."
+            ),
         },
         # The full (trimmed) transcript the session must reason over to produce its next reply.
         "transcript": state.get("messages") or [],
@@ -19046,33 +19074,82 @@ async def _agent_hunt_run_or_404(conn, run_id: str, *, for_update: bool = False)
 
 @app.post("/agent/hunt/{target_id}/session")
 async def start_agent_hunt_session(target_id: str, req: AgentHuntSessionStartRequest):
-    """Start a KEYLESS, turn-based ReAct hunt. Seeds the context pack + loop transcript, persists
-    a durable run, and returns the first observation for the coding-agent session to reason over.
-    The session then drives it via POST /agent/hunt/session/{run_id}/reply. Read-only tool surface
-    (writes/active scanners require a gated episode with an approval receipt). No API key needed."""
+    """Start a keyless, turn-based AI investigation.
+
+    ``read_only`` preserves the passive Explorer contract. ``deep_hunt`` is the product's
+    autonomous exploration + bounded-exploitation mode: it requires a live target-bound,
+    credential-tier approval, enables active scanner templates, and may promote supported
+    evidence through the deterministic proof moat. Raw state-changing HTTP stays disabled;
+    mutations remain inside typed workflows with restoration/proof contracts.
+    """
     target_uuid = _uuid_or_400(target_id, "target id")
+    allow_active = req.mode == "deep_hunt"
+    allow_write = False
     async with db_pool.acquire() as conn:
         target = await conn.fetchrow("SELECT id, url, is_active FROM targets WHERE id=$1", target_uuid)
         if not target or not target["is_active"]:
             raise HTTPException(status_code=404, detail="Active target not found")
-        await _require_approval_receipt_if_policy_enabled(
-            conn, req.approval_receipt_id, action_name="agent.hunt", risk_tier="active",
-            created_by="agent_hunt_session",
-        )
+        if allow_active:
+            if not _ai_ops_execute_enabled():
+                raise HTTPException(
+                    status_code=409,
+                    detail="Deep Hunt active execution is disabled by server policy",
+                )
+            await _validate_approval_receipt_for_action(
+                conn,
+                req.approval_receipt_id,
+                target_url=str(target["url"]),
+                target_id=target_uuid,
+                action_name="agent.hunt",
+                command="agent.hunt",
+                risk_tier="credential",
+                always_require_receipt=True,
+                require_target_binding=True,
+                require_expiry=True,
+                created_by="deep_hunt_session",
+            )
+        else:
+            await _require_approval_receipt_if_policy_enabled(
+                conn, req.approval_receipt_id, action_name="agent.hunt", risk_tier="active",
+                created_by="agent_hunt_session",
+            )
     state = await _agent_seed_state(
         target_uuid, str(target["url"]), req.objective,
-        created_by="agent_hunt_session", token_budget=req.token_budget, max_iterations=req.max_iterations,
+        created_by="deep_hunt_session" if allow_active else "agent_hunt_session",
+        token_budget=req.token_budget,
+        max_iterations=req.max_iterations,
     )
+    # Keyless sessions are turn-bounded already; Deep Hunt additionally receives hard
+    # request/action ceilings so a single planner reply cannot turn authorization into
+    # unbounded traffic. The model sees the granted capability and its boundary.
+    state["action_budget_limit"] = req.max_iterations * _AGENT_MAX_TOOLS_PER_TURN
+    state["request_budget_limit"] = min(120, req.max_iterations * 8)
+    state["active_action_budget_limit"] = min(12, req.max_iterations)
+    capability_message = (
+        "Deep Hunt authorization is active for this target. You may use bounded active run_tool "
+        "templates and authenticated read probes when useful. Raw POST/PUT/PATCH/DELETE requests "
+        "remain blocked; use evidence-backed leads and the server's deterministic proof workflows "
+        "for verification. Stay same-origin and stop when the objective is answered."
+        if allow_active else
+        "This is a read-only discovery run. Active scanner templates and state-changing HTTP are blocked."
+    )
+    state["messages"].insert(1, {"role": "system", "content": capability_message})
     async with db_pool.acquire() as conn:
         row = await conn.fetchrow(
             """INSERT INTO agent_hunt_runs
                    (target_id, objective, status, planner_mode, max_iterations,
                     allow_write, allow_active, approval_receipt_id, token_budget, state, created_by)
-               VALUES ($1,$2,'awaiting_planner','agent',$3,FALSE,FALSE,$4,$5,$6,'agent_hunt_session')
+               VALUES ($1,$2,'awaiting_planner','agent',$3,$4,$5,$6,$7,$8,$9)
                RETURNING *""",
-            target_uuid, req.objective, req.max_iterations,
+            target_uuid,
+            req.objective,
+            req.max_iterations,
+            allow_write,
+            allow_active,
             _optional_uuid(req.approval_receipt_id) if req.approval_receipt_id else None,
-            req.token_budget, json.dumps(state, default=str),
+            req.token_budget,
+            json.dumps(state, default=str),
+            "deep_hunt_session" if allow_active else "agent_hunt_session",
         )
     return _agent_hunt_run_public(row)
 
@@ -19133,15 +19210,31 @@ async def submit_agent_hunt_reply(run_id: str, req: AgentHuntReplyRequest):
                     "updated_at=NOW() WHERE id=$1 RETURNING *", run_uuid)
                 return _agent_hunt_run_public(cancelled)
             approval_receipt_id = str(row["approval_receipt_id"]) if row["approval_receipt_id"] else None
-            # Re-check the approval policy on this state-changing reply, using the run's stored
-            # receipt — not only at session start. (Audit N5c.)
-            await _require_approval_receipt_if_policy_enabled(
-                conn, approval_receipt_id, action_name="agent.hunt", risk_tier="active",
-                created_by=f"agent_hunt_session:{run_id}")
             state = _decode_json_value(row["state"]) or {}
             max_iterations = int(row["max_iterations"] or _AGENT_HUNT_DEFAULT_ITERATIONS)
             allow_write = bool(row["allow_write"])
             allow_active = bool(row["allow_active"])
+            # Revalidate Deep Hunt authority on every turn. An expired, revoked, wrong-target,
+            # or downgraded receipt must stop active execution even when the run was valid at
+            # creation time. Passive sessions retain the configurable receipt-policy behavior.
+            if allow_active or allow_write:
+                await _validate_approval_receipt_for_action(
+                    conn,
+                    approval_receipt_id,
+                    target_url=target_url,
+                    target_id=target_uuid,
+                    action_name="agent.hunt",
+                    command="agent.hunt",
+                    risk_tier="credential" if allow_write or allow_active else "active",
+                    always_require_receipt=True,
+                    require_target_binding=True,
+                    require_expiry=True,
+                    created_by=f"deep_hunt_session:{run_id}",
+                )
+            else:
+                await _require_approval_receipt_if_policy_enabled(
+                    conn, approval_receipt_id, action_name="agent.hunt", risk_tier="active",
+                    created_by=f"agent_hunt_session:{run_id}")
             await conn.execute(
                 "UPDATE agent_hunt_runs SET status='planning', planning_token=$2, updated_at=NOW() WHERE id=$1",
                 run_uuid,
@@ -42013,7 +42106,7 @@ async def list_findings(
     request: Request,
     severity: Optional[str] = None,
     status: Optional[str] = None,
-    source_type: Optional[str] = Query(None, regex="^(dast|ai|ai_gate|ai_session|autonomous|model_intake|asm|manual)$"),
+    source_type: Optional[str] = Query(None, regex="^(dast|ai|ai_gate|ai_session|deep_hunt|autonomous|model_intake|asm|manual)$"),
     target_id: Optional[str] = None,
     ai_target_id: Optional[str] = None,
     scan_id: Optional[str] = None,

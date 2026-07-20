@@ -58,27 +58,26 @@ flags, skills, agents, adapters, modules, and durable tables) plus architecture/
 - **Dashboard (`/`)**: security-posture summary, prioritized action center, recent meaningful activity, and a compact operations bar for live queue state, emergency clear, worker count/scaling/stale-build warning, and Gungnir CT status/toggle. Auto-refreshes every 10-30s.
 - **Scans (`/scans`)**: filter by status/domain/search, pagination (50/page), cancel running/pending scans, re-scan dropdown (all 6 scan types), auto-refresh every 5s. Shows target, type, status, score/grade, findings count, duration, date.
 - **Scan Detail (`/scans/{id}`)**: live logs with auto-scroll while running (5s refresh), progress bar + current phase, partial-results view for failed scans (warning banner), refreshed deployment decision, full report with PDF export, compliance section, resolved coverage budget, AI Gate evidence, and Model Intake artifact checks when complete. Preserves list filter context on back navigation.
-- **Exposure (`/exposure`)**: graph linking domains, targets, APIs, auth roles, third-party JS/vendors, cloud hints, AI targets, MCP tools, model artifacts, scans, and findings. Registered web assets expose a separate **Investigate autonomously** action that launches a target-bound hunt after readiness and authorization checks.
-- **Continuous ASM (`/asm`)**: target coverage, family proof rollups, scheduler decisions, endpoint inventory, gaps, recommendations, and target campaign timeline. **Close gaps autonomously** launches an ASM-bound mission; ordinary improve/test actions remain available separately.
+- **Exposure (`/exposure`)**: graph linking domains, targets, APIs, auth roles, third-party JS/vendors, cloud hints, AI targets, MCP tools, model artifacts, scans, and findings. Registered web assets can be opened directly in **Deep Hunt**.
+- **Continuous ASM (`/asm`)**: target coverage, family proof rollups, scheduler decisions, endpoint inventory, gaps, recommendations, and target campaign timeline. **Open Deep Hunt** carries the target and a coverage-gap objective into the canonical AI investigation flow; ordinary improve/test actions remain available separately.
 - **Timeline (`/timeline`)**: cross-product mission feed for scans, schedules, command results, evidence bindings, refuters, and exports.
-- **Campaigns (`/campaigns`, `/campaigns/{id}`)**: inspect read-only mission records, lifecycle state, finding impact, and the action ledger. Start executable research from **Autonomous Hunt**; Arsenal may create linked mission records while planning authorized work.
+- **Campaigns (`/campaigns`, `/campaigns/{id}`)**: inspect the read-only mission ledger, lifecycle state, finding impact, and action history. It is not a Deep Hunt launcher.
 - **Evidence (`/evidence`)**: browse evidence instances, inspect objects, export content-free manifests/bundles, and run immutable-preview, approval-gated retention cleanup.
 - **New Scan (`/scan/new`)**: scan type grid (6 types with duration/description), coverage budget selector (`fast`, `balanced`, `thorough`, `exhaustive`), advanced option toggles (Active Testing, Nuclei Templates, Subdomain Discovery, Enhanced DNS, JS Dependency Scanning, JS Secret Scanning), and optional custom budget overrides. Warning for active testing types.
 - **Targets (`/targets`)**: hierarchical tree (root domains with collapsible subdomains), filter by discovery source/grade/has-findings, sort by domain/last-scanned/findings/score/date, search. Actions: add target, scan individual (dropdown), scan all in domain set, discover subdomains, create schedule (icon link). Shows subdomain count, scan count, findings count, grade per target.
 - **Schedules (`/schedules`)**: create/toggle/delete recurring daily/weekly normal scans and typed ASM coverage waves (`asm_improve`). Evidence cleanup is intentionally interactive-only; legacy `evidence_retention_sweep` schedules are disabled and cannot be created or resumed.
-- **Findings (`/findings`)**: filter by DAST, AI Gate, Model Intake, ASM, or Manual source plus severity/status/last-seen/domain/search; sort by severity/first-seen/last-seen/CVSS; bulk cleanup with dry-run preview.
-- **Finding Detail (`/findings/{id}`)**: status triage buttons (active/resolved/false_positive/accepted_risk), **delete finding** with confirmation, source badge, analyst notes, CVSS, CWE link, evidence summary (URLs, payloads, parameters, status codes, response anomalies), remediation steps, AI analysis (verdict/confidence/rationale/recommendations), raw HTTP request/response, copy buttons for URLs/payloads/IDs, external links to vulnerable URLs, one-shot proof replay, and a separate **Investigate autonomously** action for target-linked DAST/ASM/manual web findings. The autonomous exact-finding mission may run at most one bounded proof replay, waits for it, and returns to a visible outcome.
+- **Findings (`/findings`)**: filter by DAST, Deep Hunt, Interactive, AI Gate, Model Intake, ASM, or Manual source plus severity/status/last-seen/domain/search; sort by severity/first-seen/last-seen/CVSS; bulk cleanup with dry-run preview.
+- **Finding Detail (`/findings/{id}`)**: status triage buttons (active/resolved/false_positive/accepted_risk), **delete finding** with confirmation, source badge, analyst notes, CVSS, CWE link, evidence summary (URLs, payloads, parameters, status codes, response anomalies), remediation steps, AI analysis (verdict/confidence/rationale/recommendations), raw HTTP request/response, copy buttons for URLs/payloads/IDs, external links to vulnerable URLs, one-shot proof replay, and a bounded **Verify finding** action for target-linked DAST/Deep Hunt/ASM/manual web findings.
 - **AI Gate (`/ai-gate`)**: create and manage AI targets, use Secure RAG + Agent presets, choose auth, target type, probe pack, profile, and environment, then queue AI safety scans for chat APIs, RAG APIs, agent traces, and MCP endpoints.
 - **Model Intake (`/model-intake`)**: use model-intake presets and queue artifact checks with artifact URL, metadata URL/JSON, checksum, detached signature URL/value, public key URL/PEM, trusted key PEM/fingerprints, policy profile, model card, approval flags, timeout, and download cap.
 - **Policy Profiles (`/settings/policy-profiles`)**: create, edit, activate/deactivate, and delete deployment gate profiles for AI Gate, Model Intake, and DAST decisions. Model Intake can select saved active profiles.
-- **Interactive (`/interactive`)**: browser sessions, managed credential profiles, target principals, authz expectations, endpoint replay, screenshots, and explicit manual finding creation.
+- **Interactive Testing (`/interactive`)**: browser sessions, managed credential profiles, target principals, authz expectations, endpoint replay, screenshots, and explicit finding creation.
 - **Exceptions (`/exceptions`)**: exception queue, owner/approver/control repair, expiry visibility, and lifecycle sweep.
 - **Command Arsenal (`/settings/arsenal`)**: command contracts, plans, scope/approval receipts, action ledger, hypotheses, refuters, tools, local agents, context packs, and decision traces.
 - **AI Operations Router (`/settings/ai-ops-router`)**: preview natural-language operations as bounded API plans with safety, missing-input, blast-radius, and confirmation details before optional execution.
-- **Autonomous Hunt (`/settings/research-agent`)** (the **Operator** engine's UI front door; the **Explorer** ReAct engine has no UI yet): create target-bound analysis or gated active episodes and optionally run them with durable server-side autopilot. Subject-bound launch profiles cover target hunts, exact-finding verification, and ASM gap closure. The controller leases one episode at a time, waits for linked scans and finding retests, rejects duplicate no-progress actions, reserves a final conclusion turn, meters failed provider attempts, and continues if the browser closes. Inspect the actual model, immutable observations, linked work, finding outcome, request-unit budgets, decisions, errors, and events; pause/resume or cancel the episode plus linked work. The lead backlog remains at `/settings/research-agent/leads`.
-- **Research Experiments and Runs (`/settings/research-agent/experiment`, `/settings/research-agent/runs/{id}`)**: create bounded HTTP/workflow experiments and inspect durable run state and proof handoff.
-- **Long-running research campaigns**: the Research Agent can wrap bounded episodes in a durable campaign. A campaign shares recent-action memory across episodes, starts a fresh episode after a bounded one concludes, and continues until its time/episode ceiling, operator pause/cancel, missing input, or expired approval. The default UI path needs only a target, authorization confirmation, and optional ceilings.
-- **Research planner choice**: `shakerscan agent codex|claude|opencode` marks the current coding-agent session as the default research brain. On a clean install, launch Deep Hunt with `planner_mode: "agent"` (the campaign API default), drive the returned awaiting-planner episode immediately, and submit one bounded decision at a time from the current observation; no stored LLM/API key is required. Use `planner_mode: "configured_ai"` only when the user explicitly wants unattended server autopilot backed by `/settings/ai`, or `planner_mode: "local_codex"` for separate isolated `codex exec` planner processes. Stop after a decision queues linked scan/retest work; continue the campaign when the user asks again.
+- **Deep Hunt (`/settings/research-agent`)**: launch a keyless, AI-driven investigation through `/agent/hunt/*`. The current Codex/Claude/OpenCode session composes its own requests and tools; ShakerScan enforces target scope, expiring approval, hard action/request ceilings, evidence provenance, and deterministic proof promotion. Deep Hunt performs bounded active testing but blocks arbitrary state-changing HTTP in the free-form loop.
+- **Leads and Test Builder (`/settings/research-agent/leads`, `/settings/research-agent/experiment`)**: inspect the hypothesis backlog or hand-craft an advanced bounded experiment. They support Deep Hunt; they are not separate engines.
+- **Legacy guided verifier (`/settings/research-agent/operator`, `/settings/research-agent/runs/{id}`)**: retained for compatibility and specialized bounded verification over `/research/*`. Do not route a user’s “Deep Hunt” request here.
 - **Settings (`/settings`)**: AI providers, scan execution policy, automation defaults, and approval-receipt enforcement.
 - **Application Graph (`/targets/{id}/graph`)**: inspect persisted route/object/principal nodes, producer/consumer/auth-boundary edges, node/edge filters, search, and selected-node connections.
 
@@ -261,7 +260,7 @@ curl -X POST http://localhost:8080/findings/manual \
     "evidence": "GET /api/users/1 with User2 token returns User1 profile"
   }'
 
-# Create finding from AI session (target auto-populated)
+# Create finding from Interactive Testing (compatibility `/session` API)
 curl -X POST "http://localhost:8080/session/{session_id}/findings" \
   -H "Content-Type: application/json" \
   -d '{
@@ -275,9 +274,11 @@ curl -X POST "http://localhost:8080/session/{session_id}/findings" \
 
 Status options: `active`, `resolved`, `false_positive`, `accepted_risk`
 
-Finding source filters are first-class: `dast`, `ai`, `ai_gate`, `ai_session`, `autonomous`,
-`model_intake`, `asm`, and `manual`. The UI exposes DAST, AI Gate, Model Intake, ASM, and Manual controls; use the
-broader `ai` API filter when AI Gate and AI-session findings should be combined.
+Finding source filters are first-class: `dast`, `deep_hunt`, `ai`, `ai_gate`, `ai_session`,
+`autonomous`, `model_intake`, `asm`, and `manual`. The UI exposes DAST, Deep Hunt, Interactive,
+AI Gate, Model Intake, ASM, and Manual controls. `deep_hunt` combines agent-native claims with
+scanner findings driven by a hunt. Use the broader `ai` compatibility filter when AI Gate and
+Interactive findings should be combined.
 
 **Findings Query Parameters:**
 
@@ -285,7 +286,7 @@ broader `ai` API filter when AI Gate and AI-session findings should be combined.
 |-----------|-------------|
 | `status` | Filter by status (active, resolved, false_positive, accepted_risk) |
 | `severity` | Filter by severity (critical, high, medium, low, info) |
-| `source_type` | `dast`, `ai`, `ai_gate`, `ai_session`, `autonomous`, `model_intake`, `asm`, or `manual` |
+| `source_type` | `dast`, `deep_hunt`, `ai`, `ai_gate`, `ai_session`, `autonomous`, `model_intake`, `asm`, or `manual` |
 | `seen_within_days` | Only findings seen within N days (e.g., 7, 30, 60, 90) |
 | `root_domain` | Filter by root domain |
 | `target_id` | Filter by target ID |
@@ -293,7 +294,7 @@ broader `ai` API filter when AI Gate and AI-session findings should be combined.
 | `verification_verdict` | Filter by latest verification verdict (`exploited`, `likely_fixed`, etc.) |
 | `verification_mode` | Filter findings with verification runs in mode `deterministic` or `ai_driven` |
 | `verified_only` | If true, only return findings with `last_verification_verdict = exploited` |
-| `driven_by` | `autonomous_research`: only findings produced by research-driven work (a deep-hunt decision queued the scan; stamped in `evidence.research`). Distinct from `source_type=autonomous` (agent-native claims) and organic DAST (no marker) |
+| `driven_by` | Compatibility dimension: `autonomous_research` selects scanner work launched by a hunt. Prefer `source_type=deep_hunt` for the complete user-facing source. |
 | `research_campaign_id` | Only findings driven by a specific research campaign/run (UUID) |
 | `search` | Search by title or URL |
 | `sort_by` | Sort field: severity, first_seen, last_seen, cvss |
@@ -426,115 +427,31 @@ curl -X POST http://localhost:8080/ai/ops/route \
 
 Active or budget-increasing intents return `dry_run: true` unless `execute`, `confirm_execution`, and `confirm_authorized` are true and the server has `AI_OPS_ROUTER_EXECUTE_ENABLED=true`. High-risk BOLA also requires `confirm_high_risk` plus auth context hints.
 
-### Bounded Research Agent (the Operator engine)
+### Deep Hunt
 
-ShakerScan has **two autonomous engines**. **Operator** (this section) is the menu-driven engine: each
-turn the AI selects ONE vetted, typed action from a server-offered menu — it is wired into the scan/
-verify pipeline and can reach the **VERIFIED** tier, and it is what the Autonomous Hunt UI launches.
-**Explorer** (the "Keyless autonomous hunt" subsection below) is the free-form ReAct engine: the AI
-composes its own probes to discover net-new **SUSPECTED** bugs. Operator verifies; Explorer discovers;
-they compose (Explorer proposes → the moat promotes).
+Natural-language routing is strict:
 
-Operator research episodes let the current coding-agent session, a configured AI provider, or an
-isolated host-side Codex process select one registered action at a time from a fresh, redacted target
-observation. The API remains authoritative for command schemas, target binding, principals, scope,
-approval, risk, budget, execution, and proof.
+- `scan`, `quick scan`, `standard scan`, `deep scan`, `full scan`, `aggressive scan`, and
+  `smart scan` are Web DAST.
+- `deep hunt`, `autonomous hunt`, and `investigate autonomously` are the keyless `/agent/hunt/*`
+  workflow below. Never translate Deep Hunt into `/research/campaigns/launch`.
+- `verify this finding` uses the bounded finding verifier/retest.
+- `interactive testing` uses `/session/*`.
 
-```bash
-# Check whether the configured planner and active-execution gate are ready
-curl http://localhost:8080/research/readiness
-
-# Preferred one-click launch for an exact web finding. Gated execution also requires a current,
-# target-matching approval receipt created through the normal scope/approval APIs.
-curl -X POST http://localhost:8080/research/launch \
-  -H "Content-Type: application/json" \
-  -d '{
-    "subject_type": "finding",
-    "subject_id": "finding-uuid",
-    "mission_profile": "verify_finding",
-    "intensity": "hunt",
-    "approval_receipt_id": "approval-uuid",
-    "autopilot": true
-  }'
-
-# Create a five-step read-only episode
-curl -X POST http://localhost:8080/research/episodes \
-  -H "Content-Type: application/json" \
-  -d '{
-    "target_id": "target-uuid",
-    "objective": "Investigate the highest-value unexplained security gaps",
-    "execution_mode": "read_only",
-    "max_risk_tier": "read_only",
-    "max_steps": 5,
-    "autopilot": false
-  }'
-
-# Run one step with the configured AI provider
-curl -X POST http://localhost:8080/research/episodes/{episode_id}/plan-step \
-  -H "Content-Type: application/json" \
-  -d '{"execute": true}'
-
-# Or drive this autopilot-disabled episode with the signed-in local Codex CLI.
-# The local runner fails fast if server autopilot is enabled so two planners cannot race.
-./scanner.sh research {episode_id} 5
-
-# Inspect or cancel
-curl http://localhost:8080/research/episodes/{episode_id}
-curl -X PUT http://localhost:8080/research/episodes/{episode_id}/autopilot \
-  -H "Content-Type: application/json" -d '{"enabled":false}'
-curl -X POST http://localhost:8080/research/episodes/{episode_id}/cancel
-```
-
-For maximum unattended output, launch a durable campaign. `deep_hunt` requires a current
-target-scoped credential-tier approval receipt; the campaign never expands that authority:
-
-```bash
-curl -X POST http://localhost:8080/research/campaigns/launch \
-  -H "Content-Type: application/json" \
-  -d '{
-    "target_id": "target-uuid",
-    "intensity": "deep_hunt",
-    "planner_mode": "agent",
-    "approval_receipt_id": "approval-uuid",
-    "duration_hours": 24,
-    "max_episodes": 12
-  }'
-
-curl -X POST http://localhost:8080/research/campaigns/{campaign_id}/control \
-  -H "Content-Type: application/json" -d '{"action":"pause"}'
-```
-
-`planner_mode` is `agent` by default. In that mode the current Codex/Claude/OpenCode session must
-read the active episode and submit decisions through `/research/episodes/{id}/decisions`; ShakerScan
-remains the only executor. `configured_ai` enables durable server autopilot and requires AI settings.
-`local_codex` uses `./scanner.sh research {episode_id} 5` and a separate ephemeral Codex process.
-
-Modes are `shadow`, `read_only`, and `gated`. Gated episodes require a target-matching scope receipt,
-approval receipt, explicit active budgets, and `AI_OPS_ROUTER_EXECUTE_ENABLED=true`; the current
-allowlist includes Continuous ASM recon/test/improve, focused-family scans, finding retests, read-only
-HTTP differentials, and typed principal workflows. `experiment.http_diff` is restricted to
-`GET`/`HEAD`/`OPTIONS`. Credential-tier Deep Hunt may use typed workflow `PUT`/`PATCH`/`DELETE` only
-with server-resolved principals, cleanup/rollback, and restoration assertions. The model cannot
-provide receipt IDs, access credentials, use raw shell, or directly create verified findings. A
-trusted server replay may promote a finding only after deterministic family proof passes. A decision
-must reference the current observation ID/hash and declare its expected signal and falsifier. Request
-budgets shown for queued scans/ASM work are conservative reservation units, not a claim of exact
-outbound HTTP metering. Autopilot waits for linked scans and retests before creating exactly one
-result-bearing observation and choosing another action.
-
-#### Explorer — keyless autonomous hunt (session-driven ReAct loop)
-
-This is the **Explorer** engine (contrast the Operator menu engine above). For an unattended, key-free
-hunt, drive the turn-based ReAct loop directly: the current coding-agent
-session is the planner (no AI provider key required). ShakerScan seeds a redacted context pack, then
-suspends at each turn; the session reads the transcript, requests tools with a fenced
+Deep Hunt is AI-driven exploration plus bounded active exploitation. Before launch, confirm the
+target is authorized, create a target-bound expiring credential-tier approval, and require
+`AI_OPS_ROUTER_EXECUTE_ENABLED=true`. The current coding-agent session is the planner; no stored AI
+provider key is required. ShakerScan seeds a redacted context pack, then suspends at each turn; the
+session reads the transcript, requests tools with a fenced
 ` ```json {"tool_calls":[...]} ``` ` block (or ends with a `{"done":true,"findings":[...]}` debrief),
 and the server executes the tools (same-origin/approval-gated) and returns the next observation. Tools:
 `http_request` (send as a server-managed `as_principal` — credentials are never model-visible),
-`query_kb`, `diff`, `note`, and a bounded argv-templated `run_tool`. Findings land in the **SUSPECTED**
-tier only (provenance-gated: a surfaced finding needs real tool-output evidence; zero-evidence
-overclaims are blocked and never persisted); the deterministic `family_proof` **VERIFIED** moat is
-untouched. Writes/active scanners require a gated episode with an approval receipt.
+`query_kb`, `diff`, `note`, and a bounded argv-templated `run_tool`.
+
+Deep Hunt enables bounded active `run_tool` templates. Arbitrary state-changing HTTP remains blocked
+in the free-form loop; mutations belong to typed workflows with cleanup/restoration contracts.
+Findings land in the **SUSPECTED** tier only after the provenance gate resolves real tool evidence.
+Supported claims may become **VERIFIED** only through deterministic server re-execution.
 
 The first observation returned by `session` is itself a full system prompt (tool arsenal, the
 RECON→PLAN→EXECUTE→EVIDENCE→SELF-CRITIQUE cadence, and the exact debrief schema) — read it; the harness
@@ -544,21 +461,21 @@ self-describes the contract each turn. Three things trip up a first-time driver:
   tool-output evidence for the provenance gate. Inline `evidence`/`details` prose is NOT evidence; a
   prose-only finding fails the gate and is silently dropped (persists nothing). Debrief shape:
   `{"done":true,"findings":[{"title","severity","family","predicate","route","method","cwe","details","evidence_refs":["resp_1","resp_2"],"remediation"}],"abstained":false}`.
-- **"Auto" = the session drives each turn in a loop** — reply while `status: awaiting_planner` and
+- **The coding agent drives each turn** — reply while `status: awaiting_planner` and
   STOP on any terminal status (a run ends `completed`, `failed`, or `cancelled`, not only `completed`;
   check `stop_reason`). Do not keep replying to a terminal run.
-  There is no fully hands-off keyless mode; unattended server autopilot needs `planner_mode:
-  "configured_ai"` with a key in `/settings/ai`, or the `configured_ai` `agent_loop` deep-hunt campaign.
 - **Authenticated targets need principals configured FIRST.** Provision managed principals + credential
   profiles on the target (`POST /targets/{id}/principals` + credential profiles; `as_principal` reads
   the profile server-side) before starting, or the hunt runs anonymous-only. crAPI-style JWTs expire,
   so rotate stale profiles (`POST /targets/{id}/credential-profiles/{profile_id}/rotate`) first.
 
 ```bash
-# Start a keyless hunt (read-only tool surface). Returns run_id + the first observation transcript.
+# Start Deep Hunt. The approval must be credential-tier, target-bound, and unexpired.
 curl -X POST http://localhost:8080/agent/hunt/{target_id}/session \
   -H "Content-Type: application/json" \
-  -d '{"objective": "Find a net-new access-control bug DAST missed and prove it", "max_iterations": 12}'
+  -d '{"objective":"Explore autonomously and verify the highest-value weaknesses",
+       "mode":"deep_hunt","max_iterations":12,
+       "approval_receipt_id":"approval-uuid"}'
 
 # Submit one planner reply (a tool_calls block or a final debrief); get the next observation.
 curl -X POST http://localhost:8080/agent/hunt/session/{run_id}/reply \
@@ -578,9 +495,8 @@ curl -X POST http://localhost:8080/agent/hunt/session/{run_id}/cancel
 curl http://localhost:8080/agent/findings/{target_id}
 ```
 
-The same loop core also runs server-side (`POST /agent/hunt/{target_id}` synchronous, or a `configured_ai`
-`agent_loop` deep-hunt campaign) when an AI provider key is configured; the keyless session endpoints
-are the no-key default path.
+The compatibility `/research/*` episode controller remains available for specialized guided
+verification, exact-finding missions, and legacy runs. It is not the Deep Hunt launcher.
 
 ### Subdomain Discovery
 
@@ -789,6 +705,7 @@ curl http://localhost:8080/ai/scans/{scan_id}/transcript
 # Filter findings by product type
 curl "http://localhost:8080/findings?source_type=ai&status=active"
 curl "http://localhost:8080/findings?source_type=dast&status=active"
+curl "http://localhost:8080/findings?source_type=deep_hunt&status=active"
 ```
 
 After submitting an AI Gate scan, report the scan ID and UI link (`/scans/{scan_id}`), then stop. Do not poll; AI Gate scans can still take time depending on profile, target latency, and budget.

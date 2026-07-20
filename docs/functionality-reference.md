@@ -618,7 +618,7 @@ Result shape: `model_intake.checks.*`, `aibom`, `supply_chain`, `summary` (with 
 `source_type=model_intake`; they are excluded from `source_type=dast`. Sensitive URL params and
 metadata keys are redacted.
 
-### 11.3 AI Security Sessions (interactive)
+### 11.3 Interactive Testing
 
 `api/session_manager.py` plus `/session/*` endpoints provide collaborative, interactive testing in a
 headless browser. You start a session, drive browser actions (`navigate`, `click`, `fill`, `register`,
@@ -627,8 +627,9 @@ capture screenshots, and test endpoints for cross-user access (`test-endpoint` w
 Endpoint tests that name a user require that user to exist and be authenticated in the session; authz
 replay automation also requires at least two authenticated principals before it can make a
 cross-principal claim.
-Validated findings are saved via `POST /session/{id}/findings` (they appear with `source: ai_session`).
-This is the engine behind the `/ai-security-session` skill; see
+Validated findings are saved via `POST /session/{id}/findings` (the compatibility source value is
+`ai_session`; the user-facing source label is **Interactive**). This is the engine behind the
+`/ai-security-session` compatibility skill; see
 [`docs/INTERACTIVE_SESSIONS_GUIDE.md`](INTERACTIVE_SESSIONS_GUIDE.md).
 
 ### 11.4 AI-assisted analysis of DAST findings
@@ -651,7 +652,26 @@ Safe/Balanced plan to Lab.
 The UI binds execution confirmation to the exact prompt and target that produced the visible preview;
 editing either input invalidates the preview and clears its confirmations.
 
-### 11.6 Test scenario catalog and Honey demo
+### 11.6 Deep Hunt
+
+Deep Hunt is the canonical AI-driven web-investigation workflow. The current Codex, Claude, or
+OpenCode session plans turns through the keyless `POST /agent/hunt/{target_id}/session` and
+`POST /agent/hunt/session/{run_id}/reply` loop; ShakerScan alone executes tools. Starting with
+`mode: deep_hunt` requires a live, target-bound, expiring credential-tier approval and the active
+execution feature flag. The approval is revalidated before every turn.
+
+The free-form loop can issue same-origin read probes, compare managed principal contexts, query
+stored knowledge, record notes, and invoke bounded active scanner templates. It cannot issue
+arbitrary state-changing HTTP. Tool calls, request units, active actions, turns, and tokens are
+bounded. A debrief can persist only evidence-backed **Suspected** findings; supported families reach
+**Verified** only through server-run deterministic proof. The compatibility `/research/*`
+controller remains available for specialized guided verification and is not the Deep Hunt launcher.
+
+Natural-language routing treats an unqualified “scan” as Quick DAST, named scan types as DAST,
+“Deep Hunt” as this workflow, “verify this finding” as deterministic retest/verification, and manual
+browser work as Interactive Testing. See [`product-model.md`](product-model.md).
+
+### 11.7 Test scenario catalog and Honey demo
 
 `GET /ai/test-scenarios` returns ready-made templates — notably `secure-rag-agent` (canonical Honey
 RAG/agent/MCP endpoints with full control metadata) and `model-intake-pipeline` (safe/unsafe-pickle/
@@ -659,7 +679,7 @@ missing-signature/missing-approval model presets). Probe/test-case metadata is e
 `promptfoo`, `pyrit`, and `garak` formats (`/ai/test-cases/export`). See
 [`docs/AI_TEST_WORKFLOWS.md`](AI_TEST_WORKFLOWS.md).
 
-### 11.7 AI surface inventory, histories, replay, and evidence
+### 11.8 AI surface inventory, histories, replay, and evidence
 
 `/ai/surfaces/*` persists normalized AI surfaces and attempt facts independently of findings.
 AI-target and AI-scan campaign-history endpoints expose longitudinal decision, coverage, blocked,
@@ -672,13 +692,17 @@ audited sensitive access only when the server policy allows it.
 
 ## 12. Cross-cutting: findings, exposure graph, workers, queue
 
-**Findings lifecycle**: every DAST, AI Gate, AI-session, and model-intake result lands in one
+**Findings lifecycle**: every DAST, Deep Hunt, Interactive, AI Gate, ASM, manual, and model-intake
+result lands in one
 `findings` table, de-duplicated by `(target_id, fingerprint)`. Findings have a status
 (`active` / `resolved` / `false_positive` / `accepted_risk`), CVSS, CWE/OWASP tags, evidence,
-optional AI verdict fields, and verification history. The UI exposes DAST, AI Gate, Model Intake,
-ASM, and Manual filters; the API `source_type` filter is first-class and more granular:
-`dast`, `ai`, `ai_gate`, `ai_session`, `model_intake`, `asm`, `manual`. `model_intake` and the AI
-sources filter **separately** from `dast` (R8).
+optional AI verdict fields, and verification history. The UI exposes DAST, Deep Hunt, Interactive,
+AI Gate, Model Intake, ASM, and Manual filters. The API `source_type` filter accepts the canonical
+`deep_hunt` value plus compatibility values:
+`dast`, `ai`, `ai_gate`, `ai_session`, `autonomous`, `deep_hunt`, `model_intake`, `asm`, `manual`.
+Scanner findings driven by a hunt are included in `deep_hunt` and excluded from `dast`, so one row
+does not present two competing sources. `model_intake` and the AI sources also filter separately
+from `dast` (R8).
 Findings support filtering, sorting, bulk update/cleanup, manual creation, and per-finding retest.
 
 **Evidence objects**: finding evidence is indexed by hash, storage URI, retention class, scan/finding
@@ -1101,9 +1125,9 @@ it is the exhaustive backstop behind the human-readable product map above.
 | Release gates | 10 | `scripts/release_gates.py` |
 | Runtime environment keys | 194 | Python sources + Compose manifests |
 | Scanner modules | 83 | `scanner/scanner_tools/` |
-| UI pages | 27 | `ui/src/app/` |
+| UI pages | 29 | `ui/src/app/` |
 | Skills | 6 | `skills/` |
-| Slash commands | 14 | `.claude/commands/` |
+| Slash commands | 15 | `.claude/commands/` |
 | Specialized subagents | 3 | `.claude/agents/` |
 | Durable tables | 46 | `db/init.sql` + migrations |
 
@@ -1873,7 +1897,9 @@ Only key names and declaring sources are documented; secret values are never rea
 | `/settings` | `ui/src/app/settings/page.tsx` |
 | `/settings/policy-profiles` | `ui/src/app/settings/policy-profiles/page.tsx` |
 | `/settings/research-agent/experiment` | `ui/src/app/settings/research-agent/experiment/page.tsx` |
+| `/settings/research-agent/explorer` | `ui/src/app/settings/research-agent/explorer/page.tsx` |
 | `/settings/research-agent/leads` | `ui/src/app/settings/research-agent/leads/page.tsx` |
+| `/settings/research-agent/operator` | `ui/src/app/settings/research-agent/operator/page.tsx` |
 | `/settings/research-agent` | `ui/src/app/settings/research-agent/page.tsx` |
 | `/settings/research-agent/runs/{id}` | `ui/src/app/settings/research-agent/runs/[id]/page.tsx` |
 | `/targets/{id}/graph` | `ui/src/app/targets/[id]/graph/page.tsx` |
@@ -1884,21 +1910,22 @@ Only key names and declaring sources are documented; secret values are never rea
 
 | Skill | Purpose | Source |
 |---|---|---|
-| `ai-security-session` | Interactive Playwright session control for the ShakerScan `/session` API. Use when asked to start or drive an AI security testing session, perform manual browser actions, or run BOLA/IDOR testing via session endpoints. | `skills/ai-security-session/SKILL.md` |
+| `ai-security-session` | Interactive Testing through ShakerScan's `/session` API. Use when asked to test manually, open an interactive browser session, exercise authentication workflows, or perform BOLA/IDOR endpoint replay. | `skills/ai-security-session/SKILL.md` |
 | `content-discovery` | Build target-specific content discovery seeds, path lists, and ShakerScan scan inputs from scan results, JS analysis, framework clues, and exposed docs. Use when asked for content discovery, wordlist generation, ffuf seeds, admin path discovery, hidden file discovery, route discovery, or custom endpoint seeding. | `skills/content-discovery/SKILL.md` |
 | `js-analyze` | Analyze JavaScript bundles, frontend routes, browser-captured APIs, libraries, and secrets for a ShakerScan target or completed scan. Use when asked for JS analysis, route analysis, frontend endpoint discovery, library review, source-map hints, or to build `custom_endpoints` for a ShakerScan scan. | `skills/js-analyze/SKILL.md` |
-| `research-agent` | Create and drive bounded adaptive ShakerScan research episodes and Deep Hunt campaigns. Use when asked to investigate an authorized target, verify one finding, close Continuous ASM gaps, continue an awaiting-planner episode, or run a multi-episode campaign while preserving target scope, budgets, approvals, and deterministic proof gates. | `skills/research-agent/SKILL.md` |
+| `research-agent` | Run ShakerScan Deep Hunt: the current coding agent performs free-form, AI-driven exploration and bounded active exploitation through /agent/hunt/* while ShakerScan enforces target scope, approvals, budgets, evidence provenance, and deterministic finding verification. Use for “deep hunt”, “autonomous hunt”, or “investigate autonomously”; do not use for ordinary DAST scans. | `skills/research-agent/SKILL.md` |
 | `review-skills` | Review ShakerScan skills, commands, and subagents for broken references, invalid Claude Code configuration, prompt anti-patterns, missing hard gates, missing outputs, and weak operational guidance. Use when asked to audit, review, or quality-check the skill system itself. | `skills/review-skills/SKILL.md` |
-| `shakerscan` | Operate the ShakerScan web, API, and AI security platform. Use when asked to start or diagnose ShakerScan; scan an authorized website or API; manage targets, workers, schedules, findings, evidence, or Continuous ASM; test AI Gate or Model Intake targets; run interactive security sessions; or create and drive bounded research episodes and Deep Hunt campaigns. | `skills/shakerscan/SKILL.md` |
+| `shakerscan` | Operate ShakerScan. Route scan requests to Web DAST, Deep Hunt requests to the keyless AI investigator, and manual browser work to Interactive Testing; also manage targets, Continuous ASM, findings, AI Gate, Model Intake, evidence, schedules, and workers. | `skills/shakerscan/SKILL.md` |
 
 | Slash command | Title | Purpose | Source |
 |---|---|---|---|
 | `/ai-gate` | AI Gate | Create/list AI Gate targets and queue AI safety scans. | `.claude/commands/ai-gate.md` |
-| `/ai-security-session` | AI Security Session | Drive an authorized interactive browser security workflow with the `ai-security-session` skill. | `.claude/commands/ai-security-session.md` |
+| `/ai-security-session` | Interactive Testing | Drive an authorized Interactive Testing browser workflow with the compatibility-named `ai-security-session` skill. | `.claude/commands/ai-security-session.md` |
 | `/content-discovery` | Content Discovery | Build a high-signal route and file discovery plan for a target using ShakerScan evidence, JS outputs, and framework clues. | `.claude/commands/content-discovery.md` |
+| `/deep-hunt` | Deep Hunt | Run an authorized, AI-driven Deep Hunt against the supplied target. | `.claude/commands/deep-hunt.md` |
 | `/findings` | List Security Findings | Show security findings from scans. | `.claude/commands/findings.md` |
 | `/js-analyze` | JS Analyze | Run JavaScript and frontend attack-surface analysis for a target, completed scan, or supplied JS bundle set. | `.claude/commands/js-analyze.md` |
-| `/research` | Bounded Research Agent | Use the `research-agent` skill to create or continue a target-bound research episode or Deep Hunt campaign. | `.claude/commands/research.md` |
+| `/research` | Deep Hunt compatibility command | Use the `research-agent` skill. | `.claude/commands/research.md` |
 | `/review-skills` | Review Skills | Review all ShakerScan skills, commands, and agents for prompt bugs and quality gaps. | `.claude/commands/review-skills.md` |
 | `/save-finding` | Save Finding | Save an evidence-backed finding from authorized manual or interactive testing. | `.claude/commands/save-finding.md` |
 | `/scan-full` | Full Security Assessment | Run a comprehensive security assessment with the Full profile, including authorized active | `.claude/commands/scan-full.md` |

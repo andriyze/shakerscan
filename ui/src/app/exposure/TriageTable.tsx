@@ -356,7 +356,6 @@ function AssetDetailDrawer({
   const [ownerInput, setOwnerInput] = useState('')
   const [envInput, setEnvInput] = useState('')
   const [savingOwnership, setSavingOwnership] = useState(false)
-  const [autonomousConfirmOpen, setAutonomousConfirmOpen] = useState(false)
   const [autonomousLoading, setAutonomousLoading] = useState(false)
 
   useEffect(() => {
@@ -366,7 +365,6 @@ function AssetDetailDrawer({
     setOwnership({ owner: asset.owner || '', environment: asset.environment || '' })
     setEditingOwnership(false)
     setSavingOwnership(false)
-    setAutonomousConfirmOpen(false)
     setAutonomousLoading(false)
     let active = true
     const params =
@@ -388,7 +386,7 @@ function AssetDetailDrawer({
   // Modal behaviour (focus trap, Escape close, focus restore, inert page
   // background) via the shared hook; the drawer is portaled to <body> so the
   // inert background can't disable the drawer itself.
-  useModalA11y(Boolean(asset) && !autonomousConfirmOpen, panelRef, onClose, closeRef)
+  useModalA11y(Boolean(asset), panelRef, onClose, closeRef)
 
   if (!asset || typeof document === 'undefined') return null
   const KindIcon = KIND_META[asset.kind].icon
@@ -417,9 +415,8 @@ function AssetDetailDrawer({
     setAutonomousLoading(true)
     try {
       await onInvestigate(asset)
-      setAutonomousConfirmOpen(false)
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Failed to start autonomous investigation')
+      toast.error(err instanceof Error ? err.message : 'Failed to open Deep Hunt')
     } finally {
       setAutonomousLoading(false)
     }
@@ -672,12 +669,12 @@ function AssetDetailDrawer({
           {asset.kind === 'web' && (
             <button
               type="button"
-              onClick={() => setAutonomousConfirmOpen(true)}
+              onClick={() => void startAutonomousInvestigation()}
               disabled={autonomousLoading}
               className="inline-flex items-center gap-1 rounded border border-violet-400/40 bg-violet-500/15 px-3 py-1.5 text-xs font-medium text-violet-100 hover:bg-violet-500/25 disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-violet-400"
             >
               {autonomousLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <BrainCircuit className="h-3.5 w-3.5" />}
-              Investigate autonomously
+              Open Deep Hunt
             </button>
           )}
           <button
@@ -697,24 +694,6 @@ function AssetDetailDrawer({
         </div>,
         document.body
       )}
-      <ConfirmDialog
-        open={autonomousConfirmOpen}
-        title="Authorize autonomous investigation"
-        confirmLabel="Authorize and start"
-        busy={autonomousLoading}
-        message={
-          <div className="space-y-2 text-sm text-gray-400">
-            <p>
-              The investigator will analyze <span className="font-medium text-gray-200">{asset.url || asset.label}</span>, choose bounded discovery and active test actions, wait for their results, and continue until it reaches a defensible conclusion or its budget.
-            </p>
-            <p>
-              This sends active security probes. Continue only if you own the target or have explicit permission to test it. Authorization expires after 30 minutes; the server-side run continues if you leave this page.
-            </p>
-          </div>
-        }
-        onConfirm={startAutonomousInvestigation}
-        onCancel={() => setAutonomousConfirmOpen(false)}
-      />
     </>
   )
 }

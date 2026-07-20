@@ -15926,6 +15926,49 @@ def test_autonomous_workflow_finding_uses_canonical_retest_inputs_and_source_fil
     assert "autonomous_workflow" in api_module._source_type_filter_sql("dast")
 
 
+def test_keyless_hunt_request_distinguishes_passive_discovery_from_deep_hunt():
+    passive = api_module.AgentHuntSessionStartRequest()
+    active = api_module.AgentHuntSessionStartRequest(
+        mode="deep_hunt",
+        approval_receipt_id=str(uuid.uuid4()),
+    )
+
+    assert passive.mode == "read_only"
+    assert active.mode == "deep_hunt"
+
+
+def test_agent_hunt_public_shape_exposes_product_mode_and_capability_boundary():
+    passive = api_module._agent_hunt_run_public({
+        "id": uuid.uuid4(),
+        "target_id": uuid.uuid4(),
+        "objective": "inspect",
+        "status": "awaiting_planner",
+        "max_iterations": 12,
+        "allow_write": False,
+        "allow_active": False,
+        "state": {"messages": [], "iterations": 0},
+        "result": {},
+    })
+    deep_hunt = api_module._agent_hunt_run_public({
+        "id": uuid.uuid4(),
+        "target_id": uuid.uuid4(),
+        "objective": "hunt",
+        "status": "awaiting_planner",
+        "max_iterations": 12,
+        "allow_write": False,
+        "allow_active": True,
+        "state": {"messages": [], "iterations": 0},
+        "result": {},
+    })
+
+    assert passive["mode"] == "read_only"
+    assert passive["tool_surface"]["allow_active"] is False
+    assert deep_hunt["mode"] == "deep_hunt"
+    assert deep_hunt["tool_surface"]["allow_active"] is True
+    assert deep_hunt["tool_surface"]["allow_write"] is False
+    assert "arbitrary state-changing HTTP remains blocked" in deep_hunt["tool_surface"]["note"]
+
+
 def test_research_autobind_requires_ranked_live_operation_identity():
     target_id = uuid.uuid4()
     wrong_hypothesis_id = uuid.uuid4()

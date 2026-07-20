@@ -31,10 +31,10 @@ the VPS still use `http://localhost:8080`; user-facing links should use the URL 
 | Skill | Use it for |
 |---|---|
 | [`shakerscan`](shakerscan/SKILL.md) | General scans, targets, findings, Continuous ASM, AI Gate, Model Intake, workers, schedules, evidence, and operation routing |
-| [`ai-security-session`](ai-security-session/SKILL.md) | Interactive Playwright exploration, auth workflows, endpoint replay, and BOLA/IDOR testing |
+| [`ai-security-session`](ai-security-session/SKILL.md) | Interactive Testing: browser exploration, auth workflows, endpoint replay, and BOLA/IDOR testing |
 | [`js-analyze`](js-analyze/SKILL.md) | Frontend routes, browser-captured APIs, libraries, source-map hints, and secret candidates |
 | [`content-discovery`](content-discovery/SKILL.md) | High-signal route/file seeds, `custom_list`, and `custom_endpoints` |
-| [`research-agent`](research-agent/SKILL.md) | Bounded research episodes and Deep Hunt campaigns |
+| [`research-agent`](research-agent/SKILL.md) | Deep Hunt: AI-driven exploration, bounded active testing, evidence, and deterministic promotion |
 | [`review-skills`](review-skills/SKILL.md) | Audit the skills, slash commands, and specialized agents |
 
 Each modern skill is a directory with:
@@ -68,8 +68,9 @@ Repeat for any specialized skills you want globally.
 
 Project-local Claude Code entry points live under `.claude/`:
 
-- Commands: scan, full/smart scan, status, findings, workers, subdomains, AI Gate, interactive
-  sessions, manual findings, JS analysis, content discovery, research, and skill review
+- Commands: scan, full/smart scan, status, findings, workers, subdomains, AI Gate, Interactive
+  Testing, manual findings, JS analysis, content discovery, Deep Hunt, compatibility research,
+  and skill review
 - Specialized agents: JS analysis, content discovery, and skill-system review
 
 The commands delegate to the same skills and API safety rules. They are conveniences, not separate

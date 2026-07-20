@@ -70,7 +70,7 @@ Use:
 - **Retest** to queue deterministic verification with optional AI escalation;
 - **Evidence** to inspect durable evidence objects and content-free exports;
 - status actions for resolved, false-positive, or accepted-risk triage;
-- **Investigate autonomously** only for an authorized, target-linked web finding.
+- **Verify finding** for a bounded deterministic proof attempt on an authorized, target-linked web finding.
 
 A title, HTTP 200, reflection, or model opinion is not proof. Look for the server-derived proof state,
 deterministic replay, principal/control comparison, and linked evidence.
@@ -83,15 +83,15 @@ deterministic replay, principal/control comparison, and linked evidence.
 | Review assets, relationships, and attack paths | **Exposure** |
 | Test chat, RAG, agent, widget, or MCP endpoints | **AI Gate** |
 | Check a model artifact before deployment | **Model Intake** |
-| Reproduce browser/auth workflows manually | **Interactive** |
+| Reproduce browser/auth workflows manually | **Interactive Testing** |
 | Review evidence cleanup or exports | **Evidence** |
 | Follow scans, scheduled work, investigations, and exports | **Timeline** |
-| Start a bounded adaptive investigation | **Autonomous Hunt** |
+| Start an AI-driven investigation with bounded active testing | **Deep Hunt** |
 | Preview a natural-language operation without executing it | **AI Operations Router** |
 
-The **Campaigns** page is a read-only mission-action ledger. Start and control Deep Hunt from
-**Autonomous Hunt**, then follow the run page for readiness, current work, proof outcome, blockers,
-and the recommended next action.
+The **Campaigns** page is a read-only mission-action ledger. Start Deep Hunt from **Deep Hunt**,
+then continue its keyless turn loop from the coding-agent session. The UI shows the current
+transcript, evidence-backed suspected findings, and deterministic verification results.
 
 ## 6. Useful agent requests
 
@@ -99,9 +99,9 @@ and the recommended next action.
 Show ShakerScan status and use the correct remote UI URL.
 Run a standard scan on my authorized staging application.
 Explain the proof and coverage gaps for scan <id>.
-Show active autonomous findings for this target.
+Show active Deep Hunt findings for this target.
 What should Continuous ASM test next?
-Start a read-only investigation of this registered target.
+Run Deep Hunt on this authorized registered target.
 Check this model artifact without executing it.
 ```
 

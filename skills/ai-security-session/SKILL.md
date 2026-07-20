@@ -1,9 +1,9 @@
 ---
 name: ai-security-session
-description: Interactive Playwright session control for the ShakerScan `/session` API. Use when asked to start or drive an AI security testing session, perform manual browser actions, or run BOLA/IDOR testing via session endpoints.
+description: Interactive Testing through ShakerScan's `/session` API. Use when asked to test manually, open an interactive browser session, exercise authentication workflows, or perform BOLA/IDOR endpoint replay.
 ---
 
-# AI Security Session
+# Interactive Testing
 
 **Overview**
 Use the `/session` API to run interactive, manual security testing with a real headless browser. This is ideal for BOLA/IDOR checks, auth flows, and targeted exploration that automated scans miss.

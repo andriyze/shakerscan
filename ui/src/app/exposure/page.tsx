@@ -27,14 +27,11 @@ import {
   X,
 } from 'lucide-react'
 import {
-  createTargetPolicyApproval,
   getDomains,
   getExposureAssets,
   getExposureAttackPaths,
   getExposureGraph,
   getExposureNodes,
-  getResearchReadiness,
-  launchResearchEpisode,
   rescanModelIntakeTarget,
   scanAITarget,
   scanTarget,
@@ -778,32 +775,8 @@ function ExposureView() {
   }
 
   async function handleAutonomousInvestigation(asset: ExposureAsset): Promise<void> {
-    if (asset.kind !== 'web') throw new Error('Autonomous web investigations are only available for web assets.')
-    const candidate = asset.url || asset.origin || ''
-    let targetUrl: string
-    try {
-      const parsed = new URL(candidate)
-      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') throw new Error('unsupported protocol')
-      targetUrl = parsed.toString()
-    } catch {
-      throw new Error('This asset does not have a valid HTTP or HTTPS target URL.')
-    }
-
-    const readiness = await getResearchReadiness()
-    if (!readiness.planner_ready) throw new Error('Configure an AI model before starting an autonomous investigation.')
-    if (!readiness.execution_enabled) throw new Error('Autonomous active execution is disabled by server policy.')
-    const approvalReceiptId = await createTargetPolicyApproval(asset.id, targetUrl, 30)
-    const detail = await launchResearchEpisode({
-      subject_type: 'target',
-      subject_id: asset.id,
-      mission_profile: 'target_hunt',
-      intensity: 'hunt',
-      approval_receipt_id: approvalReceiptId,
-      autopilot: true,
-      created_by: 'exposure_ui',
-    })
-    toast.success(detail.reused ? 'Opened the existing autonomous investigation' : 'Autonomous investigation started')
-    router.push(`/settings/research-agent?episode_id=${encodeURIComponent(detail.episode.id)}`)
+    if (asset.kind !== 'web') throw new Error('Deep Hunt is only available for registered web targets.')
+    router.push(`/settings/research-agent?target=${encodeURIComponent(asset.id)}`)
   }
 
   // Bulk variant of handleScan: fire kind-appropriate scans concurrently and

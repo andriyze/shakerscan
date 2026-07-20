@@ -62,15 +62,15 @@ const VERIFICATION_VERDICTS = [
 const SOURCE_TYPE_OPTIONS = [
   { value: '', label: 'All' },
   { value: 'dast', label: 'DAST' },
+  { value: 'deep_hunt', label: 'Deep Hunt' },
   { value: 'ai_gate', label: 'AI Gate' },
-  { value: 'ai_session', label: 'AI Session' },
-  { value: 'autonomous', label: 'Autonomous' },
+  { value: 'ai_session', label: 'Interactive' },
   { value: 'model_intake', label: 'Model Intake' },
   { value: 'asm', label: 'ASM' },
   { value: 'manual', label: 'Manual' },
 ] as const
 
-type FindingSourceTypeFilter = 'dast' | 'ai' | 'ai_gate' | 'ai_session' | 'autonomous' | 'model_intake' | 'asm' | 'manual'
+type FindingSourceTypeFilter = 'dast' | 'ai' | 'ai_gate' | 'ai_session' | 'deep_hunt' | 'autonomous' | 'model_intake' | 'asm' | 'manual'
 
 function getFindingSourceType(finding: Finding): FindingSourceType {
   if (finding.source === 'model_intake' || finding.tool === 'model_intake') {
@@ -80,10 +80,10 @@ function getFindingSourceType(finding: Finding): FindingSourceType {
     return 'AI Gate'
   }
   if (finding.source === 'ai_session') {
-    return 'AI Session'
+    return 'Interactive'
   }
-  if (finding.source === 'autonomous' || finding.tool === 'autonomous_workflow') {
-    return 'Autonomous'
+  if (finding.source === 'autonomous' || finding.tool === 'autonomous_workflow' || getFindingResearchProvenance(finding)) {
+    return 'Deep Hunt'
   }
   if (finding.source === 'asm') {
     return 'ASM'
@@ -494,9 +494,10 @@ function FindingsContent() {
           More filters and sorting
         </summary>
         <div className="flex flex-wrap items-center gap-4 border-t border-gray-800 p-4">
-        {/* Source Type Filter */}
+        {/* User-facing finding source. Deep Hunt includes direct AI claims and
+            DAST work launched as part of a hunt. */}
         <div className="flex items-center gap-2">
-          <label className="text-sm text-gray-400">Type:</label>
+          <label className="text-sm text-gray-400">Source:</label>
           <div className="flex max-w-full flex-wrap gap-1 rounded-lg border border-gray-800 bg-gray-900 p-0.5">
             {SOURCE_TYPE_OPTIONS.map((option) => (
               <button
@@ -505,27 +506,6 @@ function FindingsContent() {
                 onClick={() => setFilter('source_type', option.value || undefined)}
                 className={`px-2.5 py-1 text-sm rounded-md transition-colors sm:px-3 ${
                   sourceTypeFilter === option.value
-                    ? 'bg-blue-600 text-white'
-                    : 'text-gray-400 hover:bg-gray-800 hover:text-gray-200'
-                }`}
-              >
-                {option.label}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        {/* Driven-by filter: organic DAST vs deep-hunt-driven scanner findings */}
-        <div className="flex items-center gap-2">
-          <label className="text-sm text-gray-400">Driven by:</label>
-          <div className="flex max-w-full flex-wrap gap-1 rounded-lg border border-gray-800 bg-gray-900 p-0.5">
-            {[{ value: '', label: 'Anyone' }, { value: 'autonomous_research', label: 'Deep hunt' }].map((option) => (
-              <button
-                key={option.label}
-                type="button"
-                onClick={() => setFilter('driven_by', option.value || undefined)}
-                className={`px-2.5 py-1 text-sm rounded-md transition-colors sm:px-3 ${
-                  drivenByFilter === option.value
                     ? 'bg-blue-600 text-white'
                     : 'text-gray-400 hover:bg-gray-800 hover:text-gray-200'
                 }`}
@@ -753,7 +733,6 @@ function FindingsContent() {
           <div className="divide-y divide-gray-800">
             {findings.map((finding) => {
               const sourceType = getFindingSourceType(finding)
-              const research = getFindingResearchProvenance(finding)
               return (
                 <Link
                   key={finding.id}
@@ -765,14 +744,6 @@ function FindingsContent() {
                       <SeverityBadge severity={finding.severity} />
                       <ProofStateBadge proofState={finding.proof_state} />
                       <SourceTypeBadge type={sourceType} />
-                      {research && (
-                        <span
-                          title={`Found by a deep-hunt-driven scan${research.campaign_id ? ` (run ${research.campaign_id.slice(0, 8)}…)` : ''}`}
-                          className="rounded-full bg-indigo-500/15 px-2 py-0.5 text-xs font-medium text-indigo-300"
-                        >
-                          Deep hunt
-                        </span>
-                      )}
                     </div>
                     <div className="flex-1 min-w-0">
                       <h3 className="text-sm font-medium text-white">{finding.title}</h3>

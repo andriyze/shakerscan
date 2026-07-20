@@ -197,13 +197,13 @@ export const RETEST_VERDICT_LABELS: Record<string, string> = {
   error: 'Retest error',
 }
 
-export type FindingSourceType = 'DAST' | 'AI Gate' | 'AI Session' | 'Autonomous' | 'Model Intake' | 'ASM' | 'Manual'
+export type FindingSourceType = 'DAST' | 'AI Gate' | 'Interactive' | 'Deep Hunt' | 'Model Intake' | 'ASM' | 'Manual'
 
 export const SOURCE_TYPE_BADGE_STYLES: Record<FindingSourceType, string> = {
   DAST: 'bg-blue-500/20 text-blue-300',
   'AI Gate': 'bg-purple-500/20 text-purple-300',
-  'AI Session': 'bg-fuchsia-500/20 text-fuchsia-300',
-  Autonomous: 'bg-indigo-500/20 text-indigo-300',
+  Interactive: 'bg-fuchsia-500/20 text-fuchsia-300',
+  'Deep Hunt': 'bg-indigo-500/20 text-indigo-300',
   'Model Intake': 'bg-cyan-500/20 text-cyan-300',
   ASM: 'bg-emerald-500/20 text-emerald-300',
   Manual: 'bg-amber-500/20 text-amber-300',
