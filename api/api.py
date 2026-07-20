@@ -19696,35 +19696,42 @@ def _materialize_fieldconstraint_verification_workflow(
     read_path: Optional[str] = None,
 ) -> Optional[dict[str, Any]]:
     """Build a MUTATING field_constraint proof: read the field (baseline within the constraint) ->
-    write it OUT OF BOUNDS -> read back (the out-of-bounds value persisted) -> restore the captured
-    baseline -> read again. The invariant binder derives constraint_baseline_observed /
-    constraint_violation_persisted from the observed field values vs the approved contract; the model
-    supplies no verdict. Restoration is mandatory (before_after_state needs it) and field-scoped so a
-    write-bumped timestamp does not mask a genuine restore. Returns None (caller 422s -> stays
-    SUSPECTED) when no violating probe can be built.
+    write it OUT OF BOUNDS -> read back (the out-of-bounds value persisted) -> restore -> read.
+
+    Restoration replays the FULL captured parent object (``baseline_body`` — the write-body-shaped
+    subtree at the read projection's parent), not just the probed field: a PUT-replace API gets
+    every sibling field back, and the baseline value keeps its original JSON type (no stringified
+    scalar restore). The invariant binder derives constraint_baseline_observed /
+    constraint_violation_persisted from the observed field values vs the approved contract; the
+    model supplies no verdict. Restoration is mandatory (before_after_state needs it) and
+    field-scoped so a write-bumped timestamp does not mask a genuine restore. Returns None (caller
+    422s -> stays SUSPECTED) when no violating probe can be built.
 
     ``read_path`` (contract condition) is the dotted response projection to OBSERVE the field on the
     read, for APIs whose read wraps it differently than the write body (write {field: v}; read
-    $.data.field). It defaults to ``field_name`` so symmetric APIs are unchanged; the WRITE body always
-    keys on ``field_name``."""
+    $.data.field). It defaults to ``field_name`` so symmetric APIs are unchanged; the WRITE body
+    always keys on ``field_name``."""
     probe = _field_constraint_probe_value(operator, expected_value)
     if probe is None or _invariant_value_allowed(probe, operator, expected_value):
         return None
     base = str(route)
     field = str(field_name)                       # WRITE body key (flat)
-    sel = f"$.{str(read_path or field_name)}"      # READ projection (may differ for wrapping APIs)
+    read = str(read_path or field_name)
+    sel = f"$.{read}"                             # READ projection (may differ for wrapping APIs)
+    parent = read.rsplit(".", 1)[0] if "." in read else ""
+    body_sel = f"$.{parent}" if parent else "$"   # restore body = the object the write body mirrors
     return {
         "proof_family": "field_constraint",
         "steps": [
             {"label": "before", "kind": "http", "principal": "user1", "checkpoint": "before",
              "method": "GET", "path": base, "select_json": [sel],
-             "extract": [{"name": "baseline", "source": "json", "path": sel}]},
+             "extract": [{"name": "baseline_body", "source": "json_object", "path": body_sel}]},
             {"label": "mutate", "kind": "http", "principal": "user1", "checkpoint": "mutation",
              "method": method, "path": base, "json_body": {field: probe}},
             {"label": "violation", "kind": "http", "principal": "user1", "checkpoint": "action",
              "method": "GET", "path": base, "select_json": [sel]},
             {"label": "rollback", "kind": "http", "principal": "user1", "checkpoint": "rollback",
-             "method": method, "path": base, "json_body": {field: "${baseline}"}},
+             "method": method, "path": base, "json_body": "${baseline_body}"},
             {"label": "after", "kind": "http", "principal": "user1", "checkpoint": "after",
              "method": "GET", "path": base, "select_json": [sel], "compare_to": "before"},
         ],
@@ -19740,29 +19747,34 @@ def _materialize_workflowtransition_verification_workflow(
 ) -> Optional[dict[str, Any]]:
     """Build a MUTATING workflow_transition proof: read the state field (baseline) -> attempt a
     FORBIDDEN transition (write ``probe_state`` — a state other than the single allowed ``to_state``)
-    -> read back (the forbidden state persisted) -> restore the captured baseline -> read. The
-    invariant binder derives transition_invariant_broken when the observed transition is NOT the
-    approved from->to; the model supplies no verdict. Restoration is mandatory + field-scoped. Returns
-    None (caller 422s -> stays SUSPECTED) when the contract carries no probe_state. proof_family is
-    "workflow" (the FAMILY_CONTRACTS key for workflow_transition)."""
+    -> read back (the forbidden state persisted) -> restore -> read. Restoration replays the FULL
+    captured parent object (``baseline_body``), preserving sibling fields and JSON types. The
+    invariant binder derives transition_invariant_broken ONLY when the object started in the
+    approved from_state AND the forbidden probe_state persisted; the model supplies no verdict.
+    Restoration is mandatory + field-scoped. Returns None (caller 422s -> stays SUSPECTED) when the
+    contract carries no probe_state. proof_family is "workflow" (the FAMILY_CONTRACTS key for
+    workflow_transition)."""
     probe = str(probe_state or "").strip()
     if not probe:
         return None
     base = str(route)
     field = str(field_name)                       # WRITE body key (the state field)
-    sel = f"$.{str(read_path or field_name)}"      # READ projection (may differ for wrapping APIs)
+    read = str(read_path or field_name)
+    sel = f"$.{read}"                             # READ projection (may differ for wrapping APIs)
+    parent = read.rsplit(".", 1)[0] if "." in read else ""
+    body_sel = f"$.{parent}" if parent else "$"   # restore body = the object the write body mirrors
     return {
         "proof_family": "workflow",
         "steps": [
             {"label": "before", "kind": "http", "principal": "user1", "checkpoint": "before",
              "method": "GET", "path": base, "select_json": [sel],
-             "extract": [{"name": "baseline", "source": "json", "path": sel}]},
+             "extract": [{"name": "baseline_body", "source": "json_object", "path": body_sel}]},
             {"label": "mutate", "kind": "http", "principal": "user1", "checkpoint": "mutation",
              "method": method, "path": base, "json_body": {field: probe}},
             {"label": "violation", "kind": "http", "principal": "user1", "checkpoint": "action",
              "method": "GET", "path": base, "select_json": [sel]},
             {"label": "rollback", "kind": "http", "principal": "user1", "checkpoint": "rollback",
-             "method": method, "path": base, "json_body": {field: "${baseline}"}},
+             "method": method, "path": base, "json_body": "${baseline_body}"},
             {"label": "after", "kind": "http", "principal": "user1", "checkpoint": "after",
              "method": "GET", "path": base, "select_json": [sel], "compare_to": "before"},
         ],

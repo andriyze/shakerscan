@@ -16777,8 +16777,10 @@ def test_field_constraint_materializer_is_mutating_restoring_and_field_scoped():
     assert [s["checkpoint"] for s in wf["steps"]] == ["before", "mutation", "action", "rollback", "after"]
     # Every step (reads + writes) hits the CONCRETE path, not a canonical {id} route (audit M1).
     assert all(s["path"] == "/api/orders/1234" and "{" not in s["path"] for s in wf["steps"])
-    assert wf["steps"][0]["extract"][0]["path"] == "$.quantity"          # baseline captured at runtime
-    assert wf["steps"][3]["json_body"] == {"quantity": "${baseline}"}    # ... and restored, no debrief capture
+    # Full-body baseline captured at runtime (flat read -> root object) and replayed on restore, so
+    # a PUT-replace API gets sibling fields + original JSON types back (audit F3/F4).
+    assert wf["steps"][0]["extract"][0] == {"name": "baseline_body", "source": "json_object", "path": "$"}
+    assert wf["steps"][3]["json_body"] == "${baseline_body}"
     assert not api_module._invariant_value_allowed(wf["steps"][1]["json_body"]["quantity"], "lte", 10)  # out-of-bounds write
     ra = wf["assertions"][0]
     assert ra["type"] == "restored" and ra["field_scoped"] is True and ra["predicate"] == "before_after_state"
@@ -16792,9 +16794,10 @@ def test_field_constraint_read_path_splits_read_from_write():
     keys on `quantity`. Surfaced by the Juice Shop live validation."""
     wf = api_module._materialize_fieldconstraint_verification_workflow("/api/BasketItems/10", "PUT", "quantity", "lte", 3, "data.quantity")
     assert wf["steps"][0]["select_json"] == ["$.data.quantity"]              # READ projection
-    assert wf["steps"][0]["extract"][0]["path"] == "$.data.quantity"
+    # restore body = the projection's PARENT (the write-body-shaped object)
+    assert wf["steps"][0]["extract"][0] == {"name": "baseline_body", "source": "json_object", "path": "$.data"}
     assert wf["steps"][1]["json_body"] == {"quantity": 4}                     # WRITE body (probe, flat)
-    assert wf["steps"][3]["json_body"] == {"quantity": "${baseline}"}         # restore (flat)
+    assert wf["steps"][3]["json_body"] == "${baseline_body}"                  # restore (full body replay)
     # default (no read_path) -> read path == write field
     assert api_module._materialize_fieldconstraint_verification_workflow("/x", "PUT", "amount", "lte", 5)["steps"][0]["select_json"] == ["$.amount"]
 
@@ -16819,7 +16822,8 @@ def test_workflow_transition_materializer_attempts_forbidden_state_and_restores(
     assert [s["checkpoint"] for s in wf["steps"]] == ["before", "mutation", "action", "rollback", "after"]
     assert all(s["path"] == "/api/orders/7" and "{" not in s["path"] for s in wf["steps"])  # concrete (M1)
     assert wf["steps"][1]["json_body"] == {"status": "delivered"}          # attempt the forbidden target
-    assert wf["steps"][3]["json_body"] == {"status": "${baseline}"}        # restore captured baseline
+    assert wf["steps"][0]["extract"][0] == {"name": "baseline_body", "source": "json_object", "path": "$"}
+    assert wf["steps"][3]["json_body"] == "${baseline_body}"               # restore full captured body
     assert wf["assertions"][0]["field_scoped"] is True                     # timestamp-tolerant restore
     # read-path override + no-probe abstain
     wf2 = api_module._materialize_workflowtransition_verification_workflow("/x", "PUT", "status", "shipped", "data.status")

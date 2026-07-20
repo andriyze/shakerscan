@@ -741,6 +741,28 @@ def server_corroborated_predicate_bindings(result: dict[str, Any]) -> dict[str, 
     return _server_corroborated_evidence(result)[1]
 
 
+def _json_path_get_container(value: Any, path: str) -> Any:
+    """``_json_path_get`` variant that permits container results and the ``$`` root.
+
+    http_experiment's getter is deliberately scalar-only (its variables substitute into paths and
+    scalar body slots); restore-body capture needs the whole object instead. Dotted traversal with
+    optional ``[index]`` segments is identical; ``$`` returns the parsed document itself.
+    """
+    if path == "$":
+        return value
+    current = value
+    for token in path[2:].split("."):
+        match = re.fullmatch(r"([^\[\]]+)(?:\[(\d+)\])?", token)
+        if not match or not isinstance(current, dict) or match.group(1) not in current:
+            raise WorkflowContractError(f"extract_path_missing:{path}")
+        current = current[match.group(1)]
+        if match.group(2) is not None:
+            if not isinstance(current, list) or int(match.group(2)) >= len(current):
+                raise WorkflowContractError(f"extract_path_missing:{path}")
+            current = current[int(match.group(2))]
+    return current
+
+
 def _assert_restoration_renderable(workflow: dict[str, Any], mutation_index: int, variables: dict[str, str]) -> None:
     """Fail BEFORE a mutation fires when a rollback/cleanup step can never be rendered.
 
@@ -782,6 +804,20 @@ def _assert_restoration_renderable(workflow: dict[str, Any], mutation_index: int
                 missing.add(name)
         if _sensitive_body_violation(candidate.get("json_body"), managed_names) is not None:
             raise WorkflowContractError("restoration_sensitive_key_pre_mutation")
+        # A variable-sourced restore body (``${baseline_body}``) that is already bound can be fully
+        # validated NOW — a body that will not parse or carries a sensitive key must stop the
+        # mutation, not fail after the target is changed.
+        candidate_body = candidate.get("json_body")
+        if isinstance(candidate_body, str):
+            match = re.fullmatch(r"\$\{([A-Za-z][A-Za-z0-9_]{0,63})\}", candidate_body)
+            bound_value = variables.get(match.group(1)) if match else None
+            if bound_value is not None:
+                try:
+                    parsed_body = json.loads(bound_value)
+                except (TypeError, ValueError):
+                    raise WorkflowContractError("restoration_unrenderable_pre_mutation:invalid_json_body")
+                if not isinstance(parsed_body, dict) or _sensitive_object_key(parsed_body):
+                    raise WorkflowContractError("restoration_sensitive_key_pre_mutation")
     if missing:
         raise WorkflowContractError(
             "restoration_unrenderable_pre_mutation:" + ",".join(sorted(missing)[:4])
@@ -811,10 +847,17 @@ def _normalize_extracts(index: int, raw: Any, *, browser: bool) -> list[dict[str
             result.append({"name": name, "source": "browser", "selector": selector, "attribute": attribute})
             continue
         source = str(item.get("source") or "json").strip().lower()
-        selector = str(item.get("path") if source == "json" else item.get("header") or "").strip()
-        if source not in {"json", "header"}:
+        selector = str(item.get("path") if source in {"json", "json_object"} else item.get("header") or "").strip()
+        if source not in {"json", "json_object", "header"}:
             raise WorkflowContractError(f"step_{index}_extract_source_not_allowed")
         if source == "json" and (not selector.startswith("$.") or _sensitive_name(selector)):
+            raise WorkflowContractError(f"step_{index}_extract_json_path_invalid")
+        # json_object captures an OBJECT subtree (or the root "$") serialized as JSON text — used by
+        # the mutating verify materializers to replay the full baseline body on restore, so a
+        # PUT-replace API gets every field back (not just the probed one) with original JSON types.
+        if source == "json_object" and (
+            (selector != "$" and not selector.startswith("$.")) or _sensitive_name(selector)
+        ):
             raise WorkflowContractError(f"step_{index}_extract_json_path_invalid")
         if source == "header" and (
             not selector or selector.lower() in {"set-cookie", *FORBIDDEN_HEADERS} or _sensitive_name(selector)
@@ -973,6 +1016,10 @@ def normalize_workflow(target_url: str, raw: Any) -> dict[str, Any]:
             form_body = _normalize_mapping(index, "form_body", item.get("form_body"), max_items=50) if isinstance(item.get("form_body"), dict) else None
             if json_body is not None and form_body is not None:
                 raise WorkflowContractError(f"step_{index}_multiple_body_types")
+            # A json_body may be exactly one ``${var}`` reference (a captured restore body). It is
+            # parsed + validated at render time; anything else must be a mapping as before.
+            if isinstance(json_body, str) and not re.fullmatch(r"\$\{[A-Za-z][A-Za-z0-9_]{0,63}\}", json_body):
+                raise WorkflowContractError(f"step_{index}_json_body_string_must_be_single_variable")
             if _sensitive_body_violation(json_body, declared) is not None:
                 raise WorkflowContractError(f"step_{index}_json_body_sensitive_key_forbidden")
             _bounded_json_size(query)
@@ -1315,6 +1362,18 @@ async def execute_workflow(
                     headers = _render_variables(step["headers"], variables)
                     json_body = _render_variables(step["json_body"], variables)
                     form_body = _render_variables(step["form_body"], variables)
+                    if isinstance(json_body, str):
+                        # A captured restore body (${baseline_body}): parse the serialized object and
+                        # validate it like a literal body before it can be sent.
+                        try:
+                            parsed_variable_body = json.loads(json_body)
+                        except (TypeError, ValueError):
+                            raise WorkflowContractError("rendered_json_body_not_json")
+                        if not isinstance(parsed_variable_body, dict):
+                            raise WorkflowContractError("rendered_json_body_must_be_object")
+                        if _sensitive_object_key(parsed_variable_body):
+                            raise WorkflowContractError("rendered_sensitive_key_forbidden")
+                        json_body = parsed_variable_body
                     submitted_fields = sorted(
                         json_body.keys() if isinstance(json_body, dict)
                         else form_body.keys() if isinstance(form_body, dict) else []
@@ -1398,10 +1457,16 @@ async def execute_workflow(
                     except (TypeError, ValueError):
                         pass
                     for spec in step["extract"]:
-                        value = _json_path_get(parsed, spec["selector"]) if spec["source"] == "json" else http_response.headers.get(spec["selector"])
-                        if value is None:
-                            raise WorkflowContractError(f"extract_value_missing:{spec['name']}")
-                        rendered_value = str(value)[:1000]
+                        if spec["source"] == "json_object":
+                            container = _json_path_get_container(parsed, spec["selector"])
+                            if not isinstance(container, dict):
+                                raise WorkflowContractError(f"extract_value_must_be_object:{spec['name']}")
+                            rendered_value = json.dumps(container, separators=(",", ":"), ensure_ascii=True)[:8000]
+                        else:
+                            value = _json_path_get(parsed, spec["selector"]) if spec["source"] == "json" else http_response.headers.get(spec["selector"])
+                            if value is None:
+                                raise WorkflowContractError(f"extract_value_missing:{spec['name']}")
+                            rendered_value = str(value)[:1000]
                         if _contains_control_character(rendered_value):
                             raise WorkflowContractError(f"extract_value_contains_control_character:{spec['name']}")
                         extracted[spec["name"]] = rendered_value

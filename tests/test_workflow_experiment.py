@@ -243,6 +243,123 @@ def test_mutation_allowed_when_cleanup_needs_later_produced_variable():
     assert all(not obs.get("error") for obs in result["observations"])
 
 
+def test_full_body_restore_replays_sibling_fields_and_types():
+    """Audit F3/F4: the restore must replay the captured parent object verbatim — sibling fields
+    recovered on a replace-semantics API, numeric baseline restored as a number (not "1")."""
+    resource = {"quantity": 1, "name": "juice", "updatedAt": "2026-07-20T00:00:00Z"}
+    sent_bodies: list[dict] = []
+
+    def handler(request):
+        if request.method == "PUT":
+            body = __import__("json").loads(request.content.decode())
+            sent_bodies.append(body)
+            # Replace semantics: the stored resource becomes exactly the sent body, with a bumped
+            # server timestamp (the field_scoped restored assertion tolerates that bump).
+            stored = dict(body)
+            stored["updatedAt"] = "2026-07-20T01:00:00Z"
+            resource.clear()
+            resource.update(stored)
+        return httpx.Response(200, json=dict(resource))
+
+    payload = {
+        "proof_family": "field_constraint",
+        "steps": [
+            {"label": "before", "checkpoint": "before", "method": "GET", "path": "/item",
+             "select_json": ["$.quantity"],
+             "extract": [{"name": "baseline_body", "source": "json_object", "path": "$"}]},
+            {"label": "mutate", "checkpoint": "mutation", "method": "PUT", "path": "/item",
+             "json_body": {"quantity": 4}},
+            {"label": "violation", "checkpoint": "action", "method": "GET", "path": "/item",
+             "select_json": ["$.quantity"]},
+            {"label": "rollback", "checkpoint": "rollback", "method": "PUT", "path": "/item",
+             "json_body": "${baseline_body}"},
+            {"label": "after", "checkpoint": "after", "method": "GET", "path": "/item",
+             "select_json": ["$.quantity"], "compare_to": "before"},
+        ],
+        "assertions": [
+            {"type": "restored", "control": "before", "candidate": "after",
+             "predicate": "before_after_state", "field_scoped": True},
+        ],
+    }
+    result = asyncio.run(workflow.execute_workflow(
+        "https://example.test", payload, principal_contexts={}, transport=httpx.MockTransport(handler)
+    ))
+    assert len(sent_bodies) == 2
+    assert sent_bodies[0] == {"quantity": 4}                      # minimal probe write
+    # restore replays the FULL captured object: sibling name recovered, quantity back as an int
+    assert sent_bodies[1] == {"quantity": 1, "name": "juice", "updatedAt": "2026-07-20T00:00:00Z"}
+    assert isinstance(sent_bodies[1]["quantity"], int)
+    assert resource["name"] == "juice" and resource["quantity"] == 1
+    assert result["restoration_verified"] is True
+
+
+def test_restore_body_at_wrapped_projection_and_sensitive_key_blocks_mutation():
+    """json_object at a nested path ($.data); a captured body carrying a sensitive key must stop
+    the mutation PRE-flight (F2 gate), not fail after the target changed."""
+    # 1) wrapped projection: restore replays $.data, not the envelope
+    sent_bodies: list[dict] = []
+
+    def handler(request):
+        if request.method == "PUT":
+            sent_bodies.append(__import__("json").loads(request.content.decode()))
+        return httpx.Response(200, json={"data": {"quantity": 1, "name": "x"}, "status": "ok"})
+
+    payload = {
+        "proof_family": "field_constraint",
+        "steps": [
+            {"label": "before", "checkpoint": "before", "method": "GET", "path": "/item",
+             "select_json": ["$.data.quantity"],
+             "extract": [{"name": "baseline_body", "source": "json_object", "path": "$.data"}]},
+            {"label": "mutate", "checkpoint": "mutation", "method": "PUT", "path": "/item",
+             "json_body": {"quantity": 4}},
+            {"label": "rollback", "checkpoint": "rollback", "method": "PUT", "path": "/item",
+             "json_body": "${baseline_body}"},
+            {"label": "after", "checkpoint": "after", "method": "GET", "path": "/item",
+             "select_json": ["$.data.quantity"], "compare_to": "before"},
+        ],
+        "assertions": [
+            {"type": "restored", "control": "before", "candidate": "after",
+             "predicate": "before_after_state", "field_scoped": True},
+        ],
+    }
+    asyncio.run(workflow.execute_workflow(
+        "https://example.test", payload, principal_contexts={}, transport=httpx.MockTransport(handler)
+    ))
+    assert sent_bodies[1] == {"quantity": 1, "name": "x"}  # inner object replayed, envelope dropped
+
+    # 2) sensitive key in the captured body -> mutation never fires
+    state = {"v": 1}
+
+    def leaky_handler(request):
+        if request.method == "PUT":
+            state["v"] = 4
+        return httpx.Response(200, json={"v": 1, "password": "hunter2"})
+
+    payload2 = {
+        "proof_family": "field_constraint",
+        "steps": [
+            {"label": "before", "checkpoint": "before", "method": "GET", "path": "/item",
+             "extract": [{"name": "baseline_body", "source": "json_object", "path": "$"}]},
+            {"label": "mutate", "checkpoint": "mutation", "method": "PUT", "path": "/item",
+             "json_body": {"v": 4}},
+            {"label": "rollback", "checkpoint": "rollback", "method": "PUT", "path": "/item",
+             "json_body": "${baseline_body}"},
+            {"label": "after", "checkpoint": "after", "method": "GET", "path": "/item",
+             "compare_to": "before"},
+        ],
+        "assertions": [
+            {"type": "restored", "control": "before", "candidate": "after",
+             "predicate": "before_after_state", "field_scoped": True},
+        ],
+    }
+    result2 = asyncio.run(workflow.execute_workflow(
+        "https://example.test", payload2, principal_contexts={}, transport=httpx.MockTransport(leaky_handler)
+    ))
+    assert state["v"] == 1  # mutation blocked pre-flight
+    by_label = {obs["label"]: obs for obs in result2["observations"]}
+    assert by_label["mutate"]["error"] == "restoration_sensitive_key_pre_mutation"
+
+
 def test_browser_mutation_success_and_restoration_use_hashed_extracted_state():
     state = {"value": "off"}
 
