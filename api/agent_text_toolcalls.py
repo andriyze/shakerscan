@@ -63,12 +63,17 @@ def render_tool_contract(tools: list[dict[str, Any]]) -> str:
         '"family":"bola|mass_assignment|injection|…","predicate":"one verifiable predicate '
         'or null","route":"/exact/vulnerable/operation","method":"GET|POST|PUT|PATCH|DELETE",'
         '"details":"… cite the exact tool output/receipt that evidences it …",'
-        '"evidence_refs":["resp_1"],"cvss":0.0,"cwe":"CWE-…","remediation":"…"}],'
+        '"evidence_refs":["resp_1"],"cvss":0.0,"cwe":"CWE-…","remediation":"…",'
+        '"param":"only for injection","payload":"only for injection"}],'
         '"abstained":false}',
         "```",
         "  evidence_refs are the http_request result refs (e.g. resp_1) that PROVE the "
         "finding. That block is the ONLY finding channel recorded — prose is dropped. Emit "
         'findings:[] + "abstained":true if nothing real was proven.',
+        "  For an INJECTION finding (family xss / sqli / nosqli / ssrf) ALSO set \"param\" (the "
+        "vulnerable parameter) and \"payload\" (the exact value you injected). The server hands "
+        "these to the deterministic DAST prover (headless-DOM XSS / DBMS SQLi / OOB SSRF) to "
+        "promote the lead; without them the injection stays a SUSPECTED signal.",
         "• Never run these tools yourself — REQUEST them. Requesting is how you act.",
     ]
     return "\n".join(lines)
@@ -229,6 +234,10 @@ def _findings_from_obj(obj: dict[str, Any]) -> list[dict[str, Any]]:
                     [str(r)[:24] for r in refs if str(r).strip()][:8] if isinstance(refs, list) else []
                 ),
                 "remediation": (str(f.get("remediation"))[:1000] if f.get("remediation") else None),
+                # Injection point for the deterministic DAST prover (xss/sqli/nosqli/ssrf). Kept only
+                # so the SUSPECTED lead can be re-executed by the real prover; it never self-verifies.
+                "param": (str(f.get("param")).strip()[:500] if f.get("param") else None),
+                "payload": (str(f.get("payload"))[:4000] if f.get("payload") else None),
                 # Model-asserted in the debrief — NO tool provenance yet. The gate downgrades these.
                 "provenance": "model",
             }

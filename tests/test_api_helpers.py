@@ -16672,3 +16672,35 @@ def test_verification_route_abstains_when_finding_has_no_concrete_route():
     assert f("http://host.docker.internal:8888") is None     # target base, no path
     assert f("") is None
     assert f(None) is None
+
+
+def test_explorer_injection_finding_routes_to_deterministic_prover():
+    """An Explorer SUSPECTED injection finding (source=autonomous, evidence.retest_type set, with
+    param+payload columns) must resolve to the DETERMINISTIC DAST prover — not the generic_http AI
+    tier — so it is promotable through the retest pipeline."""
+    finding = {
+        "title": "Reflected XSS in q",
+        "tool": "autonomous_agent",
+        "source": "autonomous",
+        "url": "http://t.example.com/search",
+        # Explorer stores the injection point in evidence (findings has no param/payload column),
+        # unredacted so the prover can replay it verbatim.
+        "evidence": json.dumps({
+            "family": "xss",
+            "retest_type": "xss",
+            "method": "GET",
+            "route": "/search",
+            "param": "q",
+            "payload": "<script>alert(1)</script>",
+        }),
+    }
+    inputs = api_module.extract_retest_inputs(finding)
+    assert inputs["finding_type"] == "xss"                       # deterministic prover, not generic_http
+    assert inputs["target_url"] == "http://t.example.com/search"
+    assert inputs["param"] == "q"
+    assert inputs["payload"] == "<script>alert(1)</script>"
+    assert inputs["method"] == "GET"
+    # sanity: xss/sqli/nosqli/ssrf are exactly the agent injection retest types
+    assert api_module._AGENT_INJECTION_RETEST_TYPES == frozenset({"xss", "sqli", "nosqli", "ssrf"})
+    for t in api_module._AGENT_INJECTION_RETEST_TYPES:
+        assert t in api_module.SUPPORTED_RETEST_TYPES

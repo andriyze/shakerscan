@@ -149,6 +149,20 @@ def test_parse_final_findings():
     assert fs[0]["provenance"] == "model"
 
 
+def test_parse_final_findings_preserves_injection_point():
+    # An injection debrief must carry param + payload through so the deterministic DAST prover can
+    # re-execute it; a non-injection finding simply omits them.
+    text = ('```json\n{"done":true,"findings":[{"title":"Reflected XSS in q","severity":"high",'
+            '"family":"xss","route":"/search","method":"GET","details":"payload reflected unescaped",'
+            '"evidence_refs":["resp_1"],"param":"q","payload":"<script>alert(1)</script>"}],'
+            '"abstained":false}\n```')
+    fs = tc.parse_final_findings(text)
+    assert len(fs) == 1
+    assert fs[0]["family"] == "xss"
+    assert fs[0]["param"] == "q"
+    assert fs[0]["payload"] == "<script>alert(1)</script>"
+
+
 def test_interpret_assistant_dict_toolcalls():
     d = tc.interpret_assistant({"tool_calls": [{"name": "http_request", "arguments": {"path": "/x"}}]})
     assert d["done"] is False and len(d["tool_calls"]) == 1

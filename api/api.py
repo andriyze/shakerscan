@@ -17871,6 +17871,12 @@ def _agent_finding_locus(finding: dict[str, Any]) -> tuple[Optional[str], Option
     return None, None
 
 
+# Injection families whose SUSPECTED lead is promotable through the DETERMINISTIC DAST retest
+# pipeline (headless-DOM XSS / DBMS SQLi / OOB SSRF). Each maps 1:1 to a retest_contract prover type.
+# The deterministic prover is the sole arbiter — the model supplies only the injection point.
+_AGENT_INJECTION_RETEST_TYPES: frozenset[str] = frozenset({"xss", "sqli", "nosqli", "ssrf"})
+
+
 async def _persist_agent_suspected_finding(
     conn,
     target_uuid: uuid.UUID,
@@ -17909,6 +17915,15 @@ async def _persist_agent_suspected_finding(
     fingerprint = hashlib.sha256(
         f"{target_uuid}:{fingerprint_identity}:autonomous_agent".encode()
     ).hexdigest()[:32]
+    # Injection leads (xss/sqli/nosqli/ssrf) carry an injection point (param + payload) so the
+    # deterministic DAST prover can later promote them. `retest_type` makes infer_retest_type resolve
+    # the right prover deterministically; the values themselves never self-verify the finding — the
+    # worker's prover (headless-DOM XSS / DBMS SQLi / OOB SSRF) is the only arbiter.
+    injection_type = normalize_retest_type(str(family)) if family else None
+    if injection_type not in _AGENT_INJECTION_RETEST_TYPES:
+        injection_type = None
+    finding_param = str(finding.get("param")).strip()[:500] if (injection_type and finding.get("param")) else None
+    finding_payload = str(finding.get("payload"))[:4000] if (injection_type and finding.get("payload")) else None
     evidence_json = _redact_finding_evidence({
         "trust_tier": "suspected",
         "provenance": gate.get("provenance"),
@@ -17927,6 +17942,15 @@ async def _persist_agent_suspected_finding(
         "agent_run_receipt_id": run_receipt_id,
         "net_new_vs_known": net_new,
     })
+    # The deterministic retest reads these from evidence (findings has no param/payload column).
+    # Set them AFTER redaction: the payload is an attack string the prover must replay VERBATIM, and
+    # a vulnerable param can be named like a secret ("token") — redaction would corrupt both.
+    if injection_type:
+        evidence_json["retest_type"] = injection_type
+        if finding_param:
+            evidence_json["param"] = finding_param
+        if finding_payload:
+            evidence_json["payload"] = finding_payload
     existing = await conn.fetchrow(
         "SELECT id, status FROM findings WHERE fingerprint=$1 AND target_id=$2", fingerprint, target_uuid
     )
@@ -18466,6 +18490,65 @@ async def _agent_auto_verify(
     return attempts
 
 
+async def _agent_auto_queue_injection_retests(
+    persisted: list[dict[str, Any]],
+    *,
+    target_uuid: uuid.UUID,
+    approval_receipt_id: Optional[str],
+    created_by: str,
+) -> list[dict[str, Any]]:
+    """Route SUSPECTED injection findings (xss/sqli/nosqli/ssrf) into the DETERMINISTIC DAST verify
+    pipeline: enqueue a deterministic retest whose prover (headless-DOM XSS / DBMS SQLi / OOB SSRF)
+    is the sole ARBITER. The finding stays SUSPECTED until the worker's prover confirms it
+    (-> last_verification_verdict='exploited'); the model never self-promotes. Gated on the hunt's
+    approval receipt and only for findings that carry a concrete injection point (param). Best-effort:
+    a queue failure must never lose findings or fail the hunt."""
+    queued: list[dict[str, Any]] = []
+    if not approval_receipt_id:
+        return queued
+    try:
+        r = get_redis()
+        r.ping()
+    except Exception:
+        return queued
+    for rec in persisted:
+        if not isinstance(rec, dict) or rec.get("persisted") != "created" or not rec.get("id"):
+            continue
+        try:
+            async with db_pool.acquire() as conn:
+                finding = await get_finding_record(conn, str(rec["id"]))
+                if not finding:
+                    continue
+                finding_data = dict(finding)
+                retest_inputs = extract_retest_inputs(finding_data)
+                rtype = retest_inputs.get("finding_type")
+                # Only deterministic injection provers, and only with a concrete injection point.
+                if rtype not in _AGENT_INJECTION_RETEST_TYPES or not retest_inputs.get("param"):
+                    continue
+                approval_context = await _validate_approval_receipt_for_action(
+                    conn, approval_receipt_id, target_url=retest_inputs.get("target_url"),
+                    target_id=finding_data.get("target_id"), action_name="finding.retest")
+                retest_id, job_id = await enqueue_finding_retest(
+                    conn, finding_data, retest_inputs, requested_by=created_by)
+            job_data = build_retest_job_payload(
+                job_id=job_id, verification_id=str(retest_id), finding_id=str(finding_data["id"]),
+                submitted_at=utc_now_iso(), trigger=created_by)
+            job_data["mode"] = "deterministic"  # force the real prover, never the AI tier
+            if approval_context:
+                job_data.update(approval_context)
+            valid, _reason = validate_retest_job_payload(job_data)
+            if not valid:
+                continue
+            r.rpush(RETEST_QUEUE_NAME, json.dumps(job_data))
+            queued.append({"finding_id": str(finding_data["id"]), "retest_type": rtype,
+                           "retest_id": str(retest_id), "queued_deterministic": True})
+        except HTTPException:
+            continue  # approval/contract guard failed for this finding — leave it SUSPECTED
+        except Exception:
+            continue  # best-effort: never fail the hunt on a queue error
+    return queued
+
+
 async def _agent_finalize_and_persist(
     state: dict[str, Any],
     *,
@@ -18493,6 +18576,7 @@ async def _agent_finalize_and_persist(
     )
     persisted: list[dict[str, Any]] = []
     auto_verified: list[dict[str, Any]] = []
+    injection_verifications: list[dict[str, Any]] = []
     if persist and gated_findings:
         persisted = await _agent_persist_suspected_findings(
             gated_findings, target_uuid=target_uuid, target_url=target_url, receipt_id=receipt_id,
@@ -18526,6 +18610,15 @@ async def _agent_finalize_and_persist(
             active_action_budget=remaining_active_actions,
             seconds_budget=remaining_seconds,
         )
+        # Route SUSPECTED injection leads (xss/sqli/nosqli/ssrf) into the deterministic DAST verify
+        # pipeline. The worker's prover is the arbiter; the finding stays SUSPECTED until it confirms.
+        injection_verifications = [] if state.get("stop_reason") == "cancelled" else (
+            await _agent_auto_queue_injection_retests(
+                persisted, target_uuid=target_uuid,
+                approval_receipt_id=approval_receipt_id,
+                created_by=f"{created_by}:inject_verify",
+            )
+        )
     auto_verify_requests = sum(int(item.get("request_units_reserved") or 0) for item in auto_verified)
     auto_verify_actions = sum(int(item.get("action_units_reserved") or 0) for item in auto_verified)
     auto_verify_active_actions = sum(
@@ -18549,6 +18642,8 @@ async def _agent_finalize_and_persist(
         "net_new_count": sum(1 for record in persisted if record.get("net_new")),
         "auto_verified": auto_verified,
         "verified_count": sum(1 for a in auto_verified if a.get("verified")),
+        "injection_verifications_queued": injection_verifications,
+        "injection_verifications_count": len(injection_verifications),
         "auto_verify_requests_reserved": auto_verify_requests,
         "auto_verify_actions_reserved": auto_verify_actions,
         "auto_verify_active_actions_reserved": auto_verify_active_actions,
