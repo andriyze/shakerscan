@@ -16756,6 +16756,25 @@ async def _build_agent_context_pack_from_target(conn, req: AgentContextPackFromT
         """,
         target_uuid,
     )
+    # B1: which collected artifacts feed the surface (crawl / har / js / ffuf / openapi / manual),
+    # so the planner can see observability coverage at a glance — e.g. no JS-derived endpoints means
+    # client-side routes are unexplored; no HAR means authenticated traffic was never captured.
+    endpoint_source_counts: list[Any] = []
+    try:
+        async with _optional_database_savepoint(conn):
+            endpoint_source_counts = await conn.fetch(
+                """
+                SELECT COALESCE(NULLIF(source, ''), 'unknown') AS source, COUNT(*) AS count
+                FROM target_endpoints
+                WHERE target_id = $1 AND COALESCE(test_status, '') <> 'gone'
+                GROUP BY COALESCE(NULLIF(source, ''), 'unknown')
+                ORDER BY count DESC
+                LIMIT 12
+                """,
+                target_uuid,
+            )
+    except Exception:
+        endpoint_source_counts = []
     sample_endpoints = []
     if req.include_endpoints and req.endpoint_limit > 0:
         endpoint_rows = await conn.fetch(
@@ -17149,6 +17168,7 @@ async def _build_agent_context_pack_from_target(conn, req: AgentContextPackFromT
         "asm_last_recon_at": target_payload.get("asm_last_recon_at"),
         "coverage": coverage,
         "endpoint_counts": [_json_safe_row(row) for row in endpoint_counts],
+        "endpoint_source_counts": [_json_safe_row(row) for row in endpoint_source_counts],
         "sample_endpoints": sample_endpoints,
         "principal_matrix": principal_summary,
         "approved_invariant_contracts": approved_invariant_contracts,
@@ -17258,6 +17278,22 @@ def _agent_context_pack_sections(context: dict[str, Any]) -> list[dict[str, Any]
     if surface.get("exhausted_families"):
         coverage_lines.append(f"exhausted_families: {_agent_pack_compact(surface.get('exhausted_families'), 200)}")
     _add("coverage", coverage_lines, len(coverage_lines))
+
+    # B1: observed-artifact provenance — which collected artifacts (crawl / har / js bundle analysis /
+    # ffuf / openapi / manual) the surface was mined from. Leads and drafts are derived from these
+    # artifacts; this section is the planner's observability-coverage signal (missing js -> client
+    # routes unexplored; missing har -> authenticated traffic never captured).
+    source_rows = _rows(surface.get("endpoint_source_counts"))
+    if source_rows:
+        artifact_lines = [
+            "endpoint discovery sources (what has been OBSERVED so far):",
+            *[f"  {row.get('source')}: {row.get('count')} endpoints" for row in source_rows],
+        ]
+        if surface.get("asm_last_recon_at"):
+            artifact_lines.append(f"last recon: {surface.get('asm_last_recon_at')}")
+        if surface.get("asm_last_test_at"):
+            artifact_lines.append(f"last endpoint test: {surface.get('asm_last_test_at')}")
+        _add("observed_artifacts", artifact_lines, len(artifact_lines))
 
     principal_lines: list[str] = []
     for principal in _rows(principals.get("principals")):

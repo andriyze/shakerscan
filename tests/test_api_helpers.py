@@ -16832,3 +16832,42 @@ def test_workflow_transition_materializer_attempts_forbidden_state_and_restores(
     # family gating: verifiable AND mutating (allow_write-gated)
     assert {"workflow"} <= api_module._AGENT_VERIFIABLE_FAMILIES
     assert {"workflow"} <= api_module._AGENT_MUTATING_VERIFY_FAMILIES
+
+
+def test_context_pack_sections_render_observed_artifacts_and_invariant_candidates():
+    """B1/A3 pack sections: artifact provenance renders from endpoint_source_counts; draft
+    invariant candidates render clearly labeled as UNAPPROVED and separate from approved rules."""
+    context = {
+        "current_surface": {
+            "coverage": {"endpoints": {"tested": 10, "discovered": 40}},
+            "endpoint_counts": [{"auth_state": "user", "test_status": "tested", "count": 10}],
+            "endpoint_source_counts": [
+                {"source": "crawl", "count": 22},
+                {"source": "js", "count": 13},
+                {"source": "openapi", "count": 5},
+            ],
+            "asm_last_recon_at": "2026-07-20T01:00:00Z",
+            "approved_invariant_contracts": [{"contract_kind": "access_control", "path": "/x"}],
+            "invariant_candidate_contracts": [
+                {"contract_kind": "field_constraint", "path": "/api/BasketItems/3",
+                 "field_name": "quantity", "approvable": True, "approval_errors": []},
+            ],
+            "sample_endpoints": [],
+            "principal_matrix": {},
+            "attack_graph": {},
+        },
+        "ranked_hypotheses": [],
+        "findings_summary": [],
+        "current_gaps": [],
+    }
+    sections = api_module._agent_context_pack_sections(context)
+    by_key = {section["key"]: section["body"] for section in sections}
+    assert "observed_artifacts" in by_key
+    assert "js: 13 endpoints" in by_key["observed_artifacts"]
+    assert "openapi: 5 endpoints" in by_key["observed_artifacts"]
+    assert "invariant_candidates" in by_key
+    assert "UNAPPROVED CANDIDATE (no authority)" in by_key["invariant_candidates"]
+    assert "field_constraint" in by_key["invariant_candidates"]
+    # approved rules stay in their own authoritative section
+    assert "invariant_contracts" in by_key
+    assert "UNAPPROVED" not in by_key["invariant_contracts"]
