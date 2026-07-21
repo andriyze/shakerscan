@@ -13607,8 +13607,8 @@ async def cli_main():
     ap.add_argument("--subfinder", action="store_true", help="Subdomain discovery mode - comprehensive CT log and passive enumeration")
     ap.add_argument("--subdomain-sources", default="all", help="Comma-separated subdomain sources: gungnir,subfinder,crtsh (default: all)")
     ap.add_argument("--subdomain-quick", action="store_true", help="Quick subdomain scan using Gungnir only (faster)")
-    ap.add_argument("--nuclei", action="store_true", help="Nuclei scan mode - comprehensive vulnerability scan with all templates (10-30 min)")
-    ap.add_argument("--complete", action="store_true", help="Complete scan mode - comprehensive security assessment (30-60 min)")
+    ap.add_argument("--nuclei", action="store_true", help="Nuclei scan mode - vulnerability scan with the configured template set (10-30 min)")
+    ap.add_argument("--complete", action="store_true", help="Complete scan mode - broader passive plus selected active checks (30-60 min)")
     ap.add_argument("--complete-tier", choices=["safe", "full", "aggressive"], default="safe",
                     help="Scan tier for complete mode: safe (30-45min), full (2-3hr), aggressive (3+hr)")
     ap.add_argument("--max-ports", type=int, default=1000, help="Max ports to scan in complete mode (default 1000)")

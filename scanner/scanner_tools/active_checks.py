@@ -567,7 +567,7 @@ async def dalfox_one(
         if deep_domxss:
             cmd.append("--deep-domxss")  # Check for DOM-based XSS (spawns headless browser)
         timeout = 180
-    out, err, rc = await run(cmd, timeout=timeout, kill_process_group=bool(deep_domxss))
+    out, err, rc = await run(cmd, timeout=timeout)
     findings: list[dict] = []
     scan_completed = rc == 0  # Tool executed successfully
     error = None

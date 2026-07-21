@@ -241,7 +241,6 @@ async def run(
     timeout: int = 60,
     input_text: str | None = None,
     retry: int = 0,
-    kill_process_group: bool = False
 ) -> tuple[str, str, int]:
     """Execute command with optional retry logic (shared across modules).
 

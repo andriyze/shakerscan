@@ -12,8 +12,9 @@ dependency-lock:
 		--generate-hashes --output-file scanner/requirements.lock
 
 ## Networked release check: fail on known UI or locked Python dependency vulnerabilities.
+## Uses the same --audit-level=high threshold as the release workflow so local == CI.
 dependency-audit:
-	npm --prefix ui audit --omit=dev
+	npm --prefix ui audit --omit=dev --audit-level=high
 	$(UVX) pip-audit --no-deps --disable-pip -r scanner/requirements.lock
 
 ## Exercise current migrations twice over clean and duplicate-dirty published schemas.

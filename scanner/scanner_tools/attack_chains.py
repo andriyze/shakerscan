@@ -911,6 +911,10 @@ def build_attack_chain(
                 step_number = int(observation.get("step_number"))
             except (TypeError, ValueError):
                 continue
+            # NOTE: the reference is checked non-empty only, never resolved
+            # against an evidence store. No attack_chain_observations producer
+            # exists today, so every multi-step chain demotes to partial; if a
+            # producer is added, resolution must land here first.
             reference = str(observation.get("evidence_ref") or "").strip()
             if step_number < 1 or not reference:
                 continue
@@ -1019,7 +1023,10 @@ def _mark_chain_partial_for_unobserved_steps(chain: AttackChain) -> None:
     chain.missing_required_all.append(reason)
     chain.evidence["chain_quality"] = "verified_entry_point_with_hypothetical_steps"
     chain.evidence["quality_reason"] = (
-        "Only reference-backed deterministic observations are presented as observed chain steps."
+        "Only steps carrying a non-empty evidence reference from a deterministic observation "
+        "are presented as observed; references attest provenance but are not resolved against "
+        "an evidence store (no attack_chain_observations producer exists today, so every "
+        "multi-step chain demotes to partial)."
     )
 
 

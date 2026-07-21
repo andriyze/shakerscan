@@ -2988,7 +2988,7 @@ class ScanOptions(BaseModel):
     # quick: DNS, TLS, headers (1-2 min)
     # standard: + tech detection, basic nuclei (5-10 min)
     # deep: + full nuclei, port scan, JS scanning (30-60 min)
-    # full: + active XSS/SQLi, all security tests (1-2 hours)
+    # full: + active XSS/SQLi, WebSocket and auth/session checks (1-2 hours)
     # aggressive: + aggressive exploit level, extended ports (2+ hours)
     scan_type: Optional[str] = None  # quick, standard, deep, full, aggressive, smart
 
