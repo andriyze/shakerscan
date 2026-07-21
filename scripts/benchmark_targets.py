@@ -845,6 +845,21 @@ def main():
         print(f"ABORT: {e}", file=sys.stderr)
         return 2
 
+    # Fail fast on an unknown benchmark target instead of writing a mis-named "failed" scorecard: the
+    # output filename is derived from the target name (benchmark-<name>.json), so a typo such as
+    # "juice-shop" (the fixture is juice_shop.yaml) would otherwise silently emit a stray file.
+    missing_fixtures = [
+        name for name in args.targets
+        if not os.path.isfile(os.path.join(FIXTURE_DIR, f"{name}.yaml"))
+    ]
+    if missing_fixtures:
+        available = sorted(
+            os.path.splitext(f)[0] for f in os.listdir(FIXTURE_DIR) if f.endswith(".yaml")
+        )
+        print(f"ABORT: no benchmark fixture for {missing_fixtures}. Available targets: {available}",
+              file=sys.stderr)
+        return 2
+
     # §3/§10 fleet gate: a stale/mixed fleet silently produces bad numbers. Abort
     # unless explicitly overridden, and record the fleet state in the output.
     uniform, fleet = check_fleet(args.api)

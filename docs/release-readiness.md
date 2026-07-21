@@ -1,46 +1,75 @@
 # Release Readiness
 
-**Status (2026-07-17):** preparation in progress. The repository remains on `0.5.7` intentionally;
-do not choose or publish the next version until the open product, security, and validation items
-below are resolved. This page is the live release checklist. It is not a claim that the current
-branch is release-ready.
+**Status (2026-07-21):** `0.7.0` candidate in preparation on
+`docs/architecture-review-and-crapi-auth-baseline`; `VERSION` is `0.7.0`. The product scope and
+stop-ship list are in [`release-must-fix.md`](release-must-fix.md) — a **trusted-operator,
+self-hosted scanner**, not a hosted SaaS. This page is the live checklist reconciled to that scope.
+It is not a claim that the branch is release-ready: it is release-ready only when every item below is
+green on the **frozen candidate SHA**.
 
 Code, migrations, runtime receipts, and tests are authoritative. Historical test results and audit
-snapshots may support investigation, but they cannot satisfy a current-release gate.
+snapshots may support investigation, but they cannot satisfy a current-release gate — the
+authoritative validation is a fresh run on the frozen candidate (VAL-01), not on branch HEAD.
 
-## Blocking product and security items
+## Product and security items — reconciled to the 0.7.0 scope
 
-The disposition table at
-[`archive/ui-ux-audit-2026-07-16.md`](archive/ui-ux-audit-2026-07-16.md#release-disposition-2026-07-17)
-tracks the complete July UI/UX audit. The following items still require implementation or explicit
-release acceptance:
+The full July UI/UX audit disposition table is at
+[`archive/ui-ux-audit-2026-07-16.md`](archive/ui-ux-audit-2026-07-16.md#release-disposition-2026-07-17).
+Reconciled against the trusted-operator scope in `release-must-fix.md`:
 
-- **AUD-02 — serialized nested evidence redaction:** structurally parse and redact supported
-  serialized JSON/form/cookie evidence before storage and presentation; provide a migration or
-  containment plan for existing evidence.
-- **AUD-03 — proof/provenance authority:** finish removing caller authority over proof state and
-  provenance from public evidence-recording paths. UI badges already consume server-derived proof
-  state, but the API boundary still needs a complete contract review.
-- **AUD-08 — attack-path semantics:** complete browser/contract acceptance that observed,
-  verified, partial, and hypothetical steps cannot be presented as one fully proven path.
-- **AUD-10 — active-scan authorization:** add a reusable, server-authoritative acknowledgement for
-  Full, Aggressive, and Smart work, including scheduled execution. Plain warning text is not the
-  completed gate.
-- **AUD-11 — deployment trust boundary:** until application authentication and authorization exist,
-  release documentation must continue to limit access to localhost, Tailscale, or an authenticated
-  firewall/VPN/reverse-proxy boundary. Direct public exposure is unsupported.
+- **AUD-03 — proof/provenance authority — CLOSED under SCAN-01.** Deterministic evidence controls
+  verified status and severity; AI verdicts are downgrade-only and cannot manufacture or upgrade a
+  verified/high finding; a registry proof contract that is unmet can no longer persist
+  `last_verification_verdict='exploited'` from a raw proof signal (the persisted-surface fix in
+  `e35fe24`).
+- **AUD-08 — attack-path semantics — CLOSED under SCAN-01.** A chain reaches the proven `chains[]`
+  only when it is complete AND every step is reference-backed "observed"; otherwise it routes to
+  `partial_chains` with per-step status. Observed/verified/partial/hypothetical cannot appear as one
+  fully proven path.
+- **AUD-02 — comprehensive nested-evidence secret redaction — DEFERRED to 0.8.0** per the scope
+  boundary. Existing safeguards remain and documentation warns that result storage is sensitive; a
+  typed redaction pipeline and old-data rewrite are not 0.7.0 gates.
+- **AUD-10 — server-authoritative active-scan approval receipts — DEFERRED to 0.8.0** per the scope
+  boundary. Under the trusted-operator model, starting a local active scan is the operator's
+  authorization; scope and same-origin enforcement still apply and clear active-testing warnings
+  remain required. Reusable target-bound approvals return before shared/untrusted control planes exist.
+- **AUD-11 — deployment trust boundary — STANDING documented requirement.** Until ShakerScan has
+  application authentication, docs and installer defaults bind to localhost and require Tailscale, a
+  VPN, firewall, or an authenticated reverse proxy for remote access. Direct public exposure is
+  unsupported.
+
+## Known limitations accepted for 0.7.0
+
+Recorded from the release-candidate adversarial audit (2026-07-21, three tracks over SCAN-01..04 /
+UPGRADE-01). **None can produce a false-VERIFIED finding or a false "covered" coverage claim**; each
+is conservative/fail-closed or latent, and is an owned decision rather than a silent gap:
+
+- Registry `severity_rules` are advisory metadata; runtime severity capping is the wired active-family
+  map (`xss`/`sqli`/`bola`/`auth`/`mass_assignment`/`jwt`), which covers the families that emit
+  critical/high. No detector emits a name-only high today; a generic rule evaluator is deferred
+  (per-predicate evidence mapping carries mis-cap regression risk with no confirmed benefit).
+- The attack-chain "observed step" gate accepts a self-attested `evidence_ref`, but the
+  `attack_chain_observations` field has no producer today, so every multi-step chain already demotes
+  to `partial`. Latent only.
+- `partial` is not a top-level registry execution status (it collapses to `failed`, never to
+  `completed`); budget-exhausted work is reported honestly via `budget_exhausted_reason` telemetry.
+- Non-active scans omit receipts for the active families (absent, not an explicit `skipped`); nothing
+  derives "covered/clean" from receipt absence, and the e2e harness cross-checks receipt presence.
 
 ## Release-candidate validation
 
-Run these against the exact candidate commit and retain content-free receipts/artifacts:
+Run these against the exact candidate commit and retain content-free receipts/artifacts. On branch
+HEAD (`df0e08b`) the fast host-verifiable checks already pass — unit/contract (2341 passed, 7
+skipped), `generate_capability_inventory.py --check`, and all `release_gates.py` gates — but each MUST
+be re-confirmed on the frozen candidate SHA; the live-stack and benchmark rows below are freeze-time.
 
 - [ ] Unit and contract suites pass on the candidate.
 - [ ] UI production build and targeted browser QA pass at desktop and narrow viewport widths.
 - [ ] `python3 scripts/generate_capability_inventory.py --check` passes.
 - [ ] Every skill validates with the skill validator.
 - [ ] Documentation links and current/archive indexes pass.
-- [ ] `make release-gates` passes. The named gates exist today, but the GitHub Release workflow does
-      not yet invoke them automatically.
+- [ ] `make release-gates` passes. (The Release workflow now invokes the gates in the candidate
+      scanner image before publish, so a wrong candidate cannot be published green.)
 - [ ] `make e2e` passes against a uniform build-current fleet.
 - [ ] `make e2e-model-intake` passes the real public-model path, or the offline fixture is explicitly
       recorded as a limited substitute.
@@ -57,13 +86,16 @@ Benchmark reinterpretations and contamination corrections are preserved in the
 
 Complete these before creating a tag:
 
-- [ ] Correct OCI image license labels from MIT to Apache-2.0 in the GitHub release workflow and
-      manual image publisher.
-- [ ] Replace the hard-coded `0.5.7` GitHub release highlights with version-specific release notes.
-- [ ] Make the Release workflow run the required documentation, release-gate, and candidate
-      validation jobs, or require a referenced successful workflow run before tag publication.
-- [ ] Restrict manual release dispatch to an approved release commit/branch and verify that the
-      requested version matches `VERSION`.
+- [x] Correct OCI image license labels from MIT to Apache-2.0 in the GitHub release workflow and
+      manual image publisher. (`release.yml` + `scripts/publish-images.sh` label Apache-2.0.)
+- [x] Replace the hard-coded `0.5.7` GitHub release highlights with version-specific release notes.
+      (`docs/releases/0.7.0.md`; the workflow refuses to publish without non-empty version notes.)
+- [x] Make the Release workflow run the required documentation, release-gate, and candidate
+      validation jobs. (`release.yml` builds the candidate scanner image and runs unit/contract +
+      `release_gates.py` + `npm audit --audit-level=high` + inventory `--check` before publish.)
+- [x] Restrict manual release dispatch to an approved release commit/branch and verify that the
+      requested version matches `VERSION`. (Candidate SHA must equal checked-out HEAD and be an
+      ancestor of `origin/main`; the tag must equal `v${VERSION}`.)
 - [ ] Decide which slower benchmark/E2E jobs are scheduled and add the schedule before describing
       them as nightly.
 - [ ] Replace remaining absolute CLI help claims such as Full running “ALL security tests.” The
