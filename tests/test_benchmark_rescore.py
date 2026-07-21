@@ -633,3 +633,61 @@ def test_retest_settle_counts_all_retest_lanes(monkeypatch):
     monkeypatch.setattr(b.time, "sleep", lambda *_: None)
     assert b.wait_for_retest_settle("http://x", timeout=60, poll=0) is True
     assert seen["calls"] >= 2
+
+
+def _run_target_with_claim(monkeypatch, tmp_path, server_distinct):
+    """Drive run_target with a submitter-supplied distinct-principal claim.
+
+    The claim intentionally asserts distinct_identity_claims_validated=True in
+    every case: the scorecard's authoritative auth_workflow legs must come from
+    the SERVER-observed receipt (server_distinct), never from the claim.
+    """
+    (tmp_path / "crapi.yaml").write_text(
+        "target_url: http://target.test\n"
+        "auth:\n  user1_login: {}\n  user2_login: {}\n  requires_two_users: true\n"
+        "gates:\n  require_verified_bola: true\n"
+    )
+    monkeypatch.setattr(b, "FIXTURE_DIR", str(tmp_path))
+    report = _verified_bola_report(server_distinct)
+    client_claim = {
+        "schema_version": "benchmark_principal_validation_v1",
+        "contexts_configured": ["user1", "user2"],
+        "distinct_identity_claims_validated": True,
+        "identity_fingerprints": ["aaaa1111", "bbbb2222"],
+        "validation_method": "jwt_stable_claim",
+        "authenticated_responses_accepted": None,
+    }
+    monkeypatch.setattr(b, "submit_target", lambda *a, **k: {
+        "scan_id": "scan-1", "two_user": True, "principal_validation": client_claim,
+    })
+
+    def fake_get(url):
+        if url.endswith("/result"):
+            return report
+        return {"status": "completed"}
+
+    monkeypatch.setattr(b, "_get", fake_get)
+    out = b.run_target("crapi", "http://api.test", timeout=60, do_auth=True)
+    return out, client_claim
+
+
+def test_run_target_client_claim_cannot_override_server_principal_leg(monkeypatch, tmp_path):
+    out, claim = _run_target_with_claim(monkeypatch, tmp_path, server_distinct=False)
+    # Server receipt absent: authoritative leg stays False despite the True claim.
+    assert out["auth_workflow"]["principal_identities_validated"] is False
+    assert out["auth_workflow"]["authenticated_responses_accepted"] is None
+    # The claim is preserved as explicitly-labeled informational provenance.
+    assert out["principal_validation_client_claim"] is claim
+    assert "principal_validation" not in out
+    gate = next(g for g in out["gates"] if g["gate"] == "require_verified_bola")
+    assert gate["pass"] is False
+    assert out["passed"] is False
+
+
+def test_run_target_server_receipt_passes_with_claim_recorded(monkeypatch, tmp_path):
+    out, claim = _run_target_with_claim(monkeypatch, tmp_path, server_distinct=True)
+    assert out["auth_workflow"]["principal_identities_validated"] is True
+    assert out["auth_workflow"]["authenticated_responses_accepted"] is True
+    assert out["principal_validation_client_claim"] is claim
+    gate = next(g for g in out["gates"] if g["gate"] == "require_verified_bola")
+    assert gate["pass"] is True

@@ -769,10 +769,12 @@ def run_target(name, api, timeout, do_auth, preset_scan_id=None, rescore_after_r
     finish_card["report_invariant_violations"] = list(report.get("invariant_violations") or []) or _report_invariants(report)
     finish_card["two_user"] = two_user
     if principal_validation:
-        finish_card["principal_validation"] = principal_validation
-        finish_card["auth_workflow"]["principal_identities_validated"] = bool(
-            principal_validation.get("distinct_identity_claims_validated")
-        )
+        # SCAN-04: the harness's client-side claim is informational provenance
+        # only. The authoritative legs (principal_identities_validated,
+        # authenticated_responses_accepted) live in auth_workflow, derived by
+        # collect_scorecard from SERVER-observed receipts — a submitter-supplied
+        # claim must never override them.
+        finish_card["principal_validation_client_claim"] = principal_validation
 
     cards_by_phase = {"scan_finish": finish_card}
     scoring_card = finish_card
@@ -790,10 +792,9 @@ def run_target(name, api, timeout, do_auth, preset_scan_id=None, rescore_after_r
             post_card["retest_settled"] = settled
             post_card["two_user"] = two_user
             if principal_validation:
-                post_card["principal_validation"] = principal_validation
-                post_card["auth_workflow"]["principal_identities_validated"] = bool(
-                    principal_validation.get("distinct_identity_claims_validated")
-                )
+                # SCAN-04: informational client claim only; the authoritative
+                # auth_workflow legs come from server-observed receipts.
+                post_card["principal_validation_client_claim"] = principal_validation
             # The post-retest card is the scoring card, so carry over the report-level
             # trust signals from scan finish. A verified-count lift must not hide a
             # degraded report, active-lane failure, or invariant violation.
