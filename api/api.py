@@ -35732,7 +35732,7 @@ async def _reuse_research_launch_episode(
             detail={
                 "error": "existing_episode_requires_input",
                 "episode_id": str(existing["id"]),
-                "ui_path": f"/settings/research-agent?episode_id={existing['id']}",
+                "ui_path": f"/deep-hunt?episode_id={existing['id']}",
             },
         )
     approval_id: uuid.UUID | None = None
@@ -35775,7 +35775,7 @@ async def _reuse_research_launch_episode(
     )
     detail = await _research_episode_detail(conn, str(updated["id"]))
     detail["reused"] = True
-    detail["ui_path"] = f"/settings/research-agent?episode_id={updated['id']}"
+    detail["ui_path"] = f"/deep-hunt?episode_id={updated['id']}"
     return detail
 
 
@@ -36057,7 +36057,7 @@ async def launch_research_episode(req: ResearchLaunchRequest):
                 target_url=target_url,
             )
     detail["reused"] = False
-    detail["ui_path"] = f"/settings/research-agent?episode_id={detail['episode']['id']}"
+    detail["ui_path"] = f"/deep-hunt?episode_id={detail['episode']['id']}"
     return detail
 
 
@@ -36192,7 +36192,7 @@ async def launch_research_campaign(req: ResearchCampaignLaunchRequest):
                 "scan_id": preflight_scan_id,
                 "status": "queued" if preflight_scan_id else repair.get("action"),
             },
-            "ui_path": f"/scans/{preflight_scan_id}" if preflight_scan_id else "/settings/research-agent",
+            "ui_path": f"/scans/{preflight_scan_id}" if preflight_scan_id else "/deep-hunt",
         }
     async with db_pool.acquire() as conn:
         await _materialize_research_invariant_hypotheses(conn, campaign["target_id"])
@@ -36227,7 +36227,7 @@ async def launch_research_campaign(req: ResearchCampaignLaunchRequest):
             "episode": None,
             "readiness": readiness,
             "stop_reason": "campaign_budget_exhausted",
-            "ui_path": "/settings/research-agent",
+            "ui_path": "/deep-hunt",
         }
     try:
         episode = await launch_research_episode(ResearchLaunchRequest(

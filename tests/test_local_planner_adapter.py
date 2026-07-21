@@ -652,7 +652,7 @@ def test_research_cli_projection_omits_full_observation_pack():
         "planner": {"agent": "codex"},
     })
 
-    assert projected["ui_path"] == "/settings/research-agent?episode_id=episode-1"
+    assert projected["ui_path"] == "/deep-hunt?episode_id=episode-1"
     assert projected["current_observation"]["previous_result"]["command"] == "asm.gaps"
     assert "observation_pack" not in json.dumps(projected)
     assert len(json.dumps(projected)) < 5000

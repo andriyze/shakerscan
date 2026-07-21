@@ -13715,7 +13715,7 @@ def test_deep_campaign_bootstraps_principals_before_readiness_repair(monkeypatch
 
     async def fake_launch(_request):
         launched.append(_request)
-        return {"episode": {"id": "episode-1"}, "ui_path": "/settings/research-agent?episode_id=episode-1"}
+        return {"episode": {"id": "episode-1"}, "ui_path": "/deep-hunt?episode_id=episode-1"}
 
     monkeypatch.setattr(api_module, "db_pool", Pool())
     monkeypatch.setattr(api_module, "_research_maybe_auto_provision_principals", fake_bootstrap)
