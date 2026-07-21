@@ -43,9 +43,8 @@ const isTerminal = (status?: AgentHuntStatus | null) => !!status && TERMINAL.inc
 
 // You can also start a hunt straight from the terminal: the current coding-agent
 // session is the planner, so a plain-language ask kicks it off and drives it.
-function TerminalHint() {
+function TerminalHint({ example }: { example: string }) {
   const [copied, setCopied] = useState(false)
-  const example = 'start a deep hunt for example.com'
   const copyExample = async () => {
     try {
       await navigator.clipboard.writeText(example)
@@ -106,6 +105,13 @@ function DeepHuntPage() {
   const activeTarget = useMemo(() => targets.find((t) => t.id === findingsTargetId), [targets, findingsTargetId])
   const launchTarget = useMemo(() => targets.find((t) => t.id === targetId), [targets, targetId])
   const activeHost = activeTarget ? hostFromUrl(activeTarget.url) : ''
+  // Use a real (random) target in the terminal example when the DB has any.
+  const exampleCommand = useMemo(() => {
+    const host = targets.length
+      ? hostFromUrl(targets[Math.floor(Math.random() * targets.length)].url)
+      : 'example.com'
+    return `start a deep hunt for ${host}`
+  }, [targets])
 
   useEffect(() => {
     let cancelled = false
@@ -238,7 +244,7 @@ function DeepHuntPage() {
         </div>
       </header>
 
-      <TerminalHint />
+      <TerminalHint example={exampleCommand} />
 
       {error ? <div className="mt-4"><ErrorState message={error} /></div> : null}
 
