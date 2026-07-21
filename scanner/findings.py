@@ -160,6 +160,7 @@ try:
     )
     from .ai_verdict_policy import (
         ai_confidence,
+        has_deterministic_exploit_proof,
         is_trusted_ai_false_positive,
         is_trusted_ai_true_positive,
         _has_browser_execution_proof,
@@ -186,6 +187,7 @@ except ImportError:
     )
     from ai_verdict_policy import (
         ai_confidence,
+        has_deterministic_exploit_proof,
         is_trusted_ai_false_positive,
         is_trusted_ai_true_positive,
         _has_browser_execution_proof,
@@ -344,6 +346,140 @@ def _cap_confidence_for_precision(
     policy["confidence_cap_reason"] = reason
     finding["confidence_tier"] = get_confidence_tier(float(finding["confidence"]))
     _cap_severity(finding, _max_severity_for_confidence(float(finding["confidence"])))
+
+
+def _registry_family_for_finding(finding: dict[str, Any]) -> Any:
+    """Resolve a scanner finding to the canonical runnable family contract."""
+    try:
+        import check_registry
+    except ImportError:
+        try:
+            from api import check_registry
+        except ImportError:
+            return None
+    tool = str(finding.get("tool") or "").strip().lower()
+    cwe = str(finding.get("cwe") or "").strip().upper()
+    title = str(finding.get("title") or "").strip().lower()
+    finding_type = str(finding.get("type") or "").strip().lower()
+    for spec in check_registry.runnable_families(active_only=True):
+        if tool and tool in {str(item).lower() for item in spec.finding_tools}:
+            return spec
+        if cwe and cwe in {str(item).upper() for item in spec.finding_cwes}:
+            return spec
+        if any(marker in title for marker in spec.finding_title_markers):
+            return spec
+        if any(marker in finding_type for marker in spec.finding_type_markers):
+            return spec
+    return None
+
+
+def _nested_proof_value(finding: dict[str, Any], *names: str) -> Any:
+    for container in (
+        finding,
+        finding.get("evidence"),
+        finding.get("validation"),
+        finding.get("poe"),
+        finding.get("poe_result"),
+    ):
+        if not isinstance(container, dict):
+            continue
+        for name in names:
+            value = container.get(name)
+            if value not in (None, "", [], {}):
+                return value
+    return None
+
+
+def _registry_proof_field_present(
+    finding: dict[str, Any], field: str, *, deterministic: bool,
+) -> bool:
+    aliases = {
+        "request_or_dom_route": ("url", "file", "route", "path", "request_url"),
+        "attacker_input": ("payload", "parameter", "param", "source"),
+        "sink_or_execution": ("sink_or_reflection", "sink", "context", "browser_proof", "payload_executed"),
+        "method": ("method", "http_method"),
+        "url": ("url", "endpoint", "route", "path", "request_url", "matched_at"),
+        "parameter": ("parameter", "param", "injection_point"),
+        "payload": ("payload", "injected_value"),
+        "response_delta": ("response_delta", "response_diff", "behavior_change", "differential"),
+        "resource_template": ("resource_template", "route_template", "path_template", "url"),
+        "resource_id": ("resource_id", "object_id", "requested_object_id", "owner_resource_id", "attacker_resource_id"),
+        "primary_auth": ("primary_auth", "owner_status", "user1_status", "owner_response_status"),
+        "second_user_auth": ("second_user_auth", "attacker_status", "user2_status", "attacker_response_status"),
+        "status_delta": ("status_delta", "cross_user_data_access", "object_authorization_bypass", "responses_equivalent"),
+        "distinct_principal_control": ("distinct_principal_control", "object_id_absent_from_attacker_listing"),
+        "authenticated_responses_accepted": ("authenticated_responses_accepted", "accepted_principal_responses"),
+        "anonymous_status": ("anonymous_status", "unauthenticated_status"),
+        "authenticated_status": ("authenticated_status", "owner_status", "user1_status"),
+        "field": ("field", "parameter", "param"),
+        "baseline_value": ("baseline_value", "before_value", "baseline_status"),
+        "observed_privilege_effect": ("observed_privilege_effect", "observable_state_change", "privileged_effect"),
+        "token_source": ("token_source", "token_location"),
+        "mutation": ("mutation", "algorithm", "claim"),
+        "baseline_status": ("baseline_status", "original_status"),
+        "forged_status": ("forged_status", "mutated_status"),
+        "acceptance_delta": ("acceptance_delta", "forged_token_accepted"),
+    }
+    if _nested_proof_value(finding, *(aliases.get(field) or (field,))) is not None:
+        return True
+    proof_type = str(_nested_proof_value(finding, "proof_type", "poe_technique") or "").lower()
+    if field == "response_delta" and deterministic and proof_type in {
+        "differential_response", "sqli_data_extraction", "data_extraction",
+    }:
+        return True
+    return field == "sink_or_execution" and deterministic
+
+
+def enforce_registry_finding_contracts(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Apply registry proof and severity declarations at the report boundary."""
+    for finding in findings:
+        if not isinstance(finding, dict):
+            continue
+        spec = _registry_family_for_finding(finding)
+        if spec is None:
+            continue
+        deterministic = has_deterministic_exploit_proof(finding)
+        required = list(spec.proof_contract)
+        met = [field for field in required if _registry_proof_field_present(
+            finding, field, deterministic=deterministic,
+        )]
+        missing = [field for field in required if field not in met]
+        contract_satisfied = deterministic and not missing
+        severity_before = str(finding.get("severity") or "info").lower()
+
+        if finding.get("verified") is True and not contract_satisfied:
+            finding["verified"] = False
+            finding["suspected"] = True
+            finding["needs_verification"] = True
+            finding["proof_state"] = "likely_vulnerable"
+            finding["verification_reason"] = (
+                f"Registry {spec.name} proof contract missing: "
+                f"{', '.join(missing) or 'deterministic proof'}"
+            )
+
+        severity = str(finding.get("severity") or "info").lower()
+        if spec.name == "xss" and severity in {"critical", "high"} and not contract_satisfied:
+            _cap_severity(finding, "medium")
+        elif spec.name == "sqli" and severity == "critical" and not contract_satisfied:
+            _cap_severity(finding, "high")
+            if "response_delta" in missing:
+                _cap_severity(finding, "medium")
+        elif spec.name in {"bola", "auth", "mass_assignment", "jwt"} and severity in {"critical", "high"} and not contract_satisfied:
+            _cap_severity(finding, "medium")
+
+        finding["registry_contract"] = {
+            "registry_version": "check_family_v1",
+            "family": spec.name,
+            "proof_contract": required,
+            "proof_fields_met": met,
+            "proof_fields_missing": missing,
+            "deterministic_proof": deterministic,
+            "contract_satisfied": contract_satisfied,
+            "severity_rules": dict(spec.severity_rules),
+            "severity_before": severity_before,
+            "severity_after": str(finding.get("severity") or "info").lower(),
+        }
+    return findings
 
 
 def _evidence_value(finding: dict[str, Any], key: str) -> Any:
@@ -594,7 +730,7 @@ def apply_dast_precision_policy(
         confidence = float(finding.get("confidence") or 0.5)
         finding["confidence_tier"] = get_confidence_tier(confidence)
 
-    return findings
+    return enforce_registry_finding_contracts(findings)
 
 
 def normalize_finding(

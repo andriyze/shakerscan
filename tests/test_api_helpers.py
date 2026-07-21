@@ -57,7 +57,7 @@ def _test_jwt(**claims):
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "api"))
 # api/api.py imports asyncpg/redis/fastapi at module load; stub the ones
 # missing in the test environment. Stubs mirror tests/test_api_scan_option_masking.py.
-sys.modules.setdefault("asyncpg", types.SimpleNamespace())
+sys.modules.setdefault("asyncpg", types.SimpleNamespace(Pool=object))
 sys.modules.setdefault("redis", types.SimpleNamespace(from_url=lambda *args, **kwargs: None))
 
 if "fastapi" not in sys.modules:

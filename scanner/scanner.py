@@ -3133,6 +3133,7 @@ SCANNER_REGISTRY_ADAPTER_CONTRACTS = {
     "bola": "asm_endpoint_batch",
     "mass_assignment": "legacy_phase4_mass_assignment",
     "jwt": "legacy_advanced_jwt",
+    "endpoint_security": "endpoint_scoped_surface",
 }
 
 _SCANNER_REQUIRED_REGISTRY_FAMILIES = frozenset(SCANNER_REGISTRY_ADAPTER_CONTRACTS)
@@ -3837,7 +3838,7 @@ async def build_report(target: str,
         requested_family=active_check_family,
         mass_assignment=mass_assignment_testing,
         jwt=registry_jwt_testing,
-        bola=bool(smart_mode and not focused_active_family),
+        bola=bool(bola_testing or (smart_mode and not focused_active_family)),
     )
     if smart_mode and focused_active_family:
         print(f"[smart] Focused active mode enabled for {focused_active_family_name}; disabling unrelated active modules", file=sys.stderr)
@@ -5099,7 +5100,13 @@ async def build_report(target: str,
         families={"jwt"},
     ))
     if advanced_scan and not public_only:
-        nosql_task = asyncio.create_task(nosql_injection_test(base_url))
+        # NoSQL is part of the registry-owned SQLi/injection family.  The old
+        # eager base-URL probe ran before the registry decision and could claim
+        # coverage even when that family was not dispatched.  Keep an empty
+        # compatibility result here; the active-family adapter executes NoSQL
+        # against discovered endpoints (or the base URL in legacy mode).
+        async def dummy_nosql(): return {"vulnerable": False, "payloads_tested": [], "evidence": [], "skipped": True, "reason": "registry_active_adapter"}
+        nosql_task = asyncio.create_task(dummy_nosql())
         ldap_task = asyncio.create_task(ldap_injection_test(base_url))
         xpath_task = asyncio.create_task(xpath_injection_test(base_url))
         ssti_task = asyncio.create_task(ssti_test(base_url))
@@ -6288,28 +6295,19 @@ async def build_report(target: str,
         families={"mass_assignment"},
     ))
 
-    # BOLA/IDOR Check (requires auth for best results, user2_session enables true multi-user comparison)
-    if bola_testing and not public_only:
-        from scanner_tools.access_control_checks import check_bola
-        phase4_bola_resources = bola_resource_endpoints_from_manual_endpoints(
-            manual_endpoints_norm,
-            max_endpoints=smart_bola_max_endpoints,
-        )
-        if phase4_bola_resources:
-            print(
-                f"[bola] Phase 4 using {len(phase4_bola_resources)} manual resource endpoint templates",
-                file=sys.stderr,
-                flush=True,
-            )
-        bola_task = asyncio.create_task(check_bola(
-            base_url,
-            resource_endpoints=phase4_bola_resources or None,
-            user1_session=auth_session,
-            user2_session=user2_session,
-        ))
-    else:
-        async def dummy_bola(): return {"vulnerable": False, "findings": [], "endpoints_tested": 0, "access_violations": 0}
-        bola_task = asyncio.create_task(dummy_bola())
+    # BOLA is executed later by the registry-owned asm_endpoint_batch adapter.
+    # Keep this compatibility result empty so the phase-4 collector cannot
+    # start a second, unreceipted detector lane before the registry decision.
+    async def dummy_bola():
+        return {
+            "vulnerable": False,
+            "findings": [],
+            "endpoints_tested": 0,
+            "access_violations": 0,
+            "skipped": True,
+            "reason": "registry_active_adapter",
+        }
+    bola_task = asyncio.create_task(dummy_bola())
 
     # Race Condition Testing (smart/full/aggressive only)
     if advanced_scan and not public_only:
@@ -9148,6 +9146,7 @@ async def build_report(target: str,
         ) -> RegistryPhaseBatchOutcome:
             nonlocal active_block, run_xss, run_sqli
             nonlocal smart_succeeded, post_active_budget_exhausted, endpoints
+            nonlocal nosql_results
             enabled_active_families = {
                 str(row.get("name") or "").strip().lower()
                 for row in family_rows
@@ -11513,6 +11512,29 @@ async def build_report(target: str,
                     legacy_fallback_timed_out = True
                     active_block["legacy_active_timeout"] = True
 
+                # Preserve legacy Full/Aggressive NoSQL coverage, but only after
+                # the registry has selected the SQLi family.  This closes the
+                # former pre-registry execution bypass.
+                if run_sqli and advanced_scan and not legacy_fallback_timed_out:
+                    try:
+                        nosql_results = await nosql_injection_test(base_url)
+                        active_block["nosql_injection_legacy"] = nosql_results
+                        if nosql_results.get("vulnerable"):
+                            report["findings"].append(normalize_finding(
+                                "nosql_injection",
+                                "NoSQL Injection Vulnerability",
+                                "critical",
+                                {
+                                    "type": "nosql_injection",
+                                    "url": base_url,
+                                    "evidence": nosql_results.get("evidence") or [],
+                                    "payloads_tested": len(nosql_results.get("payloads_tested") or []),
+                                },
+                                "CWE-943",
+                            ))
+                    except Exception as exc:
+                        active_block.setdefault("nosql_errors", []).append({"error": str(exc)})
+
             family_outcomes: dict[str, RegistryPhaseOutcome] = {}
             endpoint_attempts = [
                 attempt for attempt in (active_block.get("endpoint_attempts") or [])
@@ -11692,6 +11714,50 @@ async def build_report(target: str,
         )
         active_dispatch_receipts.extend(auth_dispatch_receipts)
         async def run_asm_endpoint_batch_bola() -> RegistryPhaseOutcome:
+            nonlocal bola_results
+            if not smart_mode or not smart_succeeded:
+                try:
+                    from scanner_tools.access_control_checks import check_bola
+
+                    phase4_bola_resources = bola_resource_endpoints_from_manual_endpoints(
+                        manual_endpoints_norm,
+                        max_endpoints=smart_bola_max_endpoints,
+                    )
+                    bola_results = await check_bola(
+                        base_url,
+                        resource_endpoints=phase4_bola_resources or None,
+                        user1_session=auth_session,
+                        user2_session=user2_session,
+                    )
+                    active_block["smart_bola"] = bola_results
+                    if isinstance(report.get("access_control"), dict):
+                        report["access_control"]["bola"] = bola_results
+                    for finding in bola_results.get("findings") or []:
+                        _append_bola_finding(
+                            report,
+                            finding,
+                            tool="bola_idor",
+                            default_title="Broken Object Level Authorization",
+                            default_severity="critical",
+                        )
+                    telemetry = {
+                        "schema_version": "active_endpoint_attempt_v1",
+                        "endpoints_tested": int(bola_results.get("endpoints_tested") or 0),
+                        "finding_count": len(bola_results.get("findings") or []),
+                        "access_violations": int(bola_results.get("access_violations") or 0),
+                        "cancelled": bool(bola_results.get("cancelled")),
+                    }
+                    if bola_results.get("cancelled"):
+                        return RegistryPhaseOutcome("cancelled", "scanner_cancel_requested", telemetry)
+                    if bola_results.get("error"):
+                        return RegistryPhaseOutcome("failed", str(bola_results.get("error"))[:200], telemetry)
+                    return RegistryPhaseOutcome("completed", telemetry=telemetry)
+                except Exception as exc:
+                    return RegistryPhaseOutcome(
+                        "failed",
+                        f"{type(exc).__name__}: {str(exc)[:160]}",
+                    )
+
             # Broken function-level authorization (BFLA) on sensitive collection
             # endpoints needs only primary auth plus an anonymous-vs-authenticated
             # differential. Keep it independent from the heavier BOLA lane, which can
@@ -12145,6 +12211,7 @@ async def build_report(target: str,
         scanner_execution_plan,
         "passive",
         {"legacy_config_findings": lambda: emit_config_findings(report)},
+        families={"headers"},
     )
     if passive_dispatch_receipts:
         report.setdefault("scanner_execution_receipts", []).extend(passive_dispatch_receipts)
@@ -12155,7 +12222,15 @@ async def build_report(target: str,
     # so — like host posture — they run on exactly ONE shard per auth state (the
     # global-checks shard, skip_global_checks=False) over the FULL OpenAPI
     # surface, giving complete route coverage without N-fold duplicate probing.
-    if not public_only and not skip_global_checks:
+    endpoint_surface_decision = registry_dispatch_decision(
+        scanner_execution_plan,
+        "endpoint_security",
+        expected_adapter="endpoint_scoped_surface",
+    )
+    endpoint_surface_findings_before = len(report.get("findings") or [])
+    endpoint_surface_errors: list[str] = []
+    endpoint_surface_candidates = 0
+    if endpoint_surface_decision.get("dispatch_enabled"):
         import re as _id_re
         _ep_candidates: list[Any] = []
         _ac = report.get("active_checks") if isinstance(report.get("active_checks"), dict) else {}
@@ -12185,6 +12260,7 @@ async def build_report(target: str,
             print(f"[scanner] api-active-checks openapi expand failed: {_oas_err}", file=sys.stderr)
 
         if _ep_candidates:
+            endpoint_surface_candidates = len(_ep_candidates)
             try:
                 from scanner_tools.data_exposure import check_api_data_exposure
                 _exp_findings = await check_api_data_exposure(base_url, _ep_candidates, max_endpoints=400)
@@ -12199,6 +12275,7 @@ async def build_report(target: str,
                         file=sys.stderr,
                     )
             except Exception as _exp_err:
+                endpoint_surface_errors.append(f"data_exposure:{type(_exp_err).__name__}")
                 print(f"[scanner] data_exposure check failed: {_exp_err}", file=sys.stderr)
 
             # Active write probes (POST) — only on active scans.
@@ -12217,6 +12294,7 @@ async def build_report(target: str,
                             file=sys.stderr,
                         )
                 except Exception as _wh_err:
+                    endpoint_surface_errors.append(f"webhook_checks:{type(_wh_err).__name__}")
                     print(f"[scanner] webhook check failed: {_wh_err}", file=sys.stderr)
                 try:
                     from scanner_tools.approval_checks import check_approval_authz_bypass
@@ -12232,7 +12310,39 @@ async def build_report(target: str,
                             file=sys.stderr,
                         )
                 except Exception as _ap_err:
+                    endpoint_surface_errors.append(f"approval_checks:{type(_ap_err).__name__}")
                     print(f"[scanner] approval check failed: {_ap_err}", file=sys.stderr)
+
+    endpoint_surface_status = (
+        "failed" if endpoint_surface_errors else (
+            # Dispatch was enabled but discovery produced no endpoint candidates: nothing was
+            # probed, so report "skipped" (not "completed"). SCAN-02: an empty run must never read
+            # as covered on status alone. endpoint_surface_candidates is authoritative here.
+            "skipped" if (endpoint_surface_decision.get("dispatch_enabled") and endpoint_surface_candidates == 0) else (
+                "completed" if endpoint_surface_decision.get("dispatch_enabled") else (
+                    "blocked" if endpoint_surface_decision.get("decision") == "blocked" else "skipped"
+                )
+            )
+        )
+    )
+    report.setdefault("scanner_execution_receipts", []).append({
+        "family": "endpoint_security",
+        "phase": "passive",
+        "dispatch_adapter": "endpoint_scoped_surface",
+        "status": endpoint_surface_status,
+        "reason": (
+            ";".join(endpoint_surface_errors)
+            if endpoint_surface_errors
+            else str(endpoint_surface_decision.get("reason") or "registry_family_disabled")
+        ),
+        "telemetry_schema": "endpoint_surface_attempt_v1",
+        "proof_contract": ["request_url", "observed_response", "detector_evidence"],
+        "adapter_telemetry": {
+            "candidate_count": endpoint_surface_candidates,
+            "finding_count": len(report.get("findings") or []) - endpoint_surface_findings_before,
+            "failed_modules": endpoint_surface_errors,
+        },
+    })
 
     if family_focused_active_scope:
         family = focused_active_family_name or ("xss" if active_xss else "sqli")
@@ -13675,9 +13785,9 @@ async def cli_main():
     # --quick: Fast passive scan (DNS, TLS, headers) - 1-2 min
     # --standard: Standard scan (+ tech detection, basic nuclei) - 5-10 min
     # --deep: Deep scan (+ full nuclei, port scan, JS scanning) - 30-60 min (alias for --complete)
-    # --full: Full assessment (+ active XSS/SQLi, all security tests) - 1-2 hours
+    # --full: Broad full assessment with active XSS/SQLi - 1-2 hours
     # --aggressive: Maximum coverage (+ aggressive exploit level) - 2+ hours
-    ap.add_argument("--full", action="store_true", help="Full assessment - ALL security tests including active XSS/SQLi (1-2 hours)")
+    ap.add_argument("--full", action="store_true", help="Broad full assessment including active XSS/SQLi (1-2 hours; bounded modules and budgets apply)")
     ap.add_argument("--aggressive", action="store_true", help="Aggressive mode - maximum coverage with aggressive testing (2+ hours)")
     ap.add_argument("--smart", action="store_true", help="Smart scan - adaptive scanning with staged templates, recursive discovery, and context-aware attacks")
     ap.add_argument("--standard", action="store_true", help="Standard scan - balanced passive coverage (5-10 min)")

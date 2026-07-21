@@ -7,7 +7,7 @@ import sys
 import types
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "api"))
-sys.modules.setdefault("asyncpg", types.SimpleNamespace())
+sys.modules.setdefault("asyncpg", types.SimpleNamespace(Pool=object))
 sys.modules.setdefault("redis", types.SimpleNamespace(from_url=lambda *a, **k: None))
 
 import worker  # noqa: E402

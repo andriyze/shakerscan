@@ -1,5 +1,6 @@
 import asyncio
 import importlib.util
+import inspect
 import os
 import sys
 from pathlib import Path
@@ -670,6 +671,15 @@ def test_registry_dispatch_decision_rejects_unmapped_scanner_adapter():
 
     assert decision["dispatch_enabled"] is False
     assert decision["reason"] == "scanner_adapter_contract_missing"
+
+
+def test_release_critical_active_families_have_no_eager_registry_bypass():
+    source = inspect.getsource(scanner_mod.build_report)
+
+    assert "create_task(nosql_injection_test" not in source
+    assert "create_task(check_bola" not in source
+    assert 'families={"sqli", "xss"}' in source
+    assert 'families={"bola"}' in source
 
 
 def test_registry_dispatch_decision_keeps_disabled_broad_family_skipped():

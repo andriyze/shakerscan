@@ -1642,6 +1642,51 @@ def _signal_scanner_cancel_file(cancel_file: str | None) -> None:
         pass
 
 
+def _descendant_process_group_ids(root_pid: int, proc_root: str = "/proc") -> set[int]:
+    """Best-effort PGIDs of all live descendants of ``root_pid`` (Linux ``/proc``); empty set on any
+    failure, including non-Linux hosts that have no ``/proc``.
+
+    Scanner tools run in their OWN session (scanner_tools/common.py starts each with
+    ``start_new_session=True`` so the in-scanner cooperative watcher can reap grandchildren), which
+    places them OUTSIDE scanner.py's process group. The force-kill backstop must therefore reach those
+    separate groups explicitly. Callers enumerate BEFORE killing the scanner so the process tree is
+    still intact — once the parent is reaped its descendants reparent to init and the link is lost.
+    """
+    try:
+        children: dict[int, list[int]] = {}
+        pid_pgid: dict[int, int] = {}
+        for entry in os.listdir(proc_root):
+            if not entry.isdigit():
+                continue
+            try:
+                with open(os.path.join(proc_root, entry, "stat"), "r") as handle:
+                    # "pid (comm) state ppid pgrp ..." — comm may contain spaces/parens, so split
+                    # after the final ") " to reach the fixed positional fields.
+                    after = handle.read().rsplit(") ", 1)[1].split()
+                ppid = int(after[1])
+                pgrp = int(after[2])
+            except (OSError, ValueError, IndexError):
+                continue
+            pid = int(entry)
+            children.setdefault(ppid, []).append(pid)
+            pid_pgid[pid] = pgrp
+    except OSError:
+        return set()
+
+    pgids: set[int] = set()
+    seen: set[int] = set()
+    stack = list(children.get(root_pid, []))
+    while stack:
+        pid = stack.pop()
+        if pid in seen:
+            continue
+        seen.add(pid)
+        if pid in pid_pgid:
+            pgids.add(pid_pgid[pid])
+        stack.extend(children.get(pid, []))
+    return pgids
+
+
 async def _terminate_scanner_process(proc: Any) -> None:
     """Terminate a scanner subprocess, preferring the process group on POSIX."""
     if getattr(proc, "returncode", None) is not None:
@@ -1670,6 +1715,15 @@ async def _terminate_scanner_process(proc: Any) -> None:
     try:
         pid = getattr(proc, "pid", None)
         if os.name == "posix" and pid:
+            # Reach tool subprocesses that run in their OWN session (outside scanner.py's group) so a
+            # starved-event-loop cancellation cannot orphan them. Enumerate descendant groups while the
+            # tree is still intact, then SIGKILL them and the scanner's own group. Best-effort: the
+            # descendant sweep is a no-op where /proc is unavailable, leaving prior behavior unchanged.
+            for descendant_pgid in _descendant_process_group_ids(pid):
+                try:
+                    os.killpg(descendant_pgid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    pass
             os.killpg(os.getpgid(pid), signal.SIGKILL)
         else:
             proc.kill()

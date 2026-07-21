@@ -67,6 +67,14 @@ def scan_time_verification_fields(finding: dict[str, Any]) -> dict[str, Any] | N
         or validation.get("poe_technique")
         or ""
     ).strip().lower()
+    # A registered detector family whose registry proof contract is unmet was already judged NOT
+    # trustworthy-verified at the report boundary (scanner.findings.enforce_registry_finding_contracts
+    # stamps registry_contract.contract_satisfied=False and caps severity). Honor that verdict here so
+    # a raw proof signal (proof_of_exploitation, proof_type, ...) cannot independently persist
+    # `last_verification_verdict='exploited'` on the authoritative verified surface the UI,
+    # verified-only filters, and benchmark gates read. Cap it at `likely_vulnerable` instead.
+    registry_contract = finding.get("registry_contract") if isinstance(finding.get("registry_contract"), dict) else {}
+    registry_rejected = registry_contract.get("contract_satisfied") is False
 
     strong_proof = (
         _truthy(validation.get("poe_proven"))
@@ -90,9 +98,9 @@ def scan_time_verification_fields(finding: dict[str, Any]) -> dict[str, Any] | N
         or confidence_tier == "verified"
     )
 
-    if strong_proof:
+    if strong_proof and not registry_rejected:
         out_verdict = "exploited"
-    elif weak_proof:
+    elif weak_proof or (strong_proof and registry_rejected):
         out_verdict = "likely_vulnerable"
     else:
         return None

@@ -288,7 +288,12 @@ async def run(
         for attempt in range(retry + 1):
             proc = None
             metered_request = False
-            use_process_group = kill_process_group and os.name == "posix"
+            # Every external tool gets its own process group.  This lets the
+            # shared timeout/cancellation path reap grandchildren as well as the
+            # immediate process (nuclei/sqlmap regularly spawn helpers).  The
+            # worker first signals SHAKERSCAN_CANCEL_FILE, giving this runner a
+            # chance to kill that group before it terminates scanner.py.
+            use_process_group = os.name == "posix"
             tool_name = cmd[0] if cmd else "subprocess"
             if is_http_request and request_url:
                 try:
@@ -310,11 +315,39 @@ async def run(
                     stderr=asyncio.subprocess.PIPE,
                     start_new_session=use_process_group,
                 )
+                cancel_watch = None
+                if os.environ.get("SHAKERSCAN_CANCEL_FILE"):
+                    async def _cancel_child_group() -> None:
+                        from .cancellation import wait_for_scanner_cancel
+
+                        await wait_for_scanner_cancel()
+                        if proc is None or proc.returncode is not None:
+                            return
+                        try:
+                            if use_process_group:
+                                os.killpg(proc.pid, signal.SIGKILL)
+                            else:
+                                proc.kill()
+                        except ProcessLookupError:
+                            pass
+
+                    cancel_watch = asyncio.create_task(_cancel_child_group())
                 try:
                     out_b, err_b = await asyncio.wait_for(
                         proc.communicate(input=input_text.encode() if input_text is not None else None),
                         timeout=timeout,
                     )
+                    from .cancellation import scanner_cancel_requested
+                    if scanner_cancel_requested():
+                        _record_subprocess_receipt(
+                            cmd,
+                            timeout_seconds=timeout,
+                            exit_code=130,
+                            timed_out=False,
+                            started_at=_req_started,
+                            stderr="scanner cancellation requested",
+                        )
+                        return "", "scanner cancellation requested", 130
                 except asyncio.CancelledError:
                     if proc is not None:
                         try:
@@ -352,6 +385,13 @@ async def run(
                         stderr=f"timeout after {timeout}s",
                     )
                     return "", f"timeout after {timeout}s", 124
+                finally:
+                    if cancel_watch is not None:
+                        cancel_watch.cancel()
+                        try:
+                            await cancel_watch
+                        except BaseException:
+                            pass
                 out = out_b.decode(errors="ignore")
                 err = err_b.decode(errors="ignore")
                 if _throttle is not None:

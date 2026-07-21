@@ -105,7 +105,7 @@ CHECK_REGISTRY: tuple[CheckFamilySpec, ...] = (
         is_active=True,
         risk_level="medium",
         telemetry_schema="active_endpoint_attempt_v1",
-        proof_contract=("method", "url", "parameter", "payload", "sink_or_reflection"),
+        proof_contract=("request_or_dom_route", "attacker_input", "sink_or_execution"),
         severity_rules={"high_requires": ["confirmed_execution_or_dangerous_sink"], "medium_requires": ["reflection"]},
         scanner_options={"xss": True, "sqli": False, "asm_check_family": "xss"},
         dispatch_adapter="legacy_active_loop",
@@ -135,7 +135,10 @@ CHECK_REGISTRY: tuple[CheckFamilySpec, ...] = (
         risk_level="high",
         allowed_presets=("lab",),
         telemetry_schema="active_endpoint_attempt_v1",
-        proof_contract=("resource_template", "resource_id", "primary_auth", "second_user_auth", "status_delta"),
+        proof_contract=(
+            "resource_template", "resource_id", "primary_auth", "second_user_auth",
+            "status_delta", "distinct_principal_control", "authenticated_responses_accepted",
+        ),
         severity_rules={"critical_requires": ["cross_user_data_access"], "high_requires": ["object_authorization_bypass"]},
         scanner_options={"sqli": False, "xss": False, "asm_check_family": "bola"},
         dispatch_adapter="asm_endpoint_batch",
@@ -168,7 +171,7 @@ CHECK_REGISTRY: tuple[CheckFamilySpec, ...] = (
         scanner_options={"sqli": False, "xss": False, "asm_check_family": "auth"},
         dispatch_adapter="asm_endpoint_batch",
         aliases=("authentication", "access-control", "access_control"),
-        finding_tools=("smart_auth", "session_management", "auth_bypass", "forced_browsing"),
+        finding_tools=("smart_auth", "session_management", "auth_bypass"),
         finding_cwes=("CWE-306", "CWE-862", "CWE-287", "CWE-425"),
         finding_title_markers=("authentication", "auth bypass", "anonymous access", "forced browsing"),
         finding_type_markers=("authentication", "access control", "auth"),
@@ -239,6 +242,25 @@ CHECK_REGISTRY: tuple[CheckFamilySpec, ...] = (
         dispatch_adapter="legacy_config_findings",
         runnable=True,
         description="HTTP security header posture checks.",
+    ),
+    CheckFamilySpec(
+        name="endpoint_security",
+        phase="passive",
+        family="endpoint_surface",
+        label="Endpoint Security",
+        is_active=False,
+        telemetry_schema="endpoint_surface_attempt_v1",
+        proof_contract=("request_url", "observed_response", "detector_evidence"),
+        severity_rules={
+            "high_requires": ["deterministic_access_or_signature_bypass"],
+            "name_only_data_exposure_ceiling": "medium",
+        },
+        dispatch_adapter="endpoint_scoped_surface",
+        runnable=True,
+        description=(
+            "Target-wide API data exposure, webhook signature, and approval/authorization checks "
+            "over the discovered endpoint inventory."
+        ),
     ),
     CheckFamilySpec(
         name="ssrf",
@@ -460,6 +482,15 @@ def scanner_execution_plan(
                 reason = "focused_endpoints_only"
             else:
                 reason = "template_scan_expected"
+        elif spec.name == "endpoint_security":
+            enabled = not public_only and not skip_global_checks
+            expected = enabled
+            if public_only:
+                reason = "public_only"
+            elif skip_global_checks:
+                reason = "parallel_child_skip_global_checks"
+            else:
+                reason = "target_wide_endpoint_surface"
         elif spec.is_active:
             enabled = bool(active_checks and not public_only and requested and spec.runnable)
             expected = enabled

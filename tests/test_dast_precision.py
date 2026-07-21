@@ -252,8 +252,9 @@ def test_precision_policy_ai_true_positive_is_likely_not_verified():
     assert adjusted[0]["suspected"] is True
     assert adjusted[0]["needs_verification"] is True
     assert adjusted[0]["precision_policy"]["ai_supported_likely"] is True
-    # Still kept at its assessed severity (not buried by the heuristic ladder).
-    assert adjusted[0]["severity"] == "high"
+    # Registry severity rules prevent an unexecuted XSS lead from remaining High.
+    assert adjusted[0]["severity"] == "medium"
+    assert adjusted[0]["registry_contract"]["contract_satisfied"] is False
 
 
 def test_precision_policy_ai_false_positive_overrides_heuristic_verified():
@@ -321,6 +322,13 @@ def test_precision_policy_ai_false_positive_does_not_override_poe():
             "verified": True,
             "validation": {"poe_proven": True},
             "poe_result": {"proven": True},
+            "evidence": {
+                "url": "https://example.test/search",
+                "method": "GET",
+                "param": "q",
+                "payload": "' OR 1=1--",
+                "response_delta": {"control": 200, "payload": 500},
+            },
             "ai_verdict": "false_positive",
             "ai_confidence": 0.98,
             "ai_classification_source": "provider",
@@ -370,7 +378,14 @@ def test_precision_policy_syncs_validation_confidence_on_verified():
             "confidence": 0.7,
             "verified": True,
             "validation": {"verified": True, "confidence": 0.75, "evidence_level": "confirmed_exploit"},
-            "evidence": {"verified": True},
+            "evidence": {
+                "verified": True,
+                "url": "https://example.test/search",
+                "method": "GET",
+                "param": "q",
+                "payload": "' OR 1=1--",
+                "response_delta": {"control": 200, "payload": 500},
+            },
         }
     ]
 
@@ -450,6 +465,7 @@ def test_precision_policy_does_not_cap_verified_vendor_dom_xss():
                 "file": "https://cdn.jsdelivr.net/npm/example/widget.js",
                 "verified": True,
                 "payload_executed": True,
+                "payload": "<svg onload=alert(1)>",
             },
         }
     ]
@@ -460,6 +476,50 @@ def test_precision_policy_does_not_cap_verified_vendor_dom_xss():
     assert adjusted[0]["severity"] == "high"
     assert adjusted[0]["confidence"] >= 0.9
     assert "precision_policy" not in adjusted[0]
+
+
+def test_registry_contract_rejects_generic_sqli_poe_without_request_proof():
+    finding = {
+        "tool": "smart_sqli",
+        "title": "SQL injection",
+        "severity": "critical",
+        "cvss_score": 9.8,
+        "confidence": 0.95,
+        "proof_of_exploitation": True,
+    }
+
+    adjusted = apply_dast_precision_policy([finding])[0]
+
+    assert adjusted["verified"] is False
+    assert adjusted["severity"] == "medium"
+    assert adjusted["proof_state"] == "likely_vulnerable"
+    assert set(adjusted["registry_contract"]["proof_fields_missing"]) == {
+        "method", "url", "parameter", "payload", "response_delta",
+    }
+
+
+def test_registry_contract_accepts_complete_sqli_runtime_proof():
+    finding = {
+        "tool": "smart_sqli",
+        "title": "SQL injection",
+        "severity": "critical",
+        "cvss_score": 9.8,
+        "confidence": 0.95,
+        "proof_type": "differential_response",
+        "evidence": {
+            "url": "https://example.test/search",
+            "method": "GET",
+            "param": "q",
+            "payload": "' OR 1=1--",
+            "response_delta": {"control": 200, "payload": 500},
+        },
+    }
+
+    adjusted = apply_dast_precision_policy([finding])[0]
+
+    assert adjusted["verified"] is True
+    assert adjusted["severity"] == "critical"
+    assert adjusted["registry_contract"]["contract_satisfied"] is True
 
 
 def test_precision_policy_keeps_dom_xss_on_target_app_bundle():
@@ -816,10 +876,15 @@ def test_sqli_extraction_proof_survives_validation_pipeline():
         "proof_of_exploitation": True,
         "needs_verification": True,
         "suspected": True,
-        "evidence": {
-            "verified": True,
-            "proof_of_exploitation": True,
-            "extraction_evidence": ["Extracted sensitive rowset markers: password_hash, api_key"],
+            "evidence": {
+                "verified": True,
+                "proof_of_exploitation": True,
+                "url": "https://example.test/search",
+                "method": "GET",
+                "param": "q",
+                "payload": "' UNION SELECT password_hash,api_key FROM users--",
+                "response_delta": {"control": 200, "payload": 200, "extracted_rows": 1},
+                "extraction_evidence": ["Extracted sensitive rowset markers: password_hash, api_key"],
             "extracted_data": {"sensitive_markers": ["password_hash", "api_key"]},
         },
     }

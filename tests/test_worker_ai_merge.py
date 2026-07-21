@@ -9,10 +9,11 @@ from datetime import datetime, timedelta
 
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "api"))
-sys.modules.setdefault("asyncpg", types.SimpleNamespace())
+sys.modules.setdefault("asyncpg", types.SimpleNamespace(Pool=object))
 sys.modules.setdefault("redis", types.SimpleNamespace(from_url=lambda *args, **kwargs: None))
 
 from worker import (  # noqa: E402
+    _descendant_process_group_ids,
     _enforce_verdict_invariants,
     _has_partial_deterministic_evidence,
     _internal_retest_scope_authorized,
@@ -58,6 +59,54 @@ def test_scan_time_verification_fields_rejects_generic_verified_flags():
     assert _scan_time_verification_fields(
         {"validation": {"verified": True, "confidence": "0.88"}}
     ) == (None, None, None)
+
+
+def test_scan_time_verification_fields_caps_exploited_when_registry_contract_unmet():
+    # SCAN-01: a registered family whose registry proof contract is unmet was judged NOT
+    # trustworthy-verified at the report boundary. The raw proof_of_exploitation signal must NOT
+    # independently persist `exploited` on the authoritative verified surface (the divergence the
+    # in-report enforce_registry_finding_contracts left open). It is capped to likely_vulnerable.
+    status, verdict, confidence = _scan_time_verification_fields(
+        {"proof_of_exploitation": True, "confidence": 0.9,
+         "registry_contract": {"family": "sqli", "contract_satisfied": False}}
+    )
+    assert verdict == "likely_vulnerable"   # capped, not persisted as exploited
+    assert confidence == 0.9
+
+
+def test_scan_time_verification_fields_keeps_exploited_when_registry_contract_satisfied():
+    # Positive control: a satisfied registry contract (or an unregistered family with no contract)
+    # still persists exploited, so the SCAN-01 fix does not weaken legitimate verified findings.
+    _, satisfied_verdict, _ = _scan_time_verification_fields(
+        {"proof_of_exploitation": True, "confidence": 0.9,
+         "registry_contract": {"family": "sqli", "contract_satisfied": True}}
+    )
+    assert satisfied_verdict == "exploited"
+    _, no_contract_verdict, _ = _scan_time_verification_fields(
+        {"proof_of_exploitation": True, "confidence": 0.9}
+    )
+    assert no_contract_verdict == "exploited"
+
+
+def test_descendant_process_group_ids_reaches_own_session_tools(tmp_path):
+    # SCAN-03: the force-kill backstop must reach tool subprocesses that run in their own session
+    # (outside the scanner's process group). Fake /proc: scanner(100) -> tool(200, own group 200) ->
+    # grandchild(300, group 200); an unrelated process (400) and a non-numeric entry are excluded.
+    # The scanner's own group (100) is killed separately, so it is not expected in the descendant set.
+    def _stat(pid, ppid, pgrp):
+        directory = tmp_path / str(pid)
+        directory.mkdir()
+        # comm intentionally contains ") " to exercise the rsplit-after-last-") " parse.
+        (directory / "stat").write_text(f"{pid} (od) d) S {ppid} {pgrp} 0 0 -1 0\n")
+    _stat(100, 1, 100)      # scanner (root)
+    _stat(200, 100, 200)    # tool in its own session/group
+    _stat(300, 200, 200)    # tool grandchild, same group as the tool
+    _stat(400, 1, 400)      # unrelated process
+    (tmp_path / "cpuinfo").write_text("not-a-pid")   # non-numeric entry ignored
+
+    assert _descendant_process_group_ids(100, proc_root=str(tmp_path)) == {200}
+    # A missing/unavailable proc root (e.g. non-Linux hosts) yields an empty set, never raises.
+    assert _descendant_process_group_ids(100, proc_root=str(tmp_path / "absent")) == set()
 
 
 def test_scan_time_verification_fields_rejects_failed_browser_proof():

@@ -123,12 +123,6 @@ async def run_health_check(include_optional: bool = True) -> dict[str, Any]:
     # Define tools to check
     # Format: (name, command_variants, version_pattern, required)
     required_tools = [
-        ("sslyze", [
-            ["sslyze", "-h"],  # SSLyze doesn't support --version
-            ["python3", "-m", "sslyze", "-h"],
-            ["/opt/tools/sslyze", "-h"],
-        ], r"sslyze\s+(\d+\.\d+)", True),
-
         ("nmap", [
             ["nmap", "--version"],
             ["/usr/bin/nmap", "--version"],
@@ -149,6 +143,15 @@ async def run_health_check(include_optional: bool = True) -> dict[str, Any]:
     ]
 
     optional_tools = [
+        # Disabled in the 0.7.0 image: latest SSLyze constrains cryptography<47,
+        # while the audited runtime requires cryptography>=48.0.1. testssl.sh,
+        # Nmap ciphers, and native TLS checks remain the release TLS engines.
+        ("sslyze", [
+            ["sslyze", "-h"],
+            ["python3", "-m", "sslyze", "-h"],
+            ["/opt/tools/sslyze", "-h"],
+        ], r"sslyze\s+(\d+\.\d+)", False),
+
         ("nuclei", [
             ["nuclei", "-version"],
             ["/opt/tools/nuclei", "-version"],

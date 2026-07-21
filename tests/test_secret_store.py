@@ -14,8 +14,11 @@ def _reload_secret_store():
     return importlib.reload(secret_store)
 
 
-def test_disabled_by_default_is_plaintext(monkeypatch):
+def test_unavailable_key_store_fails_closed(monkeypatch, tmp_path):
     monkeypatch.delenv("AI_CREDENTIAL_ENC_KEY", raising=False)
+    blocked_parent = tmp_path / "not-a-directory"
+    blocked_parent.write_text("file")
+    monkeypatch.setenv("AI_CREDENTIAL_ENC_KEY_FILE", str(blocked_parent / "credential.key"))
     ss = _reload_secret_store()
     assert ss.encryption_enabled() is False
     with pytest.raises(ss.SecretStoreUnavailable):

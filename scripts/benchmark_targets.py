@@ -502,14 +502,13 @@ def collect_scorecard(report, fixture):
             + (["missing_second_principal"] if "user2" in missing_auth_states else [])
         ) if missing_auth_states else [],
     }
-    scan_options = ((report.get("scan_metadata") or {}).get("options") or {})
-    principal_validation = scan_options.get("benchmark_principal_validation") \
-        if isinstance(scan_options, dict) else None
-    if isinstance(principal_validation, dict):
-        auth_workflow["principal_identities_validated"] = bool(
-            principal_validation.get("distinct_identity_claims_validated")
-        )
+    # SCAN-04: the distinct-principal leg must come from SERVER-OBSERVED proof, not a client-supplied
+    # scan option. A verified cross_principal_replay finding is emitted only on the scanner path gated
+    # by the fail-closed distinct-credential-fingerprint check (same_principal_context -> skip), so its
+    # evidence `distinct_principal_control` is the authoritative distinct-principal receipt. A finding
+    # label or a submitter-set benchmark option cannot satisfy this leg on its own.
     accepted_auth_replay = False
+    server_observed_distinct_principals = False
     for finding, _hay, classes, _sev, verified, _browser in enriched:
         if not verified or "bola" not in classes:
             continue
@@ -524,12 +523,15 @@ def collect_scorecard(report, fixture):
         owner_status = evidence.get("owner_status", evidence.get("user1_status"))
         attacker_status = evidence.get("attacker_status", evidence.get("user2_status"))
         try:
-            accepted_auth_replay = 200 <= int(owner_status) < 300 and 200 <= int(attacker_status) < 300
+            replay_accepted = 200 <= int(owner_status) < 300 and 200 <= int(attacker_status) < 300
         except (TypeError, ValueError):
-            accepted_auth_replay = False
-        if accepted_auth_replay:
+            replay_accepted = False
+        if bool(evidence.get("distinct_principal_control")) and replay_accepted:
+            accepted_auth_replay = True
+            server_observed_distinct_principals = True
             break
-    if auth_workflow["principal_identities_validated"]:
+    auth_workflow["principal_identities_validated"] = server_observed_distinct_principals
+    if server_observed_distinct_principals:
         auth_workflow["authenticated_responses_accepted"] = accepted_auth_replay
 
     expected = fixture.get("expected", [])

@@ -227,21 +227,30 @@ def test_submit_target_uses_fresh_role_distinct_principal_accounts(monkeypatch):
     assert "run123" not in str(receipt)
 
 
-def _verified_bola_report(principal_validated: bool):
+def _verified_bola_report(server_distinct: bool):
+    # SCAN-04: the gate's distinct-principal leg reads the SERVER-observed `distinct_principal_control`
+    # receipt on the verified finding, NOT a client-supplied scan option. server_distinct=True models a
+    # real scanner cross-principal replay; False models a finding lacking the server distinctness
+    # receipt — which must NOT pass the gate even though the submitter-set option below claims distinct
+    # identities (the option is intentionally present to prove it is ignored).
+    evidence = {
+        "proof_type": "cross_principal_replay",
+        "owner_status": 200,
+        "attacker_status": 200,
+    }
+    if server_distinct:
+        evidence["distinct_principal_control"] = True
+        evidence["principal_credential_fingerprints"] = ["aaaa1111bbbb2222", "cccc3333dddd4444"]
     return {
         "findings": [{
             "title": "BOLA control-backed cross-principal replay",
             "severity": "high",
             "verified": True,
-            "evidence": {
-                "proof_type": "cross_principal_replay",
-                "owner_status": 200,
-                "attacker_status": 200,
-            },
+            "evidence": evidence,
         }],
         "smart_coverage": {"auth_states_tested": ["user1", "user2"]},
         "scan_metadata": {"options": {"benchmark_principal_validation": {
-            "distinct_identity_claims_validated": principal_validated,
+            "distinct_identity_claims_validated": True,
         }}},
     }
 

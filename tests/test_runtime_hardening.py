@@ -130,3 +130,15 @@ def test_scanner_sh_restart_and_rebuild_recreate_api_scaled_workers():
     assert 'existing_workers="$(running_scan_worker_count)"' in script
     assert 'refresh_workers_after_rebuild "$existing_workers"' in script
     assert 'compose up --no-build -d --force-recreate --scale worker="$desired_count" worker' in script
+
+
+def test_scanner_sh_backup_is_private_and_fail_closed():
+    script = (ROOT / "scanner.sh").read_text()
+
+    assert "create_backup()" in script
+    assert "umask 077" in script
+    assert 'pg_dump -U scanner -d scanner -Fc' in script
+    assert 'results.tar.gz' in script
+    assert 'runtime.env' in script
+    assert '.incomplete' in script
+    assert 'backup)' in script

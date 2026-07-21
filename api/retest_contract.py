@@ -21,6 +21,10 @@ ASM_ENDPOINT_FINGERPRINT_MIGRATION = "asm_endpoint_fingerprint_v2"
 CAMPAIGN_SCAN_FINDING_LINKS_MIGRATION = "campaign_scan_finding_links_v1"
 
 
+class SchemaMigrationError(RuntimeError):
+    """A required database invariant could not be established safely."""
+
+
 async def backfill_campaign_scan_finding_links(conn, *, campaign_id=None, scan_id=None) -> int:
     """Link research-driven scan findings back to the campaign ledger and stamp provenance.
 
@@ -830,6 +834,85 @@ async def _migrate_hypothesis_proof_links(conn) -> None:
         ALTER TABLE hypotheses
         ADD COLUMN IF NOT EXISTS promoted_finding_ids JSONB NOT NULL DEFAULT '[]'::jsonb
     """)
+
+
+async def _ensure_target_canonical_key_invariant(conn) -> None:
+    """Create the canonical target key and fail startup if uniqueness cannot heal.
+
+    Older installations may contain scheme/trailing-slash variants of the same
+    target. The automatic merge is safe and idempotent, but continuing without
+    the unique index is not: current insert paths rely on that invariant.
+    """
+    await conn.execute("ALTER TABLE targets ADD COLUMN IF NOT EXISTS canonical_key TEXT")
+    await conn.execute("""
+        CREATE OR REPLACE FUNCTION targets_set_canonical_key() RETURNS trigger AS $$
+        BEGIN
+            NEW.canonical_key := rtrim(
+                regexp_replace(lower(btrim(COALESCE(NEW.url, ''))), '^https?://', ''), '/');
+            RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql
+    """)
+    await conn.execute("DROP TRIGGER IF EXISTS trg_targets_canonical_key ON targets")
+    await conn.execute("""
+        CREATE TRIGGER trg_targets_canonical_key
+            BEFORE INSERT OR UPDATE OF url ON targets
+            FOR EACH ROW EXECUTE FUNCTION targets_set_canonical_key()
+    """)
+    await conn.execute("""
+        UPDATE targets
+        SET canonical_key = rtrim(regexp_replace(lower(btrim(url)), '^https?://', ''), '/')
+        WHERE url IS NOT NULL AND (canonical_key IS NULL OR canonical_key = '')
+    """)
+
+    # A prior half-migration may have left a NON-unique index of this exact name. CREATE UNIQUE
+    # INDEX IF NOT EXISTS matches by NAME only, so it would then be a silent no-op and the required
+    # uniqueness invariant would be falsely reported as established. Drop the wrong index first so
+    # the unique index is actually built (the canonical_key index is unique by contract; a
+    # non-unique one of this name is corruption, not a valid state).
+    existing_index_is_unique = await conn.fetchval(
+        "SELECT indisunique FROM pg_index WHERE indexrelid = to_regclass('idx_targets_canonical_key')"
+    )
+    if existing_index_is_unique is False:
+        await conn.execute("DROP INDEX IF EXISTS idx_targets_canonical_key")
+
+    initial_index_error: Exception | None = None
+    try:
+        await conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_targets_canonical_key ON targets(canonical_key)"
+        )
+        return
+    except Exception as index_error:
+        initial_index_error = index_error
+        from target_dedupe import merge_all_canonical_duplicates
+
+        print(
+            "[schema] canonical_key unique index blocked; attempting automatic "
+            f"duplicate-target repair ({index_error})",
+            flush=True,
+        )
+
+    try:
+        removed = await merge_all_canonical_duplicates(conn)
+        await conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_targets_canonical_key ON targets(canonical_key)"
+        )
+    except Exception as repair_error:
+        message = (
+            "Required schema invariant idx_targets_canonical_key could not be established "
+            "after automatic duplicate-target repair. ShakerScan startup is blocked to avoid "
+            "running against a half-migrated database. Restore a database backup or repair "
+            "canonical duplicate targets in maintenance mode, then restart. "
+            f"Initial index error: {initial_index_error}; repair/retry error: {repair_error}"
+        )
+        print(f"[schema] FATAL: {message}", flush=True)
+        raise SchemaMigrationError(message) from repair_error
+
+    print(
+        f"[schema] auto-merged {removed} duplicate target row(s); "
+        "idx_targets_canonical_key created",
+        flush=True,
+    )
 
 
 async def run_schema_migrations(pool) -> None:
@@ -1951,7 +2034,9 @@ async def run_schema_migrations(pool) -> None:
                 CREATE TABLE IF NOT EXISTS agent_hunt_runs (
                     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                     target_id UUID REFERENCES targets(id) ON DELETE CASCADE,
-                    episode_id UUID REFERENCES research_episodes(id) ON DELETE SET NULL,
+                    -- research_episodes is created later in this upgrade path. Add
+                    -- the FK after both tables exist so published schemas can upgrade.
+                    episode_id UUID,
                     objective TEXT NOT NULL DEFAULT '',
                     status TEXT NOT NULL DEFAULT 'awaiting_planner',
                     planner_mode TEXT NOT NULL DEFAULT 'agent',
@@ -2090,6 +2175,20 @@ async def run_schema_migrations(pool) -> None:
                 )
                 WHERE planner->>'dedupe_launch' = 'true'
                   AND status NOT IN ('completed','cancelled','failed','budget_exhausted','blocked')
+            """)
+            await conn.execute("""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM pg_constraint
+                        WHERE conname = 'agent_hunt_runs_episode_id_fkey'
+                          AND conrelid = 'agent_hunt_runs'::regclass
+                    ) THEN
+                        ALTER TABLE agent_hunt_runs
+                        ADD CONSTRAINT agent_hunt_runs_episode_id_fkey
+                        FOREIGN KEY (episode_id) REFERENCES research_episodes(id) ON DELETE SET NULL;
+                    END IF;
+                END $$
             """)
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS research_observations (
@@ -2678,54 +2777,9 @@ async def run_schema_migrations(pool) -> None:
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_app_graph_nodes_target ON application_graph_nodes(target_id)")
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_app_graph_edges_target ON application_graph_edges(target_id)")
 
-            # Canonical de-dupe PREVENTION: a scheme/trailing-slash-insensitive key on
-            # targets, auto-maintained by a trigger, with a UNIQUE index so duplicate
-            # origins can't re-form. Must stay byte-identical to the Python
-            # _canonical_target_key in api.py (strip scheme, lowercase, strip trailing /).
-            await conn.execute("ALTER TABLE targets ADD COLUMN IF NOT EXISTS canonical_key TEXT")
-            await conn.execute("""
-                CREATE OR REPLACE FUNCTION targets_set_canonical_key() RETURNS trigger AS $$
-                BEGIN
-                    NEW.canonical_key := rtrim(
-                        regexp_replace(lower(btrim(COALESCE(NEW.url, ''))), '^https?://', ''), '/');
-                    RETURN NEW;
-                END;
-                $$ LANGUAGE plpgsql
-            """)
-            await conn.execute("DROP TRIGGER IF EXISTS trg_targets_canonical_key ON targets")
-            await conn.execute("""
-                CREATE TRIGGER trg_targets_canonical_key
-                    BEFORE INSERT OR UPDATE OF url ON targets
-                    FOR EACH ROW EXECUTE FUNCTION targets_set_canonical_key()
-            """)
-            await conn.execute("""
-                UPDATE targets
-                SET canonical_key = rtrim(regexp_replace(lower(btrim(url)), '^https?://', ''), '/')
-                WHERE url IS NOT NULL AND (canonical_key IS NULL OR canonical_key = '')
-            """)
-            try:
-                await conn.execute(
-                    "CREATE UNIQUE INDEX IF NOT EXISTS idx_targets_canonical_key ON targets(canonical_key)"
-                )
-            except Exception as canon_err:  # only on a dirty install with residual dupes
-                # The UNIQUE index can't be built while canonical-duplicate targets
-                # exist — and the new ON CONFLICT (canonical_key) insert paths would
-                # then break (no matching constraint). Auto-heal with the same tested
-                # merge, then retry so the install ends up consistent and functional
-                # rather than half-migrated.
-                from target_dedupe import merge_all_canonical_duplicates
-                print(f"[schema] canonical_key unique index blocked by duplicates "
-                      f"({canon_err}); auto-merging…", flush=True)
-                try:
-                    removed = await merge_all_canonical_duplicates(conn)
-                    await conn.execute(
-                        "CREATE UNIQUE INDEX IF NOT EXISTS idx_targets_canonical_key ON targets(canonical_key)"
-                    )
-                    print(f"[schema] auto-merged {removed} duplicate target row(s); "
-                          "idx_targets_canonical_key created", flush=True)
-                except Exception as heal_err:
-                    print(f"[schema] FAILED to auto-heal canonical duplicates: {heal_err}. "
-                          "Run POST /targets/dedupe?dry_run=false then restart.", flush=True)
+            # Canonical de-dupe prevention must be present before startup completes;
+            # current ON CONFLICT insert paths rely on this unique index.
+            await _ensure_target_canonical_key_invariant(conn)
         finally:
             await conn.execute("SELECT pg_advisory_unlock(8675309)")
 

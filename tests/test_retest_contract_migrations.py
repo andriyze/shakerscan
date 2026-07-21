@@ -4,6 +4,8 @@ import sys
 import uuid
 from datetime import datetime, timezone
 
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "api"))
 
 import asm_inventory  # noqa: E402
@@ -30,6 +32,50 @@ class _FakeMigrationConn:
 
     async def executemany(self, query, args):
         self.executemany_calls.append((query, list(args)))
+
+
+class _NoopTransaction:
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, traceback):
+        return False
+
+
+class _FailingCanonicalInvariantConn(_FakeMigrationConn):
+    def __init__(self, index_failures):
+        super().__init__([], applied=1)
+        self.index_failures = list(index_failures)
+        self.index_attempts = 0
+
+    async def execute(self, query, *args):
+        self.executed.append((query, args))
+        if "CREATE UNIQUE INDEX IF NOT EXISTS idx_targets_canonical_key" in query:
+            self.index_attempts += 1
+            if self.index_failures:
+                raise self.index_failures.pop(0)
+
+    def transaction(self):
+        return _NoopTransaction()
+
+
+class _FakePoolAcquire:
+    def __init__(self, conn):
+        self.conn = conn
+
+    async def __aenter__(self):
+        return self.conn
+
+    async def __aexit__(self, exc_type, exc, traceback):
+        return False
+
+
+class _FakePool:
+    def __init__(self, conn):
+        self.conn = conn
+
+    def acquire(self):
+        return _FakePoolAcquire(self.conn)
 
 
 def _endpoint_row(**overrides):
@@ -153,3 +199,37 @@ def test_hypothesis_proof_link_migration_adds_durable_promoted_finding_ids():
     assert args == ()
     assert "ALTER TABLE hypotheses" in statement
     assert "promoted_finding_ids JSONB NOT NULL DEFAULT '[]'::jsonb" in statement
+
+
+def test_canonical_key_invariant_auto_repairs_then_retries(monkeypatch):
+    conn = _FailingCanonicalInvariantConn([RuntimeError("duplicate canonical key")])
+
+    async def fake_merge(_conn):
+        assert _conn is conn
+        return 2
+
+    monkeypatch.setattr("target_dedupe.merge_all_canonical_duplicates", fake_merge)
+
+    asyncio.run(retest_contract._ensure_target_canonical_key_invariant(conn))
+
+    assert conn.index_attempts == 2
+
+
+def test_schema_migration_failure_blocks_startup_and_releases_lock(monkeypatch):
+    conn = _FailingCanonicalInvariantConn([RuntimeError("duplicate canonical key")])
+
+    async def failed_merge(_conn):
+        raise RuntimeError("retention preview blocks merge")
+
+    monkeypatch.setattr("target_dedupe.merge_all_canonical_duplicates", failed_merge)
+
+    with pytest.raises(retest_contract.SchemaMigrationError) as exc:
+        asyncio.run(retest_contract.run_schema_migrations(_FakePool(conn)))
+
+    message = str(exc.value)
+    assert "startup is blocked" in message
+    assert "idx_targets_canonical_key" in message
+    assert "duplicate canonical key" in message
+    assert "retention preview blocks merge" in message
+    assert isinstance(exc.value.__cause__, RuntimeError)
+    assert any("pg_advisory_unlock(8675309)" in query for query, _args in conn.executed)

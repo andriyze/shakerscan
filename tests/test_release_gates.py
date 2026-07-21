@@ -18,6 +18,10 @@ EXPECTED_GATES = {
     "test:planner-scope",
     "test:planner-risk",
     "test:planner-no-shell",
+    "test:scanner-proof-truth",
+    "test:scanner-registry-coverage",
+    "test:scanner-bounds",
+    "test:scanner-auth-quality",
 }
 
 

@@ -55,6 +55,8 @@ class ChainStep:
     prerequisites: list[str] = field(default_factory=list)
     outputs: list[str] = field(default_factory=list)
     evidence: dict[str, Any] = field(default_factory=dict)
+    status: str = "hypothetical"
+    evidence_refs: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -883,9 +885,41 @@ def build_attack_chain(
 
     confidence = calculate_chain_confidence(evidence.get("supporting_findings", [])) or confidence
 
-    # Create chain steps with evidence
+    # A verified entry-point finding proves only the entry point.  It does not
+    # prove the template's later credential theft / privilege escalation / data
+    # exfiltration narrative.  Later steps become observed only when a
+    # deterministically proven finding carries an explicit, reference-backed
+    # chain observation for that step.
+    observed_steps: dict[int, list[str]] = {}
+    if any(item.get("verified") is True for item in evidence["supporting_findings"]):
+        observed_steps[1] = [
+            str(item.get("id"))
+            for item in evidence["supporting_findings"]
+            if item.get("verified") is True and item.get("id")
+        ]
+    for finding in findings:
+        if not isinstance(finding, dict) or not has_deterministic_exploit_proof(finding):
+            continue
+        finding_evidence = finding.get("evidence") if isinstance(finding.get("evidence"), dict) else {}
+        observations = finding.get("attack_chain_observations") or finding_evidence.get("attack_chain_observations") or []
+        if not isinstance(observations, list):
+            continue
+        for observation in observations:
+            if not isinstance(observation, dict) or observation.get("observed") is not True:
+                continue
+            try:
+                step_number = int(observation.get("step_number"))
+            except (TypeError, ValueError):
+                continue
+            reference = str(observation.get("evidence_ref") or "").strip()
+            if step_number < 1 or not reference:
+                continue
+            observed_steps.setdefault(step_number, []).append(reference[:200])
+
+    # Create chain steps with explicit observed/hypothetical state.
     steps = []
     for step_data in template.get("steps", []):
+        refs = list(dict.fromkeys(observed_steps.get(step_data.step_number, [])))
         step = ChainStep(
             step_number=step_data.step_number,
             finding_type=step_data.finding_type,
@@ -893,6 +927,8 @@ def build_attack_chain(
             impact=step_data.impact,
             prerequisites=step_data.prerequisites,
             outputs=step_data.outputs,
+            status="observed" if refs else "hypothetical",
+            evidence_refs=refs,
         )
         steps.append(step)
 
@@ -972,6 +1008,21 @@ def _mark_chain_partial_for_unverified_evidence(chain: AttackChain) -> None:
     )
 
 
+def _mark_chain_partial_for_unobserved_steps(chain: AttackChain) -> None:
+    missing = [str(step.step_number) for step in chain.steps if step.status != "observed"]
+    if not missing:
+        return
+    chain.status = "partial"
+    chain.severity = _downgrade_severity(chain.severity)
+    reason = "unobserved_chain_steps:" + ",".join(missing)
+    chain.missing_required.append(reason)
+    chain.missing_required_all.append(reason)
+    chain.evidence["chain_quality"] = "verified_entry_point_with_hypothetical_steps"
+    chain.evidence["quality_reason"] = (
+        "Only reference-backed deterministic observations are presented as observed chain steps."
+    )
+
+
 def _identify_attack_chains_internal(findings: list[dict]) -> tuple[list[AttackChain], list[AttackChain]]:
     """
     Identify possible attack chains from a list of findings.
@@ -1028,7 +1079,11 @@ def _identify_attack_chains_internal(findings: list[dict]) -> tuple[list[AttackC
             chain.completeness = completeness
             if is_complete:
                 if _chain_has_verified_supporting_evidence(chain):
-                    chains.append(chain)
+                    if all(step.status == "observed" for step in chain.steps):
+                        chains.append(chain)
+                    else:
+                        _mark_chain_partial_for_unobserved_steps(chain)
+                        partial_chains.append(chain)
                 else:
                     _mark_chain_partial_for_unverified_evidence(chain)
                     partial_chains.append(chain)
@@ -1153,6 +1208,8 @@ def chains_to_dict(chains: list[AttackChain]) -> list[dict]:
                     "impact": s.impact,
                     "prerequisites": s.prerequisites,
                     "outputs": s.outputs,
+                    "status": s.status,
+                    "evidence_refs": s.evidence_refs,
                 }
                 for s in chain.steps
             ],

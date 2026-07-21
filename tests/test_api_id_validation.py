@@ -32,7 +32,7 @@ def _response_has_body(response_cls) -> bool:
         return False
 
 
-sys.modules.setdefault("asyncpg", types.SimpleNamespace())
+sys.modules.setdefault("asyncpg", types.SimpleNamespace(Pool=object))
 sys.modules.setdefault("redis", types.SimpleNamespace(from_url=lambda *args, **kwargs: None))
 
 if "fastapi" not in sys.modules:

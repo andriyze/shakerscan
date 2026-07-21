@@ -3020,6 +3020,19 @@ async def authz_resource_replay_test(
         results["skipped"] = True
         results["reason"] = "multi_user_credentials_required"
         return results
+    principal_fingerprints = [
+        hashlib.sha256(json.dumps(headers, sort_keys=True).encode()).hexdigest()[:16]
+        for headers in (user1_headers, user2_headers)
+    ]
+    results["principal_validation"] = {
+        "credential_contexts_distinct": principal_fingerprints[0] != principal_fingerprints[1],
+        "credential_fingerprints": principal_fingerprints,
+        "accepted_responses_observed": False,
+    }
+    if principal_fingerprints[0] == principal_fingerprints[1]:
+        results["skipped"] = True
+        results["reason"] = "same_principal_context"
+        return results
     max_write_replays = max(1, min(20, int(max_replays or 1) // 4 or 1))
 
     producer_candidates: list[str] = []
@@ -3100,6 +3113,8 @@ async def authz_resource_replay_test(
         producer_attempt["completed_params_count"] = 2
         producer_attempt["owner_status"] = user1_status
         producer_attempt["attacker_listing_status"] = user2_listing_status
+        if 200 <= user1_status < 300 and 200 <= user2_listing_status < 300:
+            results["principal_validation"]["accepted_responses_observed"] = True
         if not (200 <= user1_status < 300) or not _is_json_like_response(user1_resp):
             producer_attempt["status"] = "partial"
             producer_attempt["skip_reason"] = "producer_not_json_or_not_accessible"
@@ -3232,11 +3247,20 @@ async def authz_resource_replay_test(
                         "object_id_key": ref.get("object_id_key"),
                         "object_id_location": candidate["object_id_location"],
                         "object_id_absent_from_attacker_listing": True,
+                        "distinct_principal_control": True,
+                        "principal_credential_fingerprints": principal_fingerprints,
                         # Proof that the attacker received the OWNER's object, not their own.
                         "requested_object_id": object_id,
                         "attacker_returned_object_ids": sorted(attacker_returned_ids)[:8],
                         "owner_status": owner_status,
                         "attacker_status": attacker_status,
+                        "authenticated_responses_accepted": True,
+                        "accepted_principal_responses": {
+                            "owner_listing_status": user1_status,
+                            "attacker_listing_status": user2_listing_status,
+                            "owner_replay_status": owner_status,
+                            "attacker_replay_status": attacker_status,
+                        },
                         "responses_equivalent": True,
                         "response_similarity": round(similarity, 3),
                         "sensitive_fields": sensitive_fields,
@@ -3355,9 +3379,18 @@ async def authz_resource_replay_test(
                                 "object_id_key": ref.get("object_id_key"),
                                 "object_id_location": write_candidate["object_id_location"],
                                 "object_id_absent_from_attacker_listing": True,
+                                "distinct_principal_control": True,
+                                "principal_credential_fingerprints": principal_fingerprints,
                                 "requested_object_id": object_id,
                                 "attacker_returned_object_ids": sorted(write_returned_ids)[:8],
+                                "owner_status": user1_status,
                                 "attacker_status": write_status,
+                                "authenticated_responses_accepted": True,
+                                "accepted_principal_responses": {
+                                    "owner_listing_status": user1_status,
+                                    "attacker_listing_status": user2_listing_status,
+                                    "attacker_write_status": write_status,
+                                },
                                 "sensitive_fields": write_sensitive_fields,
                                 "user_specific_signals": write_user_signals[:8],
                                 "authz_diff": {

@@ -22,6 +22,7 @@ _CONFIRMED_EVIDENCE_LEVELS = {
 _DETERMINISTIC_PROOF_TYPES = {
     "browser_execution",
     "cross_principal_replay",
+    "write_cross_principal_replay",
     "sqli_data_extraction",
     "data_extraction",
     "oob_callback",

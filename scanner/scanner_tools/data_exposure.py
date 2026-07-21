@@ -132,7 +132,11 @@ async def check_api_data_exposure(
     findings_by_family: set[tuple[str, str]] = set()  # (family, url) dedupe
     sem = asyncio.Semaphore(max(1, concurrency))
 
-    async with httpx.AsyncClient(verify=False, follow_redirects=True, timeout=timeout) as client:
+    # follow_redirects MUST stay False: the same-origin gate above only vets the initial URL, so
+    # following a target-controlled 3xx (e.g. -> 169.254.169.254 or an attacker host) would take the
+    # scanner off-origin (SSRF egress) and misattribute the response. Siblings webhook_checks.py and
+    # approval_checks.py enforce the same. A redirected resource is simply not evaluated here.
+    async with httpx.AsyncClient(verify=False, follow_redirects=False, timeout=timeout) as client:
 
         async def probe(url: str) -> None:
             async with sem:

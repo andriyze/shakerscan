@@ -16,7 +16,7 @@ import planner_evals  # noqa: E402
 # script stays dependency-light while this test can still drive
 # `_build_local_agent_dry_run_plan`.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "api"))
-sys.modules.setdefault("asyncpg", types.SimpleNamespace())
+sys.modules.setdefault("asyncpg", types.SimpleNamespace(Pool=object))
 sys.modules.setdefault("redis", types.SimpleNamespace(from_url=lambda *args, **kwargs: None))
 
 if "fastapi" not in sys.modules:
