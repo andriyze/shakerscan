@@ -77,7 +77,7 @@ flags, skills, agents, adapters, modules, and durable tables) plus architecture/
 - **AI Operations Router (`/settings/ai-ops-router`)**: preview natural-language operations as bounded API plans with safety, missing-input, blast-radius, and confirmation details before optional execution.
 - **Deep Hunt (`/deep-hunt`)**: launch a keyless, AI-driven investigation through `/agent/hunt/*`. The current Codex/Claude/OpenCode session composes its own requests and tools; ShakerScan enforces target scope, expiring approval, hard action/request ceilings, evidence provenance, and deterministic proof promotion. Deep Hunt performs bounded active testing but blocks arbitrary state-changing HTTP in the free-form loop.
 - **Leads and Test Builder (`/deep-hunt/leads`, `/deep-hunt/experiment`)**: inspect the hypothesis backlog or hand-craft an advanced bounded experiment. They support Deep Hunt; they are not separate engines.
-- **Legacy guided verifier (`/deep-hunt/operator`, `/deep-hunt/runs/{id}`)**: retained for compatibility and specialized bounded verification over `/research/*`. Do not route a user’s “Deep Hunt” request here.
+- **Bounded experiments (`/deep-hunt/runs/{id}`)**: inspect durable runs from the compatibility `/research/*` controller, retained for specialized guided verification. Do not route a user's "Deep Hunt" request there; `/deep-hunt/operator` and `/deep-hunt/explorer` are legacy URLs that redirect to `/deep-hunt`.
 - **Settings (`/settings`)**: AI providers, scan execution policy, automation defaults, and approval-receipt enforcement.
 - **Application Graph (`/targets/{id}/graph`)**: inspect persisted route/object/principal nodes, producer/consumer/auth-boundary edges, node/edge filters, search, and selected-node connections.
 

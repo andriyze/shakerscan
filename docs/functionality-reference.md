@@ -1037,10 +1037,11 @@ concurrency-limited with per-tool timeouts and a global deadline.
 | `/settings/policy-profiles` | Deployment policy profile lifecycle across DAST, AI Gate, and Model Intake |
 | `/exceptions` | Finding-exception queue, repair, expiry visibility, and lifecycle sweep |
 | `/settings/arsenal` | Command contracts, receipts, plans, actions, hypotheses (claim/signal/plan-campaign, from-plan/from-benchmark generators), refuters, tools, local agents, context packs, and traces |
-| `/deep-hunt` | Create and inspect bounded shadow/read-only/gated research episodes, run configured-AI steps, inspect budgets/actions/decisions/events, refresh observations, and cancel episodes |
+| `/deep-hunt` | Launch and drive a keyless, AI-driven Deep Hunt through `/agent/hunt/*`: start/pause/resume/cancel hunt sessions, read the live transcript and observations, inspect run state and hunt-driven findings |
 | `/deep-hunt/experiment` | Create bounded HTTP-differential or managed-principal workflow experiments |
 | `/deep-hunt/runs/{id}` | Inspect a durable experiment run and its proof handoff |
 | `/deep-hunt/leads` | Review durable research leads and route them to the appropriate product workflow |
+| `/deep-hunt/operator`, `/deep-hunt/explorer` | Compatibility redirects to `/deep-hunt` (former split-page URLs) |
 
 ### API-only or partially UI-backed workflows
 
