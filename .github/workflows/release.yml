@@ -42,6 +42,10 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          # Full history is required for the "candidate is on main" ancestor
+          # check; a shallow clone truncates merge-base and can falsely fail.
+          fetch-depth: 0
 
       - name: Resolve release metadata
         id: meta
@@ -72,6 +76,14 @@ jobs:
             exit 1
           fi
 
+          # Dereference annotated/signed tags: on a tag push GITHUB_SHA is the
+          # tag OBJECT sha, while checkout dereferences to the commit. Resolve
+          # both sides to commit SHAs before comparing (rev-list is idempotent
+          # for commit input; unknown objects fail closed).
+          candidate_sha="$(git rev-list -n1 "$candidate_sha")" || {
+            echo "Candidate does not resolve to a commit: $candidate_sha" >&2
+            exit 1
+          }
           checked_out_sha="$(git rev-parse HEAD)"
           if [[ ! "$candidate_sha" =~ ^[0-9a-f]{40}$ ]] || [[ "$candidate_sha" != "$checked_out_sha" ]]; then
             echo "Candidate mismatch: approved=$candidate_sha checked_out=$checked_out_sha" >&2
@@ -90,7 +102,12 @@ jobs:
       - name: Verify candidate is on main
         shell: bash
         run: |
-          git fetch --no-tags origin main
+          # A bare `git fetch origin main` updates only FETCH_HEAD; the explicit
+          # refspec is required so refs/remotes/origin/main exists (on a tag
+          # push, checkout fetched only the tag ref). Fetching the LIVE branch
+          # also keeps the dispatch path honest against main moving after
+          # approval instead of comparing against a vacuous local ref.
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
           git merge-base --is-ancestor "${{ steps.meta.outputs.candidate_sha }}" origin/main || {
             echo "Approved candidate is not reachable from origin/main" >&2
             exit 1
@@ -303,8 +320,13 @@ jobs:
     permissions:
       contents: write
     steps:
-      - name: Checkout
+      # Notes must come from the approved candidate, not from wherever the
+      # triggering ref happens to point when this job runs (dispatch: main may
+      # have moved past the candidate since validation).
+      - name: Checkout approved candidate
         uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.meta.outputs.candidate_sha }}
 
       - name: Create release notes
         shell: bash
@@ -321,10 +343,15 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.merge.outputs.version }}
+          CANDIDATE_SHA: ${{ needs.meta.outputs.candidate_sha }}
         shell: bash
         run: |
           if gh release view "v${VERSION}" >/dev/null 2>&1; then
             gh release edit "v${VERSION}" --notes-file release-notes.md
           else
-            gh release create "v${VERSION}" --title "ShakerScan v${VERSION}" --notes-file release-notes.md
+            # --target pins the tag to the validated candidate. Without it the
+            # dispatch path would tag the default branch's HEAD at release
+            # time, which can be newer than the commit the images were built
+            # and validated from.
+            gh release create "v${VERSION}" --target "${CANDIDATE_SHA}" --title "ShakerScan v${VERSION}" --notes-file release-notes.md
           fi
