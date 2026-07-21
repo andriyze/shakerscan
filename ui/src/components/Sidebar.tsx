@@ -4,12 +4,14 @@ import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { usePathname } from 'next/navigation'
 import Link from 'next/link'
 import { Activity, Bot, Boxes, Compass, Crosshair, FileArchive, Lightbulb, Menu, Network, PackageCheck, Radar, ShieldAlert, ShieldCheck, Wand2, X } from 'lucide-react'
-import { buttonClasses } from '@/components/ui'
+import { buttonClasses, Toggle } from '@/components/ui'
 
 const navGroups: {
   heading: string | null
   badge?: string
-  items: { href: string; label: string; icon: ReactNode }[]
+  // Advanced groups/items are hidden unless the sidebar "show all" switch is on.
+  advanced?: boolean
+  items: { href: string; label: string; icon: ReactNode; advanced?: boolean }[]
 }[] = [
   {
     heading: null,
@@ -68,6 +70,7 @@ const navGroups: {
         href: '/interactive',
         label: 'Interactive Testing',
         icon: <Crosshair className="w-5 h-5" />,
+        advanced: true,
       },
     ],
   },
@@ -83,11 +86,12 @@ const navGroups: {
     badge: 'Alpha',
     items: [
       { href: '/deep-hunt', label: 'Deep Hunt', icon: <Compass className="w-5 h-5" /> },
-      { href: '/deep-hunt/leads', label: 'Leads', icon: <Lightbulb className="w-5 h-5" /> },
+      { href: '/deep-hunt/leads', label: 'Leads', icon: <Lightbulb className="w-5 h-5" />, advanced: true },
     ],
   },
   {
     heading: 'Records',
+    advanced: true,
     items: [
       { href: '/evidence', label: 'Evidence', icon: <FileArchive className="w-5 h-5" /> },
       { href: '/timeline', label: 'Timeline', icon: <Activity className="w-5 h-5" /> },
@@ -102,6 +106,7 @@ const navGroups: {
   },
   {
     heading: 'Governance',
+    advanced: true,
     items: [
       { href: '/settings/policy-profiles', label: 'Policy Profiles', icon: <ShieldCheck className="w-5 h-5" /> },
       { href: '/exceptions', label: 'Exceptions Queue', icon: <ShieldAlert className="w-5 h-5" /> },
@@ -124,8 +129,21 @@ function BrandMark({ className = 'w-6 h-6' }: { className?: string }) {
   )
 }
 
-function NavContent({ pathname }: { pathname: string }) {
+function NavContent({
+  pathname,
+  showAll,
+  onToggleShowAll,
+}: {
+  pathname: string
+  showAll: boolean
+  onToggleShowAll: (value: boolean) => void
+}) {
   const appVersion = process.env.NEXT_PUBLIC_APP_VERSION
+  // Default view hides advanced groups/items; the footer switch reveals them.
+  const visibleGroups = navGroups
+    .filter((group) => showAll || !group.advanced)
+    .map((group) => ({ ...group, items: group.items.filter((item) => showAll || !item.advanced) }))
+    .filter((group) => group.items.length > 0)
   // Only the Settings landing lights the gear. The /settings/* sub-routes
   // (research-agent, arsenal, ai-ops-router) belong to their own nav groups.
   const settingsActive = pathname === '/settings'
@@ -150,10 +168,14 @@ function NavContent({ pathname }: { pathname: string }) {
   return (
     <>
       <div className="mb-8">
-        <h1 className="text-xl font-bold text-white flex items-center gap-2">
+        <Link
+          href="/"
+          aria-label="ShakerScan dashboard"
+          className="flex items-center gap-2 rounded text-xl font-bold text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+        >
           <BrandMark />
           ShakerScan
-        </h1>
+        </Link>
         <p className="text-xs text-gray-500 mt-1">Open Source Edition</p>
         {appVersion && (
           <p className="text-[10px] text-gray-600 mt-1">Build {appVersion}</p>
@@ -161,7 +183,7 @@ function NavContent({ pathname }: { pathname: string }) {
       </div>
 
       <nav className="flex-1">
-        {navGroups.map((group, groupIndex) => (
+        {visibleGroups.map((group, groupIndex) => (
           <div key={group.heading ?? 'overview'} className={`space-y-1 ${groupIndex === 0 ? '' : 'mt-4'}`}>
             {group.heading ? (
               <div className="flex items-center gap-1.5 px-3 pb-0.5 text-[10px] font-semibold uppercase tracking-wider text-gray-600">
@@ -221,6 +243,10 @@ function NavContent({ pathname }: { pathname: string }) {
             </svg>
             GitHub
           </a>
+          <div className="flex items-center gap-2">
+          <span title="Show all sections (Interactive Testing, Leads, Records, Governance)" className="inline-flex">
+            <Toggle checked={showAll} onChange={onToggleShowAll} label="Show all sidebar sections" />
+          </span>
           <Link
             href="/settings"
             aria-label="Settings"
@@ -242,6 +268,7 @@ function NavContent({ pathname }: { pathname: string }) {
               <circle cx="13.5" cy="12" r="2.5" strokeWidth={2} />
             </svg>
           </Link>
+          </div>
         </div>
       </div>
     </>
@@ -251,8 +278,26 @@ function NavContent({ pathname }: { pathname: string }) {
 export default function Sidebar() {
   const pathname = usePathname()
   const [mobileOpen, setMobileOpen] = useState(false)
+  const [showAll, setShowAll] = useState(false)
   const openerRef = useRef<HTMLButtonElement>(null)
   const drawerRef = useRef<HTMLElement>(null)
+
+  // Persist the "show all sections" preference across reloads (default off).
+  useEffect(() => {
+    try {
+      setShowAll(window.localStorage.getItem('shakerscan.sidebar.show_all') === 'true')
+    } catch {
+      /* localStorage unavailable */
+    }
+  }, [])
+  const handleToggleShowAll = (value: boolean) => {
+    setShowAll(value)
+    try {
+      window.localStorage.setItem('shakerscan.sidebar.show_all', String(value))
+    } catch {
+      /* localStorage unavailable */
+    }
+  }
 
   // Close the mobile drawer whenever navigation happens.
   useEffect(() => {
@@ -342,14 +387,14 @@ export default function Sidebar() {
                 <X className="h-5 w-5" aria-hidden="true" />
               </button>
             </div>
-            <NavContent pathname={pathname} />
+            <NavContent pathname={pathname} showAll={showAll} onToggleShowAll={handleToggleShowAll} />
           </aside>
         </div>
       )}
 
       {/* Desktop: persistent sidebar. */}
       <aside className="sticky top-0 hidden h-screen w-64 shrink-0 flex-col overflow-y-auto overscroll-contain border-r border-gray-800 bg-gray-900 p-4 md:flex">
-        <NavContent pathname={pathname} />
+        <NavContent pathname={pathname} showAll={showAll} onToggleShowAll={handleToggleShowAll} />
       </aside>
     </>
   )
