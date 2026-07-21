@@ -783,7 +783,7 @@ def run_research_episode(
             if not settled.get("settled"):
                 waiting = settled.get("waiting_on") if isinstance(settled.get("waiting_on"), list) else []
                 linked_work = waiting[0] if waiting and isinstance(waiting[0], dict) else {
-                    "kind": "async_work", "status": "waiting", "ui_path": f"/settings/research-agent?episode_id={episode_id}",
+                    "kind": "async_work", "status": "waiting", "ui_path": f"/deep-hunt?episode_id={episode_id}",
                 }
                 final_detail = settled
                 break
@@ -909,7 +909,7 @@ def _research_cli_projection(result: dict[str, Any]) -> dict[str, Any]:
     return {
         "ok": bool(result.get("ok")),
         "episode_id": result.get("episode_id"),
-        "ui_path": f"/settings/research-agent?episode_id={result.get('episode_id')}",
+        "ui_path": f"/deep-hunt?episode_id={result.get('episode_id')}",
         "status": episode.get("status"),
         "terminal": bool(episode.get("terminal")),
         "decision_count": int(result.get("decision_count") or 0),

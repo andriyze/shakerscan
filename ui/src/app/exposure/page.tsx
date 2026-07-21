@@ -501,7 +501,7 @@ function NodeDetailPanel({
         )}
 
         {node.type === 'web_target' && node.id.startsWith('target:') && (
-          <AgentFindingsSection targetId={node.id.slice('target:'.length)} />
+          <AgentFindingsSection key={node.id} targetId={node.id.slice('target:'.length)} />
         )}
 
         <div>

@@ -1,8 +1,7 @@
 'use client'
 
 import { useState } from 'react'
-import Link from 'next/link'
-import { ArrowLeft, Wand2 } from 'lucide-react'
+import { Wand2 } from 'lucide-react'
 import { routeAiOps, type AIOpsRouteResponse } from '@/lib/api'
 import { Badge, Button, Card, ConfirmDialog, Input, PageHeader, SectionCard, Textarea, useToast } from '@/components/ui'
 

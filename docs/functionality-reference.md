@@ -1037,10 +1037,10 @@ concurrency-limited with per-tool timeouts and a global deadline.
 | `/settings/policy-profiles` | Deployment policy profile lifecycle across DAST, AI Gate, and Model Intake |
 | `/exceptions` | Finding-exception queue, repair, expiry visibility, and lifecycle sweep |
 | `/settings/arsenal` | Command contracts, receipts, plans, actions, hypotheses (claim/signal/plan-campaign, from-plan/from-benchmark generators), refuters, tools, local agents, context packs, and traces |
-| `/settings/research-agent` | Create and inspect bounded shadow/read-only/gated research episodes, run configured-AI steps, inspect budgets/actions/decisions/events, refresh observations, and cancel episodes |
-| `/settings/research-agent/experiment` | Create bounded HTTP-differential or managed-principal workflow experiments |
-| `/settings/research-agent/runs/{id}` | Inspect a durable experiment run and its proof handoff |
-| `/settings/research-agent/leads` | Review durable research leads and route them to the appropriate product workflow |
+| `/deep-hunt` | Create and inspect bounded shadow/read-only/gated research episodes, run configured-AI steps, inspect budgets/actions/decisions/events, refresh observations, and cancel episodes |
+| `/deep-hunt/experiment` | Create bounded HTTP-differential or managed-principal workflow experiments |
+| `/deep-hunt/runs/{id}` | Inspect a durable experiment run and its proof handoff |
+| `/deep-hunt/leads` | Review durable research leads and route them to the appropriate product workflow |
 
 ### API-only or partially UI-backed workflows
 
@@ -1880,6 +1880,12 @@ Only key names and declaring sources are documented; secret values are never rea
 | `/asm` | `ui/src/app/asm/page.tsx` |
 | `/campaigns/{id}` | `ui/src/app/campaigns/[id]/page.tsx` |
 | `/campaigns` | `ui/src/app/campaigns/page.tsx` |
+| `/deep-hunt/experiment` | `ui/src/app/deep-hunt/experiment/page.tsx` |
+| `/deep-hunt/explorer` | `ui/src/app/deep-hunt/explorer/page.tsx` |
+| `/deep-hunt/leads` | `ui/src/app/deep-hunt/leads/page.tsx` |
+| `/deep-hunt/operator` | `ui/src/app/deep-hunt/operator/page.tsx` |
+| `/deep-hunt` | `ui/src/app/deep-hunt/page.tsx` |
+| `/deep-hunt/runs/{id}` | `ui/src/app/deep-hunt/runs/[id]/page.tsx` |
 | `/evidence` | `ui/src/app/evidence/page.tsx` |
 | `/exceptions` | `ui/src/app/exceptions/page.tsx` |
 | `/exposure` | `ui/src/app/exposure/page.tsx` |
@@ -1896,12 +1902,6 @@ Only key names and declaring sources are documented; secret values are never rea
 | `/settings/arsenal` | `ui/src/app/settings/arsenal/page.tsx` |
 | `/settings` | `ui/src/app/settings/page.tsx` |
 | `/settings/policy-profiles` | `ui/src/app/settings/policy-profiles/page.tsx` |
-| `/settings/research-agent/experiment` | `ui/src/app/settings/research-agent/experiment/page.tsx` |
-| `/settings/research-agent/explorer` | `ui/src/app/settings/research-agent/explorer/page.tsx` |
-| `/settings/research-agent/leads` | `ui/src/app/settings/research-agent/leads/page.tsx` |
-| `/settings/research-agent/operator` | `ui/src/app/settings/research-agent/operator/page.tsx` |
-| `/settings/research-agent` | `ui/src/app/settings/research-agent/page.tsx` |
-| `/settings/research-agent/runs/{id}` | `ui/src/app/settings/research-agent/runs/[id]/page.tsx` |
 | `/targets/{id}/graph` | `ui/src/app/targets/[id]/graph/page.tsx` |
 | `/targets` | `ui/src/app/targets/page.tsx` |
 | `/timeline` | `ui/src/app/timeline/page.tsx` |

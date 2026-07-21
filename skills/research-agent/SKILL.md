@@ -141,6 +141,6 @@ Stop when:
 - the user cancels;
 - the planner declines or cannot produce a valid turn.
 
-Report the Deep Hunt run ID and UI path `/settings/research-agent?run={run_id}`. If a Deep Hunt tool
+Report the Deep Hunt run ID and UI path `/deep-hunt?run={run_id}`. If a Deep Hunt tool
 queues an asynchronous scan or retest, report its ID and stop instead of polling unless the user
 explicitly asks to continue later.

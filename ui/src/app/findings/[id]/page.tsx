@@ -768,7 +768,7 @@ function FindingDetailContent() {
 
       <nav aria-label="Jump to section" className="flex flex-wrap items-center gap-1.5 rounded-lg border border-gray-800 bg-gray-900/60 p-2 text-xs">
         <span className="px-2 py-1 font-medium text-gray-500">Jump to</span>
-        {([['overview', 'Overview'], ['tracking', 'Tracking'], ['retest', 'Retest'], ['evidence', 'Evidence'], ['ai-analysis', 'AI analysis'], ['http', 'HTTP']] as const).map(([anchor, label]) => (
+        {(([['overview', 'Overview'], ['tracking', 'Tracking'], ['retest', 'Retest'], ['evidence', 'Evidence'], ['ai-analysis', 'AI analysis'], ...((request || response) ? [['http', 'HTTP']] : [])]) as [string, string][]).map(([anchor, label]) => (
           <a key={anchor} href={`#${anchor}`} className="rounded px-2 py-1 text-gray-400 transition-colors hover:bg-gray-800 hover:text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500">{label}</a>
         ))}
       </nav>

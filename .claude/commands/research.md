@@ -23,4 +23,4 @@ Drive the returned run one planner turn at a time through
 cite real `resp_N` values in `evidence_refs`; prose is not evidence. Stop on `completed`, `failed`,
 or `cancelled`.
 
-Use `/settings/research-agent?run={run_id}` as the UI link.
+Use `/deep-hunt?run={run_id}` as the UI link.
