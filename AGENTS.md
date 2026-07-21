@@ -1503,7 +1503,7 @@ shakerscan/
 ├── AGENTS.md            # This file (cross-tool AI agent instructions)
 ├── scanner/             # Core scanner engine
 │   ├── scanner.py       # Main orchestrator
-│   ├── scanner_tools/   # 61 specialized security modules
+│   ├── scanner_tools/   # 83 specialized security modules
 │   │   ├── nuclei.py    # Nuclei vulnerability scanning
 │   │   ├── active_checks.py  # XSS/SQLi testing
 │   │   ├── discovery.py # Endpoint discovery

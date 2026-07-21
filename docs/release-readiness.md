@@ -58,10 +58,10 @@ is conservative/fail-closed or latent, and is an owned decision rather than a si
 
 ## Release-candidate validation
 
-Run these against the exact candidate commit and retain content-free receipts/artifacts. On branch
-HEAD (`df0e08b`) the fast host-verifiable checks already pass — unit/contract (2341 passed, 7
-skipped), `generate_capability_inventory.py --check`, and all `release_gates.py` gates — but each MUST
-be re-confirmed on the frozen candidate SHA; the live-stack and benchmark rows below are freeze-time.
+Run these against the exact candidate commit and retain content-free receipts/artifacts. The fast
+host-verifiable checks pass on this branch — unit/contract (2343 passed, 7 skipped),
+`generate_capability_inventory.py --check`, and all `release_gates.py` gates — but each MUST be
+re-confirmed on the frozen candidate SHA; the live-stack and benchmark rows below are freeze-time.
 
 - [ ] Unit and contract suites pass on the candidate.
 - [ ] UI production build and targeted browser QA pass at desktop and narrow viewport widths.
@@ -98,9 +98,9 @@ Complete these before creating a tag:
       ancestor of `origin/main`; the tag must equal `v${VERSION}`.)
 - [ ] Decide which slower benchmark/E2E jobs are scheduled and add the schedule before describing
       them as nightly.
-- [ ] Replace remaining absolute CLI help claims such as Full running “ALL security tests.” The
-      generated functionality inventory intentionally mirrors the current code until that
-      user-facing help string is corrected.
+- [x] Replace remaining absolute CLI help claims such as Full running “ALL security tests.”
+      (User-facing help is clean; internal leftovers in an api.py comment and scanner.py argparse
+      help were reworded in the pre-release hygiene sweep.)
 - [ ] Use one product name, **ShakerScan**, in release titles and notes.
 
 ## Version and provenance
@@ -125,8 +125,8 @@ After the release commit is public:
 
 - [ ] Deploy the current `install/index.sh`.
 - [ ] Verify the root response is shell content with an appropriate text/shell content type.
-- [ ] Confirm the installer fetches `skills/shakerscan`, `skills/research-agent`, and the matching
-      `.claude/commands/research.md`.
+- [ ] Confirm the installer fetches `skills/shakerscan`, `skills/research-agent`, and the full
+      `.claude/commands/` set (including `research.md` and `deep-hunt.md`).
 - [ ] Run a clean install into an empty temporary home.
 - [ ] Verify `shakerscan doctor`, `shakerscan status`, agent launch, skill discovery, and one safe
       quick-scan submission.

@@ -6,7 +6,7 @@ governance, automation, UI, CLI, API, and agent-facing surfaces. The human-reada
 the behavior; the generated inventory in §17 enumerates every current public route, registry command,
 CLI flag, wrapper command, Make target, release gate, runtime configuration key, UI page, skill,
 agent, adapter, scanner module, and durable table.
-**Reconciled:** 2026-07-17
+**Reconciled:** 2026-07-21
 **Audience:** users, operators, AI coding agents, and engineers who need one place that explains the
 product's functionality end to end.
 
@@ -1551,7 +1551,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | `--cicd-exposure` | - | Test for exposed CI/CD configuration files |
 | `--cloud-bucket-testing` | - | Test for publicly accessible cloud storage buckets |
 | `--cloud-ssrf` | - | Test for SSRF vulnerabilities targeting cloud metadata |
-| `--complete` | - | Complete scan mode - comprehensive security assessment (30-60 min) |
+| `--complete` | - | Complete scan mode - broader passive plus selected active checks (30-60 min) |
 | `--complete-tier` | safe, full, aggressive | Scan tier for complete mode: safe (30-45min), full (2-3hr), aggressive (3+hr) |
 | `--compliance-report` | - | Generate compliance report (PCI DSS, SOC 2, HIPAA, GDPR, CIS) |
 | `--create-baseline` | - | Create baseline file from scan results (save known issues) |
@@ -1606,7 +1606,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | `--no-browser` | - | Disable browser-based scanning, use curl only (faster but less data) |
 | `--no-early-stop` | - | Disable early stopping in smart scan (continue even after finding many vulns) |
 | `--no-verified-findings-only` | - | Keep all findings regardless of verification status |
-| `--nuclei` | - | Nuclei scan mode - comprehensive vulnerability scan with all templates (10-30 min) |
+| `--nuclei` | - | Nuclei scan mode - vulnerability scan with the configured template set (10-30 min) |
 | `--oauth-client-id` | - | OAuth 2.0 client ID |
 | `--oauth-client-secret` | - | OAuth 2.0 client secret |
 | `--oauth-password` | - | Password for OAuth password grant flow |

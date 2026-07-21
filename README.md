@@ -206,8 +206,8 @@ curl -X POST http://localhost:8080/targets/{target_id}/asm/improve \
   -d '{"batch_size":50,"stale_days":30}'
 ```
 
-Auth checks require a primary auth context. BOLA testing also requires a distinct second user,
-explicit deep intent, and the applicable approvals.
+Auth checks require a primary auth context. BOLA testing also requires a distinct second user and
+explicit deep intent (`exploit_depth`).
 
 ### Run Deep Hunt
 
