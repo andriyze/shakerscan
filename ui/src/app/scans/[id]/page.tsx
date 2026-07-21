@@ -406,6 +406,7 @@ function AiGateCampaignReviewCard({ scan }: { scan: any }) {
   const [confirmProductionReplay, setConfirmProductionReplay] = useState(false)
   const [campaignHistory, setCampaignHistory] = useState<AiScanCampaignHistory | null>(null)
   const [campaignHistoryError, setCampaignHistoryError] = useState<string | null>(null)
+  const [collapsed, setCollapsed] = useState(false)
   const judgingGate = aiGateJudgingGateDisplay(review.judging_gate_status)
 
   useEffect(() => {
@@ -491,9 +492,19 @@ function AiGateCampaignReviewCard({ scan }: { scan: any }) {
               {judgingGate.label}
             </span>
           )}
+          <button
+            type="button"
+            onClick={() => setCollapsed((v) => !v)}
+            aria-expanded={!collapsed}
+            className="rounded border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+          >
+            {collapsed ? 'Show details' : 'Hide details'}
+          </button>
         </div>
       </div>
 
+      {!collapsed && (
+        <>
       {review.rationale && <p className="mt-3 text-sm text-gray-300">{review.rationale}</p>}
 
       <div className="mt-4 rounded border border-gray-800 bg-gray-950/50 p-3">
@@ -766,6 +777,8 @@ function AiGateCampaignReviewCard({ scan }: { scan: any }) {
             ))}
           </div>
         </div>
+      )}
+        </>
       )}
     </Card>
   )
