@@ -76,7 +76,7 @@ export function RecentHunts({ limit = 12 }: { limit?: number }) {
           return {
             key: `op-${c.id}`,
             engine: 'legacy_verifier' as const,
-            href: `/settings/research-agent/runs/${c.id}`,
+            href: `/deep-hunt/runs/${c.id}`,
             title: hostFromUrl(url) || c.name || 'Guided verifier run',
             state: runState(c),
             createdAt: c.created_at,
@@ -89,7 +89,7 @@ export function RecentHunts({ limit = 12 }: { limit?: number }) {
       const deepHuntItems: FeedItem[] = runs.map((r) => ({
         key: `ex-${r.id}`,
         engine: 'deep_hunt' as const,
-        href: `/settings/research-agent?run=${r.id}`,
+        href: `/deep-hunt?run=${r.id}`,
         title: hostFromUrl(targetUrl.get(r.target_id) || '') || r.objective || 'Deep Hunt',
         state: AGENT_RUN_STATE[r.status] ?? 'idle',
         createdAt: r.created_at,

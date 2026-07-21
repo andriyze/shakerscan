@@ -7,7 +7,7 @@ import { cn } from '@/lib/cn'
 // One small product navigation for AI investigation. Deep Hunt is the single
 // user-facing engine; Leads and Test Builder support it. The legacy guided
 // verifier remains an implementation surface, not a peer launcher.
-const BASE = '/settings/research-agent'
+const BASE = '/deep-hunt'
 
 type TabId = 'deep_hunt' | 'leads' | 'experiment'
 

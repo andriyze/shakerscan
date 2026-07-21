@@ -283,8 +283,8 @@ export default function ExperimentBuilderPage() {
             <p className="mt-2 text-sm leading-6 text-gray-400">No requests were sent. This screen validates and records the plan only; an authorized agent or Deep Hunt must initiate execution.</p>
             {result.execution_blocked_reason ? <div className="mt-3 rounded-lg bg-gray-950/60 p-3 text-xs text-gray-400"><span className="font-medium text-amber-300">Execution gate:</span> {result.execution_blocked_reason}</div> : null}
             <div className="mt-4 flex flex-wrap gap-3">
-              <Link href={`/settings/research-agent?target=${encodeURIComponent(targetId)}`} className="inline-flex items-center gap-1 text-sm text-blue-300 hover:text-blue-200">Use target in Deep Hunt <ArrowRight className="h-4 w-4" /></Link>
-              <Link href="/settings/research-agent/leads" className="inline-flex items-center gap-1 text-sm text-gray-400 hover:text-gray-200">Return to leads</Link>
+              <Link href={`/deep-hunt?target=${encodeURIComponent(targetId)}`} className="inline-flex items-center gap-1 text-sm text-blue-300 hover:text-blue-200">Use target in Deep Hunt <ArrowRight className="h-4 w-4" /></Link>
+              <Link href="/deep-hunt/leads" className="inline-flex items-center gap-1 text-sm text-gray-400 hover:text-gray-200">Return to leads</Link>
             </div>
           </Card> : null}
 

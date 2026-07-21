@@ -239,7 +239,7 @@ export default function RunDetailPage() {
   return (
     <div>
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <Link href="/settings/research-agent" className="inline-flex items-center gap-1.5 text-sm text-gray-400 hover:text-white">
+        <Link href="/deep-hunt" className="inline-flex items-center gap-1.5 text-sm text-gray-400 hover:text-white">
           <ArrowLeft className="h-4 w-4" />All hunts
         </Link>
         <InvestigatorTabs />

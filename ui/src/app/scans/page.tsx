@@ -481,7 +481,7 @@ function ScansContent() {
                 <div key={`hunt-${campaign.id}`} className="rounded-lg border border-blue-500/30 bg-blue-500/[0.04] p-4">
                   <div className="flex items-start justify-between gap-3">
                     <Link
-                      href={`/settings/research-agent/runs/${campaign.id}`}
+                      href={`/deep-hunt/runs/${campaign.id}`}
                       className="min-w-0 flex-1 truncate text-sm font-medium text-blue-300 hover:text-blue-200"
                       title={huntTargetLabel(campaign)}
                     >
@@ -509,7 +509,7 @@ function ScansContent() {
                   </div>
                   <div className="mt-3">
                     <Link
-                      href={`/settings/research-agent/runs/${campaign.id}`}
+                      href={`/deep-hunt/runs/${campaign.id}`}
                       className="inline-flex rounded bg-blue-600 px-2 py-1 text-xs font-medium text-white hover:bg-blue-700"
                     >
                       View hunt
@@ -635,7 +635,7 @@ function ScansContent() {
                   <tr key={`hunt-${campaign.id}`} className="bg-blue-500/[0.035] transition-colors hover:bg-blue-500/[0.07]">
                     <td className="max-w-[20rem] px-4 py-3">
                       <Link
-                        href={`/settings/research-agent/runs/${campaign.id}`}
+                        href={`/deep-hunt/runs/${campaign.id}`}
                         className="block truncate text-sm text-blue-300 hover:text-blue-200"
                         title={huntTargetLabel(campaign)}
                       >
@@ -658,7 +658,7 @@ function ScansContent() {
                     <td className="hidden px-4 py-3 text-sm text-gray-500 2xl:table-cell">{formatDate(campaign.created_at)}</td>
                     <td className="px-4 py-3">
                       <Link
-                        href={`/settings/research-agent/runs/${campaign.id}`}
+                        href={`/deep-hunt/runs/${campaign.id}`}
                         className="inline-flex rounded bg-blue-600 px-2 py-1 text-xs font-medium text-white hover:bg-blue-700"
                       >
                         View

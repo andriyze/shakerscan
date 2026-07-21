@@ -79,7 +79,7 @@ function experimentHref(lead: ScheduledLead): string {
   if (expected) q.set('expected', expected)
   if (falsifier) q.set('falsifier', falsifier)
   if (path) q.set('path', path)
-  return `/settings/research-agent/experiment?${q.toString()}`
+  return `/deep-hunt/experiment?${q.toString()}`
 }
 
 function nextAction(lead: ScheduledLead): { href: string; label: string; description: string } {

@@ -568,7 +568,7 @@ function FindingDetailContent() {
       })
       setAutonomousConfirmOpen(false)
       toast.success(detail.reused ? 'Opened the existing autonomous investigation' : 'Autonomous investigation started')
-      router.push(`/settings/research-agent/runs/${encodeURIComponent(detail.episode.id)}`)
+      router.push(`/deep-hunt/runs/${encodeURIComponent(detail.episode.id)}`)
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Failed to start autonomous investigation')
     } finally {
@@ -861,7 +861,7 @@ function FindingDetailContent() {
                   <span className="text-indigo-300">Deep hunt</span>
                   {research.campaign_id && (
                     <Link
-                      href={`/settings/research-agent/runs/${research.campaign_id}`}
+                      href={`/deep-hunt/runs/${research.campaign_id}`}
                       className="text-blue-400 hover:text-blue-300"
                     >
                       View run {research.campaign_id.slice(0, 8)}…

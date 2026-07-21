@@ -792,7 +792,7 @@ function activityHref(event: TimelineEvent): string | null {
   if (event.next_action?.startsWith('/') && !event.next_action.startsWith('/campaigns/')) return event.next_action
   if (event.scan_id) return `/scans/${event.scan_id}`
   const campaignId = event.campaign_id || event.mission_campaign_id
-  if (campaignId) return `/settings/research-agent/runs/${campaignId}`
+  if (campaignId) return `/deep-hunt/runs/${campaignId}`
   if (event.finding_ids?.length === 1) return `/findings/${event.finding_ids[0]}`
   return null
 }

@@ -1232,7 +1232,7 @@ function ActivityCard({
                   <div className="mt-1 text-xs text-gray-500">{event.detail || 'No detail recorded.'}</div>
                   {event.campaign_id && (
                     <Link
-                      href={`/settings/research-agent/runs/${event.campaign_id}`}
+                      href={`/deep-hunt/runs/${event.campaign_id}`}
                       className="mt-1 inline-flex text-[11px] text-blue-400 hover:text-blue-300"
                     >
                       Open related hunt
@@ -1456,7 +1456,7 @@ function TargetView({ targetId }: { targetId: string }) {
       return
     }
     const objective = 'Explore this target autonomously and close the highest-value unexplained coverage gaps with evidence.'
-    router.push(`/settings/research-agent?target=${encodeURIComponent(target.id)}&objective=${encodeURIComponent(objective)}`)
+    router.push(`/deep-hunt?target=${encodeURIComponent(target.id)}&objective=${encodeURIComponent(objective)}`)
   }
 
   const coverageDenominator = asmCoverageDenominator(coverage)

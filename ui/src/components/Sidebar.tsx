@@ -82,8 +82,8 @@ const navGroups: {
     heading: 'AI Investigator',
     badge: 'Alpha',
     items: [
-      { href: '/settings/research-agent', label: 'Deep Hunt', icon: <Compass className="w-5 h-5" /> },
-      { href: '/settings/research-agent/leads', label: 'Leads', icon: <Lightbulb className="w-5 h-5" /> },
+      { href: '/deep-hunt', label: 'Deep Hunt', icon: <Compass className="w-5 h-5" /> },
+      { href: '/deep-hunt/leads', label: 'Leads', icon: <Lightbulb className="w-5 h-5" /> },
     ],
   },
   {
@@ -134,14 +134,14 @@ function NavContent({ pathname }: { pathname: string }) {
     if (href === '/') {
       return pathname === '/'
     }
-    if (href === '/settings/research-agent') {
+    if (href === '/deep-hunt') {
       // Deep Hunt is the canonical investigator launcher; keep it lit across its
       // cluster pages that have no sidebar entry of their own (run detail and
       // Test Builder). Leads highlights its own item.
       return (
         pathname === href ||
-        pathname.startsWith('/settings/research-agent/runs') ||
-        pathname.startsWith('/settings/research-agent/experiment')
+        pathname.startsWith('/deep-hunt/runs') ||
+        pathname.startsWith('/deep-hunt/experiment')
       )
     }
     return pathname.startsWith(href)

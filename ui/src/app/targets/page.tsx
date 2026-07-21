@@ -614,7 +614,7 @@ function TargetsContent() {
                       )}
                       {(domain.root_target.investigator_verified_count || 0) > 0 && (
                         <Link
-                          href={`/settings/research-agent?target=${domain.root_target.id}`}
+                          href={`/deep-hunt?target=${domain.root_target.id}`}
                           onClick={(e) => e.stopPropagation()}
                           className="text-emerald-400 transition-colors hover:text-emerald-300"
                           title="Deterministically verified investigator findings"
@@ -624,7 +624,7 @@ function TargetsContent() {
                       )}
                       {(domain.root_target.investigator_suspected_count || 0) > 0 && (
                         <Link
-                          href={`/settings/research-agent?target=${domain.root_target.id}`}
+                          href={`/deep-hunt?target=${domain.root_target.id}`}
                           onClick={(e) => e.stopPropagation()}
                           className="text-amber-400 transition-colors hover:text-amber-300"
                           title="Evidence-backed investigator leads awaiting deterministic proof"
@@ -840,7 +840,7 @@ function TargetsContent() {
                         )}
                         {(subdomain.investigator_verified_count || 0) > 0 && (
                           <Link
-                            href={`/settings/research-agent?target=${subdomain.id}`}
+                            href={`/deep-hunt?target=${subdomain.id}`}
                             className="text-emerald-400 transition-colors hover:text-emerald-300"
                             title="Deterministically verified investigator findings"
                           >
@@ -849,7 +849,7 @@ function TargetsContent() {
                         )}
                         {(subdomain.investigator_suspected_count || 0) > 0 && (
                           <Link
-                            href={`/settings/research-agent?target=${subdomain.id}`}
+                            href={`/deep-hunt?target=${subdomain.id}`}
                             className="text-amber-400 transition-colors hover:text-amber-300"
                             title="Evidence-backed investigator leads awaiting deterministic proof"
                           >
