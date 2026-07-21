@@ -16,6 +16,7 @@ import {
   getFindingEvidence,
   getPolicyProfiles,
   getResearchReadiness,
+  getTarget,
   launchResearchEpisode,
   retestFinding,
   retestAiFinding,
@@ -314,6 +315,7 @@ function FindingDetailContent() {
   const [retestMessage, setRetestMessage] = useState<string | null>(null)
   const [retestMode, setRetestMode] = useState<'tiered' | 'deterministic' | 'ai' | 'same_probe' | 'same_family' | 'strict_replay'>('tiered')
   const [retestHistory, setRetestHistory] = useState<RetestRecord[]>([])
+  const [targetInactive, setTargetInactive] = useState(false)
   const [historyExpanded, setHistoryExpanded] = useState(false)
   const [findingExceptions, setFindingExceptions] = useState<FindingException[]>([])
   const [policyProfiles, setPolicyProfiles] = useState<PolicyProfile[]>([])
@@ -342,13 +344,15 @@ function FindingDetailContent() {
   const fetchFinding = useCallback(async () => {
     try {
       const data = await getFinding(findingId)
-      const [retestData, evidenceData, exceptionData, policyData] = await Promise.all([
+      const [retestData, evidenceData, exceptionData, policyData, targetData] = await Promise.all([
         getFindingRetests(findingId, 10).catch(() => null),
         getFindingEvidence(findingId).catch(() => null),
         getFindingExceptions(data.target_id ? { target_id: data.target_id } : undefined).catch(() => null),
         getPolicyProfiles().catch(() => null),
+        data.target_id ? getTarget(data.target_id).catch(() => null) : Promise.resolve(null),
       ])
       setFinding(data)
+      setTargetInactive(targetData ? targetData.is_active === false : false)
       if (retestData) {
         setRetestHistory(retestData.retests || [])
       }
@@ -666,22 +670,28 @@ function FindingDetailContent() {
           <button
             type="button"
             onClick={() => setAutonomousConfirmOpen(true)}
-            disabled={!autonomousTargetUrl || autonomousLoading || hasPendingRetest}
+            disabled={!autonomousTargetUrl || autonomousLoading || hasPendingRetest || targetInactive}
             title={
               hasPendingRetest
                 ? 'A proof replay is already queued or running for this finding.'
-                : autonomousTargetUrl
-                  ? 'Inspect this finding, run at most one bounded proof replay, and conclude from its result.'
-                  : autonomousUnsupportedReason(finding)
+                : targetInactive
+                  ? "This finding's target is deactivated. Reactivate it under Targets to verify."
+                  : autonomousTargetUrl
+                    ? 'Inspect this finding, run at most one bounded proof replay, and conclude from its result.'
+                    : autonomousUnsupportedReason(finding)
             }
             className="inline-flex items-center gap-2 rounded-lg bg-violet-600 px-3 py-2 text-sm font-medium text-white transition-colors hover:bg-violet-500 disabled:cursor-not-allowed disabled:opacity-45"
           >
             <BrainCircuit className="h-4 w-4" />
             Verify finding
           </button>
-          {(!autonomousTargetUrl || hasPendingRetest) && (
+          {(!autonomousTargetUrl || hasPendingRetest || targetInactive) && (
             <span className={`max-w-64 text-xs leading-4 ${hasPendingRetest ? 'text-gray-500' : 'text-amber-300/80'}`}>
-              {hasPendingRetest ? 'Available after the current proof replay finishes.' : autonomousUnsupportedReason(finding)}
+              {hasPendingRetest
+                ? 'Available after the current proof replay finishes.'
+                : targetInactive
+                  ? 'Target is deactivated — reactivate it under Targets to verify.'
+                  : autonomousUnsupportedReason(finding)}
             </span>
           )}
           <div className="flex flex-wrap items-center gap-2 rounded-lg border border-gray-800 bg-gray-950/50 p-1">
