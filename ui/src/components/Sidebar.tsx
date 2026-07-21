@@ -83,7 +83,7 @@ const navGroups: {
   },
   {
     heading: 'AI Investigator',
-    badge: 'Alpha',
+    badge: 'Agentic',
     items: [
       { href: '/deep-hunt', label: 'Deep Hunt', icon: <Compass className="w-5 h-5" /> },
       { href: '/deep-hunt/leads', label: 'Leads', icon: <Lightbulb className="w-5 h-5" />, advanced: true },
@@ -114,6 +114,7 @@ const navGroups: {
   },
   {
     heading: 'Developer',
+    advanced: true,
     items: [
       { href: '/settings/arsenal', label: 'Command Arsenal', icon: <Boxes className="w-5 h-5" /> },
       { href: '/settings/ai-ops-router', label: 'AI Ops Router', icon: <Wand2 className="w-5 h-5" /> },
@@ -189,7 +190,8 @@ function NavContent({
               <div className="flex items-center gap-1.5 px-3 pb-0.5 text-[10px] font-semibold uppercase tracking-wider text-gray-600">
                 <span>{group.heading}</span>
                 {group.badge ? (
-                  <span className="rounded-full border border-blue-500/30 bg-blue-500/10 px-1.5 py-px text-[8px] font-bold tracking-wider text-blue-400">
+                  <span className="inline-flex items-center gap-1 rounded-full border border-violet-400/40 bg-violet-500/20 px-1.5 py-px text-[8px] font-bold uppercase tracking-wider text-violet-200">
+                    <span className="h-1 w-1 rounded-full bg-violet-300 animate-pulse" aria-hidden="true" />
                     {group.badge}
                   </span>
                 ) : null}
@@ -244,7 +246,7 @@ function NavContent({
             GitHub
           </a>
           <div className="flex items-center gap-2">
-          <span title="Show all sections (Interactive Testing, Leads, Records, Governance)" className="inline-flex">
+          <span title="Show all sections (Interactive Testing, Leads, Records, Governance, Developer)" className="inline-flex">
             <Toggle checked={showAll} onChange={onToggleShowAll} label="Show all sidebar sections" />
           </span>
           <Link
