@@ -18,8 +18,8 @@ ShakerScan covers:
 
 - DAST for websites and APIs, from fast posture checks to authorized active XSS/SQLi testing
 - Continuous attack-surface management (ASM), subdomain discovery, and certificate-transparency monitoring
-- AI Gate tests for chat, RAG, agent, and MCP endpoints
-- Model Intake checks for provenance, signatures, checksums, unsafe serialization, and policy readiness
+- AI Gate tests for chat, RAG, agent, and MCP endpoints *(preview)*
+- Model Intake checks for provenance, signatures, checksums, unsafe serialization, and policy readiness *(preview)*
 - Interactive Testing, finding retests, evidence, exceptions, the mission ledger, and Deep Hunt
 
 > Only scan systems you own or are explicitly authorized to test. Active scan modes can change
@@ -170,6 +170,9 @@ The findings workflow distinguishes reported, suspected, and verified issues. A 
 alone is not exploit proof; use the finding detail page and retest history to inspect the evidence.
 
 ### Test AI systems
+
+> **Preview:** AI Gate and Model Intake are preview surfaces for this release — usable and
+> smoke-tested, but not yet covered by the full real-stack E2E matrix that gates the DAST engine.
 
 AI Gate supports chat APIs, RAG APIs, agent traces, MCP traces, and embeddable widgets. In the UI:
 

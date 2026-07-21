@@ -81,8 +81,8 @@ deterministic replay, principal/control comparison, and linked evidence.
 |---|---|
 | Maintain endpoint inventory and close coverage gaps | **Continuous ASM** |
 | Review assets, relationships, and attack paths | **Exposure** |
-| Test chat, RAG, agent, widget, or MCP endpoints | **AI Gate** |
-| Check a model artifact before deployment | **Model Intake** |
+| Test chat, RAG, agent, widget, or MCP endpoints | **AI Gate** (preview) |
+| Check a model artifact before deployment | **Model Intake** (preview) |
 | Reproduce browser/auth workflows manually | **Interactive Testing** |
 | Review evidence cleanup or exports | **Evidence** |
 | Follow scans, scheduled work, investigations, and exports | **Timeline** |
