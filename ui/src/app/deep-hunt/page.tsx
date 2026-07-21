@@ -6,7 +6,7 @@
 import { Suspense, useEffect, useMemo, useRef, useState } from 'react'
 import Link from 'next/link'
 import { useSearchParams } from 'next/navigation'
-import { CircleStop, Compass, Rocket, ShieldCheck } from 'lucide-react'
+import { CircleStop, Compass, Rocket, ShieldCheck, Terminal } from 'lucide-react'
 import {
   cancelAgentHuntSession,
   createTargetPolicyApproval,
@@ -40,6 +40,46 @@ const AGENT_RUN_STATE: Record<AgentHuntStatus, RunState> = {
   failed: 'failed',
 }
 const isTerminal = (status?: AgentHuntStatus | null) => !!status && TERMINAL.includes(status)
+
+// You can also start a hunt straight from the terminal: the current coding-agent
+// session is the planner, so a plain-language ask kicks it off and drives it.
+function TerminalHint() {
+  const [copied, setCopied] = useState(false)
+  const example = 'start a deep hunt for example.com'
+  const copyExample = async () => {
+    try {
+      await navigator.clipboard.writeText(example)
+      setCopied(true)
+      window.setTimeout(() => setCopied(false), 1500)
+    } catch {
+      /* clipboard unavailable */
+    }
+  }
+  return (
+    <div className="mt-4 flex flex-col gap-3 rounded-lg border border-violet-500/25 bg-violet-500/[0.06] p-4 lg:flex-row lg:items-center lg:justify-between">
+      <div className="flex items-start gap-3">
+        <Terminal className="mt-0.5 h-5 w-5 shrink-0 text-violet-300" aria-hidden="true" />
+        <div>
+          <p className="text-sm font-medium text-violet-100">Prefer the terminal? Start it from your coding agent.</p>
+          <p className="mt-0.5 text-xs leading-5 text-gray-400">
+            In the ShakerScan runtime (<code className="rounded bg-gray-800 px-1 py-0.5 font-mono text-[11px] text-gray-300">shakerscan agent claude</code>), just ask in plain language — the agent launches the hunt, drives each turn, and it appears here live.
+          </p>
+        </div>
+      </div>
+      <div className="flex shrink-0 items-center gap-2">
+        <code className="rounded-md border border-gray-700 bg-gray-950 px-3 py-1.5 font-mono text-xs text-gray-200">{example}</code>
+        <button
+          type="button"
+          onClick={copyExample}
+          aria-label="Copy example command"
+          className="rounded-md border border-gray-700 px-2.5 py-1.5 text-xs text-gray-300 hover:bg-gray-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+        >
+          {copied ? 'Copied' : 'Copy'}
+        </button>
+      </div>
+    </div>
+  )
+}
 
 function DeepHuntPage() {
   const toast = useToast()
@@ -197,6 +237,8 @@ function DeepHuntPage() {
           <EngineHint />
         </div>
       </header>
+
+      <TerminalHint />
 
       {error ? <div className="mt-4"><ErrorState message={error} /></div> : null}
 
