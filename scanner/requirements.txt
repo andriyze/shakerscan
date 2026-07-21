@@ -1,4 +1,8 @@
 # ShakerScan Python Dependencies
+#
+# Human-maintained input for scanner/requirements.lock. Regenerate the lock with:
+# uv pip compile scanner/requirements.txt --python-version 3.12 --universal \
+#   --generate-hashes --output-file scanner/requirements.lock
 # Core API/Worker dependencies
 fastapi>=0.109.0
 uvicorn>=0.27.0
@@ -14,6 +18,20 @@ aiohttp>=3.9.0
 beautifulsoup4>=4.12.0
 lxml>=5.1.0
 onnx>=1.16.0,<2
+PyYAML>=6.0.2
+
+# Python security tools and their direct runtime integrations. Keep scanner
+# executables exact; the generated lock pins every transitive dependency.
+sqlmap==1.10.5
+commix==0.1
+XSStrike==3.2.2
+certifi>=2026.6.17
+cryptography>=48.0.1,<50
+dnspython>=2.8.0
+pyOpenSSL>=26.0.0
+python-whois>=0.9.6
+shodan>=1.31.0
+paramiko>=4.0.0
 
 # Test runner (so `make test` works in the api/worker image without an ad-hoc install).
 pytest>=8.0.0

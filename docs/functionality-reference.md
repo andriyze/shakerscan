@@ -423,10 +423,10 @@ coverage over time within safe budgets and allowed windows (`api/asm_inventory.p
   marked `tested` when scanner telemetry proves it was attempted/completed. Timeouts/partial results
   do not count unattempted endpoints as covered.
 - For AI/agent workflows, prefer `POST /targets/{id}/asm/improve`, which chooses recon vs. test batch
-  vs. wait from current gaps. Focused families: `sqli`, `xss`, and gated `bola` (requires
-  `exploit_depth: true` plus primary and second-user auth). Planned families (`auth`, `ssrf`, `lfi`,
-  `rce`, `business_logic`) are registered but rejected for ASM execution until their scanner
-  integrations ship.
+  vs. wait from current gaps. Focused families: `sqli`, `xss`, credential-gated `auth` (requires a
+  primary auth context), and gated `bola` (requires `exploit_depth: true` plus primary and
+  second-user auth). Planned families (`ssrf`, `lfi`, `rce`, `business_logic`) are registered but
+  rejected for ASM execution until their scanner integrations ship.
 - `GET /targets/{id}/asm/activity` is the read-only operator summary for one target: recent hidden ASM
   recon/test jobs, the scheduler decision, campaign timeline events, active ASM scans, and a bounded
   target-scoped hypothesis situation report. The embedded hypothesis report surfaces proof leads and
@@ -1115,14 +1115,14 @@ it is the exhaustive backstop behind the human-readable product map above.
 |---|---|---|
 | Public REST operations | 234 | `api/api.py` FastAPI decorators |
 | Unique REST paths | 192 | `api/api.py` |
-| Check families | 13 | `api/check_registry.py` |
+| Check families | 14 | `api/check_registry.py` |
 | Command Arsenal commands | 82 | `api/command_arsenal.py` |
 | Tool adapters | 13 | `api/command_arsenal.py` |
 | Local-agent adapters | 4 | `api/command_arsenal.py` |
 | Scanner CLI flags | 158 | `scanner/scanner.py` |
-| Scanner wrapper commands | 23 | `scanner.sh` |
-| Make targets | 7 | `Makefile` |
-| Release gates | 10 | `scripts/release_gates.py` |
+| Scanner wrapper commands | 24 | `scanner.sh` |
+| Make targets | 10 | `Makefile` |
+| Release gates | 14 | `scripts/release_gates.py` |
 | Runtime environment keys | 194 | Python sources + Compose manifests |
 | Scanner modules | 83 | `scanner/scanner_tools/` |
 | UI pages | 29 | `ui/src/app/` |
@@ -1377,6 +1377,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | `auth` | active | access_control | True | medium | True | `asm_endpoint_batch` | `active_endpoint_attempt_v1` | Read-only authenticated-vs-anonymous access checks for focused ASM endpoint batches. |
 | `bola` | active | access_control | True | high | True | `asm_endpoint_batch` | `active_endpoint_attempt_v1` | Multi-user object authorization comparisons. Requires Lab/deep policy and two auth contexts. |
 | `business_logic` | active | workflow | True | high | False | `none` | `planned_workflow_attempt` | Workflow/business-logic testing. Planned for AI/manual-assisted campaigns. |
+| `endpoint_security` | passive | endpoint_surface | False | low | True | `endpoint_scoped_surface` | `endpoint_surface_attempt_v1` | Target-wide API data exposure, webhook signature, and approval/authorization checks over the discovered endpoint inventory. |
 | `headers` | passive | headers | False | low | True | `legacy_config_findings` | `planned_passive_attempt` | HTTP security header posture checks. |
 | `jwt` | active | authentication | True | medium | True | `legacy_advanced_jwt` | `jwt_probe_attempt_v1` | JWT algorithm, signature, key, and claim mutation checks with acceptance proof. |
 | `lfi` | active | server_side | True | high | False | `none` | `planned_high_risk_attempt` | File inclusion and path traversal checks. Planned and permission-gated. |
@@ -1489,7 +1490,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | `nuclei` | template_vuln_scan | wired | active | `nuclei-jsonl-v1` | `template-match-with-request-response` | Nuclei template scanner. |
 | `playwright` | browser_proof | wired | active | `playwright-proof-v1` | `browser-observation` | Playwright browser proof execution. |
 | `sqlmap` | sqli | gated | active | `sqlmap-output-v1` | `sqli-dbms-or-error-proof` | sqlmap SQL injection verifier. |
-| `sslyze` | tls | wired | passive | `sslyze-json-v1` | `tls-protocol-observation` | SSLyze TLS scanner. |
+| `sslyze` | tls | disabled | passive | `sslyze-json-v1` | `tls-protocol-observation` | SSLyze TLS scanner (disabled until upstream supports the audited cryptography runtime). |
 | `subfinder` | subdomain_discovery | wired | passive | `subfinder-lines-v1` | `passive-discovery` | ProjectDiscovery subfinder passive subdomain discovery. |
 | `testssl.sh` | tls | wired | passive | `testssl-json-v1` | `tls-protocol-observation` | testssl.sh TLS scanner. |
 
@@ -1575,7 +1576,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | `--focus-rules-json` | - | JSON array of focus rules to constrain endpoint scope |
 | `--focused-endpoints-only` | - | - |
 | `--forced-browsing` | - | Test for forced browsing/direct request vulnerabilities (privileged path enumeration) |
-| `--full` | - | Full assessment - ALL security tests including active XSS/SQLi (1-2 hours) |
+| `--full` | - | Broad full assessment including active XSS/SQLi (1-2 hours; bounded modules and budgets apply) |
 | `--github-token` | - | GitHub token for code search (env: GITHUB_TOKEN) |
 | `--grpc-discovery` | - | Enable gRPC reflection discovery (requires grpcurl) |
 | `--health-check` | - | Run tool health check and exit (validate all scanner tools are available) |
@@ -1667,9 +1668,9 @@ it is the exhaustive backstop behind the human-readable product map above.
 
 | Surface | Names |
 |---|---|
-| `scanner.sh` commands | `agent`, `ai`, `build`, `doctor`, `env`, `gungnir`, `help`, `install-deps`, `logs`, `mcp`, `rebuild`, `reload`, `research`, `reset`, `restart`, `scale`, `scan`, `scan-full`, `scan-smart`, `shell`, `start`, `status`, `stop` |
-| Make targets | `e2e`, `e2e-ai-gate`, `e2e-dast`, `e2e-model-intake`, `e2e-model-intake-fixture`, `release-gates`, `test` |
-| Release gates | `test:evidence-provenance`, `test:fleet-current`, `test:hypothesis-proof-promotion`, `test:mcp-read-only`, `test:no-ai-verified`, `test:no-benchmark-fitting`, `test:no-phantom-tools`, `test:planner-no-shell`, `test:planner-risk`, `test:planner-scope` |
+| `scanner.sh` commands | `agent`, `ai`, `backup`, `build`, `doctor`, `env`, `gungnir`, `help`, `install-deps`, `logs`, `mcp`, `rebuild`, `reload`, `research`, `reset`, `restart`, `scale`, `scan`, `scan-full`, `scan-smart`, `shell`, `start`, `status`, `stop` |
+| Make targets | `dependency-audit`, `dependency-lock`, `e2e`, `e2e-ai-gate`, `e2e-dast`, `e2e-model-intake`, `e2e-model-intake-fixture`, `release-gates`, `test`, `upgrade-smoke` |
+| Release gates | `test:evidence-provenance`, `test:fleet-current`, `test:hypothesis-proof-promotion`, `test:mcp-read-only`, `test:no-ai-verified`, `test:no-benchmark-fitting`, `test:no-phantom-tools`, `test:planner-no-shell`, `test:planner-risk`, `test:planner-scope`, `test:scanner-auth-quality`, `test:scanner-bounds`, `test:scanner-proof-truth`, `test:scanner-registry-coverage` |
 
 ### Runtime Environment-Key Inventory
 
@@ -1738,7 +1739,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `AWS_SESSION_TOKEN` | `api/evidence_storage.py` |
 | `BUILD_FINGERPRINT` | `api/worker.py` |
 | `COVERAGE_ALLOCATION_DEFAULT` | `api/parallel_scan.py` |
-| `DATABASE_URL` | `api/api.py`, `api/gungnir_worker.py`, `api/worker.py`, `scanner/gungnir_worker.py` |
+| `DATABASE_URL` | `api/api.py`, `api/gungnir_worker.py`, `api/worker.py`, `scanner/gungnir_worker.py`, `scripts/upgrade_schema_smoke.py` |
 | `DEFAULT_ASM_ENABLED` | `api/api.py` |
 | `DEFAULT_RESEARCH_PLANNER_MODE` | `api/api.py` |
 | `DOMAIN_RATE_REQUEUE_DELAY_SECONDS` | `api/worker.py` |
@@ -1835,7 +1836,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SHAKERSCAN_API_URL` | `scripts/shakerscan_mcp.py` |
 | `SHAKERSCAN_ASM_DISPATCH_INTERVAL` | `api/api.py` |
 | `SHAKERSCAN_BIND_HOST` | `docker-compose.release.yml`, `docker-compose.yml` |
-| `SHAKERSCAN_CANCEL_FILE` | `scanner/scanner_tools/cancellation.py` |
+| `SHAKERSCAN_CANCEL_FILE` | `scanner/scanner_tools/cancellation.py`, `scanner/scanner_tools/common.py` |
 | `SHAKERSCAN_CUSTOM_WORDLIST` | `scanner/scanner_tools/discovery.py` |
 | `SHAKERSCAN_DEBUG_POST_INFER` | `scanner/scanner.py` |
 | `SHAKERSCAN_ENABLE_ADAPTIVE_THROTTLE` | `scanner/scanner.py` |

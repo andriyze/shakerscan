@@ -17,6 +17,9 @@ on:
         options:
           - "false"
           - "true"
+      candidate_sha:
+        description: "Exact approved commit SHA (must be the selected main commit)"
+        required: true
 
 permissions:
   contents: write
@@ -35,6 +38,7 @@ jobs:
       version: ${{ steps.meta.outputs.version }}
       push_latest: ${{ steps.meta.outputs.push_latest }}
       created: ${{ steps.meta.outputs.created }}
+      candidate_sha: ${{ steps.meta.outputs.candidate_sha }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -46,9 +50,15 @@ jobs:
           if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
             version="${{ inputs.version }}"
             push_latest="${{ inputs.push_latest }}"
+            candidate_sha="${{ inputs.candidate_sha }}"
+            if [[ "${GITHUB_REF}" != "refs/heads/main" ]]; then
+              echo "Manual releases must run from refs/heads/main, got ${GITHUB_REF}" >&2
+              exit 1
+            fi
           else
             version="${GITHUB_REF_NAME#v}"
             push_latest="true"
+            candidate_sha="${GITHUB_SHA}"
           fi
 
           if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$ ]]; then
@@ -62,16 +72,81 @@ jobs:
             exit 1
           fi
 
+          checked_out_sha="$(git rev-parse HEAD)"
+          if [[ ! "$candidate_sha" =~ ^[0-9a-f]{40}$ ]] || [[ "$candidate_sha" != "$checked_out_sha" ]]; then
+            echo "Candidate mismatch: approved=$candidate_sha checked_out=$checked_out_sha" >&2
+            exit 1
+          fi
+          if [[ "${GITHUB_EVENT_NAME}" != "workflow_dispatch" ]] && [[ "${GITHUB_REF_NAME}" != "v${file_version}" ]]; then
+            echo "Tag mismatch: ${GITHUB_REF_NAME} must equal v${file_version}" >&2
+            exit 1
+          fi
+
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "push_latest=$push_latest" >> "$GITHUB_OUTPUT"
           echo "created=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+          echo "candidate_sha=$candidate_sha" >> "$GITHUB_OUTPUT"
+
+      - name: Verify candidate is on main
+        shell: bash
+        run: |
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "${{ steps.meta.outputs.candidate_sha }}" origin/main || {
+            echo "Approved candidate is not reachable from origin/main" >&2
+            exit 1
+          }
+
+  validate:
+    name: Validate exact release candidate
+    needs: meta
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout approved candidate
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.meta.outputs.candidate_sha }}
+
+      - name: Verify generated documentation
+        run: python3 scripts/generate_capability_inventory.py --check
+
+      - name: Build locked scanner image
+        run: docker build -f scanner/Dockerfile -t shakerscan-scanner:release-candidate .
+
+      - name: Unit, contract, documentation, and release gates
+        run: |
+          docker run --rm --entrypoint python \
+            -e PYTHONPATH=/src/api:/src/scanner:/src \
+            -v "$PWD:/src:ro" -w /src \
+            shakerscan-scanner:release-candidate \
+            -m pytest -q -p no:cacheprovider tests
+          docker run --rm --entrypoint python \
+            -e PYTHONPATH=/src/api:/src/scanner:/src \
+            -v "$PWD:/src:ro" -w /src \
+            shakerscan-scanner:release-candidate \
+            scripts/release_gates.py
+
+      - name: Set up supported Node runtime
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - name: Audit and build UI
+        run: |
+          npm --prefix ui ci
+          npm --prefix ui audit --omit=dev --audit-level=high
+          npm --prefix ui run build
 
   # Build each architecture on a NATIVE runner (no QEMU emulation — that is what
   # blew past the 6h job limit, and katana's CGO dep cannot cross-compile). Each
   # job pushes by digest; the manifest lists are assembled in the merge job.
   build:
     name: Build ${{ matrix.platform }}
-    needs: meta
+    needs: [meta, validate]
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -111,7 +186,7 @@ jobs:
           file: scanner/Dockerfile
           platforms: ${{ matrix.platform }}
           labels: |
-            org.opencontainers.image.title=Shaker Scan Scanner
+            org.opencontainers.image.title=ShakerScan Scanner
             org.opencontainers.image.description=Open-source DAST scanner API, worker, and security tooling image
             org.opencontainers.image.created=${{ needs.meta.outputs.created }}
             org.opencontainers.image.version=${{ needs.meta.outputs.version }}
@@ -119,8 +194,8 @@ jobs:
             org.opencontainers.image.source=${{ env.SOURCE_URL }}
             org.opencontainers.image.url=https://hub.docker.com/r/shakerscan/shakerscan-scanner
             org.opencontainers.image.documentation=${{ env.SOURCE_URL }}#readme
-            org.opencontainers.image.licenses=MIT
-            org.opencontainers.image.vendor=Shaker Scan
+            org.opencontainers.image.licenses=Apache-2.0
+            org.opencontainers.image.vendor=ShakerScan
           outputs: type=image,name=${{ env.SCANNER_IMAGE }},push-by-digest=true,name-canonical=true,push=true
 
       - name: Build and push UI by digest
@@ -133,16 +208,16 @@ jobs:
           build-args: |
             NEXT_PUBLIC_APP_VERSION=${{ needs.meta.outputs.version }}
           labels: |
-            org.opencontainers.image.title=Shaker Scan UI
-            org.opencontainers.image.description=Open-source Shaker Scan web dashboard
+            org.opencontainers.image.title=ShakerScan UI
+            org.opencontainers.image.description=Open-source ShakerScan web dashboard
             org.opencontainers.image.created=${{ needs.meta.outputs.created }}
             org.opencontainers.image.version=${{ needs.meta.outputs.version }}
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.source=${{ env.SOURCE_URL }}
             org.opencontainers.image.url=https://hub.docker.com/r/shakerscan/shakerscan-ui
             org.opencontainers.image.documentation=${{ env.SOURCE_URL }}#readme
-            org.opencontainers.image.licenses=MIT
-            org.opencontainers.image.vendor=Shaker Scan
+            org.opencontainers.image.licenses=Apache-2.0
+            org.opencontainers.image.vendor=ShakerScan
           outputs: type=image,name=${{ env.UI_IMAGE }},push-by-digest=true,name-canonical=true,push=true
 
       - name: Export digests
@@ -235,32 +310,12 @@ jobs:
         shell: bash
         run: |
           version="${{ needs.meta.outputs.version }}"
-          cat > release-notes.md <<EOF
-          ## Shaker Scan v${{ needs.meta.outputs.version }}
-
-          This release focuses on DAST precision, retest trust, and attack-surface visibility.
-
-          ### Highlights
-          - Improved DAST calibration and false-positive handling for SQL injection, CORS, auth/rate-limit checks, GraphQL introspection, HTTP methods, and exposed-file findings.
-          - Added clearer scan completion metadata so reports show when budgets capped active coverage or modules were skipped.
-          - Hardened retest verdict handling so false-positive or inconclusive verification does not leave findings presented as confidently active.
-          - Expanded the Exposure page into a risk-ranked attack-surface view with triage, graph, and attack-path lenses.
-          - Stabilized long smart-scan progress reporting so active scans no longer jump backward between phases.
-
-          ### Docker images
-          - \`${SCANNER_IMAGE}:${version}\`
-          - \`${UI_IMAGE}:${version}\`
-
-          ### Multi-architecture platforms
-          - \`linux/amd64\`
-          - \`linux/arm64\`
-
-          ### Run prebuilt images
-
-          \`\`\`bash
-          ./scanner.sh start --prebuilt --image-tag ${version}
-          \`\`\`
-          EOF
+          notes="docs/releases/${version}.md"
+          if [[ ! -s "$notes" ]]; then
+            echo "Missing version-specific release notes: $notes" >&2
+            exit 1
+          fi
+          cp "$notes" release-notes.md
 
       - name: Create or update GitHub release
         env:
@@ -271,5 +326,5 @@ jobs:
           if gh release view "v${VERSION}" >/dev/null 2>&1; then
             gh release edit "v${VERSION}" --notes-file release-notes.md
           else
-            gh release create "v${VERSION}" --title "Shaker Scan v${VERSION}" --notes-file release-notes.md
+            gh release create "v${VERSION}" --title "ShakerScan v${VERSION}" --notes-file release-notes.md
           fi

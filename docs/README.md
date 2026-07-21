@@ -23,6 +23,8 @@ runtime receipts, and tests remain authoritative when a document disagrees.
 | [`proposed-next-steps.md`](proposed-next-steps.md) | Single live hardening roadmap and acceptance status |
 | [`release-readiness.md`](release-readiness.md) | Live pre-release blockers, validation, publishing, installer, and documentation checklist |
 | [`release-must-fix.md`](release-must-fix.md) | Short release-owner stop-ship list distilled from the full audit and readiness checklist |
+| [`upgrade-and-rollback.md`](upgrade-and-rollback.md) | Backup, upgrade, verification, and rollback runbook for source and installer deployments |
+| [`releases/0.7.0.md`](releases/0.7.0.md) | Version-specific ShakerScan 0.7.0 release notes and supported product boundary |
 | [`SMART_SCAN_POLICY.md`](SMART_SCAN_POLICY.md) | Smart-scan budget, proof, safety, and release policy |
 | [`owasp-coverage-matrix.md`](owasp-coverage-matrix.md) | Implemented DAST mechanisms mapped to OWASP categories |
 | [`E2E_TEST_PLAN.md`](E2E_TEST_PLAN.md) | Real-stack E2E contract, implemented/planned cases, and freshness rules |

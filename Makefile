@@ -1,7 +1,25 @@
 # ShakerScan developer targets.
 PY ?= python3
+UV ?= uv
+UVX ?= uvx
 
-.PHONY: e2e e2e-model-intake e2e-model-intake-fixture e2e-ai-gate e2e-dast test release-gates
+.PHONY: e2e e2e-model-intake e2e-model-intake-fixture e2e-ai-gate e2e-dast test \
+	release-gates dependency-lock dependency-audit upgrade-smoke
+
+## Regenerate the cross-platform Python 3.12 runtime lock consumed by scanner/Dockerfile.
+dependency-lock:
+	$(UV) pip compile scanner/requirements.txt --python-version 3.12 --universal \
+		--generate-hashes --output-file scanner/requirements.lock
+
+## Networked release check: fail on known UI or locked Python dependency vulnerabilities.
+dependency-audit:
+	npm --prefix ui audit --omit=dev
+	$(UVX) pip-audit --no-deps --disable-pip -r scanner/requirements.lock
+
+## Exercise current migrations twice over clean and duplicate-dirty published schemas.
+upgrade-smoke:
+	docker build -f scanner/Dockerfile -t shakerscan-scanner:upgrade-smoke .
+	SCANNER_IMAGE=shakerscan-scanner:upgrade-smoke scripts/upgrade_smoke.sh
 
 ## Full end-to-end suite against the live stack + honey targets (hard gate).
 e2e:

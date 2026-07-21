@@ -12,6 +12,7 @@ itself pin those files.
 
 | Version | Git Commit | Scanner Image | UI Image |
 | --- | --- | --- | --- |
+| 0.7.0 | pending candidate | `shakerscan/shakerscan-scanner:0.7.0` | `shakerscan/shakerscan-ui:0.7.0` |
 | 0.5.7 | `f27bbffda3451ce013aedfb250c7b018104f41d5` | `shakerscan/shakerscan-scanner:0.5.7` | `shakerscan/shakerscan-ui:0.5.7` |
 | 0.5.6 | `e7f8dbde13d218d54c195a0be934c6b5bd459b1b` | `shakerscan/shakerscan-scanner:0.5.6` | `shakerscan/shakerscan-ui:0.5.6` |
 | 0.5.5 | `53f3cb47ee88a90de7fc49346ac85497f4a6c1db` | `shakerscan/shakerscan-scanner:0.5.5` | `shakerscan/shakerscan-ui:0.5.5` |
@@ -28,9 +29,9 @@ tag alone does not prove which commit produced an image.
 
 ## Release Workflow
 
-Do not select the next version yet. First complete
-[`docs/release-readiness.md`](docs/release-readiness.md), freeze a candidate, and record its
-validation evidence.
+Version 0.7.0 is the current candidate. Complete
+[`docs/release-readiness.md`](docs/release-readiness.md), freeze its exact commit, and record its
+validation evidence before tagging.
 
 1. Finish and validate changes on a feature branch.
 2. Correct release automation/metadata prerequisites, including Apache-2.0 image labels,

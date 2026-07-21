@@ -1366,6 +1366,7 @@ print_help() {
     echo "                       --no-cache  Full rebuild (slow, 10-20 min)"
     echo "                       scanner     Rebuild scanner/worker only"
     echo "                       ui          Rebuild UI only"
+    echo "  backup [dir]       Back up PostgreSQL, results, config, and release metadata"
     echo "  reset              Reset database (WARNING: deletes all data)"
     echo "  shell              Open shell in scanner container"
     echo ""
@@ -1868,6 +1869,51 @@ reset_database() {
     fi
 }
 
+create_backup() {
+    local backup_root="${1:-$SCRIPT_DIR/backups}"
+    local timestamp
+    local snapshot_dir
+
+    timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
+    snapshot_dir="$backup_root/shakerscan-$timestamp"
+    if [ -e "$snapshot_dir" ]; then
+        echo -e "${RED}Error: backup destination already exists: $snapshot_dir${NC}"
+        return 1
+    fi
+
+    umask 077
+    mkdir -p "$snapshot_dir"
+    printf '%s\n' "Backup is incomplete; do not use for restore." > "$snapshot_dir/.incomplete"
+
+    echo "Creating consistent PostgreSQL dump..."
+    if ! compose exec -T postgres pg_dump -U scanner -d scanner -Fc > "$snapshot_dir/postgres.dump"; then
+        echo -e "${RED}PostgreSQL backup failed. Partial files remain at $snapshot_dir${NC}"
+        return 1
+    fi
+
+    echo "Archiving result artifacts..."
+    if ! tar -C "$SCRIPT_DIR" -czf "$snapshot_dir/results.tar.gz" results; then
+        echo -e "${RED}Results backup failed. Partial files remain at $snapshot_dir${NC}"
+        return 1
+    fi
+
+    [ ! -f "$SCRIPT_DIR/.env" ] || cp "$SCRIPT_DIR/.env" "$snapshot_dir/runtime.env"
+    [ ! -f "$SCRIPT_DIR/VERSION" ] || cp "$SCRIPT_DIR/VERSION" "$snapshot_dir/VERSION"
+    [ ! -f "$SCRIPT_DIR/docker-compose.release.yml" ] || \
+        cp "$SCRIPT_DIR/docker-compose.release.yml" "$snapshot_dir/docker-compose.release.yml"
+
+    {
+        printf 'created_at=%s\n' "$timestamp"
+        printf 'release_version=%s\n' "$(get_release_version)"
+        printf 'image_tag=%s\n' "${SCANNER_IMAGE_TAG:-$DEFAULT_PREBUILT_IMAGE_TAG}"
+        printf 'compose_project=%s\n' "${COMPOSE_PROJECT_NAME:-shakerscan}"
+    } > "$snapshot_dir/manifest.txt"
+    rm "$snapshot_dir/.incomplete"
+
+    echo -e "${GREEN}Backup complete: $snapshot_dir${NC}"
+    echo "This directory contains sensitive configuration and scan evidence; store it securely."
+}
+
 scale_workers() {
     COUNT=$1
     if [ -z "$COUNT" ]; then
@@ -2248,6 +2294,9 @@ case $COMMAND in
         ;;
     rebuild)
         rebuild_images "${ARGS[@]}"
+        ;;
+    backup)
+        create_backup "${ARGS[0]}"
         ;;
     reset)
         reset_database

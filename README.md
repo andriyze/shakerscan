@@ -286,14 +286,20 @@ Use `./scanner.sh start` in a clone to run the published images instead.
 
 ### Upgrade
 
-Re-run the installer:
+Create a database/results/configuration backup, then re-run the installer:
 
 ```bash
+shakerscan backup
 curl -fsSL https://install.shakerscan.com | sh
 ```
 
 It refreshes the runtime files and skills, preserves `.env`, `results`, and Docker volumes, and pulls
-the selected images. Useful overrides:
+the selected images. Required database migrations fail startup rather than continuing with an
+incomplete schema. Do not use `shakerscan reset` to recover from an upgrade failure because it deletes
+the database volume. The complete backup, verification, and database rollback procedure is in
+[Upgrade and Rollback](https://github.com/andriyze/shakerscan/blob/main/docs/upgrade-and-rollback.md).
+
+Useful overrides:
 
 ```bash
 # Update files without starting services
@@ -315,6 +321,7 @@ reload                        Reload edited source and verify container parity
 status                        Show services, queue state, workers, and access URLs
 scale <N>                     Scale to 1-20 workers
 logs [service] [-f]           Read API, worker, UI, PostgreSQL, or Redis logs
+backup [directory]            Back up PostgreSQL, results, configuration, and release metadata
 scan <target>                 Submit a quick scan
 scan-full <target>            Submit an authorized full scan
 scan-smart <target>           Submit an authorized smart scan

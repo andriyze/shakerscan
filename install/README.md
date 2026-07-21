@@ -44,6 +44,8 @@ Re-running the install command upgrades the installed runtime files in place. It
 `scanner.sh`, `docker-compose.release.yml`, `VERSION`, `README.md`, `AGENTS.md`, `CLAUDE.md`,
 `skills/`, and `.claude/`; keeps `.env`, `results`, and Docker volumes; then starts ShakerScan.
 Prebuilt starts pull Docker Hub images by default; set `SHAKERSCAN_PULL_IMAGES=0` to skip that pull.
+Run `shakerscan backup` before upgrading. The supported database restore and previous-image procedure
+is documented in [`../docs/upgrade-and-rollback.md`](../docs/upgrade-and-rollback.md).
 
 Useful environment overrides:
 

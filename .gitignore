@@ -13,6 +13,7 @@ results/benchmark-runs/*
 .env
 .env.local
 .env.*
+backups/
 
 # Claude Code local settings
 .claude/settings.local.json

@@ -72,6 +72,37 @@ GATES: dict[str, tuple[str, ...]] = {
         "tests/test_api_helpers.py::test_reconcile_hypothesis_keeps_ai_only_or_weak_finding_open",
         "tests/test_command_arsenal.py::test_hypothesis_proof_reconciliation_is_gated_and_proof_constrained",
     ),
+    "test:scanner-proof-truth": (
+        "tests/test_attack_chain_precision.py",
+        "tests/test_dast_precision.py",
+        "tests/test_report_verification_gating.py",
+    ),
+    "test:scanner-registry-coverage": (
+        "tests/test_check_registry.py",
+        "tests/test_scanner_check_family_scope.py",
+        "tests/test_attempt_telemetry.py",
+        "tests/test_active_execution_honesty.py",
+        "tests/test_asm_inventory.py::test_coverage_summary_treats_completed_without_endpoint_telemetry_as_partial",
+        "tests/test_asm_inventory.py::test_campaign_attempt_summary_uses_expected_denominator_and_telemetry_guard",
+    ),
+    "test:scanner-bounds": (
+        "tests/test_scanner_cancellation.py",
+        "tests/test_action_scope.py",
+        "tests/test_budget_contract.py",
+        "tests/test_agent_ports.py::test_over_budget_drops_and_notes",
+        "tests/test_agent_ports.py::test_same_origin_path_guard",
+        "tests/test_api_helpers.py::test_runtime_destination_scope_blocks_redirect_out_of_scope",
+        "tests/test_api_helpers.py::test_runtime_destination_scope_fails_closed_when_unverified",
+        "tests/test_api_helpers.py::test_trusted_workflow_proof_requires_stable_replay_and_restoration",
+        "tests/test_api_helpers.py::test_workflow_runtime_closes_browser_session_after_cancellation",
+    ),
+    "test:scanner-auth-quality": (
+        "tests/test_access_control_checks.py",
+        "tests/test_smart_bola_detection.py",
+        "tests/test_benchmark_rescore.py::test_verified_bola_gate_requires_distinct_accepted_principals",
+        "tests/test_benchmark_rescore.py::test_verified_bola_gate_rejects_unvalidated_principals",
+        "tests/test_benchmark_rescore.py::test_scorecard_blocks_bola_followup_until_second_principal_observed",
+    ),
 }
 
 
