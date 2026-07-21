@@ -284,6 +284,7 @@ download "$REPO_RAW_BASE/.claude/agents/skills-reviewer.md" "$INSTALL_DIR/.claud
 download "$REPO_RAW_BASE/.claude/commands/ai-gate.md" "$INSTALL_DIR/.claude/commands/ai-gate.md"
 download "$REPO_RAW_BASE/.claude/commands/ai-security-session.md" "$INSTALL_DIR/.claude/commands/ai-security-session.md"
 download "$REPO_RAW_BASE/.claude/commands/content-discovery.md" "$INSTALL_DIR/.claude/commands/content-discovery.md"
+download "$REPO_RAW_BASE/.claude/commands/deep-hunt.md" "$INSTALL_DIR/.claude/commands/deep-hunt.md"
 download "$REPO_RAW_BASE/.claude/commands/findings.md" "$INSTALL_DIR/.claude/commands/findings.md"
 download "$REPO_RAW_BASE/.claude/commands/js-analyze.md" "$INSTALL_DIR/.claude/commands/js-analyze.md"
 download "$REPO_RAW_BASE/.claude/commands/research.md" "$INSTALL_DIR/.claude/commands/research.md"
