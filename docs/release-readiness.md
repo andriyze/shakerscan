@@ -59,7 +59,7 @@ is conservative/fail-closed or latent, and is an owned decision rather than a si
 ## Release-candidate validation
 
 Run these against the exact candidate commit and retain content-free receipts/artifacts. The fast
-host-verifiable checks pass on this branch — unit/contract (2343 passed, 7 skipped),
+host-verifiable checks pass on this branch — unit/contract (2344 passed, 7 skipped),
 `generate_capability_inventory.py --check`, and all `release_gates.py` gates — but each MUST be
 re-confirmed on the frozen candidate SHA; the live-stack and benchmark rows below are freeze-time.
 
