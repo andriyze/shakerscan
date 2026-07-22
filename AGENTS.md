@@ -56,6 +56,7 @@ flags, skills, agents, adapters, modules, and durable tables) plus architecture/
 ## Current UI (Implemented)
 
 - **Dashboard (`/`)**: security-posture summary, prioritized action center, recent meaningful activity, and a compact operations bar for live queue state, emergency clear, worker count/scaling/stale-build warning, and Gungnir CT status/toggle. Auto-refreshes every 10-30s.
+- **Docs (`/docs`)**: safely renders the installed `README.md` in the web UI. Relative README links open the matching public GitHub document; raw HTML is not rendered.
 - **Scans (`/scans`)**: filter by status/domain/search, pagination (50/page), cancel running/pending scans, re-scan dropdown (all 6 scan types), auto-refresh every 5s. Shows target, type, status, score/grade, findings count, duration, date.
 - **Scan Detail (`/scans/{id}`)**: live logs with auto-scroll while running (5s refresh), progress bar + current phase, partial-results view for failed scans (warning banner), refreshed deployment decision, full report with PDF export, compliance section, resolved coverage budget, AI Gate evidence, and Model Intake artifact checks when complete. Preserves list filter context on back navigation.
 - **Exposure (`/exposure`)**: graph linking domains, targets, APIs, auth roles, third-party JS/vendors, cloud hints, AI targets, MCP tools, model artifacts, scans, and findings. Registered web assets can be opened directly in **Deep Hunt**.

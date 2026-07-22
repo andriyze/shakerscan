@@ -85,7 +85,8 @@ Recommended thresholds:
 - Apply adaptive backoff on `429`/`503`.
 - Downgrade unverified `critical/high` findings after verification budget exhaustion.
 - Require explicit operator consent for active modes. Agent workflows enforce this conversationally;
-  the reusable server-authoritative acknowledgement remains a release-readiness item.
+  server-authoritative approval receipts for every local scan are deferred beyond 0.7.0 under the
+  trusted-operator scope in `release-readiness.md`.
 
 ## Verification Policy
 - `critical/high` findings require proof or independent corroboration.

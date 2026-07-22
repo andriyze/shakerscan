@@ -479,8 +479,10 @@ preserved only as an [archived implementation record](archive/ai-redteam-model-i
 
 ### AI capability status quick read
 
-Status reflects shipped behavior last reconciled against code (2026-07-11). "Partial" means the capability
-runs but the listed caveat applies — treat the caveat as load-bearing, not cosmetic.
+These implemented components were last reconciled against code on 2026-07-21. AI Gate and Model
+Intake remain preview product surfaces for 0.7.0 because their full release E2E matrix is incomplete.
+"Partial" means the capability runs but the listed caveat applies — treat the caveat as load-bearing,
+not cosmetic.
 
 | Capability | Status | Trust / proof caveat |
 |---|---|---|
@@ -1018,6 +1020,7 @@ concurrency-limited with per-tool timeouts and a global deadline.
 | Route | Operator capability |
 |---|---|
 | `/` | Security posture, prioritized action center, recent activity, and a compact operations header for queue state, emergency clear, worker scaling/freshness, and Gungnir CT |
+| `/docs` | Safe in-app rendering of the installed README, including GitHub-flavored tables and code blocks |
 | `/scan/new` | Scan type, parallel strategy, coverage budget, active options, auth, custom budget, and bounded batch submission with partial-failure receipts |
 | `/scans` | Filter, inspect, cancel, and rescan logical scans without exposing internal rows by default |
 | `/scans/{id}` | Live progress/logs, report, proof/coverage, deployment decision, AI/Model Intake panels, replay, history, and PDF |
@@ -1129,7 +1132,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | Release gates | 14 | `scripts/release_gates.py` |
 | Runtime environment keys | 194 | Python sources + Compose manifests |
 | Scanner modules | 83 | `scanner/scanner_tools/` |
-| UI pages | 29 | `ui/src/app/` |
+| UI pages | 30 | `ui/src/app/` |
 | Skills | 6 | `skills/` |
 | Slash commands | 15 | `.claude/commands/` |
 | Specialized subagents | 3 | `.claude/agents/` |
@@ -1891,6 +1894,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `/deep-hunt/operator` | `ui/src/app/deep-hunt/operator/page.tsx` |
 | `/deep-hunt` | `ui/src/app/deep-hunt/page.tsx` |
 | `/deep-hunt/runs/{id}` | `ui/src/app/deep-hunt/runs/[id]/page.tsx` |
+| `/docs` | `ui/src/app/docs/page.tsx` |
 | `/evidence` | `ui/src/app/evidence/page.tsx` |
 | `/exceptions` | `ui/src/app/exceptions/page.tsx` |
 | `/exposure` | `ui/src/app/exposure/page.tsx` |

@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { usePathname } from 'next/navigation'
 import Link from 'next/link'
-import { Activity, Bot, Boxes, Compass, Crosshair, FileArchive, Lightbulb, Menu, Network, PackageCheck, Radar, ShieldAlert, ShieldCheck, Wand2, X } from 'lucide-react'
+import { Activity, BookOpen, Bot, Boxes, Compass, Crosshair, FileArchive, Lightbulb, Menu, Network, PackageCheck, Radar, ShieldAlert, ShieldCheck, Wand2, X } from 'lucide-react'
 import { buttonClasses, Toggle } from '@/components/ui'
 
 const navGroups: {
@@ -25,6 +25,7 @@ const navGroups: {
           </svg>
         ),
       },
+      { href: '/docs', label: 'Docs', icon: <BookOpen className="w-5 h-5" /> },
     ],
   },
   {

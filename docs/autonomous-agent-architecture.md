@@ -6,14 +6,14 @@ This is the target architecture. It is deliberately built by **borrowing T3MP3ST
 (the T3MP3ST reference checkout, cited as `T:path:line`), not by inventing our own scaffolding — that was
 the mistake of the last 100 commits._
 
-## 0. The honest gap, and T3MP3ST's lesson
+## 0. Historical baseline and T3MP3ST's lesson
 
-**What our deep-hunt loop is today: a menu-selector.** Leads are produced by deterministic code
-(`_endpoint_inventory_hypothesis_requests`); families are a fixed set; the exploit is a server-side template
-(`_server_materialize_create_ma`, with `role=admin` hardcoded); the verdict is 100% server-deterministic and
-the LLM is explicitly ignored. That buys zero-FP by **not trusting the LLM at all** — and strangles the
-*propose* side down to "trigger a pre-approved template." It can only re-find **known bug classes**. That is
-why it took 100+ commits to make one family (create-MA) work end-to-end.
+**Baseline before the keyless ReAct work shipped:** the deep-hunt loop was a menu-selector. Leads
+were produced by deterministic code (`_endpoint_inventory_hypothesis_requests`); families were a
+fixed set; the exploit was a server-side template (`_server_materialize_create_ma`, with
+`role=admin` hardcoded); and the verdict was entirely server-deterministic while the LLM was ignored.
+That bought zero-FP by **not trusting the LLM at all**, but constrained the *propose* side to
+pre-approved templates and known bug classes.
 
 **T3MP3ST's v4 breakthrough (their `docs/COGNITIVE_ARCHITECTURE.md`): removing the hand-coded recipes *raised*
 the solve rate.** Their words: *"the bottleneck was never the agent's knowledge — Opus knows the attacks. The
@@ -237,9 +237,8 @@ in `api/api.py`): the in-process `configured_ai` loop and a durable, turn-based 
 keyless proof on Juice Shop (this coding-agent session as planner, no key): 4 turns / 7 tool calls; all four
 tools executed server-side; a tool-proven BOLA passed the provenance gate → SUSPECTED, while a zero-evidence
 "critical SQLi" was **blocked and never persisted** (fail-closed); the `family_proof` VERIFIED moat added
-nothing (0 FP). Remaining: **(B)** auto-bridge a gate-passing SUSPECTED finding into `family_proof` re-execution
-(unattended promotion), and **(C)** present keyless turns from the durable campaign supervisor so a
-`planner_mode:"agent"` deep-hunt campaign drives this loop end-to-end.
+nothing (0 FP). At that checkpoint, the verification bridge and campaign integration remained; the
+later shipped disposition is recorded in §12.
 
 1. **Context pack** — `GET /agent/context/{target_id}` from Layer-1 tables, token-bounded, **with drop
    telemetry** (borrow `packContext`). **[DONE]**

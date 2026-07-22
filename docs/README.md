@@ -21,8 +21,7 @@ runtime receipts, and tests remain authoritative when a document disagrees.
 | Document | Purpose |
 |---|---|
 | [`proposed-next-steps.md`](proposed-next-steps.md) | Single live hardening roadmap and acceptance status |
-| [`release-readiness.md`](release-readiness.md) | Live pre-release blockers, validation, publishing, installer, and documentation checklist |
-| [`release-must-fix.md`](release-must-fix.md) | Short release-owner stop-ship list distilled from the full audit and readiness checklist |
+| [`release-readiness.md`](release-readiness.md) | Single release scope, stop-ship, validation, publishing, installer, and documentation checklist |
 | [`upgrade-and-rollback.md`](upgrade-and-rollback.md) | Backup, upgrade, verification, and rollback runbook for source and installer deployments |
 | [`releases/0.7.0.md`](releases/0.7.0.md) | Version-specific ShakerScan 0.7.0 release notes and supported product boundary |
 | [`SMART_SCAN_POLICY.md`](SMART_SCAN_POLICY.md) | Smart-scan budget, proof, safety, and release policy |
@@ -52,7 +51,7 @@ runtime receipts, and tests remain authoritative when a document disagrees.
 | [`parallel-scan-architecture.md`](parallel-scan-architecture.md) | Local parent/plan/shard/merge core shipped; remaining hardening is explicit |
 | [`continuous-asm-architecture.md`](continuous-asm-architecture.md) | Bounded local Continuous ASM shipped; target design and open gates retained |
 | [`multi-node-architecture.md`](multi-node-architecture.md) | RFC only; multi-node fleet is not implemented |
-| [`autonomous-agent-architecture.md`](autonomous-agent-architecture.md) | Keyless ReAct hunt loop shipped (SUSPECTED tier); SUSPECTED→VERIFIED bridge + campaign wiring remain |
+| [`autonomous-agent-architecture.md`](autonomous-agent-architecture.md) | Historical build narrative plus the shipped keyless ReAct loop and deterministic business-logic verification bridge |
 
 ## Maintenance Rule
 

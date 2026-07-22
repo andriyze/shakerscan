@@ -269,6 +269,7 @@ and compatibility. It is not the Deep Hunt launcher.
 | Area | What it provides |
 |---|---|
 | Dashboard | Security posture, prioritized actions, recent activity, queue operations, worker freshness/scaling, and Gungnir |
+| Docs | In-app rendering of the installed README for setup, workflows, safety, and troubleshooting |
 | DAST Scans / New Scan | Submission, filters, cancellation, live logs, reports, proof, coverage, and PDF export |
 | Targets / Exposure | Asset inventory, subdomains, exposure graph, and application graph |
 | Coverage (Continuous ASM) | Endpoint inventory, proof-family coverage, gaps, recommendations, and activity |

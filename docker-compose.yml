@@ -230,6 +230,9 @@ services:
     environment:
       - NEXT_PUBLIC_API_URL=${SHAKERSCAN_PUBLIC_API_URL:-}
       - NEXT_PUBLIC_APP_VERSION=${SCANNER_VERSION:-dev}
+      - SHAKERSCAN_README_PATH=/docs/README.md
+    volumes:
+      - ./README.md:/docs/README.md:ro
     depends_on:
       - api
     restart: unless-stopped

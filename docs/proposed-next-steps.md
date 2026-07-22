@@ -118,8 +118,9 @@ both modes before parity is accepted.
 ## 8. Proof taxonomy
 
 AI judgment and source context are advisory. Only deterministic family proof contracts may mint
-verified findings. Declared registry `proof_contract` and `severity_rules` must become enforced
-runtime validators rather than descriptive metadata.
+verified findings. Registry `proof_contract` remains a runtime authority. Registry `severity_rules`
+may remain advisory while the current wired active-family caps for XSS, SQLi, BOLA, auth, mass
+assignment, and JWT remain authoritative and regression-tested.
 
 ## 9. AI boundary
 
@@ -187,13 +188,15 @@ Required next increments:
 
 ## Ordered next work
 
-1. Close the release-blocking evidence redaction, proof-authority, attack-path semantics, and active
-   authorization contracts tracked in `release-readiness.md`.
+1. Close the remaining release-blocking proof-authority and attack-path acceptance tracked in
+   `release-readiness.md`. Comprehensive evidence redaction and universal active-scan approval
+   receipts are deferred beyond 0.7.0 under the trusted-operator scope.
 2. Freeze a candidate and rerun unit, UI build/browser, release-gate, E2E, and current-fleet
    benchmark acceptance. Preserve exact fingerprints and content-free receipts.
 3. Seed BOLA/SQLi detector-isolation controls, followed by universal authenticated discovery and an
    unseeded scorecard.
-4. Close registered-family bypasses and enforce runtime proof/severity validation uniformly.
+4. Close release-critical registered-family bypasses and keep runtime proof contracts plus the wired
+   active-family severity caps authoritative and uniformly tested.
 5. Complete engine-wide cancellation plus per-adapter metering-quality contracts.
 6. Run quantitative dynamic/static parity, cancellation, rate, and current-fleet detector soak.
 7. Close the research discovery/surface/ranking items in §13, then expand held-out Research Agent

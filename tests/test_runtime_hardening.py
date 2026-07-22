@@ -40,6 +40,24 @@ def test_compose_runtimes_enable_and_pass_the_documented_gated_execution_flag():
     assert expected in release_compose
 
 
+def test_compose_runtimes_mount_installed_readme_for_in_app_docs():
+    for compose_name in ("docker-compose.yml", "docker-compose.release.yml"):
+        compose = (ROOT / compose_name).read_text()
+        assert "SHAKERSCAN_README_PATH=/docs/README.md" in compose
+        assert "./README.md:/docs/README.md:ro" in compose
+
+
+def test_docs_page_renders_markdown_without_raw_html_injection():
+    page = (ROOT / "ui" / "src" / "app" / "docs" / "page.tsx").read_text()
+    sidebar = (ROOT / "ui" / "src" / "components" / "Sidebar.tsx").read_text()
+
+    assert "ReactMarkdown" in page
+    assert "remarkGfm" in page
+    assert "readFile" in page
+    assert "dangerouslySetInnerHTML" not in page
+    assert "href: '/docs', label: 'Docs'" in sidebar
+
+
 def test_dockerfile_copies_all_scanner_modules_without_drift():
     # The prebuilt image must contain every top-level scanner module the runtime
     # imports — not just a hand-maintained subset that silently drifts (this is
