@@ -1,0 +1,19 @@
+{
+  "browser_proven_high_critical_families": [],
+  "false_positive_risk": 0.8,
+  "gates": {
+    "active_execution_ok": true,
+    "completion_telemetry_consistent": true,
+    "grade_reliable": true,
+    "max_unverified_high_ratio": false,
+    "min_verified_high_critical": false,
+    "report_invariants_clean": true,
+    "report_not_degraded": true,
+    "require_browser_proven_xss": false,
+    "require_verified_sqli": false
+  },
+  "verified_high_critical": 1,
+  "verified_high_critical_families": [
+    "broken_access_control"
+  ]
+}

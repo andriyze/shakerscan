@@ -308,6 +308,7 @@ async def _resolve_domain(domain: str, timeout: int = 5) -> dict[str, Any] | Non
             # Try to check HTTPS (certificate)
             try:
                 ctx = ssl.create_default_context()
+                ctx.minimum_version = ssl.TLSVersion.TLSv1_2
                 with socket.create_connection((domain, 443), timeout=5) as sock:
                     with ctx.wrap_socket(sock, server_hostname=domain) as ssock:
                         cert = ssock.getpeercert()

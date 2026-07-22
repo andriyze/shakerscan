@@ -12,6 +12,29 @@ def _coerce_float(value: Any) -> float | None:
         return None
 
 
+# Proof-state vocabulary + helpers live ONCE in scanner/ai_verdict_policy so the
+# "one proof taxonomy" guarantee can't drift across copies (audit follow-up). The
+# scanner dir is on path in the API/worker runtime (flattened /app); unit tests
+# only add api/, so locate scanner/ relative to this file as a fallback.
+try:
+    from ai_verdict_policy import (
+        _has_browser_execution_proof,
+        _truthy,
+        _CONFIRMED_EVIDENCE_LEVELS,
+        _DETERMINISTIC_PROOF_TYPES,
+    )
+except ImportError:
+    import os
+    import sys
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scanner"))
+    from ai_verdict_policy import (
+        _has_browser_execution_proof,
+        _truthy,
+        _CONFIRMED_EVIDENCE_LEVELS,
+        _DETERMINISTIC_PROOF_TYPES,
+    )
+
+
 def scan_time_verification_fields(finding: dict[str, Any]) -> dict[str, Any] | None:
     """Return DB verification fields implied by fresh scan-time proof.
 
@@ -28,21 +51,46 @@ def scan_time_verification_fields(finding: dict[str, Any]) -> dict[str, Any] | N
     if not isinstance(finding, dict):
         return None
 
+    evidence = finding.get("evidence") if isinstance(finding.get("evidence"), dict) else {}
     validation = finding.get("validation") if isinstance(finding.get("validation"), dict) else {}
     poe = finding.get("poe") if isinstance(finding.get("poe"), dict) else {}
     poe_result = finding.get("poe_result") if isinstance(finding.get("poe_result"), dict) else {}
+    browser_proof = finding.get("browser_proof") if isinstance(finding.get("browser_proof"), dict) else {}
     verdict = str(finding.get("verification_verdict") or finding.get("last_verification_verdict") or "").strip().lower()
     result_status = str(finding.get("result_status") or "").strip().lower()
     confidence_tier = str(finding.get("confidence_tier") or "").strip().lower()
+    evidence_level = str(validation.get("evidence_level") or "").strip().lower()
+    proof_type = str(
+        finding.get("proof_type")
+        or evidence.get("proof_type")
+        or validation.get("proof_type")
+        or validation.get("poe_technique")
+        or ""
+    ).strip().lower()
+    # A registered detector family whose registry proof contract is unmet was already judged NOT
+    # trustworthy-verified at the report boundary (scanner.findings.enforce_registry_finding_contracts
+    # stamps registry_contract.contract_satisfied=False and caps severity). Honor that verdict here so
+    # a raw proof signal (proof_of_exploitation, proof_type, ...) cannot independently persist
+    # `last_verification_verdict='exploited'` on the authoritative verified surface the UI,
+    # verified-only filters, and benchmark gates read. Cap it at `likely_vulnerable` instead.
+    registry_contract = finding.get("registry_contract") if isinstance(finding.get("registry_contract"), dict) else {}
+    registry_rejected = registry_contract.get("contract_satisfied") is False
 
     strong_proof = (
-        finding.get("verified") is True
-        or validation.get("verified") is True
-        or validation.get("poe_proven") is True
-        or poe.get("proven") is True
-        or poe_result.get("proven") is True
+        _truthy(validation.get("poe_proven"))
+        or _truthy(poe.get("proven"))
+        or _truthy(poe_result.get("proven"))
         or verdict == "exploited"
         or result_status == "verified_vulnerable"
+        or _truthy(finding.get("proof_of_exploitation"))
+        or _truthy(evidence.get("proof_of_exploitation"))
+        or _truthy(evidence.get("payload_executed"))
+        or _truthy(evidence.get("executed"))
+        or bool(finding.get("extraction_evidence") or evidence.get("extraction_evidence"))
+        or bool(finding.get("extracted_data") or evidence.get("extracted_data"))
+        or _has_browser_execution_proof(finding, evidence)
+        or proof_type in _DETERMINISTIC_PROOF_TYPES
+        or (_truthy(validation.get("verified")) and evidence_level in _CONFIRMED_EVIDENCE_LEVELS)
     )
     weak_proof = (
         verdict == "likely_vulnerable"
@@ -50,9 +98,9 @@ def scan_time_verification_fields(finding: dict[str, Any]) -> dict[str, Any] | N
         or confidence_tier == "verified"
     )
 
-    if strong_proof:
+    if strong_proof and not registry_rejected:
         out_verdict = "exploited"
-    elif weak_proof:
+    elif weak_proof or (strong_proof and registry_rejected):
         out_verdict = "likely_vulnerable"
     else:
         return None
@@ -64,6 +112,7 @@ def scan_time_verification_fields(finding: dict[str, Any]) -> dict[str, Any] | N
         validation.get("confidence"),
         poe.get("confidence"),
         poe_result.get("confidence"),
+        browser_proof.get("confidence"),
     ):
         confidence = _coerce_float(value)
         if confidence is not None:

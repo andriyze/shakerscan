@@ -197,7 +197,11 @@ async def api_login(
     attempts = 0
     last_error = None
 
-    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True, verify=False) as client:
+    # follow_redirects=False is deliberate (SCAN-03a): these POSTs carry the
+    # operator's credentials, and a target-controlled 307/308 would otherwise
+    # re-send the credential body to an off-origin Location. Success detection
+    # reads token/cookies from the first response, so following is unnecessary.
+    async with httpx.AsyncClient(timeout=timeout, follow_redirects=False, verify=False) as client:
         for candidate in candidates:
             # Isolate the cookie jar per candidate endpoint. Otherwise a cookie
             # set by one candidate (e.g. an anonymous session/CSRF cookie from

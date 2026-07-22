@@ -65,6 +65,18 @@ def test_completion_status_marks_clean_complete_scan():
     assert status["capped_lists"] == {}
 
 
+def test_completion_status_degrades_enforced_request_budget_stop():
+    status = build_scan_completion_status(
+        coverage_status="complete",
+        request_budget={"mode": "enforce", "rejected_requests": 1},
+    )
+
+    assert status["complete"] is False
+    assert status["limited"] is True
+    assert status["budget_exhausted"] is True
+    assert status["budget_exhausted_at"] == "request_budget"
+
+
 def test_completion_status_records_config_skips_without_budget_failure():
     status = build_scan_completion_status(
         coverage_status="complete",

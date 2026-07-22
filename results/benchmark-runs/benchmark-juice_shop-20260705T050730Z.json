@@ -1,0 +1,352 @@
+{
+  "artifact_type": "benchmark_scorecard_run",
+  "artifact_status": "failed_benchmark_scorecard",
+  "artifact_note": "Tracked benchmark scorecard. A tracked file is not a success claim: passed=true means every configured gate passed; passed=false means at least one configured gate failed.",
+  "fleet": {
+    "count": 16,
+    "current": 16,
+    "stale": 0,
+    "pending": 0,
+    "fingerprints": [
+      "a0a3b2ad273479b0"
+    ]
+  },
+  "fleet_uniform": true,
+  "rescore_after_retest": true,
+  "targets": [
+    {
+      "total_findings": 28,
+      "verified_high_critical": 1,
+      "suspected_high_critical": 8,
+      "false_positive_risk": 0.89,
+      "coverage_percent": 0.365,
+      "endpoints_discovered": 1494,
+      "endpoints_tested": 545,
+      "budget_exhausted": false,
+      "budget_exhausted_reason": null,
+      "auth_blocked": false,
+      "auth_states_tested": [
+        "user1"
+      ],
+      "timeout": false,
+      "error": null,
+      "expected_found": [
+        {
+          "id": "xss-dom-search",
+          "family": "xss",
+          "route": "#/search",
+          "proof": "browser",
+          "evidence": "DOM XSS in Hash Route (iframe_js_uri) (2 occurrences)"
+        },
+        {
+          "id": "exposed-ftp-listing",
+          "family": "sensitive_exposure",
+          "route": "/ftp",
+          "proof": "deterministic",
+          "evidence": "Sensitive file exposed: premium.key"
+        },
+        {
+          "id": "exposed-confidential",
+          "family": "sensitive_exposure",
+          "route": "/ftp/acquisitions.md",
+          "proof": "deterministic",
+          "evidence": "Sensitive file exposed: acquisitions.md"
+        }
+      ],
+      "expected_missed": [
+        {
+          "id": "sqli-search",
+          "family": "sqli",
+          "route": "/rest/products/search",
+          "proof": "verified",
+          "evidence": null
+        },
+        {
+          "id": "sqli-login",
+          "family": "sqli",
+          "route": "/rest/user/login",
+          "proof": "verified",
+          "evidence": null
+        },
+        {
+          "id": "xss-reflected",
+          "family": "xss",
+          "route": "/rest/track-order",
+          "proof": "browser",
+          "evidence": null
+        },
+        {
+          "id": "bfla-users",
+          "family": "broken_access_control",
+          "route": "/api/Users",
+          "proof": "deterministic",
+          "evidence": null
+        },
+        {
+          "id": "exposed-metrics",
+          "family": "sensitive_exposure",
+          "route": "/metrics",
+          "proof": "deterministic",
+          "evidence": null
+        },
+        {
+          "id": "nosqli-reviews",
+          "family": "nosqli",
+          "route": "/rest/products/reviews",
+          "proof": "deterministic",
+          "evidence": null
+        }
+      ],
+      "expected_recall": 0.33,
+      "phase": "post_retest",
+      "retest_settled": true,
+      "two_user": false,
+      "resolved_budget": null,
+      "invariant_violations": [],
+      "active_execution_failed": false,
+      "grade_reliable": true,
+      "report_degraded": false,
+      "report_invariant_violations": [],
+      "scan_id": "56e1cacf-6f30-4749-95eb-06883bed231c",
+      "target": "juice_shop",
+      "gates": [
+        {
+          "gate": "report_invariants_clean",
+          "pass": true,
+          "detail": "clean"
+        },
+        {
+          "gate": "grade_reliable",
+          "pass": true,
+          "detail": "grade_reliable=True"
+        },
+        {
+          "gate": "active_execution_ok",
+          "pass": true,
+          "detail": "active_execution_failed=False"
+        },
+        {
+          "gate": "report_not_degraded",
+          "pass": true,
+          "detail": "report_degraded=False"
+        },
+        {
+          "gate": "retest_settled",
+          "pass": true,
+          "detail": "retest_settled=True"
+        },
+        {
+          "gate": "min_verified_high_critical",
+          "pass": false,
+          "detail": "1 >= 6"
+        },
+        {
+          "gate": "max_unverified_high_ratio",
+          "pass": false,
+          "detail": "0.89 <= 0.35"
+        },
+        {
+          "gate": "require_verified_sqli",
+          "pass": false,
+          "detail": "no verified SQLi"
+        },
+        {
+          "gate": "require_browser_proven_xss",
+          "pass": true,
+          "detail": "browser XSS present"
+        }
+      ],
+      "passed": false,
+      "scorecards": {
+        "scan_finish": {
+          "total_findings": 28,
+          "verified_high_critical": 1,
+          "suspected_high_critical": 8,
+          "false_positive_risk": 0.89,
+          "coverage_percent": 0.365,
+          "endpoints_discovered": 1494,
+          "endpoints_tested": 545,
+          "budget_exhausted": false,
+          "budget_exhausted_reason": null,
+          "auth_blocked": false,
+          "auth_states_tested": [
+            "user1"
+          ],
+          "timeout": false,
+          "error": null,
+          "expected_found": [
+            {
+              "id": "xss-dom-search",
+              "family": "xss",
+              "route": "#/search",
+              "proof": "browser",
+              "evidence": "DOM XSS in Hash Route (iframe_js_uri) (2 occurrences)"
+            },
+            {
+              "id": "exposed-ftp-listing",
+              "family": "sensitive_exposure",
+              "route": "/ftp",
+              "proof": "deterministic",
+              "evidence": "Sensitive file exposed: acquisitions.md"
+            },
+            {
+              "id": "exposed-confidential",
+              "family": "sensitive_exposure",
+              "route": "/ftp/acquisitions.md",
+              "proof": "deterministic",
+              "evidence": "Sensitive file exposed: acquisitions.md"
+            }
+          ],
+          "expected_missed": [
+            {
+              "id": "sqli-search",
+              "family": "sqli",
+              "route": "/rest/products/search",
+              "proof": "verified",
+              "evidence": null
+            },
+            {
+              "id": "sqli-login",
+              "family": "sqli",
+              "route": "/rest/user/login",
+              "proof": "verified",
+              "evidence": null
+            },
+            {
+              "id": "xss-reflected",
+              "family": "xss",
+              "route": "/rest/track-order",
+              "proof": "browser",
+              "evidence": null
+            },
+            {
+              "id": "bfla-users",
+              "family": "broken_access_control",
+              "route": "/api/Users",
+              "proof": "deterministic",
+              "evidence": null
+            },
+            {
+              "id": "exposed-metrics",
+              "family": "sensitive_exposure",
+              "route": "/metrics",
+              "proof": "deterministic",
+              "evidence": null
+            },
+            {
+              "id": "nosqli-reviews",
+              "family": "nosqli",
+              "route": "/rest/products/reviews",
+              "proof": "deterministic",
+              "evidence": null
+            }
+          ],
+          "expected_recall": 0.33,
+          "phase": "scan_finish",
+          "resolved_budget": null,
+          "invariant_violations": [],
+          "active_execution_failed": false,
+          "grade_reliable": true,
+          "report_degraded": false,
+          "report_invariant_violations": [],
+          "two_user": false
+        },
+        "post_retest": {
+          "total_findings": 28,
+          "verified_high_critical": 1,
+          "suspected_high_critical": 8,
+          "false_positive_risk": 0.89,
+          "coverage_percent": 0.365,
+          "endpoints_discovered": 1494,
+          "endpoints_tested": 545,
+          "budget_exhausted": false,
+          "budget_exhausted_reason": null,
+          "auth_blocked": false,
+          "auth_states_tested": [
+            "user1"
+          ],
+          "timeout": false,
+          "error": null,
+          "expected_found": [
+            {
+              "id": "xss-dom-search",
+              "family": "xss",
+              "route": "#/search",
+              "proof": "browser",
+              "evidence": "DOM XSS in Hash Route (iframe_js_uri) (2 occurrences)"
+            },
+            {
+              "id": "exposed-ftp-listing",
+              "family": "sensitive_exposure",
+              "route": "/ftp",
+              "proof": "deterministic",
+              "evidence": "Sensitive file exposed: premium.key"
+            },
+            {
+              "id": "exposed-confidential",
+              "family": "sensitive_exposure",
+              "route": "/ftp/acquisitions.md",
+              "proof": "deterministic",
+              "evidence": "Sensitive file exposed: acquisitions.md"
+            }
+          ],
+          "expected_missed": [
+            {
+              "id": "sqli-search",
+              "family": "sqli",
+              "route": "/rest/products/search",
+              "proof": "verified",
+              "evidence": null
+            },
+            {
+              "id": "sqli-login",
+              "family": "sqli",
+              "route": "/rest/user/login",
+              "proof": "verified",
+              "evidence": null
+            },
+            {
+              "id": "xss-reflected",
+              "family": "xss",
+              "route": "/rest/track-order",
+              "proof": "browser",
+              "evidence": null
+            },
+            {
+              "id": "bfla-users",
+              "family": "broken_access_control",
+              "route": "/api/Users",
+              "proof": "deterministic",
+              "evidence": null
+            },
+            {
+              "id": "exposed-metrics",
+              "family": "sensitive_exposure",
+              "route": "/metrics",
+              "proof": "deterministic",
+              "evidence": null
+            },
+            {
+              "id": "nosqli-reviews",
+              "family": "nosqli",
+              "route": "/rest/products/reviews",
+              "proof": "deterministic",
+              "evidence": null
+            }
+          ],
+          "expected_recall": 0.33,
+          "phase": "post_retest",
+          "retest_settled": true,
+          "two_user": false,
+          "resolved_budget": null,
+          "invariant_violations": [],
+          "active_execution_failed": false,
+          "grade_reliable": true,
+          "report_degraded": false,
+          "report_invariant_violations": []
+        }
+      }
+    }
+  ],
+  "passed": false
+}

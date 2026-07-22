@@ -151,7 +151,7 @@ curl -X POST http://localhost:8080/scans \
 |--------|-------------|
 | `xss` | Run only XSS checks |
 | `sqli` | Run only SQLi checks |
-| `no_early_stop` | Disable early stopping (find all vulns) |
+| `no_early_stop` | Disable yield-based early stopping; this increases coverage but does not guarantee every vulnerability is found |
 | `thorough_params` | Test more parameters (100×10 vs 50×5) |
 | `deep_domxss` | Deep DOM XSS analysis |
 | `custom_endpoints` | Array of specific endpoints to test |

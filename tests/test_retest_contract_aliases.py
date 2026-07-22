@@ -72,20 +72,20 @@ def test_exposed_file_inferred_from_tool_names():
     assert infer_type_from_title_tool("Accessible Backup File: /dump.sql", "") == "exposed_file"
 
 
-def test_nosql_injection_never_routes_to_sqli_prover():
-    # The SQLi prover cannot reproduce NoSQL operator injection; routing it
-    # there yields a false "likely_fixed". These must stay un-inferred.
-    assert infer_type_from_title_tool("NoSQL Injection in username", "nosql_injection") is None
-    assert infer_type_from_title_tool("NoSQL Injection Vulnerability", "") is None
-    # Plain SQLi still infers
+def test_nosql_injection_routes_to_nosqli_never_sqli():
+    # NoSQL now has a dedicated prover, so it routes to 'nosqli' — and NEVER to the
+    # SQLi prover (which cannot reproduce operator injection -> false "likely_fixed").
+    assert infer_type_from_title_tool("NoSQL Injection in username", "nosql_injection") == "nosqli"
+    assert infer_type_from_title_tool("NoSQL Injection Vulnerability", "") == "nosqli"
+    # Plain SQLi still infers to sqli
     assert infer_type_from_title_tool("SQL Injection in id parameter", "") == "sqli"
 
 
 def test_nosql_guard_runs_before_tool_map():
     # Even if a NoSQL finding were mistagged with a sqli-family tool, the guard
-    # (which runs before the tool map) must prevent misrouting to the SQLi prover.
-    assert infer_type_from_title_tool("NoSQL Injection in username", "smart_sqli") is None
-    assert infer_type_from_title_tool("Some title", "nosql_injection") is None
+    # (which runs before the tool map) routes it to 'nosqli', never 'sqli'.
+    assert infer_type_from_title_tool("NoSQL Injection in username", "smart_sqli") == "nosqli"
+    assert infer_type_from_title_tool("Some title", "nosql_injection") == "nosqli"
 
 
 def test_tool_map_covers_types_previously_missing_from_api_inference():
@@ -127,3 +127,23 @@ def test_infer_retest_inputs_for_exposed_file_finding_row():
     assert inferred["finding_type"] == "exposed_file"
     assert inferred["original_url"] == "https://example.com/id_rsa"
     assert inferred["evidence"]["markers"] == ["private_key_marker"]
+
+
+def test_infer_bfla_findings_route_to_bola_prover():
+    # BFLA / broken-access-control findings (normal scanner emits tool=bfla, title
+    # "Broken Function Level Authorization...") must route to the cross-user-access
+    # (bola) prover, not fall through unverified.
+    assert infer_type_from_title_tool("Broken Function Level Authorization: /api/users", None) == "bola"
+    assert infer_type_from_title_tool("Broken access control on /admin", None) == "bola"
+    assert infer_type_from_title_tool("anything", "bfla") == "bola"
+    assert get_attempt_ladder("bola")[0] == "cross_user_access"
+
+
+def test_infer_nosqli_routes_to_nosqli_not_sqli():
+    # "NoSQL Injection" contains the substring "sql injection"; it must route to the
+    # dedicated nosqli prover, never the SQLi prover.
+    assert infer_type_from_title_tool("NoSQL Injection in email", None) == "nosqli"
+    assert infer_type_from_title_tool("NoSQL Injection Vulnerability", "nosql_injection") == "nosqli"
+    assert "nosqli" in SUPPORTED_RETEST_TYPES
+    # plain SQLi still routes to sqli (guard didn't break it)
+    assert infer_type_from_title_tool("SQL Injection in q", None) == "sqli"

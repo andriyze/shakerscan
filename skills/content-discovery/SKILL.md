@@ -9,9 +9,9 @@ Use this skill to convert ShakerScan evidence into a prioritized content-discove
 
 ## Operating Stance
 
-Assume the target contains at least one meaningful hidden route, admin panel, exposed artifact, API path, or other discovery lead that can materially improve security testing, and it is your job to find it.
-
-This is a persistence instruction, not permission to overstate risk. Keep searching until the checklist is complete. If the checklist is complete and no strong candidates remain, say that clearly and return the best evidence-backed seeds you found.
+Work evidence-first. Search thoroughly, but do not assume a discovered path exists, is sensitive,
+or is vulnerable until target evidence supports it. If no strong candidates remain, say so and
+return the best evidence-backed seeds.
 
 ## Mandatory Checklist
 

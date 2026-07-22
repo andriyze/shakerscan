@@ -13,6 +13,7 @@ These are NOT insecure patterns in this scanner itself.
 """
 
 import re
+from html.parser import HTMLParser
 from dataclasses import dataclass
 from typing import Any
 
@@ -421,8 +422,29 @@ def analyze_url_for_dom_xss(
         "summary": {},
     }
 
-    script_pattern = r"<script[^>]*>(.*?)</script>"
-    scripts = re.findall(script_pattern, html_content, re.DOTALL | re.IGNORECASE)
+    class _InlineScriptParser(HTMLParser):
+        def __init__(self) -> None:
+            super().__init__(convert_charrefs=True)
+            self.scripts: list[str] = []
+            self.current: list[str] | None = None
+
+        def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+            if tag.lower() == "script" and not any(key.lower() == "src" and value for key, value in attrs):
+                self.current = []
+
+        def handle_data(self, data: str) -> None:
+            if self.current is not None:
+                self.current.append(data)
+
+        def handle_endtag(self, tag: str) -> None:
+            if tag.lower() == "script" and self.current is not None:
+                self.scripts.append("".join(self.current))
+                self.current = None
+
+    parser = _InlineScriptParser()
+    parser.feed(html_content or "")
+    parser.close()
+    scripts = parser.scripts
 
     all_findings: list[dict] = []
 

@@ -8,27 +8,26 @@ import styles from './exposure.module.css'
 
 type AnchorMode = '7d' | '30d' | 'visit'
 
-const LAST_VISIT_KEY = 'shakerscan-exposure-last-visit'
-const SESSION_ANCHOR_KEY = 'shakerscan-exposure-visit-anchor'
-
 // Capture "previous visit" once per browser tab: the first mount stamps the
 // current time into localStorage and keeps the prior stamp as this session's
 // anchor, so refreshes within the same tab don't erase the delta window.
-function useLastVisitAnchor(): string | null {
+function useLastVisitAnchor(storageKey: string): string | null {
   const [anchor, setAnchor] = useState<string | null>(null)
   useEffect(() => {
     try {
-      let sessionAnchor = sessionStorage.getItem(SESSION_ANCHOR_KEY)
+      const lastVisitKey = `shakerscan-${storageKey}-last-visit`
+      const sessionAnchorKey = `shakerscan-${storageKey}-visit-anchor`
+      let sessionAnchor = sessionStorage.getItem(sessionAnchorKey)
       if (sessionAnchor === null) {
-        sessionAnchor = localStorage.getItem(LAST_VISIT_KEY) ?? ''
-        sessionStorage.setItem(SESSION_ANCHOR_KEY, sessionAnchor)
+        sessionAnchor = localStorage.getItem(lastVisitKey) ?? ''
+        sessionStorage.setItem(sessionAnchorKey, sessionAnchor)
       }
-      localStorage.setItem(LAST_VISIT_KEY, new Date().toISOString())
+      localStorage.setItem(lastVisitKey, new Date().toISOString())
       setAnchor(sessionAnchor || null)
     } catch {
       // Storage unavailable (private mode etc.) — day windows still work.
     }
-  }, [])
+  }, [storageKey])
   return anchor
 }
 
@@ -74,8 +73,8 @@ function ChangeTile({ category }: { category: ExposureChangeCategory }) {
   return <div className="min-w-0 px-2.5 py-1.5">{body}</div>
 }
 
-export function ChangesStrip({ rootDomain }: { rootDomain?: string }) {
-  const lastVisit = useLastVisitAnchor()
+export function ChangesStrip({ rootDomain, storageKey = 'exposure' }: { rootDomain?: string; storageKey?: string }) {
+  const lastVisit = useLastVisitAnchor(storageKey)
   const [mode, setMode] = useState<AnchorMode>('7d')
   const [data, setData] = useState<ExposureChangesResponse | null>(null)
   const [loading, setLoading] = useState(true)

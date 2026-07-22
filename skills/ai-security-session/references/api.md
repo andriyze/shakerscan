@@ -45,6 +45,8 @@ Query params:
 - `full_page` (boolean, default false)
 - `user` (string, default `default`)
 
+Use `GET /session/{session_id}/screenshot.png` for raw PNG bytes.
+
 ### Browser Action
 `POST /session/{session_id}/action`
 
@@ -61,6 +63,8 @@ Common actions:
 - `navigate`: `data.url`, optional `data.allow_out_of_scope`
 - `click`: `data.selector`
 - `fill`: `data.selector`, `data.value`
+- `set_auth`: bearer header or cookie data
+- `use_credential_profile`: `data.credential_profile_id`; supported for managed `user1` or `user2`
 - `submit`: optional `data.selector`
 - `wait`: optional `data.selector` or `data.timeout`
 - `extract`: optional `data.selector`, `data.attribute`
@@ -82,7 +86,16 @@ Request body:
 
 Notes:
 - `body` may be provided for `POST`, `PUT`, `PATCH`.
-- `allow_out_of_scope: true` allows cross‑origin tests.
+- `allow_out_of_scope: true` allows explicitly authorized cross-origin tests.
+- A 200 response or response difference is a lead, not proof by itself. Confirm distinct principals,
+  ownership, sensitive data or state impact, and control behavior.
+
+### Save A Session Finding
+
+`POST /session/{session_id}/findings`
+
+Provide `title` and `severity` plus evidence-backed fields such as `description`, `category`, `cwe`,
+`url`, `evidence`, `request`, `response`, and `remediation`. The target is derived from the session.
 
 ### End Session
 `DELETE /session/{session_id}`

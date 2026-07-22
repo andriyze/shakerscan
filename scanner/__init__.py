@@ -136,7 +136,6 @@ from .reporting import (
     _redact_body_for_report,
     _mask_structure,
     _generate_fallback_executive_summary,
-    HONEYPOT_TEST_DOMAINS,
 )
 
 __all__ = [
@@ -236,5 +235,4 @@ __all__ = [
     "_redact_body_for_report",
     "_mask_structure",
     "_generate_fallback_executive_summary",
-    "HONEYPOT_TEST_DOMAINS",
 ]

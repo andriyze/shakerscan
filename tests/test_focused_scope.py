@@ -5,13 +5,75 @@ The FocusedScope helper centralizes the previously open-coded
 module migrations don't accidentally drift.
 """
 
-from scanner.scanner_tools.focused_scope import (
+import os
+import sys
+
+
+_SCANNER_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "scanner"))
+if _SCANNER_DIR not in sys.path:
+    sys.path.insert(0, _SCANNER_DIR)
+
+from scanner_tools.focused_scope import (  # noqa: E402
     CORS_SHAPE,
     DMARC_SHAPE,
     FOCUSED_SKIP_REASON,
     FocusedScope,
     NO_FOCUSED_SCOPE,
 )
+
+
+def test_scanner_zero_rediscovery_flag_guards_discovery_branches():
+    from pathlib import Path
+
+    source = Path(__file__).resolve().parents[1].joinpath("scanner", "scanner.py").read_text()
+
+    assert "--zero-rediscovery" in source
+    assert "zero_rediscovery=getattr(args, \"zero_rediscovery\", False)" in source
+    assert "zero_rediscovery_scope = bool(zero_rediscovery and focused_manual_active_scope)" in source
+    assert "zero_rediscovery=zero_rediscovery_scope" in source
+    assert '"recon",\n        {"legacy_discovery": run_legacy_discovery}' in source
+    assert "recon_dispatch_receipts = await recon_phase_task" in source
+    assert "elif smart_mode and not zero_rediscovery_scope:\n        js_urls =" in source
+    assert "if json_link_following and not public_only and not zero_rediscovery_scope" in source
+    assert "if options_method_discovery and not public_only and not zero_rediscovery_scope" in source
+    assert '"template",\n        {"legacy_nuclei_template": run_legacy_nuclei_template}' in source
+    assert "template_dispatch_receipts = await template_phase_task" in source
+
+
+def test_endpoint_focused_shards_do_not_apply_family_filter_or_grading():
+    from pathlib import Path
+
+    source = Path(__file__).resolve().parents[1].joinpath("scanner", "scanner.py").read_text()
+
+    assert "family_focused_active_scope = bool(focused_manual_active_scope and focused_active_family_name)" in source
+    assert "if family_focused_active_scope:\n        family = focused_active_family_name" in source
+    assert "coverage[\"focused_endpoint_scope\"] = True" in source
+
+
+def test_focused_manual_scope_disables_nuclei_before_registry_template_phase():
+    from pathlib import Path
+
+    source = Path(__file__).resolve().parents[1].joinpath("scanner", "scanner.py").read_text()
+
+    focused_scope_index = source.index("if focused_manual_active_scope:")
+    forced_budget_index = source.index('scan_budget["nuclei_max_targets"] = 0')
+    delayed_launcher_index = source.index("# Start the registry-owned template phase once discovery has populated")
+
+    assert focused_scope_index < forced_budget_index < delayed_launcher_index
+
+
+def test_focused_non_injection_families_skip_primary_active_runner():
+    from pathlib import Path
+
+    source = Path(__file__).resolve().parents[1].joinpath("scanner", "scanner.py").read_text()
+
+    primary_guard_index = source.index("if (run_sqli or run_xss) and not active_budget_zero:")
+    runner_index = source.index("smart_results = await run_smart_active_tests(")
+    focused_skip_index = source.index('active_block["primary_active_skipped"] = reason')
+    budget_message_index = source.index("family-specific checks keep the active budget")
+    bola_decision_index = source.index("bola_decision = (")
+
+    assert primary_guard_index < runner_index < focused_skip_index < budget_message_index < bola_decision_index
 
 
 def test_from_request_active_requires_smart_family_and_endpoints():

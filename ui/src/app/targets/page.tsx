@@ -3,10 +3,11 @@
 import { useEffect, useState, useRef, useCallback, Suspense } from 'react'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
-import { getTargetsGrouped, createTarget, scanTarget, discoverSubdomains, getGradeColor, type Target, type GroupedDomain } from '@/lib/api'
+import { getTargetsGrouped, createTarget, scanTarget, discoverSubdomains, dedupeTargets, getGradeColor, type Target, type GroupedDomain } from '@/lib/api'
 import { SCAN_TYPES, getScanOptions, DISCOVERY_SOURCES, GRADES, TARGET_SORT_OPTIONS, type ScanType, type SortOrder } from '@/lib/constants'
 import { useUrlFilters } from '@/lib/useUrlFilters'
-import { Card, CardSkeleton, ErrorState, useToast } from '@/components/ui'
+import { ArrowDown, ArrowUp, Plus, Search } from 'lucide-react'
+import { Button, Card, CardSkeleton, ConfirmDialog, EmptyState, ErrorState, Field, Input, Modal, PageHeader, Select, useToast } from '@/components/ui'
 
 const SEARCH_DEBOUNCE_MS = 300
 
@@ -61,9 +62,14 @@ function TargetsContent() {
   const [searchInput, setSearchInput] = useState<string>(filters.search || '')
   const [totalRootDomains, setTotalRootDomains] = useState(0)
   const [totalTargets, setTotalTargets] = useState(0)
+  const [dedupePreview, setDedupePreview] = useState<{ groups_found: number; targets_merged: number } | null>(null)
+  const [dedupeLoading, setDedupeLoading] = useState(false)
+  const [dedupeExecuting, setDedupeExecuting] = useState(false)
+  const [scanAllPending, setScanAllPending] = useState<{ domain: GroupedDomain; scanType: ScanType } | null>(null)
   const scanMenuRef = useRef<HTMLDivElement>(null)
   const scanAllMenuRef = useRef<HTMLDivElement>(null)
   const searchTimeout = useRef<NodeJS.Timeout | null>(null)
+  const discoverTimeouts = useRef<Set<NodeJS.Timeout>>(new Set())
 
   const searchQuery = filters.search || ''
   const discoverySourceFilter = filters.discovery_source || ''
@@ -87,6 +93,16 @@ function TargetsContent() {
     }
     document.addEventListener('mousedown', handleClickOutside)
     return () => document.removeEventListener('mousedown', handleClickOutside)
+  }, [])
+
+  // Clear any pending discovery-refresh timers on unmount so they don't
+  // fire setState on an unmounted component.
+  useEffect(() => {
+    const timeouts = discoverTimeouts.current
+    return () => {
+      timeouts.forEach(clearTimeout)
+      timeouts.clear()
+    }
   }, [])
 
   // Sync searchInput with URL when filters change externally (e.g., browser back)
@@ -127,12 +143,11 @@ function TargetsContent() {
       setTotalRootDomains(data.total_root_domains || 0)
       setTotalTargets(data.total_targets || 0)
       setFetchError(false)
-      // Auto-expand domains with subdomains
-      const toExpand = new Set<string>()
-      data.domains?.forEach(d => {
-        if (d.subdomain_count > 0) toExpand.add(d.root_domain)
-      })
-      setExpandedDomains(toExpand)
+      // Keep large inventories scannable. Search results are expanded because
+      // the user is looking for a specific match; the normal inventory is not.
+      setExpandedDomains(searchQuery
+        ? new Set((data.domains || []).filter(d => d.subdomain_count > 0).map(d => d.root_domain))
+        : new Set())
     } catch (err) {
       console.error('Failed to fetch targets:', err)
       setFetchError(true)
@@ -149,18 +164,6 @@ function TargetsContent() {
     setShowAddModal(false)
     setUrlError('')
   }
-
-  useEffect(() => {
-    if (!showAddModal) return
-    function onKey(e: KeyboardEvent) {
-      if (e.key === 'Escape') {
-        setShowAddModal(false)
-        setUrlError('')
-      }
-    }
-    document.addEventListener('keydown', onKey)
-    return () => document.removeEventListener('keydown', onKey)
-  }, [showAddModal])
 
   async function handleAddTarget(e: React.FormEvent) {
     e.preventDefault()
@@ -205,6 +208,13 @@ function TargetsContent() {
     }
   }
 
+  function confirmScanAll() {
+    if (!scanAllPending) return
+    const { domain, scanType } = scanAllPending
+    setScanAllPending(null)
+    handleScanDomainSet(domain, scanType)
+  }
+
   async function handleScanDomainSet(domain: GroupedDomain, scanType: ScanType) {
     const allTargets: Target[] = []
     if (domain.root_target) {
@@ -222,13 +232,34 @@ function TargetsContent() {
 
     try {
       const options = getScanOptions(scanType)
-      // Submit scans for all targets in parallel
-      const results = await Promise.all(allTargets.map(target => scanTarget(target.id, options)))
-      const scanId = allTargets.length === 1 ? results[0]?.scan_id : undefined
-      toast.success(
-        `Started ${allTargets.length} scan${allTargets.length !== 1 ? 's' : ''} for ${domain.root_domain}`,
-        scanId ? { link: { href: `/scans/${scanId}`, label: 'View scan' } } : undefined
-      )
+      // Submit scans for all targets, tolerating per-target failures.
+      const results = await Promise.allSettled(allTargets.map(target => scanTarget(target.id, options)))
+      const succeeded = results.filter((r): r is PromiseFulfilledResult<{ scan_id?: string }> => r.status === 'fulfilled')
+      const failedCount = results.length - succeeded.length
+
+      if (succeeded.length === 0) {
+        console.error('Failed to start domain set scan:', results.find(r => r.status === 'rejected'))
+        toast.error(`Failed to start scans for ${domain.root_domain}`)
+        setScanningDomains(prev => {
+          const next = new Set(prev)
+          next.delete(domain.root_domain)
+          return next
+        })
+        return
+      }
+
+      const scanId = allTargets.length === 1 ? succeeded[0]?.value?.scan_id : undefined
+      const message = failedCount > 0
+        ? `Started ${succeeded.length} of ${allTargets.length} scans for ${domain.root_domain}`
+        : `Started ${allTargets.length} scan${allTargets.length !== 1 ? 's' : ''} for ${domain.root_domain}`
+      if (failedCount > 0) {
+        toast.info(message)
+      } else {
+        toast.success(
+          message,
+          scanId ? { link: { href: `/scans/${scanId}`, label: 'View scan' } } : undefined
+        )
+      }
       router.push('/scans')
     } catch (err) {
       console.error('Failed to start domain set scan:', err)
@@ -246,8 +277,10 @@ function TargetsContent() {
     try {
       await discoverSubdomains(rootDomain)
       toast.success(`Subdomain discovery started for ${rootDomain}`)
-      // Refresh targets after a short delay to allow discovery to start
-      setTimeout(() => {
+      // Refresh targets after a short delay to allow discovery to start.
+      // Track the timer so it can be cleared if the component unmounts first.
+      const timeoutId = setTimeout(() => {
+        discoverTimeouts.current.delete(timeoutId)
         fetchTargets()
         setDiscoveringDomains(prev => {
           const next = new Set(prev)
@@ -255,6 +288,7 @@ function TargetsContent() {
           return next
         })
       }, 2000)
+      discoverTimeouts.current.add(timeoutId)
     } catch (err) {
       console.error('Failed to start discovery:', err)
       toast.error(`Failed to start discovery for ${rootDomain}`)
@@ -263,6 +297,37 @@ function TargetsContent() {
         next.delete(rootDomain)
         return next
       })
+    }
+  }
+
+  async function handleFindDuplicates() {
+    setDedupeLoading(true)
+    try {
+      const preview = await dedupeTargets(true)
+      if (preview.groups_found === 0) {
+        toast.success('No duplicate targets found')
+        setDedupePreview(null)
+      } else {
+        setDedupePreview({ groups_found: preview.groups_found, targets_merged: preview.targets_merged })
+      }
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to check for duplicates')
+    } finally {
+      setDedupeLoading(false)
+    }
+  }
+
+  async function handleExecuteDedupe() {
+    setDedupeExecuting(true)
+    try {
+      const res = await dedupeTargets(false)
+      toast.success(`Merged ${res.targets_merged} duplicate target(s) across ${res.groups_executed} group(s)`)
+      setDedupePreview(null)
+      fetchTargets()
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to merge duplicates')
+    } finally {
+      setDedupeExecuting(false)
     }
   }
 
@@ -307,110 +372,144 @@ function TargetsContent() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-bold text-white">Targets</h1>
-          <p className="text-gray-400 mt-1">Manage your scan targets</p>
-        </div>
-        <button
-          onClick={() => setShowAddModal(true)}
-          className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition-colors"
-        >
-          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
-          </svg>
-          Add Target
-        </button>
-      </div>
+      <PageHeader
+        title="Targets"
+        description="Manage your scan targets"
+        actions={
+          <>
+            <Button
+              variant="secondary"
+              onClick={handleFindDuplicates}
+              loading={dedupeLoading}
+              title="Find and merge scheme/trailing-slash duplicate targets"
+            >
+              {dedupeLoading ? 'Checking…' : 'Find duplicates'}
+            </Button>
+            <Button onClick={() => setShowAddModal(true)}>
+              <Plus className="h-4 w-4" aria-hidden="true" />
+              Add Target
+            </Button>
+          </>
+        }
+      />
+
+      <ConfirmDialog
+        open={dedupePreview !== null}
+        title="Merge duplicate targets?"
+        message={
+          dedupePreview
+            ? `Found ${dedupePreview.groups_found} duplicate group(s) covering ${dedupePreview.targets_merged} target(s). Merging reassigns their scans, findings, endpoints, and schedules to one survivor and deletes the duplicates. This cannot be undone.`
+            : ''
+        }
+        confirmLabel="Merge duplicates"
+        danger
+        busy={dedupeExecuting}
+        onConfirm={handleExecuteDedupe}
+        onCancel={() => setDedupePreview(null)}
+      />
+
+      <ConfirmDialog
+        open={scanAllPending !== null}
+        title={scanAllPending ? `Scan all of ${scanAllPending.domain.root_domain}?` : ''}
+        message={
+          scanAllPending
+            ? (() => {
+                const count = (scanAllPending.domain.root_target ? 1 : 0) + scanAllPending.domain.subdomain_count
+                const active = SCAN_TYPES.find((t) => t.value === scanAllPending.scanType)?.requiresPermission
+                return `This queues a ${scanAllPending.scanType} scan for ${count} target${count !== 1 ? 's' : ''} (root + subdomains) in this domain set.${
+                  active ? ' This scan type runs active exploitation checks — only start it on targets you are authorized to test.' : ''
+                }`
+              })()
+            : ''
+        }
+        confirmLabel="Start scans"
+        danger={Boolean(scanAllPending && SCAN_TYPES.find((t) => t.value === scanAllPending.scanType)?.requiresPermission)}
+        onConfirm={confirmScanAll}
+        onCancel={() => setScanAllPending(null)}
+      />
 
       {/* Filters */}
       <div className="flex gap-4 flex-wrap">
         {/* Discovery Source Filter */}
         <div className="flex items-center gap-3">
-          <label className="text-sm text-gray-400">Source:</label>
-          <select
+          <label htmlFor="targets-source-filter" className="text-sm text-gray-400">Source:</label>
+          <Select
+            id="targets-source-filter"
+            fullWidth={false}
             value={discoverySourceFilter}
             onChange={(e) => setFilter('discovery_source', e.target.value || undefined)}
-            className="px-3 py-2 bg-gray-900 border border-gray-800 rounded-lg text-white text-sm focus:outline-none focus:border-blue-500"
           >
             <option value="">All sources</option>
             {DISCOVERY_SOURCES.map((source) => (
               <option key={source} value={source}>{source}</option>
             ))}
-          </select>
+          </Select>
         </div>
 
         {/* Grade Filter */}
         <div className="flex items-center gap-3">
-          <label className="text-sm text-gray-400">Grade:</label>
-          <select
+          <label htmlFor="targets-grade-filter" className="text-sm text-gray-400">Grade:</label>
+          <Select
+            id="targets-grade-filter"
+            fullWidth={false}
             value={gradeFilter}
             onChange={(e) => setFilter('grade', e.target.value || undefined)}
-            className="px-3 py-2 bg-gray-900 border border-gray-800 rounded-lg text-white text-sm focus:outline-none focus:border-blue-500"
           >
             <option value="">All grades</option>
             {GRADES.map((grade) => (
               <option key={grade} value={grade}>{grade}</option>
             ))}
-          </select>
+          </Select>
         </div>
 
         {/* Has Findings Filter */}
         <div className="flex items-center gap-3">
-          <label className="text-sm text-gray-400">Findings:</label>
-          <select
+          <label htmlFor="targets-findings-filter" className="text-sm text-gray-400">Findings:</label>
+          <Select
+            id="targets-findings-filter"
+            fullWidth={false}
             value={hasFindingsFilter}
             onChange={(e) => setFilter('has_findings', e.target.value || undefined)}
-            className="px-3 py-2 bg-gray-900 border border-gray-800 rounded-lg text-white text-sm focus:outline-none focus:border-blue-500"
           >
             <option value="">All</option>
             <option value="true">With findings</option>
             <option value="false">No findings</option>
-          </select>
+          </Select>
         </div>
 
         {/* Sort By */}
         <div className="flex items-center gap-3">
-          <label className="text-sm text-gray-400">Sort:</label>
-          <select
+          <label htmlFor="targets-sort-filter" className="text-sm text-gray-400">Sort:</label>
+          <Select
+            id="targets-sort-filter"
+            fullWidth={false}
             value={sortBy}
             onChange={(e) => setFilter('sort_by', e.target.value || undefined)}
-            className="px-3 py-2 bg-gray-900 border border-gray-800 rounded-lg text-white text-sm focus:outline-none focus:border-blue-500"
           >
             {TARGET_SORT_OPTIONS.map((option) => (
               <option key={option.value} value={option.value}>{option.label}</option>
             ))}
-          </select>
-          <button
+          </Select>
+          <Button
+            variant="secondary"
             onClick={toggleSortOrder}
-            className="px-3 py-2 bg-gray-900 border border-gray-800 rounded-lg text-white text-sm hover:bg-gray-800 focus:outline-none focus:border-blue-500"
             title={sortOrder === 'asc' ? 'Ascending' : 'Descending'}
             aria-label={sortOrder === 'asc' ? 'Sort ascending' : 'Sort descending'}
           >
-            {sortOrder === 'asc' ? (
-              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 15l7-7 7 7" />
-              </svg>
-            ) : (
-              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-              </svg>
-            )}
-          </button>
+            {sortOrder === 'asc' ? <ArrowUp className="h-4 w-4" aria-hidden="true" /> : <ArrowDown className="h-4 w-4" aria-hidden="true" />}
+          </Button>
         </div>
 
         {/* Search */}
         <div className="relative flex-1 min-w-[200px]">
-          <input
+          <Input
             type="text"
             placeholder="Search by URL or domain..."
             value={searchInput}
             onChange={(e) => setSearchInput(e.target.value)}
-            className="w-full px-4 py-2 bg-gray-900 border border-gray-800 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-blue-500"
+            className="pr-10"
           />
-          <svg className="absolute right-3 top-2.5 w-5 h-5 text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-          </svg>
+          <Search className="pointer-events-none absolute right-3 top-1/2 h-5 w-5 -translate-y-1/2 text-gray-500" aria-hidden="true" />
         </div>
       </div>
 
@@ -435,14 +534,15 @@ function TargetsContent() {
       ) : fetchError ? (
         <ErrorState message="Failed to load targets. Is the API running?" onRetry={fetchTargets} />
       ) : domains.length === 0 ? (
-        <Card className="p-8 text-center">
-          <svg className="w-12 h-12 text-gray-600 mx-auto mb-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9" />
-          </svg>
-          <p className="text-gray-500">
-            {hasActiveFilters ? 'No targets found matching your filters.' : 'No targets yet. Add a target to get started.'}
-          </p>
-        </Card>
+        <EmptyState
+          message={hasActiveFilters ? 'No targets found matching your filters.' : 'No targets yet.'}
+          hint={hasActiveFilters ? 'Try clearing your filters.' : 'Add a target to get started.'}
+          action={
+            hasActiveFilters
+              ? { label: 'Clear filters', onClick: clearFilters }
+              : { label: 'Add target', onClick: () => setShowAddModal(true) }
+          }
+        />
       ) : (
         <div className="space-y-3">
           {domains.map((domain) => {
@@ -464,7 +564,7 @@ function TargetsContent() {
             return (
             <Card key={domain.root_domain}>
               {/* Root Domain Header */}
-              <div className="flex items-center gap-3 p-4 hover:bg-gray-800/50 transition-colors">
+              <div className="flex flex-col gap-3 p-4 transition-colors hover:bg-gray-800/50 md:flex-row md:items-center">
                 {domain.subdomain_count > 0 ? (
                   <button
                     type="button"
@@ -495,7 +595,7 @@ function TargetsContent() {
                 {/* Root Target Stats */}
                 {domain.root_target && (
                   <>
-                    <div className="flex items-center gap-4 text-sm text-gray-500">
+                    <div className="hidden items-center gap-4 text-sm text-gray-500 lg:flex">
                       <Link
                         href={`/scans?domain=${domain.root_domain}`}
                         onClick={(e) => e.stopPropagation()}
@@ -512,9 +612,47 @@ function TargetsContent() {
                           {domain.root_target.active_findings_count} findings
                         </Link>
                       )}
+                      {(domain.root_target.investigator_verified_count || 0) > 0 && (
+                        <Link
+                          href={`/deep-hunt?target=${domain.root_target.id}`}
+                          onClick={(e) => e.stopPropagation()}
+                          className="text-emerald-400 transition-colors hover:text-emerald-300"
+                          title="Deterministically verified investigator findings"
+                        >
+                          {domain.root_target.investigator_verified_count} verified
+                        </Link>
+                      )}
+                      {(domain.root_target.investigator_suspected_count || 0) > 0 && (
+                        <Link
+                          href={`/deep-hunt?target=${domain.root_target.id}`}
+                          onClick={(e) => e.stopPropagation()}
+                          className="text-amber-400 transition-colors hover:text-amber-300"
+                          title="Evidence-backed investigator leads awaiting deterministic proof"
+                        >
+                          {domain.root_target.investigator_suspected_count} suspected
+                        </Link>
+                      )}
+                      {domain.root_target.asm_coverage && (
+                        <Link
+                          href={`/asm?target_id=${domain.root_target.id}`}
+                          onClick={(e) => e.stopPropagation()}
+                          className="text-blue-400 hover:text-blue-300 transition-colors"
+                          title="Attack surface coverage"
+                        >
+                          {(domain.root_target.asm_coverage.coverage * 100).toFixed(0)}% covered
+                        </Link>
+                      )}
+                      <Link
+                        href={`/targets/${domain.root_target.id}/graph`}
+                        onClick={(e) => e.stopPropagation()}
+                        className="text-purple-400 hover:text-purple-300 transition-colors"
+                        title="Application graph"
+                      >
+                        graph
+                      </Link>
                     </div>
                     {domain.root_target.last_grade && (
-                      <span className={`text-xl font-bold ${getGradeColor(domain.root_target.last_grade)}`}>
+                      <span className={`hidden text-xl font-bold sm:inline ${getGradeColor(domain.root_target.last_grade)}`}>
                         {domain.root_target.last_grade}
                       </span>
                     )}
@@ -522,7 +660,7 @@ function TargetsContent() {
                     <Link
                       href={`/schedules?create=true&target_id=${domain.root_target!.id}`}
                       onClick={(e) => e.stopPropagation()}
-                      className="p-1 text-gray-500 hover:text-blue-400 transition-colors"
+                      className="hidden p-1 text-gray-500 transition-colors hover:text-blue-400 md:inline-flex"
                       title="Create schedule"
                       aria-label={`Create schedule for ${domain.root_domain}`}
                     >
@@ -612,7 +750,8 @@ function TargetsContent() {
                             key={type.value}
                             onClick={(e) => {
                               e.stopPropagation()
-                              handleScanDomainSet(domain, type.value)
+                              setOpenScanAllMenu(null)
+                              setScanAllPending({ domain, scanType: type.value })
                             }}
                             className="w-full px-3 py-2 text-left hover:bg-gray-700 transition-colors"
                           >
@@ -638,7 +777,7 @@ function TargetsContent() {
                     handleDiscover(domain.root_domain)
                   }}
                   disabled={discoveringDomains.has(domain.root_domain)}
-                  className="flex items-center gap-1 px-3 py-1 bg-purple-600 hover:bg-purple-700 disabled:bg-purple-600/50 text-white rounded text-xs font-medium transition-colors"
+                  className="flex items-center justify-center gap-1 rounded border border-gray-700 bg-gray-800 px-3 py-1 text-xs font-medium text-gray-200 transition-colors hover:bg-gray-700 disabled:opacity-50"
                   title="Discover subdomains"
                 >
                   {discoveringDomains.has(domain.root_domain) ? (
@@ -666,7 +805,7 @@ function TargetsContent() {
                   {domain.subdomains.map((subdomain) => (
                     <div
                       key={subdomain.id}
-                      className="flex items-center gap-3 px-4 py-3 pl-12 hover:bg-gray-800/30 transition-colors border-b border-gray-800/50 last:border-b-0"
+                      className="grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 border-b border-gray-800/50 px-3 py-3 transition-colors last:border-b-0 hover:bg-gray-800/30 sm:flex sm:gap-3 sm:px-4 sm:pl-12"
                     >
                       {/* Tree connector */}
                       <span className="text-gray-700">&#x2514;</span>
@@ -684,7 +823,7 @@ function TargetsContent() {
                       </div>
 
                       {/* Subdomain Stats */}
-                      <div className="flex items-center gap-4 text-sm text-gray-500">
+                      <div className="hidden items-center gap-4 text-sm text-gray-500 lg:flex">
                         <Link
                           href={`/scans?domain=${domain.root_domain}`}
                           className="hover:text-blue-400 transition-colors"
@@ -699,10 +838,44 @@ function TargetsContent() {
                             {subdomain.active_findings_count}
                           </Link>
                         )}
+                        {(subdomain.investigator_verified_count || 0) > 0 && (
+                          <Link
+                            href={`/deep-hunt?target=${subdomain.id}`}
+                            className="text-emerald-400 transition-colors hover:text-emerald-300"
+                            title="Deterministically verified investigator findings"
+                          >
+                            {subdomain.investigator_verified_count} verified
+                          </Link>
+                        )}
+                        {(subdomain.investigator_suspected_count || 0) > 0 && (
+                          <Link
+                            href={`/deep-hunt?target=${subdomain.id}`}
+                            className="text-amber-400 transition-colors hover:text-amber-300"
+                            title="Evidence-backed investigator leads awaiting deterministic proof"
+                          >
+                            {subdomain.investigator_suspected_count} suspected
+                          </Link>
+                        )}
+                        {subdomain.asm_coverage && (
+                          <Link
+                            href={`/asm?target_id=${subdomain.id}`}
+                            className="text-blue-400 hover:text-blue-300 transition-colors"
+                            title="Attack surface coverage"
+                          >
+                            {(subdomain.asm_coverage.coverage * 100).toFixed(0)}% covered
+                          </Link>
+                        )}
+                        <Link
+                          href={`/targets/${subdomain.id}/graph`}
+                          className="text-purple-400 hover:text-purple-300 transition-colors"
+                          title="Application graph"
+                        >
+                          graph
+                        </Link>
                       </div>
 
                       {subdomain.last_grade && (
-                        <span className={`text-lg font-bold ${getGradeColor(subdomain.last_grade)}`}>
+                        <span className={`hidden text-lg font-bold sm:inline ${getGradeColor(subdomain.last_grade)}`}>
                           {subdomain.last_grade}
                         </span>
                       )}
@@ -710,7 +883,7 @@ function TargetsContent() {
                       {/* Schedule Button for Subdomain */}
                       <Link
                         href={`/schedules?create=true&target_id=${subdomain.id}`}
-                        className="p-1 text-gray-500 hover:text-blue-400 transition-colors"
+                        className="hidden p-1 text-gray-500 transition-colors hover:text-blue-400 md:inline-flex"
                         title="Create schedule"
                         aria-label={`Create schedule for ${subdomain.url.replace(/^https?:\/\//, '')}`}
                       >
@@ -767,74 +940,39 @@ function TargetsContent() {
         </div>
       )}
 
-      {/* Add Target Modal */}
-      {showAddModal && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <Card className="max-w-md w-full">
-            <div className="p-4 border-b border-gray-800 flex items-center justify-between">
-              <h2 className="font-medium text-white">Add Target</h2>
-              <button
-                type="button"
-                onClick={closeAddModal}
-                aria-label="Close"
-                className="text-gray-400 hover:text-white"
-              >
-                <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                </svg>
-              </button>
-            </div>
-            <form onSubmit={handleAddTarget} className="p-4 space-y-4">
-              <div>
-                <label className="block text-sm font-medium text-gray-400 mb-1">URL</label>
-                <input
-                  type="text"
-                  value={newTargetUrl}
-                  onChange={(e) => {
-                    setNewTargetUrl(e.target.value)
-                    if (urlError) setUrlError('')
-                  }}
-                  placeholder="https://example.com"
-                  aria-invalid={urlError ? true : undefined}
-                  className={`w-full px-3 py-2 bg-gray-800 border rounded-lg text-white placeholder-gray-500 focus:outline-none ${
-                    urlError ? 'border-red-500 focus:border-red-500' : 'border-gray-700 focus:border-blue-500'
-                  }`}
-                  required
-                />
-                {urlError && (
-                  <p className="mt-1 text-sm text-red-400">{urlError}</p>
-                )}
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-400 mb-1">Name (optional)</label>
-                <input
-                  type="text"
-                  value={newTargetName}
-                  onChange={(e) => setNewTargetName(e.target.value)}
-                  placeholder="My Website"
-                  className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-blue-500"
-                />
-              </div>
-              <div className="flex gap-3">
-                <button
-                  type="button"
-                  onClick={closeAddModal}
-                  className="flex-1 px-4 py-2 bg-gray-800 hover:bg-gray-700 text-white rounded-lg text-sm font-medium transition-colors"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={adding}
-                  className="flex-1 px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:bg-blue-600/50 text-white rounded-lg text-sm font-medium transition-colors"
-                >
-                  {adding ? 'Adding...' : 'Add Target'}
-                </button>
-              </div>
-            </form>
-          </Card>
-        </div>
-      )}
+      <Modal open={showAddModal} title="Add Target" onClose={closeAddModal}>
+        <form onSubmit={handleAddTarget} className="space-y-4">
+          <Field label="URL" error={urlError || undefined}>
+            <Input
+              type="text"
+              value={newTargetUrl}
+              onChange={(e) => {
+                setNewTargetUrl(e.target.value)
+                if (urlError) setUrlError('')
+              }}
+              placeholder="https://example.com"
+              error={Boolean(urlError)}
+              required
+            />
+          </Field>
+          <Field label="Name (optional)">
+            <Input
+              type="text"
+              value={newTargetName}
+              onChange={(e) => setNewTargetName(e.target.value)}
+              placeholder="My Website"
+            />
+          </Field>
+          <div className="flex gap-3">
+            <Button type="button" variant="secondary" onClick={closeAddModal} className="flex-1">
+              Cancel
+            </Button>
+            <Button type="submit" loading={adding} className="flex-1">
+              {adding ? 'Adding…' : 'Add Target'}
+            </Button>
+          </div>
+        </form>
+      </Modal>
     </div>
   )
 }

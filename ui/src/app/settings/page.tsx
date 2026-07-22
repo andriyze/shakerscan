@@ -1,52 +1,74 @@
 import AISettingsPanel from '@/components/AISettingsPanel'
-import Link from 'next/link'
-import { Bot, PackageCheck } from 'lucide-react'
+import ScanExecutionSettingsPanel from '@/components/ScanExecutionSettingsPanel'
+import { Cpu, Sparkles } from 'lucide-react'
+import { PageHeader, Tabs } from '@/components/ui'
 
-export default function SettingsPage() {
+type SettingsSection = 'automation' | 'ai'
+
+const SECTIONS: Array<{ id: SettingsSection; label: string }> = [
+  { id: 'automation', label: 'Automation' },
+  { id: 'ai', label: 'AI & verification' },
+]
+
+function IntroBanner({ icon, title, text }: { icon: React.ReactNode; title: string; text: string }) {
+  return (
+    <div className="flex items-start gap-3 rounded-lg border border-gray-800 bg-gray-900/60 px-4 py-3">
+      <span className="mt-0.5 shrink-0">{icon}</span>
+      <div>
+        <p className="text-sm font-medium text-gray-100">{title}</p>
+        <p className="mt-1 text-xs leading-5 text-gray-500">{text}</p>
+      </div>
+    </div>
+  )
+}
+
+export default async function SettingsPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ section?: string }>
+}) {
+  const params = await searchParams
+  const requestedSection = params.section
+  const activeSection: SettingsSection = SECTIONS.some((section) => section.id === requestedSection)
+    ? (requestedSection as SettingsSection)
+    : 'automation'
+
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-bold text-white">Settings</h1>
-        <p className="text-gray-400 mt-1">
-          Runtime configuration for scan-time AI triage, retest verification, and smart-scan output policy. Hover the
-          <span className="mx-1 inline-flex h-4 w-4 items-center justify-center rounded-full border border-gray-600 text-[10px] font-semibold text-gray-300">?</span>
-          icons for quick explanations.
-        </p>
-      </div>
+      <PageHeader
+        title="Settings"
+        description="Organization-wide defaults. Settings on an individual scan or target take priority."
+      />
 
-      <Link
-        href="/settings/ai-gate"
-        className="flex items-center justify-between rounded-lg border border-gray-800 bg-gray-900 p-4 hover:bg-gray-800/80 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2 focus-visible:ring-offset-gray-950"
-      >
-        <div className="flex items-center gap-3">
-          <span className="flex h-10 w-10 items-center justify-center rounded-lg bg-blue-600/20 text-blue-300">
-            <Bot className="h-5 w-5" />
-          </span>
-          <div>
-            <h2 className="text-sm font-medium text-white">AI Gate</h2>
-            <p className="mt-1 text-sm text-gray-400">Chat, RAG, agent trace, and MCP probe targets</p>
-          </div>
-        </div>
-        <span className="text-sm text-blue-400">Open</span>
-      </Link>
+      <Tabs
+        ariaLabel="Settings sections"
+        active={activeSection}
+        items={SECTIONS.map((section) => ({
+          key: section.id,
+          label: section.label,
+          href: `/settings?section=${section.id}`,
+        }))}
+      />
 
-      <Link
-        href="/settings/model-intake"
-        className="flex items-center justify-between rounded-lg border border-gray-800 bg-gray-900 p-4 hover:bg-gray-800/80 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2 focus-visible:ring-offset-gray-950"
-      >
-        <div className="flex items-center gap-3">
-          <span className="flex h-10 w-10 items-center justify-center rounded-lg bg-cyan-600/20 text-cyan-300">
-            <PackageCheck className="h-5 w-5" />
-          </span>
-          <div>
-            <h2 className="text-sm font-medium text-white">Model Intake</h2>
-            <p className="mt-1 text-sm text-gray-400">Provenance, unsafe serialization, signing, checksum, and approval checks</p>
-          </div>
-        </div>
-        <span className="text-sm text-cyan-300">Open</span>
-      </Link>
-
-      <AISettingsPanel />
+      {activeSection === 'automation' ? (
+        <section aria-label="Scanning and coverage defaults" className="space-y-4">
+          <IntroBanner
+            icon={<Cpu className="h-5 w-5 text-blue-400" />}
+            title="Changes save immediately"
+            text="These controls save as soon as you change them. They affect new work only unless the control says otherwise."
+          />
+          <ScanExecutionSettingsPanel />
+        </section>
+      ) : (
+        <section aria-label="AI provider and verification" className="space-y-4">
+          <IntroBanner
+            icon={<Sparkles className="h-5 w-5 text-purple-400" />}
+            title="Review, then save"
+            text="Provider changes are applied only after you select Save. Start with Basic; advanced controls are optional."
+          />
+          <AISettingsPanel />
+        </section>
+      )}
     </div>
   )
 }

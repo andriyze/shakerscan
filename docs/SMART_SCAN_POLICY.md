@@ -1,5 +1,12 @@
 # Smart Scan Policy
 
+**Status:** reconciled 2026-07-21. Resolved profile budgets, hard override ceilings, phase watchdogs,
+request-meter telemetry, adaptive throttling, and proof-aware reporting are shipped. Yield-based
+cross-phase budget reallocation below is a target policy, not current runtime behavior. Release SLOs
+are acceptance goals and must not be represented as passing without a current scorecard. The named
+release-gate runner and benchmark commands exist, but the GitHub Release workflow does not yet
+enforce this full policy; that automation gap is tracked in `release-readiness.md`.
+
 ## Purpose
 Define how ShakerScan budgets time and attack effort in `smart` mode, while keeping scans safe, explainable, and commercially defensible.
 
@@ -23,6 +30,9 @@ Resolved smart-scan budget fields include:
 - `browser_max_pages`
 - `browser_max_depth`
 - `api_probe_limit`
+- `param_discovery_url_limit`
+- `param_discovery_max_params`
+- `phase4_max_seconds`
 - `nuclei_max_targets`
 - `nuclei_early_stop`
 - `active_max_seconds`
@@ -33,11 +43,18 @@ Resolved smart-scan budget fields include:
 - `dom_xss_max_files`
 - `sqli_extract_max`
 - `oob_max_findings`
+- `active_worklist_max`
+- `request_max`
 
-Default profile values are centralized in `scanner/constants.py` as `SCAN_BUDGET_DEFAULTS`. Per-scan overrides are accepted through `custom_budget`.
+Smart-specific adaptive values are centralized in `scanner/constants.py` as `SMART_SCAN_BUDGETS`.
+General scan-type and coverage-profile defaults use `SCAN_BUDGET_DEFAULTS`. Per-scan overrides are
+accepted through `custom_budget` and capped by the configured ceilings.
 
-## Phase Allocation
-Initial allocation before reserve rebalancing:
+## Target Phase Allocation
+
+The following allocation is a design target for future cross-phase accounting. Current execution
+uses resolved per-module limits and watchdogs; it does not reserve these percentages in one shared
+runtime allocator.
 
 | Phase | Time | Request | Payload |
 |---|---:|---:|---:|
@@ -47,7 +64,10 @@ Initial allocation before reserve rebalancing:
 | Verification/proof | 15% | 10% | 0% |
 | Reserve | 10% | 5% | 0% |
 
-## Dynamic Reallocation Rules
+## Proposed Dynamic Reallocation Rules
+
+These rules are not implemented in the current scanner. They require exact-enough per-adapter request
+accounting, a shared phase allocator, and benchmark evidence before activation.
 - Reallocate reserve only to phases with positive yield.
 - Yield metric: `confirmed_high_or_critical / 100 requests`.
 - Continue a high-cost phase only if yield is above threshold for the last window.
@@ -64,7 +84,10 @@ Recommended thresholds:
 - Cap active probes per endpoint and per parameter family.
 - Apply adaptive backoff on `429`/`503`.
 - Downgrade unverified `critical/high` findings after verification budget exhaustion.
-- Require explicit operator consent for aggressive active modes.
+- Require explicit operator consent for active modes. Approval receipts and a global enforcement
+  toggle are implemented, and Deep Hunt requires a target-bound expiring approval. Under the 0.7.0
+  trusted-operator scope, mandatory receipt enforcement for every ordinary local DAST scan remains
+  optional; starting the scan is treated as the local operator's authorization.
 
 ## Verification Policy
 - `critical/high` findings require proof or independent corroboration.
@@ -75,6 +98,8 @@ Recommended thresholds:
 - If proof fails or is skipped, lower severity and mark rationale in evidence.
 
 ## Quality SLOs
+These are release targets, not claims about the latest build. A release artifact satisfies them only
+when its fingerprint-current benchmark scorecard records the required measurements.
 Severity-level precision targets:
 - `critical`: `>= 0.95`
 - `high`: `>= 0.90`
@@ -86,8 +111,10 @@ Coverage and confidence targets:
 - `smart_endpoint_coverage`: `>= 0.50` on authenticated test apps
 - `benchmark_quality_score`: `>= 60` for reference corpora
 
-## Release Gates
-A release is blocked if any of these fail:
+## Release Acceptance Policy
+
+The release owner must block a release if any of these fail. These are policy requirements; they are
+not all automatically enforced by the current GitHub Release workflow:
 - Schema/API compatibility checks for upgraded environments.
 - Benchmark assertion suite (`tests/benchmark/*`) fails.
 - Precision or confidence SLO regressions exceed tolerance.
@@ -95,6 +122,15 @@ A release is blocked if any of these fail:
 
 CI gate command examples:
 ```bash
+# Canonical current-fleet scorecards. Use --submit-only when an agent must queue and stop.
+python3 scripts/benchmark_targets.py juice_shop --auth
+python3 scripts/benchmark_targets.py crapi --auth
+python3 scripts/benchmark_targets.py honey --auth
+
+# Score an already completed scan without submitting another.
+python3 scripts/benchmark_targets.py juice_shop --scan-id <scan-id>
+
+# Lower-level artifact assertion and calibration tools remain available when needed.
 # Absolute SLO gates
 python3 tests/benchmark/run_benchmarks.py --benchmarks tests/benchmark/benchmarks.json
 
@@ -134,10 +170,10 @@ python3 tests/benchmark/run_benchmarks.py --benchmarks tests/benchmark/benchmark
 
 ## Presales Positioning
 How to answer common buyer questions:
-- "How do you control scan cost?" -> "We use explicit time/request/payload/verification budgets with adaptive reallocation and hard safety caps."
-- "How do you limit false positives?" -> "High-impact findings must be verified or they are downgraded, and we track precision SLOs per severity."
-- "How do you prove quality over time?" -> "We run benchmark gates in CI and reject releases that regress coverage or verified-finding quality."
-- "Can we run safely in production?" -> "Yes, smart mode is safe-by-default, with scoped targets, throttling, and opt-in controls for aggressive behavior."
+- "How do you control scan cost?" -> "We resolve explicit time, endpoint, parameter, and request budgets. Request enforcement is adapter-dependent and reported in receipts."
+- "How do you limit false positives?" -> "High-impact promotion requires deterministic proof contracts; unproven findings remain suspected or require review."
+- "How do you prove quality over time?" -> "We retain fingerprinted benchmark scorecards and keep release acceptance open when the current build has not passed them."
+- "Can we run safely in production?" -> "Active smart scans require explicit authorization. Use bounded profiles and review adapter enforcement before targeting production."
 
 ## Implementation Notes
 Recent policy-aligned hardening:

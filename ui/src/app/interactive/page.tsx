@@ -2,21 +2,51 @@
 
 import Link from 'next/link'
 import { useCallback, useEffect, useMemo, useState } from 'react'
+import { KeyRound, RefreshCw, ShieldCheck, XCircle } from 'lucide-react'
 import {
+  approveTargetInvariant,
   captureInteractiveScreenshot,
+  compileTargetInvariant,
+  createTargetCredentialProfile,
+  createTargetPrincipal,
   createInteractiveSessionFinding,
+  createTargetPolicyApproval,
+  deactivateTargetCredentialProfile,
+  deactivateTargetPrincipal,
+  deleteTargetPrincipalExpectation,
   endInteractiveSession,
   getInteractiveSession,
+  getTargetCredentialProfiles,
+  getTargetInvariants,
+  getTargetPrincipalMatrix,
   listInteractiveSessions,
+  generateTargetInvariantHypotheses,
   runInteractiveAction,
+  rotateTargetCredentialProfile,
   startInteractiveSession,
   testInteractiveEndpoint,
+  updateTargetPrincipal,
+  upsertTargetPrincipalExpectation,
   type InteractiveEndpointTestResult,
   type InteractiveSessionState,
   type InteractiveSessionSummary,
+  type TargetPrincipalMatrixResponse,
+  type TargetCredentialProfile,
+  type TargetInvariantCompileResponse,
+  type TargetInvariantListResponse,
 } from '@/lib/api'
 import { SEVERITY_LEVELS } from '@/lib/constants'
 import { Badge, Button, Card, ErrorState, useToast } from '@/components/ui'
+import {
+  buildPrincipalProfilePayload,
+  emptyPrincipalProfileDraft,
+  type PrincipalProfileDraft,
+} from '@/lib/principalProfile'
+import {
+  buildPrincipalExpectationPayload,
+  emptyPrincipalExpectationDraft,
+  type PrincipalExpectationDraft,
+} from '@/lib/principalExpectation'
 
 type UserKey = 'user1' | 'user2'
 
@@ -38,6 +68,14 @@ type FindingFormState = {
   response: string
   remediation: string
   notes: string
+}
+
+type CredentialProfileDraft = {
+  name: string
+  authKind: TargetCredentialProfile['auth_kind']
+  secret: string
+  expiresAt: string
+  rotateProfileId: string
 }
 
 const REQUEST_METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE']
@@ -72,13 +110,89 @@ function getOriginFromUrl(url: string): string {
 
 export default function InteractiveSessionPage() {
   const toast = useToast()
-  const [target, setTarget] = useState('https://cr.shakerscan.com')
+  const [target, setTarget] = useState('')
   const [sessionInput, setSessionInput] = useState('')
   const [session, setSession] = useState<InteractiveSessionState | null>(null)
   const [activeSessions, setActiveSessions] = useState<InteractiveSessionSummary[]>([])
   const [sessionsError, setSessionsError] = useState<string | null>(null)
+  const [targetId, setTargetId] = useState('')
+  const [principalMatrix, setPrincipalMatrix] = useState<TargetPrincipalMatrixResponse | null>(null)
+  const [principalMatrixError, setPrincipalMatrixError] = useState<string | null>(null)
+  const [principalDrafts, setPrincipalDrafts] = useState<Record<UserKey, PrincipalProfileDraft>>({
+    user1: emptyPrincipalProfileDraft(),
+    user2: emptyPrincipalProfileDraft(),
+  })
+  const [principalBusy, setPrincipalBusy] = useState<UserKey | null>(null)
+  const [credentialProfiles, setCredentialProfiles] = useState<TargetCredentialProfile[]>([])
+  const [credentialProfilesError, setCredentialProfilesError] = useState<string | null>(null)
+  const [credentialBusy, setCredentialBusy] = useState<string | null>(null)
+  const [credentialDraft, setCredentialDraft] = useState<CredentialProfileDraft>({
+    name: '',
+    authKind: 'authorization_header',
+    secret: '',
+    expiresAt: '',
+    rotateProfileId: '',
+  })
+  const [expectationDraft, setExpectationDraft] = useState<PrincipalExpectationDraft>(emptyPrincipalExpectationDraft)
+  const [expectationBusy, setExpectationBusy] = useState<string | null>(null)
+  const [invariants, setInvariants] = useState<TargetInvariantListResponse | null>(null)
+  const [invariantsError, setInvariantsError] = useState<string | null>(null)
+  const [invariantRule, setInvariantRule] = useState('')
+  const [invariantPreview, setInvariantPreview] = useState<TargetInvariantCompileResponse | null>(null)
+  const [invariantBusy, setInvariantBusy] = useState<string | null>(null)
 
-  const [endpoint, setEndpoint] = useState('/identity/api/v2/user/dashboard')
+  const loadPrincipalMatrix = useCallback(async (id: string) => {
+    if (!id) return
+    try {
+      const matrix = await getTargetPrincipalMatrix(id, 100)
+      setPrincipalMatrix(matrix)
+      setPrincipalMatrixError(null)
+    } catch (err) {
+      setPrincipalMatrix(null)
+      setPrincipalMatrixError(err instanceof Error ? err.message : 'Failed to load principal matrix')
+    }
+  }, [])
+
+  const loadCredentialProfiles = useCallback(async (id: string) => {
+    if (!id) return
+    try {
+      const result = await getTargetCredentialProfiles(id)
+      setCredentialProfiles(result.profiles || [])
+      setCredentialProfilesError(null)
+    } catch (err) {
+      setCredentialProfiles([])
+      setCredentialProfilesError(err instanceof Error ? err.message : 'Failed to load credential profiles')
+    }
+  }, [])
+
+  const loadInvariants = useCallback(async (id: string) => {
+    if (!id) return
+    try {
+      setInvariants(await getTargetInvariants(id))
+      setInvariantsError(null)
+    } catch (err) {
+      setInvariants(null)
+      setInvariantsError(err instanceof Error ? err.message : 'Failed to load target invariants')
+    }
+  }, [])
+
+  useEffect(() => {
+    const requestedTarget = new URLSearchParams(window.location.search).get('target')
+    const requestedTargetId = new URLSearchParams(window.location.search).get('target_id')
+    if (requestedTarget) setTarget(requestedTarget)
+    if (requestedTargetId) setTargetId(requestedTargetId)
+  }, [])
+
+  useEffect(() => {
+    if (!targetId) return
+    setPrincipalDrafts({ user1: emptyPrincipalProfileDraft(), user2: emptyPrincipalProfileDraft() })
+    setInvariantPreview(null)
+    void loadPrincipalMatrix(targetId)
+    void loadCredentialProfiles(targetId)
+    void loadInvariants(targetId)
+  }, [loadCredentialProfiles, loadInvariants, loadPrincipalMatrix, targetId])
+
+  const [endpoint, setEndpoint] = useState('')
   const [method, setMethod] = useState('GET')
   const [asUser, setAsUser] = useState<UserKey>('user1')
   const [allowOutOfScope, setAllowOutOfScope] = useState(false)
@@ -163,6 +277,245 @@ export default function InteractiveSessionPage() {
     return Array.from(new Set(['default', ...keys]))
   }, [session?.users])
 
+  const principalsByAuthState = useMemo(() => {
+    const mapped: Partial<Record<UserKey, TargetPrincipalMatrixResponse['principals'][number]>> = {}
+    for (const principal of principalMatrix?.principals || []) {
+      if ((principal.auth_state === 'user1' || principal.auth_state === 'user2') && !mapped[principal.auth_state]) {
+        mapped[principal.auth_state] = principal
+      }
+    }
+    return mapped
+  }, [principalMatrix])
+
+  useEffect(() => {
+    if (!principalMatrix) return
+    setPrincipalDrafts((current) => {
+      const next = { ...current }
+      for (const slot of ['user1', 'user2'] as UserKey[]) {
+        const principal = principalMatrix.principals.find((item) => item.auth_state === slot)
+        if (!principal) continue
+        next[slot] = {
+          label: principal.label,
+          role: principal.role,
+          tenantId: principal.tenant_id || '',
+          credentialProfile: principal.credential_profile || '',
+        }
+      }
+      return next
+    })
+  }, [principalMatrix])
+
+  async function handleSavePrincipal(slot: UserKey) {
+    if (!targetId) return
+    const principal = principalsByAuthState[slot]
+    const payload = buildPrincipalProfilePayload(slot, principalDrafts[slot], Boolean(principal))
+    if (!payload.label) {
+      toast.error(`${slot} label is required`)
+      return
+    }
+
+    setPrincipalBusy(slot)
+    try {
+      if (principal) {
+        await updateTargetPrincipal(targetId, principal.id, payload)
+      } else {
+        await createTargetPrincipal(targetId, payload)
+      }
+      await loadPrincipalMatrix(targetId)
+      toast.success(`${slot} principal ${principal ? 'updated' : 'created'}`)
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : `Failed to save ${slot} principal`)
+    } finally {
+      setPrincipalBusy(null)
+    }
+  }
+
+  async function handleSaveCredentialProfile() {
+    if (!targetId) return
+    if (!credentialDraft.name.trim() || !credentialDraft.secret.trim()) {
+      toast.error('Profile name and secret are required')
+      return
+    }
+    const expiresAt = credentialDraft.expiresAt
+      ? new Date(credentialDraft.expiresAt).toISOString()
+      : undefined
+    setCredentialBusy(credentialDraft.rotateProfileId || 'create')
+    try {
+      if (credentialDraft.rotateProfileId) {
+        await rotateTargetCredentialProfile(targetId, credentialDraft.rotateProfileId, {
+          secret: credentialDraft.secret,
+          expires_at: expiresAt,
+          clear_expiry: !expiresAt,
+        })
+      } else {
+        await createTargetCredentialProfile(targetId, {
+          name: credentialDraft.name.trim(),
+          auth_kind: credentialDraft.authKind,
+          secret: credentialDraft.secret,
+          expires_at: expiresAt,
+        })
+      }
+      setCredentialDraft({ name: '', authKind: 'authorization_header', secret: '', expiresAt: '', rotateProfileId: '' })
+      await Promise.all([loadCredentialProfiles(targetId), loadPrincipalMatrix(targetId)])
+      toast.success(credentialDraft.rotateProfileId ? 'Credential profile rotated' : 'Credential profile created')
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to save credential profile')
+    } finally {
+      setCredentialBusy(null)
+    }
+  }
+
+  function handlePrepareCredentialRotation(profile: TargetCredentialProfile) {
+    setCredentialDraft({
+      name: profile.name,
+      authKind: profile.auth_kind,
+      secret: '',
+      expiresAt: profile.expires_at ? profile.expires_at.slice(0, 16) : '',
+      rotateProfileId: profile.id,
+    })
+  }
+
+  async function handleDeactivateCredentialProfile(profile: TargetCredentialProfile) {
+    if (!targetId || !window.confirm(`Deactivate credential profile ${profile.name}?`)) return
+    setCredentialBusy(profile.id)
+    try {
+      await deactivateTargetCredentialProfile(targetId, profile.id)
+      await Promise.all([loadCredentialProfiles(targetId), loadPrincipalMatrix(targetId)])
+      toast.success('Credential profile deactivated')
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to deactivate credential profile')
+    } finally {
+      setCredentialBusy(null)
+    }
+  }
+
+  async function handleDeactivatePrincipal(slot: UserKey) {
+    if (!targetId) return
+    const principal = principalsByAuthState[slot]
+    if (!principal || !window.confirm(`Deactivate principal ${principal.label}?`)) return
+
+    setPrincipalBusy(slot)
+    try {
+      await deactivateTargetPrincipal(targetId, principal.id)
+      setPrincipalDrafts((current) => ({ ...current, [slot]: emptyPrincipalProfileDraft() }))
+      await loadPrincipalMatrix(targetId)
+      toast.success(`${slot} principal deactivated`)
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : `Failed to deactivate ${slot} principal`)
+    } finally {
+      setPrincipalBusy(null)
+    }
+  }
+
+  async function handleSaveExpectation() {
+    if (!targetId) return
+    let payload
+    try {
+      payload = buildPrincipalExpectationPayload(expectationDraft)
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Invalid expectation')
+      return
+    }
+    if (!payload.path) {
+      toast.error('Endpoint path is required')
+      return
+    }
+    if (!payload.principal_id && !payload.principal_role) {
+      toast.error('Select a principal or provide a role')
+      return
+    }
+    if (!target || !window.confirm('Approve this authorization expectation for future replay and BOLA decisions?')) return
+
+    setExpectationBusy('save')
+    try {
+      const approvalReceiptId = await createTargetPolicyApproval(targetId, target)
+      await upsertTargetPrincipalExpectation(targetId, { ...payload, approval_receipt_id: approvalReceiptId })
+      await loadPrincipalMatrix(targetId)
+      setExpectationDraft(emptyPrincipalExpectationDraft())
+      toast.success('Principal expectation saved')
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to save principal expectation')
+    } finally {
+      setExpectationBusy(null)
+    }
+  }
+
+  async function handleDeleteExpectation(expectationId: string) {
+    if (!targetId || !target || !window.confirm('Approve deletion of this authorization expectation?')) return
+    setExpectationBusy(expectationId)
+    try {
+      const approvalReceiptId = await createTargetPolicyApproval(targetId, target)
+      await deleteTargetPrincipalExpectation(targetId, expectationId, approvalReceiptId)
+      await loadPrincipalMatrix(targetId)
+      toast.success('Principal expectation deleted')
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to delete principal expectation')
+    } finally {
+      setExpectationBusy(null)
+    }
+  }
+
+  async function handleCompileInvariant(persistDraft: boolean) {
+    if (!targetId || !target || !invariantRule.trim()) {
+      toast.error('Select a target and enter a short business rule')
+      return
+    }
+    setInvariantBusy(persistDraft ? 'persist' : 'preview')
+    try {
+      let approvalReceiptId: string | undefined
+      if (persistDraft) {
+        if (!window.confirm('Save the compiled rule as a non-authoritative draft for operator review?')) return
+        approvalReceiptId = await createTargetPolicyApproval(targetId, target)
+      }
+      const result = await compileTargetInvariant(targetId, {
+        rule_text: invariantRule.trim(),
+        persist_drafts: persistDraft,
+        approval_receipt_id: approvalReceiptId,
+      })
+      setInvariantPreview(result)
+      if (persistDraft) {
+        await loadInvariants(targetId)
+        toast.success(`${result.persisted_count} invariant draft${result.persisted_count === 1 ? '' : 's'} saved`)
+      } else if (!result.matched) {
+        toast.error(result.warnings[0] || 'Rule is ambiguous; use typed fields')
+      }
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to compile invariant')
+    } finally {
+      setInvariantBusy(null)
+    }
+  }
+
+  async function handleApproveInvariant(contractId: string) {
+    if (!targetId || !target || !window.confirm(
+      'Approve this typed rule as planning guidance? It will still require deterministic live proof before any finding.',
+    )) return
+    setInvariantBusy(contractId)
+    try {
+      const approvalReceiptId = await createTargetPolicyApproval(targetId, target)
+      await approveTargetInvariant(targetId, contractId, approvalReceiptId)
+      await loadInvariants(targetId)
+      toast.success('Invariant approved for planning; finding promotion remains disabled without live proof')
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to approve invariant')
+    } finally {
+      setInvariantBusy(null)
+    }
+  }
+
+  async function handleGenerateInvariantHypotheses() {
+    if (!targetId) return
+    setInvariantBusy('hypotheses')
+    try {
+      const result = await generateTargetInvariantHypotheses(targetId)
+      toast.success(`${result.created} new invariant lead${result.created === 1 ? '' : 's'} added to the research backlog`)
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to generate invariant hypotheses')
+    } finally {
+      setInvariantBusy(null)
+    }
+  }
+
   async function handleStartSession() {
     if (!target.trim()) {
       toast.error('Target URL is required')
@@ -238,6 +591,27 @@ export default function InteractiveSessionPage() {
       await loadSessionState(currentSessionId, true)
     } catch (err) {
       toast.error(err instanceof Error ? err.message : `Failed to apply auth for ${user}`)
+    } finally {
+      setBusyAction(null)
+    }
+  }
+
+  async function handleApplyManagedProfile(user: UserKey, credentialProfileId: string) {
+    if (!currentSessionId) {
+      toast.error('Start or attach a session first')
+      return
+    }
+    setBusyAction(`auth-${user}`)
+    try {
+      const res = await runInteractiveAction(currentSessionId, {
+        action: 'use_credential_profile',
+        user,
+        data: { credential_profile_id: credentialProfileId },
+      })
+      toast.success(`${user} managed profile applied (${res.auth_method || 'unknown method'})`)
+      await loadSessionState(currentSessionId, true)
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : `Failed to apply managed profile for ${user}`)
     } finally {
       setBusyAction(null)
     }
@@ -492,43 +866,484 @@ export default function InteractiveSessionPage() {
             <p><span className="text-gray-500">Current URL:</span> {session.current_url || '-'}</p>
             <p><span className="text-gray-500">Network Entries:</span> {session.network_log_count}</p>
             <p><span className="text-gray-500">Discovered Endpoints:</span> {session.discovered_endpoints_count}</p>
-            <p><span className="text-gray-500">Last Activity:</span> {new Date(session.last_activity).toLocaleString()}</p>
+            <p><span className="text-gray-500">Last Activity:</span> {(() => {
+              const d = session.last_activity ? new Date(session.last_activity) : null
+              return d && !isNaN(d.getTime()) ? d.toLocaleString() : '—'
+            })()}</p>
           </div>
         )}
       </Card>
+
+      {(principalMatrix || principalMatrixError) && (
+        <Card className="p-5 space-y-4">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <h2 className="text-lg font-semibold text-white">Principal Replay Plan</h2>
+            {principalMatrix && <Badge className="bg-gray-800 text-gray-300">{principalMatrix.expectations.length} expectations</Badge>}
+          </div>
+          {principalMatrixError ? (
+            <ErrorState message={principalMatrixError} />
+          ) : principalMatrix && (
+            <>
+              <div className="space-y-3 border-b border-gray-800 pb-4">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <KeyRound className="h-4 w-4 text-blue-300" aria-hidden="true" />
+                    <h3 className="text-sm font-medium text-white">Managed credential profiles</h3>
+                  </div>
+                  <span className="text-xs text-gray-500">Secrets are write-only</span>
+                </div>
+                {credentialProfilesError && <ErrorState message={credentialProfilesError} />}
+                {credentialProfiles.length > 0 && (
+                  <div className="divide-y divide-gray-800 border-y border-gray-800">
+                    {credentialProfiles.map((profile) => (
+                      <div key={profile.id} className="flex flex-wrap items-center gap-2 py-2 text-xs">
+                        <span className="w-full font-medium text-gray-200 sm:w-auto sm:min-w-0 sm:flex-1 sm:truncate">{profile.name}</span>
+                        <Badge className={profile.status === 'active' ? 'bg-green-500/15 text-green-300' : 'bg-amber-500/15 text-amber-300'}>
+                          {profile.status}
+                        </Badge>
+                        <span className="text-gray-500">{profile.auth_kind === 'authorization_header' ? 'Authorization' : 'Cookie'}</span>
+                        <span className="font-mono text-gray-500">{profile.secret_preview || 'configured'}</span>
+                        {profile.storage_encrypted ? (
+                          <span className="inline-flex items-center gap-1 text-green-300"><ShieldCheck className="h-3.5 w-3.5" aria-hidden="true" /> encrypted</span>
+                        ) : (
+                          <span className="text-amber-300">plaintext storage</span>
+                        )}
+                        {profile.refresh_required && <span className="text-amber-300">refresh due</span>}
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          title={`Rotate ${profile.name}`}
+                          disabled={credentialBusy === profile.id}
+                          onClick={() => handlePrepareCredentialRotation(profile)}
+                        >
+                          <RefreshCw className="h-3.5 w-3.5" aria-hidden="true" />
+                          <span>Rotate</span>
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          title={`Deactivate ${profile.name}`}
+                          disabled={credentialBusy === profile.id}
+                          onClick={() => void handleDeactivateCredentialProfile(profile)}
+                        >
+                          <XCircle className="h-3.5 w-3.5" aria-hidden="true" />
+                          <span>Deactivate</span>
+                        </Button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                <div className="grid gap-2 md:grid-cols-[minmax(10rem,1.2fr)_minmax(10rem,1fr)_minmax(13rem,2fr)_minmax(12rem,1fr)_auto]">
+                  <label className="space-y-1 text-xs text-gray-500">
+                    <span>Profile name</span>
+                    <input
+                      value={credentialDraft.name}
+                      disabled={Boolean(credentialDraft.rotateProfileId)}
+                      onChange={(event) => setCredentialDraft((current) => ({ ...current, name: event.target.value }))}
+                      placeholder="customer-a"
+                      className="w-full rounded-md border border-gray-800 bg-gray-900 px-2.5 py-2 text-sm text-white placeholder-gray-600 focus:border-blue-500 focus:outline-none disabled:opacity-60"
+                    />
+                  </label>
+                  <label className="space-y-1 text-xs text-gray-500">
+                    <span>Credential type</span>
+                    <select
+                      value={credentialDraft.authKind}
+                      disabled={Boolean(credentialDraft.rotateProfileId)}
+                      onChange={(event) => setCredentialDraft((current) => ({ ...current, authKind: event.target.value as TargetCredentialProfile['auth_kind'] }))}
+                      className="w-full rounded-md border border-gray-800 bg-gray-900 px-2.5 py-2 text-sm text-white focus:border-blue-500 focus:outline-none disabled:opacity-60"
+                    >
+                      <option value="authorization_header">Authorization header</option>
+                      <option value="cookie">Cookie string</option>
+                    </select>
+                  </label>
+                  <label className="space-y-1 text-xs text-gray-500">
+                    <span>{credentialDraft.rotateProfileId ? 'New secret' : 'Secret'}</span>
+                    <input
+                      type="password"
+                      autoComplete="new-password"
+                      value={credentialDraft.secret}
+                      onChange={(event) => setCredentialDraft((current) => ({ ...current, secret: event.target.value }))}
+                      placeholder={credentialDraft.authKind === 'authorization_header' ? 'Bearer token' : 'session=value'}
+                      className="w-full rounded-md border border-gray-800 bg-gray-900 px-2.5 py-2 text-sm text-white placeholder-gray-600 focus:border-blue-500 focus:outline-none"
+                    />
+                  </label>
+                  <label className="space-y-1 text-xs text-gray-500">
+                    <span>Expires at</span>
+                    <input
+                      type="datetime-local"
+                      value={credentialDraft.expiresAt}
+                      onChange={(event) => setCredentialDraft((current) => ({ ...current, expiresAt: event.target.value }))}
+                      className="w-full rounded-md border border-gray-800 bg-gray-900 px-2.5 py-2 text-sm text-white focus:border-blue-500 focus:outline-none"
+                    />
+                  </label>
+                  <div className="flex items-end gap-1">
+                    {credentialDraft.rotateProfileId && (
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => setCredentialDraft({ name: '', authKind: 'authorization_header', secret: '', expiresAt: '', rotateProfileId: '' })}
+                      >
+                        Cancel
+                      </Button>
+                    )}
+                    <Button size="sm" disabled={Boolean(credentialBusy)} onClick={() => void handleSaveCredentialProfile()}>
+                      <KeyRound className="h-3.5 w-3.5" aria-hidden="true" />
+                      <span>{credentialDraft.rotateProfileId ? 'Rotate' : 'Add profile'}</span>
+                    </Button>
+                  </div>
+                </div>
+              </div>
+              <div className="grid gap-3 md:grid-cols-2">
+                {(['user1', 'user2'] as UserKey[]).map((authState) => {
+                  const principal = principalsByAuthState[authState]
+                  const expectations = principalMatrix.expectations.filter((item) => item.principal_auth_state === authState || item.principal_id === principal?.id)
+                  const allowCount = expectations.filter((item) => item.expected_access === 'allow').length
+                  const denyCount = expectations.filter((item) => item.expected_access === 'deny').length
+                  return (
+                    <div key={authState} className="space-y-3 rounded-md border border-gray-800 bg-gray-950 p-3">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <Badge className="bg-blue-500/15 text-blue-300">{authState}</Badge>
+                        <span className="text-sm font-medium text-white">{principal?.label || 'Unassigned principal'}</span>
+                        {principal?.role && <Badge className="bg-gray-800 text-gray-300">{principal.role}</Badge>}
+                        {principal?.credential_configured && <Badge className="bg-green-500/15 text-green-300">credential profile</Badge>}
+                      </div>
+                      <div className="flex flex-wrap gap-2 text-xs text-gray-500">
+                        <span>tenant: <span className="text-gray-300">{principal?.tenant_id || 'none'}</span></span>
+                        <span>allow: <span className="text-green-300">{allowCount}</span></span>
+                        <span>deny: <span className="text-amber-300">{denyCount}</span></span>
+                      </div>
+                      <div className="grid gap-2 sm:grid-cols-2">
+                        <label className="space-y-1 text-xs text-gray-500">
+                          <span>Label</span>
+                          <input
+                            value={principalDrafts[authState].label}
+                            onChange={(event) => setPrincipalDrafts((current) => ({ ...current, [authState]: { ...current[authState], label: event.target.value } }))}
+                            placeholder="Customer account"
+                            className="w-full rounded-md border border-gray-800 bg-gray-900 px-2.5 py-2 text-sm text-white placeholder-gray-600 focus:border-blue-500 focus:outline-none"
+                          />
+                        </label>
+                        <label className="space-y-1 text-xs text-gray-500">
+                          <span>Role</span>
+                          <input
+                            value={principalDrafts[authState].role}
+                            onChange={(event) => setPrincipalDrafts((current) => ({ ...current, [authState]: { ...current[authState], role: event.target.value } }))}
+                            placeholder="user"
+                            className="w-full rounded-md border border-gray-800 bg-gray-900 px-2.5 py-2 text-sm text-white placeholder-gray-600 focus:border-blue-500 focus:outline-none"
+                          />
+                        </label>
+                        <label className="space-y-1 text-xs text-gray-500">
+                          <span>Tenant ID</span>
+                          <input
+                            value={principalDrafts[authState].tenantId}
+                            onChange={(event) => setPrincipalDrafts((current) => ({ ...current, [authState]: { ...current[authState], tenantId: event.target.value } }))}
+                            placeholder="tenant-a"
+                            className="w-full rounded-md border border-gray-800 bg-gray-900 px-2.5 py-2 text-sm text-white placeholder-gray-600 focus:border-blue-500 focus:outline-none"
+                          />
+                        </label>
+                        <label className="space-y-1 text-xs text-gray-500">
+                          <span>Credential profile</span>
+                          <select
+                            value={principalDrafts[authState].credentialProfile}
+                            onChange={(event) => setPrincipalDrafts((current) => ({ ...current, [authState]: { ...current[authState], credentialProfile: event.target.value } }))}
+                            className="w-full rounded-md border border-gray-800 bg-gray-900 px-2.5 py-2 text-sm text-white placeholder-gray-600 focus:border-blue-500 focus:outline-none"
+                          >
+                            <option value="">No managed profile</option>
+                            {principalDrafts[authState].credentialProfile && !credentialProfiles.some((profile) => profile.name === principalDrafts[authState].credentialProfile) && (
+                              <option value={principalDrafts[authState].credentialProfile}>{principalDrafts[authState].credentialProfile} (unresolved)</option>
+                            )}
+                            {credentialProfiles.map((profile) => (
+                              <option key={profile.id} value={profile.name}>{profile.name} · {profile.auth_kind === 'authorization_header' ? 'Authorization' : 'Cookie'}</option>
+                            ))}
+                          </select>
+                        </label>
+                      </div>
+                      <div className="flex flex-wrap items-center justify-end gap-2">
+                        {principal && (
+                          <Button size="sm" variant="ghost" disabled={principalBusy === authState} onClick={() => void handleDeactivatePrincipal(authState)}>
+                            Deactivate
+                          </Button>
+                        )}
+                        <Button size="sm" disabled={principalBusy === authState} onClick={() => void handleSavePrincipal(authState)}>
+                          {principalBusy === authState ? 'Saving...' : principal ? 'Update principal' : 'Create principal'}
+                        </Button>
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+              <div className="border-t border-gray-800 pt-4">
+                <div className="grid gap-3 lg:grid-cols-[auto_minmax(12rem,2fr)_minmax(11rem,1fr)_minmax(9rem,1fr)_7rem_auto]">
+                  <label className="space-y-1 text-xs text-gray-500">
+                    <span>Method</span>
+                    <select
+                      value={expectationDraft.method}
+                      onChange={(event) => setExpectationDraft((current) => ({ ...current, method: event.target.value }))}
+                      className="w-full rounded-md border border-gray-800 bg-gray-950 px-2.5 py-2 text-sm text-white focus:border-blue-500 focus:outline-none"
+                    >
+                      {REQUEST_METHODS.map((option) => <option key={option} value={option}>{option}</option>)}
+                    </select>
+                  </label>
+                  <label className="space-y-1 text-xs text-gray-500">
+                    <span>Endpoint path</span>
+                    <input
+                      value={expectationDraft.path}
+                      onChange={(event) => setExpectationDraft((current) => ({ ...current, path: event.target.value }))}
+                      placeholder="/api/orders/{id}"
+                      className="w-full rounded-md border border-gray-800 bg-gray-950 px-2.5 py-2 text-sm font-mono text-white placeholder-gray-600 focus:border-blue-500 focus:outline-none"
+                    />
+                  </label>
+                  <label className="space-y-1 text-xs text-gray-500">
+                    <span>Principal</span>
+                    <select
+                      value={expectationDraft.principalId}
+                      onChange={(event) => {
+                        const selected = principalMatrix.principals.find((item) => item.id === event.target.value)
+                        setExpectationDraft((current) => ({
+                          ...current,
+                          principalId: event.target.value,
+                          principalRole: selected?.role || current.principalRole,
+                          tenantId: selected?.tenant_id || current.tenantId,
+                        }))
+                      }}
+                      className="w-full rounded-md border border-gray-800 bg-gray-950 px-2.5 py-2 text-sm text-white focus:border-blue-500 focus:outline-none"
+                    >
+                      <option value="">Role only</option>
+                      {principalMatrix.principals.map((item) => <option key={item.id} value={item.id}>{item.auth_state}: {item.label}</option>)}
+                    </select>
+                  </label>
+                  <label className="space-y-1 text-xs text-gray-500">
+                    <span>Expected access</span>
+                    <select
+                      value={expectationDraft.expectedAccess}
+                      onChange={(event) => setExpectationDraft((current) => ({ ...current, expectedAccess: event.target.value as PrincipalExpectationDraft['expectedAccess'] }))}
+                      className="w-full rounded-md border border-gray-800 bg-gray-950 px-2.5 py-2 text-sm text-white focus:border-blue-500 focus:outline-none"
+                    >
+                      <option value="allow">Allow</option>
+                      <option value="deny">Deny</option>
+                      <option value="requires_role">Requires role</option>
+                      <option value="unknown">Unknown</option>
+                    </select>
+                  </label>
+                  <label className="space-y-1 text-xs text-gray-500">
+                    <span>HTTP status</span>
+                    <input
+                      value={expectationDraft.expectedHttpStatus}
+                      onChange={(event) => setExpectationDraft((current) => ({ ...current, expectedHttpStatus: event.target.value }))}
+                      inputMode="numeric"
+                      placeholder="403"
+                      className="w-full rounded-md border border-gray-800 bg-gray-950 px-2.5 py-2 text-sm text-white placeholder-gray-600 focus:border-blue-500 focus:outline-none"
+                    />
+                  </label>
+                  <div className="flex items-end">
+                    <Button className="w-full" disabled={expectationBusy === 'save'} onClick={() => void handleSaveExpectation()}>
+                      {expectationBusy === 'save' ? 'Saving...' : 'Save expectation'}
+                    </Button>
+                  </div>
+                </div>
+                {!expectationDraft.principalId && (
+                  <label className="mt-3 block max-w-xs space-y-1 text-xs text-gray-500">
+                    <span>Required role</span>
+                    <input
+                      value={expectationDraft.principalRole}
+                      onChange={(event) => setExpectationDraft((current) => ({ ...current, principalRole: event.target.value }))}
+                      placeholder="admin"
+                      className="w-full rounded-md border border-gray-800 bg-gray-950 px-2.5 py-2 text-sm text-white placeholder-gray-600 focus:border-blue-500 focus:outline-none"
+                    />
+                  </label>
+                )}
+              </div>
+              {principalMatrix.expectations.length > 0 && (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead><tr className="border-b border-gray-800 text-left text-xs text-gray-500"><th className="px-2 py-2">Endpoint</th><th className="px-2 py-2">Principal</th><th className="px-2 py-2">Expected</th><th className="px-2 py-2" /></tr></thead>
+                    <tbody>
+                      {principalMatrix.expectations.slice(0, 8).map((item) => (
+                        <tr key={item.id} className="border-b border-gray-800/70">
+                          <td className="px-2 py-2 font-mono text-xs text-gray-300">{item.method} {item.path}</td>
+                          <td className="px-2 py-2 text-gray-400">{item.principal_label || item.principal_auth_state || item.principal_role || 'unspecified'}</td>
+                          <td className="px-2 py-2"><Badge className={item.expected_access === 'deny' ? 'bg-amber-500/15 text-amber-300' : item.expected_access === 'allow' ? 'bg-green-500/15 text-green-300' : 'bg-gray-800 text-gray-300'}>{item.expected_access}{item.expected_http_status ? ` · ${item.expected_http_status}` : ''}</Badge></td>
+                          <td className="px-2 py-2 text-right">
+                            <div className="flex justify-end gap-1">
+                              <Button size="sm" variant="ghost" onClick={() => setExpectationDraft({
+                                method: item.method,
+                                path: item.path,
+                                principalId: item.principal_id || '',
+                                principalRole: item.principal_role || '',
+                                tenantId: item.tenant_id || '',
+                                expectedAccess: item.expected_access,
+                                expectedHttpStatus: item.expected_http_status ? String(item.expected_http_status) : '',
+                              })}>Edit</Button>
+                              <Button size="sm" variant="ghost" onClick={() => {
+                                setEndpoint(item.path)
+                                setMethod(item.method)
+                                if (item.principal_auth_state === 'user1' || item.principal_auth_state === 'user2') setAsUser(item.principal_auth_state)
+                              }}>Load test</Button>
+                              <Button size="sm" variant="ghost" disabled={expectationBusy === item.id} onClick={() => void handleDeleteExpectation(item.id)}>Delete</Button>
+                            </div>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </>
+          )}
+        </Card>
+      )}
+
+      {targetId && (
+        <Card className="p-5 space-y-4">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h2 className="text-lg font-semibold text-white">Business Rules for Deep Hunt</h2>
+              <p className="mt-1 text-xs text-gray-500">
+                One short rule becomes a typed draft. Approval guides planning only; live deterministic replay is still required.
+              </p>
+            </div>
+            <div className="flex items-center gap-2">
+              {invariants && <Badge className="bg-gray-800 text-gray-300">{invariants.approved_count} approved · {invariants.draft_count} drafts</Badge>}
+              <Button
+                size="sm"
+                variant="ghost"
+                disabled={!invariants?.approved_count || invariantBusy === 'hypotheses'}
+                onClick={() => void handleGenerateInvariantHypotheses()}
+              >
+                {invariantBusy === 'hypotheses' ? 'Generating...' : 'Generate research leads'}
+              </Button>
+            </div>
+          </div>
+          {invariantsError && <ErrorState message={invariantsError} />}
+          <div className="grid gap-2 lg:grid-cols-[minmax(18rem,1fr)_auto_auto]">
+            <textarea
+              value={invariantRule}
+              onChange={(event) => setInvariantRule(event.target.value)}
+              rows={2}
+              placeholder="Only managers can issue refunds at /api/refunds POST"
+              className="w-full resize-y rounded-md border border-gray-800 bg-gray-950 px-3 py-2 text-sm text-white placeholder-gray-600 focus:border-blue-500 focus:outline-none"
+            />
+            <Button
+              variant="ghost"
+              disabled={!invariantRule.trim() || Boolean(invariantBusy)}
+              onClick={() => void handleCompileInvariant(false)}
+            >
+              {invariantBusy === 'preview' ? 'Compiling...' : 'Preview typed rule'}
+            </Button>
+            <Button
+              disabled={!invariantRule.trim() || Boolean(invariantBusy)}
+              onClick={() => void handleCompileInvariant(true)}
+            >
+              {invariantBusy === 'persist' ? 'Saving...' : 'Compile & save draft'}
+            </Button>
+          </div>
+          {invariantPreview && (
+            <div className="rounded-md border border-gray-800 bg-gray-950 p-3 text-xs">
+              {invariantPreview.candidates.length === 0 ? (
+                <p className="text-amber-300">{invariantPreview.warnings.join('; ')}</p>
+              ) : invariantPreview.candidates.map((candidate, index) => (
+                <div key={`${candidate.contract_kind}-${index}`} className="flex flex-wrap items-center gap-2 text-gray-300">
+                  <Badge className="bg-blue-500/15 text-blue-300">{candidate.contract_kind}</Badge>
+                  <span>{candidate.title}</span>
+                  {candidate.method && <span className="font-mono text-gray-500">{candidate.method}</span>}
+                  {candidate.path && <span className="font-mono text-gray-400">{candidate.path}</span>}
+                  <Badge className={candidate.ready_for_approval ? 'bg-green-500/15 text-green-300' : 'bg-amber-500/15 text-amber-300'}>
+                    {candidate.ready_for_approval ? 'ready for review' : candidate.approval_errors?.join(', ') || 'needs fields'}
+                  </Badge>
+                  <span className="text-gray-600">no execution · no finding authority</span>
+                </div>
+              ))}
+            </div>
+          )}
+          {invariants && invariants.contracts.length > 0 && (
+            <div className="divide-y divide-gray-800 border-y border-gray-800">
+              {invariants.contracts.slice(0, 12).map((contract) => (
+                <div key={contract.id || contract.title} className="flex flex-wrap items-center gap-2 py-3 text-xs">
+                  <Badge className={contract.status === 'approved' ? 'bg-green-500/15 text-green-300' : 'bg-gray-800 text-gray-300'}>
+                    {contract.status}
+                  </Badge>
+                  <Badge className="bg-blue-500/15 text-blue-300">{contract.contract_kind}</Badge>
+                  <span className="min-w-0 flex-1 text-sm text-gray-200">{contract.title}</span>
+                  {contract.verification_plan && (
+                    <span className={contract.verification_plan.deterministic_family_supported ? 'text-green-300' : 'text-amber-300'}>
+                      {contract.verification_plan.deterministic_family_supported
+                        ? `${contract.verification_plan.proof_family} verifier available`
+                        : 'deterministic contract binder pending'}
+                    </span>
+                  )}
+                  {contract.status === 'draft' && contract.id && (
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      disabled={invariantBusy === contract.id}
+                      onClick={() => void handleApproveInvariant(contract.id!)}
+                    >
+                      {invariantBusy === contract.id ? 'Approving...' : 'Approve for planning'}
+                    </Button>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </Card>
+      )}
 
       <Card className="p-5 space-y-4">
         <h2 className="text-lg font-semibold text-white">Step 2. Configure Two User Contexts</h2>
         <div className="grid gap-4 lg:grid-cols-2">
           {(['user1', 'user2'] as UserKey[]).map((user) => {
             const userState = session?.users?.[user]
+            const plannedPrincipal = principalsByAuthState[user]
+            const managedProfile = credentialProfiles.find((profile) => profile.name === plannedPrincipal?.credential_profile)
+            const managedProfileBound = Boolean(
+              managedProfile?.id
+              && userState?.credential_profile_id === managedProfile.id
+              && userState?.principal_auth_state === user,
+            )
             return (
               <div key={user} className="rounded-lg border border-gray-800 bg-gray-950 p-4 space-y-3">
                 <div className="flex items-center justify-between">
-                  <h3 className="text-sm font-semibold text-white uppercase tracking-wide">{user}</h3>
+                  <div>
+                    <h3 className="text-sm font-semibold text-white uppercase tracking-wide">{user}</h3>
+                    {plannedPrincipal && <p className="mt-0.5 text-xs text-gray-500">{plannedPrincipal.label} · {plannedPrincipal.role}{plannedPrincipal.tenant_id ? ` · tenant ${plannedPrincipal.tenant_id}` : ''}</p>}
+                  </div>
                   <Badge className={userState?.is_authenticated ? 'bg-green-500/20 text-green-300' : 'bg-gray-700 text-gray-400'}>
-                    {userState?.is_authenticated ? `${userState.auth_method || 'auth'} ready` : 'not authenticated'}
+                    {managedProfileBound ? 'profile bound' : userState?.is_authenticated ? `${userState.auth_method || 'auth'} ready` : 'not authenticated'}
                   </Badge>
                 </div>
 
+                {managedProfile && (
+                  <Button
+                    onClick={() => void handleApplyManagedProfile(user, managedProfile.id)}
+                    disabled={!currentSessionId || busyAction === `auth-${user}` || !managedProfile.execution_compatible}
+                    className="w-full"
+                  >
+                    {busyAction === `auth-${user}` ? `Applying ${user}...` : `Apply ${managedProfile.name}`}
+                  </Button>
+                )}
+
                 <div className="space-y-2">
                   <input
+                    type="password"
+                    autoComplete="off"
                     value={authForms[user].token}
                     onChange={(e) => setAuthForms(prev => ({ ...prev, [user]: { ...prev[user], token: e.target.value } }))}
                     placeholder="Bearer token (without Bearer prefix)"
                     className="w-full rounded-lg border border-gray-700 bg-gray-900 px-3 py-2 text-sm text-white placeholder-gray-500 focus:border-blue-500 focus:outline-none"
                   />
                   <input
+                    type="password"
+                    autoComplete="off"
                     value={authForms[user].authHeader}
                     onChange={(e) => setAuthForms(prev => ({ ...prev, [user]: { ...prev[user], authHeader: e.target.value } }))}
                     placeholder="Auth header (e.g., Bearer eyJ...)"
                     className="w-full rounded-lg border border-gray-700 bg-gray-900 px-3 py-2 text-sm text-white placeholder-gray-500 focus:border-blue-500 focus:outline-none"
                   />
-                  <textarea
+                  <input
+                    type="password"
+                    autoComplete="off"
                     value={authForms[user].cookies}
                     onChange={(e) => setAuthForms(prev => ({ ...prev, [user]: { ...prev[user], cookies: e.target.value } }))}
                     placeholder="Cookies (session=abc; token=xyz)"
-                    rows={2}
                     className="w-full rounded-lg border border-gray-700 bg-gray-900 px-3 py-2 text-sm text-white placeholder-gray-500 focus:border-blue-500 focus:outline-none"
                   />
                 </div>
@@ -537,8 +1352,9 @@ export default function InteractiveSessionPage() {
                   onClick={() => void handleApplyAuth(user)}
                   disabled={!currentSessionId || busyAction === `auth-${user}`}
                   className="w-full"
+                  variant={managedProfile ? 'secondary' : 'primary'}
                 >
-                  {busyAction === `auth-${user}` ? `Applying ${user}...` : `Apply ${user} Auth`}
+                  {busyAction === `auth-${user}` ? `Applying ${user}...` : `Apply manual auth`}
                 </Button>
               </div>
             )
@@ -593,8 +1409,13 @@ export default function InteractiveSessionPage() {
                 onChange={(e) => setAllowOutOfScope(e.target.checked)}
                 className="rounded border-gray-600 bg-gray-900 text-blue-600"
               />
-              Allow out-of-scope request (cross-origin)
+              I reviewed scope and authorize this cross-origin request
             </label>
+            {allowOutOfScope && (
+              <p className="text-xs text-amber-300">
+                The request may leave the current target origin. Confirm the destination is explicitly authorized before running it.
+              </p>
+            )}
 
             <div className="flex flex-wrap gap-2">
               <Button

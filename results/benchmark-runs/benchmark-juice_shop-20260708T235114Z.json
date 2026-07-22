@@ -1,0 +1,591 @@
+{
+  "artifact_type": "benchmark_scorecard_run",
+  "artifact_status": "failed_benchmark_scorecard",
+  "artifact_note": "Tracked benchmark scorecard. A tracked file is not a success claim: passed=true means every configured gate passed; passed=false means at least one configured gate failed.",
+  "fleet": {
+    "count": 16,
+    "current": 16,
+    "stale": 0,
+    "pending": 0,
+    "fingerprints": [
+      "bcd703e384b3f607"
+    ]
+  },
+  "fleet_uniform": true,
+  "rescore_after_retest": false,
+  "seed_hypotheses": false,
+  "targets": [
+    {
+      "total_findings": 32,
+      "verified_high_critical": 3,
+      "suspected_high_critical": 0,
+      "false_positive_risk": 0.0,
+      "coverage_percent": 0.195,
+      "endpoints_discovered": 924,
+      "endpoints_tested": 180,
+      "budget_exhausted": false,
+      "budget_exhausted_reason": null,
+      "auth_blocked": false,
+      "auth_states_tested": [
+        "anonymous",
+        "user1",
+        "user2"
+      ],
+      "auth_workflow": {
+        "required_auth_states": [
+          "user1"
+        ],
+        "observed_auth_states": [
+          "anonymous",
+          "user1",
+          "user2"
+        ],
+        "missing_auth_states": [],
+        "two_principal_required": false,
+        "two_principal_observed": true,
+        "status": "ready",
+        "blockers": []
+      },
+      "timeout": false,
+      "error": null,
+      "expected_found": [
+        {
+          "id": "xss-dom-search",
+          "family": "xss",
+          "route": "#/search",
+          "proof": "browser",
+          "min_severity": "high",
+          "evidence": "DOM XSS in Hash Route (iframe_js_uri) (2 occurrences)"
+        },
+        {
+          "id": "exposed-ftp-listing",
+          "family": "sensitive_exposure",
+          "route": "/ftp",
+          "proof": "deterministic",
+          "min_severity": "high",
+          "evidence": "Sensitive file exposed: acquisitions.md"
+        },
+        {
+          "id": "exposed-confidential",
+          "family": "sensitive_exposure",
+          "route": "/ftp/acquisitions.md",
+          "proof": "deterministic",
+          "min_severity": "high",
+          "evidence": "Sensitive file exposed: acquisitions.md"
+        }
+      ],
+      "expected_missed": [
+        {
+          "id": "sqli-search",
+          "family": "sqli",
+          "route": "/rest/products/search",
+          "proof": "verified",
+          "min_severity": "critical",
+          "evidence": null
+        },
+        {
+          "id": "sqli-login",
+          "family": "sqli",
+          "route": "/rest/user/login",
+          "proof": "verified",
+          "min_severity": "critical",
+          "evidence": null
+        },
+        {
+          "id": "xss-reflected",
+          "family": "xss",
+          "route": "/rest/track-order",
+          "proof": "browser",
+          "min_severity": "high",
+          "evidence": null
+        },
+        {
+          "id": "bfla-users",
+          "family": "broken_access_control",
+          "route": "/api/Users",
+          "proof": "deterministic",
+          "min_severity": "high",
+          "evidence": null
+        },
+        {
+          "id": "exposed-metrics",
+          "family": "sensitive_exposure",
+          "route": "/metrics",
+          "proof": "deterministic",
+          "min_severity": "high",
+          "evidence": null
+        },
+        {
+          "id": "nosqli-reviews",
+          "family": "nosqli",
+          "route": "/rest/products/reviews",
+          "proof": "deterministic",
+          "min_severity": "high",
+          "evidence": null
+        }
+      ],
+      "benchmark_followups": [
+        {
+          "id": "benchmark-miss:juice-shop:sqli-search",
+          "benchmark": "juice-shop",
+          "expectation_id": "sqli-search",
+          "family": "sqli",
+          "route": "/rest/products/search",
+          "proof_required": "verified",
+          "min_severity": "critical",
+          "status": "ready",
+          "operator_hints": [],
+          "blocked_by": [],
+          "reason": "missing_verified_benchmark_expectation",
+          "next_test_action": {
+            "command": "scan.focused_family",
+            "risk_tier": "active",
+            "parameters": {
+              "target": "http://host.docker.internal:3001",
+              "check_family": "sqli",
+              "scan_type": "smart",
+              "budget_profile": "thorough",
+              "no_early_stop": true
+            }
+          }
+        },
+        {
+          "id": "benchmark-miss:juice-shop:sqli-login",
+          "benchmark": "juice-shop",
+          "expectation_id": "sqli-login",
+          "family": "sqli",
+          "route": "/rest/user/login",
+          "proof_required": "verified",
+          "min_severity": "critical",
+          "status": "ready",
+          "operator_hints": [
+            "post_body_params"
+          ],
+          "blocked_by": [],
+          "reason": "missing_verified_benchmark_expectation",
+          "next_test_action": {
+            "command": "scan.focused_family",
+            "risk_tier": "active",
+            "parameters": {
+              "target": "http://host.docker.internal:3001",
+              "check_family": "sqli",
+              "scan_type": "smart",
+              "budget_profile": "thorough",
+              "no_early_stop": true
+            }
+          }
+        },
+        {
+          "id": "benchmark-miss:juice-shop:xss-reflected",
+          "benchmark": "juice-shop",
+          "expectation_id": "xss-reflected",
+          "family": "xss",
+          "route": "/rest/track-order",
+          "proof_required": "browser",
+          "min_severity": "high",
+          "status": "ready",
+          "operator_hints": [
+            "browser_proof_required"
+          ],
+          "blocked_by": [],
+          "reason": "missing_verified_benchmark_expectation",
+          "next_test_action": {
+            "command": "scan.focused_family",
+            "risk_tier": "active",
+            "parameters": {
+              "target": "http://host.docker.internal:3001",
+              "check_family": "xss",
+              "scan_type": "smart",
+              "budget_profile": "thorough",
+              "no_early_stop": true
+            }
+          }
+        },
+        {
+          "id": "benchmark-miss:juice-shop:bfla-users",
+          "benchmark": "juice-shop",
+          "expectation_id": "bfla-users",
+          "family": "broken_access_control",
+          "route": "/api/Users",
+          "proof_required": "deterministic",
+          "min_severity": "high",
+          "status": "ready",
+          "operator_hints": [],
+          "blocked_by": [],
+          "reason": "missing_verified_benchmark_expectation",
+          "next_test_action": {
+            "command": "scan.focused_family",
+            "risk_tier": "active",
+            "parameters": {
+              "target": "http://host.docker.internal:3001",
+              "check_family": "auth",
+              "scan_type": "smart",
+              "budget_profile": "thorough",
+              "no_early_stop": true
+            }
+          }
+        },
+        {
+          "id": "benchmark-miss:juice-shop:exposed-metrics",
+          "benchmark": "juice-shop",
+          "expectation_id": "exposed-metrics",
+          "family": "sensitive_exposure",
+          "route": "/metrics",
+          "proof_required": "deterministic",
+          "min_severity": "high",
+          "status": "detector_gap",
+          "operator_hints": [],
+          "blocked_by": [],
+          "reason": "missing_verified_benchmark_expectation",
+          "next_test_action": null,
+          "developer_note": "No focused-family executor currently maps this benchmark family; improve the generic detector or add a registered executor before this miss can be campaign-queued."
+        },
+        {
+          "id": "benchmark-miss:juice-shop:nosqli-reviews",
+          "benchmark": "juice-shop",
+          "expectation_id": "nosqli-reviews",
+          "family": "nosqli",
+          "route": "/rest/products/reviews",
+          "proof_required": "deterministic",
+          "min_severity": "high",
+          "status": "ready",
+          "operator_hints": [
+            "json_body_operator_probes"
+          ],
+          "blocked_by": [],
+          "reason": "missing_verified_benchmark_expectation",
+          "next_test_action": {
+            "command": "scan.focused_family",
+            "risk_tier": "active",
+            "parameters": {
+              "target": "http://host.docker.internal:3001",
+              "check_family": "sqli",
+              "scan_type": "smart",
+              "budget_profile": "thorough",
+              "no_early_stop": true
+            }
+          }
+        }
+      ],
+      "expected_recall": 0.33,
+      "phase": "scan_finish",
+      "resolved_budget": null,
+      "invariant_violations": [],
+      "active_execution_failed": false,
+      "grade_reliable": true,
+      "report_degraded": false,
+      "report_invariant_violations": [],
+      "two_user": false,
+      "scan_id": "566ee6ad-b85e-40cf-9e8d-af62434b504f",
+      "target": "juice_shop",
+      "gates": [
+        {
+          "gate": "report_invariants_clean",
+          "pass": true,
+          "detail": "clean"
+        },
+        {
+          "gate": "grade_reliable",
+          "pass": true,
+          "detail": "grade_reliable=True"
+        },
+        {
+          "gate": "active_execution_ok",
+          "pass": true,
+          "detail": "active_execution_failed=False"
+        },
+        {
+          "gate": "report_not_degraded",
+          "pass": true,
+          "detail": "report_degraded=False"
+        },
+        {
+          "gate": "min_verified_high_critical",
+          "pass": false,
+          "detail": "3 >= 6"
+        },
+        {
+          "gate": "max_unverified_high_ratio",
+          "pass": true,
+          "detail": "0.0 <= 0.35"
+        },
+        {
+          "gate": "require_verified_sqli",
+          "pass": false,
+          "detail": "no verified SQLi"
+        },
+        {
+          "gate": "require_browser_proven_xss",
+          "pass": true,
+          "detail": "browser XSS present"
+        }
+      ],
+      "passed": false,
+      "scorecards": {
+        "scan_finish": {
+          "total_findings": 32,
+          "verified_high_critical": 3,
+          "suspected_high_critical": 0,
+          "false_positive_risk": 0.0,
+          "coverage_percent": 0.195,
+          "endpoints_discovered": 924,
+          "endpoints_tested": 180,
+          "budget_exhausted": false,
+          "budget_exhausted_reason": null,
+          "auth_blocked": false,
+          "auth_states_tested": [
+            "anonymous",
+            "user1",
+            "user2"
+          ],
+          "auth_workflow": {
+            "required_auth_states": [
+              "user1"
+            ],
+            "observed_auth_states": [
+              "anonymous",
+              "user1",
+              "user2"
+            ],
+            "missing_auth_states": [],
+            "two_principal_required": false,
+            "two_principal_observed": true,
+            "status": "ready",
+            "blockers": []
+          },
+          "timeout": false,
+          "error": null,
+          "expected_found": [
+            {
+              "id": "xss-dom-search",
+              "family": "xss",
+              "route": "#/search",
+              "proof": "browser",
+              "min_severity": "high",
+              "evidence": "DOM XSS in Hash Route (iframe_js_uri) (2 occurrences)"
+            },
+            {
+              "id": "exposed-ftp-listing",
+              "family": "sensitive_exposure",
+              "route": "/ftp",
+              "proof": "deterministic",
+              "min_severity": "high",
+              "evidence": "Sensitive file exposed: acquisitions.md"
+            },
+            {
+              "id": "exposed-confidential",
+              "family": "sensitive_exposure",
+              "route": "/ftp/acquisitions.md",
+              "proof": "deterministic",
+              "min_severity": "high",
+              "evidence": "Sensitive file exposed: acquisitions.md"
+            }
+          ],
+          "expected_missed": [
+            {
+              "id": "sqli-search",
+              "family": "sqli",
+              "route": "/rest/products/search",
+              "proof": "verified",
+              "min_severity": "critical",
+              "evidence": null
+            },
+            {
+              "id": "sqli-login",
+              "family": "sqli",
+              "route": "/rest/user/login",
+              "proof": "verified",
+              "min_severity": "critical",
+              "evidence": null
+            },
+            {
+              "id": "xss-reflected",
+              "family": "xss",
+              "route": "/rest/track-order",
+              "proof": "browser",
+              "min_severity": "high",
+              "evidence": null
+            },
+            {
+              "id": "bfla-users",
+              "family": "broken_access_control",
+              "route": "/api/Users",
+              "proof": "deterministic",
+              "min_severity": "high",
+              "evidence": null
+            },
+            {
+              "id": "exposed-metrics",
+              "family": "sensitive_exposure",
+              "route": "/metrics",
+              "proof": "deterministic",
+              "min_severity": "high",
+              "evidence": null
+            },
+            {
+              "id": "nosqli-reviews",
+              "family": "nosqli",
+              "route": "/rest/products/reviews",
+              "proof": "deterministic",
+              "min_severity": "high",
+              "evidence": null
+            }
+          ],
+          "benchmark_followups": [
+            {
+              "id": "benchmark-miss:juice-shop:sqli-search",
+              "benchmark": "juice-shop",
+              "expectation_id": "sqli-search",
+              "family": "sqli",
+              "route": "/rest/products/search",
+              "proof_required": "verified",
+              "min_severity": "critical",
+              "status": "ready",
+              "operator_hints": [],
+              "blocked_by": [],
+              "reason": "missing_verified_benchmark_expectation",
+              "next_test_action": {
+                "command": "scan.focused_family",
+                "risk_tier": "active",
+                "parameters": {
+                  "target": "http://host.docker.internal:3001",
+                  "check_family": "sqli",
+                  "scan_type": "smart",
+                  "budget_profile": "thorough",
+                  "no_early_stop": true
+                }
+              }
+            },
+            {
+              "id": "benchmark-miss:juice-shop:sqli-login",
+              "benchmark": "juice-shop",
+              "expectation_id": "sqli-login",
+              "family": "sqli",
+              "route": "/rest/user/login",
+              "proof_required": "verified",
+              "min_severity": "critical",
+              "status": "ready",
+              "operator_hints": [
+                "post_body_params"
+              ],
+              "blocked_by": [],
+              "reason": "missing_verified_benchmark_expectation",
+              "next_test_action": {
+                "command": "scan.focused_family",
+                "risk_tier": "active",
+                "parameters": {
+                  "target": "http://host.docker.internal:3001",
+                  "check_family": "sqli",
+                  "scan_type": "smart",
+                  "budget_profile": "thorough",
+                  "no_early_stop": true
+                }
+              }
+            },
+            {
+              "id": "benchmark-miss:juice-shop:xss-reflected",
+              "benchmark": "juice-shop",
+              "expectation_id": "xss-reflected",
+              "family": "xss",
+              "route": "/rest/track-order",
+              "proof_required": "browser",
+              "min_severity": "high",
+              "status": "ready",
+              "operator_hints": [
+                "browser_proof_required"
+              ],
+              "blocked_by": [],
+              "reason": "missing_verified_benchmark_expectation",
+              "next_test_action": {
+                "command": "scan.focused_family",
+                "risk_tier": "active",
+                "parameters": {
+                  "target": "http://host.docker.internal:3001",
+                  "check_family": "xss",
+                  "scan_type": "smart",
+                  "budget_profile": "thorough",
+                  "no_early_stop": true
+                }
+              }
+            },
+            {
+              "id": "benchmark-miss:juice-shop:bfla-users",
+              "benchmark": "juice-shop",
+              "expectation_id": "bfla-users",
+              "family": "broken_access_control",
+              "route": "/api/Users",
+              "proof_required": "deterministic",
+              "min_severity": "high",
+              "status": "ready",
+              "operator_hints": [],
+              "blocked_by": [],
+              "reason": "missing_verified_benchmark_expectation",
+              "next_test_action": {
+                "command": "scan.focused_family",
+                "risk_tier": "active",
+                "parameters": {
+                  "target": "http://host.docker.internal:3001",
+                  "check_family": "auth",
+                  "scan_type": "smart",
+                  "budget_profile": "thorough",
+                  "no_early_stop": true
+                }
+              }
+            },
+            {
+              "id": "benchmark-miss:juice-shop:exposed-metrics",
+              "benchmark": "juice-shop",
+              "expectation_id": "exposed-metrics",
+              "family": "sensitive_exposure",
+              "route": "/metrics",
+              "proof_required": "deterministic",
+              "min_severity": "high",
+              "status": "detector_gap",
+              "operator_hints": [],
+              "blocked_by": [],
+              "reason": "missing_verified_benchmark_expectation",
+              "next_test_action": null,
+              "developer_note": "No focused-family executor currently maps this benchmark family; improve the generic detector or add a registered executor before this miss can be campaign-queued."
+            },
+            {
+              "id": "benchmark-miss:juice-shop:nosqli-reviews",
+              "benchmark": "juice-shop",
+              "expectation_id": "nosqli-reviews",
+              "family": "nosqli",
+              "route": "/rest/products/reviews",
+              "proof_required": "deterministic",
+              "min_severity": "high",
+              "status": "ready",
+              "operator_hints": [
+                "json_body_operator_probes"
+              ],
+              "blocked_by": [],
+              "reason": "missing_verified_benchmark_expectation",
+              "next_test_action": {
+                "command": "scan.focused_family",
+                "risk_tier": "active",
+                "parameters": {
+                  "target": "http://host.docker.internal:3001",
+                  "check_family": "sqli",
+                  "scan_type": "smart",
+                  "budget_profile": "thorough",
+                  "no_early_stop": true
+                }
+              }
+            }
+          ],
+          "expected_recall": 0.33,
+          "phase": "scan_finish",
+          "resolved_budget": null,
+          "invariant_violations": [],
+          "active_execution_failed": false,
+          "grade_reliable": true,
+          "report_degraded": false,
+          "report_invariant_violations": [],
+          "two_user": false
+        }
+      }
+    }
+  ],
+  "passed": false
+}

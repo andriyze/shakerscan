@@ -1,4 +1,5 @@
 import asyncio
+import json
 import urllib.parse
 
 from scanner.scanner_tools.proof_of_exploit import (
@@ -128,6 +129,422 @@ def test_sqli_active_check_accepts_honey_postgresql_error_banner():
     assert vulnerable is True
     assert any("postgresql" in item.lower() for item in evidence)
     assert any("SQL error detected" in item for item in evidence)
+
+
+def test_sqli_active_check_accepts_login_auth_bypass():
+    body = json.dumps({
+        "authentication": {"token": "jwt-token"},
+        "user": {"email": "admin@juice-sh.op", "role": "admin"},
+    })
+
+    vulnerable, evidence = _check_sqli_response(
+        out=body,
+        baseline_len=len("Invalid email or password."),
+        elapsed=0.1,
+        technique="auth_bypass_boolean",
+        dbms_detected="sqlite",
+        status_code=200,
+        baseline_status=401,
+        baseline_body="Invalid email or password.",
+        payload="' OR 1=1--",
+    )
+
+    assert vulnerable is True
+    assert any("Authentication bypass via SQLi" in item for item in evidence)
+
+
+def test_sqli_active_check_accepts_json_collection_expansion():
+    baseline = json.dumps({"data": []})
+    body = json.dumps({
+        "data": [
+            {"id": 1, "code": "SAVE10", "amount": 10},
+            {"id": 2, "code": "SAVE20", "amount": 20},
+            {"id": 3, "code": "SAVE30", "amount": 30},
+        ]
+    })
+
+    vulnerable, evidence = _check_sqli_response(
+        out=body,
+        baseline_len=len(baseline),
+        elapsed=0.1,
+        technique="boolean",
+        dbms_detected=None,
+        status_code=200,
+        baseline_status=422,
+        baseline_body=baseline,
+        payload="' OR 1=1--",
+    )
+
+    assert vulnerable is True
+    assert any("SQLi JSON collection expansion" in item for item in evidence)
+
+
+def test_sqli_active_check_rejects_uniform_json_collection_response():
+    body = json.dumps({
+        "data": [
+            {"id": 1, "code": "SAVE10"},
+            {"id": 2, "code": "SAVE20"},
+        ]
+    })
+
+    vulnerable, evidence = _check_sqli_response(
+        out=body,
+        baseline_len=len(body),
+        elapsed=0.1,
+        technique="boolean",
+        dbms_detected=None,
+        status_code=200,
+        baseline_status=200,
+        baseline_body=body,
+        payload="' OR 1=1--",
+    )
+
+    assert vulnerable is False
+    assert not any("SQLi JSON collection expansion" in item for item in evidence)
+
+
+def test_smart_sqli_rejects_collection_expansion_against_validation_error_baseline(monkeypatch):
+    marker = active_checks._CURL_STATUS_MARKER
+
+    async def fake_run(cmd, *args, **kwargs):
+        if "-d" not in cmd:
+            return f'{{"error":"invalid coupon"}}\n{marker}422', "", 0
+        body = json.loads(cmd[cmd.index("-d") + 1])
+        code = str(body.get("code") or body.get("coupon") or "")
+        if " OR " in code.upper():
+            return (
+                json.dumps({
+                    "data": [
+                        {"id": 1, "code": "SAVE10", "amount": 10},
+                        {"id": 2, "code": "SAVE20", "amount": 20},
+                        {"id": 3, "code": "SAVE30", "amount": 30},
+                    ]
+                })
+                + f"\n{marker}200",
+                "",
+                0,
+            )
+        return f'{{"data":[]}}\n{marker}422', "", 0
+
+    monkeypatch.setattr(active_checks, "run", fake_run)
+
+    result = asyncio.run(
+        active_checks.smart_sqli_test(
+            "https://example.test",
+            [
+                {
+                    "url": "https://example.test/community/api/v2/coupon",
+                    "method": "POST",
+                    "content_type": "application/json",
+                    "body_params": ["code"],
+                    "body_template": {"code": "TEST123"},
+                }
+            ],
+            max_seconds=10,
+            max_params_per_endpoint=1,
+        )
+    )
+
+    assert result["vulnerabilities_found"] == 0
+    assert result["findings"] == []
+
+
+def test_extracts_bounded_safe_fields_from_json_validation_errors():
+    body = json.dumps({
+        "detail": [
+            {"loc": ["body", "customer", "email"], "msg": "Field required", "type": "missing"},
+            {"field": "quantity", "message": "must not be blank"},
+            {"field": "role", "message": "Field required"},
+        ],
+        "errors": {"couponCode": "is required", "approvalStatus": "is required"},
+    })
+
+    fields = active_checks._extract_missing_validation_fields(body)
+    assert set(fields) == {"customer.email", "quantity", "couponCode"}
+    assert len(fields) == 3
+    assert active_checks._extract_missing_validation_fields("missing field: email") == []
+
+
+def test_smart_sqli_completes_missing_validation_siblings_before_payloads(monkeypatch):
+    marker = active_checks._CURL_STATUS_MARKER
+    sent_bodies: list[dict] = []
+
+    async def fake_run(cmd, *args, **kwargs):
+        body = json.loads(cmd[cmd.index("-d") + 1])
+        sent_bodies.append(body)
+        if "customerId" not in body:
+            return (
+                json.dumps({
+                    "detail": [{
+                        "loc": ["body", "customerId"],
+                        "msg": "Field required",
+                        "type": "missing",
+                    }]
+                }) + f"\n{marker}422",
+                "",
+                0,
+            )
+        query = str(body.get("query") or "")
+        if " OR " in query.upper():
+            return "SQLite error: near OR: syntax error" + f"\n{marker}500", "", 0
+        return '{"data":[]}' + f"\n{marker}200", "", 0
+
+    monkeypatch.setattr(active_checks, "run", fake_run)
+
+    result = asyncio.run(
+        active_checks.smart_sqli_test(
+            "https://example.test",
+            [{
+                "url": "https://example.test/api/search",
+                "method": "POST",
+                "content_type": "application/json",
+                "body_params": ["query"],
+            }],
+            dbms="sqlite",
+            max_seconds=10,
+            max_params_per_endpoint=1,
+        )
+    )
+
+    assert result["vulnerabilities_found"] == 1
+    assert result["validation_fields_added"] == [{
+        "url": "https://example.test/api/search",
+        "method": "POST",
+        "fields": ["customerId"],
+    }]
+    assert any(body.get("customerId") == 1 for body in sent_bodies)
+    assert result["endpoint_attempts"][0]["validation_fields_added"] == ["customerId"]
+    assert result["endpoint_attempts"][0]["proof_type"] == "differential_response"
+
+
+def test_smart_sqli_skips_payloads_when_completed_baseline_retry_fails(monkeypatch):
+    marker = active_checks._CURL_STATUS_MARKER
+    sent_bodies: list[dict] = []
+
+    async def fake_run(cmd, *args, **kwargs):
+        body = json.loads(cmd[cmd.index("-d") + 1])
+        sent_bodies.append(body)
+        if "customerId" not in body:
+            return (
+                json.dumps({"detail": [{"loc": ["body", "customerId"], "msg": "Field required"}]})
+                + f"\n{marker}422",
+                "",
+                0,
+            )
+        if " OR " in str(body.get("query") or "").upper():
+            return "SQLite error: near OR: syntax error" + f"\n{marker}500", "", 0
+        return "", "operation timed out", 28
+
+    monkeypatch.setattr(active_checks, "run", fake_run)
+
+    result = asyncio.run(active_checks.smart_sqli_test(
+        "https://example.test",
+        [{
+            "url": "https://example.test/api/search",
+            "method": "POST",
+            "content_type": "application/json",
+            "body_params": ["query"],
+        }],
+        dbms="sqlite",
+        max_seconds=10,
+        max_params_per_endpoint=1,
+    ))
+
+    assert result["vulnerabilities_found"] == 0
+    assert result["findings"] == []
+    assert len(sent_bodies) == 2
+    assert not any(" OR " in str(body.get("query") or "").upper() for body in sent_bodies)
+
+
+def test_smart_sqli_detects_json_login_auth_bypass(monkeypatch):
+    marker = active_checks._CURL_STATUS_MARKER
+
+    async def fake_run(cmd, *args, **kwargs):
+        if "-d" in cmd:
+            body = json.loads(cmd[cmd.index("-d") + 1])
+            if body.get("email") == "' OR 1=1--":
+                return (
+                    json.dumps({
+                        "authentication": {"token": "jwt-token"},
+                        "user": {"email": "admin@juice-sh.op", "role": "admin"},
+                    })
+                    + f"\n{marker}200",
+                    "",
+                    0,
+                )
+        return f"Invalid email or password.\n{marker}401", "", 0
+
+    monkeypatch.setattr(active_checks, "run", fake_run)
+
+    result = asyncio.run(
+        active_checks.smart_sqli_test(
+            "https://example.test",
+            [
+                {
+                    "url": "https://example.test/rest/user/login",
+                    "method": "POST",
+                    "content_type": "application/json",
+                    "body_params": ["email", "password"],
+                }
+            ],
+            dbms="sqlite",
+            max_seconds=10,
+            max_params_per_endpoint=2,
+        )
+    )
+
+    assert result["vulnerabilities_found"] == 1
+    finding = result["findings"][0]
+    assert finding["severity"] == "critical"
+    assert finding["payload"] == "' OR 1=1--"
+    assert any("Authentication bypass via SQLi" in item for item in finding["evidence"])
+
+
+def test_smart_sqli_repairs_numeric_login_json_replay(monkeypatch):
+    marker = active_checks._CURL_STATUS_MARKER
+
+    async def fake_run(cmd, *args, **kwargs):
+        if "-d" in cmd:
+            body = json.loads(cmd[cmd.index("-d") + 1])
+            if not isinstance(body.get("password"), str):
+                return f"TypeError: password must be a string\n{marker}500", "", 0
+            if body.get("email") in {"' OR '1'='1'--", "' OR 1=1--"}:
+                return (
+                    json.dumps({
+                        "authentication": {"token": "jwt-token"},
+                        "bid": 1,
+                        "umail": "admin@juice-sh.op",
+                    })
+                    + f"\n{marker}200",
+                    "",
+                    0,
+                )
+        return f"Invalid email or password.\n{marker}401", "", 0
+
+    monkeypatch.setattr(active_checks, "run", fake_run)
+
+    result = asyncio.run(
+        active_checks.smart_sqli_test(
+            "https://example.test",
+            [
+                {
+                    "url": "https://example.test/rest/user/login",
+                    "method": "POST",
+                    "content_type": "application/json",
+                    "body_template": {"email": 1, "username": 1, "password": 1},
+                    "body_param_defaults": {"email": 1, "username": 1, "password": 1},
+                    "body_params": ["email", "username", "password"],
+                }
+            ],
+            max_seconds=10,
+            max_params_per_endpoint=3,
+        )
+    )
+
+    assert result["vulnerabilities_found"] == 1
+    finding = result["findings"][0]
+    assert finding["severity"] == "critical"
+    assert finding["param"] == "email"
+    assert any("Authentication bypass via SQLi" in item for item in finding["evidence"])
+
+
+def test_detect_dbms_post_uses_nested_json_body_param(monkeypatch):
+    marker = active_checks._CURL_STATUS_MARKER
+    sent_bodies: list[dict] = []
+
+    async def fake_run(cmd, *args, **kwargs):
+        body = json.loads(cmd[cmd.index("-d") + 1])
+        sent_bodies.append(body)
+        assert "credentials.email" not in body
+        assert body["credentials"]["password"] == "not-real"
+        if body["credentials"]["email"] == "1'":
+            return HONEY_POSTGRES_ERROR + f"\n{marker}500", "", 0
+        return f'{{"error":"invalid login"}}\n{marker}401', "", 0
+
+    monkeypatch.setattr(active_checks, "run", fake_run)
+
+    result = asyncio.run(
+        active_checks._detect_dbms_post(
+            "https://example.test/api/login",
+            "credentials.email",
+            "application/json",
+            [],
+            method="POST",
+            base_body={
+                "credentials": {
+                    "email": "nobody@example.test",
+                    "password": "not-real",
+                }
+            },
+        )
+    )
+
+    assert result["detected"] == "postgresql"
+    assert len(sent_bodies) == 2
+    assert all("credentials.email" not in body for body in sent_bodies)
+
+
+def test_smart_sqli_nested_json_body_param_auth_bypass(monkeypatch):
+    marker = active_checks._CURL_STATUS_MARKER
+    sent_bodies: list[dict] = []
+
+    async def fake_run(cmd, *args, **kwargs):
+        if "-d" not in cmd:
+            return f"normal\n{marker}200", "", 0
+        body = json.loads(cmd[cmd.index("-d") + 1])
+        sent_bodies.append(body)
+        assert "credentials.email" not in body
+        email = body["credentials"]["email"]
+        if email == "' OR 1=1--":
+            assert body["credentials"]["password"] == "not-real"
+            return (
+                json.dumps({
+                    "authentication": {"token": "jwt-token"},
+                    "user": {"email": "admin@example.test", "role": "admin"},
+                })
+                + f"\n{marker}200",
+                "",
+                0,
+            )
+        return f"Invalid email or password.\n{marker}401", "", 0
+
+    monkeypatch.setattr(active_checks, "run", fake_run)
+
+    result = asyncio.run(
+        active_checks.smart_sqli_test(
+            "https://example.test",
+            [
+                {
+                    "url": "https://example.test/api/login",
+                    "method": "POST",
+                    "content_type": "application/json",
+                    "body_template": {
+                        "credentials": {
+                            "email": "nobody@example.test",
+                            "password": "not-real",
+                        }
+                    },
+                    "body_params": ["credentials.email", "credentials.password"],
+                }
+            ],
+            dbms="sqlite",
+            max_seconds=10,
+            max_params_per_endpoint=2,
+        )
+    )
+
+    assert result["vulnerabilities_found"] == 1
+    finding = result["findings"][0]
+    assert finding["param"] == "credentials.email"
+    assert json.loads(finding["body"]) == {
+        "credentials": {
+            "email": "nobody@example.test",
+            "password": "not-real",
+        }
+    }
+    assert any("Authentication bypass via SQLi" in item for item in finding["evidence"])
+    assert sent_bodies
+    assert all("credentials.email" not in body for body in sent_bodies)
 
 
 def test_detect_dbms_accepts_honey_postgresql_error(monkeypatch):
@@ -369,6 +786,42 @@ def test_sqli_data_extraction_rejects_version_already_in_baseline(monkeypatch):
 
     assert result["extraction_successful"] is False
     assert "version" not in result["extracted_data"]
+
+
+def test_sqli_data_extraction_reuses_post_body_template(monkeypatch):
+    marker = active_checks._CURL_STATUS_MARKER
+    sent_bodies: list[dict] = []
+
+    async def fake_run(cmd, *args, **kwargs):
+        body_arg = json.loads(cmd[cmd.index("-d") + 1])
+        sent_bodies.append(body_arg)
+        # This endpoint requires the sibling category field. The old extraction
+        # replay sent only {"q": payload}, which never reached the SQL sink.
+        if body_arg.get("category") != "all":
+            return f'{{"error":"category required"}}\n{marker}400', "", 0
+        if "sqlite_version()" in str(body_arg.get("q")):
+            return f"SQLite 3.40.1\n{marker}200", "", 0
+        return f'{{"items":[]}}\n{marker}200', "", 0
+
+    monkeypatch.setattr(active_checks, "run", fake_run)
+
+    result = asyncio.run(
+        active_checks.sqli_data_extraction(
+            {
+                "url": "https://example.test/api/search",
+                "param": "q",
+                "dbms": "sqlite",
+                "method": "POST",
+                "content_type": "application/json",
+                "body": json.dumps({"q": "apple", "category": "all"}),
+            }
+        )
+    )
+
+    assert result["extraction_successful"] is True
+    assert result["extracted_data"]["version"] == "3.40.1"
+    assert sent_bodies
+    assert all(body.get("category") == "all" for body in sent_bodies)
 
 
 # ---------------------------------------------------------------------------

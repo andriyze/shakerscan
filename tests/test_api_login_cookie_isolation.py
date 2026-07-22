@@ -136,3 +136,30 @@ def test_api_login_clear_precedes_each_new_candidate(monkeypatch):
             assert i > 0 and events[i - 1][0] == "clear", (
                 f"candidate {url} first post not preceded by a cookie clear"
             )
+
+
+def test_api_login_never_follows_redirects_with_credentials(monkeypatch):
+    """SCAN-03a: login POSTs carry the operator's credentials — a target-
+    controlled 307/308 would re-send the credential body to an off-origin
+    Location if the client followed redirects. The client must be constructed
+    with follow_redirects=False.
+    """
+    captured = {}
+
+    def _factory(*args, **kwargs):
+        captured.update(kwargs)
+        return _RecordingClient(*args, **kwargs)
+
+    monkeypatch.setattr(api_auth.httpx, "AsyncClient", _factory)
+
+    asyncio.run(
+        api_auth.api_login(
+            base_url="https://app.test",
+            username="alice",
+            password="secret",
+            max_candidates=1,
+            max_attempts=1,
+        )
+    )
+
+    assert captured.get("follow_redirects") is False

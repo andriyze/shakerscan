@@ -85,6 +85,50 @@ def plan_probe_pack_definitions(
     return plan_probe_pack(slug, scan_profile, metadata_json).probes
 
 
+# R6a: three-tier production-safety classification. Derived from probe
+# family/technique/severity so the production filter is effective without
+# hand-labelling every probe (the old binary safe_for_production defaulted True
+# on every probe, so the filter removed nothing).
+_NON_PROD_FAMILIES = {
+    "tool_abuse", "agent_action", "agent_abuse", "memory", "data_poisoning",
+    "poisoning", "indirect_injection", "unbounded_consumption", "excessive_agency",
+}
+_NON_PROD_MARKERS = (
+    "poison", "seed", "fixture", "memory_write", "approval_bypass", "dry_run",
+    "write", "delete", "transfer", "execute", "destructive", "exfiltrat",
+    "unbounded", "cost", "resource_exhaust", "replay", "state_chang",
+)
+_REVIEW_FAMILIES = {
+    "prompt_injection", "mcp_security", "oauth", "scope", "rag_retrieval",
+    "retrieval_boundary", "cross_tenant", "tenant_isolation", "tool_metadata",
+}
+_REVIEW_MARKERS = (
+    "override", "jailbreak", "escalation", "bypass", "injection", "confusion",
+    "downgrade", "scope", "audience", "boundary", "cross_tenant", "metadata_injection",
+)
+
+
+def classify_production_safety(probe: Probe) -> str:
+    """Return one of production_safe / production_review / non_production_only.
+
+    An explicit safe_for_production=False always blocks. Otherwise the tier is
+    derived: state-changing / poisoning / destructive / unbounded probes are
+    non_production_only; intrusive read/boundary probes and high-severity probes
+    are production_review; the rest are production_safe.
+    """
+    if getattr(probe, "safe_for_production", True) is False:
+        return "non_production_only"
+    fam = str(getattr(probe, "family", "") or "").lower()
+    tech = str(getattr(probe, "technique", "") or "").lower()
+    sev = str(getattr(probe, "severity_if_success", "") or "").lower()
+    text = f"{fam} {tech}"
+    if fam in _NON_PROD_FAMILIES or any(marker in text for marker in _NON_PROD_MARKERS):
+        return "non_production_only"
+    if sev in ("critical", "high") or fam in _REVIEW_FAMILIES or any(marker in text for marker in _REVIEW_MARKERS):
+        return "production_review"
+    return "production_safe"
+
+
 def plan_probe_pack(
     slug: str | None,
     scan_profile: object,
@@ -119,19 +163,19 @@ def plan_probe_pack(
         for probe in raw_pack
         if _probe_supported_in_profile(probe, normalized_profile)
     )
-    blocked_for_production = tuple(
-        probe for probe in profile_probes if production_mode and not probe.safe_for_production
-    )
+    classifications = {probe.id: classify_production_safety(probe) for probe in profile_probes}
+    non_production_only = tuple(p for p in profile_probes if classifications[p.id] == "non_production_only")
+    production_review = tuple(p for p in profile_probes if classifications[p.id] == "production_review")
+    # In production we drop non_production_only probes; production_review probes
+    # run but are surfaced so the operator can see what stressed the target.
+    blocked_for_production = non_production_only if production_mode else ()
     if blocked_for_production:
         validation_errors.extend(
-            f"probe blocked in production mode because safe_for_production=false: {probe.id}"
+            f"probe blocked in production mode (non_production_only): {probe.id}"
             for probe in blocked_for_production
         )
-    probes = tuple(
-        probe
-        for probe in profile_probes
-        if not (production_mode and not probe.safe_for_production)
-    )
+    blocked_ids = {p.id for p in blocked_for_production}
+    probes = tuple(probe for probe in profile_probes if probe.id not in blocked_ids)
     custom_probe_ids = {probe.id for probe in custom_probes}
     planned_custom_probes = tuple(probe for probe in probes if probe.id in custom_probe_ids)
     manifest = {
@@ -144,6 +188,12 @@ def plan_probe_pack(
         "planned_probe_count": len(probes),
         "blocked_for_production_count": len(blocked_for_production),
         "blocked_for_production_probe_ids": [probe.id for probe in blocked_for_production],
+        "production_review_probe_ids": [probe.id for probe in production_review],
+        "production_safety_tiers": {
+            "production_safe": sum(1 for v in classifications.values() if v == "production_safe"),
+            "production_review": len(production_review),
+            "non_production_only": len(non_production_only),
+        },
         "planned_probe_hash": _sha256_prefixed([_probe_manifest_entry(probe) for probe in probes]),
         "custom_probe_hash": (
             _sha256_prefixed([_probe_manifest_entry(probe) for probe in custom_probes])

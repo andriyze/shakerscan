@@ -123,12 +123,6 @@ async def run_health_check(include_optional: bool = True) -> dict[str, Any]:
     # Define tools to check
     # Format: (name, command_variants, version_pattern, required)
     required_tools = [
-        ("sslyze", [
-            ["sslyze", "-h"],  # SSLyze doesn't support --version
-            ["python3", "-m", "sslyze", "-h"],
-            ["/opt/tools/sslyze", "-h"],
-        ], r"sslyze\s+(\d+\.\d+)", True),
-
         ("nmap", [
             ["nmap", "--version"],
             ["/usr/bin/nmap", "--version"],
@@ -149,6 +143,15 @@ async def run_health_check(include_optional: bool = True) -> dict[str, Any]:
     ]
 
     optional_tools = [
+        # Disabled in the 0.7.0 image: latest SSLyze constrains cryptography<47,
+        # while the audited runtime requires cryptography>=48.0.1. testssl.sh,
+        # Nmap ciphers, and native TLS checks remain the release TLS engines.
+        ("sslyze", [
+            ["sslyze", "-h"],
+            ["python3", "-m", "sslyze", "-h"],
+            ["/opt/tools/sslyze", "-h"],
+        ], r"sslyze\s+(\d+\.\d+)", False),
+
         ("nuclei", [
             ["nuclei", "-version"],
             ["/opt/tools/nuclei", "-version"],
@@ -366,6 +369,17 @@ def log_health_check_results(results: dict[str, Any]) -> None:
 # Network/Connectivity Validation
 # =============================================================================
 
+def _target_is_reachable(dns_ok: bool, http_ok: bool, any_port_open: bool) -> bool:
+    """Decide whether a target is reachable enough to start a scan.
+
+    DNS must resolve, and then EITHER a valid HTTP response OR an open TCP port is enough.
+    Treating an open port as reachable prevents a slow/overloaded HTTP response (common when
+    the scanner fans out many concurrent shards at one single-host target) from fail-closing
+    an otherwise-scannable target. No DNS, or no open port at all, still fails closed.
+    """
+    return bool(dns_ok and (http_ok or any_port_open))
+
+
 async def validate_target_connectivity(target: str, timeout: int = 15) -> dict[str, Any]:
     """
     Validate network connectivity to a target before scanning.
@@ -548,9 +562,21 @@ async def validate_target_connectivity(target: str, timeout: int = 15) -> dict[s
         if not http_ok and last_url:
             issues.append(f"HTTP request to {last_url} failed or returned invalid status")
 
-    # Calculate overall reachability
-    # Target is reachable if DNS works and we can get a valid HTTP response.
-    reachable = dns_ok and http_ok
+    # Calculate overall reachability. A valid HTTP response is the strongest signal, but an
+    # open TCP port is sufficient to START a scan: under the scanner's own concurrent shard
+    # burst a single-host target can accept the TCP connection yet be too overwhelmed to
+    # complete an HTTP HEAD in time. Fail-closing that shard is wrong when its port is
+    # demonstrably open and sibling shards reach it fine (scan phases have their own
+    # timeouts). A genuinely-down target (no DNS, or no open port at all) still fails closed.
+    reachable = _target_is_reachable(dns_ok, http_ok, any_port_open)
+    if reachable and not http_ok:
+        details["reachable_via"] = "open_port_http_probe_inconclusive"
+        issues.append(
+            "HTTP probe did not complete but the target port is open; proceeding "
+            "(target may be slow or under load)."
+        )
+    elif reachable:
+        details["reachable_via"] = "http"
 
     return {
         "reachable": reachable,
@@ -579,21 +605,47 @@ def _get_connectivity_recommendation(dns_ok: bool, port_443: bool, port_80: bool
     return "Unknown connectivity issue."
 
 
-async def pre_scan_validation(target: str) -> dict[str, Any]:
+async def pre_scan_validation(
+    target: str,
+    *,
+    attempts: int = 3,
+    backoff_seconds: float = 0.75,
+) -> dict[str, Any]:
     """
     Run pre-scan validation to ensure we can reach the target.
 
     This should be called before starting a scan to detect network issues early.
 
+    A single reachability probe is retried with linear backoff before failing closed:
+    the scanner itself fans a smart scan out into many concurrent shards, and that burst
+    of simultaneous probes can momentarily saturate a single-host target's connection
+    backlog (or the Docker host-gateway), producing transient connection refusals. Without
+    a retry, an otherwise-reachable target that 20 sibling shards reached fine would fail a
+    handful of shards. A genuinely-down target still fails after all attempts, so the gate
+    stays fail-closed for real outages.
+
     Returns:
         Dict with validation results and whether scanning should proceed
     """
-    connectivity = await validate_target_connectivity(target)
+    attempts = max(1, int(attempts))
+    connectivity: dict[str, Any] = {}
+    used_attempt = 1
+    for used_attempt in range(1, attempts + 1):
+        connectivity = await validate_target_connectivity(target)
+        if connectivity.get("reachable"):
+            if used_attempt > 1:
+                connectivity.setdefault("details", {})["reachable_after_retries"] = used_attempt
+            break
+        if used_attempt < attempts:
+            # Linear backoff (0.75s, 1.5s, ...) lets the initial shard burst drain before
+            # we re-probe, staggering retries instead of hammering in lockstep.
+            await asyncio.sleep(backoff_seconds * used_attempt)
 
     return {
         "target": target,
         "connectivity": connectivity,
-        "can_proceed": connectivity["reachable"],
-        "warnings": connectivity["issues"],
-        "recommendation": connectivity.get("recommendation")
+        "can_proceed": connectivity.get("reachable", False),
+        "warnings": connectivity.get("issues", []),
+        "recommendation": connectivity.get("recommendation"),
+        "validation_attempts": used_attempt,
     }

@@ -461,6 +461,7 @@ install_packages_if_missing_apt() {
 
     command_exists curl || packages+=("curl")
     command_exists jq || packages+=("jq")
+    command_exists python3 || packages+=("python3")
 
     if [ ${#packages[@]} -gt 0 ]; then
         run_with_sudo apt-get update
@@ -708,6 +709,7 @@ install_dependencies_dnf() {
 
     command_exists curl || base_packages+=("curl")
     command_exists jq || base_packages+=("jq")
+    command_exists python3 || base_packages+=("python3")
 
     if [ ${#base_packages[@]} -gt 0 ]; then
         echo -e "${GREEN}Installing packages: ${base_packages[*]}${NC}"
@@ -729,6 +731,7 @@ install_dependencies_pacman() {
     has_docker_compose || packages+=("docker-compose")
     command_exists curl || packages+=("curl")
     command_exists jq || packages+=("jq")
+    command_exists python3 || packages+=("python")
 
     if [ ${#packages[@]} -gt 0 ]; then
         echo -e "${GREEN}Installing packages: ${packages[*]}${NC}"
@@ -743,6 +746,7 @@ install_dependencies_zypper() {
     has_docker_compose || packages+=("docker-compose")
     command_exists curl || packages+=("curl")
     command_exists jq || packages+=("jq")
+    command_exists python3 || packages+=("python3")
 
     if [ ${#packages[@]} -gt 0 ]; then
         echo -e "${GREEN}Installing packages: ${packages[*]}${NC}"
@@ -757,6 +761,7 @@ install_dependencies_apk() {
     has_docker_compose || packages+=("docker-cli-compose")
     command_exists curl || packages+=("curl")
     command_exists jq || packages+=("jq")
+    command_exists python3 || packages+=("python3")
 
     if [ ${#packages[@]} -gt 0 ]; then
         echo -e "${GREEN}Installing packages: ${packages[*]}${NC}"
@@ -779,6 +784,7 @@ install_dependencies_linux() {
                 local base_packages=()
                 command_exists curl || base_packages+=("curl")
                 command_exists jq || base_packages+=("jq")
+                command_exists python3 || base_packages+=("python3")
                 if [ ${#base_packages[@]} -gt 0 ]; then
                     run_with_sudo "$package_manager" -y install "${base_packages[@]}"
                 fi
@@ -812,7 +818,7 @@ install_dependencies_linux() {
             ;;
         *)
             echo -e "${RED}Automatic install is not supported for this Linux package manager.${NC}"
-            echo "Install manually: Docker Engine + Docker Compose + curl + jq"
+            echo "Install manually: Docker Engine + Docker Compose + curl + jq + Python 3"
             return 1
             ;;
     esac
@@ -888,6 +894,11 @@ install_dependencies_macos() {
         brew install curl
     fi
 
+    if ! command_exists python3; then
+        echo -e "${GREEN}Installing Python 3 for host-side MCP and legacy research adapters...${NC}"
+        brew install python
+    fi
+
     if command_exists docker && ! docker info > /dev/null 2>&1; then
         echo -e "${YELLOW}Docker daemon is not running. Launching Docker Desktop...${NC}"
         open -a Docker > /dev/null 2>&1 || true
@@ -907,7 +918,7 @@ install_dependencies() {
             ;;
         *)
             echo -e "${RED}Automatic install is supported on macOS and Linux hosts with apt, dnf/yum, pacman, zypper, or apk.${NC}"
-            echo "Install manually: Docker Engine + Docker Compose + curl + jq"
+            echo "Install manually: Docker Engine + Docker Compose + curl + jq + Python 3"
             return 1
             ;;
     esac
@@ -949,6 +960,17 @@ command_needs_jq() {
     command_needs_curl "$1" "$2"
 }
 
+command_needs_python() {
+    case "$1" in
+        mcp|research)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
 collect_missing_dependencies() {
     local cmd="$1"
     local subcmd="$2"
@@ -965,6 +987,10 @@ collect_missing_dependencies() {
 
     if command_needs_jq "$cmd" "$subcmd"; then
         command_exists jq || missing+=("jq")
+    fi
+
+    if command_needs_python "$cmd"; then
+        command_exists python3 || missing+=("python3")
     fi
 
     echo "${missing[*]}"
@@ -1178,6 +1204,62 @@ total_memory_gb() {
     echo 0
 }
 
+runtime_memory_gb() {
+    local bytes
+    local host_memory_gb
+
+    # Docker Desktop and VM-backed engines can expose substantially less memory
+    # than the host. Size the fleet against the memory the containers can
+    # actually use, then fall back to host RAM when Docker cannot report it.
+    if command_exists docker; then
+        bytes="$(docker info --format '{{.MemTotal}}' 2>/dev/null || echo "")"
+        if [[ "$bytes" =~ ^[0-9]+$ ]] && [ "$bytes" -gt 0 ]; then
+            # Round down so the startup fleet never spends a fractional GB that
+            # the API's Docker-memory calculation correctly leaves unavailable.
+            echo $(( bytes / 1073741824 ))
+            return 0
+        fi
+    fi
+
+    host_memory_gb="$(total_memory_gb)"
+    echo "${host_memory_gb:-0}"
+}
+
+auto_workers_for_memory_gb() {
+    local memory_gb="${1:-0}"
+    local platform_reserve_gb="${SHAKERSCAN_PLATFORM_MEMORY_RESERVE_GB:-7}"
+    local per_worker_gb="${SHAKERSCAN_PER_WORKER_MEM_GB:-1}"
+    local workers
+
+    if ! [[ "$memory_gb" =~ ^[0-9]+$ ]] || [ "$memory_gb" -le 0 ]; then
+        echo 5
+        return 0
+    fi
+    if ! [[ "$platform_reserve_gb" =~ ^[0-9]+$ ]]; then
+        platform_reserve_gb=7
+    fi
+    if ! [[ "$per_worker_gb" =~ ^[0-9]+$ ]] || [ "$per_worker_gb" -lt 1 ]; then
+        per_worker_gb=1
+    fi
+
+    # Very small installations cannot safely carry five scanner processes.
+    # Normal sub-16GB installations get a predictable five-worker fleet.
+    if [ "$memory_gb" -lt 8 ]; then
+        workers=$((memory_gb - 3))
+        [ "$workers" -lt 1 ] && workers=1
+    elif [ "$memory_gb" -lt 16 ]; then
+        workers=5
+    else
+        # Reserve memory for Docker/the OS plus PostgreSQL, Redis, API and UI,
+        # then spend the remaining budget at roughly 1GB per scanner worker.
+        workers=$(( (memory_gb - platform_reserve_gb) / per_worker_gb ))
+        [ "$workers" -lt 5 ] && workers=5
+    fi
+
+    [ "$workers" -gt 20 ] && workers=20
+    echo "$workers"
+}
+
 resolve_start_workers() {
     local memory_gb
 
@@ -1190,16 +1272,8 @@ resolve_start_workers() {
         return 0
     fi
 
-    memory_gb="$(total_memory_gb)"
-    if [ "$memory_gb" -ge 48 ]; then
-        echo 5
-    elif [ "$memory_gb" -ge 24 ]; then
-        echo 3
-    elif [ "$memory_gb" -ge 12 ]; then
-        echo 2
-    else
-        echo 1
-    fi
+    memory_gb="$(runtime_memory_gb)"
+    auto_workers_for_memory_gb "$memory_gb"
 }
 
 prepare_runtime_files() {
@@ -1298,23 +1372,27 @@ print_help() {
     echo "  start              Start all services (API, workers, UI)"
     echo "  stop               Stop all services"
     echo "  restart            Restart all services"
-    echo "  reload             Reload edited source into running containers + verify parity"
-    echo "  status             Show service status"
+    echo "  reload             Reload edited source in local-build mode + verify parity"
+    echo "  status             Show services, queue, workers, and access URLs"
     echo "  scale <N>          Scale to N workers (1-20)"
     echo "  logs [service]     View logs (api, worker, ui, postgres, redis)"
-    echo "  scan <target>      Quick scan a target"
-    echo "  scan-full <target> Full assessment scan"
-    echo "  scan-smart <target> Smart adaptive scan"
+    echo "                       worker aggregates all shakerscan-worker* containers"
+    echo "  scan <target>      Submit any DAST scan type (quick by default)"
+    echo "  scan-full <target> Compatibility alias for 'scan --type full'"
+    echo "  scan-smart <target> Compatibility alias for 'scan --type smart'"
     echo "  install-deps       Install missing prerequisites"
     echo "  doctor             Check local prerequisites and common startup issues"
     echo "  env                Show PATH, launcher, and runtime guidance"
     echo "  agent [name]       Start Codex, Claude, or OpenCode in this runtime dir"
+    echo "  mcp                Start the read-only Command Arsenal MCP stdio adapter"
+    echo "  research <id> [N]  Run up to N bounded Codex decisions for a research episode"
     echo "  gungnir <cmd>      CT monitor: start, stop, status, logs"
     echo "  build              Build Docker images"
     echo "  rebuild [opts]     Rebuild Docker images (cached by default)"
     echo "                       --no-cache  Full rebuild (slow, 10-20 min)"
     echo "                       scanner     Rebuild scanner/worker only"
     echo "                       ui          Rebuild UI only"
+    echo "  backup [dir]       Back up PostgreSQL, results, config, and release metadata"
     echo "  reset              Reset database (WARNING: deletes all data)"
     echo "  shell              Open shell in scanner container"
     echo ""
@@ -1326,8 +1404,8 @@ print_help() {
     echo "  --prebuilt         Force prebuilt Docker Hub images (default for start/restart)"
     echo "  --image-tag TAG    Override Docker image tag (default: latest)"
     echo "  --remote           Bind UI/API to this host's Tailscale IPv4 address"
-    echo "  --confirm-active   Confirm authorization for scan-full or scan-smart"
-    echo "  --budget-profile P scan-smart only: fast, balanced, thorough, exhaustive"
+    echo "  --confirm-active   Confirm authorization for full, aggressive, or smart scans"
+    echo "  Scan-specific options are listed by './scanner.sh scan --help'"
     echo "  SHAKERSCAN_BIND_HOST=IP overrides the Docker bind address"
     echo "  SHAKERSCAN_PUBLIC_HOST=HOST overrides displayed/browser API host"
     echo "  SHAKERSCAN_PULL_IMAGES=0 skips Docker Hub pulls in prebuilt mode"
@@ -1341,12 +1419,14 @@ print_help() {
     echo "  ./scanner.sh start --remote           # VPS access over Tailscale"
     echo "  ./scanner.sh env                      # Show PATH and agent launch commands"
     echo "  ./scanner.sh agent codex              # Start an AI agent with local docs loaded"
+    echo "  ./scanner.sh research <episode-id> 5  # Drive a bounded research episode"
     echo "  ./scanner.sh start --local            # Build locally and start"
     echo "  ./scanner.sh start -w 10              # Start with 10 workers"
-    echo "  ./scanner.sh start --image-tag 0.4.2  # Use a specific published tag"
+    echo "  ./scanner.sh start --image-tag $(get_release_version)  # Use this release's published tag"
     echo "  ./scanner.sh scale 10                 # Scale to 10 workers"
     echo "  ./scanner.sh scan https://example.com # Quick scan"
-    echo "  ./scanner.sh scan-smart https://example.com --budget-profile thorough --confirm-active"
+    echo "  ./scanner.sh scan https://example.com --type standard --budget-profile thorough"
+    echo "  ./scanner.sh scan https://example.com --type smart --execution coverage --confirm-active"
     echo "  ./scanner.sh install-deps             # Install dependencies"
     echo "  ./scanner.sh logs worker -f           # Follow worker logs"
     echo ""
@@ -1357,14 +1437,19 @@ print_help() {
 
 start_services() {
     local start_workers
+    local requested_workers="${1:-}"
 
     prepare_runtime_files
     persist_remote_access_env
-    start_workers="$(resolve_start_workers)"
+    if [ -n "$requested_workers" ]; then
+        start_workers="$requested_workers"
+    else
+        start_workers="$(resolve_start_workers)"
+    fi
     set_build_env
     echo -e "${GREEN}Starting ShakerScan with $start_workers worker(s)...${NC}"
     if [ "$WORKERS" = "auto" ]; then
-        echo "Worker sizing: auto ($(total_memory_gb)GB RAM detected)"
+        echo "Worker sizing: auto ($(runtime_memory_gb)GB container RAM; ${SHAKERSCAN_PLATFORM_MEMORY_RESERVE_GB:-7}GB platform reserve; ${SHAKERSCAN_PER_WORKER_MEM_GB:-1}GB/worker)"
     fi
     if [ "$USE_PREBUILT" -eq 1 ]; then
         echo "Mode: prebuilt images"
@@ -1389,12 +1474,15 @@ start_services() {
 stop_services() {
     echo -e "${YELLOW}Stopping ShakerScan...${NC}"
     compose down
+    remove_scan_worker_containers "Removing API-scaled worker containers left outside Compose..."
     echo -e "${GREEN}Services stopped${NC}"
 }
 
 restart_services() {
+    local restart_workers
+    restart_workers="$(restart_worker_count)"
     stop_services
-    start_services
+    start_services "$restart_workers"
 }
 
 # Reload source into running containers without a full stop/start.
@@ -1406,20 +1494,27 @@ restart_services() {
 # re-resolves the mounts. This command does that and verifies host<->container
 # parity so drift is caught loudly instead of debugged for an hour.
 reload_services() {
+    if [ "$USE_PREBUILT" -eq 1 ]; then
+        echo -e "${RED}Error: reload is only available in local-build mode.${NC}"
+        echo "Published images do not mount editable source. Use './scanner.sh restart' to refresh prebuilt services,"
+        echo "or switch a source checkout to local mode with './scanner.sh start --local'."
+        return 1
+    fi
+
     echo -e "${BLUE}Reloading source into running containers...${NC}"
     compose restart api worker || return 1
 
     # API-scaled workers (created by the /workers scaler, not compose) are not
     # covered by `compose restart worker`; restart them directly.
     local scaled
-    scaled=$(docker ps --filter name=shakerscan-worker --format '{{.Names}}' 2>/dev/null)
+    scaled=$(running_scan_worker_containers)
     for w in $scaled; do
         docker restart "$w" >/dev/null 2>&1 || true
     done
 
     # Verify host<->container parity for the single-file-mounted modules.
     local host_sha cont_sha drift=0 worker
-    worker=$(docker ps --filter name=shakerscan-worker --format '{{.Names}}' 2>/dev/null | head -n1)
+    worker=$(running_scan_worker_containers | head -n1)
     if [ -n "$worker" ]; then
         sleep 4
         for f in scanner.py constants.py grading.py findings.py reporting.py signals.py target_context.py; do
@@ -1464,6 +1559,37 @@ show_status() {
         echo "  Running: $(echo $QUEUE | jq -r '.running')"
         echo "  Completed: $(echo $QUEUE | jq -r '.completed')"
     fi
+
+    # Worker fleet truth — read the SAME /workers source the API and benchmark
+    # runner use, so CLI status can never disagree with them about how many
+    # workers are real and which are running stale code (docs proposed-next-steps §3).
+    if curl -s "$api_url/workers" > /dev/null 2>&1; then
+        WK=$(curl -s "$api_url/workers")
+        echo ""
+        echo -e "${BLUE}Worker Fleet:${NC}"
+        echo "  Running:  $(echo "$WK" | jq -r '.count')"
+        echo "  Current:  $(echo "$WK" | jq -r '.current_count // "?"')  (on expected build $(echo "$WK" | jq -r '.expected_build_fingerprint // "?"'))"
+        local stale_n pending_n uniform
+        stale_n=$(echo "$WK" | jq -r '.stale_count // 0')
+        pending_n=$(echo "$WK" | jq -r '.pending_count // 0')
+        uniform=$(echo "$WK" | jq -r '.fleet_uniform')
+        if [ "$stale_n" != "0" ]; then
+            echo -e "  Stale:    ${RED}$stale_n${NC} running OLD code: $(echo "$WK" | jq -rc '.stale_workers')"
+        else
+            echo "  Stale:    0"
+        fi
+        [ "$pending_n" != "0" ] && echo -e "  Pending:  ${YELLOW}$pending_n${NC} (started, not yet registered a build)"
+        if [ "$uniform" = "true" ]; then
+            echo -e "  Uniform:  ${GREEN}yes — fleet safe to benchmark${NC}"
+        else
+            echo -e "  Uniform:  ${RED}NO — restart workers before trusting benchmark numbers${NC}"
+        fi
+    fi
+
+    echo ""
+    echo -e "${BLUE}Access:${NC}"
+    echo "  UI:  $(ui_base_url)"
+    echo "  API: $(api_base_url)"
 }
 
 show_logs() {
@@ -1477,6 +1603,10 @@ show_logs() {
             compose logs --tail=100
         fi
     else
+        if [ "$SERVICE" = "worker" ] || [ "$SERVICE" = "workers" ]; then
+            show_worker_logs "$FOLLOW"
+            return $?
+        fi
         if [ "$FOLLOW" = "-f" ]; then
             compose logs -f $SERVICE
         else
@@ -1485,101 +1615,453 @@ show_logs() {
     fi
 }
 
-quick_scan() {
-    TARGET=$1
-    if [ -z "$TARGET" ]; then
-        echo -e "${RED}Error: Please provide a target URL${NC}"
-        echo "Usage: ./scanner.sh scan <target>"
-        exit 1
-    fi
-
-    echo -e "${GREEN}Starting quick scan: $TARGET${NC}"
-    RESULT=$(curl -s -X POST "$(api_base_url)/scans" \
-        -H "Content-Type: application/json" \
-        -d "{\"target\": \"$TARGET\", \"options\": {\"quick\": true}}")
-
-    SCAN_ID=$(echo $RESULT | jq -r '.scan_id')
-    echo "Scan ID: $SCAN_ID"
-    echo "Status: $(echo $RESULT | jq -r '.status')"
-    echo ""
-    echo "View progress at: $(ui_base_url)/scans"
+scan_worker_containers() {
+    docker ps -a --filter name=worker --format '{{.Names}}' 2>/dev/null |
+        awk 'BEGIN { IGNORECASE=1 } /shakerscan/ && /worker/ && !/gungnir/ { print }' |
+        sort
 }
 
-full_scan() {
-    TARGET=$1
-    if [ -z "$TARGET" ]; then
-        echo -e "${RED}Error: Please provide a target URL${NC}"
-        echo "Usage: ./scanner.sh scan-full <target>"
-        exit 1
-    fi
-
-    echo -e "${YELLOW}Starting full assessment: $TARGET${NC}"
-    if ! confirm_active_testing "Full assessment" "$TARGET"; then
-        echo "Cancelled"
-        exit 1
-    fi
-    echo ""
-
-    RESULT=$(curl -s -X POST "$(api_base_url)/scans" \
-        -H "Content-Type: application/json" \
-        -d "{\"target\": \"$TARGET\", \"options\": {\"quick\": false, \"thorough\": true, \"active\": true}}")
-
-    SCAN_ID=$(echo $RESULT | jq -r '.scan_id')
-    echo "Scan ID: $SCAN_ID"
-    echo "Status: $(echo $RESULT | jq -r '.status')"
-    echo ""
-    echo "View progress at: $(ui_base_url)/scans"
+running_scan_worker_containers() {
+    docker ps --filter name=worker --format '{{.Names}}' 2>/dev/null |
+        awk 'BEGIN { IGNORECASE=1 } /shakerscan/ && /worker/ && !/gungnir/ { print }' |
+        sort
 }
 
-smart_scan() {
-    TARGET=$1
-    shift || true
-    if [ -z "$TARGET" ]; then
-        echo -e "${RED}Error: Please provide a target URL${NC}"
-        echo "Usage: ./scanner.sh scan-smart <target> [--budget-profile fast|balanced|thorough|exhaustive]"
-        exit 1
+running_scan_worker_count() {
+    local count
+    count=$(running_scan_worker_containers | wc -l | tr -d '[:space:]')
+    echo "${count:-0}"
+}
+
+restart_worker_count() {
+    local resolved
+    local running
+    resolved="$(resolve_start_workers)"
+    running="$(running_scan_worker_count)"
+    if [ "$WORKERS" = "auto" ] && [ "${running:-0}" -gt "$resolved" ]; then
+        echo "$running"
+    else
+        echo "$resolved"
     fi
-    BUDGET_PROFILE=""
+}
+
+remove_scan_worker_containers() {
+    local message="${1:-Removing scanner worker containers...}"
+    local containers
+    local container
+    containers="$(scan_worker_containers)"
+    if [ -z "$containers" ]; then
+        return 0
+    fi
+    echo -e "${YELLOW}${message}${NC}"
+    for container in $containers; do
+        docker rm -f "$container" >/dev/null 2>&1 || true
+    done
+}
+
+worker_log_containers() {
+    scan_worker_containers
+}
+
+show_worker_logs() {
+    local follow_arg="${1:-}"
+    local containers
+    local container
+    local pids=""
+    local status=0
+
+    containers="$(worker_log_containers)"
+    if [ -z "$containers" ]; then
+        echo -e "${YELLOW}No shakerscan-worker containers found; falling back to Compose worker logs.${NC}"
+        if [ "$follow_arg" = "-f" ]; then
+            compose logs -f worker
+        else
+            compose logs --tail=100 worker
+        fi
+        return $?
+    fi
+
+    if [ "$follow_arg" = "-f" ]; then
+        for container in $containers; do
+            (
+                docker logs --tail=100 -f "$container" 2>&1 |
+                    awk -v name="$container" '{ print "[" name "] " $0; fflush(); }'
+            ) &
+            pids="$pids $!"
+        done
+        for pid in $pids; do
+            wait "$pid" || status=1
+        done
+        return "$status"
+    fi
+
+    for container in $containers; do
+        docker logs --tail=100 "$container" 2>&1 |
+            awk -v name="$container" '{ print "[" name "] " $0; fflush(); }'
+    done
+}
+
+print_scan_help() {
+    local command_name="${1:-scan}"
+    echo "Usage: ./scanner.sh $command_name <target> [scan options]"
+    echo ""
+    echo "Scan options:"
+    if [ "$command_name" = "scan" ]; then
+        echo "  --type TYPE              quick, standard, deep, full, aggressive, or smart"
+    fi
+    echo "  --budget-profile P       fast, balanced, thorough, or exhaustive"
+    echo "  --execution MODE         auto, normal, parallel, or coverage"
+    echo "  --shards N|auto          Parallel shard count (2-20)"
+    echo "  --shard-strategy S       auto, scope, family, coverage, or coverage_family"
+    echo "  --endpoint SPEC          Known endpoint; repeat for scope sharding"
+    echo "  --coverage-depth D       standard or deep"
+    echo "  --auth-state-shards      Expand parallel work across configured auth states"
+    echo "  --approval-receipt ID    Stamp a target-bound approval receipt on submission"
+    echo "  --require-current-workers Reject active work on stale/unconfirmed workers"
+    echo "  --confirm-active         Confirm authorization for full, aggressive, or smart"
+}
+
+scan_error_detail() {
+    local body="$1"
+    if jq -e . >/dev/null 2>&1 <<<"$body"; then
+        jq -r '
+            if (.detail | type) == "object" then
+                .detail.message // .detail.error // (.detail | tojson)
+            elif .detail != null then .detail
+            else .message // .error // (tojson)
+            end
+        ' <<<"$body"
+    else
+        printf '%s\n' "$body"
+    fi
+}
+
+submit_scan() {
+    local command_name="$1"
+    local scan_type="$2"
+    local allow_type_override="$3"
+    shift 3
+
+    local target=""
+    local budget_profile=""
+    local execution="auto"
+    local shards=""
+    local shard_strategy=""
+    local coverage_depth="standard"
+    local require_current_workers=0
+    local auth_state_shards=0
+    local approval_receipt=""
+    local endpoint_count=0
+    local endpoints='[]'
+    local coverage_mode=0
+    local scan_label=""
+    local value
+
     while [[ $# -gt 0 ]]; do
         case "$1" in
+            --type|--scan-type)
+                if [ "$allow_type_override" -ne 1 ]; then
+                    echo -e "${RED}Error: $command_name has a fixed scan type; use 'scan --type ...' instead.${NC}"
+                    return 1
+                fi
+                [ -n "${2:-}" ] || { echo -e "${RED}Error: $1 requires a value${NC}"; return 1; }
+                scan_type="$2"
+                shift 2
+                ;;
+            --type=*|--scan-type=*)
+                if [ "$allow_type_override" -ne 1 ]; then
+                    echo -e "${RED}Error: $command_name has a fixed scan type; use 'scan --type ...' instead.${NC}"
+                    return 1
+                fi
+                scan_type="${1#*=}"
+                shift
+                ;;
             --budget-profile)
-                BUDGET_PROFILE="${2:-}"
+                [ -n "${2:-}" ] || { echo -e "${RED}Error: --budget-profile requires a value${NC}"; return 1; }
+                budget_profile="$2"
                 shift 2
                 ;;
             --budget-profile=*)
-                BUDGET_PROFILE="${1#*=}"
+                budget_profile="${1#*=}"
                 shift
                 ;;
+            --execution)
+                [ -n "${2:-}" ] || { echo -e "${RED}Error: --execution requires a value${NC}"; return 1; }
+                execution="$2"
+                shift 2
+                ;;
+            --execution=*)
+                execution="${1#*=}"
+                shift
+                ;;
+            --shards)
+                [ -n "${2:-}" ] || { echo -e "${RED}Error: --shards requires a value${NC}"; return 1; }
+                shards="$2"
+                shift 2
+                ;;
+            --shards=*)
+                shards="${1#*=}"
+                shift
+                ;;
+            --shard-strategy)
+                [ -n "${2:-}" ] || { echo -e "${RED}Error: --shard-strategy requires a value${NC}"; return 1; }
+                shard_strategy="$2"
+                shift 2
+                ;;
+            --shard-strategy=*)
+                shard_strategy="${1#*=}"
+                shift
+                ;;
+            --endpoint)
+                [ -n "${2:-}" ] || { echo -e "${RED}Error: --endpoint requires a value${NC}"; return 1; }
+                endpoints="$(jq -c --arg endpoint "$2" '. + [$endpoint]' <<<"$endpoints")"
+                endpoint_count=$((endpoint_count + 1))
+                shift 2
+                ;;
+            --endpoint=*)
+                value="${1#*=}"
+                [ -n "$value" ] || { echo -e "${RED}Error: --endpoint requires a value${NC}"; return 1; }
+                endpoints="$(jq -c --arg endpoint "$value" '. + [$endpoint]' <<<"$endpoints")"
+                endpoint_count=$((endpoint_count + 1))
+                shift
+                ;;
+            --coverage-depth)
+                [ -n "${2:-}" ] || { echo -e "${RED}Error: --coverage-depth requires a value${NC}"; return 1; }
+                coverage_depth="$2"
+                shift 2
+                ;;
+            --coverage-depth=*)
+                coverage_depth="${1#*=}"
+                shift
+                ;;
+            --require-current-workers)
+                require_current_workers=1
+                shift
+                ;;
+            --auth-state-shards)
+                auth_state_shards=1
+                shift
+                ;;
+            --approval-receipt)
+                [ -n "${2:-}" ] || { echo -e "${RED}Error: --approval-receipt requires a value${NC}"; return 1; }
+                approval_receipt="$2"
+                shift 2
+                ;;
+            --approval-receipt=*)
+                approval_receipt="${1#*=}"
+                [ -n "$approval_receipt" ] || { echo -e "${RED}Error: --approval-receipt requires a value${NC}"; return 1; }
+                shift
+                ;;
+            --help|-h)
+                print_scan_help "$command_name"
+                return 0
+                ;;
+            --*)
+                echo -e "${RED}Error: unknown $command_name option: $1${NC}"
+                print_scan_help "$command_name"
+                return 1
+                ;;
             *)
-                echo -e "${RED}Unknown scan-smart option: $1${NC}"
-                echo "Usage: ./scanner.sh scan-smart <target> [--budget-profile fast|balanced|thorough|exhaustive]"
-                exit 1
+                if [ -n "$target" ]; then
+                    echo -e "${RED}Error: unexpected argument: $1${NC}"
+                    print_scan_help "$command_name"
+                    return 1
+                fi
+                target="$1"
+                shift
                 ;;
         esac
     done
 
-    echo -e "${YELLOW}Starting smart adaptive scan: $TARGET${NC}"
-    if ! confirm_active_testing "Smart adaptive scan" "$TARGET"; then
-        echo "Cancelled"
-        exit 1
+    case "$scan_type" in
+        quick|standard|deep|full|aggressive|smart) ;;
+        *) echo -e "${RED}Error: invalid scan type '$scan_type'${NC}"; return 1 ;;
+    esac
+    case "$budget_profile" in
+        ""|fast|balanced|thorough|exhaustive) ;;
+        *) echo -e "${RED}Error: invalid budget profile '$budget_profile'${NC}"; return 1 ;;
+    esac
+    case "$execution" in
+        auto|normal|parallel|coverage) ;;
+        *) echo -e "${RED}Error: invalid execution mode '$execution'${NC}"; return 1 ;;
+    esac
+    case "$shard_strategy" in
+        ""|auto|scope|family|coverage|coverage_family) ;;
+        *) echo -e "${RED}Error: invalid shard strategy '$shard_strategy'${NC}"; return 1 ;;
+    esac
+    case "$coverage_depth" in
+        standard|deep) ;;
+        *) echo -e "${RED}Error: invalid coverage depth '$coverage_depth'${NC}"; return 1 ;;
+    esac
+    if [ "$execution" = "coverage" ] && [ -n "$shard_strategy" ] && [ "$shard_strategy" != "coverage" ]; then
+        echo -e "${RED}Error: --execution coverage fixes the shard strategy to coverage${NC}"
+        return 1
     fi
-    echo ""
-
-    OPTIONS="{\"scan_type\": \"smart\""
-    if [ -n "$BUDGET_PROFILE" ]; then
-        OPTIONS="$OPTIONS, \"budget_profile\": \"$BUDGET_PROFILE\""
+    if [ -n "$shards" ] && [ "$shards" != "auto" ]; then
+        if ! [[ "$shards" =~ ^[0-9]+$ ]] || [ "$shards" -lt 2 ] || [ "$shards" -gt 20 ]; then
+            echo -e "${RED}Error: shards must be auto or a number between 2 and 20${NC}"
+            return 1
+        fi
     fi
-    OPTIONS="$OPTIONS}"
+    if [ -z "$target" ]; then
+        echo -e "${RED}Error: please provide a target URL${NC}"
+        print_scan_help "$command_name"
+        return 1
+    fi
+    if [ "$execution" != "parallel" ] && [ "$execution" != "coverage" ]; then
+        if [ -n "$shards" ] || [ -n "$shard_strategy" ]; then
+            echo -e "${RED}Error: --shards and --shard-strategy require --execution parallel or coverage${NC}"
+            return 1
+        fi
+        if [ "$auth_state_shards" -eq 1 ]; then
+            echo -e "${RED}Error: --auth-state-shards requires --execution parallel or coverage${NC}"
+            return 1
+        fi
+    fi
+    if [ "$shard_strategy" = "scope" ] && [ "$endpoint_count" -lt 2 ]; then
+        echo -e "${RED}Error: scope sharding requires at least two --endpoint values${NC}"
+        return 1
+    fi
+    if [ "$execution" = "coverage" ] || [ "$shard_strategy" = "coverage" ] || [ "$shard_strategy" = "coverage_family" ]; then
+        coverage_mode=1
+    fi
+    if [ "$coverage_depth" = "deep" ] && [ "$coverage_mode" -ne 1 ]; then
+        echo -e "${RED}Error: --coverage-depth requires Full Coverage execution${NC}"
+        return 1
+    fi
+    if [ "$coverage_depth" = "deep" ]; then
+        case "$scan_type" in
+            full|aggressive|smart) ;;
+            *) echo -e "${RED}Error: deep Full Coverage requires full, aggressive, or smart scan type${NC}"; return 1 ;;
+        esac
+    fi
+    if [ "$shard_strategy" = "family" ] || [ "$shard_strategy" = "coverage_family" ]; then
+        case "$scan_type" in
+            full|aggressive|smart) ;;
+            *) echo -e "${RED}Error: $shard_strategy sharding requires full, aggressive, or smart scan type${NC}"; return 1 ;;
+        esac
+    fi
+    if { [ "$execution" = "parallel" ] || [ "$execution" = "coverage" ]; } \
+        && [ "$endpoint_count" -lt 2 ]; then
+        case "$scan_type" in
+            full|aggressive|smart) ;;
+            *)
+                echo -e "${RED}Error: parallel discovery/family execution requires full, aggressive, or smart; provide known --endpoint values for passive scope sharding.${NC}"
+                return 1
+                ;;
+        esac
+    fi
 
-    RESULT=$(curl -s -X POST "$(api_base_url)/scans" \
+    case "$scan_type" in
+        full|aggressive|smart)
+            case "$scan_type" in
+                full) scan_label="Full" ;;
+                aggressive) scan_label="Aggressive" ;;
+                smart) scan_label="Smart" ;;
+            esac
+            if ! confirm_active_testing "$scan_label scan" "$target"; then
+                echo "Cancelled"
+                return 1
+            fi
+            ;;
+    esac
+
+    local options
+    options="$(jq -cn --arg scan_type "$scan_type" '{scan_type: $scan_type}')"
+    if [ -n "$budget_profile" ]; then
+        options="$(jq -c --arg budget_profile "$budget_profile" '. + {budget_profile: $budget_profile}' <<<"$options")"
+    fi
+    if [ "$require_current_workers" -eq 1 ]; then
+        options="$(jq -c '. + {require_current_workers: true}' <<<"$options")"
+    fi
+    if [ "$auth_state_shards" -eq 1 ]; then
+        options="$(jq -c '. + {auth_state_shards: true}' <<<"$options")"
+    fi
+    if [ -n "$approval_receipt" ]; then
+        options="$(jq -c --arg approval_receipt "$approval_receipt" '. + {approval_receipt_id: $approval_receipt}' <<<"$options")"
+    fi
+    if [ "$endpoint_count" -gt 0 ]; then
+        options="$(jq -c --argjson endpoints "$endpoints" '. + {custom_endpoints: $endpoints}' <<<"$options")"
+    fi
+
+    case "$execution" in
+        normal)
+            options="$(jq -c '. + {parallel: false}' <<<"$options")"
+            ;;
+        parallel|coverage)
+            local resolved_strategy="${shard_strategy:-auto}"
+            [ "$execution" = "coverage" ] && resolved_strategy="coverage"
+            options="$(jq -c --arg strategy "$resolved_strategy" '. + {parallel: true, shard_strategy: $strategy}' <<<"$options")"
+            if [ -n "$shards" ]; then
+                if [ "$shards" = "auto" ]; then
+                    options="$(jq -c '. + {shards: "auto"}' <<<"$options")"
+                else
+                    options="$(jq -c --argjson shards "$shards" '. + {shards: $shards}' <<<"$options")"
+                fi
+            fi
+            ;;
+    esac
+
+    if [ "$coverage_mode" -eq 1 ]; then
+        if [ "$coverage_depth" = "deep" ]; then
+            options="$(jq -c '
+                . + {
+                    budget_profile: "exhaustive",
+                    exploit_depth: true,
+                    custom_budget: {
+                        active_worklist_max: 50000,
+                        param_discovery_url_limit: 500,
+                        param_discovery_max_params: 100,
+                        active_params_per_endpoint: 20,
+                        max_findings_per_family: -1,
+                        sqli_extract_max: 25,
+                        oob_max_findings: 25
+                    }
+                }
+            ' <<<"$options")"
+        else
+            options="$(jq -c '
+                . + {
+                    budget_profile: "thorough",
+                    custom_budget: {
+                        active_worklist_max: 50000,
+                        param_discovery_url_limit: 500,
+                        param_discovery_max_params: 100
+                    }
+                }
+            ' <<<"$options")"
+        fi
+    fi
+
+    local payload response http_code body scan_id status
+    payload="$(jq -cn --arg target "$target" --argjson options "$options" '{target: $target, options: $options}')"
+
+    echo -e "${GREEN}Submitting $scan_type scan: $target${NC}"
+    if ! response="$(curl -sS -w $'\n%{http_code}' -X POST "$(api_base_url)/scans" \
         -H "Content-Type: application/json" \
-        -d "{\"target\": \"$TARGET\", \"options\": $OPTIONS}")
+        --data-binary "$payload")"; then
+        echo -e "${RED}Error: could not reach the ShakerScan API at $(api_base_url)${NC}"
+        return 1
+    fi
+    http_code="${response##*$'\n'}"
+    body="${response%$'\n'*}"
 
-    SCAN_ID=$(echo $RESULT | jq -r '.scan_id')
-    echo "Scan ID: $SCAN_ID"
-    echo "Status: $(echo $RESULT | jq -r '.status')"
+    if ! [[ "$http_code" =~ ^2[0-9][0-9]$ ]]; then
+        echo -e "${RED}Scan submission failed (HTTP $http_code): $(scan_error_detail "$body")${NC}"
+        return 1
+    fi
+    if ! jq -e '.scan_id and .status' >/dev/null 2>&1 <<<"$body"; then
+        echo -e "${RED}Scan submission returned an invalid response.${NC}"
+        scan_error_detail "$body"
+        return 1
+    fi
+
+    scan_id="$(jq -r '.scan_id' <<<"$body")"
+    status="$(jq -r '.status' <<<"$body")"
+    echo "Scan ID: $scan_id"
+    echo "Status: $status"
     echo ""
-    echo "View progress at: $(ui_base_url)/scans"
+    echo "View progress at: $(ui_base_url)/scans/$scan_id"
 }
 
 build_images() {
@@ -1598,6 +2080,8 @@ rebuild_images() {
     local NO_CACHE=""
     local SERVICES=""
     local SERVICE_DESC="all services"
+    local REFRESH_WORKERS=1
+    local existing_workers
 
     # Parse arguments
     while [[ $# -gt 0 ]]; do
@@ -1609,16 +2093,19 @@ rebuild_images() {
             scanner)
                 SERVICES="api worker"
                 SERVICE_DESC="scanner services (api, worker)"
+                REFRESH_WORKERS=1
                 shift
                 ;;
             ui)
                 SERVICES="ui"
                 SERVICE_DESC="UI"
+                REFRESH_WORKERS=0
                 shift
                 ;;
             all)
                 SERVICES=""
                 SERVICE_DESC="all services"
+                REFRESH_WORKERS=1
                 shift
                 ;;
             *)
@@ -1635,6 +2122,8 @@ rebuild_images() {
         echo -e "${GREEN}Rebuilding $SERVICE_DESC (using cache)...${NC}"
     fi
 
+    existing_workers="$(running_scan_worker_count)"
+
     if [ -n "$SERVICES" ]; then
         compose build $NO_CACHE $SERVICES
     else
@@ -1642,10 +2131,31 @@ rebuild_images() {
     fi
 
     printf "local\n" > "$LOCAL_BUILD_MARKER"
+
+    if [ "$REFRESH_WORKERS" -eq 1 ]; then
+        refresh_workers_after_rebuild "$existing_workers"
+    fi
+
     echo -e "${GREEN}Rebuild complete${NC}"
     echo ""
-    echo -e "${BLUE}Local-build mode recorded. Run './scanner.sh restart' to use the new local images.${NC}"
+    if [ "$REFRESH_WORKERS" -eq 1 ] && [ "${existing_workers:-0}" -gt 0 ]; then
+        echo -e "${BLUE}Local-build mode recorded. Running worker containers were recreated from the rebuilt image.${NC}"
+        echo -e "${BLUE}Run './scanner.sh restart' if you also need to recreate API/UI containers.${NC}"
+    else
+        echo -e "${BLUE}Local-build mode recorded. Run './scanner.sh restart' to use the new local images.${NC}"
+    fi
     echo -e "${BLUE}Use './scanner.sh restart --prebuilt' only when you intentionally want Docker Hub images.${NC}"
+}
+
+refresh_workers_after_rebuild() {
+    local desired_count="${1:-0}"
+    if [ "$desired_count" -lt 1 ]; then
+        remove_scan_worker_containers "Removing stale stopped worker containers after rebuild..."
+        return 0
+    fi
+
+    remove_scan_worker_containers "Recreating worker containers from rebuilt image..."
+    compose up --no-build -d --force-recreate --scale worker="$desired_count" worker
 }
 
 reset_database() {
@@ -1662,6 +2172,51 @@ reset_database() {
     else
         echo "Cancelled"
     fi
+}
+
+create_backup() {
+    local backup_root="${1:-$SCRIPT_DIR/backups}"
+    local timestamp
+    local snapshot_dir
+
+    timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
+    snapshot_dir="$backup_root/shakerscan-$timestamp"
+    if [ -e "$snapshot_dir" ]; then
+        echo -e "${RED}Error: backup destination already exists: $snapshot_dir${NC}"
+        return 1
+    fi
+
+    umask 077
+    mkdir -p "$snapshot_dir"
+    printf '%s\n' "Backup is incomplete; do not use for restore." > "$snapshot_dir/.incomplete"
+
+    echo "Creating consistent PostgreSQL dump..."
+    if ! compose exec -T postgres pg_dump -U scanner -d scanner -Fc > "$snapshot_dir/postgres.dump"; then
+        echo -e "${RED}PostgreSQL backup failed. Partial files remain at $snapshot_dir${NC}"
+        return 1
+    fi
+
+    echo "Archiving result artifacts..."
+    if ! tar -C "$SCRIPT_DIR" -czf "$snapshot_dir/results.tar.gz" results; then
+        echo -e "${RED}Results backup failed. Partial files remain at $snapshot_dir${NC}"
+        return 1
+    fi
+
+    [ ! -f "$SCRIPT_DIR/.env" ] || cp "$SCRIPT_DIR/.env" "$snapshot_dir/runtime.env"
+    [ ! -f "$SCRIPT_DIR/VERSION" ] || cp "$SCRIPT_DIR/VERSION" "$snapshot_dir/VERSION"
+    [ ! -f "$SCRIPT_DIR/docker-compose.release.yml" ] || \
+        cp "$SCRIPT_DIR/docker-compose.release.yml" "$snapshot_dir/docker-compose.release.yml"
+
+    {
+        printf 'created_at=%s\n' "$timestamp"
+        printf 'release_version=%s\n' "$(get_release_version)"
+        printf 'image_tag=%s\n' "${SCANNER_IMAGE_TAG:-$DEFAULT_PREBUILT_IMAGE_TAG}"
+        printf 'compose_project=%s\n' "${COMPOSE_PROJECT_NAME:-shakerscan}"
+    } > "$snapshot_dir/manifest.txt"
+    rm "$snapshot_dir/.incomplete"
+
+    echo -e "${GREEN}Backup complete: $snapshot_dir${NC}"
+    echo "This directory contains sensitive configuration and scan evidence; store it securely."
 }
 
 scale_workers() {
@@ -1808,7 +2363,10 @@ start_agent() {
                 if command_exists "$agent"; then
                     echo "Starting $agent in $SCRIPT_DIR"
                     echo "This lets the agent read README.md, AGENTS.md, CLAUDE.md, skills/, and .claude/."
+                    echo "Research planner: this agent session (no stored AI provider required)."
                     cd "$SCRIPT_DIR"
+                    export SHAKERSCAN_AGENT_NAME="$agent"
+                    export SHAKERSCAN_RESEARCH_PLANNER_MODE="agent"
                     exec "$agent"
                 fi
                 ;;
@@ -1966,11 +2524,23 @@ fi
 configure_runtime_mode "$COMMAND"
 
 # Dependency preflight for command execution
+COMMAND_HELP_ONLY=0
+case "$COMMAND" in
+    scan|scan-full|scan-smart)
+        for arg in "${ARGS[@]}"; do
+            if [ "$arg" = "--help" ] || [ "$arg" = "-h" ]; then
+                COMMAND_HELP_ONLY=1
+                break
+            fi
+        done
+        ;;
+esac
+
 case $COMMAND in
     help|--help|-h|install-deps|doctor|env|agent|ai)
         ;;
     *)
-        if ! ensure_command_dependencies "$COMMAND" "${ARGS[0]}"; then
+        if [ "$COMMAND_HELP_ONLY" -ne 1 ] && ! ensure_command_dependencies "$COMMAND" "${ARGS[0]}"; then
             exit 1
         fi
         ;;
@@ -2000,13 +2570,13 @@ case $COMMAND in
         show_logs "${ARGS[0]}" "$FOLLOW"
         ;;
     scan)
-        quick_scan "${ARGS[0]}"
+        submit_scan "scan" "quick" 1 "${ARGS[@]}"
         ;;
     scan-full)
-        full_scan "${ARGS[0]}"
+        submit_scan "scan-full" "full" 0 "${ARGS[@]}"
         ;;
     scan-smart)
-        smart_scan "${ARGS[@]}"
+        submit_scan "scan-smart" "smart" 0 "${ARGS[@]}"
         ;;
     install-deps)
         install_dependencies
@@ -2020,6 +2590,34 @@ case $COMMAND in
     agent|ai)
         start_agent "${ARGS[0]}"
         ;;
+    mcp)
+        if [ ! -f "$SCRIPT_DIR/scripts/shakerscan_mcp.py" ]; then
+            echo -e "${RED}Error: the MCP adapter is missing from this runtime.${NC}"
+            echo "Re-run the ShakerScan installer to refresh runtime files."
+            exit 1
+        fi
+        exec python3 "$SCRIPT_DIR/scripts/shakerscan_mcp.py"
+        ;;
+    research)
+        if [ -z "${ARGS[0]:-}" ]; then
+            echo "Usage: ./scanner.sh research <episode-id> [max-decisions]"
+            exit 1
+        fi
+        for required_file in \
+            "$SCRIPT_DIR/scripts/local_planner_adapter.py" \
+            "$SCRIPT_DIR/scripts/planner_evals.py" \
+            "$SCRIPT_DIR/api/command_arsenal.py"; do
+            if [ ! -f "$required_file" ]; then
+                echo -e "${RED}Error: legacy research adapter runtime files are incomplete.${NC}"
+                echo "Re-run the ShakerScan installer to refresh runtime files."
+                exit 1
+            fi
+        done
+        exec python3 "$SCRIPT_DIR/scripts/local_planner_adapter.py" episode \
+            --api-url "$(api_base_url)" \
+            --episode-id "${ARGS[0]}" \
+            --max-decisions "${ARGS[1]:-5}"
+        ;;
     gungnir)
         gungnir_cmd "${ARGS[0]}"
         ;;
@@ -2028,6 +2626,9 @@ case $COMMAND in
         ;;
     rebuild)
         rebuild_images "${ARGS[@]}"
+        ;;
+    backup)
+        create_backup "${ARGS[0]}"
         ;;
     reset)
         reset_database

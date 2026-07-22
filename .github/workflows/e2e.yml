@@ -1,0 +1,82 @@
+name: E2E (full release gate)
+
+# The full suite performs bounded active SQLi/XSS testing against the pinned
+# Juice Shop service. It is intentionally manual: run it for an approved release
+# candidate before creating the release tag. PRs use e2e-pr.yml instead.
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_sha:
+        description: "Exact approved commit SHA on main"
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: e2e-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    env:
+      # Juice Shop shares the Compose network with the scanner worker. Do not
+      # route active scans through the runner host gateway.
+      SHAKERSCAN_E2E_DAST_TARGET: http://juice-shop:3000
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.candidate_sha }}
+          fetch-depth: 0
+
+      - name: Verify exact release candidate
+        shell: bash
+        env:
+          REQUESTED_CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+        run: |
+          if [[ ! "$REQUESTED_CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "candidate_sha must be a full lowercase 40-character commit SHA" >&2
+            exit 1
+          fi
+          candidate_sha="$(git rev-parse HEAD)"
+          if [[ "$REQUESTED_CANDIDATE_SHA" != "$candidate_sha" ]]; then
+            echo "Candidate mismatch: requested=$REQUESTED_CANDIDATE_SHA checked_out=$candidate_sha" >&2
+            exit 1
+          fi
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          git merge-base --is-ancestor "$candidate_sha" origin/main || {
+            echo "Approved candidate is not reachable from origin/main" >&2
+            exit 1
+          }
+
+      - name: Start ShakerScan and pinned Juice Shop
+        run: |
+          docker compose --profile e2e up -d --build
+          for i in $(seq 1 90); do
+            curl -sf http://localhost:8080/health && break
+            sleep 5
+          done
+          curl -sf http://localhost:8080/health
+          for i in $(seq 1 40); do
+            curl -sf http://localhost:3001/ >/dev/null && break
+            sleep 5
+          done
+          curl -sf http://localhost:3001/ >/dev/null
+
+      - name: Verify Juice Shop is reachable from the worker network
+        run: |
+          docker compose exec -T worker python3 -c 'import urllib.request; response = urllib.request.urlopen("http://juice-shop:3000/rest/products/search?q=apple", timeout=10); assert response.status == 200'
+
+      - name: Run full E2E release gate
+        run: python3 tests/e2e/run_e2e.py --area all
+
+      - name: Dump stack logs on failure
+        if: failure()
+        run: docker compose --profile e2e logs --tail=300 api worker juice-shop || true
+
+      - name: Stop E2E stack
+        if: always()
+        run: docker compose --profile e2e down -v

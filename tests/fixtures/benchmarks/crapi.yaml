@@ -1,0 +1,49 @@
+# Benchmark scorecard fixture — crAPI (BOLA/Authz-focused DAST target).
+# Consumed by scripts/benchmark_targets.py. crAPI's headline class is multi-user
+# BOLA/IDOR, which requires two authenticated principals.
+name: crapi
+target_url: http://host.docker.internal:8888
+scan_options:
+  scan_type: smart
+  parallel: false
+  budget_profile: thorough
+  exploit_depth: true            # BOLA is gated behind exploit_depth + two users
+  no_early_stop: true
+auth:
+  # crAPI auth is self-serviceable: signup + login mint JWTs (see memory
+  # crapi-juiceshop-validation-setup). benchmark_targets.py --auth crapi handles it.
+  user1_login: { url: /identity/api/auth/login, email_field: email, password_field: password }
+  user2_login: { url: /identity/api/auth/login, email_field: email, password_field: password }
+  requires_two_users: true
+
+gates:
+  min_verified_high_critical: 1
+  require_verified_bola: true
+  # If only one user is supplied, BOLA must report a clear blocked reason, not a pass.
+  bola_blocked_reason_if_single_user: true
+
+expected:
+  - id: bola-vehicle-location
+    family: bola
+    route: /identity/api/v2/vehicle
+    min_severity: high
+    proof: verified
+  - id: bola-mechanic-report
+    family: bola
+    route: /workshop/api/mechanic
+    min_severity: high
+    proof: verified
+  - id: bola-orders
+    family: bola
+    route: /workshop/api/shop/orders
+    min_severity: high
+    proof: verified
+  - id: sqli-coupon
+    family: sqli
+    route: /community/api/v2/coupon
+    min_severity: high
+    proof: verified
+
+hard_tail:
+  - mass-assignment      # write-BOLA / mass assignment is Lab/deep-gated
+  - jwt-forged

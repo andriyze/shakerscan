@@ -1,11 +1,13 @@
 'use client'
 
-import { useEffect, useState, useCallback, useRef, Suspense } from 'react'
+import { useEffect, useState, useCallback, useMemo, useRef, Suspense } from 'react'
 import Link from 'next/link'
-import { getScans, cancelScan, getDomains, getGradeColor, formatDate, formatDuration, submitScan, type Scan } from '@/lib/api'
+import { getScans, cancelScan, getCampaigns, getDomains, getGradeColor, formatDate, formatDuration, submitScan, type Campaign, type Scan } from '@/lib/api'
 import { useUrlFilters } from '@/lib/useUrlFilters'
-import { SCAN_STATUSES, SCAN_TYPES } from '@/lib/constants'
-import { Card, ConfirmDialog, ErrorState, LastUpdated, ScanStatusBadge, TableSkeleton, useToast } from '@/components/ui'
+import { SCAN_STATUSES, SCAN_TYPES, type ScanType } from '@/lib/constants'
+import { Plus, Search } from 'lucide-react'
+import { buttonClasses, Card, ConfirmDialog, ErrorState, Input, LastUpdated, PageHeader, ScanStatusBadge, Select, TableSkeleton, useToast } from '@/components/ui'
+import { episodesStarted, findingCount, RunStatusBadge, runState } from '@/components/hunt'
 
 const PAGE_SIZE = 50
 const SEARCH_DEBOUNCE_MS = 300
@@ -49,6 +51,10 @@ function formatScanTypeLabel(scan: Scan): string {
     .join(' ')
 }
 
+function isParallelParent(scan: Scan): boolean {
+  return scan.scan_role === 'parent' || Boolean(scan.options?.parallel_strategy)
+}
+
 function formatAITargetType(value?: string | null): string | null {
   if (!value) return null
   const labels: Record<string, string> = {
@@ -59,12 +65,30 @@ function formatAITargetType(value?: string | null): string | null {
   return labels[value] || value.replace(/_/g, ' ')
 }
 
+function huntTargetUrl(campaign: Campaign): string {
+  const url = campaign.target_scope?.url
+  return typeof url === 'string' && url.trim() ? url : ''
+}
+
+function huntTargetLabel(campaign: Campaign): string {
+  return huntTargetUrl(campaign) || campaign.name || 'Autonomous run'
+}
+
+function huntMatchesFilters(campaign: Campaign, status: string, domain: string, search: string): boolean {
+  if (status && !['active', 'running', 'pending', 'queued'].includes(status.toLowerCase())) return false
+  const target = huntTargetUrl(campaign).toLowerCase()
+  if (domain && !target.includes(domain.toLowerCase())) return false
+  const query = search.trim().toLowerCase()
+  return !query || `${campaign.name || ''} ${target}`.toLowerCase().includes(query)
+}
+
 interface ScansFilters {
   [key: string]: string | number | undefined
   status?: string
   domain?: string
   search?: string
   page?: number
+  include_internal?: string
 }
 
 function ScansContent() {
@@ -74,6 +98,7 @@ function ScansContent() {
   const toast = useToast()
 
   const [scans, setScans] = useState<Scan[]>([])
+  const [activeHunts, setActiveHunts] = useState<Campaign[]>([])
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState(false)
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null)
@@ -94,6 +119,10 @@ function ScansContent() {
   // Time cohort (?within=7) — exposure "What changed" links use it so the
   // destination shows the same windowed slice the tile counted.
   const withinFilter = filters.within ? Number(filters.within) : 0
+  // Continuous-ASM batch/recon scans are hidden from this list by default (they
+  // are internal coverage work, not user-initiated scans). This opt-in surfaces
+  // them so an "active ASM scan" is reachable here too.
+  const includeInternal = filters.include_internal === 'true'
   // Page is 1-based in URL (page=1 is first page), clamped to valid range
   const rawPage = Math.max(1, filters.page || 1)
 
@@ -157,6 +186,7 @@ function ScansContent() {
         root_domain: domainFilter || undefined,
         target: searchQuery || undefined,
         created_within_days: withinFilter || undefined,
+        include_internal: includeInternal || undefined,
         limit: PAGE_SIZE,
         offset: (rawPage - 1) * PAGE_SIZE
       })
@@ -185,13 +215,28 @@ function ScansContent() {
       }
       return false
     }
-  }, [statusFilter, domainFilter, searchQuery, withinFilter, rawPage, setFilter])
+  }, [statusFilter, domainFilter, searchQuery, withinFilter, includeInternal, rawPage, setFilter])
+
+  const fetchActiveHunts = useCallback(async (): Promise<boolean> => {
+    try {
+      const data = await getCampaigns({ status: 'active', limit: 50 })
+      setActiveHunts((data.campaigns || []).filter((campaign) => campaign.campaign_type === 'autonomous_research'))
+      return true
+    } catch (err) {
+      console.error('Failed to fetch active autonomous hunts:', err)
+      return false
+    }
+  }, [])
 
   useEffect(() => {
     fetchScans()
-    const interval = setInterval(() => fetchScans(true), 5000)
+    fetchActiveHunts()
+    const interval = setInterval(() => {
+      fetchScans(true)
+      fetchActiveHunts()
+    }, 5000)
     return () => clearInterval(interval)
-  }, [fetchScans])
+  }, [fetchActiveHunts, fetchScans])
 
   // Keep running scan elapsed durations fresh without per-second churn.
   useEffect(() => {
@@ -213,10 +258,10 @@ function ScansContent() {
 
   async function handleManualRefresh() {
     setRefreshing(true)
-    const ok = await fetchScans(true)
+    const [scansOk, huntsOk] = await Promise.all([fetchScans(true), fetchActiveHunts()])
     setRefreshing(false)
-    if (!ok) {
-      toast.error('Failed to refresh scans')
+    if (!scansOk || !huntsOk) {
+      toast.error('Some work could not be refreshed')
     }
   }
 
@@ -240,14 +285,17 @@ function ScansContent() {
     }
   }
 
-  async function handleScan(targetUrl: string, scanType: string) {
+  async function handleScan(targetUrl: string, scanType: ScanType) {
     const type = SCAN_TYPES.find(t => t.value === scanType)
     if (!type) return
     try {
-      const result = await submitScan(targetUrl, { ...type.options, scan_type: scanType })
+      const result = await submitScan(targetUrl, {
+        ...type.options,
+        scan_type: scanType
+      })
       setOpenScanMenu(null)
       toast.success(
-        'Scan started',
+        result?.auto_sharded ? 'Auto-sharded scan started' : result?.parallel ? 'Parallel scan started' : 'Scan started',
         result?.scan_id
           ? { link: { href: `/scans/${result.scan_id}`, label: 'View scan' } }
           : undefined
@@ -260,6 +308,10 @@ function ScansContent() {
   }
 
   const totalPages = Math.ceil(total / PAGE_SIZE)
+  const visibleHunts = useMemo(
+    () => activeHunts.filter((campaign) => huntMatchesFilters(campaign, statusFilter, domainFilter, searchQuery)),
+    [activeHunts, statusFilter, domainFilter, searchQuery],
+  )
 
   // Clamp page to valid range for display
   const page = Math.min(rawPage, Math.max(1, totalPages))
@@ -290,75 +342,80 @@ function ScansContent() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-bold text-white">Scans</h1>
-          <p className="text-gray-400 mt-1">View all security scans</p>
-        </div>
-        <div className="flex items-center gap-4">
-          <LastUpdated updatedAt={lastUpdated} onRefresh={handleManualRefresh} refreshing={refreshing} />
-          <Link
-            href="/scan/new"
-            className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition-colors"
-          >
-            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
-            </svg>
-            New Scan
-          </Link>
-        </div>
-      </div>
+      <PageHeader
+        title="Scans"
+        description="Scans and active autonomous testing in one place"
+        actions={
+          <>
+            <LastUpdated updatedAt={lastUpdated} onRefresh={handleManualRefresh} refreshing={refreshing} />
+            <Link href="/scan/new" className={buttonClasses('primary')}>
+              <Plus className="h-4 w-4" aria-hidden="true" />
+              New Scan
+            </Link>
+          </>
+        }
+      />
 
       {/* Filters */}
       <div className="flex gap-4 flex-wrap">
         {/* Status Filter */}
         <div className="flex items-center gap-3">
           <label className="text-sm text-gray-400">Status:</label>
-          <select
+          <Select
+            fullWidth={false}
             value={statusFilter}
             onChange={(e) => setFilter('status', e.target.value || undefined)}
             aria-label="Filter by scan status"
-            className="px-3 py-2 bg-gray-900 border border-gray-800 rounded-lg text-white text-sm focus:outline-none focus:border-blue-500"
           >
             <option value="">All statuses</option>
             {SCAN_STATUSES.map((status) => (
               <option key={status} value={status}>{status}</option>
             ))}
-          </select>
+          </Select>
         </div>
 
         {/* Domain Filter */}
         {domains.length > 0 && (
           <div className="flex items-center gap-3">
             <label className="text-sm text-gray-400">Domain:</label>
-            <select
+            <Select
+              fullWidth={false}
               value={domainFilter}
               onChange={(e) => setFilter('domain', e.target.value || undefined)}
               aria-label="Filter by domain"
-              className="px-3 py-2 bg-gray-900 border border-gray-800 rounded-lg text-white text-sm focus:outline-none focus:border-blue-500"
             >
               <option value="">All domains</option>
               {domains.map((domain) => (
                 <option key={domain} value={domain}>{domain}</option>
               ))}
-            </select>
+            </Select>
           </div>
         )}
 
         {/* Search */}
         <div className="relative flex-1 min-w-[200px]">
-          <input
+          <Input
             type="text"
             placeholder="Search by target URL..."
             value={searchInput}
             onChange={(e) => setSearchInput(e.target.value)}
             aria-label="Search scans by target URL"
-            className="w-full px-4 py-2 bg-gray-900 border border-gray-800 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-blue-500"
+            className="pr-10"
           />
-          <svg className="absolute right-3 top-2.5 w-5 h-5 text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-          </svg>
+          <Search className="pointer-events-none absolute right-3 top-1/2 h-5 w-5 -translate-y-1/2 text-gray-500" aria-hidden="true" />
         </div>
+
+        {/* Show Continuous-ASM batch/recon scans (hidden by default) */}
+        <label className="flex items-center gap-2 self-center text-sm text-gray-400 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={includeInternal}
+            onChange={(e) => setFilter('include_internal', e.target.checked ? 'true' : undefined)}
+            aria-label="Show ASM and internal scans"
+            className="h-4 w-4 rounded border-gray-700 bg-gray-900 text-blue-600 focus:ring-blue-500"
+          />
+          Show ASM/internal scans
+        </label>
 
         {/* Time cohort chip (deep-linked from exposure "What changed") */}
         {withinFilter > 0 && (
@@ -382,6 +439,7 @@ function ScansContent() {
               ? `Showing ${total} scan${total !== 1 ? 's' : ''}`
               : `Showing ${(page - 1) * PAGE_SIZE + 1}-${Math.min(page * PAGE_SIZE, total)} of ${total}`
             }
+            {visibleHunts.length > 0 ? ` · ${visibleHunts.length} active hunt${visibleHunts.length === 1 ? '' : 's'}` : ''}
           </span>
           <PaginationControls />
         </div>
@@ -397,17 +455,165 @@ function ScansContent() {
       <Card>
         {loading ? (
           <TableSkeleton rows={8} cols={6} />
-        ) : scans.length === 0 ? (
-          <div className="p-8 text-center text-gray-500">
-            {searchQuery || domainFilter || statusFilter ? 'No scans found matching your filters.' : 'No scans found. Start a new scan to get started.'}
+        ) : scans.length === 0 && visibleHunts.length === 0 ? (
+          <div className="p-8 text-center">
+            <p className="text-gray-500">
+              {searchQuery || domainFilter || statusFilter ? 'No scans found matching your filters.' : 'No scans yet.'}
+            </p>
+            <p className="mt-1 text-sm text-gray-600">
+              {searchQuery || domainFilter || statusFilter ? 'Try clearing your filters.' : 'Start a new scan to get started.'}
+            </p>
           </div>
         ) : (
-          <div className="overflow-x-auto">
+          <>
+          {/* Mobile / tablet card layout (below lg): the desktop table scrolls
+              the important columns off-screen on a phone, so render each scan as
+              a stacked card with everything visible in the first viewport. */}
+          <div className="lg:hidden space-y-3 p-3">
+            {visibleHunts.map((campaign) => {
+              const progress = episodesStarted(campaign)
+              const found = findingCount(campaign)
+              const createdAtMs = Date.parse(campaign.created_at)
+              const duration = Number.isNaN(createdAtMs)
+                ? '-'
+                : formatDuration(Math.max(0, Math.floor((durationTickMs - createdAtMs) / 1000)))
+              return (
+                <div key={`hunt-${campaign.id}`} className="rounded-lg border border-blue-500/30 bg-blue-500/[0.04] p-4">
+                  <div className="flex items-start justify-between gap-3">
+                    <Link
+                      href={`/deep-hunt/runs/${campaign.id}`}
+                      className="min-w-0 flex-1 truncate text-sm font-medium text-blue-300 hover:text-blue-200"
+                      title={huntTargetLabel(campaign)}
+                    >
+                      {huntTargetLabel(campaign)}
+                    </Link>
+                    <RunStatusBadge state={runState(campaign)} />
+                  </div>
+                  <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2 text-sm">
+                    <span className="text-gray-400">No score yet</span>
+                    <span className={found > 0 ? 'text-emerald-300' : 'text-gray-400'}>
+                      {found} active finding{found === 1 ? '' : 's'}
+                    </span>
+                  </div>
+                  <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-gray-500">
+                    <span className="text-blue-300">Verifier · legacy</span>
+                    {progress.max > 0 ? (
+                      <span className="rounded bg-gray-800 px-1.5 py-0.5 text-gray-400">
+                        Episode {progress.started}/{progress.max}
+                      </span>
+                    ) : null}
+                    <span aria-hidden="true">·</span>
+                    <span>{duration}</span>
+                    <span aria-hidden="true">·</span>
+                    <span>{formatDate(campaign.created_at)}</span>
+                  </div>
+                  <div className="mt-3">
+                    <Link
+                      href={`/deep-hunt/runs/${campaign.id}`}
+                      className="inline-flex rounded bg-blue-600 px-2 py-1 text-xs font-medium text-white hover:bg-blue-700"
+                    >
+                      View hunt
+                    </Link>
+                  </div>
+                </div>
+              )
+            })}
+            {scans.map((scan) => {
+              const isAIScan = scan.scan_type === 'ai_gate' || scan.run_kind?.startsWith('ai_')
+              const authenticated = isAuthenticatedScan(scan)
+              const aiTargetType = formatAITargetType(scan.ai_target_type)
+              const scanTypeLabel = formatScanTypeLabel(scan)
+              const parallelParent = isParallelParent(scan)
+              const asmBatch = scan.scan_role === 'asm_batch'
+              const asmRecon = scan.scan_role === 'asm_recon'
+              const variantLabel = asmBatch
+                ? 'ASM batch'
+                : asmRecon
+                  ? 'ASM recon'
+                  : parallelParent
+                    ? 'Parallel'
+                    : aiTargetType || (authenticated ? 'Authenticated' : null)
+              const canCancel = scan.status === 'running' || scan.status === 'pending' || scan.status === 'queued'
+              return (
+                <div key={scan.id} className="rounded-lg border border-gray-800 bg-gray-900 p-4">
+                  <div className="flex items-start justify-between gap-3">
+                    <Link
+                      href={buildUrl(`/scans/${scan.id}`, {
+                        return_status: statusFilter,
+                        return_domain: domainFilter,
+                        return_search: searchQuery,
+                        return_page: page > 1 ? page : undefined,
+                        return_include_internal: includeInternal ? 'true' : undefined
+                      })}
+                      className="min-w-0 flex-1 truncate text-sm font-medium text-blue-400 hover:text-blue-300"
+                      title={scan.target_url}
+                    >
+                      {scan.target_url}
+                    </Link>
+                    <ScanStatusBadge status={scan.status} />
+                  </div>
+                  <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2 text-sm">
+                    {scan.grade ? (
+                      <div className="flex items-center gap-1.5">
+                        <span className={`text-lg font-bold ${getGradeColor(scan.grade)}`}>{scan.grade}</span>
+                        <span className="text-gray-500">{scan.score}/100</span>
+                      </div>
+                    ) : (
+                      <span className="text-gray-500">No score</span>
+                    )}
+                    {(scan.findings_count || 0) > 0 ? (
+                      <Link
+                        href={`/findings?scan_id=${scan.id}`}
+                        className="text-blue-400 hover:text-blue-300"
+                      >
+                        {scan.findings_count} finding{scan.findings_count === 1 ? '' : 's'}
+                      </Link>
+                    ) : (
+                      <span className="text-gray-400">0 findings</span>
+                    )}
+                  </div>
+                  <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-gray-500">
+                    <span className="text-gray-300">{scanTypeLabel}</span>
+                    {variantLabel && (
+                      <span className="rounded bg-gray-800 px-1.5 py-0.5 text-gray-400">{variantLabel}</span>
+                    )}
+                    <span aria-hidden="true">·</span>
+                    <span>{getDurationLabel(scan)}</span>
+                    <span aria-hidden="true">·</span>
+                    <span>{formatDate(scan.created_at)}</span>
+                  </div>
+                  {(canCancel || isAIScan) && (
+                    <div className="mt-3 flex items-center gap-2">
+                      {canCancel ? (
+                        <button
+                          onClick={() => setConfirmCancelId(scan.id)}
+                          disabled={cancelling.has(scan.id)}
+                          className="px-2 py-1 bg-red-600/20 hover:bg-red-600/40 text-red-400 rounded text-xs font-medium transition-colors disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-red-500"
+                        >
+                          {cancelling.has(scan.id) ? 'Cancelling...' : 'Cancel'}
+                        </button>
+                      ) : isAIScan ? (
+                        <Link
+                          href="/ai-gate"
+                          className="px-2 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded text-xs font-medium transition-colors"
+                        >
+                          AI Gate
+                        </Link>
+                      ) : null}
+                    </div>
+                  )}
+                </div>
+              )
+            })}
+          </div>
+
+          {/* Desktop table layout (lg and up) */}
+          <div className="hidden lg:block overflow-x-auto">
           <table className="w-full min-w-[760px] 2xl:min-w-full">
             <thead className="bg-gray-800/50">
               <tr>
                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">Target</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">Type</th>
+                <th className="hidden xl:table-cell px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">Type</th>
                 <th className="hidden 2xl:table-cell px-4 py-3 text-center text-xs font-medium text-gray-400 uppercase">Auth</th>
                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">Status</th>
                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">Score</th>
@@ -418,11 +624,57 @@ function ScansContent() {
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-800">
+              {visibleHunts.map((campaign) => {
+                const progress = episodesStarted(campaign)
+                const found = findingCount(campaign)
+                const createdAtMs = Date.parse(campaign.created_at)
+                const duration = Number.isNaN(createdAtMs)
+                  ? '-'
+                  : formatDuration(Math.max(0, Math.floor((durationTickMs - createdAtMs) / 1000)))
+                return (
+                  <tr key={`hunt-${campaign.id}`} className="bg-blue-500/[0.035] transition-colors hover:bg-blue-500/[0.07]">
+                    <td className="max-w-[20rem] px-4 py-3">
+                      <Link
+                        href={`/deep-hunt/runs/${campaign.id}`}
+                        className="block truncate text-sm text-blue-300 hover:text-blue-200"
+                        title={huntTargetLabel(campaign)}
+                      >
+                        {huntTargetLabel(campaign)}
+                      </Link>
+                    </td>
+                    <td className="hidden px-4 py-3 xl:table-cell">
+                      <span className="text-sm text-blue-300">Verifier · legacy</span>
+                      {progress.max > 0 ? <div className="mt-0.5 text-xs text-gray-500">Episode {progress.started}/{progress.max}</div> : null}
+                    </td>
+                    <td className="hidden px-4 py-3 text-center text-gray-600 2xl:table-cell">—</td>
+                    <td className="px-4 py-3"><RunStatusBadge state={runState(campaign)} /></td>
+                    <td className="px-4 py-3 text-gray-600">—</td>
+                    <td className="px-4 py-3">
+                      {found > 0 && campaign.target_id ? (
+                        <Link href={`/findings?target_id=${campaign.target_id}&status=active`} className="text-sm text-emerald-300 hover:text-emerald-200">{found}</Link>
+                      ) : <span className="text-sm text-gray-400">{found}</span>}
+                    </td>
+                    <td className="hidden px-4 py-3 text-sm text-gray-400 xl:table-cell">{duration}</td>
+                    <td className="hidden px-4 py-3 text-sm text-gray-500 2xl:table-cell">{formatDate(campaign.created_at)}</td>
+                    <td className="px-4 py-3">
+                      <Link
+                        href={`/deep-hunt/runs/${campaign.id}`}
+                        className="inline-flex rounded bg-blue-600 px-2 py-1 text-xs font-medium text-white hover:bg-blue-700"
+                      >
+                        View
+                      </Link>
+                    </td>
+                  </tr>
+                )
+              })}
               {scans.map((scan) => {
                 const isAIScan = scan.scan_type === 'ai_gate' || scan.run_kind?.startsWith('ai_')
                 const authenticated = isAuthenticatedScan(scan)
                 const aiTargetType = formatAITargetType(scan.ai_target_type)
                 const scanTypeLabel = formatScanTypeLabel(scan)
+                const parallelParent = isParallelParent(scan)
+                const asmBatch = scan.scan_role === 'asm_batch'
+                const asmRecon = scan.scan_role === 'asm_recon'
                 return (
                 <tr key={scan.id} className="hover:bg-gray-800/50 transition-colors">
                   <td className="px-4 py-3 max-w-[20rem]">
@@ -431,7 +683,8 @@ function ScansContent() {
                         return_status: statusFilter,
                         return_domain: domainFilter,
                         return_search: searchQuery,
-                        return_page: page > 1 ? page : undefined
+                        return_page: page > 1 ? page : undefined,
+                        return_include_internal: includeInternal ? 'true' : undefined
                       })}
                       className="block truncate text-sm text-blue-400 hover:text-blue-300"
                       title={scan.target_url}
@@ -442,9 +695,9 @@ function ScansContent() {
                   <td className="hidden xl:table-cell px-4 py-3">
                     <div className="min-w-0">
                       <span className="text-sm text-gray-300">{scanTypeLabel}</span>
-                      {(aiTargetType || authenticated) && (
+                      {(asmBatch || asmRecon || parallelParent || aiTargetType || authenticated) && (
                         <div className="mt-0.5 truncate text-xs text-gray-500">
-                          {aiTargetType || 'Authenticated'}
+                          {asmBatch ? 'ASM batch' : asmRecon ? 'ASM recon' : parallelParent ? 'Parallel' : aiTargetType || 'Authenticated'}
                         </div>
                       )}
                     </div>
@@ -497,7 +750,7 @@ function ScansContent() {
                       <span className="text-sm text-gray-400">0</span>
                     )}
                   </td>
-                  <td className="px-4 py-3">
+                  <td className="hidden xl:table-cell px-4 py-3">
                     <span className="text-sm text-gray-400">
                       {getDurationLabel(scan)}
                     </span>
@@ -516,7 +769,7 @@ function ScansContent() {
                       </button>
                     ) : isAIScan ? (
                       <Link
-                        href="/settings/ai-gate"
+                        href="/ai-gate"
                         className="px-2 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded text-xs font-medium transition-colors"
                       >
                         AI Gate
@@ -564,6 +817,7 @@ function ScansContent() {
             </tbody>
           </table>
           </div>
+          </>
         )}
       </Card>
       )}
@@ -576,6 +830,7 @@ function ScansContent() {
               ? `Showing ${total} scan${total !== 1 ? 's' : ''}`
               : `Showing ${(page - 1) * PAGE_SIZE + 1}-${Math.min(page * PAGE_SIZE, total)} of ${total}`
             }
+            {visibleHunts.length > 0 ? ` · ${visibleHunts.length} active hunt${visibleHunts.length === 1 ? '' : 's'}` : ''}
           </span>
           <PaginationControls />
         </div>
@@ -598,11 +853,7 @@ function ScansContent() {
 
 export default function ScansPage() {
   return (
-    <Suspense fallback={
-      <div className="flex items-center justify-center h-32">
-        <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-blue-500"></div>
-      </div>
-    }>
+    <Suspense fallback={<Card><TableSkeleton rows={8} cols={6} /></Card>}>
       <ScansContent />
     </Suspense>
   )

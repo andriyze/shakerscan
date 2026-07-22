@@ -9,12 +9,14 @@ from datetime import datetime, timedelta
 
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "api"))
-sys.modules.setdefault("asyncpg", types.SimpleNamespace())
+sys.modules.setdefault("asyncpg", types.SimpleNamespace(Pool=object))
 sys.modules.setdefault("redis", types.SimpleNamespace(from_url=lambda *args, **kwargs: None))
 
 from worker import (  # noqa: E402
+    _descendant_process_group_ids,
     _enforce_verdict_invariants,
     _has_partial_deterministic_evidence,
+    _internal_retest_scope_authorized,
     _merge_ai_result_into_retest_result,
     _is_ai_circuit_open,
     _is_retryable_ai_error,
@@ -32,7 +34,7 @@ from worker import (  # noqa: E402
 
 def test_scan_time_verification_fields_promote_fresh_verified_finding():
     status, verdict, confidence = _scan_time_verification_fields(
-        {"verified": True, "confidence": 0.95, "last_verification_verdict": "false_positive"}
+        {"proof_of_exploitation": True, "confidence": 0.95, "last_verification_verdict": "false_positive"}
     )
 
     assert status == "still_vulnerable"
@@ -42,12 +44,85 @@ def test_scan_time_verification_fields_promote_fresh_verified_finding():
 
 def test_scan_time_verification_fields_accept_nested_validation_proof():
     status, verdict, confidence = _scan_time_verification_fields(
-        {"validation": {"verified": True, "confidence": "0.88"}}
+        {"validation": {"verified": True, "evidence_level": "confirmed_exploit", "confidence": "0.88"}}
     )
 
     assert status == "still_vulnerable"
     assert verdict == "exploited"
     assert confidence == 0.88
+
+
+def test_scan_time_verification_fields_rejects_generic_verified_flags():
+    assert _scan_time_verification_fields(
+        {"verified": True, "confidence": 0.95}
+    ) == (None, None, None)
+    assert _scan_time_verification_fields(
+        {"validation": {"verified": True, "confidence": "0.88"}}
+    ) == (None, None, None)
+
+
+def test_scan_time_verification_fields_caps_exploited_when_registry_contract_unmet():
+    # SCAN-01: a registered family whose registry proof contract is unmet was judged NOT
+    # trustworthy-verified at the report boundary. The raw proof_of_exploitation signal must NOT
+    # independently persist `exploited` on the authoritative verified surface (the divergence the
+    # in-report enforce_registry_finding_contracts left open). It is capped to likely_vulnerable.
+    status, verdict, confidence = _scan_time_verification_fields(
+        {"proof_of_exploitation": True, "confidence": 0.9,
+         "registry_contract": {"family": "sqli", "contract_satisfied": False}}
+    )
+    assert verdict == "likely_vulnerable"   # capped, not persisted as exploited
+    assert confidence == 0.9
+
+
+def test_scan_time_verification_fields_keeps_exploited_when_registry_contract_satisfied():
+    # Positive control: a satisfied registry contract (or an unregistered family with no contract)
+    # still persists exploited, so the SCAN-01 fix does not weaken legitimate verified findings.
+    _, satisfied_verdict, _ = _scan_time_verification_fields(
+        {"proof_of_exploitation": True, "confidence": 0.9,
+         "registry_contract": {"family": "sqli", "contract_satisfied": True}}
+    )
+    assert satisfied_verdict == "exploited"
+    _, no_contract_verdict, _ = _scan_time_verification_fields(
+        {"proof_of_exploitation": True, "confidence": 0.9}
+    )
+    assert no_contract_verdict == "exploited"
+
+
+def test_descendant_process_group_ids_reaches_own_session_tools(tmp_path):
+    # SCAN-03: the force-kill backstop must reach tool subprocesses that run in their own session
+    # (outside the scanner's process group). Fake /proc: scanner(100) -> tool(200, own group 200) ->
+    # grandchild(300, group 200); an unrelated process (400) and a non-numeric entry are excluded.
+    # The scanner's own group (100) is killed separately, so it is not expected in the descendant set.
+    def _stat(pid, ppid, pgrp):
+        directory = tmp_path / str(pid)
+        directory.mkdir()
+        # comm intentionally contains ") " to exercise the rsplit-after-last-") " parse.
+        (directory / "stat").write_text(f"{pid} (od) d) S {ppid} {pgrp} 0 0 -1 0\n")
+    _stat(100, 1, 100)      # scanner (root)
+    _stat(200, 100, 200)    # tool in its own session/group
+    _stat(300, 200, 200)    # tool grandchild, same group as the tool
+    _stat(400, 1, 400)      # unrelated process
+    (tmp_path / "cpuinfo").write_text("not-a-pid")   # non-numeric entry ignored
+
+    assert _descendant_process_group_ids(100, proc_root=str(tmp_path)) == {200}
+    # A missing/unavailable proc root (e.g. non-Linux hosts) yields an empty set, never raises.
+    assert _descendant_process_group_ids(100, proc_root=str(tmp_path / "absent")) == set()
+
+
+def test_scan_time_verification_fields_rejects_failed_browser_proof():
+    assert _scan_time_verification_fields(
+        {"verified": True, "browser_proof": {"proven": False, "confidence": 0.2}}
+    ) == (None, None, None)
+
+
+def test_scan_time_verification_fields_accepts_proven_browser_proof():
+    status, verdict, confidence = _scan_time_verification_fields(
+        {"browser_proof": {"proven": True, "confidence": 0.99}}
+    )
+
+    assert status == "still_vulnerable"
+    assert verdict == "exploited"
+    assert confidence == 0.99
 
 
 def test_scan_time_verification_fields_ignores_stale_false_positive_without_fresh_proof():
@@ -99,7 +174,9 @@ def test_ai_inconclusive_upgrades_error_to_completed_inconclusive():
     assert merged["result_status"] == "inconclusive"
 
 
-def test_ai_exploited_overrides_non_error_result():
+def test_ai_exploited_does_not_override_deterministic_verdict():
+    # Verification Depth C: AI never overrides a deterministic conclusion, and an AI
+    # "exploited" verdict is NOT proof — a deterministic 'likely_fixed' survives.
     result = {
         "status": "completed",
         "result_status": "likely_fixed",
@@ -109,11 +186,26 @@ def test_ai_exploited_overrides_non_error_result():
     ai_result = {"verdict": "exploited", "confidence": 0.92, "reasoning": "Exploit replay succeeded"}
     merged = _merge_ai_result_into_retest_result(result, ai_result)
 
-    assert merged["status"] == "completed"
+    assert merged["verdict"] == "likely_fixed"           # deterministic conclusion wins
+    assert merged["verification_mode"] == "deterministic"
+
+
+def test_ai_exploited_on_inconclusive_becomes_likely_vulnerable_not_verified():
+    # Verification Depth C: AI fills an inconclusive deterministic outcome but can only
+    # raise it to 'likely_vulnerable' (suspected) — never 'exploited' (verified).
+    result = {
+        "status": "running",
+        "result_status": "inconclusive",
+        "verdict": "inconclusive",
+        "verification_mode": "deterministic",
+    }
+    ai_result = {"verdict": "exploited", "confidence": 0.92, "reasoning": "AI thinks exploited"}
+    merged = _merge_ai_result_into_retest_result(result, ai_result)
+
+    assert merged["verdict"] == "likely_vulnerable"      # NOT 'exploited'
+    assert merged["verdict"] != "exploited"
+    assert merged["result_status"] == "inconclusive"     # not 'still_vulnerable' (verified)
     assert merged["verification_mode"] == "ai_driven"
-    assert merged["verdict"] == "exploited"
-    assert merged["result_status"] == "still_vulnerable"
-    assert merged["confidence"] == 0.92
 
 
 def test_ai_false_positive_does_not_override_existing_non_error_verdict():
@@ -165,6 +257,72 @@ def test_classify_catch_all_is_inconclusive():
         inputs={"target_url": "https://example.com/x"},
     )
     assert verdict == "inconclusive"
+
+
+def test_private_retest_without_inherited_scope_stays_out_of_scope():
+    _status, verdict, _reason = classify_retest_outcome(
+        proof={"evidence_type": "not_found"},
+        proven=False,
+        confidence=0.8,
+        inputs={"target_url": "http://127.0.0.1:3001/ftp/file"},
+    )
+    assert verdict == "out_of_scope_internal"
+
+
+def test_private_retest_with_authorized_source_scan_can_be_classified():
+    verification = {
+        "source_scan_target_url": "http://127.0.0.1:3001",
+        "source_scan_type": "smart",
+        "source_scan_options": {"scan_type": "smart", "exploit_depth": True},
+    }
+    target_url = "http://127.0.0.1:3001/ftp/file"
+
+    authorized = _internal_retest_scope_authorized(verification, target_url)
+    _status, verdict, _reason = classify_retest_outcome(
+        proof={"evidence_type": "not_found"},
+        proven=False,
+        confidence=0.8,
+        inputs={"target_url": target_url},
+        internal_target_authorized=authorized,
+    )
+
+    assert authorized is True
+    assert verdict != "out_of_scope_internal"
+
+
+def test_private_retest_does_not_inherit_scope_across_origins():
+    verification = {
+        "source_scan_target_url": "http://127.0.0.1:3001",
+        "source_scan_type": "smart",
+        "source_scan_options": {"scan_type": "smart", "exploit_depth": True},
+    }
+
+    assert _internal_retest_scope_authorized(
+        verification,
+        "http://127.0.0.1:8888/identity/api/users",
+    ) is False
+
+
+def test_private_retest_inherits_matching_lab_scope_receipt():
+    verification = {
+        "source_scan_target_url": "http://host.docker.internal:3001",
+        "source_scan_options": {
+            "runtime_scope_guard": {
+                "scope_receipt_id": "scope-unit",
+                "environment": "lab",
+                "allowed_hosts": ["host.docker.internal"],
+                "allowed_root_domains": [],
+                "normalized_scope": {"host": "host.docker.internal"},
+                "requires_runtime_destination_check": True,
+                "requires_runtime_dns_check": False,
+            }
+        },
+    }
+
+    assert _internal_retest_scope_authorized(
+        verification,
+        "http://host.docker.internal:3001/rest/products/search",
+    ) is True
 
 
 def test_ai_timeout_over_low_conf_no_proof_stays_inconclusive():

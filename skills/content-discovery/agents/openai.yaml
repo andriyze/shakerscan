@@ -1,4 +1,4 @@
 interface:
   display_name: "Content Discovery"
   short_description: "Generate high-signal route and file seeds for ShakerScan"
-  default_prompt: "Build a high-signal content discovery plan from ShakerScan results, JS analysis, and framework clues. Return a concise report, a custom_list block, and a ShakerScan custom_endpoints block."
+  default_prompt: "Use $content-discovery to build high-signal route, file, custom_list, and custom_endpoints seeds from ShakerScan evidence."

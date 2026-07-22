@@ -63,16 +63,43 @@ async def get_monitored_domains() -> list[str]:
 
 
 async def store_subdomain(subdomain: str, root_domain: str) -> bool:
-    """Insert discovered subdomain as target. Returns True if new."""
+    """Insert discovered subdomain as target. Returns True if new.
+
+    Continuous ASM (docs §16 Phase 4): if the root domain already has ASM
+    enabled on any target, inherit that policy onto the newly discovered
+    surface. The background dispatcher then auto-recons it (last_recon_at is
+    NULL -> recon fires) and subsequently tests it — new attack surface flows
+    straight into continuous testing, mirroring how Gungnir alerts on new certs.
+    """
     async with db_pool.acquire() as conn:
         try:
-            result = await conn.execute("""
+            row = await conn.fetchrow("""
                 INSERT INTO targets (url, root_domain, is_root, discovery_source)
                 VALUES ($1, $2, false, 'gungnir-monitor')
-                ON CONFLICT (url) DO NOTHING
+                ON CONFLICT (canonical_key) DO NOTHING
+                RETURNING id
             """, f"https://{subdomain}", root_domain)
-            # Check if row was inserted (not a conflict)
-            return result == 'INSERT 0 1'
+            if not row:
+                return False  # already existed
+
+            # Inherit ASM policy from the root domain (copied entirely in SQL so
+            # there's no JSONB round-trip); only updates if some target under
+            # this root has ASM enabled.
+            tag = await conn.execute("""
+                UPDATE targets t
+                SET asm_enabled = true, asm_config = src.asm_config, updated_at = NOW()
+                FROM (
+                    SELECT asm_config FROM targets
+                    WHERE root_domain = $2 AND asm_enabled = true
+                    ORDER BY is_root DESC, created_at ASC
+                    LIMIT 1
+                ) src
+                WHERE t.id = $1
+            """, row['id'], root_domain)
+            if tag.endswith('1'):
+                print(f"[gungnir] ASM auto-enabled on new surface {subdomain} "
+                      f"(inherited policy from {root_domain})", flush=True)
+            return True
         except Exception as e:
             print(f"[gungnir] Error storing subdomain {subdomain}: {e}", flush=True)
             return False

@@ -83,7 +83,49 @@ def derive_markers(path: str, content: str) -> list[str]:
         markers.append("sql_dump_signature")
     if re.search(r"(?i)password\s*[=:]|secret(_key)?\s*[=:]", body):
         markers.append("credential_like")
+    # Deliberate document-sensitivity labels. Kept to strong, unambiguous
+    # markings — NOT generic mentions of "password"/"secret" (those are covered
+    # structurally by credential_like / private_key above) — so a browsable
+    # confidential doc (e.g. a leaked business memo with no sensitive extension
+    # and no structured marker) still classifies as sensitive and re-proves on
+    # retest, while prose that merely mentions a secret word does not inflate.
+    if any(kw in body.lower() for kw in _CONFIDENTIAL_LABELS):
+        markers.append("confidential_content")
     return markers
+
+
+# Document-sensitivity labels shared by scan-time harvest and the retest prover so
+# both agree on what "confidential content" means (no target-specific strings).
+_CONFIDENTIAL_LABELS = (
+    "confidential", "classified", "restricted",
+    "internal use only", "internal only",
+    "do not distribute", "not for distribution", "proprietary",
+)
+
+
+def exposure_severity(
+    markers: list[str] | None,
+    confidence: str | None,
+    *,
+    sensitive_ext: bool = False,
+    via_bypass: bool = False,
+) -> str:
+    """Severity for an exposed/harvested file, gated on evidence strength.
+
+    Mirrors the confidence-gated model of ``check_exposed_files`` so a bare 200 +
+    single keyword/extension does not inflate to HIGH (the directory-listing
+    harvest historically hardcoded HIGH regardless of confidence, flooding the
+    unverified-high ratio). HIGH requires strong evidence — a structured content
+    marker, high confidence, or a successful allowlist bypass (reading a blocked
+    file IS the vuln). Sensitive-extension-only or medium-confidence hits are
+    MEDIUM; everything else LOW.
+    """
+    conf = str(confidence or "low").lower()
+    if via_bypass or (markers or []) or conf == "high":
+        return "high"
+    if sensitive_ext or conf == "medium":
+        return "medium"
+    return "low"
 
 
 def match_critical_validator(path: str):

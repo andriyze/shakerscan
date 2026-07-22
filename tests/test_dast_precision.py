@@ -147,7 +147,33 @@ def test_precision_policy_downgrades_gap_analytics_style_leads():
     assert all(item["suspected"] is True for item in adjusted)
 
 
-def test_precision_policy_accepts_verified_evidence_flag():
+def test_precision_policy_accepts_typed_deterministic_proof():
+    findings = [
+        {
+            "tool": "forced_browsing",
+            "title": "Accessible Sensitive File: /.env",
+            "severity": "high",
+            "cvss_score": 7.5,
+            "confidence": 0.8,
+            "evidence": {
+                "url": "https://example.test/.env",
+                "path": "/.env",
+                "status_code": 200,
+                "content_type": "text/plain",
+                "verified": True,
+                "proof_of_exploitation": True,
+            },
+        }
+    ]
+
+    adjusted = apply_dast_precision_policy(findings)
+
+    assert adjusted[0]["verified"] is True
+    assert adjusted[0]["validation"]["evidence_level"] == "confirmed_exploit"
+    assert adjusted[0]["severity"] == "high"
+
+
+def test_precision_policy_rejects_generic_verified_evidence_flag():
     findings = [
         {
             "tool": "forced_browsing",
@@ -167,9 +193,10 @@ def test_precision_policy_accepts_verified_evidence_flag():
 
     adjusted = apply_dast_precision_policy(findings)
 
-    assert adjusted[0]["verified"] is True
-    assert adjusted[0]["validation"]["evidence_level"] == "confirmed_exploit"
-    assert adjusted[0]["severity"] == "high"
+    assert adjusted[0]["verified"] is False
+    assert adjusted[0]["suspected"] is True
+    assert adjusted[0]["needs_verification"] is True
+    assert adjusted[0]["precision_policy"]["generic_verified_ignored"] is True
 
 
 def test_cap_severity_preserves_earliest_original_across_chain():
@@ -200,9 +227,10 @@ def test_cap_severity_accepts_critical_target_without_keyerror():
     assert finding["severity"] == "high"
 
 
-def test_precision_policy_ai_true_positive_overrides_heuristic_downgrade():
-    # A DOM XSS finding on a third-party CDN chunk would normally be capped to
-    # info, but a high-confidence AI true_positive should override and verify.
+def test_precision_policy_ai_true_positive_is_likely_not_verified():
+    # docs §8: AI never promotes to `verified`. A high-confidence AI true_positive
+    # keeps the finding visible at its severity as a `likely_vulnerable` SUSPECTED
+    # lead, but it is NOT deterministically verified.
     findings = [
         {
             "tool": "dom_xss",
@@ -219,9 +247,14 @@ def test_precision_policy_ai_true_positive_overrides_heuristic_downgrade():
 
     adjusted = apply_dast_precision_policy(findings)
 
-    assert adjusted[0]["verified"] is True
-    assert adjusted[0]["severity"] == "high"
-    assert adjusted[0]["confidence"] >= 0.9
+    assert adjusted[0]["verified"] is False  # AI never promotes to verified
+    assert adjusted[0]["proof_state"] == "likely_vulnerable"
+    assert adjusted[0]["suspected"] is True
+    assert adjusted[0]["needs_verification"] is True
+    assert adjusted[0]["precision_policy"]["ai_supported_likely"] is True
+    # Registry severity rules prevent an unexecuted XSS lead from remaining High.
+    assert adjusted[0]["severity"] == "medium"
+    assert adjusted[0]["registry_contract"]["contract_satisfied"] is False
 
 
 def test_precision_policy_ai_false_positive_overrides_heuristic_verified():
@@ -248,7 +281,8 @@ def test_precision_policy_ai_false_positive_overrides_heuristic_verified():
     adjusted = apply_dast_precision_policy(findings)
 
     assert adjusted[0]["verified"] is False
-    assert adjusted[0]["precision_policy"]["ai_overrode_verified"] is True
+    assert adjusted[0]["precision_policy"]["generic_verified_ignored"] is True
+    assert "ai_overrode_verified" not in adjusted[0]["precision_policy"]
     assert adjusted[0]["precision_policy"]["confidence_cap_reason"] == "ai_false_positive"
     assert adjusted[0]["severity"] == "info"
     assert "AI judged false_positive" in adjusted[0]["verification_reason"]
@@ -271,7 +305,9 @@ def test_precision_policy_ai_false_positive_without_provenance_does_not_override
 
     adjusted = apply_dast_precision_policy(findings)
 
-    assert adjusted[0]["verified"] is True
+    assert adjusted[0]["verified"] is False
+    assert adjusted[0]["needs_verification"] is True
+    assert adjusted[0]["precision_policy"]["generic_verified_ignored"] is True
     assert adjusted[0]["severity"] == "high"
 
 
@@ -286,6 +322,13 @@ def test_precision_policy_ai_false_positive_does_not_override_poe():
             "verified": True,
             "validation": {"poe_proven": True},
             "poe_result": {"proven": True},
+            "evidence": {
+                "url": "https://example.test/search",
+                "method": "GET",
+                "param": "q",
+                "payload": "' OR 1=1--",
+                "response_delta": {"control": 200, "payload": 500},
+            },
             "ai_verdict": "false_positive",
             "ai_confidence": 0.98,
             "ai_classification_source": "provider",
@@ -318,8 +361,11 @@ def test_precision_policy_low_confidence_ai_verdict_ignored():
 
     adjusted = apply_dast_precision_policy(findings)
 
-    # Low-confidence AI verdict does not override heuristic verified.
-    assert adjusted[0]["verified"] is True
+    # Low-confidence AI verdict does not add a downgrade, but the generic
+    # verified flag still does not become deterministic proof.
+    assert adjusted[0]["verified"] is False
+    assert adjusted[0]["needs_verification"] is True
+    assert adjusted[0]["precision_policy"]["generic_verified_ignored"] is True
 
 
 def test_precision_policy_syncs_validation_confidence_on_verified():
@@ -331,8 +377,15 @@ def test_precision_policy_syncs_validation_confidence_on_verified():
             "cvss_score": 9.0,
             "confidence": 0.7,
             "verified": True,
-            "validation": {"confidence": 0.75, "evidence_level": "strong_indicator"},
-            "evidence": {"verified": True},
+            "validation": {"verified": True, "confidence": 0.75, "evidence_level": "confirmed_exploit"},
+            "evidence": {
+                "verified": True,
+                "url": "https://example.test/search",
+                "method": "GET",
+                "param": "q",
+                "payload": "' OR 1=1--",
+                "response_delta": {"control": 200, "payload": 500},
+            },
         }
     ]
 
@@ -369,6 +422,36 @@ def test_precision_policy_does_not_auto_verify_forced_browsing_response_shape():
     assert adjusted[0].get("validation", {}).get("evidence_level") != "confirmed_exploit"
 
 
+def test_precision_policy_does_not_treat_metric_names_as_exploitation_proof():
+    findings = [
+        {
+            "tool": "forced_browsing",
+            "title": "Accessible Debug/Development Endpoint",
+            "severity": "high",
+            "cvss_score": 7.5,
+            "evidence": {
+                "url": "https://example.test/observability",
+                "status_code": 200,
+                "signal_type": "sensitive_metric_names_exposed",
+                "proof_state": "observed",
+                "sensitive_metric_categories": ["commerce", "identity"],
+                "sensitive_metric_names": [
+                    "service_users_registered",
+                    "service_orders_placed_total",
+                    "service_wallet_balance_total",
+                ],
+            },
+        }
+    ]
+
+    adjusted = apply_dast_precision_policy(findings)
+
+    assert adjusted[0]["verified"] is False
+    assert adjusted[0]["severity"] == "medium"
+    assert adjusted[0]["needs_verification"] is True
+    assert adjusted[0]["proof_state"] != "exploited"
+
+
 def test_precision_policy_does_not_cap_verified_vendor_dom_xss():
     findings = [
         {
@@ -382,6 +465,7 @@ def test_precision_policy_does_not_cap_verified_vendor_dom_xss():
                 "file": "https://cdn.jsdelivr.net/npm/example/widget.js",
                 "verified": True,
                 "payload_executed": True,
+                "payload": "<svg onload=alert(1)>",
             },
         }
     ]
@@ -392,6 +476,50 @@ def test_precision_policy_does_not_cap_verified_vendor_dom_xss():
     assert adjusted[0]["severity"] == "high"
     assert adjusted[0]["confidence"] >= 0.9
     assert "precision_policy" not in adjusted[0]
+
+
+def test_registry_contract_rejects_generic_sqli_poe_without_request_proof():
+    finding = {
+        "tool": "smart_sqli",
+        "title": "SQL injection",
+        "severity": "critical",
+        "cvss_score": 9.8,
+        "confidence": 0.95,
+        "proof_of_exploitation": True,
+    }
+
+    adjusted = apply_dast_precision_policy([finding])[0]
+
+    assert adjusted["verified"] is False
+    assert adjusted["severity"] == "medium"
+    assert adjusted["proof_state"] == "likely_vulnerable"
+    assert set(adjusted["registry_contract"]["proof_fields_missing"]) == {
+        "method", "url", "parameter", "payload", "response_delta",
+    }
+
+
+def test_registry_contract_accepts_complete_sqli_runtime_proof():
+    finding = {
+        "tool": "smart_sqli",
+        "title": "SQL injection",
+        "severity": "critical",
+        "cvss_score": 9.8,
+        "confidence": 0.95,
+        "proof_type": "differential_response",
+        "evidence": {
+            "url": "https://example.test/search",
+            "method": "GET",
+            "param": "q",
+            "payload": "' OR 1=1--",
+            "response_delta": {"control": 200, "payload": 500},
+        },
+    }
+
+    adjusted = apply_dast_precision_policy([finding])[0]
+
+    assert adjusted["verified"] is True
+    assert adjusted["severity"] == "critical"
+    assert adjusted["registry_contract"]["contract_satisfied"] is True
 
 
 def test_precision_policy_keeps_dom_xss_on_target_app_bundle():
@@ -469,6 +597,7 @@ def test_precision_policy_accepts_graphql_verified_evidence_flag():
             "evidence": {
                 "issue": "introspection_enabled",
                 "verified": True,
+                "proof_type": "differential_response",
                 "evidence": [{"type": "introspection_enabled", "verified": True}],
             },
         }
@@ -519,6 +648,26 @@ def test_grade_ceiling_ignores_unverified_suspected_high_findings():
     result = grade(_healthy_grade_report([suspected]))
 
     assert result["grade"] in {"A", "B"}
+
+
+def test_grade_does_not_full_weight_generic_verified_without_proof():
+    generic_verified = {
+        "tool": "legacy_probe",
+        "title": "Legacy verified high",
+        "severity": "high",
+        "cvss_score": 7.5,
+        "confidence": 0.6,
+        "verified": True,
+    }
+    proven = {
+        **generic_verified,
+        "proof_of_exploitation": True,
+    }
+
+    generic_grade = grade(_healthy_grade_report([generic_verified]))
+    proven_grade = grade(_healthy_grade_report([proven]))
+
+    assert generic_grade["score"] > proven_grade["score"]
 
 
 def test_quick_public_scan_accepts_basic_tls_probe_for_completeness():
@@ -644,6 +793,40 @@ def test_xss_payload_without_response_is_not_verified():
     assert updated["severity"] == "medium"
 
 
+def test_failed_browser_proof_is_not_trusted_as_verified_xss():
+    # A FAILED browser proof attempt (proven=false) must NOT be treated as
+    # confirmed XSS — otherwise a low-confidence non-execution blob becomes a
+    # trusted high-confidence finding.
+    finding = {
+        "tool": "hash_route_dom_xss",
+        "title": "DOM XSS in Hash Route",
+        "severity": "high",
+        "cvss_score": 7.4,
+        "browser_proof": {"proven": False, "confidence": 0.2},
+        "evidence": {"payload": "<img src=x onerror=alert(1)>"},
+    }
+    validation = validate_xss(finding, response_body="<html>no execution here</html>")
+    assert validation.verified is False
+    assert validation.evidence_level != "confirmed_exploit"
+
+
+def test_proven_browser_proof_is_trusted_as_verified_xss():
+    # The positive case still works: a proven dialog-fired DOM XSS is confirmed
+    # even though its payload never appears in the server response (client-side).
+    finding = {
+        "tool": "hash_route_dom_xss",
+        "title": "DOM XSS in Hash Route",
+        "severity": "high",
+        "cvss_score": 7.4,
+        "browser_proof": {"proven": True, "technique": "headless_xss_dialog", "confidence": 0.99},
+        "poe_result": {"proven": True, "confidence": 0.99},
+        "evidence": {"payload": "<img src=x onerror=alert(1)>"},
+    }
+    validation = validate_xss(finding, response_body="<html>search results</html>")
+    assert validation.verified is True
+    assert getattr(validation, "downgrade_to", None) is None
+
+
 def test_sqli_error_indicator_is_strong_but_not_verified():
     finding = {
         "tool": "active_sqli",
@@ -693,10 +876,15 @@ def test_sqli_extraction_proof_survives_validation_pipeline():
         "proof_of_exploitation": True,
         "needs_verification": True,
         "suspected": True,
-        "evidence": {
-            "verified": True,
-            "proof_of_exploitation": True,
-            "extraction_evidence": ["Extracted sensitive rowset markers: password_hash, api_key"],
+            "evidence": {
+                "verified": True,
+                "proof_of_exploitation": True,
+                "url": "https://example.test/search",
+                "method": "GET",
+                "param": "q",
+                "payload": "' UNION SELECT password_hash,api_key FROM users--",
+                "response_delta": {"control": 200, "payload": 200, "extracted_rows": 1},
+                "extraction_evidence": ["Extracted sensitive rowset markers: password_hash, api_key"],
             "extracted_data": {"sensitive_markers": ["password_hash", "api_key"]},
         },
     }
@@ -729,6 +917,24 @@ def test_ai_rule_verdict_trusts_verified_exploitation_evidence():
     assert verdict == "true_positive"
     assert confidence >= 0.95
     assert "verified exploitation evidence" in rationale
+
+
+def test_ai_rule_verdict_does_not_trust_generic_verified_flags_as_proof():
+    verdict, confidence, rationale = _ai_rule_verdict(
+        {
+            "tool": "custom_probe",
+            "title": "Potential issue",
+            "verified": True,
+            "evidence": {"verified": True},
+            "validation": {"verified": True, "confidence": 0.9},
+        },
+        http_status="HTTP/2 200",
+        target_host="honey.shakerscan.com",
+    )
+
+    assert verdict == "unclear"
+    assert confidence == 0.5
+    assert "verified exploitation evidence" not in rationale
 
 
 def test_ai_quality_metrics_refresh_after_ai_review():
@@ -792,7 +998,8 @@ def test_post_ai_precision_policy_applies_ai_false_positive_downgrade():
     assert finding["verified"] is False
     assert finding["severity"] == "info"
     assert finding["precision_policy"]["confidence_cap_reason"] == "ai_false_positive"
-    assert finding["precision_policy"]["ai_overrode_reason"] == "ai_false_positive_high_confidence"
+    assert finding["precision_policy"]["generic_verified_ignored"] is True
+    assert "ai_overrode_reason" not in finding["precision_policy"]
 
 
 def test_focused_fallback_summary_uses_focused_remediation_only():
@@ -846,6 +1053,76 @@ def test_deterministic_hygiene_finding_is_not_suspected_lead():
     assert updated.get("needs_verification") is not True
     assert updated.get("suspected") is not True
     assert updated["confidence_tier"] == "high"
+
+
+def test_smart_authz_cross_principal_replay_is_verified():
+    finding = {
+        "tool": "smart_authz",
+        "title": "Broken object authorization: user2 can access user1 object",
+        "severity": "high",
+        "cvss_score": 8.0,
+        "evidence": {
+            "url": "https://example.test/workshop/api/shop/orders/15",
+            "proof_type": "cross_principal_replay",
+            "owner_status": 200,
+            "attacker_status": 200,
+            "responses_equivalent": True,
+            "object_id_absent_from_attacker_listing": True,
+            "authz_diff": {
+                "replayed_owner_object_missing_from_attacker_listing": True,
+                "owner_resource_equivalent_to_attacker_resource": True,
+            },
+            "producer_endpoint": "GET /workshop/api/shop/orders/all",
+            "consumer_endpoint": "GET /workshop/api/shop/orders/15",
+        },
+    }
+
+    validation = validate_finding(finding)
+    updated = apply_validation_to_finding(finding, validation)
+
+    assert validation.verified is True
+    assert validation.confidence == 0.95
+    assert validation.evidence_level == "confirmed_exploit"
+    assert updated["verified"] is True
+    assert updated["needs_verification"] is False
+    assert updated["confidence_tier"] == "verified"
+
+
+def test_precision_policy_caps_unverified_smart_bola_lead_below_high():
+    finding = {
+        "tool": "smart_bola",
+        "title": (
+            "BOLA: Cross-user data access at "
+            "https://example.test/identity/api/v2/user/dashboard?id={id}"
+        ),
+        "severity": "high",
+        "cvss_score": 8.0,
+        "confidence": 0.5,
+        "suspected": True,
+        "needs_verification": True,
+        "validation": {
+            "verified": False,
+            "confidence": 0.5,
+            "evidence_level": "weak_indicator",
+            "reason": "IDOR pattern detected but not confirmed",
+        },
+        "evidence": {
+            "url": "https://example.test/identity/api/v2/user/dashboard?id=9999",
+            "responses_equivalent": True,
+            "response_similarity": 0.969,
+            "user_specific_signals": ["field:email"],
+        },
+    }
+
+    adjusted = apply_dast_precision_policy([finding])[0]
+
+    assert adjusted["severity"] == "medium"
+    assert adjusted["cvss_score"] <= 6.0
+    assert adjusted["verified"] is False
+    assert adjusted["needs_verification"] is True
+    assert adjusted["suspected"] is True
+    assert adjusted["confidence_tier"] == "low"
+    assert adjusted["precision_policy"]["confidence_cap_reason"] == "bola_lead_without_cross_principal_proof"
 
 
 def test_ssti_ignores_generic_next_html_shell_with_incidental_49(monkeypatch):

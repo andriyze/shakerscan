@@ -9,6 +9,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scanner"))
 
 from scanner_tools.discovery import (
     _BASELINE_SIGNATURE_CACHE,
+    _is_api_probe_base_path,
+    _is_recursive_seed_path,
     build_response_signature,
     get_baseline_signature,
     path_exists,
@@ -150,6 +152,52 @@ class TestPathExists:
         assert not exists
         assert reason == "html_success"
         assert not protected
+
+    def test_file_parent_success_rejected_for_api_probe(self):
+        exists, reason, protected = path_exists(
+            status=200,
+            content_type="text/plain",
+            body="Contact: mailto:security@example.test\nExpires: 2027-01-01",
+            redirect_status=None,
+            redirect_location="",
+            allow="",
+            www_auth="",
+            target_url="https://example.com/.well-known/security.txt/register",
+            baseline_signature=None,
+            require_api_style=True,
+        )
+
+        assert not exists
+        assert reason == "file_parent_success"
+        assert not protected
+
+    def test_text_api_success_allowed_on_real_api_path(self):
+        exists, reason, protected = path_exists(
+            status=200,
+            content_type="text/plain",
+            body="ok",
+            redirect_status=None,
+            redirect_location="",
+            allow="",
+            www_auth="",
+            target_url="https://example.com/api/health",
+            baseline_signature=None,
+            require_api_style=True,
+        )
+
+        assert exists
+        assert reason == "success"
+        assert not protected
+
+    def test_static_files_are_not_api_probe_bases_or_recursive_seeds(self):
+        assert not _is_api_probe_base_path("/.well-known/security.txt/")
+        assert not _is_api_probe_base_path("/openapi.json/")
+        assert _is_api_probe_base_path("/api/")
+        assert _is_api_probe_base_path("/v2/")
+
+        assert not _is_recursive_seed_path("https://example.com/.well-known/security.txt/")
+        assert not _is_recursive_seed_path("https://example.com/openapi.json/")
+        assert _is_recursive_seed_path("https://example.com/api/")
 
     def test_get_baseline_signature_cached(self):
         _BASELINE_SIGNATURE_CACHE.clear()

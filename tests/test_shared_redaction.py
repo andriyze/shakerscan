@@ -1,0 +1,155 @@
+"""Tests for the shared secret-redaction module (R2a).
+
+The point of scanner.redaction is that the API and Model Intake share ONE
+sensitive-key set so coverage cannot drift. These tests lock that in plus the
+masking/URL/text behaviour the old per-module helpers provided.
+"""
+
+from scanner import redaction
+from scanner.redaction import (
+    SENSITIVE_KEYS,
+    is_sensitive_key,
+    mask_secret,
+    redact_sensitive,
+    redact_text,
+    redact_url_credentials,
+)
+from scanner.scanner_tools import model_intake
+
+
+def test_unified_keyset_covers_both_historical_sources():
+    # Previously API-only gap: AWS/Azure/GCP keys were missing from the API set.
+    for key in ("aws_access_key_id", "aws_secret_access_key", "azure_sas_token", "gcp_credentials"):
+        assert is_sensitive_key(key), key
+    # Previously model-intake-only gap: API auth keys were missing from its set.
+    for key in ("auth_header", "auth_cookies", "user2_header", "ai_api_key", "login_password"):
+        assert is_sensitive_key(key), key
+
+
+def test_key_matching_normalizes_dashes_and_fragments():
+    assert is_sensitive_key("X-Api-Token")          # dash -> underscore, fragment "_token"
+    assert is_sensitive_key("customer_password")    # fragment "password"
+    assert is_sensitive_key("MY_SECRET_VALUE")      # case-insensitive exact
+    assert not is_sensitive_key("username")
+    assert not is_sensitive_key("user_id")
+
+
+def test_model_intake_shares_the_one_keyset():
+    # model_intake's public alias must BE the shared set (single source of truth).
+    assert model_intake.SENSITIVE_METADATA_KEYS is SENSITIVE_KEYS
+    # and it now masks an API-origin key it historically missed.
+    out = model_intake.redact_model_intake_value({"auth_header": "Bearer abc", "note": "ok"})
+    assert out["auth_header"] == "***"
+    assert out["note"] == "ok"
+
+
+def test_redact_sensitive_recurses_and_preserves_empty():
+    payload = {
+        "aws_access_key_id": "AKIAEXAMPLE",
+        "empty_token": "",
+        "nested": {"client_secret": "s3cr3t", "keep": "v"},
+        "list": [{"password": "p"}, {"ok": 1}],
+    }
+    out = redact_sensitive(payload)
+    assert out["aws_access_key_id"] == "***"
+    assert out["empty_token"] == ""          # empty values are not masked
+    assert out["nested"]["client_secret"] == "***"
+    assert out["nested"]["keep"] == "v"
+    assert out["list"][0]["password"] == "***"
+    assert out["list"][1]["ok"] == 1
+
+
+def test_redact_strings_flag_controls_url_credential_masking():
+    url = "https://example.com/m?token=zzz&keep=1"
+    # default (API scan-options mode) leaves strings alone
+    assert redact_sensitive({"u": url})["u"] == url
+    # redact_strings (model-intake mode) masks sensitive query params
+    masked = redact_sensitive({"u": url}, redact_strings=True)["u"]
+    assert "token=%2A%2A%2A" in masked or "token=***" in masked
+    assert "keep=1" in masked
+
+
+def test_redact_url_credentials_masks_userinfo_password():
+    out = redact_url_credentials("https://user:hunter2@host/model")
+    assert ":***@host" in out
+    assert "hunter2" not in out
+
+
+def test_mask_secret_partial_and_full():
+    assert mask_secret("abcdefghijkl") == "abcd...ijkl"
+    assert mask_secret("short") == "*****"
+    assert mask_secret("") == ""
+
+
+def test_redact_text_scrubs_known_patterns():
+    assert redact_text("Authorization: Bearer abc.def-123") == "Authorization: Bearer ***"
+    assert redact_text("api_key=SECRET&x=1") == "api_key=***&x=1"
+    assert redact_text(None) is None
+
+
+def test_scrub_text_composes_url_and_text_redaction_for_transcripts():
+    # Transcript-shaped payload: mask credential KEYS, scrub inline secrets in free
+    # text, redact URL creds in references, keep the readable prompt/response.
+    transcript = {
+        "prompt": "Please summarize the doc",
+        "request_headers": {"Authorization": "Bearer eyJsecret"},
+        "response": "Sure. Debug note: api_key=SECRETVALUE was used.",
+        "reference": "https://svc/internal?token=zzz&page=2",
+    }
+    out = redact_sensitive(transcript, redact_strings=True, scrub_text=True)
+    assert out["prompt"] == "Please summarize the doc"          # readable text preserved
+    assert out["request_headers"]["Authorization"] == "***"      # sensitive key masked
+    assert "SECRETVALUE" not in out["response"]                  # inline secret scrubbed
+    assert "api_key=***" in out["response"]
+    assert "token=%2A%2A%2A" in out["reference"] or "token=***" in out["reference"]
+    assert "page=2" in out["reference"]
+
+
+def test_scrub_text_off_by_default_preserves_free_text():
+    # Default (redact_strings only) does NOT scrub inline free-text tokens.
+    out = redact_sensitive({"response": "api_key=SECRET"}, redact_strings=True)
+    assert out["response"] == "api_key=SECRET"
+
+
+def test_redact_text_scrubs_json_style_secret_assignments():
+    # Transcript bodies embed JSON as TEXT; the `=`-only patterns missed these.
+    assert '"api_key": "***"' in redact_text('{"api_key": "SECRETVALUE"}')
+    assert "SECRETVALUE" not in redact_text('{"api_key": "SECRETVALUE"}')
+    assert '"password":"***"' in redact_text('{"password":"hunter2"}')
+    assert "hunter2" not in redact_text('{"password":"hunter2"}')
+    # single-quoted dict literal + a prefixed/suffixed key name
+    assert "topsecret" not in redact_text("{'x_access_token': 'topsecret'}")
+    assert "'authorization': 'Bearer abc'" not in redact_text("{'authorization': 'Bearer abc'}")
+    # JSON authorization value is masked whole
+    assert "Bearer abc" not in redact_text('{"authorization": "Bearer abc"}')
+
+
+def test_redact_text_preserves_non_secret_json_fields():
+    # Numeric/benign fields must stay readable (no false redaction).
+    assert redact_text('{"tokens_used": 42}') == '{"tokens_used": 42}'
+    assert redact_text('{"name": "alice"}') == '{"name": "alice"}'
+
+
+def test_scrub_text_redacts_json_secret_in_transcript_body():
+    transcript = {"response": 'upstream said {"api_key":"LEAKED123","ok":true}'}
+    out = redact_sensitive(transcript, redact_strings=True, scrub_text=True)
+    assert "LEAKED123" not in out["response"]
+    assert '"ok":true' in out["response"]
+
+
+def test_redact_text_covers_password_family_basic_cookie_and_dsn():
+    # Shapes the `=`/bearer-only patterns missed (under-redaction).
+    assert redact_text("password=hunter2SECRET") == "password=***"
+    assert redact_text("pwd=hunter2SECRET") == "pwd=***"
+    assert "CLIENTSECRETxyz" not in redact_text("client_secret: CLIENTSECRETxyz")   # bare key: value
+    assert "MYSQLSECRET" not in redact_text("mysql://root:MYSQLSECRET@10.0.0.5/db")  # connection string
+    assert "dXNlcjpwYXNz" not in redact_text("Authorization: Basic dXNlcjpwYXNz")    # Basic auth
+    assert "SECRETSESS" not in redact_text("Cookie: session=SECRETSESS; csrf=z")     # cookie header
+    # existing bearer behaviour preserved exactly
+    assert redact_text("Authorization: Bearer abc.def-123") == "Authorization: Bearer ***"
+
+
+def test_redact_text_does_not_over_redact_benign_colon_lines():
+    # "token:"/"key:" only redact a real value of 4+ chars; benign prose is kept.
+    assert redact_text('{"tokens_used": 42}') == '{"tokens_used": 42}'
+    assert redact_text("status: ok") == "status: ok"

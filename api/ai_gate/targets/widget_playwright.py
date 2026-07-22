@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse
 
-from ai_gate.budget import CHARS_PER_TOKEN_ESTIMATE
+from ai_gate.budget import CHARS_PER_TOKEN_ESTIMATE, RequestBudget
 from ai_gate.targets.rest_json import as_dict, build_headers, build_url
 
 try:
@@ -30,6 +30,7 @@ MIN_WIDGET_RESPONSE_TIMEOUT_MS = 1_000
 MAX_WIDGET_RESPONSE_TIMEOUT_MS = 60_000
 MAX_WIDGET_SETTLE_DELAY_MS = 5_000
 MAX_WIDGET_NETWORK_EVENTS = 512
+DEFAULT_WIDGET_MAX_RESPONSE_BYTES = 262_144
 DEFAULT_WIDGET_WAIT_FOR_RESPONSE = "new_message"
 DEFAULT_BROWSER_SAFETY_POLICY = {
     "safe_mode": "observe_only",
@@ -200,6 +201,23 @@ def _normalize_bool(value: Any, default: bool) -> bool:
     return default
 
 
+def _coerce_int(value: Any, default: int, *, minimum: int, maximum: int) -> int:
+    try:
+        coerced = int(value)
+    except (TypeError, ValueError):
+        coerced = default
+    return min(max(coerced, minimum), maximum)
+
+
+def _cap_widget_response_text(text: str, max_response_bytes: int) -> tuple[str, bool, int]:
+    raw = str(text or "").encode("utf-8", errors="replace")
+    observed = len(raw)
+    if observed <= max_response_bytes:
+        return str(text or ""), False, observed
+    capped = raw[:max_response_bytes].decode("utf-8", errors="replace")
+    return capped, True, observed
+
+
 def _normalize_browser_safety_policy(metadata: dict[str, Any]) -> dict[str, Any]:
     configured = as_dict(metadata.get("browser_safety_policy")) or as_dict(
         metadata.get("widget_safety_policy")
@@ -306,7 +324,7 @@ class WidgetConversationExchange:
 
 
 class WidgetPlaywrightConversationTarget:
-    def __init__(self, target_url: str, target: dict[str, Any]) -> None:
+    def __init__(self, target_url: str, target: dict[str, Any], *, default_max_response_bytes: int | None = None) -> None:
         self.target = target
         raw_url = str(target.get("endpoint_url") or target_url).strip()
         if not raw_url:
@@ -318,6 +336,13 @@ class WidgetPlaywrightConversationTarget:
         self.headers = build_headers(target)
         self.credential = as_dict(target.get("credential"))
         self.metadata = as_dict(target.get("metadata_json"))
+        self.max_response_bytes = _coerce_int(
+            self.metadata.get("max_response_bytes", target.get("max_response_bytes")),
+            default_max_response_bytes or DEFAULT_WIDGET_MAX_RESPONSE_BYTES,
+            minimum=1_024,
+            maximum=5_000_000,
+        )
+        self.request_budget: RequestBudget | None = None
         self.browser_safety_policy = _normalize_browser_safety_policy(self.metadata)
         self.browser_safety_policy_hash = _sha256_prefixed(
             json.dumps(self.browser_safety_policy, sort_keys=True, ensure_ascii=False)
@@ -333,6 +358,17 @@ class WidgetPlaywrightConversationTarget:
         self._context = None
         self._page = None
         self._network_events: deque[dict[str, Any]] = deque(maxlen=MAX_WIDGET_NETWORK_EVENTS)
+
+    def set_request_budget(self, request_budget: RequestBudget) -> None:
+        self.request_budget = request_budget
+
+    def _consume_request_budget(self, phase: str) -> None:
+        if self.request_budget is not None:
+            self.request_budget.consume(phase=phase)
+
+    def _record_request_response(self, status_code: int | None) -> None:
+        if self.request_budget is not None:
+            self.request_budget.record_response(status_code=status_code)
 
     def _auth_mode(self) -> str:
         auth_state = as_dict(self.metadata.get("playwright_auth_state")) or as_dict(
@@ -805,6 +841,7 @@ class WidgetPlaywrightConversationTarget:
     ) -> WidgetConversationExchange:
         started = time.perf_counter()
         try:
+            self._consume_request_budget("widget_target")
             await self._ensure_browser()
             await self._ensure_widget_ready()
             assert self._page is not None
@@ -818,6 +855,10 @@ class WidgetPlaywrightConversationTarget:
                 previous_count=previous_count,
                 previous_text=previous_text,
                 previous_outer_html=previous_outer_html,
+            )
+            response_text, response_truncated, raw_response_bytes_observed = _cap_widget_response_text(
+                current_text,
+                self.max_response_bytes,
             )
             elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
             response_selector = await self._resolve_response_selector()
@@ -851,6 +892,9 @@ class WidgetPlaywrightConversationTarget:
                 else "autodetected",
                 "wait_for_response": self.manifest["wait_for_response"],
                 "response_count": current_count,
+                "response_truncated": response_truncated,
+                "max_response_bytes": self.max_response_bytes,
+                "raw_response_bytes_observed": raw_response_bytes_observed,
                 "network_event_count": len(network_slice),
                 "probe_id": probe_id,
                 "session_id": session_id,
@@ -858,23 +902,26 @@ class WidgetPlaywrightConversationTarget:
                 "browser_safety_policy_hash": self.browser_safety_policy_hash,
                 **browser_state_evidence,
             }
+            self._record_request_response(200)
             return WidgetConversationExchange(
                 request_method=self.method,
                 status_code=200,
                 latency_ms=elapsed_ms,
                 prompt=prompt,
-                response_excerpt=current_text,
+                response_excerpt=response_text,
                 input_chars=len(prompt),
-                output_chars=len(current_text),
+                output_chars=len(response_text),
                 evidence=evidence,
             )
         except Exception as exc:
             elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
+            status_code = 504 if isinstance(exc, PlaywrightTimeoutError) else None
+            self._record_request_response(status_code)
             if self._context is not None or self._browser is not None or self._playwright is not None:
                 await self.close()
             return WidgetConversationExchange(
                 request_method=self.method,
-                status_code=504 if isinstance(exc, PlaywrightTimeoutError) else None,
+                status_code=status_code,
                 latency_ms=elapsed_ms,
                 prompt=prompt,
                 error=str(exc),

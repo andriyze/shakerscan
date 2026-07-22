@@ -273,6 +273,7 @@ def build_scan_completion_status(
     checks_skipped: list[Any] | None = None,
     active_block: dict[str, Any] | None = None,
     discovery_summary: dict[str, Any] | None = None,
+    request_budget: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Return root-level report metadata describing incomplete or limited scans."""
     skipped_modules = _checks_skipped_entries(checks_skipped)
@@ -289,6 +290,14 @@ def build_scan_completion_status(
         capped_lists["urls"] = {k: v for k, v in discovery_cap.items() if v is not None}
 
     any_capped = any(bool(value.get("capped")) for value in capped_lists.values() if isinstance(value, dict))
+    request_budget_stopped = bool(
+        isinstance(request_budget, dict)
+        and request_budget.get("mode") == "enforce"
+        and int(request_budget.get("rejected_requests") or 0) > 0
+    )
+    if request_budget_stopped:
+        budget_exhausted = True
+        budget_exhausted_at = "request_budget"
     if any_capped and not budget_exhausted:
         budget_exhausted = True
         budget_exhausted_at = (
@@ -296,7 +305,7 @@ def build_scan_completion_status(
             if (capped_lists.get("active_endpoints") or {}).get("capped")
             else "discovery"
         )
-    limited = bool(skipped_modules or any_capped)
+    limited = bool(skipped_modules or any_capped or request_budget_stopped)
     normalized_coverage = coverage_status or "unknown"
 
     return {

@@ -20,13 +20,73 @@ from ai_gate_scan import (  # noqa: E402
     _control_gap_findings,
     _apply_ai_gate_analysis_fields,
     _agent_execution_receipt_findings,
+    _ai_gate_runtime_destinations,
     _classify_response,
     _cross_principal_probe_extensions,
+    _redact_secrets_for_judge,
     _semantic_review_priority,
 )
+
+
+def test_ai_gate_runtime_destinations_preserve_redirect_and_peer_ip_evidence():
+    destinations = _ai_gate_runtime_destinations(
+        {"endpoint_url": "https://app.example.com/api/chat"},
+        [{
+            "response_metadata": {
+                "request_url": "https://app.example.com/api/chat",
+                "final_url": "https://api.example.com/chat",
+                "redirect_chain": ["https://api.example.com/chat"],
+                "remote_ip": "8.8.8.8",
+            },
+        }],
+    )
+
+    request = next(item for item in destinations if item["label"] == "ai_gate_request")
+    assert request["redirect_chain"] == ["https://api.example.com/chat"]
+    assert request["remote_ip"] == "8.8.8.8"
+    assert request["resolved_host"] == "api.example.com"
+
+
+def test_judge_does_not_downgrade_finding_with_deterministic_proof():
+    # A high-confidence AI false_positive must NOT bury a finding that carries
+    # deterministic proof of exploitation (matches the documented guarantee).
+    proven = {
+        "title": "SQLi extraction", "severity": "high",
+        "evidence": {"semantic_result": {"complied": False, "confidence": 0.95},
+                     "proof_of_exploitation": True},
+    }
+    out = _apply_ai_gate_analysis_fields([proven])[0]
+    assert out["ai_verdict"] == "false_positive"
+    assert out["severity"] == "high"  # NOT downgraded
+    assert out["evidence"].get("ai_gate_ai_judge_downgrade_suppressed") == "deterministic_exploit_proof"
+
+    # Control: identical AI false_positive, no deterministic proof -> downgraded to info.
+    unproven = {
+        "title": "Maybe XSS", "severity": "high",
+        "evidence": {"semantic_result": {"complied": False, "confidence": 0.95}},
+    }
+    out2 = _apply_ai_gate_analysis_fields([unproven])[0]
+    assert out2["ai_verdict"] == "false_positive"
+    assert out2["severity"] == "info"
+    assert out2["evidence"].get("ai_gate_ai_judge_downgraded") is True
+
+
+def test_judge_redactor_strips_credential_assignments_and_dsn():
+    # These reach both the persisted transcript AND the external LLM judge prompt,
+    # so credential-assignment / DB-DSN / auth-header shapes must not survive.
+    for raw, secret in [
+        ("password=hunter2SECRET", "hunter2SECRET"),
+        ("api_key=APIKEYSECRET999", "APIKEYSECRET999"),
+        ("client_secret: CLIENTSECRETxyz", "CLIENTSECRETxyz"),
+        ("mysql://root:MYSQLSECRET@10.0.0.5/db", "MYSQLSECRET"),
+        ("dsn=postgres://u:DSNSECRET@h/db", "DSNSECRET"),
+        ("Authorization: Bearer abc.def.ghi", "abc.def.ghi"),
+    ]:
+        assert secret not in _redact_secrets_for_judge(raw), raw
 from ai_gate.budget import RequestBudget  # noqa: E402
 from ai_gate.planner import plan_probe_pack  # noqa: E402
 from ai_gate.targets.rest_json import RestJsonConversationTarget, extract_calibration_metadata, extract_response_text  # noqa: E402
+from ai_gate.targets.widget_playwright import WidgetPlaywrightConversationTarget, _cap_widget_response_text  # noqa: E402
 
 
 class _FakeContent:
@@ -118,6 +178,62 @@ def test_rest_target_blocks_request_when_budget_is_exhausted():
     assert exchange.status_code is None
     assert "request budget exhausted" in exchange.error
     assert len(session.requests) == 0
+
+
+def _widget_target(*, metadata: dict | None = None, max_response_bytes: int | None = None):
+    widget_metadata = {
+        "widget_manifest": {
+            "entry_url": "https://example.test/app",
+            "input_selector": "textarea",
+            "response_selector": ".assistant",
+        },
+        **(metadata or {}),
+    }
+    target = {
+        "endpoint_url": "https://example.test/app",
+        "target_type": "widget",
+        "metadata_json": widget_metadata,
+    }
+    if max_response_bytes is not None:
+        target["max_response_bytes"] = max_response_bytes
+    return WidgetPlaywrightConversationTarget(
+        "https://example.test/app",
+        target,
+        default_max_response_bytes=65_536,
+    )
+
+
+def test_widget_target_uses_response_byte_cap_with_override():
+    target = _widget_target()
+    assert target.max_response_bytes == 65_536
+
+    override = _widget_target(metadata={"max_response_bytes": 300_000})
+    assert override.max_response_bytes == 300_000
+
+    capped, truncated, observed = _cap_widget_response_text("A" * 2000, 1024)
+    assert truncated is True
+    assert observed == 2000
+    assert len(capped.encode("utf-8")) == 1024
+
+
+def test_widget_target_blocks_request_when_budget_is_exhausted():
+    target = _widget_target()
+    request_budget = RequestBudget(0)
+    target.set_request_budget(request_budget)
+
+    exchange = asyncio.run(
+        target.send_message(
+            None,
+            prompt="hello",
+            probe_id="probe",
+            session_id="session",
+        )
+    )
+
+    assert exchange.status_code is None
+    assert "request budget exhausted" in exchange.error
+    assert request_budget.attempted_requests == 0
+    assert request_budget.rejected_requests == 1
 
 
 def test_rest_target_uses_principal_specific_credential_and_replacements():
@@ -252,9 +368,18 @@ def test_planner_filters_unsafe_custom_probes_in_production_mode():
         production_mode=True,
     )
 
+    blocked_ids = plan.manifest["blocked_for_production_probe_ids"]
     assert "custom.destructive" not in {probe.id for probe in plan.probes}
-    assert plan.manifest["blocked_for_production_probe_ids"] == ["custom.destructive"]
-    assert any("safe_for_production=false" in error for error in plan.validation_errors)
+    # The explicit safe_for_production=False custom probe must be blocked. Under the
+    # 3-tier classification model, built-in non_production_only probes (e.g. the
+    # smoke unbounded-consumption probe) are filtered too, so assert containment
+    # rather than an exact one-element list.
+    assert "custom.destructive" in blocked_ids
+    assert "smoke.unbounded-consumption" in blocked_ids
+    assert any(
+        "custom.destructive" in error and "non_production_only" in error
+        for error in plan.validation_errors
+    )
 
 
 def test_high_severity_deterministic_finding_is_semantic_candidate():

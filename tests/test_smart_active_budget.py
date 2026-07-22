@@ -1,6 +1,13 @@
 import asyncio
+import os
+import sys
 
-from scanner.scanner_tools import active_checks
+
+_SCANNER_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "scanner"))
+if _SCANNER_DIR not in sys.path:
+    sys.path.insert(0, _SCANNER_DIR)
+
+from scanner_tools import active_checks  # noqa: E402
 
 
 def test_sqli_payload_selection_keeps_cross_dbms_fallbacks():
@@ -135,6 +142,100 @@ def test_smart_sqli_distinguishes_finding_cap_from_time_budget(monkeypatch):
     assert result["budget_exhausted"] is True
     assert result["budget_exhausted_reason"] == "finding_cap"
     assert result["vulnerabilities_found"] == 1
+
+
+def test_smart_sqli_emits_endpoint_attempt_telemetry(monkeypatch):
+    async def fake_run(command, *args, **kwargs):
+        return ("normal response", "", 0)
+
+    monkeypatch.setattr(active_checks, "run", fake_run)
+
+    result = asyncio.run(
+        active_checks.smart_sqli_test(
+            "https://example.test",
+            [
+                {
+                    "url": "https://example.test/search?q=test",
+                    "method": "GET",
+                    "params": ["q"],
+                }
+            ],
+            dbms="mysql",
+            max_seconds=10,
+        )
+    )
+
+    assert len(result["endpoint_attempts"]) == 1
+    attempt = result["endpoint_attempts"][0]
+    expected = {
+        "custom_endpoint": "GET /search?q=test",
+        "family": "sqli",
+        "method": "GET",
+        "url": "https://example.test/search?q=test",
+        "param_count": 1,
+        "attempted_params_count": 1,
+        "completed_params_count": 1,
+        "status": "completed",
+    }
+    assert {key: attempt.get(key) for key in expected} == expected
+    assert attempt["techniques_attempted"]
+
+
+def test_smart_sqli_accepts_query_param_maps(monkeypatch):
+    async def fake_run(command, *args, **kwargs):
+        return ("normal response", "", 0)
+
+    monkeypatch.setattr(active_checks, "run", fake_run)
+
+    result = asyncio.run(
+        active_checks.smart_sqli_test(
+            "https://example.test",
+            [
+                {
+                    "url": "https://example.test/rest/products/search",
+                    "method": "GET",
+                    "params": {"q": "apple", "limit": 10},
+                }
+            ],
+            dbms="mysql",
+            max_seconds=10,
+            max_params_per_endpoint=2,
+        )
+    )
+
+    assert result["endpoints_tested"] == 1
+    assert result["params_tested"] == 2
+    assert result["endpoint_attempts"][0]["param_count"] == 2
+    assert result["endpoint_attempts"][0]["status"] == "completed"
+
+
+def test_smart_sqli_accepts_body_param_maps(monkeypatch):
+    async def fake_run(command, *args, **kwargs):
+        return ("normal response", "", 0)
+
+    monkeypatch.setattr(active_checks, "run", fake_run)
+
+    result = asyncio.run(
+        active_checks.smart_sqli_test(
+            "https://example.test",
+            [
+                {
+                    "url": "https://example.test/api/login",
+                    "method": "POST",
+                    "content_type": "application/json",
+                    "body_params": {"email": "a@example.test", "password": "pw"},
+                }
+            ],
+            dbms="mysql",
+            max_seconds=10,
+            max_params_per_endpoint=2,
+        )
+    )
+
+    assert result["endpoints_tested"] == 1
+    assert result["post_endpoints_tested"] == 1
+    assert result["params_tested"] == 2
+    assert result["endpoint_attempts"][0]["param_count"] == 2
 
 
 def test_smart_sqli_skips_documentation_endpoints(monkeypatch):
@@ -331,6 +432,140 @@ def test_run_smart_active_tests_reserves_time_for_xss(monkeypatch):
     assert result["budget"]["active_elapsed_seconds"] == 70
     assert result["budget"]["active_remaining_seconds"] == 30
     assert result["xss"]["endpoints_tested"] == 1
+
+
+def test_run_smart_active_tests_uses_filtered_worklist_for_xss(monkeypatch):
+    phantom = {"url": "https://example.test/api/phantom?id=1", "method": "GET", "params": ["id"], "source": "inferred"}
+    real = {"url": "https://example.test/search?q=test", "method": "GET", "params": ["q"], "source": "har_discovery"}
+    captured = {}
+
+    async def fake_filter(_base_url, endpoints, _auth_session):
+        assert endpoints == [phantom, real]
+        return [real]
+
+    async def fake_sqli(*args, **kwargs):
+        return {
+            "findings": [],
+            "dbms_detected": None,
+            "vulnerabilities_found": 0,
+            "get_endpoints_tested": 0,
+            "post_endpoints_tested": 0,
+            "endpoints_tested": 0,
+            "params_tested": 0,
+        }
+
+    async def fake_xss(_base_url, endpoints, *args, **kwargs):
+        captured["xss_endpoints"] = list(endpoints)
+        return {
+            "findings": [],
+            "reflections_found": 0,
+            "vulnerabilities_found": 0,
+            "endpoints_tested": len(endpoints),
+            "params_tested": 0,
+        }
+
+    async def fake_hash_route_dom_xss(*args, **kwargs):
+        return {
+            "findings": [],
+            "endpoints_tested": 0,
+            "params_tested": 0,
+            "vulnerabilities_found": 0,
+        }
+
+    monkeypatch.setattr(active_checks, "_filter_reachable_active_endpoints", fake_filter)
+    monkeypatch.setattr(active_checks, "smart_sqli_test", fake_sqli)
+    monkeypatch.setattr(active_checks, "smart_xss_test", fake_xss)
+    monkeypatch.setattr(active_checks, "hash_route_dom_xss_test", fake_hash_route_dom_xss)
+
+    result = asyncio.run(
+        active_checks.run_smart_active_tests(
+            "https://example.test",
+            [phantom, real],
+            run_sqli=True,
+            run_xss=True,
+            active_max_seconds=100,
+        )
+    )
+
+    assert captured["xss_endpoints"] == [real]
+    assert result["xss"]["endpoints_tested"] == 1
+
+
+def test_enabled_active_family_names_are_registry_ordered():
+    assert active_checks._enabled_active_family_names(run_sqli=True, run_xss=True) == ("sqli", "xss")
+    assert active_checks._enabled_active_family_names(run_sqli=False, run_xss=True) == ("xss",)
+    assert active_checks._enabled_active_family_names(run_sqli=True, run_xss=False) == ("sqli",)
+
+
+def test_enabled_active_family_names_falls_back_without_registry(monkeypatch):
+    monkeypatch.setattr(active_checks, "_check_registry", None)
+
+    assert active_checks._registry_active_family_dispatch_order() == ("sqli", "xss")
+    assert active_checks._enabled_active_family_names(run_sqli=True, run_xss=True) == ("sqli", "xss")
+
+
+def test_enabled_active_family_names_uses_registry_parallel_order(monkeypatch):
+    class _Spec:
+        def __init__(self, name):
+            self.name = name
+            self.scanner_options = {"enabled": True}
+
+    class _Registry:
+        @staticmethod
+        def default_parallel_focus_families():
+            return (_Spec("xss"), _Spec("sqli"), _Spec("bola"))
+
+    monkeypatch.setattr(active_checks, "_check_registry", _Registry)
+
+    assert active_checks._registry_active_family_dispatch_order() == ("xss", "sqli")
+    assert active_checks._enabled_active_family_names(run_sqli=True, run_xss=True) == ("xss", "sqli")
+    assert active_checks._enabled_active_family_names(run_sqli=True, run_xss=False) == ("sqli",)
+
+
+def test_smart_sqli_stops_on_cooperative_cancel_file(monkeypatch, tmp_path):
+    cancel_file = tmp_path / "scan.cancel"
+    cancel_file.write_text("1", encoding="utf-8")
+    monkeypatch.setenv("SHAKERSCAN_CANCEL_FILE", str(cancel_file))
+
+    async def fail_run(*args, **kwargs):
+        raise AssertionError("SQLi should stop before issuing probes when cancelled")
+
+    monkeypatch.setattr(active_checks, "run", fail_run)
+
+    result = asyncio.run(
+        active_checks.smart_sqli_test(
+            "https://example.test",
+            [{"url": "https://example.test/search?q=1", "method": "GET", "params": ["q"]}],
+            max_seconds=30,
+        )
+    )
+
+    assert result["budget_exhausted"] is True
+    assert result["budget_exhausted_reason"] == "cancelled"
+    assert result["endpoints_tested"] == 0
+
+
+def test_smart_xss_stops_on_cooperative_cancel_file(monkeypatch, tmp_path):
+    cancel_file = tmp_path / "scan.cancel"
+    cancel_file.write_text("1", encoding="utf-8")
+    monkeypatch.setenv("SHAKERSCAN_CANCEL_FILE", str(cancel_file))
+
+    async def fail_run(*args, **kwargs):
+        raise AssertionError("XSS should stop before issuing probes when cancelled")
+
+    monkeypatch.setattr(active_checks, "run", fail_run)
+
+    result = asyncio.run(
+        active_checks.smart_xss_test(
+            "https://example.test",
+            [{"url": "https://example.test/search?q=1", "method": "GET", "params": ["q"]}],
+            max_seconds=30,
+        )
+    )
+
+    assert result["budget_exhausted"] is True
+    assert result["budget_exhausted_reason"] == "cancelled"
+    assert result["endpoints_tested"] == 0
 
 
 def test_thorough_params_honors_explicit_active_caps(monkeypatch):

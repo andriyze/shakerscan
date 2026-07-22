@@ -55,12 +55,12 @@ Use `API_BASE=${SHAKERSCAN_API_BASE:-http://localhost:8080}` for API calls. Use 
 5. After submitting, report:
    - scan ID
    - UI link: `${UI_BASE}/scans/{scan_id}`
-   - AI Gate page: `${UI_BASE}/settings/ai-gate`
+   - AI Gate page: `${UI_BASE}/ai-gate`
 
    Then stop. Do not poll unless explicitly asked.
 
 6. To review results later:
    ```bash
-   curl "http://localhost:8080/findings?source_type=ai&status=active"
+   curl "http://localhost:8080/findings?source_type=ai_gate&status=active"
    curl http://localhost:8080/ai/scans/{scan_id}/transcript
    ```

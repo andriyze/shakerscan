@@ -10,6 +10,7 @@ import { getApiUrl } from '@/lib/api'
 import { gradeTextColor } from '@/components/ui'
 import { SEVERITY_BADGE_STYLES, type SeverityLevel } from '@/lib/constants'
 import { AlertTriangle, CheckCircle2 } from 'lucide-react'
+import { normalizeSkipReasons } from '@/lib/deferredWorkContracts'
 
 type RemediationStatus = 'open' | 'in_progress' | 'remediated' | 'false_positive' | 'accepted_risk'
 
@@ -68,6 +69,29 @@ function asRecord(value: any): Record<string, any> {
   return {}
 }
 
+function formatCheckFamilyName(value: string): string {
+  const labels: Record<string, string> = {
+    sqli: 'SQLi',
+    xss: 'XSS',
+  }
+  return labels[value] || value.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase())
+}
+
+function getCheckFamilyScopeLabel(scope: any): string | null {
+  const rec = asRecord(scope)
+  const families = Array.isArray(rec.families) ? rec.families.filter((v: any) => typeof v === 'string') : []
+  if (rec.mode === 'focused' && typeof rec.focused_family === 'string') {
+    return `${formatCheckFamilyName(rec.focused_family)} only`
+  }
+  if (rec.mode === 'active_mix' && families.length) {
+    return families.map(formatCheckFamilyName).join(' + ')
+  }
+  if (rec.mode === 'custom_active') {
+    return 'Custom active scope'
+  }
+  return null
+}
+
 function parseEvidenceRecord(evidence: any): Record<string, any> {
   if (!evidence) return {}
   if (typeof evidence === 'string') {
@@ -108,6 +132,56 @@ function formatScanToken(value: any): string {
     .replace(/\b\w/g, (char) => char.toUpperCase())
 }
 
+function activeAttemptStatusClass(status: any): string {
+  const value = String(status || '').toLowerCase()
+  if (value === 'completed') return 'bg-green-500/10 text-green-300'
+  if (value === 'partial') return 'bg-yellow-500/10 text-yellow-300'
+  if (value === 'skipped') return 'bg-blue-500/10 text-blue-300'
+  if (value === 'failed' || value === 'error') return 'bg-red-500/10 text-red-300'
+  return 'bg-gray-700 text-gray-300'
+}
+
+function activeAttemptFamilies(attempt: any): string[] {
+  if (Array.isArray(attempt?.families)) {
+    return attempt.families.filter((family: any) => typeof family === 'string' && family.trim())
+  }
+  if (typeof attempt?.family === 'string' && attempt.family.trim()) return [attempt.family]
+  if (attempt?.family_attempts && typeof attempt.family_attempts === 'object') {
+    return Object.keys(attempt.family_attempts)
+  }
+  return []
+}
+
+function activeAttemptParamSummary(attempt: any): string {
+  const completed = Number(attempt?.completed_params_count ?? 0)
+  const attempted = Number(attempt?.attempted_params_count ?? 0)
+  const expected = Number(attempt?.param_count ?? 0)
+  const left = Number.isFinite(completed) ? completed : 0
+  const right = Number.isFinite(expected) && expected > 0
+    ? expected
+    : (Number.isFinite(attempted) && attempted > 0 ? attempted : 0)
+  return `${left} / ${right} params`
+}
+
+function activeAttemptParamPreview(attempt: any): string | null {
+  const names = Array.isArray(attempt?.param_names)
+    ? attempt.param_names.filter((name: any) => typeof name === 'string' && name.trim())
+    : []
+  if (!names.length) return null
+  const location = Array.isArray(attempt?.param_locations) && attempt.param_locations.length === 1
+    ? `${String(attempt.param_locations[0]).replace(/_/g, ' ')}: `
+    : (typeof attempt?.param_location === 'string' && attempt.param_location ? `${attempt.param_location.replace(/_/g, ' ')}: ` : '')
+  const shown = names.slice(0, 6).join(', ')
+  const suffix = names.length > 6 ? ` +${names.length - 6}` : ''
+  return `${location}${shown}${suffix}`
+}
+
+function activeAttemptReason(attempt: any): string | null {
+  const reason = attempt?.skip_reason || attempt?.budget_exhausted_reason
+  if (!reason) return null
+  return formatScanToken(reason)
+}
+
 function getAIDeployRecommendation(decision: string) {
   if (decision === 'block') return 'Do not deploy'
   if (decision === 'needs_approval') return 'Manual approval required'
@@ -122,6 +196,33 @@ function formatAIProfile(profile: any) {
   if (value === 'standard') return 'Standard'
   if (value === 'deep') return 'Deep'
   return String(profile || 'AI Gate')
+}
+
+function getAIJudgingGateDisplay(status: any): { label: string; className: string; title: string } | null {
+  switch (String(status || '').toLowerCase()) {
+    case 'judging_completed':
+      return {
+        label: 'AI judged',
+        className: 'bg-green-900/50 text-green-200',
+        title: 'Semantic judge completed for the probes that required it.',
+      }
+    case 'judging_failed':
+    case 'judging_required':
+    case 'judging_unavailable':
+      return {
+        label: 'needs review',
+        className: 'bg-yellow-900/50 text-yellow-200',
+        title: 'Semantic judging was required but did not complete; rely on deterministic evidence and manual review.',
+      }
+    case 'not_required':
+      return {
+        label: 'deterministic only',
+        className: 'bg-gray-800 text-gray-300',
+        title: 'This run did not require semantic judging; the visible results are deterministic-only.',
+      }
+    default:
+      return null
+  }
 }
 
 function formatAIProbePack(pack: any) {
@@ -417,6 +518,9 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
   }
   const network_services = scanData.network_services || {}
   const active_checks = scanData.active_checks || {}
+  const activeEndpointAttempts = Array.isArray(active_checks.endpoint_attempts)
+    ? active_checks.endpoint_attempts.filter((attempt: any) => attempt && typeof attempt === 'object')
+    : []
   const access_control = scanData.access_control || {}
   const cloud_ssrf = scanData.cloud_ssrf || {}
   const kubernetes_exposure = scanData.kubernetes_exposure || {}
@@ -426,10 +530,17 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
   const completionSkippedModules = Array.isArray(scanCompletionStatus.skipped_modules)
     ? scanCompletionStatus.skipped_modules
     : []
+  const completionSkipViews = normalizeSkipReasons(completionSkippedModules)
   const completionCappedEntries = Object.entries(asRecord(scanCompletionStatus.capped_lists))
     .filter(([, cap]: [string, any]) => cap && typeof cap === 'object' && cap.capped)
   const scan_config = scanData.scan_config || {}
+  const activeCheckFamilyScope = active_checks.check_family_scope || scan_config.check_family_scope
+  const activeCheckFamilyScopeLabel = getCheckFamilyScopeLabel(activeCheckFamilyScope)
+    || (typeof scan_config.focused_active_family === 'string'
+      ? `${formatCheckFamilyName(scan_config.focused_active_family)} only`
+      : null)
   const resolved_budget = scan_config.resolved_budget || scan.options?.resolved_budget || {}
+  const requestBudget = scanData.request_budget || {}
   const budgetProfile = scan_config.budget_profile || scan.options?.budget_profile || resolved_budget.budget_profile
   const coverage = scanData.coverage || {}
   const smart_coverage = scanData.smart_coverage || {}
@@ -471,6 +582,8 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
   const aiGateDecisionText = String(aiGateDecision?.decision || '').toLowerCase()
   const aiGateExecutionPlan = asRecord(ai_gate?.execution_plan)
   const aiGateSemanticJudge = asRecord(aiGateExecutionPlan.semantic_judge)
+  const aiGateJudgingGate = asRecord(aiGateExecutionPlan.judging_quality_gate)
+  const aiGateJudgingGateDisplay = getAIJudgingGateDisplay(aiGateJudgingGate.status)
   const semanticReviewedIds = new Set(
     [
       ...(Array.isArray(aiGateExecutionPlan.semantic_reviewed) ? aiGateExecutionPlan.semantic_reviewed : []),
@@ -487,13 +600,27 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
       : 'bg-slate-700 text-slate-300'
   const isAIScan = scan.scan_type === 'ai_gate' || String(scan.run_kind || '').startsWith('ai_') || Boolean(ai_gate)
   const isModelIntakeScan = scan.scan_type === 'model_intake' || scan.run_kind === 'model_intake' || Boolean(model_intake)
-  const showCompletionBanner = !isAIScan && !isModelIntakeScan && (
+  // Continuous ASM recon is a DISCOVERY pass (active testing off by design) that
+  // refreshes the endpoint inventory; active vuln testing runs as separate ASM
+  // test batches. Don't frame its intentionally-off active modules as a
+  // "budget exhausted / coverage incomplete" failure.
+  const isAsmRecon = scan.scan_role === 'asm_recon'
+  const isAsmBatch = scan.scan_role === 'asm_batch'
+  const showCompletionBanner = !isAIScan && !isModelIntakeScan && !isAsmRecon && (
     scanCompletionStatus.complete === false ||
     scanCompletionStatus.limited === true ||
     completionSkippedModules.length > 0 ||
     completionCappedEntries.length > 0
   )
-  const scanTypeLabel = isAIScan ? 'AI Gate' : isModelIntakeScan ? 'Model Intake' : String(scan.scan_type || 'Standard').replace(/_/g, ' ')
+  const scanTypeLabel = isAIScan
+    ? 'AI Gate'
+    : isModelIntakeScan
+      ? 'Model Intake'
+      : isAsmRecon
+        ? 'ASM recon (discovery)'
+        : isAsmBatch
+          ? 'ASM test batch'
+          : String(scan.scan_type || 'Standard').replace(/_/g, ' ')
   const modelIntakeDecision = String(result?.decision || '').toLowerCase()
   const modelIntakeDecisionClass =
     modelIntakeDecision === 'block'
@@ -626,15 +753,47 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
     URL.revokeObjectURL(url)
   }
 
+  // For Model Intake scans the "target" is a long artifact URL (e.g. a HF resolve
+  // link with a commit hash) that otherwise dominates the header on mobile and
+  // pushes the block decision/rationale below the fold. Show a short label instead
+  // and keep the full URL in a collapsed, copyable field.
+  const fullArtifactUrl = scan.url || scan.target_url || input.target || ''
+  const modelIntakeArtifactLabel = (() => {
+    const named = modelIntakeArtifact?.name || modelIntakeSummary?.artifact_name
+    if (named) return String(named)
+    try {
+      const u = new URL(fullArtifactUrl)
+      const segs = u.pathname.split('/').filter(Boolean)
+      if (u.hostname.includes('huggingface') && segs.length >= 2) return `${segs[0]}/${segs[1]}`
+      return segs[segs.length - 1] || u.hostname
+    } catch {
+      return fullArtifactUrl || 'Model artifact'
+    }
+  })()
+
   return (
-    <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+    <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
       {/* Scan Summary */}
       <div className="bg-gray-800/50 backdrop-blur-lg rounded-lg p-6 mb-8">
         <div className="mb-4 flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
           <div className="min-w-0">
-            <h1 className="text-3xl font-bold mb-2 break-words">
-              {scan.url || scan.target_url || input.target || 'Unknown Target'}
-            </h1>
+            {isModelIntakeScan ? (
+              <>
+                <h1 className="text-2xl sm:text-3xl font-bold mb-1 break-words">{modelIntakeArtifactLabel}</h1>
+                {fullArtifactUrl && (
+                  <details className="mb-2">
+                    <summary className="text-xs text-blue-400 hover:text-blue-300 cursor-pointer select-none">
+                      Show full artifact URL
+                    </summary>
+                    <p className="mt-1 text-xs text-gray-400 font-mono break-all">{fullArtifactUrl}</p>
+                  </details>
+                )}
+              </>
+            ) : (
+              <h1 className="text-3xl font-bold mb-2 break-words">
+                {scan.url || scan.target_url || input.target || 'Unknown Target'}
+              </h1>
+            )}
             <p className="text-gray-400">
               Scanned on {new Date(scan.created_at).toLocaleDateString()} at {new Date(scan.created_at).toLocaleTimeString()}
             </p>
@@ -712,6 +871,12 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
                   {resolved_budget.active_max_endpoints ? `${resolved_budget.active_max_endpoints} active endpoints` : ''}
                 </p>
               )}
+              {(requestBudget.request_limit !== undefined || resolved_budget.request_max) && (
+                <p className="mt-1 text-xs text-gray-500">
+                  {requestBudget.attempted_requests || 0}/{requestBudget.request_limit ?? resolved_budget.request_max} requests
+                  {requestBudget.mode ? ` (${requestBudget.mode})` : ''}
+                </p>
+              )}
             </div>
           )}
           <div className="bg-gray-700/50 rounded-lg p-4">
@@ -720,6 +885,25 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
           </div>
         </div>
       </div>
+
+      {isAsmRecon && (
+        <div className="mb-8 rounded-lg border border-blue-500/40 bg-blue-950/20 p-4">
+          <div className="flex items-start gap-3">
+            <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-blue-300" />
+            <div className="min-w-0 flex-1">
+              <h2 className="text-base font-semibold text-white">Continuous ASM — discovery pass</h2>
+              <p className="mt-1 text-sm text-gray-300">
+                This is an automated recon scan that re-enumerates the attack surface to keep the
+                target&apos;s endpoint inventory fresh. Active vulnerability testing (SQLi, XSS, BOLA,
+                etc.) is intentionally <span className="text-gray-100">off</span> here — it runs as
+                separate <span className="text-gray-100">ASM test batches</span>, so a small finding
+                count is expected. See coverage on the{' '}
+                <a href="/asm" className="text-blue-300 hover:text-blue-200">Coverage</a> page.
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
 
       {showCompletionBanner && (
         <div className={`mb-8 rounded-lg border p-4 ${
@@ -768,25 +952,15 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
                   <div className="rounded border border-gray-800 bg-black/20 p-3">
                     <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-400">Skipped Modules</div>
                     <div className="flex flex-wrap gap-2">
-                      {completionSkippedModules.slice(0, 8).map((skip: any, index: number) => {
-                        // skip may be a string, an object with module/check, or
-                        // an arbitrary object — coerce defensively so we never
-                        // render "[object Object]".
-                        const isString = typeof skip === 'string'
-                        const label = isString
-                          ? skip
-                          : (skip?.module || skip?.check || skip?.name || `module_${index}`)
-                        const reason = !isString && skip?.reason ? skip.reason : null
-                        return (
-                          <span key={`${typeof label === 'string' ? label : index}-${index}`} className="rounded bg-gray-900 px-2 py-1 text-xs text-gray-300">
-                            {formatScanToken(label)}
-                            {reason ? `: ${formatScanToken(reason)}` : ''}
-                          </span>
-                        )
-                      })}
-                      {completionSkippedModules.length > 8 && (
+                      {completionSkipViews.items.map((skip) => (
+                        <span key={skip.key} className="rounded bg-gray-900 px-2 py-1 text-xs text-gray-300">
+                          {formatScanToken(skip.label)}
+                          {skip.reason ? `: ${formatScanToken(skip.reason)}` : ''}
+                        </span>
+                      ))}
+                      {completionSkipViews.remaining > 0 && (
                         <span className="rounded bg-gray-900 px-2 py-1 text-xs text-gray-500">
-                          +{completionSkippedModules.length - 8} more
+                          +{completionSkipViews.remaining} more
                         </span>
                       )}
                     </div>
@@ -1027,8 +1201,13 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
                     Each card now starts with the result. The green/red boxes below are the test rubric, not the verdict.
                   </p>
                 </div>
-                {Object.keys(aiGateSemanticJudge).length > 0 && (
+                {(Object.keys(aiGateSemanticJudge).length > 0 || aiGateJudgingGateDisplay) && (
                   <div className="flex flex-wrap gap-2 text-xs text-gray-300">
+                    {aiGateJudgingGateDisplay && (
+                      <span className={`rounded px-2 py-1 ${aiGateJudgingGateDisplay.className}`} title={aiGateJudgingGateDisplay.title}>
+                        {aiGateJudgingGateDisplay.label}
+                      </span>
+                    )}
                     <span className="rounded bg-gray-800 px-2 py-1">
                       semantic judge: {aiGateSemanticJudge.enabled ? 'on' : 'off'}
                     </span>
@@ -2204,9 +2383,16 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
       )}
 
       {/* Active Checks Results */}
-      {(active_checks.xss || active_checks.sqli || active_checks.endpoints_tested) && (
+      {(active_checks.xss || active_checks.sqli || active_checks.endpoints_tested || activeEndpointAttempts.length > 0 || activeCheckFamilyScopeLabel) && (
         <div className="bg-gray-800/50 backdrop-blur-lg rounded-lg p-6 mb-8">
-          <h2 className="text-2xl font-bold mb-4">Active Security Testing</h2>
+          <div className="mb-4 flex flex-wrap items-center gap-3">
+            <h2 className="text-2xl font-bold">Active Security Testing</h2>
+            {activeCheckFamilyScopeLabel && (
+              <span className="rounded-full bg-blue-900/40 px-3 py-1 text-xs font-medium text-blue-200">
+                Scope: {activeCheckFamilyScopeLabel}
+              </span>
+            )}
+          </div>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             {active_checks.xss && (
               <div className="bg-gray-900 rounded-lg p-4">
@@ -2276,6 +2462,69 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
                   <div className="text-xs text-gray-500 mt-1">+{active_checks.endpoints_tested.length - 20} more</div>
                 )}
               </div>
+            </div>
+          )}
+          {activeEndpointAttempts.length > 0 && (
+            <div className="mt-4">
+              <div className="mb-2 flex items-center justify-between gap-3">
+                <h3 className="text-sm font-semibold text-gray-400">Active Attempt Ledger ({activeEndpointAttempts.length})</h3>
+                <span className="text-xs text-gray-500">showing {Math.min(activeEndpointAttempts.length, 12)}</span>
+              </div>
+              <div className="overflow-x-auto rounded-lg border border-gray-800 bg-gray-950/60">
+                <table className="min-w-full divide-y divide-gray-800 text-left text-xs">
+                  <thead className="bg-gray-900/80 text-gray-500">
+                    <tr>
+                      <th className="px-3 py-2 font-medium">Endpoint</th>
+                      <th className="px-3 py-2 font-medium">Families</th>
+                      <th className="px-3 py-2 font-medium">Params</th>
+                      <th className="px-3 py-2 font-medium">Status</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-900">
+                    {activeEndpointAttempts.slice(0, 12).map((attempt: any, i: number) => {
+                      const families = activeAttemptFamilies(attempt)
+                      const reason = activeAttemptReason(attempt)
+                      const paramPreview = activeAttemptParamPreview(attempt)
+                      return (
+                        <tr key={`${attempt.custom_endpoint || attempt.url || i}`} className="align-top">
+                          <td className="max-w-[420px] px-3 py-2">
+                            <div className="font-mono text-gray-300 break-all">
+                              {attempt.custom_endpoint || attempt.url || 'unknown endpoint'}
+                            </div>
+                            {Array.isArray(attempt.techniques_attempted) && attempt.techniques_attempted.length > 0 && (
+                              <div className="mt-1 text-[11px] text-gray-500">
+                                techniques: {attempt.techniques_attempted.slice(0, 5).join(', ')}
+                              </div>
+                            )}
+                          </td>
+                          <td className="px-3 py-2">
+                            <div className="flex flex-wrap gap-1">
+                              {(families.length ? families : ['unknown']).map((family) => (
+                                <span key={family} className="rounded bg-blue-500/10 px-1.5 py-0.5 text-[11px] text-blue-300">
+                                  {formatCheckFamilyName(family)}
+                                </span>
+                              ))}
+                            </div>
+                          </td>
+                          <td className="px-3 py-2">
+                            <div className="whitespace-nowrap text-gray-300">{activeAttemptParamSummary(attempt)}</div>
+                            {paramPreview && <div className="mt-1 max-w-[260px] break-words font-mono text-[11px] text-gray-500">{paramPreview}</div>}
+                          </td>
+                          <td className="px-3 py-2">
+                            <span className={`rounded px-1.5 py-0.5 text-[11px] font-medium ${activeAttemptStatusClass(attempt.status)}`}>
+                              {formatScanToken(attempt.status || 'unknown')}
+                            </span>
+                            {reason && <div className="mt-1 max-w-[220px] text-[11px] text-gray-500">{reason}</div>}
+                          </td>
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
+              </div>
+              {activeEndpointAttempts.length > 12 && (
+                <div className="mt-2 text-xs text-gray-500">+{activeEndpointAttempts.length - 12} more attempt rows in the raw report.</div>
+              )}
             </div>
           )}
         </div>
@@ -3364,15 +3613,20 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
             </div>
           )}
           {scan_metadata.options && Object.keys(scan_metadata.options).length > 0 && (
-            <div className="mt-4">
-              <h3 className="text-sm font-semibold text-gray-400 mb-2">Scan Options</h3>
-              <div className="bg-gray-900 rounded-lg p-3">
-                <pre className="text-xs text-gray-400 overflow-x-auto">{JSON.stringify(scan_metadata.options, null, 2)}</pre>
+            <details className="mt-4 rounded-lg border border-gray-800 bg-gray-950/40">
+              <summary className="cursor-pointer px-3 py-2 text-sm font-medium text-gray-500 hover:text-gray-300">
+                Developer diagnostics: resolved scan configuration
+              </summary>
+              <div className="border-t border-gray-800 p-3">
+                <p className="mb-2 text-xs text-gray-600">
+                  Internal execution details for troubleshooting. These do not change the result shown above.
+                </p>
+                <pre className="max-h-96 overflow-auto text-xs text-gray-500">{JSON.stringify(scan_metadata.options, null, 2)}</pre>
               </div>
-            </div>
+            </details>
           )}
         </div>
       )}
-    </main>
+    </div>
   )
 }

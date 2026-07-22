@@ -70,6 +70,35 @@ SCAN_BUDGET_FIELDS = {
     "smart_bola_max_endpoints",
     "sqli_extract_max",
     "oob_max_findings",
+    "active_worklist_max",
+    "request_max",
+}
+
+# Hard ceilings for custom_budget overrides. These are intentionally MUCH higher
+# than the `exhaustive` profile defaults so operators can dial in "huge" budgets
+# on demand (e.g. parallel coverage shards that must test every endpoint of a
+# large estate) without us changing what the exhaustive PROFILE does by default.
+# A key absent here falls back to the exhaustive profile value as the cap.
+SCAN_BUDGET_CEILINGS = {
+    "max_duration_minutes": 2880,      # 48h
+    "discovery_depth": 12,
+    "max_urls": 100000,
+    "browser_max_pages": 2000,
+    "browser_max_depth": 10,
+    "api_probe_limit": 100000,
+    "param_discovery_url_limit": 5000,
+    "param_discovery_max_params": 200,
+    "phase4_max_seconds": 86400,
+    "nuclei_max_targets": 100000,
+    "active_max_seconds": 86400,        # 24h
+    "active_max_endpoints": 10000,
+    "active_params_per_endpoint": 100,
+    "dom_xss_max_files": 2000,
+    "smart_bola_max_endpoints": 10000,
+    "sqli_extract_max": 100,
+    "oob_max_findings": 100,
+    "active_worklist_max": 100000,
+    "request_max": 1_000_000,
 }
 
 
@@ -107,8 +136,13 @@ SCAN_BUDGET_DEFAULTS: dict[str, dict[str, dict[str, Any]]] = {
     "smart": {
         "fast": {"max_duration_minutes": 30, "discovery_depth": 3, "max_urls": 500, "browser_max_pages": 20, "browser_max_depth": 3, "api_probe_limit": 400, "param_discovery_url_limit": 4, "param_discovery_max_params": 6, "nuclei_max_targets": 600, "nuclei_early_stop": True, "active_max_seconds": 450, "active_max_endpoints": 25, "active_params_per_endpoint": 4, "max_findings_per_family": 6, "smart_bola_max_endpoints": 50, "dom_xss_max_files": 12, "sqli_extract_max": 2, "oob_max_findings": 2},
         "balanced": {"max_duration_minutes": 90, "discovery_depth": 4, "max_urls": 1000, "browser_max_pages": 40, "browser_max_depth": 4, "api_probe_limit": 800, "param_discovery_url_limit": 8, "param_discovery_max_params": 8, "nuclei_max_targets": 1000, "nuclei_early_stop": True, "active_max_seconds": 900, "active_max_endpoints": 50, "active_params_per_endpoint": 6, "max_findings_per_family": 8, "smart_bola_max_endpoints": 100, "dom_xss_max_files": 25, "sqli_extract_max": 3, "oob_max_findings": 3},
-        "thorough": {"max_duration_minutes": 240, "discovery_depth": 5, "max_urls": 2500, "browser_max_pages": 100, "browser_max_depth": 5, "api_probe_limit": 2000, "param_discovery_url_limit": 20, "param_discovery_max_params": 12, "nuclei_max_targets": 2500, "nuclei_early_stop": False, "active_max_seconds": 2400, "active_max_endpoints": 150, "active_params_per_endpoint": 12, "max_findings_per_family": None, "smart_bola_max_endpoints": 250, "dom_xss_max_files": 75, "sqli_extract_max": 5, "oob_max_findings": 5},
-        "exhaustive": {"max_duration_minutes": 480, "discovery_depth": 7, "max_urls": 5000, "browser_max_pages": 250, "browser_max_depth": 6, "api_probe_limit": 5000, "param_discovery_url_limit": 50, "param_discovery_max_params": 24, "nuclei_max_targets": 5000, "nuclei_early_stop": False, "active_max_seconds": 7200, "active_max_endpoints": 300, "active_params_per_endpoint": 20, "max_findings_per_family": None, "smart_bola_max_endpoints": 500, "dom_xss_max_files": 150, "sqli_extract_max": 8, "oob_max_findings": 8},
+        # §3 "raise budgets SAFELY": active_max_endpoints kept at completable levels
+        # (180/400). Raising it to 250/600 made a single Smart scan's finalize phase
+        # run long enough to be reaped as stale on rich apps (lost results) — breadth
+        # belongs in Full Coverage (parallel waves), not a bigger single-scan slice.
+        # Other depth knobs (params/bola/dom/nuclei) are still raised over baseline.
+        "thorough": {"max_duration_minutes": 240, "discovery_depth": 5, "max_urls": 2500, "browser_max_pages": 100, "browser_max_depth": 5, "api_probe_limit": 2000, "param_discovery_url_limit": 30, "param_discovery_max_params": 14, "nuclei_max_targets": 2500, "nuclei_early_stop": False, "active_max_seconds": 2700, "active_max_endpoints": 180, "active_params_per_endpoint": 14, "max_findings_per_family": None, "smart_bola_max_endpoints": 300, "dom_xss_max_files": 100, "sqli_extract_max": 5, "oob_max_findings": 5},
+        "exhaustive": {"max_duration_minutes": 600, "discovery_depth": 7, "max_urls": 6000, "browser_max_pages": 300, "browser_max_depth": 6, "api_probe_limit": 6000, "param_discovery_url_limit": 60, "param_discovery_max_params": 24, "nuclei_max_targets": 6000, "nuclei_early_stop": False, "active_max_seconds": 7200, "active_max_endpoints": 400, "active_params_per_endpoint": 20, "max_findings_per_family": None, "smart_bola_max_endpoints": 600, "dom_xss_max_files": 200, "sqli_extract_max": 8, "oob_max_findings": 8},
     },
 }
 
@@ -163,9 +197,127 @@ def resolve_phase4_max_seconds(
     return phase4_max
 
 
+def resolve_bola_deadline_seconds(scan_budget: dict[str, Any] | None, custom_budget: dict[str, Any] | None) -> int:
+    """Resolve BOLA's graceful stop deadline.
+
+    Profile defaults keep the historical five-minute floor, but explicit custom
+    budgets are respected so known-endpoint parallel shards can stay fast.
+    """
+    budget = scan_budget if isinstance(scan_budget, dict) else {}
+    raw_budget = budget.get("active_max_seconds")
+    try:
+        active_budget = int(raw_budget or 600)
+    except (TypeError, ValueError):
+        active_budget = 600
+
+    custom = custom_budget if isinstance(custom_budget, dict) else {}
+    if custom.get("active_max_seconds") is not None:
+        return max(30, min(900, active_budget))
+    return max(300, min(900, active_budget))
+
+
+ACTIVE_ENRICHMENT_LIMITS_BY_PROFILE: dict[str, dict[str, int]] = {
+    "fast": {
+        "auxiliary_get_endpoints": 4,
+        "auxiliary_post_json_endpoints": 3,
+        "auxiliary_params_per_endpoint": 2,
+        "auxiliary_payloads_per_param": 4,
+        "stored_xss_max_forms": 4,
+        "stored_xss_max_pages": 10,
+        "nosql_json_endpoints": 4,
+        "blind_ssrf_get_endpoints": 3,
+    },
+    "balanced": {
+        "auxiliary_get_endpoints": 8,
+        "auxiliary_post_json_endpoints": 6,
+        "auxiliary_params_per_endpoint": 3,
+        "auxiliary_payloads_per_param": 6,
+        "stored_xss_max_forms": 8,
+        "stored_xss_max_pages": 25,
+        "nosql_json_endpoints": 12,
+        "blind_ssrf_get_endpoints": 5,
+    },
+    "thorough": {
+        "auxiliary_get_endpoints": 24,
+        "auxiliary_post_json_endpoints": 18,
+        "auxiliary_params_per_endpoint": 5,
+        "auxiliary_payloads_per_param": 8,
+        "stored_xss_max_forms": 16,
+        "stored_xss_max_pages": 75,
+        "nosql_json_endpoints": 40,
+        "blind_ssrf_get_endpoints": 15,
+    },
+    "exhaustive": {
+        "auxiliary_get_endpoints": 80,
+        "auxiliary_post_json_endpoints": 60,
+        "auxiliary_params_per_endpoint": 8,
+        "auxiliary_payloads_per_param": 12,
+        "stored_xss_max_forms": 30,
+        "stored_xss_max_pages": 180,
+        "nosql_json_endpoints": 120,
+        "blind_ssrf_get_endpoints": 40,
+    },
+}
+
+
+def resolve_active_enrichment_limits(
+    scan_budget: dict[str, Any] | None,
+    *,
+    quick_mode: bool = False,
+    thorough_params: bool = False,
+) -> dict[str, Any]:
+    """Resolve depth for post-primary active modules from the scan budget.
+
+    These modules used to have hard-coded tiny caps (for example 3-8 JSON
+    endpoints), so Thorough/Exhaustive scans still behaved like shallow scans for
+    NoSQL, stored XSS, SSRF/XXE, LDAP/XPath, and similar follow-on checks.
+    """
+    budget = scan_budget if isinstance(scan_budget, dict) else {}
+    profile = normalize_budget_profile(budget.get("budget_profile"))
+    rank = {name: idx for idx, name in enumerate(SCAN_BUDGET_PROFILES)}
+
+    if thorough_params and rank[profile] < rank["thorough"]:
+        profile = "thorough"
+
+    active_max = _coerce_budget_value("active_max_endpoints", budget.get("active_max_endpoints"))
+    if active_max is not None:
+        if active_max >= 600 and rank[profile] < rank["exhaustive"]:
+            profile = "exhaustive"
+        elif active_max >= 150 and rank[profile] < rank["thorough"]:
+            profile = "thorough"
+        elif active_max >= 50 and rank[profile] < rank["balanced"]:
+            profile = "balanced"
+
+    if quick_mode and rank[profile] > rank["balanced"]:
+        profile = "balanced"
+
+    limits = dict(ACTIVE_ENRICHMENT_LIMITS_BY_PROFILE[profile])
+    limits["profile"] = profile
+    return limits
+
+
 def normalize_budget_profile(value: Any) -> str:
     profile = str(value or DEFAULT_SCAN_BUDGET_PROFILE).strip().lower()
     return profile if profile in SCAN_BUDGET_PROFILES else DEFAULT_SCAN_BUDGET_PROFILE
+
+
+def derive_request_max(budget: dict[str, Any]) -> int:
+    """Conservative request ceiling for one standalone scan budget contract."""
+    def _count(key: str) -> int:
+        try:
+            return max(0, int(budget.get(key) or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    discovery = _count("max_urls") + _count("api_probe_limit")
+    browser = _count("browser_max_pages") * 20
+    template = _count("nuclei_max_targets") * 3
+    active = (
+        _count("active_max_endpoints")
+        * max(1, _count("active_params_per_endpoint"))
+        * 24
+    )
+    return max(1, min(SCAN_BUDGET_CEILINGS["request_max"], discovery + browser + template + active))
 
 
 def resolve_scan_budget(
@@ -191,7 +343,12 @@ def resolve_scan_budget(
                 continue
             if key == "max_duration_minutes" and isinstance(value, int) and value <= 0:
                 value = 1
-            ceiling = SCAN_BUDGET_DEFAULTS[normalized_scan_type]["exhaustive"].get(key)
+            # Cap at the generous custom-budget ceiling (allows huge on-demand
+            # budgets), falling back to the exhaustive profile value when a key
+            # has no explicit ceiling.
+            ceiling = SCAN_BUDGET_CEILINGS.get(key)
+            if ceiling is None:
+                ceiling = SCAN_BUDGET_DEFAULTS[normalized_scan_type]["exhaustive"].get(key)
             if (
                 key != "max_findings_per_family"
                 and isinstance(value, int)
@@ -201,7 +358,33 @@ def resolve_scan_budget(
                 value = ceiling
             budget[key] = value
 
+    if budget.get("request_max") is None:
+        budget["request_max"] = derive_request_max(budget)
+    budget.setdefault("budget_source", "resolved")
     return budget
+
+
+def resolve_or_consume_budget(
+    scan_type: str | None,
+    options: dict[str, Any] | None = None,
+    budget_profile: str | None = None,
+    custom_budget: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Return THE one resolved budget contract for a scan (docs proposed-next-steps §4).
+
+    Budget bugs recurred because the watchdog, stale checker, coverage planner,
+    dynamic ASM batch path, and scanner internals each re-resolved the budget and
+    could silently re-clamp it (e.g. SQLi back to 8s/endpoint after the planner
+    raised it). The budget is resolved ONCE at submission/planning and stamped into
+    ``options['resolved_budget']``; every runtime path must CONSUME that exact
+    object rather than re-deriving it. This consumes the stamped contract when
+    present and only resolves fresh (legacy/older scans) when it is absent.
+    """
+    if isinstance(options, dict):
+        stamped = options.get("resolved_budget")
+        if isinstance(stamped, dict) and stamped.get("max_duration_minutes") is not None:
+            return stamped
+    return resolve_scan_budget(scan_type, budget_profile, custom_budget)
 
 
 # =============================================================================

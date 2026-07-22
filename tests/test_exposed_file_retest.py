@@ -13,6 +13,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scanner"))
 from scanner_tools import proof_of_exploit as poe  # noqa: E402
 from scanner_tools.exposure_markers import (  # noqa: E402
     derive_markers,
+    exposure_severity,
     looks_like_soft_404,
     match_critical_validator,
 )
@@ -69,6 +70,51 @@ def test_derive_markers_detects_private_key_and_dotenv():
     assert "private_key_marker" in derive_markers("id_rsa", PEM_KEY_BODY)
     assert "dotenv_format" in derive_markers(".env", "DB_PASSWORD=hunter2\nAPI_KEY=abc\n")
     assert derive_markers("readme.txt", "hello world") == []
+
+
+def test_derive_markers_detects_confidential_document():
+    # A confidential business memo with no sensitive extension and no key=value
+    # credential must still be marked sensitive (recall preservation) so it stays
+    # HIGH and re-proves on retest. Bare prose that merely mentions a secret word
+    # (no explicit sensitivity label) must NOT be marked.
+    assert "confidential_content" in derive_markers(
+        "acquisitions.md", "# CONFIDENTIAL\nPending acquisition of Foo Corp.\n")
+    assert "confidential_content" in derive_markers(
+        "memo.txt", "Proprietary and not for distribution.")
+    assert derive_markers("notes.md", "Here is how to reset your password page.") == []
+
+
+def test_exposure_severity_gating():
+    # HIGH only on strong evidence: a content marker, high confidence, or a
+    # successful allowlist bypass (reading a blocked file IS the vuln).
+    assert exposure_severity(["confidential_content"], "low") == "high"
+    assert exposure_severity([], "high") == "high"
+    assert exposure_severity([], "low", via_bypass=True) == "high"
+    # Sensitive extension / medium confidence alone is only MEDIUM — this is the
+    # bulk of the old unverified-high flood.
+    assert exposure_severity([], "low", sensitive_ext=True) == "medium"
+    assert exposure_severity([], "medium") == "medium"
+    # A bare 200 with a single weak keyword and nothing else drops out of HIGH.
+    assert exposure_severity([], "low") == "low"
+
+
+def test_prove_exposed_file_confidential_doc_round_trip(monkeypatch):
+    # The recall-preservation case end to end: a confidential doc harvested from a
+    # directory listing (marker-backed HIGH) must re-prove on retest so it stays a
+    # VERIFIED high rather than being downgraded.
+    body = "CONFIDENTIAL\nProject acquisitions pending board approval.\n"
+    assert "confidential_content" in derive_markers("acquisitions.md", body)
+    monkeypatch.setattr(poe, "fetch_with_capture", _fake_fetch({
+        "status_code": 200,
+        "body": body,
+        "headers": {"content-type": "text/markdown"},
+    }))
+    proof = asyncio.run(poe.prove_exposed_file(
+        "https://example.com/ftp/acquisitions.md",
+        evidence={"path": "/ftp/acquisitions.md", "markers": ["confidential_content"]},
+    ))
+    assert proof.proven is True
+    assert proof.evidence_type == "content_marker_match"
 
 
 def test_match_critical_validator_for_key_files():

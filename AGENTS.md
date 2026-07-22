@@ -49,25 +49,52 @@ The scanner runs as Docker containers:
 - **PostgreSQL** - Stores scans, findings, targets
 - **Redis** - Job queue
 
+For the exhaustive generated capability catalog (all REST operations, registries, UI pages, CLI
+flags, skills, agents, adapters, modules, and durable tables) plus architecture/policy pointers, see
+[the functionality reference](https://github.com/andriyze/shakerscan/blob/main/docs/functionality-reference.md).
+
 ## Current UI (Implemented)
 
-- **Dashboard (`/`)**: real-time metrics (targets, scans, findings, avg score), queue stats (pending/running/completed/failed with clickable links), worker scaling (1-20 with +/- controls), Gungnir CT monitor toggle, recent scans list (last 5), critical/high findings list (last 5). Auto-refreshes every 10-30s.
+- **Dashboard (`/`)**: security-posture summary, prioritized action center, recent meaningful activity, and a compact operations bar for live queue state, emergency clear, worker count/scaling/stale-build warning, and Gungnir CT status/toggle. Auto-refreshes every 10-30s.
+- **Docs (`/docs`)**: safely renders the installed `README.md` in the web UI. Relative README links open the matching public GitHub document; raw HTML is not rendered.
 - **Scans (`/scans`)**: filter by status/domain/search, pagination (50/page), cancel running/pending scans, re-scan dropdown (all 6 scan types), auto-refresh every 5s. Shows target, type, status, score/grade, findings count, duration, date.
-- **Scan Detail (`/scans/{id}`)**: live logs with auto-scroll while running (5s refresh), progress bar + current phase, partial-results view for failed scans (warning banner), full report with PDF export, compliance section, resolved coverage budget, AI Gate evidence, and Model Intake artifact checks when complete. Preserves list filter context on back navigation.
-- **Exposure (`/exposure`)**: graph linking domains, targets, APIs, auth roles, third-party JS/vendors, cloud hints, AI targets, MCP tools, model artifacts, scans, and findings.
+- **Scan Detail (`/scans/{id}`)**: live logs with auto-scroll while running (5s refresh), progress bar + current phase, partial-results view for failed scans (warning banner), refreshed deployment decision, full report with PDF export, compliance section, resolved coverage budget, AI Gate evidence, and Model Intake artifact checks when complete. Preserves list filter context on back navigation.
+- **Exposure (`/exposure`)**: graph linking domains, targets, APIs, auth roles, third-party JS/vendors, cloud hints, AI targets, MCP tools, model artifacts, scans, and findings. Registered web assets can be opened directly in **Deep Hunt**.
+- **Continuous ASM (`/asm`)**: target coverage, family proof rollups, scheduler decisions, endpoint inventory, gaps, recommendations, and target campaign timeline. **Open Deep Hunt** carries the target and a coverage-gap objective into the canonical AI investigation flow; ordinary improve/test actions remain available separately.
+- **Timeline (`/timeline`)**: cross-product mission feed for scans, schedules, command results, evidence bindings, refuters, and exports.
+- **Campaigns (`/campaigns`, `/campaigns/{id}`)**: inspect the read-only mission ledger, lifecycle state, finding impact, and action history. It is not a Deep Hunt launcher.
+- **Evidence (`/evidence`)**: browse evidence instances, inspect objects, export content-free manifests/bundles, and run immutable-preview, approval-gated retention cleanup.
 - **New Scan (`/scan/new`)**: scan type grid (6 types with duration/description), coverage budget selector (`fast`, `balanced`, `thorough`, `exhaustive`), advanced option toggles (Active Testing, Nuclei Templates, Subdomain Discovery, Enhanced DNS, JS Dependency Scanning, JS Secret Scanning), and optional custom budget overrides. Warning for active testing types.
 - **Targets (`/targets`)**: hierarchical tree (root domains with collapsible subdomains), filter by discovery source/grade/has-findings, sort by domain/last-scanned/findings/score/date, search. Actions: add target, scan individual (dropdown), scan all in domain set, discover subdomains, create schedule (icon link). Shows subdomain count, scan count, findings count, grade per target.
-- **Schedules (`/schedules`)**: create/toggle/delete recurring daily/weekly scans. Create modal with target dropdown, name, frequency, day-of-week selector, time (UTC), scan type. Auto-opens from targets page with pre-populated target.
-- **Findings (`/findings`)**: filter by type (DAST vs AI), severity/status/last-seen (7/30/60/90 days)/domain/search, sort by severity/first-seen/last-seen/CVSS. Pagination (50/page). **Bulk cleanup**: dry-run preview before deletion, filter by age (30-180+ days)/status/domain.
-- **Finding Detail (`/findings/{id}`)**: status triage buttons (active/resolved/false_positive/accepted_risk), **delete finding** with confirmation, DAST/AI type badge, analyst notes, CVSS, CWE link, evidence summary (URLs, payloads, parameters, status codes, response anomalies), remediation steps, AI analysis (verdict/confidence/rationale/recommendations), raw HTTP request/response, copy buttons for URLs/payloads/IDs, external links to vulnerable URLs.
-- **AI Gate (`/settings/ai-gate`)**: create and manage AI targets, use Secure RAG + Agent presets, choose auth, target type, probe pack, profile, and environment, then queue AI safety scans for chat APIs, RAG APIs, agent traces, and MCP endpoints.
-- **Model Intake (`/settings/model-intake`)**: use model-intake presets and queue artifact checks with artifact URL, metadata URL/JSON, checksum, signature, model card, approval flags, timeout, and download cap.
+- **Schedules (`/schedules`)**: create/toggle/delete recurring daily/weekly normal scans and typed ASM coverage waves (`asm_improve`). Evidence cleanup is intentionally interactive-only; legacy `evidence_retention_sweep` schedules are disabled and cannot be created or resumed.
+- **Findings (`/findings`)**: filter by DAST, Deep Hunt, Interactive, AI Gate, Model Intake, ASM, or Manual source plus severity/status/last-seen/domain/search; sort by severity/first-seen/last-seen/CVSS; bulk cleanup with dry-run preview.
+- **Finding Detail (`/findings/{id}`)**: status triage buttons (active/resolved/false_positive/accepted_risk), **delete finding** with confirmation, source badge, analyst notes, CVSS, CWE link, evidence summary (URLs, payloads, parameters, status codes, response anomalies), remediation steps, AI analysis (verdict/confidence/rationale/recommendations), raw HTTP request/response, copy buttons for URLs/payloads/IDs, external links to vulnerable URLs, one-shot proof replay, and a bounded **Verify finding** action for target-linked DAST/Deep Hunt/ASM/manual web findings.
+- **AI Gate (`/ai-gate`)**: create and manage AI targets, use Secure RAG + Agent presets, choose auth, target type, probe pack, profile, and environment, then queue AI safety scans for chat APIs, RAG APIs, agent traces, and MCP endpoints. *(Preview surface: deterministic real-stack PR smoke is implemented; planned policy/exception and deterministic-judge seams are not yet release-gated.)*
+- **Model Intake (`/model-intake`)**: use model-intake presets and queue artifact checks with artifact URL, metadata URL/JSON, checksum, detached signature URL/value, public key URL/PEM, trusted key PEM/fingerprints, policy profile, model card, approval flags, timeout, and download cap. *(Preview surface: deterministic real-stack PR smoke is implemented; the planned policy/exception seam is not yet release-gated.)*
+- **Policy Profiles (`/settings/policy-profiles`)**: create, edit, activate/deactivate, and delete deployment gate profiles for AI Gate, Model Intake, and DAST decisions. Model Intake can select saved active profiles.
+- **Interactive Testing (`/interactive`)**: browser sessions, managed credential profiles, target principals, authz expectations, endpoint replay, screenshots, and explicit finding creation.
+- **Exceptions (`/exceptions`)**: exception queue, owner/approver/control repair, expiry visibility, and lifecycle sweep.
+- **Command Arsenal (`/settings/arsenal`)**: command contracts, plans, scope/approval receipts, action ledger, hypotheses, refuters, tools, local agents, context packs, and decision traces.
+- **AI Operations Router (`/settings/ai-ops-router`)**: preview natural-language operations as bounded API plans with safety, missing-input, blast-radius, and confirmation details before optional execution.
+- **Deep Hunt (`/deep-hunt`)**: launch a keyless, AI-driven investigation through `/agent/hunt/*`. The current Codex/Claude/OpenCode session composes its own requests and tools; ShakerScan enforces target scope, expiring approval, hard action/request ceilings, evidence provenance, and deterministic proof promotion. Deep Hunt performs bounded active testing but blocks arbitrary state-changing HTTP in the free-form loop.
+- **Leads and Test Builder (`/deep-hunt/leads`, `/deep-hunt/experiment`)**: inspect the hypothesis backlog or hand-craft an advanced bounded experiment. They support Deep Hunt; they are not separate engines.
+- **Bounded experiments (`/deep-hunt/runs/{id}`)**: inspect durable runs from the compatibility `/research/*` controller, retained for specialized guided verification. Do not route a user's "Deep Hunt" request there; `/deep-hunt/operator` and `/deep-hunt/explorer` are legacy URLs that redirect to `/deep-hunt`.
+- **Settings (`/settings`)**: AI providers, scan execution policy, automation defaults, and approval-receipt enforcement.
+- **Application Graph (`/targets/{id}/graph`)**: inspect persisted route/object/principal nodes, producer/consumer/auth-boundary edges, node/edge filters, search, and selected-node connections.
 
 ## Your Role
 
 When users ask about security scanning, you should:
 
 **Important**: After submitting a scan, report the scan ID and UI link, then stop. Do NOT poll or wait for completion - scans can take minutes to hours. Users can check results via UI or ask later.
+
+**DAST-quality / benchmarking notes:**
+- **Never measure on a build-stale fleet.** Check `GET /workers` `build_current` (fingerprint-authoritative) and restart workers before validation scans. Scans stamp `expected_build_fingerprint_at_submit`/`stale_worker_count_at_submit`; pass `require_current_workers: true` to fail-closed on a stale fleet.
+- **For DAST-quality benchmarking use a single Smart scan, not parallel `coverage`.** Coverage mode detects fewer crit/high (zero-rediscovery children skip the browser/DOM-XSS + global posture checks where many crit/highs live). Coverage is for breadth.
+- **Benchmark scorecards:** `python3 scripts/benchmark_targets.py <juice_shop|crapi|honey> --auth` (submits, polls, scores verified-vs-suspected, coverage, gates). Fixtures in `tests/fixtures/benchmarks/*.yaml`. Score an existing scan with `--scan-id`. A verified-BOLA gate also requires a persisted distinct-principal receipt and successful owner/attacker responses; a finding label alone cannot pass it.
+- **Agent-safe benchmark submission:** use `python3 scripts/benchmark_targets.py <target> --auth --submit-only` to require a current fleet, mint required principals, queue exactly one scan, print a content-free receipt, and exit. Report the scan ID/UI link and stop; score it on a later request with `--scan-id`.
+- **Model Intake validation:** use `make e2e-model-intake` for the real public-model path. It enables the bounded Nex-N2-mini Hugging Face shard check and verifies that a capped partial download is reported as `known_unverified_truncated`, never as a false hash mismatch. Use `make e2e-model-intake-fixture` only when external network access is intentionally unavailable.
+- **ASM gaps** (`GET /targets/{id}/asm/gaps`) returns `family_coverage` (completed vs attempts) and `recommended_campaigns` (recon / add_credentials / sqli_wave / xss_wave / bola_wave / retest_stale). Reports carry `verification_summary` (verified vs suspected, unproven crit/high).
 
 For commands you run on the same machine as ShakerScan, use `http://localhost:8080` for the API. For browser-facing links on a remote VPS, use the UI URL printed by `./scanner.sh status` or `./scanner.sh start --remote` instead of hardcoding `localhost:3000`.
 
@@ -133,6 +160,9 @@ curl http://localhost:8080/scans/{scan_id}
 curl "http://localhost:8080/scans?limit=10"
 curl "http://localhost:8080/scans?status=completed&root_domain=example.com&limit=50"
 
+# The scan list hides implementation rows by default. Use these only for debugging:
+curl "http://localhost:8080/scans?include_shards=true&include_internal=true&limit=50"
+
 # Get full result JSON
 curl http://localhost:8080/scans/{scan_id}/result
 
@@ -144,6 +174,10 @@ curl -X POST http://localhost:8080/scans/{scan_id}/cancel
 ```
 
 ### Batch Scans
+
+Batch submission accepts 1-50 targets, removes duplicates, and returns `queued_count`,
+`failed_count`, and per-target `errors`; `status: partial` means some scans were queued and others
+were rejected. Do not report the requested count as queued.
 
 ```bash
 curl -X POST http://localhost:8080/scans/batch \
@@ -227,7 +261,7 @@ curl -X POST http://localhost:8080/findings/manual \
     "evidence": "GET /api/users/1 with User2 token returns User1 profile"
   }'
 
-# Create finding from AI session (target auto-populated)
+# Create finding from Interactive Testing (compatibility `/session` API)
 curl -X POST "http://localhost:8080/session/{session_id}/findings" \
   -H "Content-Type: application/json" \
   -d '{
@@ -241,7 +275,11 @@ curl -X POST "http://localhost:8080/session/{session_id}/findings" \
 
 Status options: `active`, `resolved`, `false_positive`, `accepted_risk`
 
-Finding type filter: use `source_type=dast` for non-AI findings and `source_type=ai` for AI Gate or AI-session findings. The UI intentionally exposes only these two product categories: **DAST** and **AI**.
+Finding source filters are first-class: `dast`, `deep_hunt`, `ai`, `ai_gate`, `ai_session`,
+`autonomous`, `model_intake`, `asm`, and `manual`. The UI exposes DAST, Deep Hunt, Interactive,
+AI Gate, Model Intake, ASM, and Manual controls. `deep_hunt` combines agent-native claims with
+scanner findings driven by a hunt. Use the broader `ai` compatibility filter when AI Gate and
+Interactive findings should be combined.
 
 **Findings Query Parameters:**
 
@@ -249,7 +287,7 @@ Finding type filter: use `source_type=dast` for non-AI findings and `source_type
 |-----------|-------------|
 | `status` | Filter by status (active, resolved, false_positive, accepted_risk) |
 | `severity` | Filter by severity (critical, high, medium, low, info) |
-| `source_type` | Filter by product type: `dast` or `ai` |
+| `source_type` | `dast`, `deep_hunt`, `ai`, `ai_gate`, `ai_session`, `autonomous`, `model_intake`, `asm`, or `manual` |
 | `seen_within_days` | Only findings seen within N days (e.g., 7, 30, 60, 90) |
 | `root_domain` | Filter by root domain |
 | `target_id` | Filter by target ID |
@@ -257,6 +295,8 @@ Finding type filter: use `source_type=dast` for non-AI findings and `source_type
 | `verification_verdict` | Filter by latest verification verdict (`exploited`, `likely_fixed`, etc.) |
 | `verification_mode` | Filter findings with verification runs in mode `deterministic` or `ai_driven` |
 | `verified_only` | If true, only return findings with `last_verification_verdict = exploited` |
+| `driven_by` | Compatibility dimension: `autonomous_research` selects scanner work launched by a hunt. Prefer `source_type=deep_hunt` for the complete user-facing source. |
+| `research_campaign_id` | Only findings driven by a specific research campaign/run (UUID) |
 | `search` | Search by title or URL |
 | `sort_by` | Sort field: severity, first_seen, last_seen, cvss |
 | `sort_order` | asc or desc (default: desc) |
@@ -319,6 +359,164 @@ curl -X POST http://localhost:8080/targets/{target_id}/scan \
 | `sort_by` | root_domain, last_scanned_at, active_findings_count, last_score, created_at |
 | `sort_order` | asc or desc |
 
+### Continuous ASM
+
+Continuous ASM keeps a persistent endpoint inventory per target, then lets users improve coverage without starting many separate visible scans. The `/asm/improve` endpoint is the simplest API for UI and AI agents: it queues discovery when no inventory exists, queues the next endpoint test batch when endpoints are untested/stale, or returns `wait` when work is already active for the target.
+
+```bash
+# Get inventory and coverage
+curl http://localhost:8080/targets/{target_id}/asm/endpoints
+curl http://localhost:8080/targets/{target_id}/asm/coverage
+
+# Explain what remains untested and what to do next
+curl http://localhost:8080/targets/{target_id}/asm/gaps
+
+# Queue the recommended next action: discovery, endpoint test batch, or wait
+curl -X POST http://localhost:8080/targets/{target_id}/asm/improve \
+  -H "Content-Type: application/json" \
+  -d '{"batch_size": 100, "stale_days": 30}'
+
+# Force a discovery refresh only
+curl -X POST http://localhost:8080/targets/{target_id}/asm/recon \
+  -H "Content-Type: application/json" \
+  -d '{}'
+
+# Force an endpoint test batch over untested/stale inventory
+curl -X POST http://localhost:8080/targets/{target_id}/asm/test \
+  -H "Content-Type: application/json" \
+  -d '{"batch_size": 100, "stale_days": 30, "exploit_depth": false}'
+
+# Focus the next ASM test batch on one supported active family
+curl -X POST http://localhost:8080/targets/{target_id}/asm/improve \
+  -H "Content-Type: application/json" \
+  -d '{"check_family": "sqli"}'
+
+curl -X POST http://localhost:8080/targets/{target_id}/asm/test \
+  -H "Content-Type: application/json" \
+  -d '{"batch_size": 100, "check_family": "xss"}'
+
+# Auth/access-control checks require primary auth context on the target
+curl -X POST http://localhost:8080/targets/{target_id}/asm/improve \
+  -H "Content-Type: application/json" \
+  -d '{"check_family": "auth"}'
+
+# High-risk BOLA/IDOR requires Lab/deep intent and two auth contexts on the target
+curl -X POST http://localhost:8080/targets/{target_id}/asm/improve \
+  -H "Content-Type: application/json" \
+  -d '{"check_family": "bola", "exploit_depth": true}'
+
+# Spend extra one-shot batch budget on API-like endpoints only
+curl -X POST http://localhost:8080/targets/{target_id}/asm/improve \
+  -H "Content-Type: application/json" \
+  -d '{"endpoint_filter": "api", "batch_size": 100}'
+
+# View recent ASM recon/test jobs without cluttering the normal scans list
+curl http://localhost:8080/targets/{target_id}/asm/activity
+```
+
+ASM actions are target-scoped and reject new work while another pending/running scan exists for the same target. `check_family` currently supports `all`, `sqli`, `xss`, credential-gated `auth`, and gated `bola`; omit it or use `all` for the normal ASM mix. `endpoint_filter: "api"` narrows a batch to API-like endpoints without changing target-wide defaults. Auth requires primary auth on the target. BOLA requires `exploit_depth: true`, primary auth, and second-user auth. After submitting an ASM action that queues a scan, report the returned scan ID and UI link (`/scans/{scan_id}`), then stop. Do not poll unless the user explicitly asks.
+
+### AI Operations Router
+
+For natural-language agent requests, prefer the dry-run router first. It returns the planned API call, safety preset, missing inputs, blast radius, and confirmation requirements without queueing active work by default.
+
+```bash
+curl -X POST http://localhost:8080/ai/ops/route \
+  -H "Content-Type: application/json" \
+  -d '{"prompt": "Run full coverage on this target", "target": "https://example.com"}'
+```
+
+Active or budget-increasing intents return `dry_run: true` unless `execute`, `confirm_execution`, and `confirm_authorized` are true. Standard installs set `AI_OPS_ROUTER_EXECUTE_ENABLED=true`; an administrator can set it to `false` as a global execution kill switch. High-risk BOLA also requires `confirm_high_risk` plus auth context hints.
+
+### Deep Hunt
+
+Natural-language routing is strict:
+
+- `scan`, `quick scan`, `standard scan`, `deep scan`, `full scan`, `aggressive scan`, and
+  `smart scan` are Web DAST.
+- `deep hunt`, `autonomous hunt`, and `investigate autonomously` are the keyless `/agent/hunt/*`
+  workflow below. Never translate Deep Hunt into `/research/campaigns/launch`.
+- `verify this finding` uses the bounded finding verifier/retest.
+- `interactive testing` uses `/session/*`.
+
+Deep Hunt is AI-driven exploration plus bounded active exploitation. Before launch, confirm the
+target is authorized and create a target-bound expiring credential-tier approval. Standard installs
+enable gated execution by default; `AI_OPS_ROUTER_EXECUTE_ENABLED=false` is the administrator's
+global kill switch. The current coding-agent session is the planner; no stored AI provider key is
+required. ShakerScan seeds a redacted context pack, then suspends at each turn; the
+session reads the transcript, requests tools with a fenced
+` ```json {"tool_calls":[...]} ``` ` block (or ends with a `{"done":true,"findings":[...]}` debrief),
+and the server executes the tools (same-origin/approval-gated) and returns the next observation. Tools:
+`http_request` (send as a server-managed `as_principal` — credentials are never model-visible),
+`query_kb`, `diff`, `note`, and a bounded argv-templated `run_tool`.
+
+Deep Hunt enables bounded active `run_tool` templates. Arbitrary state-changing HTTP remains blocked
+in the free-form loop; mutations belong to typed workflows with cleanup/restoration contracts.
+Findings land in the **SUSPECTED** tier only after the provenance gate resolves real tool evidence.
+Supported claims may become **VERIFIED** only through deterministic server re-execution.
+
+Business-logic families (access_control, field_constraint, workflow_transition) verify through
+operator-approved typed invariant contracts: the hunt auto-drafts review candidates from black-box
+facts (endpoint expectations, app-graph auth_boundary edges, its own SUSPECTED findings) at board
+seeding — drafts never auto-approve. Approve a draft, then re-verify. workflow_transition contracts
+require a `probe_state` (the forbidden target state to attempt) at approval time.
+
+The first observation returned by `session` is itself a full system prompt (tool arsenal, the
+RECON→PLAN→EXECUTE→EVIDENCE→SELF-CRITIQUE cadence, and the exact debrief schema) — read it; the harness
+self-describes the contract each turn. Three things trip up a first-time driver:
+- **Evidence is `evidence_refs`, not prose.** Each debrief finding proves itself ONLY through
+  `evidence_refs` — the `resp_N` refs returned by `http_request` — which the server resolves into
+  tool-output evidence for the provenance gate. Inline `evidence`/`details` prose is NOT evidence; a
+  prose-only finding fails the gate and is silently dropped (persists nothing). Debrief shape:
+  `{"done":true,"findings":[{"title","severity","family","predicate","route","method","cwe","details","evidence_refs":["resp_1","resp_2"],"remediation"}],"abstained":false}`.
+- **The coding agent drives each turn** — reply while `status: awaiting_planner` and
+  STOP on any terminal status (a run ends `completed`, `failed`, or `cancelled`, not only `completed`;
+  check `stop_reason`). Do not keep replying to a terminal run.
+- **Authenticated targets need principals configured FIRST.** Provision managed principals + credential
+  profiles on the target (`POST /targets/{id}/principals` + credential profiles; `as_principal` reads
+  the profile server-side) before starting, or the hunt runs anonymous-only. crAPI-style JWTs expire,
+  so rotate stale profiles (`POST /targets/{id}/credential-profiles/{profile_id}/rotate`) first.
+
+```bash
+# Start Deep Hunt. The approval must be credential-tier, target-bound, and unexpired.
+curl -X POST http://localhost:8080/agent/hunt/{target_id}/session \
+  -H "Content-Type: application/json" \
+  -d '{"objective":"Explore autonomously and verify the highest-value weaknesses",
+       "mode":"deep_hunt","max_iterations":20,
+       "approval_receipt_id":"approval-uuid"}'
+
+# Optional grey-box grounding (B2): when you have the target's source locally, set
+# SHAKERSCAN_SOURCE_ROOT on the API host to the containing tree (mounted into the api container),
+# then pass source_dir. The hunt gets a security-ranked source_excerpt pack section + source-derived
+# leads. Containment is enforced (realpath both sides; 400 outside the root). Black-box is the default.
+curl -X POST http://localhost:8080/agent/hunt/{target_id}/session \
+  -H "Content-Type: application/json" \
+  -d '{"objective":"Explore autonomously and verify the highest-value weaknesses",
+       "mode":"deep_hunt","max_iterations":20,
+       "approval_receipt_id":"approval-uuid",
+       "source_dir":"/srv/sources/juice-shop"}'
+
+# Submit one planner reply (a tool_calls block or a final debrief); get the next observation.
+curl -X POST http://localhost:8080/agent/hunt/session/{run_id}/reply \
+  -H "Content-Type: application/json" \
+  -d '{"reply": "```json\n{\"tool_calls\":[{\"name\":\"query_kb\",\"arguments\":{\"kind\":\"findings\"}}]}\n```"}'
+
+# Final debrief — evidence_refs are the resp_N refs from prior http_request calls that PROVE the finding.
+curl -X POST http://localhost:8080/agent/hunt/session/{run_id}/reply \
+  -H "Content-Type: application/json" \
+  -d '{"reply": "```json\n{\"done\":true,\"findings\":[{\"title\":\"Excessive data exposure in feed\",\"severity\":\"medium\",\"family\":\"data_exposure\",\"predicate\":\"sensitive_value_present\",\"route\":\"/api/feed\",\"method\":\"GET\",\"cwe\":\"CWE-200\",\"details\":\"non-requester email present; identical across principals\",\"evidence_refs\":[\"resp_1\",\"resp_2\"]}],\"abstained\":false}\n```"}'
+
+# Inspect / cancel
+curl http://localhost:8080/agent/hunt/session/{run_id}
+curl -X POST http://localhost:8080/agent/hunt/session/{run_id}/cancel
+
+# Two-tier finding view for the target (VERIFIED moat vs SUSPECTED agent)
+curl http://localhost:8080/agent/findings/{target_id}
+```
+
+The compatibility `/research/*` episode controller remains available for specialized guided
+verification, exact-finding missions, and legacy runs. It is not the Deep Hunt launcher.
+
 ### Subdomain Discovery
 
 ```bash
@@ -344,6 +542,23 @@ curl http://localhost:8080/queue/stats
 # Emergency clear all pending jobs
 curl -X DELETE http://localhost:8080/queue/clear
 ```
+
+### Automation Settings
+
+```bash
+# Compact safe automation defaults: auto-sharding + default Continuous ASM policy
+curl http://localhost:8080/settings/automation
+
+curl -X PUT http://localhost:8080/settings/automation \
+  -H "Content-Type: application/json" \
+  -d '{"auto_sharding_enabled": true, "default_asm_enabled": true,
+       "default_asm_config": {"batch_size": 50, "stale_days": 30},
+       "default_research_planner_mode": "agent",
+       "approval_receipts_required_for_state_changing_actions": false}'
+```
+
+`/settings/automation` is the preferred compact surface for UI/API/AI agents. It keeps global `exploit_depth` locked off; Lab/deep ASM still requires explicit per-target or per-action intent. Set `approval_receipts_required_for_state_changing_actions` to `true` to require a valid scope/approval receipt before queueing scans, ASM actions, AI Gate runs, Model Intake scans, or retests.
+`default_research_planner_mode` accepts `agent`, `local_codex`, or `configured_ai`; clean installs default to `agent`.
 
 ### Worker Management
 
@@ -425,7 +640,7 @@ Notes:
 
 ### AI Gate
 
-AI Gate tests AI application surfaces for prompt injection, sensitive disclosure, unsafe tool use, RAG leakage, and MCP/tool boundary failures. It is managed in the UI at `/settings/ai-gate` and through REST APIs, so Claude, Codex, OpenCode, or any agent that can call HTTP can use it as a ShakerScan tool.
+AI Gate tests AI application surfaces for prompt injection, sensitive disclosure, unsafe tool use, RAG leakage, and MCP/tool boundary failures. It is managed in the UI at `/ai-gate` and through REST APIs, so Claude, Codex, OpenCode, or any agent that can call HTTP can use it as a ShakerScan tool. AI Gate is a **preview** surface for this release: deterministic real-stack PR smoke is implemented, while the planned policy/exception and deterministic-judge seams are not yet release-gated. DAST remains the manual full-release E2E area.
 
 AI Gate evaluates probes with deterministic/regex detectors first. When an AI provider is configured in AI settings, it also runs semantic AI judging on probe transcripts, populates `ai_verdict`, `ai_confidence`, `ai_rationale`, and `ai_recommendations`, and can downgrade high-confidence false positives before the AI Gate score and deploy decision are computed.
 
@@ -509,15 +724,17 @@ curl http://localhost:8080/ai/scans/{scan_id}/transcript
 # Filter findings by product type
 curl "http://localhost:8080/findings?source_type=ai&status=active"
 curl "http://localhost:8080/findings?source_type=dast&status=active"
+curl "http://localhost:8080/findings?source_type=deep_hunt&status=active"
 ```
 
 After submitting an AI Gate scan, report the scan ID and UI link (`/scans/{scan_id}`), then stop. Do not poll; AI Gate scans can still take time depending on profile, target latency, and budget.
 
 ### Model Intake
 
-Model Intake checks model artifacts before deployment without importing or executing model code. It is available in the UI at `/settings/model-intake` and through REST APIs. It is for provenance, unsafe serialization, checksum/signature, model card, license review, SBOM/dependency evidence, malware scan evidence, security evals, deployment restrictions, monitoring plan, and deployment approval checks.
+Model Intake checks model artifacts before deployment without importing or executing model code. It is available in the UI at `/model-intake` and through REST APIs. Like AI Gate, Model Intake is a **preview** surface for this release. It is for provenance, unsafe serialization, checksum/signature, model card, license review, SBOM/dependency evidence, malware scan evidence, security evals, deployment restrictions, monitoring plan, and deployment approval checks.
 
-Model Intake findings are stored as non-AI findings with `tool=model_intake`; `source_type=dast` includes them until the product adds a separate model-intake source filter.
+Model Intake findings use `tool/source=model_intake`, filter with `source_type=model_intake`, and are
+excluded from `source_type=dast`.
 
 The `/ai/test-scenarios` catalog also includes `model-intake-pipeline` presets and the canonical Honey model-intake routes: scenario registry, index, artifact/manifest/signature/card reads, submit, status, scan, approve, and deploy.
 
@@ -530,6 +747,9 @@ curl -X POST http://localhost:8080/model-intake/scan \
     "metadata_url": "https://example.com/models/model.metadata.json",
     "expected_sha256": "optional-known-good-sha256",
     "signature_url": "https://example.com/models/model.sig",
+    "signature_public_key_url": "https://example.com/models/signing-key.pem",
+    "signature_trusted_key_sha256": ["optional-trusted-key-fingerprint"],
+    "policy_profile": "production",
     "model_card_url": "https://example.com/models/model-card.md",
     "deployment_approved": true,
     "metadata_json": {
@@ -556,9 +776,20 @@ curl -X POST http://localhost:8080/schedules \
   -H "Content-Type: application/json" \
   -d '{
     "target_id": "target-uuid",
+    "schedule_kind": "normal_scan",
     "frequency": "daily",
     "time_of_day": "02:00",
     "scan_type": "standard"
+  }'
+
+# Create a recurring Continuous ASM coverage wave
+curl -X POST http://localhost:8080/schedules \
+  -H "Content-Type: application/json" \
+  -d '{
+    "target_id": "target-uuid",
+    "schedule_kind": "asm_improve",
+    "frequency": "daily",
+    "time_of_day": "02:00"
   }'
 
 # Update/toggle schedule
@@ -569,6 +800,26 @@ curl -X PATCH http://localhost:8080/schedules/{schedule_id} \
 # Delete schedule
 curl -X DELETE http://localhost:8080/schedules/{schedule_id}
 ```
+
+Evidence retention cannot be scheduled. Legacy retention schedules are fail-closed and disabled by
+the scheduler; migrate them to a normal scan or ASM schedule, or delete them. Interactive deletion at
+`POST /evidence/retention/sweep` starts with a target-scoped dry run that durably binds an immutable
+candidate snapshot, criteria, storage effects, policy hash, and expiry to a `preview_id`. Preview TTL
+defaults to 600 seconds and `EVIDENCE_RETENTION_PREVIEW_TTL_SECONDS` is clamped to 60-3600 seconds.
+
+Deletion confirmation creates a one-use `dangerous` approval scoped to the preview target, with
+`action_name: "evidence.retention_sweep"` and exact `action_context` keys `preview_id`,
+`preview_hash`, and `target_id`. The approval must be created for that preview and expire no later
+than it. The execution request must contain only `dry_run:false`, `preview_id`, and
+`approval_receipt_id`; resubmitting target or retention criteria is rejected.
+
+Before blob deletion, the server locks and revalidates the exact previewed objects, commits durable
+`executing` intent, and marks the candidate rows as pending for that preview. A retry with the same
+preview/approval resumes unfinished finalization safely; already-missing content-addressed blobs are
+treated as completed work. Once consumed, the same retry returns the stored result idempotently
+without repeating deletion. Expired, changed, mismatched, or reused preview/approval pairs fail
+closed. A committed `executing` intent remains authoritative if finding state changes later, and
+canonical target merges are blocked until that intent is finalized.
 
 ### Certificate Transparency Monitoring (Gungnir)
 
@@ -717,11 +968,10 @@ Smart scans correlate findings into attack chains - multi-step vulnerability com
 | `ssrf_to_cloud_breach` | SSRF + cloud metadata access | Cloud IAM credential theft |
 | `idor_to_data_breach` | BOLA + predictable IDs | Mass user data exfiltration |
 | `lfi_to_credential_theft` | LFI + sensitive file access | Credential file exposure |
-| `auth_bypass_to_admin_access` | Auth bypass + admin functions | Unauthorized admin access |
 | `cors_to_data_theft` | CORS misconfig + sensitive endpoints | Cross-origin data theft |
 | `weak_jwt_to_impersonation` | JWT weakness + user endpoints | User impersonation |
-| `open_redirect_to_phishing` | Open redirect + auth pages | Credential phishing |
-| `info_disclosure_to_exploitation` | Info leak + known CVE | Targeted exploitation |
+| `xxe_to_data_exfil` | XXE + file read / SSRF-via-XXE | Server file / credential exfiltration |
+| `deserialization_to_rce` | Insecure deserialization sink + gadget | Remote code execution / server compromise |
 
 **JSON Output Structure (`result.attack_chains`):**
 ```json
@@ -920,7 +1170,8 @@ By default, smart scan:
 - **Uses the `balanced` budget** unless `budget_profile` or `custom_budget` is provided
 
 With `no_early_stop` and `thorough_params`:
-- **Continues scanning** regardless of findings (finds all vulnerabilities, not just first few)
+- **Continues scanning** after high-severity findings instead of stopping at the normal threshold;
+  this increases coverage but does not guarantee that every vulnerability will be found
 - **Promotes to the `thorough` budget** when no explicit budget is provided, increasing discovery, browser, nuclei, and active-test coverage
 
 ## Scan Types Explained
@@ -932,7 +1183,7 @@ Scan type controls **what** ShakerScan tests. `budget_profile` controls **how ha
 | **quick** | `"scan_type": "quick"` | 1-2 min | DNS, TLS cert, HTTP headers, basic tech detection |
 | **standard** | `"scan_type": "standard"` | 5-10 min | + Nuclei (safe), cookies, CORS, JS dependencies (no port scan by default) |
 | **deep** | `"scan_type": "deep"` | 30-60 min | + Full Nuclei, top-ports scan (1000), JS secrets |
-| **full** | `"scan_type": "full"` | 1-2 hrs | + Active XSS/SQLi, all security tests, WebSocket |
+| **full** | `"scan_type": "full"` | 1-2 hrs | + Broad active XSS/SQLi and WebSocket testing |
 | **aggressive** | `"scan_type": "aggressive"` | 2+ hrs | + Aggressive exploits, extended ports, threat intel |
 | **smart** | `"scan_type": "smart"` | Variable | Adaptive: staged templates, DBMS-aware SQLi, context-aware XSS |
 
@@ -1099,7 +1350,9 @@ Interactive security testing sessions enable collaborative manual penetration te
 4. AI executes tests and reports findings immediately
 5. Validated findings are saved to the database
 
-**Recommended Workflow**: Run a smart scan first, then use interactive session to validate findings and explore areas scanners miss.
+**Recommended Workflow**: When the user has authorized active testing and a Smart scan would add
+useful context, run it first; otherwise bootstrap from an existing scan or use the interactive
+session directly. After submitting any scan, report its ID and UI link and stop.
 
 ### Bootstrapping from Scan Data
 
@@ -1245,14 +1498,14 @@ For authenticated scans, focused XSS/SQLi-only checks, budget profiles/custom bu
 ## Files Structure
 
 ```
-scanner-oss/
+shakerscan/
 ├── scanner.sh           # CLI tool (start, stop, scan, scale, etc.)
 ├── docker-compose.yml   # Docker stack orchestration
 ├── CLAUDE.md            # Claude Code instructions
 ├── AGENTS.md            # This file (cross-tool AI agent instructions)
 ├── scanner/             # Core scanner engine
 │   ├── scanner.py       # Main orchestrator
-│   ├── scanner_tools/   # 61 specialized security modules
+│   ├── scanner_tools/   # 83 specialized security modules
 │   │   ├── nuclei.py    # Nuclei vulnerability scanning
 │   │   ├── active_checks.py  # XSS/SQLi testing
 │   │   ├── discovery.py # Endpoint discovery

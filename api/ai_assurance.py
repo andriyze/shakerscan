@@ -524,11 +524,15 @@ def build_ai_inventory(
             if not existing or float(candidate.get("confidence") or 0) > float(existing.get("confidence") or 0):
                 candidates_by_url[key] = candidate
 
-    candidates = sorted(
+    CANDIDATE_DISPLAY_CAP = 100
+    candidates_ranked = sorted(
         candidates_by_url.values(),
         key=lambda item: (float(item.get("confidence") or 0), item.get("endpoint_url") or ""),
         reverse=True,
-    )[:100]
+    )
+    total_candidates = len(candidates_ranked)
+    candidates = candidates_ranked[:CANDIDATE_DISPLAY_CAP]
+    candidates_truncated = total_candidates > len(candidates)
     for candidate in candidates:
         by_type[candidate["target_type"]] = by_type.get(candidate["target_type"], 0) + 1
 
@@ -551,6 +555,8 @@ def build_ai_inventory(
             "saved_ai_targets": len(ai_targets),
             "model_artifacts": len([asset for asset in assets if asset.get("kind") == "model_artifact"]),
             "candidate_count": len(candidates),
+            "total_candidates": total_candidates,
+            "candidates_truncated": candidates_truncated,
             "by_type": by_type,
             "highest_blast_radius_score": highest_score,
             "coverage_gaps": coverage_gaps,
@@ -655,6 +661,17 @@ def _extract_mcp_tools(payload: Any) -> list[dict[str, Any]]:
     return []
 
 
+def _extract_mcp_resources(payload: Any) -> list[dict[str, Any]]:
+    if not isinstance(payload, dict):
+        return []
+    result = payload.get("result")
+    if isinstance(result, dict) and isinstance(result.get("resources"), list):
+        return [item for item in result["resources"] if isinstance(item, dict)]
+    if isinstance(payload.get("resources"), list):
+        return [item for item in payload["resources"] if isinstance(item, dict)]
+    return []
+
+
 def _tool_schema_risks(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
     risks: list[dict[str, Any]] = []
     for tool in tools[:100]:
@@ -714,6 +731,15 @@ def run_mcp_live_readiness_probe(target: dict[str, Any], *, timeout_seconds: int
         timeout_seconds=timeout_seconds,
         json_body=_mcp_jsonrpc_request("tools/list", "shakerscan-readiness-unauth-tools"),
     )
+    # Read-only resources/list (safe, never invokes a tool).
+    resources_list_probe = _fetch_url_metadata(
+        endpoint_url,
+        method="POST",
+        timeout_seconds=timeout_seconds,
+        headers=auth_headers,
+        json_body=_mcp_jsonrpc_request("resources/list", "shakerscan-readiness-resources"),
+    )
+    resources = _extract_mcp_resources(resources_list_probe.get("json"))
     tools = _extract_mcp_tools(tools_list_probe.get("json"))
     unauthenticated_tools = _extract_mcp_tools(unauthenticated_tools_probe.get("json"))
     tool_schema_risks = _tool_schema_risks(tools)
@@ -726,6 +752,16 @@ def run_mcp_live_readiness_probe(target: dict[str, Any], *, timeout_seconds: int
     auth_header_text = " ".join(authenticate_headers).lower()
 
     checks = [
+        {
+            "id": "mcp.resource_inventory",
+            "label": "Resource inventory (resources/list)",
+            "status": "pass" if isinstance(resources_list_probe.get("json"), dict) else "warn",
+            "evidence": (
+                f"{len(resources)} resource(s) advertised via resources/list"
+                if resources
+                else "resources/list returned no resources or is not supported"
+            ),
+        },
         {
             "id": "mcp.protected_resource_metadata",
             "label": "Protected resource metadata",

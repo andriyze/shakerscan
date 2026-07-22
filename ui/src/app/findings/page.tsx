@@ -2,15 +2,19 @@
 
 import { useEffect, useState, useRef, Suspense } from 'react'
 import Link from 'next/link'
-import { getFindings, cleanupFindings, getDomains, getSeverityBg, formatDate, type Finding } from '@/lib/api'
+import { getFindings, cleanupFindings, getDomains, getSeverityBg, formatDate, getFindingResearchProvenance, type Finding } from '@/lib/api'
 import { useUrlFilters } from '@/lib/useUrlFilters'
-import { SEVERITY_LEVELS, FINDING_STATUSES, SORT_OPTIONS, LAST_SEEN_OPTIONS, CLEANUP_AGE_OPTIONS, type SortOption, type SortOrder } from '@/lib/constants'
+import { SEVERITY_LEVELS, FINDING_STATUSES, SORT_OPTIONS, LAST_SEEN_OPTIONS, CLEANUP_AGE_OPTIONS, type FindingSourceType, type SortOption, type SortOrder } from '@/lib/constants'
 import {
+  Button,
   Card,
   ConfirmDialog,
   EmptyState,
   ErrorState,
   FindingStatusBadge,
+  Input,
+  PageHeader,
+  ProofStateBadge,
   RetestVerdictBadge,
   SeverityBadge,
   SourceTypeBadge,
@@ -30,6 +34,8 @@ interface FindingsFilters {
   scan_id?: string
   target_id?: string
   ai_target_id?: string
+  driven_by?: string
+  research_campaign_id?: string
   search?: string
   last_seen?: number
   first_seen_within?: number
@@ -56,16 +62,34 @@ const VERIFICATION_VERDICTS = [
 const SOURCE_TYPE_OPTIONS = [
   { value: '', label: 'All' },
   { value: 'dast', label: 'DAST' },
-  { value: 'ai', label: 'AI' },
-  { value: 'model_intake', label: 'Model Intake' }
+  { value: 'deep_hunt', label: 'Deep Hunt' },
+  { value: 'ai_gate', label: 'AI Gate' },
+  { value: 'ai_session', label: 'Interactive' },
+  { value: 'model_intake', label: 'Model Intake' },
+  { value: 'asm', label: 'ASM' },
+  { value: 'manual', label: 'Manual' },
 ] as const
 
-function getFindingSourceType(finding: Finding): 'AI' | 'DAST' | 'Model Intake' {
+type FindingSourceTypeFilter = 'dast' | 'ai' | 'ai_gate' | 'ai_session' | 'deep_hunt' | 'autonomous' | 'model_intake' | 'asm' | 'manual'
+
+function getFindingSourceType(finding: Finding): FindingSourceType {
   if (finding.source === 'model_intake' || finding.tool === 'model_intake') {
     return 'Model Intake'
   }
-  if (finding.source === 'ai_gate' || finding.source === 'ai_session' || finding.ai_target_id) {
-    return 'AI'
+  if (finding.source === 'ai_gate' || finding.ai_target_id) {
+    return 'AI Gate'
+  }
+  if (finding.source === 'ai_session') {
+    return 'Interactive'
+  }
+  if (finding.source === 'autonomous' || finding.tool === 'autonomous_workflow' || getFindingResearchProvenance(finding)) {
+    return 'Deep Hunt'
+  }
+  if (finding.source === 'asm') {
+    return 'ASM'
+  }
+  if (finding.source === 'manual') {
+    return 'Manual'
   }
   return 'DAST'
 }
@@ -123,6 +147,8 @@ function FindingsContent() {
   const scanIdFilter = filters.scan_id || ''
   const targetIdFilter = filters.target_id || ''
   const aiTargetIdFilter = filters.ai_target_id || ''
+  const drivenByFilter = filters.driven_by || ''
+  const researchCampaignFilter = filters.research_campaign_id || ''
   const searchQuery = filters.search || ''
   const lastSeenFilter = filters.last_seen ? Number(filters.last_seen) : 0
   const firstSeenWithinFilter = filters.first_seen_within ? Number(filters.first_seen_within) : 0
@@ -137,7 +163,8 @@ function FindingsContent() {
 
   const hasActiveFilters = Boolean(
     severityFilter || statusFilter || sourceTypeFilter || domainFilter ||
-    scanIdFilter || targetIdFilter || aiTargetIdFilter || searchQuery || lastSeenFilter ||
+    scanIdFilter || targetIdFilter || aiTargetIdFilter || drivenByFilter || researchCampaignFilter ||
+    searchQuery || lastSeenFilter ||
     firstSeenWithinFilter || resolvedWithinFilter ||
     verificationVerdictFilter || verificationModeFilter || verifiedOnlyFilter
   )
@@ -170,14 +197,14 @@ function FindingsContent() {
 
   useEffect(() => {
     fetchFindings()
-  }, [severityFilter, statusFilter, sourceTypeFilter, domainFilter, scanIdFilter, targetIdFilter, aiTargetIdFilter, searchQuery, lastSeenFilter, firstSeenWithinFilter, resolvedWithinFilter, verificationVerdictFilter, verificationModeFilter, verifiedOnlyFilter, rawPage, sortBy, sortOrder])
+  }, [severityFilter, statusFilter, sourceTypeFilter, domainFilter, scanIdFilter, targetIdFilter, aiTargetIdFilter, drivenByFilter, researchCampaignFilter, searchQuery, lastSeenFilter, firstSeenWithinFilter, resolvedWithinFilter, verificationVerdictFilter, verificationModeFilter, verifiedOnlyFilter, rawPage, sortBy, sortOrder])
 
   async function fetchFindings() {
     try {
       const data = await getFindings({
         severity: severityFilter || undefined,
         status: statusFilter || undefined,
-        source_type: sourceTypeFilter ? (sourceTypeFilter as 'dast' | 'ai' | 'model_intake') : undefined,
+        source_type: sourceTypeFilter ? (sourceTypeFilter as FindingSourceTypeFilter) : undefined,
         root_domain: domainFilter || undefined,
         scan_id: scanIdFilter || undefined,
         target_id: targetIdFilter || undefined,
@@ -189,6 +216,8 @@ function FindingsContent() {
         verification_verdict: verificationVerdictFilter ? (verificationVerdictFilter as 'exploited' | 'likely_vulnerable' | 'blocked_by_security' | 'out_of_scope_internal' | 'false_positive' | 'likely_fixed' | 'inconclusive' | 'error') : undefined,
         verification_mode: verificationModeFilter ? (verificationModeFilter as 'deterministic' | 'ai_driven') : undefined,
         verified_only: verifiedOnlyFilter || undefined,
+        driven_by: drivenByFilter === 'autonomous_research' ? 'autonomous_research' : undefined,
+        research_campaign_id: researchCampaignFilter || undefined,
         sort_by: sortBy,
         sort_order: sortOrder,
         limit: PAGE_SIZE,
@@ -317,22 +346,48 @@ function FindingsContent() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-start justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-bold text-white">Findings</h1>
-          <p className="text-gray-400 mt-1">
+      <PageHeader
+        title="Findings"
+        description={
+          <>
             Vulnerability findings across all scans
             {scanIdFilter && <span className="text-blue-400"> (filtered by scan)</span>}
             {targetIdFilter && <span className="text-blue-400"> (filtered by target)</span>}
-          </p>
+          </>
+        }
+        actions={
+          <Button variant="secondary" onClick={() => { setShowCleanup(!showCleanup); setCleanupPreview(null) }}>
+            Advanced cleanup
+          </Button>
+        }
+      />
+
+      {/* Legend: Severity / Proof / Retest / Status render as look-alike badges on each row.
+          Spell out that they are four different questions so newcomers don't conflate them. */}
+      <details className="group rounded-lg border border-gray-800 bg-gray-900/50">
+        <summary className="flex cursor-pointer list-none items-center justify-between px-4 py-2.5 text-sm text-gray-400 hover:text-gray-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 rounded-lg">
+          <span>What do the badges mean?</span>
+          <span aria-hidden="true" className="text-gray-600 transition-transform group-open:rotate-180">▾</span>
+        </summary>
+        <div className="grid gap-3 border-t border-gray-800 p-4 sm:grid-cols-2">
+          <div className="flex items-start gap-3">
+            <SeverityBadge severity="high" />
+            <p className="text-xs leading-5 text-gray-400"><span className="font-medium text-gray-200">Severity</span> — how serious it would be if real, from Critical down to Info.</p>
+          </div>
+          <div className="flex items-start gap-3">
+            <div className="shrink-0"><ProofStateBadge proofState="verified" /></div>
+            <p className="text-xs leading-5 text-gray-400"><span className="font-medium text-gray-200">Proof</span> — how sure ShakerScan is it is real: <span className="text-gray-200">Proven</span> (evidence captured), <span className="text-gray-200">Suspected</span> (a lead, not confirmed), Refuted, or Inconclusive.</p>
+          </div>
+          <div className="flex items-start gap-3">
+            <div className="shrink-0"><RetestVerdictBadge verdict="likely_vulnerable" /></div>
+            <p className="text-xs leading-5 text-gray-400"><span className="font-medium text-gray-200">Retest</span> — what the most recent automated re-check found.</p>
+          </div>
+          <div className="flex items-start gap-3">
+            <FindingStatusBadge status="active" />
+            <p className="text-xs leading-5 text-gray-400"><span className="font-medium text-gray-200">Status</span> — your triage decision: active, resolved, false positive, or accepted risk.</p>
+          </div>
         </div>
-        <button
-          onClick={() => { setShowCleanup(!showCleanup); setCleanupPreview(null) }}
-          className="px-3 py-1.5 bg-gray-800 text-gray-400 rounded-lg text-sm hover:bg-gray-700 shrink-0"
-        >
-          Cleanup old findings
-        </button>
-      </div>
+      </details>
 
       {/* Cleanup Panel */}
       {showCleanup && (
@@ -422,18 +477,34 @@ function FindingsContent() {
         onCancel={() => setCleanupConfirmOpen(false)}
       />
 
-      {/* Filters Row */}
-      <div className="flex flex-wrap items-center gap-4">
-        {/* Source Type Filter */}
+      <div className="relative">
+        <Input
+          type="text"
+          placeholder="Search findings by title or URL..."
+          value={searchInput}
+          onChange={(e) => setSearchInput(e.target.value)}
+          aria-label="Search findings by title or URL"
+        />
+      </div>
+
+      {/* Secondary filters stay available without competing with the primary
+          search, severity, and lifecycle controls. */}
+      <details className="rounded-lg border border-gray-800 bg-gray-950/30">
+        <summary className="cursor-pointer px-4 py-3 text-sm font-medium text-gray-400 hover:text-gray-200">
+          More filters and sorting
+        </summary>
+        <div className="flex flex-wrap items-center gap-4 border-t border-gray-800 p-4">
+        {/* User-facing finding source. Deep Hunt includes direct AI claims and
+            DAST work launched as part of a hunt. */}
         <div className="flex items-center gap-2">
-          <label className="text-sm text-gray-400">Type:</label>
-          <div className="inline-flex rounded-lg border border-gray-800 bg-gray-900 p-0.5">
+          <label className="text-sm text-gray-400">Source:</label>
+          <div className="flex max-w-full flex-wrap gap-1 rounded-lg border border-gray-800 bg-gray-900 p-0.5">
             {SOURCE_TYPE_OPTIONS.map((option) => (
               <button
                 key={option.label}
                 type="button"
                 onClick={() => setFilter('source_type', option.value || undefined)}
-                className={`px-3 py-1 text-sm rounded-md transition-colors ${
+                className={`px-2.5 py-1 text-sm rounded-md transition-colors sm:px-3 ${
                   sourceTypeFilter === option.value
                     ? 'bg-blue-600 text-white'
                     : 'text-gray-400 hover:bg-gray-800 hover:text-gray-200'
@@ -541,34 +612,23 @@ function FindingsContent() {
             onChange={(e) => setFilter('verified_only', e.target.checked ? 'true' : undefined)}
             className="h-4 w-4 rounded border-gray-700 bg-gray-900 text-blue-600 focus:ring-blue-500"
           />
-          exploited only
+          verified only
         </label>
 
-        {/* Search */}
-        <div className="relative flex-1 min-w-[200px]">
-          <input
-            type="text"
-            placeholder="Search by title or URL..."
-            value={searchInput}
-            onChange={(e) => setSearchInput(e.target.value)}
-            aria-label="Search findings by title or URL"
-            className="w-full px-4 py-1.5 bg-gray-900 border border-gray-800 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-blue-500 text-sm"
-          />
-          <svg className="absolute right-3 top-2 w-4 h-4 text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-          </svg>
         </div>
-
-      </div>
+      </details>
 
       {/* Deep-link filters (arrive via links from scans/targets/exposure and
           have no visible control above) — surface each as a removable chip so
           the active scope is obvious and individually clearable. */}
-      {(scanIdFilter || targetIdFilter || aiTargetIdFilter || firstSeenWithinFilter > 0 || resolvedWithinFilter > 0) && (
+      {(scanIdFilter || targetIdFilter || aiTargetIdFilter || researchCampaignFilter || firstSeenWithinFilter > 0 || resolvedWithinFilter > 0) && (
         <div className="flex flex-wrap items-center gap-2">
           <span className="text-xs text-gray-500">Filtered by:</span>
           {scanIdFilter && (
             <DeepLinkFilterChip label={`Scan ${scanIdFilter.slice(0, 8)}…`} onClear={() => setFilter('scan_id', undefined)} />
+          )}
+          {researchCampaignFilter && (
+            <DeepLinkFilterChip label={`Deep hunt run ${researchCampaignFilter.slice(0, 8)}…`} onClear={() => setFilter('research_campaign_id', undefined)} />
           )}
           {targetIdFilter && (
             <DeepLinkFilterChip
@@ -682,6 +742,7 @@ function FindingsContent() {
                   <div className="flex items-start gap-3">
                     <div className="flex items-center gap-3 shrink-0">
                       <SeverityBadge severity={finding.severity} />
+                      <ProofStateBadge proofState={finding.proof_state} />
                       <SourceTypeBadge type={sourceType} />
                     </div>
                     <div className="flex-1 min-w-0">
@@ -689,7 +750,7 @@ function FindingsContent() {
                       <div className="flex items-center gap-4 mt-1 text-xs text-gray-500">
                         {finding.tool && <span>Tool: {finding.tool}</span>}
                         {finding.cwe && <span>CWE: {finding.cwe}</span>}
-                        {finding.cvss_score && <span>CVSS: {finding.cvss_score}</span>}
+                        {finding.cvss_score !== undefined && finding.cvss_score !== null && <span>CVSS: {finding.cvss_score}</span>}
                       </div>
                       <div className="flex items-center gap-4 mt-1 text-xs text-gray-500">
                         <span>First seen: {formatDate(finding.first_seen_at)}</span>

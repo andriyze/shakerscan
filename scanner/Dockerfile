@@ -9,7 +9,7 @@
 # results into one multi-arch manifest, so there is no QEMU emulation (which is
 # what blew past GitHub's 6h job limit on the v0.5.4 build) and katana's CGO
 # dependency (go-tree-sitter) compiles cleanly.
-FROM golang:1.25 AS go-builder
+FROM golang:1.25@sha256:9006890ecba0a168034d99516084099ae3114d9f2b7d6572c77f2dde57ebc980 AS go-builder
 
 # Install ProjectDiscovery tools + Gungnir (CT log scanner). Separate installs
 # because Go requires all packages in a single `go install` to share one
@@ -25,7 +25,7 @@ RUN go install github.com/projectdiscovery/tlsx/cmd/tlsx@v1.2.2 \
  && go install github.com/g0ldencybersec/gungnir/cmd/gungnir@v1.4.0
 
 # --- Stage 2: Runtime with Playwright (Chromium) ---
-FROM mcr.microsoft.com/playwright/python:v1.59.0-noble
+FROM mcr.microsoft.com/playwright/python:v1.59.0-noble@sha256:d8d9811a0e7cfac967f0c2f55d12b739087ae4b0808577b794c2a29ed5124938
 
 # System deps for network tooling and additional scanners
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -38,15 +38,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libcurl4-openssl-dev libssl-dev python3-dev \
     bsdmainutils \
  && rm -rf /var/lib/apt/lists/*
-
-# Install Python-based security tools
-RUN pip3 install --no-cache-dir --break-system-packages \
-    sqlmap==1.10.5 \
-    sslyze==6.3.1 commix==0.1 XSStrike==3.2.2 \
-    certifi cryptography \
-    dnspython pyOpenSSL \
-    python-whois shodan \
-    paramiko
 
 # Copy Go binaries to /opt/tools
 COPY --from=go-builder /go/bin/tlsx /opt/tools/tlsx
@@ -67,10 +58,17 @@ RUN chmod +x /opt/tools/*
 # ============================================================
 ENV NUCLEI_CONFIG_DIR=/opt/nuclei-config
 ENV NUCLEI_TEMPLATES=/opt/nuclei-templates
+ARG NUCLEI_TEMPLATES_COMMIT=2935d63aebd1f5f4a3c8e87c6e7f5c47f689b115
+ARG NUCLEI_TEMPLATES_SHA256=20aff7085b5c1771a8f7a28624009359a1cedab924c9ad7836078ca07e28de39
 
 RUN set -e && \
     mkdir -p /opt/nuclei-templates /opt/nuclei-config && \
-    /opt/tools/nuclei -update-templates -ud /opt/nuclei-templates 2>&1 && \
+    curl -fsSL \
+        "https://codeload.github.com/projectdiscovery/nuclei-templates/tar.gz/${NUCLEI_TEMPLATES_COMMIT}" \
+        -o /tmp/nuclei-templates.tar.gz && \
+    echo "${NUCLEI_TEMPLATES_SHA256}  /tmp/nuclei-templates.tar.gz" | sha256sum -c - && \
+    tar -xzf /tmp/nuclei-templates.tar.gz -C /opt/nuclei-templates --strip-components=1 && \
+    rm /tmp/nuclei-templates.tar.gz && \
     TEMPLATE_COUNT=$(find /opt/nuclei-templates -name "*.yaml" -type f 2>/dev/null | wc -l) && \
     echo "Templates found: $TEMPLATE_COUNT" && \
     echo '{"nuclei-templates-directory":"/opt/nuclei-templates"}' > /opt/nuclei-config/.templates-config.json && \
@@ -79,27 +77,52 @@ RUN set -e && \
     fi && \
     chmod -R 755 /opt/nuclei-config /opt/nuclei-templates
 
-# Download wordlists for deep discovery
+# Download immutable, checksum-verified wordlists for deep discovery.
+ARG SECLISTS_COMMIT=f0e9596052a4e27c073cfb452c94a0d955cb29be
+ARG SECLISTS_COMMON_SHA256=47fb86ca6fb3f97e5491161581900d6d99851fb16764eacddf16aa85617c956a
+ARG SECLISTS_DIRECTORY_SMALL_SHA256=77f7aba81570b24c30965bfc4652cf6c99ee4e5ed38f1eab96f2e102981a6d90
 RUN mkdir -p /usr/share/wordlists && \
     cd /usr/share/wordlists && \
-    curl -L "https://github.com/danielmiessler/SecLists/raw/master/Discovery/Web-Content/common.txt" -o common.txt && \
-    curl -L "https://github.com/danielmiessler/SecLists/raw/master/Discovery/Web-Content/directory-list-2.3-small.txt" -o directory-list-small.txt
+    curl -fsSL \
+        "https://raw.githubusercontent.com/danielmiessler/SecLists/${SECLISTS_COMMIT}/Discovery/Web-Content/common.txt" \
+        -o common.txt && \
+    echo "${SECLISTS_COMMON_SHA256}  common.txt" | sha256sum -c - && \
+    curl -fsSL \
+        "https://raw.githubusercontent.com/danielmiessler/SecLists/${SECLISTS_COMMIT}/Discovery/Web-Content/DirBuster-2007_directory-list-2.3-small.txt" \
+        -o directory-list-small.txt && \
+    echo "${SECLISTS_DIRECTORY_SMALL_SHA256}  directory-list-small.txt" | sha256sum -c -
 
-# Download Retire.js vulnerability database
+# Download an immutable, checksum-verified Retire.js vulnerability database.
+ARG RETIREJS_COMMIT=24fe8f48b93998bfc78c5c0567877fe689cce44d
+ARG RETIREJS_REPOSITORY_SHA256=5fdf3cc5707264de891f3844becea5fbc17377e8a684aecf8d2fca7936afb6da
 RUN mkdir -p /app/data && \
-    curl -L "https://raw.githubusercontent.com/RetireJS/retire.js/master/repository/jsrepository.json" \
-    -o /app/data/jsrepository.json
+    curl -fsSL \
+        "https://raw.githubusercontent.com/RetireJS/retire.js/${RETIREJS_COMMIT}/repository/jsrepository.json" \
+        -o /app/data/jsrepository.json && \
+    echo "${RETIREJS_REPOSITORY_SHA256}  /app/data/jsrepository.json" | sha256sum -c -
 
-# Install testssl.sh
-RUN git clone --depth 1 https://github.com/drwetter/testssl.sh.git /opt/testssl.sh
+# Install an immutable, checksum-verified testssl.sh snapshot.
+ARG TESTSSL_COMMIT=5296954a701dd00240bec32feadffaa7eacb2bba
+ARG TESTSSL_SHA256=8e650af4f83f8fbe7baed0287db906d885f955141b93b5cbe46421d050703a82
+RUN mkdir -p /opt/testssl.sh && \
+    curl -fsSL \
+        "https://codeload.github.com/testssl/testssl.sh/tar.gz/${TESTSSL_COMMIT}" \
+        -o /tmp/testssl.tar.gz && \
+    echo "${TESTSSL_SHA256}  /tmp/testssl.tar.gz" | sha256sum -c - && \
+    tar -xzf /tmp/testssl.tar.gz -C /opt/testssl.sh --strip-components=1 && \
+    rm /tmp/testssl.tar.gz && \
+    chmod +x /opt/testssl.sh/testssl.sh
 ENV TESTSSL_BIN=/opt/testssl.sh/testssl.sh
 
 # App directory
 WORKDIR /app
 
-# Python deps for scanner
+# Python deps for scanner. requirements.txt is the human-maintained input;
+# requirements.lock is the reviewed, reproducible release resolution.
 COPY scanner/requirements.txt /app/requirements.txt
-RUN pip install --no-cache-dir --break-system-packages -r /app/requirements.txt
+COPY scanner/requirements.lock /app/requirements.lock
+RUN pip install --no-cache-dir --break-system-packages --ignore-installed --require-hashes \
+    -r /app/requirements.lock
 
 # Playwright browser path
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright

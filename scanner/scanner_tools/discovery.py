@@ -185,6 +185,47 @@ def _read_wordlist(path: str, limit: int | None = None) -> list[str]:
     return entries
 
 
+_CUSTOM_WORDLIST_CACHE: dict[str, str | None] = {}
+
+
+def custom_wordlist_file() -> str | None:
+    """Materialize user-supplied content-discovery words into a temp file.
+
+    Words arrive via the SHAKERSCAN_CUSTOM_WORDLIST env var (newline-joined),
+    set by the worker from the scan's ``custom_wordlist`` option. Returns the
+    temp file path, or None when no custom words were supplied. Cached per
+    process so repeated discovery calls reuse the same file.
+    """
+    raw = os.environ.get("SHAKERSCAN_CUSTOM_WORDLIST")
+    if not raw:
+        return None
+    if raw in _CUSTOM_WORDLIST_CACHE:
+        return _CUSTOM_WORDLIST_CACHE[raw]
+    words = []
+    seen = set()
+    for line in raw.splitlines():
+        word = line.strip().lstrip("/")
+        if not word or word.startswith("#") or word in seen:
+            continue
+        seen.add(word)
+        words.append(word)
+    if not words:
+        _CUSTOM_WORDLIST_CACHE[raw] = None
+        return None
+    try:
+        import tempfile
+        fd, path = tempfile.mkstemp(prefix="shaker_custom_wl_", suffix=".txt")
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(words))
+        print(f"[discovery] Loaded {len(words)} custom content-discovery words", file=sys.stderr)
+        _CUSTOM_WORDLIST_CACHE[raw] = path
+        return path
+    except OSError as e:
+        print(f"[discovery] Failed to write custom wordlist: {e}", file=sys.stderr)
+        _CUSTOM_WORDLIST_CACHE[raw] = None
+        return None
+
+
 def _unique_preserve_order(items: list[str]) -> list[str]:
     seen = set()
     ordered: list[str] = []
@@ -292,6 +333,58 @@ def _is_api_candidate_path(target_url: str) -> bool:
         "/auth", "/oauth", "/login", "/token", "/users", "/user", "/account"
     ]
     return any(marker in path for marker in api_markers)
+
+
+FILE_LIKE_DISCOVERY_EXTENSIONS = {
+    ".txt", ".json", ".yaml", ".yml", ".xml", ".php", ".asp", ".aspx",
+    ".jsp", ".config", ".ini", ".env", ".sql", ".log", ".bak", ".old",
+}
+
+
+def _is_file_like_segment(segment: str) -> bool:
+    if not segment:
+        return False
+    lowered = segment.lower().strip()
+    if lowered in {".well-known", ".."}:
+        return False
+    _, ext = os.path.splitext(lowered)
+    return ext in FILE_LIKE_DISCOVERY_EXTENSIONS
+
+
+def _has_file_like_parent_path(target_url: str) -> bool:
+    """True when a candidate was fuzzed below a static/document path."""
+    parsed = urllib.parse.urlparse(target_url)
+    segments = [s for s in (parsed.path or "").split("/") if s]
+    return any(_is_file_like_segment(segment) for segment in segments[:-1])
+
+
+def _is_file_like_path(target_url: str) -> bool:
+    parsed = urllib.parse.urlparse(target_url)
+    path = parsed.path or target_url
+    segment = path.rstrip("/").rsplit("/", 1)[-1]
+    return _is_file_like_segment(segment)
+
+
+def _is_api_probe_base_path(api_base: str) -> bool:
+    """Limit resource fan-out to paths that are actually API-style bases."""
+    parsed = urllib.parse.urlparse(api_base)
+    path = parsed.path or api_base
+    if _has_file_like_parent_path(path) or _is_file_like_path(path):
+        return False
+    segments = [s.lower() for s in path.strip("/").split("/") if s]
+    if not segments:
+        return False
+    api_segments = {"api", "rest", "graphql", "gql", "auth", "oauth", "oauth2"}
+    if any(segment in api_segments for segment in segments):
+        return True
+    first = segments[0]
+    return bool(re.fullmatch(r"v\d+(?:\.\d+)?", first))
+
+
+def _is_recursive_seed_path(path: str) -> bool:
+    if _has_file_like_parent_path(path) or _is_file_like_path(path):
+        return False
+    return path.endswith("/") and _is_interesting_path(path)
 
 
 def _looks_like_api_error(body: str) -> bool:
@@ -464,8 +557,12 @@ def path_exists(
     protected = status in (401, 403)
 
     if status in (200, 201, 202, 204):
+        if require_api_style and _has_file_like_parent_path(target_url):
+            return False, "file_parent_success", False
         if require_api_style and is_html:
             return False, "html_success", False
+        if require_api_style and status != 204 and not is_json and not _is_api_candidate_path(target_url):
+            return False, "non_api_success", protected
         return True, "success", protected
 
     if status in (301, 302, 303, 307, 308):
@@ -1527,9 +1624,11 @@ async def enhanced_url_discovery(
 
             print(f"[discovery] JS parsing found {len(js_endpoints.get('api_endpoints', []))} API endpoints, {hash_routes_added} hash routes", file=sys.stderr)
 
-    # FFUF-based directory fuzzing with appropriate wordlist
+    # FFUF-based directory fuzzing. Build the list of wordlists to fuzz with:
+    # the scan-type default plus any user-supplied custom wordlist. The custom
+    # list runs even for quick/minimal scans so explicit keywords are honored.
+    ffuf_targets: list[tuple[str, str]] = []  # (label, path)
     if ffuf_wordlist and ffuf_wordlist != "minimal":
-        # Map wordlist names to actual wordlists
         wordlist_paths = {
             "common": "/usr/share/wordlists/dirb/common.txt",
             "comprehensive": "/usr/share/wordlists/dirbuster/directory-list-2.3-medium.txt",
@@ -1542,32 +1641,39 @@ async def enhanced_url_discovery(
                 wordlist_path = local_common
                 print("[discovery] System wordlist missing, using bundled common wordlist", file=sys.stderr)
         if wordlist_path and os.path.exists(wordlist_path):
-            print(f"[discovery] Running ffuf with {ffuf_wordlist} wordlist", file=sys.stderr)
-            ffuf_cmd = "/opt/tools/ffuf" if os.path.exists("/opt/tools/ffuf") else "ffuf"
-            ffuf_out, _, ffuf_rc = await run([
-                ffuf_cmd, "-u", f"{url.rstrip('/')}/FUZZ", "-w", wordlist_path,
-                "-mc", "200,201,204,301,302,307,401,403",
-                "-ac",  # Auto-calibrate to filter soft 404s
-                "-t", "20", "-timeout", "5", "-o", "/dev/stdout", "-of", "json",
-                "-s"  # Silent mode
-            ], timeout=180)
-            if ffuf_rc == 0 and ffuf_out:
-                try:
-                    ffuf_data = json.loads(ffuf_out)
-                    for result in ffuf_data.get("results", []):
-                        found_url = result.get("url", "")
-                        if found_url and found_url not in unique_urls:
-                            unique_urls.append(found_url)
-                    print(f"[discovery] ffuf found {len(ffuf_data.get('results', []))} paths", file=sys.stderr)
-                except json.JSONDecodeError:
-                    pass
+            ffuf_targets.append((ffuf_wordlist, wordlist_path))
+
+    custom_wl = custom_wordlist_file()
+    if custom_wl:
+        ffuf_targets.append(("custom", custom_wl))
+
+    for label, wordlist_path in ffuf_targets:
+        print(f"[discovery] Running ffuf with {label} wordlist", file=sys.stderr)
+        ffuf_cmd = "/opt/tools/ffuf" if os.path.exists("/opt/tools/ffuf") else "ffuf"
+        ffuf_out, _, ffuf_rc = await run([
+            ffuf_cmd, "-u", f"{url.rstrip('/')}/FUZZ", "-w", wordlist_path,
+            "-mc", "200,201,204,301,302,307,401,403",
+            "-ac",  # Auto-calibrate to filter soft 404s
+            "-t", "20", "-timeout", "5", "-o", "/dev/stdout", "-of", "json",
+            "-s"  # Silent mode
+        ], timeout=180)
+        if ffuf_rc == 0 and ffuf_out:
+            try:
+                ffuf_data = json.loads(ffuf_out)
+                for result in ffuf_data.get("results", []):
+                    found_url = result.get("url", "")
+                    if found_url and found_url not in unique_urls:
+                        unique_urls.append(found_url)
+                print(f"[discovery] ffuf ({label}) found {len(ffuf_data.get('results', []))} paths", file=sys.stderr)
+            except json.JSONDecodeError:
+                pass
 
     # Recursive directory fuzzing for deeper discovery
     # Skip if scan_type is "smart" - smart_discovery does its own recursive phase
     if do_recursive_fuzzing and scan_type != "smart":
         print(f"[discovery] Running recursive directory discovery", file=sys.stderr)
         # Collect directory paths from discovered URLs
-        initial_dirs = [u for u in unique_urls if u.endswith("/")]
+        initial_dirs = [u for u in unique_urls if _is_recursive_seed_path(u)]
         # Also add common starting points
         parsed = urllib.parse.urlparse(url)
         base = f"{parsed.scheme}://{parsed.netloc}"
@@ -1737,10 +1843,6 @@ OPENAPI_DISCOVERY_PATHS = [
     "/service/api-docs",
     # GraphQL schema
     "/graphql/schema",
-    # Common API base prefixes (for apps like crAPI)
-    "/community/api-docs", "/community/openapi.json",
-    "/identity/api-docs", "/identity/openapi.json",
-    "/workshop/api-docs", "/workshop/openapi.json",
 ]
 
 
@@ -1907,8 +2009,10 @@ def extract_openapi_endpoints(spec: dict[str, Any]) -> list[dict[str, Any]]:
 async def fetch_openapi_schema(schema_url: str, auth_session: Any | None = None) -> dict[str, Any] | None:
     """Fetch and parse a schema from a specific OpenAPI/Swagger URL."""
     auth_args = get_auth_curl_args(auth_session)
-    cmd = ["curl", "-sS", "-L", "-k", "--max-time", "5"] + auth_args + [schema_url]
-    out, _, rc = await run(cmd, timeout=8)
+    # OpenAPI specs can be large (honey's is ~400KB; real apps often bigger); a 5s
+    # budget times out mid-download and silently yields zero ingested endpoints.
+    cmd = ["curl", "-sS", "-L", "-k", "--max-time", "20"] + auth_args + [schema_url]
+    out, _, rc = await run(cmd, timeout=25)
     if rc != 0 or not out:
         return None
 
@@ -1931,29 +2035,155 @@ async def fetch_openapi_schema(schema_url: str, auth_session: Any | None = None)
     }
 
 
-async def discover_openapi_schema(base_url: str, auth_session: Any | None = None) -> dict[str, Any] | None:
-    """Auto-discover and parse OpenAPI/Swagger schema from common paths.
+# Versioned spec suffixes worth probing UNDER a discovered service/path prefix.
+# Microservice APIs commonly mount their spec at ``/{service}/v3/api-docs`` (crAPI,
+# many SpringDoc apps), which a root-only probe never reaches. Kept small so the
+# extra requests stay bounded (suffixes x prefixes).
+_OPENAPI_PREFIX_SPEC_SUFFIXES = (
+    "/v3/api-docs",
+    "/v2/api-docs",
+    "/api-docs",
+    "/openapi.json",
+    "/swagger.json",
+)
+OPENAPI_DISCOVERY_MAX_PROBES = 80
+OPENAPI_DISCOVERY_CONCURRENCY = 8
+OPENAPI_DISCOVERY_DEADLINE_SECONDS = 60.0
+
+
+def _api_path_prefixes(urls: Any, limit: int = 8) -> list[str]:
+    """Return distinct leading path segments (service mounts) from discovered URLs.
+
+    ``"GET /workshop/api/shop/orders"`` -> ``"/workshop"``. Accepts "METHOD /path",
+    "/path", or full URLs. Used to probe for service-mounted OpenAPI specs that a
+    root-only probe misses.
+    """
+    _SKIP = {"static", "assets", "js", "css", "images", "img", "fonts", "favicon.ico"}
+    prefixes: list[str] = []
+    seen: set[str] = set()
+    for raw in (urls or []):
+        if not isinstance(raw, str) or not raw.strip():
+            continue
+        spec = raw.strip()
+        parts = spec.split(None, 2)
+        if len(parts) >= 2 and parts[0].upper() in {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}:
+            spec = parts[1]
+        try:
+            joined = spec if "://" in spec else "http://x" + (spec if spec.startswith("/") else "/" + spec)
+            path = urllib.parse.urlsplit(joined).path
+        except Exception:
+            continue
+        segments = [s for s in path.strip("/").split("/") if s]
+        if not segments:
+            continue
+        first = segments[0].lower()
+        key = "/" + first
+        if first in _SKIP or key in seen:
+            continue
+        seen.add(key)
+        prefixes.append(key)
+        if len(prefixes) >= limit:
+            break
+    return prefixes
+
+
+async def discover_openapi_schema(
+    base_url: str,
+    auth_session: Any | None = None,
+    extra_prefixes: Any | None = None,
+    deadline_seconds: float = OPENAPI_DISCOVERY_DEADLINE_SECONDS,
+) -> dict[str, Any] | None:
+    """Auto-discover and parse OpenAPI/Swagger schema(s) from common paths.
+
+    Probes root-level spec paths AND, for each discovered service/path prefix, a
+    small set of versioned spec suffixes (``/{service}/v3/api-docs`` etc.), then
+    aggregates endpoints from EVERY spec found. A microservice app whose API is
+    split across per-service specs (or mounted under a service prefix) is fully
+    ingested instead of being missed by a root-only, first-hit probe. Auth-aware
+    for protected spec endpoints.
 
     Args:
-        base_url: The base URL to scan for OpenAPI schemas
-        auth_session: Optional authenticated session for protected schema endpoints
+        base_url: The base URL to scan for OpenAPI schemas.
+        auth_session: Optional authenticated session for protected spec endpoints.
+        extra_prefixes: Optional discovered path prefixes (or raw endpoint strings
+            to derive them from) to probe for service-mounted specs.
 
     Returns:
-        Dict with schema info if found, None otherwise
+        Dict with aggregated schema info (``endpoints`` deduped across all specs
+        found, ``schema_urls`` listing each spec URL), or None if none found.
     """
     import sys
 
-    for path in OPENAPI_DISCOVERY_PATHS:
-        url = urllib.parse.urljoin(base_url, path)
-        schema = await fetch_openapi_schema(url, auth_session=auth_session)
-        if schema:
-            print(
-                f"[discovery] Auto-discovered OpenAPI schema at {url} "
-                f"(version {schema.get('version')}, {schema.get('endpoint_count', 0)} endpoints)",
-                file=sys.stderr
-            )
-            return schema
-    return None
+    prefixes = extra_prefixes if isinstance(extra_prefixes, list) else []
+    # Callers may pass raw endpoint strings; derive prefixes if these aren't bare paths.
+    if prefixes and not all(isinstance(p, str) and p.startswith("/") and p.count("/") == 1 for p in prefixes):
+        prefixes = _api_path_prefixes(prefixes)
+
+    priority_root_paths = (
+        "/openapi.json", "/swagger.json", "/v3/api-docs", "/v2/api-docs", "/api-docs",
+    )
+    probe_urls: list[str] = [urllib.parse.urljoin(base_url, path) for path in priority_root_paths]
+    for prefix in prefixes[:8]:
+        for suffix in _OPENAPI_PREFIX_SPEC_SUFFIXES:
+            probe_urls.append(urllib.parse.urljoin(base_url, prefix.rstrip("/") + suffix))
+    probe_urls.extend(urllib.parse.urljoin(base_url, path) for path in OPENAPI_DISCOVERY_PATHS)
+    probe_urls = _unique_preserve_order(probe_urls)[:OPENAPI_DISCOVERY_MAX_PROBES]
+
+    found: list[dict[str, Any]] = []
+    aggregated: list[dict[str, Any]] = []
+    seen_endpoints: set[tuple[str, str]] = set()
+    semaphore = asyncio.Semaphore(OPENAPI_DISCOVERY_CONCURRENCY)
+
+    async def _bounded_fetch(url: str) -> tuple[str, dict[str, Any] | None]:
+        async with semaphore:
+            return url, await fetch_openapi_schema(url, auth_session=auth_session)
+
+    tasks = [asyncio.create_task(_bounded_fetch(url)) for url in probe_urls]
+    done, pending = await asyncio.wait(tasks, timeout=max(0.01, float(deadline_seconds)))
+    for task in pending:
+        task.cancel()
+    if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
+
+    completed: dict[str, dict[str, Any] | None] = {}
+    for task in done:
+        try:
+            url, schema = task.result()
+            completed[url] = schema
+        except Exception:
+            continue
+
+    # Preserve deterministic URL priority even though fetches complete concurrently.
+    for url in probe_urls:
+        schema = completed.get(url)
+        if not schema:
+            continue
+        found.append(schema)
+        for endpoint in (schema.get("endpoints") or []):
+            key = (str(endpoint.get("method", "")).upper(), str(endpoint.get("path", "")))
+            if key in seen_endpoints:
+                continue
+            seen_endpoints.add(key)
+            aggregated.append(endpoint)
+        print(
+            f"[discovery] Auto-discovered OpenAPI schema at {url} "
+            f"(version {schema.get('version')}, {schema.get('endpoint_count', 0)} endpoints)",
+            file=sys.stderr,
+        )
+
+    if not found:
+        return None
+    primary = found[0]
+    return {
+        "url": primary.get("url"),
+        "schema_urls": [s.get("url") for s in found],
+        "version": primary.get("version"),
+        "title": primary.get("title"),
+        "endpoints": aggregated,
+        "endpoint_count": len(aggregated),
+        "auth_schemes": sorted({a for s in found for a in (s.get("auth_schemes") or [])}),
+        "spec": primary.get("spec"),
+    }
 
 
 async def deep_discovery_scan(base_url: str) -> dict[str, Any]:
@@ -2102,6 +2332,7 @@ async def check_cors(url: str) -> dict[str, Any]:
 
 async def detect_cloud_services(host: str, headers: dict[str, list[str]]) -> dict[str, Any]:
     results: dict[str, Any] = {"provider": None, "services": [], "cdn": None, "misconfigurations": []}
+    host = host.lower().rstrip(".")
     server_header = " ".join(headers.get("server", [])).lower()
     x_headers = {k: v for k, v in headers.items() if k.startswith("x-")}
     aws_indicators = [("x-amz-", "AWS Service"), ("x-amzn-", "AWS Service"), ("awselb", "AWS Elastic Load Balancer"), ("amazonws", "AWS"), ("cloudfront", "AWS CloudFront CDN")]
@@ -2111,7 +2342,11 @@ async def detect_cloud_services(host: str, headers: dict[str, list[str]]) -> dic
             results["services"].append(service)
             if "cloudfront" in service.lower():
                 results["cdn"] = "CloudFront"
-    if "s3.amazonaws.com" in host or "s3-website" in host:
+    is_s3_host = host == "s3.amazonaws.com" or (
+        host.endswith(".amazonaws.com")
+        and (host.startswith(("s3.", "s3-website")) or ".s3." in host or ".s3-website" in host)
+    )
+    if is_s3_host:
         results["provider"] = "AWS"
         results["services"].append("S3 Bucket")
         s3_url = f"https://{host}"
@@ -2740,7 +2975,6 @@ def _is_interesting_path(path: str) -> bool:
 
 # Path-to-parameter inference mapping
 PATH_TO_PARAMS = {
-    "mechanic": ["mechanic_code", "mechanic_id", "id", "code"],
     "user": ["user_id", "id", "uid", "username"],
     "users": ["user_id", "id", "uid", "username"],
     "order": ["order_id", "id", "oid"],
@@ -2758,8 +2992,6 @@ PATH_TO_PARAMS = {
     "posts": ["post_id", "id"],
     "comment": ["comment_id", "id"],
     "comments": ["comment_id", "id"],
-    "coupon": ["coupon_code", "code", "id"],
-    "coupons": ["coupon_code", "code", "id"],
     "search": ["q", "query", "search", "keyword"],
     "login": ["username", "email", "password"],
     "auth": ["token", "code", "redirect_uri"],
@@ -2780,7 +3012,6 @@ def infer_params_from_path(path: str) -> list[str]:
     Infer likely parameter names from a URL path.
 
     For example:
-    - /mechanic → ["mechanic_code", "mechanic_id", "id", "code"]
     - /user/profile → ["user_id", "id", "uid", "username"]
     """
     params: list[str] = []
@@ -2823,15 +3054,14 @@ async def probe_api_base(
     """
     Probe common API resources at a discovered API base path.
 
-    When we find an API base like /workshop/api/, probe for common resources:
-    - /workshop/api/mechanic
-    - /workshop/api/users
-    - /workshop/api/vehicles
+    When we find an API base like /tenant/api/, probe for common resources:
+    - /tenant/api/users
+    - /tenant/api/orders
     etc.
 
     Args:
         base_url: Target base URL
-        api_path: API base path (e.g., "/workshop/api/")
+        api_path: API base path (e.g., "/tenant/api/")
         auth_session: Optional auth session for authenticated probing
         limit: Max resources to probe
         concurrency: Max concurrent requests
@@ -2848,7 +3078,7 @@ async def probe_api_base(
 
     # Add high-priority resources at the top
     priority_resources = [
-        "mechanic", "users", "vehicles", "orders", "products",
+        "users", "vehicles", "orders", "products",
         "posts", "comments", "contact", "location", "service",
         "otp", "validate", "verify", "check", "report"
     ]
@@ -2947,7 +3177,7 @@ async def recursive_directory_discovery(
     signals = signals or {}
 
     all_paths: list[str] = list(initial_paths)
-    current_level = [p for p in initial_paths if p.endswith("/") and _is_interesting_path(p)]
+    current_level = [p for p in initial_paths if _is_recursive_seed_path(p)]
 
     stats = {
         "depth_reached": 0,
@@ -2977,7 +3207,7 @@ async def recursive_directory_discovery(
                 if path not in all_paths:
                     all_paths.append(path)
                     # Add directories to next level for recursive fuzzing
-                    if path.endswith("/") and _is_interesting_path(path):
+                    if _is_recursive_seed_path(path):
                         next_level.append(path)
 
         stats["paths_per_level"].append({
@@ -2994,6 +3224,358 @@ async def recursive_directory_discovery(
         "paths": list(set(all_paths)),
         "stats": stats,
     }
+
+
+def expand_frontend_route_api_candidates(endpoints: list[str], discovered_api_bases: list[str] | None = None) -> list[str]:
+    """Expand SPA route fragments into likely backend API endpoints.
+
+    Some modern frontends store service-local routes such as `/v2/user/dashboard`
+    or `/shop/orders` in JS bundles while prepending the actual service prefix
+    at runtime through an HTTP client wrapper. The static analyzer usually sees
+    the route fragment but not the wrapper base, so active DAST ends up probing
+    root-relative 404s. These expansions are read-only candidates; reachability
+    filtering and active checks still decide whether they are useful.
+    """
+    discovered_api_bases = discovered_api_bases or []
+    expanded: set[str] = set()
+
+    def _clean(raw: str) -> str | None:
+        value = str(raw or "").strip("'\"` ")
+        if not value or value in {"/", "//"}:
+            return None
+        if value.startswith("http://") or value.startswith("https://"):
+            return value
+        if not value.startswith("/"):
+            value = "/" + value
+        return value
+
+    for raw in endpoints or []:
+        endpoint = _clean(raw)
+        if not endpoint:
+            continue
+        expanded.add(endpoint)
+        lowered = endpoint.lower()
+
+        # Generic base composition for any API bases found in the same bundle.
+        for raw_base in discovered_api_bases:
+            base = _clean(raw_base)
+            if not base or base.startswith("http"):
+                continue
+            base = base.rstrip("/")
+            if endpoint.startswith("/") and not endpoint.startswith(base + "/"):
+                if endpoint.startswith(("/api/", "/v1/", "/v2/", "/v3/", "/v4/")):
+                    expanded.add(base + endpoint)
+
+        # NOTE: service-prefix expansion is done ONLY via discovered_api_bases above.
+        # Hardcoding product-specific service mounts fabricates routes that exist only on one
+        # target and inflates a benchmark without generalizing. Service routing must be
+        # discovered (from bases in the same bundle / OpenAPI / observed traffic), never
+        # hardcoded per product. See universal-engine rule: ship techniques, not app facts.
+
+    return sorted(expanded)
+
+
+def extract_frontend_route_fragments(content: str) -> list[str]:
+    """Extract app route fragments from SPA bundles that are later base-prefixed."""
+    route_fragment_patterns = [
+        r'''/(?:api/)?v[0-9]+/[A-Za-z0-9_./<>{}$?-]+''',
+    ]
+    fragments: set[str] = set()
+    for pattern in route_fragment_patterns:
+        for match in re.findall(pattern, content or ""):
+            route = match if isinstance(match, str) else (match[0] if match else "")
+            route = route.strip("'\"` ,;)")
+            if route and route not in {"/", "//"}:
+                fragments.add(route)
+    return sorted(fragments)
+
+
+_FRONTEND_HTTP_METHODS = frozenset({"GET", "POST", "PUT", "PATCH", "DELETE"})
+
+
+def _extract_balanced_js_segment(content: str, start: int, opener: str, closer: str) -> str | None:
+    """Extract one balanced JS segment while ignoring delimiters inside strings."""
+    if start >= len(content) or content[start] != opener:
+        return None
+    depth = 0
+    quote = ""
+    escaped = False
+    index = start
+    while index < len(content):
+        char = content[index]
+        if quote:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = ""
+            index += 1
+            continue
+        if char in ("'", '"', "`"):
+            quote = char
+        elif char == opener:
+            depth += 1
+        elif char == closer:
+            depth -= 1
+            if depth == 0:
+                return content[start:index + 1]
+        index += 1
+    return None
+
+
+_JS_OBJECT_SCAN_MAX_CHARS = 64_000
+_JS_OBJECT_KEY_LIMIT = 30
+
+
+def _js_object_depth_profile(content: str) -> list[int]:
+    """Return quote-aware object depth at each position in one bounded pass."""
+    depths = [0] * (len(content) + 1)
+    depth = 0
+    quote = ""
+    escaped = False
+    for index, char in enumerate(content):
+        if quote:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = ""
+        elif char in ("'", '"', "`"):
+            quote = char
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+        depths[index + 1] = depth
+    return depths
+
+
+def _js_object_property_value(object_text: str, property_name: str) -> str | None:
+    """Return a static top-level object-property value from a JS object literal."""
+    if not object_text.startswith("{"):
+        return None
+    object_text = object_text[:_JS_OBJECT_SCAN_MAX_CHARS]
+    depth_at = _js_object_depth_profile(object_text)
+    property_re = re.compile(
+        rf"(?:^|[,{{])\s*(?:['\"]{re.escape(property_name)}['\"]|{re.escape(property_name)})\s*:\s*",
+        re.IGNORECASE,
+    )
+    for match in property_re.finditer(object_text):
+        if depth_at[match.end()] != 1:
+            continue
+        cursor = match.end()
+        if cursor >= len(object_text):
+            return None
+        if object_text[cursor] == "{":
+            return _extract_balanced_js_segment(object_text, cursor, "{", "}")
+        if object_text.startswith("JSON.stringify", cursor):
+            open_paren = object_text.find("(", cursor + len("JSON.stringify"))
+            if open_paren >= 0:
+                call = _extract_balanced_js_segment(object_text, open_paren, "(", ")")
+                if call:
+                    return call
+        if object_text.startswith("new URLSearchParams", cursor):
+            open_paren = object_text.find("(", cursor + len("new URLSearchParams"))
+            if open_paren >= 0:
+                call = _extract_balanced_js_segment(object_text, open_paren, "(", ")")
+                if call:
+                    return call
+        quote = object_text[cursor]
+        if quote in ("'", '"', "`"):
+            end = cursor + 1
+            escaped = False
+            while end < len(object_text):
+                char = object_text[end]
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == quote:
+                    return object_text[cursor:end + 1]
+                end += 1
+        end = cursor
+        while end < len(object_text) and object_text[end] not in ",}":
+            end += 1
+        return object_text[cursor:end].strip() or None
+    return None
+
+
+def _js_object_keys(object_text: str | None) -> list[str]:
+    """Extract top-level keys from a static JS object without evaluating it."""
+    if not object_text:
+        return []
+    first_brace = object_text.find("{")
+    if first_brace < 0:
+        return []
+    object_text = object_text[first_brace:first_brace + _JS_OBJECT_SCAN_MAX_CHARS]
+    if not object_text:
+        return []
+    depth_at = _js_object_depth_profile(object_text)
+    keys: list[str] = []
+    seen: set[str] = set()
+    key_re = re.compile(r"(?:^|[,{}])\s*(?:['\"]([^'\"]+)['\"]|([A-Za-z_$][\w$-]*))\s*:")
+    for match in key_re.finditer(object_text):
+        if depth_at[match.end()] != 1:
+            continue
+        key = match.group(1) or match.group(2)
+        if key and key not in seen:
+            seen.add(key)
+            keys.append(key)
+            if len(keys) >= _JS_OBJECT_KEY_LIMIT:
+                return keys
+    shorthand_re = re.compile(r"(?:^|,)\s*([A-Za-z_$][\w$]*)\s*(?=,|})")
+    for match in shorthand_re.finditer(object_text):
+        if depth_at[match.end()] != 1:
+            continue
+        key = match.group(1)
+        if key and key not in seen:
+            seen.add(key)
+            keys.append(key)
+            if len(keys) >= _JS_OBJECT_KEY_LIMIT:
+                break
+    return keys
+
+
+def _static_js_call_config(content: str, after_url: int) -> str | None:
+    cursor = after_url
+    while cursor < len(content) and content[cursor].isspace():
+        cursor += 1
+    if cursor >= len(content) or content[cursor] != ",":
+        return None
+    cursor += 1
+    while cursor < len(content) and content[cursor].isspace():
+        cursor += 1
+    if cursor < len(content) and content[cursor] == "{":
+        return _extract_balanced_js_segment(content, cursor, "{", "}")
+    return None
+
+
+def _normalize_frontend_request_url(raw_url: str) -> str | None:
+    url = str(raw_url or "").strip()
+    if not url or url.startswith(("data:", "javascript:")):
+        return None
+    if "${" in url:
+        url = re.sub(r"\$\{\s*([A-Za-z_$][\w$.-]*)\s*\}", r"{\1}", url)
+    if not url.startswith(("/", "http://", "https://")):
+        return None
+    return url
+
+
+def extract_frontend_http_client_bases(content: str) -> dict[str, str]:
+    """Map statically configured axios client variables to their literal base URLs."""
+    clients: dict[str, str] = {}
+    create_re = re.compile(
+        r"(?:\b(?:const|let|var)\s+)?([A-Za-z_$][\w$]*)\s*=\s*axios\s*\.\s*create\s*\(\s*",
+        re.IGNORECASE,
+    )
+    for match in create_re.finditer(content or ""):
+        cursor = match.end()
+        if cursor >= len(content) or content[cursor] != "{":
+            continue
+        config = _extract_balanced_js_segment(content, cursor, "{", "}")
+        base_value = _js_object_property_value(config or "", "baseURL")
+        base = str(base_value or "").strip("'\"` ")
+        normalized = _normalize_frontend_request_url(base)
+        if normalized:
+            clients[match.group(1)] = normalized.rstrip("/")
+    return clients
+
+
+def _compose_frontend_client_url(client_base: str | None, request_url: str) -> str:
+    if not client_base or request_url.startswith(("http://", "https://")):
+        return request_url
+    if client_base.startswith(("http://", "https://")):
+        return client_base.rstrip("/") + "/" + request_url.lstrip("/")
+    return "/" + "/".join(
+        part.strip("/") for part in (client_base, request_url) if part.strip("/")
+    )
+
+
+def extract_frontend_http_requests(content: str, *, max_requests: int = 500) -> list[dict[str, Any]]:
+    """Recover static HTTP call facts from frontend bundles without executing JS.
+
+    This intentionally requires a literal URL inside a recognized call expression.
+    Loose route strings remain discovery hints and never gain an invented method/body.
+    """
+    requests: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, tuple[str, ...], tuple[str, ...]]] = set()
+    client_bases = extract_frontend_http_client_bases(content)
+
+    def add_request(url: str, method: str, *, body_params=None, query_params=None, content_type=None):
+        normalized_url = _normalize_frontend_request_url(url)
+        method = str(method or "GET").upper()
+        if not normalized_url or method not in _FRONTEND_HTTP_METHODS:
+            return
+        parsed_query = list(urllib.parse.parse_qs(urllib.parse.urlparse(normalized_url).query).keys())
+        body = list(dict.fromkeys(str(p) for p in (body_params or []) if p))[:30]
+        query = list(dict.fromkeys(parsed_query + [str(p) for p in (query_params or []) if p]))[:30]
+        key = (method, normalized_url, tuple(body), tuple(query))
+        if key in seen or len(requests) >= max_requests:
+            return
+        seen.add(key)
+        item: dict[str, Any] = {"url": normalized_url, "method": method, "source": "js_bundle_analysis"}
+        if body and method in {"POST", "PUT", "PATCH"}:
+            item["body_params"] = body
+            item["content_type"] = content_type or "application/json"
+        if query:
+            item["params"] = query
+        requests.append(item)
+
+    method_call_re = re.compile(
+        r"\b(axios|[A-Za-z_$][\w$]*)\s*\.\s*(get|post|put|patch|delete)\s*\(\s*(['\"`])([^'\"`\s]+)\3",
+        re.IGNORECASE,
+    )
+    for match in method_call_re.finditer(content or ""):
+        client = match.group(1)
+        if client.lower() != "axios" and client not in client_bases:
+            continue
+        method = match.group(2).upper()
+        request_url = _compose_frontend_client_url(client_bases.get(client), match.group(4))
+        config = _static_js_call_config(content, match.end())
+        if method == "GET":
+            params_value = _js_object_property_value(config or "", "params")
+            add_request(request_url, method, query_params=_js_object_keys(params_value))
+        else:
+            add_request(request_url, method, body_params=_js_object_keys(config))
+
+    fetch_re = re.compile(r"\bfetch\s*\(\s*(['\"`])([^'\"`\s]+)\1", re.IGNORECASE)
+    for match in fetch_re.finditer(content or ""):
+        config = _static_js_call_config(content, match.end())
+        method_value = _js_object_property_value(config or "", "method")
+        method = str(method_value or "GET").strip("'\"` ").upper()
+        body_value = _js_object_property_value(config or "", "body")
+        body_params = _js_object_keys(body_value)
+        content_type = "application/x-www-form-urlencoded" if body_value and "URLSearchParams" in body_value else None
+        add_request(match.group(2), method, body_params=body_params, content_type=content_type)
+
+    config_call_re = re.compile(
+        r"\b(axios|[A-Za-z_$][\w$]*)\s*(\.\s*request\s*)?\(\s*(\{)",
+        re.IGNORECASE,
+    )
+    for match in config_call_re.finditer(content or ""):
+        client = match.group(1)
+        if client.lower() != "axios" and not match.group(2) and client not in client_bases:
+            continue
+        config = _extract_balanced_js_segment(content, match.start(3), "{", "}")
+        url_value = _js_object_property_value(config or "", "url")
+        method_value = _js_object_property_value(config or "", "method")
+        request_url = str(url_value or "").strip("'\"` ")
+        method = str(method_value or "").strip("'\"` ").upper()
+        if not request_url or method not in _FRONTEND_HTTP_METHODS:
+            continue
+        request_url = _compose_frontend_client_url(client_bases.get(client), request_url)
+        data_value = _js_object_property_value(config or "", "data")
+        params_value = _js_object_property_value(config or "", "params")
+        add_request(
+            request_url,
+            method,
+            body_params=_js_object_keys(data_value),
+            query_params=_js_object_keys(params_value),
+        )
+
+    return requests
 
 
 async def analyze_js_bundles(base_url: str, js_urls: list[str], max_bundles: int = 20) -> dict:
@@ -3021,6 +3603,7 @@ async def analyze_js_bundles(base_url: str, js_urls: list[str], max_bundles: int
         "websocket_urls": [],
         "internal_urls": [],
         "discovered_api_bases": [],
+        "request_endpoints": [],
         "analyzed_count": 0,
     }
 
@@ -3219,6 +3802,9 @@ async def analyze_js_bundles(base_url: str, js_urls: list[str], max_bundles: int
                     if base_path and len(base_path) > 1:
                         findings["api_endpoints"].append(base_path)
 
+            findings["api_endpoints"].extend(extract_frontend_route_fragments(content))
+            findings["request_endpoints"].extend(extract_frontend_http_requests(content))
+
             # Extract GraphQL operations
             for pattern in graphql_patterns:
                 matches = re.findall(pattern, content)
@@ -3277,16 +3863,39 @@ async def analyze_js_bundles(base_url: str, js_urls: list[str], max_bundles: int
     findings["websocket_urls"] = list(set(findings["websocket_urls"]))
     findings["internal_urls"] = list(set(filter(None, map(normalize_path, findings["internal_urls"]))))
     findings["discovered_api_bases"] = list(set(filter(None, map(normalize_path, findings["discovered_api_bases"]))))
+    deduped_requests: list[dict[str, Any]] = []
+    seen_requests: set[tuple[str, str, tuple[str, ...], tuple[str, ...]]] = set()
+    for request in findings["request_endpoints"]:
+        key = (
+            str(request.get("method") or "GET"),
+            str(request.get("url") or ""),
+            tuple(request.get("body_params") or []),
+            tuple(request.get("params") or []),
+        )
+        if key not in seen_requests:
+            seen_requests.add(key)
+            deduped_requests.append(request)
+    findings["request_endpoints"] = deduped_requests
+
+    versioned_api_routes = [
+        route for route in findings["routes"]
+        if isinstance(route, str)
+        and route.startswith(("/v1/", "/v2/", "/v3/", "/v4/"))
+    ]
+    findings["api_endpoints"] = expand_frontend_route_api_candidates(
+        findings["api_endpoints"] + versioned_api_routes,
+        findings["discovered_api_bases"],
+    )
 
     # Prepend discovered API bases to relative endpoints to create combined paths
-    # This helps find endpoints like /community/api/v2/... when JS only has /api/v2/...
+    # Compose only API bases and paths observed in the same bundle.
     if findings["discovered_api_bases"]:
         combined_endpoints = set(findings["api_endpoints"])
         for base in findings["discovered_api_bases"]:
             base = base.rstrip("/")
             for endpoint in findings["api_endpoints"]:
                 if endpoint.startswith("/") and not endpoint.startswith(base):
-                    # Combine base + endpoint (e.g., /community + /api/v2/users)
+                    # Combine base + endpoint (e.g., /tenant + /api/v2/users)
                     combined = base + endpoint
                     combined_endpoints.add(combined)
                     # Also try with common API path segments
@@ -3400,7 +4009,7 @@ async def smart_discovery(
 
     # Get initial directories for recursive fuzzing
     all_urls = initial_discovery.get("all_urls", [])
-    directories = [u for u in all_urls if u.endswith("/")]
+    directories = [u for u in all_urls if _is_recursive_seed_path(u)]
 
     # Also get API base paths
     api_endpoints = initial_discovery.get("api_endpoints", [])
@@ -3410,7 +4019,7 @@ async def smart_discovery(
         path_parts = parsed.path.split("/")
         if len(path_parts) >= 2:
             api_base = "/".join(path_parts[:3]) + "/"
-            if api_base != "/":
+            if api_base != "/" and _is_api_probe_base_path(api_base):
                 api_bases.add(api_base)
 
     directories.extend(list(api_bases))
@@ -3466,7 +4075,7 @@ async def smart_discovery(
             # Add probed paths to directories for recursive fuzzing
             for p in probed:
                 path = p.get("path", "")
-                if path and not path.endswith("/"):
+                if path and not path.endswith("/") and not _is_file_like_path(path):
                     directories.append(path + "/")
 
         if probed_endpoints:

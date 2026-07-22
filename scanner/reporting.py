@@ -20,10 +20,14 @@ from typing import Any
 # Support both package import and script import
 try:
     from .findings import normalize_finding
+    from .ai_verdict_policy import has_deterministic_exploit_proof
     from .target_context import is_local_or_private_scan_target
+    from .redaction import redact_text
 except ImportError:
     from findings import normalize_finding
+    from ai_verdict_policy import has_deterministic_exploit_proof
     from target_context import is_local_or_private_scan_target
+    from redaction import redact_text
 
 
 # ---------- Reproduction command helpers ----------
@@ -568,26 +572,13 @@ def _ai_safe_commands_for_finding(f: dict, base_url: str, host: str) -> list[str
     return cmds[:3]
 
 
-# Allowlist of test honeypot domains where vulnerabilities ARE intentional and real
-# Findings on these domains should NOT be marked as false positives due to honeypot indicators
-HONEYPOT_TEST_DOMAINS = {"honey.shakerscan.com", "test.shakerscan.com"}
-
-
 def _ai_rule_verdict(f: dict, http_status: str | None, target_host: str = "") -> tuple[str, float, str]:
     """Heuristic verdict when no external AI provider configured."""
     title = (f.get("title") or "").lower()
     tool = (f.get("tool") or "").lower()
     ev = f.get("evidence") or {}
-    validation = f.get("validation") if isinstance(f.get("validation"), dict) else {}
     rationale = []
-    if (
-        f.get("verified") is True
-        or f.get("proof_of_exploitation") is True
-        or ev.get("verified") is True
-        or ev.get("proof_of_exploitation") is True
-        or validation.get("verified") is True
-        or validation.get("poe_proven") is True
-    ):
+    if has_deterministic_exploit_proof(f):
         rationale.append("Finding includes verified exploitation evidence")
         return "true_positive", 0.95, "; ".join(rationale)
 
@@ -596,10 +587,8 @@ def _ai_rule_verdict(f: dict, http_status: str | None, target_host: str = "") ->
         rationale.append("Static misconfiguration derived from observed headers/records")
         return "true_positive", 0.95, "; ".join(rationale)
 
-    # Check if this is a known test honeypot domain - skip honeypot detection
-    is_test_honeypot = any(domain in target_host.lower() for domain in HONEYPOT_TEST_DOMAINS)
-
-    # Honeypot heuristic (only for non-test domains)
+    # Honeypot heuristic. Benchmark/test hostnames must not change detector behavior; an explicit
+    # verified exploit proof above is the host-independent way an intentional target wins this gate.
     snippet = (ev.get("response_snippet") or "").lower()
     # Consider nested evidence structures for honeypot indicators
     nested_blob = ""
@@ -607,7 +596,7 @@ def _ai_rule_verdict(f: dict, http_status: str | None, target_host: str = "") ->
         nested_blob = json.dumps(ev, default=str).lower()
     except Exception:
         nested_blob = str(ev).lower()
-    if not is_test_honeypot and (
+    if (
         "honeypot" in snippet or "enterprise security testing honeypot" in snippet or
         "honeypot" in nested_blob or "enterprise security testing honeypot" in nested_blob or
         (http_status and " 405" in http_status)):
@@ -655,12 +644,8 @@ def _mask_text_host(text: str, host: str, replacement_host: str, scheme: str | N
 
 
 def _redact_sensitive(text: str) -> str:
-    """Redact sensitive tokens from text."""
-    if not isinstance(text, str):
-        return text
-    text = re.sub(r"(?i)(authorization:\s*bearer)\s+[A-Za-z0-9._-]+", r"\1 ***", text)
-    text = re.sub(r"(?i)(api[-_ ]?key|token|secret)=([^&\s]+)", r"\1=***", text)
-    return text
+    """Redact sensitive tokens from text (shared scrubber, see scanner.redaction)."""
+    return redact_text(text)
 
 
 def _redact_body_value(value: Any) -> Any:

@@ -29,6 +29,51 @@ def post_active_skip_reason(active_block: dict[str, Any] | None) -> str:
     return str(active_block.get("post_active_enrichment_skipped") or "active_time_budget_exhausted")
 
 
+def reserve_active_enrichment_budget(
+    active_max_seconds: Any,
+    *,
+    primary_enabled: bool = True,
+    reserve_enrichment: bool = True,
+) -> tuple[float | None, float]:
+    """Split active time into primary probe and post-active enrichment budgets.
+
+    SQLi/XSS are the primary active probes. They should not be allowed to consume
+    the entire shard budget because SQLMap, NoSQL, stored-XSS, DOM-XSS, and
+    auxiliary injection checks are the modules that often turn broad probing into
+    actionable proof. Very small budgets are left untouched.
+
+    ``reserve_enrichment=False`` gives the FULL budget to primary SQLi/XSS: used by
+    coverage shards, where the discover-once recon backbone already runs the
+    enrichment modules once, so each zero-rediscovery shard should spend its whole
+    budget on per-endpoint SQLi/XSS breadth instead of re-reserving ~20% for
+    enrichment it won't meaningfully add.
+    """
+    if not primary_enabled:
+        return active_max_seconds, 0.0
+    if not reserve_enrichment:
+        try:
+            return (max(0.0, float(active_max_seconds)) if active_max_seconds is not None else None), 0.0
+        except (TypeError, ValueError):
+            return None, 0.0
+    if active_max_seconds is None:
+        return None, 0.0
+    try:
+        total = max(0.0, float(active_max_seconds))
+    except (TypeError, ValueError):
+        return None, 0.0
+    if total < 90.0:
+        return total, 0.0
+
+    reserve_floor = 30.0 if total < 600.0 else 90.0
+    reserve = max(reserve_floor, total * 0.20)
+    reserve = min(reserve, 600.0)
+    # Keep at least a minute for primary probes when the user gave a finite
+    # active budget.
+    reserve = min(reserve, max(0.0, total - 60.0))
+    primary = max(0.0, total - reserve)
+    return primary, reserve
+
+
 def should_run_active_enrichment(
     module: str,
     *,

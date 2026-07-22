@@ -12,6 +12,11 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+try:
+    from ..ai_verdict_policy import has_deterministic_exploit_proof
+except ImportError:
+    from ai_verdict_policy import has_deterministic_exploit_proof
+
 logger = logging.getLogger(__name__)
 
 
@@ -182,17 +187,26 @@ EXECUTABLE_CONTEXTS = [
 
 
 def _finding_has_execution_proof(finding: dict[str, Any]) -> bool:
-    """Return True when XSS evidence includes execution proof, not just reflection."""
-    if finding.get("poe_result", {}).get("proven") is True:
+    """Return True only when XSS evidence shows actual execution.
+
+    A non-empty browser_proof/poe_result blob is NOT sufficient: a FAILED proof
+    attempt (``proven: false``) must never be trusted as confirmed XSS. Require
+    ``proven is True`` on the proof structures, or an execution-positive marker in
+    the evidence text (a bare "browser proof"/"dialog" substring is ambiguous —
+    a failed attempt logs those too — so only execution-confirming phrases count).
+    """
+    poe = finding.get("poe_result")
+    if isinstance(poe, dict) and poe.get("proven") is True:
         return True
-    if finding.get("browser_proof"):
+    bp = finding.get("browser_proof")
+    if isinstance(bp, dict) and bp.get("proven") is True:
         return True
     evidence = finding.get("evidence") if isinstance(finding.get("evidence"), dict) else {}
     evidence_text = str(evidence).lower()
     proof_markers = (
-        "browser proof",
         "payload executed",
-        "dialog",
+        "dialog fired",
+        "dialog triggered",
         "console proof",
         "dom proof",
         "execution proof",
@@ -217,6 +231,24 @@ def validate_xss(
     evidence = finding.get("evidence", {})
     tool = finding.get("tool", "").lower()
     payload = evidence.get("payload", "") or evidence.get("detail", {}).get("payload", "")
+
+    # Browser execution proof (a fired dialog / console execution) is the strongest
+    # possible evidence and is INDEPENDENT of any HTTP response body: a DOM / hash-route
+    # XSS executes client-side, so its payload never appears in the server response.
+    # Trust it FIRST — before the response-body context checks below — otherwise a
+    # proven DOM XSS is downgraded to medium just because the payload isn't echoed in
+    # the response (or because no response body was captured for a browser-side finding).
+    # Execution proof is sufficient on its own — do NOT also require a top-level
+    # `verified` flag (normalize_finding does not promote it, so a proven DOM XSS
+    # often has browser_proof/poe_result but no top-level verified=True).
+    if _finding_has_execution_proof(finding):
+        return ValidationResult(
+            verified=True,
+            confidence=max(0.85, float(finding.get("confidence") or 0.85)),
+            evidence=(payload[:100] if payload else "xss execution proof"),
+            reason="Browser execution proof (dialog/console) — confirmed XSS",
+            evidence_level="confirmed_exploit",
+        )
 
     # Trust dalfox findings - it does its own verification
     # Dalfox only reports confirmed XSS, not potential
@@ -393,12 +425,12 @@ def validate_sqli(
             evidence_level="confirmed_exploit",
         )
 
-    if finding.get("verified") is True or evidence.get("verified") is True or validation.get("verified") is True:
+    if has_deterministic_exploit_proof(finding):
         return ValidationResult(
             verified=True,
             confidence=ConfidenceTier.VERIFIED,
-            evidence="SQL injection finding marked verified by scanner evidence",
-            reason="SQL injection verified by scanner evidence",
+            evidence="SQL injection finding includes deterministic exploitation proof",
+            reason="SQL injection verified by deterministic proof",
             evidence_level="confirmed_exploit",
         )
 
@@ -1607,6 +1639,57 @@ def validate_idor(
     )
 
 
+def validate_object_authorization(
+    finding: dict[str, Any],
+    response_body: str | None = None
+) -> ValidationResult:
+    """Validate deterministic object-authorization replay findings."""
+    evidence = finding.get("evidence", {}) if isinstance(finding.get("evidence"), dict) else {}
+    proof_type = str(evidence.get("proof_type") or finding.get("proof_type") or "").lower()
+    authz_diff = evidence.get("authz_diff") if isinstance(evidence.get("authz_diff"), dict) else {}
+    owner_status = evidence.get("owner_status")
+    attacker_status = evidence.get("attacker_status")
+
+    cross_principal_replay = proof_type == "cross_principal_replay"
+    replayed_missing_object = (
+        evidence.get("object_id_absent_from_attacker_listing") is True
+        or authz_diff.get("replayed_owner_object_missing_from_attacker_listing") is True
+    )
+    equivalent_resource = (
+        evidence.get("responses_equivalent") is True
+        or authz_diff.get("owner_resource_equivalent_to_attacker_resource") is True
+    )
+
+    if (
+        cross_principal_replay
+        and replayed_missing_object
+        and equivalent_resource
+        and owner_status == 200
+        and attacker_status == 200
+    ):
+        return ValidationResult(
+            verified=True,
+            confidence=0.95,
+            evidence=evidence.get("url") or evidence.get("consumer_endpoint"),
+            evidence_level="confirmed_exploit",
+            reason=(
+                "Confirmed object authorization bypass: attacker principal replayed "
+                "an owner object absent from its own listing and received equivalent data"
+            ),
+        )
+
+    if cross_principal_replay and owner_status == 200 and attacker_status == 200:
+        return ValidationResult(
+            verified=False,
+            confidence=0.75,
+            evidence=evidence.get("url") or evidence.get("consumer_endpoint"),
+            evidence_level="strong_indicator",
+            reason="Cross-principal object replay returned 200 but ownership differential was incomplete",
+        )
+
+    return validate_idor(finding, response_body)
+
+
 # =============================================================================
 # FILE UPLOAD VALIDATION
 # =============================================================================
@@ -2029,8 +2112,17 @@ def validate_finding(
     if any(x in title_lower for x in ["path traversal", "lfi", "local file", "directory traversal", "../"]):
         return validate_path_traversal(finding, response_body)
 
-    # IDOR validation
-    if "idor" in title_lower or "insecure direct object" in title_lower or "bola" in title_lower:
+    # Object authorization / IDOR validation
+    if (
+        tool == "smart_authz"
+        or "broken object authorization" in title_lower
+        or "object authorization" in title_lower
+        or "idor" in title_lower
+        or "insecure direct object" in title_lower
+        or "bola" in title_lower
+    ):
+        if tool == "smart_authz" or "object authorization" in title_lower:
+            return validate_object_authorization(finding, response_body)
         return validate_idor(finding, response_body)
 
     # CSRF validation

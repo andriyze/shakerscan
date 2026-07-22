@@ -1,0 +1,827 @@
+{
+  "artifact_type": "benchmark_scorecard_run",
+  "artifact_status": "passed_benchmark_scorecard",
+  "artifact_note": "Tracked benchmark scorecard. A tracked file is not a success claim: passed=true means every configured gate passed; passed=false means at least one configured gate failed.",
+  "fleet": {
+    "count": 16,
+    "current": 0,
+    "stale": 16,
+    "pending": 0,
+    "fingerprints": [
+      "97b6b81b7a9c63ed"
+    ]
+  },
+  "fleet_uniform": false,
+  "rescore_after_retest": true,
+  "seed_hypotheses": false,
+  "targets": [
+    {
+      "total_findings": 30,
+      "verified_high_critical": 6,
+      "verified_high_critical_families": [
+        "broken_access_control",
+        "sensitive_exposure",
+        "sqli",
+        "xss"
+      ],
+      "browser_proven_high_critical_families": [
+        "xss"
+      ],
+      "suspected_high_critical": 0,
+      "false_positive_risk": 0.0,
+      "coverage_percent": 0.425,
+      "endpoints_discovered": 1500,
+      "endpoints_tested": 638,
+      "budget_exhausted": false,
+      "budget_exhausted_reason": null,
+      "auth_blocked": false,
+      "auth_states_tested": [
+        "anonymous"
+      ],
+      "auth_workflow": {
+        "required_auth_states": [
+          "user1"
+        ],
+        "observed_auth_states": [
+          "anonymous"
+        ],
+        "missing_auth_states": [
+          "user1"
+        ],
+        "two_principal_required": false,
+        "two_principal_observed": false,
+        "status": "blocked",
+        "blockers": [
+          "missing_required_auth_states"
+        ]
+      },
+      "timeout": false,
+      "error": null,
+      "expected_found": [
+        {
+          "id": "sqli-search",
+          "family": "sqli",
+          "route": "/rest/products/search",
+          "proof": "verified",
+          "min_severity": "critical",
+          "evidence": "SQL Injection (sqlite - auth_bypass_boolean)"
+        },
+        {
+          "id": "sqli-login",
+          "family": "sqli",
+          "route": "/rest/user/login",
+          "proof": "verified",
+          "min_severity": "critical",
+          "evidence": "POST SQL Injection (sqlite - auth_bypass_boolean)"
+        },
+        {
+          "id": "xss-dom-search",
+          "family": "xss",
+          "route": "#/search",
+          "proof": "browser",
+          "min_severity": "high",
+          "evidence": "DOM XSS in Hash Route (iframe_js_uri) (2 occurrences)"
+        },
+        {
+          "id": "exposed-metrics",
+          "family": "sensitive_exposure",
+          "route": "/metrics",
+          "proof": "deterministic",
+          "min_severity": "high",
+          "evidence": "Accessible Debug/Development Endpoint: /metrics"
+        },
+        {
+          "id": "exposed-ftp-listing",
+          "family": "sensitive_exposure",
+          "route": "/ftp",
+          "proof": "deterministic",
+          "min_severity": "high",
+          "evidence": "Accessible Debug/Development Endpoint: /metrics"
+        },
+        {
+          "id": "exposed-confidential",
+          "family": "sensitive_exposure",
+          "route": "/ftp/acquisitions.md",
+          "proof": "deterministic",
+          "min_severity": "high",
+          "evidence": "Sensitive file exposed: acquisitions.md"
+        }
+      ],
+      "expected_missed": [
+        {
+          "id": "xss-reflected",
+          "family": "xss",
+          "route": "/rest/track-order",
+          "proof": "browser",
+          "min_severity": "high",
+          "evidence": null
+        },
+        {
+          "id": "bfla-users",
+          "family": "broken_access_control",
+          "route": "/api/Users",
+          "proof": "deterministic",
+          "min_severity": "high",
+          "evidence": null
+        },
+        {
+          "id": "nosqli-reviews",
+          "family": "nosqli",
+          "route": "/rest/products/reviews",
+          "proof": "deterministic",
+          "min_severity": "high",
+          "evidence": null
+        }
+      ],
+      "benchmark_followups": [
+        {
+          "id": "benchmark-miss:juice-shop:xss-reflected",
+          "benchmark": "juice-shop",
+          "expectation_id": "xss-reflected",
+          "family": "xss",
+          "route": "/rest/track-order",
+          "proof_required": "browser",
+          "min_severity": "high",
+          "status": "ready",
+          "operator_hints": [
+            "browser_proof_required"
+          ],
+          "blocked_by": [],
+          "reason": "missing_verified_benchmark_expectation",
+          "next_test_action": {
+            "command": "scan.focused_family",
+            "risk_tier": "active",
+            "parameters": {
+              "target": "http://host.docker.internal:3001",
+              "check_family": "xss",
+              "scan_type": "smart",
+              "budget_profile": "thorough",
+              "no_early_stop": true
+            }
+          }
+        },
+        {
+          "id": "benchmark-miss:juice-shop:bfla-users",
+          "benchmark": "juice-shop",
+          "expectation_id": "bfla-users",
+          "family": "broken_access_control",
+          "route": "/api/Users",
+          "proof_required": "deterministic",
+          "min_severity": "high",
+          "status": "blocked",
+          "operator_hints": [],
+          "blocked_by": [
+            "missing_required_auth_states"
+          ],
+          "reason": "missing_required_auth_context",
+          "next_test_action": null,
+          "blocked_action_template": {
+            "command": "scan.focused_family",
+            "risk_tier": "active",
+            "parameters": {
+              "target": "http://host.docker.internal:3001",
+              "check_family": "auth",
+              "scan_type": "smart",
+              "budget_profile": "thorough",
+              "no_early_stop": true
+            }
+          }
+        },
+        {
+          "id": "benchmark-miss:juice-shop:nosqli-reviews",
+          "benchmark": "juice-shop",
+          "expectation_id": "nosqli-reviews",
+          "family": "nosqli",
+          "route": "/rest/products/reviews",
+          "proof_required": "deterministic",
+          "min_severity": "high",
+          "status": "ready",
+          "operator_hints": [
+            "json_body_operator_probes"
+          ],
+          "blocked_by": [],
+          "reason": "missing_verified_benchmark_expectation",
+          "next_test_action": {
+            "command": "scan.focused_family",
+            "risk_tier": "active",
+            "parameters": {
+              "target": "http://host.docker.internal:3001",
+              "check_family": "sqli",
+              "scan_type": "smart",
+              "budget_profile": "thorough",
+              "no_early_stop": true
+            }
+          }
+        }
+      ],
+      "body_completion_diagnostics": {
+        "body_attempts": 220,
+        "attempted_params": 849,
+        "completed_params": 1551,
+        "parameter_completion_ratio": 0.0,
+        "response_guided_completion_ratio": 0.0,
+        "probe_parameter_completion_ratio": 1.8269,
+        "families": {
+          "nosqli": {
+            "body_attempts": 40,
+            "attempted_params": 146,
+            "completed_params": 146,
+            "response_guided_completion_attempts": 0,
+            "validation_fields_added": 0,
+            "validation_field_samples": [],
+            "status_counts": {
+              "completed": 40
+            },
+            "proof_counts": {},
+            "parameter_completion_ratio": 0.0,
+            "response_guided_completion_ratio": 0.0,
+            "probe_parameter_completion_ratio": 1.0
+          },
+          "sqli": {
+            "body_attempts": 180,
+            "attempted_params": 703,
+            "completed_params": 1405,
+            "response_guided_completion_attempts": 0,
+            "validation_fields_added": 0,
+            "validation_field_samples": [],
+            "status_counts": {
+              "completed": 180
+            },
+            "proof_counts": {
+              "authentication_bypass": 1
+            },
+            "parameter_completion_ratio": 0.0,
+            "response_guided_completion_ratio": 0.0,
+            "probe_parameter_completion_ratio": 1.9986
+          }
+        }
+      },
+      "expected_recall": 0.67,
+      "phase": "post_retest",
+      "retest_settled": true,
+      "two_user": false,
+      "resolved_budget": null,
+      "invariant_violations": [],
+      "active_execution_failed": false,
+      "grade_reliable": true,
+      "report_degraded": false,
+      "report_invariant_violations": [],
+      "scan_id": "148dd7f2-0e2a-401c-abfa-1bea3f80aea7",
+      "target": "juice_shop",
+      "gates": [
+        {
+          "gate": "report_invariants_clean",
+          "pass": true,
+          "detail": "clean"
+        },
+        {
+          "gate": "grade_reliable",
+          "pass": true,
+          "detail": "grade_reliable=True"
+        },
+        {
+          "gate": "active_execution_ok",
+          "pass": true,
+          "detail": "active_execution_failed=False"
+        },
+        {
+          "gate": "report_not_degraded",
+          "pass": true,
+          "detail": "report_degraded=False"
+        },
+        {
+          "gate": "retest_settled",
+          "pass": true,
+          "detail": "retest_settled=True"
+        },
+        {
+          "gate": "min_verified_high_critical",
+          "pass": true,
+          "detail": "6 >= 6"
+        },
+        {
+          "gate": "max_unverified_high_ratio",
+          "pass": true,
+          "detail": "0.0 <= 0.35"
+        },
+        {
+          "gate": "require_verified_sqli",
+          "pass": true,
+          "detail": "verified SQLi present"
+        },
+        {
+          "gate": "require_browser_proven_xss",
+          "pass": true,
+          "detail": "browser XSS present"
+        }
+      ],
+      "passed": true,
+      "scorecards": {
+        "scan_finish": {
+          "total_findings": 30,
+          "verified_high_critical": 6,
+          "verified_high_critical_families": [
+            "broken_access_control",
+            "sensitive_exposure",
+            "sqli",
+            "xss"
+          ],
+          "browser_proven_high_critical_families": [
+            "xss"
+          ],
+          "suspected_high_critical": 0,
+          "false_positive_risk": 0.0,
+          "coverage_percent": 0.425,
+          "endpoints_discovered": 1500,
+          "endpoints_tested": 638,
+          "budget_exhausted": false,
+          "budget_exhausted_reason": null,
+          "auth_blocked": false,
+          "auth_states_tested": [
+            "anonymous"
+          ],
+          "auth_workflow": {
+            "required_auth_states": [
+              "user1"
+            ],
+            "observed_auth_states": [
+              "anonymous"
+            ],
+            "missing_auth_states": [
+              "user1"
+            ],
+            "two_principal_required": false,
+            "two_principal_observed": false,
+            "status": "blocked",
+            "blockers": [
+              "missing_required_auth_states"
+            ]
+          },
+          "timeout": false,
+          "error": null,
+          "expected_found": [
+            {
+              "id": "sqli-search",
+              "family": "sqli",
+              "route": "/rest/products/search",
+              "proof": "verified",
+              "min_severity": "critical",
+              "evidence": "SQL Injection (sqlite - auth_bypass_boolean)"
+            },
+            {
+              "id": "sqli-login",
+              "family": "sqli",
+              "route": "/rest/user/login",
+              "proof": "verified",
+              "min_severity": "critical",
+              "evidence": "POST SQL Injection (sqlite - auth_bypass_boolean)"
+            },
+            {
+              "id": "xss-dom-search",
+              "family": "xss",
+              "route": "#/search",
+              "proof": "browser",
+              "min_severity": "high",
+              "evidence": "DOM XSS in Hash Route (iframe_js_uri) (2 occurrences)"
+            },
+            {
+              "id": "exposed-metrics",
+              "family": "sensitive_exposure",
+              "route": "/metrics",
+              "proof": "deterministic",
+              "min_severity": "high",
+              "evidence": "Accessible Debug/Development Endpoint: /metrics"
+            },
+            {
+              "id": "exposed-ftp-listing",
+              "family": "sensitive_exposure",
+              "route": "/ftp",
+              "proof": "deterministic",
+              "min_severity": "high",
+              "evidence": "Sensitive file exposed: acquisitions.md"
+            },
+            {
+              "id": "exposed-confidential",
+              "family": "sensitive_exposure",
+              "route": "/ftp/acquisitions.md",
+              "proof": "deterministic",
+              "min_severity": "high",
+              "evidence": "Sensitive file exposed: acquisitions.md"
+            }
+          ],
+          "expected_missed": [
+            {
+              "id": "xss-reflected",
+              "family": "xss",
+              "route": "/rest/track-order",
+              "proof": "browser",
+              "min_severity": "high",
+              "evidence": null
+            },
+            {
+              "id": "bfla-users",
+              "family": "broken_access_control",
+              "route": "/api/Users",
+              "proof": "deterministic",
+              "min_severity": "high",
+              "evidence": null
+            },
+            {
+              "id": "nosqli-reviews",
+              "family": "nosqli",
+              "route": "/rest/products/reviews",
+              "proof": "deterministic",
+              "min_severity": "high",
+              "evidence": null
+            }
+          ],
+          "benchmark_followups": [
+            {
+              "id": "benchmark-miss:juice-shop:xss-reflected",
+              "benchmark": "juice-shop",
+              "expectation_id": "xss-reflected",
+              "family": "xss",
+              "route": "/rest/track-order",
+              "proof_required": "browser",
+              "min_severity": "high",
+              "status": "ready",
+              "operator_hints": [
+                "browser_proof_required"
+              ],
+              "blocked_by": [],
+              "reason": "missing_verified_benchmark_expectation",
+              "next_test_action": {
+                "command": "scan.focused_family",
+                "risk_tier": "active",
+                "parameters": {
+                  "target": "http://host.docker.internal:3001",
+                  "check_family": "xss",
+                  "scan_type": "smart",
+                  "budget_profile": "thorough",
+                  "no_early_stop": true
+                }
+              }
+            },
+            {
+              "id": "benchmark-miss:juice-shop:bfla-users",
+              "benchmark": "juice-shop",
+              "expectation_id": "bfla-users",
+              "family": "broken_access_control",
+              "route": "/api/Users",
+              "proof_required": "deterministic",
+              "min_severity": "high",
+              "status": "blocked",
+              "operator_hints": [],
+              "blocked_by": [
+                "missing_required_auth_states"
+              ],
+              "reason": "missing_required_auth_context",
+              "next_test_action": null,
+              "blocked_action_template": {
+                "command": "scan.focused_family",
+                "risk_tier": "active",
+                "parameters": {
+                  "target": "http://host.docker.internal:3001",
+                  "check_family": "auth",
+                  "scan_type": "smart",
+                  "budget_profile": "thorough",
+                  "no_early_stop": true
+                }
+              }
+            },
+            {
+              "id": "benchmark-miss:juice-shop:nosqli-reviews",
+              "benchmark": "juice-shop",
+              "expectation_id": "nosqli-reviews",
+              "family": "nosqli",
+              "route": "/rest/products/reviews",
+              "proof_required": "deterministic",
+              "min_severity": "high",
+              "status": "ready",
+              "operator_hints": [
+                "json_body_operator_probes"
+              ],
+              "blocked_by": [],
+              "reason": "missing_verified_benchmark_expectation",
+              "next_test_action": {
+                "command": "scan.focused_family",
+                "risk_tier": "active",
+                "parameters": {
+                  "target": "http://host.docker.internal:3001",
+                  "check_family": "sqli",
+                  "scan_type": "smart",
+                  "budget_profile": "thorough",
+                  "no_early_stop": true
+                }
+              }
+            }
+          ],
+          "body_completion_diagnostics": {
+            "body_attempts": 220,
+            "attempted_params": 849,
+            "completed_params": 1551,
+            "parameter_completion_ratio": 0.0,
+            "response_guided_completion_ratio": 0.0,
+            "probe_parameter_completion_ratio": 1.8269,
+            "families": {
+              "nosqli": {
+                "body_attempts": 40,
+                "attempted_params": 146,
+                "completed_params": 146,
+                "response_guided_completion_attempts": 0,
+                "validation_fields_added": 0,
+                "validation_field_samples": [],
+                "status_counts": {
+                  "completed": 40
+                },
+                "proof_counts": {},
+                "parameter_completion_ratio": 0.0,
+                "response_guided_completion_ratio": 0.0,
+                "probe_parameter_completion_ratio": 1.0
+              },
+              "sqli": {
+                "body_attempts": 180,
+                "attempted_params": 703,
+                "completed_params": 1405,
+                "response_guided_completion_attempts": 0,
+                "validation_fields_added": 0,
+                "validation_field_samples": [],
+                "status_counts": {
+                  "completed": 180
+                },
+                "proof_counts": {
+                  "authentication_bypass": 1
+                },
+                "parameter_completion_ratio": 0.0,
+                "response_guided_completion_ratio": 0.0,
+                "probe_parameter_completion_ratio": 1.9986
+              }
+            }
+          },
+          "expected_recall": 0.67,
+          "phase": "scan_finish",
+          "resolved_budget": null,
+          "invariant_violations": [],
+          "active_execution_failed": false,
+          "grade_reliable": true,
+          "report_degraded": false,
+          "report_invariant_violations": [],
+          "two_user": false
+        },
+        "post_retest": {
+          "total_findings": 30,
+          "verified_high_critical": 6,
+          "verified_high_critical_families": [
+            "broken_access_control",
+            "sensitive_exposure",
+            "sqli",
+            "xss"
+          ],
+          "browser_proven_high_critical_families": [
+            "xss"
+          ],
+          "suspected_high_critical": 0,
+          "false_positive_risk": 0.0,
+          "coverage_percent": 0.425,
+          "endpoints_discovered": 1500,
+          "endpoints_tested": 638,
+          "budget_exhausted": false,
+          "budget_exhausted_reason": null,
+          "auth_blocked": false,
+          "auth_states_tested": [
+            "anonymous"
+          ],
+          "auth_workflow": {
+            "required_auth_states": [
+              "user1"
+            ],
+            "observed_auth_states": [
+              "anonymous"
+            ],
+            "missing_auth_states": [
+              "user1"
+            ],
+            "two_principal_required": false,
+            "two_principal_observed": false,
+            "status": "blocked",
+            "blockers": [
+              "missing_required_auth_states"
+            ]
+          },
+          "timeout": false,
+          "error": null,
+          "expected_found": [
+            {
+              "id": "sqli-search",
+              "family": "sqli",
+              "route": "/rest/products/search",
+              "proof": "verified",
+              "min_severity": "critical",
+              "evidence": "SQL Injection (sqlite - auth_bypass_boolean)"
+            },
+            {
+              "id": "sqli-login",
+              "family": "sqli",
+              "route": "/rest/user/login",
+              "proof": "verified",
+              "min_severity": "critical",
+              "evidence": "POST SQL Injection (sqlite - auth_bypass_boolean)"
+            },
+            {
+              "id": "xss-dom-search",
+              "family": "xss",
+              "route": "#/search",
+              "proof": "browser",
+              "min_severity": "high",
+              "evidence": "DOM XSS in Hash Route (iframe_js_uri) (2 occurrences)"
+            },
+            {
+              "id": "exposed-metrics",
+              "family": "sensitive_exposure",
+              "route": "/metrics",
+              "proof": "deterministic",
+              "min_severity": "high",
+              "evidence": "Accessible Debug/Development Endpoint: /metrics"
+            },
+            {
+              "id": "exposed-ftp-listing",
+              "family": "sensitive_exposure",
+              "route": "/ftp",
+              "proof": "deterministic",
+              "min_severity": "high",
+              "evidence": "Accessible Debug/Development Endpoint: /metrics"
+            },
+            {
+              "id": "exposed-confidential",
+              "family": "sensitive_exposure",
+              "route": "/ftp/acquisitions.md",
+              "proof": "deterministic",
+              "min_severity": "high",
+              "evidence": "Sensitive file exposed: acquisitions.md"
+            }
+          ],
+          "expected_missed": [
+            {
+              "id": "xss-reflected",
+              "family": "xss",
+              "route": "/rest/track-order",
+              "proof": "browser",
+              "min_severity": "high",
+              "evidence": null
+            },
+            {
+              "id": "bfla-users",
+              "family": "broken_access_control",
+              "route": "/api/Users",
+              "proof": "deterministic",
+              "min_severity": "high",
+              "evidence": null
+            },
+            {
+              "id": "nosqli-reviews",
+              "family": "nosqli",
+              "route": "/rest/products/reviews",
+              "proof": "deterministic",
+              "min_severity": "high",
+              "evidence": null
+            }
+          ],
+          "benchmark_followups": [
+            {
+              "id": "benchmark-miss:juice-shop:xss-reflected",
+              "benchmark": "juice-shop",
+              "expectation_id": "xss-reflected",
+              "family": "xss",
+              "route": "/rest/track-order",
+              "proof_required": "browser",
+              "min_severity": "high",
+              "status": "ready",
+              "operator_hints": [
+                "browser_proof_required"
+              ],
+              "blocked_by": [],
+              "reason": "missing_verified_benchmark_expectation",
+              "next_test_action": {
+                "command": "scan.focused_family",
+                "risk_tier": "active",
+                "parameters": {
+                  "target": "http://host.docker.internal:3001",
+                  "check_family": "xss",
+                  "scan_type": "smart",
+                  "budget_profile": "thorough",
+                  "no_early_stop": true
+                }
+              }
+            },
+            {
+              "id": "benchmark-miss:juice-shop:bfla-users",
+              "benchmark": "juice-shop",
+              "expectation_id": "bfla-users",
+              "family": "broken_access_control",
+              "route": "/api/Users",
+              "proof_required": "deterministic",
+              "min_severity": "high",
+              "status": "blocked",
+              "operator_hints": [],
+              "blocked_by": [
+                "missing_required_auth_states"
+              ],
+              "reason": "missing_required_auth_context",
+              "next_test_action": null,
+              "blocked_action_template": {
+                "command": "scan.focused_family",
+                "risk_tier": "active",
+                "parameters": {
+                  "target": "http://host.docker.internal:3001",
+                  "check_family": "auth",
+                  "scan_type": "smart",
+                  "budget_profile": "thorough",
+                  "no_early_stop": true
+                }
+              }
+            },
+            {
+              "id": "benchmark-miss:juice-shop:nosqli-reviews",
+              "benchmark": "juice-shop",
+              "expectation_id": "nosqli-reviews",
+              "family": "nosqli",
+              "route": "/rest/products/reviews",
+              "proof_required": "deterministic",
+              "min_severity": "high",
+              "status": "ready",
+              "operator_hints": [
+                "json_body_operator_probes"
+              ],
+              "blocked_by": [],
+              "reason": "missing_verified_benchmark_expectation",
+              "next_test_action": {
+                "command": "scan.focused_family",
+                "risk_tier": "active",
+                "parameters": {
+                  "target": "http://host.docker.internal:3001",
+                  "check_family": "sqli",
+                  "scan_type": "smart",
+                  "budget_profile": "thorough",
+                  "no_early_stop": true
+                }
+              }
+            }
+          ],
+          "body_completion_diagnostics": {
+            "body_attempts": 220,
+            "attempted_params": 849,
+            "completed_params": 1551,
+            "parameter_completion_ratio": 0.0,
+            "response_guided_completion_ratio": 0.0,
+            "probe_parameter_completion_ratio": 1.8269,
+            "families": {
+              "nosqli": {
+                "body_attempts": 40,
+                "attempted_params": 146,
+                "completed_params": 146,
+                "response_guided_completion_attempts": 0,
+                "validation_fields_added": 0,
+                "validation_field_samples": [],
+                "status_counts": {
+                  "completed": 40
+                },
+                "proof_counts": {},
+                "parameter_completion_ratio": 0.0,
+                "response_guided_completion_ratio": 0.0,
+                "probe_parameter_completion_ratio": 1.0
+              },
+              "sqli": {
+                "body_attempts": 180,
+                "attempted_params": 703,
+                "completed_params": 1405,
+                "response_guided_completion_attempts": 0,
+                "validation_fields_added": 0,
+                "validation_field_samples": [],
+                "status_counts": {
+                  "completed": 180
+                },
+                "proof_counts": {
+                  "authentication_bypass": 1
+                },
+                "parameter_completion_ratio": 0.0,
+                "response_guided_completion_ratio": 0.0,
+                "probe_parameter_completion_ratio": 1.9986
+              }
+            }
+          },
+          "expected_recall": 0.67,
+          "phase": "post_retest",
+          "retest_settled": true,
+          "two_user": false,
+          "resolved_budget": null,
+          "invariant_violations": [],
+          "active_execution_failed": false,
+          "grade_reliable": true,
+          "report_degraded": false,
+          "report_invariant_violations": []
+        }
+      }
+    }
+  ],
+  "passed": true
+}

@@ -12,13 +12,17 @@ All functions follow async patterns and return structured dictionaries.
 """
 
 import asyncio
+import base64
 import hashlib
 import json
+import re
 import time
+import urllib.parse
 from typing import Any
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 
 from .common import run, detect_spa_catch_all, fetch_homepage_hash, is_same_as_homepage, _compute_content_hash
+from .cancellation import scanner_cancel_requested
 from .bola_comparison import (
     all_responses_equivalent,
     extract_user_specific_signals,
@@ -28,6 +32,15 @@ from .bola_comparison import (
 )
 
 FORCED_BROWSING_MAX_BODY_BYTES = 262_144
+
+
+def _mark_cooperative_cancel(results: dict[str, Any]) -> bool:
+    if not scanner_cancel_requested():
+        return False
+    results["cancelled"] = True
+    results["budget_exceeded"] = True
+    results["budget_exhausted_reason"] = "cancelled"
+    return True
 
 # =============================================================================
 # CONTENT VALIDATION PATTERNS - Validate that responses match expected content
@@ -67,6 +80,24 @@ CATEGORY_CONTENT_VALIDATORS = {
         "always_validate": True,
         "reject_html_content_type": True,
     },
+    "rest_api_models": {
+        # Auto-CRUD model collections are only a vuln when the unauthenticated
+        # response actually leaks sensitive records — a public /api/Products
+        # catalog returning 200 JSON is NOT a finding. Require sensitive PII /
+        # credential / token field markers so this stays precise and universal
+        # (no app-specific knowledge), and reject SPA HTML shells outright.
+        "required_patterns": [
+            '"email"', '"password"', '"passwordhash"', '"pwd"', '"ssn"',
+            '"token"', '"accesstoken"', '"apikey"', '"api_key"', '"secret"',
+            '"creditcard"', '"cardnumber"', '"cvv"', '"iban"', '"totpsecret"',
+            '"role":"admin"', '"isadmin"', '"is_admin"', '"privatekey"',
+            '"securityanswer"', '"sessionid"', '"refreshtoken"',
+        ],
+        "min_matches": 1,
+        "reject_html_always": True,
+        "reject_html_content_type": True,
+        "always_validate": True,
+    },
     "management_consoles": {
         # Management console patterns - more specific
         "required_patterns": [
@@ -103,6 +134,18 @@ CATEGORY_CONTENT_VALIDATORS = {
             # Kubernetes health (JSON)
             '"healthy":', '"ready":', '"live":',
         ],
+        # Unambiguous debug/actuator/prometheus/dev-server signatures: any ONE confirms a
+        # real debug endpoint. The generic JSON tokens in required_patterns above (e.g.
+        # "status":, _count, _total) also match ordinary API / JSON-catch-all bodies, so
+        # they no longer validate on a single match (min_matches is 2) and only a strong
+        # signature short-circuits — preventing a false HIGH exposure on {"status":"ok"}.
+        "strong_signature_patterns": [
+            "# help", "# type", "_bucket",
+            '"beans":', '"mappings":', '"configprops":', '"components":',
+            "hot module", "__webpack_hmr", "webpackhotupdate",
+            "__nextjs_original-stack-frame", "next-router-state-tree",
+            "v8.serialize",
+        ],
         # Highly specific patterns valid in HTML (1 match sufficient)
         "html_safe_patterns_unique": [
             # phpinfo specific (outputs HTML by design) - very unique markers
@@ -130,7 +173,7 @@ CATEGORY_CONTENT_VALIDATORS = {
             # Node.js (need multiple)
             "    at ", "node_modules/", "internal/modules",
         ],
-        "min_matches": 1,
+        "min_matches": 2,
         "reject_if_html_generic": True,
         # These paths should NEVER return generic HTML app content
         "always_validate": True,
@@ -316,6 +359,13 @@ def _has_category_content(body: str, content_type: str, category: str) -> tuple[
     if validator.get("reject_html_content_type", False) and is_html:
         return False, "html_content_type_rejected"
 
+    # Unambiguous signatures validate on a single match; the generic tokens in
+    # required_patterns need min_matches (so a JSON catch-all body like {"status":"ok"}
+    # with one loose token does not become a false HIGH exposure).
+    strong_signatures = validator.get("strong_signature_patterns", [])
+    if strong_signatures and any(p in body_lower for p in strong_signatures):
+        return True, "strong_signature_match"
+
     # Check for required patterns
     pattern_matches = 0
     if patterns:
@@ -353,6 +403,74 @@ def _has_category_content(body: str, content_type: str, category: str) -> tuple[
             return False, "no_patterns_and_generic_html"
 
     return True, "default_pass"
+
+
+_PROMETHEUS_SENSITIVE_METRIC_TOKENS = {
+    "identity": {"user", "users", "account", "accounts", "customer", "customers", "tenant", "tenants"},
+    "commerce": {
+        "order", "orders", "payment", "payments", "wallet", "wallets", "balance", "balances",
+        "transaction", "transactions", "revenue", "invoice", "invoices",
+    },
+    "security": {
+        "auth", "login", "logins", "token", "tokens", "credential", "credentials", "secret", "secrets",
+        "challenge", "challenges",
+    },
+}
+_PROMETHEUS_RUNTIME_METRIC_PREFIXES = (
+    "process_",
+    "nodejs_",
+    "go_",
+    "python_",
+    "jvm_",
+    "dotnet_",
+    "runtime_",
+    "system_",
+    "http_",
+    "promhttp_",
+    "scrape_",
+)
+
+
+def _prometheus_sensitive_metric_signal(body: str, content_type: str) -> dict[str, Any] | None:
+    """Identify business-sensitive metric names without claiming value disclosure."""
+    sample = str(body or "")[:262144]
+    ct_lower = str(content_type or "").lower()
+    if not sample or (
+        "text/plain" not in ct_lower
+        and "openmetrics" not in ct_lower
+        and not ("# help " in sample.lower() and "# type " in sample.lower())
+    ):
+        return None
+
+    metric_names: set[str] = set()
+    for line in sample.splitlines():
+        if not line or line.startswith("#"):
+            continue
+        match = re.match(r"^([A-Za-z_:][A-Za-z0-9_:]*)\s*(?:\{|\s)", line)
+        if match:
+            metric_names.add(match.group(1).lower())
+
+    matched_by_category: dict[str, list[str]] = {}
+    for category, tokens in _PROMETHEUS_SENSITIVE_METRIC_TOKENS.items():
+        matches = sorted({
+            name
+            for name in metric_names
+            if not name.startswith(_PROMETHEUS_RUNTIME_METRIC_PREFIXES)
+            if set(filter(None, re.split(r"[^a-z0-9]+", name))) & tokens
+        })
+        if matches:
+            matched_by_category[category] = matches[:10]
+
+    matched_names = sorted({name for names in matched_by_category.values() for name in names})
+    if len(matched_by_category) < 2 or len(matched_names) < 3:
+        return None
+    return {
+        "signal_type": "sensitive_metric_names_exposed",
+        "proof_state": "observed",
+        "sensitive_metric_categories": sorted(matched_by_category),
+        "sensitive_metric_names": matched_names[:20],
+        "sensitive_metric_count": len(matched_names),
+    }
 
 # Paths that are intentionally public and should NOT be flagged as vulnerabilities
 # These are legitimate public endpoints, not security issues
@@ -490,6 +608,19 @@ PRIVILEGED_PATHS = {
         "/.aws/credentials", "/.aws/config",
         "/aws-credentials", "/aws.json",
     ],
+    # Auto-CRUD REST model collections, case-sensitive. Frameworks that auto-expose
+    # ORM models as REST endpoints (Express/loopback, Sails Blueprints, Feathers,
+    # LoopBack, NestJS CRUD, Strapi) route on the EXACT model class name, so the
+    # lowercase /api/users above never matches a PascalCase /api/Users collection.
+    # A 200 JSON record array on any of these = anonymous bulk read of admin-only
+    # data (BFLA / function-level access control). This is a generic technology
+    # wordlist, not app-specific: common model names + case variants.
+    "rest_api_models": [
+        "/api/Users", "/api/User", "/api/Accounts", "/api/Customers",
+        "/api/Orders", "/api/Products", "/api/Cards", "/api/Payments",
+        "/api/Addresses", "/api/Feedbacks", "/api/Reviews", "/api/Messages",
+        "/api/Files", "/api/Documents", "/api/Tokens", "/api/Sessions",
+    ],
 }
 
 
@@ -513,9 +644,9 @@ def determine_severity(status_code: int, category: str, path: str) -> str:
     """Determine finding severity based on status code and category."""
     # 200 OK = accessible (highest severity)
     if status_code == 200:
-        if category in ["admin_panels", "sensitive_files", "debug_dev"]:
+        if category in ["admin_panels", "sensitive_files"]:
             return "critical"
-        elif category in ["api_endpoints", "user_management", "management_consoles"] or category in ["backup_files", "logs_monitoring"]:
+        elif category in ["api_endpoints", "user_management", "management_consoles", "debug_dev"] or category in ["backup_files", "logs_monitoring", "rest_api_models"]:
             return "high"
         else:
             return "medium"
@@ -684,12 +815,17 @@ async def test_single_path(
                     # Validate that the response actually contains content appropriate for this category
                     content_type = finding.get("content_type", "")
                     is_valid_content, validation_reason = _has_category_content(body, content_type, category)
+                    finding["validation_reason"] = validation_reason
 
                     if not is_valid_content:
                         # Content doesn't match what we expect for this category
                         is_soft_404 = True
                         finding["content_validation_failed"] = True
                         finding["validation_reason"] = validation_reason
+                    elif category == "debug_dev":
+                        sensitive_metrics = _prometheus_sensitive_metric_signal(body, content_type)
+                        if sensitive_metrics:
+                            finding.update(sensitive_metrics)
 
                     # Legacy check: Also check if response is generic HTML when expecting a specific file
                     # SPAs often return their homepage/app shell for all paths
@@ -765,13 +901,19 @@ async def check_forced_browsing(
 
     # SPA DETECTION: Check if site uses catch-all routing (returns same page for all paths)
     # This causes massive false positives since every path returns HTTP 200
+    spa_content_only = False
     try:
         spa_result = await detect_spa_catch_all(url, timeout=timeout_per_request)
         if spa_result.get("is_spa_catch_all"):
             results["spa_detected"] = True
             results["spa_evidence"] = spa_result.get("evidence", {})
-            # Skip forced browsing checks - all paths would return same content
-            return results
+            # Do NOT skip entirely (that silently hid /metrics, /actuator/*, and
+            # other real exposures on every Angular/React app). A validated
+            # Prometheus/actuator/JSON body provably is NOT the SPA shell, so we
+            # restrict to the content-validated categories and let
+            # test_single_path's content validation + homepage-hash guard reject
+            # the shell. Genuinely-exposed endpoints still surface as verified.
+            spa_content_only = True
     except Exception:
         pass  # Continue with checks if SPA detection fails
 
@@ -783,16 +925,19 @@ async def check_forced_browsing(
     except Exception:
         pass  # Continue without homepage comparison if fetch fails
 
-    # Determine which paths to test
-    if categories:
-        paths_to_test = []
-        for cat in categories:
-            if cat in PRIVILEGED_PATHS:
-                paths_to_test.extend(PRIVILEGED_PATHS[cat])
-                results["categories_tested"].append(cat)
-    else:
-        paths_to_test = get_all_paths()
-        results["categories_tested"] = list(PRIVILEGED_PATHS.keys())
+    # Determine which categories to test.
+    selected_categories = list(categories) if categories else list(PRIVILEGED_PATHS.keys())
+    if spa_content_only:
+        # Under an SPA catch-all, only categories with a strict content validator
+        # can be told apart from the app shell — restrict to those so we don't
+        # re-introduce the 200-everywhere false-positive flood.
+        selected_categories = [c for c in selected_categories if c in CATEGORY_CONTENT_VALIDATORS]
+
+    paths_to_test = []
+    for cat in selected_categories:
+        if cat in PRIVILEGED_PATHS:
+            paths_to_test.extend(PRIVILEGED_PATHS[cat])
+            results["categories_tested"].append(cat)
 
     results["paths_tested"] = len(paths_to_test)
 
@@ -906,6 +1051,12 @@ def format_findings_for_scanner(
                     fb_finding.get("validation_reason")
                     or "Forced browsing content validation accepted this response"
                 ),
+                "proof_type": fb_finding.get("proof_type"),
+                "proof_state": fb_finding.get("proof_state"),
+                "signal_type": fb_finding.get("signal_type"),
+                "sensitive_metric_categories": fb_finding.get("sensitive_metric_categories"),
+                "sensitive_metric_names": fb_finding.get("sensitive_metric_names"),
+                "sensitive_metric_count": fb_finding.get("sensitive_metric_count"),
             },
             "remediation": "Implement proper authentication and authorization controls. Consider using role-based access control (RBAC) and ensure all administrative endpoints require authentication.",
             "references": [
@@ -1018,6 +1169,9 @@ async def check_mass_assignment(
         "findings": [],
         "endpoints_tested": 0,
         "parameters_tested": 0,
+        "endpoint_attempt_schema_version": "active_endpoint_attempt_v1",
+        "endpoint_attempts": [],
+        "cancelled": False,
     }
 
     # Default endpoints to test
@@ -1041,19 +1195,45 @@ async def check_mass_assignment(
 
     headers["Content-Type"] = "application/json"
 
+    expected_parameters = sum(len(params) for params in MASS_ASSIGNMENT_PARAMS.values())
     for endpoint in endpoints:
+        if _mark_cooperative_cancel(results):
+            break
         url = urljoin(base_url, endpoint)
         results["endpoints_tested"] += 1
+        path = urlsplit(url).path or "/"
+        attempt = {
+            "custom_endpoint": f"POST {path}",
+            "family": "mass_assignment",
+            "method": "POST",
+            "url": url,
+            "param_count": expected_parameters,
+            "attempted_params_count": 0,
+            "completed_params_count": 0,
+            "status": "started",
+            "proof_observed": False,
+        }
 
         # First, make a baseline request to see if endpoint exists
         baseline = await fetch_with_capture(url, headers=headers, timeout=timeout)
         if baseline.get("status_code", 0) not in [200, 201, 204, 400, 422]:
+            attempt["status"] = "skipped"
+            attempt["skip_reason"] = "endpoint_not_accessible"
+            results["endpoint_attempts"].append(attempt)
             continue  # Endpoint doesn't exist or not accessible
 
         # Test each category of mass assignment parameters
         for category, params in MASS_ASSIGNMENT_PARAMS.items():
             for param_name, param_value in params:
+                if _mark_cooperative_cancel(results):
+                    attempt["status"] = "partial"
+                    attempt["cancelled"] = True
+                    attempt["skip_reason"] = "cancelled"
+                    attempt["budget_exhausted_reason"] = "cancelled"
+                    results["endpoint_attempts"].append(attempt)
+                    return results
                 results["parameters_tested"] += 1
+                attempt["attempted_params_count"] += 1
 
                 # Build test payload
                 import json
@@ -1073,6 +1253,7 @@ async def check_mass_assignment(
                 patch_response = await fetch_with_capture(
                     url, method="PATCH", data=payload, headers=headers, timeout=timeout
                 )
+                attempt["completed_params_count"] += 1
 
                 # Analyze responses for signs of acceptance
                 for method, response in [("POST", post_response), ("PUT", put_response), ("PATCH", patch_response)]:
@@ -1110,7 +1291,18 @@ async def check_mass_assignment(
                                     "cwe": "CWE-915",
                                     "owasp": "API6:2023 - Unrestricted Access to Sensitive Business Flows",
                                 })
+                                attempt["proof_observed"] = True
+                                attempt.setdefault("proof_types", []).append(
+                                    "observed_privilege_field_acceptance"
+                                )
                                 break  # Found for this param, move to next
+
+        attempt["status"] = (
+            "completed"
+            if attempt["completed_params_count"] == attempt["attempted_params_count"]
+            else "partial"
+        )
+        results["endpoint_attempts"].append(attempt)
 
     return results
 
@@ -1391,6 +1583,15 @@ BOLA_RESOURCE_PATH_SEGMENTS = {
     "cart", "carts", "basket", "baskets", "customer", "customers",
     "member", "members", "tenant", "tenants", "project", "projects",
     "organization", "organizations", "org", "company", "companies",
+    # Vulnerable-app/API resource names observed in Juice Shop, crAPI, and
+    # similar REST labs. These should influence only object-resource heuristics,
+    # not operational endpoints such as health/rate-limit.
+    "address", "addresses", "addresss", "card", "cards", "wallet", "wallets",
+    "vehicle", "vehicles", "mechanic", "mechanics", "report", "reports",
+    "service", "services", "shop", "shops", "item", "items", "product",
+    "products", "review", "reviews", "feedback", "complaint", "complaints",
+    "post", "posts", "comment", "comments", "video", "videos", "coupon",
+    "coupons",
 }
 
 BOLA_OPERATIONAL_PATH_SEGMENTS = {
@@ -1411,10 +1612,33 @@ BOLA_RESOURCE_STRONG_KEYS = {
     "email", "username", "profile", "order_id", "orderid", "invoice_id",
     "invoiceid", "document_id", "documentid", "payment_id", "paymentid",
     "customer_id", "customerid", "member_id", "memberid",
+    "vehicle_id", "vehicleid", "vin", "address_id", "addressid",
+    "basket_id", "basketid", "cart_id", "cartid",
 }
 
 BOLA_JSON_ENVELOPE_KEYS = {
     "id", "status", "message", "code", "ok", "success", "data", "result", "errors",
+}
+
+AUTHZ_PRODUCER_STRONG_SEGMENTS = {
+    "me", "dashboard", "profile", "profiles", "account", "accounts",
+    "user", "users", "customer", "customers", "member", "members",
+    "order", "orders", "invoice", "invoices", "payment", "payments",
+    "basket", "baskets", "cart", "carts", "address", "addresses", "addresss",
+    "wallet", "wallets", "vehicle", "vehicles", "garage", "garages",
+    "service", "services", "booking", "bookings", "appointment", "appointments",
+    "report", "reports", "complaint", "complaints", "message", "messages",
+    "conversation", "conversations", "thread", "threads", "post", "posts",
+    "comment", "comments",
+}
+
+AUTHZ_PRODUCER_LOW_VALUE_SEGMENTS = {
+    "auth", "login", "logout", "signin", "signup", "register", "token",
+    "session", "sessions", "csrf", "captcha", "swagger", "openapi", "docs",
+    "health", "status", "metrics", "version", "info", "static", "assets",
+    "images", "files", "uploads", "download", "downloads", "search",
+    "products", "product", "category", "categories", "catalog", "popular",
+    "recommended", "trending", "featured",
 }
 
 
@@ -1447,12 +1671,716 @@ def _extract_json_keys(body: str) -> set[str]:
     return _collect_json_keys(parsed)
 
 
+BOLA_RESOURCE_ID_KEYS = {
+    "id", "_id", "uuid", "uid", "object_id", "objectid",
+    "user_id", "userid", "owner_id", "ownerid", "account_id", "accountid",
+    "customer_id", "customerid", "member_id", "memberid", "order_id", "orderid",
+    "invoice_id", "invoiceid", "document_id", "documentid", "payment_id",
+    "paymentid", "vehicle_id", "vehicleid", "address_id", "addressid",
+    "basket_id", "basketid", "cart_id", "cartid", "product_id", "productid",
+    "vin", "vehicle_vin", "vehiclevin", "vin_number", "vinnumber",
+    "license_plate", "licenseplate",
+}
+
+BOLA_SENSITIVE_FIELD_KEYS = {
+    "email", "username", "phone", "mobile", "mobile_num", "mobilenum",
+    "address", "street", "zip", "postal_code", "vin", "license_plate",
+    "card", "card_number", "credit_card", "token", "jwt", "secret",
+    "api_key", "apikey", "password", "ssn", "dob", "balance", "amount",
+}
+
+
+def _parse_json_body(body: str) -> Any | None:
+    if not body:
+        return None
+    try:
+        return json.loads(body)
+    except Exception:
+        return None
+
+
+def _is_json_like_response(response: dict[str, Any] | None) -> bool:
+    if not response:
+        return False
+    body = str(response.get("body") or "")
+    if not body:
+        return False
+    if _parse_json_body(body) is not None:
+        return True
+    content_type = ""
+    headers = response.get("headers") or {}
+    if isinstance(headers, dict):
+        content_type = str(headers.get("content-type") or headers.get("Content-Type") or "").lower()
+    return "json" in content_type
+
+
+def _flatten_json_objects(value: Any, *, depth: int = 0, max_depth: int = 4) -> list[dict[str, Any]]:
+    """Return object dictionaries from a JSON value without traversing unbounded payloads."""
+    if depth > max_depth:
+        return []
+    objects: list[dict[str, Any]] = []
+    if isinstance(value, dict):
+        objects.append(value)
+        for nested in list(value.values())[:40]:
+            objects.extend(_flatten_json_objects(nested, depth=depth + 1, max_depth=max_depth))
+    elif isinstance(value, list):
+        for nested in value[:80]:
+            objects.extend(_flatten_json_objects(nested, depth=depth + 1, max_depth=max_depth))
+    return objects
+
+
+def _safe_scalar_id(value: Any) -> str | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, str):
+        candidate = value.strip()
+        if not candidate or len(candidate) > 128:
+            return None
+        lowered = candidate.lower()
+        if lowered in {"true", "false", "null", "undefined", "nan"}:
+            return None
+        if candidate.isdigit():
+            return candidate
+        import re
+        if re.fullmatch(r"[a-f0-9]{24}", candidate, re.IGNORECASE):
+            return candidate
+        if re.fullmatch(r"[a-f0-9-]{32,36}", candidate, re.IGNORECASE):
+            return candidate
+        if re.fullmatch(r"[A-Za-z0-9_-]{8,64}", candidate) and any(ch.isdigit() for ch in candidate):
+            return candidate
+    return None
+
+
+def _resource_identifier_name(name: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", str(name or "").lower())
+
+
+def _is_resource_identifier_name(name: str) -> bool:
+    normalized = _resource_identifier_name(name)
+    if not normalized:
+        return False
+    normalized_keys = {_resource_identifier_name(key) for key in BOLA_RESOURCE_ID_KEYS}
+    return normalized in normalized_keys or normalized.endswith("id")
+
+
+def _safe_resource_identifier_value(value: Any, key_name: str) -> str | None:
+    scalar = _safe_scalar_id(value)
+    if scalar:
+        return scalar
+    normalized_key = _resource_identifier_name(key_name)
+    if normalized_key not in {"vin", "vehiclevin", "vinnumber", "licenseplate"}:
+        return None
+    if not isinstance(value, str):
+        return None
+    candidate = value.strip()
+    if not (5 <= len(candidate) <= 32):
+        return None
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", candidate):
+        return None
+    if not any(ch.isdigit() for ch in candidate) or not any(ch.isalpha() for ch in candidate):
+        return None
+    return candidate
+
+
+def _extract_resource_refs_from_json(body: str) -> list[dict[str, Any]]:
+    """Extract generic object IDs and sensitive field names from JSON responses."""
+    parsed = _parse_json_body(body)
+    if parsed is None:
+        return []
+    refs: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for obj in _flatten_json_objects(parsed):
+        if not isinstance(obj, dict):
+            continue
+        sensitive_fields = sorted(
+            str(k) for k in obj.keys()
+            if isinstance(k, str) and k.strip().lower() in BOLA_SENSITIVE_FIELD_KEYS
+        )
+        keys_lower = {str(k).strip().lower(): str(k) for k in obj.keys() if isinstance(k, str)}
+        for lowered, original_key in keys_lower.items():
+            if not _is_resource_identifier_name(lowered):
+                continue
+            object_id = _safe_resource_identifier_value(obj.get(original_key), original_key)
+            if not object_id:
+                continue
+            key = (lowered, object_id)
+            if key in seen:
+                continue
+            seen.add(key)
+            refs.append({
+                "object_id": object_id,
+                "object_id_key": original_key,
+                "object_id_location": "json",
+                "sensitive_fields": sensitive_fields[:12],
+            })
+    return refs[:100]
+
+
+def _resource_ids_from_response(body: str) -> set[str]:
+    return {ref["object_id"] for ref in _extract_resource_refs_from_json(body) if ref.get("object_id")}
+
+
+# JSON keys whose value identifies the OWNER of a resource / a principal.
+_OWNER_IDENTITY_FIELDS = frozenset({
+    "email", "username", "user_name", "user_id", "userid", "owner", "owner_id",
+    "ownerid", "sub", "account", "account_id", "accountid", "preferred_username",
+})
+
+
+def _decode_jwt_claims(token: str) -> dict[str, Any]:
+    """Best-effort decode of a JWT payload (no signature check — identity read only)."""
+    try:
+        parts = token.split(".")
+        if len(parts) < 2:
+            return {}
+        payload = parts[1] + "=" * (-len(parts[1]) % 4)
+        decoded = base64.urlsafe_b64decode(payload).decode("utf-8", "replace")
+        claims = json.loads(decoded)
+        return claims if isinstance(claims, dict) else {}
+    except Exception:
+        return {}
+
+
+def _principal_identity_values(session: Any) -> set[str]:
+    """Stable identity strings for a principal, decoded from its JWT bearer token.
+
+    Returns an empty set for non-JWT/opaque auth (so ownership can't be spoofed into
+    a false-confirm — the caller stays at the suspected tier when identity is unknown).
+    """
+    if session is None:
+        return set()
+    config = getattr(session, "config", None)
+    headers = dict(getattr(config, "headers", None) or {}) if config is not None else {}
+    auth = headers.get("Authorization") or headers.get("authorization") or ""
+    match = re.match(r"bearer\s+(\S+)", str(auth), re.IGNORECASE)
+    if not match:
+        return set()
+    claims = _decode_jwt_claims(match.group(1))
+    values: set[str] = set()
+    for key in ("email", "sub", "user_id", "userId", "username", "preferred_username", "name"):
+        value = claims.get(key)
+        if isinstance(value, (str, int)) and str(value).strip():
+            values.add(str(value).strip().lower())
+    return values
+
+
+def _owner_identity_values(body: str, limit: int = 40) -> set[str]:
+    """Identity values from explicit owner/principal fields in a JSON response."""
+    values: set[str] = set()
+    if not body:
+        return values
+    try:
+        parsed = json.loads(body)
+    except Exception:
+        return values
+
+    def _walk(node: Any, depth: int = 0) -> None:
+        if depth > 6 or len(values) > limit:
+            return
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if isinstance(value, (str, int)) and str(key).lower().replace("-", "_") in _OWNER_IDENTITY_FIELDS:
+                    token = str(value).strip().lower()
+                    if token:
+                        values.add(token)
+                else:
+                    _walk(value, depth + 1)
+        elif isinstance(node, list):
+            for item in node[:20]:
+                _walk(item, depth + 1)
+
+    _walk(parsed)
+    return values
+
+
+def _confirm_cross_principal_ownership(
+    owner_body: str, owner_session: Any, requester_session: Any
+) -> bool:
+    """Return a paired-owner identity signal, never standalone authorization proof.
+
+    A response email or owner-like field is not enough to establish that the requester
+    lacks access. This helper only confirms that the paired owner's identity is present
+    and the requester's is absent. Callers must still retain the suspected tier unless
+    they also have an independent listing/expectation differential.
+    """
+    owner_ident = _principal_identity_values(owner_session)
+    requester_ident = _principal_identity_values(requester_session)
+    if not owner_ident or not requester_ident or owner_ident == requester_ident:
+        return False
+    body_idents = _owner_identity_values(owner_body)
+    return bool(body_idents & owner_ident) and not bool(body_idents & requester_ident)
+
+
+def _sensitive_fields_from_body(body: str) -> list[str]:
+    parsed = _parse_json_body(body)
+    if parsed is None:
+        return []
+    fields: set[str] = set()
+    for obj in _flatten_json_objects(parsed):
+        for key in obj.keys():
+            if isinstance(key, str) and key.strip().lower() in BOLA_SENSITIVE_FIELD_KEYS:
+                fields.add(key)
+    return sorted(fields)[:20]
+
+
+def _path_with_resource_id(base_path: str, object_id: str) -> str:
+    path = (base_path or "/").rstrip("/")
+    if not path:
+        path = "/"
+    return f"{path}/{object_id}"
+
+
+def _collection_item_base_path(base_path: str) -> str | None:
+    """Infer an item endpoint from collection-listing routes such as /orders/all."""
+    path = (base_path or "/").rstrip("/")
+    if not path or path == "/":
+        return None
+    segments = [segment for segment in path.split("/") if segment]
+    if len(segments) < 2:
+        return None
+    terminal = segments[-1].lower()
+    if terminal in {
+        "all", "list", "listing", "recent", "history", "past", "mine",
+        "my", "owned", "search", "results",
+    }:
+        parent = "/" + "/".join(segments[:-1])
+        if parent != path:
+            return parent
+    return None
+
+
+def _normalize_authz_url(base_url: str, raw_url: str) -> str | None:
+    if not isinstance(raw_url, str):
+        return None
+    url = raw_url.strip()
+    if not url:
+        return None
+    if url.startswith("//"):
+        url = "https:" + url
+    if url.startswith("/"):
+        return urljoin(base_url.rstrip("/") + "/", url.lstrip("/"))
+    if not url.startswith("http"):
+        return urljoin(base_url.rstrip("/") + "/", url)
+    return url
+
+
+def _is_resource_placeholder_segment(segment: str) -> bool:
+    text = urllib.parse.unquote(str(segment or "")).strip()
+    if not text:
+        return False
+    lowered = text.lower()
+    if lowered in {"{id}", ":id", "<id>", "$id"}:
+        return True
+    if (text.startswith("{") and text.endswith("}")) or (text.startswith("<") and text.endswith(">")):
+        inner = text[1:-1].strip().lower()
+        return bool(inner) and _is_resource_identifier_name(inner)
+    if text.startswith(":"):
+        return _is_resource_identifier_name(text[1:])
+    return False
+
+
+def _replace_discovered_consumer_id(url: str, object_id: str) -> dict[str, Any] | None:
+    """Return a concrete replay candidate by applying ``object_id`` to a discovered route."""
+    if not object_id:
+        return None
+    try:
+        parsed = urlsplit(url)
+    except Exception:
+        return None
+    if parsed.fragment:
+        return None
+    path = parsed.path or "/"
+    segments = path.split("/")
+    changed = False
+    object_id_location = "path"
+    new_segments: list[str] = []
+    for segment in segments:
+        if not segment:
+            new_segments.append(segment)
+            continue
+        decoded = urllib.parse.unquote(segment)
+        if not changed and (_is_resource_placeholder_segment(segment) or _safe_scalar_id(decoded)):
+            new_segments.append(urllib.parse.quote(str(object_id), safe=""))
+            changed = True
+        else:
+            new_segments.append(segment)
+
+    query_pairs = parse_qsl(parsed.query, keep_blank_values=True)
+    new_pairs: list[tuple[str, str]] = []
+    query_changed = False
+    for key, value in query_pairs:
+        value_is_placeholder = _is_resource_placeholder_segment(value)
+        value_is_id = bool(_safe_scalar_id(value))
+        if not changed and not query_changed and _is_probable_id_param(key) and (value == "" or value_is_placeholder or value_is_id):
+            new_pairs.append((key, str(object_id)))
+            query_changed = True
+            object_id_location = "query"
+        else:
+            new_pairs.append((key, value))
+
+    if not changed and not query_changed:
+        return None
+
+    new_path = "/".join(new_segments) or "/"
+    query = urlencode(new_pairs, doseq=True)
+    concrete_url = urlunsplit((parsed.scheme, parsed.netloc, new_path, query, ""))
+    custom_endpoint = f"GET {new_path}?{query}" if query else f"GET {new_path}"
+    return {
+        "method": "GET",
+        "url": concrete_url,
+        "object_id_location": object_id_location,
+        "custom_endpoint": custom_endpoint,
+        "source": "discovered_consumer_template",
+    }
+
+
+def _authz_consumer_templates(base_url: str, discovered_urls: list[str]) -> list[str]:
+    """Select discovered routes that can consume owner object IDs during replay."""
+    templates: list[str] = []
+    seen: set[str] = set()
+    for raw_url in discovered_urls or []:
+        url = _normalize_authz_url(base_url, raw_url)
+        if not url or url in seen:
+            continue
+        if any(excl in url.lower() for excl in COLLECTION_EXCLUSIONS):
+            continue
+        if _has_excluded_synth_path_segment(url):
+            continue
+        try:
+            parsed = urlsplit(url)
+        except Exception:
+            continue
+        if parsed.fragment:
+            continue
+        path_segments = _bola_path_segments(url)
+        if not (path_segments & BOLA_RESOURCE_PATH_SEGMENTS):
+            continue
+        has_path_id = any(
+            _is_resource_placeholder_segment(segment) or bool(_safe_scalar_id(urllib.parse.unquote(segment)))
+            for segment in (parsed.path or "").split("/")
+            if segment
+        )
+        has_query_id = any(
+            _is_probable_id_param(key) and (value == "" or _is_resource_placeholder_segment(value) or bool(_safe_scalar_id(value)))
+            for key, value in parse_qsl(parsed.query, keep_blank_values=True)
+        )
+        if not has_path_id and not has_query_id:
+            continue
+        seen.add(url)
+        templates.append(url)
+    templates.sort(key=lambda item: (_rank_authz_producer_url(item), len(urlsplit(item).path or "")), reverse=True)
+    return templates[:80]
+
+
+def _resource_replay_candidates(
+    producer_url: str,
+    ref: dict[str, Any],
+    *,
+    consumer_templates: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Build read-safe candidate consumer URLs from a producer response reference."""
+    object_id = str(ref.get("object_id") or "").strip()
+    object_key = str(ref.get("object_id_key") or "id")
+    if not object_id:
+        return []
+    try:
+        parsed = urlsplit(producer_url)
+    except Exception:
+        return []
+    base_path = parsed.path or "/"
+    host = urlunsplit((parsed.scheme, parsed.netloc, "", "", ""))
+    candidates: list[dict[str, Any]] = []
+    seen_urls: set[str] = set()
+
+    for template_url in consumer_templates or []:
+        candidate = _replace_discovered_consumer_id(template_url, object_id)
+        if not candidate:
+            continue
+        candidate_url = str(candidate.get("url") or "")
+        if not candidate_url or candidate_url in seen_urls:
+            continue
+        candidates.append(candidate)
+        seen_urls.add(candidate_url)
+        if len(candidates) >= 5:
+            break
+
+    path_url = host + _path_with_resource_id(base_path, object_id)
+    if path_url not in seen_urls:
+        candidates.append({
+            "method": "GET",
+            "url": path_url,
+            "object_id_location": "path",
+            "custom_endpoint": f"GET {_path_with_resource_id(base_path, object_id)}",
+        })
+        seen_urls.add(path_url)
+
+    item_base_path = _collection_item_base_path(base_path)
+    if item_base_path:
+        item_path = _path_with_resource_id(item_base_path, object_id)
+        item_url = host + item_path
+        if item_url not in seen_urls:
+            candidates.append({
+                "method": "GET",
+                "url": item_url,
+                "object_id_location": "path",
+                "custom_endpoint": f"GET {item_path}",
+            })
+            seen_urls.add(item_url)
+
+    query_pairs = [(k, v) for k, v in parse_qsl(parsed.query, keep_blank_values=True) if not _is_probable_id_param(k)]
+    query_key = object_key if _is_probable_id_param(object_key) else "id"
+    query_pairs.append((query_key, object_id))
+    query = urlencode(query_pairs, doseq=True)
+    query_url = urlunsplit((parsed.scheme, parsed.netloc, base_path, query, ""))
+    if query_url not in seen_urls:
+        candidates.append({
+            "method": "GET",
+            "url": query_url,
+            "object_id_location": "query",
+            "custom_endpoint": f"GET {base_path}?{query}",
+        })
+    return candidates[:6]
+
+
+def _rank_authz_producer_url(url: str) -> int:
+    """Score endpoints by likelihood of producing principal-owned resource IDs."""
+    try:
+        parsed = urlsplit(url)
+    except Exception:
+        parsed = urlsplit(str(url or "/"))
+    path = parsed.path or "/"
+    raw_segments = [segment.lower() for segment in path.split("/") if segment]
+    # Treat endpoint names such as ``mechanic_report`` and ``return-order`` as
+    # semantic resource tokens. Microservice APIs frequently encode the resource
+    # noun in a compound leaf segment, and BOLA producer ranking should not miss
+    # those just because the route is not slash-delimited.
+    segments = set(raw_segments)
+    for segment in raw_segments:
+        segments.update(token for token in re.split(r"[-_]+", segment) if token)
+    score = 0
+
+    if segments & AUTHZ_PRODUCER_STRONG_SEGMENTS:
+        score += 40
+    if any(segment in {"api", "rest"} or segment.startswith("v") and segment[1:].isdigit() for segment in segments):
+        score += 15
+    if parsed.query:
+        # Query IDs are useful, but discovered apps often produce many synthetic
+        # ?id=1/?username=test variants. Keep them competitive without letting
+        # them crowd out concrete service-prefixed collection routes.
+        score += 2
+    if any(segment.endswith(("s", "es", "ies")) for segment in segments):
+        score += 8
+    if segments & BOLA_RESOURCE_PATH_SEGMENTS:
+        score += 10
+    if raw_segments and raw_segments[-1] in {"all", "list", "mine", "owned"} and (segments & BOLA_RESOURCE_PATH_SEGMENTS):
+        score += 18
+
+    low_value_hits = segments & AUTHZ_PRODUCER_LOW_VALUE_SEGMENTS
+    score -= 15 * len(low_value_hits)
+    if _is_operational_only_bola_endpoint(url):
+        score -= 40
+    if any(excl in url.lower() for excl in COLLECTION_EXCLUSIONS):
+        score -= 80
+    if _has_excluded_synth_path_segment(url):
+        score -= 35
+    if any(ch in path for ch in "<>{}"):
+        score -= 25
+
+    # Authenticated producer discovery is read-only. GET collection-ish
+    # endpoints are better producers than deeply nested guessed leaves.
+    depth = len(segments)
+    if depth <= 4:
+        score += 6
+    elif depth >= 8:
+        score -= 10
+
+    return score
+
+
+def _authz_producer_path_key(url: str) -> str:
+    try:
+        parsed = urlsplit(url)
+    except Exception:
+        parsed = urlsplit(str(url or ""))
+    return parsed.path or str(url or "")
+
+
+def _select_authz_producers(ranked_producers: list[str], limit: int) -> list[str]:
+    """Return a diversified producer list from ranked candidates.
+
+    Discovery commonly creates several query variants for one path. Testing all
+    of those before moving on wastes the bounded BOLA budget on repeated 404s and
+    can starve real collection producers discovered later in the worklist.
+    """
+    limit = max(1, int(limit or 1))
+    selected: list[str] = []
+    selected_set: set[str] = set()
+    seen_paths: set[str] = set()
+
+    for url in ranked_producers:
+        path_key = _authz_producer_path_key(url)
+        if path_key in seen_paths:
+            continue
+        selected.append(url)
+        selected_set.add(url)
+        seen_paths.add(path_key)
+        if len(selected) >= limit:
+            return selected
+
+    for url in ranked_producers:
+        if url in selected_set:
+            continue
+        selected.append(url)
+        if len(selected) >= limit:
+            break
+    return selected
+
+
+def _is_low_value_authz_producer_url(url: str) -> bool:
+    """Return True for read targets unlikely to produce owner-scoped IDs."""
+    try:
+        parsed = urlsplit(url)
+    except Exception:
+        parsed = urlsplit(str(url or "/"))
+    segments = {segment.lower() for segment in (parsed.path or "/").split("/") if segment}
+    if not segments:
+        return True
+    if _is_operational_only_bola_endpoint(url):
+        return True
+    auth_flow_segments = {
+        "auth", "login", "logout", "signin", "signup", "register", "token",
+        "tokens", "session", "sessions", "oauth", "oauth2", "verify",
+        "reset-password", "reset", "password", "forgot-password", "mfa",
+        "2fa", "otp", "captcha",
+    }
+    if segments & auth_flow_segments:
+        return True
+    if segments & {"docs", "swagger", "openapi", "health", "status", "metrics"}:
+        return True
+    public_catalog_segments = {
+        "product", "products", "catalog", "category", "categories",
+        "popular", "recommended", "trending", "featured", "search",
+    }
+    if segments & public_catalog_segments and not (segments & {"order", "orders", "basket", "cart", "wallet"}):
+        return True
+    if any(ch in (parsed.path or "") for ch in "<>{}"):
+        return True
+    return False
+
+
+def _new_authz_endpoint_attempt(
+    *,
+    producer_endpoint: str,
+    consumer_endpoint: str,
+    object_id_location: str,
+    principal_label: str,
+    attacker_label: str,
+    property_names: list[str] | None = None,
+) -> dict[str, Any]:
+    return {
+        "custom_endpoint": consumer_endpoint,
+        "family": "authz",
+        "method": "GET",
+        "auth_state": attacker_label,
+        "principal_label": attacker_label,
+        "source_principal": principal_label,
+        "attacker_principal": attacker_label,
+        "producer_endpoint": producer_endpoint,
+        "consumer_endpoint": consumer_endpoint,
+        "object_id_location": object_id_location,
+        "property_names_tested": list(property_names or []),
+        "proof_type": "cross_principal_replay",
+        "param_count": 1,
+        "attempted_params_count": 0,
+        "completed_params_count": 0,
+        "status": "started",
+    }
+
+
+def _authz_write_replay_candidate(candidate: dict[str, Any]) -> dict[str, Any] | None:
+    """Build a bounded low-impact write probe from a proven object URL."""
+    try:
+        parsed = urlsplit(str(candidate.get("url") or ""))
+    except Exception:
+        return None
+    if not parsed.scheme or not parsed.netloc:
+        return None
+    path = parsed.path or "/"
+    query = parsed.query
+    custom_endpoint = f"PATCH {path}?{query}" if query else f"PATCH {path}"
+    return {
+        "method": "PATCH",
+        "url": urlunsplit((parsed.scheme, parsed.netloc, path, query, "")),
+        "object_id_location": candidate.get("object_id_location") or "unknown",
+        "custom_endpoint": custom_endpoint,
+        "body": "{}",
+    }
+
+
+def _new_authz_write_attempt(
+    *,
+    producer_endpoint: str,
+    consumer_endpoint: str,
+    object_id_location: str,
+    principal_label: str,
+    attacker_label: str,
+    property_names: list[str] | None = None,
+) -> dict[str, Any]:
+    return {
+        "custom_endpoint": consumer_endpoint,
+        "family": "authz",
+        "method": "PATCH",
+        "auth_state": attacker_label,
+        "principal_label": attacker_label,
+        "source_principal": principal_label,
+        "attacker_principal": attacker_label,
+        "producer_endpoint": producer_endpoint,
+        "consumer_endpoint": consumer_endpoint,
+        "object_id_location": object_id_location,
+        "property_names_tested": list(property_names or []),
+        "proof_type": "write_cross_principal_replay",
+        "param_count": 1,
+        "attempted_params_count": 0,
+        "completed_params_count": 0,
+        "status": "started",
+    }
+
+
+def _new_authz_producer_attempt(producer_endpoint: str) -> dict[str, Any]:
+    return {
+        "custom_endpoint": producer_endpoint,
+        "family": "authz",
+        "method": "GET",
+        "auth_state": "user1,user2",
+        "principal_label": "user1,user2",
+        "source_principal": "user1",
+        "attacker_principal": "user2",
+        "producer_endpoint": producer_endpoint,
+        "consumer_endpoint": producer_endpoint,
+        "object_id_location": "producer_response",
+        "property_names_tested": [],
+        "proof_type": "resource_producer_discovery",
+        "param_count": 2,
+        "attempted_params_count": 0,
+        "completed_params_count": 0,
+        "status": "started",
+    }
+
+
 def _bola_path_segments(url_or_template: str) -> set[str]:
     try:
         path = urlsplit(url_or_template).path.lower()
     except Exception:
         path = str(url_or_template).lower()
-    return {segment for segment in path.split("/") if segment}
+    segments: set[str] = set()
+    for segment in path.split("/"):
+        if not segment:
+            continue
+        segments.add(segment)
+        segments.update(token for token in re.split(r"[-_]+", segment) if token)
+    return segments
 
 
 def _is_operational_only_bola_endpoint(url_or_template: str) -> bool:
@@ -1551,9 +2479,7 @@ def _is_probable_id_param(param_name: str) -> bool:
     lowered = name.lower()
     if any(excl in lowered for excl in QUERY_ID_PARAM_EXCLUSIONS):
         return False
-    if lowered in {"id", "uid", "uuid"}:
-        return True
-    return lowered.endswith("id")
+    return _is_resource_identifier_name(lowered)
 
 
 def _has_excluded_synth_path_segment(url: str) -> bool:
@@ -1571,6 +2497,7 @@ def synthesize_resource_urls_from_collections(
     discovered_urls: list[str],
     max_collections: int = 20,
     ids_to_test: list[str] | None = None,
+    max_synthesized_urls: int | None = 60,
 ) -> list[str]:
     """
     Synthesize resource URLs from REST collection endpoints.
@@ -1583,8 +2510,14 @@ def synthesize_resource_urls_from_collections(
 
     synthesized = []
     collections_found = []
+    try:
+        max_urls = max(0, int(max_synthesized_urls)) if max_synthesized_urls is not None else None
+    except (TypeError, ValueError):
+        max_urls = 60
 
     for url in discovered_urls:
+        if max_urls is not None and len(collections_found) * len(ids_to_test) >= max_urls:
+            break
         # Skip if URL already has an ID pattern
         if any(re.search(pattern, url) for pattern, _ in ID_PATTERNS):
             continue
@@ -1607,6 +2540,8 @@ def synthesize_resource_urls_from_collections(
     for collection_url in collections_found[:max_collections]:
         base = collection_url.rstrip('/')
         for test_id in ids_to_test:
+            if max_urls is not None and len(synthesized) >= max_urls:
+                return synthesized
             synthesized.append(f"{base}/{test_id}")
 
     return synthesized
@@ -1683,6 +2618,823 @@ def synthesize_query_urls_from_param_endpoints(
     return synthesized
 
 
+def _bola_custom_endpoint(url: str, method: str = "GET") -> str | None:
+    try:
+        parsed = urlsplit(url)
+    except Exception:
+        return None
+    path = parsed.path or "/"
+    if not path.startswith("/"):
+        path = "/" + path
+    method = (method or "GET").upper()
+    return f"{method} {path}?{parsed.query}" if parsed.query else f"{method} {path}"
+
+
+def _new_bola_endpoint_attempt(url: str, *, test_id_count: int) -> dict[str, Any] | None:
+    custom_endpoint = _bola_custom_endpoint(url, "GET")
+    if not custom_endpoint:
+        return None
+    return {
+        "custom_endpoint": custom_endpoint,
+        "family": "bola",
+        "method": "GET",
+        "url": url,
+        "param_count": max(0, int(test_id_count or 0)),
+        "attempted_params_count": 0,
+        "completed_params_count": 0,
+        "status": "started",
+    }
+
+
+def _finish_bola_endpoint_attempt(
+    attempt: dict[str, Any] | None,
+    *,
+    budget_exceeded: bool = False,
+    budget_exhausted_reason: str = "time_budget",
+) -> dict[str, Any] | None:
+    if not attempt:
+        return None
+    if budget_exceeded:
+        attempt["budget_exhausted"] = True
+        attempt["budget_exhausted_reason"] = budget_exhausted_reason
+    completed = int(attempt.get("completed_params_count") or 0)
+    expected = int(attempt.get("param_count") or 0)
+    if completed <= 0:
+        attempt["status"] = "partial"
+    elif budget_exceeded and expected and completed < expected:
+        attempt["status"] = "partial"
+    else:
+        attempt["status"] = "completed"
+    return attempt
+
+
+SAFE_AUTH_PROBE_METHODS = {"GET", "HEAD"}
+
+
+def _auth_session_headers(session: Any | None) -> dict[str, str]:
+    """Snapshot headers/cookies from an AuthSession-like object."""
+    headers: dict[str, str] = {}
+    if not session or not hasattr(session, "config"):
+        return headers
+    headers.update(getattr(session.config, "headers", None) or {})
+    cookies = dict(getattr(session.config, "cookies", None) or {})
+    state = getattr(session, "state", None)
+    if state is not None:
+        cookies.update(getattr(state, "cookies_received", None) or {})
+    if cookies:
+        headers["Cookie"] = "; ".join(f"{k}={v}" for k, v in cookies.items())
+    return headers
+
+
+def _endpoint_auth_probe_candidate(base_url: str, endpoint: Any) -> dict[str, Any] | None:
+    """Return a read-only URL + inventory replay key for one discovered endpoint."""
+    replay_spec: str | None = None
+    if isinstance(endpoint, str):
+        raw = endpoint.strip()
+        method = "GET"
+        parts = raw.split(" ", 1)
+        if len(parts) == 2 and parts[0].isalpha():
+            method = parts[0].upper()
+            raw = parts[1].strip()
+            replay_spec = endpoint.strip()
+        if " " in raw:
+            raw = raw.split(" ", 1)[0].strip()
+    elif isinstance(endpoint, dict):
+        raw = endpoint.get("url") or endpoint.get("path")
+        method = str(endpoint.get("method") or "GET").upper()
+        replay_spec = endpoint.get("replay_spec") if isinstance(endpoint.get("replay_spec"), str) else None
+    else:
+        return None
+    if not raw or not isinstance(raw, str):
+        return None
+
+    try:
+        absolute = raw if "://" in raw else urljoin(base_url.rstrip("/") + "/", raw.lstrip("/"))
+        parsed = urlsplit(absolute)
+    except Exception:
+        return None
+
+    path = parsed.path or "/"
+    query = parsed.query
+    params: list[str] = []
+    if isinstance(endpoint, dict):
+        params = [str(p) for p in (endpoint.get("params") or []) if p]
+    if not query and params and method in SAFE_AUTH_PROBE_METHODS:
+        query = urlencode([(p, "1") for p in params], doseq=True)
+
+    test_url = urlunsplit((parsed.scheme, parsed.netloc, path, query, ""))
+    custom_endpoint = replay_spec or (f"{method} {path}?{query}" if query else f"{method} {path}")
+    return {
+        "method": method,
+        "url": test_url,
+        "custom_endpoint": custom_endpoint,
+        "param_count": max(1, len(params)),
+    }
+
+
+def _new_auth_endpoint_attempt(candidate: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "custom_endpoint": candidate["custom_endpoint"],
+        "family": "auth",
+        "method": candidate["method"],
+        "url": candidate["url"],
+        "param_count": int(candidate.get("param_count") or 1),
+        "attempted_params_count": 0,
+        "completed_params_count": 0,
+        "status": "started",
+    }
+
+
+def _finish_auth_attempt(
+    attempt: dict[str, Any],
+    *,
+    completed: bool,
+    skip_reason: str | None = None,
+    error_summary: str | None = None,
+    cancelled: bool = False,
+) -> dict[str, Any]:
+    if cancelled:
+        attempt["status"] = "partial" if int(attempt.get("attempted_params_count") or 0) else "skipped"
+        attempt["skip_reason"] = "cancelled"
+        return attempt
+    if skip_reason:
+        attempt["status"] = "skipped"
+        attempt["skip_reason"] = skip_reason
+        return attempt
+    if error_summary:
+        attempt["status"] = "partial"
+        attempt["error_summary"] = error_summary
+        return attempt
+    attempt["status"] = "completed" if completed else "partial"
+    return attempt
+
+
+def _auth_response_status(response: dict[str, Any]) -> int:
+    try:
+        return int(response.get("status_code") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _looks_like_login_or_error(body: str) -> bool:
+    lowered = (body or "")[:4000].lower()
+    markers = (
+        "login", "log in", "sign in", "signin", "authenticate",
+        "unauthorized", "forbidden", "access denied", "permission denied",
+    )
+    return any(marker in lowered for marker in markers)
+
+
+async def _fetch_auth_access_probe(
+    url: str,
+    *,
+    method: str = "GET",
+    headers: dict[str, str] | None = None,
+    timeout: int = 10,
+) -> dict[str, Any]:
+    cmd = [
+        "curl", "-sS",
+        "-X", method,
+        "-L", "--max-redirs", "5",
+        "-k",
+        "--max-time", str(timeout),
+        "-w", "\n__AUTH_META__%{http_code}__END_AUTH_META__",
+    ]
+    for name, value in (headers or {}).items():
+        cmd.extend(["-H", f"{name}: {value}"])
+    cmd.append(url)
+    stdout, stderr, rc = await run(cmd, timeout=timeout + 5)
+    if rc != 0 and not stdout:
+        return {"status_code": 0, "body": "", "headers": {}, "error": stderr or f"curl failed with code {rc}"}
+    marker = "\n__AUTH_META__"
+    if marker not in stdout:
+        return {"status_code": 0, "body": stdout or "", "headers": {}, "error": "missing_status_metadata"}
+    body, meta = stdout.rsplit(marker, 1)
+    status_raw = meta.split("__END_AUTH_META__", 1)[0]
+    try:
+        status = int(status_raw)
+    except (TypeError, ValueError):
+        status = 0
+    return {"status_code": status, "body": body, "headers": {}, "error": None}
+
+
+async def smart_auth_access_test(
+    base_url: str,
+    endpoints: list[Any],
+    auth_session: Any | None = None,
+    max_endpoints: int = 50,
+    timeout: int = 10,
+) -> dict[str, Any]:
+    """Focused auth/access-control probe with per-endpoint telemetry.
+
+    The first runnable `auth` family check is intentionally read-only: for each
+    claimed GET/HEAD endpoint, compare an authenticated request with a truly
+    anonymous request. It reports a finding only when authenticated content
+    carrying concrete user-specific signals is reachable anonymously with an
+    equivalent response. Other public endpoints simply record completed
+    telemetry so ASM coverage is truthful without inflating findings.
+    """
+    results: dict[str, Any] = {
+        "vulnerable": False,
+        "findings": [],
+        "endpoints_analyzed": 0,
+        "anonymous_accessible": 0,
+        "auth_required": 0,
+        "skipped": 0,
+        "endpoint_attempts": [],
+        "cancelled": False,
+        "budget_exceeded": False,
+        "budget_exhausted_reason": None,
+    }
+
+    auth_headers = _auth_session_headers(auth_session)
+    candidates: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for endpoint in endpoints or []:
+        candidate = _endpoint_auth_probe_candidate(base_url, endpoint)
+        if not candidate:
+            continue
+        key = candidate["custom_endpoint"]
+        if key in seen:
+            continue
+        seen.add(key)
+        candidates.append(candidate)
+        if len(candidates) >= max(1, int(max_endpoints or 1)):
+            break
+
+    for candidate in candidates:
+        if _mark_cooperative_cancel(results):
+            break
+        attempt = _new_auth_endpoint_attempt(candidate)
+        method = str(candidate.get("method") or "GET").upper()
+        if method not in SAFE_AUTH_PROBE_METHODS:
+            results["skipped"] += 1
+            results["endpoint_attempts"].append(
+                _finish_auth_attempt(attempt, completed=False, skip_reason="unsafe_method_not_tested")
+            )
+            continue
+        if not auth_headers:
+            results["skipped"] += 1
+            results["endpoint_attempts"].append(
+                _finish_auth_attempt(attempt, completed=False, skip_reason="auth_missing")
+            )
+            continue
+
+        attempt["attempted_params_count"] += 1
+        auth_resp = await _fetch_auth_access_probe(
+            candidate["url"],
+            method=method,
+            headers=auth_headers,
+            timeout=timeout,
+        )
+        if _mark_cooperative_cancel(results):
+            results["endpoint_attempts"].append(
+                _finish_auth_attempt(attempt, completed=False, cancelled=True)
+            )
+            break
+        anon_resp = await _fetch_auth_access_probe(
+            candidate["url"],
+            method=method,
+            timeout=timeout,
+        )
+        auth_error = auth_resp.get("error")
+        anon_error = anon_resp.get("error")
+        if auth_error or anon_error:
+            error_summary = str(auth_error or anon_error or "request_error")[:200]
+            results["endpoint_attempts"].append(
+                _finish_auth_attempt(attempt, completed=False, error_summary=error_summary)
+            )
+            continue
+
+        attempt["completed_params_count"] += 1
+        results["endpoints_analyzed"] += 1
+        auth_status = _auth_response_status(auth_resp)
+        anon_status = _auth_response_status(anon_resp)
+        auth_body = str(auth_resp.get("body") or "")
+        anon_body = str(anon_resp.get("body") or "")
+        if anon_status in {401, 403}:
+            results["auth_required"] += 1
+        elif 200 <= anon_status < 300:
+            results["anonymous_accessible"] += 1
+
+        user_signals = extract_user_specific_signals(auth_body)
+        if (
+            200 <= auth_status < 300
+            and 200 <= anon_status < 300
+            and user_signals
+            and len(auth_body) > 50
+            and len(anon_body) > 50
+            and not _looks_like_login_or_error(anon_body)
+            and responses_equivalent(auth_body, anon_body)
+        ):
+            results["vulnerable"] = True
+            path_hash = hashlib.sha256(f"{candidate['custom_endpoint']}:anon".encode()).hexdigest()[:8]
+            similarity = response_similarity(auth_body, anon_body)
+            results["findings"].append({
+                "id": f"smart_auth:{path_hash}",
+                "tool": "smart_auth",
+                "title": f"Authentication bypass: anonymous access to {candidate['custom_endpoint']}",
+                "severity": "high",
+                "confidence": 0.75,
+                "evidence": {
+                    "url": candidate["url"],
+                    "method": method,
+                    "auth_status": auth_status,
+                    "anonymous_status": anon_status,
+                    "responses_equivalent": True,
+                    "response_similarity": round(similarity, 3),
+                    "user_specific_signals": user_signals[:8],
+                    "response_snippet": anon_body[:300],
+                },
+                "description": (
+                    "An endpoint returned equivalent user-specific content with and without "
+                    "authentication. Confirm the endpoint is intended to be public."
+                ),
+                "remediation": "Require authentication for user-specific resources and add anonymous-access regression tests.",
+                "cwe": "CWE-306",
+                "owasp": "A01:2021 - Broken Access Control",
+            })
+
+        results["endpoint_attempts"].append(_finish_auth_attempt(attempt, completed=True))
+
+    return results
+
+
+async def authz_resource_replay_test(
+    base_url: str,
+    discovered_urls: list[str],
+    user1_session: Any | None,
+    user2_session: Any | None,
+    *,
+    max_producers: int = 25,
+    max_replays: int = 80,
+    timeout: int = 10,
+    max_seconds: float | None = None,
+) -> dict[str, Any]:
+    """Auth-aware object authorization check built from real producer responses.
+
+    The check is intentionally read-only. It first fetches collection/resource
+    producer endpoints as user1 and user2, extracts object IDs from JSON bodies,
+    then lets user2 replay only IDs seen in user1's response but not in user2's
+    own producer response. A finding requires deterministic proof: user1 and
+    user2 both receive equivalent resource-like data for the same object ID, and
+    that ID was absent from user2's producer response.
+    """
+    from .proof_of_exploit import fetch_with_capture
+
+    started = time.monotonic()
+
+    def _deadline_exceeded() -> bool:
+        return bool(max_seconds and max_seconds > 0 and (time.monotonic() - started) >= max_seconds)
+
+    results: dict[str, Any] = {
+        "vulnerable": False,
+        "findings": [],
+        "producers_tested": 0,
+        "producer_ids_found": 0,
+        "replays_attempted": 0,
+        "replays_completed": 0,
+        "write_replays_attempted": 0,
+        "write_replays_completed": 0,
+        "cross_principal_violations": 0,
+        "write_cross_principal_violations": 0,
+        "budget_exceeded": False,
+        "cancelled": False,
+        "budget_exhausted_reason": None,
+        "resource_map": [],
+        "endpoint_attempts": [],
+    }
+
+    def _stop_requested() -> bool:
+        if _mark_cooperative_cancel(results):
+            return True
+        if _deadline_exceeded():
+            results["budget_exceeded"] = True
+            results["budget_exhausted_reason"] = "time_budget_exhausted"
+            return True
+        return False
+
+    user1_headers = _auth_session_headers(user1_session)
+    user2_headers = _auth_session_headers(user2_session)
+    if not user1_headers or not user2_headers:
+        results["skipped"] = True
+        results["reason"] = "multi_user_credentials_required"
+        return results
+    principal_fingerprints = [
+        hashlib.sha256(json.dumps(headers, sort_keys=True).encode()).hexdigest()[:16]
+        for headers in (user1_headers, user2_headers)
+    ]
+    results["principal_validation"] = {
+        "credential_contexts_distinct": principal_fingerprints[0] != principal_fingerprints[1],
+        "credential_fingerprints": principal_fingerprints,
+        "accepted_responses_observed": False,
+    }
+    if principal_fingerprints[0] == principal_fingerprints[1]:
+        results["skipped"] = True
+        results["reason"] = "same_principal_context"
+        return results
+    max_write_replays = max(1, min(20, int(max_replays or 1) // 4 or 1))
+
+    producer_candidates: list[str] = []
+    seen: set[str] = set()
+    for raw_url in discovered_urls or []:
+        url = _normalize_authz_url(base_url, raw_url)
+        if not url:
+            continue
+        if any(excl in url.lower() for excl in COLLECTION_EXCLUSIONS):
+            continue
+        if _has_excluded_synth_path_segment(url):
+            continue
+        if _is_low_value_authz_producer_url(url):
+            continue
+        try:
+            parsed = urlsplit(url)
+        except Exception:
+            continue
+        if parsed.fragment:
+            continue
+        # Producer responses should be read-safe. Keep URL-pattern endpoints
+        # too because some APIs expose a single resource that can produce nested IDs.
+        custom = _bola_custom_endpoint(url, "GET")
+        if not custom or custom in seen:
+            continue
+        seen.add(custom)
+        producer_candidates.append(url)
+
+    consumer_templates = _authz_consumer_templates(base_url, discovered_urls or [])
+    results["consumer_template_count"] = len(consumer_templates)
+    results["consumer_templates_sample"] = [
+        _bola_custom_endpoint(url, "GET") or url for url in consumer_templates[:20]
+    ]
+
+    producer_limit = max(1, int(max_producers or 1))
+    ranked_pairs = sorted(
+        enumerate(producer_candidates),
+        key=lambda item: (_rank_authz_producer_url(item[1]), -item[0]),
+        reverse=True,
+    )
+    ranked_producers = [url for _idx, url in ranked_pairs]
+    producers = _select_authz_producers(ranked_producers, producer_limit)
+    selected_producers = set(producers)
+    results["producer_candidate_count"] = len(producer_candidates)
+    results["producer_selection_strategy"] = "owned_resource_path_rank_diverse_v2"
+    results["producer_candidates_sample"] = [
+        {
+            "url": url,
+            "rank": _rank_authz_producer_url(url),
+            "selected": url in selected_producers,
+        }
+        for url in ranked_producers[: min(20, len(ranked_producers))]
+    ]
+
+    for producer_url in producers:
+        if _stop_requested():
+            break
+        results["producers_tested"] += 1
+        producer_endpoint = _bola_custom_endpoint(producer_url, "GET") or f"GET {producer_url}"
+        producer_attempt = _new_authz_producer_attempt(producer_endpoint)
+        producer_attempt["attempted_params_count"] = 1
+        try:
+            user1_resp = await fetch_with_capture(producer_url, headers=user1_headers, timeout=timeout, budget_key="bola")
+            if _mark_cooperative_cancel(results):
+                producer_attempt["status"] = "partial"
+                producer_attempt["skip_reason"] = "cancelled"
+                results["endpoint_attempts"].append(producer_attempt)
+                break
+            producer_attempt["attempted_params_count"] = 2
+            user2_listing_resp = await fetch_with_capture(producer_url, headers=user2_headers, timeout=timeout, budget_key="bola")
+        except Exception as exc:
+            producer_attempt["status"] = "partial"
+            producer_attempt["error_summary"] = str(exc)[:200]
+            results["endpoint_attempts"].append(producer_attempt)
+            continue
+        user1_status = _auth_response_status(user1_resp)
+        user2_listing_status = _auth_response_status(user2_listing_resp)
+        producer_attempt["completed_params_count"] = 2
+        producer_attempt["owner_status"] = user1_status
+        producer_attempt["attacker_listing_status"] = user2_listing_status
+        if 200 <= user1_status < 300 and 200 <= user2_listing_status < 300:
+            results["principal_validation"]["accepted_responses_observed"] = True
+        if not (200 <= user1_status < 300) or not _is_json_like_response(user1_resp):
+            producer_attempt["status"] = "partial"
+            producer_attempt["skip_reason"] = "producer_not_json_or_not_accessible"
+            results["endpoint_attempts"].append(producer_attempt)
+            continue
+        user1_body = str(user1_resp.get("body") or "")
+        user2_listing_body = str(user2_listing_resp.get("body") or "")
+        user1_refs = _extract_resource_refs_from_json(user1_body)
+        if not user1_refs:
+            producer_attempt["status"] = "completed"
+            producer_attempt["resource_ids_found"] = 0
+            producer_attempt["skip_reason"] = "no_resource_ids_found"
+            results["endpoint_attempts"].append(producer_attempt)
+            continue
+        producer_attempt["status"] = "completed"
+        producer_attempt["resource_ids_found"] = len(user1_refs)
+        results["endpoint_attempts"].append(producer_attempt)
+        user2_ids = (
+            _resource_ids_from_response(user2_listing_body)
+            if 200 <= user2_listing_status < 300 and _is_json_like_response(user2_listing_resp)
+            else set()
+        )
+        results["producer_ids_found"] += len(user1_refs)
+
+        for ref in user1_refs:
+            if _stop_requested():
+                break
+            object_id = str(ref.get("object_id") or "")
+            if not object_id or object_id in user2_ids:
+                continue
+            candidates = _resource_replay_candidates(
+                producer_url,
+                ref,
+                consumer_templates=consumer_templates,
+            )
+            if not candidates:
+                continue
+            results["resource_map"].append({
+                "producer_endpoint": producer_endpoint,
+                "object_id_key": ref.get("object_id_key"),
+                "object_id_location": ref.get("object_id_location"),
+                "source_principal": "user1",
+                "excluded_from_principal": "user2",
+                "consumer_candidates": [c["custom_endpoint"] for c in candidates],
+                "sensitive_fields": ref.get("sensitive_fields") or [],
+            })
+            for candidate in candidates:
+                if _stop_requested():
+                    break
+                if results["replays_attempted"] >= max(1, int(max_replays or 1)):
+                    results["budget_exceeded"] = True
+                    results["budget_exhausted_reason"] = "replay_budget_exhausted"
+                    break
+                attempt = _new_authz_endpoint_attempt(
+                    producer_endpoint=producer_endpoint,
+                    consumer_endpoint=candidate["custom_endpoint"],
+                    object_id_location=candidate["object_id_location"],
+                    principal_label="user1",
+                    attacker_label="user2",
+                    property_names=ref.get("sensitive_fields") or [],
+                )
+                attempt["attempted_params_count"] = 1
+                results["replays_attempted"] += 1
+                try:
+                    owner_resp = await fetch_with_capture(
+                        candidate["url"], headers=user1_headers, timeout=timeout, budget_key="bola"
+                    )
+                    if _mark_cooperative_cancel(results):
+                        attempt["status"] = "partial"
+                        attempt["skip_reason"] = "cancelled"
+                        results["endpoint_attempts"].append(attempt)
+                        break
+                    attacker_resp = await fetch_with_capture(
+                        candidate["url"], headers=user2_headers, timeout=timeout, budget_key="bola"
+                    )
+                except Exception as exc:
+                    attempt["status"] = "partial"
+                    attempt["error_summary"] = str(exc)[:200]
+                    results["endpoint_attempts"].append(attempt)
+                    continue
+
+                owner_status = _auth_response_status(owner_resp)
+                attacker_status = _auth_response_status(attacker_resp)
+                owner_body = str(owner_resp.get("body") or "")
+                attacker_body = str(attacker_resp.get("body") or "")
+                attempt["completed_params_count"] = 1
+                attempt["status"] = "completed"
+                results["replays_completed"] += 1
+
+                sensitive_fields = sorted(set((ref.get("sensitive_fields") or []) + _sensitive_fields_from_body(attacker_body)))[:20]
+                equivalent = (
+                    200 <= owner_status < 300
+                    and 200 <= attacker_status < 300
+                    and len(owner_body) > 20
+                    and len(attacker_body) > 20
+                    and responses_equivalent(owner_body, attacker_body)
+                )
+                resource_like = _looks_like_bola_resource_response(candidate["url"], attacker_body)
+                user_signals = extract_user_specific_signals(attacker_body)
+                # CRITICAL authz-proof guard: confirm the attacker actually received the
+                # REQUESTED owner object, not their OWN object echoed back by an
+                # id-ignoring endpoint (e.g. Juice Shop /rest/saveLoginIp returns the
+                # caller's own profile regardless of ?id=). Such endpoints produce
+                # equivalent-looking responses that are NOT cross-principal access:
+                # the attacker's body carries their own id (686), not the owner's (685).
+                attacker_returned_ids = _resource_ids_from_response(attacker_body)
+                if not object_id:
+                    owner_object_received = True
+                elif attacker_returned_ids:
+                    owner_object_received = object_id in attacker_returned_ids
+                else:
+                    owner_object_received = object_id in attacker_body
+                if not owner_object_received:
+                    attempt["last_verdict"] = "id_ignored_returned_own_object"
+                if equivalent and resource_like and owner_object_received and (user_signals or sensitive_fields):
+                    results["vulnerable"] = True
+                    results["cross_principal_violations"] += 1
+                    path_hash = hashlib.sha256(
+                        f"{producer_endpoint}:{candidate['custom_endpoint']}:{object_id}:user2".encode()
+                    ).hexdigest()[:10]
+                    similarity = response_similarity(owner_body, attacker_body)
+                    evidence = {
+                        "family": "authz",
+                        "method": "GET",
+                        "producer_endpoint": producer_endpoint,
+                        "consumer_endpoint": candidate["custom_endpoint"],
+                        "url": candidate["url"],
+                        "source_principal": "user1",
+                        "attacker_principal": "user2",
+                        "object_id_key": ref.get("object_id_key"),
+                        "object_id_location": candidate["object_id_location"],
+                        "object_id_absent_from_attacker_listing": True,
+                        "distinct_principal_control": True,
+                        "principal_credential_fingerprints": principal_fingerprints,
+                        # Proof that the attacker received the OWNER's object, not their own.
+                        "requested_object_id": object_id,
+                        "attacker_returned_object_ids": sorted(attacker_returned_ids)[:8],
+                        "owner_status": owner_status,
+                        "attacker_status": attacker_status,
+                        "authenticated_responses_accepted": True,
+                        "accepted_principal_responses": {
+                            "owner_listing_status": user1_status,
+                            "attacker_listing_status": user2_listing_status,
+                            "owner_replay_status": owner_status,
+                            "attacker_replay_status": attacker_status,
+                        },
+                        "responses_equivalent": True,
+                        "response_similarity": round(similarity, 3),
+                        "sensitive_fields": sensitive_fields,
+                        "user_specific_signals": user_signals[:8],
+                        "authz_diff": {
+                            "producer_ids_owner_count": len(user1_refs),
+                            "producer_ids_attacker_count": len(user2_ids),
+                            "replayed_owner_object_missing_from_attacker_listing": True,
+                            "owner_resource_equivalent_to_attacker_resource": True,
+                        },
+                        "proof_type": "cross_principal_replay",
+                        "response_snippet": attacker_body[:300],
+                    }
+                    results["findings"].append({
+                        "id": f"smart_authz:{path_hash}",
+                        "tool": "smart_authz",
+                        "title": f"Broken object authorization: user2 can access user1 object at {candidate['custom_endpoint']}",
+                        "severity": "high",
+                        "confidence": 0.82,
+                        "severity_rationale": (
+                            "High: deterministic cross-principal replay returned equivalent "
+                            "resource data for an object ID produced by user1 and absent from "
+                            "user2's own producer response."
+                        ),
+                        "evidence": evidence,
+                        "description": (
+                            "A resource ID observed in user1's authenticated response was not "
+                            "present in user2's own listing, but user2 could replay the object "
+                            "endpoint and receive equivalent resource data."
+                        ),
+                        "remediation": (
+                            "Authorize every object read against the requesting principal. "
+                            "Add regression tests for cross-user object access."
+                        ),
+                        "cwe": "CWE-639",
+                        "owasp": "API1:2023 - Broken Object Level Authorization",
+                    })
+                results["endpoint_attempts"].append(attempt)
+                if results["cross_principal_violations"] >= 10:
+                    return results
+
+                if results["write_replays_attempted"] < max_write_replays:
+                    write_candidate = _authz_write_replay_candidate(candidate)
+                    if write_candidate:
+                        if _mark_cooperative_cancel(results):
+                            break
+                        write_attempt = _new_authz_write_attempt(
+                            producer_endpoint=producer_endpoint,
+                            consumer_endpoint=write_candidate["custom_endpoint"],
+                            object_id_location=write_candidate["object_id_location"],
+                            principal_label="user1",
+                            attacker_label="user2",
+                            property_names=ref.get("sensitive_fields") or [],
+                        )
+                        write_attempt["attempted_params_count"] = 1
+                        results["write_replays_attempted"] += 1
+                        write_headers = dict(user2_headers)
+                        write_headers["Content-Type"] = "application/json"
+                        try:
+                            write_resp = await fetch_with_capture(
+                                write_candidate["url"],
+                                method=write_candidate["method"],
+                                data=write_candidate["body"],
+                                headers=write_headers,
+                                timeout=timeout,
+                                budget_key="bola",
+                            )
+                        except Exception as exc:
+                            write_attempt["status"] = "partial"
+                            write_attempt["error_summary"] = str(exc)[:200]
+                            results["endpoint_attempts"].append(write_attempt)
+                            continue
+
+                        write_status = _auth_response_status(write_resp)
+                        write_body = str(write_resp.get("body") or "")
+                        write_attempt["completed_params_count"] = 1
+                        write_attempt["status"] = "completed"
+                        write_attempt["attacker_status"] = write_status
+                        results["write_replays_completed"] += 1
+                        write_returned_ids = _resource_ids_from_response(write_body)
+                        # Require the owner's object id as a STRUCTURED resource id in the write
+                        # response, not a bare substring (which also matches error text / unrelated
+                        # echoes). Unconfirmed -> not a write finding.
+                        write_owner_object_received = bool(write_returned_ids) and object_id in write_returned_ids
+                        if not write_owner_object_received:
+                            write_attempt["last_verdict"] = "owner_object_not_confirmed_in_write_response"
+
+                        write_resource_like = _looks_like_bola_resource_response(write_candidate["url"], write_body)
+                        write_user_signals = extract_user_specific_signals(write_body)
+                        # Derive sensitive-field signals from the WRITE response only; inheriting
+                        # the earlier GET's sensitive_fields would let a read-derived signal satisfy
+                        # the write gate (evidence contamination).
+                        write_sensitive_fields = sorted(set(_sensitive_fields_from_body(write_body)))[:20]
+                        if (
+                            200 <= write_status < 300
+                            and write_body
+                            and _is_json_like_response(write_resp)
+                            and write_resource_like
+                            and write_owner_object_received
+                            and (write_user_signals or write_sensitive_fields)
+                        ):
+                            results["vulnerable"] = True
+                            results["write_cross_principal_violations"] += 1
+                            path_hash = hashlib.sha256(
+                                f"{producer_endpoint}:{write_candidate['custom_endpoint']}:{object_id}:user2:write".encode()
+                            ).hexdigest()[:10]
+                            write_evidence = {
+                                "family": "authz",
+                                "producer_endpoint": producer_endpoint,
+                                "consumer_endpoint": write_candidate["custom_endpoint"],
+                                "url": write_candidate["url"],
+                                "method": write_candidate["method"],
+                                "request_body": write_candidate["body"],
+                                "source_principal": "user1",
+                                "attacker_principal": "user2",
+                                "object_id_key": ref.get("object_id_key"),
+                                "object_id_location": write_candidate["object_id_location"],
+                                "object_id_absent_from_attacker_listing": True,
+                                "distinct_principal_control": True,
+                                "principal_credential_fingerprints": principal_fingerprints,
+                                "requested_object_id": object_id,
+                                "attacker_returned_object_ids": sorted(write_returned_ids)[:8],
+                                "owner_status": user1_status,
+                                "attacker_status": write_status,
+                                "authenticated_responses_accepted": True,
+                                "accepted_principal_responses": {
+                                    "owner_listing_status": user1_status,
+                                    "attacker_listing_status": user2_listing_status,
+                                    "attacker_write_status": write_status,
+                                },
+                                "sensitive_fields": write_sensitive_fields,
+                                "user_specific_signals": write_user_signals[:8],
+                                "authz_diff": {
+                                    "producer_ids_owner_count": len(user1_refs),
+                                    "producer_ids_attacker_count": len(user2_ids),
+                                    "replayed_owner_object_missing_from_attacker_listing": True,
+                                    "attacker_write_returned_owner_object": True,
+                                },
+                                "proof_type": "write_cross_principal_replay",
+                                "mutation_confirmed": False,
+                                "response_snippet": write_body[:300],
+                            }
+                            results["findings"].append({
+                                "id": f"smart_authz_write:{path_hash}",
+                                "tool": "smart_authz",
+                                "title": f"Broken object authorization: user2 reached user1 object via write-method (PATCH) at {write_candidate['custom_endpoint']}",
+                                "severity": "critical",
+                                "confidence": 0.84,
+                                "severity_rationale": (
+                                    "Critical: a second authenticated principal received a successful "
+                                    "write-method response for an object ID produced by user1 and absent "
+                                    "from user2's own producer response. Cross-principal write ACCESS is "
+                                    "confirmed; persistence of a mutation was not separately re-verified."
+                                ),
+                                "evidence": write_evidence,
+                                "description": (
+                                    "A resource ID observed in user1's authenticated response was not "
+                                    "present in user2's own listing, but user2 could invoke a PATCH "
+                                    "request against that object and receive resource data for it."
+                                ),
+                                "remediation": (
+                                    "Authorize every object write against the requesting principal. "
+                                    "Add multi-user regression tests for update/delete workflows."
+                                ),
+                                "cwe": "CWE-639",
+                                "owasp": "API1:2023 - Broken Object Level Authorization",
+                            })
+                        results["endpoint_attempts"].append(write_attempt)
+            if results.get("budget_exceeded"):
+                break
+
+    return results
+
+
 async def smart_bola_test(
     base_url: str,
     discovered_urls: list[str],
@@ -1735,11 +3487,24 @@ async def smart_bola_test(
         "id_patterns_found": 0,
         "access_violations": 0,
         "cross_user_violations": 0,
+        "write_cross_user_violations": 0,
         "method_variations_tested": 0,
         "synthesized_urls_tested": 0,
         "synthesized_query_urls_tested": 0,
         "budget_exceeded": False,
+        "cancelled": False,
+        "budget_exhausted_reason": None,
+        "endpoint_attempts": [],
     }
+
+    def _stop_requested() -> bool:
+        if _mark_cooperative_cancel(results):
+            return True
+        if _deadline is not None and _time.monotonic() >= _deadline:
+            results["budget_exceeded"] = True
+            results["budget_exhausted_reason"] = "time_budget_exhausted"
+            return True
+        return False
 
     def build_headers(session):
         """Snapshot auth headers + cookies for a session.
@@ -1757,6 +3522,34 @@ async def smart_bola_test(
                 cookie_str = "; ".join(f"{k}={v}" for k, v in cookies.items())
                 headers["Cookie"] = cookie_str
         return headers
+
+    if _stop_requested():
+        return results
+
+    if user1_session is not None and user2_session is not None:
+        authz_results = await authz_resource_replay_test(
+            base_url=base_url,
+            discovered_urls=discovered_urls,
+            user1_session=user1_session,
+            user2_session=user2_session,
+            max_producers=min(40, max_endpoints),
+            max_replays=max(20, max_endpoints * 2),
+            timeout=timeout,
+            max_seconds=max_seconds * 0.35 if max_seconds and max_seconds > 0 else None,
+        )
+        results["authz_resource_replay"] = authz_results
+        results["findings"].extend(authz_results.get("findings") or [])
+        results["endpoint_attempts"].extend(authz_results.get("endpoint_attempts") or [])
+        results["cross_user_violations"] += int(authz_results.get("cross_principal_violations") or 0)
+        results["write_cross_user_violations"] += int(authz_results.get("write_cross_principal_violations") or 0)
+        if authz_results.get("vulnerable"):
+            results["vulnerable"] = True
+        if authz_results.get("budget_exceeded"):
+            results["budget_exceeded"] = True
+            results["budget_exhausted_reason"] = authz_results.get("budget_exhausted_reason")
+        if authz_results.get("cancelled"):
+            results["cancelled"] = True
+            return results
 
     # Synthesize resource URLs from collection endpoints
     synthesized_urls = synthesize_resource_urls_from_collections(
@@ -1790,6 +3583,8 @@ async def smart_bola_test(
     id_endpoints = {}  # path_template -> {pattern_type, original_ids, base_url}
 
     for url in all_urls_to_analyze:
+        if _stop_requested():
+            break
         for pattern, pattern_type in ID_PATTERNS:
             match = re.search(pattern, url)
             if match:
@@ -1813,10 +3608,9 @@ async def smart_bola_test(
     for template, info in list(id_endpoints.items())[:max_endpoints]:
         # Respect the overall budget: stop gracefully and keep findings so far
         # instead of being hard-cancelled (which discards partial results).
-        if _deadline is not None and _time.monotonic() >= _deadline:
-            results["budget_exceeded"] = True
+        if _stop_requested():
             print(
-                f"[bola] Overall budget reached after {results['endpoints_analyzed']} "
+                f"[bola] Stop requested after {results['endpoints_analyzed']} "
                 f"endpoints; returning {len(results['findings'])} findings gathered so far",
                 file=__import__('sys').stderr,
             )
@@ -1851,6 +3645,10 @@ async def smart_bola_test(
 
         # Deduplicate test IDs
         test_ids = list(dict.fromkeys(test_ids))[:10]
+        attempt = _new_bola_endpoint_attempt(
+            info.get("example_url") or template.replace("{id}", test_ids[0] if test_ids else "1"),
+            test_id_count=len(test_ids),
+        )
 
         template_no_auth_candidates: list[dict[str, Any]] = []
         template_no_auth_statuses: set[int] = set()
@@ -1858,8 +3656,12 @@ async def smart_bola_test(
 
         # Test each ID
         for test_id in test_ids:
+            if _stop_requested():
+                break
             # Replace {id} with test ID
             test_url = template.replace('{id}', test_id)
+            if attempt is not None:
+                attempt["attempted_params_count"] += 1
 
             # Rebuild headers per request so mid-loop session refresh is honoured.
             user1_headers = build_headers(user1_session)
@@ -1867,6 +3669,8 @@ async def smart_bola_test(
 
             # Test with user1
             user1_resp = await fetch_with_capture(test_url, headers=user1_headers, timeout=timeout, budget_key="bola")
+            if _mark_cooperative_cancel(results):
+                break
             user1_status = user1_resp.get("status_code", 0)
             user1_body = user1_resp.get("body", "")
 
@@ -1874,6 +3678,8 @@ async def smart_bola_test(
             # (cross-user comparison only makes sense with two authenticated users)
             if user2_session is not None:
                 user2_resp = await fetch_with_capture(test_url, headers=user2_headers, timeout=timeout, budget_key="bola")
+                if _mark_cooperative_cancel(results):
+                    break
                 user2_status = user2_resp.get("status_code", 0)
                 user2_body = user2_resp.get("body", "")
 
@@ -1895,20 +3701,23 @@ async def smart_bola_test(
                                 similarity = response_similarity(user1_body, user2_body)
                                 results["cross_user_violations"] += 1
                                 path_hash = hashlib.sha256(f"{test_url}:crossuser".encode()).hexdigest()[:8]
-                                results["findings"].append({
+                                # A paired-owner identity is supporting evidence only.
+                                # The generic ID loop has no attacker-listing or policy
+                                # control, so equivalent responses cannot prove user2 is
+                                # unauthorized. Deterministic promotion is reserved for
+                                # authz_resource_replay_test's listing differential.
+                                paired_owner_identity = _confirm_cross_principal_ownership(
+                                    user2_body, user1_session, user2_session
+                                )
+                                finding = {
                                     "id": f"smart_bola:{path_hash}",
                                     "tool": "smart_bola",
                                     "title": f"BOLA: Cross-user data access at {template}",
-                                    "severity": "high",
-                                    "suspected": True,
-                                    "needs_verification": True,
-                                    "verification_reason": (
-                                        "Both users received equivalent user-specific data for the same "
-                                        "resource ID; confirm the second user is not an owner/admin."
-                                    ),
-                                    "confidence": 0.6,
+                                    "cwe": "CWE-639",
+                                    "owasp": "API1:2023 - Broken Object Level Authorization",
                                     "evidence": {
                                         "url": test_url,
+                                        "method": "GET",
                                         "test_id": test_id,
                                         "pattern_type": pattern_type,
                                         "user1_status": user1_status,
@@ -1916,17 +3725,30 @@ async def smart_bola_test(
                                         "responses_equivalent": True,
                                         "response_similarity": round(similarity, 3),
                                         "user_specific_signals": user_signals[:8],
+                                        "paired_owner_identity_observed": paired_owner_identity,
                                         "response_snippet": user1_body[:300],
                                     },
-                                    "description": f"Both test users received equivalent user-specific data for resource ID {test_id}. "
-                                                 "If user2 does not own this resource, this is missing object-level authorization.",
-                                    "remediation": "Implement object-level authorization. Verify requesting user owns the resource.",
-                                    "cwe": "CWE-639",
-                                    "owasp": "API1:2023 - Broken Object Level Authorization",
-                                })
+                                    "severity": "high",
+                                    "suspected": True,
+                                    "needs_verification": True,
+                                    "verification_reason": (
+                                        "Both users received equivalent user-specific data for the same "
+                                        "resource ID; prove the object is absent from user2's authorized "
+                                        "listing or compare against an explicit deny expectation."
+                                    ),
+                                    "confidence": 0.65 if paired_owner_identity else 0.6,
+                                    "description": (
+                                        f"Both test users received equivalent user-specific data for resource ID {test_id}. "
+                                        "This is a BOLA lead, but the response alone does not prove user2 lacks access."
+                                    ),
+                                    "remediation": "Implement object-level authorization and verify requesting user owns the resource.",
+                                }
+                                results["findings"].append(finding)
 
             # Test without auth
             no_auth_resp = await fetch_with_capture(test_url, timeout=timeout, budget_key="bola")
+            if _mark_cooperative_cancel(results):
+                break
             no_auth_status = no_auth_resp.get("status_code", 0)
             no_auth_body = no_auth_resp.get("body", "")
             template_no_auth_statuses.add(no_auth_status)
@@ -1945,6 +3767,24 @@ async def smart_bola_test(
                         }
                     )
                     template_no_auth_fingerprints.add(_response_body_fingerprint(no_auth_body))
+            if attempt is not None:
+                attempt["completed_params_count"] += 1
+
+        if results.get("cancelled") or results.get("budget_exceeded"):
+            stop_reason = (
+                "cancelled"
+                if results.get("cancelled")
+                else str(results.get("budget_exhausted_reason") or "time_budget_exhausted")
+            )
+            finished_attempt = _finish_bola_endpoint_attempt(
+                attempt,
+                budget_exceeded=True,
+                budget_exhausted_reason=stop_reason,
+            )
+            if finished_attempt:
+                finished_attempt["skip_reason"] = stop_reason
+                results["endpoint_attempts"].append(finished_attempt)
+            break
 
         if template_no_auth_candidates:
             sample = template_no_auth_candidates[0]
@@ -1968,6 +3808,7 @@ async def smart_bola_test(
                     "severity": "critical",
                     "evidence": {
                         "url": sample.get("url"),
+                        "method": "GET",
                         "pattern_type": pattern_type,
                         "successful_ids": successful_ids[:10],
                         "successful_count": len(successful_ids),
@@ -1988,6 +3829,8 @@ async def smart_bola_test(
         # Test method variations (PUT, DELETE, PATCH on GET endpoints)
         if user1_headers and results["endpoints_analyzed"] <= 10:  # Limit method testing
             for method in ["PUT", "DELETE", "PATCH"]:
+                if _stop_requested():
+                    break
                 results["method_variations_tested"] += 1
                 # Use the first discovered URL for method testing
                 method_url = info['example_url']
@@ -2025,6 +3868,13 @@ async def smart_bola_test(
                             "cwe": "CWE-639",
                             "owasp": "API1:2023 - Broken Object Level Authorization",
                         })
+
+        finished_attempt = _finish_bola_endpoint_attempt(
+            attempt,
+            budget_exceeded=bool(results.get("budget_exceeded")),
+        )
+        if finished_attempt:
+            results["endpoint_attempts"].append(finished_attempt)
 
     return results
 
@@ -2487,5 +4337,154 @@ async def check_vertical_privilege_escalation(
                     "cwe": "CWE-269",
                     "owasp": "A01:2021 - Broken Access Control",
                 })
+
+    return results
+
+
+def _is_collection_endpoint(url: str) -> bool:
+    """True if the URL looks like a REST collection (``/api/Users``, ``/rest/products``)
+    and isn't an excluded docs/static/health path. Reuses the shared collection
+    patterns so this stays consistent with resource-id synthesis."""
+    import re
+    low = url.lower()
+    if any(excl in low for excl in COLLECTION_EXCLUSIONS):
+        return False
+    return any(re.match(p, url, re.IGNORECASE) for p in COLLECTION_ENDPOINT_PATTERNS)
+
+
+async def check_collection_authz(
+    base_url: str,
+    discovered_urls: list[str] | None = None,
+    auth_session: Any | None = None,
+    timeout: int = 10,
+    max_endpoints: int = 40,
+) -> dict[str, Any]:
+    """Broken function-level authorization (BFLA) on sensitive COLLECTION endpoints.
+
+    General technique, no app-specific paths: a collection like ``/api/Users``
+    that denies anonymous callers (401/403) but returns a bulk array of OTHER
+    principals' sensitive records to *any authenticated user* is broken
+    function-level authorization — authentication is enforced, authorization is
+    not. The anonymous-denied vs authenticated-bulk-data differential IS the
+    deterministic proof, so findings are emitted pre-verified.
+
+    Precision guards (avoid flagging an endpoint returning only the caller's own
+    record): require the authenticated response to (a) pass the ``rest_api_models``
+    sensitive-field content validation (email/role/token markers, HTML rejected)
+    and (b) expose cross-principal data — >=2 distinct identities OR a privileged
+    (role:admin) record.
+    """
+    import re
+
+    results: dict[str, Any] = {"vulnerable": False, "findings": [], "endpoints_tested": 0}
+    if not auth_session:
+        results["skipped_reason"] = "no_auth_session"
+        return results
+
+    from .proof_of_exploit import fetch_with_capture
+
+    auth_headers: dict[str, str] = {}
+    if hasattr(auth_session, "config"):
+        auth_headers.update(getattr(auth_session.config, "headers", {}) or {})
+        cookies = getattr(auth_session.config, "cookies", {}) or {}
+        if cookies:
+            auth_headers["Cookie"] = "; ".join(f"{k}={v}" for k, v in cookies.items())
+    if not auth_headers:
+        results["skipped_reason"] = "no_auth_headers"
+        return results
+
+    # Candidate collections: discovered URLs that match the collection pattern,
+    # plus the curated rest_api_models model list so an admin/model API not
+    # linked in the SPA is still probed.
+    candidates: list[str] = []
+    seen: set[str] = set()
+
+    def _add(raw: Any) -> None:
+        if not raw:
+            return
+        u = str(raw)
+        full = u if u.startswith("http") else urljoin(base_url.rstrip("/") + "/", u.lstrip("/"))
+        path = urlsplit(full).path or "/"
+        if path in seen:
+            return
+        if not _is_collection_endpoint(full):
+            return
+        seen.add(path)
+        candidates.append(full)
+
+    for u in (discovered_urls or []):
+        _add(u)
+    for p in PRIVILEGED_PATHS.get("rest_api_models", []):
+        _add(urljoin(base_url.rstrip("/") + "/", p.lstrip("/")))
+    candidates = candidates[:max_endpoints]
+
+    def _content_type(resp: dict[str, Any]) -> str:
+        for k, v in (resp.get("headers") or {}).items():
+            if str(k).lower() == "content-type":
+                return str(v)
+        return ""
+
+    for url in candidates:
+        results["endpoints_tested"] += 1
+        try:
+            r_auth = await fetch_with_capture(url, headers=auth_headers, timeout=timeout)
+        except Exception:
+            continue
+        if int(r_auth.get("status_code") or 0) != 200:
+            continue
+        body_auth = r_auth.get("body") or ""
+        ok, _reason = _has_category_content(body_auth, _content_type(r_auth), "rest_api_models")
+        if not ok:
+            continue
+        # Cross-principal guard: bulk data belonging to more than just the caller.
+        emails = set(re.findall(r'"email"\s*:\s*"([^"]+)"', body_auth))
+        has_privileged = bool(re.search(r'"(?:role|isadmin|is_admin)"\s*:\s*"?(?:admin|true)"?', body_auth, re.I))
+        if len(emails) < 2 and not has_privileged:
+            continue
+
+        # Anonymous differential.
+        try:
+            r_anon = await fetch_with_capture(url, timeout=timeout)
+        except Exception:
+            continue
+        s_anon = int(r_anon.get("status_code") or 0)
+        anon_denied = s_anon in (401, 403)
+        anon_leaks = False
+        if s_anon == 200:
+            anon_leaks, _ = _has_category_content(r_anon.get("body") or "", _content_type(r_anon), "rest_api_models")
+
+        # BFLA when anonymous is denied but any authenticated user gets the bulk
+        # data. If anonymous ALSO leaks it, that is an even worse unauthenticated
+        # exposure — still report (forced browsing may also flag it separately).
+        if not (anon_denied or (s_anon == 200 and not anon_leaks)):
+            continue
+
+        results["vulnerable"] = True
+        path = urlsplit(url).path
+        principal = "any authenticated user" if anon_denied else "a lower-privileged principal"
+        results["findings"].append({
+            "tool": "bfla",
+            "title": f"Broken function-level authorization: {path} returns bulk user records to {principal}",
+            "severity": "high",
+            "verified": True,
+            "type": "bfla",
+            "url": url,
+            "evidence": {
+                "type": "bfla",
+                "url": url,
+                "anonymous_status": s_anon,
+                "authenticated_status": 200,
+                "distinct_identities": len(emails),
+                "privileged_record_present": has_privileged,
+                "differential": (
+                    f"anonymous -> HTTP {s_anon}; authenticated -> HTTP 200 with "
+                    f"{len(emails)} distinct user record(s)"
+                    + (" incl. a privileged (admin) record" if has_privileged else "")
+                ),
+                "authenticated_snippet": body_auth[:300],
+            },
+            "cwe": "CWE-285",
+            "owasp": "A01:2021 - Broken Access Control",
+        })
 
     return results

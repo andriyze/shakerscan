@@ -441,8 +441,22 @@ class ConversationExchange:
         return transcript
 
 
+# R6b/§3.8: per-profile response-body caps. An explicit metadata/target
+# max_response_bytes always wins; otherwise the cap scales with scan depth.
+PROFILE_RESPONSE_BYTE_CAPS = {
+    "smoke": 65_536,
+    "trace": 131_072,
+    "standard": 262_144,
+    "deep": 1_000_000,
+}
+
+
+def profile_response_byte_cap(scan_profile: Any) -> int:
+    return PROFILE_RESPONSE_BYTE_CAPS.get(str(scan_profile or "").strip().lower(), 262_144)
+
+
 class RestJsonConversationTarget:
-    def __init__(self, target_url: str, target: dict[str, Any]) -> None:
+    def __init__(self, target_url: str, target: dict[str, Any], *, default_max_response_bytes: int | None = None) -> None:
         self.target = target
         self.method = str(target.get("method") or "POST").upper()
         raw_url = str(target.get("endpoint_url") or target_url).strip()
@@ -482,7 +496,7 @@ class RestJsonConversationTarget:
         metadata = as_dict(target.get("metadata_json"))
         self.max_response_bytes = _coerce_int(
             metadata.get("max_response_bytes", target.get("max_response_bytes")),
-            262_144,
+            default_max_response_bytes or 262_144,
             minimum=1_024,
             maximum=5_000_000,
         )
@@ -1133,11 +1147,31 @@ class RestJsonConversationTarget:
                 )
                 response_metadata: dict[str, Any] = {
                     "streaming_mode": self.streaming_mode,
+                    "request_url": request_url,
+                    "final_url": str(getattr(response, "url", "") or request_url),
                     "content_type": content_type,
                     "response_truncated": response_truncated,
                     "max_response_bytes": self.max_response_bytes,
                     "raw_response_bytes_observed": raw_bytes_observed,
                 }
+                redirect_chain = [
+                    str(getattr(item, "url", "") or "")
+                    for item in (getattr(response, "history", None) or [])
+                    if str(getattr(item, "url", "") or "").strip()
+                ]
+                final_response_url = str(getattr(response, "url", "") or request_url)
+                if final_response_url != request_url and final_response_url not in redirect_chain:
+                    redirect_chain.append(final_response_url)
+                if redirect_chain:
+                    response_metadata["redirect_chain"] = redirect_chain
+                try:
+                    connection = getattr(response, "connection", None)
+                    transport = getattr(connection, "transport", None)
+                    peer = transport.get_extra_info("peername") if transport else None
+                    if isinstance(peer, (list, tuple)) and peer:
+                        response_metadata["remote_ip"] = str(peer[0])
+                except Exception:
+                    pass
                 if self.request_budget is not None:
                     response_metadata["request_budget"] = self.request_budget.to_dict()
                 selected_principal = self._select_principal(principal)
@@ -1176,7 +1210,10 @@ class RestJsonConversationTarget:
                 )
         except Exception as exc:  # noqa: BLE001
             elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
-            response_metadata: dict[str, Any] = {"streaming_mode": self.streaming_mode}
+            response_metadata: dict[str, Any] = {
+                "streaming_mode": self.streaming_mode,
+                "request_url": request_url,
+            }
             if self.request_budget is not None:
                 response_metadata["request_budget"] = self.request_budget.to_dict()
             return ConversationExchange(
@@ -1200,7 +1237,7 @@ class RestJsonConversationTarget:
 
 
 class SseConversationTarget(RestJsonConversationTarget):
-    def __init__(self, target_url: str, target: dict[str, Any]) -> None:
+    def __init__(self, target_url: str, target: dict[str, Any], **kwargs: Any) -> None:
         sse_target = dict(target)
         sse_target["streaming_mode"] = "sse"
-        super().__init__(target_url, sse_target)
+        super().__init__(target_url, sse_target, **kwargs)

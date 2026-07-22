@@ -100,6 +100,7 @@ async def verify_high_severity_findings(
     max_verification_attempts: int = 3,
     min_severity: str = "high",
     include_summary: bool = False,
+    max_findings: int | None = None,
 ) -> list[dict] | tuple[list[dict], dict]:
     """
     Attempt to verify findings at/above the configured severity before final report.
@@ -147,6 +148,8 @@ async def verify_high_severity_findings(
             "prove_xxe",
             "prove_jwt",
             "prove_bola",
+            "prove_exposed_file",
+            "prove_nosqli",
         )
         for name in prover_names:
             fn = getattr(_proof_module, name, None)
@@ -166,6 +169,32 @@ async def verify_high_severity_findings(
     eligible_count = 0
     attempted_count = 0
     skipped_count = 0
+    # Bound how many findings get the EXPENSIVE per-finding proof (browser/timing)
+    # at scan time. Without this, a large scan with many high/critical findings runs
+    # verification for tens of minutes with no progress, and the finalize phase gets
+    # reaped as stale (losing all results). Deferred findings keep suspected/
+    # needs_verification status and are picked up by the worker's async auto-retest.
+    verify_budget_used = 0
+
+    # When a scan-time verification budget (max_findings) applies, verify the
+    # high-value families first so noisy findings can't consume the budget before
+    # SQLi/XSS/BOLA/SSRF get proofed. Stable sort; below-threshold findings keep
+    # their relative order and aren't affected (they're passed through unverified).
+    if max_findings is not None:
+        _VERIFY_FAMILY_RANK = {"sqli": 0, "bola": 0, "idor": 0, "ssrf": 1, "xss": 1,
+                               "command_injection": 1, "rce": 1, "xxe": 1,
+                               "path_traversal": 2, "open_redirect": 3}
+        def _verify_priority(f: dict) -> int:
+            t = normalize_finding_type(str(f.get("type", "")).lower()) or ""
+            if t in _VERIFY_FAMILY_RANK:
+                return _VERIFY_FAMILY_RANK[t]
+            hay = (str(f.get("title", "")) + " " + str(f.get("tool", ""))).lower()
+            for kw, rank in (("bola", 0), ("idor", 0), ("object authorization", 0),
+                             ("sql", 0), ("xss", 1), ("ssrf", 1)):
+                if kw in hay:
+                    return rank
+            return 5
+        findings = sorted(findings, key=_verify_priority)
 
     for finding in findings:
         severity = finding.get("severity", "info").lower()
@@ -194,6 +223,12 @@ async def verify_high_severity_findings(
             title = str(finding.get("title", "")).lower()
             tool = str(finding.get("tool", "")).lower()
             for probe, ft in [
+                # NoSQL + BFLA MUST come before the generic sqli/bola checks: "sql
+                # injection" is a substring of "nosql injection", and BFLA titles
+                # don't contain "bola". First match wins.
+                ("nosql", "nosqli"), ("no sql", "nosqli"),
+                ("broken function level", "bola"), ("broken access control", "bola"),
+                ("function level authorization", "bola"), ("bfla", "bola"),
                 ("xss", "xss"), ("cross-site scripting", "xss"),
                 ("sqli", "sqli"), ("sql injection", "sqli"), ("sql-injection", "sqli"),
                 ("ssrf", "ssrf"), ("server-side request forgery", "ssrf"),
@@ -202,6 +237,13 @@ async def verify_high_severity_findings(
                 ("cors", "cors"),
                 ("command injection", "command_injection"), ("rce", "command_injection"),
                 ("ssti", "ssti"), ("template injection", "ssti"),
+                ("broken object level", "bola"), ("bola", "bola"),
+                # Exposed-file harvest ("Sensitive file exposed: X") + forced
+                # browsing, so unproven exposures downgrade instead of lingering
+                # as unverified highs. Primary route is finding["type"], this is
+                # the title/tool fallback.
+                ("file exposed", "exposed_file"), ("exposed file", "exposed_file"),
+                ("exposed_file", "exposed_file"), ("forced_browsing", "exposed_file"),
             ]:
                 if probe in title or probe in tool:
                     finding_type = ft
@@ -215,6 +257,22 @@ async def verify_high_severity_findings(
         if finding_type == "sqli" and not verify_sqli:
             verified_findings.append(finding)
             continue
+
+        # Scan-time verification budget: spend it ONLY on findings that will actually
+        # attempt an expensive proof (a known finding_type with a prover ladder).
+        # Untyped/no-prover findings don't consume budget, so noisy high/critical
+        # signals can't starve SQLi/XSS/BOLA proofs. Once exhausted, defer the rest
+        # (kept suspected + needs_verification for the worker's async auto-retest).
+        if finding_type and max_findings is not None:
+            if verify_budget_used >= max_findings:
+                finding["needs_verification"] = True
+                finding["suspected"] = True
+                finding["verification_skipped"] = True
+                finding.setdefault("verification_reason", "scan_verification_budget_exhausted")
+                skipped_count += 1
+                verified_findings.append(finding)
+                continue
+            verify_budget_used += 1
 
         if finding_type == "sqli":
             try:

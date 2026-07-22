@@ -29,12 +29,42 @@ _BROWSER_CRAWL_STATIC_EXTS = {
 }
 
 
+def _redirect_chain_from_header_blocks(start_url: str, blocks: list[str]) -> list[str]:
+    """Recover each concrete Location hop from curl's followed header blocks."""
+    current = str(start_url or "").strip()
+    chain: list[str] = []
+    for block in blocks:
+        lines = [line.strip() for line in block.splitlines() if line.strip()]
+        if not lines or not lines[0].startswith("HTTP/"):
+            continue
+        try:
+            status = int(lines[0].split()[1])
+        except (IndexError, ValueError):
+            continue
+        if status < 300 or status >= 400:
+            continue
+        location = None
+        for line in lines[1:]:
+            name, sep, value = line.partition(":")
+            if sep and name.strip().lower() == "location":
+                location = value.strip()
+                break
+        if not location:
+            continue
+        destination = urllib.parse.urljoin(current, location)
+        if destination and destination not in chain:
+            chain.append(destination)
+        current = destination or current
+    return chain
+
+
 async def curl_headers(url: str, http3: bool = False) -> dict[str, Any]:
     cmd = ["curl", "-sS", "-I", "-L", "-k", "--max-redirs", "5", url]
     if http3:
         cmd.insert(-1, "--http3")
     out, err, rc = await run(cmd, timeout=45)
-    blocks = [b for b in out.split("\r\n\r\n") if b.strip()] if out else []
+    blocks = [b for b in re.split(r"\r?\n\r?\n", out) if b.strip()] if out else []
+    redirect_chain = _redirect_chain_from_header_blocks(url, blocks)
     headers: dict[str, list[str]] = {}
     status = None
     if blocks:
@@ -50,7 +80,8 @@ async def curl_headers(url: str, http3: bool = False) -> dict[str, Any]:
     if (not status) or (" 405" in status):
         get_out, _, get_rc = await run(["curl", "-sS", "-i", "-L", "-k", "--max-redirs", "5", url], timeout=45)
         if get_rc == 0 and get_out:
-            blocks2 = [b for b in get_out.split("\r\n\r\n") if b.strip()]
+            blocks2 = [b for b in re.split(r"\r?\n\r?\n", get_out) if b.strip()]
+            redirect_chain = _redirect_chain_from_header_blocks(url, blocks2)
             if blocks2:
                 # Find the last header block (line starts with HTTP/)
                 header_block = None
@@ -67,11 +98,28 @@ async def curl_headers(url: str, http3: bool = False) -> dict[str, Any]:
                         if ":" in l:
                             k, v = l.split(":", 1)
                             headers.setdefault(k.strip().lower(), []).append(v.strip())
-    out2, _, _ = await run(["curl", "-sS", "-o", "/dev/null", "-w", "%{url_effective}", "-L", "-k", url])
+    out2, _, _ = await run([
+        "curl", "-sS", "-o", "/dev/null", "-w", "%{url_effective}\\n%{remote_ip}",
+        "-L", "-k", "--max-redirs", "5", url,
+    ])
+    effective_lines = [line.strip() for line in str(out2 or "").splitlines()]
+    final_url = effective_lines[0] if effective_lines and effective_lines[0] else url
+    remote_ip = effective_lines[1] if len(effective_lines) > 1 and effective_lines[1] else None
+    if final_url != url and final_url not in redirect_chain:
+        redirect_chain.append(final_url)
     # HTTP/3 advertisement via alt-svc
     alt_svc = ",".join(headers.get("alt-svc", [])) if headers else ""
     advertises_h3 = "h3=" in alt_svc.lower() if alt_svc else False
-    return {"status": status, "headers": headers, "final_url": (out2.strip() if out2 else url), "raw": out, "advertises_h3": advertises_h3}
+    return {
+        "status": status,
+        "headers": headers,
+        "request_url": url,
+        "final_url": final_url,
+        "redirect_chain": redirect_chain,
+        "remote_ip": remote_ip,
+        "raw": out,
+        "advertises_h3": advertises_h3,
+    }
 
 
 async def supports_http2(url: str) -> bool:

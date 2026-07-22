@@ -12,6 +12,20 @@ def test_synthesize_from_collection():
     assert len(result) == 5
 
 
+def test_synthesize_from_collections_is_bounded():
+    urls = [f"http://localhost:3000/api/Resource{i}s/" for i in range(50)]
+    result = synthesize_resource_urls_from_collections(
+        urls,
+        max_collections=50,
+        ids_to_test=["1", "2", "3", "4", "5"],
+        max_synthesized_urls=12,
+    )
+
+    assert len(result) == 12
+    assert result[0] == "http://localhost:3000/api/Resource0s/1"
+    assert result[-1] == "http://localhost:3000/api/Resource2s/2"
+
+
 def test_skip_urls_with_existing_ids():
     urls = ['http://localhost:3000/api/BasketItems/5']
     result = synthesize_resource_urls_from_collections(urls)

@@ -1,14 +1,29 @@
 import asyncio
 import hashlib
 import os
+import re
 import signal
 import ssl
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import UTC, datetime
 from typing import Any
+
+try:
+    from .request_meter import RequestBudgetExceeded, get_request_meter
+except ImportError:  # pragma: no cover - flat-module fallback
+    from request_meter import RequestBudgetExceeded, get_request_meter
+
+try:  # sibling module; tolerate flat (/app) execution
+    from .adaptive_throttle import get_throttle as _get_active_throttle
+except ImportError:  # pragma: no cover - flat-module fallback
+    try:
+        from adaptive_throttle import get_throttle as _get_active_throttle
+    except ImportError:
+        _get_active_throttle = None
 
 # Disable SSL verification for testing
 _ssl_context = ssl.create_default_context()
@@ -72,6 +87,135 @@ def normalize_hash_route_url(hash_route: str, current_url: str) -> str | None:
 _MAX_CONCURRENT_SUBPROCESSES = int(os.environ.get("SCANNER_MAX_CONCURRENT", "15"))
 _subprocess_semaphore: asyncio.Semaphore | None = None
 _semaphore_loop: asyncio.AbstractEventLoop | None = None
+_SUBPROCESS_RECEIPT_LIMIT = int(os.environ.get("SCANNER_SUBPROCESS_RECEIPT_LIMIT", "200"))
+_SUBPROCESS_PREVIEW_BYTES = 500
+_SUBPROCESS_ARTIFACT_MAX_BYTES = int(os.environ.get("SCANNER_SUBPROCESS_ARTIFACT_MAX_BYTES", "8192"))
+_subprocess_receipts: list[dict[str, Any]] = []
+
+
+_SENSITIVE_ARG_MARKERS = (
+    "token", "secret", "password", "passwd", "authorization", "cookie",
+    "apikey", "api_key", "key=", "jwt",
+)
+
+
+def _redact_arg(value: Any) -> str:
+    text = str(value if value is not None else "")
+    lowered = text.lower()
+    if any(marker in lowered for marker in _SENSITIVE_ARG_MARKERS):
+        return "[REDACTED]"
+    if len(text) > 240:
+        return text[:120] + "...[truncated]..." + text[-40:]
+    return text
+
+
+def _redacted_argv(cmd: list[str]) -> list[str]:
+    redacted: list[str] = []
+    redact_next = False
+    for arg in cmd or []:
+        text = str(arg)
+        if redact_next:
+            redacted.append("[REDACTED]")
+            redact_next = False
+            continue
+        if text in {"-H", "--header", "-b", "--cookie", "--cookie-jar", "-d", "--data", "--data-raw", "--data-binary"}:
+            redacted.append(text)
+            redact_next = True
+            continue
+        redacted.append(_redact_arg(text))
+    return redacted
+
+
+def _redact_output_text(value: Any) -> str:
+    text = str(value if value is not None else "")
+    replacements = (
+        (r"(?i)(authorization:\s*bearer\s+)[^\s,;]+", r"\1[REDACTED]"),
+        (r"(?i)(bearer|token|secret|password|signature|api[_-]?key)=([^&\s]+)", r"\1=[REDACTED]"),
+        (r"(?i)(\"(?:token|secret|password|api[_-]?key|authorization)\"\s*:\s*\")[^\"]+(\")", r"\1[REDACTED]\2"),
+        (r"(?i)\b(?:sk|pk)_[a-z0-9_=-]{12,}\b", "[REDACTED]"),
+    )
+    for pattern, replacement in replacements:
+        text = re.sub(pattern, replacement, text)
+    # Strip NUL bytes: they are valid UTF-8 and survive decoding, but Postgres rejects
+    #  in jsonb, so an unstripped NUL makes the receipt/artifact INSERT raise and the
+    # record is silently dropped (binary tool output would leave no receipt at all).
+    text = text.replace("\x00", "")
+    return text
+
+
+def _output_artifact(stream_name: str, value: str) -> dict[str, Any] | None:
+    redacted = _redact_output_text(value)
+    if len(redacted) <= _SUBPROCESS_PREVIEW_BYTES:
+        return None
+    max_bytes = max(0, _SUBPROCESS_ARTIFACT_MAX_BYTES)
+    if max_bytes <= 0:
+        return None
+    encoded = redacted.encode("utf-8", "ignore")
+    captured = encoded[:max_bytes].decode("utf-8", "ignore")
+    return {
+        "stream": stream_name,
+        "content": captured,
+        "content_sha256": hashlib.sha256(captured.encode("utf-8", "ignore")).hexdigest(),
+        "original_length": len(value or ""),
+        "redacted_length": len(redacted),
+        "captured_length": len(captured),
+        "truncated": len(encoded) > max_bytes,
+        "redaction_profile": "subprocess_output_redact_v1",
+    }
+
+
+def reset_subprocess_receipts() -> None:
+    _subprocess_receipts.clear()
+
+
+def snapshot_subprocess_receipts() -> list[dict[str, Any]]:
+    return [dict(item) for item in _subprocess_receipts]
+
+
+def _record_subprocess_receipt(
+    cmd: list[str],
+    *,
+    timeout_seconds: int,
+    exit_code: int,
+    timed_out: bool,
+    started_at: float,
+    stdout: str = "",
+    stderr: str = "",
+    error: str | None = None,
+) -> None:
+    if len(_subprocess_receipts) >= max(0, _SUBPROCESS_RECEIPT_LIMIT):
+        return
+    redacted = _redacted_argv(cmd or [])
+    tool_name = redacted[0] if redacted else "subprocess"
+    status = "timeout" if timed_out else "success" if exit_code == 0 else "failed"
+    parser_status = "not_applicable" if timed_out else "not_run"
+    now = time.monotonic()
+    stdout_text = str(stdout or "")
+    stderr_text = str(stderr or error or "")
+    stdout_preview = _redact_output_text(stdout_text)[:_SUBPROCESS_PREVIEW_BYTES]
+    stderr_preview = _redact_output_text(stderr_text)[:_SUBPROCESS_PREVIEW_BYTES]
+    stdout_artifact = _output_artifact("stdout", stdout_text)
+    stderr_artifact = _output_artifact("stderr", stderr_text)
+    receipt = {
+        "tool_name": tool_name,
+        "status": status,
+        "parser_status": parser_status,
+        "exit_code": int(exit_code),
+        "timed_out": bool(timed_out),
+        "timeout_seconds": int(timeout_seconds),
+        "duration_ms": int(max(0, now - started_at) * 1000),
+        "redacted_argv": redacted,
+        "command_hash": hashlib.sha256("\x00".join(redacted).encode("utf-8", "ignore")).hexdigest(),
+        "stdout_length": len(stdout_text),
+        "stderr_length": len(stderr_text),
+        "stdout_preview": stdout_preview,
+        "stderr_preview": stderr_preview,
+    }
+    if stdout_artifact:
+        receipt["stdout_artifact"] = stdout_artifact
+    if stderr_artifact:
+        receipt["stderr_artifact"] = stderr_artifact
+    _subprocess_receipts.append(receipt)
 
 
 def _get_semaphore() -> asyncio.Semaphore:
@@ -97,17 +241,71 @@ async def run(
     timeout: int = 60,
     input_text: str | None = None,
     retry: int = 0,
-    kill_process_group: bool = False
 ) -> tuple[str, str, int]:
     """Execute command with optional retry logic (shared across modules).
 
     Uses a semaphore to limit concurrent subprocess executions and prevent resource exhaustion.
     """
+    # The adaptive throttle only engages for HTTP (curl) requests during an active
+    # scan; it paces the shared request stream so a single-process target under
+    # load stops returning degraded responses that make detectors flake. No-op
+    # unless explicitly enabled (non-active scans are unaffected).
+    tool_basename = os.path.basename(cmd[0]) if cmd else "subprocess"
+    is_http_request = tool_basename == "curl"
+    request_urls = [
+        value for value in cmd
+        if isinstance(value, str) and value.startswith(("http://", "https://"))
+    ]
+    request_url = request_urls[-1] if request_urls else None
+    unmetered_network_tools = {
+        "dalfox", "ffuf", "httpx", "katana", "meg", "nikto", "nuclei",
+        "sqlmap", "xsstrike.py",
+    }
+    meter = get_request_meter()
+    if is_http_request and meter.enforcing and request_url and "-L" in cmd:
+        bounded_cmd: list[str] = []
+        skip_next = False
+        for value in cmd:
+            if skip_next:
+                skip_next = False
+                continue
+            if value in {"-L", "--location"}:
+                continue
+            if value == "--max-redirs":
+                skip_next = True
+                continue
+            bounded_cmd.append(value)
+        cmd = bounded_cmd
+    if tool_basename in unmetered_network_tools:
+        try:
+            meter.record_unmetered_tool(tool=tool_basename, target_url=request_url)
+        except RequestBudgetExceeded:
+            return "", "unmetered network tool is disabled by the request budget", 75
+    _throttle = _get_active_throttle() if (is_http_request and _get_active_throttle) else None
+
     async with _get_semaphore():
         for attempt in range(retry + 1):
             proc = None
-            use_process_group = kill_process_group and os.name == "posix"
+            metered_request = False
+            # Every external tool gets its own process group.  This lets the
+            # shared timeout/cancellation path reap grandchildren as well as the
+            # immediate process (nuclei/sqlmap regularly spawn helpers).  The
+            # worker first signals SHAKERSCAN_CANCEL_FILE, giving this runner a
+            # chance to kill that group before it terminates scanner.py.
+            use_process_group = os.name == "posix"
             tool_name = cmd[0] if cmd else "subprocess"
+            if is_http_request and request_url:
+                try:
+                    metered_request = meter.before_request(
+                        phase="curl",
+                        url=request_url,
+                        retry=attempt > 0,
+                    )
+                except RequestBudgetExceeded:
+                    return "", "request budget exhausted before HTTP request", 75
+            if _throttle is not None:
+                await _throttle.before()
+            _req_started = time.monotonic()
             try:
                 proc = await asyncio.create_subprocess_exec(
                     *cmd,
@@ -116,17 +314,45 @@ async def run(
                     stderr=asyncio.subprocess.PIPE,
                     start_new_session=use_process_group,
                 )
+                cancel_watch = None
+                if os.environ.get("SHAKERSCAN_CANCEL_FILE"):
+                    async def _cancel_child_group() -> None:
+                        from .cancellation import wait_for_scanner_cancel
+
+                        await wait_for_scanner_cancel()
+                        if proc is None or proc.returncode is not None:
+                            return
+                        try:
+                            if use_process_group:
+                                os.killpg(proc.pid, signal.SIGKILL)
+                            else:
+                                proc.kill()
+                        except ProcessLookupError:
+                            pass
+
+                    cancel_watch = asyncio.create_task(_cancel_child_group())
                 try:
                     out_b, err_b = await asyncio.wait_for(
                         proc.communicate(input=input_text.encode() if input_text is not None else None),
                         timeout=timeout,
                     )
+                    from .cancellation import scanner_cancel_requested
+                    if scanner_cancel_requested():
+                        _record_subprocess_receipt(
+                            cmd,
+                            timeout_seconds=timeout,
+                            exit_code=130,
+                            timed_out=False,
+                            started_at=_req_started,
+                            stderr="scanner cancellation requested",
+                        )
+                        return "", "scanner cancellation requested", 130
                 except asyncio.CancelledError:
                     if proc is not None:
                         try:
                             if use_process_group:
                                 os.killpg(proc.pid, signal.SIGKILL)
-                                print(f"[run] Killed process group for {tool_name} (pid {proc.pid})", file=sys.stderr)
+                                print("[run] Killed subprocess group after cancellation", file=sys.stderr)
                             else:
                                 proc.kill()
                             await proc.wait()
@@ -137,37 +363,66 @@ async def run(
                     if use_process_group:
                         try:
                             os.killpg(proc.pid, signal.SIGKILL)
-                            print(f"[run] Killed process group for {tool_name} (pid {proc.pid})", file=sys.stderr)
+                            print("[run] Killed subprocess group after timeout", file=sys.stderr)
                         except ProcessLookupError:
                             pass
                     else:
                         proc.kill()
                     await proc.wait()  # Reap zombie process
+                    if _throttle is not None:
+                        # A timeout is the strongest degradation signal.
+                        _throttle.record(rc=124, elapsed=timeout)
                     if attempt < retry:
                         await asyncio.sleep(2 ** attempt)
                         continue
+                    _record_subprocess_receipt(
+                        cmd,
+                        timeout_seconds=timeout,
+                        exit_code=124,
+                        timed_out=True,
+                        started_at=_req_started,
+                        stderr=f"timeout after {timeout}s",
+                    )
                     return "", f"timeout after {timeout}s", 124
+                finally:
+                    if cancel_watch is not None:
+                        cancel_watch.cancel()
+                        try:
+                            await cancel_watch
+                        except BaseException:
+                            pass
                 out = out_b.decode(errors="ignore")
                 err = err_b.decode(errors="ignore")
+                if _throttle is not None:
+                    _throttle.record(rc=proc.returncode, elapsed=time.monotonic() - _req_started)
+                _record_subprocess_receipt(
+                    cmd,
+                    timeout_seconds=timeout,
+                    exit_code=int(proc.returncode or 0),
+                    timed_out=False,
+                    started_at=_req_started,
+                    stdout=out,
+                    stderr=err,
+                )
                 return out.strip(), err.strip(), proc.returncode
             except asyncio.CancelledError:
                 if proc is not None:
                     try:
                         if use_process_group:
                             os.killpg(proc.pid, signal.SIGKILL)
-                            print(f"[run] Killed process group for {tool_name} (pid {proc.pid})", file=sys.stderr)
+                            print("[run] Killed subprocess group after cancellation", file=sys.stderr)
                         else:
                             proc.kill()
                         await proc.wait()
                     except Exception:
                         pass
                 raise
-            except Exception as e:
+            except Exception as exc:
                 if proc is not None:
                     try:
                         if use_process_group:
                             os.killpg(proc.pid, signal.SIGKILL)
-                            print(f"[run] Killed process group for {tool_name} (pid {proc.pid})", file=sys.stderr)
+                            print("[run] Killed subprocess group after execution failure", file=sys.stderr)
                         else:
                             proc.kill()
                         await proc.wait()
@@ -176,7 +431,18 @@ async def run(
                 if attempt < retry:
                     await asyncio.sleep(2 ** attempt)
                     continue
-                return "", str(e), 1
+                _record_subprocess_receipt(
+                    cmd,
+                    timeout_seconds=timeout,
+                    exit_code=1,
+                    timed_out=False,
+                    started_at=_req_started,
+                    error=f"subprocess execution failed ({type(exc).__name__})",
+                )
+                return "", f"subprocess execution failed ({type(exc).__name__})", 1
+            finally:
+                if metered_request:
+                    meter.record_completion(phase="curl", url=request_url)
         return "", "Max retries exceeded", 1
 
 

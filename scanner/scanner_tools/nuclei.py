@@ -538,7 +538,7 @@ async def nuclei_scan(
     else:
         return {"error": f"Templates directory not found: {templates_dir}", "scan_completed": False}
 
-    out, err, rc = await run(cmd, timeout=timeout, kill_process_group=True)
+    out, err, rc = await run(cmd, timeout=timeout)
     if target_file and os.path.exists(target_file):
         try:
             os.unlink(target_file)

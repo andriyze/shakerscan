@@ -14,6 +14,7 @@ All checks run in safe_mode by default (detection only, no exploitation).
 
 import asyncio
 import hashlib
+import json
 import re
 import urllib.parse
 from typing import Any
@@ -966,11 +967,68 @@ async def test_api_security(
             "admin_role": r'"role"\s*:\s*"admin"',
             "email": r'"email"\s*:\s*"[^"]+@[^"]+\.[^"]+"',
         }
-        return [
-            name
-            for name, pattern in marker_patterns.items()
-            if re.search(pattern, body, re.IGNORECASE)
-        ]
+        doc_path_tokens = {
+            "example",
+            "examples",
+            "curl_example",
+            "request_template",
+            "request_template_example",
+            "representative_endpoints",
+            "schema",
+            "sample",
+            "samples",
+            "fixture",
+            "fixtures",
+            "docs",
+            "documentation",
+        }
+
+        def _marker_for_key(key: str, value: object) -> str | None:
+            key_l = key.lower().replace("-", "_")
+            if key_l == "password":
+                return "password"
+            if key_l in {"api_key", "apikey"}:
+                return "api_key"
+            if key_l in {"secret", "totpsecret", "totp_secret", "mfa_secret"}:
+                return "secret"
+            if key_l in {"token", "auth_token", "access_token", "refresh_token", "deluxetoken", "deluxe_token"}:
+                return "token"
+            if key_l == "role" and isinstance(value, str) and value.lower() == "admin":
+                return "admin_role"
+            if key_l == "email" and isinstance(value, str) and re.search(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", value):
+                return "email"
+            return None
+
+        def _looks_like_doc_path(path: list[str]) -> bool:
+            segments = {part.lower().replace("-", "_") for part in path}
+            if "representative_endpoints" in segments or "curl_example" in segments:
+                return True
+            return any(segment in doc_path_tokens for segment in segments)
+
+        def _walk(value: object, path: list[str], out: set[str]) -> None:
+            if isinstance(value, dict):
+                for key, child in value.items():
+                    child_path = path + [str(key)]
+                    marker = _marker_for_key(str(key), child)
+                    if marker and not _looks_like_doc_path(child_path):
+                        out.add(marker)
+                    _walk(child, child_path, out)
+            elif isinstance(value, list):
+                for idx, child in enumerate(value):
+                    _walk(child, path + [str(idx)], out)
+
+        try:
+            parsed = json.loads(body)
+        except Exception:
+            return [
+                name
+                for name, pattern in marker_patterns.items()
+                if re.search(pattern, body, re.IGNORECASE)
+            ]
+
+        markers: set[str] = set()
+        _walk(parsed, [], markers)
+        return [name for name in marker_patterns if name in markers]
 
     # Verify sensitive data leaks from actual machine-readable API responses.
     api_candidates = []

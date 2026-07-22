@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import re
+import urllib.parse
 from typing import Any
 
 from ai_gate.budget import CHARS_PER_TOKEN_ESTIMATE, RequestBudget, TokenBudget
@@ -19,7 +20,15 @@ from ai_gate.adaptive import (
     select_recon_probes,
 )
 from ai_gate.planner import normalize_scan_profile as normalize_ai_scan_profile
-from ai_gate.planner import plan_probe_pack, resolve_max_turns_per_conversation
+from ai_gate.planner import (
+    classify_production_safety,
+    plan_probe_pack,
+    resolve_max_turns_per_conversation,
+)
+try:  # flat /app layout vs. scanner package layout
+    from ai_verdict_policy import has_deterministic_exploit_proof
+except ModuleNotFoundError:  # pragma: no cover - package-style local imports
+    from scanner.ai_verdict_policy import has_deterministic_exploit_proof
 from ai_gate.probe_registry import (
     AGENT_TOOL_ABUSE_PROBES,
     MCP_SECURITY_PROBES,
@@ -34,6 +43,7 @@ from ai_gate.targets.rest_json import (
     SseConversationTarget,
     build_headers,
     extract_response_text,
+    profile_response_byte_cap,
     replace_placeholders,
 )
 from ai_gate.targets.widget_playwright import WidgetPlaywrightConversationTarget
@@ -107,6 +117,13 @@ SECRET_ASSIGNMENT_PATTERN = re.compile(
 TRACE_CONFIG_SECRET_PATTERN = re.compile(
     r"\b(?:db|database|dsn|connection[-_ ]?string|conn)[\"'=:]+[^\s,;]{4,}",
     re.IGNORECASE,
+)
+# Authorization / cookie header VALUES in free text (Bearer/Basic tokens, session
+# cookies). Captures the header name + delimiter so the value is masked but the
+# shape stays legible to the judge.
+AUTH_HEADER_VALUE_PATTERN = re.compile(
+    r"(?i)\b((?:proxy-)?authorization|cookie|set-cookie|x-api-key|x-auth-token|x-amz-security-token)"
+    r"(\s*[:=]\s*)[^\r\n,;]+"
 )
 AGENT_TRACE_TOOL_MARKERS = (
     "http_request",
@@ -3966,6 +3983,68 @@ def _ai_gate_sensitivity_summary(value: Any) -> dict[str, Any]:
     }
 
 
+def _ai_gate_runtime_destinations(
+    target: dict[str, Any],
+    transcripts: list[dict[str, Any]],
+    widget_summary: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    destinations: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+
+    def add(label: str, url: Any, final_url: Any = None, *, source: str | None = None) -> dict[str, Any] | None:
+        raw_url = str(url or "").strip()
+        raw_final = str(final_url or raw_url).strip()
+        if not raw_url and not raw_final:
+            return None
+        key = (label, raw_url, raw_final)
+        if key in seen:
+            return next(
+                (
+                    item for item in destinations
+                    if item.get("label") == label
+                    and item.get("url") == (raw_url or raw_final)
+                    and item.get("final_url") == raw_final
+                ),
+                None,
+            )
+        seen.add(key)
+        record: dict[str, Any] = {"label": label, "url": raw_url or raw_final}
+        if raw_final:
+            record["final_url"] = raw_final
+        if source:
+            record["source"] = source
+        destinations.append(record)
+        return record
+
+    add("ai_target", target.get("endpoint_url"), source="configured_target")
+    for transcript in transcripts:
+        if not isinstance(transcript, dict):
+            continue
+        records = [transcript]
+        turns = transcript.get("turns")
+        if isinstance(turns, list):
+            records.extend(item for item in turns if isinstance(item, dict))
+        for record in records:
+            metadata = record.get("response_metadata") if isinstance(record.get("response_metadata"), dict) else {}
+            destination = add("ai_gate_request", metadata.get("request_url"), metadata.get("final_url"), source="transcript")
+            if destination is not None:
+                if isinstance(metadata.get("redirect_chain"), list):
+                    destination["redirect_chain"] = metadata.get("redirect_chain")
+                if metadata.get("remote_ip"):
+                    destination["remote_ip"] = metadata.get("remote_ip")
+                    try:
+                        destination["resolved_host"] = urllib.parse.urlparse(
+                            str(metadata.get("final_url") or metadata.get("request_url") or "")
+                        ).hostname
+                    except Exception:
+                        pass
+            widget_evidence = record.get("widget_evidence") if isinstance(record.get("widget_evidence"), dict) else {}
+            add("ai_widget_page", widget_evidence.get("page_url"), source="widget_evidence")
+    if isinstance(widget_summary, dict):
+        add("ai_widget_page", widget_summary.get("page_url"), source="widget_summary")
+    return _redact_secret_like_values(destinations)
+
+
 def _target_snapshot_for_manifest(target: dict[str, Any]) -> dict[str, Any]:
     credential = target.get("credential") if isinstance(target.get("credential"), dict) else {}
     return {
@@ -4293,8 +4372,21 @@ def _extract_judge_response_json(response_data: dict[str, Any]) -> Any | None:
 
 
 def _redact_secrets_for_judge(text: str) -> str:
-    """Strip credential patterns before sending evidence to external LLM."""
+    """Strip credential patterns before persisting evidence OR sending it to the
+    external LLM judge.
+
+    Applies EVERY credential detector defined above — not just TOKEN_PATTERN/PII.
+    The secret-assignment, DB/DSN connection-string, trace-config, and auth-header
+    detectors exist (and are used for detection), but were previously not applied
+    here, so `password=…`, `api_key=…`, `client_secret: …`, `mysql://user:pw@…`,
+    and `Authorization: Bearer …` leaked into both the stored transcript and the
+    third-party judge prompt.
+    """
     redacted = TOKEN_PATTERN.sub("[REDACTED_TOKEN]", text)
+    redacted = DB_CONNECTION_PATTERN.sub("[REDACTED_DB_URI]", redacted)
+    redacted = TRACE_CONFIG_SECRET_PATTERN.sub("[REDACTED_SECRET]", redacted)
+    redacted = SECRET_ASSIGNMENT_PATTERN.sub("[REDACTED_SECRET]", redacted)
+    redacted = AUTH_HEADER_VALUE_PATTERN.sub(r"\1\2[REDACTED]", redacted)
     for _, pattern, _ in PII_PATTERNS:
         redacted = pattern.sub("[REDACTED_PII]", redacted)
     return redacted
@@ -5070,12 +5162,19 @@ def _apply_ai_gate_analysis_fields(findings: list[dict[str, Any]]) -> list[dict[
                 and isinstance(confidence, (int, float))
                 and confidence >= SEMANTIC_FALSE_POSITIVE_DOWNGRADE_FLOOR
             ):
-                original_severity = _normalize_severity(finding.get("severity"))
-                evidence["ai_gate_pre_ai_judge_severity"] = original_severity
-                evidence["ai_gate_ai_judge_downgraded"] = True
-                finding["severity"] = "info"
-                finding["confidence"] = min(float(finding.get("confidence") or 0.4), 0.4)
-                finding["confidence_tier"] = "low"
+                if has_deterministic_exploit_proof(finding):
+                    # The semantic judge never overrides deterministic proof of
+                    # exploitation (PoE/extraction/browser-execution). This matches
+                    # the DAST policy (is_trusted_ai_false_positive) and the
+                    # documented guarantee that AI cannot bury a proven finding.
+                    evidence["ai_gate_ai_judge_downgrade_suppressed"] = "deterministic_exploit_proof"
+                else:
+                    original_severity = _normalize_severity(finding.get("severity"))
+                    evidence["ai_gate_pre_ai_judge_severity"] = original_severity
+                    evidence["ai_gate_ai_judge_downgraded"] = True
+                    finding["severity"] = "info"
+                    finding["confidence"] = min(float(finding.get("confidence") or 0.4), 0.4)
+                    finding["confidence_tier"] = "low"
             continue
 
         if rubric:
@@ -5480,6 +5579,26 @@ def _active_principals(target: dict[str, Any]) -> list[dict[str, Any]]:
     return principals
 
 
+def _production_safe_principal_probes(
+    principal_probes: "tuple[Probe, ...] | list[Probe]",
+) -> tuple[list[Probe], list[str]]:
+    """Partition generated principal-pair probes into production-safe and blocked.
+
+    These probes are generated AFTER plan_probe_pack() ran the production-safety
+    filter, so they must be classified here too — otherwise a generated
+    non_production_only probe (e.g. tool_abuse admin impersonation) slips into a
+    production scan unfiltered.
+    """
+    safe: list[Probe] = []
+    blocked_ids: list[str] = []
+    for probe in principal_probes:
+        if classify_production_safety(probe) == "non_production_only":
+            blocked_ids.append(probe.id)
+        else:
+            safe.append(probe)
+    return safe, blocked_ids
+
+
 def _cross_principal_probe_extensions(
     target_type: str,
     principals: list[dict[str, str]],
@@ -5582,6 +5701,109 @@ def _cross_principal_probe_extensions(
     return tuple(generated[:10])
 
 
+_RECEIPT_INTEGRITY_FIELDS = {"receipt_hash", "chain_hash", "signature", "prev_hash", "previous_hash"}
+
+
+def _canonical_receipt_content(receipt: dict[str, Any]) -> str:
+    """Canonical JSON of a receipt's content, excluding the integrity/chain fields."""
+    content = {k: v for k, v in receipt.items() if k not in _RECEIPT_INTEGRITY_FIELDS}
+    return json.dumps(content, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def _expected_receipt_hash(receipt: dict[str, Any], prev_hash: str) -> str:
+    """ShakerScan's verifiable receipt-hash convention: sha256(prev_hash + '.' + canonical_content)."""
+    payload = f"{prev_hash or ''}.{_canonical_receipt_content(receipt)}"
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _verify_receipt_signature(message: bytes, signature_raw: Any, public_key_pem: Any) -> dict[str, Any]:
+    """Verify a detached receipt signature over ``message``. Never raises.
+
+    ``verified`` is True only when a real cryptographic check passes.
+    """
+    if not (signature_raw and public_key_pem):
+        return {"available": None, "attempted": False, "verified": False, "error": "missing_material"}
+    import base64
+    import binascii
+
+    sig = signature_raw
+    if isinstance(sig, str):
+        try:
+            sig = base64.b64decode(sig, validate=True)
+        except (ValueError, binascii.Error):
+            try:
+                sig = bytes.fromhex(signature_raw)
+            except ValueError:
+                sig = signature_raw.encode()
+    try:
+        from cryptography.hazmat.primitives.serialization import load_pem_public_key
+        from cryptography.hazmat.primitives.asymmetric import ec, ed25519, padding as asy_padding, rsa
+        from cryptography.hazmat.primitives import hashes
+        from cryptography.exceptions import InvalidSignature
+    except ImportError:
+        return {"available": False, "attempted": False, "verified": False, "error": "verifier_unavailable"}
+    try:
+        pem = public_key_pem if isinstance(public_key_pem, (bytes, bytearray)) else str(public_key_pem).encode()
+        key = load_pem_public_key(bytes(pem))
+    except Exception as exc:  # noqa: BLE001
+        return {"available": True, "attempted": False, "verified": False, "error": f"public_key_load_failed:{type(exc).__name__}"}
+    try:
+        if isinstance(key, ed25519.Ed25519PublicKey):
+            key.verify(bytes(sig), message)
+        elif isinstance(key, rsa.RSAPublicKey):
+            key.verify(
+                bytes(sig), message,
+                asy_padding.PSS(mgf=asy_padding.MGF1(hashes.SHA256()), salt_length=asy_padding.PSS.MAX_LENGTH),
+                hashes.SHA256(),
+            )
+        elif isinstance(key, ec.EllipticCurvePublicKey):
+            key.verify(bytes(sig), message, ec.ECDSA(hashes.SHA256()))
+        else:
+            return {"available": True, "attempted": False, "verified": False, "error": "unsupported_key_type"}
+    except InvalidSignature:
+        return {"available": True, "attempted": True, "verified": False, "error": "invalid_signature"}
+    except Exception as exc:  # noqa: BLE001
+        return {"available": True, "attempted": True, "verified": False, "error": f"verify_error:{type(exc).__name__}"}
+    return {"available": True, "attempted": True, "verified": True}
+
+
+def _receipt_key_sha256(public_key_pem: Any) -> str | None:
+    """SHA-256 of the DER SubjectPublicKeyInfo — a stable receipt-signing-key id."""
+    try:
+        from cryptography.hazmat.primitives.serialization import (
+            Encoding, PublicFormat, load_pem_public_key,
+        )
+    except ImportError:
+        return None
+    try:
+        pem = public_key_pem if isinstance(public_key_pem, (bytes, bytearray)) else str(public_key_pem).encode()
+        der = load_pem_public_key(bytes(pem)).public_bytes(Encoding.DER, PublicFormat.SubjectPublicKeyInfo)
+    except Exception:  # noqa: BLE001
+        return None
+    return hashlib.sha256(der).hexdigest()
+
+
+def _configured_receipt_trust_anchors() -> set[str]:
+    """Operator-configured trusted receipt-signing key fingerprints, from DEPLOYMENT
+    ENV ONLY (AI_GATE_TRUSTED_RECEIPT_KEY_SHA256 / AI_GATE_TRUSTED_RECEIPT_KEYS) —
+    never from the target/agent-provided metadata, which is the self-attestation
+    hole. A valid receipt signature is only TRUSTED provenance when its key chains
+    to one of these."""
+    fps: set[str] = set()
+    for tok in re.split(r"[,\s]+", str(os.environ.get("AI_GATE_TRUSTED_RECEIPT_KEY_SHA256") or "")):
+        norm = tok.strip().lower().replace(":", "")
+        if norm:
+            fps.add(norm)
+    for pem in re.findall(
+        r"-----BEGIN [^-]+-----.*?-----END [^-]+-----",
+        str(os.environ.get("AI_GATE_TRUSTED_RECEIPT_KEYS") or ""), re.DOTALL,
+    ):
+        fp = _receipt_key_sha256(pem)
+        if fp:
+            fps.add(fp)
+    return fps
+
+
 def _agent_execution_receipt_findings(metadata_json: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     raw_receipts = metadata_json.get("agent_execution_receipts") or metadata_json.get("execution_receipts")
     receipts = raw_receipts if isinstance(raw_receipts, list) else []
@@ -5618,11 +5840,90 @@ def _agent_execution_receipt_findings(metadata_json: dict[str, Any]) -> tuple[li
             if not (input_hash and output_hash and receipt_hash):
                 missing_binding.append(index)
 
+    # Cryptographic verification (R5): not just field presence — actually verify the
+    # content-hash, prev_hash chain linkage, and signature when those fields are present.
+    public_key_pem = (
+        metadata_json.get("receipt_public_key")
+        or metadata_json.get("agent_receipt_public_key")
+        or metadata_json.get("receipt_signing_public_key")
+    )
+    sign_payload_mode = str(metadata_json.get("receipt_signature_payload") or "receipt_hash").strip().lower()
+    hash_mismatch: list[int] = []
+    chain_breaks: list[int] = []
+    signature_invalid: list[int] = []
+    hash_verified_count = 0
+    signature_verified_count = 0
+    signature_attempted = False
+    prev_hash = ""
+    for index, receipt in enumerate(receipts[:200]):
+        if not isinstance(receipt, dict):
+            continue
+        declared_hash = str(receipt.get("receipt_hash") or receipt.get("chain_hash") or "").strip()
+        raw_prev = receipt.get("prev_hash", receipt.get("previous_hash"))
+        declared_prev = str(raw_prev).strip() if raw_prev not in (None, "") else None
+        # Chain linkage: a declared prev_hash must match the previous receipt's hash.
+        if declared_prev is not None and index > 0 and declared_prev != prev_hash:
+            chain_breaks.append(index)
+        if declared_hash:
+            prev_for_hash = declared_prev if declared_prev is not None else prev_hash
+            expected = _expected_receipt_hash(receipt, prev_for_hash)
+            if expected == declared_hash:
+                hash_verified_count += 1
+            else:
+                hash_mismatch.append(index)
+            signature = receipt.get("signature")
+            if signature and public_key_pem:
+                signature_attempted = True
+                message = (
+                    _canonical_receipt_content(receipt).encode("utf-8")
+                    if sign_payload_mode == "canonical"
+                    else declared_hash.encode("utf-8")
+                )
+                sig_result = _verify_receipt_signature(message, signature, public_key_pem)
+                if sig_result.get("verified"):
+                    signature_verified_count += 1
+                elif sig_result.get("attempted"):
+                    signature_invalid.append(index)
+            prev_hash = declared_hash
+
     probe = {
         "id": "agent.receipt-chain",
         "family": "tool_abuse",
         "owasp": "LLM08:2025",
     }
+    if hash_mismatch:
+        findings.append(_build_finding(
+            probe=probe,
+            title="Agent execution receipt hash does not match its contents",
+            severity="high",
+            description="A receipt declared a receipt_hash that does not match the canonical hash of its contents, indicating a tampered or forged receipt rather than a verifiable audit record.",
+            remediation="Recompute receipt_hash as sha256(prev_hash + '.' + canonical_content) and reject receipts whose hash does not verify.",
+            owasp="LLM08:2025",
+            evidence={"receipt_indexes": hash_mismatch[:25], "judge_layer": "receipt_crypto"},
+            source_suffix="hash_mismatch",
+        ))
+    if chain_breaks:
+        findings.append(_build_finding(
+            probe=probe,
+            title="Agent execution receipt chain is broken",
+            severity="high",
+            description="A receipt's prev_hash does not link to the previous receipt's hash, so the execution chain cannot be proven intact (possible inserted/removed/reordered receipts).",
+            remediation="Hash-chain receipts so each prev_hash equals the previous receipt_hash; reject chains that do not link.",
+            owasp="LLM08:2025",
+            evidence={"receipt_indexes": chain_breaks[:25], "judge_layer": "receipt_crypto"},
+            source_suffix="chain_broken",
+        ))
+    if signature_invalid:
+        findings.append(_build_finding(
+            probe=probe,
+            title="Agent execution receipt signature failed verification",
+            severity="high",
+            description="A receipt carried a signature and a public key was provided, but the signature did not verify — the receipt is not cryptographically authentic.",
+            remediation="Sign the receipt hash with the agent/tool key and verify against the configured public key before trusting the receipt.",
+            owasp="LLM08:2025",
+            evidence={"receipt_indexes": signature_invalid[:25], "judge_layer": "receipt_crypto"},
+            source_suffix="signature_invalid",
+        ))
     if missing_approval:
         findings.append(_build_finding(
             probe=probe,
@@ -5668,6 +5969,47 @@ def _agent_execution_receipt_findings(metadata_json: dict[str, Any]) -> tuple[li
             source_suffix="missing_hash_binding",
         ))
 
+    # chain_verified = INTERNAL CONSISTENCY (hashes link, signatures match the
+    # supplied key). It is NOT trusted provenance — the key can come from the same
+    # config that produced the receipts (self-attestation). chain_trusted ALSO
+    # requires the signing key to chain to an operator-configured trust anchor.
+    chain_verified = bool(
+        hash_verified_count > 0
+        and not hash_mismatch
+        and not chain_breaks
+        and not signature_invalid
+    )
+    trust_anchors = _configured_receipt_trust_anchors()
+    key_fingerprint = _receipt_key_sha256(public_key_pem) if public_key_pem else None
+    if not trust_anchors:
+        signature_trusted_root: bool | None = None
+    else:
+        signature_trusted_root = bool(key_fingerprint and key_fingerprint in trust_anchors)
+    chain_trusted = bool(
+        chain_verified and signature_verified_count > 0 and signature_trusted_root is True
+    )
+    # A receipt signature that is cryptographically valid but signed by a key that
+    # is NOT a configured trust anchor proves consistency, not trusted provenance.
+    if signature_verified_count > 0 and signature_trusted_root is not True:
+        reason = ("no receipt trust anchors are configured (AI_GATE_TRUSTED_RECEIPT_KEY_SHA256/"
+                  "_KEYS)" if signature_trusted_root is None
+                  else "the receipt signing key is not among the configured trust anchors")
+        findings.append(_build_finding(
+            probe={"id": "agent.receipt-chain", "family": "tool_abuse", "owasp": "LLM08:2025"},
+            title="Agent execution receipt signature is valid but not from a trusted key",
+            severity="medium",
+            description=(
+                "Receipt signatures verify against a self-supplied public key, so the chain is internally "
+                f"consistent but its provenance is untrusted ({reason}). Internal consistency is not proof "
+                "of a trusted execution record."
+            ),
+            remediation="Configure trusted receipt-signing key fingerprints (AI_GATE_TRUSTED_RECEIPT_KEY_SHA256) "
+                        "and sign receipts with a key that chains to them.",
+            owasp="LLM08:2025",
+            evidence={"signature_key_fingerprint": key_fingerprint,
+                      "trust_anchors_configured": bool(trust_anchors), "judge_layer": "receipt_crypto"},
+            source_suffix="untrusted_signing_key",
+        ))
     return findings, {
         "available": True,
         "receipt_count": len(receipts),
@@ -5676,6 +6018,19 @@ def _agent_execution_receipt_findings(metadata_json: dict[str, Any]) -> tuple[li
         "replayed_approval_count": len(replayed_approvals),
         "unscoped_tool_call_count": len(unscoped_tool_calls),
         "missing_hash_binding_count": len(missing_binding),
+        # Cryptographic verification (R5): claimed vs actually verified vs TRUSTED.
+        "chain_verified": chain_verified,
+        "chain_trusted": chain_trusted,
+        "signature_trusted_root": signature_trusted_root,
+        "signature_key_fingerprint": key_fingerprint,
+        "trust_anchors_configured": bool(trust_anchors),
+        "hash_verified_count": hash_verified_count,
+        "hash_mismatch_count": len(hash_mismatch),
+        "chain_break_count": len(chain_breaks),
+        "signature_public_key_present": bool(public_key_pem),
+        "signature_attempted": signature_attempted,
+        "signature_verified_count": signature_verified_count,
+        "signature_invalid_count": len(signature_invalid),
     }
 
 
@@ -5716,6 +6071,15 @@ async def run_ai_target_scan(target_url: str, raw_options: dict[str, Any] | None
     probes = probe_plan.probes
     principals = _active_principals(target)
     principal_probes = _cross_principal_probe_extensions(target_type, principals, scan_profile)
+    if production_scan and principal_probes:
+        safe_principal_probes, blocked_principal_ids = _production_safe_principal_probes(principal_probes)
+        principal_probes = tuple(safe_principal_probes)
+        if blocked_principal_ids:
+            existing_blocked = list(probe_plan.manifest.get("blocked_for_production_probe_ids") or [])
+            probe_plan.manifest["blocked_for_production_probe_ids"] = existing_blocked + blocked_principal_ids
+            probe_plan.manifest["blocked_for_production_count"] = len(
+                probe_plan.manifest["blocked_for_production_probe_ids"]
+            )
     if principal_probes:
         probes = principal_probes + probes
         probe_plan.manifest["principal_probe_count"] = len(principal_probes)
@@ -5759,12 +6123,17 @@ async def run_ai_target_scan(target_url: str, raw_options: dict[str, Any] | None
     token_budget = TokenBudget(
         int(raw_token_budget) if isinstance(raw_token_budget, (int, float)) and raw_token_budget > 0 else None
     )
+    response_byte_cap = profile_response_byte_cap(scan_profile)
     if target_type == "widget":
-        target_adapter = WidgetPlaywrightConversationTarget(target_url, target)
+        target_adapter = WidgetPlaywrightConversationTarget(
+            target_url,
+            target,
+            default_max_response_bytes=response_byte_cap,
+        )
     elif target.get("streaming_mode") == "sse":
-        target_adapter = SseConversationTarget(target_url, target)
+        target_adapter = SseConversationTarget(target_url, target, default_max_response_bytes=response_byte_cap)
     else:
-        target_adapter = RestJsonConversationTarget(target_url, target)
+        target_adapter = RestJsonConversationTarget(target_url, target, default_max_response_bytes=response_byte_cap)
     max_turns_per_conversation = resolve_max_turns_per_conversation(metadata_json, scan_profile)
     runner = ConversationRunner(
         aiohttp_module=aiohttp,
@@ -6071,6 +6440,7 @@ async def run_ai_target_scan(target_url: str, raw_options: dict[str, Any] | None
     safe_coverage_matrix = _redact_secret_like_values(coverage_matrix)
     safe_control_evidence = _redact_secret_like_values(control_evidence)
     safe_widget_summary = _redact_secret_like_values(widget_summary)
+    runtime_destinations = _ai_gate_runtime_destinations(target, safe_transcripts, safe_widget_summary)
 
     return {
         "result": {
@@ -6083,6 +6453,7 @@ async def run_ai_target_scan(target_url: str, raw_options: dict[str, Any] | None
             "scan_profile": scan_profile,
             "target_type": target_type,
             "target_name": target.get("name"),
+            "runtime_destinations": runtime_destinations,
             "transcripts": safe_transcripts,
             "statistics": statistics,
             "control_evidence": safe_control_evidence,

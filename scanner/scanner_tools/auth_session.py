@@ -94,33 +94,9 @@ SESSION_CHECK_ENDPOINTS = [
 
 async def _run_command(cmd: list[str], timeout: int = 30) -> tuple[str, str, int]:
     """Run a command asynchronously and return stdout, stderr, returncode."""
-    proc = None
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-        return stdout.decode('utf-8', errors='replace'), stderr.decode('utf-8', errors='replace'), proc.returncode or 0
-    except TimeoutError:
-        if proc is not None:
-            try:
-                proc.kill()
-                await proc.wait()
-            except Exception:
-                pass
-        return "", "timeout", -1
-    except asyncio.CancelledError:
-        if proc is not None:
-            try:
-                proc.kill()
-                await proc.wait()
-            except Exception:
-                pass
-        raise
-    except Exception as e:
-        return "", str(e), -1
+    from .common import run
+
+    return await run(cmd, timeout=timeout)
 
 
 @dataclass

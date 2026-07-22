@@ -47,6 +47,10 @@ services:
     build:
       context: .
       dockerfile: scanner/Dockerfile
+    # Resolve host-published services (e2e fixtures / honey targets) from inside the
+    # container on Linux CI too. No-op on Docker Desktop, where it already resolves.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
       - "${SHAKERSCAN_BIND_HOST:-127.0.0.1}:${SHAKERSCAN_API_PORT:-8080}:8080"
     environment:
@@ -56,6 +60,11 @@ services:
       - LOCAL_ENV_FILE=/workspace/.env
       - SCANNER_VERSION=${SCANNER_VERSION:-dev}
       - GIT_COMMIT=${GIT_COMMIT:-dev}
+      # Fleet cap. Empty => Docker RAM minus the supporting-stack reserve, at
+      # roughly 1GB per worker. Set a number to force a fixed ceiling.
+      - SHAKERSCAN_MAX_WORKERS=${SHAKERSCAN_MAX_WORKERS:-}
+      - SHAKERSCAN_PLATFORM_MEMORY_RESERVE_GB=${SHAKERSCAN_PLATFORM_MEMORY_RESERVE_GB:-7}
+      - SHAKERSCAN_PER_WORKER_MEM_GB=${SHAKERSCAN_PER_WORKER_MEM_GB:-1}
       # AI options (optional - set in .env file)
       - AI_URL=${AI_URL:-}
       - AI_API_KEY=${AI_API_KEY:-}
@@ -76,6 +85,7 @@ services:
       - AI_DEMO_MODE_ENABLED=${AI_DEMO_MODE_ENABLED:-false}
       - AI_DEMO_HONEY_PUBLIC_URL=${AI_DEMO_HONEY_PUBLIC_URL:-}
       - AI_DEMO_HONEY_SCANNER_URL=${AI_DEMO_HONEY_SCANNER_URL:-}
+      - AI_OPS_ROUTER_EXECUTE_ENABLED=${AI_OPS_ROUTER_EXECUTE_ENABLED:-true}
       - RETEST_AI_BUDGET_SECONDS=${RETEST_AI_BUDGET_SECONDS:-240}
       - RETEST_AI_CIRCUIT_WINDOW_SECONDS=${RETEST_AI_CIRCUIT_WINDOW_SECONDS:-300}
       - RETEST_AI_CIRCUIT_ERROR_THRESHOLD=${RETEST_AI_CIRCUIT_ERROR_THRESHOLD:-5}
@@ -85,22 +95,12 @@ services:
       - RETEST_STALE_BATCH_SIZE=${RETEST_STALE_BATCH_SIZE:-25}
       - RETEST_STALE_REQUEUE_LIMIT=${RETEST_STALE_REQUEUE_LIMIT:-1}
     volumes:
-      - ./api/api.py:/app/api.py:ro
-      - ./api/evidence_triage.py:/app/evidence_triage.py:ro
-      - ./api/session_manager.py:/app/session_manager.py:ro
-      - ./api/retest_contract.py:/app/retest_contract.py:ro
-      - ./api/ai_verifier.py:/app/ai_verifier.py:ro
-      - ./api/ai_control_requirements.py:/app/ai_control_requirements.py:ro
-      - ./api/ai_demo_scenarios.py:/app/ai_demo_scenarios.py:ro
-      - ./api/ai_redteam_artifacts.py:/app/ai_redteam_artifacts.py:ro
-      - ./api/ai_assurance.py:/app/ai_assurance.py:ro
-      - ./scanner/constants.py:/app/constants.py:ro
-      - ./scanner/ai_verdict_policy.py:/app/ai_verdict_policy.py:ro
-      - ./scanner/grading.py:/app/grading.py:ro
-      - ./scanner/findings.py:/app/findings.py:ro
-      - ./scanner/reporting.py:/app/reporting.py:ro
-      - ./scanner/signals.py:/app/signals.py:ro
-      - ./scanner/target_context.py:/app/target_context.py:ro
+      # Live source as DIRECTORY mounts (NOT single-file): directory mounts avoid
+      # the macOS Docker single-file bind-mount inode-pinning that served stale/
+      # truncated files (silent "no output, exit 0" scans). entrypoint.sh copies
+      # the individual files from /app/_src/* over the baked /app copies.
+      - ./scanner:/app/_src/scanner:ro
+      - ./api:/app/_src/api:ro
       - ./results:/results
       - ./:/workspace
       # Docker socket for worker scaling
@@ -119,6 +119,10 @@ services:
   # ============================================================
   worker:
     init: true  # Use tini as PID 1 to reap zombie processes
+    # Resolve host-published services (e2e fixtures / honey targets) from inside the
+    # container on Linux CI too. No-op on Docker Desktop, where it already resolves.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     build:
       context: .
       dockerfile: scanner/Dockerfile
@@ -158,23 +162,12 @@ services:
       - RETEST_STALE_BATCH_SIZE=${RETEST_STALE_BATCH_SIZE:-25}
       - RETEST_STALE_REQUEUE_LIMIT=${RETEST_STALE_REQUEUE_LIMIT:-1}
     volumes:
-      - ./api/worker.py:/app/worker.py:ro
-      - ./api/evidence_triage.py:/app/evidence_triage.py:ro
-      - ./api/retest_contract.py:/app/retest_contract.py:ro
-      - ./api/ai_verifier.py:/app/ai_verifier.py:ro
-      - ./api/ai_control_requirements.py:/app/ai_control_requirements.py:ro
-      - ./api/ai_redteam_artifacts.py:/app/ai_redteam_artifacts.py:ro
-      - ./api/ai_gate_scan.py:/app/ai_gate_scan.py:ro
-      - ./api/ai_gate:/app/ai_gate:ro
-      - ./scanner/constants.py:/app/constants.py:ro
-      - ./scanner/ai_verdict_policy.py:/app/ai_verdict_policy.py:ro
-      - ./scanner/grading.py:/app/grading.py:ro
-      - ./scanner/findings.py:/app/findings.py:ro
-      - ./scanner/reporting.py:/app/reporting.py:ro
-      - ./scanner/signals.py:/app/signals.py:ro
-      - ./scanner/target_context.py:/app/target_context.py:ro
-      - ./scanner/scanner.py:/app/scanner.py:ro
-      - ./scanner/scanner_tools:/app/scanner_tools:ro
+      # Live source as DIRECTORY mounts (NOT single-file) — directory mounts avoid
+      # the macOS Docker single-file bind-mount inode-pinning that served stale/
+      # truncated scanner.py (silent "no output, exit 0" scans). entrypoint.sh
+      # copies the individual files from /app/_src/* over the baked /app copies.
+      - ./scanner:/app/_src/scanner:ro
+      - ./api:/app/_src/api:ro
       - ./results:/results
     command: ["python3", "/app/worker.py"]
     deploy:
@@ -203,7 +196,8 @@ services:
       - REDIS_URL=redis://redis:6379
       - DATABASE_URL=postgresql://scanner:scanner@postgres:5432/scanner
     volumes:
-      - ./api/gungnir_worker.py:/app/gungnir_worker.py:ro
+      # Directory mount (see api/worker note); entrypoint.sh copies the files.
+      - ./api:/app/_src/api:ro
     command: ["python3", "/app/gungnir_worker.py"]
     profiles:
       - gungnir
@@ -236,9 +230,24 @@ services:
     environment:
       - NEXT_PUBLIC_API_URL=${SHAKERSCAN_PUBLIC_API_URL:-}
       - NEXT_PUBLIC_APP_VERSION=${SCANNER_VERSION:-dev}
+      - SHAKERSCAN_README_PATH=/docs/README.md
+    volumes:
+      - ./README.md:/docs/README.md:ro
     depends_on:
       - api
     restart: unless-stopped
+
+  # ============================================================
+  # E2E DAST target (start only with --profile e2e)
+  # ============================================================
+  juice-shop:
+    # Multi-platform digest resolved 2026-07-21. Pinning prevents an upstream
+    # latest-image change from silently changing release-gate ground truth.
+    image: bkimminich/juice-shop@sha256:e68144772ebaaca0ec117b38d44903af92416793230288ef7c5437fc4f26850a
+    profiles:
+      - e2e
+    ports:
+      - "127.0.0.1:3001:3000"
 
 volumes:
   postgres-data:

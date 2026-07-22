@@ -22,6 +22,25 @@ from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import Any
 
+try:
+    from scanner.redaction import (
+        SENSITIVE_KEYS,
+        SENSITIVE_KEY_FRAGMENTS,
+        is_sensitive_key,
+        redact_sensitive,
+        redact_url_credentials,
+    )
+except ModuleNotFoundError as exc:
+    if exc.name not in {"scanner", "scanner.redaction"}:
+        raise
+    from redaction import (
+        SENSITIVE_KEYS,
+        SENSITIVE_KEY_FRAGMENTS,
+        is_sensitive_key,
+        redact_sensitive,
+        redact_url_credentials,
+    )
+
 
 RISKY_EXTENSIONS = {
     ".pkl",
@@ -115,108 +134,18 @@ RESTRICTIVE_LICENSE_HINTS = (
     "unknown",
 )
 
-SENSITIVE_METADATA_KEYS = {
-    "access_key",
-    "access_key_id",
-    "access_token",
-    "api_key",
-    "api_secret",
-    "api_token",
-    "authorization",
-    "aws_access_key_id",
-    "aws_secret_access_key",
-    "aws_session_token",
-    "azure_sas_token",
-    "bearer_token",
-    "client_secret",
-    "credential",
-    "credentials",
-    "gcp_credentials",
-    "hf_token",
-    "huggingface_token",
-    "password",
-    "private_key",
-    "refresh_token",
-    "secret",
-    "secret_access_key",
-    "secret_value",
-    "session_token",
-    "token",
-}
-
-SENSITIVE_METADATA_KEY_FRAGMENTS = (
-    "_secret",
-    "secret_",
-    "_token",
-    "token_",
-    "_credential",
-    "credential_",
-    "private_key",
-    "password",
-)
-
-SENSITIVE_QUERY_KEYS = {
-    "access_token",
-    "access-token",
-    "api_key",
-    "api-key",
-    "awsaccesskeyid",
-    "expires",
-    "x-amz-credential",
-    "x-amz-security-token",
-    "x-amz-signature",
-    "signature",
-    "sig",
-    "token",
-}
-
-
-def _is_sensitive_metadata_key(key: Any) -> bool:
-    normalized = str(key or "").strip().lower().replace("-", "_")
-    return normalized in SENSITIVE_METADATA_KEYS or any(fragment in normalized for fragment in SENSITIVE_METADATA_KEY_FRAGMENTS)
-
-
-def _redact_reference(value: str) -> str:
-    parsed = urllib.parse.urlparse(value)
-    if not parsed.scheme or not parsed.netloc:
-        return value
-
-    netloc = parsed.netloc
-    if parsed.password:
-        hostname = parsed.hostname or ""
-        username = urllib.parse.quote(urllib.parse.unquote(parsed.username or ""), safe="")
-        host = f"{username}:***@{hostname}" if username else hostname
-        if parsed.port:
-            host = f"{host}:{parsed.port}"
-        netloc = host
-
-    query_pairs = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
-    if query_pairs:
-        redacted_pairs = [
-            (key, "***" if key.strip().lower().replace("_", "-") in SENSITIVE_QUERY_KEYS else value)
-            for key, value in query_pairs
-        ]
-        query = urllib.parse.urlencode(redacted_pairs, doseq=True)
-    else:
-        query = parsed.query
-    return urllib.parse.urlunparse((parsed.scheme, netloc, parsed.path, parsed.params, query, parsed.fragment))
+# Sensitive-key matching and value masking are centralized in scanner.redaction
+# so the API and Model Intake share one key-set (previously these diverged).
+# These names are kept as aliases for backward compatibility.
+SENSITIVE_METADATA_KEYS = SENSITIVE_KEYS
+SENSITIVE_METADATA_KEY_FRAGMENTS = SENSITIVE_KEY_FRAGMENTS
+_is_sensitive_metadata_key = is_sensitive_key
+_redact_reference = redact_url_credentials
 
 
 def redact_model_intake_value(value: Any) -> Any:
     """Mask secrets in model-intake metadata and user-visible artifacts."""
-    if isinstance(value, dict):
-        redacted: dict[Any, Any] = {}
-        for key, item in value.items():
-            if _is_sensitive_metadata_key(key) and item not in (None, "", [], {}):
-                redacted[key] = "***"
-            else:
-                redacted[key] = redact_model_intake_value(item)
-        return redacted
-    if isinstance(value, list):
-        return [redact_model_intake_value(item) for item in value]
-    if isinstance(value, str):
-        return _redact_reference(value)
-    return value
+    return redact_sensitive(value, redact_strings=True)
 
 
 def _artifact_name(ref: str) -> str:
@@ -335,6 +264,21 @@ def _signed_http_hint(ref: str) -> bool:
     return parsed.scheme in {"http", "https"}
 
 
+def _normalized_hostname(parsed: urllib.parse.ParseResult) -> str:
+    return (parsed.hostname or "").lower().rstrip(".")
+
+
+def _is_s3_hostname(host: str) -> bool:
+    return host == "s3.amazonaws.com" or (
+        host.endswith(".amazonaws.com")
+        and (host.startswith("s3.") or host.startswith("s3-") or ".s3." in host or ".s3-" in host)
+    )
+
+
+def _is_azure_blob_hostname(host: str) -> bool:
+    return host.endswith(".blob.core.windows.net") and host != "blob.core.windows.net"
+
+
 def _quote_path(path: str) -> str:
     return urllib.parse.quote(path.strip("/"), safe="/")
 
@@ -406,12 +350,12 @@ def normalize_model_artifact_reference(
         key = parsed.path.lstrip("/")
         region = metadata.get("region") or metadata.get("aws_region") or metadata.get("s3_region")
         if parsed.scheme in {"http", "https"}:
-            host = parsed.netloc
-            if host.startswith("s3.") or host == "s3.amazonaws.com":
+            host = _normalized_hostname(parsed)
+            if host == "s3.amazonaws.com" or (host.endswith(".amazonaws.com") and host.startswith(("s3.", "s3-"))):
                 parts = [part for part in parsed.path.split("/") if part]
                 bucket = parts[0] if parts else ""
                 key = "/".join(parts[1:])
-            elif ".s3." in host or host.endswith(".s3.amazonaws.com"):
+            elif _is_s3_hostname(host):
                 bucket = host.split(".s3", 1)[0]
                 region_match = re.search(r"\.s3[.-]([a-z0-9-]+)\.amazonaws\.com$", host)
                 if region_match:
@@ -445,8 +389,9 @@ def normalize_model_artifact_reference(
         account = metadata.get("artifact_account") or metadata.get("azure_account") or metadata.get("storage_account")
         container = parsed.netloc
         blob_path = parsed.path.lstrip("/")
-        if parsed.scheme in {"http", "https"} and ".blob.core.windows.net" in parsed.netloc:
-            account = parsed.netloc.split(".blob.core.windows.net", 1)[0]
+        host = _normalized_hostname(parsed)
+        if parsed.scheme in {"http", "https"} and _is_azure_blob_hostname(host):
+            account = host.removesuffix(".blob.core.windows.net")
             parts = [part for part in parsed.path.split("/") if part]
             container = parts[0] if parts else ""
             blob_path = "/".join(parts[1:])
@@ -603,6 +548,35 @@ def _parse_content_range(value: str | None) -> dict[str, int | None] | None:
     }
 
 
+def _artifact_size_for_inspection(
+    artifact_meta: dict[str, Any],
+    metadata: dict[str, Any],
+    artifact_bytes: bytes,
+    *,
+    truncated: bool,
+) -> tuple[int | None, str | None]:
+    candidates: list[tuple[Any, str]] = [
+        (artifact_meta.get("bytes_total"), "fetch.bytes_total"),
+    ]
+    content_range = _parse_content_range(str(artifact_meta.get("content_range") or ""))
+    if content_range:
+        candidates.append((content_range.get("total"), "fetch.content_range"))
+    if not truncated:
+        candidates.append((len(artifact_bytes), "observed_complete_artifact"))
+    candidates.append((metadata.get("artifact_size_bytes"), "metadata.artifact_size_bytes"))
+
+    for raw_size, source in candidates:
+        if isinstance(raw_size, bool):
+            continue
+        try:
+            size = int(raw_size)
+        except (TypeError, ValueError):
+            continue
+        if size > 0:
+            return size, source
+    return None, None
+
+
 def _download_http(
     url: str,
     max_bytes: int,
@@ -621,20 +595,47 @@ def _download_http(
     with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
         data = response.read(max_bytes + 1)
         headers = dict(response.headers.items())
+        final_url = ""
+        try:
+            final_url = str(response.geturl() or "")
+        except Exception:
+            final_url = ""
+        remote_ip = None
+        try:
+            raw = getattr(getattr(response, "fp", None), "raw", None)
+            sock = getattr(raw, "_sock", None)
+            peer = sock.getpeername() if sock else None
+            if isinstance(peer, (list, tuple)) and peer:
+                remote_ip = str(peer[0])
+        except Exception:
+            remote_ip = None
         content_range = _parse_content_range(headers.get("Content-Range"))
         content_length = headers.get("Content-Length")
         try:
             declared_length = int(content_length) if content_length is not None else None
         except ValueError:
             declared_length = None
+        status = getattr(response, "status", None)
         if content_range:
             total = content_range.get("total")
             truncated = total is None or int(content_range["end"]) + 1 < int(total)
+        elif status == 206:
+            # 206 Partial Content: the server served only part of the resource in
+            # response to our Range request. Without a Content-Range total proving
+            # we fetched the whole file, assume the artifact exceeds the cap
+            # (fail-safe) — otherwise a capped prefix hashed against the
+            # full-artifact digest surfaces as a FALSE checksum mismatch.
+            truncated = True
         else:
             truncated = len(data) > max_bytes or (declared_length is not None and declared_length > max_bytes)
         return data[:max_bytes], {
             "source": "http",
-            "status": getattr(response, "status", None),
+            "requested_url": url,
+            "final_url": final_url or url,
+            "redirected": bool(final_url and final_url != url),
+            "redirect_chain": [final_url] if final_url and final_url != url else [],
+            "remote_ip": remote_ip,
+            "status": status,
             "content_type": headers.get("Content-Type"),
             "content_length": content_length,
             "content_range": headers.get("Content-Range"),
@@ -696,6 +697,37 @@ def _download_cloud_object(ref: str, metadata: dict[str, Any], max_bytes: int, t
         "fetch_url": fetch_url,
         "cloud": cloud_ref,
     }
+
+
+def _runtime_destination(
+    label: str,
+    configured_url: Any,
+    fetch_meta: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    url = str(configured_url or "").strip()
+    meta = fetch_meta if isinstance(fetch_meta, dict) else {}
+    requested_url = str(meta.get("requested_url") or meta.get("fetch_url") or meta.get("url") or url).strip()
+    final_url = str(meta.get("final_url") or requested_url or url).strip()
+    if not requested_url and not final_url:
+        return None
+    record: dict[str, Any] = {
+        "label": label,
+        "url": requested_url or final_url,
+    }
+    if final_url:
+        record["final_url"] = final_url
+    if meta.get("status") is not None:
+        record["status"] = meta.get("status")
+    if meta.get("source"):
+        record["source"] = meta.get("source")
+    if meta.get("redirected") is not None:
+        record["redirected"] = bool(meta.get("redirected"))
+    if isinstance(meta.get("redirect_chain"), list):
+        record["redirect_chain"] = meta.get("redirect_chain")
+    if meta.get("remote_ip"):
+        record["remote_ip"] = meta.get("remote_ip")
+        record["resolved_host"] = urllib.parse.urlparse(final_url or requested_url).hostname
+    return redact_model_intake_value(record)
 
 
 async def _fetch_artifact(
@@ -864,7 +896,7 @@ def _source_kind(ref: str, metadata: dict[str, Any]) -> str:
         if normalized in {"huggingface", "oci", "s3", "gcs", "azure", "azure_blob", "mlflow"}:
             return normalized
     parsed = urllib.parse.urlparse(ref)
-    host = parsed.netloc.lower()
+    host = _normalized_hostname(parsed)
     if _metadata_value(metadata, "huggingface_repo", "hf_repo"):
         return "huggingface"
     if ref.startswith("hf://") or "huggingface.co/" in ref:
@@ -875,11 +907,11 @@ def _source_kind(ref: str, metadata: dict[str, Any]) -> str:
         return "mlflow"
     if ref.startswith(("s3://", "gs://", "gcs://", "azure://")):
         return urllib.parse.urlparse(ref).scheme
-    if host == "s3.amazonaws.com" or host.startswith("s3.") or ".s3." in host or ".s3-" in host:
+    if _is_s3_hostname(host):
         return "s3"
     if host == "storage.googleapis.com" or host.endswith(".storage.googleapis.com"):
         return "gcs"
-    if "blob.core.windows.net" in host:
+    if _is_azure_blob_hostname(host):
         return "azure_blob"
     return parsed.scheme or "local"
 
@@ -929,7 +961,269 @@ def _registry_reference(ref: str, metadata: dict[str, Any]) -> dict[str, Any]:
     return reference
 
 
-def _signature_verification_status(metadata: dict[str, Any], signature_url: Any, signed_by: Any) -> dict[str, Any]:
+def _decode_signature_value(raw: Any) -> bytes | None:
+    """Decode an inline detached signature value: base64, hex, or raw bytes/text."""
+    if raw is None:
+        return None
+    if isinstance(raw, (bytes, bytearray)):
+        return bytes(raw)
+    text = str(raw).strip()
+    if not text:
+        return None
+    import base64
+    import binascii
+    try:
+        return base64.b64decode(text, validate=True)
+    except (ValueError, binascii.Error):
+        pass
+    try:
+        return bytes.fromhex(text)
+    except ValueError:
+        pass
+    return text.encode("utf-8", "ignore")
+
+
+def _verify_signature_crypto(
+    public_key_pem: Any,
+    signature_bytes: bytes | None,
+    payload_bytes: bytes | None,
+    *,
+    rsa_padding: str = "pss",
+    hash_name: str = "sha256",
+) -> dict[str, Any]:
+    """Real detached-signature verification via the cryptography library.
+
+    Never raises. ``verified`` is True only when an actual cryptographic check
+    passed — caller-supplied metadata booleans never set it (that is the whole
+    point of R1). When the cryptography library is unavailable, reports
+    ``verifier_unavailable`` rather than silently passing.
+    """
+    if not (public_key_pem and signature_bytes and payload_bytes):
+        return {"available": None, "attempted": False, "verified": False, "error": "missing_material"}
+    try:
+        from cryptography.hazmat.primitives.serialization import load_pem_public_key
+        from cryptography.hazmat.primitives.asymmetric import ec, ed25519, padding as asy_padding, rsa
+        from cryptography.hazmat.primitives import hashes
+        from cryptography.exceptions import InvalidSignature
+    except ImportError:
+        return {"available": False, "attempted": False, "verified": False, "error": "verifier_unavailable"}
+    try:
+        pem = public_key_pem if isinstance(public_key_pem, (bytes, bytearray)) else str(public_key_pem).encode()
+        key = load_pem_public_key(bytes(pem))
+    except Exception as exc:  # noqa: BLE001 - report, never raise
+        return {"available": True, "attempted": False, "verified": False, "error": f"public_key_load_failed:{type(exc).__name__}"}
+    hash_cls = {"sha256": hashes.SHA256, "sha384": hashes.SHA384, "sha512": hashes.SHA512}.get(
+        str(hash_name).lower(), hashes.SHA256
+    )
+    hash_alg = hash_cls()
+    try:
+        if isinstance(key, ed25519.Ed25519PublicKey):
+            key.verify(bytes(signature_bytes), bytes(payload_bytes))
+            algorithm = "ed25519"
+        elif isinstance(key, rsa.RSAPublicKey):
+            if str(rsa_padding).lower() == "pkcs1":
+                pad = asy_padding.PKCS1v15()
+            else:
+                pad = asy_padding.PSS(mgf=asy_padding.MGF1(hash_alg), salt_length=asy_padding.PSS.MAX_LENGTH)
+            key.verify(bytes(signature_bytes), bytes(payload_bytes), pad, hash_alg)
+            algorithm = f"rsa-{str(rsa_padding).lower()}-{str(hash_name).lower()}"
+        elif isinstance(key, ec.EllipticCurvePublicKey):
+            key.verify(bytes(signature_bytes), bytes(payload_bytes), ec.ECDSA(hash_alg))
+            algorithm = f"ecdsa-{str(hash_name).lower()}"
+        else:
+            return {"available": True, "attempted": False, "verified": False, "error": "unsupported_key_type"}
+    except InvalidSignature:
+        return {"available": True, "attempted": True, "verified": False, "verifier": "cryptography", "error": "invalid_signature"}
+    except Exception as exc:  # noqa: BLE001
+        return {"available": True, "attempted": True, "verified": False, "error": f"verify_error:{type(exc).__name__}"}
+    return {"available": True, "attempted": True, "verified": True, "verifier": f"cryptography:{algorithm}", "algorithm": algorithm}
+
+
+def _public_key_sha256(public_key_pem: Any) -> str | None:
+    """SHA-256 over the DER SubjectPublicKeyInfo — a stable signing-key fingerprint."""
+    try:
+        from cryptography.hazmat.primitives.serialization import (
+            Encoding,
+            PublicFormat,
+            load_pem_public_key,
+        )
+    except ImportError:
+        return None
+    try:
+        pem = public_key_pem if isinstance(public_key_pem, (bytes, bytearray)) else str(public_key_pem).encode()
+        key = load_pem_public_key(bytes(pem))
+        der = key.public_bytes(Encoding.DER, PublicFormat.SubjectPublicKeyInfo)
+    except Exception:  # noqa: BLE001 - report no fingerprint, never raise
+        return None
+    return hashlib.sha256(der).hexdigest()
+
+
+def _iter_str_tokens(raw: Any):
+    """Yield individual tokens from a list/tuple/set or a comma/space-delimited string."""
+    if raw is None:
+        return
+    if isinstance(raw, (list, tuple, set)):
+        for item in raw:
+            yield from _iter_str_tokens(item)
+        return
+    for token in re.split(r"[,\s]+", str(raw)):
+        if token:
+            yield token
+
+
+def _iter_pem_blocks(raw: Any):
+    """Yield individual PEM blocks from a list or a (possibly multi-key) PEM bundle."""
+    if raw is None:
+        return
+    if isinstance(raw, (list, tuple, set)):
+        for item in raw:
+            yield from _iter_pem_blocks(item)
+        return
+    text = raw.decode() if isinstance(raw, (bytes, bytearray)) else str(raw)
+    blocks = re.findall(r"-----BEGIN [^-]+-----.*?-----END [^-]+-----", text, re.DOTALL)
+    if blocks:
+        yield from blocks
+    elif text.strip():
+        yield text
+
+
+def _configured_trust_anchor_fingerprints(options: dict[str, Any]) -> set[str]:
+    """Collect operator-configured trusted signing-key SHA-256 fingerprints.
+
+    Trust anchors come ONLY from operator-controlled inputs (scan options and
+    environment), never from the artifact's own metadata — a publisher could
+    otherwise self-declare their key as trusted, which is the self-signing hole
+    this guards against.
+    """
+    fingerprints: set[str] = set()
+
+    def _add_fp(raw: Any) -> None:
+        for token in _iter_str_tokens(raw):
+            norm = token.strip().lower().replace(":", "")
+            if norm:
+                fingerprints.add(norm)
+
+    def _add_key(raw: Any) -> None:
+        for pem in _iter_pem_blocks(raw):
+            fp = _public_key_sha256(pem)
+            if fp:
+                fingerprints.add(fp)
+
+    _add_fp(options.get("signature_trusted_key_sha256"))
+    _add_fp(options.get("signature_trusted_key_fingerprints"))
+    _add_key(options.get("signature_trusted_keys"))
+    _add_fp(os.environ.get("MODEL_INTAKE_TRUSTED_KEY_SHA256"))
+    _add_key(os.environ.get("MODEL_INTAKE_TRUSTED_SIGNING_KEYS"))
+    return fingerprints
+
+
+def _evaluate_signature_trust_root(public_key_pem: Any, options: dict[str, Any]) -> dict[str, Any]:
+    """Decide whether a (validly-signing) key chains to a configured trust anchor.
+
+    ``trusted_root`` is True/False when anchors are configured, or None when none
+    are configured (trusted provenance simply cannot be established — a valid
+    signature alone does not prove a trusted publisher).
+    """
+    anchors = _configured_trust_anchor_fingerprints(options)
+    key_fp = _public_key_sha256(public_key_pem)
+    if not anchors:
+        trusted_root: bool | None = None
+    else:
+        trusted_root = bool(key_fp and key_fp in anchors)
+    return {
+        "key_fingerprint": key_fp,
+        "trusted_root": trusted_root,
+        "trust_anchors_configured": bool(anchors),
+    }
+
+
+async def _load_and_verify_signature(
+    options: dict[str, Any],
+    metadata: dict[str, Any],
+    signature_url: Any,
+    artifact_bytes: bytes,
+    sha256: str | None,
+    *,
+    timeout_seconds: int,
+    allow_local_files: bool,
+) -> dict[str, Any]:
+    """Gather signature material (inline or fetched) and run real verification.
+
+    A public key is required to verify; without one we cannot cryptographically
+    verify and return ``no_public_key`` (metadata claims may still be reported as
+    *claimed*, never *verified*).
+    """
+    pub_inline = options.get("signature_public_key") or metadata.get("signature_public_key")
+    pub_url = options.get("signature_public_key_url") or metadata.get("signature_public_key_url")
+    sig_inline = options.get("signature_value") or metadata.get("signature_value")
+    rsa_padding = str(options.get("signature_rsa_padding") or metadata.get("signature_rsa_padding") or "pss")
+    hash_name = str(options.get("signature_hash") or metadata.get("signature_hash") or "sha256")
+    payload_kind = str(options.get("signature_payload") or metadata.get("signature_payload") or "artifact").lower()
+    expected_sha256 = str(options.get("expected_sha256") or metadata.get("sha256") or "").strip().lower() or None
+
+    public_key_pem: Any = None
+    if pub_inline:
+        public_key_pem = pub_inline
+    elif pub_url:
+        pk_bytes, _pk_meta = await _fetch_artifact(
+            str(pub_url), max_bytes=1_000_000, timeout_seconds=timeout_seconds,
+            metadata=metadata, allow_local_files=allow_local_files,
+        )
+        if pk_bytes:
+            public_key_pem = pk_bytes
+    if not public_key_pem:
+        return {"available": None, "attempted": False, "verified": False, "error": "no_public_key"}
+
+    signature_bytes = _decode_signature_value(sig_inline) if sig_inline else None
+    if not signature_bytes and signature_url:
+        sig_bytes, _sig_meta = await _fetch_artifact(
+            str(signature_url), max_bytes=1_000_000, timeout_seconds=timeout_seconds,
+            metadata=metadata, allow_local_files=allow_local_files,
+        )
+        if sig_bytes:
+            signature_bytes = sig_bytes
+    if not signature_bytes:
+        return {"available": True, "attempted": False, "verified": False, "error": "no_signature"}
+
+    digest_based = False
+    if payload_kind in ("digest_hex", "digesthex", "digest-hex") and sha256:
+        payload_bytes: bytes | None = sha256.encode()
+        digest_based = True
+    elif payload_kind in ("digest_raw", "digest", "digestraw", "digest-raw") and sha256:
+        try:
+            payload_bytes = bytes.fromhex(sha256)
+        except ValueError:
+            payload_bytes = sha256.encode()
+        digest_based = True
+    else:
+        payload_bytes = artifact_bytes
+
+    result = _verify_signature_crypto(
+        public_key_pem, signature_bytes, payload_bytes, rsa_padding=rsa_padding, hash_name=hash_name
+    )
+    signature_valid = bool(result.get("verified"))
+    result["signature_valid"] = signature_valid
+    if signature_valid:
+        result["attestation_subject_digest_match"] = bool(
+            not expected_sha256 or (sha256 and sha256 == expected_sha256)
+        )
+        result["payload_kind"] = "digest" if digest_based else "artifact"
+        # A valid signature only establishes TRUSTED provenance when the signing key
+        # chains to an operator-configured trust anchor. Without that, a publisher
+        # could self-sign, so downgrade ``verified`` from cryptographic-pass-only to
+        # cryptographic-pass-AND-trusted.
+        trust = _evaluate_signature_trust_root(public_key_pem, options)
+        result.update(trust)
+        result["verified"] = signature_valid and trust.get("trusted_root") is True
+    return result
+
+
+def _signature_verification_status(
+    metadata: dict[str, Any],
+    signature_url: Any,
+    signed_by: Any,
+    crypto: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     claim_keys = (
         "signature_verified",
         "sigstore_verified",
@@ -937,7 +1231,9 @@ def _signature_verification_status(metadata: dict[str, Any], signature_url: Any,
         "attestation_verified",
         "provenance_verified",
     )
-    cryptographic_verification_keys = (
+    # Metadata booleans asserting cryptographic verification are CLAIMS, not proof
+    # (R1). Only the real verifier result can set cryptographically_verified.
+    crypto_claim_keys = (
         "signature_cryptographically_verified",
         "cryptographic_signature_verified",
         "sigstore_bundle_verified",
@@ -945,11 +1241,27 @@ def _signature_verification_status(metadata: dict[str, Any], signature_url: Any,
         "attestation_cryptographically_verified",
         "provenance_cryptographically_verified",
     )
-    claimed_verified = any(_boolish(metadata.get(key)) for key in claim_keys)
-    cryptographically_verified = any(_boolish(metadata.get(key)) for key in cryptographic_verification_keys)
+    claimed_verified = any(_boolish(metadata.get(key)) for key in (*claim_keys, *crypto_claim_keys))
+    crypto = crypto or {}
+    # ``signature_valid`` = the raw cryptographic check passed; ``cryptographically_verified``
+    # additionally requires the signing key to chain to a configured trust anchor.
+    signature_valid = bool(crypto.get("signature_valid")) or bool(crypto.get("verified"))
+    cryptographically_verified = bool(crypto.get("verified"))
+    trusted_root = crypto.get("trusted_root")
+    crypto_attempted = bool(crypto.get("attempted"))
+    crypto_invalid = crypto_attempted and not signature_valid
     present = bool(signature_url or signed_by or metadata.get("attestation_url") or metadata.get("provenance_url"))
     if cryptographically_verified:
         status = "verified"
+    elif signature_valid and trusted_root is False:
+        # Signature math passed but the signing key is not a configured trust anchor.
+        status = "untrusted_key"
+    elif signature_valid:
+        # Signature math passed but no trust anchors are configured, so provenance
+        # cannot be established (the key may be self-signed).
+        status = "untrusted_root"
+    elif crypto_invalid:
+        status = "invalid"
     elif claimed_verified:
         status = "claimed_verified"
     elif present:
@@ -959,33 +1271,99 @@ def _signature_verification_status(metadata: dict[str, Any], signature_url: Any,
     return {
         "status": status,
         "verified": cryptographically_verified,
+        "signature_valid": signature_valid,
+        "trusted_root": trusted_root,
+        "key_fingerprint": crypto.get("key_fingerprint"),
+        "trust_anchors_configured": bool(crypto.get("trust_anchors_configured")),
+        "claimed_present": present,
         "claimed_verified": claimed_verified,
         "cryptographically_verified": cryptographically_verified,
+        "crypto_attempted": crypto_attempted,
+        "crypto_invalid": crypto_invalid,
         "present": present,
         "signature_url": signature_url,
         "signed_by": signed_by,
+        "verifier": crypto.get("verifier"),
+        "algorithm": crypto.get("algorithm"),
+        "transparency_log_verified": bool(crypto.get("transparency_log_verified")),
+        "attestation_subject_digest_match": crypto.get("attestation_subject_digest_match"),
+        "crypto_error": crypto.get("error"),
         "verification_evidence": {
             key: metadata.get(key)
-            for key in (*claim_keys, *cryptographic_verification_keys)
+            for key in (*claim_keys, *crypto_claim_keys)
             if metadata.get(key) not in (None, "", [], {})
         },
     }
 
 
-def _license_policy(license_ref: Any) -> dict[str, Any]:
-    license_text = str(license_ref or "").strip()
-    normalized = license_text.lower()
+_SPDX_PERMISSIVE = {
+    "apache-2.0", "mit", "bsd-2-clause", "bsd-3-clause", "isc", "0bsd", "bsl-1.0",
+    "zlib", "unlicense", "cc0-1.0", "mpl-2.0", "python-2.0", "postgresql", "openrail",
+    "openrail++", "bigscience-openrail-m", "creativeml-openrail-m", "llama2", "llama3",
+}
+_SPDX_COPYLEFT = {
+    "gpl-2.0", "gpl-3.0", "agpl-3.0", "lgpl-2.1", "lgpl-3.0", "epl-2.0", "cddl-1.0",
+    "ms-rl", "osl-3.0",
+}
+_SPDX_ALIASES = {
+    "apache 2.0": "apache-2.0", "apache2": "apache-2.0", "apache2.0": "apache-2.0",
+    "apache license 2.0": "apache-2.0", "bsd": "bsd-3-clause", "gplv2": "gpl-2.0",
+    "gplv3": "gpl-3.0", "gpl2": "gpl-2.0", "gpl3": "gpl-3.0", "agplv3": "agpl-3.0",
+    "lgplv3": "lgpl-3.0", "the unlicense": "unlicense", "cc-0": "cc0-1.0",
+}
+_SPDX_SUFFIXES = ("-only", "-or-later", "+")
+
+
+def _normalize_spdx_token(token: str) -> str:
+    t = str(token or "").strip().strip("()").strip().lower()
+    return _SPDX_ALIASES.get(t, t)
+
+
+def _spdx_base(token: str) -> str:
+    base = _normalize_spdx_token(token)
+    for suffix in _SPDX_SUFFIXES:
+        if base.endswith(suffix):
+            base = base[: -len(suffix)]
+    return base
+
+
+def _classify_license_token(token: str) -> str:
+    normalized = _normalize_spdx_token(token)
     if not normalized:
-        status = "missing"
-    elif normalized in PERMISSIVE_LICENSES:
-        status = "permissive"
-    elif any(hint in normalized for hint in RESTRICTIVE_LICENSE_HINTS):
+        return "missing"
+    if any(hint in normalized for hint in RESTRICTIVE_LICENSE_HINTS):
+        return "restricted"
+    base = _spdx_base(normalized)
+    if base in _SPDX_PERMISSIVE or normalized in PERMISSIVE_LICENSES:
+        return "permissive"
+    if base in _SPDX_COPYLEFT or base.startswith(("gpl-", "agpl-", "lgpl-")):
+        return "restricted"
+    if base.startswith(("apache", "mit", "bsd", "isc", "mpl", "openrail")):
+        return "permissive"
+    return "review_required"
+
+
+def _license_policy(license_ref: Any) -> dict[str, Any]:
+    """Classify a license, normalizing SPDX identifiers and parsing expressions.
+
+    Supports SPDX expressions like "MIT OR Apache-2.0" and "(MIT AND GPL-3.0-only)":
+    restricted if any sub-license is restricted, permissive only if all are.
+    """
+    license_text = str(license_ref or "").strip()
+    if not license_text:
+        return {"license": license_ref, "status": "missing", "normalized": [], "review_required": True}
+    tokens = [t for t in (part.strip() for part in re.split(r"\s+(?:and|or|with)\s+|[()]", license_text, flags=re.IGNORECASE)) if t]
+    classes = [_classify_license_token(t) for t in tokens] or ["review_required"]
+    if "restricted" in classes:
         status = "restricted"
+    elif all(c == "permissive" for c in classes):
+        status = "permissive"
     else:
         status = "review_required"
     return {
         "license": license_ref,
         "status": status,
+        "normalized": [_normalize_spdx_token(t) for t in tokens],
         "review_required": status in {"missing", "restricted", "review_required"},
     }
 
@@ -1162,25 +1540,44 @@ def _scan_suspicious_loader_markers(data: bytes, zip_info: dict[str, Any]) -> li
     return list(deduped.values())[:25]
 
 
-def _inspect_safetensors(data: bytes) -> dict[str, Any]:
-    header: dict[str, Any] = {"present": False, "valid_json": False, "valid": False}
+def _inspect_safetensors(
+    data: bytes,
+    *,
+    artifact_truncated: bool = False,
+    artifact_size: int | None = None,
+    artifact_size_source: str | None = None,
+) -> dict[str, Any]:
+    header: dict[str, Any] = {
+        "present": False,
+        "valid_json": False,
+        "valid": False,
+        "conclusive_invalid": False,
+        "validation_complete": False,
+    }
     if len(data) < 8:
         header["error"] = "too_short_for_header_length"
+        header["conclusive_invalid"] = not artifact_truncated
+        header["valid"] = False if header["conclusive_invalid"] else None
         return header
 
     header_len = int.from_bytes(data[:8], "little", signed=False)
     header["length"] = header_len
     if header_len <= 0:
         header["error"] = "empty_header"
+        header["conclusive_invalid"] = True
         return header
     if header_len > 100_000_000:
         header["error"] = "header_length_unreasonable"
+        header["conclusive_invalid"] = True
         return header
     if header_len > 1_048_576:
         header["error"] = "header_exceeds_intake_limit"
+        header["valid"] = None
         return header
     if len(data) < 8 + header_len:
-        header["error"] = "truncated_header"
+        header["error"] = "header_not_fully_observed" if artifact_truncated else "truncated_header"
+        header["conclusive_invalid"] = not artifact_truncated
+        header["valid"] = False if header["conclusive_invalid"] else None
         return header
 
     duplicate_keys: list[str] = []
@@ -1202,10 +1599,12 @@ def _inspect_safetensors(data: bytes) -> dict[str, Any]:
         )
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         header["error"] = f"{type(exc).__name__}: {str(exc)[:120]}"
+        header["conclusive_invalid"] = True
         return header
 
     if not isinstance(parsed, dict):
         header["error"] = "header_json_not_object"
+        header["conclusive_invalid"] = True
         return header
 
     header["present"] = True
@@ -1228,7 +1627,13 @@ def _inspect_safetensors(data: bytes) -> dict[str, Any]:
 
     tensor_ranges: list[tuple[int, int, str]] = []
     invalid_tensors: list[dict[str, Any]] = []
-    payload_size = max(0, len(data) - 8 - header_len)
+    payload_size: int | None = None
+    if not artifact_truncated:
+        payload_size = max(0, len(data) - 8 - header_len)
+        artifact_size_source = artifact_size_source or "observed_complete_artifact"
+    elif artifact_size is not None and artifact_size >= 8 + header_len:
+        payload_size = artifact_size - 8 - header_len
+
     for name, tensor in parsed.items():
         if name == "__metadata__":
             continue
@@ -1244,7 +1649,7 @@ def _inspect_safetensors(data: bytes) -> dict[str, Any]:
             invalid_tensors.append({"tensor": name, "reason": "missing_or_invalid_data_offsets"})
             continue
         start, end = offsets
-        if start < 0 or end < start or end > payload_size:
+        if start < 0 or end < start or (payload_size is not None and end > payload_size):
             invalid_tensors.append({
                 "tensor": name,
                 "reason": "offset_out_of_bounds",
@@ -1265,14 +1670,21 @@ def _inspect_safetensors(data: bytes) -> dict[str, Any]:
                 "start": current[0],
             })
 
+    conclusive_invalid = bool(duplicate_keys or invalid_tensors or overlaps)
+    validation_complete = payload_size is not None
     header.update({
-        "valid": not duplicate_keys and not invalid_tensors and not overlaps,
+        "valid": False if conclusive_invalid else True if validation_complete else None,
+        "conclusive_invalid": conclusive_invalid,
+        "validation_complete": validation_complete,
         "tensor_count": len([key for key in parsed.keys() if key != "__metadata__"]),
         "metadata_keys": metadata_keys,
         "suspicious_metadata_keys": sorted(set(suspicious_metadata_keys))[:25],
         "invalid_tensors": invalid_tensors[:25],
         "overlapping_tensors": overlaps[:25],
         "payload_size": payload_size,
+        "payload_bounds_checked": payload_size is not None,
+        "artifact_size": artifact_size if artifact_size is not None else len(data) if not artifact_truncated else None,
+        "artifact_size_source": artifact_size_source,
     })
     return header
 
@@ -1365,7 +1777,16 @@ def _inspect_gguf(data: bytes) -> dict[str, Any]:
     }
 
 
-def _inspect_format(name: str, ext: str, data: bytes, zip_info: dict[str, Any]) -> dict[str, Any]:
+def _inspect_format(
+    name: str,
+    ext: str,
+    data: bytes,
+    zip_info: dict[str, Any],
+    *,
+    artifact_truncated: bool = False,
+    artifact_size: int | None = None,
+    artifact_size_source: str | None = None,
+) -> dict[str, Any]:
     inspection: dict[str, Any] = {
         "artifact_name": name,
         "extension": ext,
@@ -1373,7 +1794,12 @@ def _inspect_format(name: str, ext: str, data: bytes, zip_info: dict[str, Any]) 
         "lower_code_execution_risk": ext in SAFER_MODEL_EXTENSIONS,
     }
     if ext == ".safetensors":
-        inspection["safetensors_header"] = _inspect_safetensors(data)
+        inspection["safetensors_header"] = _inspect_safetensors(
+            data,
+            artifact_truncated=artifact_truncated,
+            artifact_size=artifact_size,
+            artifact_size_source=artifact_size_source,
+        )
     elif ext == ".onnx":
         inspection["onnx"] = _inspect_onnx(data)
     elif ext == ".gguf":
@@ -1545,8 +1971,16 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
     poisoning_eval_ref = _metadata_value(metadata, "poisoning_evals", "backdoor_evals", "canary_eval_report", "data_poisoning_evals")
     metadata_unavailable = bool(metadata_url and metadata_fetch_meta.get("error") and not metadata)
     require_signature_verification = _boolish(options.get("require_signature_verification"))
+    require_cryptographic_signature_verification = _boolish(
+        options.get("require_cryptographic_signature_verification")
+        or metadata.get("require_cryptographic_signature_verification")
+    )
     registry_reference = _registry_reference(artifact_ref, metadata)
-    signature_status = _signature_verification_status(metadata, signature_url, signed_by)
+    crypto_signature_result = await _load_and_verify_signature(
+        options, metadata, signature_url, artifact_bytes, sha256,
+        timeout_seconds=timeout_seconds, allow_local_files=allow_local_files,
+    )
+    signature_status = _signature_verification_status(metadata, signature_url, signed_by, crypto_signature_result)
     license_policy = _license_policy(license_ref)
     sbom_policy = _sbom_policy(sbom_ref, strict=strict_governance)
     try:
@@ -1561,7 +1995,21 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
     )
     eval_policy = _eval_policy(eval_ref, strict=strict_governance, expected_sha256=expected_sha256)
     approval_policy = _approval_policy(metadata, deployment_approved=deployment_approved, strict=strict_governance)
-    format_inspection = _inspect_format(name, ext, artifact_bytes, zip_info)
+    artifact_size, artifact_size_source = _artifact_size_for_inspection(
+        artifact_meta,
+        metadata,
+        artifact_bytes,
+        truncated=artifact_truncated,
+    )
+    format_inspection = _inspect_format(
+        name,
+        ext,
+        artifact_bytes,
+        zip_info,
+        artifact_truncated=artifact_truncated,
+        artifact_size=artifact_size,
+        artifact_size_source=artifact_size_source,
+    )
     suspicious_loader_markers = _scan_suspicious_loader_markers(artifact_bytes, zip_info)
     aibom_hash = str(expected_sha256 or sha256 or "").strip() or None
     aibom = _generate_aibom(
@@ -1677,19 +2125,55 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
             remediation="Require Sigstore, registry signing, or an equivalent signed attestation for deployable model artifacts.",
         ))
 
-    if (
-        require_signature_verification
-        and signature_status["status"] in {"present_unverified", "claimed_verified"}
-        and not metadata_unavailable
-    ):
+    # A present-but-invalid signature (real verifier ran and rejected it) is a red
+    # flag regardless of policy flags — surface it as high severity.
+    if signature_status["status"] == "invalid" and not metadata_unavailable:
         findings.append(_finding(
-            finding_id="signature_not_verified",
-            title="Model artifact signature is present but not verified",
-            severity="medium",
-            description="The artifact has signature or attestation metadata, but intake does not have cryptographic verification evidence.",
+            finding_id="signature_invalid",
+            title="Model artifact signature failed cryptographic verification",
+            severity="high",
+            description="A detached signature was present and the cryptographic verifier rejected it against the artifact/digest and supplied public key.",
             artifact_ref=artifact_ref,
             evidence={"artifact": name, "signature": signature_status},
-            remediation="Verify the signature or attestation with Sigstore/cosign or the registry verifier and record cryptographic verification evidence in model intake metadata.",
+            remediation="Do not deploy. Re-sign the artifact with the correct key, or correct the public key / payload (artifact vs digest) used for verification.",
+        ))
+
+    effective_require_verification = require_signature_verification or require_cryptographic_signature_verification
+    untrusted_signature = signature_status["status"] in {"untrusted_key", "untrusted_root"}
+    if (
+        effective_require_verification
+        and signature_status["status"] in {"present_unverified", "claimed_verified", "untrusted_key", "untrusted_root"}
+        and not metadata_unavailable
+    ):
+        crypto_strict = require_cryptographic_signature_verification
+        if untrusted_signature:
+            description = (
+                "A detached signature is cryptographically valid, but the signing key does not chain to "
+                "a configured trust anchor, so the artifact's provenance is untrusted (it may be self-signed). "
+                "Trusted verification requires an operator-configured trust root."
+            )
+        elif crypto_strict:
+            description = (
+                "Policy requires cryptographic signature verification, but intake could not verify the "
+                "signature; only a metadata claim is present."
+            )
+        else:
+            description = (
+                "The artifact has signature or attestation metadata, but intake does not have cryptographic verification evidence."
+            )
+        findings.append(_finding(
+            finding_id="signature_not_verified",
+            title="Model artifact signature is present but not cryptographically verified",
+            severity="high" if (crypto_strict or untrusted_signature) else "medium",
+            description=description,
+            artifact_ref=artifact_ref,
+            evidence={"artifact": name, "signature": signature_status},
+            remediation=(
+                "Configure a trusted signing key (signature_trusted_keys / signature_trusted_key_sha256 or the "
+                "MODEL_INTAKE_TRUSTED_* environment variables) and re-sign with a key that chains to it."
+                if untrusted_signature
+                else "Provide a public key (signature_public_key/_url) and detached signature (signature_value/signature_url) so intake can run real cryptographic verification, or verify with Sigstore/cosign and record the verifier result."
+            ),
         ))
 
     risky_ext = ext in RISKY_EXTENSIONS
@@ -1714,7 +2198,7 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
         ))
 
     safetensors_header = format_inspection.get("safetensors_header") if isinstance(format_inspection.get("safetensors_header"), dict) else {}
-    if ext == ".safetensors" and artifact_bytes and not safetensors_header.get("valid"):
+    if ext == ".safetensors" and artifact_bytes and safetensors_header.get("conclusive_invalid"):
         findings.append(_finding(
             finding_id="safetensors_header_invalid",
             title="Safetensors header failed structural validation",
@@ -2066,7 +2550,17 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
         }
         for f in findings
     )
-    if ext in SAFER_MODEL_EXTENSIONS and not any(f["id"].endswith("unsafe_serialization") for f in findings) and not format_specific_blocked:
+    format_specific_indeterminate = bool(
+        ext == ".safetensors"
+        and safetensors_header.get("valid") is None
+        and not safetensors_header.get("conclusive_invalid")
+    )
+    if (
+        ext in SAFER_MODEL_EXTENSIONS
+        and not any(f["id"].endswith("unsafe_serialization") for f in findings)
+        and not format_specific_blocked
+        and not format_specific_indeterminate
+    ):
         format_posture = "safer_static_format"
     elif ext in RISKY_EXTENSIONS or pickle_like:
         format_posture = "unsafe_executable_serialization"
@@ -2085,7 +2579,7 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
         checksum_policy_status = "review"
     else:
         checksum_policy_status = "not_required"
-    format_specific_ok = not any(
+    format_specific_ok: bool | None = not any(
         finding["id"] in {
             "model_intake:safetensors_header_invalid",
             "model_intake:onnx_external_data_reference",
@@ -2094,6 +2588,8 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
         }
         for finding in findings
     )
+    if format_specific_indeterminate:
+        format_specific_ok = None
 
     score = max(0, 100 - sum(_severity_score(f.get("severity", "info")) for f in findings))
     safe_artifact_ref = redact_model_intake_value(artifact_ref)
@@ -2104,6 +2600,20 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
     safe_signature_status = redact_model_intake_value(signature_status)
     safe_aibom = redact_model_intake_value(aibom)
     safe_findings = redact_model_intake_value(findings)
+    runtime_destinations = [
+        item for item in (
+            _runtime_destination("artifact", artifact_ref, artifact_meta),
+            _runtime_destination("metadata", metadata_url, metadata_fetch_meta) if metadata_url else None,
+            _runtime_destination("signature", signature_url, None) if signature_url else None,
+            _runtime_destination(
+                "signature_public_key",
+                options.get("signature_public_key_url") or metadata.get("signature_public_key_url"),
+                None,
+            ) if (options.get("signature_public_key_url") or metadata.get("signature_public_key_url")) else None,
+            _runtime_destination("model_card", model_card, None) if isinstance(model_card, str) else None,
+        )
+        if item
+    ]
     summary = {
         "artifact_name": name,
         "artifact_ref": safe_artifact_ref,
@@ -2129,9 +2639,18 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
         "aibom_completeness": aibom["completeness"]["score"],
         "provenance_present": bool(provenance_ref),
         "signature_present": bool(signature_url or signed_by),
+        "signature_claimed_present": signature_status["claimed_present"],
         "signature_verified": signature_status["verified"],
+        "signature_valid": signature_status.get("signature_valid"),
+        "signature_trusted_root": signature_status.get("trusted_root"),
+        "signature_key_fingerprint": signature_status.get("key_fingerprint"),
+        "signature_trust_anchors_configured": signature_status.get("trust_anchors_configured"),
         "signature_claimed_verified": signature_status["claimed_verified"],
         "signature_cryptographically_verified": signature_status["cryptographically_verified"],
+        "signature_verifier": signature_status.get("verifier"),
+        "signature_transparency_log_verified": signature_status.get("transparency_log_verified"),
+        "signature_attestation_subject_digest_match": signature_status.get("attestation_subject_digest_match"),
+        "signature_crypto_attempted": signature_status.get("crypto_attempted"),
         "expected_hash_present": bool(expected_sha256),
         "deployment_approved": deployment_approved,
         "license_present": bool(license_ref),
@@ -2155,6 +2674,7 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
         "target": safe_artifact_ref,
         "model_intake": {
             "summary": summary,
+            "runtime_destinations": runtime_destinations,
             "artifact": {
                 "name": name,
                 "extension": ext,

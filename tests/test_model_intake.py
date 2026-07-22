@@ -1,8 +1,11 @@
 import asyncio
 import hashlib
 import json
+import sys
+import types
 import zipfile
 from datetime import datetime, timezone
+from pathlib import Path
 
 from scanner.scanner_tools import model_intake
 from scanner.scanner_tools.model_intake import (
@@ -82,7 +85,10 @@ def test_model_intake_accepts_signed_safetensors_with_provenance(tmp_path):
     assert result["findings"] == []
     assert result["model_intake"]["summary"]["format_posture"] == "safer_static_format"
     assert result["model_intake"]["summary"]["aibom_generated"] is True
-    assert result["model_intake"]["summary"]["signature_verification_status"] == "verified"
+    # R1: a metadata-only cryptographic claim is "claimed", never "verified" — real
+    # cryptographic verification requires a public key + detached signature.
+    assert result["model_intake"]["summary"]["signature_verification_status"] == "claimed_verified"
+    assert result["model_intake"]["summary"]["signature_cryptographically_verified"] is False
     assert result["model_intake"]["aibom"]["completeness"]["fields"]["base_model"] is True
     assert any(component["type"] == "tokenizer" for component in result["model_intake"]["aibom"]["components"])
     assert result["result"]["grade"] == "A"
@@ -198,9 +204,196 @@ def test_model_intake_does_not_compare_full_hash_to_truncated_sample(monkeypatch
     assert result["model_intake"]["checks"]["checksum"] is False
 
 
+def test_model_intake_validates_truncated_safetensors_against_declared_artifact_size(monkeypatch):
+    header = b'{"weight":{"dtype":"F32","shape":[25],"data_offsets":[0,100]}}'
+    prefix = len(header).to_bytes(8, "little") + header + b"\0\0\0\0"
+    full_size = 8 + len(header) + 100
+
+    def fake_download_http(url, max_bytes, timeout_seconds, headers=None):
+        return prefix, {
+            "source": "huggingface",
+            "status": 206,
+            "bytes_observed": len(prefix),
+            "truncated": True,
+        }
+
+    monkeypatch.setattr(model_intake, "_download_http", fake_download_http)
+
+    result = asyncio.run(
+        run_model_intake_scan(
+            "hf://acme/ranker@abc123/model.safetensors",
+            {
+                "require_deployment_approval": False,
+                "require_hash": False,
+                "require_signature": False,
+                "require_model_governance": False,
+                "metadata_json": {"artifact_size_bytes": full_size},
+            },
+        )
+    )
+
+    finding_ids = {finding["id"] for finding in result["findings"]}
+    inspection = result["model_intake"]["supply_chain"]["format_inspection"]["safetensors_header"]
+    assert "model_intake:safetensors_header_invalid" not in finding_ids
+    assert inspection["valid"] is True
+    assert inspection["validation_complete"] is True
+    assert inspection["payload_size"] == 100
+    assert inspection["artifact_size_source"] == "metadata.artifact_size_bytes"
+    assert result["model_intake"]["summary"]["format_posture"] == "safer_static_format"
+
+
+def test_model_intake_treats_truncated_safetensors_without_total_size_as_indeterminate(monkeypatch):
+    header = b'{"weight":{"dtype":"F32","shape":[25],"data_offsets":[0,100]}}'
+    prefix = len(header).to_bytes(8, "little") + header + b"\0\0\0\0"
+
+    def fake_download_http(url, max_bytes, timeout_seconds, headers=None):
+        return prefix, {
+            "source": "huggingface",
+            "status": 206,
+            "bytes_observed": len(prefix),
+            "truncated": True,
+        }
+
+    monkeypatch.setattr(model_intake, "_download_http", fake_download_http)
+
+    result = asyncio.run(
+        run_model_intake_scan(
+            "hf://acme/ranker@abc123/model.safetensors",
+            {
+                "require_deployment_approval": False,
+                "require_hash": False,
+                "require_signature": False,
+                "require_model_governance": False,
+            },
+        )
+    )
+
+    finding_ids = {finding["id"] for finding in result["findings"]}
+    inspection = result["model_intake"]["supply_chain"]["format_inspection"]["safetensors_header"]
+    assert "model_intake:safetensors_header_invalid" not in finding_ids
+    assert inspection["valid"] is None
+    assert inspection["conclusive_invalid"] is False
+    assert inspection["validation_complete"] is False
+    assert inspection["payload_bounds_checked"] is False
+    assert result["model_intake"]["checks"]["format_specific_inspection"] is None
+    assert result["model_intake"]["summary"]["format_posture"] == "unknown_or_unclassified_format"
+
+
 def test_model_intake_allows_low_and_info_advisories():
     assert _intake_decision([{"severity": "low"}, {"severity": "info"}])["decision"] == "allow"
     assert _intake_decision([{"severity": "medium"}])["decision"] == "review"
+
+
+def test_download_http_206_without_content_range_is_truncated(monkeypatch):
+    # A 206 Partial Content reply to our Range request, returning exactly the cap
+    # and no Content-Range total, MUST be flagged truncated — otherwise a capped
+    # prefix is hashed and compared against the full-artifact digest, producing a
+    # false sha256 mismatch (the nex-agi/Nex-N2-mini case).
+    import urllib.request as _urlreq
+    from scanner.scanner_tools.model_intake import _download_http
+
+    max_bytes = 1000
+    payload = b"x" * max_bytes
+
+    class _FakeResp:
+        status = 206
+        headers = {"Content-Type": "application/octet-stream"}  # NO Content-Range
+        def read(self, n): return payload[:n]
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    monkeypatch.setattr(_urlreq, "urlopen", lambda req, timeout=None: _FakeResp())
+    _data, meta = _download_http("https://cdn.example/model.safetensors", max_bytes, 5)
+    assert meta["status"] == 206
+    assert meta["truncated"] is True
+    assert meta["bytes_observed"] == max_bytes
+
+
+def test_download_http_200_full_small_file_is_not_truncated(monkeypatch):
+    # Control: a 200 with the whole (small) file present is NOT truncated.
+    import urllib.request as _urlreq
+    from scanner.scanner_tools.model_intake import _download_http
+
+    payload = b"y" * 50
+
+    class _FakeResp:
+        status = 200
+        headers = {"Content-Length": "50"}
+        def read(self, n): return payload[:n]
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    monkeypatch.setattr(_urlreq, "urlopen", lambda req, timeout=None: _FakeResp())
+    _data, meta = _download_http("https://cdn.example/small.bin", 1000, 5)
+    assert meta["truncated"] is False
+
+
+def test_model_intake_runtime_destination_preserves_network_observations():
+    destination = model_intake._runtime_destination(
+        "artifact",
+        "https://models.example.com/start",
+        {
+            "requested_url": "https://models.example.com/start",
+            "final_url": "https://cdn.example.com/model.bin",
+            "redirect_chain": ["https://cdn.example.com/model.bin"],
+            "remote_ip": "8.8.8.8",
+            "source": "http",
+        },
+    )
+
+    assert destination["redirect_chain"] == ["https://cdn.example.com/model.bin"]
+    assert destination["remote_ip"] == "8.8.8.8"
+    assert destination["resolved_host"] == "cdn.example.com"
+
+
+def test_intake_decision_blocks_on_critical_or_high():
+    # The single most important decision line: any critical/high finding blocks.
+    assert _intake_decision([{"severity": "critical"}])["decision"] == "block"
+    assert _intake_decision([{"severity": "high"}])["decision"] == "block"
+    # mixed: a high alongside advisories still blocks
+    assert _intake_decision([{"severity": "low"}, {"severity": "high"}])["decision"] == "block"
+    assert _intake_decision([])["decision"] == "allow"
+
+
+def test_model_intake_checksum_mismatch_is_critical_and_blocks(tmp_path):
+    # A tampered artifact (observed hash != expected) must yield a critical
+    # sha256_mismatch finding and a block decision.
+    artifact = tmp_path / "model.safetensors"
+    data = _safetensors_bytes()
+    artifact.write_bytes(data)
+    wrong_sha = "0" * 64  # deliberately not the artifact's hash
+
+    result = asyncio.run(run_model_intake_scan(str(artifact), {
+        "allow_local_files": True,
+        "expected_sha256": wrong_sha,
+        "require_signature": False,
+        "require_model_governance": False,
+    }))
+    findings = {f["id"]: f for f in result["findings"]}
+    assert "model_intake:sha256_mismatch" in findings
+    assert findings["model_intake:sha256_mismatch"]["severity"] == "critical"
+    assert result["result"]["decision"] == "block"
+
+
+def test_model_intake_missing_deployment_approval_is_flagged(tmp_path):
+    # With approval required, deployment_approved=False raises the approval finding;
+    # the approved twin (only that field changed) does not.
+    artifact = tmp_path / "model.safetensors"
+    data = _safetensors_bytes()
+    artifact.write_bytes(data)
+    sha = hashlib.sha256(data).hexdigest()
+
+    def run(approved: bool):
+        return asyncio.run(run_model_intake_scan(str(artifact), {
+            "allow_local_files": True, "expected_sha256": sha,
+            "require_signature": False, "require_model_governance": False,
+            "require_deployment_approval": True, "deployment_approved": approved,
+        }))
+
+    unapproved_ids = {f["id"] for f in run(False)["findings"]}
+    approved_ids = {f["id"] for f in run(True)["findings"]}
+    assert "model_intake:missing_deployment_approval" in unapproved_ids
+    assert "model_intake:missing_deployment_approval" not in approved_ids
 
 
 def test_model_intake_uses_artifact_url_extension_when_display_name_has_dots(tmp_path):
@@ -286,6 +479,35 @@ def test_model_intake_flags_onnx_external_data_and_custom_operator(tmp_path):
     finding_ids = {finding["id"] for finding in result["findings"]}
     assert "model_intake:onnx_external_data_reference" in finding_ids
     assert "model_intake:onnx_custom_operator" in finding_ids
+
+
+def test_model_intake_onnx_inspection_uses_parser_when_available(monkeypatch):
+    fake_onnx = types.SimpleNamespace()
+
+    def load_model_from_string(_data):
+        external_entry = types.SimpleNamespace(key="location", value="weights.bin")
+        initializer = types.SimpleNamespace(external_data=[external_entry])
+        node = types.SimpleNamespace(domain="com.example.custom")
+        graph = types.SimpleNamespace(name="parsed-graph", initializer=[initializer], node=[node])
+        return types.SimpleNamespace(graph=graph)
+
+    fake_onnx.load_model_from_string = load_model_from_string
+    monkeypatch.setitem(sys.modules, "onnx", fake_onnx)
+
+    inspection = model_intake._inspect_onnx(b"opaque protobuf bytes")
+
+    assert inspection["parsed_with"] == "onnx"
+    assert inspection["graph_name"] == "parsed-graph"
+    assert inspection["external_data_hint"] is True
+    assert "weights.bin" in inspection["external_data_locations"]
+    assert inspection["custom_operator_hint"] is True
+    assert "com.example.custom" in inspection["custom_operator_domains"]
+
+
+def test_scanner_image_installs_onnx_parser_dependency():
+    requirements = Path("scanner/requirements.txt").read_text(encoding="utf-8")
+
+    assert "onnx>=" in requirements
 
 
 def test_model_intake_flags_malformed_safetensors_header(tmp_path):
@@ -440,7 +662,9 @@ def test_model_intake_runs_metadata_governance_for_unsupported_registry_refs():
     )
 
     finding_ids = {finding["id"] for finding in result["findings"]}
-    assert finding_ids == {"model_intake:unsupported_artifact_scheme"}
+    # Containment, not exact-set equality: a new advisory check firing on this input
+    # should not false-fail the assertion that the unsupported scheme is rejected.
+    assert "model_intake:unsupported_artifact_scheme" in finding_ids
     assert result["model_intake"]["checks"]["license_review"] is True
     assert result["model_intake"]["checks"]["sbom_dependencies"] is True
 
@@ -822,6 +1046,18 @@ def test_model_intake_auto_detects_common_provider_urls():
     assert mlflow_ref["kind"] == "mlflow"
     assert mlflow_ref["run_id"] == "abc123"
     assert mlflow_ref["path"] == "model"
+
+
+def test_model_intake_rejects_provider_lookalike_hosts():
+    s3_lookalike = normalize_model_artifact_reference(
+        "https://models.s3.amazonaws.com.evil.test/releases/model.safetensors"
+    )
+    azure_lookalike = normalize_model_artifact_reference(
+        "https://acct.blob.core.windows.net.evil.test/models/model.gguf"
+    )
+
+    assert s3_lookalike["kind"] == "https"
+    assert azure_lookalike["kind"] == "https"
 
 
 def test_model_intake_fetches_public_cloud_object_refs(monkeypatch):

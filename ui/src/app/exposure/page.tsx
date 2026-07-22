@@ -2,6 +2,7 @@
 
 import { Suspense, useEffect, useMemo, useRef, useState } from 'react'
 import Link from 'next/link'
+import { useRouter } from 'next/navigation'
 import {
   AlertTriangle,
   ArrowLeft,
@@ -26,6 +27,7 @@ import {
   X,
 } from 'lucide-react'
 import {
+  getAgentTwoTierFindings,
   getDomains,
   getExposureAssets,
   getExposureAttackPaths,
@@ -34,6 +36,7 @@ import {
   rescanModelIntakeTarget,
   scanAITarget,
   scanTarget,
+  type AgentTwoTierFindings,
   type AIEnvironment,
   type ExposureAsset,
   type ExposureAssetKind,
@@ -292,6 +295,8 @@ function PostureSummary({
     // Validation leads with the rare, actionable signal (assets with *proven*
     // risk) rather than the ~98%-noisy "needs verification" inverse.
     { label: 'Proven risk', value: metrics?.verified_assets ?? 0, tone: 'text-red-300', posture: 'verified' },
+    { label: 'Verified', value: metrics?.investigator_verified_assets ?? 0, tone: 'text-emerald-300', posture: 'investigator_verified' },
+    { label: 'Suspected', value: metrics?.investigator_suspected_assets ?? 0, tone: 'text-amber-300', posture: 'investigator_suspected' },
     // The high-impact slice of "needs verification" (unreviewed findings on an
     // asset that also has critical/high risk) — the raw inverse is ~all assets.
     { label: 'Unverified high', value: metrics?.unverified_high_assets ?? 0, tone: 'text-orange-300', posture: 'unverified_high' },
@@ -343,6 +348,68 @@ function PostureSummary({
         )}
       </div>
     </Panel>
+  )
+}
+
+// The two-tier Deep Hunt findings for a selected web target: VERIFIED (proven by
+// the moat) vs SUSPECTED (agent leads). Renders nothing until it has findings, so
+// it stays out of the way for targets the hunter hasn't touched.
+function AgentFindingsSection({ targetId }: { targetId: string }) {
+  const [data, setData] = useState<AgentTwoTierFindings | null>(null)
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    let cancelled = false
+    getAgentTwoTierFindings(targetId)
+      .then((d) => { if (!cancelled) setData(d) })
+      .catch(() => { if (!cancelled) setData(null) })
+      .finally(() => { if (!cancelled) setLoading(false) })
+    return () => { cancelled = true }
+  }, [targetId])
+
+  const verified = data?.verified ?? []
+  const suspected = data?.suspected ?? []
+  if (loading || (!verified.length && !suspected.length)) return null
+
+  const row = (finding: { id: string; title: string; severity: string }) => (
+    <Link
+      key={finding.id}
+      href={`/findings/${finding.id}`}
+      className="flex items-center gap-2 rounded-lg border border-gray-800 bg-gray-950 px-2.5 py-1.5 hover:bg-gray-800/50 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+    >
+      <span className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] uppercase ${severityClass(finding.severity)}`}>{finding.severity}</span>
+      <span className="min-w-0 truncate text-xs text-gray-200">{finding.title}</span>
+    </Link>
+  )
+
+  return (
+    <div>
+      <div className="mb-2 flex items-center gap-2 text-xs uppercase tracking-wide text-gray-500">
+        <span>Deep Hunt findings</span>
+        <Link
+          href={`/deep-hunt?target=${encodeURIComponent(targetId)}`}
+          className="ml-auto rounded text-[11px] normal-case text-blue-400 hover:text-blue-300 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+        >
+          Open Deep Hunt →
+        </Link>
+      </div>
+      {verified.length > 0 && (
+        <div className="mb-2">
+          <div className="mb-1 flex items-center gap-1.5 text-[11px] text-emerald-300">
+            <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" aria-hidden="true" /> Verified ({verified.length})
+          </div>
+          <div className="space-y-1">{verified.slice(0, 6).map(row)}</div>
+        </div>
+      )}
+      {suspected.length > 0 && (
+        <div>
+          <div className="mb-1 flex items-center gap-1.5 text-[11px] text-amber-300">
+            <span className="h-1.5 w-1.5 rounded-full bg-amber-400" aria-hidden="true" /> Suspected ({suspected.length})
+          </div>
+          <div className="space-y-1">{suspected.slice(0, 6).map(row)}</div>
+        </div>
+      )}
+    </div>
   )
 }
 
@@ -433,6 +500,10 @@ function NodeDetailPanel({
           </div>
         )}
 
+        {node.type === 'web_target' && node.id.startsWith('target:') && (
+          <AgentFindingsSection key={node.id} targetId={node.id.slice('target:'.length)} />
+        )}
+
         <div>
           <div className="mb-2 text-xs uppercase tracking-wide text-gray-500">
             Connected ({neighbors.length})
@@ -514,6 +585,7 @@ export default function ExposurePage() {
 }
 
 function ExposureView() {
+  const router = useRouter()
   const [graph, setGraph] = useState<ExposureGraph | null>(null)
   const [domains, setDomains] = useState<string[]>([])
   const [selectedNode, setSelectedNode] = useState<ExposureNode | null>(null)
@@ -770,6 +842,11 @@ function ExposureView() {
     }
   }
 
+  async function handleAutonomousInvestigation(asset: ExposureAsset): Promise<void> {
+    if (asset.kind !== 'web') throw new Error('Deep Hunt is only available for registered web targets.')
+    router.push(`/deep-hunt?target=${encodeURIComponent(asset.id)}`)
+  }
+
   // Bulk variant of handleScan: fire kind-appropriate scans concurrently and
   // report one summary toast instead of one per asset. Returns whether at
   // least one scan was queued so the caller can keep the selection on total
@@ -880,9 +957,9 @@ function ExposureView() {
         <div>
           <div className="flex items-center gap-2.5">
             <span className={styles.liveDot} aria-hidden="true" />
-            <span className={styles.kicker}>Attack surface · live</span>
+            <span className={styles.kicker}>Exposure · live</span>
           </div>
-          <h1 className={`${styles.displayTitle} mt-1.5 text-2xl font-bold text-white`}>Attack Surface</h1>
+          <h1 className={`${styles.displayTitle} mt-1.5 text-2xl font-bold text-white`}>Exposure</h1>
           <p className="mt-1 text-sm text-gray-400">
             {lens === 'triage' && 'Risk-ranked inventory of every asset — scan, triage, and drill in.'}
             {lens === 'map' && 'Connected view — click a node to explore its blast radius.'}
@@ -1044,6 +1121,7 @@ function ExposureView() {
             onRetry={loadAssets}
             onExplore={focusById}
             onScan={handleScan}
+            onInvestigate={handleAutonomousInvestigation}
             onDetails={setSelectedAsset}
             scanningIds={scanningIds}
             selectedAsset={selectedAsset}

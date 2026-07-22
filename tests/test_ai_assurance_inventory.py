@@ -74,6 +74,28 @@ def test_build_ai_inventory_discovers_openapi_ai_candidates_and_blast_radius():
     assert "agent_runtime_controls_missing" in inventory["summary"]["coverage_gaps"]
 
 
+def test_build_ai_inventory_flags_candidate_truncation():
+    # >100 discovered AI-surface candidates: the display list is capped at 100, but
+    # the true total must be surfaced (not silently truncated).
+    endpoints = [
+        {"method": "POST", "path": f"/api/v{i}/chat/completions", "body_params": ["messages", "model"]}
+        for i in range(130)
+    ]
+    inventory = ai_assurance.build_ai_inventory(
+        targets=[], ai_targets=[],
+        scans=[{
+            "id": "scan-web", "target_url": "https://app.example.com", "run_kind": "web_dast",
+            "result": {"discovery": {"api_security": {"openapi": {"endpoints": endpoints}}}},
+        }],
+        findings=[],
+    )
+    summary = inventory["summary"]
+    assert summary["candidate_count"] == 100          # display cap unchanged
+    assert summary["total_candidates"] >= 130          # true total now visible
+    assert summary["candidates_truncated"] is True
+    assert len(inventory["candidates"]) == 100
+
+
 def test_build_ai_inventory_skips_unsupported_ai_candidate_methods():
     inventory = ai_assurance.build_ai_inventory(
         targets=[],

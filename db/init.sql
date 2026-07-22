@@ -1,6 +1,11 @@
 -- ShakerScan - PostgreSQL Schema
 -- Open Source Edition (no auth, single-user)
 
+CREATE TABLE app_schema_migrations (
+    name TEXT PRIMARY KEY,
+    applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 -- ============================================================
 -- TARGETS - Assets to scan
 -- ============================================================
@@ -9,6 +14,9 @@ CREATE TABLE targets (
 
     -- Target identification
     url TEXT UNIQUE NOT NULL,
+    -- Scheme/trailing-slash-insensitive canonical origin (auto-maintained by the
+    -- trg_targets_canonical_key trigger below); UNIQUE so duplicate origins can't form.
+    canonical_key TEXT,
     name TEXT,
     root_domain TEXT,
     is_root BOOLEAN DEFAULT false,  -- true for root domains, false for subdomains
@@ -26,6 +34,13 @@ CREATE TABLE targets (
     -- ai_targets.metadata_json
     metadata_json JSONB NOT NULL DEFAULT '{}',
 
+    -- Continuous ASM policy (docs §16 Phase 3/4): the background dispatcher
+    -- auto-drains/refreshes this target's endpoint inventory when enabled.
+    asm_enabled BOOLEAN NOT NULL DEFAULT false,
+    asm_config JSONB NOT NULL DEFAULT '{}',   -- batch_size, stale_days, intervals, caps, time windows
+    asm_last_test_at TIMESTAMPTZ,
+    asm_last_recon_at TIMESTAMPTZ,
+
     -- Statistics (updated after each scan)
     last_scan_id UUID,
     last_scanned_at TIMESTAMPTZ,
@@ -38,6 +53,20 @@ CREATE TABLE targets (
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
+
+-- Canonical de-dupe: keep canonical_key in sync with url (must match the Python
+-- _canonical_target_key in api.py), and forbid two rows sharing a canonical origin.
+CREATE OR REPLACE FUNCTION targets_set_canonical_key() RETURNS trigger AS $$
+BEGIN
+    NEW.canonical_key := rtrim(
+        regexp_replace(lower(btrim(COALESCE(NEW.url, ''))), '^https?://', ''), '/');
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+CREATE TRIGGER trg_targets_canonical_key
+    BEFORE INSERT OR UPDATE OF url ON targets
+    FOR EACH ROW EXECUTE FUNCTION targets_set_canonical_key();
+CREATE UNIQUE INDEX idx_targets_canonical_key ON targets(canonical_key);
 
 -- ============================================================
 -- SCANS - Individual scan runs
@@ -82,7 +111,13 @@ CREATE TABLE scans (
 
     -- Error handling
     error_message TEXT,
-    retry_count INTEGER DEFAULT 0
+    retry_count INTEGER DEFAULT 0,
+
+    -- Parallel scan orchestration (parent/shard/merge fan-out)
+    parent_scan_id UUID REFERENCES scans(id) ON DELETE SET NULL,
+    scan_role TEXT NOT NULL DEFAULT 'standalone',  -- standalone, parent, shard
+    shard_index INTEGER,
+    shard_count INTEGER
 );
 
 -- ============================================================
@@ -205,6 +240,134 @@ CREATE TABLE findings (
 );
 
 -- ============================================================
+-- EVIDENCE OBJECTS - First-class durable evidence (hash, redaction
+-- profile, retention class, storage URI, scan/finding links)
+-- ============================================================
+CREATE TABLE evidence_objects (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    scan_id UUID,
+    finding_id UUID REFERENCES findings(id) ON DELETE CASCADE,
+    object_type TEXT NOT NULL DEFAULT 'finding_evidence',
+    content_sha256 TEXT,
+    size_bytes INTEGER,
+    storage_uri TEXT,
+    redaction_profile TEXT,
+    retention_class TEXT NOT NULL DEFAULT 'standard',
+    content JSONB,
+    retention_delete_preview_id UUID,
+    retention_delete_pending_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    CONSTRAINT evidence_objects_finding_type_unique UNIQUE (finding_id, object_type)
+);
+CREATE INDEX idx_evidence_objects_finding ON evidence_objects(finding_id);
+CREATE INDEX idx_evidence_objects_scan ON evidence_objects(scan_id);
+CREATE INDEX idx_evidence_objects_retention_pending ON evidence_objects(retention_delete_pending_at)
+    WHERE retention_delete_pending_at IS NOT NULL;
+
+-- One-use, target-scoped retention previews bind destructive cleanup to the
+-- exact server-computed evidence snapshot the operator reviewed.
+CREATE TABLE evidence_retention_previews (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    target_id UUID NOT NULL REFERENCES targets(id) ON DELETE CASCADE,
+    schema_version INTEGER NOT NULL,
+    criteria_json JSONB NOT NULL,
+    candidate_snapshot_json JSONB NOT NULL,
+    preview_hash TEXT NOT NULL,
+    policy_hash TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'ready',
+    approval_receipt_id UUID,
+    scope_receipt_id TEXT,
+    operation_id UUID,
+    result_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    expires_at TIMESTAMPTZ NOT NULL,
+    execution_started_at TIMESTAMPTZ,
+    consumed_at TIMESTAMPTZ,
+    CONSTRAINT evidence_retention_previews_status_check
+        CHECK (status IN ('ready','executing','consumed','stale'))
+);
+CREATE INDEX idx_evidence_retention_previews_target
+    ON evidence_retention_previews(target_id, created_at DESC);
+CREATE INDEX idx_evidence_retention_previews_ready
+    ON evidence_retention_previews(expires_at) WHERE status = 'ready';
+CREATE UNIQUE INDEX idx_evidence_retention_previews_approval_once
+    ON evidence_retention_previews(approval_receipt_id) WHERE approval_receipt_id IS NOT NULL;
+
+-- An executing preview is the durable recovery record for pending evidence rows.
+-- RESTRICT prevents target cascades (including canonical target de-duplication)
+-- from deleting that record until the pending rows are finalized or cleared.
+ALTER TABLE evidence_objects
+    ADD CONSTRAINT evidence_objects_retention_delete_preview_fk
+    FOREIGN KEY (retention_delete_preview_id)
+    REFERENCES evidence_retention_previews(id)
+    ON DELETE RESTRICT;
+
+-- ============================================================
+-- EXPORT EVENTS - Durable content-free export/audit records
+-- ============================================================
+CREATE TABLE export_events (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    export_kind TEXT NOT NULL,
+    command TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'completed',
+    risk_tier TEXT NOT NULL DEFAULT 'read_only',
+    target_id UUID REFERENCES targets(id) ON DELETE SET NULL,
+    scan_id UUID,
+    finding_id UUID REFERENCES findings(id) ON DELETE SET NULL,
+    bundle_hash TEXT,
+    manifest_hash TEXT,
+    object_count INTEGER NOT NULL DEFAULT 0,
+    filters JSONB NOT NULL DEFAULT '{}'::jsonb,
+    evidence_object_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
+    finding_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
+    scan_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
+    replay_plan JSONB NOT NULL DEFAULT '{}'::jsonb,
+    operator_message TEXT,
+    created_by TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT export_events_status_check
+        CHECK (status IN ('completed','partial','degraded','failed')),
+    CONSTRAINT export_events_risk_check
+        CHECK (risk_tier IN ('read_only','passive','active','intrusive','credential','dangerous'))
+);
+CREATE INDEX idx_export_events_created_at ON export_events(created_at DESC);
+CREATE INDEX idx_export_events_target ON export_events(target_id, created_at DESC) WHERE target_id IS NOT NULL;
+CREATE INDEX idx_export_events_scan ON export_events(scan_id, created_at DESC) WHERE scan_id IS NOT NULL;
+CREATE INDEX idx_export_events_finding ON export_events(finding_id, created_at DESC) WHERE finding_id IS NOT NULL;
+
+-- ============================================================
+-- APPLICATION GRAPH - First-class per-target graph of routes,
+-- objects, producer/consumer links, auth boundaries, sensitive
+-- fields (persisted from the BOLA resource_map + discovery)
+-- ============================================================
+CREATE TABLE application_graph_nodes (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    target_id UUID REFERENCES targets(id) ON DELETE CASCADE,
+    node_type TEXT NOT NULL,        -- route | object | principal
+    node_key TEXT NOT NULL,         -- canonical, type-prefixed id
+    label TEXT,
+    attributes JSONB,
+    scan_id UUID,
+    first_seen_at TIMESTAMPTZ DEFAULT NOW(),
+    last_seen_at TIMESTAMPTZ DEFAULT NOW(),
+    CONSTRAINT app_graph_node_unique UNIQUE (target_id, node_type, node_key)
+);
+CREATE TABLE application_graph_edges (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    target_id UUID REFERENCES targets(id) ON DELETE CASCADE,
+    src_key TEXT NOT NULL,
+    dst_key TEXT NOT NULL,
+    edge_type TEXT NOT NULL,        -- produces | consumed_by | auth_boundary
+    attributes JSONB,
+    scan_id UUID,
+    first_seen_at TIMESTAMPTZ DEFAULT NOW(),
+    last_seen_at TIMESTAMPTZ DEFAULT NOW(),
+    CONSTRAINT app_graph_edge_unique UNIQUE (target_id, src_key, dst_key, edge_type)
+);
+CREATE INDEX idx_app_graph_nodes_target ON application_graph_nodes(target_id);
+CREATE INDEX idx_app_graph_edges_target ON application_graph_edges(target_id);
+
+-- ============================================================
 -- FINDING VERIFICATIONS - Retest attempts and proof history
 -- ============================================================
 CREATE TABLE finding_verifications (
@@ -285,7 +448,7 @@ CREATE TABLE discovery_runs (
 );
 
 -- ============================================================
--- SCHEDULES - Recurring scans (optional feature)
+-- SCHEDULES - Recurring target actions (optional feature)
 -- ============================================================
 CREATE TABLE schedules (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -295,13 +458,14 @@ CREATE TABLE schedules (
     name TEXT,
 
     -- Schedule configuration
-    frequency TEXT NOT NULL,  -- daily, weekly, biweekly, monthly
-    day_of_week INTEGER,  -- 0-6 (Sunday-Saturday) for weekly
+    frequency TEXT NOT NULL,  -- daily, weekly
+    day_of_week INTEGER,  -- 0-6 (Monday-Sunday) for weekly
     time_of_day TEXT DEFAULT '02:00',  -- HH:MM in UTC
     timezone TEXT DEFAULT 'UTC',
     jitter_minutes INTEGER DEFAULT 30,
 
-    -- Scan configuration
+    -- Action configuration
+    schedule_kind TEXT DEFAULT 'normal_scan',  -- normal_scan, asm_improve, evidence_retention_sweep
     scan_type TEXT DEFAULT 'standard',
     scan_options JSONB DEFAULT '{}',
 
@@ -330,6 +494,111 @@ CREATE INDEX idx_scans_run_kind ON scans(run_kind);
 CREATE INDEX idx_scans_status ON scans(status);
 CREATE INDEX idx_scans_created ON scans(created_at DESC);
 CREATE INDEX idx_scans_job_id ON scans(job_id);
+CREATE INDEX idx_scans_parent ON scans(parent_scan_id) WHERE parent_scan_id IS NOT NULL;
+
+-- ============================================================
+-- SCAN CAMPAIGNS - Durable budget/allocator records for Full Coverage + ASM
+-- ============================================================
+CREATE TABLE scan_campaigns (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    target_id UUID REFERENCES targets(id) ON DELETE CASCADE,
+    root_domain TEXT,
+    requested_by TEXT NOT NULL DEFAULT 'api',
+    mode TEXT NOT NULL,                      -- full_coverage|continuous_asm|focused_family|finding_retest|surface_recon
+    priority INTEGER NOT NULL DEFAULT 100,
+    budget_profile TEXT,
+    wide_budget JSONB NOT NULL DEFAULT '{}'::jsonb,
+    deep_budget JSONB NOT NULL DEFAULT '{}'::jsonb,
+    check_families JSONB NOT NULL DEFAULT '[]'::jsonb,
+    auth_states JSONB NOT NULL DEFAULT '[]'::jsonb,
+    allowed_windows JSONB NOT NULL DEFAULT '{}'::jsonb,
+    daily_cap INTEGER,
+    rate_caps JSONB NOT NULL DEFAULT '{}'::jsonb,
+    parent_scan_id UUID REFERENCES scans(id) ON DELETE SET NULL,
+    policy_id UUID,
+    status TEXT NOT NULL DEFAULT 'active',
+    metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    completed_at TIMESTAMPTZ
+);
+CREATE INDEX idx_scan_campaigns_target_status ON scan_campaigns(target_id, status, created_at DESC);
+CREATE INDEX idx_scan_campaigns_parent ON scan_campaigns(parent_scan_id) WHERE parent_scan_id IS NOT NULL;
+
+ALTER TABLE scans
+ADD COLUMN campaign_id UUID REFERENCES scan_campaigns(id) ON DELETE SET NULL;
+
+-- finding_verifications is created before scan_campaigns, so its campaign_id
+-- (a retest/verification can belong to a campaign) is added here by ALTER.
+ALTER TABLE finding_verifications
+ADD COLUMN campaign_id UUID REFERENCES scan_campaigns(id) ON DELETE SET NULL;
+
+-- ============================================================
+-- TARGET ENDPOINTS - Continuous ASM attack-surface inventory (docs §16)
+-- Recon upserts discovered endpoints; exploitation drains untested/stale ones.
+-- ============================================================
+CREATE TABLE target_endpoints (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    target_id UUID NOT NULL REFERENCES targets(id) ON DELETE CASCADE,
+    method TEXT NOT NULL DEFAULT 'GET',
+    path TEXT NOT NULL,
+    param_shape TEXT NOT NULL DEFAULT '',
+    fingerprint TEXT NOT NULL,                 -- auth + method + normalized path + param location/names
+    source TEXT,                               -- crawl | har | js | ffuf | openapi | manual
+    auth_state TEXT NOT NULL DEFAULT 'anonymous',
+    param_location TEXT NOT NULL DEFAULT 'query', -- query|form|json|none
+    replay_spec TEXT,                          -- scanner custom-endpoint string preserving body/query shape
+    content_type TEXT,
+    content_hash TEXT,
+    priority_score INTEGER NOT NULL DEFAULT 10,
+    test_status TEXT NOT NULL DEFAULT 'untested',  -- untested|in_progress|tested|stale|gone
+    last_attempt_status TEXT,                  -- leased|completed|partial|auth_missing|failed
+    last_verdict TEXT,
+    last_finding_id UUID,
+    credential_ref TEXT,
+    campaign_id UUID REFERENCES scan_campaigns(id) ON DELETE SET NULL,
+    lease_owner TEXT,
+    lease_expires_at TIMESTAMPTZ,
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    last_http_status INTEGER,                  -- HTTP status from last reachability probe
+    unreachable_streak INTEGER NOT NULL DEFAULT 0, -- consecutive 404/soft-404 observations; retire to 'gone' at threshold
+    last_reachability_at TIMESTAMPTZ,          -- when reachability was last probed
+    first_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    last_tested_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE UNIQUE INDEX idx_target_endpoints_fp ON target_endpoints(target_id, fingerprint);
+CREATE INDEX idx_target_endpoints_status ON target_endpoints(target_id, test_status, priority_score DESC);
+CREATE INDEX idx_target_endpoints_auth_status ON target_endpoints(target_id, auth_state, test_status, priority_score DESC);
+CREATE INDEX idx_target_endpoints_lease ON target_endpoints(lease_expires_at) WHERE test_status = 'in_progress';
+CREATE INDEX idx_target_endpoints_campaign ON target_endpoints(campaign_id) WHERE campaign_id IS NOT NULL;
+
+CREATE TABLE asm_endpoint_attempts (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    endpoint_id UUID NOT NULL REFERENCES target_endpoints(id) ON DELETE CASCADE,
+    scan_id UUID REFERENCES scans(id) ON DELETE SET NULL,
+    parent_scan_id UUID REFERENCES scans(id) ON DELETE SET NULL,
+    campaign_id UUID REFERENCES scan_campaigns(id) ON DELETE SET NULL,
+    worker_id TEXT,
+    auth_state TEXT NOT NULL DEFAULT 'anonymous',
+    check_family TEXT NOT NULL DEFAULT 'all',
+    started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    completed_at TIMESTAMPTZ,
+    status TEXT NOT NULL,                      -- completed|partial|timeout|auth_missing|rate_limited|error
+    attempted_params_count INTEGER NOT NULL DEFAULT 0,
+    completed_params_count INTEGER NOT NULL DEFAULT 0,
+    finding_ids UUID[] NOT NULL DEFAULT '{}'::uuid[],
+    error_summary TEXT,
+    scanner_telemetry_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX idx_asm_endpoint_attempts_endpoint ON asm_endpoint_attempts(endpoint_id, started_at DESC);
+CREATE INDEX idx_asm_endpoint_attempts_scan ON asm_endpoint_attempts(scan_id) WHERE scan_id IS NOT NULL;
+CREATE INDEX idx_asm_endpoint_attempts_campaign ON asm_endpoint_attempts(campaign_id, status);
+CREATE INDEX idx_asm_endpoint_attempts_campaign_family ON asm_endpoint_attempts(campaign_id, check_family, status);
 
 -- AI targets
 CREATE INDEX idx_ai_targets_active ON ai_targets(is_active) WHERE is_active = true;
@@ -379,6 +648,7 @@ CREATE VIEW latest_scans AS
 SELECT DISTINCT ON (target_url) *
 FROM scans
 WHERE status = 'completed'
+  AND (scan_role IS NULL OR scan_role <> 'shard')
 ORDER BY target_url, completed_at DESC;
 
 -- Active findings summary
@@ -400,8 +670,8 @@ GROUP BY target_id;
 CREATE VIEW dashboard_metrics AS
 SELECT
     (SELECT COUNT(*) FROM targets WHERE is_active = true) as total_targets,
-    (SELECT COUNT(*) FROM scans WHERE status = 'completed') as total_scans,
-    (SELECT COUNT(*) FROM scans WHERE status = 'running') as running_scans,
+    (SELECT COUNT(*) FROM scans WHERE status = 'completed' AND (scan_role IS NULL OR scan_role <> 'shard')) as total_scans,
+    (SELECT COUNT(*) FROM scans WHERE status = 'running' AND (scan_role IS NULL OR scan_role <> 'shard')) as running_scans,
     (SELECT COUNT(*) FROM findings WHERE status = 'active') as active_findings,
     (SELECT COUNT(*) FROM findings WHERE status = 'active' AND severity = 'critical') as critical_findings,
     (SELECT COUNT(*) FROM findings WHERE status = 'active' AND severity = 'high') as high_findings,
@@ -415,7 +685,9 @@ SELECT
 CREATE OR REPLACE FUNCTION update_target_stats()
 RETURNS TRIGGER AS $$
 BEGIN
-    IF NEW.status = 'completed' AND NEW.target_id IS NOT NULL THEN
+    IF NEW.status = 'completed'
+       AND NEW.target_id IS NOT NULL
+       AND COALESCE(NEW.scan_role, 'standalone') <> 'shard' THEN
         UPDATE targets SET
             last_scan_id = NEW.id,
             last_scanned_at = NEW.completed_at,
@@ -455,3 +727,108 @@ CREATE TRIGGER trigger_update_finding_timestamps
 BEFORE UPDATE ON findings
 FOR EACH ROW
 EXECUTE FUNCTION update_finding_timestamps();
+
+-- R4: durable policy profiles + finding exceptions (also created idempotently in
+-- run_schema_migrations for existing installs).
+CREATE TABLE IF NOT EXISTS policy_profiles (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name TEXT NOT NULL UNIQUE,
+    product_area TEXT NOT NULL DEFAULT 'ai_gate',
+    environment TEXT NOT NULL DEFAULT 'production',
+    minimum_block_severity TEXT NOT NULL DEFAULT 'high',
+    expires_days INTEGER NOT NULL DEFAULT 30,
+    strict_model_intake BOOLEAN NOT NULL DEFAULT false,
+    allow_active_exceptions BOOLEAN NOT NULL DEFAULT true,
+    owner TEXT,
+    version TEXT,
+    is_active BOOLEAN NOT NULL DEFAULT true,
+    active_from TIMESTAMPTZ,
+    active_until TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS finding_exceptions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    finding_id TEXT,
+    fingerprint TEXT,
+    policy_id UUID REFERENCES policy_profiles(id) ON DELETE SET NULL,
+    target_id UUID,
+    scope TEXT,
+    owner TEXT,
+    approver TEXT,
+    reason TEXT,
+    compensating_controls TEXT,
+    status TEXT NOT NULL DEFAULT 'active',
+    expires_at TIMESTAMPTZ,
+    edit_history JSONB NOT NULL DEFAULT '[]'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT finding_exceptions_status_check
+        CHECK (status IN ('active','approved','accepted_risk','revoked','expired'))
+);
+CREATE INDEX IF NOT EXISTS idx_finding_exceptions_target_status ON finding_exceptions(target_id, status);
+CREATE INDEX IF NOT EXISTS idx_finding_exceptions_finding ON finding_exceptions(finding_id);
+
+-- Model Intake reusable operator trust anchors. Scan requests may reference
+-- these by id; the API expands active anchors into the existing trusted PEM /
+-- fingerprint fields before queueing the worker job.
+CREATE TABLE IF NOT EXISTS model_intake_trust_anchors (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name TEXT NOT NULL UNIQUE,
+    description TEXT,
+    public_key_pem TEXT,
+    public_key_sha256 TEXT,
+    policy_profile TEXT,
+    owner TEXT,
+    is_active BOOLEAN NOT NULL DEFAULT true,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT model_intake_trust_anchor_material_check
+        CHECK (
+            (public_key_pem IS NOT NULL AND btrim(public_key_pem) <> '')
+            OR (public_key_sha256 IS NOT NULL AND btrim(public_key_sha256) <> '')
+        )
+);
+CREATE INDEX IF NOT EXISTS idx_model_intake_trust_anchors_active
+    ON model_intake_trust_anchors(is_active, policy_profile);
+
+-- R9: durable AI surface inventory + attempt ledger (also created idempotently in
+-- run_schema_migrations for existing installs).
+CREATE TABLE IF NOT EXISTS ai_surfaces (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    ai_target_id UUID REFERENCES ai_targets(id) ON DELETE CASCADE,
+    surface_type TEXT NOT NULL DEFAULT 'api_chat',
+    endpoint_url TEXT,
+    auth_kind TEXT,
+    owner TEXT,
+    environment TEXT,
+    risk_tier TEXT,
+    data_classification TEXT,
+    tools_count INTEGER NOT NULL DEFAULT 0,
+    metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    last_seen TIMESTAMPTZ,
+    last_tested TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT ai_surfaces_target_unique UNIQUE (ai_target_id)
+);
+
+CREATE TABLE IF NOT EXISTS ai_surface_attempts (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    surface_id UUID REFERENCES ai_surfaces(id) ON DELETE CASCADE,
+    scan_id UUID,
+    probe_pack TEXT,
+    scan_profile TEXT,
+    environment TEXT,
+    families TEXT[],
+    status TEXT,
+    proof_state TEXT,
+    findings_count INTEGER NOT NULL DEFAULT 0,
+    critical_high_count INTEGER NOT NULL DEFAULT 0,
+    started_at TIMESTAMPTZ,
+    completed_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT ai_surface_attempts_unique UNIQUE (surface_id, scan_id)
+);
+CREATE INDEX IF NOT EXISTS idx_ai_surface_attempts_surface ON ai_surface_attempts(surface_id, completed_at DESC);

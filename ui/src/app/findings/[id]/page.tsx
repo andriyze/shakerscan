@@ -1,22 +1,35 @@
 'use client'
 
 import { useEffect, useMemo, useRef, useState, useCallback, Suspense } from 'react'
-import { Check, Copy, ExternalLink, Loader2 } from 'lucide-react'
+import { BrainCircuit, Check, Copy, ExternalLink, Loader2 } from 'lucide-react'
 import { useParams, useSearchParams, useRouter } from 'next/navigation'
 import Link from 'next/link'
 import {
   formatDate,
+  createTargetPolicyApproval,
+  createFindingException,
+  deleteFindingException,
   extractFindingTriage,
   getFinding,
+  getFindingExceptions,
   getFindingRetests,
+  getFindingEvidence,
+  getPolicyProfiles,
+  getResearchReadiness,
+  getTarget,
+  launchResearchEpisode,
   retestFinding,
   retestAiFinding,
   updateFinding,
   deleteFinding,
+  getFindingResearchProvenance,
   type Finding,
-  type RetestRecord
+  type FindingException,
+  type PolicyProfile,
+  type RetestRecord,
+  type EvidenceObject
 } from '@/lib/api'
-import { FINDING_STATUSES, RETEST_VERDICT_LABELS } from '@/lib/constants'
+import { FINDING_STATUSES, RETEST_VERDICT_LABELS, type FindingSourceType } from '@/lib/constants'
 import { formatAnomaly, parseEvidence, extractEndpoint, decodePayload } from '@/lib/evidence-parser'
 import {
   Card,
@@ -30,14 +43,58 @@ import {
   useToast,
 } from '@/components/ui'
 
-function getFindingSourceType(finding: Finding): 'AI' | 'DAST' | 'Model Intake' {
+function getFindingSourceType(finding: Finding): FindingSourceType {
   if (finding.source === 'model_intake' || finding.tool === 'model_intake') {
     return 'Model Intake'
   }
-  if (finding.source === 'ai_gate' || finding.source === 'ai_session' || finding.ai_target_id) {
-    return 'AI'
+  if (finding.source === 'ai_gate' || finding.ai_target_id) {
+    return 'AI Gate'
+  }
+  if (finding.source === 'ai_session') {
+    return 'Interactive'
+  }
+  if (finding.source === 'autonomous' || finding.tool === 'autonomous_workflow' || getFindingResearchProvenance(finding)) {
+    return 'Deep Hunt'
+  }
+  if (finding.source === 'asm') {
+    return 'ASM'
+  }
+  if (finding.source === 'manual') {
+    return 'Manual'
   }
   return 'DAST'
+}
+
+function isAiReplayFinding(finding: Finding): boolean {
+  const sourceType = getFindingSourceType(finding)
+  return sourceType === 'AI Gate' || sourceType === 'Interactive'
+}
+
+function autonomousWebTargetUrl(finding: Finding): string | null {
+  const sourceType = getFindingSourceType(finding)
+  if (!finding.target_id || !(['DAST', 'Deep Hunt', 'ASM', 'Manual'] as FindingSourceType[]).includes(sourceType)) return null
+  const candidate = finding.target_url || finding.url
+  if (!candidate) return null
+  try {
+    const parsed = new URL(candidate)
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:' ? parsed.toString() : null
+  } catch {
+    return null
+  }
+}
+
+function autonomousUnsupportedReason(finding: Finding): string {
+  const sourceType = getFindingSourceType(finding)
+  if (sourceType === 'Model Intake') {
+    return 'Model Intake findings must be investigated by re-running the artifact check.'
+  }
+  if (sourceType === 'AI Gate' || sourceType === 'Interactive') {
+    return 'These findings use their dedicated replay workflow; web verification supports DAST, Deep Hunt, ASM, and manual findings.'
+  }
+  if (!finding.target_id) {
+    return 'This finding is not linked to a ShakerScan web target.'
+  }
+  return 'Autonomous investigation requires an HTTP or HTTPS target.'
 }
 
 function InfoItem({ label, children }: { label: string; children: React.ReactNode }) {
@@ -161,6 +218,12 @@ const ANALYST_VERDICTS = [
   { value: 'retest_needed', label: 'Retest needed', status: 'active' },
 ] as const
 
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`
+}
+
 function asEvidenceObject(rawEvidence: string): Record<string, unknown> | null {
   if (!rawEvidence) return null
   try {
@@ -173,6 +236,12 @@ function asEvidenceObject(rawEvidence: string): Record<string, unknown> | null {
   }
 }
 
+function redactEvidenceForDisplay(value: string): string {
+  return value
+    .replace(/("(?:authorization|cookie|set-cookie|password|token|api[_-]?key)"\s*:\s*")[^"]*(")/gi, '$1[redacted]$2')
+    .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer [redacted]')
+}
+
 function evidenceString(evidence: Record<string, unknown> | null, key: string): string {
   const value = evidence?.[key]
   return typeof value === 'string' ? value : ''
@@ -181,6 +250,22 @@ function evidenceString(evidence: Record<string, unknown> | null, key: string): 
 function evidenceStringList(evidence: Record<string, unknown> | null, key: string): string[] {
   const value = evidence?.[key]
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : []
+}
+
+function evidenceObjectContentText(content: unknown): string {
+  if (content === undefined || content === null) return ''
+  if (typeof content === 'string') {
+    try {
+      return JSON.stringify(JSON.parse(content), null, 2)
+    } catch {
+      return content
+    }
+  }
+  try {
+    return JSON.stringify(content, null, 2)
+  } catch {
+    return String(content)
+  }
 }
 
 function CopyButton({ text, label }: { text: string; label?: string }) {
@@ -216,16 +301,33 @@ function FindingDetailContent() {
   const toast = useToast()
   const findingId = params.id as string
   const [finding, setFinding] = useState<Finding | null>(null)
+  const [evidenceObjects, setEvidenceObjects] = useState<EvidenceObject[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [statusUpdating, setStatusUpdating] = useState(false)
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false)
   const [deleting, setDeleting] = useState(false)
+  const [exceptionToDelete, setExceptionToDelete] = useState<string | null>(null)
+  const [exceptionDeleting, setExceptionDeleting] = useState(false)
+  const [autonomousConfirmOpen, setAutonomousConfirmOpen] = useState(false)
+  const [autonomousLoading, setAutonomousLoading] = useState(false)
   const [retestLoading, setRetestLoading] = useState(false)
   const [retestMessage, setRetestMessage] = useState<string | null>(null)
   const [retestMode, setRetestMode] = useState<'tiered' | 'deterministic' | 'ai' | 'same_probe' | 'same_family' | 'strict_replay'>('tiered')
   const [retestHistory, setRetestHistory] = useState<RetestRecord[]>([])
+  const [targetInactive, setTargetInactive] = useState(false)
   const [historyExpanded, setHistoryExpanded] = useState(false)
+  const [findingExceptions, setFindingExceptions] = useState<FindingException[]>([])
+  const [policyProfiles, setPolicyProfiles] = useState<PolicyProfile[]>([])
+  const [exceptionSaving, setExceptionSaving] = useState(false)
+  const [exceptionForm, setExceptionForm] = useState({
+    owner: '',
+    approver: '',
+    reason: '',
+    compensating_controls: '',
+    policy_id: '',
+    expires_days: '30',
+  })
 
   // Build back URL with preserved filters
   const backUrl = useMemo(() => {
@@ -241,14 +343,25 @@ function FindingDetailContent() {
 
   const fetchFinding = useCallback(async () => {
     try {
-      const [data, retestData] = await Promise.all([
-        getFinding(findingId),
-        getFindingRetests(findingId, 10).catch(() => null)
+      const data = await getFinding(findingId)
+      const [retestData, evidenceData, exceptionData, policyData, targetData] = await Promise.all([
+        getFindingRetests(findingId, 10).catch(() => null),
+        getFindingEvidence(findingId).catch(() => null),
+        getFindingExceptions(data.target_id ? { target_id: data.target_id } : undefined).catch(() => null),
+        getPolicyProfiles().catch(() => null),
+        data.target_id ? getTarget(data.target_id).catch(() => null) : Promise.resolve(null),
       ])
       setFinding(data)
+      setTargetInactive(targetData ? targetData.is_active === false : false)
       if (retestData) {
         setRetestHistory(retestData.retests || [])
       }
+      setEvidenceObjects(evidenceData?.evidence_objects || [])
+      const exceptions = (exceptionData?.finding_exceptions || []).filter((item) =>
+        item.finding_id === data.id || (data.fingerprint && item.fingerprint === data.fingerprint)
+      )
+      setFindingExceptions(exceptions)
+      setPolicyProfiles(policyData?.policy_profiles || [])
       setError(null)
     } catch {
       setError('Failed to load finding details')
@@ -321,6 +434,69 @@ function FindingDetailContent() {
     }
   }
 
+  async function handleCreateException(event: React.FormEvent) {
+    event.preventDefault()
+    if (!finding || exceptionSaving) return
+    const owner = exceptionForm.owner.trim()
+    const approver = exceptionForm.approver.trim()
+    if (!owner && !approver) {
+      toast.error('Owner or approver is required')
+      return
+    }
+    const days = Number(exceptionForm.expires_days || 30)
+    if (!Number.isFinite(days) || days < 1) {
+      toast.error('Expiry must be at least 1 day')
+      return
+    }
+    const expiresAt = new Date(Date.now() + Math.round(days) * 24 * 60 * 60 * 1000).toISOString()
+    try {
+      setExceptionSaving(true)
+      await createFindingException({
+        finding_id: finding.id,
+        fingerprint: finding.fingerprint || null,
+        target_id: finding.target_id || null,
+        policy_id: exceptionForm.policy_id || null,
+        scope: finding.title,
+        owner: owner || null,
+        approver: approver || null,
+        reason: exceptionForm.reason.trim() || null,
+        compensating_controls: exceptionForm.compensating_controls.trim() || null,
+        status: 'active',
+        expires_at: expiresAt,
+      })
+      setExceptionForm({
+        owner: '',
+        approver: '',
+        reason: '',
+        compensating_controls: '',
+        policy_id: '',
+        expires_days: '30',
+      })
+      await fetchFinding()
+      toast.success('Policy exception created')
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to create exception')
+    } finally {
+      setExceptionSaving(false)
+    }
+  }
+
+  async function handleDeleteException() {
+    const exceptionId = exceptionToDelete
+    if (!exceptionId || exceptionDeleting) return
+    setExceptionDeleting(true)
+    try {
+      await deleteFindingException(exceptionId)
+      setFindingExceptions((prev) => prev.filter((item) => item.id !== exceptionId))
+      toast.success('Policy exception deleted')
+      setExceptionToDelete(null)
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to delete exception')
+    } finally {
+      setExceptionDeleting(false)
+    }
+  }
+
   async function handleDelete() {
     if (!finding || deleting) return
     try {
@@ -341,7 +517,7 @@ function FindingDetailContent() {
     try {
       setRetestLoading(true)
       setRetestMessage(null)
-      const aiFinding = getFindingSourceType(finding) === 'AI'
+      const aiFinding = isAiReplayFinding(finding)
       const effectiveMode = selectedRetestMode
       const queued = aiFinding
         ? await retestAiFinding(finding.id, {
@@ -372,6 +548,38 @@ function FindingDetailContent() {
     }
   }
 
+  async function handleAutonomousInvestigation() {
+    if (!finding || autonomousLoading) return
+    const targetUrl = autonomousWebTargetUrl(finding)
+    if (!finding.target_id || !targetUrl) {
+      toast.error(autonomousUnsupportedReason(finding))
+      return
+    }
+    try {
+      setAutonomousLoading(true)
+      const readiness = await getResearchReadiness()
+      if (!readiness.planner_ready) throw new Error('Configure an AI model before starting an autonomous investigation.')
+      if (!readiness.execution_enabled) throw new Error('Autonomous active execution is disabled by server policy.')
+      const approvalReceiptId = await createTargetPolicyApproval(finding.target_id, targetUrl, 30)
+      const detail = await launchResearchEpisode({
+        subject_type: 'finding',
+        subject_id: finding.id,
+        mission_profile: 'verify_finding',
+        intensity: 'hunt',
+        approval_receipt_id: approvalReceiptId,
+        autopilot: true,
+        created_by: 'finding_detail_ui',
+      })
+      setAutonomousConfirmOpen(false)
+      toast.success(detail.reused ? 'Opened the existing autonomous investigation' : 'Autonomous investigation started')
+      router.push(`/deep-hunt/runs/${encodeURIComponent(detail.episode.id)}`)
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to start autonomous investigation')
+    } finally {
+      setAutonomousLoading(false)
+    }
+  }
+
   const evidence = useMemo(() => parseEvidence(finding?.evidence), [finding?.evidence])
   const primaryUrl = finding?.url || evidence.url || finding?.target_url || ''
   const request = finding?.request || evidence.request
@@ -386,7 +594,9 @@ function FindingDetailContent() {
       ? JSON.stringify(finding.evidence, null, 2)
       : ''
   const rawEvidenceObject = useMemo(() => asEvidenceObject(rawEvidence), [rawEvidence])
-  const isAiFinding = finding ? getFindingSourceType(finding) === 'AI' : false
+  const isAiFinding = finding ? isAiReplayFinding(finding) : false
+  const research = finding ? getFindingResearchProvenance(finding) : null
+  const autonomousTargetUrl = finding ? autonomousWebTargetUrl(finding) : null
   const latestRetest = retestHistory[0]
   // An inconclusive retest that is retryable means "we couldn't decide, try
   // again" — distinct from a terminal verdict. Surfaced so users understand the
@@ -447,7 +657,7 @@ function FindingDetailContent() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between gap-3">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex items-center gap-3">
           <Link href={backUrl} className="text-gray-400 hover:text-white">
             <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -456,30 +666,60 @@ function FindingDetailContent() {
           </Link>
           <h1 className="text-2xl font-bold text-white">Finding Detail</h1>
         </div>
-        <div className="flex items-center gap-2">
-          <RetestVerdictBadge
-            verdict={finding.last_verification_verdict}
-            pending={hasPendingRetest}
-          />
-          <select
-            value={selectedRetestMode}
-            onChange={(e) => setRetestMode(e.target.value as typeof retestMode)}
-            className="px-2 py-1.5 bg-gray-900 border border-gray-700 rounded-lg text-xs text-gray-200 focus:outline-none focus:border-blue-500"
-            title="Retest mode"
-            aria-label="Retest mode"
-          >
-            {retestOptions.map((option) => (
-              <option key={option.value} value={option.value}>{option.label}</option>
-            ))}
-          </select>
+        <div className="flex flex-wrap items-center gap-2">
           <button
-            onClick={handleRetest}
-            disabled={retestLoading || !retestSupported}
-            title={!retestSupported ? retestUnsupportedMessage : undefined}
-            className="px-3 py-1.5 bg-blue-900/50 text-blue-300 rounded-lg text-sm hover:bg-blue-900/80 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            type="button"
+            onClick={() => setAutonomousConfirmOpen(true)}
+            disabled={!autonomousTargetUrl || autonomousLoading || hasPendingRetest || targetInactive}
+            title={
+              hasPendingRetest
+                ? 'A proof replay is already queued or running for this finding.'
+                : targetInactive
+                  ? "This finding's target is deactivated. Reactivate it under Targets to verify."
+                  : autonomousTargetUrl
+                    ? 'Inspect this finding, run at most one bounded proof replay, and conclude from its result.'
+                    : autonomousUnsupportedReason(finding)
+            }
+            className="inline-flex items-center gap-2 rounded-lg bg-violet-600 px-3 py-2 text-sm font-medium text-white transition-colors hover:bg-violet-500 disabled:cursor-not-allowed disabled:opacity-45"
           >
-            {retestLoading ? 'Queueing...' : 'Retest Finding'}
+            <BrainCircuit className="h-4 w-4" />
+            Verify finding
           </button>
+          {(!autonomousTargetUrl || hasPendingRetest || targetInactive) && (
+            <span className={`max-w-64 text-xs leading-4 ${hasPendingRetest ? 'text-gray-500' : 'text-amber-300/80'}`}>
+              {hasPendingRetest
+                ? 'Available after the current proof replay finishes.'
+                : targetInactive
+                  ? 'Target is deactivated — reactivate it under Targets to verify.'
+                  : autonomousUnsupportedReason(finding)}
+            </span>
+          )}
+          <div className="flex flex-wrap items-center gap-2 rounded-lg border border-gray-800 bg-gray-950/50 p-1">
+            <span className="pl-1 text-[10px] font-semibold uppercase tracking-wider text-gray-500">Proof replay</span>
+            <RetestVerdictBadge
+              verdict={finding.last_verification_verdict}
+              pending={hasPendingRetest}
+            />
+            <select
+              value={selectedRetestMode}
+              onChange={(e) => setRetestMode(e.target.value as typeof retestMode)}
+              className="px-2 py-1.5 bg-gray-900 border border-gray-700 rounded-lg text-xs text-gray-200 focus:outline-none focus:border-blue-500"
+              title="Retest mode"
+              aria-label="Retest mode"
+            >
+              {retestOptions.map((option) => (
+                <option key={option.value} value={option.value}>{option.label}</option>
+              ))}
+            </select>
+            <button
+              onClick={handleRetest}
+              disabled={retestLoading || hasPendingRetest || !retestSupported}
+              title={!retestSupported ? retestUnsupportedMessage : hasPendingRetest ? 'A proof replay is already queued or running.' : 'Replay this finding with one bounded verifier'}
+              className="px-3 py-1.5 bg-blue-900/50 text-blue-300 rounded-lg text-sm hover:bg-blue-900/80 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {retestLoading ? 'Queueing...' : 'Retest Finding'}
+            </button>
+          </div>
           <button
             onClick={() => setDeleteConfirmOpen(true)}
             className="px-3 py-1.5 bg-red-900/50 text-red-400 rounded-lg text-sm hover:bg-red-900/80 transition-colors"
@@ -488,6 +728,21 @@ function FindingDetailContent() {
           </button>
         </div>
       </div>
+
+      <ConfirmDialog
+        open={autonomousConfirmOpen}
+        title="Authorize finding verification"
+        message={
+          <div className="space-y-2">
+            <p>The verifier will inspect this exact finding, run at most one bounded proof replay against <span className="font-medium text-gray-200">{autonomousTargetUrl}</span>, wait for the result, and conclude.</p>
+            <p>Continue only if you own this target or have explicit permission to test it. Active authorization expires after 30 minutes.</p>
+          </div>
+        }
+        confirmLabel="Authorize and start"
+        busy={autonomousLoading}
+        onConfirm={handleAutonomousInvestigation}
+        onCancel={() => setAutonomousConfirmOpen(false)}
+      />
 
       <ConfirmDialog
         open={deleteConfirmOpen}
@@ -500,7 +755,25 @@ function FindingDetailContent() {
         onCancel={() => setDeleteConfirmOpen(false)}
       />
 
-      <SectionCard title="Overview">
+      <ConfirmDialog
+        open={exceptionToDelete !== null}
+        title="Delete policy exception"
+        message="Remove this policy exception? The finding will be re-evaluated against the active deployment gate. This cannot be undone."
+        confirmLabel="Delete exception"
+        danger
+        busy={exceptionDeleting}
+        onConfirm={handleDeleteException}
+        onCancel={() => setExceptionToDelete(null)}
+      />
+
+      <nav aria-label="Jump to section" className="flex flex-wrap items-center gap-1.5 rounded-lg border border-gray-800 bg-gray-900/60 p-2 text-xs">
+        <span className="px-2 py-1 font-medium text-gray-500">Jump to</span>
+        {(([['overview', 'Overview'], ['tracking', 'Tracking'], ['retest', 'Retest'], ['evidence', 'Evidence'], ['ai-analysis', 'AI analysis'], ...((request || response) ? [['http', 'HTTP']] : [])]) as [string, string][]).map(([anchor, label]) => (
+          <a key={anchor} href={`#${anchor}`} className="rounded px-2 py-1 text-gray-400 transition-colors hover:bg-gray-800 hover:text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500">{label}</a>
+        ))}
+      </nav>
+
+      <SectionCard id="overview" title="Overview">
         <div className="flex flex-col gap-4">
           <div className="flex flex-wrap items-start justify-between gap-4">
             <div className="min-w-0">
@@ -592,6 +865,20 @@ function FindingDetailContent() {
                 <code className="text-gray-300 break-all">{finding.id}</code>
                 <CopyButton text={finding.id} label="Copy finding ID" />
               </div>
+              {research && (
+                <div className="flex items-center gap-2">
+                  <span>Discovered by:</span>
+                  <span className="text-indigo-300">Deep hunt</span>
+                  {research.campaign_id && (
+                    <Link
+                      href={`/deep-hunt/runs/${research.campaign_id}`}
+                      className="text-blue-400 hover:text-blue-300"
+                    >
+                      View run {research.campaign_id.slice(0, 8)}…
+                    </Link>
+                  )}
+                </div>
+              )}
               {finding.scan_id && (
                 <div className="flex items-center gap-2">
                   <span>Scan:</span>
@@ -630,7 +917,7 @@ function FindingDetailContent() {
 
       <TriagePanel finding={finding} />
 
-      <SectionCard title="Tracking">
+      <SectionCard id="tracking" title="Tracking">
         <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4">
           <InfoItem label="First seen">{formatDate(finding.first_seen_at)}</InfoItem>
           <InfoItem label="Last seen">{formatDate(finding.last_seen_at)}</InfoItem>
@@ -643,7 +930,122 @@ function FindingDetailContent() {
         </div>
       </SectionCard>
 
-      <SectionCard title="Retest Verification">
+      <SectionCard title="Policy Exceptions">
+        <div className="space-y-4">
+          {findingExceptions.length > 0 ? (
+            <div className="space-y-2">
+              {findingExceptions.map((item) => (
+                <div key={item.id} className="rounded-lg border border-gray-800 bg-gray-950 p-3">
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div>
+                      <div className="flex flex-wrap items-center gap-2 text-xs">
+                        <span className={`rounded px-2 py-0.5 ${item.status === 'active' ? 'bg-green-900/40 text-green-200' : 'bg-gray-800 text-gray-400'}`}>
+                          {item.status}
+                        </span>
+                        {item.expires_at && <span className="text-gray-500">expires {formatDate(item.expires_at)}</span>}
+                        {item.policy_id && <span className="font-mono text-gray-500">policy {item.policy_id}</span>}
+                      </div>
+                      {item.reason && <p className="mt-2 text-sm text-gray-300">{item.reason}</p>}
+                      <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-gray-500">
+                        {item.owner && <span>owner: <span className="text-gray-300">{item.owner}</span></span>}
+                        {item.approver && <span>approver: <span className="text-gray-300">{item.approver}</span></span>}
+                        {item.compensating_controls && <span>controls: <span className="text-gray-300">{item.compensating_controls}</span></span>}
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setExceptionToDelete(item.id)}
+                      className="rounded border border-red-900/70 px-2 py-1 text-xs text-red-300 hover:bg-red-950/40 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+                    >
+                      Delete
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="rounded-lg border border-gray-800 bg-gray-950 p-3 text-sm text-gray-500">
+              No active exception is recorded for this finding.
+            </div>
+          )}
+
+          <form onSubmit={handleCreateException} className="rounded-lg border border-gray-800 bg-gray-950 p-3">
+            <div className="grid gap-3 md:grid-cols-2">
+              <label className="grid gap-1 text-sm text-gray-300">
+                Owner
+                <input
+                  value={exceptionForm.owner}
+                  onChange={(e) => setExceptionForm((prev) => ({ ...prev, owner: e.target.value }))}
+                  className="rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-white"
+                  placeholder="team or person"
+                />
+              </label>
+              <label className="grid gap-1 text-sm text-gray-300">
+                Approver
+                <input
+                  value={exceptionForm.approver}
+                  onChange={(e) => setExceptionForm((prev) => ({ ...prev, approver: e.target.value }))}
+                  className="rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-white"
+                  placeholder="security approver"
+                />
+              </label>
+              <label className="grid gap-1 text-sm text-gray-300">
+                Policy
+                <select
+                  value={exceptionForm.policy_id}
+                  onChange={(e) => setExceptionForm((prev) => ({ ...prev, policy_id: e.target.value }))}
+                  className="rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-white"
+                >
+                  <option value="">Any policy</option>
+                  {policyProfiles.map((profile) => (
+                    <option key={profile.id} value={profile.id}>{profile.name} ({profile.environment})</option>
+                  ))}
+                </select>
+              </label>
+              <label className="grid gap-1 text-sm text-gray-300">
+                Expires in days
+                <input
+                  value={exceptionForm.expires_days}
+                  onChange={(e) => setExceptionForm((prev) => ({ ...prev, expires_days: e.target.value }))}
+                  className="rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-white"
+                  inputMode="numeric"
+                />
+              </label>
+            </div>
+            <div className="mt-3 grid gap-3 md:grid-cols-2">
+              <label className="grid gap-1 text-sm text-gray-300">
+                Reason
+                <textarea
+                  value={exceptionForm.reason}
+                  onChange={(e) => setExceptionForm((prev) => ({ ...prev, reason: e.target.value }))}
+                  className="min-h-24 rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-white"
+                  placeholder="Risk acceptance rationale"
+                />
+              </label>
+              <label className="grid gap-1 text-sm text-gray-300">
+                Compensating controls
+                <textarea
+                  value={exceptionForm.compensating_controls}
+                  onChange={(e) => setExceptionForm((prev) => ({ ...prev, compensating_controls: e.target.value }))}
+                  className="min-h-24 rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-white"
+                  placeholder="Controls, monitoring, or rollout constraints"
+                />
+              </label>
+            </div>
+            <div className="mt-3 flex justify-end">
+              <button
+                type="submit"
+                disabled={exceptionSaving}
+                className="rounded-lg bg-blue-600 px-3 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50"
+              >
+                {exceptionSaving ? 'Creating...' : 'Create Exception'}
+              </button>
+            </div>
+          </form>
+        </div>
+      </SectionCard>
+
+      <SectionCard id="retest" title="Retest Verification">
         <div className="space-y-3">
           {!retestSupported && (
             <div className="text-xs rounded px-2 py-1 bg-amber-900/30 text-amber-300 border border-amber-900/60">
@@ -809,7 +1211,7 @@ function FindingDetailContent() {
         </div>
       </SectionCard>
 
-      <SectionCard title="Evidence Summary">
+      <SectionCard id="evidence" title="Evidence Summary">
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <InfoItem label="Primary URL">
             {primaryUrl ? (
@@ -966,14 +1368,93 @@ function FindingDetailContent() {
             {rawEvidence && (
               <details open className="bg-gray-800/60 rounded-lg p-3">
                 <summary className="text-sm font-medium text-gray-300 cursor-pointer">Expanded raw evidence</summary>
-                <pre className="mt-3 text-xs text-gray-300 whitespace-pre-wrap break-words">{rawEvidence}</pre>
+                <pre className="mt-3 text-xs text-gray-300 whitespace-pre-wrap break-words">{redactEvidenceForDisplay(rawEvidence)}</pre>
               </details>
             )}
           </div>
         </SectionCard>
       )}
 
-      <SectionCard title="AI Analysis">
+      {evidenceObjects.length > 0 && (
+        <SectionCard
+          title="Durable Evidence Objects"
+          actions={
+            <Link href={`/evidence?finding_id=${encodeURIComponent(findingId)}`} className="text-xs text-blue-400 hover:text-blue-300">
+              Browse in Evidence →
+            </Link>
+          }
+        >
+          <p className="text-xs text-gray-500 mb-3">
+            First-class evidence records — content hash, redaction profile, retention class, and storage URI.
+            These persist independently of the embedded evidence above and survive worker churn.
+          </p>
+          <div className="space-y-2">
+            {evidenceObjects.map((eo) => {
+              const contentText = evidenceObjectContentText(eo.content)
+              return (
+                <div key={eo.id} className="bg-gray-800/60 rounded-lg p-3 space-y-2">
+                  <div className="flex items-center justify-between gap-2 flex-wrap">
+                    <span className="text-sm font-medium text-gray-200">{eo.object_type}</span>
+                    <div className="flex items-center gap-2">
+                      {eo.retention_class && (
+                        <span
+                          className={`px-2 py-0.5 rounded text-xs font-medium ${
+                            eo.retention_class === 'sensitive'
+                              ? 'bg-amber-900/50 text-amber-300'
+                              : 'bg-gray-700 text-gray-300'
+                          }`}
+                        >
+                          {eo.retention_class}
+                        </span>
+                      )}
+                      {typeof eo.size_bytes === 'number' && (
+                        <span className="text-xs text-gray-400">{formatBytes(eo.size_bytes)}</span>
+                      )}
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-1 text-xs">
+                    {eo.content_sha256 && (
+                      <div className="flex gap-2 min-w-0">
+                        <span className="text-gray-500 shrink-0">sha256</span>
+                        <span className="text-gray-300 font-mono break-all">{eo.content_sha256}</span>
+                      </div>
+                    )}
+                    {eo.storage_uri && (
+                      <div className="flex gap-2 min-w-0">
+                        <span className="text-gray-500 shrink-0">storage</span>
+                        <span className="text-gray-300 font-mono break-all">{eo.storage_uri}</span>
+                      </div>
+                    )}
+                    {eo.redaction_profile && (
+                      <div className="flex gap-2 min-w-0">
+                        <span className="text-gray-500 shrink-0">redaction</span>
+                        <span className="text-gray-300">{eo.redaction_profile}</span>
+                      </div>
+                    )}
+                    <div className="flex gap-2 min-w-0">
+                      <span className="text-gray-500 shrink-0">id</span>
+                      <span className="text-gray-400 font-mono break-all">{eo.id}</span>
+                    </div>
+                  </div>
+                  {contentText && (
+                    <details className="rounded border border-gray-800 bg-gray-950 p-2">
+                      <summary className="cursor-pointer text-xs font-medium text-gray-300">Object content</summary>
+                      <div className="mt-2 flex justify-end">
+                        <CopyButton text={contentText} label="Copy evidence object content" />
+                      </div>
+                      <pre className="mt-2 max-h-96 overflow-auto whitespace-pre-wrap break-words text-xs text-gray-300">
+                        {contentText}
+                      </pre>
+                    </details>
+                  )}
+                </div>
+              )
+            })}
+          </div>
+        </SectionCard>
+      )}
+
+      <SectionCard id="ai-analysis" title="AI Analysis">
         {finding.ai_verdict || finding.ai_rationale || finding.ai_recommendations ? (
           <div className="space-y-3">
             {finding.ai_verdict && (
@@ -1027,7 +1508,7 @@ function FindingDetailContent() {
       </SectionCard>
 
       {(request || response) && (
-        <SectionCard title="HTTP Request/Response">
+        <SectionCard id="http" title="HTTP Request/Response">
           <div className="space-y-3">
             {request && (
               <details className="bg-gray-800/60 rounded-lg p-3">
@@ -1049,7 +1530,7 @@ function FindingDetailContent() {
         <Card className="p-4">
           <details>
             <summary className="text-sm font-medium text-gray-400 cursor-pointer">Raw Evidence</summary>
-            <pre className="mt-3 text-xs text-gray-300 whitespace-pre-wrap break-words">{rawEvidence}</pre>
+            <pre className="mt-3 text-xs text-gray-300 whitespace-pre-wrap break-words">{redactEvidenceForDisplay(rawEvidence)}</pre>
           </details>
         </Card>
       )}

@@ -1,8 +1,49 @@
-from scanner.scanner_tools.active_enrichment_policy import (
+import os
+import sys
+
+
+_SCANNER_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "scanner"))
+if _SCANNER_DIR not in sys.path:
+    sys.path.insert(0, _SCANNER_DIR)
+
+from scanner_tools.active_enrichment_policy import (  # noqa: E402
     record_active_enrichment_skip,
+    reserve_active_enrichment_budget,
     should_run_active_enrichment,
 )
-from scanner.scanner_tools.completion_status import build_scan_completion_status
+from scanner_tools.completion_status import build_scan_completion_status  # noqa: E402
+
+
+def test_reserve_active_enrichment_budget_for_large_active_scan():
+    primary, reserve = reserve_active_enrichment_budget(640)
+
+    assert primary == 512
+    assert reserve == 128
+
+
+def test_reserve_active_enrichment_budget_keeps_small_scans_unchanged():
+    primary, reserve = reserve_active_enrichment_budget(60)
+
+    assert primary == 60
+    assert reserve == 0
+
+
+def test_reserve_active_enrichment_budget_handles_missing_budget():
+    primary, reserve = reserve_active_enrichment_budget(None)
+
+    assert primary is None
+    assert reserve == 0
+
+
+def test_reserve_enrichment_false_gives_full_budget_to_primary():
+    # Coverage shards skip the enrichment reserve (recon backbone runs enrichment
+    # once) so all the active time goes to per-endpoint SQLi/XSS breadth.
+    primary, reserve = reserve_active_enrichment_budget(784, reserve_enrichment=False)
+    assert primary == 784
+    assert reserve == 0
+    # default still reserves enrichment
+    primary_d, reserve_d = reserve_active_enrichment_budget(784)
+    assert primary_d < 784 and reserve_d > 0
 
 
 def test_enrichment_decision_uses_canonical_post_active_skip_reason():

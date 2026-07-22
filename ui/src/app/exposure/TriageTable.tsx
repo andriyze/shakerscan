@@ -7,6 +7,7 @@ import {
   AlertTriangle,
   Bot,
   Boxes,
+  BrainCircuit,
   ChevronRight,
   Download,
   ExternalLink,
@@ -56,6 +57,8 @@ export const POSTURE_FILTERS = [
   { value: 'verified', label: 'Proven risk' },
   { value: 'needs_verification', label: 'Needs verification' },
   { value: 'unverified_high', label: 'Unverified high-impact' },
+  { value: 'investigator_verified', label: 'Investigator verified' },
+  { value: 'investigator_suspected', label: 'Investigator suspected' },
   { value: 'prod', label: 'Production' },
   { value: 'new', label: 'New (7d)' },
   { value: 'unowned', label: 'Unowned' },
@@ -137,6 +140,8 @@ export function postureMatches(asset: ExposureAsset, filter: PostureFilter, newW
   // High-impact slice of the (otherwise ~all-assets) needs-verification set:
   // unreviewed findings on an asset that also carries critical/high risk.
   if (filter === 'unverified_high') return (asset.active_needs_verification || 0) > 0 && asset.active_critical + asset.active_high > 0
+  if (filter === 'investigator_verified') return (asset.investigator_verified_count || 0) > 0
+  if (filter === 'investigator_suspected') return (asset.investigator_suspected_count || 0) > 0
   if (filter === 'prod') return Boolean(asset.production_mode) || (asset.environment || '').toLowerCase() === 'production'
   if (filter === 'new') {
     // The change strip links here with its own window (?window=30); fall back
@@ -284,6 +289,7 @@ function RowPosture({ asset }: { asset: ExposureAsset }) {
       <PriorityBadge priority={asset.action_priority} />
       <ExposureBadge asset={asset} />
       <BlastBadge asset={asset} />
+      <InvestigatorTierBadges asset={asset} />
       {shown.map((reason) => (
         <span key={reason} className="inline-flex items-center gap-1 rounded bg-gray-800 px-1.5 py-0.5 text-[10px] text-gray-400">
           <AlertTriangle className="h-2.5 w-2.5" aria-hidden="true" />
@@ -300,11 +306,32 @@ function RowPosture({ asset }: { asset: ExposureAsset }) {
   )
 }
 
+function InvestigatorTierBadges({ asset }: { asset: ExposureAsset }) {
+  const verified = asset.investigator_verified_count || 0
+  const suspected = asset.investigator_suspected_count || 0
+  if (verified === 0 && suspected === 0) return null
+  return (
+    <>
+      {verified > 0 && (
+        <span className="inline-flex items-center rounded border border-emerald-500/30 bg-emerald-500/10 px-1.5 py-0.5 text-[10px] text-emerald-300" title="Deterministically verified investigator findings">
+          {verified} verified
+        </span>
+      )}
+      {suspected > 0 && (
+        <span className="inline-flex items-center rounded border border-amber-500/30 bg-amber-500/10 px-1.5 py-0.5 text-[10px] text-amber-300" title="Evidence-backed investigator leads awaiting deterministic proof">
+          {suspected} suspected
+        </span>
+      )}
+    </>
+  )
+}
+
 function AssetDetailDrawer({
   asset,
   onClose,
   onExplore,
   onScan,
+  onInvestigate,
   scanning,
   onUpdated,
 }: {
@@ -312,6 +339,7 @@ function AssetDetailDrawer({
   onClose: () => void
   onExplore: (nodeId: string) => void
   onScan: (asset: ExposureAsset) => void
+  onInvestigate: (asset: ExposureAsset) => Promise<void>
   scanning: boolean
   onUpdated: () => void
 }) {
@@ -328,6 +356,7 @@ function AssetDetailDrawer({
   const [ownerInput, setOwnerInput] = useState('')
   const [envInput, setEnvInput] = useState('')
   const [savingOwnership, setSavingOwnership] = useState(false)
+  const [autonomousLoading, setAutonomousLoading] = useState(false)
 
   useEffect(() => {
     if (!asset) return
@@ -336,6 +365,7 @@ function AssetDetailDrawer({
     setOwnership({ owner: asset.owner || '', environment: asset.environment || '' })
     setEditingOwnership(false)
     setSavingOwnership(false)
+    setAutonomousLoading(false)
     let active = true
     const params =
       asset.kind === 'ai'
@@ -380,6 +410,18 @@ function AssetDetailDrawer({
     }
   }
 
+  async function startAutonomousInvestigation() {
+    if (!asset || asset.kind !== 'web' || autonomousLoading) return
+    setAutonomousLoading(true)
+    try {
+      await onInvestigate(asset)
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to open Deep Hunt')
+    } finally {
+      setAutonomousLoading(false)
+    }
+  }
+
   const recommended = asset.recommended_actions || []
   const missingControls = asset.kind === 'ai' ? asset.missing_runtime_controls || [] : []
   const verified = asset.active_verified || 0
@@ -394,8 +436,10 @@ function AssetDetailDrawer({
     return {}
   }
 
-  return createPortal(
-    <div className="fixed inset-0 z-40 bg-black/60" role="dialog" aria-modal="true" aria-label={`Asset details for ${asset.label}`}>
+  return (
+    <>
+      {createPortal(
+        <div className="fixed inset-0 z-40 bg-black/60" role="dialog" aria-modal="true" aria-label={`Asset details for ${asset.label}`}>
       <button type="button" className="absolute inset-0 cursor-default" aria-label="Close asset details backdrop" onClick={onClose} />
       <aside ref={panelRef} className="absolute right-0 top-0 flex h-full w-full max-w-xl flex-col border-l border-gray-800 bg-gray-950 shadow-2xl">
         <div className={`flex items-start justify-between gap-3 p-4 ${styles.moduleHeader}`}>
@@ -438,6 +482,11 @@ function AssetDetailDrawer({
               <div className="mt-0.5 text-[11px] text-gray-600">
                 {needsVerification > 0 ? `${needsVerification} unverified` : 'all findings reviewed'}
               </div>
+              {(asset.investigator_verified_count || asset.investigator_suspected_count) ? (
+                <div className="mt-2 flex flex-wrap gap-1.5">
+                  <InvestigatorTierBadges asset={asset} />
+                </div>
+              ) : null}
             </div>
             <div className="rounded border border-gray-800 bg-black/20 p-3">
               <div className="text-[10px] uppercase tracking-wide text-gray-600">Coverage</div>
@@ -617,6 +666,17 @@ function AssetDetailDrawer({
             {scanning ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ScanLine className="h-3.5 w-3.5" />}
             {asset.kind === 'web' ? 'Quick scan' : asset.kind === 'ai' ? 'Run smoke test' : 'Re-check model'}
           </button>
+          {asset.kind === 'web' && (
+            <button
+              type="button"
+              onClick={() => void startAutonomousInvestigation()}
+              disabled={autonomousLoading}
+              className="inline-flex items-center gap-1 rounded border border-violet-400/40 bg-violet-500/15 px-3 py-1.5 text-xs font-medium text-violet-100 hover:bg-violet-500/25 disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-violet-400"
+            >
+              {autonomousLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <BrainCircuit className="h-3.5 w-3.5" />}
+              Open Deep Hunt
+            </button>
+          )}
           <button
             type="button"
             onClick={() => { onExplore(asset.node_id); onClose() }}
@@ -631,8 +691,10 @@ function AssetDetailDrawer({
           )}
         </div>
       </aside>
-    </div>,
-    document.body
+        </div>,
+        document.body
+      )}
+    </>
   )
 }
 
@@ -896,6 +958,7 @@ export function TriageTable({
   onRetry,
   onExplore,
   onScan,
+  onInvestigate,
   onDetails,
   scanningIds,
   selectedAsset,
@@ -919,6 +982,7 @@ export function TriageTable({
   onRetry: () => void
   onExplore: (nodeId: string) => void
   onScan: (asset: ExposureAsset) => void
+  onInvestigate: (asset: ExposureAsset) => Promise<void>
   onDetails: (asset: ExposureAsset) => void
   scanningIds: Set<string>
   selectedAsset: ExposureAsset | null
@@ -1226,6 +1290,7 @@ export function TriageTable({
         onClose={onCloseDetails}
         onExplore={onExplore}
         onScan={onScan}
+        onInvestigate={onInvestigate}
         scanning={Boolean(selectedAsset && scanningIds.has(selectedAsset.id))}
         onUpdated={onRetry}
       />
