@@ -430,6 +430,26 @@ AI_OPS_ROUTER_EXECUTE_ENABLED=true
 See the [Functionality Reference](https://github.com/andriyze/shakerscan/blob/main/docs/functionality-reference.md#14-configuration-and-integrated-tools)
 for the current configuration map. Never commit real credentials.
 
+## Integrated tools and credits
+
+ShakerScan combines its own orchestration, safety controls, evidence model, and reporting with
+established open-source security projects. We are grateful to their maintainers and contributors.
+
+| Capability | Projects |
+|---|---|
+| Discovery and HTTP probing | [httpx](https://github.com/projectdiscovery/httpx), [Katana](https://github.com/projectdiscovery/katana), [Subfinder](https://github.com/projectdiscovery/subfinder), and [Gungnir](https://github.com/g0ldencybersec/gungnir) |
+| Template-based checks | [Nuclei](https://github.com/projectdiscovery/nuclei) and the [Nuclei templates](https://github.com/projectdiscovery/nuclei-templates) |
+| Active web validation | [Dalfox](https://github.com/hahwul/dalfox), [sqlmap](https://github.com/sqlmapproject/sqlmap), and [ffuf](https://github.com/ffuf/ffuf) |
+| TLS and network inspection | [TLSX](https://github.com/projectdiscovery/tlsx), [testssl.sh](https://github.com/testssl/testssl.sh), and [Nmap](https://nmap.org/) |
+| Browser and client-side analysis | [Playwright](https://github.com/microsoft/playwright) and the [Retire.js](https://github.com/RetireJS/retire.js) vulnerability database |
+| Security testing wordlists | [SecLists](https://github.com/danielmiessler/SecLists) |
+| Design inspiration (not bundled) | ShakerScan adapted selected autonomous-research ideas from [T3MP3ST](https://github.com/elder-plinius/T3MP3ST) |
+
+Tool availability and execution policy vary by scan type and release. The generated
+[Functionality Reference](https://github.com/andriyze/shakerscan/blob/main/docs/functionality-reference.md#tool-and-local-agent-adapters)
+records which adapters are wired, gated, or disabled; an installed binary is not automatically an
+exposed ShakerScan action.
+
 ## Troubleshooting
 
 ```bash
