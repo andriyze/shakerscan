@@ -878,8 +878,8 @@ Shipped behavior:
   `check_family`; Auth plans require primary auth context, while BOLA plans include
   `exploit_depth=true` and require primary plus second-user auth context before execution.
 - Returns `dry_run=true` by default for active, state-changing, or budget-increasing intents.
-  Execution requires `execute=true`, explicit confirmations, and
-  `AI_OPS_ROUTER_EXECUTE_ENABLED=true`.
+  Execution requires `execute=true` and explicit confirmations. Standard installs enable the
+  execution gate; `AI_OPS_ROUTER_EXECUTE_ENABLED=false` disables it globally.
 - Returns `planned_api_call`, `planned_api_calls`, `safety_preset`,
   `authorization_assumption`, `blast_radius`, `non_goals`, `missing_inputs`, and an execution result
   with `scan_id`/`campaign_id`/`ui_link` when execution is allowed.

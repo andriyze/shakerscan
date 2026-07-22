@@ -425,7 +425,7 @@ curl -X POST http://localhost:8080/ai/ops/route \
   -d '{"prompt": "Run full coverage on this target", "target": "https://example.com"}'
 ```
 
-Active or budget-increasing intents return `dry_run: true` unless `execute`, `confirm_execution`, and `confirm_authorized` are true and the server has `AI_OPS_ROUTER_EXECUTE_ENABLED=true`. High-risk BOLA also requires `confirm_high_risk` plus auth context hints.
+Active or budget-increasing intents return `dry_run: true` unless `execute`, `confirm_execution`, and `confirm_authorized` are true. Standard installs set `AI_OPS_ROUTER_EXECUTE_ENABLED=true`; an administrator can set it to `false` as a global execution kill switch. High-risk BOLA also requires `confirm_high_risk` plus auth context hints.
 
 ### Deep Hunt
 
@@ -439,9 +439,10 @@ Natural-language routing is strict:
 - `interactive testing` uses `/session/*`.
 
 Deep Hunt is AI-driven exploration plus bounded active exploitation. Before launch, confirm the
-target is authorized, create a target-bound expiring credential-tier approval, and require
-`AI_OPS_ROUTER_EXECUTE_ENABLED=true`. The current coding-agent session is the planner; no stored AI
-provider key is required. ShakerScan seeds a redacted context pack, then suspends at each turn; the
+target is authorized and create a target-bound expiring credential-tier approval. Standard installs
+enable gated execution by default; `AI_OPS_ROUTER_EXECUTE_ENABLED=false` is the administrator's
+global kill switch. The current coding-agent session is the planner; no stored AI provider key is
+required. ShakerScan seeds a redacted context pack, then suspends at each turn; the
 session reads the transcript, requests tools with a fenced
 ` ```json {"tool_calls":[...]} ``` ` block (or ends with a `{"done":true,"findings":[...]}` debrief),
 and the server executes the tools (same-origin/approval-gated) and returns the next observation. Tools:

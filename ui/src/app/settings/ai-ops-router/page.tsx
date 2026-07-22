@@ -101,7 +101,7 @@ export default function AIOpsRouterPage() {
         description={
           <>
             Translate a natural-language DAST/ASM request into a safe, explicit API plan. Active or state-changing intents
-            dry-run by default and require explicit confirmation plus the <code className="text-xs">AI_OPS_ROUTER_EXECUTE_ENABLED</code> server flag to run.
+            dry-run by default and require explicit confirmation. Administrators can set <code className="text-xs">AI_OPS_ROUTER_EXECUTE_ENABLED=false</code> as a global kill switch.
           </>
         }
       />
@@ -190,7 +190,7 @@ export default function AIOpsRouterPage() {
                   Execute operation
                 </Button>
                 {!result.execution_allowed && (
-                  <p className="text-xs text-gray-500">Note: the server may still return a dry run unless AI_OPS_ROUTER_EXECUTE_ENABLED is set.</p>
+                  <p className="text-xs text-gray-500">The server may still return a dry run when an input, confirmation, approval, or execution policy is missing.</p>
                 )}
               </div>
             )}

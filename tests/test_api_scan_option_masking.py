@@ -473,7 +473,8 @@ def test_ai_ops_router_full_coverage_is_dry_run_by_default():
     assert plan["authorization_assumption"]
 
 
-def test_ai_ops_router_scopes_api_budget_raise_to_api_endpoint_filter():
+def test_ai_ops_router_scopes_api_budget_raise_to_api_endpoint_filter(monkeypatch):
+    monkeypatch.setenv("AI_OPS_ROUTER_EXECUTE_ENABLED", "false")
     target_id = str(uuid.uuid4())
     plan = api_module._build_ai_ops_router_plan(
         api_module.AIOpsRouterRequest(
@@ -579,8 +580,8 @@ def test_ai_ops_router_bola_execute_requires_high_risk_confirmation(monkeypatch)
     assert plan["execution_blocked_reason"] == "confirmation_required"
 
 
-def test_ai_ops_router_execute_requires_feature_flag(monkeypatch):
-    monkeypatch.delenv("AI_OPS_ROUTER_EXECUTE_ENABLED", raising=False)
+def test_ai_ops_router_execute_respects_explicitly_disabled_feature_flag(monkeypatch):
+    monkeypatch.setenv("AI_OPS_ROUTER_EXECUTE_ENABLED", "false")
     plan = api_module._build_ai_ops_router_plan(
         api_module.AIOpsRouterRequest(
             prompt="Run full coverage",
@@ -593,6 +594,12 @@ def test_ai_ops_router_execute_requires_feature_flag(monkeypatch):
 
     assert plan["dry_run"] is True
     assert plan["execution_blocked_reason"] == "AI_OPS_ROUTER_EXECUTE_ENABLED is not enabled"
+
+
+def test_ai_ops_router_execution_gate_defaults_on(monkeypatch):
+    monkeypatch.delenv("AI_OPS_ROUTER_EXECUTE_ENABLED", raising=False)
+
+    assert api_module._ai_ops_execute_enabled() is True
 
 
 def test_ai_ops_router_execute_full_coverage_when_confirmed(monkeypatch):

@@ -215,6 +215,7 @@ print_next_steps() {
     say "   Then try asking:"
     say "     \"Scan https://example.com and summarize the findings\""
     say "     \"Show me active critical and high findings\""
+    say "     \"Run a Deep Hunt on my authorized staging target\""
     say "     \"Red team my chatbot API with AI Gate smoke tests\""
     say ""
     say "2) Or run it yourself from the CLI:"

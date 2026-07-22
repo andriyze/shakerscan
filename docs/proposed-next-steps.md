@@ -129,8 +129,9 @@ and deployment gates. The shipped Research Agent binds each single decision to a
 `ObservationPack` hash, injects target, principal, and receipt authority server-side, rejects
 model-supplied control fields, reserves bounded budget, and dispatches only the explicit research
 allowlist through the Arsenal gateway. Shadow mode never dispatches; read-only mode cannot select
-gated commands; gated mode additionally requires target-matching approval/scope receipts and
-`AI_OPS_ROUTER_EXECUTE_ENABLED=true`. Anonymous HTTP differentials remain read-only. Credential-tier
+gated commands; gated mode additionally requires target-matching approval/scope receipts. Standard
+installs enable gated execution; `AI_OPS_ROUTER_EXECUTE_ENABLED=false` is the global kill switch.
+Anonymous HTTP differentials remain read-only. Credential-tier
 workflows can use server-authorized writes only through typed same-origin steps and restoration/
 cleanup rules. AI output cannot create or verify findings; trusted live re-execution and the family
 promotion gate control any autonomous finding.

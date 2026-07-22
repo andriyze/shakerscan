@@ -53,7 +53,8 @@ Deep Hunt requires:
 
 - explicit confirmation that the target is owned or authorized;
 - a target-bound, expiring credential-tier approval;
-- the server active-execution feature flag;
+- the server gated-execution policy, enabled in standard installs and globally disabled with
+  `AI_OPS_ROUTER_EXECUTE_ENABLED=false` when required;
 - hard turn, request, and active-action ceilings.
 
 The free-form loop may use approved active scanner templates. Arbitrary state-changing HTTP remains

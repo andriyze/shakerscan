@@ -646,8 +646,9 @@ exploitation blocks any downgrade.
 defaults**. It recognizes intents such as "run full coverage", "keep this target covered" (enable ASM
 with a safe preset), "what is still untested?" (ASM gaps), "spend more budget on APIs", and focused
 SQLi/XSS/BOLA requests. Active, state-changing, or budget-increasing intents stay dry-run unless
-`execute=true`, explicit confirmations, and `AI_OPS_ROUTER_EXECUTE_ENABLED=true` are all present;
-BOLA additionally requires primary + second-user auth context. Ambiguous language never upgrades a
+`execute=true` and the explicit confirmations are all present. Standard installs enable the server
+execution gate; `AI_OPS_ROUTER_EXECUTE_ENABLED=false` disables all gated execution globally. BOLA
+additionally requires primary + second-user auth context. Ambiguous language never upgrades a
 Safe/Balanced plan to Lab.
 The UI binds execution confirmation to the exact prompt and target that produced the visible preview;
 editing either input invalidates the preview and clears its confirmations.
@@ -657,8 +658,9 @@ editing either input invalidates the preview and clears its confirmations.
 Deep Hunt is the canonical AI-driven web-investigation workflow. The current Codex, Claude, or
 OpenCode session plans turns through the keyless `POST /agent/hunt/{target_id}/session` and
 `POST /agent/hunt/session/{run_id}/reply` loop; ShakerScan alone executes tools. Starting with
-`mode: deep_hunt` requires a live, target-bound, expiring credential-tier approval and the active
-execution feature flag. The approval is revalidated before every turn.
+`mode: deep_hunt` requires a live, target-bound, expiring credential-tier approval. Gated execution
+is enabled in standard installs and can be disabled globally with
+`AI_OPS_ROUTER_EXECUTE_ENABLED=false`. The approval is revalidated before every turn.
 
 The free-form loop can issue same-origin read probes, compare managed principal contexts, query
 stored knowledge, record notes, and invoke bounded active scanner templates. It cannot issue
@@ -962,7 +964,8 @@ explicit per-scan auth fields retain precedence, and undecryptable/expired profi
 - AI analysis: `AI_URL`, `AI_API_KEY`, `AI_MODEL`, `AI_FALLBACK_MODEL`.
 - AI retest verification: `AI_VERIFY_ENABLED`, `AI_VERIFY_URL`, `AI_VERIFY_API_KEY`,
   `AI_VERIFY_MODEL`, `AI_VERIFY_USE_BROWSER`, `AI_VERIFY_MAX_PER_SCAN`, `AI_VERIFY_MIN_SEVERITY`.
-- AI Ops Router execution gate: `AI_OPS_ROUTER_EXECUTE_ENABLED`.
+- AI Ops Router execution gate: `AI_OPS_ROUTER_EXECUTE_ENABLED` (default on; set `false` for a global
+  kill switch).
 - Evidence-retention preview lifetime: `EVIDENCE_RETENTION_PREVIEW_TTL_SECONDS` (default 600
   seconds, clamped to 60-3600 seconds).
 - AI Gate transcripts: `AI_GATE_TRANSCRIPT_RETENTION_DAYS` (retention label, default 30);
@@ -1701,7 +1704,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `AI_JUDGE_MODEL` | `api/ai_gate_scan.py` |
 | `AI_MASK_HOST` | `api/api.py`, `api/worker.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `AI_MODEL` | `api/ai_gate_scan.py`, `api/api.py`, `api/worker.py`, `docker-compose.release.yml`, `docker-compose.yml`, `scanner/scanner.py` |
-| `AI_OPS_ROUTER_EXECUTE_ENABLED` | `api/api.py`, `docker-compose.yml` |
+| `AI_OPS_ROUTER_EXECUTE_ENABLED` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `AI_REASONING_RETRY_MAX_TOKENS` | `scanner/scanner_tools/ai_classifier.py` |
 | `AI_SCAN_CLASSIFICATION_ENABLED` | `api/api.py`, `api/worker.py`, `docker-compose.release.yml`, `docker-compose.yml`, `scanner/scanner.py` |
 | `AI_SETTINGS_KEY` | `api/api.py`, `api/worker.py` |

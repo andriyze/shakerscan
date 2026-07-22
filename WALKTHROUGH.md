@@ -91,7 +91,9 @@ deterministic replay, principal/control comparison, and linked evidence.
 
 The **Campaigns** page is a read-only mission-action ledger. Start Deep Hunt from **Deep Hunt**,
 then continue its keyless turn loop from the coding-agent session. The UI shows the current
-transcript, evidence-backed suspected findings, and deterministic verification results.
+transcript, evidence-backed suspected findings, and deterministic verification results. Gated
+execution is enabled in standard installs, so no extra server setting or stored LLM key is needed;
+the target authorization and expiring approval prompts still apply.
 
 ## 6. Useful agent requests
 

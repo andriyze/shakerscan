@@ -10,6 +10,8 @@ Use it directly or ask Codex, Claude Code, or OpenCode in plain English:
 Start ShakerScan.
 Run a quick scan on https://app.example.test.
 Show active critical and high findings.
+Keep this authorized target covered over time.
+Run a Deep Hunt on this registered staging target.
 Red-team my chatbot API.
 Check this model artifact before deployment.
 ```
@@ -39,7 +41,8 @@ Open:
 - Web UI: [http://localhost:3000](http://localhost:3000)
 - API: [http://localhost:8080](http://localhost:8080)
 
-Then choose how you want to work.
+The first image pull normally takes about 1–3 minutes. If the UI is not ready yet, run
+`shakerscan status`. Then choose how you want to work.
 
 ### Use an AI coding agent
 
@@ -58,9 +61,10 @@ If the new command is not available in the current shell yet:
 ~/.local/bin/shakerscan agent codex
 ```
 
-The current agent session is the planner for Deep Hunt. No separate LLM API key is required for
-agent-driven investigation; ShakerScan remains responsible for target scope, approvals,
-budgets, execution, and proof.
+Codex, Claude Code, or OpenCode must already be installed and signed in. The current agent session is
+the planner for Deep Hunt, so no separate LLM API key needs to be stored in ShakerScan. Gated
+execution is enabled in standard installs; ShakerScan still requires target authorization and an
+expiring target-bound approval, and remains responsible for budgets, execution, and proof.
 
 ### Use the CLI
 
@@ -112,6 +116,11 @@ Scan type controls what is tested. The coverage budget controls how much time an
 
 Coverage budgets are `fast`, `balanced`, `thorough`, and `exhaustive`. Prefer a deeper budget when
 you want more coverage from the same scan type.
+
+The Advanced section also offers `Auto`, `Normal`, `Parallel`, and `Full Coverage` execution. Auto is
+the recommended default and can shard eligible active scans across current workers. Full Coverage is
+the heaviest breadth-first path: it discovers once, partitions the endpoint worklist, and presents
+the merged result as one logical scan.
 
 `full`, `aggressive`, and `smart` require explicit authorization. Smart scan policy and tuning are
 documented in the [Smart Scan Policy](https://github.com/andriyze/shakerscan/blob/main/docs/SMART_SCAN_POLICY.md).
@@ -196,7 +205,18 @@ deployment decision.
 
 Continuous ASM maintains a target endpoint inventory and recommends the next bounded action:
 discovery, an endpoint test batch, a focused SQLi/XSS/auth/BOLA wave, or waiting for active work.
-Use **Continuous ASM** in the UI or:
+New web targets receive the conservative Continuous ASM policy by default; existing targets and
+model artifacts are not silently changed. This can generate bounded background discovery and test
+traffic. Global defaults are under **Settings → Scan execution**, while each target keeps its own
+policy. Deep exploit mode remains off unless explicitly enabled.
+
+In the UI:
+
+1. Add an authorized web target under **Targets**.
+2. Open **Attack surface → Coverage** and select the target.
+3. Review its policy and choose **Improve coverage**.
+
+The equivalent API flow is:
 
 ```bash
 curl http://localhost:8080/targets/{target_id}/asm/gaps
@@ -215,9 +235,20 @@ Deep Hunt uses the current Codex, Claude, or OpenCode session as an autonomous s
 investigator. The AI composes its own same-origin probes, uses bounded active scanner tools, compares
 anonymous and authenticated behavior, and records only claims backed by real tool output.
 
-Deep Hunt requires explicit target authorization and an expiring target-bound approval. ShakerScan
-keeps credentials server-side, enforces turn/request/action ceilings, blocks arbitrary write methods
-in the free-form loop, and promotes a Suspected finding to Verified only through deterministic proof.
+Deep Hunt works after a standard first-time install: gated execution is on by default and the current
+coding-agent session supplies the planner. It still requires explicit target authorization and an
+expiring target-bound approval. ShakerScan keeps credentials server-side, enforces turn/request/action
+ceilings, blocks arbitrary write methods in the free-form loop, and promotes a Suspected finding to
+Verified only through deterministic proof.
+
+To start:
+
+1. Add the authorized target under **Targets**.
+2. Run `shakerscan agent codex` (or `claude` / `opencode`).
+3. Ask: `Run a Deep Hunt on this authorized target.`
+
+An administrator can disable every gated AI Operations execution path by setting
+`AI_OPS_ROUTER_EXECUTE_ENABLED=false` in `.env` and restarting ShakerScan.
 
 The UI launcher is **AI Investigator → Deep Hunt**. Through an agent, the routing is:
 
@@ -238,15 +269,18 @@ and compatibility. It is not the Deep Hunt launcher.
 | Area | What it provides |
 |---|---|
 | Dashboard | Security posture, prioritized actions, recent activity, queue operations, worker freshness/scaling, and Gungnir |
-| Scans / New Scan | Submission, filters, cancellation, live logs, reports, proof, coverage, and PDF export |
+| DAST Scans / New Scan | Submission, filters, cancellation, live logs, reports, proof, coverage, and PDF export |
 | Targets / Exposure | Asset inventory, subdomains, exposure graph, and application graph |
-| Continuous ASM | Endpoint inventory, proof-family coverage, gaps, recommendations, and activity |
-| Findings / Exceptions | Triage, notes, retests, replay, cleanup, accepted risk, and exception lifecycle |
+| Coverage (Continuous ASM) | Endpoint inventory, proof-family coverage, gaps, recommendations, and activity |
+| Findings / Exceptions Queue | Triage, notes, retests, replay, cleanup, accepted risk, and exception lifecycle |
 | AI Gate / Model Intake | AI endpoint red teaming and pre-deployment model checks |
 | Deep Hunt / Leads | AI-driven exploration, bounded exploitation, proof promotion, and the hypothesis backlog |
 | Interactive Testing | Browser sessions, credentials, principals, auth expectations, replay, and explicit findings |
 | Evidence / Timeline / Campaigns | Proof inventory, exports, retention, mission history, and the read-only mission ledger |
 | Settings | AI providers, scan policy, automation, deployment policies, Arsenal, and Router |
+
+Turn on **Show all** at the bottom of the sidebar to reveal advanced areas such as Evidence,
+Timeline, Exceptions Queue, Command Arsenal, and AI Ops Router.
 
 The exhaustive route and capability catalog is in the
 [Functionality Reference](https://github.com/andriyze/shakerscan/blob/main/docs/functionality-reference.md).
@@ -275,7 +309,9 @@ shakerscan start --remote
 ```
 
 Use `0.0.0.0` only behind a firewall, VPN, or authenticated reverse proxy. Do not expose ShakerScan
-directly to the public internet.
+directly to the public internet. ShakerScan is a trusted-operator, self-hosted product: it does not
+provide application login, users, roles, tenant isolation, or comprehensive evidence-secret masking.
+Treat results, evidence, configuration, and backups as sensitive.
 
 ### Build from source
 
@@ -285,7 +321,8 @@ cd shakerscan
 ./scanner.sh start --local
 ```
 
-Use `./scanner.sh start` in a clone to run the published images instead.
+Local-build mode is remembered for later starts. Use `./scanner.sh start --prebuilt` to switch
+explicitly to the published images.
 
 ### Upgrade
 
@@ -383,6 +420,10 @@ AI_VERIFY_ENABLED=false
 AI_VERIFY_URL=https://api.openai.com/v1/chat/completions
 AI_VERIFY_API_KEY=...
 AI_VERIFY_MODEL=...
+
+# Enabled by default so Deep Hunt works after first install. Set false to disable
+# every confirmation-gated AI Operations execution path globally.
+AI_OPS_ROUTER_EXECUTE_ENABLED=true
 ```
 
 See the [Functionality Reference](https://github.com/andriyze/shakerscan/blob/main/docs/functionality-reference.md#14-configuration-and-integrated-tools)
@@ -413,6 +454,7 @@ Common fixes:
 - [Documentation index](https://github.com/andriyze/shakerscan/blob/main/docs/README.md)
 - [Full functionality reference](https://github.com/andriyze/shakerscan/blob/main/docs/functionality-reference.md)
 - [Release readiness checklist](https://github.com/andriyze/shakerscan/blob/main/docs/release-readiness.md)
+- [ShakerScan 0.7.0 release notes](https://github.com/andriyze/shakerscan/blob/main/docs/releases/0.7.0.md)
 - [First-run walkthrough](https://github.com/andriyze/shakerscan/blob/main/WALKTHROUGH.md)
 - [Skill and agent guide](skills/README.md)
 - [Smart Scan Policy](https://github.com/andriyze/shakerscan/blob/main/docs/SMART_SCAN_POLICY.md)

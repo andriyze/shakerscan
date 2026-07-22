@@ -20239,8 +20239,8 @@ async def _verify_suspected_finding_workflow(
 async def verify_suspected_agent_finding(finding_id: str, req: AgentVerifyRequest):
     """Attempt to UPGRADE one SUSPECTED autonomous-agent finding to VERIFIED via the existing
     family_proof two-run verification (Gap B). On success the SUSPECTED row becomes the VERIFIED one
-    (in place); otherwise it stays SUSPECTED. Requires AI_OPS_ROUTER_EXECUTE_ENABLED + a valid
-    target-bound approval receipt. Supports the bola / auth_bypass / data_exposure families."""
+    (in place); otherwise it stays SUSPECTED. Requires gated execution (enabled by default) plus a
+    valid target-bound approval receipt. Supports the bola / auth_bypass / data_exposure families."""
     finding_uuid = _uuid_or_400(finding_id, "finding id")
     return await _verify_suspected_finding_workflow(
         finding_uuid, req.approval_receipt_id, created_by="agent_verify_bridge")
@@ -29466,9 +29466,9 @@ async def arsenal_execute(req: ArsenalExecuteRequest):
     """Execute a Command Arsenal product command by name through its existing handler.
 
     Read-only/dry-run commands dispatch directly. State-changing commands require
-    execute=true, their required confirmations, a valid approval receipt, and the
-    AI_OPS_ROUTER_EXECUTE_ENABLED flag; otherwise they dry-run with a recorded
-    blocked/approval_required audit row. Raw shell and arbitrary execution are not
+    execute=true, their required confirmations, a valid approval receipt, and the gated-execution
+    policy (enabled by default); otherwise they dry-run with a recorded blocked/approval_required
+    audit row. Raw shell and arbitrary execution are not
     representable — only catalog commands with a wired adapter run.
 
     Optionally pass campaign_id to link the resulting command_result's campaign
@@ -40204,9 +40204,9 @@ class AsmPolicyUpdate(BaseModel):
 class AIOpsRouterRequest(BaseModel):
     """Natural-language DAST/ASM intent planner for AI agents.
 
-    Execution is intentionally conservative: active or state-changing intents
-    dry-run by default and require both request confirmation and the
-    AI_OPS_ROUTER_EXECUTE_ENABLED feature flag before this API queues work.
+    Execution is intentionally conservative: active or state-changing intents dry-run by default
+    and require request confirmation plus the gated-execution policy before this API queues work.
+    Standard installs enable the policy; AI_OPS_ROUTER_EXECUTE_ENABLED=false disables it globally.
     """
 
     prompt: Optional[str] = None
@@ -40221,7 +40221,12 @@ class AIOpsRouterRequest(BaseModel):
 
 
 def _ai_ops_execute_enabled() -> bool:
-    return str(os.environ.get("AI_OPS_ROUTER_EXECUTE_ENABLED") or "").strip().lower() in {
+    # First-run installs should be able to launch Deep Hunt without a hidden
+    # environment prerequisite. Execution is still bounded by per-operation
+    # confirmations, target-scoped approval receipts, and the server-side
+    # scope/budget/proof gates. Operators can set the flag to false to disable
+    # every gated AI Operations execution path globally.
+    return str(os.environ.get("AI_OPS_ROUTER_EXECUTE_ENABLED", "true")).strip().lower() in {
         "1",
         "true",
         "yes",
@@ -42542,9 +42547,9 @@ async def ai_ops_route(request: AIOpsRouterRequest):
     """Map natural-language DAST/ASM operations to safe API calls.
 
     This is a deterministic router for agents, not a free-form LLM executor.
-    Active/state-changing actions dry-run unless the caller explicitly requests
-    execution, provides the required confirmations, and the server enables
-    AI_OPS_ROUTER_EXECUTE_ENABLED.
+    Active/state-changing actions dry-run unless the caller explicitly requests execution, provides
+    the required confirmations, and the gated-execution policy is enabled. Standard installs enable
+    it; AI_OPS_ROUTER_EXECUTE_ENABLED=false disables it globally.
     """
     plan = _build_ai_ops_router_plan(request)
     if plan["dry_run"]:
