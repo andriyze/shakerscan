@@ -1,6 +1,5 @@
 import asyncio
 import hashlib
-import hmac
 import os
 import re
 import signal
@@ -206,12 +205,7 @@ def _record_subprocess_receipt(
         "timeout_seconds": int(timeout_seconds),
         "duration_ms": int(max(0, now - started_at) * 1000),
         "redacted_argv": redacted,
-        # Stable receipt identifier over already-redacted argv; never used for authentication.
-        "command_hash": hmac.new(
-            b"ShakerScanCommandReceipt-v1",
-            "\x00".join(redacted).encode("utf-8", "ignore"),
-            "sha256",
-        ).hexdigest(),
+        "command_hash": hashlib.sha256("\x00".join(redacted).encode("utf-8", "ignore")).hexdigest(),
         "stdout_length": len(stdout_text),
         "stderr_length": len(stderr_text),
         "stdout_preview": stdout_preview,
