@@ -329,12 +329,23 @@ def run_dast() -> H.Scorecard:
 
     # D-1 (fast gate): a standard scan of Juice Shop must COMPLETE (catches the
     # finalize-hang / NUL-byte-crash / reaper classes) and produce a graded report
-    # with findings. Active recall (SQLi/XSS/BOLA, the 70% benchmark) is too slow
-    # for a per-PR gate and runs NIGHTLY via tests/benchmark/run_benchmarks.py.
+    # with findings. Keep discovery small and run Nuclei against the canonical
+    # target only: applying every path-oriented template to every discovered SPA
+    # route can multiply into enough synthetic 404 traffic to exhaust the fixture
+    # before the focused active-recall checks below. This still exercises the real
+    # standard/Nuclei pipeline and its receipt; it is not a coverage benchmark.
+    # Active recall (SQLi/XSS/BOLA, the 70% benchmark) remains a separate concern.
     try:
         _, resp = H.post("/scans", {
             "target": JUICE_SHOP,
-            "options": {"scan_type": "standard"},
+            "options": {
+                "scan_type": "standard",
+                "custom_budget": {
+                    "max_urls": 40,
+                    "browser_max_pages": 3,
+                    "nuclei_max_targets": 1,
+                },
+            },
         })
         scan_id = resp.get("scan_id") or resp.get("id")
         sc.check("D-1 scan accepted", bool(scan_id), str(resp)[:120])
