@@ -26,15 +26,16 @@ multi-node placement, and live parity/rate soak remain open.
 **Related design:** [parallel-scan-architecture.md](parallel-scan-architecture.md),
 [multi-node-architecture.md](multi-node-architecture.md).
 
-**2026-07-10 audit note:** Continuous ASM is the flagship surface for the product thesis in
-[proposed-next-steps.md](proposed-next-steps.md): proof-first Continuous Exposure Management for
-modern apps, APIs, and AI systems. External ASM vendors are strong at discovering and mapping unknown
+**2026-07-10 historical audit note:** Continuous ASM established the proof-first Continuous Exposure
+Management thesis for modern apps, APIs, and AI systems. External ASM vendors are strong at discovering and mapping unknown
 internet-facing assets; ShakerScan should differentiate by turning owned web/API surface into
 authenticated, replayable, proof-grade campaigns with honest coverage, attempt ledgers, and canonical
 evidence. Since the original audit, graph-driven campaign consumers, detector campaign routing,
 exception remediation, hypotheses, and safe timeline actions have shipped for the bounded product
 flow. Remaining work is the explicitly deferred registry/telemetry/family breadth and live soak
 listed below, not another parallel implementation of those workflows.
+The future roadmap now treats a coordinated Multi-Node fleet as the primary post-0.7 functional
+initiative while preserving these DAST/ASM correctness requirements as fleet acceptance gates.
 First-pass next-action / skip-reason state is now live: ASM policy/gaps/improve/activity return `scheduler_state`, and
 dispatcher/scheduler decisions persist to `targets.metadata_json.asm_last_decision`. ASM waves are
 now a first-class schedule kind (`schedules.schedule_kind='asm_improve'`) with legacy

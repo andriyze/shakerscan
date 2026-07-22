@@ -1,7 +1,8 @@
 # ShakerScan DAST — OWASP Coverage Matrix
 
 **Status:** mechanism inventory reconciled 2026-07-11. This matrix records implemented check
-families, not accepted recall, precision, or proof depth. Current benchmark acceptance is tracked in
+families, not accepted recall, precision, or proof depth. Candidate acceptance belongs in
+[`release-readiness.md`](release-readiness.md); future detector priorities are in
 [`proposed-next-steps.md`](proposed-next-steps.md).
 
 Scope: this maps the **DAST engine** (`scanner/scanner_tools/`) against the

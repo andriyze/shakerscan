@@ -20,7 +20,7 @@ runtime receipts, and tests remain authoritative when a document disagrees.
 
 | Document | Purpose |
 |---|---|
-| [`proposed-next-steps.md`](proposed-next-steps.md) | Single live hardening roadmap and acceptance status |
+| [`proposed-next-steps.md`](proposed-next-steps.md) | Future-only product roadmap; Multi-Node is the primary post-0.7 functional initiative |
 | [`release-readiness.md`](release-readiness.md) | Single release scope, stop-ship, validation, publishing, installer, and documentation checklist |
 | [`upgrade-and-rollback.md`](upgrade-and-rollback.md) | Backup, upgrade, verification, and rollback runbook for source and installer deployments |
 | [`releases/0.7.0.md`](releases/0.7.0.md) | Version-specific ShakerScan 0.7.0 release notes and supported product boundary |

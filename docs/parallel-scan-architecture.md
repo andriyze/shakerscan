@@ -12,17 +12,18 @@ enforcing request budgets for internally discovered standalone traffic are shipp
 outside the now-covered SQLi/XSS/Auth/BOLA/Phase-4 paths, additional
 focused families, multi-node orchestration, and large-fleet parity/soak are not implemented claims.
 
-**Reconciled:** 2026-07-17 against current code, integrity ledgers, and
+**Reconciled:** 2026-07-21 against current code, integrity ledgers, and the future-only roadmap in
 `proposed-next-steps.md`. Historical benchmark artifacts retain their original status.
 **Date:** 2026-06-23 (core implemented 2026-06-15)
 **Author:** Architecture audit (Claude Code)
 **Scope:** Make a single logical scan of one target fan out across the worker fleet; expand dictionaries, checks, and budgets that this parallelism makes affordable.
 
-**2026-07-05 audit note:** the parallel substrate is no longer the main product gap. The latest
-roadmap is in [proposed-next-steps.md](proposed-next-steps.md): ShakerScan's north star is
-proof-first Continuous Exposure Management for owned web, API, and AI systems. Prioritize detector
-recall campaigns, graph consumers, externalized evidence, exception remediation workflow depth, and
-registry-driven proof contracts before adding more fan-out knobs. The first ASM scheduler/dispatcher skip-reason contract is now live in ASM
+**2026-07-05 historical audit note:** the parallel substrate was no longer the main local-execution
+gap. Detector recall, graph consumers, evidence, remediation workflows, and registry proof contracts
+were prioritized before adding more local fan-out knobs. Those bounded mechanisms now support the
+primary post-0.7 functional initiative: the coordinated Multi-Node fleet in
+[proposed-next-steps.md](proposed-next-steps.md) and
+[multi-node-architecture.md](multi-node-architecture.md). The first ASM scheduler/dispatcher skip-reason contract is now live in ASM
 policy/gaps/improve/activity responses and persisted target metadata; Dashboard Action Center CTAs
 link to the safe next steps; ASM waves are now a typed schedule kind with legacy
 `scan_options.kind='asm_improve'` compatibility; `/targets/{id}/asm/activity.timeline` now derives a

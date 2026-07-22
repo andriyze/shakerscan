@@ -330,6 +330,11 @@ OAuth 2.0/OIDC (client-credentials and auth-code grants, refresh handling, optio
 supported. The scanner tracks `auth_state` per request (`anonymous` / `user1` / `user2`) so coverage
 is counted separately per identity.
 
+Principal and benchmark receipts distinguish configured contexts, redacted identity fingerprints,
+server-observed accepted authentication, family attempts, and cross-principal proof. A verified
+BOLA result requires distinct accepted principals and a deterministic owner/attacker differential;
+two configured or merely attempted lanes do not satisfy that gate.
+
 **Workflow:** create a test account → log in and capture token/cookies → pass via scan `options` →
 the scanner uses the credentials for all authenticated requests, and re-auths on expiry.
 
@@ -434,7 +439,13 @@ coverage over time within safe budgets and allowed windows (`api/asm_inventory.p
   proof state.
 
 Full design and current status: [`docs/continuous-asm-architecture.md`](continuous-asm-architecture.md).
-Multi-VPS fleet plans: [`docs/multi-node-architecture.md`](multi-node-architecture.md).
+
+**Future multi-node boundary:** production coordination across multiple VPS hosts is not implemented.
+The shipped parent/plan/shard/merge queue is the execution substrate, but remote enrollment, node
+identity, leases/ack/reclaim, fencing, evidence transfer, placement, and fleet-wide rate controls
+remain future work. The design authority is
+[`docs/multi-node-architecture.md`](multi-node-architecture.md); prioritized delivery work is tracked
+in [`docs/proposed-next-steps.md`](proposed-next-steps.md).
 
 ---
 
@@ -473,8 +484,8 @@ The AI side has four capabilities:
 be backed by deterministic, cryptographic, parser-backed, protocol-backed, or replay-backed evidence.
 Findings carry proof quality explicitly (see [AI proof and evidence states](#ai-proof-and-evidence-states)
 below); AI is never the sole authority for verified status or severity promotion. For engineering-depth
-onboarding see [`AI_REDTEAM_AND_MODEL_INTAKE.md`](AI_REDTEAM_AND_MODEL_INTAKE.md); current hardening
-work is tracked in [`proposed-next-steps.md`](proposed-next-steps.md). The completed June fix plan is
+onboarding see [`AI_REDTEAM_AND_MODEL_INTAKE.md`](AI_REDTEAM_AND_MODEL_INTAKE.md); future hardening
+and product work is tracked in [`proposed-next-steps.md`](proposed-next-steps.md). The completed June fix plan is
 preserved only as an [archived implementation record](archive/ai-redteam-model-intake-fix-plan-2026-06.md).
 
 ### AI capability status quick read
@@ -510,7 +521,7 @@ Today a finding exposes a three-state proof level — `verified` (deterministic 
 deterministic proof blocks any AI downgrade. The **target** is one taxonomy unified across DAST and AI
 (`deterministic_verified`, `cryptographically_verified`, `claimed_present`, `ai_judged_likely`,
 `inconclusive`, `blocked`, `false_positive`) so that *claimed* metadata and *AI-judged* results can
-never render as *verified*. Current proof-state hardening is tracked in
+never render as *verified*. Future proof-state hardening is tracked in
 [`proposed-next-steps.md`](proposed-next-steps.md); the original AI taxonomy design is retained in the
 [archived fix plan](archive/ai-redteam-model-intake-fix-plan-2026-06.md).
 
@@ -2019,7 +2030,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | Historical smart-scan implementation notes | [`archive/smart-scan-implementation-notes.md`](archive/smart-scan-implementation-notes.md) |
 | OWASP coverage and intentional gaps | [`owasp-coverage-matrix.md`](owasp-coverage-matrix.md) |
 | AI red teaming + model intake (engineering onboarding) | [`AI_REDTEAM_AND_MODEL_INTAKE.md`](AI_REDTEAM_AND_MODEL_INTAKE.md) |
-| Current product hardening roadmap | [`proposed-next-steps.md`](proposed-next-steps.md) |
+| Future product roadmap | [`proposed-next-steps.md`](proposed-next-steps.md) |
 | Release readiness and publishing checklist | [`release-readiness.md`](release-readiness.md) |
 | Historical AI red teaming + model intake fix ledger | [`archive/ai-redteam-model-intake-fix-plan-2026-06.md`](archive/ai-redteam-model-intake-fix-plan-2026-06.md) |
 | AI test workflows + Honey contract | [`AI_TEST_WORKFLOWS.md`](AI_TEST_WORKFLOWS.md) |

@@ -17,7 +17,7 @@ act on stale capability states. For the current quick-read, use:
   coverage, coverage-family, worker-aware sharding, and DAST execution lessons.
 - [continuous-asm-architecture.md](continuous-asm-architecture.md) for inventory, campaigns,
   leases, attempt ledgers, quality gaps, and continuous retesting.
-- [proposed-next-steps.md](proposed-next-steps.md) for the DAST quality benchmark roadmap.
+- [proposed-next-steps.md](proposed-next-steps.md) for product priority and phased delivery order.
 
 The parallel-scan design answers: "How does one logical scan fan out into plan, shard,
 and merge jobs?" This document answers: "How can those worker jobs run on more than one
