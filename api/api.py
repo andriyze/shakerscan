@@ -3152,7 +3152,7 @@ class ScanOptions(BaseModel):
     target_scheme_inferred: Optional[bool] = None  # Output-only: set by API when scheme was auto-inferred (do not use as input)
 
     # Parallel scanning: split one scan of this target across the worker fleet.
-    # See docs/parallel-scan-architecture.md.
+    # See docs/dast-asm-architecture.md.
     parallel: bool = False                          # Fan this scan out into shards
     shards: Optional[Any] = None                    # int or "auto" (scale to workers)
     shard_strategy: Optional[str] = Field(

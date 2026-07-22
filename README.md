@@ -497,13 +497,13 @@ Common fixes:
 - [First-run walkthrough](https://github.com/andriyze/shakerscan/blob/main/WALKTHROUGH.md)
 - [Skill and agent guide](skills/README.md)
 - [Smart Scan Policy](https://github.com/andriyze/shakerscan/blob/main/docs/SMART_SCAN_POLICY.md)
+- [DAST and Continuous ASM architecture](https://github.com/andriyze/shakerscan/blob/main/docs/dast-asm-architecture.md)
 - [OWASP coverage matrix](https://github.com/andriyze/shakerscan/blob/main/docs/owasp-coverage-matrix.md)
 - [AI security workflows](https://github.com/andriyze/shakerscan/blob/main/docs/AI_TEST_WORKFLOWS.md)
 - [Interactive session guide](https://github.com/andriyze/shakerscan/blob/main/docs/INTERACTIVE_SESSIONS_GUIDE.md)
 
-Historical implementation plans and point-in-time audits live under
-[`docs/archive/`](https://github.com/andriyze/shakerscan/tree/main/docs/archive). They are retained
-for traceability and are not current product instructions.
+Superseded plans and point-in-time audits are available through Git history and release tags; they
+are not shipped as current product instructions.
 
 ## Contributing
 

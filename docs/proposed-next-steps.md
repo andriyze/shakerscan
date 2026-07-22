@@ -2,8 +2,7 @@
 
 **Status (2026-07-21):** future-only product roadmap. Shipped behavior belongs in the
 [functionality reference](functionality-reference.md), release gates and candidate evidence belong in
-[release readiness](release-readiness.md), and implementation history belongs in the
-[archive](archive/README.md).
+[release readiness](release-readiness.md), while implementation history remains available in Git.
 
 The next largest functional improvement after 0.7.0 is a coordinated **Multi-Node ShakerScan
 fleet**. DAST quality and execution correctness remain continuous release requirements, but they

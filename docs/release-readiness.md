@@ -19,9 +19,10 @@ multi-tenant security platform.
   another person who can access those resources.
 - Localhost is the default. Remote access must stay behind Tailscale, a VPN, firewall, or an
   operator-managed authenticated reverse proxy. Direct public exposure is unsupported.
-- Starting a local active scan is treated as the trusted operator's authorization. Clear target and
-  active-testing warnings remain mandatory; server-authoritative approval receipts for every scan
-  are deferred until shared or untrusted control planes are supported.
+- Starting an ordinary local active DAST scan is treated as the trusted operator's authorization.
+  Clear target and active-testing warnings remain mandatory. Approval receipts and a global
+  enforcement toggle are implemented, and Deep Hunt always requires a target-bound expiring
+  approval; only mandatory receipt enforcement for every trusted-local DAST scan is deferred.
 - Scan evidence can contain request/response content, payloads, tokens, or application data. Treat
   results and backups as sensitive. Comprehensive secret masking and historical evidence rewriting
   are not promised in 0.7.0.
@@ -49,9 +50,8 @@ acceptance should not be waived.
 
 ## Product and security items — reconciled to the 0.7.0 scope
 
-The full July UI/UX audit disposition table is at
-[`archive/ui-ux-audit-2026-07-16.md`](archive/ui-ux-audit-2026-07-16.md#release-disposition-2026-07-17).
-Reconciled against the trusted-operator scope above:
+The July UI/UX audit decisions that affect the release boundary are summarized here. The original
+point-in-time audit remains available in Git history.
 
 - **AUD-03 — proof/provenance authority — CLOSED under SCAN-01.** Deterministic evidence controls
   verified status and severity; AI verdicts are downgrade-only and cannot manufacture or upgrade a
@@ -65,10 +65,10 @@ Reconciled against the trusted-operator scope above:
 - **AUD-02 — comprehensive nested-evidence secret redaction — DEFERRED to 0.8.0** per the scope
   boundary. Existing safeguards remain and documentation warns that result storage is sensitive; a
   typed redaction pipeline and old-data rewrite are not 0.7.0 gates.
-- **AUD-10 — server-authoritative active-scan approval receipts — DEFERRED to 0.8.0** per the scope
-  boundary. Under the trusted-operator model, starting a local active scan is the operator's
-  authorization; scope and same-origin enforcement still apply and clear active-testing warnings
-  remain required. Reusable target-bound approvals return before shared/untrusted control planes exist.
+- **AUD-10 — mandatory approval receipts for ordinary local DAST — DEFERRED beyond 0.7.0** under the
+  trusted-operator boundary. Receipts, target binding, expiry, and the global enforcement toggle are
+  already implemented; Deep Hunt requires them. Scope, same-origin enforcement, and active-testing
+  warnings remain required for ordinary scans even when blanket receipt enforcement is disabled.
 - **AUD-11 — deployment trust boundary — STANDING documented requirement.** Until ShakerScan has
   application authentication, docs and installer defaults bind to localhost and require Tailscale, a
   VPN, firewall, or an authenticated reverse proxy for remote access. Direct public exposure is
@@ -94,16 +94,15 @@ is conservative/fail-closed or latent, and is an owned decision rather than a si
 
 ## Release-candidate validation
 
-Run these against the exact candidate commit and retain content-free receipts/artifacts. The fast
-host-verifiable checks pass on this branch — unit/contract (2347 passed, 7 skipped),
-`generate_capability_inventory.py --check`, and all `release_gates.py` gates — but each MUST be
-re-confirmed on the frozen candidate SHA; the live-stack and benchmark rows below are freeze-time.
+Run these against the exact candidate commit and retain content-free receipts/artifacts. Earlier
+branch results are not release evidence; every applicable check must be re-run on the frozen
+candidate SHA.
 
 - [ ] Unit and contract suites pass on the candidate.
 - [ ] UI production build and targeted browser QA pass at desktop and narrow viewport widths.
 - [ ] `python3 scripts/generate_capability_inventory.py --check` passes.
 - [ ] Every skill validates with the skill validator.
-- [ ] Documentation links and current/archive indexes pass.
+- [ ] Documentation links and the maintained documentation index pass.
 - [ ] `make release-gates` passes. (The Release workflow now invokes the gates in the candidate
       scanner image before publish, so a wrong candidate cannot be published green.)
 - [ ] The manual **E2E (full release gate)** workflow passes for the exact frozen candidate SHA
@@ -143,14 +142,14 @@ Complete these before creating a tag:
 
 ## Version and provenance
 
-Only after the blocking work and candidate validation are complete:
+`VERSION`, the 0.7.0 release notes, and the pending `RELEASES.md` row are already prepared. After the
+blocking work and candidate validation are complete:
 
-1. Select the next version and update `VERSION`.
-2. Add version-specific release notes.
-3. Add a pending row to [`../RELEASES.md`](../RELEASES.md).
-4. Merge the exact candidate to `main`.
-5. Tag that commit and publish both multi-architecture images.
-6. Record the release commit and image digests in `RELEASES.md`.
+1. Confirm `VERSION`, the version-specific release notes, and the pending
+   [`../RELEASES.md`](../RELEASES.md) row still match the frozen candidate.
+2. Merge the exact candidate to `main`.
+3. Tag that commit and publish both multi-architecture images.
+4. Record the release commit and image digests in `RELEASES.md`.
 
 Do not reuse `0.5.7`; it is already a published release.
 
@@ -165,9 +164,12 @@ After the release commit is public:
 - [ ] Verify the root response is shell content with an appropriate text/shell content type.
 - [ ] Confirm the installer fetches `skills/shakerscan`, `skills/research-agent`, and the full
       `.claude/commands/` set (including `research.md` and `deep-hunt.md`).
+- [ ] Confirm Python 3 is installed and the runtime includes `scripts/shakerscan_mcp.py`,
+      `scripts/local_planner_adapter.py`, `scripts/planner_evals.py`, and
+      `api/command_arsenal.py`.
 - [ ] Run a clean install into an empty temporary home.
-- [ ] Verify `shakerscan doctor`, `shakerscan status`, agent launch, skill discovery, and one safe
-      quick-scan submission.
+- [ ] Verify `shakerscan doctor`, `shakerscan status`, `shakerscan mcp`, planner startup, agent
+      launch, skill discovery, and one safe quick-scan submission.
 - [ ] Verify an upgrade preserves `.env`, results, and Docker volumes.
 - [ ] Confirm the installed instructions use public documentation links for files that are not part
       of the minimal runtime.
@@ -179,7 +181,6 @@ After the release commit is public:
 - [ ] AGENTS and CLAUDE instructions match the live OpenAPI and installed package layout.
 - [ ] The functionality reference generated inventory is current and its curated sections do not
       contradict the generated routes.
-- [ ] Only one live roadmap exists; completed plans and point-in-time audits are archived.
-- [ ] Walkthrough text matches the current UI. Historical screenshots are not presented as
-      release-current.
-- [ ] The archived UI/UX audit disposition table is updated with the final release decision.
+- [ ] Only one live roadmap exists; completed plans, prompts, audits, and stale screenshots are not
+      shipped as maintained documentation.
+- [ ] Walkthrough text matches the current UI.

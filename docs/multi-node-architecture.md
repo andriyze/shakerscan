@@ -5,18 +5,15 @@ production-ready fleet work is not implemented yet.
 **Scope:** run a coordinated ShakerScan fleet across multiple VMs/VPS hosts so one UI/API
 can scan more targets at once and run high-budget Full Coverage scans by using workers
 from many machines.
-**Related designs:** [parallel-scan-architecture.md](parallel-scan-architecture.md),
-[continuous-asm-architecture.md](continuous-asm-architecture.md).
+**Related design:** [dast-asm-architecture.md](dast-asm-architecture.md).
 
 ## Capability Status
 
 Do not duplicate the shared status matrix here. It drifted across docs before and caused agents to
 act on stale capability states. For the current quick-read, use:
 
-- [parallel-scan-architecture.md](parallel-scan-architecture.md) for parent/plan/shard/merge,
-  coverage, coverage-family, worker-aware sharding, and DAST execution lessons.
-- [continuous-asm-architecture.md](continuous-asm-architecture.md) for inventory, campaigns,
-  leases, attempt ledgers, quality gaps, and continuous retesting.
+- [dast-asm-architecture.md](dast-asm-architecture.md) for parent/plan/shard/merge, coverage,
+  inventory, attempts, Continuous ASM, and local execution boundaries.
 - [proposed-next-steps.md](proposed-next-steps.md) for product priority and phased delivery order.
 
 The parallel-scan design answers: "How does one logical scan fan out into plan, shard,
@@ -49,7 +46,7 @@ worker instances joined to the same fleet.
    evidence, and submit results through a narrow API.
 6. **Multi-node composes with the parallel-scan work, which has shipped.** Intra-target
    fan-out (`scan_plan -> scan_shard -> scan_merge`, plus the `scope`/`family`/`coverage`
-   strategies) is implemented today — see `docs/parallel-scan-architecture.md`. Shard jobs are
+   strategies) is implemented today — see `docs/dast-asm-architecture.md`. Shard jobs are
    plain entries on the shared `scan_jobs` Redis list, so any fleet worker that consumes that
    queue already runs shards of one logical scan; the merge reconciles regardless of which node
    ran each shard. Multi-node therefore adds *capacity* (more workers draining the same shard
@@ -113,8 +110,8 @@ Coordinated multi-node mode should promote a standalone install to `control-plan
 - Do not make every VPS run a full independent stack in coordinated fleet mode.
 - Do not expose Redis or Postgres directly on the public internet.
 - Do not require Kubernetes for the first version.
-- Do not redesign the parallel scan shard model here. This doc assumes that work follows
-  [parallel-scan-architecture.md](parallel-scan-architecture.md).
+- Do not redesign the parallel scan shard model here. This doc assumes the current local execution
+  model in [dast-asm-architecture.md](dast-asm-architecture.md).
 
 ## 1. How This Relates To Parallel Scans
 
@@ -315,7 +312,7 @@ Minimum shape:
 6. The join command registers the node, writes worker-only config, and starts workers:
    no local API, UI, Postgres, or Redis.
 7. Point worker `REDIS_URL` and `DATABASE_URL` at the control plane's overlay IP.
-8. Pull a pinned scanner image from a private registry so all nodes run the same version.
+8. Pull a digest-pinned scanner image from a trusted registry so all nodes run the same version.
 9. Restrict overlay ACLs so worker nodes can reach only the required control-plane ports.
 
 The join command should produce a connection bundle for the worker node:

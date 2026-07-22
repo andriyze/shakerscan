@@ -1,8 +1,7 @@
 # ShakerScan walkthrough
 
-This guide follows the current first-run flow through an AI coding agent and the web UI. Earlier
-screenshots are retained under `docs/screenshots/` as historical UI artifacts, but they are not
-embedded here because they predate the current navigation and dashboard.
+This guide follows the current first-run flow through an AI coding agent and the web UI. It uses
+text and live routes so it does not drift with historical screenshots.
 
 ## 1. Install and open ShakerScan
 

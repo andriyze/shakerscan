@@ -1,7 +1,7 @@
 """Parallel scan orchestration: plan a parent scan into independent shards.
 
 A parallel scan splits one logical scan of a single target across the worker
-fleet (see docs/parallel-scan-architecture.md). The flow is a scatter-gather:
+fleet (see docs/dast-asm-architecture.md). The flow is a scatter-gather:
 
     POST /scans {parallel:true}
         -> parent scan row (scan_role='parent')

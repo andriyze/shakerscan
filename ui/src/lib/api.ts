@@ -3743,7 +3743,7 @@ export async function getTargetsGrouped(params?: {
   return res.json()
 }
 
-// Continuous ASM — persistent attack-surface inventory (docs/parallel-scan-architecture.md §16)
+// Continuous ASM — persistent attack-surface inventory (docs/dast-asm-architecture.md)
 export async function getAsmCoverage(targetId: string): Promise<AsmCoverage> {
   const res = await fetch(`${API_URL}/targets/${targetId}/asm/coverage`)
   if (!res.ok) throw new Error('Failed to fetch ASM coverage')

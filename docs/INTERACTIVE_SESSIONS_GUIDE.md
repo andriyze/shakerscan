@@ -226,4 +226,5 @@ Stop, avoid copying the value into notes, and rotate the credential if it was ex
 - [`AI_TEST_WORKFLOWS.md`](AI_TEST_WORKFLOWS.md) for AI Gate and Model Intake
 - [`functionality-reference.md`](functionality-reference.md) for the exhaustive API and UI map
 - `/save-finding` for the evidence-gated finding workflow
-- `/research` for a bounded adaptive investigation
+- `/deep-hunt` for the canonical AI-driven investigation; compatibility `/research/*` workflows are
+  reserved for specialized guided verification and legacy runs

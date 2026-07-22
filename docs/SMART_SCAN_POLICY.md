@@ -1,6 +1,6 @@
 # Smart Scan Policy
 
-**Status:** reconciled 2026-07-17. Resolved profile budgets, hard override ceilings, phase watchdogs,
+**Status:** reconciled 2026-07-21. Resolved profile budgets, hard override ceilings, phase watchdogs,
 request-meter telemetry, adaptive throttling, and proof-aware reporting are shipped. Yield-based
 cross-phase budget reallocation below is a target policy, not current runtime behavior. Release SLOs
 are acceptance goals and must not be represented as passing without a current scorecard. The named
@@ -84,9 +84,10 @@ Recommended thresholds:
 - Cap active probes per endpoint and per parameter family.
 - Apply adaptive backoff on `429`/`503`.
 - Downgrade unverified `critical/high` findings after verification budget exhaustion.
-- Require explicit operator consent for active modes. Agent workflows enforce this conversationally;
-  server-authoritative approval receipts for every local scan are deferred beyond 0.7.0 under the
-  trusted-operator scope in `release-readiness.md`.
+- Require explicit operator consent for active modes. Approval receipts and a global enforcement
+  toggle are implemented, and Deep Hunt requires a target-bound expiring approval. Under the 0.7.0
+  trusted-operator scope, mandatory receipt enforcement for every ordinary local DAST scan remains
+  optional; starting the scan is treated as the local operator's authorization.
 
 ## Verification Policy
 - `critical/high` findings require proof or independent corroboration.
@@ -121,6 +122,15 @@ not all automatically enforced by the current GitHub Release workflow:
 
 CI gate command examples:
 ```bash
+# Canonical current-fleet scorecards. Use --submit-only when an agent must queue and stop.
+python3 scripts/benchmark_targets.py juice_shop --auth
+python3 scripts/benchmark_targets.py crapi --auth
+python3 scripts/benchmark_targets.py honey --auth
+
+# Score an already completed scan without submitting another.
+python3 scripts/benchmark_targets.py juice_shop --scan-id <scan-id>
+
+# Lower-level artifact assertion and calibration tools remain available when needed.
 # Absolute SLO gates
 python3 tests/benchmark/run_benchmarks.py --benchmarks tests/benchmark/benchmarks.json
 

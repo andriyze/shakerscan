@@ -41,7 +41,7 @@ Deep Hunt is one user workflow. The current coding-agent session:
 2. composes its own same-origin probes;
 3. queries stored endpoints, findings, leads, and principal state;
 4. runs bounded active scanner templates when authorized;
-5. compares responses across controls and principals;
+5. can compare responses across controls and principals when managed principals are configured;
 6. records only findings backed by tool-output evidence;
 7. asks the server’s deterministic proof workflows to verify supported claims.
 

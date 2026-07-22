@@ -161,8 +161,9 @@ knobs: `max_urls`, `browser_max_pages`, `api_probe_limit`, `nuclei_max_targets`,
 
 The **smart** scan applies its own adaptive budget matrix (`SMART_SCAN_BUDGETS`) and supports
 `no_early_stop` + `thorough_params` shortcuts. See
-[`docs/SMART_SCAN_POLICY.md`](SMART_SCAN_POLICY.md) for the current operator policy. Historical
-phase-by-phase implementation notes are archived and are not a current source-location map.
+[`docs/SMART_SCAN_POLICY.md`](SMART_SCAN_POLICY.md) for the current operator policy. Superseded
+phase-by-phase implementation notes remain available in Git history and are not a current
+source-location map.
 
 ---
 
@@ -412,7 +413,7 @@ new work instead of leaving one large straggler: 50 endpoints per dynamic batch 
 mixes, 35 for exploit-depth/exhaustive scans. Focused SQLi/XSS lanes and explicit caller overrides can
 still use larger batches through `coverage_per_shard_cap` or `coverage_dynamic_batch_size`.
 
-Full design and current status: [`docs/parallel-scan-architecture.md`](parallel-scan-architecture.md).
+Current execution design: [`docs/dast-asm-architecture.md`](dast-asm-architecture.md).
 
 ### Continuous ASM
 
@@ -438,7 +439,7 @@ coverage over time within safe budgets and allowed windows (`api/asm_inventory.p
   missing preconditions next to coverage state, but it does not queue work, create findings, or change
   proof state.
 
-Full design and current status: [`docs/continuous-asm-architecture.md`](continuous-asm-architecture.md).
+Current execution design: [`docs/dast-asm-architecture.md`](dast-asm-architecture.md).
 
 **Future multi-node boundary:** production coordination across multiple VPS hosts is not implemented.
 The shipped parent/plan/shard/merge queue is the execution substrate, but remote enrollment, node
@@ -483,17 +484,17 @@ The AI side has four capabilities:
 **Design principle.** AI may help judge, correlate, and explain, but verified security decisions must
 be backed by deterministic, cryptographic, parser-backed, protocol-backed, or replay-backed evidence.
 Findings carry proof quality explicitly (see [AI proof and evidence states](#ai-proof-and-evidence-states)
-below); AI is never the sole authority for verified status or severity promotion. For engineering-depth
-onboarding see [`AI_REDTEAM_AND_MODEL_INTAKE.md`](AI_REDTEAM_AND_MODEL_INTAKE.md); future hardening
-and product work is tracked in [`proposed-next-steps.md`](proposed-next-steps.md). The completed June fix plan is
-preserved only as an [archived implementation record](archive/ai-redteam-model-intake-fix-plan-2026-06.md).
+below); AI is never the sole authority for verified status or severity promotion. Operator workflows
+are in [`AI_TEST_WORKFLOWS.md`](AI_TEST_WORKFLOWS.md), and future hardening belongs only in
+[`proposed-next-steps.md`](proposed-next-steps.md).
 
 ### AI capability status quick read
 
 These implemented components were last reconciled against code on 2026-07-21. AI Gate and Model
-Intake remain preview product surfaces for 0.7.0 because their full release E2E matrix is incomplete.
-"Partial" means the capability runs but the listed caveat applies — treat the caveat as load-bearing,
-not cosmetic.
+Intake remain preview product surfaces for 0.7.0. Their deterministic PR smoke matrix is implemented,
+but the policy/exception and deterministic-judge seams marked Planned in
+[`E2E_TEST_PLAN.md`](E2E_TEST_PLAN.md) are not yet release-gated. "Partial" means the capability runs
+but the listed caveat applies — treat the caveat as load-bearing, not cosmetic.
 
 | Capability | Status | Trust / proof caveat |
 |---|---|---|
@@ -522,8 +523,7 @@ deterministic proof blocks any AI downgrade. The **target** is one taxonomy unif
 (`deterministic_verified`, `cryptographically_verified`, `claimed_present`, `ai_judged_likely`,
 `inconclusive`, `blocked`, `false_positive`) so that *claimed* metadata and *AI-judged* results can
 never render as *verified*. Future proof-state hardening is tracked in
-[`proposed-next-steps.md`](proposed-next-steps.md); the original AI taxonomy design is retained in the
-[archived fix plan](archive/ai-redteam-model-intake-fix-plan-2026-06.md).
+[`proposed-next-steps.md`](proposed-next-steps.md).
 
 ### 11.1 AI Gate
 
@@ -596,8 +596,11 @@ reports are available via `/scans/{id}/ai-redteam-report` and a CI/CD `deploymen
 ### 11.2 Model Intake
 
 Model Intake (`scanner/scanner_tools/model_intake.py`) statically vets model artifacts **without
-importing or executing model code**. Inputs: `artifact_url`, `metadata_url`, `expected_sha256`,
-`signature_url`, `model_card_url`, and inline `metadata_json`, plus `require_*` gates.
+importing or executing model code**. The public request accepts the artifact and metadata sources,
+checksum, detached signature value/URL, public key value/URL, RSA padding/hash/payload selection,
+trusted key material or fingerprints, saved trust-anchor IDs, model card, deployment approval,
+policy profile/exceptions, approval receipt, `require_*` gates, timeout, and download cap. The
+authoritative request schema is `ModelIntakeScanRequest` in `api/api.py`.
 
 > **Signature/provenance (R1, shipped 2026-06-24).** Model Intake performs real detached-signature
 > verification (Ed25519 / RSA-PSS / ECDSA via the `cryptography` lib) over the artifact or its digest
@@ -675,8 +678,8 @@ OpenCode session plans turns through the keyless `POST /agent/hunt/{target_id}/s
 is enabled in standard installs and can be disabled globally with
 `AI_OPS_ROUTER_EXECUTE_ENABLED=false`. The approval is revalidated before every turn.
 
-The free-form loop can issue same-origin read probes, compare managed principal contexts, query
-stored knowledge, record notes, and invoke bounded active scanner templates. It cannot issue
+The free-form loop can issue same-origin read probes, compare managed principal contexts when they
+are configured, query stored knowledge, record notes, and invoke bounded active scanner templates. It cannot issue
 arbitrary state-changing HTTP. Tool calls, request units, active actions, turns, and tokens are
 bounded. A debrief can persist only evidence-backed **Suspected** findings; supported families reach
 **Verified** only through server-run deterministic proof. The compatibility `/research/*`
@@ -2027,16 +2030,12 @@ Only key names and declaring sources are documented; secret values are never rea
 | Agent-facing API how-to (request bodies, examples) | [`CLAUDE.md`](../CLAUDE.md) · [`AGENTS.md`](../AGENTS.md) |
 | Getting started, install, product tour | [`README.md`](../README.md) |
 | Smart scan budgets, SLOs, release gates | [`SMART_SCAN_POLICY.md`](SMART_SCAN_POLICY.md) |
-| Historical smart-scan implementation notes | [`archive/smart-scan-implementation-notes.md`](archive/smart-scan-implementation-notes.md) |
 | OWASP coverage and intentional gaps | [`owasp-coverage-matrix.md`](owasp-coverage-matrix.md) |
-| AI red teaming + model intake (engineering onboarding) | [`AI_REDTEAM_AND_MODEL_INTAKE.md`](AI_REDTEAM_AND_MODEL_INTAKE.md) |
 | Future product roadmap | [`proposed-next-steps.md`](proposed-next-steps.md) |
 | Release readiness and publishing checklist | [`release-readiness.md`](release-readiness.md) |
-| Historical AI red teaming + model intake fix ledger | [`archive/ai-redteam-model-intake-fix-plan-2026-06.md`](archive/ai-redteam-model-intake-fix-plan-2026-06.md) |
 | AI test workflows + Honey contract | [`AI_TEST_WORKFLOWS.md`](AI_TEST_WORKFLOWS.md) |
 | Interactive AI security sessions | [`INTERACTIVE_SESSIONS_GUIDE.md`](INTERACTIVE_SESSIONS_GUIDE.md) |
-| Parallel scan architecture | [`parallel-scan-architecture.md`](parallel-scan-architecture.md) |
-| Continuous ASM architecture | [`continuous-asm-architecture.md`](continuous-asm-architecture.md) |
+| DAST execution and Continuous ASM architecture | [`dast-asm-architecture.md`](dast-asm-architecture.md) |
 | Multi-node fleet architecture (RFC) | [`multi-node-architecture.md`](multi-node-architecture.md) |
 
 > Reminder: where any doc and the code disagree, the **code, DB schema, and tests win**. This

@@ -6974,7 +6974,7 @@ async def process_discovery_job(job_data: dict):
 
 # ===========================================================================
 # Parallel scan orchestration: plan -> shards -> merge (scatter-gather).
-# See docs/parallel-scan-architecture.md and api/parallel_scan.py.
+# See docs/dast-asm-architecture.md and api/parallel_scan.py.
 # ===========================================================================
 
 def _as_report_dict(value) -> dict | None:

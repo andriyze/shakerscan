@@ -1,6 +1,7 @@
 """Agent tool contracts + guards for the autonomous ReAct loop.
 
-The four "try it" tools the LLM can call (docs/autonomous-agent-architecture.md §4).
+The bounded tools exposed to the Deep Hunt planner (documented in
+docs/functionality-reference.md, section 11.6).
 This module holds the **function-call schemas** (consumed by the text-contract renderer
 in :mod:`agent_text_toolcalls`) and the **pure guards** — same-origin path validation,
 request-header allowlisting (so the model can never inject an auth header — real auth

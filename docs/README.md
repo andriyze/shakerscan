@@ -1,9 +1,9 @@
 # Documentation Index
 
-**Reconciled:** 2026-07-20. Top-level documents are maintained references, live operating policy, or
-active architecture. Dated audits, completed implementation prompts, detailed implementation
-ledgers, and superseded plans belong in [`archive/`](archive/README.md). Code, database schemas,
-runtime receipts, and tests remain authoritative when a document disagrees.
+**Reconciled:** 2026-07-21. This directory contains maintained product references, operating policy,
+release material, and active architecture. Point-in-time audits, completed prompts, implementation
+ledgers, and obsolete screenshots are kept in Git history rather than copied into the release docs.
+Code, database schemas, runtime receipts, and tests remain authoritative when a document disagrees.
 
 ## Start Here
 
@@ -40,7 +40,6 @@ runtime receipts, and tests remain authoritative when a document disagrees.
 
 | Document | Purpose |
 |---|---|
-| [`AI_REDTEAM_AND_MODEL_INTAKE.md`](AI_REDTEAM_AND_MODEL_INTAKE.md) | Engineering onboarding for AI Gate and Model Intake |
 | [`AI_TEST_WORKFLOWS.md`](AI_TEST_WORKFLOWS.md) | Generic AI workflows and optional Honey calibration contract |
 | [`INTERACTIVE_SESSIONS_GUIDE.md`](INTERACTIVE_SESSIONS_GUIDE.md) | Authorized interactive browser/session testing guide |
 
@@ -48,10 +47,8 @@ runtime receipts, and tests remain authoritative when a document disagrees.
 
 | Document | Status |
 |---|---|
-| [`parallel-scan-architecture.md`](parallel-scan-architecture.md) | Local parent/plan/shard/merge core shipped; remaining hardening is explicit |
-| [`continuous-asm-architecture.md`](continuous-asm-architecture.md) | Bounded local Continuous ASM shipped; target design and open gates retained |
+| [`dast-asm-architecture.md`](dast-asm-architecture.md) | Current one-shot DAST, local scatter/gather, and Continuous ASM execution model |
 | [`multi-node-architecture.md`](multi-node-architecture.md) | RFC only; multi-node fleet is not implemented |
-| [`autonomous-agent-architecture.md`](autonomous-agent-architecture.md) | Historical build narrative plus the shipped keyless ReAct loop and deterministic business-logic verification bridge |
 
 ## Maintenance Rule
 
@@ -59,9 +56,8 @@ runtime receipts, and tests remain authoritative when a document disagrees.
 - Run `python3 scripts/generate_capability_inventory.py` after changing API, registry, CLI/wrapper,
   Make/release-gate, runtime configuration, UI, skill/agent, adapter, scanner-module, or durable-table
   surfaces; CI checks the generated block.
-- Move point-in-time reviews, completed plans, and execution prompts into [`archive/`](archive/README.md).
-- Treat [`screenshots/`](screenshots/README.md) as historical until a complete same-build set is
-  recaptured; do not mix old and current UI images in release documentation.
+- Remove point-in-time reviews, completed plans, execution prompts, and stale screenshots from the
+  maintained set; Git history and release tags preserve them when needed.
 - Update [`release-readiness.md`](release-readiness.md) when an audit blocker, validation gate, or
   release/deployment prerequisite changes.
 - Never convert an old benchmark or E2E artifact into a current-build claim.
