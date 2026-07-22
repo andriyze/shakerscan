@@ -38,21 +38,26 @@ validation evidence before tagging.
    version-specific release notes, and required release gates.
 3. Update `VERSION` with the newly selected version.
 4. Add a new row to this table. Use `pending` only until the release commit exists.
-5. Open and merge the exact candidate to `main`.
-6. Replace `pending` with the exact merge/release commit SHA.
-7. Create and push a git tag from `main`:
+5. Open and merge the exact candidate to `main`. The merge triggers the E2E workflow, but does not
+   publish release images.
+6. Wait for required `main` checks to pass, record the exact merge commit, and create the release tag
+   on that commit:
 
    ```bash
    git checkout main
    git pull
-   git tag "v<next-version>"
+   git tag -a "v<next-version>" -m "ShakerScan v<next-version>"
    git push origin "v<next-version>"
    ```
 
-8. The GitHub `Release` workflow builds `linux/amd64` and `linux/arm64` on native runners, merges
+7. The tag push triggers the GitHub `Release` workflow. It validates the tagged commit, builds
+   `linux/amd64` and `linux/arm64` on native runners, merges
    those digests into multi-architecture Docker manifests, then creates or updates the GitHub
    Release.
-9. Record the published image digests and deploy/smoke-test the hosted installer.
+8. After publication, replace `pending candidate` in this ledger with the tagged commit SHA, record
+   the published image digests, and merge that provenance-only follow-up.
+9. Deploy and smoke-test the hosted installer separately; publishing this repository or the Docker
+   images does not update `install.shakerscan.com`.
 
 Manual image publishing is also available from a clean checkout:
 
