@@ -47908,9 +47908,20 @@ async def get_latest_result(target_folder: str):
     """Get latest scan result for a target."""
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,254}", target_folder) or target_folder in {".", ".."}:
         raise HTTPException(status_code=404, detail="Result not found")
-    results_root = RESULTS_DIR.resolve()
-    filepath = (results_root / target_folder / "latest.json").resolve()
-    if os.path.commonpath((str(results_root), str(filepath))) != str(results_root) or not filepath.is_file():
+    try:
+        target_dir = next(
+            (
+                entry for entry in RESULTS_DIR.iterdir()
+                if not entry.is_symlink() and entry.is_dir() and entry.name == target_folder
+            ),
+            None,
+        )
+    except OSError:
+        target_dir = None
+    if target_dir is None:
+        raise HTTPException(status_code=404, detail="Result not found")
+    filepath = target_dir / "latest.json"
+    if filepath.is_symlink() or not filepath.is_file():
         raise HTTPException(status_code=404, detail="Result not found")
     with open(filepath) as f:
         return json.load(f)
