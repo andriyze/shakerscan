@@ -1048,6 +1048,18 @@ def test_model_intake_auto_detects_common_provider_urls():
     assert mlflow_ref["path"] == "model"
 
 
+def test_model_intake_rejects_provider_lookalike_hosts():
+    s3_lookalike = normalize_model_artifact_reference(
+        "https://models.s3.amazonaws.com.evil.test/releases/model.safetensors"
+    )
+    azure_lookalike = normalize_model_artifact_reference(
+        "https://acct.blob.core.windows.net.evil.test/models/model.gguf"
+    )
+
+    assert s3_lookalike["kind"] == "https"
+    assert azure_lookalike["kind"] == "https"
+
+
 def test_model_intake_fetches_public_cloud_object_refs(monkeypatch):
     artifact_bytes = b"safe tensor bytes"
     expected_sha = hashlib.sha256(artifact_bytes).hexdigest()

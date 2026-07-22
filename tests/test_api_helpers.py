@@ -25,6 +25,44 @@ from pathlib import Path
 import pytest
 
 
+def test_persist_env_updates_is_atomic_and_owner_only(tmp_path):
+    env_path = tmp_path / ".env"
+
+    ok, message = api_module._persist_env_updates(env_path, {"OPENAI_API_KEY": "secret-value"})
+
+    assert ok is True
+    assert "secret-value" not in message
+    assert env_path.read_text() == "OPENAI_API_KEY=secret-value\n"
+    assert env_path.stat().st_mode & 0o777 == 0o600
+    assert not list(tmp_path.glob(".*.tmp"))
+
+
+def test_latest_result_rejects_traversal_and_symlink_escape(tmp_path, monkeypatch):
+    results = tmp_path / "results"
+    results.mkdir()
+    valid = results / "example.com"
+    valid.mkdir()
+    (valid / "latest.json").write_text('{"ok": true}')
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "latest.json").write_text('{"secret": true}')
+    (results / "escape.test").symlink_to(outside, target_is_directory=True)
+    monkeypatch.setattr(api_module, "RESULTS_DIR", results)
+
+    assert asyncio.run(api_module.get_latest_result("example.com")) == {"ok": True}
+    for candidate in ("..", "../outside", "escape.test", "bad/name"):
+        with pytest.raises(api_module.HTTPException) as exc:
+            asyncio.run(api_module.get_latest_result(candidate))
+        assert exc.value.status_code == 404
+
+
+def test_model_intake_platform_detection_requires_exact_provider_hosts():
+    assert api_module._detect_model_intake_platform("https://acct.blob.core.windows.net/c/m") == "azure"
+    assert api_module._detect_model_intake_platform("https://acct.blob.core.windows.net.evil.test/c/m") == "http"
+    assert api_module._detect_model_intake_platform("https://bucket.s3.amazonaws.com/m") == "s3"
+    assert api_module._detect_model_intake_platform("https://bucket.s3.amazonaws.com.evil.test/m") == "http"
+
+
 def test_worker_capacity_uses_one_gb_budget_after_platform_reserve(monkeypatch):
     monkeypatch.delenv("SHAKERSCAN_MAX_WORKERS", raising=False)
     monkeypatch.delenv("SHAKERSCAN_PER_WORKER_MEM_GB", raising=False)

@@ -307,7 +307,7 @@ def _hydrate_s3_evidence(row: dict[str, Any], storage_uri: str) -> dict[str, Any
     except Exception as exc:
         row["content"] = None
         row["storage_status"] = "remote_error"
-        row["storage_error"] = f"{type(exc).__name__}: {exc}"
+        row["storage_error"] = f"remote evidence read failed ({type(exc).__name__})"
         return row
     sha = hashlib.sha256(raw_bytes).hexdigest()
     expected = str(row.get("content_sha256") or "")

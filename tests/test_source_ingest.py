@@ -64,6 +64,23 @@ def test_containment_rejects_symlink_escape(source_root):
             si.resolve_contained_source_path(str(link))
 
 
+def test_crawl_skips_source_file_symlink_escape(source_root):
+    repo = source_root / "app"
+    repo.mkdir()
+    with tempfile.TemporaryDirectory() as outside:
+        secret = Path(outside) / "secret.py"
+        secret.write_text("def leaked():\n    return 'outside'\n")
+        os.symlink(secret, repo / "linked.py")
+        _write(repo, "safe.py", "def safe():\n    return True\n")
+
+        result = si.ingest_source(str(repo), token_budget=2000)
+
+    assert result["stats"]["files"] == 1
+    assert "safe.py" in result["text"]
+    assert "linked.py" not in result["text"]
+    assert "outside" not in result["text"]
+
+
 def test_containment_rejects_nonexistent_and_files(source_root):
     with pytest.raises(si.SourceIngestError, match="must be a directory"):
         si.resolve_contained_source_path(str(source_root / "nope"))

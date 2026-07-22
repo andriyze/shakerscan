@@ -352,7 +352,7 @@ async def run(
                         try:
                             if use_process_group:
                                 os.killpg(proc.pid, signal.SIGKILL)
-                                print(f"[run] Killed process group for {tool_name} (pid {proc.pid})", file=sys.stderr)
+                                print("[run] Killed subprocess group after cancellation", file=sys.stderr)
                             else:
                                 proc.kill()
                             await proc.wait()
@@ -363,7 +363,7 @@ async def run(
                     if use_process_group:
                         try:
                             os.killpg(proc.pid, signal.SIGKILL)
-                            print(f"[run] Killed process group for {tool_name} (pid {proc.pid})", file=sys.stderr)
+                            print("[run] Killed subprocess group after timeout", file=sys.stderr)
                         except ProcessLookupError:
                             pass
                     else:
@@ -410,7 +410,7 @@ async def run(
                     try:
                         if use_process_group:
                             os.killpg(proc.pid, signal.SIGKILL)
-                            print(f"[run] Killed process group for {tool_name} (pid {proc.pid})", file=sys.stderr)
+                            print("[run] Killed subprocess group after cancellation", file=sys.stderr)
                         else:
                             proc.kill()
                         await proc.wait()
@@ -422,7 +422,7 @@ async def run(
                     try:
                         if use_process_group:
                             os.killpg(proc.pid, signal.SIGKILL)
-                            print(f"[run] Killed process group for {tool_name} (pid {proc.pid})", file=sys.stderr)
+                            print("[run] Killed subprocess group after execution failure", file=sys.stderr)
                         else:
                             proc.kill()
                         await proc.wait()

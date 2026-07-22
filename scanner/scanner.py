@@ -448,6 +448,7 @@ def auto_detect_protocol(target: str) -> tuple[str, int, str]:
         test_sock.connect((host, 443))
         # Try SSL handshake
         context = ssl.create_default_context()
+        context.minimum_version = ssl.TLSVersion.TLSv1_2
         context.check_hostname = False
         context.verify_mode = ssl.CERT_NONE
         with context.wrap_socket(test_sock, server_hostname=host) as ssock:
@@ -11473,9 +11474,9 @@ async def build_report(target: str,
                                     "CWE-79"
                                 ))
                         print(f"[scanner] DOM XSS analysis: found {len(dom_xss_results['findings'])} potential vulnerabilities", file=sys.stderr)
-                except Exception as e:
-                    active_block["dom_xss_error"] = str(e)
-                    print(f"[scanner] DOM XSS analysis error: {e}", file=sys.stderr)
+                except Exception as exc:
+                    active_block["dom_xss_error"] = type(exc).__name__
+                    print(f"[scanner] DOM XSS analysis error: {type(exc).__name__}", file=sys.stderr)
             elif smart_mode and smart_succeeded and not focused_manual_active_scope and not dom_xss_allowed_by_focus:
                 reason = f"focused_family_{focused_active_family_name}"
                 record_active_enrichment_skip(active_block, "dom_xss", reason)
@@ -11533,7 +11534,7 @@ async def build_report(target: str,
                                 "CWE-943",
                             ))
                     except Exception as exc:
-                        active_block.setdefault("nosql_errors", []).append({"error": str(exc)})
+                        active_block.setdefault("nosql_errors", []).append({"error_type": type(exc).__name__})
 
             family_outcomes: dict[str, RegistryPhaseOutcome] = {}
             endpoint_attempts = [
@@ -12407,7 +12408,7 @@ async def build_report(target: str,
         for finding in report.get("findings", []):
             if finding.get("excluded"):
                 excluded_count += 1
-                logging.debug(f"Excluded finding: {finding.get('title', 'Unknown')} - {finding.get('exclude_reason', 'No reason')}")
+                logging.debug("Excluded one finding during validation")
             else:
                 findings_to_validate.append(finding)
 
@@ -14298,9 +14299,9 @@ async def cli_main():
                     )
                     # Recompute grade now that AI has set ai_verdict on findings
                     rep["result"] = grade(rep)
-                except Exception as e:
+                except Exception as exc:
                     rep.setdefault("ai_logs", {})
-                    rep["ai_logs"]["error"] = f"ai_review_failed: {e}"
+                    rep["ai_logs"]["error"] = f"ai_review_failed ({type(exc).__name__})"
             return JSONResponse(rep)
 
         @app.post("/retest")
@@ -14367,8 +14368,8 @@ async def cli_main():
                     result["status"] = "LIKELY_FIXED"
                     result["message"] = "The vulnerability could not be reproduced. It may be fixed."
 
-            except Exception as e:
-                result["error"] = str(e)
+            except Exception as exc:
+                result["error"] = f"retest failed ({type(exc).__name__})"
                 result["status"] = "ERROR"
 
             return JSONResponse(result)

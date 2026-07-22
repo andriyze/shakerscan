@@ -2332,6 +2332,7 @@ async def check_cors(url: str) -> dict[str, Any]:
 
 async def detect_cloud_services(host: str, headers: dict[str, list[str]]) -> dict[str, Any]:
     results: dict[str, Any] = {"provider": None, "services": [], "cdn": None, "misconfigurations": []}
+    host = host.lower().rstrip(".")
     server_header = " ".join(headers.get("server", [])).lower()
     x_headers = {k: v for k, v in headers.items() if k.startswith("x-")}
     aws_indicators = [("x-amz-", "AWS Service"), ("x-amzn-", "AWS Service"), ("awselb", "AWS Elastic Load Balancer"), ("amazonws", "AWS"), ("cloudfront", "AWS CloudFront CDN")]
@@ -2341,7 +2342,11 @@ async def detect_cloud_services(host: str, headers: dict[str, list[str]]) -> dic
             results["services"].append(service)
             if "cloudfront" in service.lower():
                 results["cdn"] = "CloudFront"
-    if "s3.amazonaws.com" in host or "s3-website" in host:
+    is_s3_host = host == "s3.amazonaws.com" or (
+        host.endswith(".amazonaws.com")
+        and (host.startswith(("s3.", "s3-website")) or ".s3." in host or ".s3-website" in host)
+    )
+    if is_s3_host:
         results["provider"] = "AWS"
         results["services"].append("S3 Bucket")
         s3_url = f"https://{host}"

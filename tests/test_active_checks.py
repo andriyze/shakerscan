@@ -39,6 +39,23 @@ def _jwt_fixture_token() -> str:
     )
 
 
+def test_html_helpers_handle_spaced_end_tags_and_script_attributes():
+    html = (
+        "<!-- hidden --><main>Visible text</main>"
+        "<style>.secret { color: red }</style >"
+        "<script nonce='x'>window.inline = true;</script >"
+        "<script defer src='/assets/app.js'></script >"
+    )
+
+    visible = active_checks._visible_html_text(html)
+    sources, inline = active_checks._html_scripts(html)
+
+    assert "Visible text" in visible
+    assert "secret" not in visible and "window.inline" not in visible
+    assert sources == ["/assets/app.js"]
+    assert inline == ["window.inline = true;"]
+
+
 # ---------------------------------------------------------------------------
 # SQLi payload selection must NOT be gated behind DBMS fingerprinting: when the
 # DBMS is unknown (fingerprint failed — common when a target degrades under load)

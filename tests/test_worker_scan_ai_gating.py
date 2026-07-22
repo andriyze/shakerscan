@@ -7,6 +7,7 @@ import json
 import os
 import sys
 import types
+import urllib.parse
 import uuid
 from datetime import datetime, timezone
 
@@ -1134,7 +1135,7 @@ def test_redact_receipt_value_strips_url_userinfo():
     out = worker._redact_receipt_value("https://admin:hunter2@app.example.com/?token=secret-token")
     assert "hunter2" not in out and "admin:" not in out
     assert "secret-token" not in out
-    assert "app.example.com" in out
+    assert urllib.parse.urlparse(out).hostname == "app.example.com"
 
 
 def test_internal_model_intake_executor_receipt_records_failure():

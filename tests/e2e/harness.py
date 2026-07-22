@@ -102,7 +102,7 @@ class Scorecard:
     def check(self, name: str, passed: bool, detail: str = "") -> bool:
         self.rows.append({"name": name, "passed": bool(passed), "skipped": False, "detail": detail})
         mark = "PASS" if passed else "FAIL"
-        print(f"  [{mark}] {name}" + (f" — {detail}" if detail else ""), flush=True)
+        print(f"  [{mark}] {name}" + (" — detail recorded" if detail else ""), flush=True)
         return bool(passed)
 
     def skip(self, name: str, reason: str) -> None:

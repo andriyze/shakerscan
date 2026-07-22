@@ -111,6 +111,13 @@ def test_parse_multiple_calls():
     assert [c["arguments"]["path"] for c in calls] == ["/a", "/b"]
 
 
+def test_unclosed_large_fence_is_bounded_and_not_a_tool_call():
+    text = "```json" + (" " * 200_000) + '{"tool_calls":['
+    assert tc.parse_text_tool_calls(text) is None
+    assert tc.parse_final_findings(text) == []
+    assert tc.has_terminal_json(text) is False
+
+
 def test_prose_is_final_answer():
     assert tc.parse_text_tool_calls("The surface is exhausted; no exploitable issue found.") is None
 

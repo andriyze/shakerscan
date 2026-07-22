@@ -51,14 +51,12 @@ def resolve_contained_source_path(input_path: Any, *, environ: Optional[Mapping[
         real = os.path.realpath(input_path.strip())
     except OSError:
         raise SourceIngestError("source_dir does not resolve to an existing path")
-    if not os.path.isdir(real):
-        raise SourceIngestError("source_dir must be a directory")
-    # relpath is '.' when equal, starts with '..' as a whole segment when outside root.
-    rel = os.path.relpath(real, root)
-    if rel != "." and (rel == ".." or rel.startswith(f"..{os.sep}") or os.path.isabs(rel)):
+    if os.path.commonpath((root, real)) != root:
         raise SourceIngestError(
             f"source_dir resolves outside the allowed root ({root}). "
             f"Set {SOURCE_ROOT_ENV} to analyze sources kept elsewhere.")
+    if not os.path.isdir(real):
+        raise SourceIngestError("source_dir must be a directory")
     return real
 
 
@@ -92,7 +90,10 @@ def _crawl(root: str) -> tuple[list[Path], bool]:
                 continue
             path = Path(dirpath) / name
             try:
-                size = path.stat().st_size
+                resolved = path.resolve(strict=True)
+                if os.path.commonpath((root, str(resolved))) != root or not resolved.is_file():
+                    continue
+                size = resolved.stat().st_size
             except OSError:
                 continue
             if size <= 0 or size > _MAX_FILE_BYTES:
@@ -100,7 +101,7 @@ def _crawl(root: str) -> tuple[list[Path], bool]:
             if len(out) >= _MAX_FILES or total_bytes + size > _MAX_TOTAL_BYTES:
                 truncated = True
                 break
-            out.append(path)
+            out.append(resolved)
             total_bytes += size
         if truncated:
             break

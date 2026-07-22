@@ -1504,6 +1504,7 @@ def _normalize_env_value(value: str) -> str:
 
 
 def _persist_env_updates(env_path: Path, updates: dict[str, Optional[str]]) -> tuple[bool, str]:
+    temp_path: Path | None = None
     try:
         if env_path.exists():
             lines = env_path.read_text(encoding="utf-8").splitlines()
@@ -1530,10 +1531,23 @@ def _persist_env_updates(env_path: Path, updates: dict[str, Optional[str]]) -> t
             else:
                 lines.append(line)
 
-        env_path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
-        return True, f"Persisted settings to {env_path}"
-    except Exception as e:
-        return False, f"Failed to persist .env: {e}"
+        payload = "\n".join(lines).rstrip() + "\n"
+        temp_path = env_path.with_name(f".{env_path.name}.{secrets.token_hex(8)}.tmp")
+        fd = os.open(temp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temp_path, env_path)
+        os.chmod(env_path, 0o600)
+        return True, "Persisted settings to the local environment file"
+    except Exception:
+        if temp_path is not None:
+            try:
+                temp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        return False, "Failed to persist the local environment file"
 
 
 def _load_probe_ai_provider():
@@ -7819,7 +7833,27 @@ def _import_model_intake_helpers():
 
 def _is_hf_ref(ref: str) -> bool:
     parsed = urllib.parse.urlparse(ref)
-    return parsed.scheme == "hf" or parsed.netloc.endswith("huggingface.co")
+    host = (parsed.hostname or "").lower().rstrip(".")
+    return parsed.scheme == "hf" or host == "huggingface.co" or host.endswith(".huggingface.co")
+
+
+def _is_s3_hostname(host: str) -> bool:
+    host = host.lower().rstrip(".")
+    return host == "s3.amazonaws.com" or (
+        host.endswith(".amazonaws.com")
+        and (host.startswith("s3.") or host.startswith("s3-") or ".s3." in host or ".s3-" in host)
+    )
+
+
+def _is_azure_blob_hostname(host: str) -> bool:
+    host = host.lower().rstrip(".")
+    return host.endswith(".blob.core.windows.net") and host != "blob.core.windows.net"
+
+
+def _looks_like_hf_repo_id(value: str) -> bool:
+    parts = value.split("/")
+    allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
+    return len(parts) == 2 and all(part and all(char in allowed for char in part) for part in parts)
 
 
 def _detect_model_intake_platform(ref: str, metadata: dict[str, Any] | None = None) -> str:
@@ -7836,19 +7870,19 @@ def _detect_model_intake_platform(ref: str, metadata: dict[str, Any] | None = No
     raw = str(ref or "").strip()
     lowered = raw.lower()
     parsed = urllib.parse.urlparse(raw)
-    host = parsed.netloc.lower()
+    host = (parsed.hostname or "").lower().rstrip(".")
 
-    if _is_hf_ref(raw) or re.fullmatch(r"[\w.-]+/[\w.-]+", raw):
+    if _is_hf_ref(raw) or _looks_like_hf_repo_id(raw):
         return "huggingface"
     if lowered.startswith("oci://"):
         return "oci"
     if lowered.startswith(("mlflow://", "models:/", "runs:/")):
         return "mlflow"
-    if parsed.scheme == "s3" or host == "s3.amazonaws.com" or host.startswith("s3.") or ".s3." in host or ".s3-" in host:
+    if parsed.scheme == "s3" or _is_s3_hostname(host):
         return "s3"
     if parsed.scheme in {"gs", "gcs"} or host == "storage.googleapis.com" or host.endswith(".storage.googleapis.com"):
         return "gcs"
-    if parsed.scheme == "azure" or "blob.core.windows.net" in host:
+    if parsed.scheme == "azure" or _is_azure_blob_hostname(host):
         return "azure"
     return "http"
 
@@ -37482,7 +37516,7 @@ async def submit_research_decision(episode_id: str, req: ResearchDecisionRequest
         try:
             await cancel_scan(compensation_scan_id)
         except Exception as exc:
-            compensation_error = f"{type(exc).__name__}: {str(exc)[:300]}"
+            compensation_error = f"scan cancellation failed ({type(exc).__name__})"
         async with db_pool.acquire() as conn:
             async with conn.transaction():
                 await _record_research_event(
@@ -46518,8 +46552,8 @@ async def get_system_resources():
             # Docker Desktop (mac/win) reports a tunable VM allocation, not host HW.
             "is_desktop_vm": "desktop" in os_name.lower(),
         }
-    except Exception as e:  # pragma: no cover - docker socket optional
-        return {"available": False, "error": str(e)}
+    except Exception:  # pragma: no cover - docker socket optional
+        return {"available": False, "error": "Docker resource query failed"}
 
 
 def compute_fleet_summary(worker_list: list[dict]) -> dict[str, Any]:
@@ -46688,10 +46722,10 @@ async def get_workers():
             "max_allowed": _compute_max_allowed_workers(),
             "max_active_scans": _compute_max_active_scans(),
         }
-    except Exception as e:
+    except Exception:
         return {
             "count": -1,
-            "error": f"Failed to query Docker: {str(e)}",
+            "error": "Failed to query Docker",
             "workers": [],
             "max_allowed": _compute_max_allowed_workers(),
             "max_active_scans": _compute_max_active_scans(),
@@ -47872,8 +47906,11 @@ async def list_results(limit: int = 50):
 @app.get("/results/{target_folder}/latest")
 async def get_latest_result(target_folder: str):
     """Get latest scan result for a target."""
-    filepath = RESULTS_DIR / target_folder / "latest.json"
-    if not filepath.exists():
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,254}", target_folder) or target_folder in {".", ".."}:
+        raise HTTPException(status_code=404, detail="Result not found")
+    results_root = RESULTS_DIR.resolve()
+    filepath = (results_root / target_folder / "latest.json").resolve()
+    if os.path.commonpath((str(results_root), str(filepath))) != str(results_root) or not filepath.is_file():
         raise HTTPException(status_code=404, detail="Result not found")
     with open(filepath) as f:
         return json.load(f)

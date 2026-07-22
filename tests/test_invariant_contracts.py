@@ -155,6 +155,17 @@ def test_low_input_compiler_recognizes_ownership_and_fails_closed_on_ambiguity()
     assert ambiguous["candidates"] == []
 
 
+def test_low_input_compiler_parses_workflow_and_constraint_without_regex_backtracking():
+    workflow = contracts.compile_rule_text("Order can only transition from draft to submitted at /api/orders/1")
+    constraint = contracts.compile_rule_text("discount must be <= 30")
+    hostile = contracts.compile_rule_text("only " + ("role " * 700) + "without a separator")
+
+    assert workflow["candidates"][0]["conditions"] == {"from_state": "draft", "to_state": "submitted"}
+    assert constraint["candidates"][0]["operator"] == "lte"
+    assert constraint["candidates"][0]["expected_value"] == 30
+    assert hostile["matched"] is False
+
+
 def test_low_input_compiler_rejects_invalid_method_and_nonfinite_number():
     try:
         contracts.compile_rule_text("Only managers can issue refunds", method="BAD!")

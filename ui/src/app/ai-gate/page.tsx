@@ -248,13 +248,20 @@ function isCalibrationLikeTarget(target: AITarget, includeLegacyHints = false) {
 
   if (!includeLegacyHints) return false
 
-  const url = String(target.endpoint_url || '').toLowerCase()
-  if (url.includes('honey.shakerscan.com')) return true
-  if (url.includes('calibration_run=')) return true
+  let endpoint: URL | null = null
+  try {
+    endpoint = new URL(String(target.endpoint_url || ''))
+  } catch {
+    endpoint = null
+  }
+  const hostname = endpoint?.hostname.toLowerCase().replace(/\.$/, '') || ''
+  if (hostname === 'honey.shakerscan.com') return true
+  if (endpoint?.searchParams.has('calibration_run')) return true
 
   const name = String(target.name || '').toLowerCase()
   const nameLooksLab = name.includes(' calibration') || name.startsWith('calibration ') || name.includes(' honey ') || name.startsWith('honey ')
-  const urlLooksLocalLab = url.includes('host.docker.internal:18080') || url.includes('localhost:18080')
+  const urlLooksLocalLab = endpoint?.port === '18080'
+    && (hostname === 'host.docker.internal' || hostname === 'localhost')
   return nameLooksLab && urlLooksLocalLab
 }
 

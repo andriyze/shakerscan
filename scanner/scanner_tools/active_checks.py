@@ -11,6 +11,7 @@ import sys
 import tempfile
 import time
 import urllib.parse
+from html.parser import HTMLParser
 from typing import Any
 
 from .common import get_auth_curl_args, get_auth_sqlmap_context, run
@@ -81,6 +82,67 @@ SQLI_DOCUMENTATION_TRUSTED_SOURCES = {
     "form_submission",
     "api_schema_operation",
 }
+
+
+class _VisibleHTMLParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.hidden_depth = 0
+        self.parts: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag.lower() in {"script", "style"}:
+            self.hidden_depth += 1
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag.lower() in {"script", "style"} and self.hidden_depth:
+            self.hidden_depth -= 1
+
+    def handle_data(self, data: str) -> None:
+        if not self.hidden_depth:
+            self.parts.append(data)
+
+
+class _ScriptHTMLParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.sources: list[str] = []
+        self.inline: list[str] = []
+        self._current: list[str] | None = None
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag.lower() != "script":
+            return
+        attributes = {key.lower(): value for key, value in attrs}
+        src = attributes.get("src")
+        if src:
+            self.sources.append(src)
+            self._current = None
+        else:
+            self._current = []
+
+    def handle_data(self, data: str) -> None:
+        if self._current is not None:
+            self._current.append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag.lower() == "script" and self._current is not None:
+            self.inline.append("".join(self._current))
+            self._current = None
+
+
+def _visible_html_text(content: str) -> str:
+    parser = _VisibleHTMLParser()
+    parser.feed(content or "")
+    parser.close()
+    return re.sub(r"\s+", " ", " ".join(parser.parts))
+
+
+def _html_scripts(content: str) -> tuple[list[str], list[str]]:
+    parser = _ScriptHTMLParser()
+    parser.feed(content or "")
+    parser.close()
+    return parser.sources, parser.inline
 
 
 def _emit_scan_progress(phase: str, pct: int, message: str) -> None:
@@ -3683,11 +3745,7 @@ async def ssti_test(
     payloads_seen: set[str] = set()
 
     def _clean_template_response(content: str) -> str:
-        clean = re.sub(r'<!--.*?-->', '', content or "", flags=re.DOTALL)
-        clean = re.sub(r'<script.*?</script>', '', clean, flags=re.DOTALL | re.IGNORECASE)
-        clean = re.sub(r'<style.*?</style>', '', clean, flags=re.DOTALL | re.IGNORECASE)
-        clean = re.sub(r'<[^>]+>', ' ', clean)
-        return re.sub(r'\s+', ' ', clean)
+        return _visible_html_text(content)
 
     def _looks_like_generic_html_shell(content: str) -> bool:
         sample = (content or "")[:2000].lower()
@@ -9551,28 +9609,12 @@ async def dom_xss_analysis(
         if rc != 0 or not out:
             return results
 
-        # Extract JavaScript URLs from the page
+        # Extract JavaScript URLs and inline scripts with a real HTML parser.
         js_urls = []
-        # Script src patterns
-        src_pattern = r'<script[^>]+src=["\']([^"\']+)["\']'
-        for match in re.finditer(src_pattern, out, re.I):
-            src = match.group(1)
+        script_sources, inline_scripts = _html_scripts(out)
+        for src in script_sources:
             if not src.startswith("data:"):
-                # Resolve relative URLs
-                if src.startswith("//"):
-                    src = "https:" + src
-                elif src.startswith("/"):
-                    parsed = urllib.parse.urlparse(url)
-                    src = f"{parsed.scheme}://{parsed.netloc}{src}"
-                elif not src.startswith("http"):
-                    parsed = urllib.parse.urlparse(url)
-                    base_path = "/".join(parsed.path.split("/")[:-1])
-                    src = f"{parsed.scheme}://{parsed.netloc}{base_path}/{src}"
-                js_urls.append(src)
-
-        # Also look for inline scripts
-        inline_pattern = r'<script[^>]*>([\s\S]*?)</script>'
-        inline_scripts = re.findall(inline_pattern, out, re.I)
+                js_urls.append(urllib.parse.urljoin(url, src))
 
         # Analyze inline scripts
         for i, script_content in enumerate(inline_scripts[:10]):  # Limit inline scripts

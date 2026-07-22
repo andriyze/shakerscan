@@ -2627,7 +2627,7 @@ def _probe_version(binary_path: str, args: tuple[str, ...], timeout_seconds: int
             check=False,
         )
     except Exception as exc:
-        return None, f"{type(exc).__name__}: {exc}"
+        return None, f"version probe failed ({type(exc).__name__})"
     output = ((proc.stdout or "") + "\n" + (proc.stderr or "")).strip()
     first_line = output.splitlines()[0].strip() if output else None
     if proc.returncode != 0 and not first_line:

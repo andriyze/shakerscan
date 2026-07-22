@@ -176,7 +176,31 @@ def _build_calls(v: Any) -> list[dict[str, Any]]:
 
 
 _TRAILING_COMMA = re.compile(r",(\s*[}\]])")
-_FENCE = re.compile(r"```(?:json|tool)?\s*([\s\S]*?)```")
+
+
+def _fenced_blocks(text: str) -> Iterator[str]:
+    """Yield fenced block bodies with a bounded, linear string scan."""
+    cursor = 0
+    yielded = 0
+    while yielded < 200:
+        opening = text.find("```", cursor)
+        if opening < 0:
+            return
+        body_start = opening + 3
+        for label in ("json", "tool"):
+            if text.startswith(label, body_start):
+                label_end = body_start + len(label)
+                if label_end == len(text) or text[label_end].isspace():
+                    body_start = label_end
+                break
+        while body_start < len(text) and text[body_start].isspace():
+            body_start += 1
+        closing = text.find("```", body_start)
+        if closing < 0:
+            return
+        yield text[body_start:closing]
+        yielded += 1
+        cursor = closing + 3
 
 
 def _try_parse(s: str) -> list[dict[str, Any]]:
@@ -196,8 +220,8 @@ def parse_text_tool_calls(text: str) -> Optional[list[dict[str, Any]]]:
     """
     if not text:
         return None
-    for m in _FENCE.finditer(text):
-        calls = _try_parse(m.group(1))
+    for block in _fenced_blocks(text):
+        calls = _try_parse(block)
         if calls:
             return calls
     for span in balanced_object_spans(text):
@@ -253,7 +277,7 @@ def parse_final_findings(text: str) -> list[dict[str, Any]]:
     substring guessing). Port of ``parseFinalFindings`` (T:src/agent/index.ts:474)."""
     if not text:
         return []
-    blocks = [m.group(1) for m in _FENCE.finditer(text)]
+    blocks = list(_fenced_blocks(text))
     for candidate in (list(reversed(blocks)) if blocks else [text]):
         start = candidate.find("{")
         end = candidate.rfind("}")
@@ -337,7 +361,7 @@ def has_terminal_json(text: Optional[str]) -> bool:
     terminal turn, so it is re-prompted rather than silently finalizing the hunt (audit N1)."""
     if not text:
         return False
-    candidates: list[str] = [m.group(1) for m in _FENCE.finditer(text)]
+    candidates: list[str] = list(_fenced_blocks(text))
     candidates.extend(balanced_object_spans(text))
     for span in candidates:
         start = span.find("{")

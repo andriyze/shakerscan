@@ -264,6 +264,21 @@ def _signed_http_hint(ref: str) -> bool:
     return parsed.scheme in {"http", "https"}
 
 
+def _normalized_hostname(parsed: urllib.parse.ParseResult) -> str:
+    return (parsed.hostname or "").lower().rstrip(".")
+
+
+def _is_s3_hostname(host: str) -> bool:
+    return host == "s3.amazonaws.com" or (
+        host.endswith(".amazonaws.com")
+        and (host.startswith("s3.") or host.startswith("s3-") or ".s3." in host or ".s3-" in host)
+    )
+
+
+def _is_azure_blob_hostname(host: str) -> bool:
+    return host.endswith(".blob.core.windows.net") and host != "blob.core.windows.net"
+
+
 def _quote_path(path: str) -> str:
     return urllib.parse.quote(path.strip("/"), safe="/")
 
@@ -335,12 +350,12 @@ def normalize_model_artifact_reference(
         key = parsed.path.lstrip("/")
         region = metadata.get("region") or metadata.get("aws_region") or metadata.get("s3_region")
         if parsed.scheme in {"http", "https"}:
-            host = parsed.netloc
-            if host.startswith("s3.") or host == "s3.amazonaws.com":
+            host = _normalized_hostname(parsed)
+            if host == "s3.amazonaws.com" or (host.endswith(".amazonaws.com") and host.startswith(("s3.", "s3-"))):
                 parts = [part for part in parsed.path.split("/") if part]
                 bucket = parts[0] if parts else ""
                 key = "/".join(parts[1:])
-            elif ".s3." in host or host.endswith(".s3.amazonaws.com"):
+            elif _is_s3_hostname(host):
                 bucket = host.split(".s3", 1)[0]
                 region_match = re.search(r"\.s3[.-]([a-z0-9-]+)\.amazonaws\.com$", host)
                 if region_match:
@@ -374,8 +389,9 @@ def normalize_model_artifact_reference(
         account = metadata.get("artifact_account") or metadata.get("azure_account") or metadata.get("storage_account")
         container = parsed.netloc
         blob_path = parsed.path.lstrip("/")
-        if parsed.scheme in {"http", "https"} and ".blob.core.windows.net" in parsed.netloc:
-            account = parsed.netloc.split(".blob.core.windows.net", 1)[0]
+        host = _normalized_hostname(parsed)
+        if parsed.scheme in {"http", "https"} and _is_azure_blob_hostname(host):
+            account = host.removesuffix(".blob.core.windows.net")
             parts = [part for part in parsed.path.split("/") if part]
             container = parts[0] if parts else ""
             blob_path = "/".join(parts[1:])
@@ -880,7 +896,7 @@ def _source_kind(ref: str, metadata: dict[str, Any]) -> str:
         if normalized in {"huggingface", "oci", "s3", "gcs", "azure", "azure_blob", "mlflow"}:
             return normalized
     parsed = urllib.parse.urlparse(ref)
-    host = parsed.netloc.lower()
+    host = _normalized_hostname(parsed)
     if _metadata_value(metadata, "huggingface_repo", "hf_repo"):
         return "huggingface"
     if ref.startswith("hf://") or "huggingface.co/" in ref:
@@ -891,11 +907,11 @@ def _source_kind(ref: str, metadata: dict[str, Any]) -> str:
         return "mlflow"
     if ref.startswith(("s3://", "gs://", "gcs://", "azure://")):
         return urllib.parse.urlparse(ref).scheme
-    if host == "s3.amazonaws.com" or host.startswith("s3.") or ".s3." in host or ".s3-" in host:
+    if _is_s3_hostname(host):
         return "s3"
     if host == "storage.googleapis.com" or host.endswith(".storage.googleapis.com"):
         return "gcs"
-    if "blob.core.windows.net" in host:
+    if _is_azure_blob_hostname(host):
         return "azure_blob"
     return parsed.scheme or "local"
 

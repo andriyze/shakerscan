@@ -12,6 +12,7 @@ fixtures are out of scope. Everything else in the production detector/planner su
 
 import ast
 import re
+import urllib.parse
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -117,5 +118,5 @@ def test_guard_would_catch_a_planted_leak():
 
     evasions = 'HOST = "test." + "shakerscan.com"\nAPP = b"cra" + b"pi"\n'
     hits = [v for v, _ in _code_string_literals(evasions) if FORBIDDEN.search(v)]
-    assert "test.shakerscan.com" in hits
+    assert urllib.parse.urlparse(f"https://{hits[0]}").hostname == "test.shakerscan.com"
     assert "crapi" in hits

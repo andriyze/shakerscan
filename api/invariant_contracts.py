@@ -23,15 +23,101 @@ COMPILER_VERSION = "target-invariant-compiler-2026-07-14.v1"
 
 
 def _clean_phrase(value: Any, *, limit: int = 160) -> str:
-    text = re.sub(r"\s+", " ", str(value or "")).strip(" .,:;!?\t\r\n")
+    text = " ".join(str(value or "").split()).strip(" .,:;!?\t\r\n")
     return text[:limit]
 
 
 def _resource_phrase(value: Any) -> str:
-    text = re.sub(r"\s+(?:at|on)\s+/\S+.*$", "", _clean_phrase(value), flags=re.IGNORECASE)
-    text = re.sub(r"^(?:a|an|the)\s+", "", text, flags=re.IGNORECASE)
-    text = re.sub(r"^(?:another|other)\s+(?:users?'?\s+)?", "", text, flags=re.IGNORECASE)
+    text = _clean_phrase(value)
+    lowered = text.lower()
+    cuts = [index for marker in (" at /", " on /") if (index := lowered.find(marker)) >= 0]
+    if cuts:
+        text = text[:min(cuts)]
+        lowered = text.lower()
+    for prefix in ("a ", "an ", "the "):
+        if lowered.startswith(prefix):
+            text = text[len(prefix):]
+            lowered = text.lower()
+            break
+    for prefix in ("another ", "other "):
+        if lowered.startswith(prefix):
+            text = text[len(prefix):]
+            lowered = text.lower()
+            for owner_prefix in ("users' ", "user's ", "users ", "user "):
+                if lowered.startswith(owner_prefix):
+                    text = text[len(owner_prefix):]
+                    break
+            break
     return text
+
+
+def _access_rule_parts(text: str) -> tuple[str, str, str, bool, bool] | None:
+    """Parse the intentionally small access grammar without backtracking regexes."""
+    words = text.split()
+    if not words:
+        return None
+    only = words[0].lower() == "only"
+    start = 1 if only else 0
+    lowered = [word.lower() for word in words]
+    separators: tuple[tuple[str, ...], ...] = (
+        (("can",), ("may",)) if only
+        else (("cannot",), ("can't",), ("must", "not"), ("may", "not"))
+    )
+    match: tuple[int, int] | None = None
+    for index in range(start, len(words)):
+        for separator in separators:
+            if tuple(lowered[index:index + len(separator)]) == separator:
+                match = (index, len(separator))
+                break
+        if match:
+            break
+    if not match:
+        return None
+    separator_at, separator_len = match
+    action_at = separator_at + separator_len
+    if separator_at <= start or action_at >= len(words) - 1:
+        return None
+    role = " ".join(words[start:separator_at])
+    action = words[action_at]
+    resource_words = words[action_at + 1:]
+    ownership = any(word.strip(".,:;!?\"'").lower() in {"other", "another"} for word in resource_words)
+    return role, action, " ".join(resource_words), only, ownership
+
+
+def _workflow_parts(text: str) -> tuple[str, str, str] | None:
+    words = text.split()
+    lowered = [word.lower() for word in words]
+    for modal_at, word in enumerate(lowered):
+        if word not in {"can", "may", "must"} or modal_at == 0:
+            continue
+        cursor = modal_at + 1
+        if cursor < len(words) and lowered[cursor] == "only":
+            cursor += 1
+        if cursor >= len(words) or lowered[cursor] not in {"move", "transition", "go", "change"}:
+            continue
+        if cursor + 4 >= len(words) or lowered[cursor + 1] != "from" or lowered[cursor + 3] != "to":
+            continue
+        return " ".join(words[:modal_at]), words[cursor + 2].strip(".,:;!?"), words[cursor + 4].strip(".,:;!?")
+    return None
+
+
+def _constraint_parts(text: str) -> tuple[str, str, str] | None:
+    words = text.split()
+    lowered = [word.lower() for word in words]
+    for marker_at, marker in enumerate(lowered):
+        if marker in {"must", "should"} and marker_at > 0:
+            cursor = marker_at + 1
+            if cursor < len(words) and lowered[cursor] == "be":
+                cursor += 1
+            if cursor + 1 < len(words) and words[cursor] in {"<=", ">=", "<", ">"}:
+                return " ".join(words[:marker_at]), words[cursor], words[cursor + 1].strip(".,:;!?")
+        if marker == "never" and marker_at > 0:
+            verb_at = marker_at + 1
+            if verb_at < len(words) and lowered[verb_at] in {"exceed", "exceeds"} and verb_at + 1 < len(words):
+                return " ".join(words[:marker_at]), "<=", words[verb_at + 1].strip(".,:;!?")
+            if verb_at + 2 < len(words) and lowered[verb_at:verb_at + 2] == ["fall", "below"]:
+                return " ".join(words[:marker_at]), ">=", words[verb_at + 2].strip(".,:;!?")
+    return None
 
 
 def _number(value: str) -> int | float:
@@ -53,70 +139,35 @@ def compile_rule_text(
     candidate; partial candidates expose their approval errors for operator correction.
     """
     text = _clean_phrase(rule_text, limit=4000)
-    inferred_path = path or next(iter(re.findall(r"/[A-Za-z0-9_./{}:*-]+", text)), None)
+    inferred_path = path or next((word.strip(".,:;!?") for word in text.split() if word.startswith("/")), None)
     inferred_method = method
     if not inferred_method:
-        method_match = re.search(r"\b(GET|POST|PUT|PATCH|DELETE)\b", text, re.IGNORECASE)
-        inferred_method = method_match.group(1) if method_match else None
+        inferred_method = next((word.upper() for word in text.split() if word.upper() in {"GET", "POST", "PUT", "PATCH", "DELETE"}), None)
     candidates: list[dict[str, Any]] = []
 
-    workflow = re.search(
-        r"^(?P<resource>[a-z][a-z0-9 _-]{0,80}?)\s+(?:can|may|must)\s+(?:only\s+)?"
-        r"(?:move|transition|go|change)\s+from\s+(?P<from>[a-z0-9_.:-]+)\s+to\s+(?P<to>[a-z0-9_.:-]+)",
-        text,
-        re.IGNORECASE,
-    )
-    cap = re.search(
-        r"^(?P<field>[a-z][a-z0-9 _.-]{0,80}?)\s+(?:must|should)\s+(?:be\s+)?"
-        r"(?P<operator><=|>=|<|>)\s*(?P<value>-?\d+(?:\.\d+)?)",
-        text,
-        re.IGNORECASE,
-    ) or re.search(
-        r"^(?P<field>[a-z][a-z0-9 _.-]{0,80}?)\s+(?:must\s+)?never\s+"
-        r"(?P<verb>exceed|exceeds|fall below)\s+(?P<value>-?\d+(?:\.\d+)?)",
-        text,
-        re.IGNORECASE,
-    )
-    ownership = re.search(
-        r"^(?P<role>[a-z][a-z0-9 _-]{0,50}?)\s+(?:cannot|can't|must not|may not)\s+"
-        r"(?P<action>[a-z][a-z0-9_-]{0,40})\s+(?P<resource>.*?\b(?:other|another)\b.+)$",
-        text,
-        re.IGNORECASE,
-    )
-    only_role = re.search(
-        r"^only\s+(?P<role>[a-z][a-z0-9 _-]{0,50}?)\s+(?:can|may)\s+"
-        r"(?P<action>[a-z][a-z0-9_-]{0,40})\s+(?P<resource>.+)$",
-        text,
-        re.IGNORECASE,
-    )
-    denied_role = re.search(
-        r"^(?P<role>[a-z][a-z0-9 _-]{0,50}?)\s+(?:cannot|can't|must not|may not)\s+"
-        r"(?P<action>[a-z][a-z0-9_-]{0,40})\s+(?P<resource>.+)$",
-        text,
-        re.IGNORECASE,
-    )
+    workflow = _workflow_parts(text)
+    cap = _constraint_parts(text)
+    access_parts = _access_rule_parts(text)
 
     base = {"method": inferred_method, "path": inferred_path, "source_text": text}
     if workflow:
-        resource = _resource_phrase(workflow.group("resource"))
+        resource, from_state, to_state = workflow
+        resource = _resource_phrase(resource)
         candidates.append({
             **base,
             "contract_kind": "workflow_transition",
-            "title": f"{resource} transition {workflow.group('from')} to {workflow.group('to')}",
+            "title": f"{resource} transition {from_state} to {to_state}",
             "action": "transition",
             "resource": resource,
             # Draft hint only; the operator can correct it before approval. Requiring an exact
             # state field prevents an unrelated changing timestamp from becoming workflow proof.
             "field_name": "status",
-            "conditions": {"from_state": workflow.group("from"), "to_state": workflow.group("to")},
+            "conditions": {"from_state": from_state, "to_state": to_state},
         })
     elif cap:
-        field = _clean_phrase(cap.group("field"))
-        symbol = cap.groupdict().get("operator")
-        verb = str(cap.groupdict().get("verb") or "").lower()
-        operator = {"<": "lt", "<=": "lte", ">": "gt", ">=": "gte"}.get(symbol)
-        if not operator:
-            operator = "gte" if "fall below" in verb else "lte"
+        raw_field, symbol, raw_value = cap
+        field = _clean_phrase(raw_field)
+        operator = {"<": "lt", "<=": "lte", ">": "gt", ">=": "gte"}[symbol]
         candidates.append({
             **base,
             "contract_kind": "field_constraint",
@@ -125,43 +176,46 @@ def compile_rule_text(
             "resource": _resource_phrase(field),
             "field_name": field,
             "operator": operator,
-            "expected_value": _number(cap.group("value")),
+            "expected_value": _number(raw_value),
         })
-    elif ownership:
-        role = _clean_phrase(ownership.group("role"))
-        resource = _resource_phrase(ownership.group("resource"))
+    elif access_parts and access_parts[4]:
+        role, action, raw_resource, _only, _ownership = access_parts
+        role = _clean_phrase(role)
+        resource = _resource_phrase(raw_resource)
         candidates.append({
             **base,
             "contract_kind": "ownership",
-            "title": f"{role} cannot {ownership.group('action')} another owner's {resource}",
+            "title": f"{role} cannot {action} another owner's {resource}",
             "subject_role": role,
-            "action": ownership.group("action"),
+            "action": action,
             "resource": resource,
             "expected_access": "deny",
             "conditions": {"resource_owner": "other"},
         })
-    elif only_role:
-        role = _clean_phrase(only_role.group("role"))
-        resource = _resource_phrase(only_role.group("resource"))
+    elif access_parts and access_parts[3]:
+        role, action, raw_resource, _only, _ownership = access_parts
+        role = _clean_phrase(role)
+        resource = _resource_phrase(raw_resource)
         candidates.append({
             **base,
             "contract_kind": "access_control",
-            "title": f"{role} role required to {only_role.group('action')} {resource}",
+            "title": f"{role} role required to {action} {resource}",
             "subject_role": role,
-            "action": only_role.group("action"),
+            "action": action,
             "resource": resource,
             "expected_access": "requires_role",
             "conditions": {},
         })
-    elif denied_role:
-        role = _clean_phrase(denied_role.group("role"))
-        resource = _resource_phrase(denied_role.group("resource"))
+    elif access_parts:
+        role, action, raw_resource, _only, _ownership = access_parts
+        role = _clean_phrase(role)
+        resource = _resource_phrase(raw_resource)
         candidates.append({
             **base,
             "contract_kind": "access_control",
-            "title": f"{role} denied from {denied_role.group('action')} {resource}",
+            "title": f"{role} denied from {action} {resource}",
             "subject_role": role,
-            "action": denied_role.group("action"),
+            "action": action,
             "resource": resource,
             "expected_access": "deny",
             "conditions": {},
