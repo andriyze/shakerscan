@@ -41,8 +41,8 @@ Open:
 - Web UI: [http://localhost:3000](http://localhost:3000)
 - API: [http://localhost:8080](http://localhost:8080)
 
-The first image pull normally takes about 1–3 minutes. If the UI is not ready yet, run
-`shakerscan status`. Then choose how you want to work.
+The first image pull may take several minutes, depending on the host and network. If the UI is not
+ready yet, run `shakerscan status`. Then choose how you want to work.
 
 ### Use an AI coding agent
 
@@ -70,11 +70,13 @@ expiring target-bound approval, and remains responsible for budgets, execution, 
 
 ```bash
 shakerscan scan https://app.example.test
+shakerscan scan https://app.example.test --type standard --budget-profile thorough
 shakerscan status
 ```
 
-`scan` submits a quick scan. Standard, deep, aggressive, authenticated, and advanced scans are
-available in the web UI or REST API.
+`scan` submits a quick scan by default. Use `--type` for `standard`, `deep`, `full`, `aggressive`, or
+`smart`; coverage budgets and normal/parallel/Full Coverage execution are also available as CLI
+options. Use the web UI or REST API for authentication values so secrets do not enter shell history.
 
 ### Use the web UI
 
@@ -133,10 +135,22 @@ documented in the [Smart Scan Policy](https://github.com/andriyze/shakerscan/blo
 # Quick scan
 shakerscan scan https://app.example.test
 
-# Full or Smart scans require an explicit authorization confirmation
-shakerscan scan-full https://app.example.test --confirm-active
-shakerscan scan-smart https://app.example.test \
+# Standard scan with a larger coverage budget
+shakerscan scan https://app.example.test \
+  --type standard \
+  --budget-profile thorough
+
+# Full, Aggressive, and Smart scans require an explicit authorization confirmation
+shakerscan scan https://app.example.test \
+  --type smart \
   --budget-profile thorough \
+  --confirm-active
+
+# Full Coverage discovers once and distributes the endpoint worklist
+shakerscan scan https://app.example.test \
+  --type smart \
+  --execution coverage \
+  --shards auto \
   --confirm-active
 ```
 
@@ -180,8 +194,9 @@ alone is not exploit proof; use the finding detail page and retest history to in
 
 ### Test AI systems
 
-> **Preview:** AI Gate and Model Intake are preview surfaces for this release — usable and
-> smoke-tested, but not yet covered by the full real-stack E2E matrix that gates the DAST engine.
+> **Preview:** AI Gate and Model Intake are preview surfaces for this release. Deterministic
+> real-stack smoke cases run in PR and release workflows, but their complete release-level E2E
+> matrices are not yet implemented.
 
 AI Gate supports chat APIs, RAG APIs, agent traces, MCP traces, and embeddable widgets. In the UI:
 
@@ -232,8 +247,9 @@ explicit deep intent (`exploit_depth`).
 ### Run Deep Hunt
 
 Deep Hunt uses the current Codex, Claude, or OpenCode session as an autonomous security
-investigator. The AI composes its own same-origin probes, uses bounded active scanner tools, compares
-anonymous and authenticated behavior, and records only claims backed by real tool output.
+investigator. The AI composes its own same-origin probes, uses bounded active scanner tools, can
+compare anonymous and authenticated behavior when managed principals are configured, and records
+only claims backed by real tool output.
 
 Deep Hunt works after a standard first-time install: gated execution is on by default and the current
 coding-agent session supplies the planner. It still requires explicit target authorization and an
@@ -358,14 +374,14 @@ The installer supports macOS and common Linux distributions using `apt`, `dnf`/`
 ```text
 start                         Start the stack
 stop | restart               Stop or restart the stack
-reload                        Reload edited source and verify container parity
+reload                        Reload edited source in local-build mode and verify parity
 status                        Show services, queue state, workers, and access URLs
 scale <N>                     Scale to 1-20 workers
 logs [service] [-f]           Read API, worker, UI, PostgreSQL, or Redis logs
 backup [directory]            Back up PostgreSQL, results, configuration, and release metadata
-scan <target>                 Submit a quick scan
-scan-full <target>            Submit an authorized full scan
-scan-smart <target>           Submit an authorized smart scan
+scan <target> [options]       Submit any DAST scan type (quick by default)
+scan-full <target>            Compatibility alias for `scan --type full`
+scan-smart <target>           Compatibility alias for `scan --type smart`
 doctor | install-deps         Diagnose or install local prerequisites
 env                           Show runtime, PATH, and agent-launch guidance
 agent [codex|claude|opencode] Launch an agent in the runtime
@@ -378,7 +394,9 @@ shell                         Open a shell in the scanner container
 ```
 
 Run `shakerscan` or `./scanner.sh` without arguments for current options and examples. `reset` is
-destructive.
+destructive. Run `shakerscan scan --help` for scan flags, including `--type`, `--budget-profile`,
+`--execution`, `--shards`, `--shard-strategy`, `--endpoint`, `--approval-receipt`, and
+`--require-current-workers`.
 
 ## REST API
 

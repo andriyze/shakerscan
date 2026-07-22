@@ -244,7 +244,7 @@ say ""
 
 install_bootstrap_deps
 
-mkdir -p "$INSTALL_DIR/db" "$INSTALL_DIR/results"
+mkdir -p "$INSTALL_DIR/db" "$INSTALL_DIR/results" "$INSTALL_DIR/scripts" "$INSTALL_DIR/api"
 mkdir -p "$INSTALL_DIR/skills/ai-security-session/agents" "$INSTALL_DIR/skills/ai-security-session/references"
 mkdir -p "$INSTALL_DIR/skills/content-discovery/agents" "$INSTALL_DIR/skills/content-discovery/references"
 mkdir -p "$INSTALL_DIR/skills/js-analyze/agents" "$INSTALL_DIR/skills/js-analyze/references"
@@ -262,6 +262,10 @@ download "$REPO_RAW_BASE/VERSION" "$INSTALL_DIR/VERSION"
 download "$REPO_RAW_BASE/README.md" "$INSTALL_DIR/README.md"
 download "$REPO_RAW_BASE/AGENTS.md" "$INSTALL_DIR/AGENTS.md"
 download "$REPO_RAW_BASE/CLAUDE.md" "$INSTALL_DIR/CLAUDE.md"
+download "$REPO_RAW_BASE/scripts/shakerscan_mcp.py" "$INSTALL_DIR/scripts/shakerscan_mcp.py"
+download "$REPO_RAW_BASE/scripts/local_planner_adapter.py" "$INSTALL_DIR/scripts/local_planner_adapter.py"
+download "$REPO_RAW_BASE/scripts/planner_evals.py" "$INSTALL_DIR/scripts/planner_evals.py"
+download "$REPO_RAW_BASE/api/command_arsenal.py" "$INSTALL_DIR/api/command_arsenal.py"
 download "$REPO_RAW_BASE/skills/README.md" "$INSTALL_DIR/skills/README.md"
 download "$REPO_RAW_BASE/skills/scanner-skill.md" "$INSTALL_DIR/skills/scanner-skill.md"
 download "$REPO_RAW_BASE/skills/ai-security-session/SKILL.md" "$INSTALL_DIR/skills/ai-security-session/SKILL.md"
@@ -318,7 +322,7 @@ if [ "$START_AFTER_INSTALL" != "1" ]; then
     exit 0
 fi
 
-say "Starting ShakerScan with latest Docker Hub images (first run pulls images, ~1-3 min)..."
+say "Starting ShakerScan with latest Docker Hub images (the first pull may take several minutes)..."
 say ""
 cd "$INSTALL_DIR"
 start_rc=0

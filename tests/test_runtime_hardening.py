@@ -1,4 +1,8 @@
+import json
+import os
 from pathlib import Path
+import shutil
+import subprocess
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -56,6 +60,154 @@ def test_docs_page_renders_markdown_without_raw_html_injection():
     assert "readFile" in page
     assert "dangerouslySetInnerHTML" not in page
     assert "href: '/docs', label: 'Docs'" in sidebar
+
+
+def test_hosted_installer_packages_advertised_host_side_adapters():
+    expected_downloads = (
+        "scripts/shakerscan_mcp.py",
+        "scripts/local_planner_adapter.py",
+        "scripts/planner_evals.py",
+        "api/command_arsenal.py",
+    )
+    installer = (ROOT / "install" / "index.sh").read_text()
+    hosted = (ROOT / "install" / "index.html").read_text()
+
+    assert installer == hosted
+    assert 'mkdir -p "$INSTALL_DIR/db" "$INSTALL_DIR/results" "$INSTALL_DIR/scripts" "$INSTALL_DIR/api"' in installer
+    for relative_path in expected_downloads:
+        assert f'download "$REPO_RAW_BASE/{relative_path}" "$INSTALL_DIR/{relative_path}"' in installer
+
+
+def test_minimal_installed_research_adapter_has_all_imports(tmp_path):
+    runtime = tmp_path / "runtime"
+    for relative_path in (
+        "scripts/local_planner_adapter.py",
+        "scripts/planner_evals.py",
+        "api/command_arsenal.py",
+    ):
+        source = ROOT / relative_path
+        destination = runtime / relative_path
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, destination)
+
+    result = subprocess.run(
+        ["python3", str(runtime / "scripts" / "local_planner_adapter.py"), "--help"],
+        cwd=runtime,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "{evaluate,plan,episode}" in result.stdout
+
+
+def _write_fake_scan_commands(tmp_path: Path) -> tuple[Path, Path]:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    capture = tmp_path / "payload.json"
+
+    docker = fake_bin / "docker"
+    docker.write_text("#!/bin/sh\nexit 0\n")
+    docker.chmod(0o755)
+
+    curl = fake_bin / "curl"
+    curl.write_text(
+        """#!/bin/bash
+payload=''
+while [[ $# -gt 0 ]]; do
+  if [[ "$1" == "--data-binary" ]]; then
+    payload="${2:-}"
+    shift 2
+  else
+    shift
+  fi
+done
+printf '%s' "$payload" > "$SHAKERSCAN_TEST_CAPTURE"
+body="${SHAKERSCAN_TEST_BODY:-}"
+if [[ -z "$body" ]]; then
+  body='{"scan_id":"scan-123","status":"pending"}'
+fi
+printf '%s\\n%s' "$body" "${SHAKERSCAN_TEST_HTTP_CODE:-201}"
+"""
+    )
+    curl.chmod(0o755)
+    return fake_bin, capture
+
+
+def test_scanner_wrapper_submits_unified_full_coverage_payload(tmp_path):
+    fake_bin, capture = _write_fake_scan_commands(tmp_path)
+    env = {
+        **os.environ,
+        "PATH": f"{fake_bin}:{os.environ['PATH']}",
+        "SHAKERSCAN_TEST_CAPTURE": str(capture),
+    }
+    result = subprocess.run(
+        [
+            "bash",
+            str(ROOT / "scanner.sh"),
+            "scan",
+            "https://app.example.test/path?value=one&other=two",
+            "--type",
+            "smart",
+            "--execution",
+            "coverage",
+            "--coverage-depth",
+            "deep",
+            "--shards",
+            "auto",
+            "--auth-state-shards",
+            "--approval-receipt",
+            "approval-123",
+            "--require-current-workers",
+            "--confirm-active",
+        ],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=15,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    payload = json.loads(capture.read_text())
+    assert payload["target"] == "https://app.example.test/path?value=one&other=two"
+    assert payload["options"]["scan_type"] == "smart"
+    assert payload["options"]["parallel"] is True
+    assert payload["options"]["shard_strategy"] == "coverage"
+    assert payload["options"]["shards"] == "auto"
+    assert payload["options"]["budget_profile"] == "exhaustive"
+    assert payload["options"]["exploit_depth"] is True
+    assert payload["options"]["auth_state_shards"] is True
+    assert payload["options"]["approval_receipt_id"] == "approval-123"
+    assert payload["options"]["require_current_workers"] is True
+    assert "http://localhost:3000/scans/scan-123" in result.stdout
+
+
+def test_scanner_wrapper_fails_loudly_on_api_rejection(tmp_path):
+    fake_bin, capture = _write_fake_scan_commands(tmp_path)
+    env = {
+        **os.environ,
+        "PATH": f"{fake_bin}:{os.environ['PATH']}",
+        "SHAKERSCAN_TEST_CAPTURE": str(capture),
+        "SHAKERSCAN_TEST_HTTP_CODE": "409",
+        "SHAKERSCAN_TEST_BODY": '{"detail":{"error":"approval_required","message":"Approval required"}}',
+    }
+    result = subprocess.run(
+        ["bash", str(ROOT / "scanner.sh"), "scan", "https://app.example.test"],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=15,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "HTTP 409" in result.stdout
+    assert "Approval required" in result.stdout
+    assert "Scan ID: null" not in result.stdout
 
 
 def test_dockerfile_copies_all_scanner_modules_without_drift():
@@ -151,6 +303,17 @@ def test_scanner_sh_restart_and_rebuild_recreate_api_scaled_workers():
     assert 'existing_workers="$(running_scan_worker_count)"' in script
     assert 'refresh_workers_after_rebuild "$existing_workers"' in script
     assert 'compose up --no-build -d --force-recreate --scale worker="$desired_count" worker' in script
+
+
+def test_scanner_sh_status_prints_urls_and_reload_rejects_prebuilt_mode():
+    script = (ROOT / "scanner.sh").read_text()
+
+    status_body = script.split("show_status() {", 1)[1].split("\n}", 1)[0]
+    reload_body = script.split("reload_services() {", 1)[1].split("\n}", 1)[0]
+    assert 'echo "  UI:  $(ui_base_url)"' in status_body
+    assert 'echo "  API: $(api_base_url)"' in status_body
+    assert 'if [ "$USE_PREBUILT" -eq 1 ]' in reload_body
+    assert "reload is only available in local-build mode" in reload_body
 
 
 def test_scanner_sh_backup_is_private_and_fail_closed():

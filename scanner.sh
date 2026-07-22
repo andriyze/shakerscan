@@ -461,6 +461,7 @@ install_packages_if_missing_apt() {
 
     command_exists curl || packages+=("curl")
     command_exists jq || packages+=("jq")
+    command_exists python3 || packages+=("python3")
 
     if [ ${#packages[@]} -gt 0 ]; then
         run_with_sudo apt-get update
@@ -708,6 +709,7 @@ install_dependencies_dnf() {
 
     command_exists curl || base_packages+=("curl")
     command_exists jq || base_packages+=("jq")
+    command_exists python3 || base_packages+=("python3")
 
     if [ ${#base_packages[@]} -gt 0 ]; then
         echo -e "${GREEN}Installing packages: ${base_packages[*]}${NC}"
@@ -729,6 +731,7 @@ install_dependencies_pacman() {
     has_docker_compose || packages+=("docker-compose")
     command_exists curl || packages+=("curl")
     command_exists jq || packages+=("jq")
+    command_exists python3 || packages+=("python")
 
     if [ ${#packages[@]} -gt 0 ]; then
         echo -e "${GREEN}Installing packages: ${packages[*]}${NC}"
@@ -743,6 +746,7 @@ install_dependencies_zypper() {
     has_docker_compose || packages+=("docker-compose")
     command_exists curl || packages+=("curl")
     command_exists jq || packages+=("jq")
+    command_exists python3 || packages+=("python3")
 
     if [ ${#packages[@]} -gt 0 ]; then
         echo -e "${GREEN}Installing packages: ${packages[*]}${NC}"
@@ -757,6 +761,7 @@ install_dependencies_apk() {
     has_docker_compose || packages+=("docker-cli-compose")
     command_exists curl || packages+=("curl")
     command_exists jq || packages+=("jq")
+    command_exists python3 || packages+=("python3")
 
     if [ ${#packages[@]} -gt 0 ]; then
         echo -e "${GREEN}Installing packages: ${packages[*]}${NC}"
@@ -779,6 +784,7 @@ install_dependencies_linux() {
                 local base_packages=()
                 command_exists curl || base_packages+=("curl")
                 command_exists jq || base_packages+=("jq")
+                command_exists python3 || base_packages+=("python3")
                 if [ ${#base_packages[@]} -gt 0 ]; then
                     run_with_sudo "$package_manager" -y install "${base_packages[@]}"
                 fi
@@ -812,7 +818,7 @@ install_dependencies_linux() {
             ;;
         *)
             echo -e "${RED}Automatic install is not supported for this Linux package manager.${NC}"
-            echo "Install manually: Docker Engine + Docker Compose + curl + jq"
+            echo "Install manually: Docker Engine + Docker Compose + curl + jq + Python 3"
             return 1
             ;;
     esac
@@ -888,6 +894,11 @@ install_dependencies_macos() {
         brew install curl
     fi
 
+    if ! command_exists python3; then
+        echo -e "${GREEN}Installing Python 3 for host-side MCP and legacy research adapters...${NC}"
+        brew install python
+    fi
+
     if command_exists docker && ! docker info > /dev/null 2>&1; then
         echo -e "${YELLOW}Docker daemon is not running. Launching Docker Desktop...${NC}"
         open -a Docker > /dev/null 2>&1 || true
@@ -907,7 +918,7 @@ install_dependencies() {
             ;;
         *)
             echo -e "${RED}Automatic install is supported on macOS and Linux hosts with apt, dnf/yum, pacman, zypper, or apk.${NC}"
-            echo "Install manually: Docker Engine + Docker Compose + curl + jq"
+            echo "Install manually: Docker Engine + Docker Compose + curl + jq + Python 3"
             return 1
             ;;
     esac
@@ -949,6 +960,17 @@ command_needs_jq() {
     command_needs_curl "$1" "$2"
 }
 
+command_needs_python() {
+    case "$1" in
+        mcp|research)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
 collect_missing_dependencies() {
     local cmd="$1"
     local subcmd="$2"
@@ -965,6 +987,10 @@ collect_missing_dependencies() {
 
     if command_needs_jq "$cmd" "$subcmd"; then
         command_exists jq || missing+=("jq")
+    fi
+
+    if command_needs_python "$cmd"; then
+        command_exists python3 || missing+=("python3")
     fi
 
     echo "${missing[*]}"
@@ -1346,14 +1372,14 @@ print_help() {
     echo "  start              Start all services (API, workers, UI)"
     echo "  stop               Stop all services"
     echo "  restart            Restart all services"
-    echo "  reload             Reload edited source into running containers + verify parity"
-    echo "  status             Show service status"
+    echo "  reload             Reload edited source in local-build mode + verify parity"
+    echo "  status             Show services, queue, workers, and access URLs"
     echo "  scale <N>          Scale to N workers (1-20)"
     echo "  logs [service]     View logs (api, worker, ui, postgres, redis)"
     echo "                       worker aggregates all shakerscan-worker* containers"
-    echo "  scan <target>      Quick scan a target"
-    echo "  scan-full <target> Full assessment scan"
-    echo "  scan-smart <target> Smart adaptive scan"
+    echo "  scan <target>      Submit any DAST scan type (quick by default)"
+    echo "  scan-full <target> Compatibility alias for 'scan --type full'"
+    echo "  scan-smart <target> Compatibility alias for 'scan --type smart'"
     echo "  install-deps       Install missing prerequisites"
     echo "  doctor             Check local prerequisites and common startup issues"
     echo "  env                Show PATH, launcher, and runtime guidance"
@@ -1378,8 +1404,8 @@ print_help() {
     echo "  --prebuilt         Force prebuilt Docker Hub images (default for start/restart)"
     echo "  --image-tag TAG    Override Docker image tag (default: latest)"
     echo "  --remote           Bind UI/API to this host's Tailscale IPv4 address"
-    echo "  --confirm-active   Confirm authorization for scan-full or scan-smart"
-    echo "  --budget-profile P scan-smart only: fast, balanced, thorough, exhaustive"
+    echo "  --confirm-active   Confirm authorization for full, aggressive, or smart scans"
+    echo "  Scan-specific options are listed by './scanner.sh scan --help'"
     echo "  SHAKERSCAN_BIND_HOST=IP overrides the Docker bind address"
     echo "  SHAKERSCAN_PUBLIC_HOST=HOST overrides displayed/browser API host"
     echo "  SHAKERSCAN_PULL_IMAGES=0 skips Docker Hub pulls in prebuilt mode"
@@ -1396,10 +1422,11 @@ print_help() {
     echo "  ./scanner.sh research <episode-id> 5  # Drive a bounded research episode"
     echo "  ./scanner.sh start --local            # Build locally and start"
     echo "  ./scanner.sh start -w 10              # Start with 10 workers"
-    echo "  ./scanner.sh start --image-tag 0.4.2  # Use a specific published tag"
+    echo "  ./scanner.sh start --image-tag $(get_release_version)  # Use this release's published tag"
     echo "  ./scanner.sh scale 10                 # Scale to 10 workers"
     echo "  ./scanner.sh scan https://example.com # Quick scan"
-    echo "  ./scanner.sh scan-smart https://example.com --budget-profile thorough --confirm-active"
+    echo "  ./scanner.sh scan https://example.com --type standard --budget-profile thorough"
+    echo "  ./scanner.sh scan https://example.com --type smart --execution coverage --confirm-active"
     echo "  ./scanner.sh install-deps             # Install dependencies"
     echo "  ./scanner.sh logs worker -f           # Follow worker logs"
     echo ""
@@ -1467,6 +1494,13 @@ restart_services() {
 # re-resolves the mounts. This command does that and verifies host<->container
 # parity so drift is caught loudly instead of debugged for an hour.
 reload_services() {
+    if [ "$USE_PREBUILT" -eq 1 ]; then
+        echo -e "${RED}Error: reload is only available in local-build mode.${NC}"
+        echo "Published images do not mount editable source. Use './scanner.sh restart' to refresh prebuilt services,"
+        echo "or switch a source checkout to local mode with './scanner.sh start --local'."
+        return 1
+    fi
+
     echo -e "${BLUE}Reloading source into running containers...${NC}"
     compose restart api worker || return 1
 
@@ -1551,6 +1585,11 @@ show_status() {
             echo -e "  Uniform:  ${RED}NO — restart workers before trusting benchmark numbers${NC}"
         fi
     fi
+
+    echo ""
+    echo -e "${BLUE}Access:${NC}"
+    echo "  UI:  $(ui_base_url)"
+    echo "  API: $(api_base_url)"
 }
 
 show_logs() {
@@ -1662,101 +1701,367 @@ show_worker_logs() {
     done
 }
 
-quick_scan() {
-    TARGET=$1
-    if [ -z "$TARGET" ]; then
-        echo -e "${RED}Error: Please provide a target URL${NC}"
-        echo "Usage: ./scanner.sh scan <target>"
-        exit 1
-    fi
-
-    echo -e "${GREEN}Starting quick scan: $TARGET${NC}"
-    RESULT=$(curl -s -X POST "$(api_base_url)/scans" \
-        -H "Content-Type: application/json" \
-        -d "{\"target\": \"$TARGET\", \"options\": {\"quick\": true}}")
-
-    SCAN_ID=$(echo $RESULT | jq -r '.scan_id')
-    echo "Scan ID: $SCAN_ID"
-    echo "Status: $(echo $RESULT | jq -r '.status')"
+print_scan_help() {
+    local command_name="${1:-scan}"
+    echo "Usage: ./scanner.sh $command_name <target> [scan options]"
     echo ""
-    echo "View progress at: $(ui_base_url)/scans"
+    echo "Scan options:"
+    if [ "$command_name" = "scan" ]; then
+        echo "  --type TYPE              quick, standard, deep, full, aggressive, or smart"
+    fi
+    echo "  --budget-profile P       fast, balanced, thorough, or exhaustive"
+    echo "  --execution MODE         auto, normal, parallel, or coverage"
+    echo "  --shards N|auto          Parallel shard count (2-20)"
+    echo "  --shard-strategy S       auto, scope, family, coverage, or coverage_family"
+    echo "  --endpoint SPEC          Known endpoint; repeat for scope sharding"
+    echo "  --coverage-depth D       standard or deep"
+    echo "  --auth-state-shards      Expand parallel work across configured auth states"
+    echo "  --approval-receipt ID    Stamp a target-bound approval receipt on submission"
+    echo "  --require-current-workers Reject active work on stale/unconfirmed workers"
+    echo "  --confirm-active         Confirm authorization for full, aggressive, or smart"
 }
 
-full_scan() {
-    TARGET=$1
-    if [ -z "$TARGET" ]; then
-        echo -e "${RED}Error: Please provide a target URL${NC}"
-        echo "Usage: ./scanner.sh scan-full <target>"
-        exit 1
+scan_error_detail() {
+    local body="$1"
+    if jq -e . >/dev/null 2>&1 <<<"$body"; then
+        jq -r '
+            if (.detail | type) == "object" then
+                .detail.message // .detail.error // (.detail | tojson)
+            elif .detail != null then .detail
+            else .message // .error // (tojson)
+            end
+        ' <<<"$body"
+    else
+        printf '%s\n' "$body"
     fi
-
-    echo -e "${YELLOW}Starting full assessment: $TARGET${NC}"
-    if ! confirm_active_testing "Full assessment" "$TARGET"; then
-        echo "Cancelled"
-        exit 1
-    fi
-    echo ""
-
-    RESULT=$(curl -s -X POST "$(api_base_url)/scans" \
-        -H "Content-Type: application/json" \
-        -d "{\"target\": \"$TARGET\", \"options\": {\"quick\": false, \"thorough\": true, \"active\": true}}")
-
-    SCAN_ID=$(echo $RESULT | jq -r '.scan_id')
-    echo "Scan ID: $SCAN_ID"
-    echo "Status: $(echo $RESULT | jq -r '.status')"
-    echo ""
-    echo "View progress at: $(ui_base_url)/scans"
 }
 
-smart_scan() {
-    TARGET=$1
-    shift || true
-    if [ -z "$TARGET" ]; then
-        echo -e "${RED}Error: Please provide a target URL${NC}"
-        echo "Usage: ./scanner.sh scan-smart <target> [--budget-profile fast|balanced|thorough|exhaustive]"
-        exit 1
-    fi
-    BUDGET_PROFILE=""
+submit_scan() {
+    local command_name="$1"
+    local scan_type="$2"
+    local allow_type_override="$3"
+    shift 3
+
+    local target=""
+    local budget_profile=""
+    local execution="auto"
+    local shards=""
+    local shard_strategy=""
+    local coverage_depth="standard"
+    local require_current_workers=0
+    local auth_state_shards=0
+    local approval_receipt=""
+    local endpoint_count=0
+    local endpoints='[]'
+    local coverage_mode=0
+    local scan_label=""
+    local value
+
     while [[ $# -gt 0 ]]; do
         case "$1" in
+            --type|--scan-type)
+                if [ "$allow_type_override" -ne 1 ]; then
+                    echo -e "${RED}Error: $command_name has a fixed scan type; use 'scan --type ...' instead.${NC}"
+                    return 1
+                fi
+                [ -n "${2:-}" ] || { echo -e "${RED}Error: $1 requires a value${NC}"; return 1; }
+                scan_type="$2"
+                shift 2
+                ;;
+            --type=*|--scan-type=*)
+                if [ "$allow_type_override" -ne 1 ]; then
+                    echo -e "${RED}Error: $command_name has a fixed scan type; use 'scan --type ...' instead.${NC}"
+                    return 1
+                fi
+                scan_type="${1#*=}"
+                shift
+                ;;
             --budget-profile)
-                BUDGET_PROFILE="${2:-}"
+                [ -n "${2:-}" ] || { echo -e "${RED}Error: --budget-profile requires a value${NC}"; return 1; }
+                budget_profile="$2"
                 shift 2
                 ;;
             --budget-profile=*)
-                BUDGET_PROFILE="${1#*=}"
+                budget_profile="${1#*=}"
                 shift
                 ;;
+            --execution)
+                [ -n "${2:-}" ] || { echo -e "${RED}Error: --execution requires a value${NC}"; return 1; }
+                execution="$2"
+                shift 2
+                ;;
+            --execution=*)
+                execution="${1#*=}"
+                shift
+                ;;
+            --shards)
+                [ -n "${2:-}" ] || { echo -e "${RED}Error: --shards requires a value${NC}"; return 1; }
+                shards="$2"
+                shift 2
+                ;;
+            --shards=*)
+                shards="${1#*=}"
+                shift
+                ;;
+            --shard-strategy)
+                [ -n "${2:-}" ] || { echo -e "${RED}Error: --shard-strategy requires a value${NC}"; return 1; }
+                shard_strategy="$2"
+                shift 2
+                ;;
+            --shard-strategy=*)
+                shard_strategy="${1#*=}"
+                shift
+                ;;
+            --endpoint)
+                [ -n "${2:-}" ] || { echo -e "${RED}Error: --endpoint requires a value${NC}"; return 1; }
+                endpoints="$(jq -c --arg endpoint "$2" '. + [$endpoint]' <<<"$endpoints")"
+                endpoint_count=$((endpoint_count + 1))
+                shift 2
+                ;;
+            --endpoint=*)
+                value="${1#*=}"
+                [ -n "$value" ] || { echo -e "${RED}Error: --endpoint requires a value${NC}"; return 1; }
+                endpoints="$(jq -c --arg endpoint "$value" '. + [$endpoint]' <<<"$endpoints")"
+                endpoint_count=$((endpoint_count + 1))
+                shift
+                ;;
+            --coverage-depth)
+                [ -n "${2:-}" ] || { echo -e "${RED}Error: --coverage-depth requires a value${NC}"; return 1; }
+                coverage_depth="$2"
+                shift 2
+                ;;
+            --coverage-depth=*)
+                coverage_depth="${1#*=}"
+                shift
+                ;;
+            --require-current-workers)
+                require_current_workers=1
+                shift
+                ;;
+            --auth-state-shards)
+                auth_state_shards=1
+                shift
+                ;;
+            --approval-receipt)
+                [ -n "${2:-}" ] || { echo -e "${RED}Error: --approval-receipt requires a value${NC}"; return 1; }
+                approval_receipt="$2"
+                shift 2
+                ;;
+            --approval-receipt=*)
+                approval_receipt="${1#*=}"
+                [ -n "$approval_receipt" ] || { echo -e "${RED}Error: --approval-receipt requires a value${NC}"; return 1; }
+                shift
+                ;;
+            --help|-h)
+                print_scan_help "$command_name"
+                return 0
+                ;;
+            --*)
+                echo -e "${RED}Error: unknown $command_name option: $1${NC}"
+                print_scan_help "$command_name"
+                return 1
+                ;;
             *)
-                echo -e "${RED}Unknown scan-smart option: $1${NC}"
-                echo "Usage: ./scanner.sh scan-smart <target> [--budget-profile fast|balanced|thorough|exhaustive]"
-                exit 1
+                if [ -n "$target" ]; then
+                    echo -e "${RED}Error: unexpected argument: $1${NC}"
+                    print_scan_help "$command_name"
+                    return 1
+                fi
+                target="$1"
+                shift
                 ;;
         esac
     done
 
-    echo -e "${YELLOW}Starting smart adaptive scan: $TARGET${NC}"
-    if ! confirm_active_testing "Smart adaptive scan" "$TARGET"; then
-        echo "Cancelled"
-        exit 1
+    case "$scan_type" in
+        quick|standard|deep|full|aggressive|smart) ;;
+        *) echo -e "${RED}Error: invalid scan type '$scan_type'${NC}"; return 1 ;;
+    esac
+    case "$budget_profile" in
+        ""|fast|balanced|thorough|exhaustive) ;;
+        *) echo -e "${RED}Error: invalid budget profile '$budget_profile'${NC}"; return 1 ;;
+    esac
+    case "$execution" in
+        auto|normal|parallel|coverage) ;;
+        *) echo -e "${RED}Error: invalid execution mode '$execution'${NC}"; return 1 ;;
+    esac
+    case "$shard_strategy" in
+        ""|auto|scope|family|coverage|coverage_family) ;;
+        *) echo -e "${RED}Error: invalid shard strategy '$shard_strategy'${NC}"; return 1 ;;
+    esac
+    case "$coverage_depth" in
+        standard|deep) ;;
+        *) echo -e "${RED}Error: invalid coverage depth '$coverage_depth'${NC}"; return 1 ;;
+    esac
+    if [ "$execution" = "coverage" ] && [ -n "$shard_strategy" ] && [ "$shard_strategy" != "coverage" ]; then
+        echo -e "${RED}Error: --execution coverage fixes the shard strategy to coverage${NC}"
+        return 1
     fi
-    echo ""
-
-    OPTIONS="{\"scan_type\": \"smart\""
-    if [ -n "$BUDGET_PROFILE" ]; then
-        OPTIONS="$OPTIONS, \"budget_profile\": \"$BUDGET_PROFILE\""
+    if [ -n "$shards" ] && [ "$shards" != "auto" ]; then
+        if ! [[ "$shards" =~ ^[0-9]+$ ]] || [ "$shards" -lt 2 ] || [ "$shards" -gt 20 ]; then
+            echo -e "${RED}Error: shards must be auto or a number between 2 and 20${NC}"
+            return 1
+        fi
     fi
-    OPTIONS="$OPTIONS}"
+    if [ -z "$target" ]; then
+        echo -e "${RED}Error: please provide a target URL${NC}"
+        print_scan_help "$command_name"
+        return 1
+    fi
+    if [ "$execution" != "parallel" ] && [ "$execution" != "coverage" ]; then
+        if [ -n "$shards" ] || [ -n "$shard_strategy" ]; then
+            echo -e "${RED}Error: --shards and --shard-strategy require --execution parallel or coverage${NC}"
+            return 1
+        fi
+        if [ "$auth_state_shards" -eq 1 ]; then
+            echo -e "${RED}Error: --auth-state-shards requires --execution parallel or coverage${NC}"
+            return 1
+        fi
+    fi
+    if [ "$shard_strategy" = "scope" ] && [ "$endpoint_count" -lt 2 ]; then
+        echo -e "${RED}Error: scope sharding requires at least two --endpoint values${NC}"
+        return 1
+    fi
+    if [ "$execution" = "coverage" ] || [ "$shard_strategy" = "coverage" ] || [ "$shard_strategy" = "coverage_family" ]; then
+        coverage_mode=1
+    fi
+    if [ "$coverage_depth" = "deep" ] && [ "$coverage_mode" -ne 1 ]; then
+        echo -e "${RED}Error: --coverage-depth requires Full Coverage execution${NC}"
+        return 1
+    fi
+    if [ "$coverage_depth" = "deep" ]; then
+        case "$scan_type" in
+            full|aggressive|smart) ;;
+            *) echo -e "${RED}Error: deep Full Coverage requires full, aggressive, or smart scan type${NC}"; return 1 ;;
+        esac
+    fi
+    if [ "$shard_strategy" = "family" ] || [ "$shard_strategy" = "coverage_family" ]; then
+        case "$scan_type" in
+            full|aggressive|smart) ;;
+            *) echo -e "${RED}Error: $shard_strategy sharding requires full, aggressive, or smart scan type${NC}"; return 1 ;;
+        esac
+    fi
+    if { [ "$execution" = "parallel" ] || [ "$execution" = "coverage" ]; } \
+        && [ "$endpoint_count" -lt 2 ]; then
+        case "$scan_type" in
+            full|aggressive|smart) ;;
+            *)
+                echo -e "${RED}Error: parallel discovery/family execution requires full, aggressive, or smart; provide known --endpoint values for passive scope sharding.${NC}"
+                return 1
+                ;;
+        esac
+    fi
 
-    RESULT=$(curl -s -X POST "$(api_base_url)/scans" \
+    case "$scan_type" in
+        full|aggressive|smart)
+            case "$scan_type" in
+                full) scan_label="Full" ;;
+                aggressive) scan_label="Aggressive" ;;
+                smart) scan_label="Smart" ;;
+            esac
+            if ! confirm_active_testing "$scan_label scan" "$target"; then
+                echo "Cancelled"
+                return 1
+            fi
+            ;;
+    esac
+
+    local options
+    options="$(jq -cn --arg scan_type "$scan_type" '{scan_type: $scan_type}')"
+    if [ -n "$budget_profile" ]; then
+        options="$(jq -c --arg budget_profile "$budget_profile" '. + {budget_profile: $budget_profile}' <<<"$options")"
+    fi
+    if [ "$require_current_workers" -eq 1 ]; then
+        options="$(jq -c '. + {require_current_workers: true}' <<<"$options")"
+    fi
+    if [ "$auth_state_shards" -eq 1 ]; then
+        options="$(jq -c '. + {auth_state_shards: true}' <<<"$options")"
+    fi
+    if [ -n "$approval_receipt" ]; then
+        options="$(jq -c --arg approval_receipt "$approval_receipt" '. + {approval_receipt_id: $approval_receipt}' <<<"$options")"
+    fi
+    if [ "$endpoint_count" -gt 0 ]; then
+        options="$(jq -c --argjson endpoints "$endpoints" '. + {custom_endpoints: $endpoints}' <<<"$options")"
+    fi
+
+    case "$execution" in
+        normal)
+            options="$(jq -c '. + {parallel: false}' <<<"$options")"
+            ;;
+        parallel|coverage)
+            local resolved_strategy="${shard_strategy:-auto}"
+            [ "$execution" = "coverage" ] && resolved_strategy="coverage"
+            options="$(jq -c --arg strategy "$resolved_strategy" '. + {parallel: true, shard_strategy: $strategy}' <<<"$options")"
+            if [ -n "$shards" ]; then
+                if [ "$shards" = "auto" ]; then
+                    options="$(jq -c '. + {shards: "auto"}' <<<"$options")"
+                else
+                    options="$(jq -c --argjson shards "$shards" '. + {shards: $shards}' <<<"$options")"
+                fi
+            fi
+            ;;
+    esac
+
+    if [ "$coverage_mode" -eq 1 ]; then
+        if [ "$coverage_depth" = "deep" ]; then
+            options="$(jq -c '
+                . + {
+                    budget_profile: "exhaustive",
+                    exploit_depth: true,
+                    custom_budget: {
+                        active_worklist_max: 50000,
+                        param_discovery_url_limit: 500,
+                        param_discovery_max_params: 100,
+                        active_params_per_endpoint: 20,
+                        max_findings_per_family: -1,
+                        sqli_extract_max: 25,
+                        oob_max_findings: 25
+                    }
+                }
+            ' <<<"$options")"
+        else
+            options="$(jq -c '
+                . + {
+                    budget_profile: "thorough",
+                    custom_budget: {
+                        active_worklist_max: 50000,
+                        param_discovery_url_limit: 500,
+                        param_discovery_max_params: 100
+                    }
+                }
+            ' <<<"$options")"
+        fi
+    fi
+
+    local payload response http_code body scan_id status
+    payload="$(jq -cn --arg target "$target" --argjson options "$options" '{target: $target, options: $options}')"
+
+    echo -e "${GREEN}Submitting $scan_type scan: $target${NC}"
+    if ! response="$(curl -sS -w $'\n%{http_code}' -X POST "$(api_base_url)/scans" \
         -H "Content-Type: application/json" \
-        -d "{\"target\": \"$TARGET\", \"options\": $OPTIONS}")
+        --data-binary "$payload")"; then
+        echo -e "${RED}Error: could not reach the ShakerScan API at $(api_base_url)${NC}"
+        return 1
+    fi
+    http_code="${response##*$'\n'}"
+    body="${response%$'\n'*}"
 
-    SCAN_ID=$(echo $RESULT | jq -r '.scan_id')
-    echo "Scan ID: $SCAN_ID"
-    echo "Status: $(echo $RESULT | jq -r '.status')"
+    if ! [[ "$http_code" =~ ^2[0-9][0-9]$ ]]; then
+        echo -e "${RED}Scan submission failed (HTTP $http_code): $(scan_error_detail "$body")${NC}"
+        return 1
+    fi
+    if ! jq -e '.scan_id and .status' >/dev/null 2>&1 <<<"$body"; then
+        echo -e "${RED}Scan submission returned an invalid response.${NC}"
+        scan_error_detail "$body"
+        return 1
+    fi
+
+    scan_id="$(jq -r '.scan_id' <<<"$body")"
+    status="$(jq -r '.status' <<<"$body")"
+    echo "Scan ID: $scan_id"
+    echo "Status: $status"
     echo ""
-    echo "View progress at: $(ui_base_url)/scans"
+    echo "View progress at: $(ui_base_url)/scans/$scan_id"
 }
 
 build_images() {
@@ -2219,11 +2524,23 @@ fi
 configure_runtime_mode "$COMMAND"
 
 # Dependency preflight for command execution
+COMMAND_HELP_ONLY=0
+case "$COMMAND" in
+    scan|scan-full|scan-smart)
+        for arg in "${ARGS[@]}"; do
+            if [ "$arg" = "--help" ] || [ "$arg" = "-h" ]; then
+                COMMAND_HELP_ONLY=1
+                break
+            fi
+        done
+        ;;
+esac
+
 case $COMMAND in
-    help|--help|-h|install-deps|doctor|env|agent|ai|mcp|research)
+    help|--help|-h|install-deps|doctor|env|agent|ai)
         ;;
     *)
-        if ! ensure_command_dependencies "$COMMAND" "${ARGS[0]}"; then
+        if [ "$COMMAND_HELP_ONLY" -ne 1 ] && ! ensure_command_dependencies "$COMMAND" "${ARGS[0]}"; then
             exit 1
         fi
         ;;
@@ -2253,13 +2570,13 @@ case $COMMAND in
         show_logs "${ARGS[0]}" "$FOLLOW"
         ;;
     scan)
-        quick_scan "${ARGS[0]}"
+        submit_scan "scan" "quick" 1 "${ARGS[@]}"
         ;;
     scan-full)
-        full_scan "${ARGS[0]}"
+        submit_scan "scan-full" "full" 0 "${ARGS[@]}"
         ;;
     scan-smart)
-        smart_scan "${ARGS[@]}"
+        submit_scan "scan-smart" "smart" 0 "${ARGS[@]}"
         ;;
     install-deps)
         install_dependencies
@@ -2274,6 +2591,11 @@ case $COMMAND in
         start_agent "${ARGS[0]}"
         ;;
     mcp)
+        if [ ! -f "$SCRIPT_DIR/scripts/shakerscan_mcp.py" ]; then
+            echo -e "${RED}Error: the MCP adapter is missing from this runtime.${NC}"
+            echo "Re-run the ShakerScan installer to refresh runtime files."
+            exit 1
+        fi
         exec python3 "$SCRIPT_DIR/scripts/shakerscan_mcp.py"
         ;;
     research)
@@ -2281,6 +2603,16 @@ case $COMMAND in
             echo "Usage: ./scanner.sh research <episode-id> [max-decisions]"
             exit 1
         fi
+        for required_file in \
+            "$SCRIPT_DIR/scripts/local_planner_adapter.py" \
+            "$SCRIPT_DIR/scripts/planner_evals.py" \
+            "$SCRIPT_DIR/api/command_arsenal.py"; do
+            if [ ! -f "$required_file" ]; then
+                echo -e "${RED}Error: legacy research adapter runtime files are incomplete.${NC}"
+                echo "Re-run the ShakerScan installer to refresh runtime files."
+                exit 1
+            fi
+        done
         exec python3 "$SCRIPT_DIR/scripts/local_planner_adapter.py" episode \
             --api-url "$(api_base_url)" \
             --episode-id "${ARGS[0]}" \
