@@ -1,0 +1,65 @@
+name: E2E smoke
+
+# Deterministic integration coverage for backend changes. Active DAST tests are
+# kept in the manually triggered full release gate (e2e.yml).
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: e2e-smoke-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Detect relevant backend changes
+        id: changes
+        shell: bash
+        run: |
+          if git diff --quiet \
+            "${{ github.event.pull_request.base.sha }}" \
+            "${{ github.event.pull_request.head.sha }}" \
+            -- api scanner db tests/e2e docker-compose.yml Makefile \
+               .github/workflows/e2e-pr.yml .github/workflows/e2e.yml; then
+            echo "backend=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "backend=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Skip smoke tests for unrelated changes
+        if: steps.changes.outputs.backend != 'true'
+        run: echo "No E2E-relevant backend changes; smoke test is not required."
+
+      - name: Start ShakerScan stack
+        if: steps.changes.outputs.backend == 'true'
+        run: |
+          docker compose up -d --build
+          for i in $(seq 1 90); do
+            curl -sf http://localhost:8080/health && break
+            sleep 5
+          done
+          curl -sf http://localhost:8080/health
+
+      - name: Run deterministic Model Intake and AI Gate smoke tests
+        if: steps.changes.outputs.backend == 'true'
+        run: |
+          python3 tests/e2e/run_e2e.py --area model_intake
+          python3 tests/e2e/run_e2e.py --area ai_gate
+
+      - name: Dump stack logs on failure
+        if: failure() && steps.changes.outputs.backend == 'true'
+        run: docker compose logs --tail=300 api worker || true
+
+      - name: Stop E2E stack
+        if: always() && steps.changes.outputs.backend == 'true'
+        run: docker compose down -v

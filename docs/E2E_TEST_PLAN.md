@@ -1,13 +1,14 @@
 # ShakerScan End-to-End Test Plan
 
-**Status (reconciled 2026-07-17):** this is the E2E coverage contract, not a current pass report.
+**Status (reconciled 2026-07-21):** this is the E2E coverage contract, not a current pass report.
 Historical `10/10`, `12/12`, and `12/12` totals were produced by an older harness/fleet and are not
-release evidence. The implemented fast runner currently covers MI-1/MI-1-HF/MI-2–MI-6,
-AI-1–AI-4, and D-1–D-4. Rows marked **Planned** below are not implemented in
+release evidence. The change-aware PR smoke workflow runs deterministic MI-1/MI-2–MI-6 and
+AI-1–AI-4 coverage. The manual full release workflow additionally runs D-1–D-4; MI-1-HF remains
+explicitly opt-in. Rows marked **Planned** below are not implemented in
 `tests/e2e/run_e2e.py` and must not be included in pass totals. `make e2e` skips the external
 Hugging Face row; `make e2e-model-intake` enables it, while `make e2e-model-intake-fixture` is the
 explicit offline path. The worker-fingerprint preflight rejects a stale/non-uniform fleet. Slow
-authenticated crAPI BOLA recall remains in the benchmark harness rather than this fast E2E gate.
+authenticated crAPI BOLA recall remains in the benchmark harness rather than the E2E workflows.
 
 ## Why this exists
 
@@ -20,7 +21,7 @@ Every recent escaped bug lived at an **integration seam that unit tests mocked o
 | `UnboundLocalError` in Full Coverage | unit-tested `harvest_endpoints_with_meta` | run a real Full Coverage scan and assert it completes |
 | Principal-probe production bypass | tested `classify_production_safety` | run a production AI scan, assert the admin-impersonation probe never executes |
 
-**Principle:** an e2e test exercises the full pipeline — `POST` to the public API → Redis → worker → **real target / real network fetch** → DB → result JSON → deployment decision — and asserts on the **real output**, including adversarial negatives (secrets must not leak, truncation must be flagged, false criticals must not fire). No mocking the seams. Ground truth lives in per-target answer keys.
+**Principle:** an e2e test exercises the full pipeline — `POST` to the public API → Redis → worker → **pinned target or deterministic fixture** → DB → result JSON → deployment decision — and asserts on the **real output**, including adversarial negatives (secrets must not leak, truncation must be flagged, false criticals must not fire). No mocking the seams. Explicit opt-in cases cover external network fetches. Ground truth lives in per-target answer keys.
 
 ## Harness (Phase 0)
 
@@ -59,21 +60,21 @@ Every recent escaped bug lived at an **integration seam that unit tests mocked o
 
 ### DAST (Phase 3)
 
-**The fast PR gate is integration + hardening, NOT broad quality/recall.** Recall %, precision, and
-dual-user BOLA are slow + discovery-heavy and live in the benchmark harness (`tests/benchmark/`),
-which is a separate quality signal—not this gate and not currently scheduled nightly.
-What the fast runner (`run_e2e.py`) actually asserts:
+**DAST is a manual release gate, not a per-PR job.** The active SQLi/XSS cases run against a pinned
+Juice Shop container on the scanner's Compose network. Recall %, precision, and dual-user BOLA are
+slower and more discovery-heavy; they live in the benchmark harness (`tests/benchmark/`), which is
+a separate quality signal and is not currently scheduled nightly. The DAST area asserts:
 
-| # | Harness status | Scenario (fast gate) | Assertion | Catches |
+| # | Harness status | Scenario (manual release gate) | Assertion | Catches |
 |---|---|---|---|---|
-| D-1 | Implemented | standard scan of Juice Shop | completes (no hang/crash/reap) + graded + findings persist | finalize-hang / NUL-crash class |
+| D-1 | Implemented | standard scan of pinned Juice Shop | worker proves target reachability; scan completes (no hang/crash/reap) + graded + findings persist | network-wiring / finalize-hang / NUL-crash class |
 | D-1 receipt | Implemented | same standard scan | template receipt matches the underlying Nuclei completion state | adapter-return completion overclaim |
 | D-2 | Implemented | bounded (un-sharded) active scan of the injectable login | critical SQLi detected | active SQLi recall (spot) |
 | D-3 | Implemented | bounded active scan of the search | XSS detected | active XSS recall (spot) |
 | D-4 | Implemented | attack-chain assertions | the 3 removed phantom chains never appear | overclaim regression |
 | D-5 | **Planned slow case** | Full Coverage run producing truncated/NUL-byte evidence | scan completes; oversized evidence is truncated-and-flagged and NUL bytes stripped before DB persist | truncation + NUL-byte crash class |
 
-Slow benchmark scope (quality, not the fast gate): authenticated smart recall ≥ 70% of the
+Slow benchmark scope (quality, not the E2E release gate): authenticated smart recall ≥ 70% of the
 Juice Shop answer key, crAPI dual-user BOLA/IDOR + mass-assignment + JWT, precision
 (false-positive rate), Full Coverage truncation, and NUL-byte evidence persistence.
 
@@ -83,12 +84,16 @@ MI-5/6 (trust root) · D-4 (phantom chains).
 
 Planned: AI-5 (judge guard) · D-5 (truncation + crash) · AI-6 / MI-7 (policy wiring).
 
-## Rollout
-- **Phase 0** harness + preflight + scorecard.
-- **Phase 1–3** a thin real slice of each area first (harness-first), then deepen toward the full matrices.
-- **Phase 4** `make e2e` is run by `.github/workflows/e2e.yml` on pull requests and pushes to
-  `main`/`master`. There is currently no scheduled nightly workflow; do not call the slow suite
-  nightly until a `schedule` trigger and implemented slow cases exist.
+## Workflow split
+- `.github/workflows/e2e-pr.yml` runs on every pull request so it can be a required check, but starts
+  the stack and executes deterministic Model Intake and AI Gate cases only when backend, database,
+  Compose, harness, or workflow code changed. Documentation/UI-only PRs pass without starting Docker.
+- `.github/workflows/e2e.yml` is a manual full release gate. It starts the pinned Juice Shop profile,
+  proves worker-to-target reachability, and runs `--area all`. Run it on the exact approved candidate
+  before creating a release tag.
+- There is no automatic `push` or scheduled nightly E2E run. Do not describe any suite as nightly
+  until a `schedule` trigger and corresponding operational ownership exist.
 
 ## Workflow rule
-Any change to fetch / scan / redaction / decision code requires an e2e test through the real stack before it is called done — not a unit test alone.
+Changes to fetch, scan, redaction, or decision code require the applicable real-stack smoke coverage.
+Scanner detection changes also require the manual full E2E release gate before release—not a unit test alone.

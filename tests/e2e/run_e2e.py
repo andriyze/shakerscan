@@ -343,6 +343,16 @@ def run_dast() -> H.Scorecard:
             status = str(scan.get("status"))
             sc.check("D-1 scan completes (no hang/crash/reap)", status == "completed", f"status={status}")
             res = H.scan_result(scan_id)
+            log_lines = (H.get(f"/scans/{scan_id}/logs?limit=1000").get("lines") or [])
+            connectivity_failures = [
+                str(line) for line in log_lines
+                if "pre_scan_failed" in str(line).lower() or "target unreachable" in str(line).lower()
+            ]
+            sc.check(
+                "D-1 target was reachable from the worker",
+                not connectivity_failures,
+                f"connectivity_failures={connectivity_failures[:2]}",
+            )
             findings = res.get("findings") or []
             grade = res.get("grade") or (res.get("result") or {}).get("grade")
             sc.check("D-1 graded report produced", bool(grade), f"grade={grade}")

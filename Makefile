@@ -22,7 +22,7 @@ upgrade-smoke:
 	docker build -f scanner/Dockerfile -t shakerscan-scanner:upgrade-smoke .
 	SCANNER_IMAGE=shakerscan-scanner:upgrade-smoke scripts/upgrade_smoke.sh
 
-## Full end-to-end suite against the live stack + honey targets (hard gate).
+## Full manual/release end-to-end suite against the live stack + honey targets.
 e2e:
 	$(PY) tests/e2e/run_e2e.py --area all
 

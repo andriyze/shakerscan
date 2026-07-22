@@ -106,7 +106,9 @@ re-confirmed on the frozen candidate SHA; the live-stack and benchmark rows belo
 - [ ] Documentation links and current/archive indexes pass.
 - [ ] `make release-gates` passes. (The Release workflow now invokes the gates in the candidate
       scanner image before publish, so a wrong candidate cannot be published green.)
-- [ ] `make e2e` passes against a uniform build-current fleet.
+- [ ] The manual **E2E (full release gate)** workflow passes for the exact frozen candidate SHA
+      against its pinned Juice Shop target and a uniform build-current fleet (`make e2e` is the
+      equivalent local harness invocation).
 - [ ] `make e2e-model-intake` passes the real public-model path, or the offline fixture is explicitly
       recorded as a limited substitute.
 - [ ] A single current-fleet Smart Juice Shop scorecard is recorded.
