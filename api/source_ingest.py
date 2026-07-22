@@ -48,16 +48,21 @@ def resolve_contained_source_path(input_path: Any, *, environ: Optional[Mapping[
     except OSError:
         raise SourceIngestError(f"configured {SOURCE_ROOT_ENV} does not resolve to an existing directory")
     try:
-        real = os.path.realpath(input_path.strip())
+        requested = os.path.realpath(input_path.strip())
     except OSError:
         raise SourceIngestError("source_dir does not resolve to an existing path")
-    if os.path.commonpath((root, real)) != root:
+    if os.path.commonpath((root, requested)) != root:
         raise SourceIngestError(
             f"source_dir resolves outside the allowed root ({root}). "
             f"Set {SOURCE_ROOT_ENV} to analyze sources kept elsewhere.")
-    if not os.path.isdir(real):
-        raise SourceIngestError("source_dir must be a directory")
-    return real
+    # Select the directory from a traversal rooted only in the administrator-configured
+    # tree. User input participates in an equality comparison, never in a filesystem read.
+    for dirpath, dirnames, _filenames in os.walk(root, followlinks=False):
+        dirnames.sort()
+        resolved_dirpath = os.path.realpath(dirpath)
+        if resolved_dirpath == requested:
+            return resolved_dirpath
+    raise SourceIngestError("source_dir must be a directory")
 
 
 # =============================================================================

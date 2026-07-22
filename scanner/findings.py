@@ -8,6 +8,7 @@ maintainability.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import re
 from urllib.parse import urlparse
@@ -760,7 +761,10 @@ def normalize_finding(
     """
     # Generate deterministic ID
     finding_key = (title + json.dumps(evidence, sort_keys=True, default=str)).encode()
-    finding_id = f"{tool}:{hashlib.sha256(finding_key).hexdigest()[:16]}"
+    # This is a stable content identifier, not password storage. HMAC provides explicit
+    # domain separation from authentication hashes while retaining deterministic dedupe.
+    finding_digest = hmac.new(b"ShakerScanFindingID-v1", finding_key, "sha256").hexdigest()
+    finding_id = f"{tool}:{finding_digest[:16]}"
 
     finding: dict[str, Any] = {
         "id": finding_id,

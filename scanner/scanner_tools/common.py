@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import hmac
 import os
 import re
 import signal
@@ -205,7 +206,12 @@ def _record_subprocess_receipt(
         "timeout_seconds": int(timeout_seconds),
         "duration_ms": int(max(0, now - started_at) * 1000),
         "redacted_argv": redacted,
-        "command_hash": hashlib.sha256("\x00".join(redacted).encode("utf-8", "ignore")).hexdigest(),
+        # Stable receipt identifier over already-redacted argv; never used for authentication.
+        "command_hash": hmac.new(
+            b"ShakerScanCommandReceipt-v1",
+            "\x00".join(redacted).encode("utf-8", "ignore"),
+            "sha256",
+        ).hexdigest(),
         "stdout_length": len(stdout_text),
         "stderr_length": len(stderr_text),
         "stdout_preview": stdout_preview,
@@ -279,8 +285,8 @@ async def run(
     if tool_basename in unmetered_network_tools:
         try:
             meter.record_unmetered_tool(tool=tool_basename, target_url=request_url)
-        except RequestBudgetExceeded as exc:
-            return "", str(exc), 75
+        except RequestBudgetExceeded:
+            return "", "unmetered network tool is disabled by the request budget", 75
     _throttle = _get_active_throttle() if (is_http_request and _get_active_throttle) else None
 
     async with _get_semaphore():
@@ -301,8 +307,8 @@ async def run(
                         url=request_url,
                         retry=attempt > 0,
                     )
-                except RequestBudgetExceeded as exc:
-                    return "", str(exc), 75
+                except RequestBudgetExceeded:
+                    return "", "request budget exhausted before HTTP request", 75
             if _throttle is not None:
                 await _throttle.before()
             _req_started = time.monotonic()
@@ -417,7 +423,7 @@ async def run(
                     except Exception:
                         pass
                 raise
-            except Exception as e:
+            except Exception as exc:
                 if proc is not None:
                     try:
                         if use_process_group:
@@ -437,9 +443,9 @@ async def run(
                     exit_code=1,
                     timed_out=False,
                     started_at=_req_started,
-                    error=str(e),
+                    error=f"subprocess execution failed ({type(exc).__name__})",
                 )
-                return "", str(e), 1
+                return "", f"subprocess execution failed ({type(exc).__name__})", 1
             finally:
                 if metered_request:
                     meter.record_completion(phase="curl", url=request_url)
