@@ -76,7 +76,7 @@ flags, skills, agents, adapters, modules, and durable tables) plus architecture/
 - **Exceptions (`/exceptions`)**: exception queue, owner/approver/control repair, expiry visibility, and lifecycle sweep.
 - **Command Arsenal (`/settings/arsenal`)**: command contracts, plans, scope/approval receipts, action ledger, hypotheses, refuters, tools, local agents, context packs, and decision traces.
 - **AI Operations Router (`/settings/ai-ops-router`)**: preview natural-language operations as bounded API plans with safety, missing-input, blast-radius, and confirmation details before optional execution.
-- **Deep Hunt (`/deep-hunt`)**: launch a keyless, AI-driven investigation through `/agent/hunt/*`. The current Codex/Claude/OpenCode session composes its own requests and tools; ShakerScan enforces target scope, expiring approval, hard action/request ceilings, evidence provenance, and deterministic proof promotion. Deep Hunt performs bounded active testing but blocks arbitrary state-changing HTTP in the free-form loop.
+- **Deep Hunt (`/deep-hunt`)**: launch a keyless, AI-driven investigation through `/agent/hunt/*`. The current Codex/Claude/OpenCode session composes its own requests and tools; ShakerScan enforces target scope, expiring approval, bounded tool/action units, per-tool traffic limits, evidence provenance, and deterministic proof promotion. The request-unit counter counts tool invocations, not every wire request issued by a bounded scanner. Deep Hunt performs bounded active testing but blocks arbitrary state-changing HTTP in the free-form loop.
 - **Leads and Test Builder (`/deep-hunt/leads`, `/deep-hunt/experiment`)**: inspect the hypothesis backlog or hand-craft an advanced bounded experiment. They support Deep Hunt; they are not separate engines.
 - **Bounded experiments (`/deep-hunt/runs/{id}`)**: inspect durable runs from the compatibility `/research/*` controller, retained for specialized guided verification. Do not route a user's "Deep Hunt" request there; `/deep-hunt/operator` and `/deep-hunt/explorer` are legacy URLs that redirect to `/deep-hunt`.
 - **Settings (`/settings`)**: AI providers, scan execution policy, automation defaults, and approval-receipt enforcement.
@@ -465,9 +465,11 @@ The first observation returned by `session` is itself a full system prompt (tool
 RECON→PLAN→EXECUTE→EVIDENCE→SELF-CRITIQUE cadence, and the exact debrief schema) — read it; the harness
 self-describes the contract each turn. Three things trip up a first-time driver:
 - **Evidence is `evidence_refs`, not prose.** Each debrief finding proves itself ONLY through
-  `evidence_refs` — the `resp_N` refs returned by `http_request` — which the server resolves into
-  tool-output evidence for the provenance gate. Inline `evidence`/`details` prose is NOT evidence; a
-  prose-only finding fails the gate and is silently dropped (persists nothing). Debrief shape:
+  `evidence_refs` — normally the `resp_N` refs returned by `http_request`; the runtime also accepts
+  `scan_N` refs from successful `run_tool` calls, although the current text contract does not advertise
+  them. The server resolves cited refs into tool-output evidence for the provenance gate. Inline
+  `evidence`/`details` prose is NOT evidence; a prose-only finding fails the gate and persists nothing.
+  Debrief shape:
   `{"done":true,"findings":[{"title","severity","family","predicate","route","method","cwe","details","evidence_refs":["resp_1","resp_2"],"remediation"}],"abstained":false}`.
 - **The coding agent drives each turn** — reply while `status: awaiting_planner` and
   STOP on any terminal status (a run ends `completed`, `failed`, or `cancelled`, not only `completed`;

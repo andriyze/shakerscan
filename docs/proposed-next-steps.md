@@ -71,10 +71,20 @@ worker to Redis.
 The engine design authority — ReAct loop, provenance gate, the two-tier verification bridge, and this
 backlog mapped to concrete seams — is [deep-hunt-architecture.md](deep-hunt-architecture.md).
 
+- Replace tool-call-as-request accounting with adapter-reported or reserved-upper-bound target-request
+  metering, and add an honest whole-session deadline for keyless runs.
+- Align the evidence contract with runtime provenance: advertise `scan_N` safely or require HTTP
+  confirmation, and make useful response diffs citeable.
+- Add DB-backed integration coverage for both drivers, cancellation/restart boundaries, provenance
+  persistence, deterministic retest queueing, and proof promotion before expanding active behavior.
 - Improve target-observed object-instance route induction and persist authorized OpenAPI/custom
   endpoint ingestion into the canonical target surface.
+- Add an operator-approved BOLA ownership oracle and restoration-backed PUT/PATCH mass-assignment
+  verification without relaxing the family-proof moat.
 - Measure useful action selection, verified net-new yield, false promotion, cost, retry behavior,
   cleanup, and stop quality across current-agent and configured-provider planners.
+- Make configured-provider turns checkpointable and keyless in-flight recovery idempotent; never
+  replay uncertain active traffic after a restart.
 - Keep arbitrary shell, model-supplied credentials, and AI-only verified findings excluded.
 
 ## 6. Graduate AI preview surfaces

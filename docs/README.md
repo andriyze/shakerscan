@@ -49,7 +49,7 @@ Code, database schemas, runtime receipts, and tests remain authoritative when a 
 |---|---|
 | [`dast-asm-architecture.md`](dast-asm-architecture.md) | Current one-shot DAST, local scatter/gather, and Continuous ASM execution model |
 | [`deep-hunt-architecture.md`](deep-hunt-architecture.md) | Deep Hunt AI-investigator engine: ReAct loop, tool arsenal, provenance gate, two-tier SUSPECTED/VERIFIED bridge, and the §5 improvement backlog |
-| [`multi-node-architecture.md`](multi-node-architecture.md) | Design authority + Phase-1 build spec; the fan-out substrate is shipped, the remote-fleet trust and lifecycle layer is not |
+| [`multi-node-architecture.md`](multi-node-architecture.md) | Design authority + Phase-1 draft vertical-slice spec; fan-out is shipped, while remote enrollment, lifecycle, reliable delivery, and general artifact transport are not |
 
 ## Maintenance Rule
 

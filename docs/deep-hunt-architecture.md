@@ -53,8 +53,10 @@ Two dimensions carry the entire trust story:
    ` ```json {"done":true,"findings":[…],"abstained":false} ``` ` debrief.
 3. **Apply** — `_agent_apply_reply` classifies each call, executes it, shapes evidence, records the
    event, and runs anti-stall. A successful `http_request` with tool provenance is assigned a stable
-   `resp_N` reference (a `run_tool` gets `scan_N`). This reference map is what debrief `evidence_refs`
-   resolve against.
+   `resp_N` reference; a successful `run_tool` gets `scan_N`. The runtime accepts either kind in a
+   debrief's `evidence_refs`. The currently rendered text contract still teaches only `resp_N`, so a
+   planner should use scanners for discovery and confirm a claim with `http_request` until that
+   contract gap is closed. `diff` marks progress but does not currently receive a citeable reference.
 4. **Terminate** — on an explicit debrief, on a terminal status (`completed` / `failed` / `cancelled`),
    or on a ceiling breach that forces a debrief. The keyless driver replies **only** while
    `status: awaiting_planner` and stops on any terminal status.
@@ -67,7 +69,7 @@ Two dimensions carry the entire trust story:
   rejected); request headers pass an allowlist that strips forbidden/sensitive headers; auth is
   injected server-side from a resolved `as_principal` slot, so credentials are never model-visible;
   write methods are gated (`needs_approval` unless the hunt is write-authorized); bounded body, 15s
-  timeout. Only a successful **tool-provenance** `http_request` produces an evidence ref.
+  timeout. A successful **tool-provenance** request produces a `resp_N` evidence ref.
 - **`query_kb`** — read-only bounded SELECTs over `{endpoints, findings, hypotheses, principals,
   graph_nodes, graph_edges, tool_receipts, notes}`, row-capped. Produces **no** evidence ref, so a KB
   read can never back a finding.
@@ -76,19 +78,29 @@ Two dimensions carry the entire trust story:
   board or create a finding.
 - **`run_tool`** — argv-templated scanner runs (`httpx` read-only; `nuclei` / `katana` / `ffuf` are
   active and require write/active authorization). Argv is hardcoded per tool with only regex-gated
-  tunables; same-origin is forced; output is capped; the subprocess is wall-clock killed.
+  tunables; same-origin is forced; output is capped; the subprocess is wall-clock killed. A
+  successful run receives a `scan_N` evidence ref, although the current prompt does not advertise it.
 
 Arbitrary state-changing HTTP stays blocked in the free-form loop; controlled mutations belong to typed
 verification workflows with cleanup/restoration contracts.
 
 ### Ceilings and anti-stall
 
-Per-run budgets are enforced every turn (action / request / active-action / wall-clock / model-token)
-and clamp the session ceilings: default 20 iterations and a hard max of 40; request ceiling
-`min(400, iters·12)`; active-action ceiling `min(24, iters)`; ≤ 12 tool calls per turn; the transcript
-is soft-capped with head+tail retention; per-tool output is capped at 8000 characters. Anti-stall
-covers duplicate calls, hallucinated tools, ≥ 4 no-progress turns, > 2 empty replies, and a transient
-planner-error cap; a likely refusal is honored, not overridden.
+The two drivers do not yet have identical accounting. Keyless sessions enforce an action ceiling, a
+request-**unit** ceiling of `min(400, iters·12)`, an active-action ceiling of
+`min(24, iters)`, and ≤ 12 tool calls per turn. A request unit is currently one `http_request` or one
+`run_tool` invocation; it is **not a wire-request count**. A bounded scanner may issue many target
+requests while consuming one unit, so the request-unit ceiling must not be described as a hard target
+request budget. Scanner argv templates still impose their own rate, duration, and subprocess limits.
+
+Configured-provider research episodes additionally pass wall-clock and model-token budgets into the
+in-process loop. A keyless session uses `token_budget` to size its seed context, but the server cannot
+measure the external coding agent's tokens and does not currently impose a whole-session wall-clock
+deadline. It does enforce per-tool timeouts and cancellation checks. Both drivers default to 20
+iterations with a hard maximum of 40; the transcript is soft-capped with head+tail retention and each
+tool result is capped at 8000 characters. Anti-stall covers duplicate calls, hallucinated tools,
+≥ 4 no-progress turns, > 2 empty replies, and a transient planner-error cap; a likely refusal is
+honored, not overridden.
 
 These ceilings are **breadth/depth knobs** — loosening them cannot manufacture a false SUSPECTED or
 VERIFIED, so they are safe to tune independently of the trust gates. Keep that separation explicit: the
@@ -103,12 +115,12 @@ etc.), so a debrief can never self-assert VERIFIED. `gate_live_finding` then adm
 file}`) with non-empty content; a critical/high asserted with zero evidence is blocked as overclaim.
 
 Evidence resolution is per-finding and fail-closed: each finding's `evidence_refs` resolve against
-**its own** cited `resp_N` refs only — never another finding's, never the run's pool. A ref that does
-not resolve yields empty evidence, and the finding is **blocked** (surfaced to the operator but never
-persisted). Inline `details` / `evidence` prose is **not** evidence.
+**its own** cited `resp_N` or `scan_N` refs only — never another finding's, never the uncited run pool.
+A ref that does not resolve yields empty evidence, and the finding is **blocked** (surfaced to the
+operator but never persisted). Inline `details` / `evidence` prose is **not** evidence.
 
 This is the single thing a first-time driver most often gets wrong: proof is `evidence_refs` pointing
-at real `resp_N` responses, not prose. A prose-only finding silently persists nothing.
+at real tool refs, normally `resp_N` responses, not prose. A prose-only finding persists nothing.
 
 Persistence writes `tool='autonomous_agent'`, `source='autonomous'`, and leaves
 `last_verification_verdict` NULL. Rediscovery updates visibility only; it never reopens a
@@ -146,7 +158,8 @@ is enabled, capped per run with per-family request/second reservations:
   backlog item.
 - **Update-based mass_assignment** (PUT/PATCH of a privileged field) is not yet bridged; only
   create-based POST is server-materialized.
-- The refusal-**reframe** helper is ported but intentionally left unwired.
+- The upstream refusal-**reframe** helper was deliberately **not ported**. ShakerScan detects and
+  honors a planner refusal; it does not automatically override the model's safety decision.
 
 ## Planner model
 
@@ -154,8 +167,10 @@ Modes (`RESEARCH_PLANNER_MODES`):
 
 - **`agent` (keyless — the default).** The coding-agent session is the planner. No stored provider key
   is required; the server suspends per turn and the reply arrives as the POST body of
-  `.../session/{run_id}/reply`. State is durable in `agent_hunt_runs`, so a mid-hunt API restart
-  resumes.
+  `.../session/{run_id}/reply`. State is durable **between completed turns**, so an API restart while
+  the run is `awaiting_planner` can continue. A restart during an in-flight `planning` turn is
+  deliberately not reclaimed because replay could duplicate active traffic; the run remains fenced
+  until the operator cancels and relaunches it. Mid-turn idempotent recovery is backlog work.
 - **`configured_ai`.** A provider model is invoked in-process (`_agent_planner_reply`: temperature 0.3,
   JSON-object mode, bounded max-tokens, with model fallbacks). There is no hardcoded default model — an
   unconfigured `configured_ai` run fails closed (`configured_ai_not_ready`). **This loop is not
@@ -185,19 +200,26 @@ two-run proof stay untouched; business-logic VERIFIED comes only from operator-a
 arbitrary shell, model-supplied credentials, and AI-only VERIFIED findings stay excluded. Every item is
 a recall/quality gain that must preserve the zero-false-VERIFIED guarantee.
 
-1. **BOLA ownership oracle** — give BOLA a sound auto-promotion path via an invariant-style ownership
+1. **Honest active-traffic metering** — reserve or measure the wire requests generated by each
+   `run_tool` adapter, expose metering quality, and add a whole-session deadline for keyless runs.
+2. **Unified evidence-reference contract** — advertise `scan_N` honestly or require HTTP
+   confirmation, and give useful `diff` results a citeable provenance-bearing ref.
+3. **Integration test harness** — end-to-end driver/endpoint tests behind a DB + provider fixture,
+   including cancellation, traffic accounting, persistence, deterministic retest queueing, and proof
+   promotion.
+4. **BOLA ownership oracle** — give BOLA a sound auto-promotion path via an invariant-style ownership
    contract (the access_control pattern) instead of leaving it manual-only. Highest-value recall win.
-2. **Update-based mass_assignment** — bridge PUT/PATCH privileged-field writes with a restoration
+5. **Update-based mass_assignment** — bridge PUT/PATCH privileged-field writes with a restoration
    contract, not just create-based POST.
-3. **Object-instance route induction & surface persistence** (§5) — induce concrete `{id}` instances
+6. **Object-instance route induction & surface persistence** (§5) — induce concrete `{id}` instances
    from observed responses and persist authorized OpenAPI / custom-endpoint ingestion into the canonical
    target surface, so `{id}` placeholders resolve in the no-captured-ref verification workflows.
-4. **Driver-quality measurement** (§5) — instrument useful-action selection, verified net-new yield,
+7. **Driver-quality measurement** (§5) — instrument useful-action selection, verified net-new yield,
    false-promotion rate, cost, retry behavior, cleanup success, and stop quality across the `agent` and
    `configured_ai` planners.
-5. **`configured_ai` resumability** — checkpoint in-process loop state per turn (the keyless path
-   already does this) so a mid-hunt restart resumes instead of failing closed.
-6. **Integration test harness** — end-to-end driver/endpoint tests behind a DB + provider fixture.
+8. **Driver resumability** — checkpoint the configured-provider loop per turn and design idempotent,
+   receipt-backed recovery for a keyless turn interrupted while `planning`. Between-turn keyless
+   durability already works; neither driver should replay uncertain active traffic.
 
 ## API surface
 

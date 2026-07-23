@@ -1,9 +1,10 @@
 # Multi-Node Architecture
 
-**Status:** Design authority + Phase-1 implementation spec. The fan-out substrate this builds on is
-shipped (see the code-grounded capability table below); the remote-fleet trust and lifecycle layer is
-not implemented yet. Milestone A is specified here to a buildable level (§6 "Phase 1 build
-specification"); Phases 2–3 remain design-level.
+**Status:** Design authority + Phase-1 draft vertical-slice specification. The fan-out substrate this
+builds on is shipped (see the code-grounded capability table below); the remote-fleet trust and
+lifecycle layer is not implemented yet. Milestone A defines the intended two-VPS slice, but its
+pre-overlay enrollment, node-credential, worker-image, and artifact contracts must be completed before
+implementation (§6). Phases 2–3 remain design-level.
 **Scope:** run a coordinated ShakerScan fleet across multiple VMs/VPS hosts so one UI/API
 can scan more targets at once and run high-budget Full Coverage scans by using workers
 from many machines.
@@ -25,7 +26,7 @@ becoming stale prose. For product priority and phased order, see
 | Race-safe concurrent finding writes | **Built** | `UNIQUE INDEX idx_findings_target_fingerprint` (`db/init.sql`) |
 | Fleet-wide active-scan concurrency cap (lease-based Redis ZSET semaphore; TTL frees a crashed holder) | **Built** | `ACTIVE_SCAN_SLOTS_KEY` (`worker.py`) |
 | Per-root-domain request reservation (atomic Redis Lua; already coordinates every process on the shared Redis) | **Built** | `reserve_domain_rate` (`asm_inventory.py`) |
-| Object-store evidence backend (SigV4 S3/MinIO client: content-addressed PUT, hash-verified GET, retention DELETE) | **Built but OFF by default** — `EVIDENCE_STORAGE_BACKEND=local`; flip to `s3`/`minio` is config-only | `evidence_storage.py` |
+| Managed `evidence_objects` backend (SigV4 S3/MinIO client: content-addressed PUT, hash-verified GET, retention DELETE) | **Built but OFF by default** — only covers large managed evidence-object payloads. General scan results, checkpoints, and other `/results` artifacts remain local; Compose does not yet pass the S3 settings through. | `evidence_storage.py`; `worker.py` `save_result_file` |
 | Job-queue delivery | **Built as at-most-once** — plain Redis list (`RPUSH`/`BLPOP`), compensated by DB row + heartbeat + `processing_lease_at` marker. **No per-message lease/ack/reclaim/fencing.** | `QUEUE_NAME` (`worker.py`, `api.py`) |
 | Remote worker scaling | **Local Docker socket only** (`/var/run/docker.sock`); no remote-node scaling | `POST /workers` (`api.py`); `scanner.sh scale` |
 | Node identity, enrollment, join tokens, node-agent, heartbeat, WireGuard provisioning, placement, `nodes` table | **Not present (greenfield)** — specified by this document | — |
@@ -34,11 +35,12 @@ The takeaways that shape the plan:
 
 - **Do not rebuild** the fan-out, merge-once, finding dedup, active-scan semaphore, or the domain-rate
   primitive. They are real and correct, and the last two already coordinate across a shared Redis.
-- **Cross-node evidence is a config + operations task on an already-working client**, not new
-  application code (stand up MinIO, set the backend; §8).
+- **Do not mistake managed evidence-object storage for a complete artifact plane.** The S3 client is
+  reusable, but cross-node results/checkpoints/diagnostics require application and deployment work
+  (§8).
 - The genuinely net-new engineering is (1) node identity / enrollment / overlay, and (2) upgrading
   queue delivery from at-most-once to leased/acked/reclaimable before any remote node is trusted with
-  unattended work.
+  unattended work, plus (3) a general cross-node artifact contract.
 
 The parallel-scan design answers: "How does one logical scan fan out into plan, shard, and merge
 jobs?" This document answers: "How can those worker jobs run safely on more than one host?"
@@ -363,11 +365,12 @@ Important limitations in Phase 1:
 - a worker crash can still lose an in-flight job under list/pop semantics;
 - routing assumes workers are mostly interchangeable.
 
-#### Phase 1 build specification (Milestone A: two-VPS queue proof)
+#### Phase 1 draft vertical-slice specification (Milestone A: two-VPS queue proof)
 
-This is the concrete, buildable form of Milestone A (§13). It reuses the shipped queue and fan-out
-unchanged; the only net-new code is node identity, a worker-only deployment profile, and overlay
-binding. Build order:
+This is the concrete target shape for Milestone A (§13). It reuses the shipped queue and fan-out
+unchanged. The enrollment/bootstrap and durable credential details below are part of the slice, not
+follow-up polish; omitting them would leave the advertised one-command join flow unimplementable.
+Build order:
 
 **1. `nodes` registry + join tokens (net-new — no node table exists today).** Add to `db/init.sql`
 and to the idempotent `run_schema_migrations` path in `api/retest_contract.py`, following the 0.7.0
@@ -378,8 +381,9 @@ unique one is asserted; migrations must fail closed, not silently no-op):
 CREATE TABLE IF NOT EXISTS nodes (
   id                   UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   name                 TEXT NOT NULL,
+  hostname             TEXT,
   role                 TEXT NOT NULL CHECK (role IN ('control_plane','worker')),
-  overlay_ip           INET,
+  overlay_ip           INET UNIQUE,
   egress_ip            INET,
   region               TEXT,
   labels               JSONB NOT NULL DEFAULT '{}'::jsonb,
@@ -391,7 +395,8 @@ CREATE TABLE IF NOT EXISTS nodes (
                          CHECK (status IN ('joining','healthy','stale','draining','disabled')),
   drain                BOOLEAN NOT NULL DEFAULT FALSE,
   last_heartbeat_at    TIMESTAMPTZ,
-  created_at           TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  created_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at           TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS node_join_tokens (
@@ -401,22 +406,41 @@ CREATE TABLE IF NOT EXISTS node_join_tokens (
   consumed_at TIMESTAMPTZ,                 -- single-use
   created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+CREATE TABLE IF NOT EXISTS node_credentials (
+  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  node_id         UUID NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+  credential_hash TEXT NOT NULL UNIQUE,       -- hash only; return the raw secret once
+  expires_at      TIMESTAMPTZ,
+  revoked_at      TIMESTAMPTZ,
+  last_used_at    TIMESTAMPTZ,
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
 ```
+
+Consume a join token with one conditional `UPDATE ... WHERE consumed_at IS NULL AND expires_at >
+NOW() RETURNING ...`, then create the node and its credential in the same database transaction. A
+concurrent second consumer must receive no row. The API must authenticate heartbeat and lifecycle
+calls by hashing the presented node credential and checking expiry/revocation; `node_id` alone is
+never authority.
 
 Each worker reports its `build_fingerprint` on heartbeat so the existing stale-build refusal
 (`build_current` / `expected_build_fingerprint_at_submit` / `stale_worker_count_at_submit`) extends to
 the fleet: a mixed- or stale-build fleet must stay rejectable, consistent with the DAST-quality rule.
 
-**2. Worker-only deployment profile.** Today the `worker` service in `docker-compose.yml` hardcodes
+**2. Worker-only deployment contract.** Today the `worker` service in `docker-compose.yml` hardcodes
 `REDIS_URL=redis://redis:6379` and `DATABASE_URL=…@postgres:5432/scanner` to the control plane's own
-service DNS. A remote worker must resolve both to the control plane's overlay address. Add a
-worker-only profile that starts **only** the `worker` service (no `api`, `ui`, `postgres`, `redis`)
-with both URLs parameterized:
+service DNS, builds locally, bind-mounts source, and declares Redis/Postgres dependencies. A Compose
+profile alone does not remove those dependencies. Add a separate worker override/file (or an explicit
+`--no-deps` wrapper contract) that starts **only** the worker, uses a digest-pinned registry image,
+has no source bind mounts, parameterizes both URLs, and passes the object-store settings when enabled:
 
 ```bash
 # worker VPS: worker service only, pointed at the control plane over the overlay
 REDIS_URL=redis://<control-plane-overlay-ip>:6379
 DATABASE_URL=postgresql://scanner:<password>@<control-plane-overlay-ip>:5432/scanner
+EVIDENCE_STORAGE_BACKEND=s3
+EVIDENCE_S3_ENDPOINT_URL=http://<artifact-store-overlay-ip>:9000
 ```
 
 **3. Overlay binding (never expose data stores publicly).** The control plane binds Redis and
@@ -425,20 +449,25 @@ today (default `127.0.0.1`); fleet mode sets it to the control-plane overlay IP 
 rule permitting only peer overlay addresses to reach 6379/5432. Public exposure of 6379/5432 remains a
 non-goal (§11).
 
-**4. Fleet CLI contract.** Add three verbs to `scanner.sh` (its current dispatch table has no
-fleet/join verb):
+**4. Fleet CLI + pre-overlay bootstrap contract.** Add three verbs to `scanner.sh` (its current
+dispatch table has no fleet/join verb):
 
 ```text
 shakerscan fleet init [--network wireguard]
     # control plane: create the overlay + control peer, flip data-store bind to the overlay IP, enable fleet mode
 shakerscan fleet join-token --role worker --ttl 24h
     # mint a single-use, hashed, expiring token; print the ready-to-paste join command
-shakerscan join <control-plane-overlay-url> --token <join-token>
-    # worker VPS: exchange token -> node identity, write worker config, start the worker-only profile
+shakerscan join <control-plane-https-url> --token <join-token>
+    # worker VPS: bootstrap over HTTPS, establish the overlay, then start the worker-only profile
 ```
 
-`join` calls a new `POST /fleet/nodes/join` on the control plane: validate the token (unexpired,
-unconsumed), consume it, insert the `nodes` row, and return the connection bundle.
+The worker cannot call an overlay URL before it has an overlay. `join` therefore generates its
+WireGuard keypair locally and calls a narrowly exposed `POST /fleet/nodes/join` over an operator-
+configured HTTPS control-plane URL. The request carries the raw enrollment token, worker public key,
+hostname, and bounded capability summary. In one transaction the endpoint consumes the token,
+allocates a unique overlay IP, inserts the node and hashed durable credential, and returns the control
+peer information. The worker installs that configuration, proves overlay reachability, and only then
+uses the private Redis/Postgres URLs. Plain HTTP is not an enrollment transport.
 
 **5. Connection bundle** returned by `POST /fleet/nodes/join` (the worker persists this and then
 authenticates with its own `node_credential`, never re-using the enrollment token):
@@ -446,8 +475,14 @@ authenticates with its own `node_credential`, never re-using the enrollment toke
 ```text
 node_id, control_plane_overlay_url, redis_url, database_url (Phase-1 overlay mode),
 worker_image_digest, desired_worker_count, labels,
-wireguard_peer_ip, wireguard_control_plane_public_key, node_credential
+wireguard_peer_ip, wireguard_control_plane_public_key, wireguard_control_plane_endpoint,
+node_credential
 ```
+
+The raw `node_credential` is returned once over HTTPS and persisted with restrictive filesystem
+permissions. It authorizes only node API operations; Phase-1 Redis/Postgres and artifact credentials
+remain separate secrets delivered after the overlay is established. Rotation and revocation are part
+of the node API even if automatic rotation is deferred.
 
 **6. Heartbeat + fleet view.** The worker posts `POST /fleet/nodes/{id}/heartbeat` (status, active
 worker count, host resources, `build_fingerprint`) on a fixed interval; the control plane marks a node
@@ -457,10 +492,11 @@ IP, and build currency.
 
 **Milestone A done** = a remote worker registers with one command, appears in the fleet view with a
 heartbeat, drains the shared `scan_jobs` queue, writes scans/findings to the control-plane database,
-and Redis/Postgres are unreachable from the public internet. The **accepted** Phase-1 gaps remain:
+and Redis/Postgres are unreachable from the public internet. This is explicitly a **lab proof**, not
+an unattended-production claim. The accepted Phase-1 gaps remain:
 at-most-once delivery (a hard worker loss between `BLPOP` and the first heartbeat still relies on the
-DB reconcilers, not a Redis lease — §9), local-bind evidence unless S3/MinIO is enabled (§8), and
-manual per-node scaling until the Phase-2 node-agent lands.
+DB reconcilers, not a Redis lease — §9), worker-local result/checkpoint artifacts even when managed
+evidence objects use S3 (§8), and manual per-node scaling until the Phase-2 node-agent lands.
 
 ### Phase 2: Production-Ready Owned Fleet
 
@@ -565,15 +601,19 @@ Required target state:
 Recommended first implementation: MinIO for self-hosted deployments, using S3-compatible
 APIs so cloud S3 can be used later without changing application code.
 
-**Implementation status:** the object-store backend already exists and is functional — a hand-rolled
+**Implementation status:** a useful but narrower object-store backend already exists — a hand-rolled
 SigV4 S3/MinIO client with content-addressed PUT, hash-verified GET, and retention DELETE
-(`evidence_storage.py`), selected by `EVIDENCE_STORAGE_BACKEND` (`s3`/`minio`/`s3-compatible`) with
-`EVIDENCE_S3_ENDPOINT_URL` for MinIO. It defaults to `local` (the `./results` bind mount), with small
-payloads inlined in Postgres. Making evidence cross-node-readable in Phase 1 is therefore a
-configuration and operations task (stand up MinIO; set the backend, endpoint, and credentials on the
-control plane and every worker), not new application code. The remaining engineering is operational:
-store lifecycle/retention, upload-failure handling so a partial upload can never become proof, and
-signed UI download proxying.
+(`evidence_storage.py`). It externalizes large managed `evidence_objects`; small objects remain inline
+in Postgres. It does **not** currently own ordinary scan result JSON, checkpoints, cancellation files,
+screenshots/HARs, or every diagnostic artifact. On remote-write failure it records the error and
+falls back to worker-local `RESULTS_DIR`, which is safe for a single host but is not cross-node
+durability. The current Compose file also does not forward the `EVIDENCE_*`/S3 environment into API
+and worker services.
+
+Phase 1 must wire the existing settings into the worker deployment and label managed evidence-object
+coverage honestly. Production readiness additionally needs a general artifact API/object manifest,
+fail-closed proof binding for missing or partial uploads, lifecycle/retention, and signed or proxied UI
+downloads. Reusing the SigV4 client reduces this work; it does not make it configuration-only.
 
 Evidence centralization should happen before advertising cross-VM parallel scans as
 production-ready. Without it, the logical scan may complete but its report can point at
@@ -709,8 +749,8 @@ Acceptance criteria:
 - scan state and findings are written to the control-plane database;
 - Redis/Postgres are not reachable from the public internet.
 
-Known gaps are acceptable here: manual scaling, local evidence, and at-most-once job
-delivery.
+Known gaps are acceptable only for this labeled lab proof: manual scaling, worker-local general
+artifacts, and at-most-once job delivery. No unattended or production-safe claim is allowed.
 
 ### Milestone B: Cross-VPS Parallel-Scan Proof
 
@@ -754,13 +794,17 @@ Acceptance criteria:
 
 ## Final Recommendation
 
-Keep multi-node deferred until local Wave 6 acceptance, then build it in layers:
+Begin the post-0.7 multi-node initiative in layers, while keeping DAST/auth quality and execution
+contracts as acceptance gates:
 
-1. **First proof, after local gates:** owned worker VPSs over a private overlay with fencing tokens,
-   stale-owner-write prevention, idempotent delivery, centralized evidence, and executing-node scope
-   revalidation. A shared Redis/Postgres deployment alone is not a production claim.
-2. **Owned-fleet hardening:** add node-agent lifecycle management, drain/reschedule, partition and
-   clock-skew tests, brokered short-lived secrets, per-adapter budget telemetry, and routing.
+1. **Labeled lab proof:** complete the HTTPS-to-WireGuard bootstrap and node-credential contracts,
+   then prove one digest-pinned remote worker can join, heartbeat, and drain the shared queue. Preserve
+   the documented at-most-once and worker-local-artifact limitations; a shared Redis/Postgres
+   deployment alone is not a production claim.
+2. **Owned-fleet hardening before unattended use:** add leased delivery with fencing,
+   stale-owner-write prevention, idempotent completion, centralized general artifacts,
+   executing-node scope revalidation, node-agent lifecycle management, drain/reschedule, partition
+   and clock-skew tests, per-adapter budget telemetry, and routing.
 3. **Later:** add the HTTPS broker for untrusted or customer-hosted nodes. That is the
    correct zero-trust architecture, but it is more work than needed for the first owned
    multi-VPS fleet.
