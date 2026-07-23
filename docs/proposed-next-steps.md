@@ -68,6 +68,9 @@ worker to Redis.
 
 ## 5. Deep Hunt acceptance
 
+The engine design authority — ReAct loop, provenance gate, the two-tier verification bridge, and this
+backlog mapped to concrete seams — is [deep-hunt-architecture.md](deep-hunt-architecture.md).
+
 - Improve target-observed object-instance route induction and persist authorized OpenAPI/custom
   endpoint ingestion into the canonical target surface.
 - Measure useful action selection, verified net-new yield, false promotion, cost, retry behavior,

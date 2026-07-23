@@ -21,9 +21,13 @@ def test_execution_architecture_is_consolidated_and_current():
         assert not retired.exists()
 
 
-def test_multi_node_rfc_uses_consolidated_local_architecture():
+def test_multi_node_doc_is_build_spec_and_honest_about_fleet_status():
     text = FLEET_DOC.read_text()
-    assert "RFC / design note" in text
+    # The doc has evolved from a pure RFC into a design authority plus a buildable Phase-1 spec,
+    # but it must still (a) honestly state the remote fleet is not implemented, (b) point at the
+    # consolidated local execution doc, and (c) never resurrect the retired sub-docs.
+    assert "Phase-1 implementation spec" in text
+    assert "Phase 1 build specification" in text
     assert "not implemented yet" in text
     assert "dast-asm-architecture.md" in text
     assert "parallel-scan-architecture.md" not in text

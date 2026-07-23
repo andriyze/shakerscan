@@ -1,7 +1,9 @@
 # Multi-Node Architecture
 
-**Status:** RFC / design note. The near-term path is operationally feasible, but the
-production-ready fleet work is not implemented yet.
+**Status:** Design authority + Phase-1 implementation spec. The fan-out substrate this builds on is
+shipped (see the code-grounded capability table below); the remote-fleet trust and lifecycle layer is
+not implemented yet. Milestone A is specified here to a buildable level (§6 "Phase 1 build
+specification"); Phases 2–3 remain design-level.
 **Scope:** run a coordinated ShakerScan fleet across multiple VMs/VPS hosts so one UI/API
 can scan more targets at once and run high-budget Full Coverage scans by using workers
 from many machines.
@@ -9,16 +11,37 @@ from many machines.
 
 ## Capability Status
 
-Do not duplicate the shared status matrix here. It drifted across docs before and caused agents to
-act on stale capability states. For the current quick-read, use:
+This section is the multi-node **substrate** inventory only — what execution machinery already exists
+in code versus what this document specifies as net-new. It deliberately does not restate the DAST/ASM
+capability matrix (that lives in [dast-asm-architecture.md](dast-asm-architecture.md) and drifted when
+duplicated). Each "Built" row is anchored to a source symbol so it stays verifiable instead of
+becoming stale prose. For product priority and phased order, see
+[proposed-next-steps.md](proposed-next-steps.md).
 
-- [dast-asm-architecture.md](dast-asm-architecture.md) for parent/plan/shard/merge, coverage,
-  inventory, attempts, Continuous ASM, and local execution boundaries.
-- [proposed-next-steps.md](proposed-next-steps.md) for product priority and phased delivery order.
+| Substrate piece | Status | Where (symbol) |
+|---|---|---|
+| Intra-target fan-out `scan_plan → scan_shard → scan_merge` (strategies: scope, family, coverage, coverage_family, auth_split, dynamic pull) | **Built** | `parallel_scan.py` planner; `worker.py` `process_scan_{plan,shard,merge}_job` |
+| Exactly-once merge trigger (Redis `SET NX` guard + DB non-terminal-shard source of truth) | **Built** | `reconcile_parallel_parent` (`parallel_scan.py`) |
+| Race-safe concurrent finding writes | **Built** | `UNIQUE INDEX idx_findings_target_fingerprint` (`db/init.sql`) |
+| Fleet-wide active-scan concurrency cap (lease-based Redis ZSET semaphore; TTL frees a crashed holder) | **Built** | `ACTIVE_SCAN_SLOTS_KEY` (`worker.py`) |
+| Per-root-domain request reservation (atomic Redis Lua; already coordinates every process on the shared Redis) | **Built** | `reserve_domain_rate` (`asm_inventory.py`) |
+| Object-store evidence backend (SigV4 S3/MinIO client: content-addressed PUT, hash-verified GET, retention DELETE) | **Built but OFF by default** — `EVIDENCE_STORAGE_BACKEND=local`; flip to `s3`/`minio` is config-only | `evidence_storage.py` |
+| Job-queue delivery | **Built as at-most-once** — plain Redis list (`RPUSH`/`BLPOP`), compensated by DB row + heartbeat + `processing_lease_at` marker. **No per-message lease/ack/reclaim/fencing.** | `QUEUE_NAME` (`worker.py`, `api.py`) |
+| Remote worker scaling | **Local Docker socket only** (`/var/run/docker.sock`); no remote-node scaling | `POST /workers` (`api.py`); `scanner.sh scale` |
+| Node identity, enrollment, join tokens, node-agent, heartbeat, WireGuard provisioning, placement, `nodes` table | **Not present (greenfield)** — specified by this document | — |
 
-The parallel-scan design answers: "How does one logical scan fan out into plan, shard,
-and merge jobs?" This document answers: "How can those worker jobs run on more than one
-host?"
+The takeaways that shape the plan:
+
+- **Do not rebuild** the fan-out, merge-once, finding dedup, active-scan semaphore, or the domain-rate
+  primitive. They are real and correct, and the last two already coordinate across a shared Redis.
+- **Cross-node evidence is a config + operations task on an already-working client**, not new
+  application code (stand up MinIO, set the backend; §8).
+- The genuinely net-new engineering is (1) node identity / enrollment / overlay, and (2) upgrading
+  queue delivery from at-most-once to leased/acked/reclaimable before any remote node is trusted with
+  unattended work.
+
+The parallel-scan design answers: "How does one logical scan fan out into plan, shard, and merge
+jobs?" This document answers: "How can those worker jobs run safely on more than one host?"
 
 Important framing: "multiple ShakerScan instances" should not mean several isolated
 all-in-one installs with separate databases and queues. That would create several
@@ -340,6 +363,105 @@ Important limitations in Phase 1:
 - a worker crash can still lose an in-flight job under list/pop semantics;
 - routing assumes workers are mostly interchangeable.
 
+#### Phase 1 build specification (Milestone A: two-VPS queue proof)
+
+This is the concrete, buildable form of Milestone A (§13). It reuses the shipped queue and fan-out
+unchanged; the only net-new code is node identity, a worker-only deployment profile, and overlay
+binding. Build order:
+
+**1. `nodes` registry + join tokens (net-new — no node table exists today).** Add to `db/init.sql`
+and to the idempotent `run_schema_migrations` path in `api/retest_contract.py`, following the 0.7.0
+UPGRADE-01 fail-closed migration pattern (a same-named non-unique index must be dropped before a
+unique one is asserted; migrations must fail closed, not silently no-op):
+
+```sql
+CREATE TABLE IF NOT EXISTS nodes (
+  id                   UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  name                 TEXT NOT NULL,
+  role                 TEXT NOT NULL CHECK (role IN ('control_plane','worker')),
+  overlay_ip           INET,
+  egress_ip            INET,
+  region               TEXT,
+  labels               JSONB NOT NULL DEFAULT '{}'::jsonb,
+  build_fingerprint    TEXT,
+  desired_worker_count INT  NOT NULL DEFAULT 0,
+  active_worker_count  INT  NOT NULL DEFAULT 0,
+  capacity             JSONB NOT NULL DEFAULT '{}'::jsonb,
+  status               TEXT NOT NULL DEFAULT 'joining'
+                         CHECK (status IN ('joining','healthy','stale','draining','disabled')),
+  drain                BOOLEAN NOT NULL DEFAULT FALSE,
+  last_heartbeat_at    TIMESTAMPTZ,
+  created_at           TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS node_join_tokens (
+  token_hash  TEXT PRIMARY KEY,           -- store only a hash; the raw token is shown once
+  role        TEXT NOT NULL CHECK (role IN ('worker')),
+  expires_at  TIMESTAMPTZ NOT NULL,
+  consumed_at TIMESTAMPTZ,                 -- single-use
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+```
+
+Each worker reports its `build_fingerprint` on heartbeat so the existing stale-build refusal
+(`build_current` / `expected_build_fingerprint_at_submit` / `stale_worker_count_at_submit`) extends to
+the fleet: a mixed- or stale-build fleet must stay rejectable, consistent with the DAST-quality rule.
+
+**2. Worker-only deployment profile.** Today the `worker` service in `docker-compose.yml` hardcodes
+`REDIS_URL=redis://redis:6379` and `DATABASE_URL=…@postgres:5432/scanner` to the control plane's own
+service DNS. A remote worker must resolve both to the control plane's overlay address. Add a
+worker-only profile that starts **only** the `worker` service (no `api`, `ui`, `postgres`, `redis`)
+with both URLs parameterized:
+
+```bash
+# worker VPS: worker service only, pointed at the control plane over the overlay
+REDIS_URL=redis://<control-plane-overlay-ip>:6379
+DATABASE_URL=postgresql://scanner:<password>@<control-plane-overlay-ip>:5432/scanner
+```
+
+**3. Overlay binding (never expose data stores publicly).** The control plane binds Redis and
+Postgres to the WireGuard overlay interface only — never `0.0.0.0`. Both bind to `SHAKERSCAN_BIND_HOST`
+today (default `127.0.0.1`); fleet mode sets it to the control-plane overlay IP and adds a firewall
+rule permitting only peer overlay addresses to reach 6379/5432. Public exposure of 6379/5432 remains a
+non-goal (§11).
+
+**4. Fleet CLI contract.** Add three verbs to `scanner.sh` (its current dispatch table has no
+fleet/join verb):
+
+```text
+shakerscan fleet init [--network wireguard]
+    # control plane: create the overlay + control peer, flip data-store bind to the overlay IP, enable fleet mode
+shakerscan fleet join-token --role worker --ttl 24h
+    # mint a single-use, hashed, expiring token; print the ready-to-paste join command
+shakerscan join <control-plane-overlay-url> --token <join-token>
+    # worker VPS: exchange token -> node identity, write worker config, start the worker-only profile
+```
+
+`join` calls a new `POST /fleet/nodes/join` on the control plane: validate the token (unexpired,
+unconsumed), consume it, insert the `nodes` row, and return the connection bundle.
+
+**5. Connection bundle** returned by `POST /fleet/nodes/join` (the worker persists this and then
+authenticates with its own `node_credential`, never re-using the enrollment token):
+
+```text
+node_id, control_plane_overlay_url, redis_url, database_url (Phase-1 overlay mode),
+worker_image_digest, desired_worker_count, labels,
+wireguard_peer_ip, wireguard_control_plane_public_key, node_credential
+```
+
+**6. Heartbeat + fleet view.** The worker posts `POST /fleet/nodes/{id}/heartbeat` (status, active
+worker count, host resources, `build_fingerprint`) on a fixed interval; the control plane marks a node
+`stale` past a timeout (reuse the `HEARTBEAT_TIMEOUT_MINUTES` convention) and surfaces every node in a
+fleet view. The dashboard operations bar / `GET /workers` extends to per-node health, capacity, egress
+IP, and build currency.
+
+**Milestone A done** = a remote worker registers with one command, appears in the fleet view with a
+heartbeat, drains the shared `scan_jobs` queue, writes scans/findings to the control-plane database,
+and Redis/Postgres are unreachable from the public internet. The **accepted** Phase-1 gaps remain:
+at-most-once delivery (a hard worker loss between `BLPOP` and the first heartbeat still relies on the
+DB reconcilers, not a Redis lease — §9), local-bind evidence unless S3/MinIO is enabled (§8), and
+manual per-node scaling until the Phase-2 node-agent lands.
+
 ### Phase 2: Production-Ready Owned Fleet
 
 Goal: operate many owned worker VPSs safely.
@@ -443,6 +565,16 @@ Required target state:
 Recommended first implementation: MinIO for self-hosted deployments, using S3-compatible
 APIs so cloud S3 can be used later without changing application code.
 
+**Implementation status:** the object-store backend already exists and is functional — a hand-rolled
+SigV4 S3/MinIO client with content-addressed PUT, hash-verified GET, and retention DELETE
+(`evidence_storage.py`), selected by `EVIDENCE_STORAGE_BACKEND` (`s3`/`minio`/`s3-compatible`) with
+`EVIDENCE_S3_ENDPOINT_URL` for MinIO. It defaults to `local` (the `./results` bind mount), with small
+payloads inlined in Postgres. Making evidence cross-node-readable in Phase 1 is therefore a
+configuration and operations task (stand up MinIO; set the backend, endpoint, and credentials on the
+control plane and every worker), not new application code. The remaining engineering is operational:
+store lifecycle/retention, upload-failure handling so a partial upload can never become proof, and
+signed UI download proxying.
+
 Evidence centralization should happen before advertising cross-VM parallel scans as
 production-ready. Without it, the logical scan may complete but its report can point at
 artifacts stranded on a worker VPS.
@@ -451,6 +583,15 @@ artifacts stranded on a worker VPS.
 
 The current queue model is enough to prove multi-node execution, but it is not enough for
 a reliable fleet.
+
+What exists today is at-most-once delivery on a plain Redis list (`RPUSH`/`BLPOP` on `scan_jobs`),
+compensated *above* Redis rather than by Redis: a durable Postgres scan row, a worker heartbeat, a
+`processing_lease_at` hash marker stamped right after `BLPOP`, and API-side reconcilers that requeue
+or fail orphaned work once a heartbeat goes stale. A separate lease-based Redis ZSET semaphore caps
+fleet-wide active scans and frees a crashed holder's slot on TTL expiry, and the parallel merge is
+guarded exactly-once with `SET NX`. This is sufficient on a single trusted host, but a hard worker
+loss between `BLPOP` and the first heartbeat still depends entirely on those DB reconcilers — there is
+no per-message Redis lease/ack/reclaim. Closing that gap is what the following semantics require.
 
 Required semantics:
 
