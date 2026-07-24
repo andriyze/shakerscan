@@ -680,9 +680,12 @@ is enabled in standard installs and can be disabled globally with
 
 The free-form loop can issue same-origin read probes, compare managed principal contexts when they
 are configured, query stored knowledge, record notes, and invoke bounded active scanner templates. It cannot issue
-arbitrary state-changing HTTP. Tool calls, request units, active actions, turns, and tokens are
-bounded. A debrief can persist only evidence-backed **Suspected** findings; supported families reach
-**Verified** only through server-run deterministic proof. The compatibility `/research/*`
+arbitrary state-changing HTTP. Tool calls, request units, active actions, and turns are bounded. A
+request unit is one tool invocation, not one wire request — a bounded scanner may issue many target
+requests within a single unit. Model-token budgets bound the configured-provider loop only; a keyless
+session uses its token budget to size the seed context pack, because the server cannot meter an
+external coding agent's tokens. A debrief can persist only evidence-backed **Suspected** findings;
+supported families reach **Verified** only through server-run deterministic proof. The compatibility `/research/*`
 controller remains available for specialized guided verification and is not the Deep Hunt launcher.
 
 Natural-language routing treats an unqualified “scan” as Quick DAST, named scan types as DAST,

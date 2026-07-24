@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 
@@ -5,14 +6,26 @@ ROOT = Path(__file__).resolve().parents[1]
 EXECUTION_DOC = ROOT / "docs" / "dast-asm-architecture.md"
 FLEET_DOC = ROOT / "docs" / "multi-node-architecture.md"
 DEEP_HUNT_DOC = ROOT / "docs" / "deep-hunt-architecture.md"
+FUNCTIONALITY_DOC = ROOT / "docs" / "functionality-reference.md"
 RETIRED_DOCS = [
     ROOT / "docs" / "parallel-scan-architecture.md",
     ROOT / "docs" / "continuous-asm-architecture.md",
 ]
 
 
+def _flat(path: Path) -> str:
+    """Read a doc with every whitespace run collapsed to one space.
+
+    These guards pin down *claims*, not line breaks. Asserting against raw text made a
+    NEGATIVE assertion silently vacuous the moment a paragraph was rewrapped — the retired
+    claim could return under a different wrap and still pass. Normalizing first means a
+    guard fails only when the claim itself changes.
+    """
+    return re.sub(r"\s+", " ", path.read_text())
+
+
 def test_execution_architecture_is_consolidated_and_current():
-    text = EXECUTION_DOC.read_text()
+    text = _flat(EXECUTION_DOC)
     assert "Parent, plan, shard, merge" in text
     assert "Continuous ASM loop" in text
     assert "schedule_kind = 'asm_improve'" in text
@@ -23,7 +36,7 @@ def test_execution_architecture_is_consolidated_and_current():
 
 
 def test_multi_node_doc_is_build_spec_and_honest_about_fleet_status():
-    text = FLEET_DOC.read_text()
+    text = _flat(FLEET_DOC)
     # The doc is a design authority plus a draft vertical slice. It must remain honest about the
     # incomplete bootstrap/artifact/reliability contracts and never resurrect retired sub-docs.
     assert "Phase-1 draft vertical-slice specification" in text
@@ -41,8 +54,20 @@ def test_multi_node_doc_is_build_spec_and_honest_about_fleet_status():
     assert "continuous-asm-architecture.md" not in text
 
 
+def test_multi_node_doc_states_semaphore_failure_posture():
+    # The active-scan semaphore fails OPEN (_take_scan_slot grants on any Redis error), so it is an
+    # OOM guard, not a limit a partitioned remote node is held to. A doc about trusting remote nodes
+    # must not present it as an enforceable fleet cap, and must not flatten it together with the
+    # fail-CLOSED domain-rate primitive.
+    text = _flat(FLEET_DOC)
+    assert "**Built, but fail-OPEN**" in text
+    assert "A partitioned node runs uncapped." in text
+    assert "fails **closed**" in text
+    assert "They are real and correct" not in text
+
+
 def test_deep_hunt_design_authority_is_honest_about_driver_limits():
-    text = DEEP_HUNT_DOC.read_text()
+    text = _flat(DEEP_HUNT_DOC)
     assert "current implementation reference" in text
     assert "not a wire-request count" in text
     assert "external coding agent's tokens" in text
@@ -51,4 +76,25 @@ def test_deep_hunt_design_authority_is_honest_about_driver_limits():
     assert "`resp_N` or `scan_N` refs" in text
     assert "does not currently receive a citeable reference" in text
     assert "deliberately **not ported**" in text
-    assert "mid-hunt API restart\n  resumes" not in text
+    assert "mid-hunt API restart resumes" not in text
+
+
+def test_deep_hunt_doc_separates_family_names_from_contract_kinds():
+    # A debrief `family` is normalized by family_proof.canonical_family, which has NO
+    # workflow_transition alias — that spelling is the invariant CONTRACT KIND, and claiming it as a
+    # family 422s at the bridge. The doc previously listed it in a Families column.
+    text = _flat(DEEP_HUNT_DOC)
+    assert "Family names are not contract-kind names." in text
+    assert "There is **no** `workflow_transition` alias" in text
+    assert "access_control, field_constraint, workflow |" in text
+    assert "field_constraint, workflow** — mutating" in text
+    assert "access_control, field_constraint, workflow_transition |" not in text
+
+
+def test_functionality_reference_does_not_overclaim_keyless_token_bounding():
+    # Model-token budgets bound the configured-provider loop only; a keyless session's token budget
+    # sizes the seed context pack, because the server cannot meter an external coding agent.
+    text = _flat(FUNCTIONALITY_DOC)
+    assert "request unit is one tool invocation, not one wire request" in text
+    assert "cannot meter an external coding agent's tokens" in text
+    assert "turns, and tokens are bounded" not in text

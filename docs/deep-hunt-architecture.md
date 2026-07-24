@@ -135,7 +135,15 @@ may assert it — the server always does.
 |---|---|---|
 | **A — deterministic DAST retest** | xss, sqli, nosqli, ssrf, path_traversal, open_redirect, ssti, command_injection, cors (route-only) | The SUSPECTED lead carries `retest_type` + `param` + `payload` in evidence; it is auto-queued as a `deterministic` retest job. The worker prover is the **sole arbiter**; the finding stays SUSPECTED until the prover writes `verdict='exploited'`. The model supplies only the injection point, never a verdict. |
 | **B — family_proof moat** | bola, auth_bypass, data_exposure, mass_assignment | A two-run workflow dispatched through the unchanged arsenal moat (distinct-principal / control differential), guarded by a cross-process advisory lock. |
-| **C — invariant contract** | access_control, field_constraint, workflow_transition | Uses the same moat machinery as B, but the predicate comes from an operator-**approved** `target_invariant_contracts` row (`source="invariant"`). **No approved contract → HTTP 422 → the finding stays SUSPECTED.** The server never guesses policy; a draft contract cannot promote. `workflow_transition` requires a `probe_state` at approval time. |
+| **C — invariant contract** | access_control, field_constraint, workflow | Uses the same moat machinery as B, but the predicate comes from an operator-**approved** `target_invariant_contracts` row (`source="invariant"`). **No approved contract → HTTP 422 → the finding stays SUSPECTED.** The server never guesses policy; a draft contract cannot promote. The `workflow_transition` contract requires a `probe_state` at approval time. |
+
+**Family names are not contract-kind names.** A debrief's `family` is normalized by
+`family_proof.canonical_family` and must be one of `_AGENT_VERIFIABLE_FAMILIES`
+(`bola, auth_bypass, data_exposure, mass_assignment, access_control, field_constraint, workflow`).
+The invariant **contract kind** for the workflow family is spelled `workflow_transition`
+(`invariant_contracts.CONTRACT_KINDS` maps it back to family `workflow`), and `bfla` / `business_logic`
+are aliases of `auth_bypass` / `workflow`. There is **no** `workflow_transition` alias: a debrief that
+claims `"family":"workflow_transition"` is unverifiable and 422s at the bridge. Use `workflow`.
 
 ### Auto-promotable today
 
@@ -145,9 +153,9 @@ is enabled, capped per run with per-family request/second reservations:
 - **auth_bypass, data_exposure** — GET-only; auto-promotable from a read-only gated hunt.
 - **access_control** — auto-promotable **only** when an approved invariant contract exists (GET-only
   role differential).
-- **mass_assignment (create/POST only), field_constraint, workflow_transition** — mutating;
-  auto-verify **only** on a write-authorized hunt, otherwise skipped as
-  `mutating_verification_requires_gated_hunt`.
+- **mass_assignment (create/POST only), field_constraint, workflow** — mutating
+  (`_AGENT_MUTATING_VERIFY_FAMILIES`); auto-verify **only** on a write-authorized hunt, otherwise
+  skipped as `mutating_verification_requires_gated_hunt`.
 
 ### Deliberately NOT auto-promotable (known limitations, by design)
 

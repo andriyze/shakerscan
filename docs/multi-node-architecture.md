@@ -24,7 +24,7 @@ becoming stale prose. For product priority and phased order, see
 | Intra-target fan-out `scan_plan → scan_shard → scan_merge` (strategies: scope, family, coverage, coverage_family, auth_split, dynamic pull) | **Built** | `parallel_scan.py` planner; `worker.py` `process_scan_{plan,shard,merge}_job` |
 | Exactly-once merge trigger (Redis `SET NX` guard + DB non-terminal-shard source of truth) | **Built** | `reconcile_parallel_parent` (`parallel_scan.py`) |
 | Race-safe concurrent finding writes | **Built** | `UNIQUE INDEX idx_findings_target_fingerprint` (`db/init.sql`) |
-| Fleet-wide active-scan concurrency cap (lease-based Redis ZSET semaphore; TTL frees a crashed holder) | **Built** | `ACTIVE_SCAN_SLOTS_KEY` (`worker.py`) |
+| Fleet-wide active-scan concurrency cap (lease-based Redis ZSET semaphore; TTL frees a crashed holder) | **Built, but fail-OPEN** — `_take_scan_slot` returns granted on any Redis error and the bounded wait fails open, so the cap is an OOM guard on a healthy shared Redis, **not** an enforceable fleet limit. A partitioned node runs uncapped. | `ACTIVE_SCAN_SLOTS_KEY`, `_take_scan_slot` (`worker.py`) |
 | Per-root-domain request reservation (atomic Redis Lua; already coordinates every process on the shared Redis) | **Built** | `reserve_domain_rate` (`asm_inventory.py`) |
 | Managed `evidence_objects` backend (SigV4 S3/MinIO client: content-addressed PUT, hash-verified GET, retention DELETE) | **Built but OFF by default** — only covers large managed evidence-object payloads. General scan results, checkpoints, and other `/results` artifacts remain local; Compose does not yet pass the S3 settings through. | `evidence_storage.py`; `worker.py` `save_result_file` |
 | Job-queue delivery | **Built as at-most-once** — plain Redis list (`RPUSH`/`BLPOP`), compensated by DB row + heartbeat + `processing_lease_at` marker. **No per-message lease/ack/reclaim/fencing.** | `QUEUE_NAME` (`worker.py`, `api.py`) |
@@ -34,7 +34,11 @@ becoming stale prose. For product priority and phased order, see
 The takeaways that shape the plan:
 
 - **Do not rebuild** the fan-out, merge-once, finding dedup, active-scan semaphore, or the domain-rate
-  primitive. They are real and correct, and the last two already coordinate across a shared Redis.
+  primitive. They are real, and the last two already coordinate across a shared Redis. Note the
+  differing failure postures before depending on either as a fleet control: `reserve_domain_rate`
+  fails **closed** (grants 0 on a Redis error), while the active-scan semaphore fails **open**. Only
+  the former is safe to treat as a limit a remote node cannot exceed; making the latter enforceable
+  is fleet work, not a rebuild.
 - **Do not mistake managed evidence-object storage for a complete artifact plane.** The S3 client is
   reusable, but cross-node results/checkpoints/diagnostics require application and deployment work
   (§8).

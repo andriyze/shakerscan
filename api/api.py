@@ -18911,7 +18911,8 @@ async def _run_agent_hunt(
             err_str = str(error or "no_reply")
             # HONOR a model safety refusal — record it and stop. We deliberately do NOT
             # auto-"reframe"/override a refusal: routing around the model's own safety signal
-            # is a bypass we will not ship. (The borrowed reframe helper is left unwired.)
+            # is a bypass we will not ship. Upstream's reframe helper was NOT ported — there is
+            # no such function in this tree, only detection (is_likely_refusal).
             if agent_text_toolcalls.is_likely_refusal(err_str):
                 state["events"].append({"iteration": i, "planner_refusal": err_str[:160]})
                 state["stop_reason"] = "model_declined"
