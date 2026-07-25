@@ -52,6 +52,13 @@ Use `API_BASE=${SHAKERSCAN_API_BASE:-http://localhost:8080}` for API calls. Use 
 
    Probe packs: `shaker-ai-smoke`, `shaker-owasp-llm`, `shaker-agent-abuse`, `shaker-mcp-security`, `shaker-rag-lite`.
 
+   **Production requires explicit confirmation.** For `"environment":"production"` you MUST also send
+   `"confirm_production":true`, and only after the user has authorized testing that production target.
+   The server enforces this (a production scan without it returns HTTP 409):
+   ```bash
+   -d '{"probe_pack":"shaker-ai-smoke","scan_profile":"smoke","environment":"production","confirm_production":true}'
+   ```
+
 5. After submitting, report:
    - scan ID
    - UI link: `${UI_BASE}/scans/{scan_id}`

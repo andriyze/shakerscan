@@ -1147,7 +1147,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | Scanner wrapper commands | 24 | `scanner.sh` |
 | Make targets | 10 | `Makefile` |
 | Release gates | 14 | `scripts/release_gates.py` |
-| Runtime environment keys | 194 | Python sources + Compose manifests |
+| Runtime environment keys | 198 | Python sources + Compose manifests |
 | Scanner modules | 83 | `scanner/scanner_tools/` |
 | UI pages | 30 | `ui/src/app/` |
 | Skills | 6 | `skills/` |
@@ -1856,11 +1856,14 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SCAN_SETTINGS_KEY` | `api/api.py` |
 | `SCAN_SHUTDOWN_GRACE_SECONDS` | `scanner/scanner.py` |
 | `SCAN_VERIFICATION_MAX` | `scanner/scanner.py` |
+| `SHAKERSCAN_ALLOW_METADATA_TARGETS` | `api/api.py` |
 | `SHAKERSCAN_API_PORT` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_API_URL` | `scripts/shakerscan_mcp.py` |
 | `SHAKERSCAN_ASM_DISPATCH_INTERVAL` | `api/api.py` |
 | `SHAKERSCAN_BIND_HOST` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_CANCEL_FILE` | `scanner/scanner_tools/cancellation.py`, `scanner/scanner_tools/common.py` |
+| `SHAKERSCAN_CORS_ALLOW_ORIGINS` | `api/api.py` |
+| `SHAKERSCAN_CORS_ALLOW_ORIGIN_REGEX` | `api/api.py` |
 | `SHAKERSCAN_CUSTOM_WORDLIST` | `scanner/scanner_tools/discovery.py` |
 | `SHAKERSCAN_DEBUG_POST_INFER` | `scanner/scanner.py` |
 | `SHAKERSCAN_ENABLE_ADAPTIVE_THROTTLE` | `scanner/scanner.py` |
@@ -1872,6 +1875,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SHAKERSCAN_PER_WORKER_MEM_GB` | `api/api.py`, `docker-compose.yml` |
 | `SHAKERSCAN_PLATFORM_MEMORY_RESERVE_GB` | `api/api.py`, `docker-compose.yml` |
 | `SHAKERSCAN_PUBLIC_API_URL` | `docker-compose.release.yml`, `docker-compose.yml` |
+| `SHAKERSCAN_PUBLIC_HOST` | `api/api.py` |
 | `SHAKERSCAN_REQUEST_BUDGET_DOMAIN` | `scanner/scanner.py` |
 | `SHAKERSCAN_REQUEST_BUDGET_LIMIT` | `scanner/scanner.py` |
 | `SHAKERSCAN_REQUEST_BUDGET_MODE` | `api/worker.py`, `scanner/scanner.py` |
@@ -1881,7 +1885,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SHAKERSCAN_STALE_DURATION_GRACE_MIN` | `api/api.py` |
 | `SHAKERSCAN_STALE_FAIL_AFTER_SECONDS` | `api/worker.py` |
 | `SHAKERSCAN_STREAM_SCANNER_LOGS` | `api/worker.py` |
-| `SHAKERSCAN_UI_PORT` | `docker-compose.release.yml`, `docker-compose.yml` |
+| `SHAKERSCAN_UI_PORT` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_WORKER_FAIL_CLOSED` | `api/worker.py` |
 | `SHAKERSCAN_WORKER_MEM_LIMIT_GB` | `api/api.py` |
 | `SMART_BOLA_LANE_MAX_SECONDS` | `scanner/scanner.py` |

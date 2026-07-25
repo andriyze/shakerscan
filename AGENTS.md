@@ -361,7 +361,7 @@ curl -X POST http://localhost:8080/targets/{target_id}/scan \
 
 ### Continuous ASM
 
-Continuous ASM keeps a persistent endpoint inventory per target, then lets users improve coverage without starting many separate visible scans. The `/asm/improve` endpoint is the simplest API for UI and AI agents: it queues discovery when no inventory exists, queues the next endpoint test batch when endpoints are untested/stale, or returns `wait` when work is already active for the target.
+Continuous ASM keeps a persistent endpoint inventory per target, then lets users improve coverage without starting many separate visible scans. The `POST /targets/{target_id}/asm/improve` endpoint is the simplest API for UI and AI agents: it queues discovery when no inventory exists, queues the next endpoint test batch when endpoints are untested/stale, or returns `wait` when work is already active for the target.
 
 ```bash
 # Get inventory and coverage

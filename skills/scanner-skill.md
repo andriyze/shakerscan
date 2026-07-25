@@ -1,6 +1,6 @@
 ---
-name: shakerscan
-description: Legacy flat-file entry point for operating ShakerScan. Use the canonical skills/shakerscan/SKILL.md workflow for scans, findings, Continuous ASM, AI Gate, Model Intake, interactive testing, and bounded research.
+name: shakerscan-legacy
+description: Legacy flat-file redirect. Superseded by the canonical skills/shakerscan/SKILL.md workflow (scans, findings, Continuous ASM, AI Gate, Model Intake, interactive testing, bounded research); use that one. Renamed from 'shakerscan' to remove a duplicate-name resolution hazard (audit P3-2).
 ---
 
 # ShakerScan legacy skill entry point

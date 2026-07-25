@@ -17009,3 +17009,69 @@ def test_context_pack_sections_render_observed_artifacts_and_invariant_candidate
     # approved rules stay in their own authoritative section
     assert "invariant_contracts" in by_key
     assert "UNAPPROVED" not in by_key["invariant_contracts"]
+
+
+# --- Audit 2026-07 regression tests -------------------------------------------------------------
+
+def test_normalize_target_url_blocks_cloud_metadata_and_link_local(monkeypatch):
+    """Audit P1-1: cloud-metadata / link-local destinations must be refused at normalization, while
+    private-range and public labs (the product's real targets) stay allowed. Regression for the
+    self-caught-exception bug found live: TargetNormalizationError subclasses ValueError, so the
+    IMDS-IP refusal must be raised OUTSIDE the ip_address() try/except (169.254.169.254 slipped
+    through the first fix)."""
+    monkeypatch.delenv("SHAKERSCAN_ALLOW_METADATA_TARGETS", raising=False)
+    for blocked in (
+        "http://169.254.169.254/latest/meta-data/",
+        "http://169.254.169.254",
+        "http://[fe80::1]",
+        "http://metadata.google.internal/",
+    ):
+        with pytest.raises(api_module.TargetNormalizationError):
+            api_module.normalize_target_url(blocked)
+    # Legit targets: local lab (private + host.docker.internal) and a public host must NOT raise.
+    for allowed in (
+        "http://host.docker.internal:3001",
+        "http://192.168.1.50",
+        "http://127.0.0.1:3000",  # loopback lab is allowed (only link-local/metadata are blocked)
+        "https://example.com",
+    ):
+        norm, _note = api_module.normalize_target_url(allowed)
+        assert norm  # normalized to a non-empty origin, no exception
+
+
+def test_normalize_target_url_metadata_override(monkeypatch):
+    """The metadata block is overridable for an explicitly authorized test."""
+    monkeypatch.setenv("SHAKERSCAN_ALLOW_METADATA_TARGETS", "1")
+    norm, _note = api_module.normalize_target_url("http://169.254.169.254/")
+    assert "169.254.169.254" in norm
+
+
+def test_cors_allow_origins_is_an_allowlist_not_wildcard(monkeypatch):
+    """Audit P0-1: CORS must never be `*`; it must include the local UI origin and honor env
+    extension, so a foreign origin is not reflected."""
+    monkeypatch.delenv("SHAKERSCAN_PUBLIC_HOST", raising=False)
+    monkeypatch.delenv("SHAKERSCAN_CORS_ALLOW_ORIGINS", raising=False)
+    monkeypatch.setenv("SHAKERSCAN_UI_PORT", "3000")
+    origins = api_module._cors_allow_origins()
+    assert "*" not in origins
+    assert "http://localhost:3000" in origins
+    assert "https://totally-evil.example.com" not in origins
+    # env extension + public host are honored
+    monkeypatch.setenv("SHAKERSCAN_PUBLIC_HOST", "scanner.example.ts.net")
+    monkeypatch.setenv("SHAKERSCAN_CORS_ALLOW_ORIGINS", "https://ops.internal")
+    origins2 = api_module._cors_allow_origins()
+    assert "https://scanner.example.ts.net" in origins2
+    assert "https://ops.internal" in origins2
+
+
+def test_bulk_finding_update_request_accepts_documented_json_body():
+    """Audit P2-2: the documented JSON body must bind to a model (previously the bare-param handler
+    forced the fields onto the query string and 422'd the documented request)."""
+    req = api_module.BulkFindingUpdateRequest(
+        finding_ids=["00000000-0000-4000-8000-000000000000"],
+        status="false_positive",
+        notes="audit",
+    )
+    assert req.finding_ids and req.status == "false_positive"
+    with pytest.raises(Exception):  # empty finding_ids rejected by min_length
+        api_module.BulkFindingUpdateRequest(finding_ids=[], status="resolved")

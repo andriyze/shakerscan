@@ -51,3 +51,6 @@ coverage/
 # OS
 .DS_Store
 Thumbs.db
+
+# Audit evidence artifacts (screenshots, harness, matrices) — durable record is docs/AUDIT-2026-07.md
+audit-results/

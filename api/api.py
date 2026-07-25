@@ -2973,14 +2973,44 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# CORS for UI
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# CORS for UI.
+#
+# SECURITY (audit P0-1): the API is tokenless and the UI issues no credentialed requests, so
+# `allow_origins=["*"]` with `allow_credentials=True` was a footgun — Starlette resolves that pair by
+# REFLECTING the caller's Origin and returning Access-Control-Allow-Credentials: true, letting any web
+# page the operator visits read every API response (findings, targets, settings) and drive scans from
+# the victim's browser. We instead allow only the UI's own origin(s). Defaults cover the local UI on
+# the standard/hostable ports; remote deployments add their public origin via env. Credentials are OFF
+# because there are none to send, and OFF avoids the reflect-with-credentials behavior entirely.
+def _cors_allow_origins() -> list[str]:
+    ui_port = os.environ.get("SHAKERSCAN_UI_PORT", "3000")
+    defaults = [
+        f"http://localhost:{ui_port}", f"http://127.0.0.1:{ui_port}",
+        "http://localhost:3000", "http://127.0.0.1:3000",
+    ]
+    public_host = os.environ.get("SHAKERSCAN_PUBLIC_HOST", "").strip()
+    if public_host:
+        for scheme in ("https", "http"):
+            defaults.append(f"{scheme}://{public_host}")
+            defaults.append(f"{scheme}://{public_host}:{ui_port}")
+    extra = os.environ.get("SHAKERSCAN_CORS_ALLOW_ORIGINS", "")
+    defaults.extend(o.strip() for o in extra.split(",") if o.strip())
+    # de-dupe, preserve order
+    seen: set[str] = set()
+    return [o for o in defaults if not (o in seen or seen.add(o))]
+
+
+_cors_kwargs: dict[str, Any] = {
+    "allow_origins": _cors_allow_origins(),
+    "allow_credentials": False,
+    "allow_methods": ["*"],
+    "allow_headers": ["*"],
+}
+# Optional regex for dynamic remote origins (e.g. a Tailscale MagicDNS name) without listing each.
+_cors_regex = os.environ.get("SHAKERSCAN_CORS_ALLOW_ORIGIN_REGEX", "").strip()
+if _cors_regex:
+    _cors_kwargs["allow_origin_regex"] = _cors_regex
+app.add_middleware(CORSMiddleware, **_cors_kwargs)
 
 
 @app.exception_handler(ValueError)
@@ -8874,8 +8904,8 @@ async def get_ai_inventory(
 async def list_ai_targets(
     include_inactive: bool = False,
     include_demo: bool = False,
-    limit: int = Query(100, le=500),
-    offset: int = 0,
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
 ):
     """List saved AI Gate targets."""
     async with db_pool.acquire() as conn:
@@ -12369,8 +12399,8 @@ async def list_scans(
     created_within_days: Optional[int] = Query(None, ge=1),
     include_shards: bool = False,
     include_internal: bool = False,
-    limit: int = Query(50, le=200),
-    offset: int = 0
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0)
 ):
     """List scans with optional filtering.
 
@@ -13357,8 +13387,8 @@ async def cancel_scan(scan_id: str):
 @app.get("/targets")
 async def list_targets(
     include_inactive: bool = False,
-    limit: int = Query(100, le=500),
-    offset: int = 0
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0)
 ):
     """List all targets."""
     async with db_pool.acquire() as conn:
@@ -41849,8 +41879,8 @@ async def generate_endpoint_inventory_hypotheses(
 async def asm_list_endpoints(
     target_id: str,
     status: Optional[str] = None,
-    limit: int = Query(200, le=1000),
-    offset: int = 0,
+    limit: int = Query(200, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
 ):
     """List the persistent attack-surface inventory for a target + coverage."""
     async with db_pool.acquire() as conn:
@@ -42282,7 +42312,7 @@ async def asm_set_policy(target_id: str, body: AsmPolicyUpdate):
 async def asm_diff(
     target_id: str,
     days: int = Query(7, ge=1, le=365),
-    limit: int = Query(100, le=500),
+    limit: int = Query(100, ge=1, le=500),
 ):
     """New attack surface for a target: endpoints first seen within N days."""
     async with db_pool.acquire() as conn:
@@ -42871,8 +42901,8 @@ async def list_findings(
     resolved_within_days: Optional[int] = Query(None, ge=1),
     sort_by: Optional[str] = Query(None, regex="^(severity|first_seen|last_seen|cvss)$"),
     sort_order: Optional[str] = Query("desc", regex="^(asc|desc)$"),
-    limit: int = Query(100, le=500),
-    offset: int = 0
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0)
 ):
     """List findings with filtering and sorting.
 
@@ -45965,12 +45995,31 @@ async def cleanup_findings(request: FindingsCleanup):
             return {'deleted': len(ids), 'dry_run': False}
 
 
+class BulkFindingUpdateRequest(BaseModel):
+    """Body for POST /findings/bulk.
+
+    Audit P2-2: the handler previously took bare `finding_ids: list[str], status: str` params, which
+    FastAPI binds to the QUERY string — so the JSON body documented in AGENTS.md returned 422. A model
+    makes the documented `{"finding_ids":[...],"status":"...","notes":"..."}` body work as written.
+    """
+    finding_ids: list[str] = Field(min_length=1)
+    status: str
+    notes: Optional[str] = None
+
+
 @app.post("/findings/bulk")
-async def bulk_update_findings(finding_ids: list[str], status: str, notes: Optional[str] = None):
+async def bulk_update_findings(request: BulkFindingUpdateRequest):
     """Bulk update finding statuses."""
+    valid_statuses = {"active", "resolved", "false_positive", "accepted_risk"}
+    if request.status not in valid_statuses:
+        raise HTTPException(status_code=400,
+                            detail=f"Invalid status. Must be one of: {', '.join(sorted(valid_statuses))}")
+    try:
+        ids = [uuid.UUID(fid) for fid in request.finding_ids]
+    except (ValueError, AttributeError, TypeError):
+        raise HTTPException(status_code=400, detail="finding_ids must all be valid UUIDs")
     async with db_pool.acquire() as conn:
-        ids = [uuid.UUID(fid) for fid in finding_ids]
-        result = await conn.execute("""
+        await conn.execute("""
             UPDATE findings
             SET status = $1,
                 resolved_at = CASE WHEN $1 = 'resolved' THEN COALESCE(resolved_at, NOW())
@@ -45979,9 +46028,9 @@ async def bulk_update_findings(finding_ids: list[str], status: str, notes: Optio
                 notes = COALESCE($2, notes),
                 updated_at = NOW()
             WHERE id = ANY($3)
-        """, status, notes, ids)
+        """, request.status, request.notes, ids)
 
-    return {'updated': len(finding_ids), 'status': status}
+    return {'updated': len(request.finding_ids), 'status': request.status}
 
 
 @app.post("/findings/manual")
@@ -47961,8 +48010,8 @@ async def get_latest_result(target_folder: str):
 async def list_schedules(
     target_id: Optional[str] = None,
     is_active: Optional[bool] = None,
-    limit: int = Query(50, le=200),
-    offset: int = 0
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0)
 ):
     """List scan schedules."""
     async with db_pool.acquire() as conn:
@@ -48378,6 +48427,29 @@ def normalize_target_url(target: str) -> tuple[str, str | None]:
     scheme = parsed.scheme.lower() if has_scheme else "https"
     if scheme not in ("http", "https"):
         raise TargetNormalizationError(f"Invalid scheme '{scheme}': only http/https allowed")
+
+    # SECURITY (audit P1-1): block cloud-metadata / link-local destinations. These are NEVER a
+    # legitimate DAST target, whereas RFC-1918 / loopback ARE (ShakerScan's core workflow scans local
+    # disposable labs — Juice Shop, crAPI, DVWA — often on private IPs or host.docker.internal), so we
+    # deliberately do NOT block private ranges. Overridable for an explicitly authorized metadata test.
+    if os.environ.get("SHAKERSCAN_ALLOW_METADATA_TARGETS", "").strip() not in ("1", "true", "yes"):
+        _metadata_hostnames = {"metadata.google.internal", "metadata", "metadata.goog"}
+        if host in _metadata_hostnames:
+            raise TargetNormalizationError(
+                f"Refusing to scan cloud-metadata host '{host}'. Set "
+                "SHAKERSCAN_ALLOW_METADATA_TARGETS=1 only if this is explicitly authorized.")
+        # NOTE: TargetNormalizationError subclasses ValueError, so parse the IP in its OWN try/except
+        # and raise the refusal OUTSIDE it — otherwise the refusal is swallowed as if the host weren't
+        # an IP at all (caught live during the audit: 169.254.169.254 slipped through).
+        _ip = None
+        try:
+            _ip = ipaddress.ip_address(host.strip("[]"))
+        except ValueError:
+            pass  # not an IP literal — hostname targets are fine
+        if _ip is not None and (_ip.is_link_local or host.strip("[]") in ("fd00:ec2::254",)):
+            raise TargetNormalizationError(
+                f"Refusing to scan link-local / cloud-metadata address '{host}' "
+                "(e.g. 169.254.169.254). Set SHAKERSCAN_ALLOW_METADATA_TARGETS=1 if authorized.")
 
     # Format host (bracket IPv6 addresses)
     host_display = f"[{host}]" if ":" in host and not host.startswith("[") else host

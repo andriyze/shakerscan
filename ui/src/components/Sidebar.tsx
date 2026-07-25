@@ -5,6 +5,7 @@ import { usePathname } from 'next/navigation'
 import Link from 'next/link'
 import { Activity, BookOpen, Bot, Boxes, Compass, Crosshair, FileArchive, Lightbulb, Menu, Network, PackageCheck, Radar, ShieldAlert, ShieldCheck, Wand2, X } from 'lucide-react'
 import { buttonClasses, Toggle } from '@/components/ui'
+import { API_URL } from '@/lib/api'
 
 const navGroups: {
   heading: string | null
@@ -140,7 +141,20 @@ function NavContent({
   showAll: boolean
   onToggleShowAll: (value: boolean) => void
 }) {
-  const appVersion = process.env.NEXT_PUBLIC_APP_VERSION
+  // Audit P2-2: NEXT_PUBLIC_APP_VERSION is baked into the UI image at build time, so after a
+  // volume-mount code deploy it goes stale while the API reports the live commit. Prefer the live
+  // build label from /health (matching current_scanner_version on the server) and fall back to the
+  // baked env only if the request fails.
+  const bakedVersion = process.env.NEXT_PUBLIC_APP_VERSION
+  const [appVersion, setAppVersion] = useState<string | undefined>(bakedVersion)
+  useEffect(() => {
+    let cancelled = false
+    fetch(`${API_URL}/health`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => { if (!cancelled && d?.scanner_version) setAppVersion(d.scanner_version) })
+      .catch(() => { /* keep baked fallback */ })
+    return () => { cancelled = true }
+  }, [])
   // Default view hides advanced groups/items; the footer switch reveals them.
   const visibleGroups = navGroups
     .filter((group) => showAll || !group.advanced)
