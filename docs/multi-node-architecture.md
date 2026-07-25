@@ -5,8 +5,8 @@ substrate is shipped (see the code-grounded capability table below), and the dur
 single-use enrollment, authenticated heartbeat, and one-time connection-bundle API foundation is now
 implemented. The digest-pinned worker-only Compose runtime, pull-based node-agent, and versioned
 desired-state API are also implemented, along with the fleet-profile CA-verified overlay TLS listener.
-WireGuard/CLI host mutation, fleet UI, and the two-VPS proof are not complete. The remaining parts of
-Phases 2–3 remain design-level.
+The Linux `fleet init` / `fleet join-token` / `join` WireGuard host workflow is implemented. Fleet UI
+and the physical two-VPS proof are not complete. The remaining parts of Phases 2–3 remain design-level.
 **Scope:** run a coordinated ShakerScan fleet across multiple VMs/VPS hosts so one UI/API
 can scan more targets at once and run high-budget Full Coverage scans by using workers
 from many machines.
@@ -31,9 +31,10 @@ becoming stale prose. For product priority and phased order, see
 | Managed `evidence_objects` backend (SigV4 S3/MinIO client: content-addressed PUT, hash-verified GET, retention DELETE) | **Built but OFF by default** — only covers large managed evidence-object payloads. General scan results, checkpoints, and other `/results` artifacts remain local; Compose does not yet pass the S3 settings through. | `evidence_storage.py`; `worker.py` `save_result_file` |
 | Job-queue delivery | **Built as at-most-once** — plain Redis list (`RPUSH`/`BLPOP`), compensated by DB row + heartbeat + `processing_lease_at` marker. **No per-message lease/ack/reclaim/fencing.** | `QUEUE_NAME` (`worker.py`, `api.py`) |
 | Remote worker scaling | **Local Docker socket only** (`/var/run/docker.sock`); no remote-node scaling | `POST /workers` (`api.py`); `scanner.sh scale` |
-| Node identity, enrollment, join tokens, heartbeat, credential rotation/revocation, CA bootstrap, overlay TLS edge, `nodes` table | **Foundation built** — host join automation and fleet UI remain incomplete | `fleet.py`; `/fleet/*`; `fleet-edge`; `nodes`, `node_join_tokens`, `node_credentials` |
+| Node identity, enrollment, join tokens, heartbeat, credential rotation/revocation, CA bootstrap, overlay TLS edge, `nodes` table | **Foundation built** — fleet UI and physical two-VPS acceptance remain incomplete | `fleet.py`; `/fleet/*`; `fleet-edge`; `nodes`, `node_join_tokens`, `node_credentials` |
 | Worker-only deployment and pull-based node-agent | **Foundation built** — digest-pinned worker/agent-only Compose, owner-only local state, versioned desired state, local Docker reconciliation, drain-to-zero, capacity/error heartbeat | `docker-compose.worker.yml`; `fleet_agent.py`; `GET|PATCH /fleet/nodes/{id}/state` |
-| WireGuard/CLI host provisioning, fleet UI, placement | **Not present** — specified by this document | — |
+| WireGuard/CLI host provisioning | **Built, awaiting physical two-VPS acceptance** — persistent identity, CA/server certificates, overlay/data binding, automatic or manual peer reconciliation, public HTTPS enrollment, overlay proof, one-time bundle persistence, worker-only startup | `scripts/fleet_cli.py`; `scanner.sh fleet`; `scanner.sh join` |
+| Fleet UI and placement | **Not present** — specified by this document | — |
 
 The takeaways that shape the plan:
 
@@ -368,9 +369,9 @@ owned internal fleet, but it is not the full production architecture.
 
 Important limitations in Phase 1:
 
-- the pull-based node-agent now applies versioned worker-count and drain desired state on its local
-  Docker engine, but the join/install command, overlay proof, fleet UI, and rolling lifecycle remain
-  incomplete;
+- the pull-based node-agent applies versioned worker-count and drain desired state on its local Docker
+  engine, and the join/install/overlay proof is implemented; fleet UI, physical two-VPS acceptance,
+  and rolling lifecycle remain incomplete;
 - evidence remains incomplete unless storage is centralized;
 - a worker crash can still lose an in-flight job under list/pop semantics;
 - routing assumes workers are mostly interchangeable.
@@ -467,17 +468,16 @@ EVIDENCE_S3_ENDPOINT_URL=http://<artifact-store-overlay-ip>:9000
 **3. Overlay binding (never expose data stores publicly).** Both Compose variants now separate
 `SHAKERSCAN_DATA_BIND_HOST` from the UI/API bind and provide an opt-in `fleet` profile whose
 `fleet-edge` listener terminates CA-verified HTTPS on the data address without running duplicate
-schedulers. The control plane binds Redis and
-Postgres to the WireGuard overlay interface only — never `0.0.0.0`. Compose currently reuses
-`SHAKERSCAN_BIND_HOST` for API, UI, Redis, and Postgres, so fleet mode must first introduce a separate
-`SHAKERSCAN_DATA_BIND_HOST` for Redis/Postgres. `SHAKERSCAN_BIND_HOST` continues to control the public
-API/UI listener; changing the data listener must not make the UI disappear or accidentally broaden a
-public listener. Fleet initialization sets only the data bind to the control-plane overlay IP and
-adds a firewall rule permitting only peer overlay addresses to reach 6379/5432. Public exposure of
-6379/5432 remains a non-goal (§11).
+schedulers. On Linux the edge uses the host network and binds only to the overlay address, preserving
+the real socket peer for the one-time bundle gate instead of trusting forwarded headers. The control
+plane binds Redis and Postgres to the WireGuard overlay interface only — never `0.0.0.0`.
+`SHAKERSCAN_BIND_HOST` continues to control the public API/UI listener; the separate
+`SHAKERSCAN_DATA_BIND_HOST` controls Redis/Postgres and the overlay edge. Fleet initialization sets
+only the data bind to the control-plane overlay IP, so those ports have no public-interface listener.
+Public exposure of 6379/5432 remains a non-goal (§11).
 
-**4. Fleet CLI + pre-overlay bootstrap contract.** Add three verbs to `scanner.sh` (its current
-dispatch table has no fleet/join verb):
+**4. Fleet CLI + pre-overlay bootstrap contract.** These verbs are implemented in `scanner.sh` and
+the bounded Linux host provisioner in `scripts/fleet_cli.py`:
 
 ```text
 shakerscan fleet init [--network wireguard]
@@ -508,17 +508,25 @@ operations. This is required even while the rest of the self-hosted API keeps it
 tokenless CLI model: otherwise any network client that can reach the API could mint its own join
 token. Secret-bearing responses set `Cache-Control: no-store`.
 
+`fleet init` persists the control keypair, fleet CA, server certificate, private connection-bundle
+JSON, and rendered WireGuard configuration with restrictive modes; refuses an existing fleet CIDR
+change; verifies the operator-provided public HTTPS URL; enables the fleet Compose profile; binds the
+data stores to the first overlay address; and installs a 10-second systemd peer reconciler. Operators
+on Linux systems without systemd can select `--no-reconcile-service` and run `fleet reconcile`
+manually. The CLI never silently falls back to plaintext enrollment and production init refuses the
+local-lab insecure-enrollment escape hatch.
+
 **5. Bootstrap response + post-overlay connection bundle.** `POST /fleet/nodes/join` returns only
 the material needed to establish the overlay plus the one-time node credential (the worker persists
 it and never re-uses the enrollment token):
 
 ```text
-node_id, control_plane_overlay_url, worker_image_digest, desired_worker_count, labels,
+node_id, control_plane_overlay_url, wireguard_overlay_cidr, worker_image_digest, desired_worker_count, labels,
 wireguard_peer_ip, wireguard_control_plane_public_key, wireguard_control_plane_endpoint,
 node_credential
 ```
 
-The raw `node_credential` and public fleet CA certificate are returned once over HTTPS, and the
+The raw `node_credential`, overlay CIDR, and public fleet CA certificate are returned once over HTTPS, and the
 credential is persisted with restrictive filesystem
 permissions. It authorizes only node API operations. After installing WireGuard and proving overlay
 reachability, the worker calls `POST /fleet/nodes/{id}/connection-bundle` over **overlay HTTPS**, using
@@ -541,8 +549,8 @@ applied-state version, and reconciliation errors through `POST /fleet/nodes/{id}
 no inbound listener and clones only an explicit allowlist of worker container settings. The API
 supports operator-authenticated desired worker count/drain changes through
 `PATCH /fleet/nodes/{id}/state` and node-authenticated reads through the matching `GET`. The join
-installer, overlay reachability proof, fleet UI, stale-state presentation, and rolling lifecycle are
-still incomplete.
+installer and CA-verified overlay reachability proof are implemented. Fleet UI, stale-state
+presentation, physical two-VPS acceptance, and rolling lifecycle are still incomplete.
 
 **Milestone A done** = a remote worker registers with one command, appears in the fleet view with a
 heartbeat, drains the shared `scan_jobs` queue, writes scans/findings to the control-plane database,
@@ -550,8 +558,8 @@ and Redis/Postgres are unreachable from the public internet. This is explicitly 
 an unattended-production claim. The accepted Phase-1 gaps remain:
 at-most-once delivery (a hard worker loss between `BLPOP` and the first heartbeat still relies on the
 DB reconcilers, not a Redis lease — §9), worker-local result/checkpoint artifacts even when managed
-evidence objects use S3 (§8), and an incomplete install/UI/rolling lifecycle around the implemented
-per-node scaling primitive.
+evidence objects use S3 (§8), and an incomplete UI/rolling lifecycle around the implemented install
+and per-node scaling primitives.
 
 ### Phase 2: Production-Ready Owned Fleet
 
@@ -562,8 +570,8 @@ Build the fleet layer:
 1. **Node registry:** track `node_id`, hostname, overlay IP, egress IP, region, version,
    labels, tool capabilities, capacity, active worker count, desired worker count,
    heartbeat, and drain state.
-2. **Node-agent:** the local pull agent and desired-count/drain reconciliation foundation is built.
-   Complete installation, stale-state handling, rolling upgrades, partition behavior, and fleet UI.
+2. **Node-agent:** the local pull agent, installation, and desired-count/drain reconciliation
+   foundation are built. Complete stale-state handling, rolling upgrades, partition behavior, and fleet UI.
    The API never drives a remote Docker socket directly.
 3. **Central evidence store:** workers upload screenshots, HAR files, logs, and other
    artifacts to S3/MinIO. Findings and scan results store object keys, not local paths.
@@ -601,8 +609,9 @@ fleet milestone. The idea is that a user could provide a DigitalOcean, AWS, or s
 cloud credential and ask ShakerScan to create a control-plane VPS plus N worker VPSs,
 install ShakerScan on them, connect them with the same fleet join flow, and optionally
 destroy or scale the fleet later. This should wait until the core fleet primitives are
-solid: standalone remains default, `fleet init`, built-in WireGuard, `fleet join`,
-node-agent heartbeat, worker scaling, evidence storage, and safe queue semantics.
+solid. The first five primitives are implemented: standalone remains default, `fleet init`, built-in
+WireGuard, `fleet join`, and node-agent heartbeat/worker scaling. Evidence storage and safe queue
+semantics remain before cloud provisioning.
 
 ## 7. Node-Agent Contract
 
@@ -807,8 +816,8 @@ Acceptance criteria:
 - scan state and findings are written to the control-plane database;
 - Redis/Postgres are not reachable from the public internet.
 
-Known gaps are acceptable only for this labeled lab proof: incomplete automated install/rolling
-lifecycle, worker-local general artifacts, and at-most-once job delivery. No unattended or
+Known gaps are acceptable only for this labeled lab proof: incomplete rolling lifecycle and fleet
+UI, worker-local general artifacts, and at-most-once job delivery. No unattended or
 production-safe claim is allowed.
 
 ### Milestone B: Cross-VPS Parallel-Scan Proof

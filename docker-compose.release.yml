@@ -61,6 +61,7 @@ services:
       - FLEET_ALLOW_INSECURE_ENROLLMENT=${FLEET_ALLOW_INSECURE_ENROLLMENT:-false}
       - FLEET_OPERATOR_TOKEN=${FLEET_OPERATOR_TOKEN:-}
       - FLEET_CONNECTION_BUNDLE_JSON=${FLEET_CONNECTION_BUNDLE_JSON:-}
+      - FLEET_CONNECTION_BUNDLE_PATH=${FLEET_CONNECTION_BUNDLE_PATH:-}
       - FLEET_CA_CERT_PATH=/run/shakerscan-fleet/control/ca.crt
       - AI_URL=${AI_URL:-}
       - AI_API_KEY=${AI_API_KEY:-}
@@ -105,12 +106,11 @@ services:
 
   fleet-edge:
     profiles: ["fleet"]
+    network_mode: host
     image: ${SCANNER_IMAGE_REPO:-shakerscan/shakerscan-scanner}:${SCANNER_IMAGE_TAG:-latest}
-    ports:
-      - "${SHAKERSCAN_DATA_BIND_HOST:-127.0.0.1}:${FLEET_TLS_PORT:-8443}:8443"
     environment:
-      - REDIS_URL=redis://redis:6379
-      - DATABASE_URL=postgresql://scanner:scanner@postgres:5432/scanner
+      - REDIS_URL=redis://${SHAKERSCAN_DATA_BIND_HOST:-127.0.0.1}:${REDIS_PORT:-6379}
+      - DATABASE_URL=postgresql://scanner:scanner@${SHAKERSCAN_DATA_BIND_HOST:-127.0.0.1}:${POSTGRES_PORT:-5432}/scanner
       - RESULTS_DIR=/results
       - FLEET_EDGE_MODE=true
       - SHAKERSCAN_BIND_HOST=${SHAKERSCAN_DATA_BIND_HOST:-127.0.0.1}
@@ -124,6 +124,7 @@ services:
       - FLEET_ALLOW_INSECURE_ENROLLMENT=false
       - FLEET_OPERATOR_TOKEN=${FLEET_OPERATOR_TOKEN:-}
       - FLEET_CONNECTION_BUNDLE_JSON=${FLEET_CONNECTION_BUNDLE_JSON:-}
+      - FLEET_CONNECTION_BUNDLE_PATH=${FLEET_CONNECTION_BUNDLE_PATH:-}
       - FLEET_CA_CERT_PATH=/run/shakerscan-fleet/control/ca.crt
     volumes:
       - ./results:/results
@@ -132,9 +133,9 @@ services:
       - uvicorn
       - api:app
       - --host
-      - 0.0.0.0
+      - ${SHAKERSCAN_DATA_BIND_HOST:-127.0.0.1}
       - --port
-      - "8443"
+      - ${FLEET_TLS_PORT:-8443}
       - --ssl-keyfile
       - /run/shakerscan-fleet/control/server.key
       - --ssl-certfile

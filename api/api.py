@@ -4504,15 +4504,28 @@ def _require_fleet_operator(request: Request) -> None:
 
 
 def _fleet_connection_bundle() -> dict[str, Any]:
-    raw = os.environ.get("FLEET_CONNECTION_BUNDLE_JSON", "")
+    raw = ""
+    bundle_path = os.environ.get("FLEET_CONNECTION_BUNDLE_PATH", "").strip()
+    if bundle_path:
+        path = Path(bundle_path)
+        try:
+            if not path.is_file() or path.stat().st_mode & 0o077:
+                raise FleetConfigurationError("fleet connection bundle file must be owner-only (0600)")
+            raw = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise FleetConfigurationError("FLEET_CONNECTION_BUNDLE_PATH cannot be read") from exc
+        if len(raw.encode("utf-8")) > 256 * 1024:
+            raise FleetConfigurationError("fleet connection bundle is too large")
     if not raw:
-        raise FleetConfigurationError("FLEET_CONNECTION_BUNDLE_JSON is not configured")
+        raw = os.environ.get("FLEET_CONNECTION_BUNDLE_JSON", "")
+    if not raw:
+        raise FleetConfigurationError("fleet connection bundle is not configured")
     try:
         bundle = json.loads(raw)
     except json.JSONDecodeError as exc:
-        raise FleetConfigurationError("FLEET_CONNECTION_BUNDLE_JSON must be valid JSON") from exc
+        raise FleetConfigurationError("fleet connection bundle must be valid JSON") from exc
     if not isinstance(bundle, dict):
-        raise FleetConfigurationError("FLEET_CONNECTION_BUNDLE_JSON must be a JSON object")
+        raise FleetConfigurationError("fleet connection bundle must be a JSON object")
     for key in ("redis_url", "database_url"):
         if not isinstance(bundle.get(key), str) or not bundle[key].strip():
             raise FleetConfigurationError(f"connection bundle requires {key}")

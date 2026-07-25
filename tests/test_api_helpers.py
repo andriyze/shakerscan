@@ -228,6 +228,18 @@ def test_fleet_ca_certificate_loader_is_bounded_and_validated(tmp_path, monkeypa
         api_module._fleet_ca_certificate_pem()
 
 
+def test_fleet_connection_bundle_prefers_bounded_file(tmp_path, monkeypatch):
+    bundle = tmp_path / "bundle.json"
+    bundle.write_text(
+        json.dumps({"redis_url": "redis://10.77.0.1", "database_url": "postgresql://db"}),
+        encoding="utf-8",
+    )
+    bundle.chmod(0o600)
+    monkeypatch.setenv("FLEET_CONNECTION_BUNDLE_PATH", str(bundle))
+    monkeypatch.setenv("FLEET_CONNECTION_BUNDLE_JSON", "not-json")
+    assert api_module._fleet_connection_bundle()["redis_url"] == "redis://10.77.0.1"
+
+
 def test_worker_build_current_is_fingerprint_authoritative_over_version_label():
     # The source fingerprint covers all detection/orchestration modules and is the
     # precise currency signal. The git version label is volatile (real commit, and

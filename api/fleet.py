@@ -234,6 +234,7 @@ async def enroll_node(
     return {
         "node_id": str(node_id),
         "control_plane_overlay_url": config.control_plane_overlay_url,
+        "wireguard_overlay_cidr": config.overlay_cidr,
         "worker_image_digest": config.worker_image_digest,
         "desired_worker_count": int(config.desired_worker_count),
         "labels": safe_labels,

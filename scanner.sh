@@ -1278,10 +1278,13 @@ resolve_start_workers() {
 
 prepare_runtime_files() {
     mkdir -p results
+    mkdir -p .shakerscan-fleet
+    chmod 700 .shakerscan-fleet
 
     if [ "$USE_PREBUILT" -eq 1 ]; then
         mkdir -p db
         touch .env
+        chmod 600 .env
 
         if [ ! -f "$SCRIPT_DIR/$PREBUILT_COMPOSE_FILE" ]; then
             echo -e "${RED}Error: $PREBUILT_COMPOSE_FILE is missing.${NC}"
@@ -1387,6 +1390,10 @@ print_help() {
     echo "  mcp                Start the read-only Command Arsenal MCP stdio adapter"
     echo "  research <id> [N]  Run up to N bounded Codex decisions for a research episode"
     echo "  gungnir <cmd>      CT monitor: start, stop, status, logs"
+    echo "  fleet init [...]   Initialize the owned-fleet WireGuard control plane"
+    echo "  fleet join-token   Mint a single-use ready-to-paste worker join command"
+    echo "  fleet reconcile    Reconcile registered workers into local WireGuard state"
+    echo "  join <url> [...]   Join this Linux host as a worker-only fleet node"
     echo "  build              Build Docker images"
     echo "  rebuild [opts]     Rebuild Docker images (cached by default)"
     echo "                       --no-cache  Full rebuild (slow, 10-20 min)"
@@ -1421,6 +1428,8 @@ print_help() {
     echo "  ./scanner.sh env                      # Show PATH and agent launch commands"
     echo "  ./scanner.sh agent codex              # Start an AI agent with local docs loaded"
     echo "  ./scanner.sh research <episode-id> 5  # Drive a bounded research episode"
+    echo "  ./scanner.sh fleet init --endpoint fleet.example.com:51820 --public-url https://fleet.example.com"
+    echo "  ./scanner.sh fleet join-token --ttl 24h"
     echo "  ./scanner.sh start --local            # Build locally and start"
     echo "  ./scanner.sh start -w 10              # Start with 10 workers"
     echo "  ./scanner.sh start --image-tag $(get_release_version)  # Use this release's published tag"
@@ -2598,6 +2607,22 @@ case $COMMAND in
             exit 1
         fi
         exec python3 "$SCRIPT_DIR/scripts/shakerscan_mcp.py"
+        ;;
+    fleet)
+        if [ ! -f "$SCRIPT_DIR/scripts/fleet_cli.py" ]; then
+            echo -e "${RED}Error: the fleet host provisioner is missing from this runtime.${NC}"
+            echo "Re-run the ShakerScan installer to refresh runtime files."
+            exit 1
+        fi
+        exec python3 "$SCRIPT_DIR/scripts/fleet_cli.py" --runtime "$SCRIPT_DIR" "${ARGS[@]}"
+        ;;
+    join)
+        if [ ! -f "$SCRIPT_DIR/scripts/fleet_cli.py" ]; then
+            echo -e "${RED}Error: the fleet host provisioner is missing from this runtime.${NC}"
+            echo "Re-run the ShakerScan installer to refresh runtime files."
+            exit 1
+        fi
+        exec python3 "$SCRIPT_DIR/scripts/fleet_cli.py" --runtime "$SCRIPT_DIR" join "${ARGS[@]}"
         ;;
     research)
         if [ -z "${ARGS[0]:-}" ]; then

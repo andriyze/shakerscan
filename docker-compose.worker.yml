@@ -7,7 +7,8 @@ services:
     init: true
     image: ${FLEET_WORKER_IMAGE:?FLEET_WORKER_IMAGE must be a digest-pinned scanner image}
     env_file:
-      - ${FLEET_WORKER_ENV_FILE:-./.shakerscan-fleet/worker.env}
+      - path: ${FLEET_WORKER_ENV_FILE:-./.shakerscan-fleet/worker.env}
+        format: raw
     environment:
       - PYTHONUNBUFFERED=1
       - FLEET_WORKER_IMAGE_DIGEST=${FLEET_WORKER_IMAGE:?FLEET_WORKER_IMAGE must be a digest-pinned scanner image}

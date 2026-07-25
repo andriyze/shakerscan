@@ -135,6 +135,38 @@ def test_worker_reconciliation_refuses_scale_up_without_template():
         fleet_agent.reconcile_workers(client, node_id=NODE_ID, desired_count=1)
 
 
+def test_observed_worker_image_comes_from_container_not_desired_state():
+    client = FakeDocker()
+    containers = fleet_agent.worker_containers(client, NODE_ID)
+    assert fleet_agent.observed_worker_image(client, containers) == "registry/shakerscan@sha256:" + "a" * 64
+
+
+def test_run_once_refuses_unimplemented_image_change_and_reports_prior_state(monkeypatch):
+    posts = []
+
+    def fake_api(_state, method, _path, payload=None):
+        if method == "GET":
+            return {
+                "desired_worker_count": 1,
+                "desired_state_version": 4,
+                "applied_state_version": 3,
+                "worker_image_digest": "registry/shakerscan@sha256:" + "b" * 64,
+            }
+        posts.append(payload)
+        return {"id": NODE_ID, "status": "joining"}
+
+    monkeypatch.setattr(fleet_agent, "api_request", fake_api)
+    state = {
+        "node_id": NODE_ID,
+        "worker_image_digest": "registry/shakerscan@sha256:" + "a" * 64,
+    }
+    with pytest.raises(fleet_agent.AgentError, match="rolling update"):
+        fleet_agent.run_once(state, FakeDocker())
+    assert posts[0]["applied_state_version"] == 3
+    assert posts[0]["active_worker_image_digest"].endswith("a" * 64)
+    assert "rolling update" in posts[0]["last_error"]
+
+
 def test_worker_compose_contains_only_worker_and_agent_services(tmp_path):
     compose = Path(__file__).resolve().parents[1] / "docker-compose.worker.yml"
     text = compose.read_text(encoding="utf-8")
@@ -146,6 +178,7 @@ def test_worker_compose_contains_only_worker_and_agent_services(tmp_path):
     assert "  redis:" not in text
     assert "depends_on:" in text
     assert "FLEET_WORKER_IMAGE must be a digest-pinned scanner image" in text
+    assert "format: raw" in text
 
 
 def test_worker_entrypoint_rejects_unpinned_image_and_invalid_node(monkeypatch):
@@ -167,6 +200,7 @@ def test_control_plane_compose_defines_overlay_tls_edge():
         assert "  fleet-edge:" in text
         assert 'profiles: ["fleet"]' in text
         assert "FLEET_EDGE_MODE=true" in text
+        assert "network_mode: host" in text
         assert "FLEET_CA_CERT_PATH=/run/shakerscan-fleet/control/ca.crt" in text
         assert "--ssl-keyfile" in text
         assert "--ssl-certfile" in text

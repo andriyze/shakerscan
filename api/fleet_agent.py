@@ -271,6 +271,17 @@ def host_capacity() -> dict[str, Any]:
     return result
 
 
+def observed_worker_image(client: DockerClient, containers: list[dict[str, Any]]) -> str | None:
+    if not containers:
+        return None
+    template_id = str(containers[0].get("Id") or "")
+    status, inspect = client.request("GET", f"/containers/{template_id}/json")
+    if status != 200 or not isinstance(inspect, dict):
+        return None
+    config = inspect.get("Config") if isinstance(inspect.get("Config"), dict) else {}
+    return str(config.get("Image") or "").strip() or None
+
+
 def run_once(state: dict[str, Any], client: DockerClient) -> dict[str, Any]:
     node_id = str(state["node_id"])
     desired_state = api_request(state, "GET", f"/fleet/nodes/{node_id}/state")
@@ -279,14 +290,20 @@ def run_once(state: dict[str, Any], client: DockerClient) -> dict[str, Any]:
     previously_applied_version = int(desired_state.get("applied_state_version") or 0)
     error: Exception | None = None
     try:
+        desired_image = str(desired_state.get("worker_image_digest") or "").strip()
+        local_image = str(state.get("worker_image_digest") or "").strip()
+        if desired_image and desired_image != local_image:
+            raise AgentError("desired worker image differs from the installed digest; rolling update is required")
         reconcile_workers(client, node_id=node_id, desired_count=desired)
     except Exception as exc:
         error = exc
     try:
         containers = worker_containers(client, node_id)
         active = sum(1 for item in containers if item.get("State") == "running")
+        active_image = observed_worker_image(client, containers)
     except Exception:
         active = 0
+        active_image = None
     result = api_request(
         state,
         "POST",
@@ -295,7 +312,7 @@ def run_once(state: dict[str, Any], client: DockerClient) -> dict[str, Any]:
             "active_worker_count": active,
             "capacity": host_capacity(),
             "build_fingerprint": state.get("build_fingerprint"),
-            "active_worker_image_digest": state.get("worker_image_digest"),
+            "active_worker_image_digest": active_image,
             "agent_version": AGENT_VERSION,
             "applied_state_version": desired_version if error is None else previously_applied_version,
             "last_error": str(error)[:2000] if error is not None else None,

@@ -446,9 +446,11 @@ hashed single-use join tokens, HTTPS enrollment, authenticated heartbeat, one-ti
 bundles, and credential rotation/revocation. A digest-pinned worker/agent-only Compose runtime and
 pull-based local node-agent now apply versioned worker-count/drain desired state without an inbound
 listener or remote Docker API. The opt-in fleet Compose profile adds a CA-verified HTTPS listener on
-the private data address and disables duplicate background controllers in that edge process.
-WireGuard/CLI host automation, fleet UI, and the two-VPS queue proof
-are not complete. Production leases/ack/reclaim, fencing,
+the private data address, preserves the real overlay socket peer with Linux host networking, and
+disables duplicate background controllers in that edge process. Linux host automation now implements
+persistent `fleet init`, single-use `fleet join-token`, automatic/manual peer reconciliation, and
+worker-only `join`; physical two-VPS acceptance and fleet UI are not complete. Production
+leases/ack/reclaim, fencing,
 general evidence transfer, placement, and fleet-wide rate controls remain future work. The design authority is
 [`docs/multi-node-architecture.md`](multi-node-architecture.md); prioritized delivery work is tracked
 in [`docs/proposed-next-steps.md`](proposed-next-steps.md).
@@ -829,7 +831,10 @@ heartbeats likewise reject plaintext transport so node bearer credentials are ne
 The worker-only Compose
 runtime requires a digest-pinned image and starts no UI, API, Redis, or Postgres. Its pull-based agent
 uses owner-only local state, reconciles only node-labeled workers on the local Docker engine, and
-reports applied state/capacity/errors. WireGuard and one-command host provisioning remain incomplete.
+reports applied state/capacity/errors. `scanner.sh fleet init`, `fleet join-token`, `fleet reconcile`,
+and `scanner.sh join` provide the Linux WireGuard host workflow with owner-only state, public HTTPS
+preflight, CA-verified overlay proof, one-time bundle persistence, and pinned-image startup. The
+physical two-VPS acceptance run remains incomplete.
 
 **Command Arsenal**: `GET /arsenal/commands` · `GET /arsenal/contracts` ·
 `POST|GET /arsenal/plans` · `POST|GET /arsenal/context-packs` ·
@@ -1170,10 +1175,10 @@ it is the exhaustive backstop behind the human-readable product map above.
 | Tool adapters | 13 | `api/command_arsenal.py` |
 | Local-agent adapters | 4 | `api/command_arsenal.py` |
 | Scanner CLI flags | 158 | `scanner/scanner.py` |
-| Scanner wrapper commands | 24 | `scanner.sh` |
+| Scanner wrapper commands | 26 | `scanner.sh` |
 | Make targets | 10 | `Makefile` |
 | Release gates | 14 | `scripts/release_gates.py` |
-| Runtime environment keys | 222 | Python sources + Compose manifests |
+| Runtime environment keys | 223 | Python sources + Compose manifests |
 | Scanner modules | 83 | `scanner/scanner_tools/` |
 | UI pages | 30 | `ui/src/app/` |
 | Skills | 6 | `skills/` |
@@ -1727,7 +1732,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 
 | Surface | Names |
 |---|---|
-| `scanner.sh` commands | `agent`, `ai`, `backup`, `build`, `doctor`, `env`, `gungnir`, `help`, `install-deps`, `logs`, `mcp`, `rebuild`, `reload`, `research`, `reset`, `restart`, `scale`, `scan`, `scan-full`, `scan-smart`, `shell`, `start`, `status`, `stop` |
+| `scanner.sh` commands | `agent`, `ai`, `backup`, `build`, `doctor`, `env`, `fleet`, `gungnir`, `help`, `install-deps`, `join`, `logs`, `mcp`, `rebuild`, `reload`, `research`, `reset`, `restart`, `scale`, `scan`, `scan-full`, `scan-smart`, `shell`, `start`, `status`, `stop` |
 | Make targets | `dependency-audit`, `dependency-lock`, `e2e`, `e2e-ai-gate`, `e2e-dast`, `e2e-model-intake`, `e2e-model-intake-fixture`, `release-gates`, `test`, `upgrade-smoke` |
 | Release gates | `test:evidence-provenance`, `test:fleet-current`, `test:hypothesis-proof-promotion`, `test:mcp-read-only`, `test:no-ai-verified`, `test:no-benchmark-fitting`, `test:no-phantom-tools`, `test:planner-no-shell`, `test:planner-risk`, `test:planner-scope`, `test:scanner-auth-quality`, `test:scanner-bounds`, `test:scanner-proof-truth`, `test:scanner-registry-coverage` |
 
@@ -1820,6 +1825,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `FLEET_CA_CERT_PATH` | `api/api.py` |
 | `FLEET_COMPOSE_PROJECT_NAME` | `docker-compose.worker.yml` |
 | `FLEET_CONNECTION_BUNDLE_JSON` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `FLEET_CONNECTION_BUNDLE_PATH` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `FLEET_CONTROL_PLANE_OVERLAY_URL` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `FLEET_DESIRED_WORKER_COUNT` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `FLEET_EDGE_MODE` | `api/api.py` |
