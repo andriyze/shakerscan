@@ -10851,6 +10851,7 @@ def _worker_build_report_payload() -> tuple[str, str]:
     payload = json.dumps({
         "build_fingerprint": _worker_build_fingerprint(),
         "scanner_version": _published_scanner_version() or os.environ.get("SCANNER_VERSION") or os.environ.get("GIT_COMMIT") or "dev",
+        "node_id": os.environ.get("SHAKERSCAN_NODE_ID") or os.environ.get("FLEET_NODE_ID") or None,
         "reported_at": utc_now_iso(),
     })
     return hostname, payload

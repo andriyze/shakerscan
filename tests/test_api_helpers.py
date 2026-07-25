@@ -422,6 +422,19 @@ def test_orphaned_worker_build_reports_exclude_only_running_container_hosts():
     ) == ["stopped789"]
 
 
+def test_live_worker_build_reports_prune_old_local_hosts_but_keep_remote_nodes():
+    reports = {
+        b"live123": json.dumps({"reported_at": "2026-07-25T12:00:00+00:00"}).encode(),
+        b"old456": json.dumps({"reported_at": "2026-07-25T12:00:00+00:00"}).encode(),
+        b"remote789": json.dumps({
+            "node_id": str(uuid.uuid4()),
+            "reported_at": "2026-07-25T12:00:00+00:00",
+        }).encode(),
+    }
+    filtered = api_module._live_worker_build_reports(reports, ["live123000000"])
+    assert set(filtered) == {b"live123", b"remote789"}
+
+
 def test_target_credential_profile_public_shape_never_returns_secret(monkeypatch):
     monkeypatch.setattr(api_module, "encryption_enabled", lambda: True)
     row = {

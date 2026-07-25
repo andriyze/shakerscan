@@ -9377,6 +9377,24 @@ def _orphaned_worker_build_report_hosts(
     ]
 
 
+def _live_worker_build_reports(raw_reports: Any, running_local_ids: Optional[list[str]]) -> dict[Any, Any]:
+    """Drop superseded local-container reports while retaining remote-node reports."""
+    if running_local_ids is None:
+        return dict(raw_reports or {})
+    live_ids = [str(value or "").lower() for value in running_local_ids if value]
+    filtered: dict[Any, Any] = {}
+    for host, raw in (raw_reports or {}).items():
+        host_text = host.decode("utf-8", "replace") if isinstance(host, bytes) else str(host)
+        value = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else raw
+        try:
+            report = json.loads(value) if isinstance(value, str) else dict(value)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            report = {}
+        if report.get("node_id") or any(container_id.startswith(host_text.lower()) for container_id in live_ids):
+            filtered[host] = raw
+    return filtered
+
+
 @app.get("/health")
 async def health():
     """Health check."""
@@ -9403,7 +9421,8 @@ async def health():
     except Exception:
         db_ok = False
 
-    expected_local_workers = await asyncio.to_thread(_running_scan_worker_count_best_effort)
+    running_local_worker_ids = await asyncio.to_thread(_running_scan_worker_container_ids_best_effort)
+    expected_local_workers = len(running_local_worker_ids) if running_local_worker_ids is not None else None
     expected_worker_count = (
         (expected_local_workers or 0) + (expected_remote_workers or 0)
         if expected_local_workers is not None or expected_remote_workers is not None
@@ -9415,7 +9434,10 @@ async def health():
         r.ping()
         redis_ok = True
         worker_build = _worker_build_report_summary(
-            r.hgetall("shakerscan:worker_build") or {},
+            _live_worker_build_reports(
+                r.hgetall("shakerscan:worker_build") or {},
+                running_local_worker_ids,
+            ),
             expected_fingerprint=expected_fingerprint,
             expected_version=expected_version,
             expected_count=expected_worker_count,
@@ -48795,6 +48817,12 @@ def _running_scan_worker_count_best_effort() -> int | None:
     deployment exposes it, but should not fail API requests in environments
     without a mounted Docker socket.
     """
+    worker_ids = _running_scan_worker_container_ids_best_effort()
+    return len(worker_ids) if worker_ids is not None else None
+
+
+def _running_scan_worker_container_ids_best_effort() -> list[str] | None:
+    """Return live local worker container IDs, or None without Docker authority."""
     try:
         filters = urllib.parse.quote('{"name":["worker"]}')
         status_code, containers = docker_socket_request(
@@ -48803,13 +48831,15 @@ def _running_scan_worker_count_best_effort() -> int | None:
         )
         if status_code != 200 or not isinstance(containers, list):
             return None
-        count = 0
+        worker_ids: list[str] = []
         for container in containers:
             names = container.get("Names", [])
             name = names[0].lstrip("/") if names else ""
             if _is_scan_worker_container_name(name) and container.get("State") == "running":
-                count += 1
-        return count
+                container_id = str(container.get("Id") or "").lower()
+                if container_id:
+                    worker_ids.append(container_id)
+        return worker_ids
     except Exception:
         return None
 
