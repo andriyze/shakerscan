@@ -24,6 +24,7 @@ def test_broker_state_requires_owner_only_https_but_not_data_store_credentials(t
         "node_id": NODE_ID,
         "node_credential": "ssn_secret",
         "control_plane_url": "https://fleet.example.test",
+        "transport": "broker",
     }), encoding="utf-8")
     state_path.chmod(0o600)
     state = broker_worker.load_state(state_path)
@@ -41,10 +42,28 @@ def test_broker_state_rejects_non_https_control_plane(tmp_path):
         "node_id": NODE_ID,
         "node_credential": "ssn_secret",
         "control_plane_url": "http://fleet.example.test",
+        "transport": "broker",
     }), encoding="utf-8")
     state_path.chmod(0o600)
     with pytest.raises(broker_worker.BrokerWorkerError, match="HTTPS"):
         broker_worker.load_state(state_path)
+
+
+def test_broker_state_has_explicit_ca_modes_and_clear_errors(tmp_path):
+    state_path = tmp_path / "state.json"
+    base = {
+        "node_id": NODE_ID,
+        "node_credential": "ssn_secret",
+        "control_plane_url": "https://fleet.example.test",
+        "transport": "broker",
+    }
+    state_path.write_text(json.dumps({**base, "tls_ca_mode": "file"}), encoding="utf-8")
+    state_path.chmod(0o600)
+    with pytest.raises(broker_worker.BrokerWorkerError, match="requires ca_cert_path"):
+        broker_worker.load_state(state_path)
+
+    state_path.write_text(json.dumps({**base, "tls_ca_mode": "system"}), encoding="utf-8")
+    assert broker_worker.load_state(state_path)["tls_ca_mode"] == "system"
 
 
 def test_broker_artifact_centralization_rewrites_only_results_files(tmp_path, monkeypatch):

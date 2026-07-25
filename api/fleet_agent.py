@@ -23,6 +23,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from fleet_tls import FleetTLSConfigurationError, create_fleet_ssl_context, normalize_tls_ca_state
+
 
 AGENT_VERSION = "2"
 DOCKER_SOCKET = "/var/run/docker.sock"
@@ -96,17 +98,18 @@ def load_state(path: Path) -> dict[str, Any]:
     image_name, separator, digest = str(state["worker_image_digest"]).rpartition("@sha256:")
     if not separator or not image_name or len(digest) != 64 or any(ch not in "0123456789abcdef" for ch in digest.lower()):
         raise AgentError("worker_image_digest must be digest-pinned")
+    try:
+        normalize_tls_ca_state(state)
+    except FleetTLSConfigurationError as exc:
+        raise AgentError(str(exc)) from exc
     return state
 
 
 def _ssl_context(state: dict[str, Any]) -> ssl.SSLContext:
-    raw_path = str(state.get("ca_cert_path") or "").strip()
-    if not raw_path:
-        return ssl.create_default_context()
-    ca_path = Path(raw_path)
-    if not ca_path.is_file():
-        raise AgentError(f"fleet CA certificate does not exist: {ca_path}")
-    return ssl.create_default_context(cafile=str(ca_path))
+    try:
+        return create_fleet_ssl_context(state)
+    except FleetTLSConfigurationError as exc:
+        raise AgentError(str(exc)) from exc
 
 
 def api_request(

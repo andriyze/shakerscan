@@ -581,6 +581,12 @@ credentials once; the response is never available over the public listener and i
 data-store secrets are delivered only after the overlay exists. Rotation and revocation are part of
 the node API even if automatic rotation is deferred.
 
+Node state records an explicit TLS trust mode. Overlay agents require the enrolled fleet CA file;
+they never fall back to the system store when that file is missing. Broker workers use the system CA
+store for the normal public CA-valid endpoint, or a caller-supplied private CA persisted by
+`shakerscan join --ca-cert /path/to/ca.pem`. Both the broker worker and its node agent consume the
+same trust policy and surface missing or conflicting CA configuration before making a request.
+
 The bundle gate uses the actual socket peer address (`Request.client.host`), never
 `X-Forwarded-For`, and requires that address to be inside the configured fleet overlay CIDR. Bundle
 consumption is an atomic `UPDATE ... WHERE connection_bundle_delivered_at IS NULL RETURNING ...`; a

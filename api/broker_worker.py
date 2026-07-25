@@ -22,6 +22,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+from fleet_tls import FleetTLSConfigurationError, create_fleet_ssl_context, normalize_tls_ca_state
 from worker import (
     RESULTS_DIR,
     _clear_fleet_busy_marker,
@@ -52,15 +53,18 @@ def load_state(path: Path) -> dict[str, Any]:
     parsed = urllib.parse.urlparse(str(state["control_plane_url"]))
     if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
         raise BrokerWorkerError("control_plane_url must be HTTPS without embedded credentials")
-    raw_ca = str(state.get("ca_cert_path") or "").strip()
-    if raw_ca and not Path(raw_ca).is_file():
-        raise BrokerWorkerError(f"fleet CA certificate does not exist: {raw_ca}")
+    try:
+        normalize_tls_ca_state(state)
+    except FleetTLSConfigurationError as exc:
+        raise BrokerWorkerError(str(exc)) from exc
     return state
 
 
 def _ssl_context(state: dict[str, Any]) -> ssl.SSLContext:
-    ca_path = str(state.get("ca_cert_path") or "").strip()
-    return ssl.create_default_context(cafile=ca_path or None)
+    try:
+        return create_fleet_ssl_context(state)
+    except FleetTLSConfigurationError as exc:
+        raise BrokerWorkerError(str(exc)) from exc
 
 
 def api_request(

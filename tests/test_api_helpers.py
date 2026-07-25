@@ -245,6 +245,16 @@ def test_server_side_fleet_lease_probe_reclaims_and_acknowledges_once(monkeypatc
     assert fake.streams == {}
 
 
+def test_server_side_fleet_lease_probe_rejects_unauthenticated_remote_call(monkeypatch):
+    monkeypatch.delenv("FLEET_OPERATOR_TOKEN", raising=False)
+    monkeypatch.setenv("SHAKERSCAN_BIND_HOST", "127.0.0.1")
+    with pytest.raises(api_module.HTTPException) as exc:
+        asyncio.run(api_module.run_fleet_acceptance_lease_probe(
+            _fleet_request(host="192.168.65.1", scheme="http")
+        ))
+    assert exc.value.status_code == 403
+
+
 def test_insecure_fleet_enrollment_escape_hatch_is_loopback_only(monkeypatch):
     monkeypatch.delenv("SHAKERSCAN_BIND_HOST", raising=False)
     monkeypatch.setenv("FLEET_ALLOW_INSECURE_ENROLLMENT", "true")

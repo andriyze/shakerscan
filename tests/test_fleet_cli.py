@@ -300,7 +300,60 @@ def test_broker_join_installs_no_database_or_redis_credentials(tmp_path, monkeyp
     state_text = (paths.node / "state.json").read_text(encoding="utf-8")
     assert "REDIS_URL" not in state_text
     assert "DATABASE_URL" not in state_text
+    assert '"tls_ca_mode": "system"' in state_text
     assert not (paths.node / "worker.env").exists()
+
+
+def test_broker_join_can_pin_a_private_enrollment_ca(tmp_path, monkeypatch):
+    paths = fleet_cli.RuntimePaths(tmp_path)
+    paths.broker_worker_compose.write_text("services: {}\n", encoding="utf-8")
+    source_ca = tmp_path / "private-ca.pem"
+    source_ca.write_text(
+        "-----BEGIN CERTIFICATE-----\nZmFrZQ==\n-----END CERTIFICATE-----\n",
+        encoding="utf-8",
+    )
+    response = {
+        "node_id": NODE_ID,
+        "node_credential": "node-secret",
+        "transport": "broker",
+        "worker_image_digest": IMAGE,
+    }
+    observed_ca_files = []
+
+    def fake_api(_base, _method, path, **kwargs):
+        assert path == "/fleet/nodes/join"
+        observed_ca_files.append(kwargs.get("ca_file"))
+        return dict(response)
+
+    monkeypatch.setattr(fleet_cli, "_require_linux", lambda: None)
+    monkeypatch.setattr(fleet_cli, "_require_commands", lambda _names: None)
+    monkeypatch.setattr(fleet_cli, "_docker_compose_command", lambda: ["docker", "compose"])
+    monkeypatch.setattr(fleet_cli, "api_json", fake_api)
+    monkeypatch.setattr(fleet_cli, "_start_broker_runtime", lambda *_args: None)
+
+    fleet_cli.command_join(
+        paths,
+        types.SimpleNamespace(
+            control_plane_url="https://fleet.example.test",
+            token="ssj_" + "x" * 40,
+            ca_cert=str(source_ca),
+            name="broker-private-ca",
+            transport="broker",
+            region=None,
+            egress_group=None,
+            network_label=None,
+            data_residency=None,
+            capability=[],
+            scan_tier=[],
+            label=[],
+        ),
+    )
+
+    assert observed_ca_files == [source_ca.resolve()]
+    state = json.loads((paths.node / "state.json").read_text(encoding="utf-8"))
+    assert state["tls_ca_mode"] == "file"
+    assert state["ca_cert_path"] == "/run/shakerscan-fleet/ca.crt"
+    assert (paths.node / "ca.crt").read_text(encoding="utf-8") == source_ca.read_text(encoding="utf-8")
 
 
 def test_init_persists_identity_bundle_and_fleet_profile(tmp_path, monkeypatch):

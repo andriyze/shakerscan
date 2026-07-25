@@ -897,6 +897,16 @@ def command_join(paths: RuntimePaths, args: argparse.Namespace) -> None:
     _require_commands(("docker",) if transport == "broker" else ("wg", "wg-quick", "ip", "docker"))
     _docker_compose_command()
     public_url = validate_https_url(args.control_plane_url)
+    enrollment_ca: Path | None = None
+    raw_enrollment_ca = str(getattr(args, "ca_cert", None) or "").strip()
+    if raw_enrollment_ca:
+        enrollment_ca = Path(raw_enrollment_ca).expanduser().resolve()
+        try:
+            certificate = enrollment_ca.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise FleetCLIError(f"enrollment CA certificate cannot be read: {enrollment_ca}") from exc
+        if "-----BEGIN CERTIFICATE-----" not in certificate or len(certificate.encode("utf-8")) > 64 * 1024:
+            raise FleetCLIError("enrollment CA certificate must be a PEM certificate no larger than 64 KiB")
     _ensure_private_dir(paths.node)
     state_path = paths.node / "state.json"
     if state_path.exists():
@@ -977,22 +987,35 @@ def command_join(paths: RuntimePaths, args: argparse.Namespace) -> None:
         "labels": labels,
         "capacity": {"cpu_count": os.cpu_count() or 1},
     }
-    raw_response = api_json(public_url, "POST", "/fleet/nodes/join", payload=payload, timeout=30)
+    raw_response = api_json(
+        public_url,
+        "POST",
+        "/fleet/nodes/join",
+        payload=payload,
+        ca_file=enrollment_ca,
+        timeout=30,
+    )
     response = (
         _validated_broker_join_response(raw_response)
         if transport == "broker"
         else _validated_join_response(raw_response)
     )
     if transport == "broker":
+        ca_path = paths.node / "ca.crt"
+        if enrollment_ca is not None:
+            atomic_write(ca_path, enrollment_ca.read_text(encoding="utf-8"), 0o644)
         bootstrap_state = {
             "node_id": response["node_id"],
             "node_credential": response["node_credential"],
             "control_plane_url": public_url,
             "worker_image_digest": response["worker_image_digest"],
+            "tls_ca_mode": "file" if enrollment_ca is not None else "system",
             "transport": "broker",
             "enrollment_url": public_url,
             "bootstrap": response,
         }
+        if enrollment_ca is not None:
+            bootstrap_state["ca_cert_path"] = "/run/shakerscan-fleet/ca.crt"
         atomic_write(state_path, json.dumps(bootstrap_state, sort_keys=True, indent=2) + "\n", 0o600)
         _start_broker_runtime(paths, response)
         print(f"Joined fleet as outbound-only HTTPS broker node {response['node_id']}")
@@ -1014,6 +1037,7 @@ def command_join(paths: RuntimePaths, args: argparse.Namespace) -> None:
         "node_credential": response["node_credential"],
         "control_plane_overlay_url": response["control_plane_overlay_url"],
         "ca_cert_path": "/run/shakerscan-fleet/ca.crt",
+        "tls_ca_mode": "file",
         "worker_image_digest": response["worker_image_digest"],
         "transport": "overlay",
         "enrollment_url": public_url,
@@ -1151,6 +1175,10 @@ def build_parser() -> argparse.ArgumentParser:
     join = subparsers.add_parser("join", help="join this Linux host as a worker node")
     join.add_argument("control_plane_url")
     join.add_argument("--token")
+    join.add_argument(
+        "--ca-cert",
+        help="PEM CA certificate for a private-CA enrollment URL (system CA store is the default)",
+    )
     join.add_argument("--name")
     join.add_argument("--transport", choices=["overlay", "broker"], default="overlay")
     join.add_argument("--region")

@@ -114,6 +114,31 @@ def test_state_file_rejects_non_https_control_plane_and_unpinned_image(tmp_path)
         fleet_agent.load_state(state_path)
 
 
+def test_overlay_state_requires_configured_ca_but_broker_can_use_system_store(tmp_path):
+    state_path = tmp_path / "state.json"
+    base = {
+        "node_id": NODE_ID,
+        "node_credential": "node-secret",
+        "worker_image_digest": "registry/shakerscan@sha256:" + "a" * 64,
+    }
+    state_path.write_text(json.dumps({
+        **base,
+        "control_plane_overlay_url": "https://10.77.0.1:8443",
+        "transport": "overlay",
+    }), encoding="utf-8")
+    state_path.chmod(0o600)
+    with pytest.raises(fleet_agent.AgentError, match="fleet CA is not configured"):
+        fleet_agent.load_state(state_path)
+
+    state_path.write_text(json.dumps({
+        **base,
+        "control_plane_url": "https://fleet.example.test",
+        "transport": "broker",
+        "tls_ca_mode": "system",
+    }), encoding="utf-8")
+    assert fleet_agent.load_state(state_path)["tls_ca_mode"] == "system"
+
+
 def test_worker_reconciliation_scales_up_from_safe_template():
     client = FakeDocker()
     assert fleet_agent.reconcile_workers(client, node_id=NODE_ID, desired_count=3) == 3
