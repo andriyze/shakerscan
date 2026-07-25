@@ -204,6 +204,20 @@ def validate_https_url(value: str) -> str:
     return candidate
 
 
+def validate_ca_certificate_path(value: str | None) -> Path | None:
+    raw_path = str(value or "").strip()
+    if not raw_path:
+        return None
+    ca_path = Path(raw_path).expanduser().resolve()
+    try:
+        certificate = ca_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise FleetCLIError(f"enrollment CA certificate cannot be read: {ca_path}") from exc
+    if "-----BEGIN CERTIFICATE-----" not in certificate or len(certificate.encode("utf-8")) > 64 * 1024:
+        raise FleetCLIError("enrollment CA certificate must be a PEM certificate no larger than 64 KiB")
+    return ca_path
+
+
 def validate_endpoint(value: str) -> tuple[str, int]:
     candidate = str(value or "").strip()
     if not candidate:
@@ -562,6 +576,7 @@ def _install_reconcile_timer(paths: RuntimePaths) -> None:
 
 def command_init(paths: RuntimePaths, args: argparse.Namespace) -> None:
     _require_linux()
+    enrollment_ca = validate_ca_certificate_path(getattr(args, "ca_cert", None))
     if getattr(args, "network", "wireguard") == "broker":
         _require_commands(("docker",))
         _docker_compose_command()
@@ -569,7 +584,7 @@ def command_init(paths: RuntimePaths, args: argparse.Namespace) -> None:
         if not 1 <= args.workers <= 128:
             raise FleetCLIError("--workers must be between 1 and 128")
         if not args.skip_public_check:
-            health = api_json(public_url, "GET", "/health", timeout=10)
+            health = api_json(public_url, "GET", "/health", ca_file=enrollment_ca, timeout=10)
             if health.get("status") != "healthy":
                 raise FleetCLIError("public HTTPS API did not report healthy")
         env = load_dotenv(paths.dotenv)
@@ -595,7 +610,7 @@ def command_init(paths: RuntimePaths, args: argparse.Namespace) -> None:
         if not scanner.is_file():
             raise FleetCLIError("scanner.sh is missing from the runtime")
         _run([str(scanner), "restart"], capture=False)
-        health = api_json(public_url, "GET", "/health", timeout=30)
+        health = api_json(public_url, "GET", "/health", ca_file=enrollment_ca, timeout=30)
         if health.get("status") != "healthy":
             raise FleetCLIError("public HTTPS broker API did not report healthy after restart")
         artifact_health = api_json(
@@ -623,7 +638,7 @@ def command_init(paths: RuntimePaths, args: argparse.Namespace) -> None:
     if not 1 <= args.workers <= 128:
         raise FleetCLIError("--workers must be between 1 and 128")
     if not args.skip_public_check:
-        health = api_json(public_url, "GET", "/health", timeout=10)
+        health = api_json(public_url, "GET", "/health", ca_file=enrollment_ca, timeout=10)
         if health.get("status") != "healthy":
             raise FleetCLIError("public HTTPS API did not report healthy")
     env = load_dotenv(paths.dotenv)
@@ -897,16 +912,7 @@ def command_join(paths: RuntimePaths, args: argparse.Namespace) -> None:
     _require_commands(("docker",) if transport == "broker" else ("wg", "wg-quick", "ip", "docker"))
     _docker_compose_command()
     public_url = validate_https_url(args.control_plane_url)
-    enrollment_ca: Path | None = None
-    raw_enrollment_ca = str(getattr(args, "ca_cert", None) or "").strip()
-    if raw_enrollment_ca:
-        enrollment_ca = Path(raw_enrollment_ca).expanduser().resolve()
-        try:
-            certificate = enrollment_ca.read_text(encoding="utf-8")
-        except OSError as exc:
-            raise FleetCLIError(f"enrollment CA certificate cannot be read: {enrollment_ca}") from exc
-        if "-----BEGIN CERTIFICATE-----" not in certificate or len(certificate.encode("utf-8")) > 64 * 1024:
-            raise FleetCLIError("enrollment CA certificate must be a PEM certificate no larger than 64 KiB")
+    enrollment_ca = validate_ca_certificate_path(getattr(args, "ca_cert", None))
     _ensure_private_dir(paths.node)
     state_path = paths.node / "state.json"
     if state_path.exists():
@@ -1152,6 +1158,10 @@ def build_parser() -> argparse.ArgumentParser:
     init.add_argument("--listen-port", type=int, default=DEFAULT_WG_PORT)
     init.add_argument("--tls-port", type=int, default=DEFAULT_TLS_PORT)
     init.add_argument("--public-url", required=True, help="existing HTTPS URL used before overlay setup")
+    init.add_argument(
+        "--ca-cert",
+        help="PEM CA certificate for a private-CA public URL (system CA store is the default)",
+    )
     init.add_argument(
         "--skip-public-check",
         action="store_true",

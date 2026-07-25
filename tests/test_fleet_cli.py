@@ -419,6 +419,47 @@ def test_init_persists_identity_bundle_and_fleet_profile(tmp_path, monkeypatch):
     assert len(key_calls) == 1
 
 
+def test_broker_init_uses_private_ca_for_public_health_checks(tmp_path, monkeypatch):
+    paths = fleet_cli.RuntimePaths(tmp_path)
+    scanner = tmp_path / "scanner.sh"
+    scanner.write_text("#!/bin/sh\n", encoding="utf-8")
+    scanner.chmod(0o755)
+    ca_path = tmp_path / "private-ca.pem"
+    ca_path.write_text(
+        "-----BEGIN CERTIFICATE-----\nZmFrZQ==\n-----END CERTIFICATE-----\n",
+        encoding="utf-8",
+    )
+    calls = []
+
+    def fake_api(base, _method, path, **kwargs):
+        calls.append((base, path, kwargs.get("ca_file")))
+        if path.startswith("/artifacts/storage/health"):
+            return {"status": "ok"}
+        return {"status": "healthy"}
+
+    monkeypatch.setattr(fleet_cli, "_require_linux", lambda: None)
+    monkeypatch.setattr(fleet_cli, "_require_commands", lambda _names: None)
+    monkeypatch.setattr(fleet_cli, "_docker_compose_command", lambda: ["docker", "compose"])
+    monkeypatch.setattr(fleet_cli, "_run", lambda *a, **k: types.SimpleNamespace(returncode=0, stdout=""))
+    monkeypatch.setattr(fleet_cli, "api_json", fake_api)
+
+    fleet_cli.command_init(
+        paths,
+        types.SimpleNamespace(
+            network="broker",
+            public_url="https://fleet.internal.example",
+            ca_cert=str(ca_path),
+            skip_public_check=False,
+            worker_image=IMAGE,
+            workers=2,
+        ),
+    )
+
+    public_checks = [item for item in calls if item[0] == "https://fleet.internal.example"]
+    assert len(public_checks) == 2
+    assert all(item[2] == ca_path.resolve() for item in public_checks)
+
+
 def test_fleet_artifact_environment_preserves_external_s3():
     updates, bundled = fleet_cli._fleet_artifact_environment(
         "10.77.0.1",

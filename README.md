@@ -369,12 +369,14 @@ shakerscan fleet join-token --ttl 24h --transport broker
 shakerscan join https://scanner.example.com --token <join-token> --transport broker
 ```
 
-Both transports require a public CA-valid HTTPS enrollment URL and a digest-pinned worker image.
-For a private-CA broker or lab endpoint, pass `--ca-cert /path/to/ca.pem`; the node persists that CA
-and uses it explicitly instead of the system trust store. Overlay traffic always requires the private
-fleet CA returned during enrollment and fails with a configuration error if that CA is unavailable.
+Both transports require a CA-verified HTTPS enrollment URL and a digest-pinned worker image. For a
+private-CA endpoint, pass `--ca-cert /path/to/ca.pem` to initialization and join; broker nodes persist
+that CA and use it explicitly instead of the system trust store. Overlay traffic always requires the
+private fleet CA returned during enrollment and fails with a configuration error if that CA is unavailable.
 The broker needs only outbound HTTPS from the worker; WireGuard additionally needs its configured UDP
-port. See the [Multi-Node Architecture](https://github.com/andriyze/shakerscan/blob/main/docs/multi-node-architecture.md)
+port. Follow the [Multi-Node Fleet Guide](https://github.com/andriyze/shakerscan/blob/main/docs/multi-node-guide.md)
+for setup and operations. See the
+[Multi-Node Architecture](https://github.com/andriyze/shakerscan/blob/main/docs/multi-node-architecture.md)
 for the trust model, capacity-weighted fleet scaling, placement labels, node audit trail, artifact
 storage, drain, and rollout behavior.
 

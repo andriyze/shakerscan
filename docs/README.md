@@ -1,6 +1,6 @@
 # Documentation Index
 
-**Reconciled:** 2026-07-21. This directory contains maintained product references, operating policy,
+**Reconciled:** 2026-07-25. This directory contains maintained product references, operating policy,
 release material, and active architecture. Point-in-time audits, completed prompts, implementation
 ledgers, and obsolete screenshots are kept in Git history rather than copied into the release docs.
 Code, database schemas, runtime receipts, and tests remain authoritative when a document disagrees.
@@ -20,9 +20,10 @@ Code, database schemas, runtime receipts, and tests remain authoritative when a 
 
 | Document | Purpose |
 |---|---|
-| [`proposed-next-steps.md`](proposed-next-steps.md) | Future-only product roadmap; Multi-Node is the primary post-0.7 functional initiative |
+| [`proposed-next-steps.md`](proposed-next-steps.md) | Future-only product roadmap and remaining release-validation work |
 | [`release-readiness.md`](release-readiness.md) | Single release scope, stop-ship, validation, publishing, installer, and documentation checklist |
 | [`upgrade-and-rollback.md`](upgrade-and-rollback.md) | Backup, upgrade, verification, and rollback runbook for source and installer deployments |
+| [`multi-node-guide.md`](multi-node-guide.md) | Set up and operate WireGuard or outbound-HTTPS multi-node fleets |
 | [`releases/0.7.0.md`](releases/0.7.0.md) | Version-specific ShakerScan 0.7.0 release notes and supported product boundary |
 | [`SMART_SCAN_POLICY.md`](SMART_SCAN_POLICY.md) | Smart-scan budget, proof, safety, and release policy |
 | [`owasp-coverage-matrix.md`](owasp-coverage-matrix.md) | Implemented DAST mechanisms mapped to OWASP categories |
@@ -51,7 +52,7 @@ Code, database schemas, runtime receipts, and tests remain authoritative when a 
 |---|---|
 | [`dast-asm-architecture.md`](dast-asm-architecture.md) | Current one-shot DAST, local scatter/gather, and Continuous ASM execution model |
 | [`deep-hunt-architecture.md`](deep-hunt-architecture.md) | Deep Hunt AI-investigator engine: ReAct loop, tool arsenal, provenance gate, two-tier SUSPECTED/VERIFIED bridge, and the §5 improvement backlog |
-| [`multi-node-architecture.md`](multi-node-architecture.md) | Design authority + Phase-1 draft vertical-slice spec; fan-out is shipped, while remote enrollment, lifecycle, reliable delivery, and general artifact transport are not |
+| [`multi-node-architecture.md`](multi-node-architecture.md) | Implemented multi-node trust, transport, scheduling, lifecycle, evidence, and acceptance design authority |
 
 ## Maintenance Rule
 

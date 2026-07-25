@@ -21,6 +21,7 @@ durable per-node lifecycle events are implemented. Physical multi-host acceptanc
 **Scope:** run a coordinated ShakerScan fleet across multiple VMs/VPS hosts so one UI/API
 can scan more targets at once and run high-budget Full Coverage scans by using workers
 from many machines.
+**Operator guide:** [multi-node-guide.md](multi-node-guide.md).
 **Related design:** [dast-asm-architecture.md](dast-asm-architecture.md).
 
 ## Capability Status
