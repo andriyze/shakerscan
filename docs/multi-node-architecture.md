@@ -550,6 +550,10 @@ Secret-bearing responses set `Cache-Control: no-store`. An authenticated operato
 roll out any syntactically valid digest-pinned worker image; authentication, audit events, and exact
 digest enforcement are the security boundary rather than a repository policy imposed by ShakerScan.
 
+The connection bundle is deliberately one-shot. If a node fails after delivery but before its
+owner-only bundle file is durable, revoke that incomplete node, mint a fresh single-use join token,
+and run `shakerscan join` again. Do not weaken the delivery gate or copy a shared bundle by hand.
+
 `fleet init` persists the control keypair, fleet CA, server certificate, private connection-bundle
 JSON, generated operator token, and rendered WireGuard configuration with restrictive modes; refuses an existing fleet CIDR
 change; verifies the operator-provided public HTTPS URL; enables the fleet Compose profile; binds the

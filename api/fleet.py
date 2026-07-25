@@ -346,7 +346,7 @@ async def enroll_node(
         )
     except Exception as exc:
         # The surrounding transaction rolls token consumption back too.
-        if "wireguard_public_key" in str(exc).lower():
+        if getattr(exc, "constraint_name", None) == "nodes_wireguard_public_key_key":
             raise FleetConflictError("wireguard_public_key is already enrolled") from exc
         raise
 

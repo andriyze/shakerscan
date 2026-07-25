@@ -153,6 +153,36 @@ def test_broker_node_enrollment_allocates_no_overlay_or_wireguard_identity():
     asyncio.run(run())
 
 
+def test_enrollment_maps_only_the_exact_wireguard_unique_constraint():
+    class WireGuardConflict(Exception):
+        constraint_name = "nodes_wireguard_public_key_key"
+
+    class ConflictConnection(FakeFleetConnection):
+        async def execute(self, sql, *args):
+            if "INSERT INTO nodes" in sql:
+                raise WireGuardConflict("localized database message")
+            return await super().execute(sql, *args)
+
+    async def run():
+        conn = ConflictConnection()
+        token = (await create_join_token(conn, ttl_seconds=600))["token"]
+        with pytest.raises(FleetConflictError, match="already enrolled"):
+            await enroll_node(
+                conn,
+                token=token,
+                name="worker-conflict",
+                hostname=None,
+                region=None,
+                wireguard_public_key=WG_KEY_2,
+                labels={},
+                capacity={},
+                build_fingerprint=None,
+                config=bootstrap_config(),
+            )
+
+    asyncio.run(run())
+
+
 async def _test_join_token_is_single_use_and_raw_secrets_are_never_stored():
     conn = FakeFleetConnection()
     token_result = await create_join_token(conn, ttl_seconds=600)
