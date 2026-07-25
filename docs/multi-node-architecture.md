@@ -493,7 +493,7 @@ with its owning node. The installed join workflow still needs to generate that s
 
 ```bash
 # worker VPS: worker service only, pointed at the control plane over the overlay
-REDIS_URL=redis://<control-plane-overlay-ip>:6379
+REDIS_URL=redis://:<generated-password>@<control-plane-overlay-ip>:6379
 DATABASE_URL=postgresql://scanner:<password>@<control-plane-overlay-ip>:5432/scanner
 EVIDENCE_STORAGE_BACKEND=s3
 EVIDENCE_S3_ENDPOINT_URL=http://<artifact-store-overlay-ip>:9000
@@ -508,6 +508,11 @@ plane binds Redis and Postgres to the WireGuard overlay interface only — never
 `SHAKERSCAN_BIND_HOST` continues to control the public API/UI listener; the separate
 `SHAKERSCAN_DATA_BIND_HOST` controls Redis/Postgres and the overlay edge. Fleet initialization sets
 only the data bind to the control-plane overlay IP, so those ports have no public-interface listener.
+Before making that bind non-loopback, `fleet init` generates owner-only Redis/Postgres credentials,
+rotates an initialized Postgres role through stdin, enables Redis authentication, and writes only
+credentialed URLs to the one-time connection bundle. Strong operator-provided URL-safe passwords
+are preserved. Standalone/local-lab Compose remains usable with its backward-compatible local
+defaults, which are still protected by the loopback bind unless the operator deliberately changes it.
 Public exposure of 6379/5432 remains a non-goal (§11).
 
 **4. Fleet CLI + pre-overlay bootstrap contract.** These verbs are implemented in `scanner.sh` and

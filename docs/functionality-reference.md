@@ -1024,6 +1024,8 @@ explicit per-scan auth fields retain precedence, and undecryptable/expired profi
 - Custom dictionaries: `SHAKERSCAN_CUSTOM_WORDLIST`, `SHAKERSCAN_CUSTOM_<CAT>_PAYLOADS`.
 - Deployment/binding: `SHAKERSCAN_BIND_HOST` (UI/API), `SHAKERSCAN_DATA_BIND_HOST`
   (Redis/Postgres; loopback by default), `SHAKERSCAN_PUBLIC_HOST`, `SHAKERSCAN_REMOTE`.
+- Data-store authentication: `REDIS_PASSWORD`, `POSTGRES_PASSWORD` (local-compatible defaults;
+  `fleet init` generates strong values before an overlay bind).
 - Owned-fleet bootstrap: `FLEET_OVERLAY_CIDR`, `FLEET_CONTROL_PLANE_OVERLAY_URL`,
   `FLEET_WIREGUARD_PUBLIC_KEY`, `FLEET_WIREGUARD_ENDPOINT`, digest-pinned
   `FLEET_WORKER_IMAGE_DIGEST`, generated `FLEET_OPERATOR_TOKEN`, and one-time
@@ -1930,6 +1932,8 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SCANNER_DEBUG_NOSQL` | `scanner/scanner.py`, `scanner/scanner_tools/active_checks.py` |
 | `SCANNER_DEBUG_SQLMAP` | `scanner/scanner.py` |
 | `SCANNER_DNS_RESOLVERS` | `scanner/scanner.py` |
+| `POSTGRES_PASSWORD` | `docker-compose.release.yml`, `docker-compose.yml`, `scripts/fleet_cli.py` |
+| `REDIS_PASSWORD` | `docker-compose.release.yml`, `docker-compose.yml`, `scripts/fleet_cli.py` |
 | `SCANNER_IMAGE_REPO` | `docker-compose.release.yml` |
 | `SCANNER_IMAGE_TAG` | `docker-compose.release.yml` |
 | `SCANNER_MAX_CONCURRENT` | `scanner/scanner_tools/common.py` |

@@ -2414,7 +2414,7 @@ gungnir_cmd() {
             echo -e "${YELLOW}Stopping Gungnir CT monitor...${NC}"
             compose stop gungnir-worker
             # Update Redis status
-            compose exec -T redis redis-cli HSET gungnir:status running false > /dev/null 2>&1 || true
+            compose exec -T redis sh -c 'redis-cli -a "$REDIS_PASSWORD" HSET gungnir:status running false' > /dev/null 2>&1 || true
             echo -e "${GREEN}Gungnir stopped${NC}"
             ;;
         status)

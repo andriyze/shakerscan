@@ -79,7 +79,7 @@ run_scenario() {
         --entrypoint python \
         "$SCANNER_IMAGE" \
         /upgrade-smoke/upgrade_schema_smoke.py \
-        --database-url "postgresql://scanner:scanner@127.0.0.1:5432/$database" \
+        --database-url "postgresql://scanner:${POSTGRES_PASSWORD:-scanner}@127.0.0.1:5432/$database" \
         --scenario "$scenario"
 }
 

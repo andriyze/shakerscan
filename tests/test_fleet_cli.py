@@ -120,13 +120,46 @@ def test_worker_environment_is_allowlisted_and_owner_only(tmp_path):
 def test_connection_bundle_is_written_as_json_not_dotenv_secret(tmp_path):
     bundle = fleet_cli._connection_bundle(
         "10.77.0.1",
-        {"EVIDENCE_S3_SECRET_ACCESS_KEY": "secret$with#compose-characters"},
+        {
+            "POSTGRES_PASSWORD": "p" * 40,
+            "REDIS_PASSWORD": "r" * 40,
+            "EVIDENCE_S3_SECRET_ACCESS_KEY": "secret$with#compose-characters",
+        },
     )
     destination = tmp_path / "bundle.json"
     fleet_cli.atomic_write(destination, json.dumps(bundle), 0o600)
     loaded = json.loads(destination.read_text(encoding="utf-8"))
     assert loaded["worker_environment"]["EVIDENCE_S3_SECRET_ACCESS_KEY"] == "secret$with#compose-characters"
     assert destination.stat().st_mode & 0o777 == 0o600
+
+
+def test_fleet_datastore_credentials_rotate_defaults_without_putting_secret_in_argv(monkeypatch):
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append((argv, kwargs))
+        if argv[-3:] == ["ps", "-q", "postgres"]:
+            return types.SimpleNamespace(returncode=0, stdout="container-id\n")
+        return types.SimpleNamespace(returncode=0, stdout="")
+
+    monkeypatch.setattr(fleet_cli, "_docker_compose_command", lambda: ["docker", "compose"])
+    monkeypatch.setattr(fleet_cli, "_run", fake_run)
+    credentials = fleet_cli.fleet_datastore_credentials({})
+    fleet_cli.rotate_postgres_password_if_running(credentials["POSTGRES_PASSWORD"])
+
+    assert len(credentials["POSTGRES_PASSWORD"]) >= 32
+    assert len(credentials["REDIS_PASSWORD"]) >= 32
+    alter_argv, alter_kwargs = calls[-1]
+    assert credentials["POSTGRES_PASSWORD"] not in " ".join(alter_argv)
+    assert credentials["POSTGRES_PASSWORD"] in alter_kwargs["input_text"]
+
+    preserved = fleet_cli.fleet_datastore_credentials({
+        "POSTGRES_PASSWORD": "p" * 40,
+        "REDIS_PASSWORD": "r" * 40,
+    })
+    assert preserved == {"POSTGRES_PASSWORD": "p" * 40, "REDIS_PASSWORD": "r" * 40}
+    with pytest.raises(fleet_cli.FleetCLIError, match="URL-safe"):
+        fleet_cli.fleet_datastore_credentials({"POSTGRES_PASSWORD": ("p" * 39) + ":"})
 
 
 def test_parser_exposes_documented_commands():
@@ -326,7 +359,9 @@ def test_init_persists_identity_bundle_and_fleet_profile(tmp_path, monkeypatch):
     bundle_path = paths.control / "connection-bundle.json"
     assert bundle_path.stat().st_mode & 0o777 == 0o600
     bundle = json.loads(bundle_path.read_text(encoding="utf-8"))
-    assert bundle["redis_url"] == "redis://10.77.0.1:6379"
+    assert bundle["redis_url"].startswith("redis://:")
+    assert bundle["redis_url"].endswith("@10.77.0.1:6379")
+    assert bundle["database_url"].startswith("postgresql://scanner:")
     assert bundle["worker_environment"]["EVIDENCE_S3_ENDPOINT_URL"] == "http://10.77.0.1:9000"
     assert len(key_calls) == 1
 

@@ -39,6 +39,7 @@ DEFAULT_TLS_PORT = 8443
 MAX_HTTP_BODY = 2 * 1024 * 1024
 DIGEST_IMAGE_RE = re.compile(r"^\S+@sha256:[0-9a-fA-F]{64}$")
 ENV_KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
+URL_SAFE_SECRET_RE = re.compile(r"^[A-Za-z0-9._~-]+$")
 
 
 class FleetCLIError(RuntimeError):
@@ -49,6 +50,34 @@ def fleet_operator_token(env: dict[str, str]) -> str:
     """Return the persisted operator token, creating a strong one when absent."""
     current = str(env.get("FLEET_OPERATOR_TOKEN") or "").strip()
     return current if len(current) >= 32 else secrets.token_urlsafe(48)
+
+
+def fleet_datastore_credentials(env: dict[str, str]) -> dict[str, str]:
+    """Return strong URL-safe credentials, preserving strong operator values."""
+    current_postgres = str(env.get("POSTGRES_PASSWORD") or "").strip()
+    current_redis = str(env.get("REDIS_PASSWORD") or "").strip()
+    for key, current in (("POSTGRES_PASSWORD", current_postgres), ("REDIS_PASSWORD", current_redis)):
+        if len(current) >= 32 and not URL_SAFE_SECRET_RE.fullmatch(current):
+            raise FleetCLIError(f"{key} must use URL-safe unreserved characters for fleet mode")
+    postgres_password = current_postgres if len(current_postgres) >= 32 else secrets.token_hex(32)
+    redis_password = current_redis if len(current_redis) >= 32 else secrets.token_hex(32)
+    return {
+        "POSTGRES_PASSWORD": postgres_password,
+        "REDIS_PASSWORD": redis_password,
+    }
+
+
+def rotate_postgres_password_if_running(password: str) -> None:
+    """Rotate an initialized Compose role; new volumes consume the env directly."""
+    compose = _docker_compose_command()
+    running = _run([*compose, "ps", "-q", "postgres"], check=False)
+    if running.returncode == 0 and running.stdout.strip():
+        # fleet-generated passwords are hex, so the fixed SQL literal cannot be
+        # escaped into another statement. The secret travels on stdin, not argv.
+        _run(
+            [*compose, "exec", "-T", "postgres", "psql", "-U", "scanner", "-d", "scanner", "-v", "ON_ERROR_STOP=1"],
+            input_text=f"ALTER ROLE scanner PASSWORD '{password}';\n",
+        )
 
 
 @dataclass(frozen=True)
@@ -445,9 +474,13 @@ def _connection_bundle(control_ip: str, env: dict[str, str]) -> dict[str, Any]:
     for key in evidence_keys:
         if env.get(key):
             worker_environment[key] = env[key]
+    redis_password = urllib.parse.quote(str(env.get("REDIS_PASSWORD") or ""), safe="")
+    postgres_password = urllib.parse.quote(str(env.get("POSTGRES_PASSWORD") or ""), safe="")
+    if not redis_password or not postgres_password:
+        raise FleetCLIError("fleet datastore credentials are missing")
     return {
-        "redis_url": f"redis://{control_ip}:6379",
-        "database_url": f"postgresql://scanner:scanner@{control_ip}:5432/scanner",
+        "redis_url": f"redis://:{redis_password}@{control_ip}:6379",
+        "database_url": f"postgresql://scanner:{postgres_password}@{control_ip}:5432/scanner",
         "worker_environment": worker_environment,
     }
 
@@ -600,6 +633,7 @@ def command_init(paths: RuntimePaths, args: argparse.Namespace) -> None:
         raise FleetCLIError("production fleet init refuses FLEET_ALLOW_INSECURE_ENROLLMENT")
     worker_image = validate_digest_image(args.worker_image) if args.worker_image else _discover_digest_image(env)
     operator_token = fleet_operator_token(env)
+    datastore_updates = fleet_datastore_credentials(env)
     _ensure_private_dir(paths.control)
     private_key, public_key = generate_wireguard_keypair(
         paths.control / "wireguard.key", paths.control / "wireguard.pub"
@@ -618,7 +652,7 @@ def command_init(paths: RuntimePaths, args: argparse.Namespace) -> None:
     artifact_updates, bundled_minio = _fleet_artifact_environment(str(control_ip), env)
     if bundled_minio:
         profiles.add("artifacts")
-    effective_env = {**env, **artifact_updates}
+    effective_env = {**env, **artifact_updates, **datastore_updates}
     bundle = _connection_bundle(str(control_ip), effective_env)
     atomic_write(
         paths.control / "connection-bundle.json",
@@ -642,6 +676,7 @@ def command_init(paths: RuntimePaths, args: argparse.Namespace) -> None:
         "FLEET_OPERATOR_TOKEN": operator_token,
         "FLEET_CONNECTION_BUNDLE_PATH": "/run/shakerscan-fleet/control/connection-bundle.json",
         "FLEET_CONNECTION_BUNDLE_JSON": "",
+        **datastore_updates,
         **artifact_updates,
     }
     update_dotenv(paths.dotenv, updates)
@@ -653,6 +688,8 @@ def command_init(paths: RuntimePaths, args: argparse.Namespace) -> None:
     scanner = paths.root / "scanner.sh"
     if not scanner.is_file():
         raise FleetCLIError("scanner.sh is missing from the runtime")
+    if datastore_updates["POSTGRES_PASSWORD"] != str(env.get("POSTGRES_PASSWORD") or "").strip():
+        rotate_postgres_password_if_running(datastore_updates["POSTGRES_PASSWORD"])
     _run([str(scanner), "restart"], capture=False)
     deadline = time.monotonic() + 90
     last_error: Exception | None = None

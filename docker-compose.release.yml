@@ -6,7 +6,7 @@ services:
     image: postgres:16-alpine
     environment:
       POSTGRES_USER: scanner
-      POSTGRES_PASSWORD: scanner
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-scanner}
       POSTGRES_DB: scanner
     volumes:
       - postgres-data:/var/lib/postgresql/data
@@ -22,13 +22,15 @@ services:
 
   redis:
     image: redis:7-alpine
-    command: redis-server --appendonly yes
+    command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD:-scanner}"]
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-scanner}
     volumes:
       - redis-data:/data
     ports:
       - "${SHAKERSCAN_DATA_BIND_HOST:-127.0.0.1}:${REDIS_PORT:-6379}:6379"
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" ping"]
       interval: 5s
       timeout: 3s
       retries: 5
@@ -74,8 +76,8 @@ services:
     ports:
       - "${SHAKERSCAN_BIND_HOST:-127.0.0.1}:${SHAKERSCAN_API_PORT:-8080}:8080"
     environment:
-      - REDIS_URL=redis://redis:6379
-      - DATABASE_URL=postgresql://scanner:scanner@postgres:5432/scanner
+      - REDIS_URL=redis://:${REDIS_PASSWORD:-scanner}@redis:6379
+      - DATABASE_URL=postgresql://scanner:${POSTGRES_PASSWORD:-scanner}@postgres:5432/scanner
       - RESULTS_DIR=/results
       - LOCAL_ENV_FILE=/workspace/.env
       - SCANNER_VERSION=${SCANNER_VERSION:-latest}
@@ -163,8 +165,8 @@ services:
     network_mode: host
     image: ${SCANNER_IMAGE_REPO:-shakerscan/shakerscan-scanner}:${SCANNER_IMAGE_TAG:-latest}
     environment:
-      - REDIS_URL=redis://${SHAKERSCAN_DATA_BIND_HOST:-127.0.0.1}:${REDIS_PORT:-6379}
-      - DATABASE_URL=postgresql://scanner:scanner@${SHAKERSCAN_DATA_BIND_HOST:-127.0.0.1}:${POSTGRES_PORT:-5432}/scanner
+      - REDIS_URL=redis://:${REDIS_PASSWORD:-scanner}@${SHAKERSCAN_DATA_BIND_HOST:-127.0.0.1}:${REDIS_PORT:-6379}
+      - DATABASE_URL=postgresql://scanner:${POSTGRES_PASSWORD:-scanner}@${SHAKERSCAN_DATA_BIND_HOST:-127.0.0.1}:${POSTGRES_PORT:-5432}/scanner
       - RESULTS_DIR=/results
       - FLEET_EDGE_MODE=true
       - SHAKERSCAN_BIND_HOST=${SHAKERSCAN_DATA_BIND_HOST:-127.0.0.1}
@@ -217,8 +219,8 @@ services:
     image: ${SCANNER_IMAGE_REPO:-shakerscan/shakerscan-scanner}:${SCANNER_IMAGE_TAG:-latest}
     environment:
       - PYTHONUNBUFFERED=1
-      - REDIS_URL=redis://redis:6379
-      - DATABASE_URL=postgresql://scanner:scanner@postgres:5432/scanner
+      - REDIS_URL=redis://:${REDIS_PASSWORD:-scanner}@redis:6379
+      - DATABASE_URL=postgresql://scanner:${POSTGRES_PASSWORD:-scanner}@postgres:5432/scanner
       - RESULTS_DIR=/results
       - SCANNER_VERSION=${SCANNER_VERSION:-latest}
       - GIT_COMMIT=${GIT_COMMIT:-image:latest}
@@ -292,8 +294,8 @@ services:
   gungnir-worker:
     image: ${SCANNER_IMAGE_REPO:-shakerscan/shakerscan-scanner}:${SCANNER_IMAGE_TAG:-latest}
     environment:
-      - REDIS_URL=redis://redis:6379
-      - DATABASE_URL=postgresql://scanner:scanner@postgres:5432/scanner
+      - REDIS_URL=redis://:${REDIS_PASSWORD:-scanner}@redis:6379
+      - DATABASE_URL=postgresql://scanner:${POSTGRES_PASSWORD:-scanner}@postgres:5432/scanner
     command: ["python3", "/app/gungnir_worker.py"]
     profiles:
       - gungnir
