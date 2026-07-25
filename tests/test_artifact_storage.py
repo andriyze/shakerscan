@@ -82,3 +82,15 @@ def test_artifact_uri_rejects_traversal(tmp_path, monkeypatch):
         artifact_storage.object_key(
             scan_id=str(uuid.uuid4()), artifact_type="../result"
         )
+
+
+def test_retention_policy_is_per_type_and_zero_means_keep(monkeypatch):
+    monkeypatch.delenv("ARTIFACT_RETENTION_DAYS", raising=False)
+    monkeypatch.delenv("ARTIFACT_RETENTION_RESULT_DAYS", raising=False)
+    assert artifact_storage.retention_days("checkpoint") == 14
+    assert artifact_storage.retention_days("result") == 365
+
+    monkeypatch.setenv("ARTIFACT_RETENTION_DAYS", "42")
+    assert artifact_storage.retention_days("attachment") == 42
+    monkeypatch.setenv("ARTIFACT_RETENTION_RESULT_DAYS", "0")
+    assert artifact_storage.retention_days("result") is None

@@ -11,6 +11,7 @@ import hashlib
 import json
 import mimetypes
 import os
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import re
 from typing import Any
@@ -23,6 +24,13 @@ from evidence_storage import _s3_config, _s3_request
 LOCAL_PREFIX = "local:scan_artifacts/"
 S3_PREFIX = "s3:scan_artifacts/"
 VALID_ARTIFACT_TYPE = re.compile(r"^[a-z][a-z0-9_.-]{0,63}$")
+DEFAULT_RETENTION_DAYS = {
+    "checkpoint": 14,
+    "diagnostic": 30,
+    "screenshot": 90,
+    "attachment": 90,
+    "result": 365,
+}
 
 
 class ArtifactStorageError(RuntimeError):
@@ -59,6 +67,21 @@ def remote_required() -> bool:
     if configured is not None:
         return _truthy("ARTIFACT_STORAGE_REQUIRED")
     return bool(str(os.environ.get("SHAKERSCAN_NODE_ID") or "").strip())
+
+
+def retention_days(artifact_type: str) -> int | None:
+    specific = f"ARTIFACT_RETENTION_{str(artifact_type).upper()}_DAYS"
+    raw = os.environ.get(specific)
+    if raw is None:
+        raw = os.environ.get("ARTIFACT_RETENTION_DAYS")
+    if raw is None:
+        return DEFAULT_RETENTION_DAYS.get(str(artifact_type), 90)
+    try:
+        days = int(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_RETENTION_DAYS.get(str(artifact_type), 90)
+    # Zero is the explicit keep-forever setting.
+    return None if days <= 0 else days
 
 
 def _safe_component(value: Any, fallback: str) -> str:
@@ -243,14 +266,21 @@ async def upsert_manifest(
         node_uuid = uuid.UUID(node_id) if node_id else None
     except ValueError:
         node_uuid = None
+    days = retention_days(artifact_type)
+    expires_at = (
+        datetime.now(timezone.utc) + timedelta(days=days)
+        if days is not None
+        else None
+    )
     row = await conn.fetchrow(
         """
         INSERT INTO scan_artifacts (
             scan_id, parent_scan_id, shard_index, executing_node_id,
             artifact_type, artifact_key, content_type, storage_uri,
-            storage_backend, content_sha256, size_bytes, status, metadata
+            storage_backend, content_sha256, size_bytes, status, metadata,
+            expires_at
         ) VALUES (
-            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13
+            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14
         )
         ON CONFLICT (scan_id, artifact_type, artifact_key) DO UPDATE SET
             parent_scan_id=EXCLUDED.parent_scan_id,
@@ -263,6 +293,7 @@ async def upsert_manifest(
             size_bytes=EXCLUDED.size_bytes,
             status=EXCLUDED.status,
             metadata=EXCLUDED.metadata,
+            expires_at=EXCLUDED.expires_at,
             updated_at=NOW(),
             deleted_at=NULL
         RETURNING *
@@ -280,5 +311,6 @@ async def upsert_manifest(
         int(descriptor.get("size_bytes") or 0),
         descriptor.get("status") or "available",
         json.dumps(metadata or {}),
+        expires_at,
     )
     return dict(row)

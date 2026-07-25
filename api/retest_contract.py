@@ -2564,7 +2564,7 @@ async def run_schema_migrations(pool) -> None:
                     content_sha256 TEXT NOT NULL,
                     size_bytes BIGINT NOT NULL DEFAULT 0,
                     status TEXT NOT NULL DEFAULT 'available'
-                        CHECK (status IN ('available','upload_failed','missing','deleted')),
+                        CHECK (status IN ('available','deleting','upload_failed','missing','deleted')),
                     retention_class TEXT NOT NULL DEFAULT 'standard',
                     metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
                     expires_at TIMESTAMPTZ,
@@ -2574,6 +2574,15 @@ async def run_schema_migrations(pool) -> None:
                     CONSTRAINT scan_artifacts_identity_unique
                         UNIQUE (scan_id, artifact_type, artifact_key)
                 )
+            """)
+            await conn.execute("""
+                ALTER TABLE scan_artifacts
+                DROP CONSTRAINT IF EXISTS scan_artifacts_status_check
+            """)
+            await conn.execute("""
+                ALTER TABLE scan_artifacts
+                ADD CONSTRAINT scan_artifacts_status_check
+                CHECK (status IN ('available','deleting','upload_failed','missing','deleted'))
             """)
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_scan_artifacts_scan ON scan_artifacts(scan_id, created_at DESC)")
             await conn.execute("""

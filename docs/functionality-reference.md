@@ -1178,7 +1178,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | Scanner wrapper commands | 26 | `scanner.sh` |
 | Make targets | 10 | `Makefile` |
 | Release gates | 14 | `scripts/release_gates.py` |
-| Runtime environment keys | 234 | Python sources + Compose manifests |
+| Runtime environment keys | 241 | Python sources + Compose manifests |
 | Scanner modules | 83 | `scanner/scanner_tools/` |
 | UI pages | 31 | `ui/src/app/` |
 | Skills | 6 | `skills/` |
@@ -1781,6 +1781,13 @@ Only key names and declaring sources are documented; secret values are never rea
 | `ARTIFACT_CHECKPOINT_INTERVAL_SECONDS` | `api/worker.py` |
 | `ARTIFACT_REFERENCED_FILE_MAX_BYTES` | `api/worker.py` |
 | `ARTIFACT_REFERENCED_FILE_MAX_COUNT` | `api/worker.py` |
+| `ARTIFACT_RETENTION_ATTACHMENT_DAYS` | `docker-compose.release.yml`, `docker-compose.yml` |
+| `ARTIFACT_RETENTION_CHECKPOINT_DAYS` | `docker-compose.release.yml`, `docker-compose.yml` |
+| `ARTIFACT_RETENTION_DAYS` | `api/artifact_storage.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `ARTIFACT_RETENTION_DIAGNOSTIC_DAYS` | `docker-compose.release.yml`, `docker-compose.yml` |
+| `ARTIFACT_RETENTION_RESULT_DAYS` | `docker-compose.release.yml`, `docker-compose.yml` |
+| `ARTIFACT_RETENTION_SCREENSHOT_DAYS` | `docker-compose.release.yml`, `docker-compose.yml` |
+| `ARTIFACT_RETENTION_SWEEP_SECONDS` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `ARTIFACT_S3_PREFIX` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `ARTIFACT_STORAGE_BACKEND` | `api/artifact_storage.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `ARTIFACT_STORAGE_REQUIRED` | `api/artifact_storage.py`, `docker-compose.release.yml`, `docker-compose.yml` |

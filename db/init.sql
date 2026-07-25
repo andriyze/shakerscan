@@ -281,7 +281,7 @@ CREATE TABLE scan_artifacts (
     content_sha256 TEXT NOT NULL,
     size_bytes BIGINT NOT NULL DEFAULT 0,
     status TEXT NOT NULL DEFAULT 'available'
-        CHECK (status IN ('available','upload_failed','missing','deleted')),
+        CHECK (status IN ('available','deleting','upload_failed','missing','deleted')),
     retention_class TEXT NOT NULL DEFAULT 'standard',
     metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
     expires_at TIMESTAMPTZ,

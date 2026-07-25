@@ -424,6 +424,12 @@ def _connection_bundle(control_ip: str, env: dict[str, str]) -> dict[str, Any]:
         "ARTIFACT_S3_SESSION_TOKEN",
         "ARTIFACT_S3_FORCE_PATH_STYLE",
         "ARTIFACT_S3_PREFIX",
+        "ARTIFACT_RETENTION_DAYS",
+        "ARTIFACT_RETENTION_RESULT_DAYS",
+        "ARTIFACT_RETENTION_CHECKPOINT_DAYS",
+        "ARTIFACT_RETENTION_DIAGNOSTIC_DAYS",
+        "ARTIFACT_RETENTION_SCREENSHOT_DAYS",
+        "ARTIFACT_RETENTION_ATTACHMENT_DAYS",
     )
     for key in evidence_keys:
         if env.get(key):

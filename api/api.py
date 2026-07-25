@@ -117,11 +117,19 @@ except ModuleNotFoundError as exc:
     from api.evidence_storage import delete_remote_evidence_object, hydrate_evidence_content, local_evidence_path
 
 try:
-    from artifact_storage import ArtifactStorageError, read_bytes as read_artifact_bytes
+    from artifact_storage import (
+        ArtifactStorageError,
+        delete_object as delete_artifact_object,
+        read_bytes as read_artifact_bytes,
+    )
 except ModuleNotFoundError as exc:
     if exc.name != "artifact_storage":
         raise
-    from api.artifact_storage import ArtifactStorageError, read_bytes as read_artifact_bytes
+    from api.artifact_storage import (
+        ArtifactStorageError,
+        delete_object as delete_artifact_object,
+        read_bytes as read_artifact_bytes,
+    )
 
 try:
     from scan_verification_state import scan_time_verification_fields as _scan_time_verification_fields
@@ -2963,6 +2971,106 @@ async def asm_dispatcher(pool: asyncpg.Pool):
 db_pool: Optional[asyncpg.Pool] = None
 
 
+async def cleanup_expired_scan_artifacts_once(
+    pool: asyncpg.Pool,
+    *,
+    limit: int = 100,
+) -> dict[str, int]:
+    """Claim, delete, and tombstone expired artifact objects centrally."""
+    batch_limit = max(1, min(int(limit), 500))
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            # A control-plane crash after claiming an object is recoverable.
+            await conn.execute(
+                """
+                UPDATE scan_artifacts
+                SET status='available', updated_at=NOW()
+                WHERE status='deleting'
+                  AND updated_at < NOW() - INTERVAL '15 minutes'
+                """
+            )
+            rows = await conn.fetch(
+                """
+                WITH candidates AS (
+                    SELECT id
+                    FROM scan_artifacts
+                    WHERE status='available'
+                      AND expires_at IS NOT NULL
+                      AND expires_at <= NOW()
+                    ORDER BY expires_at, id
+                    FOR UPDATE SKIP LOCKED
+                    LIMIT $1
+                )
+                UPDATE scan_artifacts sa
+                SET status='deleting', updated_at=NOW()
+                FROM candidates
+                WHERE sa.id=candidates.id
+                RETURNING sa.id, sa.storage_uri
+                """,
+                batch_limit,
+            )
+
+    deleted = 0
+    failed = 0
+    for row in rows:
+        error: str | None = None
+        try:
+            await asyncio.to_thread(
+                delete_artifact_object,
+                str(row["storage_uri"]),
+                results_dir=RESULTS_DIR,
+            )
+        except Exception as exc:
+            error = f"{type(exc).__name__}: {exc}"[:500]
+        async with pool.acquire() as conn:
+            if error is None:
+                await conn.execute(
+                    """
+                    UPDATE scan_artifacts
+                    SET status='deleted', deleted_at=NOW(), updated_at=NOW(),
+                        metadata=metadata || jsonb_build_object(
+                            'retention_deleted_at', NOW()::text
+                        )
+                    WHERE id=$1 AND status='deleting'
+                    """,
+                    row["id"],
+                )
+                deleted += 1
+            else:
+                await conn.execute(
+                    """
+                    UPDATE scan_artifacts
+                    SET status='available', updated_at=NOW(),
+                        metadata=metadata || jsonb_build_object(
+                            'retention_delete_error', $2::text,
+                            'retention_delete_retry_at', NOW()::text
+                        )
+                    WHERE id=$1 AND status='deleting'
+                    """,
+                    row["id"],
+                    error,
+                )
+                failed += 1
+    return {"claimed": len(rows), "deleted": deleted, "failed": failed}
+
+
+async def scan_artifact_retention_runner(pool: asyncpg.Pool) -> None:
+    interval = max(60, _int_env("ARTIFACT_RETENTION_SWEEP_SECONDS", 3600))
+    while True:
+        try:
+            outcome = await cleanup_expired_scan_artifacts_once(pool)
+            if outcome["claimed"]:
+                print(f"[artifact-retention] {outcome}", flush=True)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            print(
+                f"[artifact-retention] sweep failed: {type(exc).__name__}: {exc}",
+                flush=True,
+            )
+        await asyncio.sleep(interval)
+
+
 def _int_env(name: str, default: int) -> int:
     """Coerce an env var to int, falling back to default on bad values."""
     try:
@@ -3034,6 +3142,7 @@ async def lifespan(app: FastAPI):
             asyncio.create_task(schedule_runner(db_pool)),
             asyncio.create_task(asm_dispatcher(db_pool)),
             asyncio.create_task(research_autopilot_runner(db_pool)),
+            asyncio.create_task(scan_artifact_retention_runner(db_pool)),
         ]
 
     yield
