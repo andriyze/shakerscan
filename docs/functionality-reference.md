@@ -443,8 +443,10 @@ Current execution design: [`docs/dast-asm-architecture.md`](dast-asm-architectur
 
 **Multi-node boundary:** the first owned-fleet trust foundation is implemented: durable node identity,
 hashed single-use join tokens, HTTPS enrollment, authenticated heartbeat, one-time overlay connection
-bundles, and credential rotation/revocation. WireGuard/CLI host automation, the worker-only runtime,
-node-agent, and the two-VPS queue proof are not complete. Production leases/ack/reclaim, fencing,
+bundles, and credential rotation/revocation. A digest-pinned worker/agent-only Compose runtime and
+pull-based local node-agent now apply versioned worker-count/drain desired state without an inbound
+listener or remote Docker API. WireGuard/CLI host automation, fleet UI, and the two-VPS queue proof
+are not complete. Production leases/ack/reclaim, fencing,
 general evidence transfer, placement, and fleet-wide rate controls remain future work. The design authority is
 [`docs/multi-node-architecture.md`](multi-node-architecture.md); prioritized delivery work is tracked
 in [`docs/proposed-next-steps.md`](proposed-next-steps.md).
@@ -814,13 +816,17 @@ how-to with request bodies is in [`CLAUDE.md`](../CLAUDE.md) / [`AGENTS.md`](../
 `GET|PUT /settings/scan-execution` · `GET|PUT /settings/automation`
 
 **Owned-fleet foundation**: `POST /fleet/join-tokens` · `POST /fleet/nodes/join` ·
-`GET /fleet/nodes` · `POST /fleet/nodes/{id}/heartbeat` ·
+`GET /fleet/nodes` · `GET|PATCH /fleet/nodes/{id}/state` · `POST /fleet/nodes/{id}/heartbeat` ·
 `POST /fleet/nodes/{id}/connection-bundle` · `POST /fleet/nodes/{id}/credentials/rotate` ·
 `POST /fleet/nodes/{id}/revoke`. Join tokens and node credentials are returned once and stored only
 as hashes. Fleet lifecycle operations are loopback-operator actions unless an explicit remote
 operator token is configured; enrollment and secret delivery require HTTPS, and connection bundles
-also require the actual socket peer to be inside the configured overlay CIDR. This is the trust/API
-foundation, not yet a completed one-command WireGuard or remote-worker deployment workflow.
+also require the actual socket peer to be inside the configured overlay CIDR. Node state pulls and
+heartbeats likewise reject plaintext transport so node bearer credentials are never sent over HTTP.
+The worker-only Compose
+runtime requires a digest-pinned image and starts no UI, API, Redis, or Postgres. Its pull-based agent
+uses owner-only local state, reconciles only node-labeled workers on the local Docker engine, and
+reports applied state/capacity/errors. WireGuard and one-command host provisioning remain incomplete.
 
 **Command Arsenal**: `GET /arsenal/commands` · `GET /arsenal/contracts` ·
 `POST|GET /arsenal/plans` · `POST|GET /arsenal/context-packs` ·
@@ -1154,8 +1160,8 @@ it is the exhaustive backstop behind the human-readable product map above.
 
 | Surface | Count | Source |
 |---|---|---|
-| Public REST operations | 241 | `api/api.py` FastAPI decorators |
-| Unique REST paths | 199 | `api/api.py` |
+| Public REST operations | 243 | `api/api.py` FastAPI decorators |
+| Unique REST paths | 200 | `api/api.py` |
 | Check families | 14 | `api/check_registry.py` |
 | Command Arsenal commands | 82 | `api/command_arsenal.py` |
 | Tool adapters | 13 | `api/command_arsenal.py` |
@@ -1164,7 +1170,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | Scanner wrapper commands | 24 | `scanner.sh` |
 | Make targets | 10 | `Makefile` |
 | Release gates | 14 | `scripts/release_gates.py` |
-| Runtime environment keys | 208 | Python sources + Compose manifests |
+| Runtime environment keys | 219 | Python sources + Compose manifests |
 | Scanner modules | 83 | `scanner/scanner_tools/` |
 | UI pages | 30 | `ui/src/app/` |
 | Skills | 6 | `skills/` |
@@ -1305,6 +1311,8 @@ it is the exhaustive backstop behind the human-readable product map above.
 | `POST` | `/fleet/nodes/{node_id}/credentials/rotate` | `rotate_fleet_node_credential` |
 | `POST` | `/fleet/nodes/{node_id}/heartbeat` | `heartbeat_fleet_node` |
 | `POST` | `/fleet/nodes/{node_id}/revoke` | `revoke_fleet_node` |
+| `GET` | `/fleet/nodes/{node_id}/state` | `get_fleet_node_state` |
+| `PATCH` | `/fleet/nodes/{node_id}/state` | `update_fleet_node_state` |
 | `POST` | `/gungnir/start` | `gungnir_start` |
 | `GET` | `/gungnir/status` | `gungnir_status` |
 | `POST` | `/gungnir/stop` | `gungnir_stop` |
@@ -1804,16 +1812,26 @@ Only key names and declaring sources are documented; secret values are never rea
 | `EVIDENCE_S3_TIMEOUT_SECONDS` | `api/evidence_storage.py` |
 | `EVIDENCE_STORAGE_BACKEND` | `api/evidence_storage.py` |
 | `FINALIZATION_HEARTBEAT_TIMEOUT_MINUTES` | `api/api.py` |
+| `FLEET_AGENT_INTERVAL_SECONDS` | `api/fleet_agent.py`, `docker-compose.worker.yml` |
 | `FLEET_ALLOW_INSECURE_ENROLLMENT` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `FLEET_COMPOSE_PROJECT_NAME` | `docker-compose.worker.yml` |
 | `FLEET_CONNECTION_BUNDLE_JSON` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `FLEET_CONTROL_PLANE_OVERLAY_URL` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `FLEET_DESIRED_WORKER_COUNT` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `FLEET_HEARTBEAT_TIMEOUT_SECONDS` | `docker-compose.release.yml`, `docker-compose.yml` |
+| `FLEET_NODE_ID` | `docker-compose.worker.yml` |
 | `FLEET_OPERATOR_TOKEN` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `FLEET_OVERLAY_CIDR` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `FLEET_RESULTS_DIR` | `docker-compose.worker.yml` |
+| `FLEET_RUNTIME_DIR` | `docker-compose.worker.yml` |
+| `FLEET_STATE_PATH` | `api/fleet_agent.py` |
 | `FLEET_WIREGUARD_ENDPOINT` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `FLEET_WIREGUARD_PUBLIC_KEY` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
-| `FLEET_WORKER_IMAGE_DIGEST` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `FLEET_WORKER_CPU_LIMIT` | `docker-compose.worker.yml` |
+| `FLEET_WORKER_ENV_FILE` | `docker-compose.worker.yml` |
+| `FLEET_WORKER_IMAGE` | `docker-compose.worker.yml` |
+| `FLEET_WORKER_IMAGE_DIGEST` | `api/api.py`, `api/fleet_worker_entrypoint.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `FLEET_WORKER_MEMORY_LIMIT` | `docker-compose.worker.yml` |
 | `FULL_COVERAGE_ALLOCATION_DEFAULT` | `api/parallel_scan.py` |
 | `GITHUB_TOKEN` | `scanner/scanner.py` |
 | `GIT_COMMIT` | `api/api.py`, `api/worker.py`, `docker-compose.release.yml`, `docker-compose.yml`, `scanner/scanner.py` |
@@ -1905,6 +1923,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SHAKERSCAN_MAX_WORKERS` | `api/api.py`, `docker-compose.yml` |
 | `SHAKERSCAN_MCP_ALLOW_REMOTE_API` | `scripts/shakerscan_mcp.py` |
 | `SHAKERSCAN_MCP_TIMEOUT_SECONDS` | `scripts/shakerscan_mcp.py` |
+| `SHAKERSCAN_NODE_ID` | `api/fleet_worker_entrypoint.py` |
 | `SHAKERSCAN_PAYLOAD_PACK_MAX` | `scanner/scanner_tools/active_checks.py` |
 | `SHAKERSCAN_PER_WORKER_MEM_GB` | `api/api.py`, `docker-compose.yml` |
 | `SHAKERSCAN_PLATFORM_MEMORY_RESERVE_GB` | `api/api.py`, `docker-compose.yml` |

@@ -3,8 +3,9 @@
 **Status:** Design authority + Phase-1 vertical-slice implementation in progress. The fan-out
 substrate is shipped (see the code-grounded capability table below), and the durable node identity,
 single-use enrollment, authenticated heartbeat, and one-time connection-bundle API foundation is now
-implemented. WireGuard/CLI host mutation, worker-only deployment, the minimal node-agent, and the
-two-VPS proof are not complete. Phases 2–3 remain design-level.
+implemented. The digest-pinned worker-only Compose runtime, pull-based node-agent, and versioned
+desired-state API are also implemented. WireGuard/CLI host mutation, fleet UI, and the two-VPS proof
+are not complete. The remaining parts of Phases 2–3 remain design-level.
 **Scope:** run a coordinated ShakerScan fleet across multiple VMs/VPS hosts so one UI/API
 can scan more targets at once and run high-budget Full Coverage scans by using workers
 from many machines.
@@ -30,7 +31,8 @@ becoming stale prose. For product priority and phased order, see
 | Job-queue delivery | **Built as at-most-once** — plain Redis list (`RPUSH`/`BLPOP`), compensated by DB row + heartbeat + `processing_lease_at` marker. **No per-message lease/ack/reclaim/fencing.** | `QUEUE_NAME` (`worker.py`, `api.py`) |
 | Remote worker scaling | **Local Docker socket only** (`/var/run/docker.sock`); no remote-node scaling | `POST /workers` (`api.py`); `scanner.sh scale` |
 | Node identity, enrollment, join tokens, heartbeat, credential rotation/revocation, `nodes` table | **Foundation built** — host join automation and fleet UI remain incomplete | `fleet.py`; `/fleet/*`; `nodes`, `node_join_tokens`, `node_credentials` |
-| Node-agent, WireGuard provisioning, worker-only deployment, placement | **Not present** — specified by this document | — |
+| Worker-only deployment and pull-based node-agent | **Foundation built** — digest-pinned worker/agent-only Compose, owner-only local state, versioned desired state, local Docker reconciliation, drain-to-zero, capacity/error heartbeat | `docker-compose.worker.yml`; `fleet_agent.py`; `GET|PATCH /fleet/nodes/{id}/state` |
+| WireGuard/CLI host provisioning, fleet UI, placement | **Not present** — specified by this document | — |
 
 The takeaways that shape the plan:
 
@@ -365,8 +367,9 @@ owned internal fleet, but it is not the full production architecture.
 
 Important limitations in Phase 1:
 
-- a minimal node-agent performs enrollment, overlay proof, heartbeat, and worker startup; desired-state
-  scaling and drain orchestration remain manual until Phase 2 expands that agent;
+- the pull-based node-agent now applies versioned worker-count and drain desired state on its local
+  Docker engine, but the join/install command, overlay proof, fleet UI, and rolling lifecycle remain
+  incomplete;
 - evidence remains incomplete unless storage is centralized;
 - a worker crash can still lose an in-flight job under list/pop semantics;
 - routing assumes workers are mostly interchangeable.
@@ -445,12 +448,12 @@ Each worker reports its `build_fingerprint` on heartbeat so the existing stale-b
 (`build_current` / `expected_build_fingerprint_at_submit` / `stale_worker_count_at_submit`) extends to
 the fleet: a mixed- or stale-build fleet must stay rejectable, consistent with the DAST-quality rule.
 
-**2. Worker-only deployment contract.** Today the `worker` service in `docker-compose.yml` hardcodes
-`REDIS_URL=redis://redis:6379` and `DATABASE_URL=…@postgres:5432/scanner` to the control plane's own
-service DNS, builds locally, bind-mounts source, and declares Redis/Postgres dependencies. A Compose
-profile alone does not remove those dependencies. Add a separate worker override/file (or an explicit
-`--no-deps` wrapper contract) that starts **only** the worker, uses a digest-pinned registry image,
-has no source bind mounts, parameterizes both URLs, and passes the object-store settings when enabled:
+**2. Worker-only deployment contract.** The standalone `worker` service in `docker-compose.yml` still
+uses the control plane's service DNS, local build, source mounts, and Redis/Postgres dependencies.
+The separate `docker-compose.worker.yml` now provides the remote-node contract: it starts only a
+digest-pinned worker image and the pull-based node-agent, has no control-plane services or source
+mounts, parameterizes the worker environment through an owner-only file, and labels every container
+with its owning node. The installed join workflow still needs to generate that state and environment:
 
 ```bash
 # worker VPS: worker service only, pointed at the control plane over the overlay
@@ -525,14 +528,16 @@ consumption is an atomic `UPDATE ... WHERE connection_bundle_delivered_at IS NUL
 retry after a successfully committed response is denied and requires an explicit operator reset or
 credential rotation workflow. Neither access logs nor audit payloads may contain the bundle.
 
-**6. Minimal Phase-1 node-agent + fleet view.** The join command installs a small node-agent in
-Phase 1. It owns the persisted node credential, overlay reachability proof, worker-only startup, and
-the fixed-interval heartbeat; it does not yet implement desired-state scaling or automated drain.
-The agent posts `POST /fleet/nodes/{id}/heartbeat` (status, active
-worker count, host resources, `build_fingerprint`) on a fixed interval; the control plane marks a node
-`stale` past a timeout (reuse the `HEARTBEAT_TIMEOUT_MINUTES` convention) and surfaces every node in a
-fleet view. The dashboard operations bar / `GET /workers` extends to per-node health, capacity, egress
-IP, and build currency.
+**6. Minimal Phase-1 node-agent + fleet view.** The pull-based node-agent is implemented. It keeps
+the persisted node credential in an owner-only state file, fetches versioned desired state over
+CA-verified HTTPS, reconciles only its own labeled worker containers through the local Docker
+socket, drains to zero, and reports capacity, active worker count, image digest, agent version,
+applied-state version, and reconciliation errors through `POST /fleet/nodes/{id}/heartbeat`. It has
+no inbound listener and clones only an explicit allowlist of worker container settings. The API
+supports operator-authenticated desired worker count/drain changes through
+`PATCH /fleet/nodes/{id}/state` and node-authenticated reads through the matching `GET`. The join
+installer, overlay reachability proof, fleet UI, stale-state presentation, and rolling lifecycle are
+still incomplete.
 
 **Milestone A done** = a remote worker registers with one command, appears in the fleet view with a
 heartbeat, drains the shared `scan_jobs` queue, writes scans/findings to the control-plane database,
@@ -540,7 +545,8 @@ and Redis/Postgres are unreachable from the public internet. This is explicitly 
 an unattended-production claim. The accepted Phase-1 gaps remain:
 at-most-once delivery (a hard worker loss between `BLPOP` and the first heartbeat still relies on the
 DB reconcilers, not a Redis lease — §9), worker-local result/checkpoint artifacts even when managed
-evidence objects use S3 (§8), and manual per-node scaling until Phase 2 expands the node-agent.
+evidence objects use S3 (§8), and an incomplete install/UI/rolling lifecycle around the implemented
+per-node scaling primitive.
 
 ### Phase 2: Production-Ready Owned Fleet
 
@@ -551,9 +557,9 @@ Build the fleet layer:
 1. **Node registry:** track `node_id`, hostname, overlay IP, egress IP, region, version,
    labels, tool capabilities, capacity, active worker count, desired worker count,
    heartbeat, and drain state.
-2. **Node-agent:** each worker VPS runs a local agent that reports health and applies
-   desired worker count on that VPS. The API should never drive a remote Docker socket
-   directly.
+2. **Node-agent:** the local pull agent and desired-count/drain reconciliation foundation is built.
+   Complete installation, stale-state handling, rolling upgrades, partition behavior, and fleet UI.
+   The API never drives a remote Docker socket directly.
 3. **Central evidence store:** workers upload screenshots, HAR files, logs, and other
    artifacts to S3/MinIO. Findings and scan results store object keys, not local paths.
 4. **Reliable job leases:** replace or wrap plain list pop with ack/reclaim semantics.
@@ -610,8 +616,10 @@ Responsibilities:
 - expose local logs/metrics needed for debugging;
 - refuse jobs when the local image major version is incompatible.
 
-Prefer a pull model for commands in Phase 2. The agent periodically asks the control
-plane for desired state, which avoids opening inbound management ports on worker VPSs.
+The implemented foundation uses the preferred pull model: the agent periodically asks the control
+plane for versioned desired state and exposes no inbound management port. Registration, overlay and
+bundle installation still belong to the pending host CLI; image compatibility refusal and richer
+logs/metrics are completed with the rolling-upgrade lifecycle.
 
 Join tokens should be short-lived and preferably single-use. After registration, the
 node should use its own node credential, not keep reusing the enrollment token.
@@ -794,8 +802,9 @@ Acceptance criteria:
 - scan state and findings are written to the control-plane database;
 - Redis/Postgres are not reachable from the public internet.
 
-Known gaps are acceptable only for this labeled lab proof: manual scaling, worker-local general
-artifacts, and at-most-once job delivery. No unattended or production-safe claim is allowed.
+Known gaps are acceptable only for this labeled lab proof: incomplete automated install/rolling
+lifecycle, worker-local general artifacts, and at-most-once job delivery. No unattended or
+production-safe claim is allowed.
 
 ### Milestone B: Cross-VPS Parallel-Scan Proof
 

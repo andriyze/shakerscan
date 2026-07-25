@@ -2792,6 +2792,11 @@ async def run_schema_migrations(pool) -> None:
                     labels JSONB NOT NULL DEFAULT '{}'::jsonb,
                     build_fingerprint TEXT,
                     worker_image_digest TEXT,
+                    active_worker_image_digest TEXT,
+                    agent_version TEXT,
+                    desired_state_version INTEGER NOT NULL DEFAULT 1,
+                    applied_state_version INTEGER NOT NULL DEFAULT 0,
+                    last_error TEXT,
                     desired_worker_count INTEGER NOT NULL DEFAULT 0,
                     active_worker_count INTEGER NOT NULL DEFAULT 0,
                     capacity JSONB NOT NULL DEFAULT '{}'::jsonb,
@@ -2808,6 +2813,11 @@ async def run_schema_migrations(pool) -> None:
                 ALTER TABLE nodes
                 ADD COLUMN IF NOT EXISTS wireguard_public_key TEXT,
                 ADD COLUMN IF NOT EXISTS worker_image_digest TEXT,
+                ADD COLUMN IF NOT EXISTS active_worker_image_digest TEXT,
+                ADD COLUMN IF NOT EXISTS agent_version TEXT,
+                ADD COLUMN IF NOT EXISTS desired_state_version INTEGER NOT NULL DEFAULT 1,
+                ADD COLUMN IF NOT EXISTS applied_state_version INTEGER NOT NULL DEFAULT 0,
+                ADD COLUMN IF NOT EXISTS last_error TEXT,
                 ADD COLUMN IF NOT EXISTS connection_bundle_delivered_at TIMESTAMPTZ
             """)
             await conn.execute("""

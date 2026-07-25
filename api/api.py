@@ -4409,7 +4409,16 @@ class FleetHeartbeatRequest(BaseModel):
     active_worker_count: int = Field(default=0, ge=0, le=128)
     capacity: dict[str, Any] = Field(default_factory=dict)
     build_fingerprint: Optional[str] = Field(default=None, max_length=256)
+    active_worker_image_digest: Optional[str] = Field(default=None, max_length=512)
+    agent_version: Optional[str] = Field(default=None, max_length=64)
+    applied_state_version: int = Field(default=0, ge=0)
+    last_error: Optional[str] = Field(default=None, max_length=2000)
     egress_ip: Optional[str] = Field(default=None, max_length=64)
+
+
+class FleetDesiredStateRequest(BaseModel):
+    desired_worker_count: Optional[int] = Field(default=None, ge=0, le=128)
+    drain: Optional[bool] = None
 
 
 def _fleet_bootstrap_config() -> FleetBootstrapConfig:
@@ -7240,8 +7249,66 @@ async def list_fleet_nodes():
     }
 
 
+@app.get("/fleet/nodes/{node_id}/state")
+async def get_fleet_node_state(node_id: str, request: Request):
+    """Node-agent pull endpoint for desired state; authenticated with node identity."""
+    _require_fleet_https(request)
+    credential = _fleet_bearer_credential(request)
+    try:
+        async with db_pool.acquire() as conn:
+            async with conn.transaction():
+                node = await _authenticate_fleet_node(conn, node_id=node_id, credential=credential)
+        return {
+            "node_id": str(node["id"]),
+            "desired_worker_count": int(node.get("desired_worker_count") or 0),
+            "drain": bool(node.get("drain")),
+            "desired_state_version": int(node.get("desired_state_version") or 1),
+            "applied_state_version": int(node.get("applied_state_version") or 0),
+            "worker_image_digest": node.get("worker_image_digest"),
+            "status": node.get("status"),
+        }
+    except FleetAuthenticationError as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
+
+
+@app.patch("/fleet/nodes/{node_id}/state")
+async def update_fleet_node_state(node_id: str, body: FleetDesiredStateRequest, request: Request):
+    """Operator desired-state action consumed asynchronously by the node agent."""
+    _require_fleet_operator(request)
+    if body.desired_worker_count is None and body.drain is None:
+        raise HTTPException(status_code=422, detail="desired_worker_count or drain is required")
+    try:
+        parsed_id = uuid.UUID(node_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="node not found") from exc
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            UPDATE nodes
+            SET desired_worker_count = COALESCE($2, desired_worker_count),
+                drain = COALESCE($3, drain),
+                desired_state_version = desired_state_version + 1,
+                status = CASE
+                    WHEN COALESCE($3, drain) THEN 'draining'
+                    WHEN status = 'draining' THEN 'joining'
+                    ELSE status
+                END,
+                updated_at = NOW()
+            WHERE id = $1 AND status <> 'disabled'
+            RETURNING *
+            """,
+            parsed_id,
+            body.desired_worker_count,
+            body.drain,
+        )
+    if not row:
+        raise HTTPException(status_code=404, detail="node not found or disabled")
+    return _public_fleet_node(row, stale_after_seconds=HEARTBEAT_TIMEOUT_MINUTES * 60)
+
+
 @app.post("/fleet/nodes/{node_id}/heartbeat")
 async def heartbeat_fleet_node(node_id: str, body: FleetHeartbeatRequest, request: Request):
+    _require_fleet_https(request)
     credential = _fleet_bearer_credential(request)
     try:
         async with db_pool.acquire() as conn:
@@ -7253,6 +7320,10 @@ async def heartbeat_fleet_node(node_id: str, body: FleetHeartbeatRequest, reques
                     active_worker_count=body.active_worker_count,
                     capacity=body.capacity,
                     build_fingerprint=body.build_fingerprint,
+                    active_worker_image_digest=body.active_worker_image_digest,
+                    agent_version=body.agent_version,
+                    applied_state_version=body.applied_state_version,
+                    last_error=body.last_error,
                     egress_ip=body.egress_ip,
                 )
         return _public_fleet_node(result, stale_after_seconds=HEARTBEAT_TIMEOUT_MINUTES * 60)

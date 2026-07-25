@@ -278,11 +278,17 @@ async def record_heartbeat(
     active_worker_count: int,
     capacity: Mapping[str, Any] | None,
     build_fingerprint: str | None,
+    active_worker_image_digest: str | None,
+    agent_version: str | None,
+    applied_state_version: int,
+    last_error: str | None,
     egress_ip: str | None,
 ) -> dict[str, Any]:
     safe_capacity = normalize_json_object(capacity, max_bytes=8192, field="capacity")
     if not 0 <= int(active_worker_count) <= 128:
         raise FleetEnrollmentError("active_worker_count must be between 0 and 128")
+    if not 0 <= int(applied_state_version) <= 2_147_483_647:
+        raise FleetEnrollmentError("applied_state_version is invalid")
     if egress_ip:
         try:
             ipaddress.ip_address(egress_ip)
@@ -294,8 +300,16 @@ async def record_heartbeat(
         SET active_worker_count = $2,
             capacity = $3::jsonb,
             build_fingerprint = COALESCE($4, build_fingerprint),
-            egress_ip = $5::inet,
-            status = CASE WHEN drain THEN 'draining' ELSE 'healthy' END,
+            active_worker_image_digest = COALESCE($5, active_worker_image_digest),
+            agent_version = COALESCE($6, agent_version),
+            applied_state_version = $7,
+            last_error = $8,
+            egress_ip = COALESCE($9::inet, egress_ip),
+            status = CASE
+                WHEN drain THEN 'draining'
+                WHEN $8 IS NOT NULL OR $7 < desired_state_version THEN 'joining'
+                ELSE 'healthy'
+            END,
             last_heartbeat_at = NOW(),
             updated_at = NOW()
         WHERE id = $1 AND status <> 'disabled'
@@ -305,6 +319,10 @@ async def record_heartbeat(
         int(active_worker_count),
         json.dumps(safe_capacity),
         str(build_fingerprint or "").strip() or None,
+        str(active_worker_image_digest or "").strip() or None,
+        str(agent_version or "").strip()[:64] or None,
+        int(applied_state_version),
+        str(last_error or "").strip()[:2000] or None,
         egress_ip,
     )
     if not row:
