@@ -16872,6 +16872,106 @@ def test_workflow_transition_materializer_attempts_forbidden_state_and_restores(
     assert {"workflow"} <= api_module._AGENT_MUTATING_VERIFY_FAMILIES
 
 
+def test_every_advertised_debrief_family_is_promotable():
+    """The debrief contract's `family` vocabulary must agree with what the promoters accept.
+
+    A family the prompt advertises but no server path accepts is a SILENT recall hole: the finding
+    passes the provenance gate, persists as SUSPECTED, and can never be promoted. Two such values
+    shipped — `injection` (advertised in the schema line; the DAST prover wants the specific type)
+    and `workflow_transition` (the invariant CONTRACT KIND; the family is `workflow`). This pins the
+    contract↔promoter agreement in BOTH directions so the next drift fails here instead of quietly
+    costing findings.
+    """
+    import agent_text_toolcalls as tc
+    import agent_tools
+    import family_proof
+
+    moat = api_module._AGENT_VERIFIABLE_FAMILIES
+    dast = api_module._AGENT_DAST_RETEST_FAMILIES
+
+    # 1. Everything advertised is promotable by the moat (after canonicalization) or the DAST prover.
+    for fam in tc.ADVERTISED_FAMILIES:
+        canonical = family_proof.canonical_family(fam)
+        routable = canonical in moat or api_module.normalize_retest_type(fam) in dast
+        assert routable, f"contract advertises {fam!r} but no promotion path accepts it"
+
+    # 2. Conversely, every promotable family is advertised — an accepted-but-unadvertised family is
+    #    recall the model never knows it can claim.
+    for fam in moat:
+        assert fam in tc.ADVERTISED_FAMILIES, f"{fam!r} is moat-verifiable but not advertised"
+    for fam in dast:
+        assert fam in tc.ADVERTISED_FAMILIES, f"{fam!r} is DAST-retestable but not advertised"
+
+    # 3. The two known-bad spellings must never be advertised again, and the schema line must stay a
+    #    CLOSED enum — an "…" invites exactly the guess that produced them. Assert on the parsed enum
+    #    VALUES, not substrings: "injection|" also matches "command_injection|", which is legitimate.
+    assert "injection" not in tc.ADVERTISED_FAMILIES  # generic; the prover needs xss/sqli/…
+    assert "workflow_transition" not in tc.ADVERTISED_FAMILIES  # contract kind, not a family
+    assert len(set(tc.ADVERTISED_FAMILIES)) == len(tc.ADVERTISED_FAMILIES)
+
+    contract = tc.render_tool_contract(agent_tools.AGENT_TOOL_SCHEMAS)
+    advertised_enum = '"family":"' + "|".join(tc.ADVERTISED_FAMILIES) + '"'
+    assert advertised_enum in contract
+    # The rendered enum itself must be closed and contain only promotable values.
+    rendered = re.search(r'"family":"([^"]+)"', contract).group(1).split("|")
+    assert "…" not in rendered and "..." not in rendered
+    assert set(rendered) == set(tc.ADVERTISED_FAMILIES)
+
+
+def test_auto_verify_reports_unverifiable_families_without_spending_the_attempt_cap(monkeypatch):
+    """A family the moat cannot verify must be REPORTED, not silently dropped — and reporting it
+    must not consume _AGENT_AUTO_VERIFY_LIMIT.
+
+    Before this, the unverifiable branch was a bare `continue`: a taxonomy mismatch produced a
+    permanently unpromotable SUSPECTED finding that looked identical to "nothing to verify" in every
+    run summary. The cap counts real verification work (target traffic); a mismatch costs none, so
+    padding `attempts` with skip notes would let unpromotable findings starve a verifiable one.
+    """
+    monkeypatch.setattr(api_module, "_ai_ops_execute_enabled", lambda: True)
+
+    verified_ids = []
+
+    async def _fake_verify(finding_uuid, approval_receipt_id, *, created_by):
+        verified_ids.append(str(finding_uuid))
+        return {"verified": True, "verified_finding_id": "v-1", "family_proof": {"verdict": "verified"}}
+
+    monkeypatch.setattr(api_module, "_verify_suspected_finding_workflow", _fake_verify)
+
+    def _entry(family, fid):
+        return {"finding": {"family": family}, "persisted": {"id": fid, "persisted": "created"}}
+
+    # More unverifiable findings than the cap, with a verifiable one LAST.
+    gated = [
+        _entry("workflow_transition", "00000000-0000-4000-8000-000000000001"),  # contract kind, not a family
+        _entry("injection", "00000000-0000-4000-8000-000000000002"),            # generic; DAST wants xss/sqli
+        _entry("totally_made_up", "00000000-0000-4000-8000-000000000003"),
+        _entry("xss", "00000000-0000-4000-8000-000000000004"),                  # DAST-routed, also not moat
+        _entry("data_exposure", "00000000-0000-4000-8000-000000000005"),        # genuinely moat-verifiable
+    ]
+
+    out = asyncio.run(api_module._agent_auto_verify(
+        gated, approval_receipt_id="receipt-1", created_by="test"))
+
+    # The verifiable finding was still attempted despite four unverifiable ones ahead of it.
+    assert verified_ids == ["00000000-0000-4000-8000-000000000005"]
+    assert sum(1 for r in out if r.get("verified")) == 1
+
+    # Every unverifiable finding is reported with its claimed spelling, and DAST-routed leads are
+    # distinguished from genuine taxonomy mismatches.
+    by_id = {r["finding_id"]: r for r in out if r.get("finding_id")}
+    assert by_id["00000000-0000-4000-8000-000000000001"]["skipped"] == "family_not_verifiable"
+    assert by_id["00000000-0000-4000-8000-000000000001"]["claimed_family"] == "workflow_transition"
+    assert by_id["00000000-0000-4000-8000-000000000002"]["skipped"] == "family_not_verifiable"
+    assert by_id["00000000-0000-4000-8000-000000000003"]["skipped"] == "family_not_verifiable"
+    assert by_id["00000000-0000-4000-8000-000000000004"]["skipped"] == "family_routed_to_dast_retest"
+
+    # Telemetry carries no budget reservations, so the caller's *_reserved sums are unaffected.
+    assert all(
+        not r.get("request_units_reserved") and not r.get("seconds_reserved")
+        for r in out if r.get("skipped", "").startswith("family_")
+    )
+
+
 def test_context_pack_sections_render_observed_artifacts_and_invariant_candidates():
     """B1/A3 pack sections: artifact provenance renders from endpoint_source_counts; draft
     invariant candidates render clearly labeled as UNAPPROVED and separate from approved rules."""

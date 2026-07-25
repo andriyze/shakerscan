@@ -18508,6 +18508,9 @@ async def _agent_persist_suspected_findings(
 
 
 _AGENT_AUTO_VERIFY_LIMIT = 3
+# Bound the unverifiable-family telemetry so a large debrief cannot bloat the stored run summary.
+# These records cost no target traffic, so this is a report cap, not a work cap.
+_AGENT_UNVERIFIABLE_FAMILY_REPORT_LIMIT = 10
 _AGENT_VERIFY_REQUEST_RESERVATIONS: dict[str, int] = {
     "bola": 8,             # four requests, independently replayed
     "auth_bypass": 4,      # two requests, independently replayed
@@ -18547,6 +18550,11 @@ async def _agent_auto_verify(
     if not approval_receipt_id or not _ai_ops_execute_enabled():
         return []
     attempts: list[dict[str, Any]] = []
+    # Telemetry for findings the bridge cannot verify AT ALL (unknown/unpromotable family). Kept in a
+    # SEPARATE list on purpose: _AGENT_AUTO_VERIFY_LIMIT caps real verification work (target traffic),
+    # and a taxonomy mismatch costs none. Counting these in `attempts` would let a debrief full of
+    # unpromotable families exhaust the cap and starve a genuinely verifiable finding later in the list.
+    unverifiable: list[dict[str, Any]] = []
     for entry in gated_findings:
         if len(attempts) >= _AGENT_AUTO_VERIFY_LIMIT:
             break
@@ -18568,8 +18576,25 @@ async def _agent_auto_verify(
             continue
         if persistence_state == "existing" and str(record.get("existing_status") or "") != "active":
             continue
-        family = family_proof.canonical_family((entry.get("finding") or {}).get("family"))
+        claimed_family = str((entry.get("finding") or {}).get("family") or "")
+        family = family_proof.canonical_family(claimed_family)
         if family not in _AGENT_VERIFIABLE_FAMILIES:
+            # NOT silent: a family the moat cannot verify is either a DAST-retest lead (promoted by
+            # _agent_auto_queue_dast_retests instead) or a taxonomy mismatch that leaves the finding
+            # permanently SUSPECTED. Both were previously indistinguishable from "nothing to verify",
+            # which is how a doc/contract family-name drift could go unnoticed in every run summary.
+            if len(unverifiable) < _AGENT_UNVERIFIABLE_FAMILY_REPORT_LIMIT:
+                unverifiable.append({
+                    "finding_id": str(record["id"]),
+                    "verified": False,
+                    "skipped": (
+                        "family_routed_to_dast_retest"
+                        if normalize_retest_type(claimed_family) in _AGENT_DAST_RETEST_FAMILIES
+                        else "family_not_verifiable"
+                    ),
+                    "claimed_family": claimed_family[:80],
+                    "canonical_family": family[:80],
+                })
             continue
         # BOLA is NOT auto-promoted. Its family_proof establishes a managed, distinct reference — not
         # OWNERSHIP — so an authenticated shared-behind-login collection (everyone may read any object)
@@ -18645,7 +18670,7 @@ async def _agent_auto_verify(
                 "active_action_units_reserved": 1,
                 "seconds_reserved": seconds_reservation,
             })
-    return attempts
+    return attempts + unverifiable
 
 
 async def _agent_auto_queue_dast_retests(

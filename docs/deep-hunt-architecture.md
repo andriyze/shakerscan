@@ -137,13 +137,29 @@ may assert it — the server always does.
 | **B — family_proof moat** | bola, auth_bypass, data_exposure, mass_assignment | A two-run workflow dispatched through the unchanged arsenal moat (distinct-principal / control differential), guarded by a cross-process advisory lock. |
 | **C — invariant contract** | access_control, field_constraint, workflow | Uses the same moat machinery as B, but the predicate comes from an operator-**approved** `target_invariant_contracts` row (`source="invariant"`). **No approved contract → HTTP 422 → the finding stays SUSPECTED.** The server never guesses policy; a draft contract cannot promote. The `workflow_transition` contract requires a `probe_state` at approval time. |
 
-**Family names are not contract-kind names.** A debrief's `family` is normalized by
-`family_proof.canonical_family` and must be one of `_AGENT_VERIFIABLE_FAMILIES`
-(`bola, auth_bypass, data_exposure, mass_assignment, access_control, field_constraint, workflow`).
-The invariant **contract kind** for the workflow family is spelled `workflow_transition`
-(`invariant_contracts.CONTRACT_KINDS` maps it back to family `workflow`), and `bfla` / `business_logic`
-are aliases of `auth_bypass` / `workflow`. There is **no** `workflow_transition` alias: a debrief that
-claims `"family":"workflow_transition"` is unverifiable and 422s at the bridge. Use `workflow`.
+### `family` is a closed vocabulary
+
+A debrief's `family` must be a value some promoter accepts — the moat set above, or a Path-A DAST
+type. `agent_text_toolcalls.ADVERTISED_FAMILIES` is that vocabulary, and the rendered contract
+enumerates it exactly (no open `…`). A family outside it passes the provenance gate, persists as
+SUSPECTED, and can then never be promoted by any path.
+
+Two spellings the system itself used to invite are the reason this is pinned by
+`test_every_advertised_debrief_family_is_promotable`, which asserts the contract and the promoters
+agree in **both** directions:
+
+- **`injection`** — the old schema line advertised it, but neither path takes it: the deterministic
+  prover dispatches on the *specific* type. Use `xss` / `sqli` / `nosqli` / `ssti`, never the generic.
+- **`workflow_transition`** — the invariant **contract kind**, not a family.
+  `invariant_contracts.CONTRACT_KINDS` maps it back to family `workflow`, and
+  `family_proof.canonical_family` has no alias for it, so claiming it 422s at the bridge. Use
+  `workflow`. (`bfla` and `business_logic` *are* aliases, of `auth_bypass` and `workflow`.)
+
+When the moat cannot verify a family, `_agent_auto_verify` now records why rather than dropping it
+silently: `family_routed_to_dast_retest` (a Path-A lead, promoted by the retest pipeline instead) or
+`family_not_verifiable` (a taxonomy mismatch — the finding is stuck at SUSPECTED). These records carry
+no budget reservation and do not consume `_AGENT_AUTO_VERIFY_LIMIT`, which caps real verification
+traffic.
 
 ### Auto-promotable today
 

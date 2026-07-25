@@ -26,6 +26,27 @@ from typing import Any, Iterator, Optional
 # --------------------------------------------------------------------------------------
 
 
+# The EXACT family vocabulary a debrief may claim. Every value here must be promotable by at least
+# one server path — the family_proof moat (api._AGENT_VERIFIABLE_FAMILIES) or the deterministic DAST
+# retest pipeline (api._AGENT_DAST_RETEST_FAMILIES) — and that agreement is pinned by
+# test_api_helpers.test_every_advertised_debrief_family_is_promotable.
+#
+# Do NOT reintroduce an open "…" here, and do NOT advertise a family the promoters do not accept.
+# Both mistakes are silent: the finding persists as SUSPECTED and can never be promoted. Two real
+# instances this replaces: `injection` (advertised in the old schema line, accepted by NEITHER path —
+# the DAST prover wants the specific `xss`/`sqli`/… type) and `workflow_transition` (the invariant
+# CONTRACT KIND, not a family; the family is `workflow`).
+MOAT_FAMILIES: tuple[str, ...] = (
+    "bola", "auth_bypass", "data_exposure", "mass_assignment",
+    "access_control", "field_constraint", "workflow",
+)
+DAST_RETEST_FAMILIES: tuple[str, ...] = (
+    "xss", "sqli", "nosqli", "ssrf", "path_traversal",
+    "open_redirect", "ssti", "command_injection", "cors",
+)
+ADVERTISED_FAMILIES: tuple[str, ...] = MOAT_FAMILIES + DAST_RETEST_FAMILIES
+
+
 def render_tool_contract(tools: list[dict[str, Any]]) -> str:
     """Describe ``tools`` in-prompt and state the exact action contract.
 
@@ -60,7 +81,7 @@ def render_tool_contract(tools: list[dict[str, Any]]) -> str:
         "block (no prose, no tool_calls):",
         "```json",
         '{"done":true,"findings":[{"title":"…","severity":"critical|high|medium|low|info",'
-        '"family":"bola|mass_assignment|injection|…","predicate":"one verifiable predicate '
+        '"family":"' + "|".join(ADVERTISED_FAMILIES) + '","predicate":"one verifiable predicate '
         'or null","route":"/exact/vulnerable/operation","method":"GET|POST|PUT|PATCH|DELETE",'
         '"details":"… cite the exact tool output/receipt that evidences it …",'
         '"evidence_refs":["resp_1"],"cvss":0.0,"cwe":"CWE-…","remediation":"…",'
@@ -70,6 +91,12 @@ def render_tool_contract(tools: list[dict[str, Any]]) -> str:
         "  evidence_refs are the http_request result refs (e.g. resp_1) that PROVE the "
         "finding. That block is the ONLY finding channel recorded — prose is dropped. Emit "
         'findings:[] + "abstained":true if nothing real was proven.',
+        '  "family" is a CLOSED vocabulary — use one of these EXACT values, nothing else: '
+        + ", ".join(ADVERTISED_FAMILIES)
+        + ". A family outside this list cannot be promoted by any server path, so the finding is "
+        'stuck at SUSPECTED forever. In particular use the SPECIFIC injection type ("xss", "sqli"), '
+        'never the generic "injection"; and use "workflow" for a forbidden state transition — '
+        '"workflow_transition" is the name of the operator contract, not a family.',
         "  For a DAST-VERIFIABLE finding — family xss / sqli / nosqli / ssrf / path_traversal / "
         "open_redirect / ssti / command_injection — ALSO set \"param\" (the vulnerable parameter) "
         "and \"payload\" (the exact value you injected): the server hands these to the deterministic "

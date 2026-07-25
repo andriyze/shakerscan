@@ -80,12 +80,17 @@ def test_deep_hunt_design_authority_is_honest_about_driver_limits():
 
 
 def test_deep_hunt_doc_separates_family_names_from_contract_kinds():
-    # A debrief `family` is normalized by family_proof.canonical_family, which has NO
-    # workflow_transition alias — that spelling is the invariant CONTRACT KIND, and claiming it as a
-    # family 422s at the bridge. The doc previously listed it in a Families column.
+    # A debrief `family` must be a value some promoter accepts. `workflow_transition` is the invariant
+    # CONTRACT KIND (no canonical_family alias) and `injection` is accepted by neither path, yet both
+    # were once advertised. The doc must teach the closed vocabulary and the recorded skip reasons.
     text = _flat(DEEP_HUNT_DOC)
-    assert "Family names are not contract-kind names." in text
-    assert "There is **no** `workflow_transition` alias" in text
+    assert "`family` is a closed vocabulary" in text
+    assert "ADVERTISED_FAMILIES" in text
+    assert "never the generic" in text
+    assert "the invariant **contract kind**, not a family" in text
+    assert "family_not_verifiable" in text
+    assert "do not consume `_AGENT_AUTO_VERIFY_LIMIT`" in text
+    # The Path C table row must name the FAMILY, not the contract kind.
     assert "access_control, field_constraint, workflow |" in text
     assert "field_constraint, workflow** — mutating" in text
     assert "access_control, field_constraint, workflow_transition |" not in text
