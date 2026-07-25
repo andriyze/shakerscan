@@ -488,8 +488,15 @@ async def consume_connection_bundle(conn: Any, *, node_id: str) -> None:
 
 
 def public_node(row: Mapping[str, Any], *, stale_after_seconds: int) -> dict[str, Any]:
-    result = dict(row)
-    result.pop("credential_id", None)
+    public_fields = {
+        "id", "name", "hostname", "role", "overlay_ip", "wireguard_public_key",
+        "egress_ip", "region", "labels", "build_fingerprint", "worker_image_digest",
+        "active_worker_image_digest", "agent_version", "desired_state_version",
+        "applied_state_version", "last_error", "desired_worker_count",
+        "active_worker_count", "capacity", "status", "drain", "rollout_in_progress",
+        "last_heartbeat_at", "created_at", "updated_at",
+    }
+    result = {key: value for key, value in dict(row).items() if key in public_fields}
     last_heartbeat = result.get("last_heartbeat_at")
     status = str(result.get("status") or "joining")
     now = utcnow()

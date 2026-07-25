@@ -45,6 +45,12 @@ class FleetCLIError(RuntimeError):
     pass
 
 
+def fleet_operator_token(env: dict[str, str]) -> str:
+    """Return the persisted operator token, creating a strong one when absent."""
+    current = str(env.get("FLEET_OPERATOR_TOKEN") or "").strip()
+    return current if len(current) >= 32 else secrets.token_urlsafe(48)
+
+
 @dataclass(frozen=True)
 class RuntimePaths:
     root: Path
@@ -537,6 +543,7 @@ def command_init(paths: RuntimePaths, args: argparse.Namespace) -> None:
         if env.get("FLEET_ALLOW_INSECURE_ENROLLMENT", "").lower() in {"1", "true", "yes", "on"}:
             raise FleetCLIError("production fleet init refuses FLEET_ALLOW_INSECURE_ENROLLMENT")
         worker_image = validate_digest_image(args.worker_image) if args.worker_image else _discover_digest_image(env)
+        operator_token = fleet_operator_token(env)
         profiles = {item.strip() for item in env.get("COMPOSE_PROFILES", "").split(",") if item.strip()}
         artifact_updates, bundled_minio = _fleet_artifact_environment("127.0.0.1", env)
         if bundled_minio:
@@ -548,6 +555,7 @@ def command_init(paths: RuntimePaths, args: argparse.Namespace) -> None:
             "FLEET_DESIRED_WORKER_COUNT": str(args.workers),
             "FLEET_PUBLIC_URL": public_url,
             "FLEET_ALLOW_INSECURE_ENROLLMENT": "false",
+            "FLEET_OPERATOR_TOKEN": operator_token,
             **artifact_updates,
         })
         scanner = paths.root / "scanner.sh"
@@ -591,6 +599,7 @@ def command_init(paths: RuntimePaths, args: argparse.Namespace) -> None:
     if env.get("FLEET_ALLOW_INSECURE_ENROLLMENT", "").lower() in {"1", "true", "yes", "on"}:
         raise FleetCLIError("production fleet init refuses FLEET_ALLOW_INSECURE_ENROLLMENT")
     worker_image = validate_digest_image(args.worker_image) if args.worker_image else _discover_digest_image(env)
+    operator_token = fleet_operator_token(env)
     _ensure_private_dir(paths.control)
     private_key, public_key = generate_wireguard_keypair(
         paths.control / "wireguard.key", paths.control / "wireguard.pub"
@@ -630,6 +639,7 @@ def command_init(paths: RuntimePaths, args: argparse.Namespace) -> None:
         "FLEET_TLS_PORT": str(args.tls_port),
         "FLEET_PUBLIC_URL": public_url,
         "FLEET_ALLOW_INSECURE_ENROLLMENT": "false",
+        "FLEET_OPERATOR_TOKEN": operator_token,
         "FLEET_CONNECTION_BUNDLE_PATH": "/run/shakerscan-fleet/control/connection-bundle.json",
         "FLEET_CONNECTION_BUNDLE_JSON": "",
         **artifact_updates,
@@ -686,6 +696,7 @@ def command_join_token(paths: RuntimePaths, args: argparse.Namespace) -> None:
         "POST",
         "/fleet/join-tokens",
         payload={"role": "worker", "ttl_seconds": ttl_seconds},
+        bearer=env.get("FLEET_OPERATOR_TOKEN"),
     )
     token = str(result.get("token") or "")
     if not token.startswith("ssj_"):
@@ -1026,7 +1037,13 @@ def command_reconcile(paths: RuntimePaths, args: argparse.Namespace) -> None:
     _require_linux()
     _require_commands(("wg", "wg-quick", "ip"))
     config = _control_config(paths)
-    result = api_json(args.local_api.rstrip("/"), "GET", "/fleet/nodes")
+    env = load_dotenv(paths.dotenv)
+    result = api_json(
+        args.local_api.rstrip("/"),
+        "GET",
+        "/fleet/nodes",
+        bearer=env.get("FLEET_OPERATOR_TOKEN"),
+    )
     rows = result.get("nodes")
     if not isinstance(rows, list):
         raise FleetCLIError("fleet node list response is invalid")

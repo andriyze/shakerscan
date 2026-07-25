@@ -136,7 +136,7 @@ export default function FleetPage() {
     if (background) setRefreshing(true)
     else setLoading(true)
     try {
-      const response = await getFleetNodes()
+      const response = await getFleetNodes(operatorToken)
       setNodes(response.nodes)
       setSummary(response.summary)
       setStaleAfterSeconds(response.stale_after_seconds)
@@ -148,7 +148,7 @@ export default function FleetPage() {
       setLoading(false)
       setRefreshing(false)
     }
-  }, [])
+  }, [operatorToken])
 
   useEffect(() => {
     setOperatorToken(sessionStorage.getItem(OPERATOR_TOKEN_KEY) || '')
@@ -214,8 +214,8 @@ export default function FleetPage() {
     setActivityLoading(nodeId)
     try {
       const [response, eventResponse] = await Promise.all([
-        getFleetNodeActivity(nodeId),
-        getFleetNodeEvents(nodeId),
+        getFleetNodeActivity(nodeId, 25, operatorToken),
+        getFleetNodeEvents(nodeId, 25, operatorToken),
       ])
       setActivity((current) => ({ ...current, [nodeId]: response }))
       setEvents((current) => ({ ...current, [nodeId]: eventResponse }))

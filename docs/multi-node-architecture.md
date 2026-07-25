@@ -535,15 +535,18 @@ reverse proxy configuration; it does not trust caller-controlled forwarding head
 `FLEET_ALLOW_INSECURE_ENROLLMENT=true` escape hatch is permitted only for a loopback/local lab and is
 off by default. Production fleet initialization must refuse that setting.
 
-Fleet lifecycle authority is separate from node authority. Join-token creation, credential rotation,
-bundle reset, drain, and revoke are accepted from the control-plane loopback listener, or over HTTPS
-with an explicit high-entropy `FLEET_OPERATOR_TOKEN`. A node credential can never call those operator
-operations. This is required even while the rest of the self-hosted API keeps its trusted-operator,
-tokenless CLI model: otherwise any network client that can reach the API could mint its own join
-token. Secret-bearing responses set `Cache-Control: no-store`.
+Fleet lifecycle authority is separate from node authority. Fleet initialization generates and
+persists a high-entropy `FLEET_OPERATOR_TOKEN`. Node listing/activity/events, join-token creation,
+credential rotation, bundle reset, scaling, drain, image rollout, and revoke accept either a request
+whose actual socket peer is loopback or that bearer token. A loopback Docker host publish is not
+treated as proof that a Docker-network caller is local; those calls still need the token. Remote
+operator calls additionally require HTTPS. A node credential can never call operator operations.
+Secret-bearing responses set `Cache-Control: no-store`. An authenticated operator remains free to
+roll out any syntactically valid digest-pinned worker image; authentication, audit events, and exact
+digest enforcement are the security boundary rather than a repository policy imposed by ShakerScan.
 
 `fleet init` persists the control keypair, fleet CA, server certificate, private connection-bundle
-JSON, and rendered WireGuard configuration with restrictive modes; refuses an existing fleet CIDR
+JSON, generated operator token, and rendered WireGuard configuration with restrictive modes; refuses an existing fleet CIDR
 change; verifies the operator-provided public HTTPS URL; enables the fleet Compose profile; binds the
 data stores to the first overlay address; and installs a 10-second systemd peer reconciler. Operators
 on Linux systems without systemd can select `--no-reconcile-service` and run `fleet reconcile`

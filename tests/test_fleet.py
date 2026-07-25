@@ -255,3 +255,17 @@ def test_public_node_derives_state_and_image_currency():
     )
     assert result["state_current"] is True
     assert result["image_current"] is True
+
+
+def test_public_node_uses_an_explicit_allow_list():
+    result = public_node(
+        {
+            "id": uuid.uuid4(),
+            "status": "joining",
+            "credential_id": uuid.uuid4(),
+            "future_private_material": "must-never-leak",
+        },
+        stale_after_seconds=60,
+    )
+    assert "credential_id" not in result
+    assert "future_private_material" not in result

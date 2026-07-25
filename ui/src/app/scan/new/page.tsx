@@ -96,7 +96,7 @@ export default function NewScanPage() {
         setExistingTargets(list)
       })
       .catch(() => { /* target suggestions are optional; ignore failures */ })
-    getFleetNodes()
+    getFleetNodes(sessionStorage.getItem('shakerscan:fleet-operator-token') || '')
       .then((result) => { if (!cancelled) setFleetNodes(result.nodes || []) })
       .catch(() => { /* standalone installs have no fleet nodes */ })
     return () => { cancelled = true }

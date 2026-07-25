@@ -35,6 +35,21 @@ class AcceptanceError(RuntimeError):
     pass
 
 
+def _local_operator_token() -> str:
+    """Load the generated runtime token without exposing it in process arguments."""
+    explicit = os.environ.get("SHAKERSCAN_FLEET_OPERATOR_TOKEN") or os.environ.get("FLEET_OPERATOR_TOKEN")
+    if explicit:
+        return explicit.strip()
+    dotenv = Path(__file__).resolve().parents[1] / ".env"
+    try:
+        for line in dotenv.read_text(encoding="utf-8").splitlines():
+            if line.startswith("FLEET_OPERATOR_TOKEN="):
+                return line.split("=", 1)[1].strip().strip('"').strip("'")
+    except OSError:
+        pass
+    return ""
+
+
 class ApiClient:
     def __init__(self, base_url: str, operator_token: str = "") -> None:
         parsed = urllib.parse.urlsplit(base_url)
@@ -300,7 +315,7 @@ def _evaluate_scan(
 
 
 def run(args: argparse.Namespace) -> dict[str, Any]:
-    client = ApiClient(args.api_url, args.operator_token or os.environ.get("SHAKERSCAN_FLEET_OPERATOR_TOKEN", ""))
+    client = ApiClient(args.api_url, args.operator_token or _local_operator_token())
     checks: list[dict[str, Any]] = []
     health = client.request("GET", "/health")
     _check(checks, "control_plane_health", health.get("status") == "healthy", str(health.get("status")))

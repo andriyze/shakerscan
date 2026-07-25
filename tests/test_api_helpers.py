@@ -181,13 +181,13 @@ def test_fleet_operator_actions_are_loopback_or_explicit_token_only(monkeypatch)
         api_module._require_fleet_operator(_fleet_request(host="203.0.113.2"))
     assert exc.value.status_code == 403
 
-    # Docker port publishing can replace the socket peer with a bridge address;
-    # a loopback-only host bind is still a local operator boundary.
+    # A loopback host publish does not make Docker-network peers trusted.
     monkeypatch.setenv("SHAKERSCAN_BIND_HOST", "127.0.0.1")
-    assert api_module._require_fleet_operator(_fleet_request(host="192.168.65.1", scheme="http")) is None
+    with pytest.raises(api_module.HTTPException) as exc:
+        api_module._require_fleet_operator(_fleet_request(host="192.168.65.1", scheme="http"))
+    assert exc.value.status_code == 403
     monkeypatch.setenv("SHAKERSCAN_BIND_HOST", "100.64.0.10")
-    with pytest.raises(api_module.HTTPException):
-        api_module._require_fleet_operator(_fleet_request(host="127.0.0.1", scheme="https"))
+    assert api_module._require_fleet_operator(_fleet_request(host="127.0.0.1", scheme="http")) is None
     monkeypatch.delenv("SHAKERSCAN_BIND_HOST", raising=False)
 
     operator_token = "operator-" + "x" * 40
@@ -198,6 +198,19 @@ def test_fleet_operator_actions_are_loopback_or_explicit_token_only(monkeypatch)
     with pytest.raises(api_module.HTTPException) as exc:
         api_module._require_fleet_operator(
             _fleet_request(host="203.0.113.2", authorization="Bearer incorrect-token")
+        )
+    assert exc.value.status_code == 403
+
+    # A loopback-published port may carry the token over local HTTP, while a
+    # genuinely remote publish still requires HTTPS.
+    monkeypatch.setenv("SHAKERSCAN_BIND_HOST", "127.0.0.1")
+    assert api_module._require_fleet_operator(
+        _fleet_request(host="192.168.65.1", scheme="http", authorization=f"Bearer {operator_token}")
+    ) is None
+    monkeypatch.setenv("SHAKERSCAN_BIND_HOST", "100.64.0.10")
+    with pytest.raises(api_module.HTTPException) as exc:
+        api_module._require_fleet_operator(
+            _fleet_request(host="192.168.65.1", scheme="http", authorization=f"Bearer {operator_token}")
         )
     assert exc.value.status_code == 403
 

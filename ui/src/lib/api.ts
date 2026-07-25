@@ -5153,23 +5153,28 @@ function fleetOperatorHeaders(operatorToken?: string): HeadersInit {
   return headers
 }
 
-export async function getFleetNodes(): Promise<FleetNodesResponse> {
-  const res = await fetch(`${API_URL}/fleet/nodes`, { cache: 'no-store' })
+export async function getFleetNodes(operatorToken?: string): Promise<FleetNodesResponse> {
+  const res = await fetch(`${API_URL}/fleet/nodes`, {
+    cache: 'no-store',
+    headers: fleetOperatorHeaders(operatorToken),
+  })
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to fetch fleet nodes'))
   return res.json()
 }
 
-export async function getFleetNodeActivity(nodeId: string, limit = 25): Promise<FleetNodeActivityResponse> {
+export async function getFleetNodeActivity(nodeId: string, limit = 25, operatorToken?: string): Promise<FleetNodeActivityResponse> {
   const res = await fetch(`${API_URL}/fleet/nodes/${encodeURIComponent(nodeId)}/activity?limit=${limit}`, {
     cache: 'no-store',
+    headers: fleetOperatorHeaders(operatorToken),
   })
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to fetch node activity'))
   return res.json()
 }
 
-export async function getFleetNodeEvents(nodeId: string, limit = 25): Promise<FleetNodeEventsResponse> {
+export async function getFleetNodeEvents(nodeId: string, limit = 25, operatorToken?: string): Promise<FleetNodeEventsResponse> {
   const res = await fetch(`${API_URL}/fleet/nodes/${encodeURIComponent(nodeId)}/events?limit=${limit}`, {
     cache: 'no-store',
+    headers: fleetOperatorHeaders(operatorToken),
   })
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to fetch node events'))
   return res.json()

@@ -42,6 +42,14 @@ def test_dotenv_update_preserves_unrelated_content_and_owner_only_mode(tmp_path)
     assert dotenv.stat().st_mode & 0o777 == 0o600
 
 
+def test_fleet_operator_token_preserves_strong_values_and_replaces_weak_ones():
+    existing = "operator-" + "x" * 40
+    assert fleet_cli.fleet_operator_token({"FLEET_OPERATOR_TOKEN": existing}) == existing
+    generated = fleet_cli.fleet_operator_token({"FLEET_OPERATOR_TOKEN": "weak"})
+    assert len(generated) >= 32
+    assert generated != "weak"
+
+
 def test_wireguard_rendering_is_deterministic_and_scoped():
     rendered = fleet_cli.render_control_wireguard(
         private_key=WG_KEY,
@@ -309,6 +317,7 @@ def test_init_persists_identity_bundle_and_fleet_profile(tmp_path, monkeypatch):
     assert env["COMPOSE_PROFILES"] == "artifacts,fleet"
     assert env["SHAKERSCAN_DATA_BIND_HOST"] == "10.77.0.1"
     assert env["FLEET_WORKER_IMAGE_DIGEST"] == IMAGE
+    assert len(env["FLEET_OPERATOR_TOKEN"]) >= 32
     assert env["FLEET_CONNECTION_BUNDLE_JSON"] == ""
     assert env["EVIDENCE_STORAGE_BACKEND"] == "s3"
     assert env["ARTIFACT_STORAGE_REQUIRED"] == "true"

@@ -4741,22 +4741,25 @@ def _fleet_bearer_credential(request: Request) -> str:
 
 
 def _require_fleet_operator(request: Request) -> None:
-    """Keep fleet lifecycle authority local unless an explicit remote operator secret exists."""
+    """Authorize fleet operators from the real peer or a configured bearer secret.
+
+    ``SHAKERSCAN_BIND_HOST`` describes host-port publishing, not the request peer.
+    It may relax the HTTPS requirement for a loopback-published port, but it can
+    never bypass authentication for Docker-network callers.
+    """
     configured_bind = os.environ.get("SHAKERSCAN_BIND_HOST", "").strip()
     peer = getattr(getattr(request, "client", None), "host", None)
-    if configured_bind:
-        try:
-            local_transport = ipaddress.ip_address(configured_bind).is_loopback
-        except ValueError:
-            local_transport = False
-    else:
-        try:
-            local_transport = bool(peer) and ipaddress.ip_address(peer).is_loopback
-        except ValueError:
-            local_transport = False
-    if local_transport:
+    try:
+        peer_is_loopback = bool(peer) and ipaddress.ip_address(peer).is_loopback
+    except ValueError:
+        peer_is_loopback = False
+    if peer_is_loopback:
         return
-    if request.url.scheme != "https":
+    try:
+        host_publish_is_loopback = bool(configured_bind) and ipaddress.ip_address(configured_bind).is_loopback
+    except ValueError:
+        host_publish_is_loopback = False
+    if request.url.scheme != "https" and not host_publish_is_loopback:
         raise HTTPException(status_code=403, detail="fleet operator access requires loopback or authenticated HTTPS")
     expected = os.environ.get("FLEET_OPERATOR_TOKEN", "")
     if len(expected) < 32:
@@ -7603,7 +7606,8 @@ async def join_fleet_node(body: FleetNodeJoinRequest, request: Request, response
 
 
 @app.get("/fleet/nodes")
-async def list_fleet_nodes():
+async def list_fleet_nodes(request: Request):
+    _require_fleet_operator(request)
     stale_after = max(60, _int_env("FLEET_HEARTBEAT_TIMEOUT_SECONDS", HEARTBEAT_TIMEOUT_MINUTES * 60))
     async with db_pool.acquire() as conn:
         rows = await conn.fetch("SELECT * FROM nodes ORDER BY created_at ASC")
@@ -7724,8 +7728,9 @@ async def scale_fleet_workers(body: FleetScaleRequest, request: Request):
 
 
 @app.get("/fleet/nodes/{node_id}/activity")
-async def get_fleet_node_activity(node_id: str, limit: int = Query(50, ge=1, le=200)):
+async def get_fleet_node_activity(request: Request, node_id: str, limit: int = Query(50, ge=1, le=200)):
     """Recent durable scan/shard attribution for one fleet node."""
+    _require_fleet_operator(request)
     try:
         parsed_id = uuid.UUID(node_id)
     except ValueError as exc:
@@ -7751,8 +7756,9 @@ async def get_fleet_node_activity(node_id: str, limit: int = Query(50, ge=1, le=
 
 
 @app.get("/fleet/nodes/{node_id}/events")
-async def get_fleet_node_events(node_id: str, limit: int = Query(50, ge=1, le=200)):
+async def get_fleet_node_events(request: Request, node_id: str, limit: int = Query(50, ge=1, le=200)):
     """Read the bounded durable lifecycle/audit trail for one fleet node."""
+    _require_fleet_operator(request)
     try:
         parsed_id = uuid.UUID(node_id)
     except ValueError as exc:
