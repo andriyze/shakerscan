@@ -1921,9 +1921,38 @@ export interface FleetNodeScanActivity {
   progress: number
   current_phase?: string | null
   worker_id?: string | null
+  execution_context?: Record<string, unknown>
   created_at: string
   started_at?: string | null
   completed_at?: string | null
+}
+
+export interface FleetNodeEvent {
+  id: string
+  node_id: string
+  event_type: string
+  actor_type: 'operator' | 'node' | 'system' | 'broker'
+  severity: 'info' | 'warning' | 'error'
+  details: Record<string, unknown>
+  created_at: string
+}
+
+export interface FleetNodeEventsResponse {
+  node_id: string
+  events: FleetNodeEvent[]
+  limit: number
+}
+
+export interface FleetScaleResponse {
+  desired_worker_count: number
+  eligible_node_count: number
+  allocations: Array<{ node_id: string; name: string; desired_worker_count: number }>
+  changed_nodes: Array<{
+    node_id: string
+    name: string
+    previous_worker_count: number
+    desired_worker_count: number
+  }>
 }
 
 export interface FleetNodeActivityResponse {
@@ -5135,6 +5164,27 @@ export async function getFleetNodeActivity(nodeId: string, limit = 25): Promise<
     cache: 'no-store',
   })
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to fetch node activity'))
+  return res.json()
+}
+
+export async function getFleetNodeEvents(nodeId: string, limit = 25): Promise<FleetNodeEventsResponse> {
+  const res = await fetch(`${API_URL}/fleet/nodes/${encodeURIComponent(nodeId)}/events?limit=${limit}`, {
+    cache: 'no-store',
+  })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to fetch node events'))
+  return res.json()
+}
+
+export async function scaleFleetWorkers(
+  desiredWorkerCount: number,
+  operatorToken?: string,
+): Promise<FleetScaleResponse> {
+  const res = await fetch(`${API_URL}/fleet/scale`, {
+    method: 'POST',
+    headers: fleetOperatorHeaders(operatorToken),
+    body: JSON.stringify({ desired_worker_count: desiredWorkerCount }),
+  })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to scale fleet'))
   return res.json()
 }
 

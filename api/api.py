@@ -242,11 +242,13 @@ try:
         authenticate_node as _authenticate_fleet_node,
         consume_connection_bundle as _consume_fleet_connection_bundle,
         create_join_token as _create_fleet_join_token,
+        distribute_worker_count as _distribute_fleet_worker_count,
         enroll_node as _enroll_fleet_node,
         generate_secret as _generate_fleet_secret,
         hash_secret as _hash_fleet_secret,
         public_node as _public_fleet_node,
         record_heartbeat as _record_fleet_heartbeat,
+        record_node_event as _record_fleet_node_event,
         socket_peer_is_overlay as _fleet_peer_is_overlay,
     )
 except ModuleNotFoundError:
@@ -259,11 +261,13 @@ except ModuleNotFoundError:
         authenticate_node as _authenticate_fleet_node,
         consume_connection_bundle as _consume_fleet_connection_bundle,
         create_join_token as _create_fleet_join_token,
+        distribute_worker_count as _distribute_fleet_worker_count,
         enroll_node as _enroll_fleet_node,
         generate_secret as _generate_fleet_secret,
         hash_secret as _hash_fleet_secret,
         public_node as _public_fleet_node,
         record_heartbeat as _record_fleet_heartbeat,
+        record_node_event as _record_fleet_node_event,
         socket_peer_is_overlay as _fleet_peer_is_overlay,
     )
 
@@ -4658,6 +4662,10 @@ class FleetDesiredStateRequest(BaseModel):
         return candidate
 
 
+class FleetScaleRequest(BaseModel):
+    desired_worker_count: int = Field(ge=0, le=16_384)
+
+
 class BrokerLeaseRequest(BaseModel):
     worker_id: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_.:-]+$")
     wait_seconds: int = Field(default=20, ge=0, le=30)
@@ -7567,6 +7575,100 @@ async def list_fleet_nodes():
     }
 
 
+@app.post("/fleet/scale")
+async def scale_fleet_workers(body: FleetScaleRequest, request: Request):
+    """Set one fleet-wide worker target and distribute it by reported capacity."""
+    _require_fleet_operator(request)
+    stale_after = max(60, _int_env("FLEET_HEARTBEAT_TIMEOUT_SECONDS", HEARTBEAT_TIMEOUT_MINUTES * 60))
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=stale_after)
+    async with db_pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute("SELECT pg_advisory_xact_lock($1)", 8_675_311)
+            rows = await conn.fetch(
+                "SELECT * FROM nodes WHERE status <> 'disabled' ORDER BY created_at ASC FOR UPDATE"
+            )
+            if any(bool(row.get("rollout_in_progress")) for row in rows):
+                raise HTTPException(
+                    status_code=409,
+                    detail="fleet scaling is paused while a node image rollout is in progress",
+                )
+            eligible = [
+                row for row in rows
+                if not bool(row.get("drain"))
+                and row.get("last_heartbeat_at") is not None
+                and row.get("last_heartbeat_at") >= cutoff
+            ]
+            if body.desired_worker_count > 0 and not eligible:
+                raise HTTPException(status_code=409, detail="no healthy schedulable fleet nodes are available")
+            try:
+                allocations = _distribute_fleet_worker_count(eligible, body.desired_worker_count)
+            except (FleetEnrollmentError, FleetConflictError) as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+            changes: list[dict[str, Any]] = []
+            for row in rows:
+                node_id = str(row["id"])
+                desired = int(allocations.get(node_id, 0))
+                previous = int(row.get("desired_worker_count") or 0)
+                if desired == previous:
+                    continue
+                updated = await conn.fetchrow(
+                    """
+                    UPDATE nodes
+                    SET desired_worker_count=$2,
+                        desired_state_version=desired_state_version + 1,
+                        updated_at=NOW()
+                    WHERE id=$1 AND status <> 'disabled'
+                    RETURNING desired_state_version
+                    """,
+                    row["id"],
+                    desired,
+                )
+                if not updated:
+                    raise HTTPException(status_code=409, detail="fleet changed while scaling")
+                await _record_fleet_node_event(
+                    conn,
+                    node_id=row["id"],
+                    event_type="worker_target_changed",
+                    actor_type="operator",
+                    details={
+                        "scope": "fleet",
+                        "previous_worker_count": previous,
+                        "desired_worker_count": desired,
+                        "desired_state_version": int(updated["desired_state_version"]),
+                    },
+                )
+                changes.append({
+                    "node_id": node_id,
+                    "name": str(row.get("name") or node_id),
+                    "previous_worker_count": previous,
+                    "desired_worker_count": desired,
+                })
+            await _record_fleet_node_event(
+                conn,
+                node_id=None,
+                event_type="fleet_worker_target_changed",
+                actor_type="operator",
+                details={
+                    "desired_worker_count": body.desired_worker_count,
+                    "eligible_node_count": len(eligible),
+                    "allocations": allocations,
+                },
+            )
+    return {
+        "desired_worker_count": body.desired_worker_count,
+        "eligible_node_count": len(eligible),
+        "allocations": [
+            {
+                "node_id": str(row["id"]),
+                "name": str(row.get("name") or row["id"]),
+                "desired_worker_count": int(allocations.get(str(row["id"]), 0)),
+            }
+            for row in rows
+        ],
+        "changed_nodes": changes,
+    }
+
+
 @app.get("/fleet/nodes/{node_id}/activity")
 async def get_fleet_node_activity(node_id: str, limit: int = Query(50, ge=1, le=200)):
     """Recent durable scan/shard attribution for one fleet node."""
@@ -7582,7 +7684,7 @@ async def get_fleet_node_activity(node_id: str, limit: int = Query(50, ge=1, le=
             """
             SELECT id, parent_scan_id, target_url, scan_type, run_kind, scan_role,
                    shard_index, shard_count, status, progress, current_phase,
-                   worker_id, created_at, started_at, completed_at
+                   worker_id, execution_context, created_at, started_at, completed_at
             FROM scans
             WHERE executing_node_id = $1
             ORDER BY COALESCE(started_at, created_at) DESC
@@ -7592,6 +7694,36 @@ async def get_fleet_node_activity(node_id: str, limit: int = Query(50, ge=1, le=
             limit,
         )
     return {"node_id": node_id, "scans": [row_to_dict(row) for row in rows], "limit": limit}
+
+
+@app.get("/fleet/nodes/{node_id}/events")
+async def get_fleet_node_events(node_id: str, limit: int = Query(50, ge=1, le=200)):
+    """Read the bounded durable lifecycle/audit trail for one fleet node."""
+    try:
+        parsed_id = uuid.UUID(node_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="node not found") from exc
+    async with db_pool.acquire() as conn:
+        exists = await conn.fetchval("SELECT EXISTS(SELECT 1 FROM nodes WHERE id=$1)", parsed_id)
+        if not exists:
+            raise HTTPException(status_code=404, detail="node not found")
+        rows = await conn.fetch(
+            """
+            SELECT id, node_id, event_type, actor_type, severity, details, created_at
+            FROM fleet_node_events
+            WHERE node_id=$1
+            ORDER BY created_at DESC
+            LIMIT $2
+            """,
+            parsed_id,
+            limit,
+        )
+    events = []
+    for row in rows:
+        event = row_to_dict(row)
+        event["details"] = parse_json_field(event.get("details")) or {}
+        events.append(event)
+    return {"node_id": node_id, "events": events, "limit": limit}
 
 
 @app.get("/fleet/nodes/{node_id}/state")
@@ -7636,37 +7768,60 @@ async def update_fleet_node_state(node_id: str, body: FleetDesiredStateRequest, 
     except ValueError as exc:
         raise HTTPException(status_code=404, detail="node not found") from exc
     async with db_pool.acquire() as conn:
-        row = await conn.fetchrow(
-            """
-            UPDATE nodes
-            SET desired_worker_count = COALESCE($2, desired_worker_count),
-                drain = CASE
-                    WHEN $4::text IS NOT NULL AND $4 IS DISTINCT FROM worker_image_digest THEN true
-                    WHEN rollout_in_progress AND $3 IS FALSE THEN true
-                    ELSE COALESCE($3, drain)
-                END,
-                worker_image_digest = COALESCE($4, worker_image_digest),
-                rollout_in_progress = CASE
-                    WHEN $4::text IS NOT NULL AND $4 IS DISTINCT FROM worker_image_digest THEN true
-                    ELSE rollout_in_progress
-                END,
-                desired_state_version = desired_state_version + 1,
-                status = CASE
-                    WHEN ($4::text IS NOT NULL AND $4 IS DISTINCT FROM worker_image_digest)
-                         OR rollout_in_progress
-                         OR COALESCE($3, drain) THEN 'draining'
-                    WHEN status = 'draining' THEN 'joining'
-                    ELSE status
-                END,
-                updated_at = NOW()
-            WHERE id = $1 AND status <> 'disabled'
-            RETURNING *
-            """,
-            parsed_id,
-            body.desired_worker_count,
-            body.drain,
-            body.worker_image_digest,
-        )
+        async with conn.transaction():
+            before = await conn.fetchrow(
+                "SELECT * FROM nodes WHERE id=$1 AND status <> 'disabled' FOR UPDATE",
+                parsed_id,
+            )
+            if not before:
+                raise HTTPException(status_code=404, detail="node not found or disabled")
+            row = await conn.fetchrow(
+                """
+                UPDATE nodes
+                SET desired_worker_count = COALESCE($2, desired_worker_count),
+                    drain = CASE
+                        WHEN $4::text IS NOT NULL AND $4 IS DISTINCT FROM worker_image_digest THEN true
+                        WHEN rollout_in_progress AND $3 IS FALSE THEN true
+                        ELSE COALESCE($3, drain)
+                    END,
+                    worker_image_digest = COALESCE($4, worker_image_digest),
+                    rollout_in_progress = CASE
+                        WHEN $4::text IS NOT NULL AND $4 IS DISTINCT FROM worker_image_digest THEN true
+                        ELSE rollout_in_progress
+                    END,
+                    desired_state_version = desired_state_version + 1,
+                    status = CASE
+                        WHEN ($4::text IS NOT NULL AND $4 IS DISTINCT FROM worker_image_digest)
+                             OR rollout_in_progress
+                             OR COALESCE($3, drain) THEN 'draining'
+                        WHEN status = 'draining' THEN 'joining'
+                        ELSE status
+                    END,
+                    updated_at = NOW()
+                WHERE id = $1 AND status <> 'disabled'
+                RETURNING *
+                """,
+                parsed_id,
+                body.desired_worker_count,
+                body.drain,
+                body.worker_image_digest,
+            )
+            await _record_fleet_node_event(
+                conn,
+                node_id=parsed_id,
+                event_type="desired_state_updated",
+                actor_type="operator",
+                details={
+                    "previous_worker_count": int(before.get("desired_worker_count") or 0),
+                    "desired_worker_count": int(row.get("desired_worker_count") or 0),
+                    "previous_drain": bool(before.get("drain")),
+                    "drain": bool(row.get("drain")),
+                    "worker_image_changed": before.get("worker_image_digest") != row.get("worker_image_digest"),
+                    "worker_image_digest": row.get("worker_image_digest"),
+                    "rollout_in_progress": bool(row.get("rollout_in_progress")),
+                    "desired_state_version": int(row.get("desired_state_version") or 0),
+                },
+            )
     if not row:
         raise HTTPException(status_code=404, detail="node not found or disabled")
     return _public_fleet_node(row, stale_after_seconds=HEARTBEAT_TIMEOUT_MINUTES * 60)
@@ -7679,7 +7834,7 @@ async def heartbeat_fleet_node(node_id: str, body: FleetHeartbeatRequest, reques
     try:
         async with db_pool.acquire() as conn:
             async with conn.transaction():
-                await _authenticate_fleet_node(conn, node_id=node_id, credential=credential)
+                before = await _authenticate_fleet_node(conn, node_id=node_id, credential=credential)
                 result = await _record_fleet_heartbeat(
                     conn,
                     node_id=node_id,
@@ -7711,6 +7866,39 @@ async def heartbeat_fleet_node(node_id: str, body: FleetHeartbeatRequest, reques
                     )
                     if completed:
                         result = completed
+                        await _record_fleet_node_event(
+                            conn,
+                            node_id=node_id,
+                            event_type="image_rollout_completed",
+                            actor_type="node",
+                            details={
+                                "worker_image_digest": body.active_worker_image_digest,
+                                "active_worker_count": body.active_worker_count,
+                                "applied_state_version": body.applied_state_version,
+                            },
+                        )
+                status_changed = str(before.get("status") or "") != str(result.get("status") or "")
+                worker_count_changed = int(before.get("active_worker_count") or 0) != body.active_worker_count
+                version_changed = int(before.get("applied_state_version") or 0) != body.applied_state_version
+                error_changed = bool(before.get("last_error")) != bool(body.last_error)
+                image_changed = str(before.get("active_worker_image_digest") or "") != str(body.active_worker_image_digest or "")
+                if status_changed or worker_count_changed or version_changed or error_changed or image_changed:
+                    await _record_fleet_node_event(
+                        conn,
+                        node_id=node_id,
+                        event_type="node_state_reported",
+                        actor_type="node",
+                        severity="error" if body.last_error else "info",
+                        details={
+                            "status": result.get("status"),
+                            "active_worker_count": body.active_worker_count,
+                            "applied_state_version": body.applied_state_version,
+                            "active_worker_image_digest": body.active_worker_image_digest,
+                            "last_error_present": bool(body.last_error),
+                            "capacity": body.capacity,
+                            "egress_ip": body.egress_ip,
+                        },
+                    )
         return _public_fleet_node(result, stale_after_seconds=HEARTBEAT_TIMEOUT_MINUTES * 60)
     except FleetAuthenticationError as exc:
         raise HTTPException(status_code=401, detail=str(exc)) from exc
@@ -8080,11 +8268,25 @@ async def lease_broker_job(node_id: str, body: BrokerLeaseRequest, request: Requ
                 expires_at,
             )
         if row and scan_id:
+            execution_context = {
+                "node_id": node_id,
+                "node_name": str(node.get("name") or "") or None,
+                "worker_id": f"broker:{body.worker_id}",
+                "worker_build_fingerprint": str(node.get("build_fingerprint") or "") or None,
+                "worker_image_digest": str(node.get("active_worker_image_digest") or node.get("worker_image_digest") or "") or None,
+                "node_agent_version": str(node.get("agent_version") or "") or None,
+                "region": str(node.get("region") or "") or None,
+                "egress_ip": str(node.get("egress_ip") or "") or None,
+                "transport": "broker",
+                "credential_scope": "broker_job_lease",
+                "lease_id": str(row["id"]),
+            }
             await conn.execute(
                 """
                 UPDATE scans
                 SET executing_node_id=$2,
                     worker_id=$3,
+                    execution_context=$4::jsonb,
                     status='running',
                     started_at=COALESCE(started_at, NOW()),
                     current_phase='broker_execution',
@@ -8094,6 +8296,21 @@ async def lease_broker_job(node_id: str, body: BrokerLeaseRequest, request: Requ
                 scan_id,
                 parsed_node_id,
                 f"broker:{body.worker_id}",
+                json.dumps(execution_context, sort_keys=True, separators=(",", ":")),
+            )
+        if row:
+            await _record_fleet_node_event(
+                conn,
+                node_id=parsed_node_id,
+                event_type="broker_lease_started",
+                actor_type="broker",
+                details={
+                    "lease_id": str(row["id"]),
+                    "scan_id": str(scan_id) if scan_id else None,
+                    "worker_id": body.worker_id,
+                    "delivery_attempts": lease.delivery_attempts,
+                    "queue_name": lease.queue_name,
+                },
             )
     if budget_reservation is None:
         _broker_release_slot(redis_client, slot_id)
@@ -8277,6 +8494,18 @@ async def submit_broker_job_result(
                 "UPDATE broker_job_leases SET status='submitted' WHERE id=$1 AND status='leased'",
                 row["id"],
             )
+            if str(row["status"]) == "leased":
+                await _record_fleet_node_event(
+                    conn,
+                    node_id=node_id,
+                    event_type="broker_result_submitted",
+                    actor_type="broker",
+                    details={
+                        "lease_id": lease_id,
+                        "scan_id": str(row.get("scan_id") or "") or None,
+                        "result_sha256": result_hash,
+                    },
+                )
 
     if row.get("ingest_enqueued_at"):
         redis_client = get_redis()
@@ -8429,6 +8658,13 @@ async def get_fleet_connection_bundle(node_id: str, request: Request):
             async with conn.transaction():
                 await _authenticate_fleet_node(conn, node_id=node_id, credential=credential)
                 await _consume_fleet_connection_bundle(conn, node_id=node_id)
+                await _record_fleet_node_event(
+                    conn,
+                    node_id=node_id,
+                    event_type="connection_bundle_delivered",
+                    actor_type="node",
+                    details={"transport": "overlay", "delivered_once": True},
+                )
         return JSONResponse(
             content={"node_id": node_id, "bundle": bundle, "delivered_once": True},
             headers={"Cache-Control": "no-store"},
@@ -8481,6 +8717,13 @@ async def rotate_fleet_node_credential(node_id: str, request: Request, response:
                 _hash_fleet_secret(raw_credential, "node-credential"),
                 int(version),
             )
+            await _record_fleet_node_event(
+                conn,
+                node_id=parsed_id,
+                event_type="node_credential_rotated",
+                actor_type="operator",
+                details={"credential_version": int(version)},
+            )
     return {"node_id": node_id, "node_credential": raw_credential, "credential_version": int(version)}
 
 
@@ -8507,6 +8750,14 @@ async def revoke_fleet_node(node_id: str, request: Request):
             await conn.execute(
                 "UPDATE node_credentials SET revoked_at = COALESCE(revoked_at, NOW()) WHERE node_id = $1",
                 parsed_id,
+            )
+            await _record_fleet_node_event(
+                conn,
+                node_id=parsed_id,
+                event_type="node_revoked",
+                actor_type="operator",
+                severity="warning",
+                details={"credentials_revoked": True},
             )
     return {"node_id": node_id, "status": "disabled", "credentials_revoked": True}
 

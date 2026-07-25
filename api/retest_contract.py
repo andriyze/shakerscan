@@ -2865,7 +2865,8 @@ async def run_schema_migrations(pool) -> None:
             """)
             await conn.execute("""
                 ALTER TABLE scans
-                ADD COLUMN IF NOT EXISTS executing_node_id UUID
+                ADD COLUMN IF NOT EXISTS executing_node_id UUID,
+                ADD COLUMN IF NOT EXISTS execution_context JSONB NOT NULL DEFAULT '{}'::jsonb
             """)
             await conn.execute("""
                 DO $$
@@ -2907,6 +2908,21 @@ async def run_schema_migrations(pool) -> None:
             await conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_nodes_status_heartbeat
                 ON nodes(status, last_heartbeat_at DESC)
+            """)
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS fleet_node_events (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    node_id UUID REFERENCES nodes(id) ON DELETE CASCADE,
+                    event_type TEXT NOT NULL,
+                    actor_type TEXT NOT NULL CHECK (actor_type IN ('operator','node','system','broker')),
+                    severity TEXT NOT NULL DEFAULT 'info' CHECK (severity IN ('info','warning','error')),
+                    details JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_fleet_node_events_node_created
+                ON fleet_node_events(node_id, created_at DESC)
             """)
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS broker_job_leases (

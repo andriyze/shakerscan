@@ -10129,22 +10129,49 @@ async def _attribute_job_execution(job_data: dict[str, Any]) -> None:
     except ValueError as exc:
         raise RuntimeError("SHAKERSCAN_NODE_ID is not a UUID") from exc
     async with db_pool.acquire() as conn:
+        node = None
+        if node_uuid is not None:
+            node = await conn.fetchrow(
+                """
+                SELECT id, name, region, egress_ip, labels, build_fingerprint,
+                       active_worker_image_digest, agent_version, status, drain
+                FROM nodes WHERE id=$1
+                """,
+                node_uuid,
+            )
+            if not node or str(node.get("status") or "") == "disabled" or bool(node.get("drain")):
+                raise RuntimeError("fleet node is missing or disabled, or is draining; refusing job execution")
+        labels = parse_json_field(node.get("labels")) if node else {}
+        labels = labels if isinstance(labels, dict) else {}
+        execution_context = {
+            "node_id": str(node_uuid) if node_uuid else None,
+            "node_name": str(node.get("name") or "") if node else None,
+            "worker_id": worker_id,
+            "worker_build_fingerprint": _worker_build_fingerprint(),
+            "worker_image_digest": (
+                str(node.get("active_worker_image_digest") or "") if node
+                else str(os.environ.get("FLEET_WORKER_IMAGE_DIGEST") or "")
+            ) or None,
+            "node_build_fingerprint": str(node.get("build_fingerprint") or "") if node else None,
+            "node_agent_version": str(node.get("agent_version") or "") if node else None,
+            "region": str(node.get("region") or "") if node else None,
+            "egress_ip": str(node.get("egress_ip") or "") if node else None,
+            "transport": str(labels.get("transport") or "standalone"),
+            "credential_scope": "overlay_shared_store" if node else "standalone_local",
+        }
         row = await conn.fetchrow(
             """
             UPDATE scans
             SET worker_id = $2,
-                executing_node_id = COALESCE($3, executing_node_id)
+                executing_node_id = COALESCE($3, executing_node_id),
+                execution_context = $4::jsonb
             WHERE id = $1
-              AND (
-                  $3::uuid IS NULL OR EXISTS (
-                      SELECT 1 FROM nodes WHERE id = $3 AND status <> 'disabled'
-                  )
-              )
             RETURNING id
             """,
             scan_uuid,
             worker_id,
             node_uuid,
+            json.dumps(execution_context, sort_keys=True, separators=(",", ":")),
         )
     if node_uuid is not None and not row:
         raise RuntimeError("fleet node is missing or disabled; refusing job execution")

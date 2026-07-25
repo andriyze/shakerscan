@@ -128,9 +128,14 @@ def test_job_execution_is_attributed_to_worker_and_fleet_node(monkeypatch):
 
     _run(worker._attribute_job_execution({"scan_id": str(scan_id)}))
 
-    assert len(conn.calls) == 1
-    assert conn.calls[0][1] == (scan_id, "fleet-worker:container-12", node_id)
-    assert "status <> 'disabled'" in conn.calls[0][0]
+    assert len(conn.calls) == 2
+    assert "FROM nodes" in conn.calls[0][0]
+    assert conn.calls[0][1] == (node_id,)
+    assert conn.calls[1][1][:3] == (scan_id, "fleet-worker:container-12", node_id)
+    context = json.loads(conn.calls[1][1][3])
+    assert context["node_id"] == str(node_id)
+    assert context["worker_id"] == "fleet-worker:container-12"
+    assert context["credential_scope"] == "overlay_shared_store"
 
 
 def test_disabled_or_missing_fleet_node_refuses_execution(monkeypatch):

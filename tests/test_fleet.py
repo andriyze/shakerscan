@@ -16,6 +16,7 @@ from fleet import (  # noqa: E402
     FleetEnrollmentError,
     consume_connection_bundle,
     create_join_token,
+    distribute_worker_count,
     enroll_node,
     hash_secret,
     public_node,
@@ -102,6 +103,24 @@ def test_hashes_are_domain_separated_and_wireguard_keys_are_strict():
         validate_wireguard_public_key(base64.b64encode(b"short").decode())
     with pytest.raises(FleetEnrollmentError):
         validate_wireguard_public_key("not-base64!")
+
+
+def test_fleet_worker_distribution_is_capacity_weighted_deterministic_and_capped():
+    nodes = [
+        {"id": "a", "capacity": {"cpu_count": 8}},
+        {"id": "b", "capacity": {"cpu_count": 4}},
+        {"id": "c", "capacity": {"worker_weight": 1, "max_workers": 1}},
+    ]
+    first = distribute_worker_count(nodes, 10)
+    assert first == distribute_worker_count(nodes, 10)
+    assert sum(first.values()) == 10
+    assert first["a"] > first["b"] > first["c"]
+    assert first["c"] == 1
+
+
+def test_fleet_worker_distribution_rejects_capacity_overflow():
+    with pytest.raises(FleetConflictError, match="exceeds eligible fleet capacity"):
+        distribute_worker_count([{"id": "a", "capacity": {"max_workers": 2}}], 3)
 
 
 def test_join_token_is_single_use_and_raw_secrets_are_never_stored():

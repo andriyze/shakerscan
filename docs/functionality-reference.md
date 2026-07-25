@@ -1168,8 +1168,8 @@ it is the exhaustive backstop behind the human-readable product map above.
 
 | Surface | Count | Source |
 |---|---|---|
-| Public REST operations | 251 | `api/api.py` FastAPI decorators |
-| Unique REST paths | 208 | `api/api.py` |
+| Public REST operations | 253 | `api/api.py` FastAPI decorators |
+| Unique REST paths | 210 | `api/api.py` |
 | Check families | 14 | `api/check_registry.py` |
 | Command Arsenal commands | 82 | `api/command_arsenal.py` |
 | Tool adapters | 13 | `api/command_arsenal.py` |
@@ -1184,7 +1184,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | Skills | 6 | `skills/` |
 | Slash commands | 15 | `.claude/commands/` |
 | Specialized subagents | 3 | `.claude/agents/` |
-| Durable tables | 52 | `db/init.sql` + migrations |
+| Durable tables | 53 | `db/init.sql` + migrations |
 
 ### Public REST Operations
 
@@ -1323,10 +1323,12 @@ it is the exhaustive backstop behind the human-readable product map above.
 | `GET` | `/fleet/nodes/{node_id}/activity` | `get_fleet_node_activity` |
 | `POST` | `/fleet/nodes/{node_id}/connection-bundle` | `get_fleet_connection_bundle` |
 | `POST` | `/fleet/nodes/{node_id}/credentials/rotate` | `rotate_fleet_node_credential` |
+| `GET` | `/fleet/nodes/{node_id}/events` | `get_fleet_node_events` |
 | `POST` | `/fleet/nodes/{node_id}/heartbeat` | `heartbeat_fleet_node` |
 | `POST` | `/fleet/nodes/{node_id}/revoke` | `revoke_fleet_node` |
 | `GET` | `/fleet/nodes/{node_id}/state` | `get_fleet_node_state` |
 | `PATCH` | `/fleet/nodes/{node_id}/state` | `update_fleet_node_state` |
+| `POST` | `/fleet/scale` | `scale_fleet_workers` |
 | `POST` | `/gungnir/start` | `gungnir_start` |
 | `GET` | `/gungnir/status` | `gungnir_status` |
 | `POST` | `/gungnir/stop` | `gungnir_stop` |
@@ -1866,7 +1868,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `FLEET_WORKER_CPU_LIMIT` | `docker-compose.broker-worker.yml`, `docker-compose.worker.yml` |
 | `FLEET_WORKER_ENV_FILE` | `docker-compose.worker.yml` |
 | `FLEET_WORKER_IMAGE` | `docker-compose.broker-worker.yml`, `docker-compose.worker.yml` |
-| `FLEET_WORKER_IMAGE_DIGEST` | `api/api.py`, `api/fleet_worker_entrypoint.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `FLEET_WORKER_IMAGE_DIGEST` | `api/api.py`, `api/fleet_worker_entrypoint.py`, `api/worker.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `FLEET_WORKER_MEMORY_LIMIT` | `docker-compose.broker-worker.yml`, `docker-compose.worker.yml` |
 | `FULL_COVERAGE_ALLOCATION_DEFAULT` | `api/parallel_scan.py` |
 | `GITHUB_TOKEN` | `scanner/scanner.py` |
@@ -2111,6 +2113,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `finding_exceptions` | `db/init.sql` |
 | `finding_verifications` | `db/init.sql` |
 | `findings` | `db/init.sql` |
+| `fleet_node_events` | `db/init.sql` |
 | `hypotheses` | `api/retest_contract.py` |
 | `model_intake_trust_anchors` | `db/init.sql` |
 | `node_credentials` | `db/init.sql` |

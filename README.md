@@ -372,7 +372,8 @@ shakerscan join https://scanner.example.com --token <join-token> --transport bro
 Both transports require a public CA-valid HTTPS enrollment URL and a digest-pinned worker image.
 The broker needs only outbound HTTPS from the worker; WireGuard additionally needs its configured UDP
 port. See the [Multi-Node Architecture](https://github.com/andriyze/shakerscan/blob/main/docs/multi-node-architecture.md)
-for the trust model, placement labels, artifact storage, drain, and rollout behavior.
+for the trust model, capacity-weighted fleet scaling, placement labels, node audit trail, artifact
+storage, drain, and rollout behavior.
 
 ### Build from source
 

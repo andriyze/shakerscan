@@ -21,11 +21,14 @@ import {
 } from 'lucide-react'
 import {
   getFleetNodeActivity,
+  getFleetNodeEvents,
   getFleetNodes,
   revokeFleetNode,
+  scaleFleetWorkers,
   updateFleetNodeState,
   type FleetNode,
   type FleetNodeActivityResponse,
+  type FleetNodeEventsResponse,
   type FleetSummary,
 } from '@/lib/api'
 import {
@@ -122,9 +125,12 @@ export default function FleetPage() {
   const [revokeNode, setRevokeNode] = useState<FleetNode | null>(null)
   const [expandedNodeId, setExpandedNodeId] = useState<string | null>(null)
   const [activity, setActivity] = useState<Record<string, FleetNodeActivityResponse>>({})
+  const [events, setEvents] = useState<Record<string, FleetNodeEventsResponse>>({})
   const [activityLoading, setActivityLoading] = useState<string | null>(null)
   const [activityError, setActivityError] = useState<Record<string, string>>({})
   const [rolloutDigests, setRolloutDigests] = useState<Record<string, string>>({})
+  const [fleetWorkerTarget, setFleetWorkerTarget] = useState('')
+  const [fleetScaling, setFleetScaling] = useState(false)
 
   const loadFleet = useCallback(async (background = false) => {
     if (background) setRefreshing(true)
@@ -185,11 +191,34 @@ export default function FleetPage() {
     }
   }
 
+  async function applyFleetWorkerTarget() {
+    const target = Number(fleetWorkerTarget)
+    if (!Number.isInteger(target) || target < 0 || target > 16384) {
+      toast.error('Fleet worker target must be a whole number from 0 to 16384')
+      return
+    }
+    setFleetScaling(true)
+    try {
+      const response = await scaleFleetWorkers(target, operatorToken)
+      toast.success(`Distributed ${response.desired_worker_count} workers across ${response.eligible_node_count} eligible nodes`)
+      setFleetWorkerTarget('')
+      await loadFleet(true)
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to scale fleet')
+    } finally {
+      setFleetScaling(false)
+    }
+  }
+
   async function loadActivity(nodeId: string) {
     setActivityLoading(nodeId)
     try {
-      const response = await getFleetNodeActivity(nodeId)
+      const [response, eventResponse] = await Promise.all([
+        getFleetNodeActivity(nodeId),
+        getFleetNodeEvents(nodeId),
+      ])
       setActivity((current) => ({ ...current, [nodeId]: response }))
+      setEvents((current) => ({ ...current, [nodeId]: eventResponse }))
       setActivityError((current) => ({ ...current, [nodeId]: '' }))
     } catch (err) {
       setActivityError((current) => ({
@@ -283,6 +312,36 @@ export default function FleetPage() {
         </div>
       </Card>
 
+      <Card className="mb-6 p-4">
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
+          <div>
+            <div className="text-sm font-medium text-gray-200">Fleet worker target</div>
+            <p className="mt-1 max-w-2xl text-xs text-gray-500">
+              Set one worker total. The control plane assigns integer shares by each healthy node&apos;s reported CPU or worker weight while honoring optional per-node caps.
+            </p>
+          </div>
+          <div className="flex w-full gap-2 lg:w-80">
+            <Input
+              type="number"
+              min={0}
+              max={16384}
+              step={1}
+              value={fleetWorkerTarget}
+              onChange={(event) => setFleetWorkerTarget(event.target.value)}
+              placeholder={`Current: ${summary.desired_workers}`}
+              aria-label="Desired workers across the fleet"
+            />
+            <Button
+              onClick={() => void applyFleetWorkerTarget()}
+              loading={fleetScaling}
+              disabled={fleetWorkerTarget.trim() === ''}
+            >
+              Apply
+            </Button>
+          </div>
+        </div>
+      </Card>
+
       {error && <div className="mb-4"><ErrorState message={error} onRetry={() => void loadFleet()} /></div>}
 
       {loading && nodes.length === 0 ? (
@@ -300,6 +359,7 @@ export default function FleetPage() {
             const busy = pendingNodeId === node.id
             const disabled = node.status === 'disabled'
             const currentActivity = activity[node.id]
+            const currentEvents = events[node.id]
             const expanded = expandedNodeId === node.id
             return (
               <Card key={node.id} className={disabled ? 'border-red-950/70 opacity-75' : ''}>
@@ -465,10 +525,33 @@ export default function FleetPage() {
                       <p className="flex items-center gap-2 text-sm text-gray-500"><Gauge className="h-4 w-4 animate-pulse" /> Loading activity…</p>
                     ) : activityError[node.id] ? (
                       <ErrorState message={activityError[node.id]} onRetry={() => void loadActivity(node.id)} />
-                    ) : !currentActivity?.scans.length ? (
-                      <p className="text-sm text-gray-500">No scans have been attributed to this node yet.</p>
                     ) : (
-                      <div className="overflow-x-auto">
+                      <div className="space-y-6">
+                        <div>
+                          <h3 className="mb-2 text-xs font-medium uppercase tracking-wide text-gray-600">Lifecycle audit</h3>
+                          {!currentEvents?.events.length ? (
+                            <p className="text-sm text-gray-500">No lifecycle events recorded yet.</p>
+                          ) : (
+                            <div className="space-y-2">
+                              {currentEvents.events.slice(0, 12).map((event) => (
+                                <div key={event.id} className="flex flex-col gap-1 rounded-lg border border-gray-800 bg-gray-950/60 px-3 py-2 sm:flex-row sm:items-center sm:justify-between">
+                                  <div className="flex items-center gap-2">
+                                    <Badge className={event.severity === 'error' ? 'bg-red-500/15 text-red-300' : event.severity === 'warning' ? 'bg-amber-500/15 text-amber-300' : 'bg-gray-800 text-gray-300'}>
+                                      {event.actor_type}
+                                    </Badge>
+                                    <span className="text-sm text-gray-300">{event.event_type.replaceAll('_', ' ')}</span>
+                                  </div>
+                                  <span className="text-xs text-gray-600" title={event.created_at}>{relativeTime(event.created_at)}</span>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                        <div className="overflow-x-auto">
+                          <h3 className="mb-2 text-xs font-medium uppercase tracking-wide text-gray-600">Attributed scans</h3>
+                          {!currentActivity?.scans.length ? (
+                            <p className="text-sm text-gray-500">No scans have been attributed to this node yet.</p>
+                          ) : (
                         <table className="w-full min-w-[760px] text-left text-sm">
                           <thead className="text-xs uppercase tracking-wide text-gray-600">
                             <tr>
@@ -495,6 +578,8 @@ export default function FleetPage() {
                             ))}
                           </tbody>
                         </table>
+                          )}
+                        </div>
                       </div>
                     )}
                   </div>

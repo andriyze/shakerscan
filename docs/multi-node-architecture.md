@@ -16,7 +16,8 @@ persistence, centralized retry-safe retention, and a digest-pinned self-hosted M
 and enforceable fleet-wide admission/request limits are implemented. Graceful drain and digest-pinned
 one-at-a-time worker image rollout are implemented. The outbound-only Phase-3 HTTPS broker, thin
 worker runtime, broker enrollment, lease/result/artifact protocol, and control-plane ingestion are
-implemented. Physical multi-host acceptance remains.
+implemented. Capacity-weighted fleet-wide scaling, immutable execution-context snapshots, and
+durable per-node lifecycle events are implemented. Physical multi-host acceptance remains.
 **Scope:** run a coordinated ShakerScan fleet across multiple VMs/VPS hosts so one UI/API
 can scan more targets at once and run high-budget Full Coverage scans by using workers
 from many machines.
@@ -45,6 +46,7 @@ becoming stale prose. For product priority and phased order, see
 | Worker-only deployment and pull-based node-agent | **Built for owned-fleet lifecycle** — digest-pinned worker/agent-only Compose, owner-only local state, versioned desired state, local Docker reconciliation, graceful drain-to-zero, rolling image replacement, capacity/error heartbeat | `docker-compose.worker.yml`; `fleet_agent.py`; `GET|PATCH /fleet/nodes/{id}/state` |
 | WireGuard/CLI host provisioning | **Built, awaiting physical two-VPS acceptance** — persistent identity, CA/server certificates, overlay/data binding, automatic or manual peer reconciliation, public HTTPS enrollment, overlay proof, one-time bundle persistence, worker-only startup | `scripts/fleet_cli.py`; `scanner.sh fleet`; `scanner.sh join` |
 | Per-node execution attribution and fleet rollup | **Built** — scan/shard rows record the executing node and unique worker replica; revoked nodes fail closed and re-enqueue refused work; node API derives state/image drift and exposes recent activity | `scans.executing_node_id`; `worker.py` `_attribute_job_execution`; `GET /fleet/nodes`; `GET /fleet/nodes/{id}/activity` |
+| Fleet-wide scaling and node audit trail | **Built** — one operator request distributes an exact worker total across healthy schedulable nodes using reported CPU/worker weights and optional per-node caps. State changes, join, credential rotation, bundle delivery, heartbeat transitions, rollout completion, broker leases/results, and revocation create bounded credential-free node events. Every scan snapshots node, worker build/image, egress, transport, and credential scope at execution time. | `POST /fleet/scale`; `fleet.py` `distribute_worker_count`; `GET /fleet/nodes/{id}/events`; `fleet_node_events`; `scans.execution_context` |
 | Fleet UI | **Built** — unified health/capacity/drift view, recent attributed work, desired worker scaling, graceful drain/resume, digest-pinned rollout, revoke confirmation, placement labels, and session-only remote operator credential handling | `ui/src/app/fleet/page.tsx`; sidebar `/fleet` |
 | Capability/region/egress placement | **Built** — scan options accept normalized placement constraints; jobs enter deterministic capability Streams; workers dynamically subscribe only to routes matching their node/region/network/residency/tier/tool labels. Equivalent eligible workers retain normal lease failover. Fleet join persists labels and the UI exposes both submission and node labels. | `job_queue.py` `routed_queue_name`, `qualified_route_queues`; `ScanOptions.placement`; `fleet_cli.py`; `/scan/new`; `/fleet` |
 | HTTPS broker for zero-trust nodes | **Built** — `--transport broker` enrolls an outbound-only node without WireGuard, Redis, PostgreSQL, or object-store credentials. Node/job-scoped HTTPS leases use hashed single-job tokens, Stream ownership heartbeat/reclaim, bounded delivery, global admission and root-domain reservations, progress/log forwarding, cancellation, lease-bound proxy artifact uploads, immutable result hashes, and idempotent control-plane ingestion for normal and shard scans. | `broker_worker.py`; `docker-compose.broker-worker.yml`; `/fleet/broker/*`; `broker_job_leases`; `broker_job_results` |
@@ -241,7 +243,7 @@ worker-count changes.
 | Job queue | Scan/retest jobs use Redis Streams consumer groups with ack, heartbeat, bounded reclaim, and a legacy-list drain bridge. | A worker on another VPS can participate if it can reach the same queue; hard loss is reclaimed after the visibility timeout. |
 | Finding writes | Findings are deduped with a database uniqueness constraint and conflict-safe inserts. | Concurrent workers can scan the same target without inventing a distributed lock. |
 | Parallel scan plan | Parent, shard, and merge jobs are implemented on the queue. | Shard jobs are naturally host-agnostic when remote workers can safely reach the shared queue and state. |
-| Worker scaling | Local `POST /workers` remains for standalone; fleet desired state scales/drains each remote node through its pull agent. | Graceful rolling image rollout is built; aggregate fleet-wide count distribution remains. |
+| Worker scaling | Local `POST /workers` remains for standalone; fleet desired state scales/drains each remote node through its pull agent. | Graceful rolling image rollout and capacity-weighted aggregate fleet count distribution are built. |
 | Evidence | Standalone retains `./results`; fleet workers upload to S3/MinIO and commit a durable manifest before completion. | The control plane can proxy artifacts from every node without a shared filesystem. |
 | Queue reliability | Stream messages remain pending while leased, heartbeat during execution, are acknowledged only after successful dispatch, and are reclaimed after owner loss. | Physical partition/kill testing remains required before the production acceptance claim. |
 | Networking | The local stack binds API/UI to the configured host; remote mode already parameterizes public/private bind addresses. | Built-in WireGuard should become the default fleet overlay; Redis/Postgres binding and firewall rules must be explicit. |
@@ -615,9 +617,9 @@ Build the fleet layer:
    request metering off for authorized local labs.
 6. **Routing and affinity:** **built.** Deterministic capability Streams place jobs by region,
    egress group, private-network reachability, scan tier, data residency, node, and required tools.
-7. **Fleet operations:** support drain, disable, rolling image upgrade, version mismatch
-   refusal, per-node audit logs, and a fleet-level worker count that can be distributed
-   across nodes by capacity.
+7. **Fleet operations:** **built.** Drain, disable, rolling image upgrade, version mismatch
+   refusal, per-node audit logs, and a fleet-level worker count distributed across healthy nodes by
+   reported capacity are available through the API and Fleet UI.
 
 ### Phase 3: HTTPS Broker For Zero-Trust Nodes — Implemented
 
@@ -667,7 +669,9 @@ Responsibilities:
 The implementation uses the preferred pull model: the agent periodically asks the control
 plane for versioned desired state and exposes no inbound management port. Registration, overlay, and
 bundle installation are implemented in the host CLI. Digest-pinned image rollout is versioned and
-observable; richer centralized node logs/metrics remain observability work.
+observable. Heartbeats centralize bounded capacity, worker count, image, version, egress, and error
+state; meaningful transitions are durable audit events, and broker scan logs stream to the central
+scan log. Full arbitrary host-log aggregation remains outside the trust-minimized node-agent scope.
 
 Join tokens should be short-lived and preferably single-use. After registration, the
 node should use its own node credential, not keep reusing the enrollment token.
@@ -813,7 +817,8 @@ Security requirements:
 - **Disposable high-risk nodes:** run aggressive/exploit-tier scans on nodes that can be
   rebuilt frequently and isolated from the control plane.
 - **Audit:** record which node, worker version, egress IP, and credential scope ran each
-  scan or shard.
+  scan or shard. This is persisted as the immutable-at-dispatch `scans.execution_context` snapshot;
+  node lifecycle actions are stored separately in `fleet_node_events`.
 - **Egress control:** allow scanner traffic to intended targets, but keep management
   traffic restricted to the control plane and artifact store.
 
@@ -829,7 +834,7 @@ Security requirements:
 | Image distribution | Private registry with pinned tags. | Rolling upgrade and version compatibility checks. |
 | Queue | Shared default queue. | Leases, routing, retry policy, and idempotent shard completion are built. |
 | Rate limiting | Known-endpoint buckets plus standalone compatibility request metering/reservation. | Joined nodes enforce global admission/request limits by default; physical fleet soak remains. |
-| Observability | Per-host logs. | Central logs, metrics, node audit trail, per-node scan attribution. |
+| Observability | Per-host logs. | Heartbeat metrics, transition/error events, broker scan logs, node audit trail, and execution-context scan attribution are built. |
 | Zero-trust worker transport | Not required for owned overlay nodes. | HTTPS lease/heartbeat/artifact/result broker is built; nodes receive no Redis/PostgreSQL/object-store credentials. |
 
 ## 13. First Milestones

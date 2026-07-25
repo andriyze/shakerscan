@@ -82,6 +82,7 @@ CREATE TABLE scans (
     job_id TEXT UNIQUE,
     worker_id TEXT,
     executing_node_id UUID,
+    execution_context JSONB NOT NULL DEFAULT '{}'::jsonb,
 
     -- Status
     status TEXT NOT NULL DEFAULT 'pending',  -- pending, running, completed, failed
@@ -901,6 +902,18 @@ ALTER TABLE scans
     ADD CONSTRAINT scans_executing_node_fk
     FOREIGN KEY (executing_node_id) REFERENCES nodes(id) ON DELETE SET NULL;
 CREATE INDEX IF NOT EXISTS idx_nodes_status_heartbeat ON nodes(status, last_heartbeat_at DESC);
+
+CREATE TABLE IF NOT EXISTS fleet_node_events (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    node_id UUID REFERENCES nodes(id) ON DELETE CASCADE,
+    event_type TEXT NOT NULL,
+    actor_type TEXT NOT NULL CHECK (actor_type IN ('operator','node','system','broker')),
+    severity TEXT NOT NULL DEFAULT 'info' CHECK (severity IN ('info','warning','error')),
+    details JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_fleet_node_events_node_created
+    ON fleet_node_events(node_id, created_at DESC);
 
 CREATE TABLE IF NOT EXISTS broker_job_leases (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

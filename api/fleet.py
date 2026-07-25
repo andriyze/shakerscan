@@ -22,6 +22,7 @@ from typing import Any, Mapping
 
 OVERLAY_ALLOCATION_LOCK = 8_675_310
 MAX_OVERLAY_ADDRESSES = 65_536
+MAX_WORKERS_PER_NODE = 128
 
 
 class FleetConfigurationError(ValueError):
@@ -112,6 +113,112 @@ def normalize_json_object(value: Mapping[str, Any] | None, *, max_bytes: int, fi
     if len(encoded.encode("utf-8")) > max_bytes:
         raise FleetEnrollmentError(f"{field} exceeds {max_bytes} bytes")
     return result
+
+
+def distribute_worker_count(
+    nodes: list[Mapping[str, Any]],
+    desired_worker_count: int,
+) -> dict[str, int]:
+    """Distribute a fleet worker target proportionally and deterministically.
+
+    CPU count is the default capacity weight. Operators can report a positive
+    ``worker_weight`` and a bounded ``max_workers`` in node capacity when CPU
+    count is not a useful proxy (for example memory-heavy browser nodes).
+    D'Hondt allocation provides stable integer shares and naturally redistributes
+    around per-node caps.
+    """
+    desired = int(desired_worker_count)
+    if desired < 0:
+        raise FleetEnrollmentError("desired_worker_count must be non-negative")
+    entries: list[tuple[str, float, int]] = []
+    for node in nodes:
+        node_id = str(node.get("id") or "").strip()
+        if not node_id:
+            raise FleetEnrollmentError("fleet scale candidate is missing node identity")
+        capacity = node.get("capacity") or {}
+        if isinstance(capacity, str):
+            try:
+                capacity = json.loads(capacity)
+            except json.JSONDecodeError:
+                capacity = {}
+        if not isinstance(capacity, Mapping):
+            capacity = {}
+        try:
+            weight = float(capacity.get("worker_weight") or capacity.get("cpu_count") or 1)
+        except (TypeError, ValueError):
+            weight = 1.0
+        if weight <= 0 or weight != weight:
+            weight = 1.0
+        weight = min(weight, 4096.0)
+        try:
+            cap = int(capacity.get("max_workers", MAX_WORKERS_PER_NODE))
+        except (TypeError, ValueError):
+            cap = MAX_WORKERS_PER_NODE
+        cap = max(0, min(MAX_WORKERS_PER_NODE, cap))
+        entries.append((node_id, weight, cap))
+    allocations = {node_id: 0 for node_id, _weight, _cap in entries}
+    total_capacity = sum(cap for _node_id, _weight, cap in entries)
+    if desired > total_capacity:
+        raise FleetConflictError(
+            f"requested {desired} workers exceeds eligible fleet capacity {total_capacity}"
+        )
+    # Give each usable node one worker before proportional expansion whenever
+    # the target is large enough. This avoids permanently starving small nodes
+    # while still choosing the largest-capacity nodes first for tiny totals.
+    remaining = desired
+    for node_id, _weight, cap in sorted(entries, key=lambda item: (-item[1], item[0])):
+        if remaining <= 0:
+            break
+        if cap > 0:
+            allocations[node_id] = 1
+            remaining -= 1
+    # Highest quotient wins each integer worker. Stable node identity is the
+    # final tie-break, so repeated plans over the same inputs are identical.
+    for _ in range(remaining):
+        candidates = [
+            (weight / (allocations[node_id] + 1), node_id)
+            for node_id, weight, cap in entries
+            if allocations[node_id] < cap
+        ]
+        if not candidates:
+            raise FleetConflictError("eligible fleet capacity was exhausted")
+        _quotient, selected = max(candidates, key=lambda item: (item[0], item[1]))
+        allocations[selected] += 1
+    return allocations
+
+
+async def record_node_event(
+    conn: Any,
+    *,
+    node_id: str | uuid.UUID | None,
+    event_type: str,
+    actor_type: str,
+    details: Mapping[str, Any] | None = None,
+    severity: str = "info",
+) -> None:
+    """Persist a bounded, credential-free fleet lifecycle event."""
+    clean_event = str(event_type or "").strip().lower()
+    clean_actor = str(actor_type or "").strip().lower()
+    clean_severity = str(severity or "info").strip().lower()
+    if not clean_event or len(clean_event) > 80:
+        raise FleetEnrollmentError("fleet event type is invalid")
+    if clean_actor not in {"operator", "node", "system", "broker"}:
+        raise FleetEnrollmentError("fleet event actor type is invalid")
+    if clean_severity not in {"info", "warning", "error"}:
+        raise FleetEnrollmentError("fleet event severity is invalid")
+    safe_details = normalize_json_object(details, max_bytes=16_384, field="fleet event details")
+    parsed_node_id = uuid.UUID(str(node_id)) if node_id is not None else None
+    await conn.execute(
+        """
+        INSERT INTO fleet_node_events (node_id, event_type, actor_type, severity, details)
+        VALUES ($1,$2,$3,$4,$5::jsonb)
+        """,
+        parsed_node_id,
+        clean_event,
+        clean_actor,
+        clean_severity,
+        json.dumps(safe_details, sort_keys=True, separators=(",", ":"), default=str),
+    )
 
 
 def socket_peer_is_overlay(peer_host: str | None, overlay_cidr: str) -> bool:
@@ -250,6 +357,18 @@ async def enroll_node(
         """,
         node_id,
         hash_secret(raw_credential, "node-credential"),
+    )
+    await record_node_event(
+        conn,
+        node_id=node_id,
+        event_type="node_joined",
+        actor_type="node",
+        details={
+            "transport": normalized_transport,
+            "region": str(region or "").strip()[:128] or None,
+            "desired_worker_count": int(config.desired_worker_count),
+            "worker_image_digest": config.worker_image_digest,
+        },
     )
     return {
         "node_id": str(node_id),
