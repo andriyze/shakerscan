@@ -16963,13 +16963,56 @@ def test_auto_verify_reports_unverifiable_families_without_spending_the_attempt_
     assert by_id["00000000-0000-4000-8000-000000000001"]["claimed_family"] == "workflow_transition"
     assert by_id["00000000-0000-4000-8000-000000000002"]["skipped"] == "family_not_verifiable"
     assert by_id["00000000-0000-4000-8000-000000000003"]["skipped"] == "family_not_verifiable"
-    assert by_id["00000000-0000-4000-8000-000000000004"]["skipped"] == "family_routed_to_dast_retest"
+    assert by_id["00000000-0000-4000-8000-000000000004"]["skipped"] == "family_eligible_for_dast_retest"
 
     # Telemetry carries no budget reservations, so the caller's *_reserved sums are unaffected.
     assert all(
         not r.get("request_units_reserved") and not r.get("seconds_reserved")
         for r in out if r.get("skipped", "").startswith("family_")
     )
+
+
+def test_auto_verify_classifies_findings_after_attempt_cap_and_without_approval(monkeypatch):
+    monkeypatch.setattr(api_module, "_ai_ops_execute_enabled", lambda: True)
+
+    async def _fake_verify(_finding_uuid, _approval_receipt_id, *, created_by):
+        return {"verified": False, "family_proof": {"verdict": "not_verified"}}
+
+    monkeypatch.setattr(api_module, "_verify_suspected_finding_workflow", _fake_verify)
+
+    def _entry(family, suffix):
+        return {
+            "finding": {"family": family},
+            "persisted": {
+                "id": f"00000000-0000-4000-8000-{suffix:012d}",
+                "persisted": "created",
+            },
+        }
+
+    # Three real attempts consume the traffic cap; the later taxonomy mismatch must still appear.
+    gated = [
+        _entry("data_exposure", 1),
+        _entry("data_exposure", 2),
+        _entry("data_exposure", 3),
+        _entry("totally_made_up", 4),
+        _entry("data_exposure", 5),
+    ]
+    capped = asyncio.run(api_module._agent_auto_verify(
+        gated, approval_receipt_id="receipt", created_by="test"
+    ))
+    capped_by_id = {row.get("finding_id"): row for row in capped}
+    assert capped_by_id["00000000-0000-4000-8000-000000000004"]["skipped"] == "family_not_verifiable"
+    assert capped_by_id["00000000-0000-4000-8000-000000000005"]["skipped"] == "auto_verify_attempt_limit_reached"
+
+    # Read-only/no-approval runs do not execute traffic, but they still expose taxonomy truth.
+    no_approval = asyncio.run(api_module._agent_auto_verify(
+        [_entry("totally_made_up", 6), _entry("data_exposure", 7)],
+        approval_receipt_id=None,
+        created_by="test",
+    ))
+    no_approval_by_id = {row.get("finding_id"): row for row in no_approval}
+    assert no_approval_by_id["00000000-0000-4000-8000-000000000006"]["skipped"] == "family_not_verifiable"
+    assert no_approval_by_id["00000000-0000-4000-8000-000000000007"]["skipped"] == "auto_verify_requires_approval"
 
 
 def test_context_pack_sections_render_observed_artifacts_and_invariant_candidates():
@@ -17013,37 +17056,21 @@ def test_context_pack_sections_render_observed_artifacts_and_invariant_candidate
 
 # --- Audit 2026-07 regression tests -------------------------------------------------------------
 
-def test_normalize_target_url_blocks_cloud_metadata_and_link_local(monkeypatch):
-    """Audit P1-1: cloud-metadata / link-local destinations must be refused at normalization, while
-    private-range and public labs (the product's real targets) stay allowed. Regression for the
-    self-caught-exception bug found live: TargetNormalizationError subclasses ValueError, so the
-    IMDS-IP refusal must be raised OUTSIDE the ip_address() try/except (169.254.169.254 slipped
-    through the first fix)."""
-    monkeypatch.delenv("SHAKERSCAN_ALLOW_METADATA_TARGETS", raising=False)
-    for blocked in (
+def test_normalize_target_url_preserves_operator_choice_for_all_http_targets():
+    """ShakerScan is operator-controlled and does not censor local/internal/metadata destinations."""
+    for allowed in (
         "http://169.254.169.254/latest/meta-data/",
         "http://169.254.169.254",
         "http://[fe80::1]",
         "http://metadata.google.internal/",
-    ):
-        with pytest.raises(api_module.TargetNormalizationError):
-            api_module.normalize_target_url(blocked)
-    # Legit targets: local lab (private + host.docker.internal) and a public host must NOT raise.
-    for allowed in (
+        "http://2852039166/",
         "http://host.docker.internal:3001",
         "http://192.168.1.50",
-        "http://127.0.0.1:3000",  # loopback lab is allowed (only link-local/metadata are blocked)
+        "http://127.0.0.1:3000",
         "https://example.com",
     ):
         norm, _note = api_module.normalize_target_url(allowed)
-        assert norm  # normalized to a non-empty origin, no exception
-
-
-def test_normalize_target_url_metadata_override(monkeypatch):
-    """The metadata block is overridable for an explicitly authorized test."""
-    monkeypatch.setenv("SHAKERSCAN_ALLOW_METADATA_TARGETS", "1")
-    norm, _note = api_module.normalize_target_url("http://169.254.169.254/")
-    assert "169.254.169.254" in norm
+        assert norm
 
 
 def test_cors_allow_origins_is_an_allowlist_not_wildcard(monkeypatch):
@@ -17064,6 +17091,61 @@ def test_cors_allow_origins_is_an_allowlist_not_wildcard(monkeypatch):
     assert "https://ops.internal" in origins2
 
 
+def test_unsafe_origin_guard_rejects_before_handler_and_preserves_cli_and_allowlisted_ui():
+    calls = []
+
+    async def downstream(scope, receive, send):
+        calls.append(scope)
+        await send({"type": "http.response.start", "status": 204, "headers": []})
+        await send({"type": "http.response.body", "body": b""})
+
+    guard = api_module.UnsafeOriginGuardMiddleware(
+        downstream,
+        allow_origins=["http://localhost:3000", "https://ops.example"],
+    )
+
+    async def request(origin):
+        sent = []
+        headers = [] if origin is None else [(b"origin", origin.encode())]
+        scope = {"type": "http", "method": "POST", "headers": headers}
+
+        async def send(message):
+            sent.append(message)
+
+        await guard(scope, lambda: None, send)
+        return sent
+
+    blocked = asyncio.run(request("https://evil.example"))
+    assert blocked[0]["status"] == 403
+    assert calls == []
+    assert asyncio.run(request("https://ops.example"))[0]["status"] == 204
+    assert asyncio.run(request(None))[0]["status"] == 204  # curl/CLI/agent
+    assert len(calls) == 2
+
+    wildcard_guard = api_module.UnsafeOriginGuardMiddleware(downstream, allow_origins=["*"])
+
+    async def wildcard_request():
+        sent = []
+
+        async def send(message):
+            sent.append(message)
+
+        await wildcard_guard(
+            {"type": "http", "method": "POST", "headers": [(b"origin", b"https://any.example")]},
+            lambda: None,
+            send,
+        )
+        return sent
+
+    assert asyncio.run(wildcard_request())[0]["status"] == 204
+    assert api_module._origin_is_allowed(
+        "https://scanner.example", [], r"https://.*\.example"
+    ) is True
+    assert api_module._origin_is_allowed(
+        "https://scanner.invalid", [], r"https://.*\.example"
+    ) is False
+
+
 def test_bulk_finding_update_request_accepts_documented_json_body():
     """Audit P2-2: the documented JSON body must bind to a model (previously the bare-param handler
     forced the fields onto the query string and 422'd the documented request)."""
@@ -17075,3 +17157,62 @@ def test_bulk_finding_update_request_accepts_documented_json_body():
     assert req.finding_ids and req.status == "false_positive"
     with pytest.raises(Exception):  # empty finding_ids rejected by min_length
         api_module.BulkFindingUpdateRequest(finding_ids=[], status="resolved")
+
+
+def test_bulk_finding_update_reports_rows_actually_changed(monkeypatch):
+    class Conn:
+        async def fetch(self, _query, status, notes, ids):
+            assert status == "resolved" and notes == "audit"
+            assert len(ids) == 2  # duplicate request ID is de-duplicated
+            return [{"id": ids[0]}]  # second UUID does not exist
+
+    class Acquire:
+        async def __aenter__(self):
+            return Conn()
+
+        async def __aexit__(self, *_args):
+            return False
+
+    class Pool:
+        def acquire(self):
+            return Acquire()
+
+    monkeypatch.setattr(api_module, "db_pool", Pool())
+    request = api_module.BulkFindingUpdateRequest(
+        finding_ids=[
+            "00000000-0000-4000-8000-000000000001",
+            "00000000-0000-4000-8000-000000000001",
+            "00000000-0000-4000-8000-000000000002",
+        ],
+        status="resolved",
+        notes="audit",
+    )
+    result = asyncio.run(api_module.bulk_update_findings(request))
+    assert result == {
+        "updated": 1,
+        "requested": 3,
+        "unique_requested": 2,
+        "not_found": 1,
+        "status": "resolved",
+    }
+
+
+def test_all_public_limit_parameters_have_explicit_lower_bounds():
+    source = inspect.getsource(api_module)
+    assert 'async def get_scan_logs(scan_id: str, limit: int = Query(200, ge=1, le=1000))' in source
+    assert 'async def list_discovery_runs(limit: int = Query(20, ge=1, le=200))' in source
+    assert 'async def list_results(limit: int = Query(50, ge=1, le=500))' in source
+
+
+def test_compose_propagates_browser_origin_configuration_to_api():
+    repo_root = Path(__file__).resolve().parents[1]
+    required = (
+        "SHAKERSCAN_UI_PORT",
+        "SHAKERSCAN_PUBLIC_HOST",
+        "SHAKERSCAN_CORS_ALLOW_ORIGINS",
+        "SHAKERSCAN_CORS_ALLOW_ORIGIN_REGEX",
+    )
+    for compose_name in ("docker-compose.yml", "docker-compose.release.yml"):
+        compose = (repo_root / compose_name).read_text()
+        for variable in required:
+            assert f"- {variable}=${{{variable}" in compose

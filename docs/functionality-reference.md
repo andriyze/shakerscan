@@ -659,9 +659,10 @@ exploitation blocks any downgrade.
 ### 11.5 AI Operations Router
 
 `POST /ai/ops/route` maps natural-language DAST/ASM requests to concrete API calls with **dry-run
-defaults**. It recognizes intents such as "run full coverage", "keep this target covered" (enable ASM
-with a safe preset), "what is still untested?" (ASM gaps), "spend more budget on APIs", and focused
-SQLi/XSS/BOLA requests. Active, state-changing, or budget-increasing intents stay dry-run unless
+defaults**. It recognizes unqualified scans (Quick by default), all six exact DAST scan types,
+"run full coverage", "keep this target covered" (enable ASM with a safe preset), "what is still
+untested?" (ASM gaps), "spend more budget on APIs", and focused SQLi/XSS/BOLA requests. Active,
+state-changing, or budget-increasing intents stay dry-run unless
 `execute=true` and the explicit confirmations are all present. Standard installs enable the server
 execution gate; `AI_OPS_ROUTER_EXECUTE_ENABLED=false` disables all gated execution globally. BOLA
 additionally requires primary + second-user auth context. Ambiguous language never upgrades a
@@ -1147,7 +1148,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | Scanner wrapper commands | 24 | `scanner.sh` |
 | Make targets | 10 | `Makefile` |
 | Release gates | 14 | `scripts/release_gates.py` |
-| Runtime environment keys | 198 | Python sources + Compose manifests |
+| Runtime environment keys | 197 | Python sources + Compose manifests |
 | Scanner modules | 83 | `scanner/scanner_tools/` |
 | UI pages | 30 | `ui/src/app/` |
 | Skills | 6 | `skills/` |
@@ -1856,14 +1857,13 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SCAN_SETTINGS_KEY` | `api/api.py` |
 | `SCAN_SHUTDOWN_GRACE_SECONDS` | `scanner/scanner.py` |
 | `SCAN_VERIFICATION_MAX` | `scanner/scanner.py` |
-| `SHAKERSCAN_ALLOW_METADATA_TARGETS` | `api/api.py` |
 | `SHAKERSCAN_API_PORT` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_API_URL` | `scripts/shakerscan_mcp.py` |
 | `SHAKERSCAN_ASM_DISPATCH_INTERVAL` | `api/api.py` |
 | `SHAKERSCAN_BIND_HOST` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_CANCEL_FILE` | `scanner/scanner_tools/cancellation.py`, `scanner/scanner_tools/common.py` |
-| `SHAKERSCAN_CORS_ALLOW_ORIGINS` | `api/api.py` |
-| `SHAKERSCAN_CORS_ALLOW_ORIGIN_REGEX` | `api/api.py` |
+| `SHAKERSCAN_CORS_ALLOW_ORIGINS` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `SHAKERSCAN_CORS_ALLOW_ORIGIN_REGEX` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_CUSTOM_WORDLIST` | `scanner/scanner_tools/discovery.py` |
 | `SHAKERSCAN_DEBUG_POST_INFER` | `scanner/scanner.py` |
 | `SHAKERSCAN_ENABLE_ADAPTIVE_THROTTLE` | `scanner/scanner.py` |
@@ -1875,7 +1875,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SHAKERSCAN_PER_WORKER_MEM_GB` | `api/api.py`, `docker-compose.yml` |
 | `SHAKERSCAN_PLATFORM_MEMORY_RESERVE_GB` | `api/api.py`, `docker-compose.yml` |
 | `SHAKERSCAN_PUBLIC_API_URL` | `docker-compose.release.yml`, `docker-compose.yml` |
-| `SHAKERSCAN_PUBLIC_HOST` | `api/api.py` |
+| `SHAKERSCAN_PUBLIC_HOST` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_REQUEST_BUDGET_DOMAIN` | `scanner/scanner.py` |
 | `SHAKERSCAN_REQUEST_BUDGET_LIMIT` | `scanner/scanner.py` |
 | `SHAKERSCAN_REQUEST_BUDGET_MODE` | `api/worker.py`, `scanner/scanner.py` |

@@ -156,7 +156,8 @@ agree in **both** directions:
   `workflow`. (`bfla` and `business_logic` *are* aliases, of `auth_bypass` and `workflow`.)
 
 When the moat cannot verify a family, `_agent_auto_verify` now records why rather than dropping it
-silently: `family_routed_to_dast_retest` (a Path-A lead, promoted by the retest pipeline instead) or
+silently: `family_eligible_for_dast_retest` (a Path-A lead which may subsequently be queued by the
+retest pipeline) or
 `family_not_verifiable` (a taxonomy mismatch — the finding is stuck at SUSPECTED). These records carry
 no budget reservation and do not consume `_AGENT_AUTO_VERIFY_LIMIT`, which caps real verification
 traffic.
@@ -199,7 +200,7 @@ Modes (`RESEARCH_PLANNER_MODES`):
   JSON-object mode, bounded max-tokens, with model fallbacks). There is no hardcoded default model — an
   unconfigured `configured_ai` run fails closed (`configured_ai_not_ready`). **This loop is not
   per-turn checkpointed:** a mid-hunt restart cannot resume, and the run-once guard fails closed to
-  `interrupted_no_resume` (relaunch required). Closing this is backlog item 5.
+  `interrupted_no_resume` (relaunch required). Closing this is backlog item 8.
 - **`local_codex`.** A separate research-episode adapter, not the ReAct hunt planner.
 
 ## Tests and the coverage gap
@@ -215,7 +216,7 @@ need a DB + provider fixture) — `_run_agent_hunt`, `_agent_apply_reply`, `subm
 `start_agent_hunt_session`, `_agent_finalize_and_persist`, `_agent_auto_verify`,
 `_agent_auto_queue_dast_retests`, and the actual moat dispatch are unit-untested. The pure logic and
 workflow shapes are tested; the wiring that runs them is not. Closing this is the highest-value test
-investment for the §5 work (backlog item 6).
+  investment for the §5 work (backlog item 3).
 
 ## Improvement backlog (maps to proposed-next-steps.md §5)
 

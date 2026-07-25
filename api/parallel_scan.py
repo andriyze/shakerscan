@@ -1714,10 +1714,23 @@ async def reconcile_parallel_parent(conn, parent_id: str, redis_client, queue_na
     )
     if non_terminal:
         return False
-    # All shards terminal — enqueue merge exactly once. Put merge jobs at the
-    # front of the shared scan queue so completed parents finalize before new
-    # shard work starts behind them.
-    if redis_client.set(merge_guard_key(parent_id), "1", nx=True, ex=86400):
-        redis_client.lpush(queue_name, json.dumps(merge_job(parent_id)))
-        return True
-    return False
+    # All shards terminal — atomically claim AND enqueue. A former two-command SET NX -> LPUSH
+    # sequence could lose the merge forever if the caller died between those operations.
+    enqueue_script = """
+    local claimed = redis.call('SET', KEYS[1], ARGV[1], 'NX', 'EX', ARGV[2])
+    if not claimed then
+      return 0
+    end
+    redis.call('LPUSH', KEYS[2], ARGV[3])
+    return 1
+    """
+    enqueued = redis_client.eval(
+        enqueue_script,
+        2,
+        merge_guard_key(parent_id),
+        queue_name,
+        "1",
+        "86400",
+        json.dumps(merge_job(parent_id)),
+    )
+    return bool(enqueued)

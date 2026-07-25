@@ -473,20 +473,23 @@ allocates a unique overlay IP, inserts the node and hashed durable credential, a
 peer information. The worker installs that configuration, proves overlay reachability, and only then
 uses the private Redis/Postgres URLs. Plain HTTP is not an enrollment transport.
 
-**5. Connection bundle** returned by `POST /fleet/nodes/join` (the worker persists this and then
-authenticates with its own `node_credential`, never re-using the enrollment token):
+**5. Bootstrap response + post-overlay connection bundle.** `POST /fleet/nodes/join` returns only
+the material needed to establish the overlay plus the one-time node credential (the worker persists
+it and never re-uses the enrollment token):
 
 ```text
-node_id, control_plane_overlay_url, redis_url, database_url (Phase-1 overlay mode),
-worker_image_digest, desired_worker_count, labels,
+node_id, control_plane_overlay_url, worker_image_digest, desired_worker_count, labels,
 wireguard_peer_ip, wireguard_control_plane_public_key, wireguard_control_plane_endpoint,
 node_credential
 ```
 
 The raw `node_credential` is returned once over HTTPS and persisted with restrictive filesystem
-permissions. It authorizes only node API operations; Phase-1 Redis/Postgres and artifact credentials
-remain separate secrets delivered after the overlay is established. Rotation and revocation are part
-of the node API even if automatic rotation is deferred.
+permissions. It authorizes only node API operations. After installing WireGuard and proving overlay
+reachability, the worker calls `POST /fleet/nodes/{id}/connection-bundle` over **overlay HTTPS**, using
+that credential. The control plane returns the Phase-1 Redis/Postgres URLs and any artifact-store
+credentials once; the response is never available over the public listener and is not logged. Thus
+data-store secrets are delivered only after the overlay exists. Rotation and revocation are part of
+the node API even if automatic rotation is deferred.
 
 **6. Heartbeat + fleet view.** The worker posts `POST /fleet/nodes/{id}/heartbeat` (status, active
 worker count, host resources, `build_fingerprint`) on a fixed interval; the control plane marks a node

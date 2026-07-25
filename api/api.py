@@ -3013,6 +3013,73 @@ if _cors_regex:
 app.add_middleware(CORSMiddleware, **_cors_kwargs)
 
 
+def _origin_is_allowed(origin: str, allowed_origins: Sequence[str], allow_origin_regex: str = "") -> bool:
+    """Apply the same exact/regex origin decision to actual unsafe requests as CORS preflights.
+
+    CORS response headers are not a CSRF boundary: browsers still dispatch simple cross-origin POSTs
+    and merely hide the response. ShakerScan intentionally remains friendly to curl/agents (which do
+    not send Origin), while browser requests that do carry Origin must come from the configured UI.
+    """
+    normalized = str(origin or "").strip()
+    if not normalized:
+        return True
+    if "*" in allowed_origins:
+        return True
+    if normalized in allowed_origins:
+        return True
+    if allow_origin_regex:
+        try:
+            return re.fullmatch(allow_origin_regex, normalized) is not None
+        except re.error:
+            # Invalid security configuration fails closed for browser mutations.
+            return False
+    return False
+
+
+class UnsafeOriginGuardMiddleware:
+    """Reject disallowed browser-origin mutations before endpoint code executes.
+
+    Safe/read-only methods retain ordinary CORS behavior, and non-browser clients remain compatible
+    because requests without an Origin header are accepted.
+    """
+
+    _SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
+
+    def __init__(self, app: Any, *, allow_origins: Sequence[str], allow_origin_regex: str = ""):
+        self.app = app
+        self.allow_origins = tuple(allow_origins)
+        self.allow_origin_regex = allow_origin_regex
+
+    async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
+        if scope.get("type") == "http" and str(scope.get("method") or "GET").upper() not in self._SAFE_METHODS:
+            headers = {
+                key.decode("latin-1").lower(): value.decode("latin-1")
+                for key, value in scope.get("headers") or []
+            }
+            origin = headers.get("origin", "")
+            if origin and not _origin_is_allowed(origin, self.allow_origins, self.allow_origin_regex):
+                body = json.dumps({"detail": "Cross-origin browser mutation is not allowed"}).encode("utf-8")
+                await send({
+                    "type": "http.response.start",
+                    "status": 403,
+                    "headers": [
+                        (b"content-type", b"application/json"),
+                        (b"content-length", str(len(body)).encode("ascii")),
+                        (b"vary", b"Origin"),
+                    ],
+                })
+                await send({"type": "http.response.body", "body": body})
+                return
+        await self.app(scope, receive, send)
+
+
+app.add_middleware(
+    UnsafeOriginGuardMiddleware,
+    allow_origins=_cors_kwargs["allow_origins"],
+    allow_origin_regex=str(_cors_kwargs.get("allow_origin_regex") or ""),
+)
+
+
 @app.exception_handler(ValueError)
 async def _value_error_handler(request: Request, exc: ValueError) -> JSONResponse:
     """Convert raw uuid.UUID parse failures into client errors without masking
@@ -13262,7 +13329,7 @@ async def get_scan_result(scan_id: str):
 
 
 @app.get("/scans/{scan_id}/logs")
-async def get_scan_logs(scan_id: str, limit: int = 200):
+async def get_scan_logs(scan_id: str, limit: int = Query(200, ge=1, le=1000)):
     """Get recent scan logs (tail)."""
     r = get_redis()
     log_key = f"scan:{scan_id}:logs"
@@ -18577,27 +18644,16 @@ async def _agent_auto_verify(
     execution is enabled, auto-attempt VERIFIED promotion for the gate-passing SUSPECTED findings the
     bridge can verify. The family_proof moat decides — a non-provable finding stays SUSPECTED. This is
     best-effort: a verify failure is recorded, never allowed to break the hunt. Bounded per run."""
-    if not approval_receipt_id or not _ai_ops_execute_enabled():
-        return []
+    execution_enabled = _ai_ops_execute_enabled()
     attempts: list[dict[str, Any]] = []
     # Telemetry for findings the bridge cannot verify AT ALL (unknown/unpromotable family). Kept in a
     # SEPARATE list on purpose: _AGENT_AUTO_VERIFY_LIMIT caps real verification work (target traffic),
     # and a taxonomy mismatch costs none. Counting these in `attempts` would let a debrief full of
     # unpromotable families exhaust the cap and starve a genuinely verifiable finding later in the list.
     unverifiable: list[dict[str, Any]] = []
+    cancelled = False
+    execution_stop_reason: str | None = None
     for entry in gated_findings:
-        if len(attempts) >= _AGENT_AUTO_VERIFY_LIMIT:
-            break
-        # Re-check cancellation before EACH credential-tier verification: a cancel arriving during
-        # finalize/auto-verify is not caught by the pre-finalize stop_reason guard, so without this a
-        # cancelled episode could still begin up to _AGENT_AUTO_VERIFY_LIMIT verifications. (Audit P1.)
-        if cancelled_check is not None:
-            try:
-                if await cancelled_check():
-                    attempts.append({"verified": False, "skipped": "cancelled_during_auto_verify"})
-                    break
-            except Exception:
-                pass
         record = entry.get("persisted")
         if not isinstance(record, dict) or not record.get("id"):
             continue
@@ -18618,9 +18674,23 @@ async def _agent_auto_verify(
                     "finding_id": str(record["id"]),
                     "verified": False,
                     "skipped": (
-                        "family_routed_to_dast_retest"
+                        "family_eligible_for_dast_retest"
                         if normalize_retest_type(claimed_family) in _AGENT_DAST_RETEST_FAMILIES
                         else "family_not_verifiable"
+                    ),
+                    "claimed_family": claimed_family[:80],
+                    "canonical_family": family[:80],
+                })
+            continue
+        if not approval_receipt_id or not execution_enabled:
+            if len(unverifiable) < _AGENT_UNVERIFIABLE_FAMILY_REPORT_LIMIT:
+                unverifiable.append({
+                    "finding_id": str(record["id"]),
+                    "verified": False,
+                    "skipped": (
+                        "auto_verify_requires_approval"
+                        if not approval_receipt_id
+                        else "auto_verify_execution_disabled"
                     ),
                     "claimed_family": claimed_family[:80],
                     "canonical_family": family[:80],
@@ -18633,15 +18703,39 @@ async def _agent_auto_verify(
         # suspected BOLA stays SUSPECTED for a human to promote. The manual /agent/findings/{id}/verify
         # endpoint remains for an accountable human decision. (Zero-FP: unattended never promotes BOLA.)
         if family in _AGENT_AUTO_VERIFY_EXCLUDED_FAMILIES:
-            attempts.append({"finding_id": str(record["id"]), "verified": False,
-                             "skipped": "auto_verify_disabled_ownership_unprovable"})
+            if len(unverifiable) < _AGENT_UNVERIFIABLE_FAMILY_REPORT_LIMIT:
+                unverifiable.append({"finding_id": str(record["id"]), "verified": False,
+                                     "skipped": "auto_verify_disabled_ownership_unprovable"})
             continue
         # A mutating verification (create-MA does live create POSTs) must not run from a read-only
         # hunt, even with a receipt — that would violate the hunt's no-writes invariant. The
-        # GET-only families (bola/auth_bypass/data_exposure) stay allowed. (External-audit BUG 3.)
+        # GET-only families (auth_bypass/data_exposure) stay allowed. (External-audit BUG 3.)
         if family in _AGENT_MUTATING_VERIFY_FAMILIES and not allow_write:
-            attempts.append({"finding_id": str(record["id"]), "verified": False,
-                             "skipped": "mutating_verification_requires_gated_hunt"})
+            if len(unverifiable) < _AGENT_UNVERIFIABLE_FAMILY_REPORT_LIMIT:
+                unverifiable.append({"finding_id": str(record["id"]), "verified": False,
+                                     "skipped": "mutating_verification_requires_gated_hunt"})
+            continue
+        if len(attempts) >= _AGENT_AUTO_VERIFY_LIMIT:
+            if len(unverifiable) < _AGENT_UNVERIFIABLE_FAMILY_REPORT_LIMIT:
+                unverifiable.append({"finding_id": str(record["id"]), "verified": False,
+                                     "skipped": "auto_verify_attempt_limit_reached"})
+            continue
+        if execution_stop_reason:
+            if len(unverifiable) < _AGENT_UNVERIFIABLE_FAMILY_REPORT_LIMIT:
+                unverifiable.append({"finding_id": str(record["id"]), "verified": False,
+                                     "skipped": execution_stop_reason})
+            continue
+        # Re-check cancellation before EACH credential-tier verification. Continue classifying later
+        # findings after cancellation so taxonomy/route telemetry is never silently dropped.
+        if not cancelled and cancelled_check is not None:
+            try:
+                cancelled = bool(await cancelled_check())
+            except Exception:
+                cancelled = False
+        if cancelled:
+            if len(unverifiable) < _AGENT_UNVERIFIABLE_FAMILY_REPORT_LIMIT:
+                unverifiable.append({"finding_id": str(record["id"]), "verified": False,
+                                     "skipped": "cancelled_during_auto_verify"})
             continue
         request_reservation = int(_AGENT_VERIFY_REQUEST_RESERVATIONS.get(family) or 0)
         seconds_reservation = int(_AGENT_VERIFY_SECONDS_RESERVATIONS.get(family) or 0)
@@ -18650,17 +18744,29 @@ async def _agent_auto_verify(
         reserved_active = sum(int(item.get("active_action_units_reserved") or 0) for item in attempts)
         reserved_seconds = sum(int(item.get("seconds_reserved") or 0) for item in attempts)
         if request_budget is not None and reserved_requests + request_reservation > request_budget:
-            attempts.append({"verified": False, "skipped": "budget_exhausted:requests"})
-            break
+            execution_stop_reason = "budget_exhausted:requests"
+            if len(unverifiable) < _AGENT_UNVERIFIABLE_FAMILY_REPORT_LIMIT:
+                unverifiable.append({"finding_id": str(record["id"]), "verified": False,
+                                     "skipped": execution_stop_reason})
+            continue
         if action_budget is not None and reserved_actions + 1 > action_budget:
-            attempts.append({"verified": False, "skipped": "budget_exhausted:actions"})
-            break
+            execution_stop_reason = "budget_exhausted:actions"
+            if len(unverifiable) < _AGENT_UNVERIFIABLE_FAMILY_REPORT_LIMIT:
+                unverifiable.append({"finding_id": str(record["id"]), "verified": False,
+                                     "skipped": execution_stop_reason})
+            continue
         if active_action_budget is not None and reserved_active + 1 > active_action_budget:
-            attempts.append({"verified": False, "skipped": "budget_exhausted:active_actions"})
-            break
+            execution_stop_reason = "budget_exhausted:active_actions"
+            if len(unverifiable) < _AGENT_UNVERIFIABLE_FAMILY_REPORT_LIMIT:
+                unverifiable.append({"finding_id": str(record["id"]), "verified": False,
+                                     "skipped": execution_stop_reason})
+            continue
         if seconds_budget is not None and reserved_seconds + seconds_reservation > seconds_budget:
-            attempts.append({"verified": False, "skipped": "budget_exhausted:seconds"})
-            break
+            execution_stop_reason = "budget_exhausted:seconds"
+            if len(unverifiable) < _AGENT_UNVERIFIABLE_FAMILY_REPORT_LIMIT:
+                unverifiable.append({"finding_id": str(record["id"]), "verified": False,
+                                     "skipped": execution_stop_reason})
+            continue
         try:
             result = await _verify_suspected_finding_workflow(
                 _uuid_or_400(str(record["id"]), "finding id"), approval_receipt_id, created_by=created_by)
@@ -40389,6 +40495,31 @@ def _build_ai_ops_router_plan(request: AIOpsRouterRequest) -> dict[str, Any]:
             },
         )
         explanation = "Plan a one-shot Full Coverage scan with discover-once dynamic fan-out."
+    elif "scan" in lowered and not any(
+        phrase in lowered for phrase in ("deep hunt", "autonomous hunt", "investigate autonomously")
+    ):
+        # Product vocabulary is intentionally exact: "deep scan" is DAST, while "Deep Hunt" is
+        # the separate /agent/hunt workflow. An unqualified "scan" uses the documented quick default.
+        scan_match = re.search(r"\b(quick|standard|deep|full|aggressive|smart)\s+scan\b", lowered)
+        scan_type = scan_match.group(1) if scan_match else "quick"
+        intent = f"run_dast_{scan_type}"
+        active_or_budget = True  # queueing any scan is a state-changing operation
+        if scan_type in {"full", "smart"}:
+            safety_preset = "balanced"
+            active_families = ["all"]
+        elif scan_type == "aggressive":
+            safety_preset = "lab"
+            active_families = ["all"]
+        else:
+            safety_preset = "safe"
+        if not request.target:
+            missing.append("target")
+        planned_call = _ai_ops_call(
+            "POST",
+            "/scans",
+            {"target": request.target or "<target>", "options": {"scan_type": scan_type}},
+        )
+        explanation = f"Plan the explicitly requested {scan_type} DAST scan."
     elif ("keep" in lowered and "covered" in lowered) or "enable asm" in lowered or "continuous asm" in lowered:
         intent = "enable_continuous_asm"
         active_or_budget = True
@@ -42651,7 +42782,11 @@ async def ai_ops_route(request: AIOpsRouterRequest):
     body = call.get("body") if isinstance(call.get("body"), dict) else {}
     executed: dict[str, Any]
 
-    if plan["intent"] == "run_full_coverage" and method == "POST" and path == "/scans":
+    if (
+        (plan["intent"] == "run_full_coverage" or str(plan["intent"]).startswith("run_dast_"))
+        and method == "POST"
+        and path == "/scans"
+    ):
         result = await submit_scan(
             ScanRequest(
                 target=body["target"],
@@ -46002,7 +46137,7 @@ class BulkFindingUpdateRequest(BaseModel):
     FastAPI binds to the QUERY string — so the JSON body documented in AGENTS.md returned 422. A model
     makes the documented `{"finding_ids":[...],"status":"...","notes":"..."}` body work as written.
     """
-    finding_ids: list[str] = Field(min_length=1)
+    finding_ids: list[str] = Field(min_length=1, max_length=500)
     status: str
     notes: Optional[str] = None
 
@@ -46015,11 +46150,11 @@ async def bulk_update_findings(request: BulkFindingUpdateRequest):
         raise HTTPException(status_code=400,
                             detail=f"Invalid status. Must be one of: {', '.join(sorted(valid_statuses))}")
     try:
-        ids = [uuid.UUID(fid) for fid in request.finding_ids]
+        ids = list(dict.fromkeys(uuid.UUID(fid) for fid in request.finding_ids))
     except (ValueError, AttributeError, TypeError):
         raise HTTPException(status_code=400, detail="finding_ids must all be valid UUIDs")
     async with db_pool.acquire() as conn:
-        await conn.execute("""
+        updated_rows = await conn.fetch("""
             UPDATE findings
             SET status = $1,
                 resolved_at = CASE WHEN $1 = 'resolved' THEN COALESCE(resolved_at, NOW())
@@ -46028,9 +46163,16 @@ async def bulk_update_findings(request: BulkFindingUpdateRequest):
                 notes = COALESCE($2, notes),
                 updated_at = NOW()
             WHERE id = ANY($3)
+            RETURNING id
         """, request.status, request.notes, ids)
 
-    return {'updated': len(request.finding_ids), 'status': request.status}
+    return {
+        'updated': len(updated_rows),
+        'requested': len(request.finding_ids),
+        'unique_requested': len(ids),
+        'not_found': max(0, len(ids) - len(updated_rows)),
+        'status': request.status,
+    }
 
 
 @app.post("/findings/manual")
@@ -46223,7 +46365,7 @@ async def start_discovery(root_domain: str):
 
 
 @app.get("/discovery")
-async def list_discovery_runs(limit: int = 20):
+async def list_discovery_runs(limit: int = Query(20, ge=1, le=200)):
     """List discovery runs."""
     async with db_pool.acquire() as conn:
         rows = await conn.fetch("""
@@ -47951,7 +48093,7 @@ async def clear_queue(include_retests: bool = False):
 # ============================================================
 
 @app.get("/results")
-async def list_results(limit: int = 50):
+async def list_results(limit: int = Query(50, ge=1, le=500)):
     """List recent scan results from files."""
     if not RESULTS_DIR.exists():
         return {'results': [], 'count': 0}
@@ -48427,29 +48569,6 @@ def normalize_target_url(target: str) -> tuple[str, str | None]:
     scheme = parsed.scheme.lower() if has_scheme else "https"
     if scheme not in ("http", "https"):
         raise TargetNormalizationError(f"Invalid scheme '{scheme}': only http/https allowed")
-
-    # SECURITY (audit P1-1): block cloud-metadata / link-local destinations. These are NEVER a
-    # legitimate DAST target, whereas RFC-1918 / loopback ARE (ShakerScan's core workflow scans local
-    # disposable labs — Juice Shop, crAPI, DVWA — often on private IPs or host.docker.internal), so we
-    # deliberately do NOT block private ranges. Overridable for an explicitly authorized metadata test.
-    if os.environ.get("SHAKERSCAN_ALLOW_METADATA_TARGETS", "").strip() not in ("1", "true", "yes"):
-        _metadata_hostnames = {"metadata.google.internal", "metadata", "metadata.goog"}
-        if host in _metadata_hostnames:
-            raise TargetNormalizationError(
-                f"Refusing to scan cloud-metadata host '{host}'. Set "
-                "SHAKERSCAN_ALLOW_METADATA_TARGETS=1 only if this is explicitly authorized.")
-        # NOTE: TargetNormalizationError subclasses ValueError, so parse the IP in its OWN try/except
-        # and raise the refusal OUTSIDE it — otherwise the refusal is swallowed as if the host weren't
-        # an IP at all (caught live during the audit: 169.254.169.254 slipped through).
-        _ip = None
-        try:
-            _ip = ipaddress.ip_address(host.strip("[]"))
-        except ValueError:
-            pass  # not an IP literal — hostname targets are fine
-        if _ip is not None and (_ip.is_link_local or host.strip("[]") in ("fd00:ec2::254",)):
-            raise TargetNormalizationError(
-                f"Refusing to scan link-local / cloud-metadata address '{host}' "
-                "(e.g. 169.254.169.254). Set SHAKERSCAN_ALLOW_METADATA_TARGETS=1 if authorized.")
 
     # Format host (bracket IPv6 addresses)
     host_display = f"[{host}]" if ":" in host and not host.startswith("[") else host

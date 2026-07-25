@@ -341,6 +341,15 @@ class _FakeRedis:
         self.calls.append(("lpush", key, value))
         return len(self.pushed)
 
+    def eval(self, _script, numkeys, guard_key, queue_name, guard_value, _ttl, payload):
+        assert numkeys == 2
+        self.calls.append(("eval", guard_key, queue_name))
+        if guard_key in self.store:
+            return 0
+        self.store[guard_key] = guard_value
+        self.lpush(queue_name, payload)
+        return 1
+
 
 def _run(coro):
     return asyncio.run(coro)
@@ -357,7 +366,8 @@ def test_reconcile_enqueues_merge_when_all_terminal():
     assert queue == "scan_jobs"
     assert parallel_scan.MERGE_JOB_TYPE in payload
     assert pid in payload
-    assert r.calls[0][0] == "lpush"
+    assert r.calls[0][0] == "eval"
+    assert r.calls[1][0] == "lpush"
 
 
 def test_reconcile_waits_while_shards_pending():

@@ -60,6 +60,12 @@ services:
       - LOCAL_ENV_FILE=/workspace/.env
       - SCANNER_VERSION=${SCANNER_VERSION:-dev}
       - GIT_COMMIT=${GIT_COMMIT:-dev}
+      # Browser/API origin contract. These must be present inside the API
+      # container; Compose host variables are not inherited unless listed.
+      - SHAKERSCAN_UI_PORT=${SHAKERSCAN_UI_PORT:-3000}
+      - SHAKERSCAN_PUBLIC_HOST=${SHAKERSCAN_PUBLIC_HOST:-}
+      - SHAKERSCAN_CORS_ALLOW_ORIGINS=${SHAKERSCAN_CORS_ALLOW_ORIGINS:-}
+      - SHAKERSCAN_CORS_ALLOW_ORIGIN_REGEX=${SHAKERSCAN_CORS_ALLOW_ORIGIN_REGEX:-}
       # Fleet cap. Empty => Docker RAM minus the supporting-stack reserve, at
       # roughly 1GB per worker. Set a number to force a fixed ceiling.
       - SHAKERSCAN_MAX_WORKERS=${SHAKERSCAN_MAX_WORKERS:-}

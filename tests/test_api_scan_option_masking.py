@@ -473,6 +473,42 @@ def test_ai_ops_router_full_coverage_is_dry_run_by_default():
     assert plan["authorization_assumption"]
 
 
+@pytest.mark.parametrize("scan_type", ["quick", "standard", "deep", "full", "aggressive", "smart"])
+def test_ai_ops_router_preserves_explicit_dast_scan_type(scan_type):
+    target = "http://169.254.169.254/latest/meta-data/"
+    plan = api_module._build_ai_ops_router_plan(
+        api_module.AIOpsRouterRequest(
+            prompt=f"Run a {scan_type} scan",
+            target=target,
+        )
+    )
+
+    assert plan["intent"] == f"run_dast_{scan_type}"
+    assert plan["dry_run"] is True
+    assert plan["requires_confirmation"] is True
+    assert plan["missing_inputs"] == []
+    assert plan["planned_api_call"] == {
+        "method": "POST",
+        "path": "/scans",
+        "body": {"target": target, "options": {"scan_type": scan_type}},
+    }
+
+
+def test_ai_ops_router_unqualified_scan_defaults_to_quick_without_conflating_deep_hunt():
+    target = "http://host.docker.internal:3001"
+    default_plan = api_module._build_ai_ops_router_plan(
+        api_module.AIOpsRouterRequest(prompt="Scan this target", target=target)
+    )
+    assert default_plan["intent"] == "run_dast_quick"
+    assert default_plan["planned_api_call"]["body"]["options"]["scan_type"] == "quick"
+
+    hunt_plan = api_module._build_ai_ops_router_plan(
+        api_module.AIOpsRouterRequest(prompt="Deep Hunt this target", target=target)
+    )
+    assert hunt_plan["intent"] == "unknown"
+    assert hunt_plan["planned_api_call"] is None
+
+
 def test_ai_ops_router_scopes_api_budget_raise_to_api_endpoint_filter(monkeypatch):
     monkeypatch.setenv("AI_OPS_ROUTER_EXECUTE_ENABLED", "false")
     target_id = str(uuid.uuid4())
@@ -632,6 +668,34 @@ def test_ai_ops_router_execute_full_coverage_when_confirmed(monkeypatch):
     assert captured["options"]["exploit_depth"] is False
     assert result["executed"]["scan_id"] == "scan-1"
     assert result["executed"]["ui_link"] == "/scans/scan-1"
+
+
+def test_ai_ops_router_executes_exact_dast_type_when_confirmed(monkeypatch):
+    monkeypatch.setenv("AI_OPS_ROUTER_EXECUTE_ENABLED", "true")
+    captured = {}
+
+    async def fake_submit_scan(request):
+        captured["target"] = request.target
+        captured["options"] = request.options.model_dump()
+        return {"scan_id": "scan-deep", "job_id": "job-deep", "status": "queued"}
+
+    monkeypatch.setattr(api_module, "submit_scan", fake_submit_scan)
+
+    result = asyncio.run(
+        api_module.ai_ops_route(
+            api_module.AIOpsRouterRequest(
+                prompt="Run a deep scan",
+                target="http://host.docker.internal:3001",
+                execute=True,
+                confirm_execution=True,
+                confirm_authorized=True,
+            )
+        )
+    )
+
+    assert result["dry_run"] is False
+    assert captured["options"]["scan_type"] == "deep"
+    assert result["executed"]["scan_id"] == "scan-deep"
 
 
 def test_ai_ops_router_execute_api_budget_when_confirmed(monkeypatch):

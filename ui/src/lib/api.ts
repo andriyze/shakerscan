@@ -1846,6 +1846,7 @@ export interface WorkerInfo {
   status: string
   health?: string
   build_current?: boolean | null
+  scanner_version?: string | null
 }
 
 export interface WorkerStats {
@@ -1853,6 +1854,9 @@ export interface WorkerStats {
   workers: WorkerInfo[]
   max_allowed: number
   stale_workers?: string[]
+  fleet_uniform?: boolean
+  stale_count?: number
+  pending_count?: number
   expected_scanner_version?: string
   error?: string
 }

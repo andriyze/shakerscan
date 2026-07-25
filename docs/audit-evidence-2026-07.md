@@ -1,0 +1,78 @@
+# 2026-07 Audit Evidence and Remediation Gates
+
+This is the durable evidence index for [`AUDIT-2026-07.md`](AUDIT-2026-07.md). Large screenshots and
+browser dumps may remain in a local `audit-results/` working directory; the release decision does not
+depend on their presence in a checkout.
+
+## Original artifact fingerprints
+
+These SHA-256 values bind the most important original artifacts without committing captured runtime
+data or screenshots:
+
+| Artifact | SHA-256 |
+|---|---|
+| `harness/cors_poc.mjs` | `8859a991ffe02e431855798633dd79c2c0a987d897b1814bed95e8e48595a0bf` |
+| `api-responses/cors_poc_result.json` | `a3a99dd933fac08a1867bd85257c2c1466c315e1471f10474c1c7e430e2ae1a9` |
+| `api-responses/negative_results.tsv` | `0dc167b1540c62b7bd603521ab5b6b2cebc07bf8d037d7a05a6b114a3f863f62` |
+| `API_ENDPOINT_MATRIX.csv` | `e85c6e440e3185947ab8577a69330db4b584af55bef1f03e50b919f55a429a5a` |
+| `UI_ROUTE_MATRIX.csv` | `28b345c548d2554d75eb556df96827de4984dde09742304da3320c7be94fff91` |
+| `TEST_RUNS.md` | `e334637efa985d15c6dc32c4cfedb1d781c553cb4c8763761ceb8767ba63a8e1` |
+
+## Required remediation gates
+
+Run from the repository root:
+
+```bash
+python3 -m pytest -q -p no:cacheprovider
+(cd ui && npm test)
+(cd ui && npm run build)
+git diff --check
+```
+
+Deployment configuration must also prove that explicit user choices reach the API container:
+
+```bash
+SHAKERSCAN_PUBLIC_HOST=scanner.example.ts.net \
+SHAKERSCAN_UI_PORT=3333 \
+SHAKERSCAN_CORS_ALLOW_ORIGINS=https://ops.example \
+SHAKERSCAN_CORS_ALLOW_ORIGIN_REGEX='https://.*\.example' \
+docker compose config
+```
+
+The rendered `api.environment` must contain all four values. Browser regression coverage must
+demonstrate:
+
+- disallowed origins cannot read API responses or execute unsafe handlers;
+- the configured local, remote, and custom-port UI origins retain full functionality;
+- requests without `Origin` (CLI/curl/agent use) retain full functionality.
+
+Destination regression coverage must demonstrate:
+
+- every syntactically valid HTTP/HTTPS destination remains operator-selectable, including RFC-1918,
+  loopback, Docker-service DNS, local labs, link-local, and metadata endpoints;
+- no hidden environment gate changes destination capability;
+- malformed URLs and non-HTTP(S) schemes remain rejected as input errors.
+
+## Recorded remediation verification
+
+Verified from the repository root on 2026-07-25:
+
+- backend suite: **2,382 passed, 7 skipped**;
+- all **14** named release gates passed;
+- UI unit suite: **11 passed**;
+- Next.js production build: passed, including TypeScript and all 26 generated pages;
+- Compose configuration: passed and preserved the configured public host, UI port, exact origins,
+  and origin regex in `api.environment`;
+- rebuilt-stack API checks: foreign-origin unsafe request rejected with 403 before validation;
+  configured-UI and no-`Origin` requests reached normal validation; negative pagination returned 422;
+- unrestricted-target dry run: “Run a quick scan” against `169.254.169.254` produced the exact
+  `run_dast_quick` `/scans` plan without queueing work or requiring a destination override;
+- rebuilt-stack UI check: separate UI/API/worker identities rendered with zero browser-console errors;
+  all 16 workers reported the current authoritative source fingerprint;
+- `git diff --check`: passed.
+
+## Qualification boundary
+
+Passing these gates closes the listed audit defects. Model Intake, complete AI Gate classification,
+authenticated multi-user BOLA, PDF/export fidelity, Gungnir, and upgrade-over-existing-install retain
+their own real-stack qualification requirements and are not silently certified by this audit.

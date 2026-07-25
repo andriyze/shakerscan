@@ -136,25 +136,13 @@ function NavContent({
   pathname,
   showAll,
   onToggleShowAll,
+  buildIdentity,
 }: {
   pathname: string
   showAll: boolean
   onToggleShowAll: (value: boolean) => void
+  buildIdentity: { ui?: string; api?: string; workers?: string; skew: boolean }
 }) {
-  // Audit P2-2: NEXT_PUBLIC_APP_VERSION is baked into the UI image at build time, so after a
-  // volume-mount code deploy it goes stale while the API reports the live commit. Prefer the live
-  // build label from /health (matching current_scanner_version on the server) and fall back to the
-  // baked env only if the request fails.
-  const bakedVersion = process.env.NEXT_PUBLIC_APP_VERSION
-  const [appVersion, setAppVersion] = useState<string | undefined>(bakedVersion)
-  useEffect(() => {
-    let cancelled = false
-    fetch(`${API_URL}/health`)
-      .then((r) => (r.ok ? r.json() : null))
-      .then((d) => { if (!cancelled && d?.scanner_version) setAppVersion(d.scanner_version) })
-      .catch(() => { /* keep baked fallback */ })
-    return () => { cancelled = true }
-  }, [])
   // Default view hides advanced groups/items; the footer switch reveals them.
   const visibleGroups = navGroups
     .filter((group) => showAll || !group.advanced)
@@ -193,8 +181,17 @@ function NavContent({
           ShakerScan
         </Link>
         <p className="text-xs text-gray-500 mt-1">Open Source Edition</p>
-        {appVersion && (
-          <p className="text-[10px] text-gray-600 mt-1">Build {appVersion}</p>
+        {(buildIdentity.ui || buildIdentity.api || buildIdentity.workers) && (
+          <p
+            className={`mt-1 text-[10px] ${buildIdentity.skew ? 'text-amber-400' : 'text-gray-600'}`}
+            title={buildIdentity.skew ? 'Component build mismatch detected' : 'Component build identities'}
+          >
+            {[
+              buildIdentity.ui && `UI ${buildIdentity.ui}`,
+              buildIdentity.api && `API ${buildIdentity.api}`,
+              buildIdentity.workers && `Workers ${buildIdentity.workers}`,
+            ].filter(Boolean).join(' · ')}
+          </p>
         )}
       </div>
 
@@ -296,8 +293,47 @@ export default function Sidebar() {
   const pathname = usePathname()
   const [mobileOpen, setMobileOpen] = useState(false)
   const [showAll, setShowAll] = useState(false)
+  const bakedVersion = process.env.NEXT_PUBLIC_APP_VERSION
+  const [buildIdentity, setBuildIdentity] = useState<{
+    ui?: string
+    api?: string
+    workers?: string
+    skew: boolean
+  }>({ ui: bakedVersion, skew: false })
   const openerRef = useRef<HTMLButtonElement>(null)
   const drawerRef = useRef<HTMLElement>(null)
+
+  // Fetch once in the parent so opening the mobile drawer does not duplicate runtime requests.
+  // Keep UI, API, and worker identities separate: version skew is evidence, not something to hide.
+  useEffect(() => {
+    let cancelled = false
+    Promise.allSettled([
+      fetch(`${API_URL}/health`).then((r) => (r.ok ? r.json() : null)),
+      fetch(`${API_URL}/workers`).then((r) => (r.ok ? r.json() : null)),
+    ]).then(([healthResult, workersResult]) => {
+      if (cancelled) return
+      const health = healthResult.status === 'fulfilled' ? healthResult.value : null
+      const workers = workersResult.status === 'fulfilled' ? workersResult.value : null
+      const apiVersion = typeof health?.scanner_version === 'string' ? health.scanner_version : undefined
+      const reportedWorkerVersions = Array.isArray(workers?.workers)
+        ? [...new Set(workers.workers.map((w: { scanner_version?: string }) => w.scanner_version).filter(Boolean))]
+        : []
+      const workerLabel = workers
+        ? workers.error || workers.count < 0
+          ? 'unavailable'
+          : workers.fleet_uniform
+          ? (reportedWorkerVersions[0] || workers.expected_scanner_version || 'current')
+          : workers.count === 0
+            ? 'none'
+            : `mixed/stale (${workers.stale_count || 0})`
+        : undefined
+      const concreteVersions = [bakedVersion, apiVersion, ...reportedWorkerVersions].filter(Boolean)
+      const versionSkew = new Set(concreteVersions).size > 1
+        || Boolean(workers && !workers.error && workers.count > 0 && !workers.fleet_uniform)
+      setBuildIdentity({ ui: bakedVersion, api: apiVersion, workers: workerLabel, skew: versionSkew })
+    })
+    return () => { cancelled = true }
+  }, [bakedVersion])
 
   // Persist the "show all sections" preference across reloads (default off).
   useEffect(() => {
@@ -404,14 +440,14 @@ export default function Sidebar() {
                 <X className="h-5 w-5" aria-hidden="true" />
               </button>
             </div>
-            <NavContent pathname={pathname} showAll={showAll} onToggleShowAll={handleToggleShowAll} />
+            <NavContent pathname={pathname} showAll={showAll} onToggleShowAll={handleToggleShowAll} buildIdentity={buildIdentity} />
           </aside>
         </div>
       )}
 
       {/* Desktop: persistent sidebar. */}
       <aside className="sticky top-0 hidden h-screen w-64 shrink-0 flex-col overflow-y-auto overscroll-contain border-r border-gray-800 bg-gray-900 p-4 md:flex">
-        <NavContent pathname={pathname} showAll={showAll} onToggleShowAll={handleToggleShowAll} />
+        <NavContent pathname={pathname} showAll={showAll} onToggleShowAll={handleToggleShowAll} buildIdentity={buildIdentity} />
       </aside>
     </>
   )

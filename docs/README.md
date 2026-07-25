@@ -43,6 +43,7 @@ Code, database schemas, runtime receipts, and tests remain authoritative when a 
 | [`AI_TEST_WORKFLOWS.md`](AI_TEST_WORKFLOWS.md) | Generic AI workflows and optional Honey calibration contract |
 | [`INTERACTIVE_SESSIONS_GUIDE.md`](INTERACTIVE_SESSIONS_GUIDE.md) | Authorized interactive browser/session testing guide |
 | [`AUDIT-2026-07.md`](AUDIT-2026-07.md) | 2026-07 end-to-end product/security audit: findings, fixes, and verified-good behavior |
+| [`audit-evidence-2026-07.md`](audit-evidence-2026-07.md) | Durable evidence index, reproduction commands, and remediation release gates for the 2026-07 audit |
 
 ## Architecture
 
