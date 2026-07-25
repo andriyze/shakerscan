@@ -7,8 +7,9 @@ implemented. The digest-pinned worker-only Compose runtime, pull-based node-agen
 desired-state API are also implemented, along with the fleet-profile CA-verified overlay TLS listener.
 The Linux `fleet init` / `fleet join-token` / `join` WireGuard host workflow is implemented. Durable
 per-scan worker/node attribution, current-vs-desired node drift derivation, fleet summary, and recent
-per-node activity APIs are implemented. Fleet UI and the physical two-VPS proof are not complete. The
-remaining parts of Phases 2–3 remain design-level.
+per-node activity APIs are implemented. The Fleet operations UI is implemented with health/drift,
+capacity, current-work, per-node scaling, drain/resume, and revoke controls. The physical two-VPS
+proof is not complete. The remaining parts of Phases 2–3 remain design-level.
 **Scope:** run a coordinated ShakerScan fleet across multiple VMs/VPS hosts so one UI/API
 can scan more targets at once and run high-budget Full Coverage scans by using workers
 from many machines.
@@ -37,7 +38,8 @@ becoming stale prose. For product priority and phased order, see
 | Worker-only deployment and pull-based node-agent | **Foundation built** — digest-pinned worker/agent-only Compose, owner-only local state, versioned desired state, local Docker reconciliation, drain-to-zero, capacity/error heartbeat | `docker-compose.worker.yml`; `fleet_agent.py`; `GET|PATCH /fleet/nodes/{id}/state` |
 | WireGuard/CLI host provisioning | **Built, awaiting physical two-VPS acceptance** — persistent identity, CA/server certificates, overlay/data binding, automatic or manual peer reconciliation, public HTTPS enrollment, overlay proof, one-time bundle persistence, worker-only startup | `scripts/fleet_cli.py`; `scanner.sh fleet`; `scanner.sh join` |
 | Per-node execution attribution and fleet rollup | **Built** — scan/shard rows record the executing node and unique worker replica; revoked nodes fail closed and return dequeued work to the compatibility queue; node API derives state/image drift and exposes recent activity | `scans.executing_node_id`; `worker.py` `_attribute_job_execution`; `GET /fleet/nodes`; `GET /fleet/nodes/{id}/activity` |
-| Fleet UI and placement | **Not present** — specified by this document | — |
+| Fleet UI | **Built** — unified health/capacity/drift view, recent attributed work, desired worker scaling, drain/resume, revoke confirmation, and session-only remote operator credential handling | `ui/src/app/fleet/page.tsx`; sidebar `/fleet` |
+| Capability/region/egress placement | **Not present** — specified by this document | — |
 
 The takeaways that shape the plan:
 
@@ -552,8 +554,9 @@ applied-state version, and reconciliation errors through `POST /fleet/nodes/{id}
 no inbound listener and clones only an explicit allowlist of worker container settings. The API
 supports operator-authenticated desired worker count/drain changes through
 `PATCH /fleet/nodes/{id}/state` and node-authenticated reads through the matching `GET`. The join
-installer and CA-verified overlay reachability proof are implemented. Fleet UI, stale-state
-presentation, physical two-VPS acceptance, and rolling lifecycle are still incomplete.
+installer and CA-verified overlay reachability proof are implemented. The Fleet UI and stale-state
+presentation are implemented, including current work and state/image drift. Physical two-VPS
+acceptance and rolling lifecycle are still incomplete.
 
 **Milestone A done** = a remote worker registers with one command, appears in the fleet view with a
 heartbeat, drains the shared `scan_jobs` queue, writes scans/findings to the control-plane database,
@@ -561,8 +564,8 @@ and Redis/Postgres are unreachable from the public internet. This is explicitly 
 an unattended-production claim. The accepted Phase-1 gaps remain:
 at-most-once delivery (a hard worker loss between `BLPOP` and the first heartbeat still relies on the
 DB reconcilers, not a Redis lease — §9), worker-local result/checkpoint artifacts even when managed
-evidence objects use S3 (§8), and an incomplete UI/rolling lifecycle around the implemented install
-and per-node scaling primitives.
+evidence objects use S3 (§8), and an incomplete rolling lifecycle around the implemented install and
+per-node scaling primitives.
 
 ### Phase 2: Production-Ready Owned Fleet
 

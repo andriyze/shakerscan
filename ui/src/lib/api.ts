@@ -1861,6 +1861,76 @@ export interface WorkerStats {
   error?: string
 }
 
+export interface FleetNode {
+  id: string
+  name: string
+  hostname?: string | null
+  role: 'control_plane' | 'worker'
+  overlay_ip?: string | null
+  egress_ip?: string | null
+  region?: string | null
+  labels: Record<string, unknown>
+  capacity: Record<string, unknown>
+  build_fingerprint?: string | null
+  worker_image_digest?: string | null
+  active_worker_image_digest?: string | null
+  agent_version?: string | null
+  desired_state_version: number
+  applied_state_version: number
+  desired_worker_count: number
+  active_worker_count: number
+  status: 'joining' | 'healthy' | 'stale' | 'draining' | 'disabled'
+  drain: boolean
+  state_current: boolean
+  image_current: boolean
+  last_error?: string | null
+  last_heartbeat_at?: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface FleetSummary {
+  total_nodes: number
+  active_nodes: number
+  healthy_nodes: number
+  stale_nodes: number
+  draining_nodes: number
+  desired_workers: number
+  active_workers: number
+  state_drift_nodes: number
+  image_drift_nodes: number
+}
+
+export interface FleetNodesResponse {
+  nodes: FleetNode[]
+  stale_after_seconds: number
+  summary: FleetSummary
+}
+
+export interface FleetNodeScanActivity {
+  id: string
+  parent_scan_id?: string | null
+  target_url: string
+  scan_type: string
+  run_kind?: string | null
+  scan_role?: string | null
+  shard_index?: number | null
+  shard_count?: number | null
+  status: string
+  progress: number
+  current_phase?: string | null
+  worker_id?: string | null
+  created_at: string
+  started_at?: string | null
+  completed_at?: string | null
+}
+
+export interface FleetNodeActivityResponse {
+  node_id: string
+  scans: FleetNodeScanActivity[]
+  limit: number
+}
+
 export interface SystemResources {
   available: boolean
   cpus?: number
@@ -5044,6 +5114,52 @@ export async function scaleWorkers(count: number): Promise<{ status: string; tar
     body: JSON.stringify({ count })
   })
   if (!res.ok) throw new Error('Failed to scale workers')
+  return res.json()
+}
+
+function fleetOperatorHeaders(operatorToken?: string): HeadersInit {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+  if (operatorToken?.trim()) headers.Authorization = `Bearer ${operatorToken.trim()}`
+  return headers
+}
+
+export async function getFleetNodes(): Promise<FleetNodesResponse> {
+  const res = await fetch(`${API_URL}/fleet/nodes`, { cache: 'no-store' })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to fetch fleet nodes'))
+  return res.json()
+}
+
+export async function getFleetNodeActivity(nodeId: string, limit = 25): Promise<FleetNodeActivityResponse> {
+  const res = await fetch(`${API_URL}/fleet/nodes/${encodeURIComponent(nodeId)}/activity?limit=${limit}`, {
+    cache: 'no-store',
+  })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to fetch node activity'))
+  return res.json()
+}
+
+export async function updateFleetNodeState(
+  nodeId: string,
+  state: { desired_worker_count?: number; drain?: boolean },
+  operatorToken?: string,
+): Promise<FleetNode> {
+  const res = await fetch(`${API_URL}/fleet/nodes/${encodeURIComponent(nodeId)}/state`, {
+    method: 'PATCH',
+    headers: fleetOperatorHeaders(operatorToken),
+    body: JSON.stringify(state),
+  })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to update fleet node'))
+  return res.json()
+}
+
+export async function revokeFleetNode(
+  nodeId: string,
+  operatorToken?: string,
+): Promise<{ node_id: string; status: 'disabled'; credentials_revoked: boolean }> {
+  const res = await fetch(`${API_URL}/fleet/nodes/${encodeURIComponent(nodeId)}/revoke`, {
+    method: 'POST',
+    headers: fleetOperatorHeaders(operatorToken),
+  })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to revoke fleet node'))
   return res.json()
 }
 

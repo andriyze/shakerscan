@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { usePathname } from 'next/navigation'
 import Link from 'next/link'
-import { Activity, BookOpen, Bot, Boxes, Compass, Crosshair, FileArchive, Lightbulb, Menu, Network, PackageCheck, Radar, ShieldAlert, ShieldCheck, TriangleAlert, Wand2, X } from 'lucide-react'
+import { Activity, BookOpen, Bot, Boxes, Compass, Crosshair, FileArchive, Lightbulb, Menu, Network, PackageCheck, Radar, ServerCog, ShieldAlert, ShieldCheck, TriangleAlert, Wand2, X } from 'lucide-react'
 import { buttonClasses, Toggle } from '@/components/ui'
 import { API_URL } from '@/lib/api'
 import {
@@ -103,6 +103,12 @@ const navGroups: {
     items: [
       { href: '/evidence', label: 'Evidence', icon: <FileArchive className="w-5 h-5" /> },
       { href: '/timeline', label: 'Timeline', icon: <Activity className="w-5 h-5" /> },
+    ],
+  },
+  {
+    heading: 'Operations',
+    items: [
+      { href: '/fleet', label: 'Fleet', icon: <ServerCog className="w-5 h-5" /> },
     ],
   },
   {

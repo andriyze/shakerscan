@@ -1180,7 +1180,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | Release gates | 14 | `scripts/release_gates.py` |
 | Runtime environment keys | 223 | Python sources + Compose manifests |
 | Scanner modules | 83 | `scanner/scanner_tools/` |
-| UI pages | 30 | `ui/src/app/` |
+| UI pages | 31 | `ui/src/app/` |
 | Skills | 6 | `skills/` |
 | Slash commands | 15 | `.claude/commands/` |
 | Specialized subagents | 3 | `.claude/agents/` |
@@ -1987,6 +1987,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `/exposure` | `ui/src/app/exposure/page.tsx` |
 | `/findings/{id}` | `ui/src/app/findings/[id]/page.tsx` |
 | `/findings` | `ui/src/app/findings/page.tsx` |
+| `/fleet` | `ui/src/app/fleet/page.tsx` |
 | `/interactive` | `ui/src/app/interactive/page.tsx` |
 | `/model-intake` | `ui/src/app/model-intake/page.tsx` |
 | `/` | `ui/src/app/page.tsx` |

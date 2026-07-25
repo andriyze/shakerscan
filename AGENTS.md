@@ -81,6 +81,7 @@ flags, skills, agents, adapters, modules, and durable tables) plus architecture/
 - **Bounded experiments (`/deep-hunt/runs/{id}`)**: inspect durable runs from the compatibility `/research/*` controller, retained for specialized guided verification. Do not route a user's "Deep Hunt" request there; `/deep-hunt/operator` and `/deep-hunt/explorer` are legacy URLs that redirect to `/deep-hunt`.
 - **Settings (`/settings`)**: AI providers, scan execution policy, automation defaults, and approval-receipt enforcement.
 - **Application Graph (`/targets/{id}/graph`)**: inspect persisted route/object/principal nodes, producer/consumer/auth-boundary edges, node/edge filters, search, and selected-node connections.
+- **Fleet (`/fleet`)**: inspect joined worker-node health, capacity, heartbeat, egress, image/state drift, and recent attributed scans/shards; scale desired workers, drain/resume nodes, and revoke credentials. Remote lifecycle actions accept an operator token kept only for the browser session.
 
 ## Your Role
 
