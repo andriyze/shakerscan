@@ -221,7 +221,13 @@ def test_init_persists_identity_bundle_and_fleet_profile(tmp_path, monkeypatch):
     monkeypatch.setattr(fleet_cli, "generate_control_certificates", lambda _path, _ip: None)
     monkeypatch.setattr(fleet_cli, "install_wireguard", lambda _path: None)
     monkeypatch.setattr(fleet_cli, "_run", lambda *a, **k: types.SimpleNamespace(returncode=0, stdout=""))
-    monkeypatch.setattr(fleet_cli, "api_json", lambda *a, **k: {"status": "healthy"})
+    monkeypatch.setattr(
+        fleet_cli,
+        "api_json",
+        lambda _base, _method, path, **_kwargs: {
+            "status": "ok" if path.startswith("/artifacts/storage/health") else "healthy"
+        },
+    )
 
     fleet_cli.command_init(
         paths,
@@ -239,11 +245,32 @@ def test_init_persists_identity_bundle_and_fleet_profile(tmp_path, monkeypatch):
     )
 
     env = fleet_cli.load_dotenv(paths.dotenv)
-    assert env["COMPOSE_PROFILES"] == "fleet"
+    assert env["COMPOSE_PROFILES"] == "artifacts,fleet"
     assert env["SHAKERSCAN_DATA_BIND_HOST"] == "10.77.0.1"
     assert env["FLEET_WORKER_IMAGE_DIGEST"] == IMAGE
     assert env["FLEET_CONNECTION_BUNDLE_JSON"] == ""
+    assert env["EVIDENCE_STORAGE_BACKEND"] == "s3"
+    assert env["ARTIFACT_STORAGE_REQUIRED"] == "true"
+    assert env["EVIDENCE_S3_ENDPOINT_URL"] == "http://10.77.0.1:9000"
+    assert len(env["MINIO_ROOT_PASSWORD"]) >= 32
     bundle_path = paths.control / "connection-bundle.json"
     assert bundle_path.stat().st_mode & 0o777 == 0o600
-    assert json.loads(bundle_path.read_text(encoding="utf-8"))["redis_url"] == "redis://10.77.0.1:6379"
+    bundle = json.loads(bundle_path.read_text(encoding="utf-8"))
+    assert bundle["redis_url"] == "redis://10.77.0.1:6379"
+    assert bundle["worker_environment"]["EVIDENCE_S3_ENDPOINT_URL"] == "http://10.77.0.1:9000"
     assert len(key_calls) == 1
+
+
+def test_fleet_artifact_environment_preserves_external_s3():
+    updates, bundled = fleet_cli._fleet_artifact_environment(
+        "10.77.0.1",
+        {
+            "EVIDENCE_STORAGE_BACKEND": "s3",
+            "EVIDENCE_S3_BUCKET": "external-bucket",
+            "EVIDENCE_S3_ACCESS_KEY_ID": "access",
+            "EVIDENCE_S3_SECRET_ACCESS_KEY": "secret",
+            "EVIDENCE_S3_ENDPOINT_URL": "https://objects.example.test",
+        },
+    )
+    assert bundled is False
+    assert updates == {"ARTIFACT_STORAGE_REQUIRED": "true"}

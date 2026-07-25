@@ -14,6 +14,7 @@ import base64
 import json
 import os
 import re
+import secrets
 import shutil
 import socket
 import ssl
@@ -441,6 +442,49 @@ def _connection_bundle(control_ip: str, env: dict[str, str]) -> dict[str, Any]:
     }
 
 
+def _fleet_artifact_environment(control_ip: str, env: dict[str, str]) -> tuple[dict[str, str], bool]:
+    """Resolve external S3 settings or provision the bundled private MinIO."""
+    backend = str(
+        env.get("ARTIFACT_STORAGE_BACKEND")
+        or env.get("EVIDENCE_STORAGE_BACKEND")
+        or ""
+    ).strip().lower()
+    bucket = str(env.get("ARTIFACT_S3_BUCKET") or env.get("EVIDENCE_S3_BUCKET") or "").strip()
+    access_key = str(
+        env.get("ARTIFACT_S3_ACCESS_KEY_ID")
+        or env.get("EVIDENCE_S3_ACCESS_KEY_ID")
+        or env.get("AWS_ACCESS_KEY_ID")
+        or ""
+    ).strip()
+    secret_key = str(
+        env.get("ARTIFACT_S3_SECRET_ACCESS_KEY")
+        or env.get("EVIDENCE_S3_SECRET_ACCESS_KEY")
+        or env.get("AWS_SECRET_ACCESS_KEY")
+        or ""
+    )
+    if backend in {"s3", "minio", "s3-compatible", "s3_compatible"} and bucket and access_key and secret_key:
+        return {"ARTIFACT_STORAGE_REQUIRED": "true"}, False
+
+    minio_user = str(env.get("MINIO_ROOT_USER") or f"ss-{secrets.token_hex(8)}")
+    minio_password = str(env.get("MINIO_ROOT_PASSWORD") or secrets.token_urlsafe(36))
+    minio_bucket = str(env.get("EVIDENCE_S3_BUCKET") or "shakerscan-artifacts")
+    endpoint = f"http://{control_ip}:9000"
+    return {
+        "MINIO_ROOT_USER": minio_user,
+        "MINIO_ROOT_PASSWORD": minio_password,
+        "EVIDENCE_STORAGE_BACKEND": "s3",
+        "EVIDENCE_S3_ENDPOINT_URL": endpoint,
+        "EVIDENCE_S3_BUCKET": minio_bucket,
+        "EVIDENCE_S3_REGION": "us-east-1",
+        "EVIDENCE_S3_ACCESS_KEY_ID": minio_user,
+        "EVIDENCE_S3_SECRET_ACCESS_KEY": minio_password,
+        "EVIDENCE_S3_FORCE_PATH_STYLE": "true",
+        "ARTIFACT_STORAGE_BACKEND": "s3",
+        "ARTIFACT_STORAGE_REQUIRED": "true",
+        "ARTIFACT_S3_PREFIX": "scan-artifacts",
+    }, True
+
+
 def _install_reconcile_timer(paths: RuntimePaths) -> None:
     if not shutil.which("systemctl") or not Path("/run/systemd/system").is_dir():
         raise FleetCLIError("fleet control mode requires systemd for automatic WireGuard peer reconciliation")
@@ -511,7 +555,11 @@ def command_init(paths: RuntimePaths, args: argparse.Namespace) -> None:
     atomic_write(paths.control / f"{INTERFACE_NAME}.conf", wg_config, 0o600)
     profiles = {item.strip() for item in env.get("COMPOSE_PROFILES", "").split(",") if item.strip()}
     profiles.add("fleet")
-    bundle = _connection_bundle(str(control_ip), env)
+    artifact_updates, bundled_minio = _fleet_artifact_environment(str(control_ip), env)
+    if bundled_minio:
+        profiles.add("artifacts")
+    effective_env = {**env, **artifact_updates}
+    bundle = _connection_bundle(str(control_ip), effective_env)
     atomic_write(
         paths.control / "connection-bundle.json",
         json.dumps(bundle, separators=(",", ":"), sort_keys=True) + "\n",
@@ -533,6 +581,7 @@ def command_init(paths: RuntimePaths, args: argparse.Namespace) -> None:
         "FLEET_ALLOW_INSECURE_ENROLLMENT": "false",
         "FLEET_CONNECTION_BUNDLE_PATH": "/run/shakerscan-fleet/control/connection-bundle.json",
         "FLEET_CONNECTION_BUNDLE_JSON": "",
+        **artifact_updates,
     }
     update_dotenv(paths.dotenv, updates)
     install_wireguard(paths.control / f"{INTERFACE_NAME}.conf")
@@ -556,6 +605,15 @@ def command_init(paths: RuntimePaths, args: argparse.Namespace) -> None:
                 timeout=5,
             )
             if result.get("status") == "healthy":
+                artifact_health = api_json(
+                    f"https://{control_ip}:{args.tls_port}",
+                    "GET",
+                    "/artifacts/storage/health?probe=true",
+                    ca_file=paths.control / "ca.crt",
+                    timeout=10,
+                )
+                if artifact_health.get("status") != "ok":
+                    raise FleetCLIError("artifact store write probe did not pass")
                 print(f"Fleet control plane initialized on {network}")
                 print(f"Private fleet API: https://{control_ip}:{args.tls_port}")
                 print(f"Public enrollment API: {public_url}")

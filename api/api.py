@@ -121,6 +121,7 @@ try:
         ArtifactStorageError,
         delete_object as delete_artifact_object,
         read_bytes as read_artifact_bytes,
+        storage_health as artifact_storage_health,
     )
 except ModuleNotFoundError as exc:
     if exc.name != "artifact_storage":
@@ -129,6 +130,7 @@ except ModuleNotFoundError as exc:
         ArtifactStorageError,
         delete_object as delete_artifact_object,
         read_bytes as read_artifact_bytes,
+        storage_health as artifact_storage_health,
     )
 
 try:
@@ -8188,10 +8190,18 @@ async def health():
             expected_version=expected_version,
         )
 
+    artifact_storage = await asyncio.to_thread(
+        artifact_storage_health,
+        results_dir=RESULTS_DIR,
+        write_probe=False,
+    )
+    artifacts_ok = artifact_storage.get("status") != "error"
+
     return {
-        "status": "healthy" if db_ok and redis_ok else "degraded",
+        "status": "healthy" if db_ok and redis_ok and artifacts_ok else "degraded",
         "database": "ok" if db_ok else "error",
         "redis": "ok" if redis_ok else "error",
+        "artifact_storage": artifact_storage,
         # Current build identity. scanner_version is the human label (git short sha
         # when set, else "dev"); build_fingerprint is a source-tree checksum that
         # differs whenever the runtime code differs — so the UI can flag a scan or
@@ -8200,6 +8210,19 @@ async def health():
         "build_fingerprint": expected_fingerprint,
         "worker_build": worker_build,
     }
+
+
+@app.get("/artifacts/storage/health")
+async def get_artifact_storage_health(probe: bool = False):
+    """Report artifact configuration; optionally exercise object I/O."""
+    result = await asyncio.to_thread(
+        artifact_storage_health,
+        results_dir=RESULTS_DIR,
+        write_probe=probe,
+    )
+    if result.get("status") == "error":
+        raise HTTPException(status_code=503, detail=result)
+    return result
 
 
 @app.get("/settings/ai")

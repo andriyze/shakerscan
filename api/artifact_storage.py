@@ -246,6 +246,42 @@ def delete_object(storage_uri: str, *, results_dir: Path) -> bool:
     return True
 
 
+def storage_health(*, results_dir: Path, write_probe: bool = False) -> dict[str, Any]:
+    """Validate configuration and optionally exercise PUT/GET/DELETE."""
+    if remote_enabled():
+        cfg = _s3_config(namespace="ARTIFACT")
+        missing = [name for name in ("bucket", "access_key", "secret_key") if not cfg.get(name)]
+        if missing:
+            return {"status": "error", "backend": "s3", "error": "missing_config"}
+        if not write_probe:
+            return {"status": "configured", "backend": "s3"}
+        key = f"{cfg['prefix']}/.health/{uuid.uuid4().hex}" if cfg["prefix"] else f".health/{uuid.uuid4().hex}"
+        payload = b"shakerscan-artifact-health-v1"
+        try:
+            _s3_request("PUT", cfg["bucket"], key, body=payload, content_type="application/octet-stream", config=cfg)
+            received = _s3_request("GET", cfg["bucket"], key, config=cfg)
+            if received != payload:
+                raise ArtifactStorageError("artifact health probe integrity mismatch")
+            _s3_request("DELETE", cfg["bucket"], key, config=cfg)
+        except Exception as exc:
+            return {"status": "error", "backend": "s3", "error": type(exc).__name__}
+        return {"status": "ok", "backend": "s3", "write_probe": True}
+
+    if remote_required():
+        return {"status": "error", "backend": "local", "error": "remote_required"}
+    if not write_probe:
+        return {"status": "configured", "backend": "local"}
+    try:
+        directory = results_dir / "scan-artifacts" / ".health"
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / uuid.uuid4().hex
+        path.write_bytes(b"ok")
+        path.unlink()
+    except OSError as exc:
+        return {"status": "error", "backend": "local", "error": type(exc).__name__}
+    return {"status": "ok", "backend": "local", "write_probe": True}
+
+
 def guess_content_type(filename: str) -> str:
     return mimetypes.guess_type(filename)[0] or "application/octet-stream"
 

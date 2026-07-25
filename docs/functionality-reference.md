@@ -1168,8 +1168,8 @@ it is the exhaustive backstop behind the human-readable product map above.
 
 | Surface | Count | Source |
 |---|---|---|
-| Public REST operations | 246 | `api/api.py` FastAPI decorators |
-| Unique REST paths | 203 | `api/api.py` |
+| Public REST operations | 247 | `api/api.py` FastAPI decorators |
+| Unique REST paths | 204 | `api/api.py` |
 | Check families | 14 | `api/check_registry.py` |
 | Command Arsenal commands | 82 | `api/command_arsenal.py` |
 | Tool adapters | 13 | `api/command_arsenal.py` |
@@ -1178,7 +1178,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | Scanner wrapper commands | 26 | `scanner.sh` |
 | Make targets | 10 | `Makefile` |
 | Release gates | 14 | `scripts/release_gates.py` |
-| Runtime environment keys | 241 | Python sources + Compose manifests |
+| Runtime environment keys | 245 | Python sources + Compose manifests |
 | Scanner modules | 83 | `scanner/scanner_tools/` |
 | UI pages | 31 | `ui/src/app/` |
 | Skills | 6 | `skills/` |
@@ -1278,6 +1278,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | `GET` | `/arsenal/tool-receipts` | `arsenal_tool_receipts` |
 | `POST` | `/arsenal/tool-receipts` | `arsenal_record_tool_receipt` |
 | `GET` | `/arsenal/tools` | `arsenal_tools` |
+| `GET` | `/artifacts/storage/health` | `get_artifact_storage_health` |
 | `GET` | `/asm/check-families` | `asm_check_families` |
 | `GET` | `/dashboard` | `dashboard` |
 | `GET` | `/discovery` | `list_discovery_runs` |
@@ -1869,6 +1870,10 @@ Only key names and declaring sources are documented; secret values are never rea
 | `HOSTNAME` | `api/worker.py` |
 | `HOST_RESULTS_PATH` | `api/api.py` |
 | `LOCAL_ENV_FILE` | `api/api.py` |
+| `MINIO_BUCKET` | `docker-compose.release.yml`, `docker-compose.yml` |
+| `MINIO_PORT` | `docker-compose.release.yml`, `docker-compose.yml` |
+| `MINIO_ROOT_PASSWORD` | `docker-compose.release.yml`, `docker-compose.yml` |
+| `MINIO_ROOT_USER` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `MODEL_INTAKE_ALLOW_LOCAL_FILES` | `scanner/scanner_tools/model_intake.py` |
 | `MODEL_INTAKE_TRUSTED_KEY_SHA256` | `scanner/scanner_tools/model_intake.py` |
 | `MODEL_INTAKE_TRUSTED_SIGNING_KEYS` | `scanner/scanner_tools/model_intake.py` |

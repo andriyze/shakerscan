@@ -34,6 +34,41 @@ services:
       retries: 5
     restart: unless-stopped
 
+  minio:
+    profiles: ["artifacts"]
+    image: quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z@sha256:a1ea29fa28355559ef137d71fc570e508a214ec84ff8083e39bc5428980b015e
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-shakerscan}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-shakerscan-local-artifacts}
+    volumes:
+      - minio-data:/data
+    ports:
+      - "${SHAKERSCAN_DATA_BIND_HOST:-127.0.0.1}:${MINIO_PORT:-9000}:9000"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+  minio-init:
+    profiles: ["artifacts"]
+    image: quay.io/minio/mc:RELEASE.2025-04-16T18-13-26Z@sha256:aead63c77f9db9107f1696fb08ecb0faeda23729cde94b0f663edf4fe09728e3
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >-
+        until mc alias set shakerscan http://minio:9000 "$${MINIO_ROOT_USER}" "$${MINIO_ROOT_PASSWORD}"; do sleep 2; done;
+        mc mb --ignore-existing "shakerscan/$${MINIO_BUCKET}"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-shakerscan}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-shakerscan-local-artifacts}
+      MINIO_BUCKET: ${EVIDENCE_S3_BUCKET:-shakerscan-artifacts}
+    depends_on:
+      minio:
+        condition: service_healthy
+    restart: "no"
+
   api:
     image: ${SCANNER_IMAGE_REPO:-shakerscan/shakerscan-scanner}:${SCANNER_IMAGE_TAG:-latest}
     ports:
@@ -294,3 +329,4 @@ services:
 volumes:
   postgres-data:
   redis-data:
+  minio-data:
