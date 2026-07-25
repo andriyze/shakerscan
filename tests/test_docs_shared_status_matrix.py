@@ -37,12 +37,13 @@ def test_execution_architecture_is_consolidated_and_current():
 
 def test_multi_node_doc_is_build_spec_and_honest_about_fleet_status():
     text = _flat(FLEET_DOC)
-    # The doc is a design authority plus an in-progress vertical slice. It must distinguish the
-    # shipped trust/API/lease foundation from incomplete physical proof, artifacts, and routing.
-    assert "Phase-1 vertical-slice implementation in progress" in text
-    assert "Phase 1 draft vertical-slice specification" in text
+    # The implementation is complete, while a physical release-topology receipt remains an
+    # operational acceptance gate. Do not regress to claiming that shipped fleet layers are drafts.
+    assert "implementation complete; physical deployment acceptance pending" in text
+    assert "Phase 1 implemented vertical-slice contract" in text
     assert "single-use enrollment" in text
-    assert "physical two-VPS proof is not complete" in text
+    assert "awaiting execution on two actual VPSs" in text
+    assert "different node to reclaim" in text
     assert "pre-overlay bootstrap contract" in text
     assert "worker cannot call an overlay URL before it has an overlay" in text
     assert "managed `evidence_objects`" in text

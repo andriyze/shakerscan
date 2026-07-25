@@ -2609,6 +2609,14 @@ case $COMMAND in
         exec python3 "$SCRIPT_DIR/scripts/shakerscan_mcp.py"
         ;;
     fleet)
+        if [ "${ARGS[0]:-}" = "accept" ]; then
+            if [ ! -f "$SCRIPT_DIR/scripts/fleet_acceptance.py" ]; then
+                echo -e "${RED}Error: the fleet acceptance runner is missing from this runtime.${NC}"
+                echo "Re-run the ShakerScan installer to refresh runtime files."
+                exit 1
+            fi
+            exec python3 "$SCRIPT_DIR/scripts/fleet_acceptance.py" "${ARGS[@]:1}"
+        fi
         if [ ! -f "$SCRIPT_DIR/scripts/fleet_cli.py" ]; then
             echo -e "${RED}Error: the fleet host provisioner is missing from this runtime.${NC}"
             echo "Re-run the ShakerScan installer to refresh runtime files."

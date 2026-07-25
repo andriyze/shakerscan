@@ -837,34 +837,66 @@ class _FakeReceiptConnection:
 
 class _FakeSlotRedis:
     def __init__(self):
-        self.values = {}
+        self.zsets = {}
+        self.legacy = {}
         self.expired = []
         self.deleted = []
 
-    def incr(self, key):
-        self.values[key] = int(self.values.get(key, 0)) + 1
-        return self.values[key]
-
-    def decr(self, key):
-        self.values[key] = int(self.values.get(key, 0)) - 1
-        return self.values[key]
+    def type(self, key):
+        if key in self.legacy:
+            return b"string"
+        if key in self.zsets:
+            return b"zset"
+        return b"none"
 
     def expire(self, key, ttl):
         self.expired.append((key, ttl))
 
     def delete(self, key):
         self.deleted.append(key)
-        self.values.pop(key, None)
+        self.zsets.pop(key, None)
+        self.legacy.pop(key, None)
+
+    def eval(self, script, key_count, key, *args):
+        assert key_count == 1
+        members = self.zsets.setdefault(key, {})
+        if "ZREMRANGEBYSCORE" in script:
+            now, expires_at, limit, member, key_ttl = args
+            members = {
+                existing: score for existing, score in members.items()
+                if score > float(now)
+            }
+            self.zsets[key] = members
+            if str(member) in members:
+                members[str(member)] = float(expires_at)
+                self.expire(key, int(key_ttl))
+                return 1
+            if len(members) >= int(limit):
+                return 0
+            members[str(member)] = float(expires_at)
+            self.expire(key, int(key_ttl))
+            return 1
+        member, expires_at, key_ttl = args
+        if str(member) not in members:
+            return 0
+        members[str(member)] = float(expires_at)
+        self.expire(key, int(key_ttl))
+        return 1
+
+    def zrem(self, key, member):
+        return int(self.zsets.get(key, {}).pop(str(member), None) is not None)
+
+    def zcard(self, key):
+        return len(self.zsets.get(key, {}))
 
 
-class _FakeJobRedis:
+class _FakeJobRedis(_FakeSlotRedis):
     def __init__(self):
+        super().__init__()
         self.hashes = []
-        self.expired = []
         self.values = {}
         self.pushed = []
         self.sets = []
-        self.deleted = []
 
     def hset(self, key, *args, mapping=None):
         self.hashes.append((key, args, dict(mapping or {})))
@@ -887,7 +919,11 @@ class _FakeJobRedis:
         self.pushed.append((key, value))
         return len(self.pushed)
 
-    def eval(self, _script, _numkeys, key, amount, cap, _ttl, all_or_nothing="0"):
+    def eval(self, script, numkeys, key, *args):
+        if "ZREMRANGEBYSCORE" in script or "ZSCORE" in script:
+            return super().eval(script, numkeys, key, *args)
+        amount, cap, _ttl, *rest = args
+        all_or_nothing = rest[0] if rest else "0"
         current = int(self.values.get(key) or 0)
         amount = int(amount)
         cap = int(cap)
@@ -911,6 +947,8 @@ class _FakeJobRedis:
     def delete(self, key):
         self.deleted.append(key)
         self.values.pop(key, None)
+        self.zsets.pop(key, None)
+        self.legacy.pop(key, None)
 
 
 def test_worker_marks_fresh_processing_lease_immediately_after_queue_pop():
@@ -1911,20 +1949,66 @@ def test_parallel_shard_slots_enforce_parent_concurrency(monkeypatch):
     r = _FakeSlotRedis()
     parent_id = "parent-1"
 
-    first, limit = worker._try_acquire_parallel_shard_slot(r, parent_id, {})
-    second, _ = worker._try_acquire_parallel_shard_slot(r, parent_id, {})
-    third, _ = worker._try_acquire_parallel_shard_slot(r, parent_id, {})
+    first, limit = worker._try_acquire_parallel_shard_slot(
+        r, parent_id, {}, slot_id="job-1"
+    )
+    retry, _ = worker._try_acquire_parallel_shard_slot(
+        r, parent_id, {}, slot_id="job-1"
+    )
+    second, _ = worker._try_acquire_parallel_shard_slot(
+        r, parent_id, {}, slot_id="job-2"
+    )
+    third, _ = worker._try_acquire_parallel_shard_slot(
+        r, parent_id, {}, slot_id="job-3"
+    )
 
     assert first is True
+    assert retry is True  # redelivery refreshes the same lease, not a second slot
     assert second is True
     assert third is False  # capped at the fleet cap (2)
     assert limit == 2
-    assert r.values[worker._parallel_shard_slot_key(parent_id)] == 2
+    assert r.zcard(worker._parallel_shard_slot_key(parent_id)) == 2
 
-    worker._release_parallel_shard_slot(r, parent_id)
-    fourth, _ = worker._try_acquire_parallel_shard_slot(r, parent_id, {})
+    worker._release_parallel_shard_slot(r, parent_id, "job-1")
+    fourth, _ = worker._try_acquire_parallel_shard_slot(
+        r, parent_id, {}, slot_id="job-3"
+    )
     assert fourth is True
-    assert r.values[worker._parallel_shard_slot_key(parent_id)] == 2
+    assert r.zcard(worker._parallel_shard_slot_key(parent_id)) == 2
+
+
+def test_parallel_shard_slots_reclaim_expired_members(monkeypatch):
+    monkeypatch.setattr(worker, "PARALLEL_SHARD_MAX_PER_PARENT", 1)
+    monkeypatch.setattr(worker, "_max_active_scans", lambda r: 1)
+    r = _FakeSlotRedis()
+    parent_id = "parent-expired"
+    key = worker._parallel_shard_slot_key(parent_id)
+    r.zsets[key] = {"dead-job": 1.0}
+
+    acquired, limit = worker._try_acquire_parallel_shard_slot(
+        r, parent_id, {}, slot_id="replacement-job"
+    )
+
+    assert acquired is True
+    assert limit == 1
+    assert set(r.zsets[key]) == {"replacement-job"}
+
+
+def test_parallel_shard_slots_remove_legacy_integer_key(monkeypatch):
+    monkeypatch.setattr(worker, "PARALLEL_SHARD_MAX_PER_PARENT", 1)
+    monkeypatch.setattr(worker, "_max_active_scans", lambda r: 1)
+    r = _FakeSlotRedis()
+    parent_id = "parent-upgrade"
+    key = worker._parallel_shard_slot_key(parent_id)
+    r.legacy[key] = 4
+
+    acquired, _ = worker._try_acquire_parallel_shard_slot(
+        r, parent_id, {}, slot_id="new-job"
+    )
+
+    assert acquired is True
+    assert key in r.deleted
+    assert set(r.zsets[key]) == {"new-job"}
 
 
 def test_parallel_shard_concurrency_override_is_clamped(monkeypatch):

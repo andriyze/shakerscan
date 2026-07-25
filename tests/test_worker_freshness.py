@@ -117,10 +117,45 @@ class _AttributionConnection:
         return self.result
 
 
+def test_fleet_node_gate_requires_healthy_current_heartbeat_and_image(monkeypatch):
+    node_id = uuid.uuid4()
+    baseline = {
+        "status": "healthy",
+        "drain": False,
+        "rollout_in_progress": False,
+        "desired_state_version": 3,
+        "applied_state_version": 3,
+        "worker_image_digest": "scanner@sha256:" + "a" * 64,
+        "active_worker_image_digest": "scanner@sha256:" + "a" * 64,
+        "last_error": None,
+        "heartbeat_current": True,
+    }
+    conn = _AttributionConnection(baseline)
+    monkeypatch.setattr(worker, "db_pool", types.SimpleNamespace(acquire=lambda: _AcquireContext(conn)))
+    monkeypatch.setenv("SHAKERSCAN_NODE_ID", str(node_id))
+
+    assert _run(worker._fleet_node_accepts_work()) is True
+    baseline["active_worker_image_digest"] = "scanner@sha256:" + "b" * 64
+    assert _run(worker._fleet_node_accepts_work()) is False
+    baseline["active_worker_image_digest"] = baseline["worker_image_digest"]
+    baseline["heartbeat_current"] = False
+    assert _run(worker._fleet_node_accepts_work()) is False
+
+
 def test_job_execution_is_attributed_to_worker_and_fleet_node(monkeypatch):
     scan_id = uuid.uuid4()
     node_id = uuid.uuid4()
-    conn = _AttributionConnection({"id": scan_id})
+    conn = _AttributionConnection({
+        "id": scan_id,
+        "status": "healthy",
+        "drain": False,
+        "rollout_in_progress": False,
+        "last_error": None,
+        "desired_state_version": 2,
+        "applied_state_version": 2,
+        "worker_image_digest": "image@sha256:" + "a" * 64,
+        "active_worker_image_digest": "image@sha256:" + "a" * 64,
+    })
     monkeypatch.setattr(worker, "db_pool", types.SimpleNamespace(acquire=lambda: _AcquireContext(conn)))
     monkeypatch.setenv("WORKER_ID", "fleet-worker")
     monkeypatch.setenv("HOSTNAME", "container-123456789")
@@ -145,6 +180,46 @@ def test_disabled_or_missing_fleet_node_refuses_execution(monkeypatch):
 
     with pytest.raises(RuntimeError, match="missing or disabled"):
         _run(worker._attribute_job_execution({"scan_id": str(uuid.uuid4())}))
+
+
+def test_execution_scope_revalidation_accepts_equivalent_target_and_rejects_mismatch(monkeypatch):
+    scan_id = uuid.uuid4()
+    conn = _AttributionConnection({
+        "target_url": "https://Lab.Example.test/path",
+        "status": "pending",
+        "parent_status": None,
+    })
+    monkeypatch.setattr(worker, "db_pool", types.SimpleNamespace(acquire=lambda: _AcquireContext(conn)))
+
+    assert _run(worker._revalidate_job_execution_scope({
+        "scan_id": str(scan_id),
+        "target": "https://lab.example.test:443/path#ignored",
+    })) is True
+    with pytest.raises(worker.ExecutionScopeError, match="does not match"):
+        _run(worker._revalidate_job_execution_scope({
+            "scan_id": str(scan_id),
+            "target": "https://other.example.test/path",
+        }))
+    with pytest.raises(worker.ExecutionScopeError, match="missing"):
+        _run(worker._revalidate_job_execution_scope({"scan_id": str(scan_id)}))
+
+
+def test_execution_target_key_normalizes_ipv6_and_survives_invalid_port():
+    assert worker._execution_target_key("HTTP://[::1]:80/lab") == "http://[::1]/lab"
+    assert worker._execution_target_key("https://lab.example:bad/path") == "https://lab.example:bad/path"
+
+
+def test_execution_scope_revalidation_skips_terminal_scan(monkeypatch):
+    conn = _AttributionConnection({
+        "target_url": "http://127.0.0.1:3001/",
+        "status": "cancelled",
+        "parent_status": None,
+    })
+    monkeypatch.setattr(worker, "db_pool", types.SimpleNamespace(acquire=lambda: _AcquireContext(conn)))
+    assert _run(worker._revalidate_job_execution_scope({
+        "scan_id": str(uuid.uuid4()),
+        "target": "http://127.0.0.1:3001",
+    })) is False
 
 
 def test_revoked_node_refusal_requeues_job_before_dispatch(monkeypatch):

@@ -70,6 +70,7 @@ def test_hosted_installer_packages_advertised_host_side_adapters():
         "scripts/local_planner_adapter.py",
         "scripts/planner_evals.py",
         "scripts/fleet_cli.py",
+        "scripts/fleet_acceptance.py",
         "api/command_arsenal.py",
     )
     installer = (ROOT / "install" / "index.sh").read_text()

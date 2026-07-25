@@ -37,6 +37,7 @@ class RequestMeter:
         self.rejected = 0
         self.successful = 0
         self.unmetered_tool_invocations = 0
+        self.adapter_usage: dict[str, dict[str, int]] = {}
         self.events: list[dict[str, Any]] = []
         self._lock = threading.Lock()
 
@@ -65,13 +66,16 @@ class RequestMeter:
         with self._lock:
             if self.enforcing and self.exhausted:
                 self.rejected += 1
+                self._increment_adapter(phase, "rejected")
                 self._event("rejected", phase=phase, url=url, retry=retry)
                 raise RequestBudgetExceeded(
                     f"request budget exhausted before {phase} ({self.attempted}/{self.limit})"
                 )
             self.attempted += 1
+            self._increment_adapter(phase, "attempted")
             if retry:
                 self.retried += 1
+                self._increment_adapter(phase, "retried")
             self._event("attempted", phase=phase, url=url, retry=retry)
         return True
 
@@ -80,8 +84,10 @@ class RequestMeter:
             return
         with self._lock:
             self.completed += 1
+            self._increment_adapter(phase, "completed")
             if status_code is not None and 200 <= int(status_code) < 400:
                 self.successful += 1
+                self._increment_adapter(phase, "successful")
             self._event("completed", phase=phase, url=url, status_code=status_code)
 
     def record_unmetered_tool(self, *, tool: str, target_url: Any = None) -> None:
@@ -89,11 +95,23 @@ class RequestMeter:
             self.unmetered_tool_invocations += 1
             if self.enforcing:
                 self.rejected += 1
+                self._increment_adapter(tool, "rejected")
                 self._event("rejected_unmetered_tool", phase=tool, url=target_url)
                 raise RequestBudgetExceeded(
                     f"unmetered network tool '{tool}' is disabled in enforcing request-budget mode"
                 )
             self._event("observed_unmetered_tool", phase=tool, url=target_url)
+
+    def _increment_adapter(self, phase: Any, field: str) -> None:
+        name = str(phase or "unknown").strip()[:100] or "unknown"
+        counters = self.adapter_usage.setdefault(name, {
+            "attempted": 0,
+            "completed": 0,
+            "retried": 0,
+            "rejected": 0,
+            "successful": 0,
+        })
+        counters[field] = int(counters.get(field) or 0) + 1
 
     def _event(self, event: str, *, phase: str, url: Any, **extra: Any) -> None:
         parsed = urllib.parse.urlparse(str(url or ""))
@@ -129,6 +147,10 @@ class RequestMeter:
                 "limit_exceeded": limit_exceeded,
                 "unmetered_tool_invocations": self.unmetered_tool_invocations,
                 "fully_metered": self.unmetered_tool_invocations == 0,
+                "adapter_usage": {
+                    name: dict(counters)
+                    for name, counters in sorted(self.adapter_usage.items())
+                },
                 "events": list(self.events),
             }
 

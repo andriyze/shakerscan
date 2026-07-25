@@ -268,6 +268,7 @@ download "$REPO_RAW_BASE/scripts/shakerscan_mcp.py" "$INSTALL_DIR/scripts/shaker
 download "$REPO_RAW_BASE/scripts/local_planner_adapter.py" "$INSTALL_DIR/scripts/local_planner_adapter.py"
 download "$REPO_RAW_BASE/scripts/planner_evals.py" "$INSTALL_DIR/scripts/planner_evals.py"
 download "$REPO_RAW_BASE/scripts/fleet_cli.py" "$INSTALL_DIR/scripts/fleet_cli.py"
+download "$REPO_RAW_BASE/scripts/fleet_acceptance.py" "$INSTALL_DIR/scripts/fleet_acceptance.py"
 download "$REPO_RAW_BASE/api/command_arsenal.py" "$INSTALL_DIR/api/command_arsenal.py"
 download "$REPO_RAW_BASE/skills/README.md" "$INSTALL_DIR/skills/README.md"
 download "$REPO_RAW_BASE/skills/scanner-skill.md" "$INSTALL_DIR/skills/scanner-skill.md"

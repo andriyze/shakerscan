@@ -1168,17 +1168,17 @@ it is the exhaustive backstop behind the human-readable product map above.
 
 | Surface | Count | Source |
 |---|---|---|
-| Public REST operations | 253 | `api/api.py` FastAPI decorators |
-| Unique REST paths | 210 | `api/api.py` |
+| Public REST operations | 254 | `api/api.py` FastAPI decorators |
+| Unique REST paths | 211 | `api/api.py` |
 | Check families | 14 | `api/check_registry.py` |
 | Command Arsenal commands | 82 | `api/command_arsenal.py` |
 | Tool adapters | 13 | `api/command_arsenal.py` |
 | Local-agent adapters | 4 | `api/command_arsenal.py` |
 | Scanner CLI flags | 158 | `scanner/scanner.py` |
 | Scanner wrapper commands | 26 | `scanner.sh` |
-| Make targets | 10 | `Makefile` |
+| Make targets | 11 | `Makefile` |
 | Release gates | 14 | `scripts/release_gates.py` |
-| Runtime environment keys | 254 | Python sources + Compose manifests |
+| Runtime environment keys | 255 | Python sources + Compose manifests |
 | Scanner modules | 83 | `scanner/scanner_tools/` |
 | UI pages | 31 | `ui/src/app/` |
 | Skills | 6 | `skills/` |
@@ -1375,6 +1375,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | `POST` | `/scans/{scan_id}/cancel` | `cancel_scan` |
 | `GET` | `/scans/{scan_id}/deployment-decision` | `get_scan_deployment_decision` |
 | `GET` | `/scans/{scan_id}/logs` | `get_scan_logs` |
+| `GET` | `/scans/{scan_id}/queue-delivery` | `get_scan_queue_delivery` |
 | `GET` | `/scans/{scan_id}/result` | `get_scan_result` |
 | `GET` | `/schedules` | `list_schedules` |
 | `POST` | `/schedules` | `create_schedule` |
@@ -1743,7 +1744,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | Surface | Names |
 |---|---|
 | `scanner.sh` commands | `agent`, `ai`, `backup`, `build`, `doctor`, `env`, `fleet`, `gungnir`, `help`, `install-deps`, `join`, `logs`, `mcp`, `rebuild`, `reload`, `research`, `reset`, `restart`, `scale`, `scan`, `scan-full`, `scan-smart`, `shell`, `start`, `status`, `stop` |
-| Make targets | `dependency-audit`, `dependency-lock`, `e2e`, `e2e-ai-gate`, `e2e-dast`, `e2e-model-intake`, `e2e-model-intake-fixture`, `release-gates`, `test`, `upgrade-smoke` |
+| Make targets | `dependency-audit`, `dependency-lock`, `e2e`, `e2e-ai-gate`, `e2e-dast`, `e2e-model-intake`, `e2e-model-intake-fixture`, `fleet-acceptance`, `release-gates`, `test`, `upgrade-smoke` |
 | Release gates | `test:evidence-provenance`, `test:fleet-current`, `test:hypothesis-proof-promotion`, `test:mcp-read-only`, `test:no-ai-verified`, `test:no-benchmark-fitting`, `test:no-phantom-tools`, `test:planner-no-shell`, `test:planner-risk`, `test:planner-scope`, `test:scanner-auth-quality`, `test:scanner-bounds`, `test:scanner-proof-truth`, `test:scanner-registry-coverage` |
 
 ### Runtime Environment-Key Inventory
@@ -1855,7 +1856,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `FLEET_DESIRED_WORKER_COUNT` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `FLEET_DRAIN_GRACE_SECONDS` | `api/fleet_agent.py` |
 | `FLEET_EDGE_MODE` | `api/api.py` |
-| `FLEET_HEARTBEAT_TIMEOUT_SECONDS` | `docker-compose.release.yml`, `docker-compose.yml` |
+| `FLEET_HEARTBEAT_TIMEOUT_SECONDS` | `api/worker.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `FLEET_NODE_ID` | `docker-compose.broker-worker.yml`, `docker-compose.worker.yml` |
 | `FLEET_OPERATOR_TOKEN` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `FLEET_OVERLAY_CIDR` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
@@ -1966,6 +1967,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SHAKERSCAN_DEBUG_POST_INFER` | `scanner/scanner.py` |
 | `SHAKERSCAN_ENABLE_ADAPTIVE_THROTTLE` | `scanner/scanner.py` |
 | `SHAKERSCAN_ENFORCE_FLEET_LIMITS` | `api/worker.py` |
+| `SHAKERSCAN_FLEET_OPERATOR_TOKEN` | `scripts/fleet_acceptance.py` |
 | `SHAKERSCAN_MAX_ACTIVE_SCANS` | `api/api.py`, `api/worker.py` |
 | `SHAKERSCAN_MAX_WORKERS` | `api/api.py`, `docker-compose.yml` |
 | `SHAKERSCAN_MCP_ALLOW_REMOTE_API` | `scripts/shakerscan_mcp.py` |

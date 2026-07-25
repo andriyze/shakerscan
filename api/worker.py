@@ -4527,26 +4527,102 @@ def _parallel_shard_concurrency_limit(r=None, options: dict[str, Any] | None = N
     return max(1, min(PARALLEL_SHARD_CONCURRENCY_HARD_MAX, limit))
 
 
-def _try_acquire_parallel_shard_slot(r, parent_id: str | None, options: dict[str, Any] | None = None) -> tuple[bool, int]:
+_PARALLEL_SHARD_SLOT_ACQUIRE_LUA = """
+local key = KEYS[1]
+local now = tonumber(ARGV[1])
+local expires_at = tonumber(ARGV[2])
+local limit = tonumber(ARGV[3])
+local member = ARGV[4]
+local key_ttl = tonumber(ARGV[5])
+redis.call('ZREMRANGEBYSCORE', key, '-inf', now)
+if redis.call('ZSCORE', key, member) then
+  redis.call('ZADD', key, expires_at, member)
+  redis.call('EXPIRE', key, key_ttl)
+  return 1
+end
+if redis.call('ZCARD', key) >= limit then
+  return 0
+end
+redis.call('ZADD', key, expires_at, member)
+redis.call('EXPIRE', key, key_ttl)
+return 1
+"""
+
+_PARALLEL_SHARD_SLOT_REFRESH_LUA = """
+local key = KEYS[1]
+local member = ARGV[1]
+local expires_at = tonumber(ARGV[2])
+local key_ttl = tonumber(ARGV[3])
+if not redis.call('ZSCORE', key, member) then
+  return 0
+end
+redis.call('ZADD', key, expires_at, member)
+redis.call('EXPIRE', key, key_ttl)
+return 1
+"""
+
+
+def _prepare_parallel_shard_slot_key(r, key: str) -> None:
+    """Remove the legacy integer semaphore before using the leased ZSET."""
+    kind = r.type(key)
+    if isinstance(kind, bytes):
+        kind = kind.decode("utf-8", errors="replace")
+    if str(kind or "none") not in {"none", "zset"}:
+        r.delete(key)
+
+
+def _try_acquire_parallel_shard_slot(
+    r,
+    parent_id: str | None,
+    options: dict[str, Any] | None = None,
+    *,
+    slot_id: str | None,
+) -> tuple[bool, int]:
     if not parent_id:
         return True, 0
+    member = str(slot_id or "").strip()
+    if not member:
+        raise ValueError("parallel shard slot_id is required")
     limit = _parallel_shard_concurrency_limit(r, options)
     key = _parallel_shard_slot_key(parent_id)
-    active = r.incr(key)
-    if active <= limit:
-        r.expire(key, PARALLEL_SHARD_SLOT_TTL_SECONDS)
-        return True, limit
-    r.decr(key)
-    return False, limit
+    _prepare_parallel_shard_slot_key(r, key)
+    now = time.time()
+    acquired = r.eval(
+        _PARALLEL_SHARD_SLOT_ACQUIRE_LUA,
+        1,
+        key,
+        now,
+        now + PARALLEL_SHARD_SLOT_TTL_SECONDS,
+        limit,
+        member,
+        PARALLEL_SHARD_SLOT_TTL_SECONDS + 600,
+    )
+    return bool(acquired), limit
 
 
-def _release_parallel_shard_slot(r, parent_id: str | None) -> None:
-    if not parent_id:
+def _refresh_parallel_shard_slot(r, parent_id: str | None, slot_id: str | None) -> bool:
+    if not parent_id or not slot_id:
+        return False
+    key = _parallel_shard_slot_key(parent_id)
+    _prepare_parallel_shard_slot_key(r, key)
+    return bool(r.eval(
+        _PARALLEL_SHARD_SLOT_REFRESH_LUA,
+        1,
+        key,
+        str(slot_id),
+        time.time() + PARALLEL_SHARD_SLOT_TTL_SECONDS,
+        PARALLEL_SHARD_SLOT_TTL_SECONDS + 600,
+    ))
+
+
+def _release_parallel_shard_slot(r, parent_id: str | None, slot_id: str | None) -> None:
+    if not parent_id or not slot_id:
         return
     key = _parallel_shard_slot_key(parent_id)
     try:
-        remaining = r.decr(key)
-        if remaining <= 0:
+        _prepare_parallel_shard_slot_key(r, key)
+        r.zrem(key, str(slot_id))
+        if int(r.zcard(key) or 0) <= 0:
             r.delete(key)
     except Exception:
         pass
@@ -6514,7 +6590,12 @@ async def persist_result_artifact(
         return local_result_path
 
 
-def send_heartbeats(job_id: str, stop_event: threading.Event):
+def send_heartbeats(
+    job_id: str,
+    stop_event: threading.Event,
+    parent_id: str | None = None,
+    shard_slot_id: str | None = None,
+):
     """Send periodic heartbeats from a dedicated thread.
 
     This avoids heartbeat starvation when the asyncio event loop is busy with
@@ -6536,6 +6617,8 @@ def send_heartbeats(job_id: str, stop_event: threading.Event):
                 r = _hb_client()
             if r is not None:
                 r.hset(f"job:{job_id}", 'heartbeat', utc_now_iso())
+                if parent_id and shard_slot_id:
+                    _refresh_parallel_shard_slot(r, parent_id, shard_slot_id)
                 _write_worker_build_report(r)
         except Exception as e:
             print(f"[{job_id[:8]}] Heartbeat error (reconnecting): {e}", flush=True)
@@ -8480,7 +8563,9 @@ async def process_scan_shard_job(job_data: dict):
                 print(f"[{job_id[:8]}] merge reconcile error after cancelled shard skip: {e}", flush=True)
         return
 
-    slot_acquired, shard_limit = _try_acquire_parallel_shard_slot(r, parent_id, options)
+    slot_acquired, shard_limit = _try_acquire_parallel_shard_slot(
+        r, parent_id, options, slot_id=job_id
+    )
     if not slot_acquired:
         wait_cycles = int(job_data.get('shard_slot_wait_cycles') or 0) + 1
         requeued = dict(job_data)
@@ -8518,7 +8603,7 @@ async def process_scan_shard_job(job_data: dict):
         except Exception as exc:
             rate = {"granted": 0, "limited": True, "requested": endpoint_count, "reason": str(exc)}
         if rate.get("limited"):
-            _release_parallel_shard_slot(r, parent_id)
+            _release_parallel_shard_slot(r, parent_id, job_id)
             slot_acquired = False
             await _requeue_for_domain_rate(
                 r,
@@ -8547,7 +8632,7 @@ async def process_scan_shard_job(job_data: dict):
         )
     if update_result.endswith("0"):
         print(f"[{job_id[:8]}] Shard '{label}' cancelled before start; skipping", flush=True)
-        _release_parallel_shard_slot(r, parent_id)
+        _release_parallel_shard_slot(r, parent_id, job_id)
         slot_acquired = False
         r.hset(
             f"job:{job_id}",
@@ -8565,7 +8650,7 @@ async def process_scan_shard_job(job_data: dict):
 
     stop_heartbeat = threading.Event()
     heartbeat_thread = threading.Thread(
-        target=send_heartbeats, args=(job_id, stop_heartbeat),
+        target=send_heartbeats, args=(job_id, stop_heartbeat, parent_id, job_id),
         name=f"heartbeat-{job_id[:8]}", daemon=True,
     )
     heartbeat_thread.start()
@@ -8637,7 +8722,7 @@ async def process_scan_shard_job(job_data: dict):
         stop_heartbeat.set()
         heartbeat_thread.join(timeout=max(1.0, HEARTBEAT_INTERVAL_SECONDS / 2))
         if slot_acquired:
-            _release_parallel_shard_slot(r, parent_id)
+            _release_parallel_shard_slot(r, parent_id, job_id)
         # Barrier + merge trigger. The DB all-terminal check in
         # reconcile_parallel_parent is the source of truth (robust to a shard
         # that crashed before reaching here and was failed by the stale checker).
@@ -9327,7 +9412,9 @@ async def process_exploit_batch_job(job_data: dict):
         return
 
     if parent_id:
-        slot_acquired, shard_limit = _try_acquire_parallel_shard_slot(r, parent_id, options)
+        slot_acquired, shard_limit = _try_acquire_parallel_shard_slot(
+            r, parent_id, options, slot_id=job_id
+        )
         if not slot_acquired:
             wait_cycles = int(job_data.get('shard_slot_wait_cycles') or 0) + 1
             requeued = dict(job_data)
@@ -9368,7 +9455,7 @@ async def process_exploit_batch_job(job_data: dict):
         )
         r.expire(f"job:{job_id}", 86400)
         if slot_acquired:
-            _release_parallel_shard_slot(r, parent_id)
+            _release_parallel_shard_slot(r, parent_id, job_id)
         return
 
     # Claim the durable scan row before leasing endpoints. This makes a failed or
@@ -9408,7 +9495,7 @@ async def process_exploit_batch_job(job_data: dict):
         )
         r.expire(f"job:{job_id}", 86400)
         if slot_acquired:
-            _release_parallel_shard_slot(r, parent_id)
+            _release_parallel_shard_slot(r, parent_id, job_id)
         return
 
     # Claim the next batch (priority-ordered, FOR UPDATE SKIP LOCKED → work-stealing).
@@ -9442,7 +9529,7 @@ async def process_exploit_batch_job(job_data: dict):
         r.expire(f"job:{job_id}", 86400)
         print(f"[asm {job_id[:8]}] no untested/stale endpoints to test", flush=True)
         if slot_acquired:
-            _release_parallel_shard_slot(r, parent_id)
+            _release_parallel_shard_slot(r, parent_id, job_id)
         await _reconcile_parallel_child_completion(parent_id, r, f"asm {job_id[:8]}")
         return
 
@@ -9477,7 +9564,7 @@ async def process_exploit_batch_job(job_data: dict):
         except Exception as exc:
             print(f"[asm {job_id[:8]}] domain-rate release error: {exc}", flush=True)
         if slot_acquired:
-            _release_parallel_shard_slot(r, parent_id)
+            _release_parallel_shard_slot(r, parent_id, job_id)
             slot_acquired = False
         async with db_pool.acquire() as conn:
             released_claim = await conn.execute(
@@ -9631,7 +9718,7 @@ async def process_exploit_batch_job(job_data: dict):
             flush=True,
         )
         if slot_acquired:
-            _release_parallel_shard_slot(r, parent_id)
+            _release_parallel_shard_slot(r, parent_id, job_id)
         await _reconcile_parallel_child_completion(parent_id, r, f"asm {job_id[:8]}")
         return
 
@@ -9757,7 +9844,7 @@ async def process_exploit_batch_job(job_data: dict):
         except Exception:
             pass
         if slot_acquired:
-            _release_parallel_shard_slot(r, parent_id)
+            _release_parallel_shard_slot(r, parent_id, job_id)
         r.hset(
             f"job:{job_id}",
             mapping={'status': 'cancelled', 'progress': '100', 'current_phase': 'cancelled'},
@@ -9773,7 +9860,12 @@ async def process_exploit_batch_job(job_data: dict):
     r.hset(f"job:{job_id}", mapping={'status': 'running', 'scan_id': scan_id, 'started_at': now.isoformat(), 'heartbeat': now.isoformat()})
 
     stop_heartbeat = threading.Event()
-    hb = threading.Thread(target=send_heartbeats, args=(job_id, stop_heartbeat), name=f"heartbeat-{job_id[:8]}", daemon=True)
+    hb = threading.Thread(
+        target=send_heartbeats,
+        args=(job_id, stop_heartbeat, parent_id, job_id),
+        name=f"heartbeat-{job_id[:8]}",
+        daemon=True,
+    )
     hb.start()
     error = None
     try:
@@ -10043,12 +10135,105 @@ async def process_exploit_batch_job(job_data: dict):
         except Exception:
             pass
         if slot_acquired:
-            _release_parallel_shard_slot(r, parent_id)
+            _release_parallel_shard_slot(r, parent_id, job_id)
         await _reconcile_parallel_child_completion(parent_id, r, f"asm {job_id[:8]}")
 
 
 STALE_REQUEUE_FAIL_AFTER_SECONDS = int(os.environ.get('SHAKERSCAN_STALE_FAIL_AFTER_SECONDS') or 180)
 STALE_JOB_MAX_REQUEUE_HARD_CAP = 500  # backstop against a pathological tight loop
+
+
+class ExecutionScopeError(RuntimeError):
+    """Queued work no longer matches the control plane's durable scan scope."""
+
+
+def _execution_target_key(value: Any) -> str:
+    raw = str(value or "").strip()
+    try:
+        parsed = urllib.parse.urlsplit(raw)
+    except ValueError:
+        return raw
+    try:
+        hostname = parsed.hostname
+        port = parsed.port
+    except ValueError:
+        return raw
+    if parsed.scheme.lower() not in {"http", "https"} or not hostname:
+        return raw
+    host = hostname.lower().rstrip(".")
+    host_authority = f"[{host}]" if ":" in host else host
+    default_port = 80 if parsed.scheme.lower() == "http" else 443
+    authority = host_authority if port in {None, default_port} else f"{host_authority}:{port}"
+    path = parsed.path or "/"
+    return urllib.parse.urlunsplit((parsed.scheme.lower(), authority, path, parsed.query, ""))
+
+
+async def _revalidate_job_execution_scope(job_data: dict[str, Any]) -> bool:
+    """Re-derive target/terminal scope immediately before worker execution.
+
+    This does not classify public versus private targets: operators retain full
+    freedom to scan authorized local labs. It fences stale or tampered queue
+    payloads against the durable scan row and cancelled parent state.
+    """
+    raw_scan_id = str(job_data.get("scan_id") or "").strip()
+    if not raw_scan_id:
+        return True
+    try:
+        scan_id = uuid.UUID(raw_scan_id)
+    except ValueError as exc:
+        raise ExecutionScopeError("queued work has an invalid scan identity") from exc
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT child.target_url, child.status, parent.status AS parent_status
+            FROM scans child
+            LEFT JOIN scans parent ON parent.id=child.parent_scan_id
+            WHERE child.id=$1
+            """,
+            scan_id,
+        )
+    if not row:
+        raise ExecutionScopeError("queued work has no durable scan record")
+    if str(row.get("status") or "") in {"completed", "failed", "cancelled"}:
+        return False
+    if str(row.get("parent_status") or "") == "cancelled":
+        return False
+    queued_target = str(job_data.get("target") or "").strip()
+    durable_target = str(row.get("target_url") or "").strip()
+    if durable_target and not queued_target:
+        raise ExecutionScopeError("queued work is missing its durable scan target")
+    if queued_target and _execution_target_key(queued_target) != _execution_target_key(durable_target):
+        raise ExecutionScopeError("queued target does not match the durable scan target")
+    return True
+
+
+async def _fail_execution_scope(job_data: dict[str, Any], message: str) -> None:
+    raw_scan_id = str(job_data.get("scan_id") or "").strip()
+    job_id = str(job_data.get("job_id") or "").strip()
+    try:
+        scan_id = uuid.UUID(raw_scan_id)
+    except ValueError:
+        scan_id = None
+    if scan_id:
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                """
+                UPDATE scans
+                SET status='failed', progress=100, current_phase='scope_revalidation_failed',
+                    error_message=$2, completed_at=NOW()
+                WHERE id=$1 AND status NOT IN ('completed','failed','cancelled')
+                """,
+                scan_id,
+                message[:500],
+            )
+    if job_id:
+        try:
+            get_redis().hset(
+                f"job:{job_id}",
+                mapping={"status": "failed", "current_phase": "scope_revalidation_failed", "error": message[:500]},
+            )
+        except Exception:
+            pass
 
 
 async def _refuse_stale_job_if_needed(job_data: dict) -> bool:
@@ -10134,13 +10319,25 @@ async def _attribute_job_execution(job_data: dict[str, Any]) -> None:
             node = await conn.fetchrow(
                 """
                 SELECT id, name, region, egress_ip, labels, build_fingerprint,
-                       active_worker_image_digest, agent_version, status, drain
+                       worker_image_digest, active_worker_image_digest, agent_version,
+                       desired_state_version, applied_state_version, last_error,
+                       rollout_in_progress, status, drain
                 FROM nodes WHERE id=$1
                 """,
                 node_uuid,
             )
-            if not node or str(node.get("status") or "") == "disabled" or bool(node.get("drain")):
-                raise RuntimeError("fleet node is missing or disabled, or is draining; refusing job execution")
+            node_current = bool(
+                node
+                and str(node.get("status") or "") == "healthy"
+                and not bool(node.get("drain"))
+                and not bool(node.get("rollout_in_progress"))
+                and not node.get("last_error")
+                and int(node.get("applied_state_version") or 0) >= int(node.get("desired_state_version") or 1)
+                and str(node.get("active_worker_image_digest") or "")
+                == str(node.get("worker_image_digest") or "")
+            )
+            if not node_current:
+                raise RuntimeError("fleet node is missing or disabled, or is not current; refusing job execution")
         labels = parse_json_field(node.get("labels")) if node else {}
         labels = labels if isinstance(labels, dict) else {}
         execution_context = {
@@ -10189,13 +10386,30 @@ async def _fleet_node_accepts_work() -> bool:
     try:
         async with db_pool.acquire() as conn:
             row = await conn.fetchrow(
-                "SELECT status, drain FROM nodes WHERE id=$1",
+                """
+                SELECT status, drain, rollout_in_progress, desired_state_version,
+                       applied_state_version, worker_image_digest,
+                       active_worker_image_digest, last_error, last_heartbeat_at,
+                       last_heartbeat_at >= NOW() - ($2::int * INTERVAL '1 second') AS heartbeat_current
+                FROM nodes WHERE id=$1
+                """,
                 node_id,
+                max(60, int(os.environ.get("FLEET_HEARTBEAT_TIMEOUT_SECONDS") or 300)),
             )
     except Exception as exc:
         print(f"[fleet] cannot authorize node scheduling: {exc}", flush=True)
         return False
-    return bool(row) and str(row["status"] or "") != "disabled" and not bool(row["drain"])
+    return bool(
+        row
+        and str(row.get("status") or "") == "healthy"
+        and not bool(row.get("drain"))
+        and not bool(row.get("rollout_in_progress"))
+        and bool(row.get("heartbeat_current"))
+        and not row.get("last_error")
+        and int(row.get("applied_state_version") or 0) >= int(row.get("desired_state_version") or 1)
+        and str(row.get("active_worker_image_digest") or "")
+        == str(row.get("worker_image_digest") or "")
+    )
 
 
 def _fleet_busy_marker(job_data: dict[str, Any]) -> Path | None:
@@ -10233,6 +10447,15 @@ def _clear_fleet_busy_marker(marker: Path | None) -> None:
 
 async def process_job(job_data: dict):
     """Route job to appropriate handler."""
+    if str(os.environ.get("SHAKERSCAN_NODE_ID") or "").strip():
+        try:
+            if not await _revalidate_job_execution_scope(job_data):
+                print("[scope] terminal or parent-cancelled queued work skipped", flush=True)
+                return
+        except ExecutionScopeError as exc:
+            await _fail_execution_scope(job_data, str(exc))
+            print(f"[scope] refused queued work: {exc}", flush=True)
+            return
     if not await _fleet_node_accepts_work():
         source_queue = str(
             job_data.get("_base_queue_name")
@@ -10361,13 +10584,19 @@ async def _fail_exhausted_queue_delivery(job_data: dict[str, Any], attempts: int
             except ValueError:
                 pass
     key = f"retest_job:{job_id}" if job_data.get("type") == "finding_retest" else f"job:{job_id}"
-    get_redis().hset(key, mapping={
+    redis_client = get_redis()
+    redis_client.hset(key, mapping={
         "status": "failed",
         "current_phase": "queue_delivery_failed",
         "error": message,
         "delivery_attempts": str(attempts),
     })
-    get_redis().expire(key, 86400)
+    redis_client.expire(key, 86400)
+    _release_parallel_shard_slot(
+        redis_client,
+        str(job_data.get("parent_scan_id") or "") or None,
+        job_id,
+    )
 
 
 async def _guard_queue_lease(

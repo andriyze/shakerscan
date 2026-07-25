@@ -7918,6 +7918,28 @@ def _broker_node_labels(node: dict[str, Any]) -> dict[str, Any]:
     return labels if isinstance(labels, dict) else {}
 
 
+def _broker_target_key(value: Any) -> str:
+    raw = str(value or "").strip()
+    try:
+        parsed = urllib.parse.urlsplit(raw)
+    except ValueError:
+        return raw
+    try:
+        hostname = parsed.hostname
+        port = parsed.port
+    except ValueError:
+        return raw
+    if parsed.scheme.lower() not in {"http", "https"} or not hostname:
+        return raw
+    host = hostname.lower().rstrip(".")
+    host_authority = f"[{host}]" if ":" in host else host
+    default_port = 80 if parsed.scheme.lower() == "http" else 443
+    authority = host_authority if port in {None, default_port} else f"{host_authority}:{port}"
+    return urllib.parse.urlunsplit(
+        (parsed.scheme.lower(), authority, parsed.path or "/", parsed.query, "")
+    )
+
+
 async def _hydrate_broker_job_options(conn: Any, payload: dict[str, Any]) -> dict[str, Any]:
     """Resolve managed credential references for one authenticated job lease only."""
     options = dict(payload.get("options") or {})
@@ -8059,8 +8081,18 @@ async def _broker_authenticated_node(
     labels = _broker_node_labels(node)
     if str(labels.get("transport") or "").strip().lower() != "broker":
         raise HTTPException(status_code=403, detail="node is not enrolled for HTTPS broker transport")
-    if require_schedulable and bool(node.get("drain")):
-        raise HTTPException(status_code=409, detail="node is draining")
+    if require_schedulable:
+        stale_after = max(60, _int_env("FLEET_HEARTBEAT_TIMEOUT_SECONDS", HEARTBEAT_TIMEOUT_MINUTES * 60))
+        public = _public_fleet_node(node, stale_after_seconds=stale_after)
+        schedulable = (
+            public.get("status") == "healthy"
+            and not bool(public.get("drain"))
+            and not bool(public.get("rollout_in_progress"))
+            and bool(public.get("state_current"))
+            and bool(public.get("image_current"))
+        )
+        if not schedulable:
+            raise HTTPException(status_code=409, detail="node is not healthy and current for scheduling")
     return node
 
 
@@ -8192,7 +8224,7 @@ async def lease_broker_job(node_id: str, body: BrokerLeaseRequest, request: Requ
         async with db_pool.acquire() as conn:
             state = await conn.fetchrow(
                 """
-                SELECT child.status, parent.status AS parent_status
+                SELECT child.status, child.target_url, parent.status AS parent_status
                 FROM scans child
                 LEFT JOIN scans parent ON parent.id=child.parent_scan_id
                 WHERE child.id=$1
@@ -8200,6 +8232,19 @@ async def lease_broker_job(node_id: str, body: BrokerLeaseRequest, request: Requ
                 candidate_scan_id,
             )
         if not state or str(state["status"]) in {"completed", "failed", "cancelled"} or str(state.get("parent_status") or "") == "cancelled":
+            await asyncio.to_thread(acknowledge_lease, redis_client, lease)
+            return Response(status_code=204)
+        if _broker_target_key(payload.get("target")) != _broker_target_key(state.get("target_url")):
+            async with db_pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    UPDATE scans
+                    SET status='failed', progress=100, current_phase='scope_revalidation_failed',
+                        error_message='queued target does not match the durable scan target', completed_at=NOW()
+                    WHERE id=$1 AND status NOT IN ('completed','failed','cancelled')
+                    """,
+                    candidate_scan_id,
+                )
             await asyncio.to_thread(acknowledge_lease, redis_client, lease)
             return Response(status_code=204)
 
@@ -14480,6 +14525,7 @@ async def get_scan(scan_id: str, verified_only: bool = False):
             shard_rows = await conn.fetch("""
                 SELECT id, scan_role, shard_index, status, score, grade,
                        findings_count, current_phase, progress, duration_seconds,
+                       executing_node_id, worker_id, execution_context,
                        result, options
                 FROM scans
                 WHERE parent_scan_id = $1
@@ -15173,6 +15219,38 @@ async def get_scan_result(scan_id: str):
                 )
             )
         raise HTTPException(status_code=404, detail="Scan result not found")
+
+
+@app.get("/scans/{scan_id}/queue-delivery")
+async def get_scan_queue_delivery(scan_id: str):
+    """Return content-free Stream delivery/reclaim evidence for one scan row."""
+    try:
+        scan_uuid = uuid.UUID(scan_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="Scan not found") from exc
+    async with db_pool.acquire() as conn:
+        scan = await conn.fetchrow(
+            "SELECT id, job_id, status, executing_node_id, worker_id FROM scans WHERE id=$1",
+            scan_uuid,
+        )
+    if not scan:
+        raise HTTPException(status_code=404, detail="Scan not found")
+    metadata = _redis_hash_text(get_redis().hgetall(f"job:{scan['job_id']}")) if scan.get("job_id") else {}
+    try:
+        attempts = int(metadata.get("queue_delivery_attempts") or 0)
+    except ValueError:
+        attempts = 0
+    return {
+        "scan_id": scan_id,
+        "status": str(scan.get("status") or ""),
+        "executing_node_id": str(scan.get("executing_node_id") or "") or None,
+        "worker_id": str(scan.get("worker_id") or "") or None,
+        "queue_message_id": metadata.get("queue_message_id") or None,
+        "delivery_attempts": attempts,
+        "reclaimed": metadata.get("queue_reclaimed", "").lower() == "true",
+        "consumer": metadata.get("queue_consumer") or None,
+        "processing_queue": metadata.get("processing_queue") or None,
+    }
 
 
 @app.get("/scans/{scan_id}/artifacts")

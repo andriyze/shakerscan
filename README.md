@@ -432,6 +432,7 @@ env                           Show runtime, PATH, and agent-launch guidance
 agent [codex|claude|opencode] Launch an agent in the runtime
 mcp                           Start the read-only Command Arsenal MCP adapter
 research <episode-id> [N]     Drive bounded local Codex decisions
+fleet init|join-token|accept  Provision a fleet or run physical acceptance
 gungnir <command>             Manage certificate-transparency monitoring
 build | rebuild               Build local images
 reset                         Delete scanner data and recreate the database

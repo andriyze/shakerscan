@@ -43,6 +43,15 @@ def test_request_meter_tracks_attempt_completion_retry_and_rejection():
     assert snapshot["retried_requests"] == 1
     assert snapshot["rejected_requests"] == 1
     assert snapshot["successful_requests"] == 1
+    assert snapshot["adapter_usage"] == {
+        "probe": {
+            "attempted": 2,
+            "completed": 2,
+            "retried": 1,
+            "rejected": 1,
+            "successful": 1,
+        }
+    }
 
 
 def test_request_meter_ignores_other_hosts():

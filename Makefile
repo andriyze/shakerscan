@@ -4,7 +4,7 @@ UV ?= uv
 UVX ?= uvx
 
 .PHONY: e2e e2e-model-intake e2e-model-intake-fixture e2e-ai-gate e2e-dast test \
-	release-gates dependency-lock dependency-audit upgrade-smoke
+	release-gates dependency-lock dependency-audit upgrade-smoke fleet-acceptance
 
 ## Regenerate the cross-platform Python 3.12 runtime lock consumed by scanner/Dockerfile.
 dependency-lock:
@@ -38,6 +38,11 @@ e2e-ai-gate:
 
 e2e-dast:
 	$(PY) tests/e2e/run_e2e.py --area dast
+
+## Physical fleet gate. Example:
+## make fleet-acceptance FLEET_ACCEPT_ARGS='--api-url https://scanner.example --public-host scanner.example --redis-url redis://127.0.0.1:6379 --target https://lab.example --authorized'
+fleet-acceptance:
+	$(PY) scripts/fleet_acceptance.py $(FLEET_ACCEPT_ARGS)
 
 ## Fast unit tests (pure logic) — run inside the api container, which has the runtime
 ## deps (asyncpg/fastapi/...). pytest ships in the image; we install it on the fly only
