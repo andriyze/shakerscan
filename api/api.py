@@ -117,6 +117,13 @@ except ModuleNotFoundError as exc:
     from api.evidence_storage import delete_remote_evidence_object, hydrate_evidence_content, local_evidence_path
 
 try:
+    from artifact_storage import ArtifactStorageError, read_bytes as read_artifact_bytes
+except ModuleNotFoundError as exc:
+    if exc.name != "artifact_storage":
+        raise
+    from api.artifact_storage import ArtifactStorageError, read_bytes as read_artifact_bytes
+
+try:
     from scan_verification_state import scan_time_verification_fields as _scan_time_verification_fields
 except ModuleNotFoundError as exc:
     if exc.name != "scan_verification_state":
@@ -13902,6 +13909,91 @@ async def get_scan_result(scan_id: str):
                 )
             )
         raise HTTPException(status_code=404, detail="Scan result not found")
+
+
+@app.get("/scans/{scan_id}/artifacts")
+async def list_scan_artifacts(
+    scan_id: str,
+    include_deleted: bool = False,
+    limit: int = Query(200, ge=1, le=500),
+):
+    """List the durable object manifest for a scan and its child shards."""
+    try:
+        scan_uuid = uuid.UUID(scan_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="Scan not found") from exc
+    async with db_pool.acquire() as conn:
+        exists = await conn.fetchval("SELECT 1 FROM scans WHERE id=$1", scan_uuid)
+        if not exists:
+            raise HTTPException(status_code=404, detail="Scan not found")
+        rows = await conn.fetch(
+            """
+            SELECT id, scan_id, parent_scan_id, shard_index, executing_node_id,
+                   artifact_type, artifact_key, content_type, storage_backend,
+                   content_sha256, size_bytes, status, retention_class, metadata,
+                   expires_at, deleted_at, created_at, updated_at
+            FROM scan_artifacts
+            WHERE (scan_id=$1 OR parent_scan_id=$1)
+              AND ($2 OR status <> 'deleted')
+            ORDER BY created_at DESC
+            LIMIT $3
+            """,
+            scan_uuid,
+            include_deleted,
+            limit,
+        )
+    artifacts = [row_to_dict(row) for row in rows]
+    for item in artifacts:
+        item["download_url"] = (
+            f"/scans/{item['scan_id']}/artifacts/{item['id']}"
+            if item.get("status") == "available"
+            else None
+        )
+    return {"scan_id": scan_id, "artifacts": artifacts, "count": len(artifacts)}
+
+
+@app.get("/scans/{scan_id}/artifacts/{artifact_id}")
+async def download_scan_artifact(scan_id: str, artifact_id: str):
+    """Proxy one artifact after validating scan ownership and its content hash."""
+    try:
+        scan_uuid = uuid.UUID(scan_id)
+        artifact_uuid = uuid.UUID(artifact_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="Artifact not found") from exc
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT * FROM scan_artifacts
+            WHERE id=$1 AND scan_id=$2 AND status='available' AND deleted_at IS NULL
+            """,
+            artifact_uuid,
+            scan_uuid,
+        )
+    if not row:
+        raise HTTPException(status_code=404, detail="Artifact not found")
+    artifact = dict(row)
+    try:
+        payload = await asyncio.to_thread(
+            read_artifact_bytes,
+            results_dir=RESULTS_DIR,
+            storage_uri=str(artifact["storage_uri"]),
+            expected_sha256=str(artifact["content_sha256"]),
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=410, detail="Artifact object is missing") from exc
+    except ArtifactStorageError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    filename = Path(str(artifact.get("artifact_key") or "artifact.bin")).name
+    safe_filename = re.sub(r"[^A-Za-z0-9_.-]+", "_", filename)[:160] or "artifact.bin"
+    return Response(
+        content=payload,
+        media_type=str(artifact.get("content_type") or "application/octet-stream"),
+        headers={
+            "Content-Disposition": f'attachment; filename="{safe_filename}"',
+            "ETag": f'"{artifact["content_sha256"]}"',
+            "Cache-Control": "private, max-age=300",
+        },
+    )
 
 
 @app.get("/scans/{scan_id}/logs")

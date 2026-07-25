@@ -2550,6 +2550,38 @@ async def run_schema_migrations(pool) -> None:
                 WHERE retention_delete_pending_at IS NOT NULL
             """)
             await conn.execute("""
+                CREATE TABLE IF NOT EXISTS scan_artifacts (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    scan_id UUID NOT NULL REFERENCES scans(id) ON DELETE CASCADE,
+                    parent_scan_id UUID REFERENCES scans(id) ON DELETE CASCADE,
+                    shard_index INTEGER,
+                    executing_node_id UUID,
+                    artifact_type TEXT NOT NULL,
+                    artifact_key TEXT NOT NULL,
+                    content_type TEXT NOT NULL DEFAULT 'application/octet-stream',
+                    storage_uri TEXT NOT NULL,
+                    storage_backend TEXT NOT NULL,
+                    content_sha256 TEXT NOT NULL,
+                    size_bytes BIGINT NOT NULL DEFAULT 0,
+                    status TEXT NOT NULL DEFAULT 'available'
+                        CHECK (status IN ('available','upload_failed','missing','deleted')),
+                    retention_class TEXT NOT NULL DEFAULT 'standard',
+                    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    expires_at TIMESTAMPTZ,
+                    deleted_at TIMESTAMPTZ,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    CONSTRAINT scan_artifacts_identity_unique
+                        UNIQUE (scan_id, artifact_type, artifact_key)
+                )
+            """)
+            await conn.execute("CREATE INDEX IF NOT EXISTS idx_scan_artifacts_scan ON scan_artifacts(scan_id, created_at DESC)")
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_scan_artifacts_retention
+                ON scan_artifacts(expires_at)
+                WHERE status = 'available' AND expires_at IS NOT NULL
+            """)
+            await conn.execute("""
                 CREATE TABLE IF NOT EXISTS evidence_retention_previews (
                     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                     target_id UUID NOT NULL REFERENCES targets(id) ON DELETE CASCADE,

@@ -66,6 +66,13 @@ except ModuleNotFoundError:
     )
     from scanner.scanner_tools.build_fingerprint import hash_source_files, runtime_file_map
 from evidence_storage import serialize_evidence_content, store_evidence_content
+from artifact_storage import (
+    ArtifactStorageError,
+    object_key as artifact_object_key,
+    remote_required as artifact_remote_required,
+    store_json as store_artifact_json,
+    upsert_manifest as upsert_artifact_manifest,
+)
 from secret_store import decrypt_secret
 try:
     from action_scope import evaluate_runtime_destination_scope
@@ -6096,6 +6103,70 @@ def save_result_file(result: dict, job_id: str) -> str:
     return str(filepath)
 
 
+async def persist_result_artifact(
+    result: dict,
+    job_id: str,
+    scan_id: str,
+    *,
+    parent_scan_id: str | None = None,
+    shard_index: int | None = None,
+    conn: Any | None = None,
+) -> str:
+    """Persist the compatibility result file and centralized artifact.
+
+    A joined fleet node fails the job lease if either the object upload or its
+    durable manifest cannot be committed. Standalone mode keeps the historical
+    local result path and treats a manifest failure as degraded compatibility.
+    """
+    local_result_path = save_result_file(result, job_id)
+    artifact_key = artifact_object_key(
+        scan_id=scan_id,
+        artifact_type="result",
+        shard_index=shard_index,
+        filename="result.json",
+    )
+    try:
+        descriptor = await asyncio.to_thread(
+            store_artifact_json,
+            result,
+            results_dir=RESULTS_DIR,
+            scan_id=scan_id,
+            artifact_type="result",
+            shard_index=shard_index,
+            filename="result.json",
+        )
+        async def record(active_conn):
+            await upsert_artifact_manifest(
+                active_conn,
+                scan_id=scan_id,
+                parent_scan_id=parent_scan_id,
+                shard_index=shard_index,
+                artifact_type="result",
+                artifact_key=artifact_key,
+                descriptor=descriptor,
+                metadata={"job_id": job_id, "canonical": True},
+            )
+        if conn is not None:
+            await record(conn)
+        else:
+            async with db_pool.acquire() as acquired_conn:
+                await record(acquired_conn)
+        return str(descriptor["storage_uri"])
+    except Exception as exc:
+        if artifact_remote_required():
+            if isinstance(exc, ArtifactStorageError):
+                raise
+            raise ArtifactStorageError(
+                f"artifact manifest persistence failed ({type(exc).__name__})"
+            ) from exc
+        print(
+            f"[{job_id[:8]}] artifact manifest degraded to local result: "
+            f"{type(exc).__name__}: {exc}",
+            flush=True,
+        )
+        return local_result_path
+
+
 def send_heartbeats(job_id: str, stop_event: threading.Event):
     """Send periodic heartbeats from a dedicated thread.
 
@@ -6665,7 +6736,7 @@ async def process_scan_job(job_data: dict):
 
         # Save an early artifact before DB finalization so runtime failures still
         # leave diagnostics. A later write refreshes it with receipt ids.
-        filepath = save_result_file(result, job_id)
+        filepath = await persist_result_artifact(result, job_id, scan_id)
 
         # Calculate duration
         completed_at = utc_now()
@@ -6806,7 +6877,7 @@ async def process_scan_job(job_data: dict):
 
         # Save to file after best-effort receipt emission so the file mirrors
         # the persisted scan result's receipt ids.
-        filepath = save_result_file(result, job_id)
+        filepath = await persist_result_artifact(result, job_id, scan_id)
 
         # Save findings (pure DB persistence)
         saved_count = 0
@@ -8076,7 +8147,13 @@ async def process_scan_shard_job(job_data: dict):
         grade = result.get('result', {}).get('grade')
         findings = result.get('findings', [])
         error = result.get('error')
-        filepath = save_result_file(result, job_id)
+        filepath = await persist_result_artifact(
+            result,
+            job_id,
+            scan_id,
+            parent_scan_id=parent_id,
+            shard_index=idx,
+        )
         completed_at = utc_now()
         duration = int((completed_at - now).total_seconds())
 
@@ -8440,7 +8517,7 @@ async def process_scan_merge_job(job_data: dict):
     except Exception as e:
         print(f"[merge {parent_id[:8]}] invariant check skipped: {e}", flush=True)
 
-    filepath = save_result_file(merged, parent_job_id)
+    filepath = await persist_result_artifact(merged, parent_job_id, parent_id)
 
     # Persist the deduped union under the PARENT scan id (clean ownership).
     saved = 0
@@ -8665,7 +8742,12 @@ async def process_scan_merge_job(job_data: dict):
                     'cap': parent_options.get('coverage_worklist_cap'),
                 }
                 if _apply_campaign_coverage_rollup(merged, campaign_coverage, worklist_meta):
-                    filepath = save_result_file(merged, parent_job_id)
+                    filepath = await persist_result_artifact(
+                        merged,
+                        parent_job_id,
+                        parent_id,
+                        conn=conn,
+                    )
                     await conn.execute(
                         "UPDATE scans SET result = $1 WHERE id = $2",
                         json.dumps(merged), uuid.UUID(parent_id),
@@ -9021,7 +9103,13 @@ async def process_exploit_batch_job(job_data: dict):
                 'claimed_endpoints': len(endpoint_ids),
             },
         }
-        filepath = save_result_file(result, job_id)
+        filepath = await persist_result_artifact(
+            result,
+            job_id,
+            scan_id,
+            parent_scan_id=parent_id,
+            shard_index=job_data.get('shard_index'),
+        )
         try:
             async with db_pool.acquire() as conn:
                 await asm_inventory.mark_partial(conn, endpoint_ids, verdict='auth_missing')
@@ -9081,7 +9169,13 @@ async def process_exploit_batch_job(job_data: dict):
                 )
         except Exception as e:
             print(f"[asm {job_id[:8]}] auth-missing inventory stamp error: {e}", flush=True)
-        filepath = save_result_file(result, job_id)
+        filepath = await persist_result_artifact(
+            result,
+            job_id,
+            scan_id,
+            parent_scan_id=parent_id,
+            shard_index=job_data.get('shard_index'),
+        )
         r.hset(f"job:{job_id}", mapping={
             'status': 'completed',
             'result_path': filepath,
@@ -9307,7 +9401,13 @@ async def process_exploit_batch_job(job_data: dict):
                 )
         except Exception as e:
             print(f"[asm {job_id[:8]}] ASM receipt record error: {e}", flush=True)
-        filepath = save_result_file(result, job_id)
+        filepath = await persist_result_artifact(
+            result,
+            job_id,
+            scan_id,
+            parent_scan_id=parent_id,
+            shard_index=job_data.get('shard_index'),
+        )
         saved = 0
         if target_id and findings and not error and not parent_id:
             try:

@@ -83,19 +83,42 @@ def _remote_timeout_seconds() -> int:
         return DEFAULT_REMOTE_TIMEOUT_SECONDS
 
 
-def _s3_config() -> dict[str, Any]:
-    endpoint = (os.environ.get("EVIDENCE_S3_ENDPOINT_URL") or os.environ.get("AWS_ENDPOINT_URL_S3") or "").strip()
+def _s3_config(*, namespace: str = "EVIDENCE") -> dict[str, Any]:
+    """Return S3 settings for evidence or general scan artifacts.
+
+    Artifact-specific settings are optional; every ARTIFACT_S3_* value falls
+    back to the established EVIDENCE_S3_* contract so existing MinIO/S3
+    deployments become the shared object plane without duplicate credentials.
+    """
+    prefix = str(namespace or "EVIDENCE").strip().upper()
+
+    def configured(name: str, fallback: str | None = None) -> str:
+        value = os.environ.get(f"{prefix}_{name}")
+        if value is None and fallback:
+            value = os.environ.get(f"EVIDENCE_{fallback}")
+        return str(value or "")
+
+    endpoint = (configured("S3_ENDPOINT_URL", "S3_ENDPOINT_URL") or os.environ.get("AWS_ENDPOINT_URL_S3") or "").strip()
     default_path_style = bool(endpoint)
+    timeout_value = configured("S3_TIMEOUT_SECONDS", "S3_TIMEOUT_SECONDS")
+    try:
+        timeout = max(1, int(timeout_value)) if timeout_value else _remote_timeout_seconds()
+    except (TypeError, ValueError):
+        timeout = _remote_timeout_seconds()
+    configured_prefix = str(os.environ.get(f"{prefix}_S3_PREFIX") or "").strip().strip("/")
     return {
-        "bucket": (os.environ.get("EVIDENCE_S3_BUCKET") or "").strip(),
-        "prefix": (os.environ.get("EVIDENCE_S3_PREFIX") or "evidence-objects").strip().strip("/"),
+        "bucket": configured("S3_BUCKET", "S3_BUCKET").strip(),
+        "prefix": configured_prefix or ("evidence-objects" if prefix == "EVIDENCE" else "scan-artifacts"),
         "endpoint": endpoint.rstrip("/"),
-        "region": (os.environ.get("EVIDENCE_S3_REGION") or os.environ.get("AWS_REGION") or "us-east-1").strip() or "us-east-1",
-        "access_key": (os.environ.get("EVIDENCE_S3_ACCESS_KEY_ID") or os.environ.get("AWS_ACCESS_KEY_ID") or "").strip(),
-        "secret_key": os.environ.get("EVIDENCE_S3_SECRET_ACCESS_KEY") or os.environ.get("AWS_SECRET_ACCESS_KEY") or "",
-        "session_token": os.environ.get("EVIDENCE_S3_SESSION_TOKEN") or os.environ.get("AWS_SESSION_TOKEN") or "",
-        "path_style": _env_bool("EVIDENCE_S3_FORCE_PATH_STYLE", default_path_style),
-        "timeout": _remote_timeout_seconds(),
+        "region": (configured("S3_REGION", "S3_REGION") or os.environ.get("AWS_REGION") or "us-east-1").strip() or "us-east-1",
+        "access_key": (configured("S3_ACCESS_KEY_ID", "S3_ACCESS_KEY_ID") or os.environ.get("AWS_ACCESS_KEY_ID") or "").strip(),
+        "secret_key": configured("S3_SECRET_ACCESS_KEY", "S3_SECRET_ACCESS_KEY") or os.environ.get("AWS_SECRET_ACCESS_KEY") or "",
+        "session_token": configured("S3_SESSION_TOKEN", "S3_SESSION_TOKEN") or os.environ.get("AWS_SESSION_TOKEN") or "",
+        "path_style": _env_bool(
+            f"{prefix}_S3_FORCE_PATH_STYLE",
+            _env_bool("EVIDENCE_S3_FORCE_PATH_STYLE", default_path_style),
+        ),
+        "timeout": timeout,
     }
 
 
@@ -193,8 +216,16 @@ def _s3_signed_headers(
     return headers
 
 
-def _s3_request(method: str, bucket: str, key: str, *, body: bytes = b"", content_type: str | None = None) -> bytes:
-    cfg = _s3_config()
+def _s3_request(
+    method: str,
+    bucket: str,
+    key: str,
+    *,
+    body: bytes = b"",
+    content_type: str | None = None,
+    config: dict[str, Any] | None = None,
+) -> bytes:
+    cfg = config or _s3_config()
     url = _s3_url(bucket, key, cfg)
     headers = _s3_signed_headers(method=method, url=url, body=body, cfg=cfg, content_type=content_type)
     request = urllib.request.Request(

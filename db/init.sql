@@ -265,6 +265,35 @@ CREATE INDEX idx_evidence_objects_scan ON evidence_objects(scan_id);
 CREATE INDEX idx_evidence_objects_retention_pending ON evidence_objects(retention_delete_pending_at)
     WHERE retention_delete_pending_at IS NOT NULL;
 
+-- General scan artifacts shared by every worker node. The object store holds
+-- bytes; this table is the durable, queryable index and integrity contract.
+CREATE TABLE scan_artifacts (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    scan_id UUID NOT NULL REFERENCES scans(id) ON DELETE CASCADE,
+    parent_scan_id UUID REFERENCES scans(id) ON DELETE CASCADE,
+    shard_index INTEGER,
+    executing_node_id UUID,
+    artifact_type TEXT NOT NULL,
+    artifact_key TEXT NOT NULL,
+    content_type TEXT NOT NULL DEFAULT 'application/octet-stream',
+    storage_uri TEXT NOT NULL,
+    storage_backend TEXT NOT NULL,
+    content_sha256 TEXT NOT NULL,
+    size_bytes BIGINT NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'available'
+        CHECK (status IN ('available','upload_failed','missing','deleted')),
+    retention_class TEXT NOT NULL DEFAULT 'standard',
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    expires_at TIMESTAMPTZ,
+    deleted_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT scan_artifacts_identity_unique UNIQUE (scan_id, artifact_type, artifact_key)
+);
+CREATE INDEX idx_scan_artifacts_scan ON scan_artifacts(scan_id, created_at DESC);
+CREATE INDEX idx_scan_artifacts_retention ON scan_artifacts(expires_at)
+    WHERE status = 'available' AND expires_at IS NOT NULL;
+
 -- One-use, target-scoped retention previews bind destructive cleanup to the
 -- exact server-computed evidence snapshot the operator reviewed.
 CREATE TABLE evidence_retention_previews (

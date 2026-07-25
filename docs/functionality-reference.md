@@ -1168,8 +1168,8 @@ it is the exhaustive backstop behind the human-readable product map above.
 
 | Surface | Count | Source |
 |---|---|---|
-| Public REST operations | 244 | `api/api.py` FastAPI decorators |
-| Unique REST paths | 201 | `api/api.py` |
+| Public REST operations | 246 | `api/api.py` FastAPI decorators |
+| Unique REST paths | 203 | `api/api.py` |
 | Check families | 14 | `api/check_registry.py` |
 | Command Arsenal commands | 82 | `api/command_arsenal.py` |
 | Tool adapters | 13 | `api/command_arsenal.py` |
@@ -1178,13 +1178,13 @@ it is the exhaustive backstop behind the human-readable product map above.
 | Scanner wrapper commands | 26 | `scanner.sh` |
 | Make targets | 10 | `Makefile` |
 | Release gates | 14 | `scripts/release_gates.py` |
-| Runtime environment keys | 228 | Python sources + Compose manifests |
+| Runtime environment keys | 231 | Python sources + Compose manifests |
 | Scanner modules | 83 | `scanner/scanner_tools/` |
 | UI pages | 31 | `ui/src/app/` |
 | Skills | 6 | `skills/` |
 | Slash commands | 15 | `.claude/commands/` |
 | Specialized subagents | 3 | `.claude/agents/` |
-| Durable tables | 49 | `db/init.sql` + migrations |
+| Durable tables | 50 | `db/init.sql` + migrations |
 
 ### Public REST Operations
 
@@ -1363,6 +1363,8 @@ it is the exhaustive backstop behind the human-readable product map above.
 | `POST` | `/scans/batch` | `submit_batch` |
 | `GET` | `/scans/{scan_id}` | `get_scan` |
 | `GET` | `/scans/{scan_id}/ai-redteam-report` | `get_ai_redteam_report` |
+| `GET` | `/scans/{scan_id}/artifacts` | `list_scan_artifacts` |
+| `GET` | `/scans/{scan_id}/artifacts/{artifact_id}` | `download_scan_artifact` |
 | `POST` | `/scans/{scan_id}/cancel` | `cancel_scan` |
 | `GET` | `/scans/{scan_id}/deployment-decision` | `get_scan_deployment_decision` |
 | `GET` | `/scans/{scan_id}/logs` | `get_scan_logs` |
@@ -1776,6 +1778,9 @@ Only key names and declaring sources are documented; secret values are never rea
 | `AI_VERIFY_MIN_SEVERITY` | `api/api.py`, `api/retest_contract.py`, `api/worker.py`, `docker-compose.release.yml`, `docker-compose.yml`, `scanner/scanner.py` |
 | `AI_VERIFY_USE_BROWSER` | `api/worker.py` |
 | `APPROVAL_RECEIPTS_REQUIRED_FOR_STATE_CHANGING_ACTIONS` | `api/api.py` |
+| `ARTIFACT_S3_PREFIX` | `docker-compose.release.yml`, `docker-compose.yml` |
+| `ARTIFACT_STORAGE_BACKEND` | `api/artifact_storage.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `ARTIFACT_STORAGE_REQUIRED` | `api/artifact_storage.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `ASM_DEFAULT_DOMAIN_RATE_PER_HOUR` | `api/asm_inventory.py` |
 | `ASM_DEFAULT_ENABLED` | `api/api.py` |
 | `ASM_GONE_RETENTION_DAYS` | `api/asm_inventory.py` |
@@ -1811,15 +1816,15 @@ Only key names and declaring sources are documented; secret values are never rea
 | `ENV` | `scanner/scanner_tools/remediation_kb.py` |
 | `EVIDENCE_INLINE_MAX_BYTES` | `api/evidence_storage.py` |
 | `EVIDENCE_RETENTION_PREVIEW_TTL_SECONDS` | `api/api.py` |
-| `EVIDENCE_S3_ACCESS_KEY_ID` | `api/evidence_storage.py` |
-| `EVIDENCE_S3_BUCKET` | `api/evidence_storage.py` |
-| `EVIDENCE_S3_ENDPOINT_URL` | `api/evidence_storage.py` |
-| `EVIDENCE_S3_PREFIX` | `api/evidence_storage.py` |
-| `EVIDENCE_S3_REGION` | `api/evidence_storage.py` |
-| `EVIDENCE_S3_SECRET_ACCESS_KEY` | `api/evidence_storage.py` |
-| `EVIDENCE_S3_SESSION_TOKEN` | `api/evidence_storage.py` |
+| `EVIDENCE_S3_ACCESS_KEY_ID` | `docker-compose.release.yml`, `docker-compose.yml` |
+| `EVIDENCE_S3_BUCKET` | `docker-compose.release.yml`, `docker-compose.yml` |
+| `EVIDENCE_S3_ENDPOINT_URL` | `docker-compose.release.yml`, `docker-compose.yml` |
+| `EVIDENCE_S3_FORCE_PATH_STYLE` | `docker-compose.release.yml`, `docker-compose.yml` |
+| `EVIDENCE_S3_REGION` | `docker-compose.release.yml`, `docker-compose.yml` |
+| `EVIDENCE_S3_SECRET_ACCESS_KEY` | `docker-compose.release.yml`, `docker-compose.yml` |
+| `EVIDENCE_S3_SESSION_TOKEN` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `EVIDENCE_S3_TIMEOUT_SECONDS` | `api/evidence_storage.py` |
-| `EVIDENCE_STORAGE_BACKEND` | `api/evidence_storage.py` |
+| `EVIDENCE_STORAGE_BACKEND` | `api/artifact_storage.py`, `api/evidence_storage.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `FINALIZATION_HEARTBEAT_TIMEOUT_MINUTES` | `api/api.py` |
 | `FLEET_AGENT_INTERVAL_SECONDS` | `api/fleet_agent.py`, `docker-compose.worker.yml` |
 | `FLEET_ALLOW_INSECURE_ENROLLMENT` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
@@ -1936,7 +1941,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SHAKERSCAN_MAX_WORKERS` | `api/api.py`, `docker-compose.yml` |
 | `SHAKERSCAN_MCP_ALLOW_REMOTE_API` | `scripts/shakerscan_mcp.py` |
 | `SHAKERSCAN_MCP_TIMEOUT_SECONDS` | `scripts/shakerscan_mcp.py` |
-| `SHAKERSCAN_NODE_ID` | `api/fleet_worker_entrypoint.py`, `api/worker.py` |
+| `SHAKERSCAN_NODE_ID` | `api/artifact_storage.py`, `api/fleet_worker_entrypoint.py`, `api/worker.py` |
 | `SHAKERSCAN_PAYLOAD_PACK_MAX` | `scanner/scanner_tools/active_checks.py` |
 | `SHAKERSCAN_PER_WORKER_MEM_GB` | `api/api.py`, `docker-compose.yml` |
 | `SHAKERSCAN_PLATFORM_MEMORY_RESERVE_GB` | `api/api.py`, `docker-compose.yml` |
@@ -2088,6 +2093,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `research_episodes` | `api/retest_contract.py` |
 | `research_events` | `api/retest_contract.py` |
 | `research_observations` | `api/retest_contract.py` |
+| `scan_artifacts` | `db/init.sql` |
 | `scan_campaigns` | `db/init.sql` |
 | `scans` | `db/init.sql` |
 | `schedules` | `db/init.sql` |

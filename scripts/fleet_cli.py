@@ -415,6 +415,15 @@ def _connection_bundle(control_ip: str, env: dict[str, str]) -> dict[str, Any]:
         "EVIDENCE_S3_SECRET_ACCESS_KEY",
         "EVIDENCE_S3_SESSION_TOKEN",
         "EVIDENCE_S3_FORCE_PATH_STYLE",
+        "ARTIFACT_STORAGE_BACKEND",
+        "ARTIFACT_S3_ENDPOINT_URL",
+        "ARTIFACT_S3_BUCKET",
+        "ARTIFACT_S3_REGION",
+        "ARTIFACT_S3_ACCESS_KEY_ID",
+        "ARTIFACT_S3_SECRET_ACCESS_KEY",
+        "ARTIFACT_S3_SESSION_TOKEN",
+        "ARTIFACT_S3_FORCE_PATH_STYLE",
+        "ARTIFACT_S3_PREFIX",
     )
     for key in evidence_keys:
         if env.get(key):
