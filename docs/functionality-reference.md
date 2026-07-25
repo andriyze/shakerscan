@@ -441,10 +441,11 @@ coverage over time within safe budgets and allowed windows (`api/asm_inventory.p
 
 Current execution design: [`docs/dast-asm-architecture.md`](dast-asm-architecture.md).
 
-**Future multi-node boundary:** production coordination across multiple VPS hosts is not implemented.
-The shipped parent/plan/shard/merge queue is the execution substrate, but remote enrollment, node
-identity, leases/ack/reclaim, fencing, evidence transfer, placement, and fleet-wide rate controls
-remain future work. The design authority is
+**Multi-node boundary:** the first owned-fleet trust foundation is implemented: durable node identity,
+hashed single-use join tokens, HTTPS enrollment, authenticated heartbeat, one-time overlay connection
+bundles, and credential rotation/revocation. WireGuard/CLI host automation, the worker-only runtime,
+node-agent, and the two-VPS queue proof are not complete. Production leases/ack/reclaim, fencing,
+general evidence transfer, placement, and fleet-wide rate controls remain future work. The design authority is
 [`docs/multi-node-architecture.md`](multi-node-architecture.md); prioritized delivery work is tracked
 in [`docs/proposed-next-steps.md`](proposed-next-steps.md).
 
@@ -812,6 +813,15 @@ how-to with request bodies is in [`CLAUDE.md`](../CLAUDE.md) / [`AGENTS.md`](../
 **Health & settings**: `GET /` · `GET /health` · `GET|PUT /settings/ai` · `POST /settings/ai/test` ·
 `GET|PUT /settings/scan-execution` · `GET|PUT /settings/automation`
 
+**Owned-fleet foundation**: `POST /fleet/join-tokens` · `POST /fleet/nodes/join` ·
+`GET /fleet/nodes` · `POST /fleet/nodes/{id}/heartbeat` ·
+`POST /fleet/nodes/{id}/connection-bundle` · `POST /fleet/nodes/{id}/credentials/rotate` ·
+`POST /fleet/nodes/{id}/revoke`. Join tokens and node credentials are returned once and stored only
+as hashes. Fleet lifecycle operations are loopback-operator actions unless an explicit remote
+operator token is configured; enrollment and secret delivery require HTTPS, and connection bundles
+also require the actual socket peer to be inside the configured overlay CIDR. This is the trust/API
+foundation, not yet a completed one-command WireGuard or remote-worker deployment workflow.
+
 **Command Arsenal**: `GET /arsenal/commands` · `GET /arsenal/contracts` ·
 `POST|GET /arsenal/plans` · `POST|GET /arsenal/context-packs` ·
 `POST /arsenal/context-packs/from-target` · `POST|GET /arsenal/decision-traces` ·
@@ -996,7 +1006,13 @@ explicit per-scan auth fields retain precedence, and undecryptable/expired profi
 - Allocation fallback: `COVERAGE_ALLOCATION_DEFAULT`. Shard ceilings: `SHAKERSCAN_MAX_SHARDS`,
   `SHAKERSCAN_COVERAGE_MAX_SHARDS`, `PARALLEL_SHARD_MAX_PER_PARENT`, etc.
 - Custom dictionaries: `SHAKERSCAN_CUSTOM_WORDLIST`, `SHAKERSCAN_CUSTOM_<CAT>_PAYLOADS`.
-- Deployment/binding: `SHAKERSCAN_BIND_HOST`, `SHAKERSCAN_PUBLIC_HOST`, `SHAKERSCAN_REMOTE`.
+- Deployment/binding: `SHAKERSCAN_BIND_HOST` (UI/API), `SHAKERSCAN_DATA_BIND_HOST`
+  (Redis/Postgres; loopback by default), `SHAKERSCAN_PUBLIC_HOST`, `SHAKERSCAN_REMOTE`.
+- Owned-fleet bootstrap: `FLEET_OVERLAY_CIDR`, `FLEET_CONTROL_PLANE_OVERLAY_URL`,
+  `FLEET_WIREGUARD_PUBLIC_KEY`, `FLEET_WIREGUARD_ENDPOINT`, digest-pinned
+  `FLEET_WORKER_IMAGE_DIGEST`, optional remote `FLEET_OPERATOR_TOKEN`, and one-time
+  `FLEET_CONNECTION_BUNDLE_JSON`. Insecure enrollment is disabled by default and its explicit test
+  escape hatch works only from loopback.
 
 **Integrated external tools**: `httpx` (HTTP probing), `katana` (crawling), `nuclei` (templates),
 `ffuf`/`meg`/`dirb`/`gobuster` (content discovery), `dalfox`/XSStrike (XSS), `sqlmap`/commix
@@ -1138,8 +1154,8 @@ it is the exhaustive backstop behind the human-readable product map above.
 
 | Surface | Count | Source |
 |---|---|---|
-| Public REST operations | 234 | `api/api.py` FastAPI decorators |
-| Unique REST paths | 192 | `api/api.py` |
+| Public REST operations | 241 | `api/api.py` FastAPI decorators |
+| Unique REST paths | 199 | `api/api.py` |
 | Check families | 14 | `api/check_registry.py` |
 | Command Arsenal commands | 82 | `api/command_arsenal.py` |
 | Tool adapters | 13 | `api/command_arsenal.py` |
@@ -1148,13 +1164,13 @@ it is the exhaustive backstop behind the human-readable product map above.
 | Scanner wrapper commands | 24 | `scanner.sh` |
 | Make targets | 10 | `Makefile` |
 | Release gates | 14 | `scripts/release_gates.py` |
-| Runtime environment keys | 197 | Python sources + Compose manifests |
+| Runtime environment keys | 208 | Python sources + Compose manifests |
 | Scanner modules | 83 | `scanner/scanner_tools/` |
 | UI pages | 30 | `ui/src/app/` |
 | Skills | 6 | `skills/` |
 | Slash commands | 15 | `.claude/commands/` |
 | Specialized subagents | 3 | `.claude/agents/` |
-| Durable tables | 46 | `db/init.sql` + migrations |
+| Durable tables | 49 | `db/init.sql` + migrations |
 
 ### Public REST Operations
 
@@ -1282,6 +1298,13 @@ it is the exhaustive backstop behind the human-readable product map above.
 | `PATCH` | `/findings/{finding_id:path}` | `update_finding` |
 | `POST` | `/findings/{finding_id:path}/retest` | `retest_finding` |
 | `GET` | `/findings/{finding_id}/evidence` | `list_finding_evidence` |
+| `POST` | `/fleet/join-tokens` | `create_fleet_join_token` |
+| `GET` | `/fleet/nodes` | `list_fleet_nodes` |
+| `POST` | `/fleet/nodes/join` | `join_fleet_node` |
+| `POST` | `/fleet/nodes/{node_id}/connection-bundle` | `get_fleet_connection_bundle` |
+| `POST` | `/fleet/nodes/{node_id}/credentials/rotate` | `rotate_fleet_node_credential` |
+| `POST` | `/fleet/nodes/{node_id}/heartbeat` | `heartbeat_fleet_node` |
+| `POST` | `/fleet/nodes/{node_id}/revoke` | `revoke_fleet_node` |
 | `POST` | `/gungnir/start` | `gungnir_start` |
 | `GET` | `/gungnir/status` | `gungnir_status` |
 | `POST` | `/gungnir/stop` | `gungnir_stop` |
@@ -1781,6 +1804,16 @@ Only key names and declaring sources are documented; secret values are never rea
 | `EVIDENCE_S3_TIMEOUT_SECONDS` | `api/evidence_storage.py` |
 | `EVIDENCE_STORAGE_BACKEND` | `api/evidence_storage.py` |
 | `FINALIZATION_HEARTBEAT_TIMEOUT_MINUTES` | `api/api.py` |
+| `FLEET_ALLOW_INSECURE_ENROLLMENT` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `FLEET_CONNECTION_BUNDLE_JSON` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `FLEET_CONTROL_PLANE_OVERLAY_URL` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `FLEET_DESIRED_WORKER_COUNT` | `docker-compose.release.yml`, `docker-compose.yml` |
+| `FLEET_HEARTBEAT_TIMEOUT_SECONDS` | `docker-compose.release.yml`, `docker-compose.yml` |
+| `FLEET_OPERATOR_TOKEN` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `FLEET_OVERLAY_CIDR` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `FLEET_WIREGUARD_ENDPOINT` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `FLEET_WIREGUARD_PUBLIC_KEY` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `FLEET_WORKER_IMAGE_DIGEST` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `FULL_COVERAGE_ALLOCATION_DEFAULT` | `api/parallel_scan.py` |
 | `GITHUB_TOKEN` | `scanner/scanner.py` |
 | `GIT_COMMIT` | `api/api.py`, `api/worker.py`, `docker-compose.release.yml`, `docker-compose.yml`, `scanner/scanner.py` |
@@ -1860,11 +1893,12 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SHAKERSCAN_API_PORT` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_API_URL` | `scripts/shakerscan_mcp.py` |
 | `SHAKERSCAN_ASM_DISPATCH_INTERVAL` | `api/api.py` |
-| `SHAKERSCAN_BIND_HOST` | `docker-compose.release.yml`, `docker-compose.yml` |
+| `SHAKERSCAN_BIND_HOST` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_CANCEL_FILE` | `scanner/scanner_tools/cancellation.py`, `scanner/scanner_tools/common.py` |
 | `SHAKERSCAN_CORS_ALLOW_ORIGINS` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_CORS_ALLOW_ORIGIN_REGEX` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_CUSTOM_WORDLIST` | `scanner/scanner_tools/discovery.py` |
+| `SHAKERSCAN_DATA_BIND_HOST` | `docker-compose.yml` |
 | `SHAKERSCAN_DEBUG_POST_INFER` | `scanner/scanner.py` |
 | `SHAKERSCAN_ENABLE_ADAPTIVE_THROTTLE` | `scanner/scanner.py` |
 | `SHAKERSCAN_MAX_ACTIVE_SCANS` | `api/api.py`, `api/worker.py` |
@@ -2006,6 +2040,9 @@ Only key names and declaring sources are documented; secret values are never rea
 | `findings` | `db/init.sql` |
 | `hypotheses` | `api/retest_contract.py` |
 | `model_intake_trust_anchors` | `db/init.sql` |
+| `node_credentials` | `db/init.sql` |
+| `node_join_tokens` | `db/init.sql` |
+| `nodes` | `db/init.sql` |
 | `operation_plans` | `api/retest_contract.py` |
 | `policy_profiles` | `db/init.sql` |
 | `refuter_reviews` | `api/retest_contract.py` |

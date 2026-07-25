@@ -1,10 +1,10 @@
 # Multi-Node Architecture
 
-**Status:** Design authority + Phase-1 draft vertical-slice specification. The fan-out substrate this
-builds on is shipped (see the code-grounded capability table below); the remote-fleet trust and
-lifecycle layer is not implemented yet. Milestone A defines the intended two-VPS slice, but its
-pre-overlay enrollment, node-credential, worker-image, and artifact contracts must be completed before
-implementation (§6). Phases 2–3 remain design-level.
+**Status:** Design authority + Phase-1 vertical-slice implementation in progress. The fan-out
+substrate is shipped (see the code-grounded capability table below), and the durable node identity,
+single-use enrollment, authenticated heartbeat, and one-time connection-bundle API foundation is now
+implemented. WireGuard/CLI host mutation, worker-only deployment, the minimal node-agent, and the
+two-VPS proof are not complete. Phases 2–3 remain design-level.
 **Scope:** run a coordinated ShakerScan fleet across multiple VMs/VPS hosts so one UI/API
 can scan more targets at once and run high-budget Full Coverage scans by using workers
 from many machines.
@@ -29,7 +29,8 @@ becoming stale prose. For product priority and phased order, see
 | Managed `evidence_objects` backend (SigV4 S3/MinIO client: content-addressed PUT, hash-verified GET, retention DELETE) | **Built but OFF by default** — only covers large managed evidence-object payloads. General scan results, checkpoints, and other `/results` artifacts remain local; Compose does not yet pass the S3 settings through. | `evidence_storage.py`; `worker.py` `save_result_file` |
 | Job-queue delivery | **Built as at-most-once** — plain Redis list (`RPUSH`/`BLPOP`), compensated by DB row + heartbeat + `processing_lease_at` marker. **No per-message lease/ack/reclaim/fencing.** | `QUEUE_NAME` (`worker.py`, `api.py`) |
 | Remote worker scaling | **Local Docker socket only** (`/var/run/docker.sock`); no remote-node scaling | `POST /workers` (`api.py`); `scanner.sh scale` |
-| Node identity, enrollment, join tokens, node-agent, heartbeat, WireGuard provisioning, placement, `nodes` table | **Not present (greenfield)** — specified by this document | — |
+| Node identity, enrollment, join tokens, heartbeat, credential rotation/revocation, `nodes` table | **Foundation built** — host join automation and fleet UI remain incomplete | `fleet.py`; `/fleet/*`; `nodes`, `node_join_tokens`, `node_credentials` |
+| Node-agent, WireGuard provisioning, worker-only deployment, placement | **Not present** — specified by this document | — |
 
 The takeaways that shape the plan:
 
@@ -364,7 +365,8 @@ owned internal fleet, but it is not the full production architecture.
 
 Important limitations in Phase 1:
 
-- scaling remote nodes is manual unless a node-agent exists;
+- a minimal node-agent performs enrollment, overlay proof, heartbeat, and worker startup; desired-state
+  scaling and drain orchestration remain manual until Phase 2 expands that agent;
 - evidence remains incomplete unless storage is centralized;
 - a worker crash can still lose an in-flight job under list/pop semantics;
 - routing assumes workers are mostly interchangeable.
@@ -388,10 +390,12 @@ CREATE TABLE IF NOT EXISTS nodes (
   hostname             TEXT,
   role                 TEXT NOT NULL CHECK (role IN ('control_plane','worker')),
   overlay_ip           INET UNIQUE,
+  wireguard_public_key TEXT UNIQUE,
   egress_ip            INET,
   region               TEXT,
   labels               JSONB NOT NULL DEFAULT '{}'::jsonb,
   build_fingerprint    TEXT,
+  worker_image_digest  TEXT,
   desired_worker_count INT  NOT NULL DEFAULT 0,
   active_worker_count  INT  NOT NULL DEFAULT 0,
   capacity             JSONB NOT NULL DEFAULT '{}'::jsonb,
@@ -399,6 +403,7 @@ CREATE TABLE IF NOT EXISTS nodes (
                          CHECK (status IN ('joining','healthy','stale','draining','disabled')),
   drain                BOOLEAN NOT NULL DEFAULT FALSE,
   last_heartbeat_at    TIMESTAMPTZ,
+  connection_bundle_delivered_at TIMESTAMPTZ,
   created_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at           TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -415,6 +420,7 @@ CREATE TABLE IF NOT EXISTS node_credentials (
   id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   node_id         UUID NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
   credential_hash TEXT NOT NULL UNIQUE,       -- hash only; return the raw secret once
+  credential_version INT NOT NULL DEFAULT 1,
   expires_at      TIMESTAMPTZ,
   revoked_at      TIMESTAMPTZ,
   last_used_at    TIMESTAMPTZ,
@@ -427,6 +433,13 @@ NOW() RETURNING ...`, then create the node and its credential in the same databa
 concurrent second consumer must receive no row. The API must authenticate heartbeat and lifecycle
 calls by hashing the presented node credential and checking expiry/revocation; `node_id` alone is
 never authority.
+
+Overlay address allocation is part of that same transaction. It takes a dedicated Postgres
+transaction-level advisory lock, reserves the network address, broadcast address, and control-plane
+address, and selects the first unused worker address. The database `UNIQUE` constraint remains the
+final collision guard. WireGuard public keys are strict base64-encoded 32-byte values and are unique
+per node. The control plane persists its private key outside the database with owner-only filesystem
+permissions; restart must reuse it, never silently create a new fleet identity.
 
 Each worker reports its `build_fingerprint` on heartbeat so the existing stale-build refusal
 (`build_current` / `expected_build_fingerprint_at_submit` / `stale_worker_count_at_submit`) extends to
@@ -448,10 +461,13 @@ EVIDENCE_S3_ENDPOINT_URL=http://<artifact-store-overlay-ip>:9000
 ```
 
 **3. Overlay binding (never expose data stores publicly).** The control plane binds Redis and
-Postgres to the WireGuard overlay interface only — never `0.0.0.0`. Both bind to `SHAKERSCAN_BIND_HOST`
-today (default `127.0.0.1`); fleet mode sets it to the control-plane overlay IP and adds a firewall
-rule permitting only peer overlay addresses to reach 6379/5432. Public exposure of 6379/5432 remains a
-non-goal (§11).
+Postgres to the WireGuard overlay interface only — never `0.0.0.0`. Compose currently reuses
+`SHAKERSCAN_BIND_HOST` for API, UI, Redis, and Postgres, so fleet mode must first introduce a separate
+`SHAKERSCAN_DATA_BIND_HOST` for Redis/Postgres. `SHAKERSCAN_BIND_HOST` continues to control the public
+API/UI listener; changing the data listener must not make the UI disappear or accidentally broaden a
+public listener. Fleet initialization sets only the data bind to the control-plane overlay IP and
+adds a firewall rule permitting only peer overlay addresses to reach 6379/5432. Public exposure of
+6379/5432 remains a non-goal (§11).
 
 **4. Fleet CLI + pre-overlay bootstrap contract.** Add three verbs to `scanner.sh` (its current
 dispatch table has no fleet/join verb):
@@ -473,6 +489,18 @@ allocates a unique overlay IP, inserts the node and hashed durable credential, a
 peer information. The worker installs that configuration, proves overlay reachability, and only then
 uses the private Redis/Postgres URLs. Plain HTTP is not an enrollment transport.
 
+The API decides transport security from the ASGI request scheme supplied by its trusted listener or
+reverse proxy configuration; it does not trust caller-controlled forwarding headers. An explicit
+`FLEET_ALLOW_INSECURE_ENROLLMENT=true` escape hatch is permitted only for a loopback/local lab and is
+off by default. Production fleet initialization must refuse that setting.
+
+Fleet lifecycle authority is separate from node authority. Join-token creation, credential rotation,
+bundle reset, drain, and revoke are accepted from the control-plane loopback listener, or over HTTPS
+with an explicit high-entropy `FLEET_OPERATOR_TOKEN`. A node credential can never call those operator
+operations. This is required even while the rest of the self-hosted API keeps its trusted-operator,
+tokenless CLI model: otherwise any network client that can reach the API could mint its own join
+token. Secret-bearing responses set `Cache-Control: no-store`.
+
 **5. Bootstrap response + post-overlay connection bundle.** `POST /fleet/nodes/join` returns only
 the material needed to establish the overlay plus the one-time node credential (the worker persists
 it and never re-uses the enrollment token):
@@ -491,7 +519,16 @@ credentials once; the response is never available over the public listener and i
 data-store secrets are delivered only after the overlay exists. Rotation and revocation are part of
 the node API even if automatic rotation is deferred.
 
-**6. Heartbeat + fleet view.** The worker posts `POST /fleet/nodes/{id}/heartbeat` (status, active
+The bundle gate uses the actual socket peer address (`Request.client.host`), never
+`X-Forwarded-For`, and requires that address to be inside the configured fleet overlay CIDR. Bundle
+consumption is an atomic `UPDATE ... WHERE connection_bundle_delivered_at IS NULL RETURNING ...`; a
+retry after a successfully committed response is denied and requires an explicit operator reset or
+credential rotation workflow. Neither access logs nor audit payloads may contain the bundle.
+
+**6. Minimal Phase-1 node-agent + fleet view.** The join command installs a small node-agent in
+Phase 1. It owns the persisted node credential, overlay reachability proof, worker-only startup, and
+the fixed-interval heartbeat; it does not yet implement desired-state scaling or automated drain.
+The agent posts `POST /fleet/nodes/{id}/heartbeat` (status, active
 worker count, host resources, `build_fingerprint`) on a fixed interval; the control plane marks a node
 `stale` past a timeout (reuse the `HEARTBEAT_TIMEOUT_MINUTES` convention) and surfaces every node in a
 fleet view. The dashboard operations bar / `GET /workers` extends to per-node health, capacity, egress
@@ -503,7 +540,7 @@ and Redis/Postgres are unreachable from the public internet. This is explicitly 
 an unattended-production claim. The accepted Phase-1 gaps remain:
 at-most-once delivery (a hard worker loss between `BLPOP` and the first heartbeat still relies on the
 DB reconcilers, not a Redis lease — §9), worker-local result/checkpoint artifacts even when managed
-evidence objects use S3 (§8), and manual per-node scaling until the Phase-2 node-agent lands.
+evidence objects use S3 (§8), and manual per-node scaling until Phase 2 expands the node-agent.
 
 ### Phase 2: Production-Ready Owned Fleet
 

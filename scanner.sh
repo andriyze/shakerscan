@@ -1407,6 +1407,7 @@ print_help() {
     echo "  --confirm-active   Confirm authorization for full, aggressive, or smart scans"
     echo "  Scan-specific options are listed by './scanner.sh scan --help'"
     echo "  SHAKERSCAN_BIND_HOST=IP overrides the Docker bind address"
+    echo "  SHAKERSCAN_DATA_BIND_HOST=IP separately binds local Redis/Postgres (default: 127.0.0.1)"
     echo "  SHAKERSCAN_PUBLIC_HOST=HOST overrides displayed/browser API host"
     echo "  SHAKERSCAN_PULL_IMAGES=0 skips Docker Hub pulls in prebuilt mode"
     echo ""

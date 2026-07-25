@@ -198,6 +198,41 @@ from target_dedupe import (
 import check_registry
 
 try:
+    from fleet import (
+        FleetAuthenticationError,
+        FleetBootstrapConfig,
+        FleetConfigurationError,
+        FleetConflictError,
+        FleetEnrollmentError,
+        authenticate_node as _authenticate_fleet_node,
+        consume_connection_bundle as _consume_fleet_connection_bundle,
+        create_join_token as _create_fleet_join_token,
+        enroll_node as _enroll_fleet_node,
+        generate_secret as _generate_fleet_secret,
+        hash_secret as _hash_fleet_secret,
+        public_node as _public_fleet_node,
+        record_heartbeat as _record_fleet_heartbeat,
+        socket_peer_is_overlay as _fleet_peer_is_overlay,
+    )
+except ModuleNotFoundError:
+    from api.fleet import (
+        FleetAuthenticationError,
+        FleetBootstrapConfig,
+        FleetConfigurationError,
+        FleetConflictError,
+        FleetEnrollmentError,
+        authenticate_node as _authenticate_fleet_node,
+        consume_connection_bundle as _consume_fleet_connection_bundle,
+        create_join_token as _create_fleet_join_token,
+        enroll_node as _enroll_fleet_node,
+        generate_secret as _generate_fleet_secret,
+        hash_secret as _hash_fleet_secret,
+        public_node as _public_fleet_node,
+        record_heartbeat as _record_fleet_heartbeat,
+        socket_peer_is_overlay as _fleet_peer_is_overlay,
+    )
+
+try:
     from action_scope import (
         evaluate_runtime_destination_scope,
         evaluate_scope,
@@ -4354,6 +4389,122 @@ class AISettingsProbeRequest(BaseModel):
     ai_fallback_model: Optional[str] = None
 
 
+class FleetJoinTokenRequest(BaseModel):
+    role: str = Field(default="worker", pattern="^worker$")
+    ttl_seconds: int = Field(default=3600, ge=60, le=604800)
+
+
+class FleetNodeJoinRequest(BaseModel):
+    token: str = Field(min_length=20, max_length=256)
+    name: str = Field(min_length=1, max_length=128)
+    hostname: Optional[str] = Field(default=None, max_length=255)
+    region: Optional[str] = Field(default=None, max_length=128)
+    wireguard_public_key: str = Field(min_length=40, max_length=64)
+    labels: dict[str, Any] = Field(default_factory=dict)
+    capacity: dict[str, Any] = Field(default_factory=dict)
+    build_fingerprint: Optional[str] = Field(default=None, max_length=256)
+
+
+class FleetHeartbeatRequest(BaseModel):
+    active_worker_count: int = Field(default=0, ge=0, le=128)
+    capacity: dict[str, Any] = Field(default_factory=dict)
+    build_fingerprint: Optional[str] = Field(default=None, max_length=256)
+    egress_ip: Optional[str] = Field(default=None, max_length=64)
+
+
+def _fleet_bootstrap_config() -> FleetBootstrapConfig:
+    required = {
+        "overlay_cidr": os.environ.get("FLEET_OVERLAY_CIDR", ""),
+        "control_plane_overlay_url": os.environ.get("FLEET_CONTROL_PLANE_OVERLAY_URL", ""),
+        "control_plane_wireguard_public_key": os.environ.get("FLEET_WIREGUARD_PUBLIC_KEY", ""),
+        "control_plane_wireguard_endpoint": os.environ.get("FLEET_WIREGUARD_ENDPOINT", ""),
+        "worker_image_digest": os.environ.get("FLEET_WORKER_IMAGE_DIGEST", ""),
+    }
+    missing = [key for key, value in required.items() if not value]
+    if missing:
+        raise FleetConfigurationError(f"fleet bootstrap is not configured ({', '.join(missing)})")
+    return FleetBootstrapConfig(
+        **required,
+        desired_worker_count=_int_env("FLEET_DESIRED_WORKER_COUNT", 1),
+    ).validated()
+
+
+def _fleet_request_is_https(request: Request) -> bool:
+    if request.url.scheme == "https":
+        return True
+    allow_lab_http = os.environ.get("FLEET_ALLOW_INSECURE_ENROLLMENT", "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+    peer = getattr(getattr(request, "client", None), "host", None)
+    try:
+        peer_is_loopback = bool(peer) and ipaddress.ip_address(peer).is_loopback
+    except ValueError:
+        peer_is_loopback = False
+    configured_bind = os.environ.get("SHAKERSCAN_BIND_HOST", "").strip()
+    if configured_bind:
+        try:
+            local_transport = ipaddress.ip_address(configured_bind).is_loopback
+        except ValueError:
+            local_transport = False
+    else:
+        local_transport = peer_is_loopback
+    return allow_lab_http and local_transport
+
+
+def _require_fleet_https(request: Request) -> None:
+    if not _fleet_request_is_https(request):
+        raise HTTPException(status_code=400, detail="fleet enrollment and node secrets require HTTPS")
+
+
+def _fleet_bearer_credential(request: Request) -> str:
+    scheme, separator, value = request.headers.get("authorization", "").partition(" ")
+    if not separator or scheme.lower() != "bearer" or not value.strip():
+        raise HTTPException(status_code=401, detail="node bearer credential is required")
+    return value.strip()
+
+
+def _require_fleet_operator(request: Request) -> None:
+    """Keep fleet lifecycle authority local unless an explicit remote operator secret exists."""
+    configured_bind = os.environ.get("SHAKERSCAN_BIND_HOST", "").strip()
+    peer = getattr(getattr(request, "client", None), "host", None)
+    if configured_bind:
+        try:
+            local_transport = ipaddress.ip_address(configured_bind).is_loopback
+        except ValueError:
+            local_transport = False
+    else:
+        try:
+            local_transport = bool(peer) and ipaddress.ip_address(peer).is_loopback
+        except ValueError:
+            local_transport = False
+    if local_transport:
+        return
+    if request.url.scheme != "https":
+        raise HTTPException(status_code=403, detail="fleet operator access requires loopback or authenticated HTTPS")
+    expected = os.environ.get("FLEET_OPERATOR_TOKEN", "")
+    if len(expected) < 32:
+        raise HTTPException(status_code=403, detail="fleet operator access is not enabled remotely")
+    presented = _fleet_bearer_credential(request)
+    if not secrets.compare_digest(presented, expected):
+        raise HTTPException(status_code=403, detail="fleet operator authentication failed")
+
+
+def _fleet_connection_bundle() -> dict[str, Any]:
+    raw = os.environ.get("FLEET_CONNECTION_BUNDLE_JSON", "")
+    if not raw:
+        raise FleetConfigurationError("FLEET_CONNECTION_BUNDLE_JSON is not configured")
+    try:
+        bundle = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise FleetConfigurationError("FLEET_CONNECTION_BUNDLE_JSON must be valid JSON") from exc
+    if not isinstance(bundle, dict):
+        raise FleetConfigurationError("FLEET_CONNECTION_BUNDLE_JSON must be a JSON object")
+    for key in ("redis_url", "database_url"):
+        if not isinstance(bundle.get(key), str) or not bundle[key].strip():
+            raise FleetConfigurationError(f"connection bundle requires {key}")
+    return bundle
+
+
 def _normalize_ai_endpoint_url(raw: str) -> str:
     candidate = str(raw or "").strip()
     if not candidate:
@@ -7029,6 +7180,188 @@ def _run_ai_target_connectivity_probe(target: dict[str, Any], *, prompt: str, ti
 
 
 # ============================================================
+# OWNED FLEET FOUNDATION
+# ============================================================
+
+@app.post("/fleet/join-tokens")
+async def create_fleet_join_token(body: FleetJoinTokenRequest, request: Request, response: Response):
+    """Mint one single-use worker enrollment token; the raw value is returned once."""
+    _require_fleet_operator(request)
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        async with db_pool.acquire() as conn:
+            result = await _create_fleet_join_token(
+                conn,
+                role=body.role,
+                ttl_seconds=body.ttl_seconds,
+            )
+        return result
+    except FleetEnrollmentError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/fleet/nodes/join")
+async def join_fleet_node(body: FleetNodeJoinRequest, request: Request, response: Response):
+    """Exchange a single-use token for overlay bootstrap data and node identity."""
+    _require_fleet_https(request)
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        config = _fleet_bootstrap_config()
+        async with db_pool.acquire() as conn:
+            async with conn.transaction():
+                return await _enroll_fleet_node(
+                    conn,
+                    token=body.token,
+                    name=body.name,
+                    hostname=body.hostname,
+                    region=body.region,
+                    wireguard_public_key=body.wireguard_public_key,
+                    labels=body.labels,
+                    capacity=body.capacity,
+                    build_fingerprint=body.build_fingerprint,
+                    config=config,
+                )
+    except FleetConfigurationError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except FleetEnrollmentError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except FleetConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.get("/fleet/nodes")
+async def list_fleet_nodes():
+    stale_after = max(60, _int_env("FLEET_HEARTBEAT_TIMEOUT_SECONDS", HEARTBEAT_TIMEOUT_MINUTES * 60))
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch("SELECT * FROM nodes ORDER BY created_at ASC")
+    return {
+        "nodes": [_public_fleet_node(row, stale_after_seconds=stale_after) for row in rows],
+        "stale_after_seconds": stale_after,
+    }
+
+
+@app.post("/fleet/nodes/{node_id}/heartbeat")
+async def heartbeat_fleet_node(node_id: str, body: FleetHeartbeatRequest, request: Request):
+    credential = _fleet_bearer_credential(request)
+    try:
+        async with db_pool.acquire() as conn:
+            async with conn.transaction():
+                await _authenticate_fleet_node(conn, node_id=node_id, credential=credential)
+                result = await _record_fleet_heartbeat(
+                    conn,
+                    node_id=node_id,
+                    active_worker_count=body.active_worker_count,
+                    capacity=body.capacity,
+                    build_fingerprint=body.build_fingerprint,
+                    egress_ip=body.egress_ip,
+                )
+        return _public_fleet_node(result, stale_after_seconds=HEARTBEAT_TIMEOUT_MINUTES * 60)
+    except FleetAuthenticationError as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
+    except FleetEnrollmentError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except (FleetConflictError, ValueError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/fleet/nodes/{node_id}/connection-bundle")
+async def get_fleet_connection_bundle(node_id: str, request: Request):
+    """Deliver shared-store credentials once, only to an authenticated overlay peer."""
+    _require_fleet_https(request)
+    credential = _fleet_bearer_credential(request)
+    peer = getattr(getattr(request, "client", None), "host", None)
+    try:
+        config = _fleet_bootstrap_config()
+        if not _fleet_peer_is_overlay(peer, config.overlay_cidr):
+            raise HTTPException(status_code=403, detail="connection bundle is available only over the fleet overlay")
+        bundle = _fleet_connection_bundle()  # validate before committing one-time consumption
+        async with db_pool.acquire() as conn:
+            async with conn.transaction():
+                await _authenticate_fleet_node(conn, node_id=node_id, credential=credential)
+                await _consume_fleet_connection_bundle(conn, node_id=node_id)
+        return JSONResponse(
+            content={"node_id": node_id, "bundle": bundle, "delivered_once": True},
+            headers={"Cache-Control": "no-store"},
+        )
+    except FleetConfigurationError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except FleetAuthenticationError as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
+    except FleetConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/fleet/nodes/{node_id}/credentials/rotate")
+async def rotate_fleet_node_credential(node_id: str, request: Request, response: Response):
+    """Operator lifecycle action: revoke current credentials and return one replacement once."""
+    _require_fleet_operator(request)
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        parsed_id = uuid.UUID(node_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="node not found") from exc
+    raw_credential = _generate_fleet_secret("ssn_")
+    async with db_pool.acquire() as conn:
+        async with conn.transaction():
+            node = await conn.fetchrow("SELECT id FROM nodes WHERE id = $1 AND status <> 'disabled' FOR UPDATE", parsed_id)
+            if not node:
+                raise HTTPException(status_code=404, detail="node not found or disabled")
+            version = await conn.fetchval(
+                "SELECT COALESCE(MAX(credential_version), 0) + 1 FROM node_credentials WHERE node_id = $1",
+                parsed_id,
+            )
+            await conn.execute(
+                "UPDATE node_credentials SET revoked_at = NOW() WHERE node_id = $1 AND revoked_at IS NULL",
+                parsed_id,
+            )
+            await conn.execute(
+                """
+                UPDATE nodes
+                SET connection_bundle_delivered_at = NULL, updated_at = NOW()
+                WHERE id = $1
+                """,
+                parsed_id,
+            )
+            await conn.execute(
+                """
+                INSERT INTO node_credentials (node_id, credential_hash, credential_version)
+                VALUES ($1, $2, $3)
+                """,
+                parsed_id,
+                _hash_fleet_secret(raw_credential, "node-credential"),
+                int(version),
+            )
+    return {"node_id": node_id, "node_credential": raw_credential, "credential_version": int(version)}
+
+
+@app.post("/fleet/nodes/{node_id}/revoke")
+async def revoke_fleet_node(node_id: str, request: Request):
+    """Disable a node and revoke every durable credential."""
+    _require_fleet_operator(request)
+    try:
+        parsed_id = uuid.UUID(node_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="node not found") from exc
+    async with db_pool.acquire() as conn:
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                """
+                UPDATE nodes
+                SET status = 'disabled', drain = true, active_worker_count = 0, updated_at = NOW()
+                WHERE id = $1 RETURNING id
+                """,
+                parsed_id,
+            )
+            if not row:
+                raise HTTPException(status_code=404, detail="node not found")
+            await conn.execute(
+                "UPDATE node_credentials SET revoked_at = COALESCE(revoked_at, NOW()) WHERE node_id = $1",
+                parsed_id,
+            )
+    return {"node_id": node_id, "status": "disabled", "credentials_revoked": True}
+
+
+# ============================================================
 # HEALTH & INFO
 # ============================================================
 
@@ -7042,6 +7375,7 @@ async def root():
         "endpoints": {
             "scans": "/scans",
             "targets": "/targets",
+            "fleet_nodes": "/fleet/nodes",
             "ai_targets": "/ai/targets",
             "ai_inventory": "/ai/inventory",
             "ai_test_scenarios": "/ai/test-scenarios",
@@ -13616,7 +13950,11 @@ async def dedupe_targets(
     Defaults to a dry run. JSON {"dry_run": false} and the backwards-compatible
     ?dry_run=false query both execute; an explicit query value wins. Idempotent and
     per-group transactional."""
-    effective_dry_run = dry_run if dry_run is not None else (payload.dry_run if payload else True)
+    # FastAPI replaces Query(...) during HTTP dispatch, but direct Python callers
+    # (unit tests, local agents, internal adapters) receive the marker object.
+    # Only a real bool is an explicit query override.
+    query_dry_run = dry_run if isinstance(dry_run, bool) else None
+    effective_dry_run = query_dry_run if query_dry_run is not None else (payload.dry_run if payload else True)
     async with db_pool.acquire() as conn:
         plan = await plan_canonical_merges(conn)
 

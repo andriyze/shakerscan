@@ -832,3 +832,55 @@ CREATE TABLE IF NOT EXISTS ai_surface_attempts (
     CONSTRAINT ai_surface_attempts_unique UNIQUE (surface_id, scan_id)
 );
 CREATE INDEX IF NOT EXISTS idx_ai_surface_attempts_surface ON ai_surface_attempts(surface_id, completed_at DESC);
+
+-- Owned-fleet identity and enrollment foundation. Raw enrollment tokens and
+-- node credentials are returned once and never stored; only domain-separated
+-- hashes live in Postgres.
+CREATE TABLE IF NOT EXISTS nodes (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name TEXT NOT NULL,
+    hostname TEXT,
+    role TEXT NOT NULL CHECK (role IN ('control_plane', 'worker')),
+    overlay_ip INET UNIQUE,
+    wireguard_public_key TEXT UNIQUE,
+    egress_ip INET,
+    region TEXT,
+    labels JSONB NOT NULL DEFAULT '{}'::jsonb,
+    build_fingerprint TEXT,
+    worker_image_digest TEXT,
+    desired_worker_count INTEGER NOT NULL DEFAULT 0 CHECK (desired_worker_count BETWEEN 0 AND 128),
+    active_worker_count INTEGER NOT NULL DEFAULT 0 CHECK (active_worker_count BETWEEN 0 AND 128),
+    capacity JSONB NOT NULL DEFAULT '{}'::jsonb,
+    status TEXT NOT NULL DEFAULT 'joining'
+        CHECK (status IN ('joining', 'healthy', 'stale', 'draining', 'disabled')),
+    drain BOOLEAN NOT NULL DEFAULT false,
+    last_heartbeat_at TIMESTAMPTZ,
+    connection_bundle_delivered_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_nodes_status_heartbeat ON nodes(status, last_heartbeat_at DESC);
+
+CREATE TABLE IF NOT EXISTS node_join_tokens (
+    token_hash TEXT PRIMARY KEY,
+    role TEXT NOT NULL CHECK (role = 'worker'),
+    expires_at TIMESTAMPTZ NOT NULL,
+    consumed_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_node_join_tokens_expires ON node_join_tokens(expires_at)
+    WHERE consumed_at IS NULL;
+
+CREATE TABLE IF NOT EXISTS node_credentials (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    node_id UUID NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+    credential_hash TEXT NOT NULL UNIQUE,
+    credential_version INTEGER NOT NULL DEFAULT 1 CHECK (credential_version > 0),
+    expires_at TIMESTAMPTZ,
+    revoked_at TIMESTAMPTZ,
+    last_used_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT node_credentials_node_version_unique UNIQUE (node_id, credential_version)
+);
+CREATE INDEX IF NOT EXISTS idx_node_credentials_active ON node_credentials(node_id, credential_version DESC)
+    WHERE revoked_at IS NULL;

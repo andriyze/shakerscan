@@ -164,6 +164,56 @@ from scan_verification_state import scan_time_verification_fields  # noqa: E402
 sys.path.pop(0)
 
 
+def _fleet_request(*, host: str, scheme: str = "https", authorization: str = ""):
+    return types.SimpleNamespace(
+        client=types.SimpleNamespace(host=host),
+        url=types.SimpleNamespace(scheme=scheme),
+        headers={"authorization": authorization} if authorization else {},
+    )
+
+
+def test_fleet_operator_actions_are_loopback_or_explicit_token_only(monkeypatch):
+    monkeypatch.delenv("SHAKERSCAN_BIND_HOST", raising=False)
+    monkeypatch.delenv("FLEET_OPERATOR_TOKEN", raising=False)
+    assert api_module._require_fleet_operator(_fleet_request(host="127.0.0.1", scheme="http")) is None
+
+    with pytest.raises(api_module.HTTPException) as exc:
+        api_module._require_fleet_operator(_fleet_request(host="203.0.113.2"))
+    assert exc.value.status_code == 403
+
+    # Docker port publishing can replace the socket peer with a bridge address;
+    # a loopback-only host bind is still a local operator boundary.
+    monkeypatch.setenv("SHAKERSCAN_BIND_HOST", "127.0.0.1")
+    assert api_module._require_fleet_operator(_fleet_request(host="192.168.65.1", scheme="http")) is None
+    monkeypatch.setenv("SHAKERSCAN_BIND_HOST", "100.64.0.10")
+    with pytest.raises(api_module.HTTPException):
+        api_module._require_fleet_operator(_fleet_request(host="127.0.0.1", scheme="https"))
+    monkeypatch.delenv("SHAKERSCAN_BIND_HOST", raising=False)
+
+    operator_token = "operator-" + "x" * 40
+    monkeypatch.setenv("FLEET_OPERATOR_TOKEN", operator_token)
+    assert api_module._require_fleet_operator(
+        _fleet_request(host="203.0.113.2", authorization=f"Bearer {operator_token}")
+    ) is None
+    with pytest.raises(api_module.HTTPException) as exc:
+        api_module._require_fleet_operator(
+            _fleet_request(host="203.0.113.2", authorization="Bearer incorrect-token")
+        )
+    assert exc.value.status_code == 403
+
+
+def test_insecure_fleet_enrollment_escape_hatch_is_loopback_only(monkeypatch):
+    monkeypatch.delenv("SHAKERSCAN_BIND_HOST", raising=False)
+    monkeypatch.setenv("FLEET_ALLOW_INSECURE_ENROLLMENT", "true")
+    assert api_module._fleet_request_is_https(_fleet_request(host="127.0.0.1", scheme="http")) is True
+    assert api_module._fleet_request_is_https(_fleet_request(host="203.0.113.2", scheme="http")) is False
+    assert api_module._fleet_request_is_https(_fleet_request(host="203.0.113.2", scheme="https")) is True
+    monkeypatch.setenv("SHAKERSCAN_BIND_HOST", "127.0.0.1")
+    assert api_module._fleet_request_is_https(_fleet_request(host="192.168.65.1", scheme="http")) is True
+    monkeypatch.setenv("SHAKERSCAN_BIND_HOST", "100.64.0.10")
+    assert api_module._fleet_request_is_https(_fleet_request(host="127.0.0.1", scheme="http")) is False
+
+
 def test_worker_build_current_is_fingerprint_authoritative_over_version_label():
     # The source fingerprint covers all detection/orchestration modules and is the
     # precise currency signal. The git version label is volatile (real commit, and
