@@ -108,6 +108,32 @@ def test_join_token_is_single_use_and_raw_secrets_are_never_stored():
     asyncio.run(_test_join_token_is_single_use_and_raw_secrets_are_never_stored())
 
 
+def test_broker_node_enrollment_allocates_no_overlay_or_wireguard_identity():
+    async def run():
+        conn = FakeFleetConnection()
+        token = (await create_join_token(conn, ttl_seconds=600))["token"]
+        joined = await enroll_node(
+            conn,
+            token=token,
+            name="broker-a",
+            hostname="broker-a.internal",
+            region="eu-test",
+            wireguard_public_key=None,
+            transport="broker",
+            labels={"network": "customer-vpc"},
+            capacity={"cpu_count": 8},
+            build_fingerprint=None,
+            config=bootstrap_config(),
+        )
+        assert joined["transport"] == "broker"
+        assert joined["wireguard_peer_ip"] is None
+        assert conn.nodes[0]["overlay_ip"] is None
+        assert conn.nodes[0]["wireguard_public_key"] is None
+        assert conn.nodes[0]["labels"]["transport"] == "broker"
+
+    asyncio.run(run())
+
+
 async def _test_join_token_is_single_use_and_raw_secrets_are_never_stored():
     conn = FakeFleetConnection()
     token_result = await create_join_token(conn, ttl_seconds=600)

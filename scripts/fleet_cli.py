@@ -69,6 +69,10 @@ class RuntimePaths:
     def worker_compose(self) -> Path:
         return self.root / "docker-compose.worker.yml"
 
+    @property
+    def broker_worker_compose(self) -> Path:
+        return self.root / "docker-compose.broker-worker.yml"
+
 
 def _run(
     argv: list[str],
@@ -519,9 +523,56 @@ def _install_reconcile_timer(paths: RuntimePaths) -> None:
 
 def command_init(paths: RuntimePaths, args: argparse.Namespace) -> None:
     _require_linux()
+    if getattr(args, "network", "wireguard") == "broker":
+        _require_commands(("docker",))
+        _docker_compose_command()
+        public_url = validate_https_url(args.public_url)
+        if not 1 <= args.workers <= 128:
+            raise FleetCLIError("--workers must be between 1 and 128")
+        if not args.skip_public_check:
+            health = api_json(public_url, "GET", "/health", timeout=10)
+            if health.get("status") != "healthy":
+                raise FleetCLIError("public HTTPS API did not report healthy")
+        env = load_dotenv(paths.dotenv)
+        if env.get("FLEET_ALLOW_INSECURE_ENROLLMENT", "").lower() in {"1", "true", "yes", "on"}:
+            raise FleetCLIError("production fleet init refuses FLEET_ALLOW_INSECURE_ENROLLMENT")
+        worker_image = validate_digest_image(args.worker_image) if args.worker_image else _discover_digest_image(env)
+        profiles = {item.strip() for item in env.get("COMPOSE_PROFILES", "").split(",") if item.strip()}
+        artifact_updates, bundled_minio = _fleet_artifact_environment("127.0.0.1", env)
+        if bundled_minio:
+            profiles.add("artifacts")
+        update_dotenv(paths.dotenv, {
+            "COMPOSE_PROFILES": ",".join(sorted(profiles)),
+            "FLEET_NETWORK_BACKEND": "broker",
+            "FLEET_WORKER_IMAGE_DIGEST": worker_image,
+            "FLEET_DESIRED_WORKER_COUNT": str(args.workers),
+            "FLEET_PUBLIC_URL": public_url,
+            "FLEET_ALLOW_INSECURE_ENROLLMENT": "false",
+            **artifact_updates,
+        })
+        scanner = paths.root / "scanner.sh"
+        if not scanner.is_file():
+            raise FleetCLIError("scanner.sh is missing from the runtime")
+        _run([str(scanner), "restart"], capture=False)
+        health = api_json(public_url, "GET", "/health", timeout=30)
+        if health.get("status") != "healthy":
+            raise FleetCLIError("public HTTPS broker API did not report healthy after restart")
+        artifact_health = api_json(
+            "http://127.0.0.1:8080",
+            "GET",
+            "/artifacts/storage/health?probe=true",
+            timeout=15,
+        )
+        if artifact_health.get("status") != "ok":
+            raise FleetCLIError("artifact store write probe did not pass")
+        print(f"HTTPS broker control plane initialized: {public_url}")
+        print("Next: shakerscan fleet join-token --ttl 24h --transport broker")
+        return
     _require_commands(("wg", "wg-quick", "ip", "openssl", "docker"))
     _docker_compose_command()
     network, control_ip = parse_overlay(args.overlay)
+    if not args.endpoint:
+        raise FleetCLIError("--endpoint is required for WireGuard fleet init")
     endpoint, listen_port = validate_endpoint(args.endpoint)
     if listen_port != args.listen_port:
         raise FleetCLIError("--endpoint port and --listen-port must match")
@@ -640,7 +691,8 @@ def command_join_token(paths: RuntimePaths, args: argparse.Namespace) -> None:
     if not token.startswith("ssj_"):
         raise FleetCLIError("control plane did not return a join token")
     print("Single-use join token created. Run on the worker VPS:")
-    print(f"shakerscan join {public_url} --token {token}")
+    transport_flag = " --transport broker" if getattr(args, "transport", "overlay") == "broker" else ""
+    print(f"shakerscan join {public_url} --token {token}{transport_flag}")
     print(f"Expires: {result.get('expires_at')}")
 
 
@@ -697,6 +749,21 @@ def _validated_join_response(result: dict[str, Any]) -> dict[str, Any]:
     certificate = str(result["fleet_ca_certificate_pem"])
     if "-----BEGIN CERTIFICATE-----" not in certificate or len(certificate) > 64 * 1024:
         raise FleetCLIError("enrollment response contains an invalid fleet CA")
+    return result
+
+
+def _validated_broker_join_response(result: dict[str, Any]) -> dict[str, Any]:
+    required = ("node_id", "node_credential", "worker_image_digest")
+    missing = [key for key in required if not str(result.get(key) or "").strip()]
+    if missing:
+        raise FleetCLIError("broker enrollment response is missing: " + ", ".join(missing))
+    try:
+        result["node_id"] = str(uuid.UUID(str(result["node_id"])))
+    except ValueError as exc:
+        raise FleetCLIError("broker enrollment response contains an invalid node ID") from exc
+    validate_digest_image(str(result["worker_image_digest"]))
+    if str(result.get("transport") or "") != "broker":
+        raise FleetCLIError("control plane did not enroll a broker node")
     return result
 
 
@@ -762,9 +829,24 @@ def _start_worker_runtime(paths: RuntimePaths, response: dict[str, Any]) -> None
     )
 
 
+def _start_broker_runtime(paths: RuntimePaths, response: dict[str, Any]) -> None:
+    if not paths.broker_worker_compose.is_file():
+        raise FleetCLIError("docker-compose.broker-worker.yml is missing from the runtime")
+    compose = _docker_compose_command()
+    compose_env = paths.node / "compose.env"
+    _write_compose_env(compose_env, _worker_compose_env(paths, response))
+    image = validate_digest_image(str(response["worker_image_digest"]))
+    _run(["docker", "pull", image], capture=False)
+    _run(
+        [*compose, "--env-file", str(compose_env), "-f", str(paths.broker_worker_compose), "up", "-d"],
+        capture=False,
+    )
+
+
 def command_join(paths: RuntimePaths, args: argparse.Namespace) -> None:
     _require_linux()
-    _require_commands(("wg", "wg-quick", "ip", "docker"))
+    transport = str(getattr(args, "transport", "overlay") or "overlay")
+    _require_commands(("docker",) if transport == "broker" else ("wg", "wg-quick", "ip", "docker"))
     _docker_compose_command()
     public_url = validate_https_url(args.control_plane_url)
     _ensure_private_dir(paths.node)
@@ -773,7 +855,18 @@ def command_join(paths: RuntimePaths, args: argparse.Namespace) -> None:
         state = _read_node_state(state_path)
         if str(state.get("enrollment_url") or "") != public_url:
             raise FleetCLIError("this host is already joined to a different control plane")
-        response = _validated_join_response(dict(state["bootstrap"]))
+        state_transport = str(state.get("transport") or "overlay")
+        if state_transport != transport:
+            raise FleetCLIError(f"this host is already joined with {state_transport} transport")
+        response = (
+            _validated_broker_join_response(dict(state["bootstrap"]))
+            if transport == "broker"
+            else _validated_join_response(dict(state["bootstrap"]))
+        )
+        if transport == "broker":
+            _start_broker_runtime(paths, response)
+            print(f"HTTPS broker node {response['node_id']} resumed")
+            return
         install_wireguard(paths.node / f"{INTERFACE_NAME}.conf")
         if not (paths.node / "worker.env").exists():
             raise FleetCLIError("existing node state has no worker environment; rotate/reset the node on the control plane")
@@ -794,11 +887,14 @@ def command_join(paths: RuntimePaths, args: argparse.Namespace) -> None:
         return
     if not args.token or not str(args.token).startswith("ssj_"):
         raise FleetCLIError("--token must contain the single-use ssj_ join token")
-    private_key, public_key = generate_wireguard_keypair(
-        paths.node / "wireguard.key", paths.node / "wireguard.pub"
-    )
+    private_key = public_key = None
+    if transport == "overlay":
+        private_key, public_key = generate_wireguard_keypair(
+            paths.node / "wireguard.key", paths.node / "wireguard.pub"
+        )
     hostname = socket.gethostname()[:255]
     labels: dict[str, Any] = {}
+    labels["transport"] = transport
     if getattr(args, "region", None):
         labels["region"] = args.region
     for key, value in (
@@ -828,13 +924,32 @@ def command_join(paths: RuntimePaths, args: argparse.Namespace) -> None:
         "name": args.name or hostname,
         "hostname": hostname,
         "region": args.region,
+        "transport": transport,
         "wireguard_public_key": public_key,
         "labels": labels,
         "capacity": {"cpu_count": os.cpu_count() or 1},
     }
-    response = _validated_join_response(
-        api_json(public_url, "POST", "/fleet/nodes/join", payload=payload, timeout=30)
+    raw_response = api_json(public_url, "POST", "/fleet/nodes/join", payload=payload, timeout=30)
+    response = (
+        _validated_broker_join_response(raw_response)
+        if transport == "broker"
+        else _validated_join_response(raw_response)
     )
+    if transport == "broker":
+        bootstrap_state = {
+            "node_id": response["node_id"],
+            "node_credential": response["node_credential"],
+            "control_plane_url": public_url,
+            "worker_image_digest": response["worker_image_digest"],
+            "transport": "broker",
+            "enrollment_url": public_url,
+            "bootstrap": response,
+        }
+        atomic_write(state_path, json.dumps(bootstrap_state, sort_keys=True, indent=2) + "\n", 0o600)
+        _start_broker_runtime(paths, response)
+        print(f"Joined fleet as outbound-only HTTPS broker node {response['node_id']}")
+        print("No Redis or PostgreSQL credentials were installed")
+        return
     ca_path = paths.node / "ca.crt"
     atomic_write(ca_path, str(response["fleet_ca_certificate_pem"]), 0o644)
     wireguard = render_worker_wireguard(
@@ -852,6 +967,7 @@ def command_join(paths: RuntimePaths, args: argparse.Namespace) -> None:
         "control_plane_overlay_url": response["control_plane_overlay_url"],
         "ca_cert_path": "/run/shakerscan-fleet/ca.crt",
         "worker_image_digest": response["worker_image_digest"],
+        "transport": "overlay",
         "enrollment_url": public_url,
         "bootstrap": response,
     }
@@ -951,10 +1067,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--runtime", default=str(Path(__file__).resolve().parents[1]))
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    init = subparsers.add_parser("init", help="initialize a WireGuard fleet control plane")
-    init.add_argument("--network", choices=["wireguard"], default="wireguard")
+    init = subparsers.add_parser("init", help="initialize a WireGuard or HTTPS-broker fleet control plane")
+    init.add_argument("--network", choices=["wireguard", "broker"], default="wireguard")
     init.add_argument("--overlay", default=DEFAULT_OVERLAY)
-    init.add_argument("--endpoint", required=True, help="public WireGuard endpoint host:port")
+    init.add_argument("--endpoint", help="public WireGuard endpoint host:port (required for wireguard)")
     init.add_argument("--listen-port", type=int, default=DEFAULT_WG_PORT)
     init.add_argument("--tls-port", type=int, default=DEFAULT_TLS_PORT)
     init.add_argument("--public-url", required=True, help="existing HTTPS URL used before overlay setup")
@@ -973,6 +1089,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     token = subparsers.add_parser("join-token", help="mint a single-use worker join command")
     token.add_argument("--role", choices=["worker"], default="worker")
+    token.add_argument("--transport", choices=["overlay", "broker"], default="overlay")
     token.add_argument("--ttl", default="24h")
     token.add_argument("--public-url")
     token.add_argument("--local-api", default="http://127.0.0.1:8080")
@@ -981,6 +1098,7 @@ def build_parser() -> argparse.ArgumentParser:
     join.add_argument("control_plane_url")
     join.add_argument("--token")
     join.add_argument("--name")
+    join.add_argument("--transport", choices=["overlay", "broker"], default="overlay")
     join.add_argument("--region")
     join.add_argument("--egress-group")
     join.add_argument("--network", dest="network_label")

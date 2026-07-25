@@ -902,6 +902,43 @@ ALTER TABLE scans
     FOREIGN KEY (executing_node_id) REFERENCES nodes(id) ON DELETE SET NULL;
 CREATE INDEX IF NOT EXISTS idx_nodes_status_heartbeat ON nodes(status, last_heartbeat_at DESC);
 
+CREATE TABLE IF NOT EXISTS broker_job_leases (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    node_id UUID NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+    worker_id TEXT NOT NULL,
+    queue_name TEXT NOT NULL,
+    stream_key TEXT NOT NULL,
+    message_id TEXT NOT NULL,
+    consumer_name TEXT NOT NULL,
+    lease_token_hash TEXT NOT NULL,
+    payload_sha256 TEXT NOT NULL,
+    budget_reservation JSONB NOT NULL DEFAULT '{}'::jsonb,
+    job_id TEXT,
+    scan_id UUID,
+    status TEXT NOT NULL DEFAULT 'leased'
+        CHECK (status IN ('leased','submitted','ingesting','completed','failed','cancelled','lost')),
+    delivery_attempts INTEGER NOT NULL DEFAULT 1,
+    lease_expires_at TIMESTAMPTZ NOT NULL,
+    last_heartbeat_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    ingest_enqueued_at TIMESTAMPTZ,
+    completed_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (stream_key, message_id)
+);
+CREATE INDEX IF NOT EXISTS idx_broker_job_leases_node_status
+    ON broker_job_leases(node_id, status, lease_expires_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_broker_job_leases_active_worker
+    ON broker_job_leases(node_id, worker_id) WHERE status = 'leased';
+
+CREATE TABLE IF NOT EXISTS broker_job_results (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    lease_id UUID NOT NULL UNIQUE REFERENCES broker_job_leases(id) ON DELETE CASCADE,
+    result_sha256 TEXT NOT NULL,
+    result JSONB NOT NULL,
+    submitted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    ingested_at TIMESTAMPTZ
+);
+
 CREATE TABLE IF NOT EXISTS node_join_tokens (
     token_hash TEXT PRIMARY KEY,
     role TEXT NOT NULL CHECK (role = 'worker'),

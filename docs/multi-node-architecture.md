@@ -14,7 +14,9 @@ general artifact manifest, deterministic result/checkpoint/diagnostic upload, re
 centralization, hash-verified proxy download, cross-node stale recovery, fleet-worker fail-closed
 persistence, centralized retry-safe retention, and a digest-pinned self-hosted MinIO profile are implemented. Capability/region/egress placement
 and enforceable fleet-wide admission/request limits are implemented. Graceful drain and digest-pinned
-one-at-a-time worker image rollout are implemented. The Phase-3 broker and physical acceptance remain.
+one-at-a-time worker image rollout are implemented. The outbound-only Phase-3 HTTPS broker, thin
+worker runtime, broker enrollment, lease/result/artifact protocol, and control-plane ingestion are
+implemented. Physical multi-host acceptance remains.
 **Scope:** run a coordinated ShakerScan fleet across multiple VMs/VPS hosts so one UI/API
 can scan more targets at once and run high-budget Full Coverage scans by using workers
 from many machines.
@@ -45,6 +47,7 @@ becoming stale prose. For product priority and phased order, see
 | Per-node execution attribution and fleet rollup | **Built** — scan/shard rows record the executing node and unique worker replica; revoked nodes fail closed and re-enqueue refused work; node API derives state/image drift and exposes recent activity | `scans.executing_node_id`; `worker.py` `_attribute_job_execution`; `GET /fleet/nodes`; `GET /fleet/nodes/{id}/activity` |
 | Fleet UI | **Built** — unified health/capacity/drift view, recent attributed work, desired worker scaling, graceful drain/resume, digest-pinned rollout, revoke confirmation, placement labels, and session-only remote operator credential handling | `ui/src/app/fleet/page.tsx`; sidebar `/fleet` |
 | Capability/region/egress placement | **Built** — scan options accept normalized placement constraints; jobs enter deterministic capability Streams; workers dynamically subscribe only to routes matching their node/region/network/residency/tier/tool labels. Equivalent eligible workers retain normal lease failover. Fleet join persists labels and the UI exposes both submission and node labels. | `job_queue.py` `routed_queue_name`, `qualified_route_queues`; `ScanOptions.placement`; `fleet_cli.py`; `/scan/new`; `/fleet` |
+| HTTPS broker for zero-trust nodes | **Built** — `--transport broker` enrolls an outbound-only node without WireGuard, Redis, PostgreSQL, or object-store credentials. Node/job-scoped HTTPS leases use hashed single-job tokens, Stream ownership heartbeat/reclaim, bounded delivery, global admission and root-domain reservations, progress/log forwarding, cancellation, lease-bound proxy artifact uploads, immutable result hashes, and idempotent control-plane ingestion for normal and shard scans. | `broker_worker.py`; `docker-compose.broker-worker.yml`; `/fleet/broker/*`; `broker_job_leases`; `broker_job_results` |
 
 The takeaways that shape the plan:
 
@@ -56,7 +59,7 @@ The takeaways that shape the plan:
   general result/checkpoint/diagnostic plane now share the S3-compatible store; the database manifest
   and hash-verified proxy are the supported cross-node contract (§8).
 - The node identity/enrollment/overlay and leased/acked/reclaimable queue are now implemented. The
-  largest remaining production gaps are the broker boundary and physical multi-VPS acceptance.
+  largest remaining production gap is physical multi-VPS acceptance and its failure-injection matrix.
 
 The parallel-scan design answers: "How does one logical scan fan out into plan, shard, and merge
 jobs?" This document answers: "How can those worker jobs run safely on more than one host?"
@@ -114,6 +117,12 @@ shakerscan fleet join-token --role worker --ttl 24h
 # On each additional VPS
 curl -fsSL https://install.shakerscan.com | sh
 shakerscan join <control-plane-url> --token <join-token>
+
+# Or, for an outbound-only node that receives no shared-store credentials
+shakerscan fleet init --network broker --public-url https://scanner.example.com \
+  --worker-image registry.example/shakerscan@sha256:<digest>
+shakerscan fleet join-token --role worker --ttl 24h --transport broker
+shakerscan join <control-plane-url> --token <join-token> --transport broker
 ```
 
 Those commands are the desired product workflow, not a statement that all flags already
@@ -206,7 +215,7 @@ The shared requirements between the two designs are:
        | Node registry / scheduler                         |
        +------------------------+-------------------------+
                                 |
-             Built-in WireGuard now, HTTPS broker later
+          Built-in WireGuard or outbound HTTPS broker
                                 |
        +------------------------+-------------------------+
        |                        |                         |
@@ -323,6 +332,18 @@ Workers do not reach Redis or Postgres. They make outbound HTTPS calls to a brok
 - upload evidence;
 - submit findings/results;
 - complete, fail, or cancel a job.
+
+**Implementation status:** built. `shakerscan join <url> --token <token> --transport broker`
+persists only the node credential, public HTTPS URL, image digest, and optional CA path. Its dedicated
+Compose file contains a thin broker worker plus the pull node-agent and contains no Redis/PostgreSQL
+environment keys. The control plane leases only direct scan/shard execution; plan and merge jobs stay
+on database-connected owned workers. Each executable lease receives a distinct hashed server-side
+token, owns the underlying Stream entry, refreshes both Stream authority and the global active-scan
+slot, and carries a server-side root-domain request reservation. Managed credentials are decrypted
+only into that one no-store lease response. Referenced local files, checkpoints, and failure
+diagnostics upload through a lease-bound API; object-store credentials never leave the control plane.
+Result submission is content-hashed, idempotent, and enters a dedicated ingestion Stream so existing
+scan/shard finalization, finding dedupe, manifests, and merge reconciliation remain authoritative.
 
 **Pros:**
 
@@ -598,11 +619,11 @@ Build the fleet layer:
    refusal, per-node audit logs, and a fleet-level worker count that can be distributed
    across nodes by capacity.
 
-### Phase 3: HTTPS Broker For Zero-Trust Nodes
+### Phase 3: HTTPS Broker For Zero-Trust Nodes — Implemented
 
 Goal: support nodes that should not be trusted with direct control-plane access.
 
-Build a broker API and convert worker communication to job leases over HTTPS. This is the
+The broker API and outbound-only worker communication use job leases over HTTPS. This is the
 right architecture for:
 
 - customer-hosted worker instances;
@@ -610,8 +631,9 @@ right architecture for:
 - nodes behind unknown NAT/firewall rules;
 - environments where direct DB/Redis credentials on workers are unacceptable.
 
-The broker can coexist with the overlay model. Owned nodes may continue to use the
-overlay while untrusted nodes use the broker.
+The broker coexists with the overlay model. Owned nodes may continue to use the overlay while
+untrusted nodes use the broker. Control-plane orchestration jobs remain local; executable normal and
+shard scans can run over either transport.
 
 ### Future Feature: Cloud Fleet Provisioning
 
@@ -622,8 +644,8 @@ install ShakerScan on them, connect them with the same fleet join flow, and opti
 destroy or scale the fleet later. This should wait until the core fleet primitives are
 solid. The core primitives are implemented: standalone remains default, `fleet init`, built-in
 WireGuard, `fleet join`, node-agent heartbeat/worker scaling, leased queue delivery, and centralized
-artifacts, placement, and rolling lifecycle. Physical fleet acceptance and the broker remain before
-cloud provisioning.
+artifacts, placement, rolling lifecycle, and the HTTPS broker. Physical fleet acceptance remains
+before cloud provisioning.
 
 ## 7. Node-Agent Contract
 
@@ -808,6 +830,7 @@ Security requirements:
 | Queue | Shared default queue. | Leases, routing, retry policy, and idempotent shard completion are built. |
 | Rate limiting | Known-endpoint buckets plus standalone compatibility request metering/reservation. | Joined nodes enforce global admission/request limits by default; physical fleet soak remains. |
 | Observability | Per-host logs. | Central logs, metrics, node audit trail, per-node scan attribution. |
+| Zero-trust worker transport | Not required for owned overlay nodes. | HTTPS lease/heartbeat/artifact/result broker is built; nodes receive no Redis/PostgreSQL/object-store credentials. |
 
 ## 13. First Milestones
 
@@ -863,7 +886,7 @@ Acceptance criteria:
 
 | Decision | Recommendation |
 |---|---|
-| Overlay first or broker first? | Built-in WireGuard overlay first for owned nodes; broker later for untrusted/customer-hosted nodes. |
+| Overlay first or broker first? | **Resolved:** both are built. Use WireGuard/shared stores for owned nodes and HTTPS broker transport for untrusted/customer-hosted nodes. |
 | Tailscale or WireGuard? | Built-in WireGuard by default for the copy/paste VPS workflow; Tailscale remains optional for operators who already use it. |
 | Self-hosted or managed data stores? | Self-host for early internal deployments; managed Postgres/Redis when HA or operational maturity matters. |
 | MinIO or cloud S3? | MinIO for self-hosted; S3-compatible API either way. |
@@ -881,7 +904,6 @@ contracts as acceptance gates:
    physical proof.
 2. **Owned-fleet hardening before unattended use:** complete physical lease/fencing acceptance,
    executing-node scope revalidation, partition and clock-skew tests, and per-adapter budget telemetry.
-3. **Later:** add the HTTPS broker for untrusted or customer-hosted nodes. That is the
-   correct zero-trust architecture, but it is more work than needed for the first owned
-   multi-VPS fleet.
+3. **Zero-trust nodes:** use the implemented HTTPS broker transport when Redis/PostgreSQL/object-store
+   credentials must not leave the control plane; keep the overlay transport for owned nodes.
 ---

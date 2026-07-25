@@ -164,15 +164,31 @@ async def enroll_node(
     name: str,
     hostname: str | None,
     region: str | None,
-    wireguard_public_key: str,
+    wireguard_public_key: str | None,
     labels: Mapping[str, Any] | None,
     capacity: Mapping[str, Any] | None,
     build_fingerprint: str | None,
     config: FleetBootstrapConfig,
+    transport: str = "overlay",
 ) -> dict[str, Any]:
-    config.validated()
-    public_key = validate_wireguard_public_key(wireguard_public_key)
+    normalized_transport = str(transport or "overlay").strip().lower()
+    if normalized_transport not in {"overlay", "broker"}:
+        raise FleetEnrollmentError("transport must be overlay or broker")
+    if normalized_transport == "overlay":
+        config.validated()
+    else:
+        image_name, separator, digest = str(config.worker_image_digest or "").rpartition("@sha256:")
+        if not separator or not image_name or len(digest) != 64 or any(ch not in "0123456789abcdef" for ch in digest.lower()):
+            raise FleetConfigurationError("FLEET_WORKER_IMAGE_DIGEST must be digest-pinned")
+        if not 1 <= int(config.desired_worker_count) <= 128:
+            raise FleetConfigurationError("FLEET_DESIRED_WORKER_COUNT must be between 1 and 128")
+    public_key = (
+        validate_wireguard_public_key(str(wireguard_public_key or ""))
+        if normalized_transport == "overlay"
+        else None
+    )
     safe_labels = normalize_json_object(labels, max_bytes=8192, field="labels")
+    safe_labels["transport"] = normalized_transport
     safe_capacity = normalize_json_object(capacity, max_bytes=8192, field="capacity")
     clean_name = str(name or "").strip()
     if not clean_name or len(clean_name) > 128:
@@ -192,7 +208,11 @@ async def enroll_node(
     if not token_row:
         raise FleetEnrollmentError("join token is invalid, expired, or already consumed")
 
-    overlay_ip = await _allocate_overlay_ip(conn, config.overlay_cidr)
+    overlay_ip = (
+        await _allocate_overlay_ip(conn, config.overlay_cidr)
+        if normalized_transport == "overlay"
+        else None
+    )
     node_id = uuid.uuid4()
     raw_credential = generate_secret("ssn_")
     try:
@@ -233,6 +253,7 @@ async def enroll_node(
     )
     return {
         "node_id": str(node_id),
+        "transport": normalized_transport,
         "control_plane_overlay_url": config.control_plane_overlay_url,
         "wireguard_overlay_cidr": config.overlay_cidr,
         "worker_image_digest": config.worker_image_digest,

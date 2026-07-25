@@ -64,9 +64,12 @@ def test_docs_page_renders_markdown_without_raw_html_injection():
 
 def test_hosted_installer_packages_advertised_host_side_adapters():
     expected_downloads = (
+        "docker-compose.worker.yml",
+        "docker-compose.broker-worker.yml",
         "scripts/shakerscan_mcp.py",
         "scripts/local_planner_adapter.py",
         "scripts/planner_evals.py",
+        "scripts/fleet_cli.py",
         "api/command_arsenal.py",
     )
     installer = (ROOT / "install" / "index.sh").read_text()

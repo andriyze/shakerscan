@@ -106,6 +106,7 @@ DATABASE_URL = os.environ.get('DATABASE_URL', 'postgresql://scanner:scanner@loca
 RESULTS_DIR = Path(os.environ.get('RESULTS_DIR', '/results'))
 QUEUE_NAME = 'scan_jobs'
 RETEST_QUEUE_NAME = os.environ.get("RETEST_QUEUE_NAME", "retest_jobs")
+BROKER_INGEST_QUEUE_NAME = os.environ.get("BROKER_INGEST_QUEUE_NAME", "broker_ingest_jobs")
 AI_GATE_RUN_KINDS = {"ai_api", "ai_rag", "ai_trace", "ai_mcp", "ai_widget"}
 MODEL_INTAKE_RUN_KINDS = {"model_intake"}
 ASM_RECON_RUN_KINDS = {"asm_recon"}
@@ -1680,6 +1681,8 @@ def _scanner_process_kwargs() -> dict[str, Any]:
 def _scan_cancel_requested(scan_id: str | None, redis_client: Any | None = None) -> bool:
     if not scan_id:
         return False
+    if str(os.environ.get("SHAKERSCAN_BROKER_LEASE") or "").strip().lower() in {"1", "true", "yes", "on"}:
+        return (RESULTS_DIR / f"{scan_id}_cancel").exists()
     try:
         client = redis_client or get_redis()
         return bool(client.get(f"scan:{scan_id}:cancel"))
@@ -1900,6 +1903,9 @@ async def _await_scan_slot(job_id: str | None, scan_id: str | None) -> tuple[Any
 
     Returns (redis_or_None, slot_id_or_None, held). Standalone mode keeps the
     compatibility fail-open posture; joined fleet nodes require authorization."""
+    if str(os.environ.get("SHAKERSCAN_BROKER_LEASE") or "").strip().lower() in {"1", "true", "yes", "on"}:
+        # The HTTPS broker authorizes global admission before issuing the lease.
+        return None, None, False
     try:
         r = get_redis()
     except Exception as exc:
@@ -1999,7 +2005,13 @@ def _scanner_preflight(scanner_path: str) -> str | None:
     return err
 
 
-async def run_scan(target: str, options: dict, scan_id: str | None = None, job_id: str | None = None) -> dict:
+async def run_scan(
+    target: str,
+    options: dict,
+    scan_id: str | None = None,
+    job_id: str | None = None,
+    progress_callback: Any = None,
+) -> dict:
     """Execute scanner and return results."""
     if options.get("run_kind") in MODEL_INTAKE_RUN_KINDS:
         if scan_id:
@@ -2533,13 +2545,22 @@ async def run_scan(target: str, options: dict, scan_id: str | None = None, job_i
                 pass
 
         progress = _parse_progress(text)
+        if progress_callback is not None:
+            callback_result = progress_callback({
+                "line": text,
+                "phase": progress[0] if progress else None,
+                "progress": progress[1] if progress else None,
+            })
+            if asyncio.iscoroutine(callback_result):
+                await callback_result
         if progress and scan_id:
             phase, pct = progress
             last_phase, last_pct = last_progress
             if phase != last_phase or pct != last_pct:
-                await update_scan_progress(scan_id, phase, pct, job_id=job_id)
+                if str(os.environ.get("SHAKERSCAN_BROKER_LEASE") or "").strip().lower() not in {"1", "true", "yes", "on"}:
+                    await update_scan_progress(scan_id, phase, pct, job_id=job_id)
                 last_progress = (phase, pct)
-            elif job_id:
+            elif job_id and str(os.environ.get("SHAKERSCAN_BROKER_LEASE") or "").strip().lower() not in {"1", "true", "yes", "on"}:
                 try:
                     # Sync Redis client blocks the event loop; run it on a worker thread
                     # so a slow Redis connect cannot stall stderr/progress handling.
@@ -6884,6 +6905,74 @@ async def _confirmed_scan_handoff_status(scan_id: str) -> str:
         return str(latest or "missing")
 
 
+async def _load_broker_result(job_data: dict[str, Any], scan_id: str) -> dict[str, Any]:
+    """Claim an immutable HTTPS-broker result for normal control-plane ingestion."""
+    try:
+        result_id = uuid.UUID(str(job_data.get("_broker_result_id") or ""))
+        lease_id = uuid.UUID(str(job_data.get("_broker_lease_id") or ""))
+        expected_scan_id = uuid.UUID(str(scan_id))
+    except ValueError as exc:
+        raise RuntimeError("invalid broker result identity") from exc
+    async with db_pool.acquire() as conn:
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                """
+                SELECT r.result, r.result_sha256, l.scan_id, l.status
+                FROM broker_job_results r
+                JOIN broker_job_leases l ON l.id = r.lease_id
+                WHERE r.id=$1 AND l.id=$2
+                FOR UPDATE OF l
+                """,
+                result_id,
+                lease_id,
+            )
+            if not row or row["scan_id"] != expected_scan_id:
+                raise RuntimeError("broker result is not bound to this scan")
+            if str(row["status"]) not in {"submitted", "ingesting", "completed", "failed"}:
+                raise RuntimeError(f"broker result lease is {row['status']}")
+            raw_result = row["result"]
+            result = json.loads(raw_result) if isinstance(raw_result, str) else dict(raw_result or {})
+            encoded = json.dumps(result, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            if hashlib.sha256(encoded).hexdigest() != str(row["result_sha256"]):
+                raise RuntimeError("broker result hash verification failed")
+            await conn.execute(
+                "UPDATE broker_job_leases SET status='ingesting' WHERE id=$1 AND status='submitted'",
+                lease_id,
+            )
+    return result
+
+
+async def _finish_broker_result_ingest(job_data: dict[str, Any]) -> None:
+    raw_lease_id = str(job_data.get("_broker_lease_id") or "").strip()
+    raw_result_id = str(job_data.get("_broker_result_id") or "").strip()
+    if not raw_lease_id or not raw_result_id:
+        return
+    try:
+        lease_id = uuid.UUID(raw_lease_id)
+        result_id = uuid.UUID(raw_result_id)
+    except ValueError:
+        return
+    async with db_pool.acquire() as conn:
+        scan_status = await conn.fetchval(
+            "SELECT status FROM scans WHERE id=(SELECT scan_id FROM broker_job_leases WHERE id=$1)",
+            lease_id,
+        )
+        terminal = "failed" if str(scan_status) == "failed" else "cancelled" if str(scan_status) == "cancelled" else "completed"
+        await conn.execute(
+            """
+            UPDATE broker_job_leases
+            SET status=$2, completed_at=NOW()
+            WHERE id=$1 AND status IN ('submitted','ingesting')
+            """,
+            lease_id,
+            terminal,
+        )
+        await conn.execute(
+            "UPDATE broker_job_results SET ingested_at=NOW() WHERE id=$1",
+            result_id,
+        )
+
+
 async def process_scan_job(job_data: dict):
     """Process a scan job."""
     job_id = job_data.get('job_id', 'unknown')
@@ -6902,9 +6991,21 @@ async def process_scan_job(job_data: dict):
 
     r = get_redis()
     now = utc_now()
+    if job_data.get("_broker_lease_id"):
+        try:
+            async with db_pool.acquire() as conn:
+                leased_at = await conn.fetchval(
+                    "SELECT created_at FROM broker_job_leases WHERE id=$1",
+                    uuid.UUID(str(job_data["_broker_lease_id"])),
+                )
+            if leased_at:
+                now = leased_at
+        except (ValueError, TypeError):
+            pass
 
     current_status = await _confirmed_scan_handoff_status(scan_id)
-    if current_status not in {'pending', 'queued'}:
+    broker_ingest = bool(job_data.get("_broker_result_id"))
+    if current_status not in ({'pending', 'queued', 'running'} if broker_ingest else {'pending', 'queued'}):
         print(f"[{job_id[:8]}] Scan is {current_status}; queued worker job skipped", flush=True)
         r.hset(
             f"job:{job_id}",
@@ -6932,8 +7033,9 @@ async def process_scan_job(job_data: dict):
     async with db_pool.acquire() as conn:
         update_result = await conn.execute("""
             UPDATE scans SET status = 'running', started_at = $1
-            WHERE id = $2 AND status IN ('pending', 'queued')
-        """, now, uuid.UUID(scan_id))
+            WHERE id = $2
+              AND (status IN ('pending', 'queued') OR ($3::boolean AND status='running'))
+        """, now, uuid.UUID(scan_id), broker_ingest)
         if update_result.endswith("0"):
             latest_status = await conn.fetchval(
                 "SELECT status FROM scans WHERE id=$1",
@@ -7032,8 +7134,11 @@ async def process_scan_job(job_data: dict):
 
     try:
         try:
-            options = await _hydrate_managed_scan_credentials(options, scan_id)
-            result = await run_scan(target, options, scan_id=scan_id, job_id=job_id)
+            if job_data.get("_broker_result_id"):
+                result = await _load_broker_result(job_data, scan_id)
+            else:
+                options = await _hydrate_managed_scan_credentials(options, scan_id)
+                result = await run_scan(target, options, scan_id=scan_id, job_id=job_id)
         except ValueError as e:
             # Validation errors (e.g., incompatible options like public+smart)
             result = {
@@ -8328,6 +8433,17 @@ async def process_scan_shard_job(job_data: dict):
 
     r = get_redis()
     now = utc_now()
+    if job_data.get("_broker_lease_id"):
+        try:
+            async with db_pool.acquire() as conn:
+                leased_at = await conn.fetchval(
+                    "SELECT created_at FROM broker_job_leases WHERE id=$1",
+                    uuid.UUID(str(job_data["_broker_lease_id"])),
+                )
+            if leased_at:
+                now = leased_at
+        except (ValueError, TypeError):
+            pass
     print(f"[{job_id[:8]}] Shard '{label}' ({idx}/{total}) start: {target}", flush=True)
     slot_acquired = False
 
@@ -8455,8 +8571,11 @@ async def process_scan_shard_job(job_data: dict):
     heartbeat_thread.start()
     try:
         try:
-            options = await _hydrate_managed_scan_credentials(options, scan_id)
-            result = await run_scan(target, options, scan_id=scan_id, job_id=job_id)
+            if job_data.get("_broker_result_id"):
+                result = await _load_broker_result(job_data, scan_id)
+            else:
+                options = await _hydrate_managed_scan_credentials(options, scan_id)
+                result = await run_scan(target, options, scan_id=scan_id, job_id=job_id)
         except Exception as e:
             result = {'target': target, 'error': str(e),
                       'result': {'score': None, 'grade': None}, 'findings': []}
@@ -10113,7 +10232,8 @@ async def process_job(job_data: dict):
     if await _refuse_stale_job_if_needed(job_data):
         return
     try:
-        await _attribute_job_execution(job_data)
+        if not job_data.get("_broker_result_id"):
+            await _attribute_job_execution(job_data)
     except RuntimeError as exc:
         # A node can be revoked between BLPOP and dispatch. Preserve the user's
         # work while the control-plane WireGuard reconciler removes that peer;
@@ -10142,6 +10262,7 @@ async def process_job(job_data: dict):
         await process_exploit_batch_job(job_data)
     else:
         await process_scan_job(job_data)
+    await _finish_broker_result_ingest(job_data)
 
 
 def _mark_worker_processing_lease(
@@ -10304,7 +10425,7 @@ async def async_main():
     await init_db()
 
     r = get_redis()
-    base_queue_keys = [QUEUE_NAME] if RETEST_QUEUE_NAME == QUEUE_NAME else [QUEUE_NAME, RETEST_QUEUE_NAME]
+    base_queue_keys = list(dict.fromkeys([QUEUE_NAME, RETEST_QUEUE_NAME, BROKER_INGEST_QUEUE_NAME]))
     queue_keys = list(base_queue_keys)
     print(
         f"Worker started, listening on queues: {', '.join(queue_keys)} "

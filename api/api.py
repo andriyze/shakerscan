@@ -120,8 +120,11 @@ try:
     from artifact_storage import (
         ArtifactStorageError,
         delete_object as delete_artifact_object,
+        object_key as artifact_object_key,
         read_bytes as read_artifact_bytes,
+        store_bytes as store_artifact_bytes,
         storage_health as artifact_storage_health,
+        upsert_manifest as upsert_artifact_manifest,
     )
 except ModuleNotFoundError as exc:
     if exc.name != "artifact_storage":
@@ -129,8 +132,11 @@ except ModuleNotFoundError as exc:
     from api.artifact_storage import (
         ArtifactStorageError,
         delete_object as delete_artifact_object,
+        object_key as artifact_object_key,
         read_bytes as read_artifact_bytes,
+        store_bytes as store_artifact_bytes,
         storage_health as artifact_storage_health,
+        upsert_manifest as upsert_artifact_manifest,
     )
 
 try:
@@ -171,7 +177,18 @@ import agent_loop
 import agent_provenance
 import agent_text_toolcalls
 import agent_tools
-from job_queue import clear_unleased, enqueue_job, normalize_placement, pending_depth, queue_payloads
+from job_queue import (
+    QueueLease,
+    acknowledge_lease,
+    clear_unleased,
+    enqueue_job,
+    heartbeat_lease,
+    lease_job,
+    normalize_placement,
+    pending_depth,
+    qualified_route_queues,
+    queue_payloads,
+)
 from http_experiment import (
     ExperimentContractError,
     MAX_BODY_BYTES,
@@ -348,6 +365,25 @@ DATABASE_URL = os.environ.get('DATABASE_URL', 'postgresql://scanner:scanner@loca
 RESULTS_DIR = Path(os.environ.get('RESULTS_DIR', '/results'))
 QUEUE_NAME = 'scan_jobs'
 RETEST_QUEUE_NAME = os.environ.get("RETEST_QUEUE_NAME", "retest_jobs")
+BROKER_INGEST_QUEUE_NAME = os.environ.get("BROKER_INGEST_QUEUE_NAME", "broker_ingest_jobs")
+BROKER_LEASE_SECONDS = max(60, int(os.environ.get("SHAKERSCAN_BROKER_LEASE_SECONDS", "300")))
+BROKER_MAX_DELIVERY_ATTEMPTS = max(1, int(os.environ.get("SHAKERSCAN_QUEUE_MAX_DELIVERY_ATTEMPTS", "5")))
+BROKER_MAX_RESULT_BYTES = max(1_048_576, int(os.environ.get("SHAKERSCAN_BROKER_MAX_RESULT_BYTES", str(64 * 1024 * 1024))))
+BROKER_ACTIVE_SLOTS_KEY = "shakerscan:active_scan_slots"
+BROKER_MAX_ACTIVE_SCANS_KEY = "shakerscan:max_active_scans"
+_BROKER_SLOT_LUA = """
+redis.call('ZREMRANGEBYSCORE', KEYS[1], 0, tonumber(ARGV[1]))
+if redis.call('ZSCORE', KEYS[1], ARGV[4]) then
+  redis.call('ZADD', KEYS[1], tonumber(ARGV[1]) + tonumber(ARGV[2]), ARGV[4])
+  return 1
+end
+if redis.call('ZCARD', KEYS[1]) < tonumber(ARGV[3]) then
+  redis.call('ZADD', KEYS[1], tonumber(ARGV[1]) + tonumber(ARGV[2]), ARGV[4])
+  redis.call('EXPIRE', KEYS[1], tonumber(ARGV[2]) + 600)
+  return 1
+end
+return 0
+"""
 HEARTBEAT_TIMEOUT_MINUTES = 5  # Mark scan stale if no heartbeat for this long
 RETEST_RUNNING_TIMEOUT_MINUTES = int(os.environ.get("RETEST_RUNNING_TIMEOUT_MINUTES", "30"))
 FINALIZATION_HEARTBEAT_TIMEOUT_MINUTES = int(
@@ -4581,7 +4617,8 @@ class FleetNodeJoinRequest(BaseModel):
     name: str = Field(min_length=1, max_length=128)
     hostname: Optional[str] = Field(default=None, max_length=255)
     region: Optional[str] = Field(default=None, max_length=128)
-    wireguard_public_key: str = Field(min_length=40, max_length=64)
+    transport: str = Field(default="overlay", pattern="^(overlay|broker)$")
+    wireguard_public_key: Optional[str] = Field(default=None, min_length=40, max_length=64)
     labels: dict[str, Any] = Field(default_factory=dict)
     capacity: dict[str, Any] = Field(default_factory=dict)
     build_fingerprint: Optional[str] = Field(default=None, max_length=256)
@@ -4619,6 +4656,28 @@ class FleetDesiredStateRequest(BaseModel):
         ):
             raise ValueError("worker_image_digest must be digest-pinned")
         return candidate
+
+
+class BrokerLeaseRequest(BaseModel):
+    worker_id: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_.:-]+$")
+    wait_seconds: int = Field(default=20, ge=0, le=30)
+
+
+class BrokerLeaseHeartbeatRequest(BaseModel):
+    lease_token: str = Field(min_length=32, max_length=256)
+    progress: Optional[int] = Field(default=None, ge=0, le=100)
+    phase: Optional[str] = Field(default=None, max_length=160)
+    log_lines: list[str] = Field(default_factory=list, max_length=20)
+
+    @field_validator("log_lines")
+    @classmethod
+    def _bound_broker_log_lines(cls, value):
+        return [str(line)[:2000] for line in value]
+
+
+class BrokerResultRequest(BaseModel):
+    lease_token: str = Field(min_length=32, max_length=256)
+    result: dict[str, Any]
 
 
 def _fleet_bootstrap_config() -> FleetBootstrapConfig:
@@ -7441,8 +7500,20 @@ async def join_fleet_node(body: FleetNodeJoinRequest, request: Request, response
     _require_fleet_https(request)
     response.headers["Cache-Control"] = "no-store"
     try:
-        config = _fleet_bootstrap_config()
-        ca_certificate = _fleet_ca_certificate_pem()
+        if body.transport == "broker":
+            worker_image = str(os.environ.get("FLEET_WORKER_IMAGE_DIGEST") or "").strip()
+            config = FleetBootstrapConfig(
+                overlay_cidr="",
+                control_plane_overlay_url="",
+                control_plane_wireguard_public_key="",
+                control_plane_wireguard_endpoint="",
+                worker_image_digest=worker_image,
+                desired_worker_count=_int_env("FLEET_DESIRED_WORKER_COUNT", 1),
+            )
+            ca_certificate = None
+        else:
+            config = _fleet_bootstrap_config()
+            ca_certificate = _fleet_ca_certificate_pem()
         async with db_pool.acquire() as conn:
             async with conn.transaction():
                 result = await _enroll_fleet_node(
@@ -7452,12 +7523,14 @@ async def join_fleet_node(body: FleetNodeJoinRequest, request: Request, response
                     hostname=body.hostname,
                     region=body.region,
                     wireguard_public_key=body.wireguard_public_key,
+                    transport=body.transport,
                     labels=body.labels,
                     capacity=body.capacity,
                     build_fingerprint=body.build_fingerprint,
                     config=config,
                 )
-        result["fleet_ca_certificate_pem"] = ca_certificate
+        if ca_certificate:
+            result["fleet_ca_certificate_pem"] = ca_certificate
         return result
     except FleetConfigurationError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
@@ -7645,6 +7718,700 @@ async def heartbeat_fleet_node(node_id: str, body: FleetHeartbeatRequest, reques
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except (FleetConflictError, ValueError) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+def _broker_node_labels(node: dict[str, Any]) -> dict[str, Any]:
+    labels = node.get("labels") or {}
+    if isinstance(labels, str):
+        try:
+            labels = json.loads(labels)
+        except json.JSONDecodeError:
+            labels = {}
+    return labels if isinstance(labels, dict) else {}
+
+
+async def _hydrate_broker_job_options(conn: Any, payload: dict[str, Any]) -> dict[str, Any]:
+    """Resolve managed credential references for one authenticated job lease only."""
+    options = dict(payload.get("options") or {})
+    raw_refs = options.pop("managed_credential_profiles", None)
+    if not isinstance(raw_refs, list) or not raw_refs:
+        payload["options"] = options
+        return payload
+    scan_id = _uuid_or_400(str(payload.get("scan_id") or ""), "scan id")
+    refs = [dict(item) for item in raw_refs if isinstance(item, dict)][:2]
+    profile_ids: list[uuid.UUID] = []
+    for ref in refs:
+        try:
+            profile_ids.append(uuid.UUID(str(ref.get("profile_id") or "")))
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail="invalid managed credential reference") from exc
+    if len(profile_ids) != len(set(profile_ids)):
+        raise HTTPException(status_code=409, detail="managed credential references must be distinct")
+    rows = await conn.fetch(
+        """
+        SELECT cp.id, cp.auth_kind, cp.secret_value
+        FROM scans s
+        JOIN target_credential_profiles cp ON cp.target_id = s.target_id
+        WHERE s.id = $1
+          AND cp.id = ANY($2::uuid[])
+          AND cp.is_active = true
+          AND (cp.expires_at IS NULL OR cp.expires_at > NOW())
+        """,
+        scan_id,
+        profile_ids,
+    )
+    profiles = {str(row["id"]): row_to_dict(row) for row in rows}
+    option_map = {
+        "user1": {"authorization_header": "auth_header", "cookie": "auth_cookies"},
+        "user2": {"authorization_header": "user2_header", "cookie": "user2_cookies"},
+    }
+    resolved: list[dict[str, str]] = []
+    for ref in refs:
+        state = str(ref.get("auth_state") or "")
+        profile_id = str(ref.get("profile_id") or "")
+        row = profiles.get(profile_id)
+        auth_kind = str((row or {}).get("auth_kind") or "")
+        option_key = option_map.get(state, {}).get(auth_kind)
+        if row is None or not option_key or option_key != str(ref.get("option_key") or ""):
+            raise HTTPException(status_code=409, detail=f"managed credential unavailable for {state or 'principal'}")
+        secret = str(decrypt_secret(row.get("secret_value")) or "")
+        if not secret or secret.startswith("enc:fernet:") or "\r" in secret or "\n" in secret:
+            raise HTTPException(status_code=409, detail=f"managed credential cannot be decrypted for {state}")
+        options.setdefault(option_key, secret)
+        resolved.append({"auth_state": state, "profile_id": profile_id, "option_key": option_key})
+    options["resolved_credential_profiles"] = resolved
+    payload["options"] = options
+    return payload
+
+
+async def _broker_reserve_request_budget(
+    conn: Any,
+    redis_client: Any,
+    payload: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Reserve the same root-domain request budget before remote execution."""
+    options = dict(payload.get("options") or {})
+    mode = str(options.get("request_budget_mode") or "compatibility").strip().lower()
+    if mode == "off":
+        return {}
+    mode = "enforce"
+    options["request_budget_mode"] = mode
+    custom_budget = options.get("custom_budget") if isinstance(options.get("custom_budget"), dict) else {}
+    resolved = resolve_or_consume_budget(
+        str(options.get("scan_type") or "standard"),
+        options=options,
+        budget_profile=options.get("budget_profile"),
+        custom_budget=custom_budget,
+    )
+    requested = max(0, int(resolved.get("request_max") or 0))
+    if requested <= 0:
+        payload["options"] = options
+        return {}
+    try:
+        scan_id = uuid.UUID(str(payload.get("scan_id") or ""))
+    except ValueError:
+        return None
+    target = await conn.fetchrow(
+        """
+        SELECT t.root_domain, t.asm_config
+        FROM scans s JOIN targets t ON t.id=s.target_id
+        WHERE s.id=$1
+        """,
+        scan_id,
+    )
+    root_domain = str((target or {}).get("root_domain") or "").strip().lower()
+    config = asm_inventory.merge_asm_config(parse_json_field((target or {}).get("asm_config")) or {})
+    cap = int(config.get("max_requests_per_hour_per_domain") or 0)
+    granted = requested
+    if root_domain and cap > 0:
+        used = await asm_inventory.domain_tested_recently_count(conn, root_domain, hours=1)
+        remaining = max(0, cap - int(used or 0))
+        try:
+            granted = asm_inventory.reserve_domain_rate(
+                redis_client,
+                root_domain,
+                remaining,
+                requested,
+                all_or_nothing=False,
+            )
+        except Exception:
+            return None
+        if granted <= 0:
+            return None
+    adjusted_budget = dict(custom_budget)
+    adjusted_budget["request_max"] = granted
+    options["custom_budget"] = adjusted_budget
+    options["request_budget_reserved"] = granted
+    if root_domain:
+        options["request_budget_domain"] = root_domain
+    payload["options"] = options
+    return {
+        "requested": requested,
+        "granted": granted,
+        "root_domain": root_domain,
+        "custom_budget": adjusted_budget,
+        "request_budget_mode": mode,
+    }
+
+
+async def _broker_authenticated_node(
+    node_id: str,
+    request: Request,
+    *,
+    require_schedulable: bool = False,
+) -> dict[str, Any]:
+    _require_fleet_https(request)
+    credential = _fleet_bearer_credential(request)
+    try:
+        async with db_pool.acquire() as conn:
+            async with conn.transaction():
+                node = await _authenticate_fleet_node(conn, node_id=node_id, credential=credential)
+    except FleetAuthenticationError as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
+    labels = _broker_node_labels(node)
+    if str(labels.get("transport") or "").strip().lower() != "broker":
+        raise HTTPException(status_code=403, detail="node is not enrolled for HTTPS broker transport")
+    if require_schedulable and bool(node.get("drain")):
+        raise HTTPException(status_code=409, detail="node is draining")
+    return node
+
+
+def _queue_lease_from_broker_row(row: Any) -> QueueLease:
+    return QueueLease(
+        queue_name=str(row["queue_name"]),
+        payload="",
+        stream_key=str(row["stream_key"]),
+        message_id=str(row["message_id"]),
+        delivery_attempts=int(row.get("delivery_attempts") or 1),
+    )
+
+
+def _broker_slot_id(stream_key: str, message_id: str) -> str:
+    return f"broker:{hashlib.sha256(f'{stream_key}:{message_id}'.encode()).hexdigest()[:32]}"
+
+
+def _broker_take_or_refresh_slot(redis_client: Any, slot_id: str) -> bool:
+    try:
+        raw_cap = redis_client.get(BROKER_MAX_ACTIVE_SCANS_KEY)
+        cap = max(1, int(raw_cap or os.environ.get("SHAKERSCAN_MAX_ACTIVE_SCANS") or 1))
+        return bool(redis_client.eval(
+            _BROKER_SLOT_LUA,
+            1,
+            BROKER_ACTIVE_SLOTS_KEY,
+            time.time(),
+            BROKER_LEASE_SECONDS,
+            cap,
+            slot_id,
+        ))
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="fleet admission control is unavailable") from exc
+
+
+def _broker_release_slot(redis_client: Any, slot_id: str) -> None:
+    try:
+        redis_client.zrem(BROKER_ACTIVE_SLOTS_KEY, slot_id)
+    except Exception:
+        pass
+
+
+@app.post("/fleet/broker/nodes/{node_id}/lease")
+async def lease_broker_job(node_id: str, body: BrokerLeaseRequest, request: Request):
+    """Lease one executable scan to an outbound-only HTTPS worker."""
+    node = await _broker_authenticated_node(node_id, request, require_schedulable=True)
+    parsed_node_id = uuid.UUID(node_id)
+    async with db_pool.acquire() as conn:
+        await conn.execute(
+            """
+            UPDATE broker_job_leases
+            SET status='lost', completed_at=NOW()
+            WHERE node_id=$1 AND worker_id=$2 AND status='leased' AND lease_expires_at < NOW()
+            """,
+            parsed_node_id,
+            body.worker_id,
+        )
+        active = await conn.fetchval(
+            """
+            SELECT EXISTS(
+                SELECT 1 FROM broker_job_leases
+                WHERE node_id=$1 AND worker_id=$2 AND status='leased'
+            )
+            """,
+            parsed_node_id,
+            body.worker_id,
+        )
+    if active:
+        raise HTTPException(status_code=409, detail="worker already owns an active broker lease")
+
+    redis_client = get_redis()
+    labels = _broker_node_labels(node)
+    queue_names = [QUEUE_NAME, *qualified_route_queues(redis_client, [QUEUE_NAME], worker_labels=labels)]
+    consumer_name = f"broker:{node_id}:{body.worker_id}"[:250]
+    lease = await asyncio.to_thread(
+        lease_job,
+        redis_client,
+        queue_names,
+        consumer_name=consumer_name,
+        block_ms=body.wait_seconds * 1000,
+        visibility_timeout_ms=BROKER_LEASE_SECONDS * 1000,
+    )
+    if lease is None:
+        return Response(status_code=204)
+    if lease.legacy:
+        try:
+            legacy_payload = json.loads(lease.payload)
+            enqueue_job(redis_client, lease.queue_name, legacy_payload)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            pass
+        return Response(status_code=204)
+    try:
+        payload = json.loads(lease.payload)
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        await asyncio.to_thread(acknowledge_lease, redis_client, lease)
+        raise HTTPException(status_code=500, detail="broker encountered malformed queued work") from exc
+    if not isinstance(payload, dict):
+        await asyncio.to_thread(acknowledge_lease, redis_client, lease)
+        raise HTTPException(status_code=500, detail="broker encountered malformed queued work")
+    job_type = str(payload.get("type") or "scan")
+    if job_type not in {"scan", parallel_scan.SHARD_JOB_TYPE}:
+        enqueue_job(redis_client, str(payload.get("_base_queue_name") or QUEUE_NAME), payload)
+        await asyncio.to_thread(acknowledge_lease, redis_client, lease)
+        return Response(status_code=204)
+    if lease.delivery_attempts > BROKER_MAX_DELIVERY_ATTEMPTS:
+        try:
+            exhausted_scan_id = uuid.UUID(str(payload.get("scan_id") or ""))
+        except ValueError:
+            exhausted_scan_id = None
+        if exhausted_scan_id:
+            message = f"HTTPS broker delivery exhausted after {lease.delivery_attempts} attempts"
+            async with db_pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    UPDATE scans
+                    SET status='failed', progress=100, current_phase='queue_delivery_failed',
+                        error_message=$2, completed_at=NOW()
+                    WHERE id=$1 AND status NOT IN ('completed','failed','cancelled')
+                    """,
+                    exhausted_scan_id,
+                    message,
+                )
+        await asyncio.to_thread(acknowledge_lease, redis_client, lease)
+        return Response(status_code=204)
+    try:
+        candidate_scan_id = uuid.UUID(str(payload.get("scan_id") or ""))
+    except ValueError:
+        candidate_scan_id = None
+    if candidate_scan_id:
+        async with db_pool.acquire() as conn:
+            state = await conn.fetchrow(
+                """
+                SELECT child.status, parent.status AS parent_status
+                FROM scans child
+                LEFT JOIN scans parent ON parent.id=child.parent_scan_id
+                WHERE child.id=$1
+                """,
+                candidate_scan_id,
+            )
+        if not state or str(state["status"]) in {"completed", "failed", "cancelled"} or str(state.get("parent_status") or "") == "cancelled":
+            await asyncio.to_thread(acknowledge_lease, redis_client, lease)
+            return Response(status_code=204)
+
+    slot_id = _broker_slot_id(str(lease.stream_key), str(lease.message_id))
+    if not _broker_take_or_refresh_slot(redis_client, slot_id):
+        enqueue_job(redis_client, str(payload.get("_base_queue_name") or QUEUE_NAME), payload)
+        await asyncio.to_thread(acknowledge_lease, redis_client, lease)
+        return Response(status_code=204)
+
+    raw_token = _generate_fleet_secret("bjl_")
+    payload_hash = hashlib.sha256(lease.payload.encode("utf-8")).hexdigest()
+    scan_id = None
+    try:
+        scan_id = uuid.UUID(str(payload.get("scan_id") or ""))
+    except ValueError:
+        pass
+    expires_at = utc_now() + timedelta(seconds=BROKER_LEASE_SECONDS)
+    budget_reservation: dict[str, Any] | None = None
+    row = None
+    async with db_pool.acquire() as conn:
+        payload = await _hydrate_broker_job_options(conn, payload)
+        budget_reservation = await _broker_reserve_request_budget(conn, redis_client, payload)
+        if budget_reservation is not None:
+            await conn.execute(
+                """
+                UPDATE broker_job_leases
+                SET status='lost', completed_at=NOW()
+                WHERE stream_key=$1 AND message_id=$2
+                  AND status='leased' AND lease_expires_at < NOW()
+                """,
+                lease.stream_key,
+                lease.message_id,
+            )
+            row = await conn.fetchrow(
+                """
+                INSERT INTO broker_job_leases (
+                    node_id, worker_id, queue_name, stream_key, message_id, consumer_name,
+                    lease_token_hash, payload_sha256, budget_reservation, job_id, scan_id,
+                    delivery_attempts, lease_expires_at
+                ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10,$11,$12,$13)
+                ON CONFLICT (stream_key, message_id) DO UPDATE
+                SET node_id=EXCLUDED.node_id,
+                    worker_id=EXCLUDED.worker_id,
+                    consumer_name=EXCLUDED.consumer_name,
+                    lease_token_hash=EXCLUDED.lease_token_hash,
+                    status='leased',
+                    delivery_attempts=EXCLUDED.delivery_attempts,
+                    lease_expires_at=EXCLUDED.lease_expires_at,
+                    last_heartbeat_at=NOW(),
+                    completed_at=NULL
+                WHERE broker_job_leases.status IN ('lost','failed','cancelled')
+                RETURNING id
+                """,
+                parsed_node_id,
+                body.worker_id,
+                lease.queue_name,
+                lease.stream_key,
+                lease.message_id,
+                consumer_name,
+                _hash_fleet_secret(raw_token, "broker-job-lease"),
+                payload_hash,
+                json.dumps(budget_reservation),
+                str(payload.get("job_id") or "") or None,
+                scan_id,
+                lease.delivery_attempts,
+                expires_at,
+            )
+        if row and scan_id:
+            await conn.execute(
+                """
+                UPDATE scans
+                SET executing_node_id=$2,
+                    worker_id=$3,
+                    status='running',
+                    started_at=COALESCE(started_at, NOW()),
+                    current_phase='broker_execution',
+                    progress=GREATEST(progress, 5)
+                WHERE id=$1 AND status IN ('pending','queued','running')
+                """,
+                scan_id,
+                parsed_node_id,
+                f"broker:{body.worker_id}",
+            )
+    if budget_reservation is None:
+        _broker_release_slot(redis_client, slot_id)
+        enqueue_job(redis_client, str(payload.get("_base_queue_name") or QUEUE_NAME), payload)
+        await asyncio.to_thread(acknowledge_lease, redis_client, lease)
+        return Response(status_code=204)
+    if not row:
+        _broker_release_slot(redis_client, slot_id)
+        raise HTTPException(status_code=409, detail="queue message already has an active broker lease")
+    if payload.get("job_id"):
+        redis_client.hset(
+            f"job:{payload['job_id']}",
+            mapping={
+                "status": "running",
+                "scan_id": str(payload.get("scan_id") or ""),
+                "current_phase": "broker_execution",
+                "progress": "5",
+                "heartbeat": utc_now_iso(),
+                "broker_node_id": node_id,
+                "broker_worker_id": body.worker_id,
+            },
+        )
+        redis_client.expire(f"job:{payload['job_id']}", 86400)
+    return JSONResponse(
+        content={
+            "lease_id": str(row["id"]),
+            "lease_token": raw_token,
+            "lease_expires_at": expires_at.isoformat(),
+            "heartbeat_interval_seconds": max(10, BROKER_LEASE_SECONDS // 3),
+            "job": payload,
+        },
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+async def _broker_lease_row(
+    conn: Any,
+    *,
+    node_id: str,
+    lease_id: str,
+    lease_token: str,
+    for_update: bool = False,
+) -> Any:
+    suffix = " FOR UPDATE" if for_update else ""
+    try:
+        row = await conn.fetchrow(
+            """
+            SELECT * FROM broker_job_leases
+            WHERE id=$1 AND node_id=$2 AND lease_token_hash=$3
+            """ + suffix,
+            uuid.UUID(lease_id),
+            uuid.UUID(node_id),
+            _hash_fleet_secret(lease_token, "broker-job-lease"),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="broker lease not found") from exc
+    if not row:
+        raise HTTPException(status_code=404, detail="broker lease not found")
+    return row
+
+
+@app.post("/fleet/broker/nodes/{node_id}/leases/{lease_id}/heartbeat")
+async def heartbeat_broker_job(
+    node_id: str,
+    lease_id: str,
+    body: BrokerLeaseHeartbeatRequest,
+    request: Request,
+):
+    await _broker_authenticated_node(node_id, request)
+    async with db_pool.acquire() as conn:
+        row = await _broker_lease_row(
+            conn,
+            node_id=node_id,
+            lease_id=lease_id,
+            lease_token=body.lease_token,
+        )
+    if str(row["status"]) != "leased":
+        raise HTTPException(status_code=409, detail=f"broker lease is {row['status']}")
+    slot_id = _broker_slot_id(str(row["stream_key"]), str(row["message_id"]))
+    if not _broker_take_or_refresh_slot(get_redis(), slot_id):
+        raise HTTPException(status_code=409, detail="broker fleet admission slot was lost")
+    owned = await asyncio.to_thread(
+        heartbeat_lease,
+        get_redis(),
+        _queue_lease_from_broker_row(row),
+        str(row["consumer_name"]),
+    )
+    if not owned:
+        _broker_release_slot(get_redis(), slot_id)
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE broker_job_leases SET status='lost', completed_at=NOW() WHERE id=$1",
+                row["id"],
+            )
+        raise HTTPException(status_code=409, detail="broker queue lease ownership was lost")
+    expires_at = utc_now() + timedelta(seconds=BROKER_LEASE_SECONDS)
+    async with db_pool.acquire() as conn:
+        scan_status = None
+        if row.get("scan_id"):
+            scan_status = await conn.fetchval("SELECT status FROM scans WHERE id=$1", row["scan_id"])
+            if body.phase is not None or body.progress is not None:
+                await conn.execute(
+                    """
+                    UPDATE scans
+                    SET current_phase=COALESCE($2, current_phase),
+                        progress=COALESCE($3, progress)
+                    WHERE id=$1 AND status='running'
+                    """,
+                    row["scan_id"],
+                    body.phase,
+                    body.progress,
+                )
+        await conn.execute(
+            """
+            UPDATE broker_job_leases
+            SET lease_expires_at=$2, last_heartbeat_at=NOW()
+            WHERE id=$1 AND status='leased'
+            """,
+            row["id"],
+            expires_at,
+        )
+    if row.get("job_id"):
+        redis_client = get_redis()
+        mapping = {"heartbeat": utc_now_iso(), "status": "running"}
+        if body.phase is not None:
+            mapping["current_phase"] = body.phase
+        if body.progress is not None:
+            mapping["progress"] = str(body.progress)
+        redis_client.hset(f"job:{row['job_id']}", mapping=mapping)
+        if body.log_lines:
+            key = f"scan:{row['scan_id']}:logs"
+            redis_client.rpush(key, *body.log_lines)
+            redis_client.ltrim(key, -1000, -1)
+            redis_client.expire(key, 86400)
+    return {
+        "lease_id": lease_id,
+        "lease_expires_at": expires_at.isoformat(),
+        "cancel_requested": str(scan_status or "") == "cancelled",
+    }
+
+
+@app.post("/fleet/broker/nodes/{node_id}/leases/{lease_id}/result", status_code=202)
+async def submit_broker_job_result(
+    node_id: str,
+    lease_id: str,
+    body: BrokerResultRequest,
+    request: Request,
+):
+    await _broker_authenticated_node(node_id, request)
+    encoded = json.dumps(body.result, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    if len(encoded) > BROKER_MAX_RESULT_BYTES:
+        raise HTTPException(status_code=413, detail="broker result exceeds configured size limit")
+    result_hash = hashlib.sha256(encoded).hexdigest()
+    async with db_pool.acquire() as conn:
+        async with conn.transaction():
+            row = await _broker_lease_row(
+                conn,
+                node_id=node_id,
+                lease_id=lease_id,
+                lease_token=body.lease_token,
+                for_update=True,
+            )
+            if str(row["status"]) not in {"leased", "submitted", "ingesting", "completed", "failed", "cancelled"}:
+                raise HTTPException(status_code=409, detail=f"broker lease is {row['status']}")
+            result_row = await conn.fetchrow(
+                """
+                INSERT INTO broker_job_results (lease_id, result_sha256, result)
+                VALUES ($1,$2,$3::jsonb)
+                ON CONFLICT (lease_id) DO UPDATE
+                SET result_sha256=broker_job_results.result_sha256
+                WHERE broker_job_results.result_sha256=EXCLUDED.result_sha256
+                RETURNING id, result_sha256
+                """,
+                row["id"],
+                result_hash,
+                encoded.decode("utf-8"),
+            )
+            if not result_row:
+                raise HTTPException(status_code=409, detail="a different result was already submitted")
+            await conn.execute(
+                "UPDATE broker_job_leases SET status='submitted' WHERE id=$1 AND status='leased'",
+                row["id"],
+            )
+
+    if row.get("ingest_enqueued_at"):
+        redis_client = get_redis()
+        await asyncio.to_thread(
+            acknowledge_lease,
+            redis_client,
+            _queue_lease_from_broker_row(row),
+        )
+        _broker_release_slot(
+            redis_client,
+            _broker_slot_id(str(row["stream_key"]), str(row["message_id"])),
+        )
+        return {"lease_id": lease_id, "result_id": str(result_row["id"]), "status": "submitted"}
+
+    redis_client = get_redis()
+    raw_rows = redis_client.xrange(str(row["stream_key"]), min=str(row["message_id"]), max=str(row["message_id"]))
+    if not raw_rows:
+        raise HTTPException(status_code=409, detail="broker queue message is no longer available")
+    fields = raw_rows[0][1]
+    raw_payload = fields.get("payload") or fields.get(b"payload")
+    try:
+        job_payload = json.loads(raw_payload)
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=500, detail="broker queue payload cannot be recovered") from exc
+    job_payload["_broker_result_id"] = str(result_row["id"])
+    job_payload["_broker_lease_id"] = lease_id
+    job_payload.pop("_base_queue_name", None)
+    reservation = parse_json_field(row.get("budget_reservation")) or {}
+    if isinstance(reservation, dict) and reservation:
+        options = dict(job_payload.get("options") or {})
+        options["request_budget_mode"] = str(reservation.get("request_budget_mode") or "enforce")
+        options["custom_budget"] = dict(reservation.get("custom_budget") or {})
+        options["request_budget_reserved"] = max(0, int(reservation.get("granted") or 0))
+        if reservation.get("root_domain"):
+            options["request_budget_domain"] = str(reservation["root_domain"])
+        job_payload["options"] = options
+        job_payload["domain_rate_reserved"] = max(0, int(reservation.get("granted") or 0))
+    enqueue_job(redis_client, BROKER_INGEST_QUEUE_NAME, job_payload)
+    async with db_pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE broker_job_leases SET ingest_enqueued_at=NOW() WHERE id=$1",
+            row["id"],
+        )
+    acknowledged = await asyncio.to_thread(
+        acknowledge_lease,
+        redis_client,
+        _queue_lease_from_broker_row(row),
+    )
+    if not acknowledged:
+        raise HTTPException(status_code=409, detail="broker queue lease could not be acknowledged")
+    _broker_release_slot(
+        redis_client,
+        _broker_slot_id(str(row["stream_key"]), str(row["message_id"])),
+    )
+    return {"lease_id": lease_id, "result_id": str(result_row["id"]), "status": "submitted"}
+
+
+@app.put("/fleet/broker/nodes/{node_id}/leases/{lease_id}/artifacts")
+async def upload_broker_job_artifact(
+    node_id: str,
+    lease_id: str,
+    request: Request,
+    artifact_type: str = Query(..., pattern=r"^(checkpoint|diagnostic|screenshot|attachment)$"),
+    filename: str = Query(..., min_length=1, max_length=180),
+    shard_index: Optional[int] = Query(default=None, ge=0),
+):
+    """Upload one lease-bound artifact without exposing object-store credentials."""
+    await _broker_authenticated_node(node_id, request)
+    lease_token = str(request.headers.get("x-shakerscan-lease-token") or "").strip()
+    if len(lease_token) < 32:
+        raise HTTPException(status_code=401, detail="broker lease token is required")
+    async with db_pool.acquire() as conn:
+        row = await _broker_lease_row(
+            conn,
+            node_id=node_id,
+            lease_id=lease_id,
+            lease_token=lease_token,
+        )
+        if str(row["status"]) not in {"leased", "submitted", "ingesting"}:
+            raise HTTPException(status_code=409, detail=f"broker lease is {row['status']}")
+        scan_row = await conn.fetchrow(
+            "SELECT parent_scan_id, shard_index FROM scans WHERE id=$1",
+            row["scan_id"],
+        )
+    raw = await request.body()
+    max_artifact_bytes = max(
+        1_048_576,
+        int(os.environ.get("SHAKERSCAN_BROKER_MAX_ARTIFACT_BYTES", str(32 * 1024 * 1024))),
+    )
+    if len(raw) > max_artifact_bytes:
+        raise HTTPException(status_code=413, detail="broker artifact exceeds configured size limit")
+    if not raw:
+        raise HTTPException(status_code=422, detail="broker artifact is empty")
+    safe_filename = Path(filename).name
+    effective_shard = shard_index
+    if effective_shard is None and scan_row and scan_row.get("shard_index") is not None:
+        effective_shard = int(scan_row["shard_index"])
+    content_type = str(request.headers.get("content-type") or "application/octet-stream").split(";", 1)[0]
+    try:
+        descriptor = await asyncio.to_thread(
+            store_artifact_bytes,
+            raw,
+            results_dir=RESULTS_DIR,
+            scan_id=str(row["scan_id"]),
+            artifact_type=artifact_type,
+            shard_index=effective_shard,
+            filename=safe_filename,
+            content_type=content_type,
+        )
+        artifact_key = artifact_object_key(
+            scan_id=str(row["scan_id"]),
+            artifact_type=artifact_type,
+            shard_index=effective_shard,
+            filename=safe_filename,
+        )
+        async with db_pool.acquire() as conn:
+            manifest = await upsert_artifact_manifest(
+                conn,
+                scan_id=str(row["scan_id"]),
+                parent_scan_id=str(scan_row["parent_scan_id"]) if scan_row and scan_row.get("parent_scan_id") else None,
+                shard_index=effective_shard,
+                artifact_type=artifact_type,
+                artifact_key=artifact_key,
+                descriptor=descriptor,
+                metadata={"broker_lease_id": lease_id, "filename": safe_filename},
+                executing_node_id=node_id,
+            )
+    except (ArtifactStorageError, ValueError) as exc:
+        raise HTTPException(status_code=503, detail=f"broker artifact persistence failed: {exc}") from exc
+    return {
+        "artifact_id": str(manifest["id"]),
+        "content_sha256": descriptor["content_sha256"],
+        "size_bytes": descriptor["size_bytes"],
+        "url": f"/scans/{row['scan_id']}/artifacts/{manifest['id']}",
+    }
 
 
 @app.post("/fleet/nodes/{node_id}/connection-bundle")
@@ -48991,6 +49758,7 @@ async def queue_stats():
         'completed': completed,
         'failed': failed,
         'retest_pending': pending_depth(r, RETEST_QUEUE_NAME),
+        'broker_ingest_pending': pending_depth(r, BROKER_INGEST_QUEUE_NAME),
         'retest_queued': retest_queued,
         'retest_running': retest_running,
         'retest_completed': retest_completed,

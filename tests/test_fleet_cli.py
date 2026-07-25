@@ -135,6 +135,17 @@ def test_parser_exposes_documented_commands():
         IMAGE,
     ])
     assert args.command == "init"
+    broker = parser.parse_args([
+        "init",
+        "--network",
+        "broker",
+        "--public-url",
+        "https://fleet.example.test",
+        "--worker-image",
+        IMAGE,
+    ])
+    assert broker.network == "broker"
+    assert broker.endpoint is None
 
 
 def test_join_persists_one_time_bundle_before_starting_runtime(tmp_path, monkeypatch):
@@ -199,6 +210,56 @@ def test_join_persists_one_time_bundle_before_starting_runtime(tmp_path, monkeyp
     worker_env = (paths.node / "worker.env").read_text(encoding="utf-8")
     assert "REDIS_URL=redis://10.77.0.1:6379" in worker_env
     assert calls[-1][2].endswith("/connection-bundle")
+
+
+def test_broker_join_installs_no_database_or_redis_credentials(tmp_path, monkeypatch):
+    paths = fleet_cli.RuntimePaths(tmp_path)
+    paths.broker_worker_compose.write_text("services: {}\n", encoding="utf-8")
+    response = {
+        "node_id": NODE_ID,
+        "node_credential": "node-secret",
+        "transport": "broker",
+        "worker_image_digest": IMAGE,
+        "labels": {"transport": "broker", "network": "customer-vpc"},
+    }
+    payloads = []
+
+    def fake_api(_base, _method, path, **kwargs):
+        assert path == "/fleet/nodes/join"
+        payloads.append(kwargs["payload"])
+        return dict(response)
+
+    started = []
+    monkeypatch.setattr(fleet_cli, "_require_linux", lambda: None)
+    monkeypatch.setattr(fleet_cli, "_require_commands", lambda _names: None)
+    monkeypatch.setattr(fleet_cli, "_docker_compose_command", lambda: ["docker", "compose"])
+    monkeypatch.setattr(fleet_cli, "api_json", fake_api)
+    monkeypatch.setattr(fleet_cli, "_start_broker_runtime", lambda _paths, result: started.append(result["node_id"]))
+
+    fleet_cli.command_join(
+        paths,
+        types.SimpleNamespace(
+            control_plane_url="https://fleet.example.test",
+            token="ssj_" + "x" * 40,
+            name="broker-a",
+            region="eu-test",
+            transport="broker",
+            egress_group=None,
+            network_label="customer-vpc",
+            data_residency=None,
+            capability=["nuclei"],
+            scan_tier=["smart"],
+            label=[],
+        ),
+    )
+
+    assert started == [NODE_ID]
+    assert payloads[0]["wireguard_public_key"] is None
+    assert payloads[0]["transport"] == "broker"
+    state_text = (paths.node / "state.json").read_text(encoding="utf-8")
+    assert "REDIS_URL" not in state_text
+    assert "DATABASE_URL" not in state_text
+    assert not (paths.node / "worker.env").exists()
 
 
 def test_init_persists_identity_bundle_and_fleet_profile(tmp_path, monkeypatch):

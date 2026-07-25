@@ -1599,6 +1599,44 @@ def test_fleet_desired_state_requires_digest_pinned_rollout_image():
     assert api_module.FleetDesiredStateRequest(worker_image_digest=digest).worker_image_digest == digest
 
 
+def test_broker_lease_models_bound_worker_and_heartbeat_payloads():
+    lease = api_module.BrokerLeaseRequest(worker_id="node-1:worker.2", wait_seconds=30)
+    assert lease.wait_seconds == 30
+    with pytest.raises(Exception):
+        api_module.BrokerLeaseRequest(worker_id="bad worker", wait_seconds=31)
+    with pytest.raises(Exception):
+        api_module.BrokerLeaseHeartbeatRequest(
+            lease_token="x" * 40,
+            log_lines=["line"] * 21,
+        )
+
+
+def test_broker_request_budget_reservation_enforces_fleet_default(monkeypatch):
+    class Conn:
+        async def fetchrow(self, _query, *_args):
+            return {"root_domain": "example.test", "asm_config": {"max_requests_per_hour_per_domain": 100}}
+
+    async def tested(*_args, **_kwargs):
+        return 10
+
+    monkeypatch.setattr(api_module.asm_inventory, "domain_tested_recently_count", tested)
+    monkeypatch.setattr(api_module.asm_inventory, "reserve_domain_rate", lambda *_args, **_kwargs: 25)
+    payload = {
+        "scan_id": "11111111-1111-4111-8111-111111111111",
+        "options": {"scan_type": "standard", "custom_budget": {"request_max": 50}},
+    }
+    receipt = asyncio.run(api_module._broker_reserve_request_budget(Conn(), object(), payload))
+    assert receipt["granted"] == 25
+    assert payload["options"]["request_budget_mode"] == "enforce"
+    assert payload["options"]["custom_budget"]["request_max"] == 25
+    assert payload["options"]["request_budget_domain"] == "example.test"
+
+
+def test_broker_request_budget_explicit_off_preserves_operator_control():
+    payload = {"options": {"request_budget_mode": "off"}}
+    assert asyncio.run(api_module._broker_reserve_request_budget(None, None, payload)) == {}
+
+
 def test_normalize_dast_scan_options_explicit_smart_sets_legacy_active():
     # An explicit smart/full/aggressive scan implies the legacy active flag.
     options = api_module.ScanOptions(scan_type="smart")

@@ -1168,8 +1168,8 @@ it is the exhaustive backstop behind the human-readable product map above.
 
 | Surface | Count | Source |
 |---|---|---|
-| Public REST operations | 247 | `api/api.py` FastAPI decorators |
-| Unique REST paths | 204 | `api/api.py` |
+| Public REST operations | 251 | `api/api.py` FastAPI decorators |
+| Unique REST paths | 208 | `api/api.py` |
 | Check families | 14 | `api/check_registry.py` |
 | Command Arsenal commands | 82 | `api/command_arsenal.py` |
 | Tool adapters | 13 | `api/command_arsenal.py` |
@@ -1178,13 +1178,13 @@ it is the exhaustive backstop behind the human-readable product map above.
 | Scanner wrapper commands | 26 | `scanner.sh` |
 | Make targets | 10 | `Makefile` |
 | Release gates | 14 | `scripts/release_gates.py` |
-| Runtime environment keys | 248 | Python sources + Compose manifests |
+| Runtime environment keys | 254 | Python sources + Compose manifests |
 | Scanner modules | 83 | `scanner/scanner_tools/` |
 | UI pages | 31 | `ui/src/app/` |
 | Skills | 6 | `skills/` |
 | Slash commands | 15 | `.claude/commands/` |
 | Specialized subagents | 3 | `.claude/agents/` |
-| Durable tables | 50 | `db/init.sql` + migrations |
+| Durable tables | 52 | `db/init.sql` + migrations |
 
 ### Public REST Operations
 
@@ -1313,6 +1313,10 @@ it is the exhaustive backstop behind the human-readable product map above.
 | `PATCH` | `/findings/{finding_id:path}` | `update_finding` |
 | `POST` | `/findings/{finding_id:path}/retest` | `retest_finding` |
 | `GET` | `/findings/{finding_id}/evidence` | `list_finding_evidence` |
+| `POST` | `/fleet/broker/nodes/{node_id}/lease` | `lease_broker_job` |
+| `PUT` | `/fleet/broker/nodes/{node_id}/leases/{lease_id}/artifacts` | `upload_broker_job_artifact` |
+| `POST` | `/fleet/broker/nodes/{node_id}/leases/{lease_id}/heartbeat` | `heartbeat_broker_job` |
+| `POST` | `/fleet/broker/nodes/{node_id}/leases/{lease_id}/result` | `submit_broker_job_result` |
 | `POST` | `/fleet/join-tokens` | `create_fleet_join_token` |
 | `GET` | `/fleet/nodes` | `list_fleet_nodes` |
 | `POST` | `/fleet/nodes/join` | `join_fleet_node` |
@@ -1791,7 +1795,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `ARTIFACT_RETENTION_SWEEP_SECONDS` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `ARTIFACT_S3_PREFIX` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `ARTIFACT_STORAGE_BACKEND` | `api/artifact_storage.py`, `docker-compose.release.yml`, `docker-compose.yml` |
-| `ARTIFACT_STORAGE_REQUIRED` | `api/artifact_storage.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `ARTIFACT_STORAGE_REQUIRED` | `api/artifact_storage.py`, `api/broker_worker.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `ASM_DEFAULT_DOMAIN_RATE_PER_HOUR` | `api/asm_inventory.py` |
 | `ASM_DEFAULT_ENABLED` | `api/api.py` |
 | `ASM_GONE_RETENTION_DAYS` | `api/asm_inventory.py` |
@@ -1818,6 +1822,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `AWS_REGION` | `api/evidence_storage.py` |
 | `AWS_SECRET_ACCESS_KEY` | `api/evidence_storage.py` |
 | `AWS_SESSION_TOKEN` | `api/evidence_storage.py` |
+| `BROKER_INGEST_QUEUE_NAME` | `api/api.py`, `api/worker.py` |
 | `BUILD_FINGERPRINT` | `api/worker.py` |
 | `COVERAGE_ALLOCATION_DEFAULT` | `api/parallel_scan.py` |
 | `DATABASE_URL` | `api/api.py`, `api/gungnir_worker.py`, `api/worker.py`, `scanner/gungnir_worker.py`, `scripts/upgrade_schema_smoke.py` |
@@ -1837,10 +1842,11 @@ Only key names and declaring sources are documented; secret values are never rea
 | `EVIDENCE_S3_TIMEOUT_SECONDS` | `api/evidence_storage.py` |
 | `EVIDENCE_STORAGE_BACKEND` | `api/artifact_storage.py`, `api/evidence_storage.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `FINALIZATION_HEARTBEAT_TIMEOUT_MINUTES` | `api/api.py` |
-| `FLEET_AGENT_INTERVAL_SECONDS` | `api/fleet_agent.py`, `docker-compose.worker.yml` |
+| `FLEET_AGENT_INTERVAL_SECONDS` | `api/fleet_agent.py`, `docker-compose.broker-worker.yml`, `docker-compose.worker.yml` |
 | `FLEET_ALLOW_INSECURE_ENROLLMENT` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `FLEET_BROKER_STATE_PATH` | `api/broker_worker.py` |
 | `FLEET_CA_CERT_PATH` | `api/api.py` |
-| `FLEET_COMPOSE_PROJECT_NAME` | `docker-compose.worker.yml` |
+| `FLEET_COMPOSE_PROJECT_NAME` | `docker-compose.broker-worker.yml`, `docker-compose.worker.yml` |
 | `FLEET_CONNECTION_BUNDLE_JSON` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `FLEET_CONNECTION_BUNDLE_PATH` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `FLEET_CONTROL_PLANE_OVERLAY_URL` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
@@ -1848,27 +1854,27 @@ Only key names and declaring sources are documented; secret values are never rea
 | `FLEET_DRAIN_GRACE_SECONDS` | `api/fleet_agent.py` |
 | `FLEET_EDGE_MODE` | `api/api.py` |
 | `FLEET_HEARTBEAT_TIMEOUT_SECONDS` | `docker-compose.release.yml`, `docker-compose.yml` |
-| `FLEET_NODE_ID` | `docker-compose.worker.yml` |
+| `FLEET_NODE_ID` | `docker-compose.broker-worker.yml`, `docker-compose.worker.yml` |
 | `FLEET_OPERATOR_TOKEN` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `FLEET_OVERLAY_CIDR` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
-| `FLEET_RESULTS_DIR` | `docker-compose.worker.yml` |
-| `FLEET_RUNTIME_DIR` | `docker-compose.worker.yml` |
+| `FLEET_RESULTS_DIR` | `docker-compose.broker-worker.yml`, `docker-compose.worker.yml` |
+| `FLEET_RUNTIME_DIR` | `docker-compose.broker-worker.yml`, `docker-compose.worker.yml` |
 | `FLEET_STATE_PATH` | `api/fleet_agent.py` |
 | `FLEET_TLS_PORT` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `FLEET_WIREGUARD_ENDPOINT` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `FLEET_WIREGUARD_PUBLIC_KEY` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
-| `FLEET_WORKER_CPU_LIMIT` | `docker-compose.worker.yml` |
+| `FLEET_WORKER_CPU_LIMIT` | `docker-compose.broker-worker.yml`, `docker-compose.worker.yml` |
 | `FLEET_WORKER_ENV_FILE` | `docker-compose.worker.yml` |
-| `FLEET_WORKER_IMAGE` | `docker-compose.worker.yml` |
+| `FLEET_WORKER_IMAGE` | `docker-compose.broker-worker.yml`, `docker-compose.worker.yml` |
 | `FLEET_WORKER_IMAGE_DIGEST` | `api/api.py`, `api/fleet_worker_entrypoint.py`, `docker-compose.release.yml`, `docker-compose.yml` |
-| `FLEET_WORKER_MEMORY_LIMIT` | `docker-compose.worker.yml` |
+| `FLEET_WORKER_MEMORY_LIMIT` | `docker-compose.broker-worker.yml`, `docker-compose.worker.yml` |
 | `FULL_COVERAGE_ALLOCATION_DEFAULT` | `api/parallel_scan.py` |
 | `GITHUB_TOKEN` | `scanner/scanner.py` |
 | `GIT_COMMIT` | `api/api.py`, `api/worker.py`, `docker-compose.release.yml`, `docker-compose.yml`, `scanner/scanner.py` |
 | `HEARTBEAT_INTERVAL_SECONDS` | `api/worker.py` |
 | `HF_TOKEN` | `scanner/scanner_tools/model_intake.py` |
 | `HIBP_API_KEY` | `scanner/scanner.py` |
-| `HOSTNAME` | `api/worker.py` |
+| `HOSTNAME` | `api/broker_worker.py`, `api/worker.py` |
 | `HOST_RESULTS_PATH` | `api/api.py` |
 | `LOCAL_ENV_FILE` | `api/api.py` |
 | `MINIO_BUCKET` | `docker-compose.release.yml`, `docker-compose.yml` |
@@ -1946,6 +1952,10 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SHAKERSCAN_API_URL` | `scripts/shakerscan_mcp.py` |
 | `SHAKERSCAN_ASM_DISPATCH_INTERVAL` | `api/api.py` |
 | `SHAKERSCAN_BIND_HOST` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `SHAKERSCAN_BROKER_LEASE` | `api/broker_worker.py`, `api/worker.py` |
+| `SHAKERSCAN_BROKER_LEASE_SECONDS` | `api/api.py` |
+| `SHAKERSCAN_BROKER_MAX_ARTIFACT_BYTES` | `api/api.py` |
+| `SHAKERSCAN_BROKER_MAX_RESULT_BYTES` | `api/api.py` |
 | `SHAKERSCAN_CANCEL_FILE` | `scanner/scanner_tools/cancellation.py`, `scanner/scanner_tools/common.py` |
 | `SHAKERSCAN_CORS_ALLOW_ORIGINS` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_CORS_ALLOW_ORIGIN_REGEX` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
@@ -1958,7 +1968,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SHAKERSCAN_MAX_WORKERS` | `api/api.py`, `docker-compose.yml` |
 | `SHAKERSCAN_MCP_ALLOW_REMOTE_API` | `scripts/shakerscan_mcp.py` |
 | `SHAKERSCAN_MCP_TIMEOUT_SECONDS` | `scripts/shakerscan_mcp.py` |
-| `SHAKERSCAN_NODE_ID` | `api/artifact_storage.py`, `api/fleet_worker_entrypoint.py`, `api/worker.py` |
+| `SHAKERSCAN_NODE_ID` | `api/artifact_storage.py`, `api/broker_worker.py`, `api/fleet_worker_entrypoint.py`, `api/worker.py` |
 | `SHAKERSCAN_NODE_LABELS_JSON` | `api/worker.py` |
 | `SHAKERSCAN_PAYLOAD_PACK_MAX` | `scanner/scanner_tools/active_checks.py` |
 | `SHAKERSCAN_PER_WORKER_MEM_GB` | `api/api.py`, `docker-compose.yml` |
@@ -1968,7 +1978,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SHAKERSCAN_QUEUE_CONSUMER_GROUP` | `api/job_queue.py`, `docker-compose.release.yml`, `docker-compose.worker.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_QUEUE_LEASE_HEARTBEAT_FAILURE_LIMIT` | `api/worker.py`, `docker-compose.release.yml`, `docker-compose.worker.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_QUEUE_LEASE_HEARTBEAT_SECONDS` | `api/worker.py`, `docker-compose.release.yml`, `docker-compose.worker.yml`, `docker-compose.yml` |
-| `SHAKERSCAN_QUEUE_MAX_DELIVERY_ATTEMPTS` | `api/worker.py`, `docker-compose.release.yml`, `docker-compose.worker.yml`, `docker-compose.yml` |
+| `SHAKERSCAN_QUEUE_MAX_DELIVERY_ATTEMPTS` | `api/api.py`, `api/worker.py`, `docker-compose.release.yml`, `docker-compose.worker.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_QUEUE_VISIBILITY_TIMEOUT_SECONDS` | `api/worker.py`, `docker-compose.release.yml`, `docker-compose.worker.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_REQUEST_BUDGET_DOMAIN` | `scanner/scanner.py` |
 | `SHAKERSCAN_REQUEST_BUDGET_LIMIT` | `scanner/scanner.py` |
@@ -1987,7 +1997,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `UI_IMAGE_REPO` | `docker-compose.release.yml` |
 | `VERIFICATION_MIN_SEVERITY` | `api/api.py`, `api/retest_contract.py`, `api/worker.py`, `scanner/scanner.py` |
 | `VIRUSTOTAL_API_KEY` | `scanner/scanner.py` |
-| `WORKER_ID` | `api/worker.py` |
+| `WORKER_ID` | `api/broker_worker.py`, `api/worker.py` |
 | `WORKER_IMAGE` | `api/worker.py` |
 | `WORKER_PREFLIGHT_ENABLED` | `api/worker.py` |
 | `WORKER_PREFLIGHT_REQUIRE_SCANNER` | `api/worker.py` |
@@ -2088,6 +2098,8 @@ Only key names and declaring sources are documented; secret values are never rea
 | `application_graph_nodes` | `db/init.sql` |
 | `approval_receipts` | `api/retest_contract.py` |
 | `asm_endpoint_attempts` | `db/init.sql` |
+| `broker_job_leases` | `db/init.sql` |
+| `broker_job_results` | `db/init.sql` |
 | `campaign_actions` | `api/retest_contract.py` |
 | `campaigns` | `api/retest_contract.py` |
 | `command_results` | `api/retest_contract.py` |

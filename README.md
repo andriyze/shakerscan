@@ -338,6 +338,42 @@ directly to the public internet. ShakerScan is a trusted-operator, self-hosted p
 provide application login, users, roles, tenant isolation, or comprehensive evidence-secret masking.
 Treat results, evidence, configuration, and backups as sensitive.
 
+### Multi-node fleets
+
+ShakerScan can add digest-pinned worker VPSs to one control plane. Use the WireGuard transport for
+machines you own and trust with scoped Redis/PostgreSQL access:
+
+```bash
+# Control plane
+shakerscan fleet init --network wireguard \
+  --endpoint fleet.example.com:51820 \
+  --public-url https://scanner.example.com \
+  --worker-image ghcr.io/andriyze/shakerscan@sha256:<digest>
+shakerscan fleet join-token --ttl 24h
+
+# Worker VPS
+shakerscan join https://scanner.example.com --token <join-token>
+```
+
+Use the outbound-only HTTPS broker transport for customer-hosted or zero-trust worker nodes. Broker
+workers receive no Redis, PostgreSQL, or object-store credentials:
+
+```bash
+# Control plane
+shakerscan fleet init --network broker \
+  --public-url https://scanner.example.com \
+  --worker-image ghcr.io/andriyze/shakerscan@sha256:<digest>
+shakerscan fleet join-token --ttl 24h --transport broker
+
+# Worker VPS
+shakerscan join https://scanner.example.com --token <join-token> --transport broker
+```
+
+Both transports require a public CA-valid HTTPS enrollment URL and a digest-pinned worker image.
+The broker needs only outbound HTTPS from the worker; WireGuard additionally needs its configured UDP
+port. See the [Multi-Node Architecture](https://github.com/andriyze/shakerscan/blob/main/docs/multi-node-architecture.md)
+for the trust model, placement labels, artifact storage, drain, and rollout behavior.
+
 ### Build from source
 
 ```bash

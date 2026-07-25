@@ -296,8 +296,13 @@ async def upsert_manifest(
     parent_scan_id: str | None = None,
     shard_index: int | None = None,
     metadata: dict[str, Any] | None = None,
+    executing_node_id: str | None = None,
 ) -> dict[str, Any]:
-    node_id = str(os.environ.get("SHAKERSCAN_NODE_ID") or "").strip() or None
+    node_id = (
+        str(executing_node_id or "").strip()
+        or str(os.environ.get("SHAKERSCAN_NODE_ID") or "").strip()
+        or None
+    )
     try:
         node_uuid = uuid.UUID(node_id) if node_id else None
     except ValueError:

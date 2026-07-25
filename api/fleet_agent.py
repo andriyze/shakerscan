@@ -80,14 +80,17 @@ def load_state(path: Path) -> dict[str, Any]:
     required = (
         "node_id",
         "node_credential",
-        "control_plane_overlay_url",
-        "ca_cert_path",
         "worker_image_digest",
     )
     missing = [key for key in required if not str(state.get(key) or "").strip()]
     if missing:
         raise AgentError(f"fleet state is missing: {', '.join(missing)}")
-    endpoint = urllib.parse.urlparse(str(state["control_plane_overlay_url"]))
+    control_plane_url = str(
+        state.get("control_plane_overlay_url") or state.get("control_plane_url") or ""
+    ).strip()
+    if not control_plane_url:
+        raise AgentError("fleet state is missing: control_plane_url")
+    endpoint = urllib.parse.urlparse(control_plane_url)
     if endpoint.scheme != "https" or not endpoint.hostname or endpoint.username or endpoint.password:
         raise AgentError("control_plane_overlay_url must be an HTTPS URL without embedded credentials")
     image_name, separator, digest = str(state["worker_image_digest"]).rpartition("@sha256:")
@@ -97,7 +100,10 @@ def load_state(path: Path) -> dict[str, Any]:
 
 
 def _ssl_context(state: dict[str, Any]) -> ssl.SSLContext:
-    ca_path = Path(str(state["ca_cert_path"]))
+    raw_path = str(state.get("ca_cert_path") or "").strip()
+    if not raw_path:
+        return ssl.create_default_context()
+    ca_path = Path(raw_path)
     if not ca_path.is_file():
         raise AgentError(f"fleet CA certificate does not exist: {ca_path}")
     return ssl.create_default_context(cafile=str(ca_path))
@@ -106,7 +112,7 @@ def _ssl_context(state: dict[str, Any]) -> ssl.SSLContext:
 def api_request(
     state: dict[str, Any], method: str, path: str, payload: dict[str, Any] | None = None
 ) -> dict[str, Any]:
-    base = str(state["control_plane_overlay_url"]).rstrip("/")
+    base = str(state.get("control_plane_overlay_url") or state.get("control_plane_url") or "").rstrip("/")
     url = f"{base}{path}"
     data = json.dumps(payload, separators=(",", ":")).encode() if payload is not None else None
     request = urllib.request.Request(

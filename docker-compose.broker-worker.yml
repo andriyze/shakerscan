@@ -1,0 +1,48 @@
+# Outbound-only HTTPS broker worker runtime. No Redis/PostgreSQL credentials
+# or data-plane ports are present on this node.
+name: ${FLEET_COMPOSE_PROJECT_NAME:-shakerscan-broker-worker}
+
+services:
+  worker:
+    init: true
+    image: ${FLEET_WORKER_IMAGE:?FLEET_WORKER_IMAGE must be a digest-pinned scanner image}
+    environment:
+      - PYTHONUNBUFFERED=1
+      - FLEET_WORKER_IMAGE_DIGEST=${FLEET_WORKER_IMAGE:?FLEET_WORKER_IMAGE must be a digest-pinned scanner image}
+      - SHAKERSCAN_NODE_ID=${FLEET_NODE_ID:?FLEET_NODE_ID is required}
+      - WORKER_ID=${FLEET_NODE_ID:?FLEET_NODE_ID is required}-broker
+      - FLEET_BROKER_STATE_PATH=/run/shakerscan-fleet/state.json
+      - SHAKERSCAN_BROKER_LEASE=1
+      - ARTIFACT_STORAGE_REQUIRED=false
+      - RESULTS_DIR=/results
+    volumes:
+      - ${FLEET_RUNTIME_DIR:-./.shakerscan-fleet}:/run/shakerscan-fleet:ro
+      - ${FLEET_RESULTS_DIR:-./results}:/results
+    command: ["python3", "/app/broker_worker.py"]
+    labels:
+      com.shakerscan.node_id: ${FLEET_NODE_ID:?FLEET_NODE_ID is required}
+      com.shakerscan.fleet_managed: "true"
+    deploy:
+      resources:
+        limits:
+          cpus: ${FLEET_WORKER_CPU_LIMIT:-2}
+          memory: ${FLEET_WORKER_MEMORY_LIMIT:-4G}
+    restart: unless-stopped
+
+  node-agent:
+    image: ${FLEET_WORKER_IMAGE:?FLEET_WORKER_IMAGE must be a digest-pinned scanner image}
+    environment:
+      - PYTHONUNBUFFERED=1
+      - FLEET_STATE_PATH=/run/shakerscan-fleet/state.json
+      - FLEET_AGENT_INTERVAL_SECONDS=${FLEET_AGENT_INTERVAL_SECONDS:-30}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${FLEET_RUNTIME_DIR:-./.shakerscan-fleet}:/run/shakerscan-fleet:ro
+      - ${FLEET_RESULTS_DIR:-./results}:/results:ro
+    command: ["python3", "/app/fleet_agent.py"]
+    labels:
+      com.shakerscan.node_id: ${FLEET_NODE_ID:?FLEET_NODE_ID is required}
+      com.shakerscan.fleet_managed: "true"
+    depends_on:
+      - worker
+    restart: unless-stopped
