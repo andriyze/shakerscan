@@ -158,3 +158,15 @@ def test_worker_entrypoint_rejects_unpinned_image_and_invalid_node(monkeypatch):
     monkeypatch.setenv("SHAKERSCAN_NODE_ID", "not-a-uuid")
     with pytest.raises(RuntimeError, match="UUID"):
         fleet_worker_entrypoint.validate_runtime()
+
+
+def test_control_plane_compose_defines_overlay_tls_edge():
+    root = Path(__file__).resolve().parents[1]
+    for filename in ("docker-compose.yml", "docker-compose.release.yml"):
+        text = (root / filename).read_text(encoding="utf-8")
+        assert "  fleet-edge:" in text
+        assert 'profiles: ["fleet"]' in text
+        assert "FLEET_EDGE_MODE=true" in text
+        assert "FLEET_CA_CERT_PATH=/run/shakerscan-fleet/control/ca.crt" in text
+        assert "--ssl-keyfile" in text
+        assert "--ssl-certfile" in text

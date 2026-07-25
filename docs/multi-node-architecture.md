@@ -4,8 +4,9 @@
 substrate is shipped (see the code-grounded capability table below), and the durable node identity,
 single-use enrollment, authenticated heartbeat, and one-time connection-bundle API foundation is now
 implemented. The digest-pinned worker-only Compose runtime, pull-based node-agent, and versioned
-desired-state API are also implemented. WireGuard/CLI host mutation, fleet UI, and the two-VPS proof
-are not complete. The remaining parts of Phases 2–3 remain design-level.
+desired-state API are also implemented, along with the fleet-profile CA-verified overlay TLS listener.
+WireGuard/CLI host mutation, fleet UI, and the two-VPS proof are not complete. The remaining parts of
+Phases 2–3 remain design-level.
 **Scope:** run a coordinated ShakerScan fleet across multiple VMs/VPS hosts so one UI/API
 can scan more targets at once and run high-budget Full Coverage scans by using workers
 from many machines.
@@ -30,7 +31,7 @@ becoming stale prose. For product priority and phased order, see
 | Managed `evidence_objects` backend (SigV4 S3/MinIO client: content-addressed PUT, hash-verified GET, retention DELETE) | **Built but OFF by default** — only covers large managed evidence-object payloads. General scan results, checkpoints, and other `/results` artifacts remain local; Compose does not yet pass the S3 settings through. | `evidence_storage.py`; `worker.py` `save_result_file` |
 | Job-queue delivery | **Built as at-most-once** — plain Redis list (`RPUSH`/`BLPOP`), compensated by DB row + heartbeat + `processing_lease_at` marker. **No per-message lease/ack/reclaim/fencing.** | `QUEUE_NAME` (`worker.py`, `api.py`) |
 | Remote worker scaling | **Local Docker socket only** (`/var/run/docker.sock`); no remote-node scaling | `POST /workers` (`api.py`); `scanner.sh scale` |
-| Node identity, enrollment, join tokens, heartbeat, credential rotation/revocation, `nodes` table | **Foundation built** — host join automation and fleet UI remain incomplete | `fleet.py`; `/fleet/*`; `nodes`, `node_join_tokens`, `node_credentials` |
+| Node identity, enrollment, join tokens, heartbeat, credential rotation/revocation, CA bootstrap, overlay TLS edge, `nodes` table | **Foundation built** — host join automation and fleet UI remain incomplete | `fleet.py`; `/fleet/*`; `fleet-edge`; `nodes`, `node_join_tokens`, `node_credentials` |
 | Worker-only deployment and pull-based node-agent | **Foundation built** — digest-pinned worker/agent-only Compose, owner-only local state, versioned desired state, local Docker reconciliation, drain-to-zero, capacity/error heartbeat | `docker-compose.worker.yml`; `fleet_agent.py`; `GET|PATCH /fleet/nodes/{id}/state` |
 | WireGuard/CLI host provisioning, fleet UI, placement | **Not present** — specified by this document | — |
 
@@ -463,7 +464,10 @@ EVIDENCE_STORAGE_BACKEND=s3
 EVIDENCE_S3_ENDPOINT_URL=http://<artifact-store-overlay-ip>:9000
 ```
 
-**3. Overlay binding (never expose data stores publicly).** The control plane binds Redis and
+**3. Overlay binding (never expose data stores publicly).** Both Compose variants now separate
+`SHAKERSCAN_DATA_BIND_HOST` from the UI/API bind and provide an opt-in `fleet` profile whose
+`fleet-edge` listener terminates CA-verified HTTPS on the data address without running duplicate
+schedulers. The control plane binds Redis and
 Postgres to the WireGuard overlay interface only — never `0.0.0.0`. Compose currently reuses
 `SHAKERSCAN_BIND_HOST` for API, UI, Redis, and Postgres, so fleet mode must first introduce a separate
 `SHAKERSCAN_DATA_BIND_HOST` for Redis/Postgres. `SHAKERSCAN_BIND_HOST` continues to control the public
@@ -514,7 +518,8 @@ wireguard_peer_ip, wireguard_control_plane_public_key, wireguard_control_plane_e
 node_credential
 ```
 
-The raw `node_credential` is returned once over HTTPS and persisted with restrictive filesystem
+The raw `node_credential` and public fleet CA certificate are returned once over HTTPS, and the
+credential is persisted with restrictive filesystem
 permissions. It authorizes only node API operations. After installing WireGuard and proving overlay
 reachability, the worker calls `POST /fleet/nodes/{id}/connection-bundle` over **overlay HTTPS**, using
 that credential. The control plane returns the Phase-1 Redis/Postgres URLs and any artifact-store

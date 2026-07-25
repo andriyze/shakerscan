@@ -11,6 +11,8 @@ services:
     volumes:
       - postgres-data:/var/lib/postgresql/data
       - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    ports:
+      - "${SHAKERSCAN_DATA_BIND_HOST:-127.0.0.1}:${POSTGRES_PORT:-5432}:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U scanner"]
       interval: 5s
@@ -23,6 +25,8 @@ services:
     command: redis-server --appendonly yes
     volumes:
       - redis-data:/data
+    ports:
+      - "${SHAKERSCAN_DATA_BIND_HOST:-127.0.0.1}:${REDIS_PORT:-6379}:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -57,6 +61,7 @@ services:
       - FLEET_ALLOW_INSECURE_ENROLLMENT=${FLEET_ALLOW_INSECURE_ENROLLMENT:-false}
       - FLEET_OPERATOR_TOKEN=${FLEET_OPERATOR_TOKEN:-}
       - FLEET_CONNECTION_BUNDLE_JSON=${FLEET_CONNECTION_BUNDLE_JSON:-}
+      - FLEET_CA_CERT_PATH=/run/shakerscan-fleet/control/ca.crt
       - AI_URL=${AI_URL:-}
       - AI_API_KEY=${AI_API_KEY:-}
       - AI_MODEL=${AI_MODEL:-}
@@ -88,8 +93,52 @@ services:
     volumes:
       - ./results:/results
       - ./.env:/workspace/.env
+      - ./.shakerscan-fleet:/run/shakerscan-fleet:ro
       - /var/run/docker.sock:/var/run/docker.sock
     command: ["python3", "/app/api.py"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  fleet-edge:
+    profiles: ["fleet"]
+    image: ${SCANNER_IMAGE_REPO:-shakerscan/shakerscan-scanner}:${SCANNER_IMAGE_TAG:-latest}
+    ports:
+      - "${SHAKERSCAN_DATA_BIND_HOST:-127.0.0.1}:${FLEET_TLS_PORT:-8443}:8443"
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - DATABASE_URL=postgresql://scanner:scanner@postgres:5432/scanner
+      - RESULTS_DIR=/results
+      - FLEET_EDGE_MODE=true
+      - SHAKERSCAN_BIND_HOST=${SHAKERSCAN_DATA_BIND_HOST:-127.0.0.1}
+      - FLEET_OVERLAY_CIDR=${FLEET_OVERLAY_CIDR:-}
+      - FLEET_CONTROL_PLANE_OVERLAY_URL=${FLEET_CONTROL_PLANE_OVERLAY_URL:-}
+      - FLEET_WIREGUARD_PUBLIC_KEY=${FLEET_WIREGUARD_PUBLIC_KEY:-}
+      - FLEET_WIREGUARD_ENDPOINT=${FLEET_WIREGUARD_ENDPOINT:-}
+      - FLEET_WORKER_IMAGE_DIGEST=${FLEET_WORKER_IMAGE_DIGEST:-}
+      - FLEET_DESIRED_WORKER_COUNT=${FLEET_DESIRED_WORKER_COUNT:-1}
+      - FLEET_HEARTBEAT_TIMEOUT_SECONDS=${FLEET_HEARTBEAT_TIMEOUT_SECONDS:-300}
+      - FLEET_ALLOW_INSECURE_ENROLLMENT=false
+      - FLEET_OPERATOR_TOKEN=${FLEET_OPERATOR_TOKEN:-}
+      - FLEET_CONNECTION_BUNDLE_JSON=${FLEET_CONNECTION_BUNDLE_JSON:-}
+      - FLEET_CA_CERT_PATH=/run/shakerscan-fleet/control/ca.crt
+    volumes:
+      - ./results:/results
+      - ./.shakerscan-fleet:/run/shakerscan-fleet:ro
+    command:
+      - uvicorn
+      - api:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8443"
+      - --ssl-keyfile
+      - /run/shakerscan-fleet/control/server.key
+      - --ssl-certfile
+      - /run/shakerscan-fleet/control/server.crt
     depends_on:
       postgres:
         condition: service_healthy

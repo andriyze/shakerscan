@@ -2971,6 +2971,8 @@ async def lifespan(app: FastAPI):
     )
     await ensure_verification_schema(db_pool)
 
+    fleet_edge_mode = os.environ.get("FLEET_EDGE_MODE", "").strip().lower() in {"1", "true", "yes", "on"}
+
     # Publish the active-scan concurrency cap up front so a fresh/headless
     # deployment doesn't run on the worker fallback until /workers is first hit.
     try:
@@ -2979,20 +2981,23 @@ async def lifespan(app: FastAPI):
     except Exception:
         pass
 
-    # Start background tasks
-    cleanup_task = asyncio.create_task(stale_scan_checker(db_pool))
-    scheduler_task = asyncio.create_task(schedule_runner(db_pool))
-    asm_task = asyncio.create_task(asm_dispatcher(db_pool))
-    research_autopilot_task = asyncio.create_task(research_autopilot_runner(db_pool))
+    # The optional overlay TLS edge serves the same app against its own pool, but
+    # must not duplicate schedulers or maintenance controllers.
+    background_tasks: list[asyncio.Task] = []
+    if not fleet_edge_mode:
+        background_tasks = [
+            asyncio.create_task(stale_scan_checker(db_pool)),
+            asyncio.create_task(schedule_runner(db_pool)),
+            asyncio.create_task(asm_dispatcher(db_pool)),
+            asyncio.create_task(research_autopilot_runner(db_pool)),
+        ]
 
     yield
 
     # Stop background tasks
-    cleanup_task.cancel()
-    scheduler_task.cancel()
-    asm_task.cancel()
-    research_autopilot_task.cancel()
-    for task in (cleanup_task, scheduler_task, asm_task, research_autopilot_task):
+    for task in background_tasks:
+        task.cancel()
+    for task in background_tasks:
         try:
             await task
         except asyncio.CancelledError:
@@ -4512,6 +4517,19 @@ def _fleet_connection_bundle() -> dict[str, Any]:
         if not isinstance(bundle.get(key), str) or not bundle[key].strip():
             raise FleetConfigurationError(f"connection bundle requires {key}")
     return bundle
+
+
+def _fleet_ca_certificate_pem() -> str:
+    path = Path(os.environ.get("FLEET_CA_CERT_PATH", "/run/shakerscan-fleet/control/ca.crt"))
+    try:
+        content = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise FleetConfigurationError("fleet CA certificate is not configured") from exc
+    if len(content.encode("utf-8")) > 64 * 1024:
+        raise FleetConfigurationError("fleet CA certificate is too large")
+    if "-----BEGIN CERTIFICATE-----" not in content or "-----END CERTIFICATE-----" not in content:
+        raise FleetConfigurationError("fleet CA certificate is invalid")
+    return content.strip() + "\n"
 
 
 def _normalize_ai_endpoint_url(raw: str) -> str:
@@ -7216,9 +7234,10 @@ async def join_fleet_node(body: FleetNodeJoinRequest, request: Request, response
     response.headers["Cache-Control"] = "no-store"
     try:
         config = _fleet_bootstrap_config()
+        ca_certificate = _fleet_ca_certificate_pem()
         async with db_pool.acquire() as conn:
             async with conn.transaction():
-                return await _enroll_fleet_node(
+                result = await _enroll_fleet_node(
                     conn,
                     token=body.token,
                     name=body.name,
@@ -7230,6 +7249,8 @@ async def join_fleet_node(body: FleetNodeJoinRequest, request: Request, response
                     build_fingerprint=body.build_fingerprint,
                     config=config,
                 )
+        result["fleet_ca_certificate_pem"] = ca_certificate
+        return result
     except FleetConfigurationError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except FleetEnrollmentError as exc:

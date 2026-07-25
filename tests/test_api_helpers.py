@@ -214,6 +214,20 @@ def test_insecure_fleet_enrollment_escape_hatch_is_loopback_only(monkeypatch):
     assert api_module._fleet_request_is_https(_fleet_request(host="127.0.0.1", scheme="http")) is False
 
 
+def test_fleet_ca_certificate_loader_is_bounded_and_validated(tmp_path, monkeypatch):
+    certificate = tmp_path / "ca.crt"
+    certificate.write_text(
+        "-----BEGIN CERTIFICATE-----\nZmFrZQ==\n-----END CERTIFICATE-----\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("FLEET_CA_CERT_PATH", str(certificate))
+    assert api_module._fleet_ca_certificate_pem().endswith("\n")
+
+    certificate.write_text("not a certificate", encoding="utf-8")
+    with pytest.raises(api_module.FleetConfigurationError, match="invalid"):
+        api_module._fleet_ca_certificate_pem()
+
+
 def test_worker_build_current_is_fingerprint_authoritative_over_version_label():
     # The source fingerprint covers all detection/orchestration modules and is the
     # precise currency signal. The git version label is volatile (real commit, and

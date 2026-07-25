@@ -445,7 +445,9 @@ Current execution design: [`docs/dast-asm-architecture.md`](dast-asm-architectur
 hashed single-use join tokens, HTTPS enrollment, authenticated heartbeat, one-time overlay connection
 bundles, and credential rotation/revocation. A digest-pinned worker/agent-only Compose runtime and
 pull-based local node-agent now apply versioned worker-count/drain desired state without an inbound
-listener or remote Docker API. WireGuard/CLI host automation, fleet UI, and the two-VPS queue proof
+listener or remote Docker API. The opt-in fleet Compose profile adds a CA-verified HTTPS listener on
+the private data address and disables duplicate background controllers in that edge process.
+WireGuard/CLI host automation, fleet UI, and the two-VPS queue proof
 are not complete. Production leases/ack/reclaim, fencing,
 general evidence transfer, placement, and fleet-wide rate controls remain future work. The design authority is
 [`docs/multi-node-architecture.md`](multi-node-architecture.md); prioritized delivery work is tracked
@@ -819,8 +821,9 @@ how-to with request bodies is in [`CLAUDE.md`](../CLAUDE.md) / [`AGENTS.md`](../
 `GET /fleet/nodes` · `GET|PATCH /fleet/nodes/{id}/state` · `POST /fleet/nodes/{id}/heartbeat` ·
 `POST /fleet/nodes/{id}/connection-bundle` · `POST /fleet/nodes/{id}/credentials/rotate` ·
 `POST /fleet/nodes/{id}/revoke`. Join tokens and node credentials are returned once and stored only
-as hashes. Fleet lifecycle operations are loopback-operator actions unless an explicit remote
-operator token is configured; enrollment and secret delivery require HTTPS, and connection bundles
+as hashes. Enrollment returns the public fleet CA alongside one-time node identity material. Fleet
+lifecycle operations are loopback-operator actions unless an explicit remote operator token is
+configured; enrollment and secret delivery require HTTPS, and connection bundles
 also require the actual socket peer to be inside the configured overlay CIDR. Node state pulls and
 heartbeats likewise reject plaintext transport so node bearer credentials are never sent over HTTP.
 The worker-only Compose
@@ -1170,7 +1173,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | Scanner wrapper commands | 24 | `scanner.sh` |
 | Make targets | 10 | `Makefile` |
 | Release gates | 14 | `scripts/release_gates.py` |
-| Runtime environment keys | 219 | Python sources + Compose manifests |
+| Runtime environment keys | 222 | Python sources + Compose manifests |
 | Scanner modules | 83 | `scanner/scanner_tools/` |
 | UI pages | 30 | `ui/src/app/` |
 | Skills | 6 | `skills/` |
@@ -1814,10 +1817,12 @@ Only key names and declaring sources are documented; secret values are never rea
 | `FINALIZATION_HEARTBEAT_TIMEOUT_MINUTES` | `api/api.py` |
 | `FLEET_AGENT_INTERVAL_SECONDS` | `api/fleet_agent.py`, `docker-compose.worker.yml` |
 | `FLEET_ALLOW_INSECURE_ENROLLMENT` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `FLEET_CA_CERT_PATH` | `api/api.py` |
 | `FLEET_COMPOSE_PROJECT_NAME` | `docker-compose.worker.yml` |
 | `FLEET_CONNECTION_BUNDLE_JSON` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `FLEET_CONTROL_PLANE_OVERLAY_URL` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `FLEET_DESIRED_WORKER_COUNT` | `docker-compose.release.yml`, `docker-compose.yml` |
+| `FLEET_EDGE_MODE` | `api/api.py` |
 | `FLEET_HEARTBEAT_TIMEOUT_SECONDS` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `FLEET_NODE_ID` | `docker-compose.worker.yml` |
 | `FLEET_OPERATOR_TOKEN` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
@@ -1825,6 +1830,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `FLEET_RESULTS_DIR` | `docker-compose.worker.yml` |
 | `FLEET_RUNTIME_DIR` | `docker-compose.worker.yml` |
 | `FLEET_STATE_PATH` | `api/fleet_agent.py` |
+| `FLEET_TLS_PORT` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `FLEET_WIREGUARD_ENDPOINT` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `FLEET_WIREGUARD_PUBLIC_KEY` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `FLEET_WORKER_CPU_LIMIT` | `docker-compose.worker.yml` |
@@ -1852,9 +1858,9 @@ Only key names and declaring sources are documented; secret values are never rea
 | `PARENT_STALE_TIMEOUT_MINUTES` | `api/api.py` |
 | `PLAYWRIGHT_BROWSERS_PATH` | `api/ai_gate/targets/widget_playwright.py`, `scanner/scanner_tools/form_login.py`, `scanner/scanner_tools/http_scanner.py` |
 | `PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD` | `scanner/scanner_tools/form_login.py`, `scanner/scanner_tools/http_scanner.py` |
-| `POSTGRES_PORT` | `docker-compose.yml` |
+| `POSTGRES_PORT` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `PROOF_REQUIRED_FOR_SMART` | `api/api.py`, `api/retest_contract.py`, `api/worker.py`, `scanner/scanner.py` |
-| `REDIS_PORT` | `docker-compose.yml` |
+| `REDIS_PORT` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `REDIS_URL` | `api/api.py`, `api/gungnir_worker.py`, `api/worker.py`, `scanner/gungnir_worker.py` |
 | `RESEARCH_EPISODE_ABANDON_TTL_HOURS` | `api/api.py` |
 | `RESULTS_DIR` | `api/api.py`, `api/secret_store.py`, `api/worker.py` |
@@ -1916,7 +1922,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SHAKERSCAN_CORS_ALLOW_ORIGINS` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_CORS_ALLOW_ORIGIN_REGEX` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_CUSTOM_WORDLIST` | `scanner/scanner_tools/discovery.py` |
-| `SHAKERSCAN_DATA_BIND_HOST` | `docker-compose.yml` |
+| `SHAKERSCAN_DATA_BIND_HOST` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_DEBUG_POST_INFER` | `scanner/scanner.py` |
 | `SHAKERSCAN_ENABLE_ADAPTIVE_THROTTLE` | `scanner/scanner.py` |
 | `SHAKERSCAN_MAX_ACTIVE_SCANS` | `api/api.py`, `api/worker.py` |
