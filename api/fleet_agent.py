@@ -19,12 +19,14 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 
-AGENT_VERSION = "1"
+AGENT_VERSION = "2"
 DOCKER_SOCKET = "/var/run/docker.sock"
+DRAIN_GRACE_SECONDS = max(2, int(os.environ.get("FLEET_DRAIN_GRACE_SECONDS", "45")))
 
 
 class AgentError(RuntimeError):
@@ -180,11 +182,29 @@ def _container_number(container: dict[str, Any]) -> int:
         return 0
 
 
-def _clone_worker(client: DockerClient, template: dict[str, Any], number: int, node_id: str) -> None:
-    template_id = str(template.get("Id") or "")
-    status, inspect = client.request("GET", f"/containers/{template_id}/json")
+def _inspect_worker(client: DockerClient, container: dict[str, Any]) -> dict[str, Any]:
+    container_id = str(container.get("Id") or "")
+    status, inspect = client.request("GET", f"/containers/{container_id}/json")
     if status != 200 or not isinstance(inspect, dict):
         raise AgentError(f"Docker worker inspection failed with status {status}")
+    return inspect
+
+
+def _worker_image(client: DockerClient, container: dict[str, Any]) -> str:
+    inspect = _inspect_worker(client, container)
+    config = inspect.get("Config") if isinstance(inspect.get("Config"), dict) else {}
+    return str(config.get("Image") or "").strip()
+
+
+def _clone_worker(
+    client: DockerClient,
+    template: dict[str, Any],
+    number: int,
+    node_id: str,
+    *,
+    image: str | None = None,
+) -> str:
+    inspect = _inspect_worker(client, template)
     config = inspect.get("Config") if isinstance(inspect.get("Config"), dict) else {}
     labels = dict(config.get("Labels") or {})
     labels.update(
@@ -198,10 +218,15 @@ def _clone_worker(client: DockerClient, template: dict[str, Any], number: int, n
     )
     project = labels.get("com.docker.compose.project") or f"shakerscan-fleet-{node_id[:8]}"
     name = f"{project}-worker-{number}"
+    environment = list(config.get("Env") or [])
+    selected_image = image or config.get("Image")
+    if image:
+        environment = [entry for entry in environment if not str(entry).startswith("FLEET_WORKER_IMAGE_DIGEST=")]
+        environment.append(f"FLEET_WORKER_IMAGE_DIGEST={image}")
     body = {
-        "Image": config.get("Image"),
+        "Image": selected_image,
         "Cmd": config.get("Cmd") or ["python3", "/app/worker.py"],
-        "Env": config.get("Env") or [],
+        "Env": environment,
         "Labels": labels,
         "WorkingDir": config.get("WorkingDir") or "",
         "HostConfig": _safe_host_config(inspect),
@@ -216,9 +241,16 @@ def _clone_worker(client: DockerClient, template: dict[str, Any], number: int, n
     if status not in {204, 304}:
         client.request("DELETE", f"/containers/{created['Id']}?force=true")
         raise AgentError(f"Docker worker start failed with status {status}")
+    return str(created["Id"])
 
 
-def reconcile_workers(client: DockerClient, *, node_id: str, desired_count: int) -> int:
+def reconcile_workers(
+    client: DockerClient,
+    *,
+    node_id: str,
+    desired_count: int,
+    desired_image: str | None = None,
+) -> int:
     desired = max(0, min(128, int(desired_count)))
     containers = sorted(worker_containers(client, node_id), key=_container_number)
     running = [item for item in containers if item.get("State") == "running"]
@@ -235,6 +267,8 @@ def reconcile_workers(client: DockerClient, *, node_id: str, desired_count: int)
     for item in list(stopped):
         if needed <= 0:
             break
+        if desired_image and _worker_image(client, item) != desired_image:
+            continue
         status, _ = client.request("POST", f"/containers/{item['Id']}/start")
         if status not in {204, 304}:
             raise AgentError(f"Docker worker restart failed with status {status}")
@@ -247,8 +281,113 @@ def reconcile_workers(client: DockerClient, *, node_id: str, desired_count: int)
             raise AgentError("no worker template exists; start the worker-only Compose project first")
         next_number = max((_container_number(item) for item in containers), default=0) + 1
         for offset in range(needed):
-            _clone_worker(client, templates[0], next_number + offset, node_id)
+            _clone_worker(
+                client,
+                templates[0],
+                next_number + offset,
+                node_id,
+                image=desired_image,
+            )
     return desired
+
+
+def pull_image(client: DockerClient, image: str) -> None:
+    status, payload = client.request(
+        "POST",
+        f"/images/create?fromImage={urllib.parse.quote(image, safe='')}",
+    )
+    if status not in {200, 201}:
+        message = payload.get("message") if isinstance(payload, dict) else ""
+        raise AgentError(f"Docker image pull failed with status {status}: {message}")
+
+
+def busy_container_ids(results_dir: Path = Path("/results")) -> set[str]:
+    directory = results_dir / ".fleet-busy"
+    busy: set[str] = set()
+    try:
+        markers = list(directory.glob("*.json"))
+    except OSError:
+        return busy
+    for marker in markers:
+        try:
+            payload = json.loads(marker.read_text(encoding="utf-8"))
+            container_id = str(payload.get("container_id") or "").strip().lower()
+            if container_id:
+                busy.add(container_id)
+        except (OSError, json.JSONDecodeError):
+            # A partially visible marker is conservatively busy until the next pass.
+            busy.add(marker.stem.lower())
+    return busy
+
+
+def _container_is_busy(container: dict[str, Any], busy_ids: set[str]) -> bool:
+    container_id = str(container.get("Id") or "").strip().lower()
+    return any(
+        container_id.startswith(marker) or marker.startswith(container_id[:12])
+        for marker in busy_ids
+        if marker
+    )
+
+
+def drain_workers(client: DockerClient, *, node_id: str, busy_ids: set[str]) -> int:
+    """Stop only idle workers; running jobs publish host-visible occupancy markers."""
+    containers = worker_containers(client, node_id)
+    for item in containers:
+        if item.get("State") != "running" or _container_is_busy(item, busy_ids):
+            continue
+        status, _ = client.request("POST", f"/containers/{item['Id']}/stop?t=30")
+        if status not in {204, 304}:
+            raise AgentError(f"Docker worker stop failed with status {status}")
+    refreshed = worker_containers(client, node_id)
+    return sum(1 for item in refreshed if item.get("State") == "running")
+
+
+def rollout_worker_once(
+    client: DockerClient,
+    *,
+    node_id: str,
+    desired_image: str,
+    desired_count: int,
+    busy_ids: set[str],
+) -> bool:
+    """Replace at most one old worker, starting its successor before stopping it."""
+    containers = sorted(worker_containers(client, node_id), key=_container_number)
+    stale: list[dict[str, Any]] = []
+    for item in containers:
+        if _worker_image(client, item) != desired_image:
+            stale.append(item)
+    stopped_stale = [item for item in stale if item.get("State") != "running"]
+    if stopped_stale:
+        status, _ = client.request("DELETE", f"/containers/{stopped_stale[0]['Id']}?force=true")
+        if status not in {204, 404}:
+            raise AgentError(f"Docker stale worker removal failed with status {status}")
+        return False
+    idle_stale = [item for item in stale if not _container_is_busy(item, busy_ids)]
+    if idle_stale:
+        old = idle_stale[0]
+        next_number = max((_container_number(item) for item in containers), default=0) + 1
+        successor_id = _clone_worker(client, old, next_number, node_id, image=desired_image)
+        status, _ = client.request("POST", f"/containers/{old['Id']}/stop?t=30")
+        if status not in {204, 304}:
+            client.request("POST", f"/containers/{successor_id}/stop?t=30")
+            client.request("DELETE", f"/containers/{successor_id}?force=true")
+            raise AgentError(f"Docker old worker stop failed with status {status}")
+        status, _ = client.request("DELETE", f"/containers/{old['Id']}?force=true")
+        if status not in {204, 404}:
+            raise AgentError(f"Docker old worker removal failed with status {status}")
+        return False
+    if stale:
+        return False
+    reconcile_workers(
+        client,
+        node_id=node_id,
+        desired_count=desired_count,
+        desired_image=desired_image,
+    )
+    running = [item for item in worker_containers(client, node_id) if item.get("State") == "running"]
+    return len(running) == max(0, min(128, int(desired_count))) and all(
+        _worker_image(client, item) == desired_image for item in running
+    )
 
 
 def host_capacity() -> dict[str, Any]:
@@ -272,29 +411,73 @@ def host_capacity() -> dict[str, Any]:
 
 
 def observed_worker_image(client: DockerClient, containers: list[dict[str, Any]]) -> str | None:
-    if not containers:
+    running = [item for item in containers if item.get("State") == "running"]
+    selected = running or containers
+    if not selected:
         return None
-    template_id = str(containers[0].get("Id") or "")
-    status, inspect = client.request("GET", f"/containers/{template_id}/json")
-    if status != 200 or not isinstance(inspect, dict):
+    try:
+        images = sorted({_worker_image(client, item) for item in selected})
+    except AgentError:
         return None
-    config = inspect.get("Config") if isinstance(inspect.get("Config"), dict) else {}
-    return str(config.get("Image") or "").strip() or None
+    if len(images) == 1:
+        return images[0] or None
+    return "mixed"
+
+
+def drain_grace_elapsed(desired_state: dict[str, Any]) -> bool:
+    raw = str(desired_state.get("desired_state_changed_at") or "").strip()
+    if not raw:
+        return True
+    try:
+        changed_at = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        if changed_at.tzinfo is None:
+            changed_at = changed_at.replace(tzinfo=timezone.utc)
+    except ValueError:
+        return False
+    return (datetime.now(timezone.utc) - changed_at).total_seconds() >= DRAIN_GRACE_SECONDS
 
 
 def run_once(state: dict[str, Any], client: DockerClient) -> dict[str, Any]:
     node_id = str(state["node_id"])
     desired_state = api_request(state, "GET", f"/fleet/nodes/{node_id}/state")
-    desired = 0 if desired_state.get("drain") else int(desired_state.get("desired_worker_count") or 0)
+    configured_count = int(desired_state.get("desired_worker_count") or 0)
+    draining = bool(desired_state.get("drain"))
+    rolling = bool(desired_state.get("rollout_in_progress"))
     desired_version = int(desired_state.get("desired_state_version") or 1)
     previously_applied_version = int(desired_state.get("applied_state_version") or 0)
     error: Exception | None = None
+    reconciliation_complete = False
+    rollout_complete = False
     try:
         desired_image = str(desired_state.get("worker_image_digest") or "").strip()
-        local_image = str(state.get("worker_image_digest") or "").strip()
-        if desired_image and desired_image != local_image:
-            raise AgentError("desired worker image differs from the installed digest; rolling update is required")
-        reconcile_workers(client, node_id=node_id, desired_count=desired)
+        if (rolling or draining) and not drain_grace_elapsed(desired_state):
+            reconciliation_complete = False
+        elif rolling:
+            if not desired_image:
+                raise AgentError("rolling update has no desired worker image")
+            pull_image(client, desired_image)
+            rollout_complete = rollout_worker_once(
+                client,
+                node_id=node_id,
+                desired_image=desired_image,
+                desired_count=configured_count,
+                busy_ids=busy_container_ids(),
+            )
+            reconciliation_complete = rollout_complete
+        elif draining:
+            reconciliation_complete = drain_workers(
+                client,
+                node_id=node_id,
+                busy_ids=busy_container_ids(),
+            ) == 0
+        else:
+            reconcile_workers(
+                client,
+                node_id=node_id,
+                desired_count=configured_count,
+                desired_image=desired_image or None,
+            )
+            reconciliation_complete = True
     except Exception as exc:
         error = exc
     try:
@@ -314,8 +497,11 @@ def run_once(state: dict[str, Any], client: DockerClient) -> dict[str, Any]:
             "build_fingerprint": state.get("build_fingerprint"),
             "active_worker_image_digest": active_image,
             "agent_version": AGENT_VERSION,
-            "applied_state_version": desired_version if error is None else previously_applied_version,
+            "applied_state_version": (
+                desired_version if error is None and reconciliation_complete else previously_applied_version
+            ),
             "last_error": str(error)[:2000] if error is not None else None,
+            "rollout_complete": rollout_complete,
         },
     )
     if error is not None:

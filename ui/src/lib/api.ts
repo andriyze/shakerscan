@@ -1881,6 +1881,7 @@ export interface FleetNode {
   active_worker_count: number
   status: 'joining' | 'healthy' | 'stale' | 'draining' | 'disabled'
   drain: boolean
+  rollout_in_progress?: boolean
   state_current: boolean
   image_current: boolean
   last_error?: string | null
@@ -5139,7 +5140,7 @@ export async function getFleetNodeActivity(nodeId: string, limit = 25): Promise<
 
 export async function updateFleetNodeState(
   nodeId: string,
-  state: { desired_worker_count?: number; drain?: boolean },
+  state: { desired_worker_count?: number; drain?: boolean; worker_image_digest?: string },
   operatorToken?: string,
 ): Promise<FleetNode> {
   const res = await fetch(`${API_URL}/fleet/nodes/${encodeURIComponent(nodeId)}/state`, {

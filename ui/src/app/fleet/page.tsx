@@ -124,6 +124,7 @@ export default function FleetPage() {
   const [activity, setActivity] = useState<Record<string, FleetNodeActivityResponse>>({})
   const [activityLoading, setActivityLoading] = useState<string | null>(null)
   const [activityError, setActivityError] = useState<Record<string, string>>({})
+  const [rolloutDigests, setRolloutDigests] = useState<Record<string, string>>({})
 
   const loadFleet = useCallback(async (background = false) => {
     if (background) setRefreshing(true)
@@ -156,7 +157,7 @@ export default function FleetPage() {
     else sessionStorage.removeItem(OPERATOR_TOKEN_KEY)
   }
 
-  async function mutateNode(node: FleetNode, update: { desired_worker_count?: number; drain?: boolean }, success: string) {
+  async function mutateNode(node: FleetNode, update: { desired_worker_count?: number; drain?: boolean; worker_image_digest?: string }, success: string) {
     setPendingNodeId(node.id)
     try {
       await updateFleetNodeState(node.id, update, operatorToken)
@@ -313,6 +314,7 @@ export default function FleetPage() {
                         </Badge>
                         {!node.state_current && !disabled && <Badge className="bg-amber-500/15 text-amber-300">state drift</Badge>}
                         {!node.image_current && node.active_worker_count > 0 && !disabled && <Badge className="bg-amber-500/15 text-amber-300">image drift</Badge>}
+                        {node.rollout_in_progress && <Badge className="bg-blue-500/15 text-blue-300">rolling update</Badge>}
                       </div>
                       <p className="mt-1 text-sm text-gray-500">
                         {node.hostname || 'Hostname unknown'} · {node.region || 'No region'} · {node.overlay_ip || 'No overlay IP'}
@@ -347,7 +349,7 @@ export default function FleetPage() {
                           </Button>
                         </div>
                         {node.drain ? (
-                          <Button size="sm" disabled={busy} onClick={() => void mutateNode(node, { drain: false }, `${node.name} resumed`)}>
+                          <Button size="sm" disabled={busy || node.rollout_in_progress} onClick={() => void mutateNode(node, { drain: false }, `${node.name} resumed`)}>
                             <Play className="h-4 w-4" /> Resume
                           </Button>
                         ) : (
@@ -388,6 +390,40 @@ export default function FleetPage() {
                       <dd className="mt-1 truncate font-mono text-xs text-gray-400" title={node.worker_image_digest || undefined}>{shortDigest(node.worker_image_digest)}</dd>
                     </div>
                   </dl>
+
+                  {!disabled && (
+                    <div className="mt-4 border-t border-gray-800 pt-4">
+                      <div className="text-xs uppercase tracking-wide text-gray-600">Rolling image update</div>
+                      <div className="mt-2 flex flex-col gap-2 lg:flex-row">
+                        <Input
+                          value={rolloutDigests[node.id] || ''}
+                          onChange={(event) => setRolloutDigests((current) => ({ ...current, [node.id]: event.target.value }))}
+                          placeholder="registry.example/shakerscan@sha256:…"
+                          aria-label={`Digest-pinned worker image for ${node.name}`}
+                          disabled={busy || node.rollout_in_progress}
+                        />
+                        <Button
+                          variant="secondary"
+                          disabled={
+                            busy
+                            || node.rollout_in_progress
+                            || !/^.+@sha256:[0-9a-fA-F]{64}$/.test((rolloutDigests[node.id] || '').trim())
+                            || (rolloutDigests[node.id] || '').trim() === node.worker_image_digest
+                          }
+                          onClick={() => void mutateNode(
+                            node,
+                            { worker_image_digest: (rolloutDigests[node.id] || '').trim() },
+                            `Rolling ${node.name} to the requested image`,
+                          )}
+                        >
+                          <RefreshCw className="h-4 w-4" /> Roll out
+                        </Button>
+                      </div>
+                      <p className="mt-2 text-xs text-gray-600">
+                        The node stops taking new leases, lets active jobs finish, then replaces one idle worker per agent pass.
+                      </p>
+                    </div>
+                  )}
 
                   {Object.keys(node.labels || {}).length > 0 && (
                     <div className="mt-4 border-t border-gray-800 pt-4">

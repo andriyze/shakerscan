@@ -10031,8 +10031,71 @@ async def _attribute_job_execution(job_data: dict[str, Any]) -> None:
         raise RuntimeError("fleet node is missing or disabled; refusing job execution")
 
 
+async def _fleet_node_accepts_work() -> bool:
+    """Fail closed while a joined node is draining, rolling, disabled, or unreachable."""
+    raw_node_id = str(os.environ.get("SHAKERSCAN_NODE_ID") or "").strip()
+    if not raw_node_id:
+        return True
+    try:
+        node_id = uuid.UUID(raw_node_id)
+    except ValueError:
+        return False
+    try:
+        async with db_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT status, drain FROM nodes WHERE id=$1",
+                node_id,
+            )
+    except Exception as exc:
+        print(f"[fleet] cannot authorize node scheduling: {exc}", flush=True)
+        return False
+    return bool(row) and str(row["status"] or "") != "disabled" and not bool(row["drain"])
+
+
+def _fleet_busy_marker(job_data: dict[str, Any]) -> Path | None:
+    """Publish host-visible job occupancy so the node agent can drain safely."""
+    if not str(os.environ.get("SHAKERSCAN_NODE_ID") or "").strip():
+        return None
+    container_id = str(os.environ.get("HOSTNAME") or "").strip().lower()
+    if not re.fullmatch(r"[a-z0-9][a-z0-9_.-]{0,127}", container_id):
+        raise RuntimeError("fleet worker hostname cannot be used for a busy marker")
+    directory = RESULTS_DIR / ".fleet-busy"
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    marker = directory / f"{container_id}.json"
+    temporary = directory / f".{container_id}.{os.getpid()}.tmp"
+    payload = {
+        "node_id": str(os.environ.get("SHAKERSCAN_NODE_ID") or ""),
+        "container_id": container_id,
+        "job_id": str(job_data.get("job_id") or ""),
+        "scan_id": str(job_data.get("scan_id") or ""),
+        "started_at": utc_now_iso(),
+    }
+    temporary.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+    temporary.chmod(0o600)
+    temporary.replace(marker)
+    return marker
+
+
+def _clear_fleet_busy_marker(marker: Path | None) -> None:
+    if marker is None:
+        return
+    try:
+        marker.unlink(missing_ok=True)
+    except OSError as exc:
+        print(f"[fleet] busy marker cleanup failed: {exc}", flush=True)
+
+
 async def process_job(job_data: dict):
     """Route job to appropriate handler."""
+    if not await _fleet_node_accepts_work():
+        source_queue = str(
+            job_data.get("_base_queue_name")
+            or (RETEST_QUEUE_NAME if job_data.get('type') == 'finding_retest' else QUEUE_NAME)
+        )
+        enqueue_job(get_redis(), source_queue, job_data)
+        print("[fleet] node is draining or unavailable; requeued leased work", flush=True)
+        await asyncio.sleep(1)
+        return
     placement = placement_from_payload(job_data)
     if placement and not worker_matches_placement(_worker_placement_labels(), placement):
         source_queue = str(
@@ -10208,24 +10271,29 @@ async def _run_job_under_lease(redis_client: Any, lease: QueueLease, job_data: d
             await loop.run_in_executor(None, lambda: acknowledge_lease(redis_client, lease))
         return
 
-    if lease.legacy:
-        await process_job(job_data)
-        return
-
-    work_task = asyncio.create_task(process_job(job_data))
-    guard_task = asyncio.create_task(_guard_queue_lease(redis_client, lease, consumer_name, work_task))
+    marker: Path | None = None
     try:
-        await work_task
-        loop = asyncio.get_running_loop()
-        acknowledged = await loop.run_in_executor(
-            None,
-            lambda: acknowledge_lease(redis_client, lease),
-        )
-        if not acknowledged:
-            raise RuntimeError(f"completed queue message {lease.message_id} was not acknowledged")
+        marker = _fleet_busy_marker(job_data)
+        if lease.legacy:
+            await process_job(job_data)
+            return
+
+        work_task = asyncio.create_task(process_job(job_data))
+        guard_task = asyncio.create_task(_guard_queue_lease(redis_client, lease, consumer_name, work_task))
+        try:
+            await work_task
+            loop = asyncio.get_running_loop()
+            acknowledged = await loop.run_in_executor(
+                None,
+                lambda: acknowledge_lease(redis_client, lease),
+            )
+            if not acknowledged:
+                raise RuntimeError(f"completed queue message {lease.message_id} was not acknowledged")
+        finally:
+            guard_task.cancel()
+            await asyncio.gather(guard_task, return_exceptions=True)
     finally:
-        guard_task.cancel()
-        await asyncio.gather(guard_task, return_exceptions=True)
+        _clear_fleet_busy_marker(marker)
 
 
 async def async_main():
@@ -10262,6 +10330,10 @@ async def async_main():
                         print(f"[watchdog] stale retest sweep error: {stale_err}", flush=True)
                     finally:
                         last_stale_check_monotonic = now_mono
+
+                if not await _fleet_node_accepts_work():
+                    await asyncio.sleep(min(5, WORKER_QUEUE_BLOCK_SECONDS))
+                    continue
 
                 # Lease a Stream message. Legacy list entries are drained only
                 # as an upgrade bridge; all new work is explicitly acked.

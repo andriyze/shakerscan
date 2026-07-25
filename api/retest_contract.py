@@ -2844,6 +2844,7 @@ async def run_schema_migrations(pool) -> None:
                     status TEXT NOT NULL DEFAULT 'joining'
                         CHECK (status IN ('joining', 'healthy', 'stale', 'draining', 'disabled')),
                     drain BOOLEAN NOT NULL DEFAULT false,
+                    rollout_in_progress BOOLEAN NOT NULL DEFAULT false,
                     last_heartbeat_at TIMESTAMPTZ,
                     connection_bundle_delivered_at TIMESTAMPTZ,
                     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -2859,6 +2860,7 @@ async def run_schema_migrations(pool) -> None:
                 ADD COLUMN IF NOT EXISTS desired_state_version INTEGER NOT NULL DEFAULT 1,
                 ADD COLUMN IF NOT EXISTS applied_state_version INTEGER NOT NULL DEFAULT 0,
                 ADD COLUMN IF NOT EXISTS last_error TEXT,
+                ADD COLUMN IF NOT EXISTS rollout_in_progress BOOLEAN NOT NULL DEFAULT false,
                 ADD COLUMN IF NOT EXISTS connection_bundle_delivered_at TIMESTAMPTZ
             """)
             await conn.execute("""

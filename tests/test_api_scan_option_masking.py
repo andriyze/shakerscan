@@ -1592,6 +1592,13 @@ def test_scan_options_reject_unknown_fleet_placement_key():
         api_module.ScanOptions(placement={"availability_zone": "eu-west-1a"})
 
 
+def test_fleet_desired_state_requires_digest_pinned_rollout_image():
+    with pytest.raises(Exception, match="digest-pinned"):
+        api_module.FleetDesiredStateRequest(worker_image_digest="registry/shakerscan:latest")
+    digest = "registry/shakerscan@sha256:" + "a" * 64
+    assert api_module.FleetDesiredStateRequest(worker_image_digest=digest).worker_image_digest == digest
+
+
 def test_normalize_dast_scan_options_explicit_smart_sets_legacy_active():
     # An explicit smart/full/aggressive scan implies the legacy active flag.
     options = api_module.ScanOptions(scan_type="smart")

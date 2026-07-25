@@ -1178,7 +1178,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | Scanner wrapper commands | 26 | `scanner.sh` |
 | Make targets | 10 | `Makefile` |
 | Release gates | 14 | `scripts/release_gates.py` |
-| Runtime environment keys | 247 | Python sources + Compose manifests |
+| Runtime environment keys | 248 | Python sources + Compose manifests |
 | Scanner modules | 83 | `scanner/scanner_tools/` |
 | UI pages | 31 | `ui/src/app/` |
 | Skills | 6 | `skills/` |
@@ -1845,6 +1845,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `FLEET_CONNECTION_BUNDLE_PATH` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `FLEET_CONTROL_PLANE_OVERLAY_URL` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `FLEET_DESIRED_WORKER_COUNT` | `docker-compose.release.yml`, `docker-compose.yml` |
+| `FLEET_DRAIN_GRACE_SECONDS` | `api/fleet_agent.py` |
 | `FLEET_EDGE_MODE` | `api/api.py` |
 | `FLEET_HEARTBEAT_TIMEOUT_SECONDS` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `FLEET_NODE_ID` | `docker-compose.worker.yml` |

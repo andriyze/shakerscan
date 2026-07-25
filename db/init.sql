@@ -891,6 +891,7 @@ CREATE TABLE IF NOT EXISTS nodes (
     status TEXT NOT NULL DEFAULT 'joining'
         CHECK (status IN ('joining', 'healthy', 'stale', 'draining', 'disabled')),
     drain BOOLEAN NOT NULL DEFAULT false,
+    rollout_in_progress BOOLEAN NOT NULL DEFAULT false,
     last_heartbeat_at TIMESTAMPTZ,
     connection_bundle_delivered_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),

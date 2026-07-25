@@ -1,6 +1,7 @@
 import json
 import os
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -21,10 +22,11 @@ class FakeDocker:
         self.calls = []
 
     @staticmethod
-    def _container(container_id, number, state):
+    def _container(container_id, number, state, image=None):
         return {
             "Id": container_id,
             "State": state,
+            "ImageName": image or "registry/shakerscan@sha256:" + "a" * 64,
             "Labels": {
                 "com.docker.compose.project": "fleet-test",
                 "com.docker.compose.service": "worker",
@@ -42,7 +44,7 @@ class FakeDocker:
             item = next(row for row in self.containers if row["Id"] == container_id)
             return 200, {
                 "Config": {
-                    "Image": "registry/shakerscan@sha256:" + "a" * 64,
+                    "Image": item["ImageName"],
                     "Cmd": ["python3", "/app/worker.py"],
                     "Env": ["REDIS_URL=redis://control"],
                     "Labels": dict(item["Labels"]),
@@ -57,7 +59,7 @@ class FakeDocker:
         if method == "POST" and path.startswith("/containers/create?"):
             number = int(body["Labels"]["com.docker.compose.container-number"])
             container_id = f"created-{number}"
-            self.containers.append(self._container(container_id, number, "created"))
+            self.containers.append(self._container(container_id, number, "created", body["Image"]))
             return 201, {"Id": container_id}
         if method == "POST" and path.endswith("/start"):
             container_id = path.split("/")[2]
@@ -67,7 +69,11 @@ class FakeDocker:
             container_id = path.split("/")[2]
             next(item for item in self.containers if item["Id"] == container_id)["State"] = "exited"
             return 204, {}
+        if method == "POST" and path.startswith("/images/create?"):
+            return 200, {}
         if method == "DELETE":
+            container_id = path.split("/")[2].split("?")[0]
+            self.containers = [item for item in self.containers if item["Id"] != container_id]
             return 204, {}
         raise AssertionError((method, path, body))
 
@@ -141,7 +147,7 @@ def test_observed_worker_image_comes_from_container_not_desired_state():
     assert fleet_agent.observed_worker_image(client, containers) == "registry/shakerscan@sha256:" + "a" * 64
 
 
-def test_run_once_refuses_unimplemented_image_change_and_reports_prior_state(monkeypatch):
+def test_run_once_rolls_worker_image_without_stopping_capacity_first(monkeypatch):
     posts = []
 
     def fake_api(_state, method, _path, payload=None):
@@ -151,6 +157,8 @@ def test_run_once_refuses_unimplemented_image_change_and_reports_prior_state(mon
                 "desired_state_version": 4,
                 "applied_state_version": 3,
                 "worker_image_digest": "registry/shakerscan@sha256:" + "b" * 64,
+                "rollout_in_progress": True,
+                "drain": True,
             }
         posts.append(payload)
         return {"id": NODE_ID, "status": "joining"}
@@ -160,11 +168,57 @@ def test_run_once_refuses_unimplemented_image_change_and_reports_prior_state(mon
         "node_id": NODE_ID,
         "worker_image_digest": "registry/shakerscan@sha256:" + "a" * 64,
     }
-    with pytest.raises(fleet_agent.AgentError, match="rolling update"):
-        fleet_agent.run_once(state, FakeDocker())
+    client = FakeDocker()
+    fleet_agent.run_once(state, client)
     assert posts[0]["applied_state_version"] == 3
-    assert posts[0]["active_worker_image_digest"].endswith("a" * 64)
-    assert "rolling update" in posts[0]["last_error"]
+    assert posts[0]["active_worker_image_digest"].endswith("b" * 64)
+    assert posts[0]["last_error"] is None
+    assert posts[0]["rollout_complete"] is False
+    create_index = next(i for i, call in enumerate(client.calls) if call[0] == "POST" and call[1].startswith("/containers/create?"))
+    stop_index = next(i for i, call in enumerate(client.calls) if call[0] == "POST" and "/stop" in call[1])
+    assert create_index < stop_index
+
+    posts.clear()
+    fleet_agent.run_once(state, client)
+    assert posts[0]["applied_state_version"] == 4
+    assert posts[0]["rollout_complete"] is True
+
+
+def test_drain_workers_keeps_busy_container_running(tmp_path):
+    client = FakeDocker()
+    client.containers.append(client._container("two", 2, "running"))
+    marker_dir = tmp_path / ".fleet-busy"
+    marker_dir.mkdir()
+    (marker_dir / "one.json").write_text(
+        json.dumps({"container_id": "one"}),
+        encoding="utf-8",
+    )
+    busy = fleet_agent.busy_container_ids(tmp_path)
+    assert fleet_agent.drain_workers(client, node_id=NODE_ID, busy_ids=busy) == 1
+    states = {item["Id"]: item["State"] for item in client.containers}
+    assert states == {"one": "running", "two": "exited"}
+
+
+def test_rollout_does_not_replace_busy_old_worker():
+    client = FakeDocker()
+    complete = fleet_agent.rollout_worker_once(
+        client,
+        node_id=NODE_ID,
+        desired_image="registry/shakerscan@sha256:" + "b" * 64,
+        desired_count=1,
+        busy_ids={"one"},
+    )
+    assert complete is False
+    assert client.containers[0]["State"] == "running"
+    assert not any(path.startswith("/containers/create?") for _, path, _ in client.calls)
+
+
+def test_drain_grace_uses_control_plane_change_time(monkeypatch):
+    monkeypatch.setattr(fleet_agent, "DRAIN_GRACE_SECONDS", 45)
+    future = datetime.now(timezone.utc) + timedelta(seconds=1)
+    old = datetime.now(timezone.utc) - timedelta(seconds=60)
+    assert fleet_agent.drain_grace_elapsed({"desired_state_changed_at": future.isoformat()}) is False
+    assert fleet_agent.drain_grace_elapsed({"desired_state_changed_at": old.isoformat()}) is True
 
 
 def test_worker_compose_contains_only_worker_and_agent_services(tmp_path):

@@ -13,7 +13,8 @@ proof is not complete. Redis Stream lease/heartbeat/ack/reclaim delivery is impl
 general artifact manifest, deterministic result/checkpoint/diagnostic upload, referenced screenshot
 centralization, hash-verified proxy download, cross-node stale recovery, fleet-worker fail-closed
 persistence, centralized retry-safe retention, and a digest-pinned self-hosted MinIO profile are implemented. Capability/region/egress placement
-and enforceable fleet-wide admission/request limits are implemented. Rolling lifecycle and the Phase-3 broker remain.
+and enforceable fleet-wide admission/request limits are implemented. Graceful drain and digest-pinned
+one-at-a-time worker image rollout are implemented. The Phase-3 broker and physical acceptance remain.
 **Scope:** run a coordinated ShakerScan fleet across multiple VMs/VPS hosts so one UI/API
 can scan more targets at once and run high-budget Full Coverage scans by using workers
 from many machines.
@@ -37,12 +38,12 @@ becoming stale prose. For product priority and phased order, see
 | Per-root-domain request reservation (atomic Redis Lua; already coordinates every process on the shared Redis) | **Built** | `reserve_domain_rate` (`asm_inventory.py`) |
 | Central artifact plane | **Built** — Compose forwards S3 settings and includes a digest-pinned MinIO profile that `fleet init` configures with generated credentials unless external S3 is already complete. Result JSON, live checkpoints, terminal diagnostics, and bounded referenced screenshots/files use deterministic keys plus a durable `scan_artifacts` manifest. Joined nodes fail closed when required upload/manifest persistence fails; the API hash-verifies proxy downloads, stale recovery reads remote checkpoints, one control-plane sweeper enforces retention, and fleet init requires a real PUT/GET/DELETE probe. | `artifact_storage.py`; `worker.py` `persist_result_artifact`, `_mirror_checkpoint`; `scan_artifact_retention_runner`; `GET /scans/{id}/artifacts` |
 | Job-queue delivery | **Built with leased delivery** — Redis Streams consumer groups, explicit ack/delete after successful dispatch, lease heartbeats, visibility-timeout reclaim, bounded delivery attempts, and fail-closed execution cancellation when lease ownership/heartbeat authority is lost. Pre-upgrade list entries remain drainable. | `job_queue.py`; `worker.py` `_run_job_under_lease` |
-| Remote worker scaling | **Built per node** — the control plane changes versioned desired count/drain state; each authenticated pull agent reconciles only its local labeled containers | `PATCH /fleet/nodes/{id}/state`; `fleet_agent.py` `reconcile_workers` |
+| Remote worker scaling and rolling lifecycle | **Built per node** — the control plane changes versioned desired count/drain/image state; workers fail closed on drain before leasing and publish host-visible busy markers while executing; the pull agent waits a race-closure grace period, preserves busy workers, starts each digest-pinned successor before stopping its idle predecessor, and resumes scheduling only after the final image-confirming heartbeat. | `PATCH /fleet/nodes/{id}/state`; `worker.py` `_fleet_node_accepts_work`, `_fleet_busy_marker`; `fleet_agent.py` `drain_workers`, `rollout_worker_once` |
 | Node identity, enrollment, join tokens, heartbeat, credential rotation/revocation, CA bootstrap, overlay TLS edge, `nodes` table | **Foundation built** — physical two-VPS acceptance remains incomplete | `fleet.py`; `/fleet/*`; `fleet-edge`; `nodes`, `node_join_tokens`, `node_credentials` |
-| Worker-only deployment and pull-based node-agent | **Foundation built** — digest-pinned worker/agent-only Compose, owner-only local state, versioned desired state, local Docker reconciliation, drain-to-zero, capacity/error heartbeat | `docker-compose.worker.yml`; `fleet_agent.py`; `GET|PATCH /fleet/nodes/{id}/state` |
+| Worker-only deployment and pull-based node-agent | **Built for owned-fleet lifecycle** — digest-pinned worker/agent-only Compose, owner-only local state, versioned desired state, local Docker reconciliation, graceful drain-to-zero, rolling image replacement, capacity/error heartbeat | `docker-compose.worker.yml`; `fleet_agent.py`; `GET|PATCH /fleet/nodes/{id}/state` |
 | WireGuard/CLI host provisioning | **Built, awaiting physical two-VPS acceptance** — persistent identity, CA/server certificates, overlay/data binding, automatic or manual peer reconciliation, public HTTPS enrollment, overlay proof, one-time bundle persistence, worker-only startup | `scripts/fleet_cli.py`; `scanner.sh fleet`; `scanner.sh join` |
 | Per-node execution attribution and fleet rollup | **Built** — scan/shard rows record the executing node and unique worker replica; revoked nodes fail closed and re-enqueue refused work; node API derives state/image drift and exposes recent activity | `scans.executing_node_id`; `worker.py` `_attribute_job_execution`; `GET /fleet/nodes`; `GET /fleet/nodes/{id}/activity` |
-| Fleet UI | **Built** — unified health/capacity/drift view, recent attributed work, desired worker scaling, drain/resume, revoke confirmation, and session-only remote operator credential handling | `ui/src/app/fleet/page.tsx`; sidebar `/fleet` |
+| Fleet UI | **Built** — unified health/capacity/drift view, recent attributed work, desired worker scaling, graceful drain/resume, digest-pinned rollout, revoke confirmation, placement labels, and session-only remote operator credential handling | `ui/src/app/fleet/page.tsx`; sidebar `/fleet` |
 | Capability/region/egress placement | **Built** — scan options accept normalized placement constraints; jobs enter deterministic capability Streams; workers dynamically subscribe only to routes matching their node/region/network/residency/tier/tool labels. Equivalent eligible workers retain normal lease failover. Fleet join persists labels and the UI exposes both submission and node labels. | `job_queue.py` `routed_queue_name`, `qualified_route_queues`; `ScanOptions.placement`; `fleet_cli.py`; `/scan/new`; `/fleet` |
 
 The takeaways that shape the plan:
@@ -55,8 +56,7 @@ The takeaways that shape the plan:
   general result/checkpoint/diagnostic plane now share the S3-compatible store; the database manifest
   and hash-verified proxy are the supported cross-node contract (§8).
 - The node identity/enrollment/overlay and leased/acked/reclaimable queue are now implemented. The
-  largest remaining production gaps are rolling lifecycle, the broker boundary, and physical
-  multi-VPS acceptance.
+  largest remaining production gaps are the broker boundary and physical multi-VPS acceptance.
 
 The parallel-scan design answers: "How does one logical scan fan out into plan, shard, and merge
 jobs?" This document answers: "How can those worker jobs run safely on more than one host?"
@@ -232,7 +232,7 @@ worker-count changes.
 | Job queue | Scan/retest jobs use Redis Streams consumer groups with ack, heartbeat, bounded reclaim, and a legacy-list drain bridge. | A worker on another VPS can participate if it can reach the same queue; hard loss is reclaimed after the visibility timeout. |
 | Finding writes | Findings are deduped with a database uniqueness constraint and conflict-safe inserts. | Concurrent workers can scan the same target without inventing a distributed lock. |
 | Parallel scan plan | Parent, shard, and merge jobs are implemented on the queue. | Shard jobs are naturally host-agnostic when remote workers can safely reach the shared queue and state. |
-| Worker scaling | Local `POST /workers` remains for standalone; fleet desired state scales/drains each remote node through its pull agent. | Rolling image rollout and aggregate capacity placement remain. |
+| Worker scaling | Local `POST /workers` remains for standalone; fleet desired state scales/drains each remote node through its pull agent. | Graceful rolling image rollout is built; aggregate fleet-wide count distribution remains. |
 | Evidence | Standalone retains `./results`; fleet workers upload to S3/MinIO and commit a durable manifest before completion. | The control plane can proxy artifacts from every node without a shared filesystem. |
 | Queue reliability | Stream messages remain pending while leased, heartbeat during execution, are acknowledged only after successful dispatch, and are reclaimed after owner loss. | Physical partition/kill testing remains required before the production acceptance claim. |
 | Networking | The local stack binds API/UI to the configured host; remote mode already parameterizes public/private bind addresses. | Built-in WireGuard should become the default fleet overlay; Redis/Postgres binding and firewall rules must be explicit. |
@@ -378,12 +378,12 @@ owned internal fleet, but it is not the full production architecture.
 
 Important limitations in Phase 1:
 
-- the pull-based node-agent applies versioned worker-count and drain desired state on its local Docker
-  engine, and the join/install/overlay proof and fleet UI are implemented; physical two-VPS acceptance
-  and rolling lifecycle remain incomplete;
+- the pull-based node-agent applies versioned worker-count, graceful drain, and image-rollout desired
+  state on its local Docker engine, and the join/install/overlay proof and fleet UI are implemented;
+  physical two-VPS acceptance remains incomplete;
 - `fleet init` enables private MinIO with generated credentials by default, or validates a configured external S3 store;
 - Stream lease recovery is implemented, but physical kill/partition acceptance is still pending;
-- routing assumes workers are mostly interchangeable.
+- the HTTPS broker boundary for untrusted nodes is not part of Phase 1.
 
 #### Phase 1 draft vertical-slice specification (Milestone A: two-VPS queue proof)
 
@@ -416,6 +416,7 @@ CREATE TABLE IF NOT EXISTS nodes (
   status               TEXT NOT NULL DEFAULT 'joining'
                          CHECK (status IN ('joining','healthy','stale','draining','disabled')),
   drain                BOOLEAN NOT NULL DEFAULT FALSE,
+  rollout_in_progress  BOOLEAN NOT NULL DEFAULT FALSE,
   last_heartbeat_at    TIMESTAMPTZ,
   connection_bundle_delivered_at TIMESTAMPTZ,
   created_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -559,15 +560,15 @@ no inbound listener and clones only an explicit allowlist of worker container se
 supports operator-authenticated desired worker count/drain changes through
 `PATCH /fleet/nodes/{id}/state` and node-authenticated reads through the matching `GET`. The join
 installer and CA-verified overlay reachability proof are implemented. The Fleet UI and stale-state
-presentation are implemented, including current work and state/image drift. Physical two-VPS
-acceptance and rolling lifecycle are still incomplete.
+presentation are implemented, including current work, state/image drift, and digest-pinned rollout.
+Workers stop leasing before drain, publish busy markers for active work, and the agent replaces one
+idle worker per pass by starting its successor first. Physical two-VPS acceptance remains incomplete.
 
 **Milestone A done** = a remote worker registers with one command, appears in the fleet view with a
 heartbeat, drains the shared `scan_jobs` queue, writes scans/findings to the control-plane database,
 and Redis/Postgres are unreachable from the public internet. This is explicitly a **lab proof**, not
 an unattended-production claim. The accepted Phase-1 gaps remain physical multi-host lease/partition
-acceptance and an incomplete rolling lifecycle around the implemented install and per-node scaling
-primitives. General artifacts are no longer an accepted gap.
+acceptance. General artifacts and owned-node rolling lifecycle are no longer accepted gaps.
 
 ### Phase 2: Production-Ready Owned Fleet
 
@@ -578,8 +579,9 @@ Build the fleet layer:
 1. **Node registry:** track `node_id`, hostname, overlay IP, egress IP, region, version,
    labels, tool capabilities, capacity, active worker count, desired worker count,
    heartbeat, and drain state.
-2. **Node-agent:** the local pull agent, installation, desired-count/drain reconciliation, stale-state
-   presentation, and fleet UI are built. Complete rolling upgrades and partition behavior.
+2. **Node-agent:** the local pull agent, installation, desired-count/graceful-drain reconciliation,
+   one-at-a-time digest rollout, stale-state presentation, and fleet UI are built. Physical partition
+   behavior remains an acceptance task.
    The API never drives a remote Docker socket directly.
 3. **Central evidence store:** workers upload screenshots, HAR files, logs, and other
    artifacts to S3/MinIO. Findings and scan results store object keys, not local paths.
@@ -620,7 +622,8 @@ install ShakerScan on them, connect them with the same fleet join flow, and opti
 destroy or scale the fleet later. This should wait until the core fleet primitives are
 solid. The core primitives are implemented: standalone remains default, `fleet init`, built-in
 WireGuard, `fleet join`, node-agent heartbeat/worker scaling, leased queue delivery, and centralized
-artifacts. Placement and rolling lifecycle remain before cloud provisioning.
+artifacts, placement, and rolling lifecycle. Physical fleet acceptance and the broker remain before
+cloud provisioning.
 
 ## 7. Node-Agent Contract
 
@@ -635,14 +638,14 @@ Responsibilities:
 - report host resources and active worker count;
 - pull desired state from the control plane or receive commands over the overlay;
 - start/stop local worker containers or processes;
-- mark itself draining and stop accepting new work;
+- mark itself draining, stop accepting new work, and preserve busy workers until completion;
 - expose local logs/metrics needed for debugging;
 - refuse jobs when the local image major version is incompatible.
 
-The implemented foundation uses the preferred pull model: the agent periodically asks the control
+The implementation uses the preferred pull model: the agent periodically asks the control
 plane for versioned desired state and exposes no inbound management port. Registration, overlay, and
-bundle installation are implemented in the host CLI; image compatibility refusal and richer
-logs/metrics are completed with the rolling-upgrade lifecycle.
+bundle installation are implemented in the host CLI. Digest-pinned image rollout is versioned and
+observable; richer centralized node logs/metrics remain observability work.
 
 Join tokens should be short-lived and preferably single-use. After registration, the
 node should use its own node credential, not keep reusing the enrollment token.
@@ -798,7 +801,7 @@ Security requirements:
 |---|---|---|
 | Redis | Bind to overlay only. | Streams, consumer groups, stale lease reclaim, Sentinel/managed Redis if HA matters. |
 | Postgres | Bind to overlay only. | Scoped worker role where possible, managed/replicated Postgres if HA matters. |
-| API/UI | Stay on control plane. | Fleet view, node status, drain, placement, and shard attribution are built; rolling lifecycle remains. |
+| API/UI | Stay on control plane. | Fleet view, node status, graceful drain, digest rollout, placement, and shard attribution are built. |
 | Worker runtime | Worker-only compose/profile on remote VPSs. | Node-agent manages desired/current worker count. |
 | Evidence | Temporary local evidence is acceptable only for proof-of-concept. | S3/MinIO object storage required. |
 | Image distribution | Private registry with pinned tags. | Rolling upgrade and version compatibility checks. |
@@ -823,8 +826,8 @@ Acceptance criteria:
 - scan state and findings are written to the control-plane database;
 - Redis/Postgres are not reachable from the public internet.
 
-Known gaps are acceptable only for this labeled lab proof: incomplete rolling lifecycle and
-incomplete physical lease/partition acceptance. No unattended or
+Known gaps are acceptable only for this labeled lab proof: incomplete physical lease/partition
+acceptance. No unattended or
 production-safe claim is allowed.
 
 ### Milestone B: Cross-VPS Parallel-Scan Proof
@@ -877,8 +880,7 @@ contracts as acceptance gates:
    Redis/Postgres and centralized-artifact implementation is not a production claim without that
    physical proof.
 2. **Owned-fleet hardening before unattended use:** complete physical lease/fencing acceptance,
-   executing-node scope revalidation, node-agent lifecycle management, drain/reschedule, partition
-   and clock-skew tests, per-adapter budget telemetry, and routing.
+   executing-node scope revalidation, partition and clock-skew tests, and per-adapter budget telemetry.
 3. **Later:** add the HTTPS broker for untrusted or customer-hosted nodes. That is the
    correct zero-trust architecture, but it is more work than needed for the first owned
    multi-VPS fleet.

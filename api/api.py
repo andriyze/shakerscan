@@ -4596,11 +4596,29 @@ class FleetHeartbeatRequest(BaseModel):
     applied_state_version: int = Field(default=0, ge=0)
     last_error: Optional[str] = Field(default=None, max_length=2000)
     egress_ip: Optional[str] = Field(default=None, max_length=64)
+    rollout_complete: bool = False
 
 
 class FleetDesiredStateRequest(BaseModel):
     desired_worker_count: Optional[int] = Field(default=None, ge=0, le=128)
     drain: Optional[bool] = None
+    worker_image_digest: Optional[str] = Field(default=None, max_length=512)
+
+    @field_validator("worker_image_digest")
+    @classmethod
+    def _validate_worker_image_digest(cls, value):
+        if value is None:
+            return None
+        candidate = value.strip()
+        image_name, separator, digest = candidate.rpartition("@sha256:")
+        if (
+            not separator
+            or not image_name
+            or len(digest) != 64
+            or any(ch not in "0123456789abcdef" for ch in digest.lower())
+        ):
+            raise ValueError("worker_image_digest must be digest-pinned")
+        return candidate
 
 
 def _fleet_bootstrap_config() -> FleetBootstrapConfig:
@@ -7519,6 +7537,12 @@ async def get_fleet_node_state(node_id: str, request: Request):
             "desired_state_version": int(node.get("desired_state_version") or 1),
             "applied_state_version": int(node.get("applied_state_version") or 0),
             "worker_image_digest": node.get("worker_image_digest"),
+            "rollout_in_progress": bool(node.get("rollout_in_progress")),
+            "desired_state_changed_at": (
+                node.get("updated_at").isoformat()
+                if node.get("updated_at") and hasattr(node.get("updated_at"), "isoformat")
+                else node.get("updated_at")
+            ),
             "status": node.get("status"),
         }
     except FleetAuthenticationError as exc:
@@ -7529,8 +7553,11 @@ async def get_fleet_node_state(node_id: str, request: Request):
 async def update_fleet_node_state(node_id: str, body: FleetDesiredStateRequest, request: Request):
     """Operator desired-state action consumed asynchronously by the node agent."""
     _require_fleet_operator(request)
-    if body.desired_worker_count is None and body.drain is None:
-        raise HTTPException(status_code=422, detail="desired_worker_count or drain is required")
+    if body.desired_worker_count is None and body.drain is None and body.worker_image_digest is None:
+        raise HTTPException(
+            status_code=422,
+            detail="desired_worker_count, drain, or worker_image_digest is required",
+        )
     try:
         parsed_id = uuid.UUID(node_id)
     except ValueError as exc:
@@ -7540,10 +7567,21 @@ async def update_fleet_node_state(node_id: str, body: FleetDesiredStateRequest, 
             """
             UPDATE nodes
             SET desired_worker_count = COALESCE($2, desired_worker_count),
-                drain = COALESCE($3, drain),
+                drain = CASE
+                    WHEN $4::text IS NOT NULL AND $4 IS DISTINCT FROM worker_image_digest THEN true
+                    WHEN rollout_in_progress AND $3 IS FALSE THEN true
+                    ELSE COALESCE($3, drain)
+                END,
+                worker_image_digest = COALESCE($4, worker_image_digest),
+                rollout_in_progress = CASE
+                    WHEN $4::text IS NOT NULL AND $4 IS DISTINCT FROM worker_image_digest THEN true
+                    ELSE rollout_in_progress
+                END,
                 desired_state_version = desired_state_version + 1,
                 status = CASE
-                    WHEN COALESCE($3, drain) THEN 'draining'
+                    WHEN ($4::text IS NOT NULL AND $4 IS DISTINCT FROM worker_image_digest)
+                         OR rollout_in_progress
+                         OR COALESCE($3, drain) THEN 'draining'
                     WHEN status = 'draining' THEN 'joining'
                     ELSE status
                 END,
@@ -7554,6 +7592,7 @@ async def update_fleet_node_state(node_id: str, body: FleetDesiredStateRequest, 
             parsed_id,
             body.desired_worker_count,
             body.drain,
+            body.worker_image_digest,
         )
     if not row:
         raise HTTPException(status_code=404, detail="node not found or disabled")
@@ -7580,6 +7619,25 @@ async def heartbeat_fleet_node(node_id: str, body: FleetHeartbeatRequest, reques
                     last_error=body.last_error,
                     egress_ip=body.egress_ip,
                 )
+                if body.rollout_complete:
+                    completed = await conn.fetchrow(
+                        """
+                        UPDATE nodes
+                        SET rollout_in_progress = false,
+                            drain = false,
+                            desired_state_version = desired_state_version + 1,
+                            status = 'joining',
+                            updated_at = NOW()
+                        WHERE id = $1
+                          AND status <> 'disabled'
+                          AND rollout_in_progress
+                          AND worker_image_digest = active_worker_image_digest
+                        RETURNING *
+                        """,
+                        uuid.UUID(node_id),
+                    )
+                    if completed:
+                        result = completed
         return _public_fleet_node(result, stale_after_seconds=HEARTBEAT_TIMEOUT_MINUTES * 60)
     except FleetAuthenticationError as exc:
         raise HTTPException(status_code=401, detail=str(exc)) from exc

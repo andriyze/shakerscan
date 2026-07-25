@@ -1974,6 +1974,20 @@ def test_fleet_request_budget_defaults_to_enforce_but_explicit_off_wins(monkeypa
     assert worker._effective_request_budget_mode({"request_budget_mode": "off"}) == "off"
 
 
+def test_fleet_busy_marker_is_atomic_and_content_free(tmp_path, monkeypatch):
+    monkeypatch.setattr(worker, "RESULTS_DIR", tmp_path)
+    monkeypatch.setenv("SHAKERSCAN_NODE_ID", "11111111-1111-4111-8111-111111111111")
+    monkeypatch.setenv("HOSTNAME", "abc123def456")
+    marker = worker._fleet_busy_marker({"job_id": "job-1", "scan_id": "scan-1", "secret": "nope"})
+    assert marker is not None and marker.is_file()
+    payload = json.loads(marker.read_text(encoding="utf-8"))
+    assert payload["container_id"] == "abc123def456"
+    assert "secret" not in payload
+    assert not list(marker.parent.glob("*.tmp"))
+    worker._clear_fleet_busy_marker(marker)
+    assert not marker.exists()
+
+
 def test_domain_endpoint_budget_reservation_accounts_for_db_and_redis_usage():
     target_id = "33333333-3333-3333-3333-333333333333"
     conn = _FakeRateConn(root_domain="example.test", cap=5, used=2)
