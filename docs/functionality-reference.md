@@ -1168,8 +1168,8 @@ it is the exhaustive backstop behind the human-readable product map above.
 
 | Surface | Count | Source |
 |---|---|---|
-| Public REST operations | 243 | `api/api.py` FastAPI decorators |
-| Unique REST paths | 200 | `api/api.py` |
+| Public REST operations | 244 | `api/api.py` FastAPI decorators |
+| Unique REST paths | 201 | `api/api.py` |
 | Check families | 14 | `api/check_registry.py` |
 | Command Arsenal commands | 82 | `api/command_arsenal.py` |
 | Tool adapters | 13 | `api/command_arsenal.py` |
@@ -1315,6 +1315,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | `POST` | `/fleet/join-tokens` | `create_fleet_join_token` |
 | `GET` | `/fleet/nodes` | `list_fleet_nodes` |
 | `POST` | `/fleet/nodes/join` | `join_fleet_node` |
+| `GET` | `/fleet/nodes/{node_id}/activity` | `get_fleet_node_activity` |
 | `POST` | `/fleet/nodes/{node_id}/connection-bundle` | `get_fleet_connection_bundle` |
 | `POST` | `/fleet/nodes/{node_id}/credentials/rotate` | `rotate_fleet_node_credential` |
 | `POST` | `/fleet/nodes/{node_id}/heartbeat` | `heartbeat_fleet_node` |
@@ -1935,7 +1936,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SHAKERSCAN_MAX_WORKERS` | `api/api.py`, `docker-compose.yml` |
 | `SHAKERSCAN_MCP_ALLOW_REMOTE_API` | `scripts/shakerscan_mcp.py` |
 | `SHAKERSCAN_MCP_TIMEOUT_SECONDS` | `scripts/shakerscan_mcp.py` |
-| `SHAKERSCAN_NODE_ID` | `api/fleet_worker_entrypoint.py` |
+| `SHAKERSCAN_NODE_ID` | `api/fleet_worker_entrypoint.py`, `api/worker.py` |
 | `SHAKERSCAN_PAYLOAD_PACK_MAX` | `scanner/scanner_tools/active_checks.py` |
 | `SHAKERSCAN_PER_WORKER_MEM_GB` | `api/api.py`, `docker-compose.yml` |
 | `SHAKERSCAN_PLATFORM_MEMORY_RESERVE_GB` | `api/api.py`, `docker-compose.yml` |

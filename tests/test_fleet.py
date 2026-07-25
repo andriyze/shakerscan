@@ -187,5 +187,26 @@ def test_public_node_derives_stale_without_overwriting_durable_state():
     result = public_node(row, stale_after_seconds=60)
     assert result["id"] == str(node_id)
     assert result["status"] == "stale"
+    assert result["state_current"] is False
+    assert result["image_current"] is False
     assert result["labels"] == {"region": "test"}
     assert row["status"] == "healthy"
+
+
+def test_public_node_derives_state_and_image_currency():
+    digest = "registry/shakerscan@sha256:" + "a" * 64
+    result = public_node(
+        {
+            "id": uuid.uuid4(),
+            "status": "healthy",
+            "last_heartbeat_at": utcnow(),
+            "desired_state_version": 4,
+            "applied_state_version": 4,
+            "worker_image_digest": digest,
+            "active_worker_image_digest": digest,
+            "last_error": None,
+        },
+        stale_after_seconds=60,
+    )
+    assert result["state_current"] is True
+    assert result["image_current"] is True

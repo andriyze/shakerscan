@@ -8686,7 +8686,7 @@ async def process_exploit_batch_job(job_data: dict):
         job_data.get('endpoint_filter') or options.get('asm_endpoint_filter')
     )
     finish_campaign_on_complete = bool(job_data.get('finish_campaign_on_complete', not bool(parent_id)))
-    worker_id = os.environ.get('HOSTNAME') or os.environ.get('WORKER_ID') or f"worker:{job_id[:8]}"
+    worker_id = _worker_runtime_identity() or f"worker:{job_id[:8]}"
     r = get_redis()
     now = utc_now()
     slot_acquired = False
@@ -9513,10 +9513,58 @@ async def _refuse_stale_job_if_needed(job_data: dict) -> bool:
     return True
 
 
+async def _attribute_job_execution(job_data: dict[str, Any]) -> None:
+    """Stamp the durable scan row before dispatch so every phase has host/node provenance."""
+    scan_id = str(job_data.get("scan_id") or "").strip()
+    if not scan_id:
+        return
+    try:
+        scan_uuid = uuid.UUID(scan_id)
+    except ValueError:
+        return
+    worker_id = _worker_runtime_identity()
+    raw_node_id = str(os.environ.get("SHAKERSCAN_NODE_ID") or "").strip()
+    try:
+        node_uuid = uuid.UUID(raw_node_id) if raw_node_id else None
+    except ValueError as exc:
+        raise RuntimeError("SHAKERSCAN_NODE_ID is not a UUID") from exc
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            UPDATE scans
+            SET worker_id = $2,
+                executing_node_id = COALESCE($3, executing_node_id)
+            WHERE id = $1
+              AND (
+                  $3::uuid IS NULL OR EXISTS (
+                      SELECT 1 FROM nodes WHERE id = $3 AND status <> 'disabled'
+                  )
+              )
+            RETURNING id
+            """,
+            scan_uuid,
+            worker_id,
+            node_uuid,
+        )
+    if node_uuid is not None and not row:
+        raise RuntimeError("fleet node is missing or disabled; refusing job execution")
+
+
 async def process_job(job_data: dict):
     """Route job to appropriate handler."""
     # Fail-closed: refuse to run a scan on a build-stale worker (see helper).
     if await _refuse_stale_job_if_needed(job_data):
+        return
+    try:
+        await _attribute_job_execution(job_data)
+    except RuntimeError as exc:
+        # A node can be revoked between BLPOP and dispatch. Preserve the user's
+        # work while the control-plane WireGuard reconciler removes that peer;
+        # Redis Streams fencing will supersede this compatibility requeue.
+        source_queue = RETEST_QUEUE_NAME if job_data.get('type') == 'finding_retest' else QUEUE_NAME
+        get_redis().rpush(source_queue, json.dumps(job_data))
+        print(f"[fleet] refused job on this node and requeued it: {exc}", flush=True)
+        await asyncio.sleep(2)
         return
     job_type = job_data.get('type', 'scan')
 
@@ -9652,9 +9700,17 @@ def _worker_build_fingerprint() -> str | None:
     return hash_source_files(runtime_file_map(), require_all=True)
 
 
-def _worker_build_hostname() -> str:
+def _worker_runtime_identity() -> str:
     import socket as _socket
-    return os.environ.get("HOSTNAME") or os.environ.get("WORKER_ID") or _socket.gethostname()
+    configured = str(os.environ.get("WORKER_ID") or "").strip()
+    hostname = str(os.environ.get("HOSTNAME") or _socket.gethostname() or "").strip()
+    if configured and hostname and hostname not in configured:
+        return f"{configured}:{hostname[:12]}"
+    return configured or hostname
+
+
+def _worker_build_hostname() -> str:
+    return _worker_runtime_identity()
 
 
 def _worker_build_report_payload() -> tuple[str, str]:

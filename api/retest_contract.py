@@ -2821,6 +2821,29 @@ async def run_schema_migrations(pool) -> None:
                 ADD COLUMN IF NOT EXISTS connection_bundle_delivered_at TIMESTAMPTZ
             """)
             await conn.execute("""
+                ALTER TABLE scans
+                ADD COLUMN IF NOT EXISTS executing_node_id UUID
+            """)
+            await conn.execute("""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM pg_constraint
+                        WHERE conname = 'scans_executing_node_fk'
+                          AND conrelid = 'scans'::regclass
+                    ) THEN
+                        ALTER TABLE scans
+                        ADD CONSTRAINT scans_executing_node_fk
+                        FOREIGN KEY (executing_node_id) REFERENCES nodes(id) ON DELETE SET NULL;
+                    END IF;
+                END $$
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_scans_executing_node
+                ON scans(executing_node_id, created_at DESC)
+                WHERE executing_node_id IS NOT NULL
+            """)
+            await conn.execute("""
                 DO $$
                 BEGIN
                     IF EXISTS (

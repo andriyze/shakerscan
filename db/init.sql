@@ -81,6 +81,7 @@ CREATE TABLE scans (
     -- Job tracking
     job_id TEXT UNIQUE,
     worker_id TEXT,
+    executing_node_id UUID,
 
     -- Status
     status TEXT NOT NULL DEFAULT 'pending',  -- pending, running, completed, failed
@@ -493,6 +494,8 @@ CREATE INDEX idx_scans_ai_target_id ON scans(ai_target_id) WHERE ai_target_id IS
 CREATE INDEX idx_scans_run_kind ON scans(run_kind);
 CREATE INDEX idx_scans_status ON scans(status);
 CREATE INDEX idx_scans_created ON scans(created_at DESC);
+CREATE INDEX idx_scans_executing_node ON scans(executing_node_id, created_at DESC)
+    WHERE executing_node_id IS NOT NULL;
 CREATE INDEX idx_scans_job_id ON scans(job_id);
 CREATE INDEX idx_scans_parent ON scans(parent_scan_id) WHERE parent_scan_id IS NOT NULL;
 
@@ -864,6 +867,9 @@ CREATE TABLE IF NOT EXISTS nodes (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+ALTER TABLE scans
+    ADD CONSTRAINT scans_executing_node_fk
+    FOREIGN KEY (executing_node_id) REFERENCES nodes(id) ON DELETE SET NULL;
 CREATE INDEX IF NOT EXISTS idx_nodes_status_heartbeat ON nodes(status, last_heartbeat_at DESC);
 
 CREATE TABLE IF NOT EXISTS node_join_tokens (

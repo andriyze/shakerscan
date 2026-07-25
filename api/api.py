@@ -7277,10 +7277,53 @@ async def list_fleet_nodes():
     stale_after = max(60, _int_env("FLEET_HEARTBEAT_TIMEOUT_SECONDS", HEARTBEAT_TIMEOUT_MINUTES * 60))
     async with db_pool.acquire() as conn:
         rows = await conn.fetch("SELECT * FROM nodes ORDER BY created_at ASC")
+    nodes = [_public_fleet_node(row, stale_after_seconds=stale_after) for row in rows]
+    active_nodes = [node for node in nodes if node.get("status") != "disabled"]
     return {
-        "nodes": [_public_fleet_node(row, stale_after_seconds=stale_after) for row in rows],
+        "nodes": nodes,
         "stale_after_seconds": stale_after,
+        "summary": {
+            "total_nodes": len(nodes),
+            "active_nodes": len(active_nodes),
+            "healthy_nodes": sum(node.get("status") == "healthy" for node in active_nodes),
+            "stale_nodes": sum(node.get("status") == "stale" for node in active_nodes),
+            "draining_nodes": sum(node.get("status") == "draining" for node in active_nodes),
+            "desired_workers": sum(int(node.get("desired_worker_count") or 0) for node in active_nodes),
+            "active_workers": sum(int(node.get("active_worker_count") or 0) for node in active_nodes),
+            "state_drift_nodes": sum(not bool(node.get("state_current")) for node in active_nodes),
+            "image_drift_nodes": sum(
+                int(node.get("active_worker_count") or 0) > 0 and not bool(node.get("image_current"))
+                for node in active_nodes
+            ),
+        },
     }
+
+
+@app.get("/fleet/nodes/{node_id}/activity")
+async def get_fleet_node_activity(node_id: str, limit: int = Query(50, ge=1, le=200)):
+    """Recent durable scan/shard attribution for one fleet node."""
+    try:
+        parsed_id = uuid.UUID(node_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="node not found") from exc
+    async with db_pool.acquire() as conn:
+        exists = await conn.fetchval("SELECT EXISTS(SELECT 1 FROM nodes WHERE id = $1)", parsed_id)
+        if not exists:
+            raise HTTPException(status_code=404, detail="node not found")
+        rows = await conn.fetch(
+            """
+            SELECT id, parent_scan_id, target_url, scan_type, run_kind, scan_role,
+                   shard_index, shard_count, status, progress, current_phase,
+                   worker_id, created_at, started_at, completed_at
+            FROM scans
+            WHERE executing_node_id = $1
+            ORDER BY COALESCE(started_at, created_at) DESC
+            LIMIT $2
+            """,
+            parsed_id,
+            limit,
+        )
+    return {"node_id": node_id, "scans": [row_to_dict(row) for row in rows], "limit": limit}
 
 
 @app.get("/fleet/nodes/{node_id}/state")

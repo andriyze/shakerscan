@@ -5,8 +5,10 @@ substrate is shipped (see the code-grounded capability table below), and the dur
 single-use enrollment, authenticated heartbeat, and one-time connection-bundle API foundation is now
 implemented. The digest-pinned worker-only Compose runtime, pull-based node-agent, and versioned
 desired-state API are also implemented, along with the fleet-profile CA-verified overlay TLS listener.
-The Linux `fleet init` / `fleet join-token` / `join` WireGuard host workflow is implemented. Fleet UI
-and the physical two-VPS proof are not complete. The remaining parts of Phases 2–3 remain design-level.
+The Linux `fleet init` / `fleet join-token` / `join` WireGuard host workflow is implemented. Durable
+per-scan worker/node attribution, current-vs-desired node drift derivation, fleet summary, and recent
+per-node activity APIs are implemented. Fleet UI and the physical two-VPS proof are not complete. The
+remaining parts of Phases 2–3 remain design-level.
 **Scope:** run a coordinated ShakerScan fleet across multiple VMs/VPS hosts so one UI/API
 can scan more targets at once and run high-budget Full Coverage scans by using workers
 from many machines.
@@ -34,6 +36,7 @@ becoming stale prose. For product priority and phased order, see
 | Node identity, enrollment, join tokens, heartbeat, credential rotation/revocation, CA bootstrap, overlay TLS edge, `nodes` table | **Foundation built** — fleet UI and physical two-VPS acceptance remain incomplete | `fleet.py`; `/fleet/*`; `fleet-edge`; `nodes`, `node_join_tokens`, `node_credentials` |
 | Worker-only deployment and pull-based node-agent | **Foundation built** — digest-pinned worker/agent-only Compose, owner-only local state, versioned desired state, local Docker reconciliation, drain-to-zero, capacity/error heartbeat | `docker-compose.worker.yml`; `fleet_agent.py`; `GET|PATCH /fleet/nodes/{id}/state` |
 | WireGuard/CLI host provisioning | **Built, awaiting physical two-VPS acceptance** — persistent identity, CA/server certificates, overlay/data binding, automatic or manual peer reconciliation, public HTTPS enrollment, overlay proof, one-time bundle persistence, worker-only startup | `scripts/fleet_cli.py`; `scanner.sh fleet`; `scanner.sh join` |
+| Per-node execution attribution and fleet rollup | **Built** — scan/shard rows record the executing node and unique worker replica; revoked nodes fail closed and return dequeued work to the compatibility queue; node API derives state/image drift and exposes recent activity | `scans.executing_node_id`; `worker.py` `_attribute_job_execution`; `GET /fleet/nodes`; `GET /fleet/nodes/{id}/activity` |
 | Fleet UI and placement | **Not present** — specified by this document | — |
 
 The takeaways that shape the plan:

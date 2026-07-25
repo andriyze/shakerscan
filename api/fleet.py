@@ -360,6 +360,12 @@ def public_node(row: Mapping[str, Any], *, stale_after_seconds: int) -> dict[str
     ):
         status = "stale"
     result["status"] = status
+    desired_version = int(result.get("desired_state_version") or 1)
+    applied_version = int(result.get("applied_state_version") or 0)
+    result["state_current"] = applied_version >= desired_version and not bool(result.get("last_error"))
+    desired_image = str(result.get("worker_image_digest") or "").strip()
+    active_image = str(result.get("active_worker_image_digest") or "").strip()
+    result["image_current"] = bool(desired_image and active_image and desired_image == active_image)
     result["id"] = str(result["id"])
     for key in ("labels", "capacity"):
         if isinstance(result.get(key), str):
