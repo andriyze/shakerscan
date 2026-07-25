@@ -52,6 +52,7 @@ const EMPTY_SUMMARY: FleetSummary = {
   total_nodes: 0,
   active_nodes: 0,
   healthy_nodes: 0,
+  unhealthy_nodes: 0,
   stale_nodes: 0,
   draining_nodes: 0,
   desired_workers: 0,
@@ -89,6 +90,7 @@ function capacityLabel(capacity: Record<string, unknown>): string {
 function statusClasses(status: FleetNode['status']): string {
   if (status === 'healthy') return 'bg-emerald-500/15 text-emerald-300'
   if (status === 'stale') return 'bg-amber-500/15 text-amber-300'
+  if (status === 'unhealthy') return 'bg-red-500/15 text-red-300'
   if (status === 'draining') return 'bg-blue-500/15 text-blue-300'
   if (status === 'disabled') return 'bg-red-500/15 text-red-300'
   return 'bg-gray-700 text-gray-300'
@@ -257,8 +259,8 @@ export default function FleetPage() {
         <SummaryCard
           label="Nodes online"
           value={`${summary.healthy_nodes}/${summary.active_nodes}`}
-          detail={`${summary.stale_nodes} stale · ${summary.draining_nodes} draining`}
-          tone={summary.stale_nodes ? 'warning' : summary.healthy_nodes ? 'good' : 'normal'}
+          detail={`${summary.unhealthy_nodes} unhealthy · ${summary.stale_nodes} stale · ${summary.draining_nodes} draining`}
+          tone={summary.unhealthy_nodes || summary.stale_nodes ? 'warning' : summary.healthy_nodes ? 'good' : 'normal'}
         />
         <SummaryCard
           label="Workers active"

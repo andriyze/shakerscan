@@ -7620,6 +7620,7 @@ async def list_fleet_nodes(request: Request):
             "total_nodes": len(nodes),
             "active_nodes": len(active_nodes),
             "healthy_nodes": sum(node.get("status") == "healthy" for node in active_nodes),
+            "unhealthy_nodes": sum(node.get("status") == "unhealthy" for node in active_nodes),
             "stale_nodes": sum(node.get("status") == "stale" for node in active_nodes),
             "draining_nodes": sum(node.get("status") == "draining" for node in active_nodes),
             "desired_workers": sum(int(node.get("desired_worker_count") or 0) for node in active_nodes),
@@ -9289,6 +9290,7 @@ def _worker_freshness_snapshot() -> dict:
 
 
 _WORKER_BUILD_REPORT_MAX_AGE_SECONDS = 120
+_WORKER_BUILD_REPORT_CLOCK_SKEW_SECONDS = 30
 
 
 def _worker_build_report_summary(
@@ -9296,13 +9298,14 @@ def _worker_build_report_summary(
     *,
     expected_fingerprint: Optional[str],
     expected_version: Optional[str],
+    expected_count: Optional[int] = None,
     now: Optional[datetime] = None,
 ) -> dict[str, Any]:
-    """Summarize fresh worker-authored build heartbeats without touching Docker.
+    """Summarize worker-authored build heartbeats against an external fleet denominator.
 
-    This is lightweight display telemetry for /health, not the benchmark/submit authority. The
-    authoritative /workers endpoint still resolves running containers and fingerprints through
-    Docker. Freshness prevents stopped-container hash entries from poisoning the sidebar forever.
+    This is display telemetry for /health, not the benchmark/submit authority. Freshness prevents
+    stopped-container hash entries from poisoning the sidebar forever; expected_count prevents a
+    silent or busy worker from disappearing and making a partial fleet look uniform.
     """
     current_time = now or datetime.now(timezone.utc)
     if current_time.tzinfo is None:
@@ -9316,7 +9319,7 @@ def _worker_build_report_summary(
             if reported_at.tzinfo is None:
                 reported_at = reported_at.replace(tzinfo=timezone.utc)
             age = (current_time - reported_at.astimezone(timezone.utc)).total_seconds()
-            if 0 <= age <= _WORKER_BUILD_REPORT_MAX_AGE_SECONDS:
+            if -_WORKER_BUILD_REPORT_CLOCK_SKEW_SECONDS <= age <= _WORKER_BUILD_REPORT_MAX_AGE_SECONDS:
                 reports.append(report)
         except (TypeError, ValueError, json.JSONDecodeError):
             continue
@@ -9337,9 +9340,19 @@ def _worker_build_report_summary(
             stale_count += 1
         else:
             pending_count += 1
-    uniform = bool(reports) and stale_count == 0 and pending_count == 0
+    normalized_expected = max(0, int(expected_count)) if expected_count is not None else None
+    count_gap = abs(normalized_expected - len(reports)) if normalized_expected is not None else 0
+    pending_count += count_gap
+    uniform = (
+        bool(reports)
+        and normalized_expected is not None
+        and len(reports) == normalized_expected
+        and stale_count == 0
+        and pending_count == 0
+    )
     return {
-        "available": bool(reports),
+        "available": bool(reports) or bool(normalized_expected),
+        "expected_count": normalized_expected,
         "reported_count": len(reports),
         "current_count": current_count,
         "stale_count": stale_count,
@@ -9369,12 +9382,33 @@ async def health():
     """Health check."""
     expected_fingerprint = expected_build_fingerprint()
     expected_version = current_scanner_version()
+    expected_remote_workers: Optional[int] = None
     try:
         async with db_pool.acquire() as conn:
             await conn.fetchval("SELECT 1")
+            try:
+                expected_remote_workers = int(await conn.fetchval(
+                    """
+                    SELECT COALESCE(SUM(active_worker_count), 0)
+                    FROM nodes
+                    WHERE status <> 'disabled'
+                      AND last_heartbeat_at >= NOW() - ($1::int * INTERVAL '1 second')
+                      AND COALESCE(labels->>'transport', 'overlay') <> 'broker'
+                    """,
+                    max(60, _int_env("FLEET_HEARTBEAT_TIMEOUT_SECONDS", HEARTBEAT_TIMEOUT_MINUTES * 60)),
+                ) or 0)
+            except Exception:
+                expected_remote_workers = None
         db_ok = True
     except Exception:
         db_ok = False
+
+    expected_local_workers = await asyncio.to_thread(_running_scan_worker_count_best_effort)
+    expected_worker_count = (
+        (expected_local_workers or 0) + (expected_remote_workers or 0)
+        if expected_local_workers is not None or expected_remote_workers is not None
+        else None
+    )
 
     try:
         r = get_redis()
@@ -9384,6 +9418,7 @@ async def health():
             r.hgetall("shakerscan:worker_build") or {},
             expected_fingerprint=expected_fingerprint,
             expected_version=expected_version,
+            expected_count=expected_worker_count,
         )
     except Exception:
         redis_ok = False
@@ -9391,6 +9426,7 @@ async def health():
             {},
             expected_fingerprint=expected_fingerprint,
             expected_version=expected_version,
+            expected_count=expected_worker_count,
         )
 
     artifact_storage = await asyncio.to_thread(
@@ -15595,13 +15631,19 @@ async def dedupe_targets(
     into one survivor (active > most findings > most scans > https), reassigning all
     scans/findings/endpoints/graph/schedules/exceptions and deleting the duplicates.
     Defaults to a dry run. JSON {"dry_run": false} and the backwards-compatible
-    ?dry_run=false query both execute; an explicit query value wins. Idempotent and
-    per-group transactional."""
+    ?dry_run=false query both execute when they do not conflict; a true value in
+    either input wins safely. Idempotent and per-group transactional."""
     # FastAPI replaces Query(...) during HTTP dispatch, but direct Python callers
     # (unit tests, local agents, internal adapters) receive the marker object.
     # Only a real bool is an explicit query override.
     query_dry_run = dry_run if isinstance(dry_run, bool) else None
-    effective_dry_run = query_dry_run if query_dry_run is not None else (payload.dry_run if payload else True)
+    body_dry_run = payload.dry_run if payload else None
+    if query_dry_run is None and body_dry_run is None:
+        effective_dry_run = True
+    elif query_dry_run is True or body_dry_run is True:
+        effective_dry_run = True
+    else:
+        effective_dry_run = False
     async with db_pool.acquire() as conn:
         plan = await plan_canonical_merges(conn)
 

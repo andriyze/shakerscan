@@ -353,11 +353,13 @@ def test_worker_build_report_summary_uses_only_fresh_fingerprint_authority():
         reports,
         expected_fingerprint="expected",
         expected_version="expected-label",
+        expected_count=2,
         now=now,
     )
 
     assert summary == {
         "available": True,
+        "expected_count": 2,
         "reported_count": 2,
         "current_count": 1,
         "stale_count": 1,
@@ -379,11 +381,38 @@ def test_worker_build_report_summary_uses_api_label_only_for_uniform_fleet():
         {"worker": report},
         expected_fingerprint="expected",
         expected_version="display-label",
+        expected_count=1,
         now=now,
     )
 
     assert summary["fleet_uniform"] is True
     assert summary["scanner_version"] == "display-label"
+
+
+def test_worker_build_report_summary_requires_expected_denominator_and_accepts_small_clock_skew():
+    now = datetime(2026, 7, 25, 12, 0, tzinfo=timezone.utc)
+    future_report = json.dumps({
+        "build_fingerprint": "expected",
+        "scanner_version": "display-label",
+        "reported_at": (now + timedelta(seconds=5)).isoformat(),
+    })
+    without_denominator = api_module._worker_build_report_summary(
+        {"worker": future_report},
+        expected_fingerprint="expected",
+        expected_version="display-label",
+        now=now,
+    )
+    missing_worker = api_module._worker_build_report_summary(
+        {"worker": future_report},
+        expected_fingerprint="expected",
+        expected_version="display-label",
+        expected_count=2,
+        now=now,
+    )
+    assert without_denominator["fleet_uniform"] is False
+    assert missing_worker["reported_count"] == 1
+    assert missing_worker["pending_count"] == 1
+    assert missing_worker["fleet_uniform"] is False
 
 
 def test_orphaned_worker_build_reports_exclude_only_running_container_hosts():

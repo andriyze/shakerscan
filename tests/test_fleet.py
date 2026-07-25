@@ -269,3 +269,17 @@ def test_public_node_uses_an_explicit_allow_list():
     )
     assert "credential_id" not in result
     assert "future_private_material" not in result
+
+
+def test_public_node_surfaces_heartbeating_reconciliation_error_as_unhealthy():
+    result = public_node(
+        {
+            "id": uuid.uuid4(),
+            "status": "joining",
+            "last_error": "worker image pull failed",
+            "last_heartbeat_at": utcnow(),
+        },
+        stale_after_seconds=60,
+    )
+    assert result["status"] == "unhealthy"
+    assert result["state_current"] is False

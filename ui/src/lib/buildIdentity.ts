@@ -2,6 +2,7 @@ export type HealthBuildIdentity = {
   scanner_version?: string
   worker_build?: {
     available?: boolean
+    expected_count?: number | null
     reported_count?: number
     stale_count?: number
     pending_count?: number
@@ -30,7 +31,9 @@ export function deriveBuildIdentity(
   const workerLabel = workerBuild?.available
     ? workerBuild.fleet_uniform
       ? workerBuild.scanner_version || apiVersion
-      : `mixed/stale (${(workerBuild.stale_count || 0) + (workerBuild.pending_count || 0)})`
+      : workerBuild.expected_count == null
+        ? `unverified (${workerBuild.reported_count || 0} reported)`
+        : `mixed/stale (${(workerBuild.stale_count || 0) + (workerBuild.pending_count || 0)})`
     : undefined
 
   // Raw docker compose intentionally bakes "dev" because Compose cannot discover Git. It is an

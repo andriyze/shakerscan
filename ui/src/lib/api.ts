@@ -1879,7 +1879,7 @@ export interface FleetNode {
   applied_state_version: number
   desired_worker_count: number
   active_worker_count: number
-  status: 'joining' | 'healthy' | 'stale' | 'draining' | 'disabled'
+  status: 'joining' | 'healthy' | 'unhealthy' | 'stale' | 'draining' | 'disabled'
   drain: boolean
   rollout_in_progress?: boolean
   state_current: boolean
@@ -1894,6 +1894,7 @@ export interface FleetSummary {
   total_nodes: number
   active_nodes: number
   healthy_nodes: number
+  unhealthy_nodes: number
   stale_nodes: number
   draining_nodes: number
   desired_workers: number

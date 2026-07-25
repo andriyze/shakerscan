@@ -112,7 +112,7 @@ class _Pool:
         return _Acquire(self.conn)
 
 
-def test_dedupe_api_accepts_json_body_and_query_takes_precedence(monkeypatch):
+def test_dedupe_api_accepts_json_body_and_resolves_conflicts_to_dry_run(monkeypatch):
     async def empty_plan(_conn):
         return []
 
@@ -126,9 +126,14 @@ def test_dedupe_api_accepts_json_body_and_query_takes_precedence(monkeypatch):
         payload=api.DedupeTargetsRequest(dry_run=False),
         dry_run=True,
     ))
+    conflict_result = asyncio.run(api.dedupe_targets(
+        payload=api.DedupeTargetsRequest(dry_run=True),
+        dry_run=False,
+    ))
 
     assert body_result["dry_run"] is False
     assert query_result["dry_run"] is True
+    assert conflict_result["dry_run"] is True
 
 
 def test_dedupe_api_returns_clear_409_for_executing_retention_preview(monkeypatch):

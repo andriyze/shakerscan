@@ -506,6 +506,10 @@ def public_node(row: Mapping[str, Any], *, stale_after_seconds: int) -> dict[str
         last_heartbeat is None or (now - last_heartbeat).total_seconds() > stale_after_seconds
     ):
         status = "stale"
+    elif status not in {"disabled", "draining"} and result.get("last_error"):
+        # Keep the durable schema's convergence state compact, but do not present
+        # a reliably heartbeating reconciliation failure as ordinary "joining".
+        status = "unhealthy"
     result["status"] = status
     desired_version = int(result.get("desired_state_version") or 1)
     applied_version = int(result.get("applied_state_version") or 0)

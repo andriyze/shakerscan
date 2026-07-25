@@ -136,17 +136,28 @@ const navGroups: {
   },
 ]
 
-// Root-layout remounts (including React StrictMode's development probe) share one lightweight
-// request. Worker display identity is part of /health, so the sidebar never opens the Docker socket.
-let healthBuildIdentityRequest: Promise<HealthBuildIdentity | null> | null = null
+// Root-layout remounts (including React StrictMode's development probe) share one short-lived
+// request. Failed requests are evicted immediately and mounted sidebars refresh after deployments.
+const HEALTH_BUILD_IDENTITY_REFRESH_MS = 30_000
+let healthBuildIdentityRequest: {
+  promise: Promise<HealthBuildIdentity | null>
+  expiresAt: number
+} | null = null
 
-function loadHealthBuildIdentity(): Promise<HealthBuildIdentity | null> {
-  if (!healthBuildIdentityRequest) {
-    healthBuildIdentityRequest = fetch(`${API_URL}/health`)
+function loadHealthBuildIdentity(force = false): Promise<HealthBuildIdentity | null> {
+  const now = Date.now()
+  if (force || !healthBuildIdentityRequest || healthBuildIdentityRequest.expiresAt <= now) {
+    const promise = fetch(`${API_URL}/health`, { cache: 'no-store' })
       .then((response) => (response.ok ? response.json() : null))
       .catch(() => null)
+    healthBuildIdentityRequest = { promise, expiresAt: now + HEALTH_BUILD_IDENTITY_REFRESH_MS }
+    promise.then((health) => {
+      if (!health && healthBuildIdentityRequest?.promise === promise) {
+        healthBuildIdentityRequest = null
+      }
+    })
   }
-  return healthBuildIdentityRequest
+  return healthBuildIdentityRequest.promise
 }
 
 function BrandMark({ className = 'w-6 h-6' }: { className?: string }) {
@@ -323,15 +334,22 @@ export default function Sidebar() {
   const openerRef = useRef<HTMLButtonElement>(null)
   const drawerRef = useRef<HTMLElement>(null)
 
-  // Fetch once in the parent so opening the mobile drawer does not duplicate runtime requests.
-  // /health carries a fresh, fingerprint-authoritative worker summary without enumerating Docker.
+  // Fetch in the parent so opening the mobile drawer does not duplicate runtime requests.
+  // Periodic refresh recovers from startup races and reflects a mid-session deploy.
   useEffect(() => {
     let cancelled = false
-    loadHealthBuildIdentity().then((health) => {
-      if (cancelled) return
-      setBuildIdentity(deriveBuildIdentity(bakedVersion, health))
-    })
-    return () => { cancelled = true }
+    const refresh = (force = false) => {
+      loadHealthBuildIdentity(force).then((health) => {
+        if (cancelled) return
+        setBuildIdentity(deriveBuildIdentity(bakedVersion, health))
+      })
+    }
+    refresh()
+    const interval = window.setInterval(() => refresh(true), HEALTH_BUILD_IDENTITY_REFRESH_MS)
+    return () => {
+      cancelled = true
+      window.clearInterval(interval)
+    }
   }, [bakedVersion])
 
   // Persist the "show all sections" preference across reloads (default off).

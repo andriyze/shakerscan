@@ -7,6 +7,7 @@ const uniformHealth = {
   scanner_version: 'abc1234',
   worker_build: {
     available: true,
+    expected_count: 4,
     reported_count: 4,
     stale_count: 0,
     pending_count: 0,
@@ -34,6 +35,7 @@ test('fingerprint-authoritative stale workers produce an explicit mismatch', () 
     ...uniformHealth,
     worker_build: {
       available: true,
+      expected_count: 4,
       reported_count: 4,
       stale_count: 1,
       pending_count: 1,
@@ -52,4 +54,20 @@ test('missing worker heartbeats do not invent a worker version or mismatch', () 
   })
   assert.equal(identity.skew, false)
   assert.equal(formatBuildIdentity(identity), 'Version abc1234')
+})
+
+test('worker reports without an expected denominator are visibly unverified', () => {
+  const identity = deriveBuildIdentity('abc1234', {
+    scanner_version: 'abc1234',
+    worker_build: {
+      available: true,
+      expected_count: null,
+      reported_count: 3,
+      stale_count: 0,
+      pending_count: 0,
+      fleet_uniform: false,
+    },
+  })
+  assert.equal(identity.skew, true)
+  assert.equal(formatBuildIdentity(identity), 'UI abc1234 · API abc1234 · Workers unverified (3 reported)')
 })
