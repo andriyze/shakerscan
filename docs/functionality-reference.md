@@ -1862,7 +1862,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `FLEET_DRAIN_GRACE_SECONDS` | `api/fleet_agent.py` |
 | `FLEET_EDGE_MODE` | `api/api.py` |
 | `FLEET_HEARTBEAT_TIMEOUT_SECONDS` | `api/worker.py`, `docker-compose.release.yml`, `docker-compose.yml` |
-| `FLEET_NODE_ID` | `docker-compose.broker-worker.yml`, `docker-compose.worker.yml` |
+| `FLEET_NODE_ID` | `api/worker.py`, `docker-compose.broker-worker.yml`, `docker-compose.worker.yml` |
 | `FLEET_OPERATOR_TOKEN` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml`, `scripts/fleet_acceptance.py` |
 | `FLEET_OVERLAY_CIDR` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `FLEET_RESULTS_DIR` | `docker-compose.broker-worker.yml`, `docker-compose.worker.yml` |
