@@ -1986,6 +1986,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SHAKERSCAN_QUEUE_LEASE_HEARTBEAT_FAILURE_LIMIT` | `api/worker.py`, `docker-compose.release.yml`, `docker-compose.worker.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_QUEUE_LEASE_HEARTBEAT_SECONDS` | `api/worker.py`, `docker-compose.release.yml`, `docker-compose.worker.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_QUEUE_MAX_DELIVERY_ATTEMPTS` | `api/api.py`, `api/worker.py`, `docker-compose.release.yml`, `docker-compose.worker.yml`, `docker-compose.yml` |
+| `SHAKERSCAN_QUEUE_ROUTE_MAX` | `api/job_queue.py` |
 | `SHAKERSCAN_QUEUE_VISIBILITY_TIMEOUT_SECONDS` | `api/worker.py`, `docker-compose.release.yml`, `docker-compose.worker.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_REQUEST_BUDGET_DOMAIN` | `scanner/scanner.py` |
 | `SHAKERSCAN_REQUEST_BUDGET_LIMIT` | `scanner/scanner.py` |

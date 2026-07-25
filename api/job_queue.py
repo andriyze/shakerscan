@@ -21,6 +21,7 @@ STREAM_SUFFIX = ":leased"
 PAYLOAD_FIELD = "payload"
 ROUTE_SET_PREFIX = "shakerscan:queue-routes:"
 ROUTE_REQUIREMENTS_PREFIX = "shakerscan:queue-route-requirements:"
+DEFAULT_ROUTE_REGISTRY_MAX = 512
 PLACEMENT_SCALAR_KEYS = {
     "region",
     "egress_group",
@@ -30,6 +31,57 @@ PLACEMENT_SCALAR_KEYS = {
     "data_residency",
     "node_id",
 }
+
+_HEARTBEAT_LEASE_LUA = """
+-- shakerscan:heartbeat-owned-lease
+local rows = redis.call('XPENDING', KEYS[1], ARGV[1], ARGV[2], ARGV[2], 1)
+if #rows ~= 1 or tostring(rows[1][2]) ~= ARGV[3] then
+  return 0
+end
+local claimed = redis.call('XCLAIM', KEYS[1], ARGV[1], ARGV[3], 0, ARGV[2], 'IDLE', 0, 'JUSTID')
+if #claimed == 1 and tostring(claimed[1]) == ARGV[2] then
+  return 1
+end
+return 0
+"""
+
+_ACK_DELETE_LUA = """
+-- shakerscan:ack-delete
+local acknowledged = redis.call('XACK', KEYS[1], ARGV[1], ARGV[2])
+if acknowledged ~= 1 then
+  return 0
+end
+redis.call('XDEL', KEYS[1], ARGV[2])
+if #KEYS == 4 and redis.call('XLEN', KEYS[1]) == 0 and redis.call('LLEN', KEYS[4]) == 0 then
+  redis.call('SREM', KEYS[2], ARGV[3])
+  redis.call('DEL', KEYS[3])
+  redis.call('DEL', KEYS[1])
+end
+return 1
+"""
+
+_ROUTED_ENQUEUE_LUA = """
+-- shakerscan:routed-enqueue
+if redis.call('SISMEMBER', KEYS[1], ARGV[1]) == 0 then
+  if redis.call('SCARD', KEYS[1]) >= tonumber(ARGV[4]) then
+    return redis.error_reply('SHAKERSCAN_ROUTE_CAPACITY_EXCEEDED')
+  end
+  redis.call('SADD', KEYS[1], ARGV[1])
+end
+redis.call('SET', KEYS[2], ARGV[2])
+return redis.call('XADD', KEYS[3], '*', 'payload', ARGV[3])
+"""
+
+_PRUNE_EMPTY_ROUTE_LUA = """
+-- shakerscan:prune-empty-route
+if redis.call('XLEN', KEYS[1]) ~= 0 or redis.call('LLEN', KEYS[4]) ~= 0 then
+  return 0
+end
+redis.call('SREM', KEYS[2], ARGV[1])
+redis.call('DEL', KEYS[3])
+redis.call('DEL', KEYS[1])
+return 1
+"""
 
 
 @dataclass(frozen=True)
@@ -83,6 +135,37 @@ def route_set_key(queue_name: str) -> str:
 
 def route_requirements_key(routed_queue: str) -> str:
     return f"{ROUTE_REQUIREMENTS_PREFIX}{routed_queue}"
+
+
+def route_registry_max() -> int:
+    try:
+        configured = int(os.environ.get("SHAKERSCAN_QUEUE_ROUTE_MAX", DEFAULT_ROUTE_REGISTRY_MAX))
+    except (TypeError, ValueError):
+        configured = DEFAULT_ROUTE_REGISTRY_MAX
+    return max(16, min(configured, 4096))
+
+
+def _route_base(queue_name: str) -> str | None:
+    base, separator, _digest = queue_name.partition(":route:")
+    return base if separator and base else None
+
+
+def _prune_empty_route(redis_client: Any, routed_queue: str) -> bool:
+    base = _route_base(routed_queue)
+    if not base:
+        return False
+    evaluator = getattr(redis_client, "eval", None)
+    if not callable(evaluator):
+        return False
+    return bool(evaluator(
+        _PRUNE_EMPTY_ROUTE_LUA,
+        4,
+        stream_key(routed_queue),
+        route_set_key(base),
+        route_requirements_key(routed_queue),
+        routed_queue,
+        routed_queue,
+    ))
 
 
 def routed_queue_name(queue_name: str, placement: dict[str, Any]) -> str:
@@ -141,7 +224,8 @@ def _known_routes(redis_client: Any, queue_name: str) -> list[str]:
     if ":route:" in queue_name or not callable(getattr(redis_client, "smembers", None)):
         return []
     try:
-        return [_text(item) for item in (redis_client.smembers(route_set_key(queue_name)) or [])]
+        routes = [_text(item) for item in (redis_client.smembers(route_set_key(queue_name)) or [])]
+        return [route for route in routes if not _prune_empty_route(redis_client, route)]
     except Exception:
         return []
 
@@ -179,12 +263,30 @@ def enqueue_job(redis_client: Any, queue_name: str, payload: str | dict[str, Any
             normalized_payload["placement"] = placement
             normalized_payload["_base_queue_name"] = queue_name
             canonical = json.dumps(placement, sort_keys=True, separators=(",", ":"))
-            redis_client.sadd(route_set_key(queue_name), routed_queue)
-            redis_client.set(route_requirements_key(routed_queue), canonical)
+            if not _has_streams(redis_client) or not callable(getattr(redis_client, "eval", None)):
+                existing = routed_queue in {_text(item) for item in (redis_client.smembers(route_set_key(queue_name)) or [])}
+                if not existing and len(redis_client.smembers(route_set_key(queue_name)) or []) >= route_registry_max():
+                    raise RuntimeError("SHAKERSCAN_ROUTE_CAPACITY_EXCEEDED")
+                redis_client.sadd(route_set_key(queue_name), routed_queue)
+                redis_client.set(route_requirements_key(routed_queue), canonical)
     encoded = normalized_payload if isinstance(normalized_payload, str) else json.dumps(normalized_payload)
     if not _has_streams(redis_client):
         redis_client.rpush(routed_queue, encoded)
         return "legacy-list"
+    if routed_queue != queue_name and callable(getattr(redis_client, "eval", None)):
+        message_id = redis_client.eval(
+            _ROUTED_ENQUEUE_LUA,
+            3,
+            route_set_key(queue_name),
+            route_requirements_key(routed_queue),
+            stream_key(routed_queue),
+            routed_queue,
+            canonical,
+            encoded,
+            route_registry_max(),
+        )
+        ensure_consumer_group(redis_client, routed_queue)
+        return _text(message_id)
     ensure_consumer_group(redis_client, routed_queue)
     return _text(redis_client.xadd(stream_key(routed_queue), {PAYLOAD_FIELD: encoded}))
 
@@ -296,14 +398,28 @@ def lease_job(
 def heartbeat_lease(redis_client: Any, lease: QueueLease, consumer_name: str) -> bool:
     if lease.legacy or not lease.stream_key or not lease.message_id:
         return True
-    claimed = redis_client.xclaim(
+    evaluator = getattr(redis_client, "eval", None)
+    if callable(evaluator):
+        return bool(evaluator(
+            _HEARTBEAT_LEASE_LUA,
+            1,
+            lease.stream_key,
+            CONSUMER_GROUP,
+            lease.message_id,
+            consumer_name,
+        ))
+    rows = redis_client.xpending_range(
         lease.stream_key,
         CONSUMER_GROUP,
-        consumer_name,
-        min_idle_time=0,
-        message_ids=[lease.message_id],
-        idle=0,
-        justid=True,
+        min=lease.message_id,
+        max=lease.message_id,
+        count=1,
+    )
+    if not rows or _text(rows[0].get("consumer") or rows[0].get(b"consumer")) != consumer_name:
+        return False
+    claimed = redis_client.xclaim(
+        lease.stream_key, CONSUMER_GROUP, consumer_name,
+        min_idle_time=0, message_ids=[lease.message_id], idle=0, justid=True,
     )
     return lease.message_id in {_text(item) for item in (claimed or [])}
 
@@ -311,6 +427,14 @@ def heartbeat_lease(redis_client: Any, lease: QueueLease, consumer_name: str) ->
 def acknowledge_lease(redis_client: Any, lease: QueueLease) -> bool:
     if lease.legacy or not lease.stream_key or not lease.message_id:
         return True
+    evaluator = getattr(redis_client, "eval", None)
+    base = _route_base(lease.queue_name)
+    if callable(evaluator):
+        keys = [lease.stream_key]
+        arguments = [CONSUMER_GROUP, lease.message_id, lease.queue_name]
+        if base:
+            keys.extend([route_set_key(base), route_requirements_key(lease.queue_name), lease.queue_name])
+        return bool(evaluator(_ACK_DELETE_LUA, len(keys), *keys, *arguments))
     acknowledged = int(redis_client.xack(lease.stream_key, CONSUMER_GROUP, lease.message_id) or 0)
     if acknowledged:
         redis_client.xdel(lease.stream_key, lease.message_id)
@@ -360,7 +484,10 @@ def pending_depth(redis_client: Any, queue_name: str) -> int:
 
 
 def _pending_depth_one(redis_client: Any, queue_name: str) -> int:
-    legacy = int(redis_client.llen(queue_name) or 0)
+    try:
+        legacy = int(redis_client.llen(queue_name) or 0)
+    except Exception:
+        legacy = 0
     if not _has_streams(redis_client):
         return legacy
     key = stream_key(queue_name)
@@ -376,8 +503,10 @@ def _pending_depth_one(redis_client: Any, queue_name: str) -> int:
 def clear_unleased(redis_client: Any, queue_name: str) -> list[str]:
     """Delete pending-but-not-leased work and return its JSON payloads."""
     deleted: list[str] = []
-    for variant in [queue_name, *_known_routes(redis_client, queue_name)]:
+    variants = [queue_name, *_known_routes(redis_client, queue_name)]
+    for variant in variants:
         deleted.extend(_clear_unleased_one(redis_client, variant))
+        _prune_empty_route(redis_client, variant)
     return deleted
 
 

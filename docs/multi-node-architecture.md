@@ -731,8 +731,10 @@ artifacts stranded on a worker VPS.
 ## 9. Queue Reliability And Idempotency
 
 **Implementation status:** scan and retest producers now `XADD` JSON payloads to leased Redis Stream
-keys. Workers use one consumer group, keep the pending entry alive while executing, acknowledge and
-delete only after the handler succeeds, and `XAUTOCLAIM` abandoned work after the visibility timeout.
+keys. Workers use one consumer group, keep only their own pending entry alive while executing,
+atomically acknowledge/delete after the handler succeeds, and `XAUTOCLAIM` abandoned work after the
+visibility timeout. The ownership check and idle refresh execute in one Redis script, so a stale
+worker cannot steal a lease back after another worker reclaims it.
 Delivery attempts come from Redis pending metadata and exhaust into an explicit durable failed state.
 If lease refresh fails repeatedly or ownership is gone, the worker cancels its execution rather than
 continuing as a stale owner. Existing DB claim predicates, stable shard identity, finding uniqueness,
@@ -791,7 +793,7 @@ Implementation options:
 | Option | Fit |
 |---|---|
 | Queue per capability | Simple and compatible with the current Stream model. Workers can read only streams they qualify for. |
-| Redis Streams with routing fields | **Implemented.** Producers register a deterministic Stream for each normalized constraint set; matching workers discover and subscribe to it. |
+| Redis Streams with routing fields | **Implemented.** Producers atomically register and enqueue to a deterministic Stream for each normalized constraint set; matching workers discover and subscribe to it. Empty routes and their requirement metadata are removed after drain, and the live registry is capped by `SHAKERSCAN_QUEUE_ROUTE_MAX` (default 512, configurable through 4096). |
 | Broker-side scheduler | Best in Phase 3. The broker leases only jobs a node is allowed to run. |
 
 Rate limiting is global, not per node. Known-endpoint ASM and Full Coverage batches use Redis
