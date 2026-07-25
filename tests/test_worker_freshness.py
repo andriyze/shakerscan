@@ -174,3 +174,69 @@ def test_revoked_node_refusal_requeues_job_before_dispatch(monkeypatch):
 
 async def _async_value(value):
     return value
+
+
+def test_stream_lease_is_acknowledged_only_after_successful_dispatch(monkeypatch):
+    calls = []
+
+    async def dispatch(job):
+        calls.append(("dispatch", job["job_id"]))
+
+    def acknowledge(_redis, lease):
+        calls.append(("ack", lease.message_id))
+        return True
+
+    monkeypatch.setattr(worker, "process_job", dispatch)
+    monkeypatch.setattr(worker, "acknowledge_lease", acknowledge)
+    lease = worker.QueueLease(
+        queue_name=worker.QUEUE_NAME,
+        payload='{"job_id":"job-1"}',
+        stream_key="scan_jobs:leased",
+        message_id="1-0",
+    )
+
+    _run(worker._run_job_under_lease(object(), lease, {"job_id": "job-1"}))
+
+    assert calls == [("dispatch", "job-1"), ("ack", "1-0")]
+
+
+def test_failed_dispatch_remains_pending_for_reclaim(monkeypatch):
+    acknowledged = []
+
+    async def fail(_job):
+        raise RuntimeError("worker crashed")
+
+    monkeypatch.setattr(worker, "process_job", fail)
+    monkeypatch.setattr(worker, "acknowledge_lease", lambda *_args: acknowledged.append(True))
+    lease = worker.QueueLease(
+        queue_name=worker.QUEUE_NAME,
+        payload='{"job_id":"job-2"}',
+        stream_key="scan_jobs:leased",
+        message_id="2-0",
+    )
+
+    with pytest.raises(RuntimeError, match="worker crashed"):
+        _run(worker._run_job_under_lease(object(), lease, {"job_id": "job-2"}))
+
+    assert acknowledged == []
+
+
+def test_lost_stream_lease_cancels_stale_execution(monkeypatch):
+    async def never_finishes(_job):
+        await asyncio.Future()
+
+    async def immediate_sleep(_seconds):
+        return None
+
+    monkeypatch.setattr(worker, "process_job", never_finishes)
+    monkeypatch.setattr(worker, "heartbeat_lease", lambda *_args: False)
+    monkeypatch.setattr(worker.asyncio, "sleep", immediate_sleep)
+    lease = worker.QueueLease(
+        queue_name=worker.QUEUE_NAME,
+        payload='{"job_id":"job-3"}',
+        stream_key="scan_jobs:leased",
+        message_id="3-0",
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        _run(worker._run_job_under_lease(object(), lease, {"job_id": "job-3"}))

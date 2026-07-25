@@ -2269,6 +2269,40 @@ def test_run_scan_terminates_subprocess_when_scan_cancel_flag_is_set(monkeypatch
     assert result["error"] == "Cancelled by user"
 
 
+def test_run_scan_external_cancellation_reaps_subprocess(monkeypatch):
+    captured = {}
+
+    async def _fake_create_subprocess_exec(*cmd, **kwargs):
+        proc = _CancellableFakeProcess()
+        captured["proc"] = proc
+        return proc
+
+    async def scenario():
+        task = asyncio.create_task(worker.run_scan(
+            "https://example.com",
+            {"scan_type": "standard"},
+            scan_id="00000000-0000-0000-0000-000000000125",
+            job_id="job-lease-fence-cancel",
+        ))
+        while "proc" not in captured:
+            await asyncio.sleep(0)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            return
+        raise AssertionError("run_scan should propagate external cancellation")
+
+    monkeypatch.setattr(worker.asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+    monkeypatch.setattr(worker, "_load_runtime_ai_settings", lambda: {})
+    monkeypatch.setattr(worker, "get_redis", lambda: _FakeCancelRedis(cancelled=False))
+
+    asyncio.run(scenario())
+
+    assert captured["proc"].terminated is True
+    assert captured["proc"].returncode == -15
+
+
 def test_run_scan_sets_cooperative_cancel_file_env_and_signal(monkeypatch, tmp_path):
     captured = {}
 

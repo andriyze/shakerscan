@@ -9,7 +9,8 @@ The Linux `fleet init` / `fleet join-token` / `join` WireGuard host workflow is 
 per-scan worker/node attribution, current-vs-desired node drift derivation, fleet summary, and recent
 per-node activity APIs are implemented. The Fleet operations UI is implemented with health/drift,
 capacity, current-work, per-node scaling, drain/resume, and revoke controls. The physical two-VPS
-proof is not complete. The remaining parts of Phases 2–3 remain design-level.
+proof is not complete. Redis Stream lease/heartbeat/ack/reclaim delivery is implemented. The
+remaining artifact, placement, rolling-lifecycle, and Phase-3 broker work remains design-level.
 **Scope:** run a coordinated ShakerScan fleet across multiple VMs/VPS hosts so one UI/API
 can scan more targets at once and run high-budget Full Coverage scans by using workers
 from many machines.
@@ -32,12 +33,12 @@ becoming stale prose. For product priority and phased order, see
 | Fleet-wide active-scan concurrency cap (lease-based Redis ZSET semaphore; TTL frees a crashed holder) | **Built, but fail-OPEN** — `_take_scan_slot` returns granted on any Redis error and the bounded wait fails open, so the cap is an OOM guard on a healthy shared Redis, **not** an enforceable fleet limit. A partitioned node runs uncapped. | `ACTIVE_SCAN_SLOTS_KEY`, `_take_scan_slot` (`worker.py`) |
 | Per-root-domain request reservation (atomic Redis Lua; already coordinates every process on the shared Redis) | **Built** | `reserve_domain_rate` (`asm_inventory.py`) |
 | Managed `evidence_objects` backend (SigV4 S3/MinIO client: content-addressed PUT, hash-verified GET, retention DELETE) | **Built but OFF by default** — only covers large managed evidence-object payloads. General scan results, checkpoints, and other `/results` artifacts remain local; Compose does not yet pass the S3 settings through. | `evidence_storage.py`; `worker.py` `save_result_file` |
-| Job-queue delivery | **Built as at-most-once** — plain Redis list (`RPUSH`/`BLPOP`), compensated by DB row + heartbeat + `processing_lease_at` marker. **No per-message lease/ack/reclaim/fencing.** | `QUEUE_NAME` (`worker.py`, `api.py`) |
-| Remote worker scaling | **Local Docker socket only** (`/var/run/docker.sock`); no remote-node scaling | `POST /workers` (`api.py`); `scanner.sh scale` |
-| Node identity, enrollment, join tokens, heartbeat, credential rotation/revocation, CA bootstrap, overlay TLS edge, `nodes` table | **Foundation built** — fleet UI and physical two-VPS acceptance remain incomplete | `fleet.py`; `/fleet/*`; `fleet-edge`; `nodes`, `node_join_tokens`, `node_credentials` |
+| Job-queue delivery | **Built with leased delivery** — Redis Streams consumer groups, explicit ack/delete after successful dispatch, lease heartbeats, visibility-timeout reclaim, bounded delivery attempts, and fail-closed execution cancellation when lease ownership/heartbeat authority is lost. Pre-upgrade list entries remain drainable. | `job_queue.py`; `worker.py` `_run_job_under_lease` |
+| Remote worker scaling | **Built per node** — the control plane changes versioned desired count/drain state; each authenticated pull agent reconciles only its local labeled containers | `PATCH /fleet/nodes/{id}/state`; `fleet_agent.py` `reconcile_workers` |
+| Node identity, enrollment, join tokens, heartbeat, credential rotation/revocation, CA bootstrap, overlay TLS edge, `nodes` table | **Foundation built** — physical two-VPS acceptance remains incomplete | `fleet.py`; `/fleet/*`; `fleet-edge`; `nodes`, `node_join_tokens`, `node_credentials` |
 | Worker-only deployment and pull-based node-agent | **Foundation built** — digest-pinned worker/agent-only Compose, owner-only local state, versioned desired state, local Docker reconciliation, drain-to-zero, capacity/error heartbeat | `docker-compose.worker.yml`; `fleet_agent.py`; `GET|PATCH /fleet/nodes/{id}/state` |
 | WireGuard/CLI host provisioning | **Built, awaiting physical two-VPS acceptance** — persistent identity, CA/server certificates, overlay/data binding, automatic or manual peer reconciliation, public HTTPS enrollment, overlay proof, one-time bundle persistence, worker-only startup | `scripts/fleet_cli.py`; `scanner.sh fleet`; `scanner.sh join` |
-| Per-node execution attribution and fleet rollup | **Built** — scan/shard rows record the executing node and unique worker replica; revoked nodes fail closed and return dequeued work to the compatibility queue; node API derives state/image drift and exposes recent activity | `scans.executing_node_id`; `worker.py` `_attribute_job_execution`; `GET /fleet/nodes`; `GET /fleet/nodes/{id}/activity` |
+| Per-node execution attribution and fleet rollup | **Built** — scan/shard rows record the executing node and unique worker replica; revoked nodes fail closed and re-enqueue refused work; node API derives state/image drift and exposes recent activity | `scans.executing_node_id`; `worker.py` `_attribute_job_execution`; `GET /fleet/nodes`; `GET /fleet/nodes/{id}/activity` |
 | Fleet UI | **Built** — unified health/capacity/drift view, recent attributed work, desired worker scaling, drain/resume, revoke confirmation, and session-only remote operator credential handling | `ui/src/app/fleet/page.tsx`; sidebar `/fleet` |
 | Capability/region/egress placement | **Not present** — specified by this document | — |
 
@@ -52,9 +53,9 @@ The takeaways that shape the plan:
 - **Do not mistake managed evidence-object storage for a complete artifact plane.** The S3 client is
   reusable, but cross-node results/checkpoints/diagnostics require application and deployment work
   (§8).
-- The genuinely net-new engineering is (1) node identity / enrollment / overlay, and (2) upgrading
-  queue delivery from at-most-once to leased/acked/reclaimable before any remote node is trusted with
-  unattended work, plus (3) a general cross-node artifact contract.
+- The node identity/enrollment/overlay and leased/acked/reclaimable queue are now implemented. The
+  largest remaining production gaps are a general cross-node artifact contract, routing/placement,
+  rolling lifecycle, the broker boundary, and physical multi-VPS acceptance.
 
 The parallel-scan design answers: "How does one logical scan fan out into plan, shard, and merge
 jobs?" This document answers: "How can those worker jobs run safely on more than one host?"
@@ -227,12 +228,12 @@ worker-count changes.
 
 | Concern | Current behavior | Multi-node implication |
 |---|---|---|
-| Job queue | Scan jobs are pushed to Redis and consumed by workers. | A worker on another VPS can participate if it can reach the same queue. |
+| Job queue | Scan/retest jobs use Redis Streams consumer groups with ack, heartbeat, bounded reclaim, and a legacy-list drain bridge. | A worker on another VPS can participate if it can reach the same queue; hard loss is reclaimed after the visibility timeout. |
 | Finding writes | Findings are deduped with a database uniqueness constraint and conflict-safe inserts. | Concurrent workers can scan the same target without inventing a distributed lock. |
 | Parallel scan plan | Parent, shard, and merge jobs are implemented on the queue. | Shard jobs are naturally host-agnostic when remote workers can safely reach the shared queue and state. |
 | Worker scaling | `POST /workers` controls replicas on the local Docker host. | This does not scale remote worker instances. Multi-node needs per-node lifecycle control. |
 | Evidence | `./results` is a local bind mount. | Artifacts written on worker VPS B are not automatically visible to the control plane. This must be centralized. |
-| Queue reliability | A plain Redis list with blocking pop is effectively at-most-once after a worker receives a job. | A multi-node fleet needs leases, ack, and reclaim before it is safe for unattended production use. |
+| Queue reliability | Stream messages remain pending while leased, heartbeat during execution, are acknowledged only after successful dispatch, and are reclaimed after owner loss. | Physical partition/kill testing remains required before the production acceptance claim. |
 | Networking | The local stack binds API/UI to the configured host; remote mode already parameterizes public/private bind addresses. | Built-in WireGuard should become the default fleet overlay; Redis/Postgres binding and firewall rules must be explicit. |
 
 The important conclusion: the scanner does not need a new distributed execution model.
@@ -375,10 +376,10 @@ owned internal fleet, but it is not the full production architecture.
 Important limitations in Phase 1:
 
 - the pull-based node-agent applies versioned worker-count and drain desired state on its local Docker
-  engine, and the join/install/overlay proof is implemented; fleet UI, physical two-VPS acceptance,
+  engine, and the join/install/overlay proof and fleet UI are implemented; physical two-VPS acceptance
   and rolling lifecycle remain incomplete;
 - evidence remains incomplete unless storage is centralized;
-- a worker crash can still lose an in-flight job under list/pop semantics;
+- Stream lease recovery is implemented, but physical kill/partition acceptance is still pending;
 - routing assumes workers are mostly interchangeable.
 
 #### Phase 1 draft vertical-slice specification (Milestone A: two-VPS queue proof)
@@ -561,11 +562,9 @@ acceptance and rolling lifecycle are still incomplete.
 **Milestone A done** = a remote worker registers with one command, appears in the fleet view with a
 heartbeat, drains the shared `scan_jobs` queue, writes scans/findings to the control-plane database,
 and Redis/Postgres are unreachable from the public internet. This is explicitly a **lab proof**, not
-an unattended-production claim. The accepted Phase-1 gaps remain:
-at-most-once delivery (a hard worker loss between `BLPOP` and the first heartbeat still relies on the
-DB reconcilers, not a Redis lease — §9), worker-local result/checkpoint artifacts even when managed
-evidence objects use S3 (§8), and an incomplete rolling lifecycle around the implemented install and
-per-node scaling primitives.
+an unattended-production claim. The accepted Phase-1 gaps remain: physical multi-host lease/partition
+acceptance, worker-local result/checkpoint artifacts even when managed evidence objects use S3 (§8),
+and an incomplete rolling lifecycle around the implemented install and per-node scaling primitives.
 
 ### Phase 2: Production-Ready Owned Fleet
 
@@ -576,13 +575,14 @@ Build the fleet layer:
 1. **Node registry:** track `node_id`, hostname, overlay IP, egress IP, region, version,
    labels, tool capabilities, capacity, active worker count, desired worker count,
    heartbeat, and drain state.
-2. **Node-agent:** the local pull agent, installation, and desired-count/drain reconciliation
-   foundation are built. Complete stale-state handling, rolling upgrades, partition behavior, and fleet UI.
+2. **Node-agent:** the local pull agent, installation, desired-count/drain reconciliation, stale-state
+   presentation, and fleet UI are built. Complete rolling upgrades and partition behavior.
    The API never drives a remote Docker socket directly.
 3. **Central evidence store:** workers upload screenshots, HAR files, logs, and other
    artifacts to S3/MinIO. Findings and scan results store object keys, not local paths.
-4. **Reliable job leases:** replace or wrap plain list pop with ack/reclaim semantics.
-   Redis Streams consumer groups are the natural Redis-native option.
+4. **Reliable job leases:** **built** with Redis Streams consumer groups, explicit completion ack,
+   periodic lease heartbeat, visibility-timeout `XAUTOCLAIM`, bounded attempts, and fail-closed
+   cancellation when the worker can no longer prove lease ownership.
 5. **Distributed rate limiting:** use Redis token buckets keyed by target/root domain so
    adding worker instances does not accidentally multiply request pressure. Known-endpoint
    ASM/Full Coverage worker batches already reserve endpoint budget this way; standalone scans need
@@ -693,18 +693,14 @@ artifacts stranded on a worker VPS.
 
 ## 9. Queue Reliability And Idempotency
 
-The current queue model is enough to prove multi-node execution, but it is not enough for
-a reliable fleet.
-
-What exists today is at-most-once delivery on a plain Redis list (`RPUSH`/`BLPOP` on `scan_jobs`),
-compensated *above* Redis rather than by Redis: a durable Postgres scan row, a worker heartbeat, a
-`processing_lease_at` hash marker stamped right after `BLPOP`, and API-side reconcilers that requeue
-or fail orphaned work once a heartbeat goes stale. A separate lease-based Redis ZSET semaphore caps
-fleet-wide active scans and frees a crashed holder's slot on TTL expiry. The parallel merge uses one
-atomic Redis Lua claim-and-`LPUSH` operation, with the DB's non-terminal shard state as source of
-truth. This is sufficient on a single trusted host, but a hard worker
-loss between `BLPOP` and the first heartbeat still depends entirely on those DB reconcilers — there is
-no per-message Redis lease/ack/reclaim. Closing that gap is what the following semantics require.
+**Implementation status:** scan and retest producers now `XADD` JSON payloads to leased Redis Stream
+keys. Workers use one consumer group, keep the pending entry alive while executing, acknowledge and
+delete only after the handler succeeds, and `XAUTOCLAIM` abandoned work after the visibility timeout.
+Delivery attempts come from Redis pending metadata and exhaust into an explicit durable failed state.
+If lease refresh fails repeatedly or ownership is gone, the worker cancels its execution rather than
+continuing as a stale owner. Existing DB claim predicates, stable shard identity, finding uniqueness,
+and atomic merge claim make duplicate/reclaimed dispatch idempotent. Legacy list entries are consumed
+only as a rolling-upgrade bridge; all new production enqueue paths use Streams.
 
 Required semantics:
 
@@ -715,12 +711,12 @@ Required semantics:
 - retries are bounded and visible;
 - duplicate completion attempts are idempotent.
 
-Redis Streams consumer groups provide this shape:
+The implemented Redis Streams shape is:
 
 ```text
-XADD scan_jobs ...
-XREADGROUP GROUP workers node-a COUNT 1 BLOCK ...
-XACK scan_jobs workers <message-id>
+XADD scan_jobs:leased ...
+XREADGROUP GROUP shakerscan-workers node-a COUNT 1 BLOCK ...
+XACK scan_jobs:leased shakerscan-workers <message-id>
 XAUTOCLAIM or XCLAIM stale pending messages
 ```
 
@@ -757,8 +753,8 @@ Implementation options:
 
 | Option | Fit |
 |---|---|
-| Queue per capability | Simple and compatible with the current list model. Workers block on queues they qualify for. |
-| Redis Streams with routing fields | Better once the queue moves to Streams. Scheduler can assign or filter by labels. |
+| Queue per capability | Simple and compatible with the current Stream model. Workers can read only streams they qualify for. |
+| Redis Streams with routing fields | Current queue substrate; placement fields and scheduler assignment remain to be added. |
 | Broker-side scheduler | Best in Phase 3. The broker leases only jobs a node is allowed to run. |
 
 Rate limiting must be global, not per node. Known-endpoint ASM and Full Coverage
@@ -822,8 +818,8 @@ Acceptance criteria:
 - scan state and findings are written to the control-plane database;
 - Redis/Postgres are not reachable from the public internet.
 
-Known gaps are acceptable only for this labeled lab proof: incomplete rolling lifecycle and fleet
-UI, worker-local general artifacts, and at-most-once job delivery. No unattended or
+Known gaps are acceptable only for this labeled lab proof: incomplete rolling lifecycle,
+worker-local general artifacts, and incomplete physical lease/partition acceptance. No unattended or
 production-safe claim is allowed.
 
 ### Milestone B: Cross-VPS Parallel-Scan Proof
@@ -838,8 +834,8 @@ Acceptance criteria:
 - findings dedupe correctly under concurrent shard writes;
 - merge creates one logical report.
 
-This should not be called production-ready until centralized evidence and reliable job
-leases are in place.
+This should not be called production-ready until centralized evidence and physical cross-node lease
+recovery acceptance are in place.
 
 ### Milestone C: Production Owned Fleet
 
@@ -864,19 +860,19 @@ Acceptance criteria:
 | Self-hosted or managed data stores? | Self-host for early internal deployments; managed Postgres/Redis when HA or operational maturity matters. |
 | MinIO or cloud S3? | MinIO for self-hosted; S3-compatible API either way. |
 | Node-agent or orchestrator first? | Node-agent first. Revisit Nomad, Docker Swarm, or Kubernetes when fleet size and rollout complexity justify it. |
-| Queue list or Streams? | Lists are acceptable only for proof-of-concept. Streams or equivalent lease semantics are required for production. |
+| Queue list or Streams? | **Resolved: Streams.** Lists are read only as an upgrade bridge; all new jobs use leased Streams. |
 
 ## Final Recommendation
 
 Begin the post-0.7 multi-node initiative in layers, while keeping DAST/auth quality and execution
 contracts as acceptance gates:
 
-1. **Labeled lab proof:** complete the HTTPS-to-WireGuard bootstrap and node-credential contracts,
-   then prove one digest-pinned remote worker can join, heartbeat, and drain the shared queue. Preserve
-   the documented at-most-once and worker-local-artifact limitations; a shared Redis/Postgres
-   deployment alone is not a production claim.
-2. **Owned-fleet hardening before unattended use:** add leased delivery with fencing,
-   stale-owner-write prevention, idempotent completion, centralized general artifacts,
+1. **Labeled lab proof:** physically prove one digest-pinned remote worker can join, heartbeat, and
+   drain the shared leased queue over the implemented HTTPS-to-WireGuard bootstrap. Preserve the
+   documented worker-local-artifact limitation; a shared Redis/Postgres deployment alone is not a
+   production claim.
+2. **Owned-fleet hardening before unattended use:** complete physical lease/fencing acceptance,
+   centralized general artifacts,
    executing-node scope revalidation, node-agent lifecycle management, drain/reschedule, partition
    and clock-skew tests, per-adapter budget telemetry, and routing.
 3. **Later:** add the HTTPS broker for untrusted or customer-hosted nodes. That is the

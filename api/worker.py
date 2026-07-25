@@ -46,6 +46,13 @@ from retest_contract import (
 )
 import parallel_scan
 import asm_inventory
+from job_queue import (
+    QueueLease,
+    acknowledge_lease,
+    enqueue_job,
+    heartbeat_lease,
+    lease_job,
+)
 try:
     from scanner_tools.attempt_telemetry import (
         endpoint_attempt_schema_from_report,
@@ -91,6 +98,25 @@ SCAN_LOG_TAIL = int(os.environ.get('SCAN_LOG_TAIL', '200'))
 SCAN_LOG_TTL_SECONDS = int(os.environ.get('SCAN_LOG_TTL_SECONDS', '86400'))
 HEARTBEAT_INTERVAL_SECONDS = int(os.environ.get('HEARTBEAT_INTERVAL_SECONDS', '30'))
 WORKER_QUEUE_BLOCK_SECONDS = max(1, int(os.environ.get("WORKER_QUEUE_BLOCK_SECONDS", "30")))
+QUEUE_VISIBILITY_TIMEOUT_SECONDS = max(
+    60,
+    int(os.environ.get("SHAKERSCAN_QUEUE_VISIBILITY_TIMEOUT_SECONDS", "300")),
+)
+QUEUE_LEASE_HEARTBEAT_SECONDS = max(
+    5,
+    min(
+        QUEUE_VISIBILITY_TIMEOUT_SECONDS // 3,
+        int(os.environ.get("SHAKERSCAN_QUEUE_LEASE_HEARTBEAT_SECONDS", "30")),
+    ),
+)
+QUEUE_MAX_DELIVERY_ATTEMPTS = max(
+    1,
+    int(os.environ.get("SHAKERSCAN_QUEUE_MAX_DELIVERY_ATTEMPTS", "5")),
+)
+QUEUE_LEASE_HEARTBEAT_FAILURE_LIMIT = max(
+    1,
+    int(os.environ.get("SHAKERSCAN_QUEUE_LEASE_HEARTBEAT_FAILURE_LIMIT", "3")),
+)
 WORKER_REDIS_SOCKET_TIMEOUT_SECONDS = max(
     WORKER_QUEUE_BLOCK_SECONDS + 5,
     int(os.environ.get("WORKER_REDIS_SOCKET_TIMEOUT_SECONDS", "35")),
@@ -2435,7 +2461,35 @@ async def run_scan(target: str, options: dict, scan_id: str | None = None, job_i
     stdout_task = asyncio.create_task(_read_stream_full(proc.stdout, _handle_stdout))
     stderr_task = asyncio.create_task(_read_stream_lines(proc.stderr, _handle_stderr))
 
-    await proc.wait()
+    try:
+        await proc.wait()
+    except asyncio.CancelledError:
+        # Queue fencing, worker shutdown, and operator cancellation must not
+        # leave scanner.py or its independently-sessioned tool descendants
+        # running after this coroutine loses authority.
+        await asyncio.to_thread(
+            _signal_scanner_cancel_file,
+            str(cancel_file) if cancel_file else None,
+        )
+        await asyncio.shield(_terminate_scanner_process(proc))
+        if _slot_held and _slot_r is not None:
+            _release_scan_slot(_slot_r, _slot_id)
+            _slot_held = False
+        for task in (watchdog_task, cancel_task, stdout_task, stderr_task):
+            task.cancel()
+        await asyncio.gather(
+            watchdog_task,
+            cancel_task,
+            stdout_task,
+            stderr_task,
+            return_exceptions=True,
+        )
+        if scanner_auth_config_file:
+            try:
+                os.unlink(scanner_auth_config_file)
+            except OSError:
+                pass
+        raise
     # Scanner subprocess (the memory hog) has exited — free the active-scan slot
     # immediately so a waiting worker can start; the rest of run_scan is light.
     if _slot_held and _slot_r is not None:
@@ -4462,7 +4516,7 @@ async def _requeue_for_domain_rate(
     requeued = dict(job_data)
     requeued["domain_rate_wait_cycles"] = wait_cycles
     requeued["last_domain_rate_wait_at"] = utc_now_iso()
-    r.rpush(QUEUE_NAME, json.dumps(requeued))
+    enqueue_job(r, QUEUE_NAME, requeued)
     mapping = {
         "status": "queued",
         "scan_id": scan_id or "",
@@ -5163,7 +5217,7 @@ async def process_finding_retest_job(job_data: dict):
             "slot_waited_seconds": str(waited_seconds),
             "next_backoff_seconds": str(backoff_seconds),
         })
-        r.rpush(RETEST_QUEUE_NAME, json.dumps(requeued_payload))
+        enqueue_job(r, RETEST_QUEUE_NAME, requeued_payload)
         r.expire(retest_key, 86400)
         await asyncio.sleep(backoff_seconds)
         return
@@ -5767,7 +5821,7 @@ async def queue_auto_retests_for_scan(scan_id: str, target_id: str | None, targe
                     WHERE id = $1
                 """, verification_id, f"Retest job payload invalid: {reason}")
                 continue
-            r.rpush(RETEST_QUEUE_NAME, json.dumps(job_payload))
+            enqueue_job(r, RETEST_QUEUE_NAME, job_payload)
             r.hset(f"retest_job:{job_id}", mapping={
                 "status": "queued",
                 "verification_id": str(verification_id),
@@ -5881,7 +5935,7 @@ async def reap_stale_retests(now: datetime | None = None) -> dict[str, int]:
                         finding_id,
                     )
 
-                    r.rpush(RETEST_QUEUE_NAME, json.dumps(payload))
+                    enqueue_job(r, RETEST_QUEUE_NAME, payload)
                     r.hset(
                         f"retest_job:{new_job_id}",
                         mapping={
@@ -6004,7 +6058,7 @@ async def requeue_circuit_recovered_retests() -> dict[str, int]:
                     trigger="circuit_recovery",
                     attempt=int(row["attempt_count"] or 0) + 1,
                 )
-                r.rpush(RETEST_QUEUE_NAME, json.dumps(payload))
+                enqueue_job(r, RETEST_QUEUE_NAME, payload)
                 requeued += 1
 
             if requeued:
@@ -7723,13 +7777,13 @@ async def process_scan_plan_job(job_data: dict):
                 "UPDATE scans SET scan_role = 'standalone', options = $1 WHERE id = $2",
                 json.dumps(single_opts), uuid.UUID(parent_id),
             )
-        r.rpush(QUEUE_NAME, json.dumps({
+        enqueue_job(r, QUEUE_NAME, {
             'job_id': parent_job_id,
             'scan_id': parent_id,
             'target': target_url,
             'options': single_opts,
             'submitted_at': utc_now_iso(),
-        }))
+        })
         return
 
     # Mark parent running and fan out child shard rows + jobs. Record the
@@ -7814,7 +7868,7 @@ async def process_scan_plan_job(job_data: dict):
                  target_url, child_job_id, json.dumps(shard.options), scan_type,
                  uuid.UUID(parent_id), shard.index, plan.shard_count,
                  uuid.UUID(campaign_id) if campaign_id else None)
-            r.rpush(QUEUE_NAME, json.dumps({
+            enqueue_job(r, QUEUE_NAME, {
                 'type': asm_inventory.EXPLOIT_BATCH_JOB_TYPE if shard.options.get('coverage_dynamic_worker') else parallel_scan.SHARD_JOB_TYPE,
                 'job_id': child_job_id,
                 'scan_id': child_id,
@@ -7829,6 +7883,8 @@ async def process_scan_plan_job(job_data: dict):
                 'shard_label': shard.label,
                 'shard_index': shard.index,
                 'shard_count': plan.shard_count,
+                'attempt': 1,
+                'plan_version': parallel_scan.PLAN_VERSION,
                 'batch_size': shard.options.get('coverage_dynamic_batch_size') or options.get('coverage_dynamic_batch_size') or options.get('coverage_per_shard_cap') or parallel_scan.COVERAGE_DYNAMIC_BATCH_SIZE,
                 'stale_days': shard.options.get('coverage_stale_days', 0),
                 'exploit_depth': bool(options.get('exploit_depth')),
@@ -7837,7 +7893,7 @@ async def process_scan_plan_job(job_data: dict):
                 'finish_campaign_on_complete': False,
                 'coverage_dynamic_worker': bool(shard.options.get('coverage_dynamic_worker')),
                 'submitted_at': utc_now_iso(),
-            }))
+            })
             r.hset(f"job:{child_job_id}", mapping={'status': 'queued', 'target': target})
 
     r.set(parallel_scan.shards_remaining_key(parent_id), plan.shard_count, ex=86400)
@@ -7921,7 +7977,7 @@ async def process_scan_shard_job(job_data: dict):
         requeued = dict(job_data)
         requeued['shard_slot_wait_cycles'] = wait_cycles
         requeued['last_shard_slot_wait_at'] = utc_now_iso()
-        r.rpush(QUEUE_NAME, json.dumps(requeued))
+        enqueue_job(r, QUEUE_NAME, requeued)
         r.hset(f"job:{job_id}", mapping={
             'status': 'queued',
             'scan_id': scan_id,
@@ -8754,7 +8810,7 @@ async def process_exploit_batch_job(job_data: dict):
             requeued = dict(job_data)
             requeued['shard_slot_wait_cycles'] = wait_cycles
             requeued['last_shard_slot_wait_at'] = utc_now_iso()
-            r.rpush(QUEUE_NAME, json.dumps(requeued))
+            enqueue_job(r, QUEUE_NAME, requeued)
             r.hset(f"job:{job_id}", mapping={
                 'status': 'queued',
                 'scan_id': scan_id,
@@ -9489,7 +9545,7 @@ async def _refuse_stale_job_if_needed(job_data: dict) -> bool:
     if (now - first_stale) < STALE_REQUEUE_FAIL_AFTER_SECONDS and attempts <= STALE_JOB_MAX_REQUEUE_HARD_CAP:
         job_data['first_stale_requeue_at'] = first_stale
         job_data['stale_requeue_attempts'] = attempts
-        get_redis().rpush(source_queue, json.dumps(job_data))
+        enqueue_job(get_redis(), source_queue, job_data)
         print(f"[{job_id[:8]}] REFUSED stale build (worker {worker_fp} != submit {expected_fp}); "
               f"requeued for a current worker (attempt {attempts}, {now - first_stale:.0f}s waiting)", flush=True)
         await asyncio.sleep(2)
@@ -9562,7 +9618,7 @@ async def process_job(job_data: dict):
         # work while the control-plane WireGuard reconciler removes that peer;
         # Redis Streams fencing will supersede this compatibility requeue.
         source_queue = RETEST_QUEUE_NAME if job_data.get('type') == 'finding_retest' else QUEUE_NAME
-        get_redis().rpush(source_queue, json.dumps(job_data))
+        enqueue_job(get_redis(), source_queue, job_data)
         print(f"[fleet] refused job on this node and requeued it: {exc}", flush=True)
         await asyncio.sleep(2)
         return
@@ -9584,7 +9640,12 @@ async def process_job(job_data: dict):
         await process_scan_job(job_data)
 
 
-def _mark_worker_processing_lease(r, job_data: dict[str, Any], source_queue: str) -> None:
+def _mark_worker_processing_lease(
+    r,
+    job_data: dict[str, Any],
+    source_queue: str,
+    lease: QueueLease | None = None,
+) -> None:
     """Stamp a short-lived proof that this worker removed the job from Redis.
 
     Queue membership disappears at BLPOP, before the durable DB row is claimed.
@@ -9597,11 +9658,133 @@ def _mark_worker_processing_lease(r, job_data: dict[str, Any], source_queue: str
         return
     is_retest = source_queue == RETEST_QUEUE_NAME or job_data.get("type") == "finding_retest"
     key = f"retest_job:{job_id}" if is_retest else f"job:{job_id}"
-    r.hset(key, mapping={
+    mapping = {
         "processing_lease_at": utc_now_iso(),
         "processing_queue": source_queue,
-    })
+    }
+    if lease is not None:
+        mapping.update({
+            "queue_message_id": lease.message_id or "legacy-list",
+            "queue_delivery_attempts": str(lease.delivery_attempts),
+            "queue_reclaimed": "true" if lease.reclaimed else "false",
+            "queue_consumer": _worker_runtime_identity(),
+        })
+    r.hset(key, mapping=mapping)
     r.expire(key, 86400)
+
+
+async def _fail_exhausted_queue_delivery(job_data: dict[str, Any], attempts: int) -> None:
+    job_id = str(job_data.get("job_id") or "unknown")
+    message = f"Queue delivery exhausted after {attempts} attempts"
+    scan_id = str(job_data.get("scan_id") or "").strip()
+    verification_id = str(job_data.get("verification_id") or "").strip()
+    async with db_pool.acquire() as conn:
+        if scan_id:
+            try:
+                await conn.execute(
+                    """
+                    UPDATE scans
+                    SET status='failed', progress=100, current_phase='queue_delivery_failed',
+                        error_message=$2, completed_at=NOW()
+                    WHERE id=$1 AND status NOT IN ('completed','failed','cancelled')
+                    """,
+                    uuid.UUID(scan_id),
+                    message,
+                )
+            except ValueError:
+                pass
+        if verification_id:
+            try:
+                await conn.execute(
+                    """
+                    UPDATE finding_verifications
+                    SET status='failed', result_status='error', verdict='error',
+                        error_message=$2, completed_at=NOW(), retryable=false,
+                        attempts_exhausted=true
+                    WHERE id=$1 AND status IN ('queued','running')
+                    """,
+                    uuid.UUID(verification_id),
+                    message,
+                )
+            except ValueError:
+                pass
+    key = f"retest_job:{job_id}" if job_data.get("type") == "finding_retest" else f"job:{job_id}"
+    get_redis().hset(key, mapping={
+        "status": "failed",
+        "current_phase": "queue_delivery_failed",
+        "error": message,
+        "delivery_attempts": str(attempts),
+    })
+    get_redis().expire(key, 86400)
+
+
+async def _guard_queue_lease(
+    redis_client: Any,
+    lease: QueueLease,
+    consumer_name: str,
+    work_task: asyncio.Task,
+) -> None:
+    """Keep Stream ownership alive and stop execution if fencing authority is lost."""
+    if lease.legacy:
+        return
+    loop = asyncio.get_running_loop()
+    failures = 0
+    while not work_task.done():
+        await asyncio.sleep(QUEUE_LEASE_HEARTBEAT_SECONDS)
+        if work_task.done():
+            return
+        try:
+            owned = await loop.run_in_executor(
+                None,
+                lambda: heartbeat_lease(redis_client, lease, consumer_name),
+            )
+            if not owned:
+                print(
+                    f"[queue] lease {lease.message_id} is no longer owned; cancelling stale execution",
+                    flush=True,
+                )
+                work_task.cancel()
+                return
+            failures = 0
+        except Exception as exc:
+            failures += 1
+            print(
+                f"[queue] lease heartbeat failed ({failures}/{QUEUE_LEASE_HEARTBEAT_FAILURE_LIMIT}): {exc}",
+                flush=True,
+            )
+            if failures >= QUEUE_LEASE_HEARTBEAT_FAILURE_LIMIT:
+                print("[queue] fencing authority unavailable; cancelling execution fail-closed", flush=True)
+                work_task.cancel()
+                return
+
+
+async def _run_job_under_lease(redis_client: Any, lease: QueueLease, job_data: dict[str, Any]) -> None:
+    consumer_name = _worker_runtime_identity()
+    if lease.delivery_attempts > QUEUE_MAX_DELIVERY_ATTEMPTS:
+        await _fail_exhausted_queue_delivery(job_data, lease.delivery_attempts)
+        if not lease.legacy:
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, lambda: acknowledge_lease(redis_client, lease))
+        return
+
+    if lease.legacy:
+        await process_job(job_data)
+        return
+
+    work_task = asyncio.create_task(process_job(job_data))
+    guard_task = asyncio.create_task(_guard_queue_lease(redis_client, lease, consumer_name, work_task))
+    try:
+        await work_task
+        loop = asyncio.get_running_loop()
+        acknowledged = await loop.run_in_executor(
+            None,
+            lambda: acknowledge_lease(redis_client, lease),
+        )
+        if not acknowledged:
+            raise RuntimeError(f"completed queue message {lease.message_id} was not acknowledged")
+    finally:
+        guard_task.cancel()
+        await asyncio.gather(guard_task, return_exceptions=True)
 
 
 async def async_main():
@@ -9638,12 +9821,20 @@ async def async_main():
                     finally:
                         last_stale_check_monotonic = now_mono
 
-                # Use run_in_executor for blocking Redis pop
-                result = await loop.run_in_executor(
+                # Lease a Stream message. Legacy list entries are drained only
+                # as an upgrade bridge; all new work is explicitly acked.
+                consumer_name = _worker_runtime_identity()
+                lease = await loop.run_in_executor(
                     None,
-                    lambda: r.blpop(queue_keys, timeout=WORKER_QUEUE_BLOCK_SECONDS),
+                    lambda: lease_job(
+                        r,
+                        queue_keys,
+                        consumer_name=consumer_name,
+                        block_ms=WORKER_QUEUE_BLOCK_SECONDS * 1000,
+                        visibility_timeout_ms=QUEUE_VISIBILITY_TIMEOUT_SECONDS * 1000,
+                    ),
                 )
-                if result is None:
+                if lease is None:
                     # Re-report build identity while idle so the per-worker version
                     # label converges to the API-published commit after a deploy (the
                     # startup report can run before the API publishes). build_current
@@ -9654,20 +9845,23 @@ async def async_main():
                         pass
                     continue  # Timeout, continue polling
 
-                source_queue_raw, job_json = result
-                source_queue = (
-                    source_queue_raw.decode("utf-8", "replace")
-                    if isinstance(source_queue_raw, bytes)
-                    else str(source_queue_raw)
-                )
-                job_data = json.loads(job_json)
+                source_queue = lease.queue_name
                 try:
-                    _mark_worker_processing_lease(r, job_data, source_queue)
+                    job_data = json.loads(lease.payload)
+                    if not isinstance(job_data, dict):
+                        raise ValueError("queue payload is not an object")
+                except (TypeError, ValueError, json.JSONDecodeError) as payload_error:
+                    print(f"[queue] discarding malformed message {lease.message_id}: {payload_error}", flush=True)
+                    if not lease.legacy:
+                        await loop.run_in_executor(None, lambda: acknowledge_lease(r, lease))
+                    continue
+                try:
+                    _mark_worker_processing_lease(r, job_data, source_queue, lease)
                 except Exception as lease_err:
                     # This marker is recovery metadata, never authority to run.
                     # The durable DB claim in each handler remains authoritative.
                     print(f"[worker] processing lease metadata error: {lease_err}", flush=True)
-                await process_job(job_data)
+                await _run_job_under_lease(r, lease, job_data)
             except asyncio.CancelledError:
                 # Graceful shutdown requested (SIGTERM/SIGINT)
                 print("Worker received shutdown signal, exiting...", flush=True)

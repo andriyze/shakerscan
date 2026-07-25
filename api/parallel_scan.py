@@ -55,6 +55,8 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
+from job_queue import ensure_consumer_group, stream_key
+
 try:
     from constants import resolve_scan_budget
 except ModuleNotFoundError as exc:
@@ -82,6 +84,7 @@ def _env_int(name: str, default: int) -> int:
 PLAN_JOB_TYPE = "scan_plan"
 SHARD_JOB_TYPE = "scan_shard"
 MERGE_JOB_TYPE = "scan_merge"
+PLAN_VERSION = 1
 
 # Statuses that mean a scan row will not change on its own.
 TERMINAL_STATUSES = ("completed", "failed", "cancelled")
@@ -1581,7 +1584,12 @@ def merge_guard_key(parent_id: str) -> str:
 
 def merge_job(parent_id: str) -> dict[str, Any]:
     """Build the scan_merge job payload for a parent scan."""
-    return {"type": MERGE_JOB_TYPE, "parent_scan_id": parent_id}
+    return {
+        "type": MERGE_JOB_TYPE,
+        "parent_scan_id": parent_id,
+        "attempt": 1,
+        "plan_version": PLAN_VERSION,
+    }
 
 
 def aggregate_shard_coverage(strategy: str | None, shard_records: list[dict[str, Any]]) -> dict[str, Any]:
@@ -1714,21 +1722,31 @@ async def reconcile_parallel_parent(conn, parent_id: str, redis_client, queue_na
     )
     if non_terminal:
         return False
-    # All shards terminal — atomically claim AND enqueue. A former two-command SET NX -> LPUSH
-    # sequence could lose the merge forever if the caller died between those operations.
-    enqueue_script = """
+    # All shards terminal — atomically claim AND enqueue. Production uses the
+    # leased Stream queue; narrow legacy clients remain supported during an
+    # upgrade and in old focused tests.
+    streams = callable(getattr(redis_client, "xadd", None)) and callable(
+        getattr(redis_client, "xreadgroup", None)
+    )
+    destination = queue_name
+    enqueue_command = "redis.call('LPUSH', KEYS[2], ARGV[3])"
+    if streams:
+        ensure_consumer_group(redis_client, queue_name)
+        destination = stream_key(queue_name)
+        enqueue_command = "redis.call('XADD', KEYS[2], '*', 'payload', ARGV[3])"
+    enqueue_script = f"""
     local claimed = redis.call('SET', KEYS[1], ARGV[1], 'NX', 'EX', ARGV[2])
     if not claimed then
       return 0
     end
-    redis.call('LPUSH', KEYS[2], ARGV[3])
+    {enqueue_command}
     return 1
     """
     enqueued = redis_client.eval(
         enqueue_script,
         2,
         merge_guard_key(parent_id),
-        queue_name,
+        destination,
         "1",
         "86400",
         json.dumps(merge_job(parent_id)),

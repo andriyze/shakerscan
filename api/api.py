@@ -154,6 +154,7 @@ import agent_loop
 import agent_provenance
 import agent_text_toolcalls
 import agent_tools
+from job_queue import clear_unleased, enqueue_job, pending_depth, queue_payloads
 from http_experiment import (
     ExperimentContractError,
     MAX_BODY_BYTES,
@@ -2379,7 +2380,7 @@ async def cleanup_stale_parents(pool: asyncpg.Pool):
         # can't prove is orphaned).
         queued_job_ids: set[str] | None = set()
         try:
-            for raw in r.lrange(QUEUE_NAME, 0, -1):
+            for raw in queue_payloads(r, QUEUE_NAME):
                 try:
                     jid = json.loads(raw).get("job_id")
                 except Exception:
@@ -2723,11 +2724,13 @@ async def run_due_schedules(pool: asyncpg.Pool):
         }
         if parallel_enabled:
             job_data['type'] = 'scan_plan'
+            job_data['attempt'] = 1
+            job_data['plan_version'] = parallel_scan.PLAN_VERSION
             if parallel_worker_count is not None:
                 job_data['parallel_worker_count'] = parallel_worker_count
 
         try:
-            r.rpush(QUEUE_NAME, json.dumps(job_data))
+            enqueue_job(r, QUEUE_NAME, job_data)
         except Exception as exc:
             # Do not advance the schedule if Redis failed to accept the queue
             # item. Mark the inserted scan failed so the next scheduler pass can
@@ -5013,7 +5016,7 @@ async def _queue_ai_target_scan(target_id: str, request: AITargetScanRequest) ->
         "options": worker_options,
         "submitted_at": utc_now_iso(),
     }
-    r.rpush(QUEUE_NAME, json.dumps(job_data))
+    enqueue_job(r, QUEUE_NAME, job_data)
     r.hset(f"job:{job_id}", mapping={"status": "queued", "target": target["endpoint_url"], "scan_id": scan_id})
 
     response = {
@@ -9199,7 +9202,7 @@ async def scan_model_intake(request: ModelIntakeScanRequest):
         "options": options,
         "submitted_at": utc_now_iso(),
     }
-    r.rpush(QUEUE_NAME, json.dumps(job_data))
+    enqueue_job(r, QUEUE_NAME, job_data)
     r.hset(f"job:{job_id}", mapping={"status": "queued", "target": artifact_ref})
 
     response = {
@@ -9424,7 +9427,7 @@ async def rescan_model_intake_target(target_id: str):
         "options": options,
         "submitted_at": utc_now_iso(),
     }
-    r.rpush(QUEUE_NAME, json.dumps(job_data))
+    enqueue_job(r, QUEUE_NAME, job_data)
     r.hset(f"job:{job_id}", mapping={"status": "queued", "target": artifact_ref})
 
     return {
@@ -12969,9 +12972,11 @@ async def submit_scan(request: ScanRequest):
     # into shard jobs. Everything else stays on the standard scan path.
     if parallel_enabled:
         job_data['type'] = 'scan_plan'
+        job_data['attempt'] = 1
+        job_data['plan_version'] = parallel_scan.PLAN_VERSION
         if parallel_worker_count is not None:
             job_data['parallel_worker_count'] = parallel_worker_count
-    r.rpush(QUEUE_NAME, json.dumps(job_data))
+    enqueue_job(r, QUEUE_NAME, job_data)
     r.hset(f"job:{job_id}", mapping={'status': 'queued', 'target': scan_target})
 
     response = {
@@ -19443,7 +19448,7 @@ async def _agent_auto_queue_dast_retests(
             valid, _reason = validate_retest_job_payload(job_data)
             if not valid:
                 continue
-            r.rpush(RETEST_QUEUE_NAME, json.dumps(job_data))
+            enqueue_job(r, RETEST_QUEUE_NAME, job_data)
             queued.append({"finding_id": str(finding_data["id"]), "retest_type": rtype,
                            "retest_id": str(retest_id), "queued_deterministic": True})
         except HTTPException:
@@ -40361,7 +40366,7 @@ async def _reconcile_stale_research_dispatches(conn) -> int:
 
 def _research_queued_job_ids(redis_client, queue_name: str) -> set[str]:
     queued: set[str] = set()
-    for raw in redis_client.lrange(queue_name, 0, -1):
+    for raw in queue_payloads(redis_client, queue_name):
         try:
             payload = json.loads(raw)
         except (TypeError, ValueError, json.JSONDecodeError):
@@ -41917,7 +41922,7 @@ async def _enqueue_asm_exploit_batch(
         "submitted_at": utc_now_iso(),
     }
     try:
-        r.rpush(QUEUE_NAME, json.dumps(job_payload))
+        enqueue_job(r, QUEUE_NAME, job_payload)
     except Exception as enqueue_error:
         await _fail_asm_queue_handoff(conn, scan_id, campaign_id, enqueue_error)
         raise
@@ -41988,7 +41993,7 @@ async def _enqueue_asm_recon(
         "submitted_at": utc_now_iso(),
     }
     try:
-        r.rpush(QUEUE_NAME, json.dumps(job_payload))
+        enqueue_job(r, QUEUE_NAME, job_payload)
     except Exception as enqueue_error:
         await _fail_asm_queue_handoff(conn, scan_id, campaign_id, enqueue_error)
         raise
@@ -45650,7 +45655,7 @@ async def retest_finding(
             created_by=request.requested_by or "api",
         )
     try:
-        r.rpush(RETEST_QUEUE_NAME, json.dumps(job_data))
+        enqueue_job(r, RETEST_QUEUE_NAME, job_data)
     except Exception as e:
         async with db_pool.acquire() as conn:
             await mark_retest_enqueue_failed(
@@ -45855,7 +45860,7 @@ async def retest_ai_finding(finding_id: str, request: AIFindingRetestRequest | N
         "submitted_at": datetime.now(timezone.utc).isoformat(),
     }
     try:
-        r.rpush(QUEUE_NAME, json.dumps(job_data))
+        enqueue_job(r, QUEUE_NAME, job_data)
         r.hset(
             f"job:{job_id}",
             mapping={
@@ -46092,7 +46097,7 @@ async def replay_ai_scan(scan_id: str, request: AIScanReplayRequest | None = Non
         "submitted_at": datetime.now(timezone.utc).isoformat(),
     }
     try:
-        r.rpush(QUEUE_NAME, json.dumps(job_data))
+        enqueue_job(r, QUEUE_NAME, job_data)
         r.hset(
             f"job:{job_id}",
             mapping={
@@ -46381,7 +46386,7 @@ async def bulk_retest_findings(request: FindingsBulkRetestRequest):
                 })
                 continue
             try:
-                r.rpush(RETEST_QUEUE_NAME, json.dumps(job_data))
+                enqueue_job(r, RETEST_QUEUE_NAME, job_data)
             except Exception as e:
                 await mark_retest_enqueue_failed(
                     conn,
@@ -46954,7 +46959,7 @@ async def start_discovery(root_domain: str):
         'root_domain': root_domain,
         'submitted_at': utc_now_iso()
     }
-    r.rpush(QUEUE_NAME, json.dumps(job_data))
+    enqueue_job(r, QUEUE_NAME, job_data)
 
     return {
         'discovery_id': discovery_id,
@@ -48553,7 +48558,7 @@ async def queue_stats():
     retest_queued = 0
     retest_failed = 0
 
-    queue_entries = r.lrange(QUEUE_NAME, 0, -1)
+    queue_entries = queue_payloads(r, QUEUE_NAME, include_leased=False)
     queued_job_ids: set[str] = set()
     malformed_queue_entries = 0
     for raw in queue_entries:
@@ -48642,12 +48647,12 @@ async def queue_stats():
             retest_failed += 1
 
     result = {
-        'pending': len(queue_entries),
+        'pending': pending_depth(r, QUEUE_NAME),
         'queued': queued,
         'running': running,
         'completed': completed,
         'failed': failed,
-        'retest_pending': r.llen(RETEST_QUEUE_NAME),
+        'retest_pending': pending_depth(r, RETEST_QUEUE_NAME),
         'retest_queued': retest_queued,
         'retest_running': retest_running,
         'retest_completed': retest_completed,
@@ -48671,7 +48676,7 @@ async def queue_stats():
 async def clear_queue(include_retests: bool = False):
     """Clear all pending scan jobs. Optionally clear retest jobs too."""
     r = get_redis()
-    entries = r.lrange(QUEUE_NAME, 0, -1)
+    entries = clear_unleased(r, QUEUE_NAME)
     count = len(entries)
     job_ids: list[str] = []
     for raw in entries:
@@ -48681,7 +48686,6 @@ async def clear_queue(include_retests: bool = False):
             job_id = ""
         if job_id:
             job_ids.append(job_id)
-    r.delete(QUEUE_NAME)
     cancelled_scans = 0
     if job_ids:
         async with db_pool.acquire() as conn:
@@ -48700,8 +48704,7 @@ async def clear_queue(include_retests: bool = False):
             r.expire(f"job:{job_id}", 86400)
     retest_cleared = 0
     if include_retests:
-        retest_cleared = r.llen(RETEST_QUEUE_NAME)
-        r.delete(RETEST_QUEUE_NAME)
+        retest_cleared = len(clear_unleased(r, RETEST_QUEUE_NAME))
     r.delete("queue:stats_cache")
     return {'cleared': count, 'cancelled_scans': cancelled_scans, 'retest_cleared': retest_cleared}
 
