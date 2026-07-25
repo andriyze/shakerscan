@@ -1574,6 +1574,24 @@ def test_scan_options_normalize_oob_callback_url_strips_whitespace():
     assert options.oob_callback_url == "http://callback.example.com"
 
 
+def test_scan_options_normalize_fleet_placement():
+    options = api_module.ScanOptions(placement={
+        "region": " EU-WEST ",
+        "scan_tier": "SMART",
+        "requires": ["Playwright", "nuclei", "playwright"],
+    })
+    assert options.placement == {
+        "region": "eu-west",
+        "scan_tier": "smart",
+        "requires": ["nuclei", "playwright"],
+    }
+
+
+def test_scan_options_reject_unknown_fleet_placement_key():
+    with pytest.raises(Exception, match="unsupported placement keys"):
+        api_module.ScanOptions(placement={"availability_zone": "eu-west-1a"})
+
+
 def test_normalize_dast_scan_options_explicit_smart_sets_legacy_active():
     # An explicit smart/full/aggressive scan implies the legacy active flag.
     options = api_module.ScanOptions(scan_type="smart")

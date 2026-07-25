@@ -389,6 +389,22 @@ export default function FleetPage() {
                     </div>
                   </dl>
 
+                  {Object.keys(node.labels || {}).length > 0 && (
+                    <div className="mt-4 border-t border-gray-800 pt-4">
+                      <div className="text-xs uppercase tracking-wide text-gray-600">Placement labels</div>
+                      <div className="mt-2 flex flex-wrap gap-2">
+                        {Object.entries(node.labels || {}).flatMap(([key, raw]) => {
+                          const values = Array.isArray(raw) ? raw : [raw]
+                          return values.slice(0, 12).map((value) => (
+                            <Badge key={`${key}:${String(value)}`} className="bg-blue-500/10 text-blue-300">
+                              {key}={String(value)}
+                            </Badge>
+                          ))
+                        })}
+                      </div>
+                    </div>
+                  )}
+
                   {node.last_error && (
                     <div className="mt-4 flex gap-2 rounded-lg border border-amber-500/20 bg-amber-500/10 p-3 text-sm text-amber-200">
                       <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0" />

@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { submitScan, submitBatch, getScanExecutionSettings, getTargets, getWorkers, type Target } from '@/lib/api'
+import { submitScan, submitBatch, getFleetNodes, getScanExecutionSettings, getTargets, getWorkers, type FleetNode, type Target } from '@/lib/api'
 import {
   BUDGET_PROFILES,
   PARALLEL_STRATEGIES,
@@ -73,6 +73,7 @@ export default function NewScanPage() {
   const [coverageDepth, setCoverageDepth] = useState<CoverageDepth>('standard')
   const [runningWorkers, setRunningWorkers] = useState<number | null>(null)
   const [staleWorkers, setStaleWorkers] = useState<number>(0)
+  const [fleetNodes, setFleetNodes] = useState<FleetNode[]>([])
 
   useEffect(() => {
     const requestedTarget = new URLSearchParams(window.location.search).get('target')?.trim()
@@ -95,6 +96,9 @@ export default function NewScanPage() {
         setExistingTargets(list)
       })
       .catch(() => { /* target suggestions are optional; ignore failures */ })
+    getFleetNodes()
+      .then((result) => { if (!cancelled) setFleetNodes(result.nodes || []) })
+      .catch(() => { /* standalone installs have no fleet nodes */ })
     return () => { cancelled = true }
   }, [])
   const [customEndpointsText, setCustomEndpointsText] = useState('')
@@ -117,6 +121,15 @@ export default function NewScanPage() {
   })
   const [customBudgetEnabled, setCustomBudgetEnabled] = useState(false)
   const [enforceRequestBudget, setEnforceRequestBudget] = useState(false)
+  const [placementEnabled, setPlacementEnabled] = useState(false)
+  const [placement, setPlacement] = useState({
+    node_id: '',
+    region: '',
+    network: '',
+    egress_group: '',
+    data_residency: '',
+    requires: ''
+  })
   const [customBudget, setCustomBudget] = useState({
     max_duration_minutes: '',
     discovery_depth: '',
@@ -242,6 +255,16 @@ export default function NewScanPage() {
           .filter(([, value]) => value !== '')
       )
       const shardAuthStates = isCoverageMode && Object.keys(authPayload).length > 0
+      const placementPayload = Object.fromEntries(
+        Object.entries(placement)
+          .map(([key, value]) => [
+            key,
+            key === 'requires'
+              ? value.split(',').map((item) => item.trim()).filter(Boolean)
+              : value.trim()
+          ])
+          .filter(([, value]) => Array.isArray(value) ? value.length > 0 : value !== '')
+      )
       const scanOptions: Record<string, unknown> = {
         ...getScanOptions(scanType),
         budget_profile: isCoverageMode ? (isDeepCoverage ? 'exhaustive' : 'thorough') : budgetProfile,
@@ -265,6 +288,9 @@ export default function NewScanPage() {
         ...(shardAuthStates ? { auth_state_shards: true } : {}),
         ...authPayload,
         ...(showAdvanced ? options : {}),
+        ...(showAdvanced && placementEnabled && Object.keys(placementPayload).length > 0
+          ? { placement: placementPayload }
+          : {}),
         ...(Object.keys(effectiveCustomBudget).length > 0
           ? { custom_budget: effectiveCustomBudget }
           : {})
@@ -709,6 +735,55 @@ export default function NewScanPage() {
                 checked={enforceRequestBudget}
                 onChange={setEnforceRequestBudget}
               />
+              <OptionToggle
+                label="Fleet Placement"
+                description="Run only on nodes matching region, network, egress, or tool constraints"
+                checked={placementEnabled}
+                onChange={setPlacementEnabled}
+              />
+              {placementEnabled && (
+                <div className="grid grid-cols-1 gap-3 border-t border-gray-800 pt-3 sm:grid-cols-2">
+                  <label className="space-y-1 sm:col-span-2">
+                    <span className="block text-xs text-gray-500">Specific node (optional)</span>
+                    <select
+                      value={placement.node_id}
+                      onChange={(event) => setPlacement({ ...placement, node_id: event.target.value })}
+                      className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-sm text-white focus:outline-none focus:border-blue-500"
+                    >
+                      <option value="">Any matching node</option>
+                      {fleetNodes.filter((node) => node.status !== 'disabled').map((node) => (
+                        <option key={node.id} value={node.id}>{node.name} · {node.status}</option>
+                      ))}
+                    </select>
+                  </label>
+                  {([
+                    ['region', 'Region', 'eu-west'],
+                    ['network', 'Network', 'customer-vpn'],
+                    ['egress_group', 'Egress group', 'standard-pool'],
+                    ['data_residency', 'Data residency', 'us']
+                  ] as const).map(([key, label, placeholder]) => (
+                    <label key={key} className="space-y-1">
+                      <span className="block text-xs text-gray-500">{label}</span>
+                      <input
+                        value={placement[key]}
+                        onChange={(event) => setPlacement({ ...placement, [key]: event.target.value })}
+                        placeholder={placeholder}
+                        className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-sm text-white placeholder-gray-600 focus:outline-none focus:border-blue-500"
+                      />
+                    </label>
+                  ))}
+                  <label className="space-y-1 sm:col-span-2">
+                    <span className="block text-xs text-gray-500">Required tools (comma separated)</span>
+                    <input
+                      value={placement.requires}
+                      onChange={(event) => setPlacement({ ...placement, requires: event.target.value })}
+                      placeholder="playwright, nuclei, sqlmap"
+                      className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-sm text-white placeholder-gray-600 focus:outline-none focus:border-blue-500"
+                    />
+                    <p className="text-xs text-gray-600">A routed scan waits until a matching healthy worker is available.</p>
+                  </label>
+                </div>
+              )}
               <OptionToggle
                 label="Custom Budget"
                 description="Override selected depth and timeout limits"

@@ -171,7 +171,7 @@ import agent_loop
 import agent_provenance
 import agent_text_toolcalls
 import agent_tools
-from job_queue import clear_unleased, enqueue_job, pending_depth, queue_payloads
+from job_queue import clear_unleased, enqueue_job, normalize_placement, pending_depth, queue_payloads
 from http_experiment import (
     ExperimentContractError,
     MAX_BODY_BYTES,
@@ -3326,6 +3326,28 @@ class ScanOptions(BaseModel):
     skip_global_checks: bool = False
     focused_endpoints_only: bool = False
     zero_rediscovery: bool = False
+    placement: Optional[dict[str, Any]] = Field(
+        default=None,
+        description="Fleet placement constraints: region, egress_group, network, scan_tier, data_residency, node_id, and required tools.",
+    )
+
+    @field_validator("placement", mode="before")
+    @classmethod
+    def _validate_placement(cls, value):
+        if value is None:
+            return None
+        if not isinstance(value, dict):
+            raise ValueError("placement must be an object")
+        unknown = set(value) - {
+            "region", "egress_group", "network", "scan_tier", "tier",
+            "data_residency", "node_id", "requires",
+        }
+        if unknown:
+            raise ValueError(f"unsupported placement keys: {', '.join(sorted(unknown))}")
+        normalized = normalize_placement(value)
+        if value and not normalized:
+            raise ValueError("placement must contain at least one non-empty constraint")
+        return normalized
 
     # AI options
     ai_url: Optional[str] = None

@@ -12,6 +12,7 @@ import ipaddress
 import json
 import os
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -52,6 +53,9 @@ from job_queue import (
     enqueue_job,
     heartbeat_lease,
     lease_job,
+    placement_from_payload,
+    qualified_route_queues,
+    worker_matches_placement,
 )
 try:
     from scanner_tools.attempt_telemetry import (
@@ -1814,9 +1818,10 @@ _STREAM_ALL_SCANNER_LOGS = str(os.environ.get("SHAKERSCAN_STREAM_SCANNER_LOGS", 
 # OOM the Docker VM. Idle workers are cheap (~37MB); the real cost is concurrent
 # ACTIVE scans (2-4GB each). A lease-based Redis semaphore caps concurrency to a
 # value the API derives from Docker RAM and publishes to MAX_ACTIVE_SCANS_KEY.
-# Best-effort: bounded wait + fail-open so it can never deadlock or starve the
-# queue, and lease expiry frees a crashed worker's slot. Pairs with the hard
-# per-worker memory cap (HostConfig.Memory) as defense in depth.
+# Standalone installs retain the historical best-effort fallback. Joined fleet
+# nodes fail closed when Redis cannot authorize a slot or when the bounded wait
+# expires; a remote node must never turn a control-plane partition into uncapped
+# target pressure or memory use. Lease expiry frees a crashed holder's slot.
 ACTIVE_SCAN_SLOTS_KEY = "shakerscan:active_scan_slots"
 MAX_ACTIVE_SCANS_KEY = "shakerscan:max_active_scans"
 _SCAN_SLOT_TTL_SECONDS = max(300, int(os.environ.get("SHAKERSCAN_SCAN_SLOT_TTL_SECONDS", "5400")))
@@ -1831,6 +1836,17 @@ if redis.call('ZCARD', KEYS[1]) < tonumber(ARGV[3]) then
 end
 return 0
 """
+
+
+class FleetAdmissionUnavailable(RuntimeError):
+    """The control plane could not authorize a fleet worker to start a scan."""
+
+
+def _fleet_limits_required() -> bool:
+    explicit = str(os.environ.get("SHAKERSCAN_ENFORCE_FLEET_LIMITS") or "").strip().lower()
+    if explicit:
+        return explicit in {"1", "true", "yes", "on"}
+    return bool(str(os.environ.get("SHAKERSCAN_NODE_ID") or "").strip())
 
 
 def _max_active_scans(r) -> int:
@@ -1857,15 +1873,19 @@ def _max_active_scans(r) -> int:
 
 
 def _take_scan_slot(r, slot_id: str) -> bool:
-    """Atomically take an active-scan slot if under the cap. Fail-open on error."""
+    """Atomically take an active-scan slot if under the cap."""
     try:
         got = r.eval(
             _SCAN_SLOT_LUA, 1, ACTIVE_SCAN_SLOTS_KEY,
             time.time(), _SCAN_SLOT_TTL_SECONDS, _max_active_scans(r), slot_id,
         )
         return bool(got)
-    except Exception:
-        return True  # never block scanning on a Redis hiccup
+    except Exception as exc:
+        if _fleet_limits_required():
+            raise FleetAdmissionUnavailable(
+                "fleet active-scan admission is unavailable"
+            ) from exc
+        return True
 
 
 def _release_scan_slot(r, slot_id: str) -> None:
@@ -1878,11 +1898,15 @@ def _release_scan_slot(r, slot_id: str) -> None:
 async def _await_scan_slot(job_id: str | None, scan_id: str | None) -> tuple[Any, str | None, bool]:
     """Wait (bounded, heartbeating) for a fleet-wide active-scan slot.
 
-    Returns (redis_or_None, slot_id_or_None, held). Fail-open after the wait so a
-    saturated fleet still drains rather than starving the queue."""
+    Returns (redis_or_None, slot_id_or_None, held). Standalone mode keeps the
+    compatibility fail-open posture; joined fleet nodes require authorization."""
     try:
         r = get_redis()
-    except Exception:
+    except Exception as exc:
+        if _fleet_limits_required():
+            raise FleetAdmissionUnavailable(
+                "fleet active-scan admission cannot reach Redis"
+            ) from exc
         return None, None, False
     slot_id = f"{job_id or scan_id or 'scan'}:{uuid.uuid4().hex[:8]}"
     deadline = time.time() + _SCAN_SLOT_MAX_WAIT_SECONDS
@@ -1893,6 +1917,10 @@ async def _await_scan_slot(job_id: str | None, scan_id: str | None) -> tuple[Any
                 print(f"[{(job_id or scan_id or '')[:8]}] acquired active-scan slot", file=sys.stderr, flush=True)
             return r, slot_id, True
         if time.time() >= deadline:
+            if _fleet_limits_required():
+                raise FleetAdmissionUnavailable(
+                    f"fleet active-scan admission timed out after {_SCAN_SLOT_MAX_WAIT_SECONDS}s"
+                )
             print(
                 f"[{(job_id or scan_id or '')[:8]}] active-scan slot wait exceeded "
                 f"({_SCAN_SLOT_MAX_WAIT_SECONDS}s); proceeding (best-effort throttle)",
@@ -1907,6 +1935,26 @@ async def _await_scan_slot(job_id: str | None, scan_id: str | None) -> tuple[Any
             except Exception:
                 pass
         await asyncio.sleep(_SCAN_SLOT_POLL_SECONDS)
+
+
+def _effective_request_budget_mode(options: dict[str, Any] | None) -> str:
+    """Resolve request metering without removing the operator's explicit off switch.
+
+    Fleet nodes turn the compatibility default into enforcement so independently
+    scheduled workers share the domain budget. An explicit ``off`` remains off,
+    preserving operator control for authorized local labs and other intentional
+    high-throughput targets.
+    """
+    raw = str(
+        (options or {}).get("request_budget_mode")
+        or os.environ.get("SHAKERSCAN_REQUEST_BUDGET_MODE")
+        or "compatibility"
+    ).strip().lower()
+    if raw not in {"off", "compatibility", "enforce"}:
+        raw = "compatibility"
+    if raw == "compatibility" and _fleet_limits_required():
+        return "enforce"
+    return raw
 
 
 _SCANNER_MAIN_MARKERS = ('if __name__ == "__main__"', "if __name__ == '__main__'")
@@ -2218,13 +2266,7 @@ async def run_scan(target: str, options: dict, scan_id: str | None = None, job_i
         _policy_overrides["proof_required_for_smart"] = options.get("proof_required_for_smart")
     _policy_for_env = VerificationPolicy.from_env(overrides=_policy_overrides)
     scan_env["PROOF_REQUIRED_FOR_SMART"] = "true" if _policy_for_env.proof_required_for_smart else "false"
-    request_budget_mode = str(
-        options.get("request_budget_mode")
-        or os.environ.get("SHAKERSCAN_REQUEST_BUDGET_MODE")
-        or "compatibility"
-    ).strip().lower()
-    if request_budget_mode not in {"off", "compatibility", "enforce"}:
-        request_budget_mode = "compatibility"
+    request_budget_mode = _effective_request_budget_mode(options)
     scan_env["SHAKERSCAN_REQUEST_BUDGET_MODE"] = request_budget_mode
     resolved_request_budget = resolve_or_consume_budget(
         scan_type or "standard",
@@ -2301,13 +2343,23 @@ async def run_scan(target: str, options: dict, scan_id: str | None = None, job_i
     # worker fleet can't run too many scans at once and OOM the Docker VM.
     try:
         _slot_r, _slot_id, _slot_held = await _await_scan_slot(job_id, scan_id)
-    except Exception:
+    except FleetAdmissionUnavailable as exc:
         if scanner_auth_config_file:
             try:
                 os.unlink(scanner_auth_config_file)
             except OSError:
                 pass
-        raise
+        return {
+            "target": target,
+            "error": str(exc),
+            "findings": [],
+            "result": {"score": None, "grade": None},
+            "scan_metadata": {
+                "status": "failed",
+                "admission_control_failed": True,
+                "retryable": True,
+            },
+        }
 
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -4505,11 +4557,7 @@ def _standalone_scan_rate_reservation_amount(options: dict[str, Any] | None) -> 
     up front instead of fail-opening unlimited discovered requests.
     """
     opts = options or {}
-    request_budget_mode = str(
-        opts.get("request_budget_mode")
-        or os.environ.get("SHAKERSCAN_REQUEST_BUDGET_MODE")
-        or "compatibility"
-    ).strip().lower()
+    request_budget_mode = _effective_request_budget_mode(opts)
     if request_budget_mode == "enforce":
         custom_budget = opts.get("custom_budget") if isinstance(opts.get("custom_budget"), dict) else {}
         try:
@@ -6911,11 +6959,7 @@ async def process_scan_job(job_data: dict):
             ai_target_id = str(row['ai_target_id']) if row['ai_target_id'] else None
 
     reserve_amount = _standalone_scan_rate_reservation_amount(options)
-    enforcing_request_budget = str(
-        options.get("request_budget_mode")
-        or os.environ.get("SHAKERSCAN_REQUEST_BUDGET_MODE")
-        or "compatibility"
-    ).strip().lower() == "enforce"
+    enforcing_request_budget = _effective_request_budget_mode(options) == "enforce"
     if reserve_amount > 0 and target_id:
         try:
             async with db_pool.acquire() as conn:
@@ -9911,7 +9955,10 @@ async def _refuse_stale_job_if_needed(job_data: dict) -> bool:
 
     job_id = str(job_data.get('job_id') or 'unknown')
     scan_id = job_data.get('scan_id')
-    source_queue = RETEST_QUEUE_NAME if job_data.get('type') == 'finding_retest' else QUEUE_NAME
+    source_queue = str(
+        job_data.get("_base_queue_name")
+        or (RETEST_QUEUE_NAME if job_data.get('type') == 'finding_retest' else QUEUE_NAME)
+    )
     # Time-based, not count-based: a current worker in a MIXED fleet picks up the
     # requeued job within seconds, so the window never elapses. Only when NO current
     # worker takes it for the whole window (the fleet is uniformly stale, e.g. a
@@ -9986,6 +10033,19 @@ async def _attribute_job_execution(job_data: dict[str, Any]) -> None:
 
 async def process_job(job_data: dict):
     """Route job to appropriate handler."""
+    placement = placement_from_payload(job_data)
+    if placement and not worker_matches_placement(_worker_placement_labels(), placement):
+        source_queue = str(
+            job_data.get("_base_queue_name")
+            or (RETEST_QUEUE_NAME if job_data.get('type') == 'finding_retest' else QUEUE_NAME)
+        )
+        enqueue_job(get_redis(), source_queue, job_data)
+        print(
+            f"[fleet] placement changed after lease; requeued for {placement}",
+            flush=True,
+        )
+        await asyncio.sleep(1)
+        return
     # Fail-closed: refuse to run a scan on a build-stale worker (see helper).
     if await _refuse_stale_job_if_needed(job_data):
         return
@@ -9995,7 +10055,10 @@ async def process_job(job_data: dict):
         # A node can be revoked between BLPOP and dispatch. Preserve the user's
         # work while the control-plane WireGuard reconciler removes that peer;
         # Redis Streams fencing will supersede this compatibility requeue.
-        source_queue = RETEST_QUEUE_NAME if job_data.get('type') == 'finding_retest' else QUEUE_NAME
+        source_queue = str(
+            job_data.get("_base_queue_name")
+            or (RETEST_QUEUE_NAME if job_data.get('type') == 'finding_retest' else QUEUE_NAME)
+        )
         enqueue_job(get_redis(), source_queue, job_data)
         print(f"[fleet] refused job on this node and requeued it: {exc}", flush=True)
         await asyncio.sleep(2)
@@ -10173,7 +10236,8 @@ async def async_main():
     await init_db()
 
     r = get_redis()
-    queue_keys = [QUEUE_NAME] if RETEST_QUEUE_NAME == QUEUE_NAME else [QUEUE_NAME, RETEST_QUEUE_NAME]
+    base_queue_keys = [QUEUE_NAME] if RETEST_QUEUE_NAME == QUEUE_NAME else [QUEUE_NAME, RETEST_QUEUE_NAME]
+    queue_keys = list(base_queue_keys)
     print(
         f"Worker started, listening on queues: {', '.join(queue_keys)} "
         f"(retest max parallel: {RETEST_MAX_PARALLEL})",
@@ -10201,6 +10265,14 @@ async def async_main():
 
                 # Lease a Stream message. Legacy list entries are drained only
                 # as an upgrade bridge; all new work is explicitly acked.
+                queue_keys = [
+                    *base_queue_keys,
+                    *qualified_route_queues(
+                        r,
+                        base_queue_keys,
+                        worker_labels=_worker_placement_labels(),
+                    ),
+                ]
                 consumer_name = _worker_runtime_identity()
                 lease = await loop.run_in_executor(
                     None,
@@ -10279,6 +10351,46 @@ def _worker_runtime_identity() -> str:
     if configured and hostname and hostname not in configured:
         return f"{configured}:{hostname[:12]}"
     return configured or hostname
+
+
+@functools.lru_cache(maxsize=1)
+def _worker_placement_labels() -> dict[str, Any]:
+    raw = str(os.environ.get("SHAKERSCAN_NODE_LABELS_JSON") or "").strip()
+    try:
+        labels = json.loads(raw) if raw else {}
+    except json.JSONDecodeError:
+        labels = {}
+    if not isinstance(labels, dict):
+        labels = {}
+    labels = dict(labels)
+    node_id = str(os.environ.get("SHAKERSCAN_NODE_ID") or "").strip().lower()
+    if node_id:
+        labels["node_id"] = node_id
+    detected_tools = {
+        tool
+        for tool, command in {
+            "nuclei": "nuclei",
+            "playwright": "node",
+            "sqlmap": "sqlmap",
+            "nmap": "nmap",
+            "subfinder": "subfinder",
+        }.items()
+        if shutil.which(command)
+    }
+    configured_tools = labels.get("tools") or labels.get("capabilities") or []
+    if isinstance(configured_tools, str):
+        configured_tools = [configured_tools]
+    labels["tools"] = sorted(
+        detected_tools
+        | {str(item).strip().lower() for item in configured_tools if str(item).strip()}
+    )
+    configured_tiers = labels.get("scan_tiers") or list(VALID_DAST_SCAN_TYPES)
+    if isinstance(configured_tiers, str):
+        configured_tiers = [configured_tiers]
+    labels["scan_tiers"] = sorted(
+        {str(item).strip().lower() for item in configured_tiers if str(item).strip()}
+    )
+    return labels
 
 
 def _worker_build_hostname() -> str:

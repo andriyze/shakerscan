@@ -11,6 +11,7 @@ import urllib.parse
 import uuid
 from datetime import datetime, timezone
 
+import pytest
 
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "api"))
@@ -1944,6 +1945,33 @@ def test_parallel_shard_concurrency_override_is_clamped(monkeypatch):
     assert worker._parallel_shard_concurrency_limit(sentinel_r, {}) == 4
     # With no redis handle (r=None), fall back to the floor (no fleet info).
     assert worker._parallel_shard_concurrency_limit(None, {}) == 4
+
+
+class _BrokenAdmissionRedis:
+    def get(self, _key):
+        return b"2"
+
+    def eval(self, *_args):
+        raise ConnectionError("redis unavailable")
+
+
+def test_active_scan_admission_fails_closed_for_joined_node(monkeypatch):
+    monkeypatch.setenv("SHAKERSCAN_NODE_ID", "11111111-1111-4111-8111-111111111111")
+    with pytest.raises(worker.FleetAdmissionUnavailable):
+        worker._take_scan_slot(_BrokenAdmissionRedis(), "slot-1")
+
+
+def test_active_scan_admission_keeps_standalone_compatibility(monkeypatch):
+    monkeypatch.delenv("SHAKERSCAN_NODE_ID", raising=False)
+    monkeypatch.delenv("SHAKERSCAN_ENFORCE_FLEET_LIMITS", raising=False)
+    assert worker._take_scan_slot(_BrokenAdmissionRedis(), "slot-1") is True
+
+
+def test_fleet_request_budget_defaults_to_enforce_but_explicit_off_wins(monkeypatch):
+    monkeypatch.setenv("SHAKERSCAN_NODE_ID", "11111111-1111-4111-8111-111111111111")
+    assert worker._effective_request_budget_mode({}) == "enforce"
+    assert worker._effective_request_budget_mode({"request_budget_mode": "compatibility"}) == "enforce"
+    assert worker._effective_request_budget_mode({"request_budget_mode": "off"}) == "off"
 
 
 def test_domain_endpoint_budget_reservation_accounts_for_db_and_redis_usage():

@@ -700,7 +700,12 @@ def _validated_join_response(result: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-def _write_worker_environment(path: Path, bundle: dict[str, Any]) -> None:
+def _write_worker_environment(
+    path: Path,
+    bundle: dict[str, Any],
+    *,
+    labels: dict[str, Any] | None = None,
+) -> None:
     redis_url = str(bundle.get("redis_url") or "").strip()
     database_url = str(bundle.get("database_url") or "").strip()
     if not redis_url.startswith("redis://") or not database_url.startswith(("postgresql://", "postgres://")):
@@ -710,6 +715,11 @@ def _write_worker_environment(path: Path, bundle: dict[str, Any]) -> None:
         "DATABASE_URL": database_url,
         "RESULTS_DIR": "/results",
     }
+    if labels:
+        encoded_labels = json.dumps(labels, sort_keys=True, separators=(",", ":"))
+        if len(encoded_labels.encode("utf-8")) > 8192:
+            raise FleetCLIError("node labels exceed 8192 bytes")
+        values["SHAKERSCAN_NODE_LABELS_JSON"] = encoded_labels
     extra = bundle.get("worker_environment") or {}
     if not isinstance(extra, dict):
         raise FleetCLIError("connection bundle worker_environment must be an object")
@@ -767,6 +777,18 @@ def command_join(paths: RuntimePaths, args: argparse.Namespace) -> None:
         install_wireguard(paths.node / f"{INTERFACE_NAME}.conf")
         if not (paths.node / "worker.env").exists():
             raise FleetCLIError("existing node state has no worker environment; rotate/reset the node on the control plane")
+        bootstrap_labels = response.get("labels") if isinstance(response.get("labels"), dict) else {}
+        if bootstrap_labels:
+            update_dotenv(
+                paths.node / "worker.env",
+                {
+                    "SHAKERSCAN_NODE_LABELS_JSON": json.dumps(
+                        bootstrap_labels,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                },
+            )
         _start_worker_runtime(paths, response)
         print(f"Fleet node {response['node_id']} resumed")
         return
@@ -776,13 +798,38 @@ def command_join(paths: RuntimePaths, args: argparse.Namespace) -> None:
         paths.node / "wireguard.key", paths.node / "wireguard.pub"
     )
     hostname = socket.gethostname()[:255]
+    labels: dict[str, Any] = {}
+    if getattr(args, "region", None):
+        labels["region"] = args.region
+    for key, value in (
+        ("egress_group", getattr(args, "egress_group", None)),
+        ("network", getattr(args, "network_label", None)),
+        ("data_residency", getattr(args, "data_residency", None)),
+    ):
+        if value:
+            labels[key] = str(value).strip()
+    capabilities = [str(item).strip().lower() for item in (getattr(args, "capability", None) or []) if str(item).strip()]
+    if capabilities:
+        labels["tools"] = sorted(set(capabilities))
+    scan_tiers = [str(item).strip().lower() for item in (getattr(args, "scan_tier", None) or []) if str(item).strip()]
+    if scan_tiers:
+        labels["scan_tiers"] = sorted(set(scan_tiers))
+    for raw_label in getattr(args, "label", None) or []:
+        key, separator, value = str(raw_label).partition("=")
+        key = key.strip().lower()
+        value = value.strip()
+        if not separator or not re.fullmatch(r"[a-z][a-z0-9_.-]{0,63}", key) or not value:
+            raise FleetCLIError("--label must use key=value with a safe lowercase key")
+        if key in {"node_id"}:
+            raise FleetCLIError("node_id is assigned by the control plane")
+        labels[key] = value[:256]
     payload = {
         "token": args.token,
         "name": args.name or hostname,
         "hostname": hostname,
         "region": args.region,
         "wireguard_public_key": public_key,
-        "labels": {"region": args.region} if args.region else {},
+        "labels": labels,
         "capacity": {"cpu_count": os.cpu_count() or 1},
     }
     response = _validated_join_response(
@@ -834,7 +881,11 @@ def command_join(paths: RuntimePaths, args: argparse.Namespace) -> None:
     bundle = bundle_response.get("bundle")
     if not isinstance(bundle, dict) or not bundle_response.get("delivered_once"):
         raise FleetCLIError("control plane returned an invalid one-time connection bundle")
-    _write_worker_environment(paths.node / "worker.env", bundle)
+    _write_worker_environment(
+        paths.node / "worker.env",
+        bundle,
+        labels=response.get("labels") if isinstance(response.get("labels"), dict) else labels,
+    )
     _start_worker_runtime(paths, response)
     print(f"Joined fleet as node {response['node_id']}")
     print(f"Overlay address: {response['wireguard_peer_ip']}")
@@ -931,6 +982,17 @@ def build_parser() -> argparse.ArgumentParser:
     join.add_argument("--token")
     join.add_argument("--name")
     join.add_argument("--region")
+    join.add_argument("--egress-group")
+    join.add_argument("--network", dest="network_label")
+    join.add_argument("--data-residency")
+    join.add_argument("--capability", action="append", default=[])
+    join.add_argument(
+        "--scan-tier",
+        action="append",
+        choices=["quick", "standard", "deep", "full", "aggressive", "smart"],
+        default=[],
+    )
+    join.add_argument("--label", action="append", default=[])
     join.add_argument("--overlay-timeout", type=int, default=90)
 
     reconcile = subparsers.add_parser("reconcile", help="apply registered WireGuard peers locally")

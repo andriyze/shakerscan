@@ -56,15 +56,14 @@ def test_multi_node_doc_is_build_spec_and_honest_about_fleet_status():
 
 
 def test_multi_node_doc_states_semaphore_failure_posture():
-    # The active-scan semaphore fails OPEN (_take_scan_slot grants on any Redis error), so it is an
-    # OOM guard, not a limit a partitioned remote node is held to. A doc about trusting remote nodes
-    # must not present it as an enforceable fleet cap, and must not flatten it together with the
-    # fail-CLOSED domain-rate primitive.
+    # Joined nodes fail closed while standalone installs preserve compatibility.
     text = _flat(FLEET_DOC)
-    assert "**Built, but fail-OPEN**" in text
-    assert "A partitioned node runs uncapped." in text
+    assert "**Built and fleet-enforceable**" in text
+    assert "joined nodes fail closed" in text
+    assert "Standalone installs retain" in text
+    assert "explicit `request_budget_mode=off`" in text
     assert "fails **closed**" in text
-    assert "They are real and correct" not in text
+    assert "A partitioned node runs uncapped." not in text
 
 
 def test_deep_hunt_design_authority_is_honest_about_driver_limits():

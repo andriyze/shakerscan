@@ -12,8 +12,8 @@ capacity, current-work, per-node scaling, drain/resume, and revoke controls. The
 proof is not complete. Redis Stream lease/heartbeat/ack/reclaim delivery is implemented. The
 general artifact manifest, deterministic result/checkpoint/diagnostic upload, referenced screenshot
 centralization, hash-verified proxy download, cross-node stale recovery, fleet-worker fail-closed
-persistence, centralized retry-safe retention, and a digest-pinned self-hosted MinIO profile are implemented. Placement, rolling lifecycle, and
-the Phase-3 broker remain.
+persistence, centralized retry-safe retention, and a digest-pinned self-hosted MinIO profile are implemented. Capability/region/egress placement
+and enforceable fleet-wide admission/request limits are implemented. Rolling lifecycle and the Phase-3 broker remain.
 **Scope:** run a coordinated ShakerScan fleet across multiple VMs/VPS hosts so one UI/API
 can scan more targets at once and run high-budget Full Coverage scans by using workers
 from many machines.
@@ -33,7 +33,7 @@ becoming stale prose. For product priority and phased order, see
 | Intra-target fan-out `scan_plan → scan_shard → scan_merge` (strategies: scope, family, coverage, coverage_family, auth_split, dynamic pull) | **Built** | `parallel_scan.py` planner; `worker.py` `process_scan_{plan,shard,merge}_job` |
 | Exactly-once merge trigger (atomic Redis Lua claim-and-enqueue + DB non-terminal-shard source of truth) | **Built** | `reconcile_parallel_parent` (`parallel_scan.py`) |
 | Race-safe concurrent finding writes | **Built** | `UNIQUE INDEX idx_findings_target_fingerprint` (`db/init.sql`) |
-| Fleet-wide active-scan concurrency cap (lease-based Redis ZSET semaphore; TTL frees a crashed holder) | **Built, but fail-OPEN** — `_take_scan_slot` returns granted on any Redis error and the bounded wait fails open, so the cap is an OOM guard on a healthy shared Redis, **not** an enforceable fleet limit. A partitioned node runs uncapped. | `ACTIVE_SCAN_SLOTS_KEY`, `_take_scan_slot` (`worker.py`) |
+| Fleet-wide active-scan concurrency cap (lease-based Redis ZSET semaphore; TTL frees a crashed holder) | **Built and fleet-enforceable** — joined nodes fail closed when Redis cannot authorize a slot or the bounded wait expires. Standalone installs retain compatibility fail-open behavior unless enforcement is explicitly enabled. | `ACTIVE_SCAN_SLOTS_KEY`, `_take_scan_slot`, `_fleet_limits_required` (`worker.py`) |
 | Per-root-domain request reservation (atomic Redis Lua; already coordinates every process on the shared Redis) | **Built** | `reserve_domain_rate` (`asm_inventory.py`) |
 | Central artifact plane | **Built** — Compose forwards S3 settings and includes a digest-pinned MinIO profile that `fleet init` configures with generated credentials unless external S3 is already complete. Result JSON, live checkpoints, terminal diagnostics, and bounded referenced screenshots/files use deterministic keys plus a durable `scan_artifacts` manifest. Joined nodes fail closed when required upload/manifest persistence fails; the API hash-verifies proxy downloads, stale recovery reads remote checkpoints, one control-plane sweeper enforces retention, and fleet init requires a real PUT/GET/DELETE probe. | `artifact_storage.py`; `worker.py` `persist_result_artifact`, `_mirror_checkpoint`; `scan_artifact_retention_runner`; `GET /scans/{id}/artifacts` |
 | Job-queue delivery | **Built with leased delivery** — Redis Streams consumer groups, explicit ack/delete after successful dispatch, lease heartbeats, visibility-timeout reclaim, bounded delivery attempts, and fail-closed execution cancellation when lease ownership/heartbeat authority is lost. Pre-upgrade list entries remain drainable. | `job_queue.py`; `worker.py` `_run_job_under_lease` |
@@ -43,22 +43,20 @@ becoming stale prose. For product priority and phased order, see
 | WireGuard/CLI host provisioning | **Built, awaiting physical two-VPS acceptance** — persistent identity, CA/server certificates, overlay/data binding, automatic or manual peer reconciliation, public HTTPS enrollment, overlay proof, one-time bundle persistence, worker-only startup | `scripts/fleet_cli.py`; `scanner.sh fleet`; `scanner.sh join` |
 | Per-node execution attribution and fleet rollup | **Built** — scan/shard rows record the executing node and unique worker replica; revoked nodes fail closed and re-enqueue refused work; node API derives state/image drift and exposes recent activity | `scans.executing_node_id`; `worker.py` `_attribute_job_execution`; `GET /fleet/nodes`; `GET /fleet/nodes/{id}/activity` |
 | Fleet UI | **Built** — unified health/capacity/drift view, recent attributed work, desired worker scaling, drain/resume, revoke confirmation, and session-only remote operator credential handling | `ui/src/app/fleet/page.tsx`; sidebar `/fleet` |
-| Capability/region/egress placement | **Not present** — specified by this document | — |
+| Capability/region/egress placement | **Built** — scan options accept normalized placement constraints; jobs enter deterministic capability Streams; workers dynamically subscribe only to routes matching their node/region/network/residency/tier/tool labels. Equivalent eligible workers retain normal lease failover. Fleet join persists labels and the UI exposes both submission and node labels. | `job_queue.py` `routed_queue_name`, `qualified_route_queues`; `ScanOptions.placement`; `fleet_cli.py`; `/scan/new`; `/fleet` |
 
 The takeaways that shape the plan:
 
 - **Do not rebuild** the fan-out, merge-once, finding dedup, active-scan semaphore, or the domain-rate
-  primitive. They are real, and the last two already coordinate across a shared Redis. Note the
-  differing failure postures before depending on either as a fleet control: `reserve_domain_rate`
-  fails **closed** (grants 0 on a Redis error), while the active-scan semaphore fails **open**. Only
-  the former is safe to treat as a limit a remote node cannot exceed; making the latter enforceable
-  is fleet work, not a rebuild.
+  primitive. They coordinate through shared Redis. `reserve_domain_rate` fails **closed** (grants 0
+  on a Redis error), and joined nodes now also fail closed when the active-scan semaphore cannot
+  authorize work. Standalone installs retain the historical fail-open admission fallback.
 - **Do not bypass the artifact manifest with worker-local paths.** Managed evidence objects and the
   general result/checkpoint/diagnostic plane now share the S3-compatible store; the database manifest
   and hash-verified proxy are the supported cross-node contract (§8).
 - The node identity/enrollment/overlay and leased/acked/reclaimable queue are now implemented. The
-  largest remaining production gaps are routing/placement, rolling lifecycle, the broker boundary,
-  enforceable fleet-wide limits, and physical multi-VPS acceptance.
+  largest remaining production gaps are rolling lifecycle, the broker boundary, and physical
+  multi-VPS acceptance.
 
 The parallel-scan design answers: "How does one logical scan fan out into plan, shard, and merge
 jobs?" This document answers: "How can those worker jobs run safely on more than one host?"
@@ -259,8 +257,10 @@ This immediately improves throughput for batches and independent targets. If the
 four VPSs with five workers each, the fleet can run about twenty worker jobs at once,
 subject to scan type, memory, CPU, and global rate limits.
 Known-endpoint ASM and Full Coverage work reserves endpoint budget through shared Redis buckets.
-Standalone scans now have an opt-in enforcing request meter and root-domain request-token
-reservation; compatibility mode remains the default until owned-fleet rate soak is accepted.
+Joined workers turn the compatibility request-meter default into enforcement and use shared
+root-domain request-token reservation. Operators retain the explicit `request_budget_mode=off`
+override for authorized local labs and other intentionally unrestricted targets. Standalone scans
+retain compatibility mode by default.
 
 The worker instances do not need to coordinate directly with each other to achieve this.
 They only need a shared scheduler/queue and a shared source of truth.
@@ -586,12 +586,12 @@ Build the fleet layer:
 4. **Reliable job leases:** **built** with Redis Streams consumer groups, explicit completion ack,
    periodic lease heartbeat, visibility-timeout `XAUTOCLAIM`, bounded attempts, and fail-closed
    cancellation when the worker can no longer prove lease ownership.
-5. **Distributed rate limiting:** use Redis token buckets keyed by target/root domain so
-   adding worker instances does not accidentally multiply request pressure. Known-endpoint
-   ASM/Full Coverage worker batches already reserve endpoint budget this way; standalone scans need
-   explicit per-adapter metering quality before any hard distributed-cap claim.
-6. **Routing and affinity:** place jobs by labels such as region, egress group,
-   private-network reachability, scan tier, or required tools.
+5. **Distributed rate limiting:** **built for the fleet execution boundary.** Redis token buckets
+   are keyed by target/root domain, joined workers enforce standalone request budgets by default,
+   and active-scan admission fails closed on joined-node partitions. Operators can explicitly turn
+   request metering off for authorized local labs.
+6. **Routing and affinity:** **built.** Deterministic capability Streams place jobs by region,
+   egress group, private-network reachability, scan tier, data residency, node, and required tools.
 7. **Fleet operations:** support drain, disable, rolling image upgrade, version mismatch
    refusal, per-node audit logs, and a fleet-level worker count that can be distributed
    across nodes by capacity.
@@ -758,13 +758,14 @@ Implementation options:
 | Option | Fit |
 |---|---|
 | Queue per capability | Simple and compatible with the current Stream model. Workers can read only streams they qualify for. |
-| Redis Streams with routing fields | Current queue substrate; placement fields and scheduler assignment remain to be added. |
+| Redis Streams with routing fields | **Implemented.** Producers register a deterministic Stream for each normalized constraint set; matching workers discover and subscribe to it. |
 | Broker-side scheduler | Best in Phase 3. The broker leases only jobs a node is allowed to run. |
 
-Rate limiting must be global, not per node. Known-endpoint ASM and Full Coverage
-batches use Redis token buckets keyed by root domain so local/owned workers do not
-multiply endpoint pressure. Standalone enforcing mode now reserves and meters request tokens;
-production fleet work still needs live multi-node rate soak before making it the default.
+Rate limiting must be global, not per node. Known-endpoint ASM and Full Coverage batches use Redis
+token buckets keyed by root domain so local/owned workers do not multiply endpoint pressure. Joined
+workers enforce request metering by default and fail closed if active-scan admission cannot be
+authorized. Explicit `off` remains an operator-controlled escape hatch; physical multi-node rate
+soak is still an acceptance task, not an implementation gap.
 
 ## 11. Security Model
 
@@ -797,12 +798,12 @@ Security requirements:
 |---|---|---|
 | Redis | Bind to overlay only. | Streams, consumer groups, stale lease reclaim, Sentinel/managed Redis if HA matters. |
 | Postgres | Bind to overlay only. | Scoped worker role where possible, managed/replicated Postgres if HA matters. |
-| API/UI | Stay on control plane. | Add fleet view, node status, drain, placement, and shard rollups. |
+| API/UI | Stay on control plane. | Fleet view, node status, drain, placement, and shard attribution are built; rolling lifecycle remains. |
 | Worker runtime | Worker-only compose/profile on remote VPSs. | Node-agent manages desired/current worker count. |
 | Evidence | Temporary local evidence is acceptable only for proof-of-concept. | S3/MinIO object storage required. |
 | Image distribution | Private registry with pinned tags. | Rolling upgrade and version compatibility checks. |
-| Queue | Shared default queue. | Leases, routing, retry policy, and idempotent shard completion. |
-| Rate limiting | Known-endpoint buckets plus opt-in standalone request metering/reservation. | Fleet soak, routing-aware global limits, and enforcing-by-default acceptance. |
+| Queue | Shared default queue. | Leases, routing, retry policy, and idempotent shard completion are built. |
+| Rate limiting | Known-endpoint buckets plus standalone compatibility request metering/reservation. | Joined nodes enforce global admission/request limits by default; physical fleet soak remains. |
 | Observability | Per-host logs. | Central logs, metrics, node audit trail, per-node scan attribution. |
 
 ## 13. First Milestones

@@ -12,7 +12,9 @@ from job_queue import (  # noqa: E402
     heartbeat_lease,
     lease_job,
     pending_depth,
+    qualified_route_queues,
     queue_payloads,
+    routed_queue_name,
     stream_key,
 )
 
@@ -27,6 +29,8 @@ class FakeStreams:
         self.pending = {}
         self.next_id = 1
         self.legacy = {}
+        self.values = {}
+        self.sets = {}
 
     def xgroup_create(self, name, group, id="0-0", mkstream=False):
         self.streams.setdefault(name, [])
@@ -105,6 +109,20 @@ class FakeStreams:
     def delete(self, name):
         self.legacy.pop(name, None)
 
+    def set(self, name, value):
+        self.values[name] = value
+
+    def get(self, name):
+        return self.values.get(name)
+
+    def sadd(self, name, value):
+        before = len(self.sets.setdefault(name, set()))
+        self.sets[name].add(value)
+        return int(len(self.sets[name]) != before)
+
+    def smembers(self, name):
+        return set(self.sets.get(name, set()))
+
 
 def test_stream_job_is_leased_heartbeated_and_acknowledged():
     redis = FakeStreams()
@@ -172,3 +190,54 @@ def test_narrow_legacy_client_keeps_upgrade_compatibility():
     lease = lease_job(redis, ["scan_jobs"], consumer_name="worker", block_ms=10, visibility_timeout_ms=1000)
     assert lease is not None and lease.legacy
     assert json.loads(lease.payload)["job_id"] == "legacy"
+
+
+def test_placement_routes_only_to_qualified_worker_streams():
+    redis = FakeStreams()
+    placement = {
+        "region": "eu-west",
+        "network": "customer-vpn",
+        "requires": ["nuclei", "playwright"],
+    }
+    payload = {"job_id": "placed", "options": {"placement": placement}}
+    enqueue_job(redis, "scan_jobs", payload)
+    route = routed_queue_name("scan_jobs", placement)
+
+    assert pending_depth(redis, "scan_jobs") == 1
+    assert qualified_route_queues(
+        redis,
+        ["scan_jobs"],
+        worker_labels={
+            "region": "us-east",
+            "network": "customer-vpn",
+            "tools": ["playwright", "nuclei"],
+        },
+    ) == []
+    assert qualified_route_queues(
+        redis,
+        ["scan_jobs"],
+        worker_labels={
+            "region": "eu-west",
+            "network": "customer-vpn",
+            "tools": ["nuclei", "playwright", "sqlmap"],
+        },
+    ) == [route]
+
+    assert lease_job(
+        redis,
+        ["scan_jobs"],
+        consumer_name="unqualified",
+        block_ms=10,
+        visibility_timeout_ms=1000,
+    ) is None
+    lease = lease_job(
+        redis,
+        ["scan_jobs", route],
+        consumer_name="qualified",
+        block_ms=10,
+        visibility_timeout_ms=1000,
+    )
+    assert lease is not None and lease.queue_name == route
+    decoded = json.loads(lease.payload)
+    assert decoded["placement"] == placement
+    assert decoded["_base_queue_name"] == "scan_jobs"
