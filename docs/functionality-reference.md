@@ -1182,7 +1182,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | Scanner wrapper commands | 26 | `scanner.sh` |
 | Make targets | 11 | `Makefile` |
 | Release gates | 14 | `scripts/release_gates.py` |
-| Runtime environment keys | 255 | Python sources + Compose manifests |
+| Runtime environment keys | 258 | Python sources + Compose manifests |
 | Scanner modules | 83 | `scanner/scanner_tools/` |
 | UI pages | 31 | `ui/src/app/` |
 | Skills | 6 | `skills/` |
@@ -1863,7 +1863,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `FLEET_EDGE_MODE` | `api/api.py` |
 | `FLEET_HEARTBEAT_TIMEOUT_SECONDS` | `api/worker.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `FLEET_NODE_ID` | `docker-compose.broker-worker.yml`, `docker-compose.worker.yml` |
-| `FLEET_OPERATOR_TOKEN` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `FLEET_OPERATOR_TOKEN` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml`, `scripts/fleet_acceptance.py` |
 | `FLEET_OVERLAY_CIDR` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `FLEET_RESULTS_DIR` | `docker-compose.broker-worker.yml`, `docker-compose.worker.yml` |
 | `FLEET_RUNTIME_DIR` | `docker-compose.broker-worker.yml`, `docker-compose.worker.yml` |
@@ -1900,8 +1900,10 @@ Only key names and declaring sources are documented; secret values are never rea
 | `PARENT_STALE_TIMEOUT_MINUTES` | `api/api.py` |
 | `PLAYWRIGHT_BROWSERS_PATH` | `api/ai_gate/targets/widget_playwright.py`, `scanner/scanner_tools/form_login.py`, `scanner/scanner_tools/http_scanner.py` |
 | `PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD` | `scanner/scanner_tools/form_login.py`, `scanner/scanner_tools/http_scanner.py` |
+| `POSTGRES_PASSWORD` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `POSTGRES_PORT` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `PROOF_REQUIRED_FOR_SMART` | `api/api.py`, `api/retest_contract.py`, `api/worker.py`, `scanner/scanner.py` |
+| `REDIS_PASSWORD` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `REDIS_PORT` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `REDIS_URL` | `api/api.py`, `api/gungnir_worker.py`, `api/worker.py`, `scanner/gungnir_worker.py` |
 | `RESEARCH_EPISODE_ABANDON_TTL_HOURS` | `api/api.py` |
@@ -1932,8 +1934,6 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SCANNER_DEBUG_NOSQL` | `scanner/scanner.py`, `scanner/scanner_tools/active_checks.py` |
 | `SCANNER_DEBUG_SQLMAP` | `scanner/scanner.py` |
 | `SCANNER_DNS_RESOLVERS` | `scanner/scanner.py` |
-| `POSTGRES_PASSWORD` | `docker-compose.release.yml`, `docker-compose.yml`, `scripts/fleet_cli.py` |
-| `REDIS_PASSWORD` | `docker-compose.release.yml`, `docker-compose.yml`, `scripts/fleet_cli.py` |
 | `SCANNER_IMAGE_REPO` | `docker-compose.release.yml` |
 | `SCANNER_IMAGE_TAG` | `docker-compose.release.yml` |
 | `SCANNER_MAX_CONCURRENT` | `scanner/scanner_tools/common.py` |
