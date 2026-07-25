@@ -290,7 +290,7 @@ export default function FleetPage() {
               Operator access
             </div>
             <p className="mt-1 max-w-2xl text-xs text-gray-500">
-              Loopback access needs no token. Remote lifecycle actions require the control plane&apos;s operator token over HTTPS; it stays in this browser tab only.
+              Fleet init creates the operator token. This Docker-host UI uses it for fleet reads and changes; direct socket-loopback clients are the only tokenless exception, and remote calls also require HTTPS. The token stays in this browser tab only.
             </p>
           </div>
           <div className="flex w-full gap-2 lg:w-[28rem]">
@@ -298,7 +298,7 @@ export default function FleetPage() {
               type={showToken ? 'text' : 'password'}
               value={operatorToken}
               onChange={(event) => changeOperatorToken(event.target.value)}
-              placeholder="Remote operator token (optional on loopback)"
+              placeholder="Fleet operator token"
               aria-label="Fleet operator token"
               autoComplete="off"
             />
