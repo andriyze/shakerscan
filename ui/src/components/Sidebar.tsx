@@ -132,6 +132,10 @@ function BrandMark({ className = 'w-6 h-6' }: { className?: string }) {
   )
 }
 
+function comparableBuildVersion(value?: string | null): string | undefined {
+  return value?.replace(/-dirty$/, '')
+}
+
 function NavContent({
   pathname,
   showAll,
@@ -143,6 +147,23 @@ function NavContent({
   onToggleShowAll: (value: boolean) => void
   buildIdentity: { ui?: string; api?: string; workers?: string; skew: boolean }
 }) {
+  const allBuildsMatch = Boolean(
+    !buildIdentity.skew
+    && buildIdentity.ui
+    && buildIdentity.api
+    && buildIdentity.workers
+    && comparableBuildVersion(buildIdentity.ui) === comparableBuildVersion(buildIdentity.api)
+    && comparableBuildVersion(buildIdentity.api) === comparableBuildVersion(buildIdentity.workers)
+  )
+  const commonVersion = [buildIdentity.ui, buildIdentity.api, buildIdentity.workers]
+    .find((value) => value?.endsWith('-dirty')) || buildIdentity.api
+  const buildLabel = allBuildsMatch
+    ? `Version ${commonVersion}`
+    : [
+        buildIdentity.ui && `UI ${buildIdentity.ui}`,
+        buildIdentity.api && `API ${buildIdentity.api}`,
+        buildIdentity.workers && `Workers ${buildIdentity.workers}`,
+      ].filter(Boolean).join(' · ')
   // Default view hides advanced groups/items; the footer switch reveals them.
   const visibleGroups = navGroups
     .filter((group) => showAll || !group.advanced)
@@ -186,11 +207,7 @@ function NavContent({
             className={`mt-1 text-[10px] ${buildIdentity.skew ? 'text-amber-400' : 'text-gray-600'}`}
             title={buildIdentity.skew ? 'Component build mismatch detected' : 'Component build identities'}
           >
-            {[
-              buildIdentity.ui && `UI ${buildIdentity.ui}`,
-              buildIdentity.api && `API ${buildIdentity.api}`,
-              buildIdentity.workers && `Workers ${buildIdentity.workers}`,
-            ].filter(Boolean).join(' · ')}
+            {buildLabel}
           </p>
         )}
       </div>
@@ -327,7 +344,9 @@ export default function Sidebar() {
             ? 'none'
             : `mixed/stale (${workers.stale_count || 0})`
         : undefined
-      const concreteVersions = [bakedVersion, apiVersion, ...reportedWorkerVersions].filter(Boolean)
+      const concreteVersions = [bakedVersion, apiVersion, ...reportedWorkerVersions]
+        .map((value) => comparableBuildVersion(value))
+        .filter(Boolean)
       const versionSkew = new Set(concreteVersions).size > 1
         || Boolean(workers && !workers.error && workers.count > 0 && !workers.fleet_uniform)
       setBuildIdentity({ ui: bakedVersion, api: apiVersion, workers: workerLabel, skew: versionSkew })
